@@ -1,95 +1,77 @@
-<!-- source: README.md sha256:1f5bf984e975 -->
+<!-- source: README.md sha256:b092c34e8ca3 -->
 # Codewhale
 
-一个面向终端的开源编程智能体——模型由你自带。
+Codewhale 是一款面向终端的开源编程智能体，使用 Rust 构建，并与用户一起在公开协作中不断改进。
 
-Codewhale 最初是为 DeepSeek 打造的原生体验,如今已成长为一个由社区驱动的项目:一套契合日益壮大的国际社区需求的编程工具,尽可能支持更多的模型与 provider——开放模型优先,托管或本地皆可,彼此之间没有谁被优先对待。
+![Codewhale 在终端中运行](assets/screenshot.webp)
 
-给它一个 provider、一个模型和一个任务:它会读你的代码、改文件、跑命令、检查自己的工作,并在任务完成或需要你介入时停下。任务中途用 `/model` 切换模型。交互式工作用 TUI,脚本和 CI 用 `codewhale exec`。它用 Rust 编写,采用 MIT 许可,运行在你自己的机器上。
-
-和其他 harness 不一样的地方在于:**每个角色用哪个模型由你决定,而且它们不必相同**——而且 **Codewhale 里的 agent 可以互相沟通,跨模型的那种。** 一个 Fleet 为每个角色分别固定 provider、模型和推理档位,所以又快又便宜的模型可以指挥昂贵的推理模型,GLM 的 builder 也可以和 Kimi 的 reviewer 干同一份活。它们运行时,你可以随时给其中任何一个发消息、看它的 transcript、或者打断它——而且不只是父子关系:同一工作区里不同的 Codewhale 任务之间可以互发持久、可跨重启的 Agent Mail,在安全边界恰好投递一次,并自动脱敏凭据。`/goal` 让一个长期目标跨回合推进,直到真正完成。角色就是文件,改起来随你,整套 harness 始终是你的。
-
-我们一直在寻找贡献者和改进的方式。如果你在用的某个模型或 provider 还不支持,或者有什么东西坏了,告诉我们就是你能做的最有用的事之一——见[贡献](#贡献)。
-
-[English](README.md) · [日本語](README.ja-JP.md) · [Tiếng Việt](README.vi.md) · [Bahasa Indonesia](README.id.md) · [한국어](README.ko-KR.md) · [Español](README.es-419.md) · [Português](README.pt-BR.md) · [Русский](README.ru.md) · [Українська](README.uk.md) · [Français](README.fr.md) · [Deutsch](README.de.md) · [繁體中文](README.zh-TW.md) · [हिन्दी](README.hi.md) · [Türkçe](README.tr.md) · [Italiano](README.it.md) · [Polski](README.pl.md) · [العربية](README.ar.md) · [Català](README.ca.md) · [codewhale.net](https://codewhale.net/) · [Docs](docs) · [Changelog](CHANGELOG.md) · [Discord 社区](https://discord.gg/37gfS3ksug)
+[English](README.md) · [日本語](README.ja-JP.md) · [Tiếng Việt](README.vi.md) · [Bahasa Indonesia](README.id.md) · [한국어](README.ko-KR.md) · [Español](README.es-419.md) · [Português](README.pt-BR.md) · [Русский](README.ru.md) · [Українська](README.uk.md) · [Français](README.fr.md) · [Deutsch](README.de.md) · [繁體中文](README.zh-TW.md) · [हिन्दी](README.hi.md) · [Türkçe](README.tr.md) · [Italiano](README.it.md) · [Polski](README.pl.md) · [العربية](README.ar.md) · [Català](README.ca.md)
 
 [![CI](https://github.com/Hmbown/CodeWhale/actions/workflows/ci.yml/badge.svg)](https://github.com/Hmbown/CodeWhale/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/codewhale-cli?label=crates.io)](https://crates.io/crates/codewhale-cli)
 [![npm](https://img.shields.io/npm/v/codewhale?label=npm)](https://www.npmjs.com/package/codewhale)
-[![Discord](https://img.shields.io/badge/Discord-join%20the%20community-5865F2?logo=discord&logoColor=white)](https://discord.gg/37gfS3ksug)
-
-![Codewhale 在终端中运行](assets/screenshot.webp)
+[![Discord](https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/37gfS3ksug)
 
 ## 安装
 
 ```bash
 npm install -g codewhale
+codewhale
 ```
 
-在 Linux x64（含 OpenHarmony x64）上，npm 包装器会同时向 GitHub Releases 和 CNB 第一方镜像请求该版本的小型校验清单（`codewhale-artifacts-sha256.txt`），采用先验证通过的来源下载二进制，而不会等待 GitHub 大文件超时。若设置了 `CODEWHALE_RELEASE_BASE_URL` 或 `CODEWHALE_USE_CNB_MIRROR=1`，则按你指定的来源执行，不再竞速。CNB 仅提供 Linux x64；其他平台仍走 GitHub 或完整镜像。安装进度和 `<binary>.source` 回执会标明选中的来源。校验失败会直接报错，不会混用两个来源的清单和二进制。
-
-Cargo、Docker、Nix、Scoop、预编译归档、Android/Termux,以及面向无法访问 GitHub 用户的 CNB 镜像,均见 [docs/INSTALL.md](docs/INSTALL.md)。从 `deepseek-tui` 迁移过来?你的配置和会话可以直接沿用——见 [docs/REBRAND.md](docs/REBRAND.md)。
+首次运行会帮助你连接提供商，也可以选择保持离线。Codewhale 还支持 Cargo、Docker、Nix、Scoop、预构建压缩包、Android/Termux 和 CNB 镜像。请参阅[安装指南](docs/INSTALL.md)。
 
 ## 使用
 
-```bash
-codewhale auth set --provider deepseek   # or export ANTHROPIC_API_KEY, etc.
-codewhale                                # open the TUI
-codewhale exec "fix the failing test"    # headless
-codewhale web                            # local browser client on 127.0.0.1
+像与队友交流一样向 Codewhale 描述任务：
+
+```text
+Fix the failing tests and explain what changed.
 ```
 
+也可以不打开 TUI，直接运行任务：
 
-在 TUI 中:`/model` 同时切换 provider 和模型,`/fleet` 构建并运行团队——一次一个角色,各自带着自己的模型,`/undo` 撤销上一轮,`/restore <N>` 把工作区回滚到更早的快照(不带参数的 `/restore` 只列出快照)。输入区为空时,`Tab` 在 Plan / Work / Operate 之间循环切换;输入区有内容时,`Tab` 改为补全斜杠命令和 `@` 提及。`Shift+Tab` 在任何时候都能循环切换 Ask / Auto-Review / Full Access 权限姿态。`!` 让 shell 命令经由正常的审批路径运行。
+```bash
+codewhale exec "fix the failing tests and explain what changed"
+```
 
-## 功能
+Codewhale 可以读取你的代码仓库、编辑文件、运行命令、检查结果，并持续推进目标。由你决定授予它多少访问权限。
 
-- **随时可以续跑的工作。** Fleet 把每一步记录在只追加的账本里,`fleet resume` 从你停下的地方继续。`/goal` 持有一个跨回合持续逼近的目标——可暂停、可恢复,并随会话在重启后一并恢复;`/workflows` 则打开一个实时面板,展示这个工作区的日志所保留的每一次运行。
-- **Agent 之间可以互相沟通——而且跨模型。** Codewhale 里的每个 agent 在干活时都够得着:`message` 给运行中的子 agent 排一条笔记,`followup` 在它的下一个安全边界把它叫醒并送上笔记,`peek` 读它的 transcript,打断只停它自己的回合。它不止于父子树:同一工作区的不同任务之间可以互发持久的 **Agent Mail**——一份排队的交接摘要,能活过重启,在收件方的安全边界恰好投递一次,并对凭据和路径脱敏——于是两个终端里的 GLM 会话和 Kimi 会话可以自己协调,不用你在中间当传话筒。两边可以是不同的模型;Codewhale 负责把对话送到。
-- **由你亲手写就的 harness。** 角色就是你能读、能改的文件——每个角色一个模型、一套工具姿态和一份常驻指令——放在项目里让团队共享,或放在你的个人设置旁边,跟着你在不同仓库之间走。constitution 记录你希望 agent 在每一次会话中如何行事,让这套 harness 贴合你的做法,而不是我们的。
-- **默认只读,放开权限才更进一步。** Plan 模式不改动文件,审批把关每一次高风险命令。只有当命令确实被 OS 沙箱包装时,Codewhale 才会如实标明:macOS 上是可用时启用的 Seatbelt,Linux 上是需显式启用的 bubblewrap。仓库的 `constitution.json` 会编译成写入拦截,连 Full Access 也无法跳过。
-- **随时可以续跑的工作。** Fleet 把每一步记录在只追加的账本里,`fleet resume` 从你停下的地方继续。
+## 为什么选择 Codewhale
 
-## 集成
+- **使用你想要的模型。** 连接托管提供商，或通过 Ollama、vLLM、SGLang 使用本地模型。使用 `/model` 切换提供商和模型。
+- **掌控始终在你手中。** Plan 模式为只读。Ask、Auto-Review 和 Full Access 会清晰展示审批行为。`/undo` 可撤销上一轮操作，`/restore` 可将工作区恢复到较早的快照。
+- **让长时间任务井然有序。** 保存会话、设置持久的 `/goal`、在工作流运行前进行审查，并协调多个智能体，同时不让其内部指令混入你的对话记录。
+- **扩展你已有的智能体。** 连接 MCP 服务器和技能、配置钩子，并将智能体角色作为可读文件保存在项目或个人设置中。
 
-- **DeepSeek Harness（dsh）——通过 Codewhale 连接。**
-  `codewhale integrations dsh connect` 可将现有的 `@deepseek-ai/dsh` 安装
-  连接到你的 Codewhale 提供商路由、权限和工作区；`integrations dsh
-  install-bundle` 会添加可选的 DSH 插件包，让 `dsh --profile codewhale`
-  独立携带同一身份。Codewhale 负责权限与生命周期；dsh 保留自己的会话、
-  配置文件和凭据，不会被改动。详见
-  [docs/INTEGRATIONS_DSH.md](docs/INTEGRATIONS_DSH.md)。
-- **VS Code。** 官方扩展脚手架（`extensions/vscode`）可在集成终端中打开
-  Codewhale，并通过本地运行时提供只读的 Agent View。目前仍是本地开发
-  预览版，尚未发布到插件市场。
+在 TUI 中运行 `/help` 可查看命令和键盘快捷键。
 
-## 了解更多
+## 安全
 
-- [docs/PROVIDERS.md](docs/PROVIDERS.md) — 每一条 provider 路由:托管、网关与本地
-- [docs/FLEET.md](docs/FLEET.md) — Fleet、账本与恢复
-- [docs/WORKFLOW_EXPERIMENTAL_SEARCH.md](docs/WORKFLOW_EXPERIMENTAL_SEARCH.md) — Workflow 内已冻结、provider 中立的实验性搜索
-- [docs/CONFIGURATION.md](docs/CONFIGURATION.md) — `config.toml`、hooks 与 constitution
-- [docs/AUTHORIZATION_ORDER.md](docs/AUTHORIZATION_ORDER.md) — 模式、hook、权限规则、安全下限、仓库规则、审批和沙箱如何组合
-- [docs/HOOKS.md](docs/HOOKS.md) — 十一个 TUI 生命周期 hook 事件、其载荷，以及其中可引导回合的三个事件（`codewhale exec` 和 CLI 子命令不会触发 hooks）
-- [docs/WEB.md](docs/WEB.md) — 仅限回环地址的内置浏览器客户端及其一次性身份验证边界
+Codewhale 在你的机器上运行，并仅拥有你授予的访问权限。审批模式和仓库规则会限制智能体的行为；在支持的平台上，可选的操作系统沙箱可提供更强的执行边界。未知的模型价格会保持显示为未知，而不会被误报为免费。
 
-其余内容——模式、键位绑定、沙箱细节、MCP、运行时 API、架构——见 [docs](docs) 与 [codewhale.net](https://codewhale.net/)。
+阅读[授权顺序](docs/AUTHORIZATION_ORDER.md)了解确切的策略层级，阅读[配置](docs/CONFIGURATION.md)了解本地设置。
 
-## 贡献
+## 文档
 
-Issue、PR、复现步骤、日志和功能请求,在这里都算真实的项目工作,也欢迎第一次贡献。当一个 PR 无法原样合并时,维护者会吸收其中可用的部分,并保留作者的署名——在提交、更新日志和 [docs/CONTRIBUTORS.md](docs/CONTRIBUTORS.md) 中。
+- [提供商和本地模型](docs/PROVIDERS.md)
+- [智能体团队](docs/FLEET.md)
+- [MCP](docs/MCP.md)、[钩子](docs/HOOKS.md)和[配置](docs/CONFIGURATION.md)
+- [本地 Web 客户端](docs/WEB.md)
+- [全部文档](docs)
 
-- [开放 issue](https://github.com/Hmbown/CodeWhale/issues) —— 适合入门的贡献在这里
-- [CONTRIBUTING.md](CONTRIBUTING.md) —— 开发环境搭建与 PR 流程
-- [docs/CONTRIBUTORS.md](docs/CONTRIBUTORS.md) —— 每一位塑造过这个项目的人
-- [Buy me a coffee](https://www.buymeacoffee.com/hmbown)
+## 加入社区
 
-感谢 [DeepSeek](https://github.com/deepseek-ai) 提供让项目起步的模型与支持,感谢 [DataWhale](https://github.com/datawhalechina) 🐋 欢迎我们加入“鲸兄弟”大家庭,也感谢 [OpenWarp](https://github.com/zerx-lab/warp) 与 [Open Design](https://github.com/nexu-io/open-design) 在终端智能体体验上的协作。
+当人们使用 Codewhale、反馈不顺手之处并帮助修复问题时，它就会变得更好。如果缺少某个提供商、工作流体验不佳，或终端界面妨碍了你，请[提交 issue](https://github.com/Hmbown/CodeWhale/issues)。如果你知道如何改进，请[提交 pull request](CONTRIBUTING.md)。我们欢迎首次贡献，贡献者也会保留已合入工作的署名。
+
+加入 [Discord](https://discord.gg/37gfS3ksug)，或在微信添加 Hunter（`hunterbown`）并申请加入 Whale Brothers 群。
+
+## 项目历史
+
+Codewhale 起初名为 `deepseek-tui`，至今仍保留与其配置和会话的兼容性。如今它已不偏向任何提供商，由社区独立维护，也不隶属于任何模型提供商。
+
+感谢每一位贡献者，以及帮助项目成长的开源社区。请参阅[贡献者记录](docs/CONTRIBUTORS.md)。
 
 ## 许可证
 
-[MIT](LICENSE)。独立的社区项目,与任何模型 provider 均无隶属关系。
-
-![Codewhale 在终端中并行派出三个只读 scout 子代理](assets/fanout.gif)
-
-[![Star History Chart](https://star-history.dera.page/svg?repos=Hmbown/CodeWhale&type=date&legend=top-left)](https://star-history.dera.page/#Hmbown/CodeWhale&type=date)
+[MIT](LICENSE)

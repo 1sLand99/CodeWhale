@@ -1,156 +1,77 @@
-<!-- source: README.md sha256:1f5bf984e975 -->
+<!-- source: README.md sha256:b092c34e8ca3 -->
 # Codewhale
 
-وكيل برمجة مفتوح المصدر لطرفيّتك — أحضر نموذجك بنفسك.
+Codewhale وكيل مفتوح المصدر للبرمجة عبر الطرفية، مبني بلغة Rust ويتطور علنًا بالتعاون مع الأشخاص الذين يستخدمونه.
 
-بدأ Codewhale تجربة أصلية لـ DeepSeek. ومنذ ذلك الحين نما إلى مشروع تقوده
-المجتمع: حزمة برمجة واحدة تناسب مجتمعًا دوليًا متناميًا وتدعم أكبر عدد ممكن من
-النماذج والمزوّدين — النماذج المفتوحة أولًا، مستضافة أو محلية، بلا امتياز لأحد
-على البقية.
+![Codewhale يعمل في طرفية](assets/screenshot.webp)
 
-أعطه مزوّدًا ونموذجًا ومهمة. يقرأ شفرتك، يعدّل الملفات، يشغّل الأوامر ويراجع
-عمله، ثم يتوقف عندما تكتمل المهمة أو يحتاجك. بدّل النموذج أثناء المهمة بـ
-`/model`. اعمل تفاعليًا في TUI، أو شغّل `codewhale exec` في السكربتات وCI.
-مكتوب بـ Rust، مرخّص بـ MIT، ويعمل على جهازك.
-
-ما لا تملكه الحزم الأخرى: **أنت تختار النموذج لكل دور — ولا يلزم أن تتطابق**
-— و**الوكلاء في Codewhale يتحدثون إلى بعضهم، عبر النماذج.** يثبِّت الـfleet
-مزوّدًا ونموذجًا ومستوى استدلالٍ لكل دور، فيمكن لنموذج رخيص وسريع أن يوجّه
-نموذجًا غاليًا يستدلّ، أو يعمل builder على GLM على المهمة نفسها التي يعمل
-عليها reviewer على Kimi. وبينما يعملون، أرسل ملاحظة إلى أيٍّ منهم في منتصف
-الطريق، أو اطّلع على transcript، أو قاطعه — وليس الأمر من الأب إلى الابن
-فقط: مهام Codewhale المنفصلة في مساحة العمل نفسها تتبادل Agent Mail متينًا
-يصمد أمام إعادة التشغيل، ويُسلَّم مرة واحدة بالضبط عند حدّ آمن، ويحجب بيانات
-الاعتماد. ويحفظ `/goal` هدفًا طويل الأمد عبر الأدوار حتى يكتمل فعلًا.
-الأدوار ملفات تحرّرها، وتبقى الحزمة كلها لك.
-
-نبحث دائمًا عن مساهمين وسبل للتحسين. إن غاب نموذج أو مزوّد تستخدمه، أو تعطل
-شيء، فإخبارنا من أكثر ما يمكنك فعله نفعًا — انظر [المساهمة](#المساهمة).
-
-[English](README.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja-JP.md) · [Tiếng Việt](README.vi.md) · [Bahasa Indonesia](README.id.md) · [한국어](README.ko-KR.md) · [Español](README.es-419.md) · [Português](README.pt-BR.md) · [Русский](README.ru.md) · [Українська](README.uk.md) · [Français](README.fr.md) · [Deutsch](README.de.md) · [繁體中文](README.zh-TW.md) · [हिन्दी](README.hi.md) · [Türkçe](README.tr.md) · [Italiano](README.it.md) · [Polski](README.pl.md) · [Català](README.ca.md) · [codewhale.net](https://codewhale.net/) · [Docs](docs) · [Changelog](CHANGELOG.md) · [Discord](https://discord.gg/37gfS3ksug)
+[English](README.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja-JP.md) · [Tiếng Việt](README.vi.md) · [Bahasa Indonesia](README.id.md) · [한국어](README.ko-KR.md) · [Español](README.es-419.md) · [Português](README.pt-BR.md) · [Русский](README.ru.md) · [Українська](README.uk.md) · [Français](README.fr.md) · [Deutsch](README.de.md) · [繁體中文](README.zh-TW.md) · [हिन्दी](README.hi.md) · [Türkçe](README.tr.md) · [Italiano](README.it.md) · [Polski](README.pl.md) · [Català](README.ca.md)
 
 [![CI](https://github.com/Hmbown/CodeWhale/actions/workflows/ci.yml/badge.svg)](https://github.com/Hmbown/CodeWhale/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/codewhale-cli?label=crates.io)](https://crates.io/crates/codewhale-cli)
 [![npm](https://img.shields.io/npm/v/codewhale?label=npm)](https://www.npmjs.com/package/codewhale)
-[![Discord](https://img.shields.io/badge/Discord-join%20the%20community-5865F2?logo=discord&logoColor=white)](https://discord.gg/37gfS3ksug)
-
-![Codewhale يعمل في طرفية](assets/screenshot.webp)
+[![Discord](https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/37gfS3ksug)
 
 ## التثبيت
 
 ```bash
 npm install -g codewhale
+codewhale
 ```
 
-Cargo وDocker وNix وScoop والأرشيفات المبنية مسبقًا وAndroid/Termux ومرآة CNB
-لمن لا يصل إلى GitHub مشروحة في
-[docs/INSTALL.md](docs/INSTALL.md). قادم من `deepseek-tui`؟ إعدادك وجلساتك
-تنتقل معك — انظر [docs/REBRAND.md](docs/REBRAND.md).
+يساعدك Codewhale عند التشغيل الأول على الاتصال بموفّر أو البقاء دون اتصال. ويدعم أيضًا Cargo وDocker وNix وScoop والأرشيفات المبنية مسبقًا وAndroid/Termux ومرآة CNB. راجع [دليل التثبيت](docs/INSTALL.md).
 
 ## الاستخدام
 
-```bash
-codewhale auth set --provider deepseek   # or export ANTHROPIC_API_KEY, etc.
-codewhale                                # open the TUI
-codewhale exec "fix the failing test"    # headless
-codewhale web                            # local browser client on 127.0.0.1
+تحدث إلى Codewhale كما تتحدث إلى زميل في فريقك:
+
+```text
+Fix the failing tests and explain what changed.
 ```
 
-في TUI: `/model` يبدّل المزوّد والنموذج معًا، `/fleet` يبني الفريق ويشغّله —
-دور واحد في كل مرة، ولكلٍ نموذجه — و`/undo` يرجع آخر دور، و`/restore <N>` يعيد
-مساحة العمل إلى لقطة أقدم (`/restore` وحده يسردها). `Tab` يدور Plan / Work /
-Operate عندما يكون المحرّر فارغًا — ومع النص يكمّل أوامر الشرطة المائلة وإشارات
-`@`. `Shift+Tab` يدور في أي وقت وضع الأذونات Ask / Auto-Review / Full Access.
-`!` يشغّل أمر صدفة عبر مسار الموافقة المعتاد.
+أو شغّل مهمة من دون فتح واجهة TUI:
 
-## ماذا يفعل
+```bash
+codewhale exec "fix the failing tests and explain what changed"
+```
 
-- **أي نموذج، أي مزوّد — وأي مزيج منهما.** DeepSeek وClaude وGPT وKimi وGLM وأكثر
-  من 30 مزوّدًا، إضافة إلى vLLM أو SGLang أو Ollama الخاص بك بلا مفتاح، كلها عبر
-  زمن تشغيل واحد ومجموعة أدوات واحدة. يتتبع الكتالوج تشكيلة كل مزوّد الحيّة —
-  يبقى خلفية DeepSeek V4 Pro (الموسومة `DeepSeek-V4-Pro-0813`) قابلة للاستدعاء
-  باسم `deepseek-v4-pro`، وGrok 4.6 هو الافتراضي المباشر لـ xAI، وOrcaRouter
-  يوجّه عبر `orcarouter/auto`. يسجّل الدور المحفوظ `provider` و`model` وطبقة
-  الاستدلال صراحة، فيقدر الـ fleet أن يعبر بائعين عدة في تشغيل واحد، ولا تعتمد
-  مسار الدور على أي مزوّد صادف أنه نشط. حدود السياق والأسعار تأتي من المسار
-  الحقيقي، والسعر المجهول يظهر مجهولًا لا 0 $.
-- **وكلاء يتحدثون إلى بعضهم — عبر النماذج.** كل وكيل في Codewhale يمكن
-  الوصول إليه أثناء عمله: `message` يضع ملاحظة في صفّ وكيلٍ فرعي يعمل،
-  و`followup` يوقظه بملاحظتك عند حدّه الآمن التالي، و`peek` يقرأ transcript،
-  والمقاطعة توقف دوره هو وحده. ويتجاوز ذلك شجرة الأب-الابن: المهام المنفصلة
-  في مساحة العمل نفسها تتبادل **Agent Mail** متينًا — ملخّص تسليم في الصفّ
-  يصمد أمام إعادة التشغيل، ويُسلَّم مرة واحدة بالضبط عند الحدّ الآمن
-  للمستلِم، ويحجب بيانات الاعتماد والمسارات — فيستطيع جلسة GLM وجلسة Kimi
-  التنسيق في طرفيتين دون أن تكون أنت الرسول. ويمكن أن يكون كل طرف على نموذج
-  مختلف؛ وCodewhale يحمل المحادثة.
-- **حزمة تكتبها أنت.** الأدوار ملفات تقرأها وتعدّلها — نموذج ووضعية أدوات
-  وتعليمات ثابتة لكل دور — تُحفظ في المشروع ليشاركها الفريق، أو بجانب إعداداتك
-  الشخصية الأخرى لتتبعك بين المستودعات. يسجّل الدستور constitution كيف تريد
-  الوكيل أن يتصرف عبر كل الجلسات، فتتوافق الحزمة مع ممارستك لا ممارستنا.
-- **عمل يمكنك استئنافه.** يسجّل الـfleet كل خطوة في دفتر إلحاق فقط، فيكمل
-  `fleet resume` من حيث توقفت. ويحفظ `/goal` هدفًا ثابتًا يواصل الوكيل السعي
-  إليه دورًا بعد دور — قابلًا للإيقاف والاستئناف، ويُستعاد مع الجلسة بعد
-  إعادة التشغيل — بينما يفتح `/workflows` لوحة حيّة بكل تشغيلة تحفظها يومية
-  هذه مساحة العمل.
-- **عمل يمكنك استئنافه.** يسجّل الـ fleet كل خطوة في دفتر للإلحاق فقط، فيلتقط
-  `fleet resume` من حيث توقفت.
+يستطيع Codewhale قراءة مستودعك وتعديل الملفات وتشغيل الأوامر وفحص النتائج ومواصلة العمل نحو هدف. وأنت من يقرر مقدار الوصول الذي تمنحه له.
 
-## التكاملات
+## لماذا Codewhale
 
-- **DeepSeek Harness (dsh) — متصل عبر Codewhale.**
-  يربط `codewhale integrations dsh connect` تثبيت `@deepseek-ai/dsh` القائم
-  بمسار مزوّد Codewhale وأذوناتك ومساحة عملك، ويضيف `integrations dsh
-  install-bundle` حزمة إضافات DSH الاختيارية حتى يحمل `dsh --profile codewhale`
-  تلك الهوية وحده. يملك Codewhale الأذونات وسلطة دورة الحياة؛ ويُبقي dsh جلساته
-  وملفاته التعريفية وبيانات اعتماده كما هي. انظر
-  [docs/INTEGRATIONS_DSH.md](docs/INTEGRATIONS_DSH.md).
-- **VS Code.** يفتح هيكل الامتداد الرسمي (`extensions/vscode`) Codewhale في
-  طرفية مدمجة ويعرض Agent View للقراءة فقط فوق زمن التشغيل المحلي. هذه معاينة
-  تطوير محلية، وليست إصدار سوق بعد.
+- **استخدم النموذج الذي تريده.** اتصل بموفّرين مستضافين أو بنماذج محلية عبر Ollama أو vLLM أو SGLang. بدّل الموفّر والنموذج باستخدام `/model`.
+- **ابقَ مسيطرًا.** وضع Plan للقراءة فقط. تجعل أوضاع Ask وAuto-Review وFull Access سلوك الموافقة واضحًا. يتراجع `/undo` عن الجولة الأخيرة، ويعيد `/restore` مساحة العمل إلى لقطة سابقة.
+- **حافظ على تنظيم الأعمال الطويلة.** احفظ الجلسات، وحدد `/goal` دائمًا، وراجع مسارات العمل قبل تشغيلها، ونسّق بين الوكلاء من دون تحويل تعليماتهم الداخلية إلى جزء من محادثتك.
+- **وسّع الوكيل الذي لديك بالفعل.** صِل خوادم MCP والمهارات، واضبط الخطافات، واحتفظ بأدوار الوكلاء كملفات مقروءة في مشروعك أو إعداداتك الشخصية.
 
-## اعرف المزيد
+شغّل `/help` في واجهة TUI لعرض الأوامر واختصارات لوحة المفاتيح.
 
-- [docs/PROVIDERS.md](docs/PROVIDERS.md) — كل مسار مزوّد: مستضاف وبوابة ومحلي
-- [docs/FLEET.md](docs/FLEET.md) — الأساطيل والدفتر والاستئناف
-- [docs/WORKFLOW_EXPERIMENTAL_SEARCH.md](docs/WORKFLOW_EXPERIMENTAL_SEARCH.md) — بحث تجريبي مجمّد ومحايد تجاه المزوّد داخل Workflow
-- [docs/CONFIGURATION.md](docs/CONFIGURATION.md) — `config.toml` والخطافات
-  والدستور constitution
-- [docs/AUTHORIZATION_ORDER.md](docs/AUTHORIZATION_ORDER.md) — كيف تتركب
-  الأوضاع والخطافات وقواعد الأذونات وأرضيات السلامة وقانون المستودع والموافقات
-  والصندوق الرملي
-- [docs/HOOKS.md](docs/HOOKS.md) — أحداث الخطاف الأحد عشر في دورة حياة TUI
-  وحمولاتها، وأي ثلاثة منها تستطيع توجيه دور (`codewhale exec` وأوامر CLI
-  الفرعية لا تطلق خطافات)
-- [docs/WEB.md](docs/WEB.md) — عميل المتصفح على العروة المحلية فقط وحدّ
-  المصادقة لمرة واحدة
+## الأمان
 
-كل ما تبقّى — الأوضاع واختصارات المفاتيح وتفاصيل الصندوق الرملي وMCP وواجهة
-زمن التشغيل والعمارة — يعيش في [docs](docs) وعلى
-[codewhale.net](https://codewhale.net/).
+يعمل Codewhale على جهازك بصلاحيات الوصول التي تمنحها له. تحد أوضاع الموافقة وقواعد المستودع مما يمكن للوكيل فعله؛ ويضيف عزل نظام التشغيل الاختياري حدًا أقوى للتنفيذ حيثما كان مدعومًا. تظل أسعار النماذج غير المعروفة مسجلة على أنها غير معروفة بدلًا من الإبلاغ عنها كمجانية.
 
-## المساهمة
+اقرأ [ترتيب التفويض](docs/AUTHORIZATION_ORDER.md) لمعرفة التسلسل الدقيق للسياسات، و[الإعدادات](docs/CONFIGURATION.md) لمعرفة الضبط المحلي.
 
-المسائل وطلبات السحب وخطوات إعادة الإنتاج والسجلات وطلبات الميزات كلها عمل
-مشروع حقيقي، وأول المساهمات مرحّب بها. عندما يتعذّر دمج طلب سحب كما هو، يحصد
-المصونون ما يعمل ويبقى المؤلف منسوبًا — في الالتزام وسجل التغييرات و
-[docs/CONTRIBUTORS.md](docs/CONTRIBUTORS.md).
+## الوثائق
 
-- [المسائل المفتوحة](https://github.com/Hmbown/CodeWhale/issues) — مساهمات أولى
-  جيدة هنا
-- [CONTRIBUTING.md](CONTRIBUTING.md) — إعداد التطوير ومسار طلبات السحب
-- [docs/CONTRIBUTORS.md](docs/CONTRIBUTORS.md) — كل من شكّل هذا المشروع
-- [اشترِ لي قهوة](https://www.buymeacoffee.com/hmbown)
+- [الموفّرون والنماذج المحلية](docs/PROVIDERS.md)
+- [فرق الوكلاء](docs/FLEET.md)
+- [MCP](docs/MCP.md) و[الخطافات](docs/HOOKS.md) و[الإعدادات](docs/CONFIGURATION.md)
+- [عميل الويب المحلي](docs/WEB.md)
+- [جميع الوثائق](docs)
 
-شكرًا لـ [DeepSeek](https://github.com/deepseek-ai) على النماذج والدعم الذي بدأ
-المشروع، ولـ [DataWhale](https://github.com/datawhalechina) 🐋 على الترحيب بنا
-في عائلة Whale Brother، ولـ [OpenWarp](https://github.com/zerx-lab/warp) و
-[Open Design](https://github.com/nexu-io/open-design) على التعاون في تجربة
-الوكيل في الطرفية.
+## انضم إلى المجتمع
 
-## الرخصة
+يتحسن Codewhale عندما يستخدمه الناس ويبلغون عما لا يبدو صحيحًا ويساعدون في إصلاحه. إذا كان أحد الموفّرين مفقودًا، أو كان مسار العمل مربكًا، أو كانت واجهة الطرفية تعيقك، [فافتح issue](https://github.com/Hmbown/CodeWhale/issues). وإذا كنت تعرف كيفية تحسينه، [فافتح pull request](CONTRIBUTING.md). نرحب بالمساهمات الأولى، ويظل كل مساهم منسوبًا إلى العمل الذي يُدمج في المشروع.
 
-[MIT](LICENSE). مشروع مجتمعي مستقل، غير مرتبط بأي مزوّد نماذج.
+انضم إلى [Discord](https://discord.gg/37gfS3ksug)، أو أضف Hunter على WeChat (`hunterbown`) واطلب الانضمام إلى مجموعة Whale Brothers.
 
-![Codewhale يفتح ثلاثة وكلاء فرعيين scout للقراءة فقط في طرفية](assets/fanout.gif)
+## تاريخ المشروع
 
-[![Star History Chart](https://star-history.dera.page/svg?repos=Hmbown/CodeWhale&type=date&legend=top-left)](https://star-history.dera.page/#Hmbown/CodeWhale&type=date)
+بدأ Codewhale باسم `deepseek-tui`، ولا يزال يحافظ على التوافق مع إعداداته وجلساته. وهو الآن محايد تجاه الموفّرين ويُصان بصورة مستقلة ولا ينتمي إلى أي موفّر نماذج.
+
+شكرًا لكل مساهم ولمجتمعات المصادر المفتوحة التي ساعدت المشروع على النمو. راجع [سجل المساهمين](docs/CONTRIBUTORS.md).
+
+## الترخيص
+
+[MIT](LICENSE)

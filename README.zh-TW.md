@@ -1,93 +1,77 @@
-<!-- source: README.md sha256:1f5bf984e975 -->
+<!-- source: README.md sha256:b092c34e8ca3 -->
 # Codewhale
 
-給終端機用的開源程式設計智能體——模型由你自備。
+Codewhale 是一款在終端機中使用的開源程式設計代理，以 Rust 打造，並與使用者一起透過公開協作持續改進。
 
-Codewhale 起初是為 DeepSeek 打造的原生體驗，如今已成長為社群驅動的專案：一套契合持續擴大的國際社群、並盡可能支援更多模型與 provider 的程式設計 harness——開放模型優先，託管或本機皆可，彼此之間沒有誰被特別優待。
+![Codewhale 在終端機中執行](assets/screenshot.webp)
 
-給它一個 provider、一個模型和一項任務。它會讀你的程式碼、改檔案、跑指令、檢查自己的工作，並在任務完成或需要你介入時停下。任務進行中可用 `/model` 切換模型。互動式工作用 TUI，腳本和 CI 用 `codewhale exec`。以 Rust 撰寫，採 MIT 授權，跑在你自己的機器上。
-
-和其他 harness 不一樣的地方在於：**每個角色用哪個模型由你決定，而且不必相同**——而且 **Codewhale 裡的 agent 可以互相溝通，跨模型的那種。** 一個 Fleet 會為每個角色分別釘住 provider、模型和推論層級，所以又快又便宜的模型可以指揮昂貴的推論模型，GLM 的 builder 也可以和 Kimi 的 reviewer 做同一份工作。它們執行時，你可以隨時給其中任何一個發訊息、看它的 transcript、或者打斷它——而且不只是父子關係：同一工作區裡不同的 Codewhale 任務之間可以互發持久、可跨重開的 Agent Mail，在安全邊界恰好投遞一次，並自動遮蔽憑證。`/goal` 讓一個長期目標跨回合推進，直到真正完成。角色就是檔案，改起來隨你，整套 harness 始終是你的。
-
-我們一直在尋找貢獻者和改進的方式。如果你在用的某個模型或 provider 還沒支援，或有東西壞了，告訴我們就是你能做的最有用的事之一——見[貢獻](#貢獻)。
-
-[English](README.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja-JP.md) · [Tiếng Việt](README.vi.md) · [Bahasa Indonesia](README.id.md) · [한국어](README.ko-KR.md) · [Español](README.es-419.md) · [Português](README.pt-BR.md) · [Русский](README.ru.md) · [Українська](README.uk.md) · [Français](README.fr.md) · [Deutsch](README.de.md) · [हिन्दी](README.hi.md) · [Türkçe](README.tr.md) · [Italiano](README.it.md) · [Polski](README.pl.md) · [العربية](README.ar.md) · [Català](README.ca.md) · [codewhale.net](https://codewhale.net/) · [Docs](docs) · [Changelog](CHANGELOG.md) · [Discord](https://discord.gg/37gfS3ksug)
+[English](README.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja-JP.md) · [Tiếng Việt](README.vi.md) · [Bahasa Indonesia](README.id.md) · [한국어](README.ko-KR.md) · [Español](README.es-419.md) · [Português](README.pt-BR.md) · [Русский](README.ru.md) · [Українська](README.uk.md) · [Français](README.fr.md) · [Deutsch](README.de.md) · [हिन्दी](README.hi.md) · [Türkçe](README.tr.md) · [Italiano](README.it.md) · [Polski](README.pl.md) · [العربية](README.ar.md) · [Català](README.ca.md)
 
 [![CI](https://github.com/Hmbown/CodeWhale/actions/workflows/ci.yml/badge.svg)](https://github.com/Hmbown/CodeWhale/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/codewhale-cli?label=crates.io)](https://crates.io/crates/codewhale-cli)
 [![npm](https://img.shields.io/npm/v/codewhale?label=npm)](https://www.npmjs.com/package/codewhale)
-[![Discord](https://img.shields.io/badge/Discord-join%20the%20community-5865F2?logo=discord&logoColor=white)](https://discord.gg/37gfS3ksug)
-
-![Codewhale 在終端機中執行](assets/screenshot.webp)
+[![Discord](https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/37gfS3ksug)
 
 ## 安裝
 
 ```bash
 npm install -g codewhale
+codewhale
 ```
 
-Cargo、Docker、Nix、Scoop、預先建置的封存檔、Android/Termux，以及給無法連上 GitHub 的人用的 CNB 鏡像，都寫在
-[docs/INSTALL.md](docs/INSTALL.md)。從 `deepseek-tui` 過來？你的設定和工作階段會沿用——見
-[docs/REBRAND.md](docs/REBRAND.md)。
+第一次執行時，系統會協助你連線至供應商，也可以選擇保持離線。Codewhale 亦支援 Cargo、Docker、Nix、Scoop、預先建置的封存檔、Android/Termux 與 CNB 映像。請參閱[安裝指南](docs/INSTALL.md)。
 
 ## 使用
 
-```bash
-codewhale auth set --provider deepseek   # or export ANTHROPIC_API_KEY, etc.
-codewhale                                # open the TUI
-codewhale exec "fix the failing test"    # headless
-codewhale web                            # local browser client on 127.0.0.1
+像和隊友交談一樣告訴 Codewhale 你的需求：
+
+```text
+Fix the failing tests and explain what changed.
 ```
 
-在 TUI 裡：`/model` 會同時切換 provider 與模型，`/fleet` 組建並執行團隊——一次一個角色，各自帶著自己的模型，`/undo` 還原上一回合，`/restore <N>` 把工作區捲回更早的快照（不帶參數的 `/restore` 只列出快照）。輸入區為空時，`Tab` 在 Plan / Work / Operate 之間循環；輸入區有文字時，`Tab` 改為補全斜線指令和 `@` 提及。`Shift+Tab` 隨時可循環切換 Ask / Auto-Review / Full Access 權限姿態。`!` 讓 shell 指令走一般的核准路徑。
+你也可以不開啟 TUI，直接執行任務：
 
-## 功能
+```bash
+codewhale exec "fix the failing tests and explain what changed"
+```
 
-- **隨時可以續跑的工作。** Fleet 把每一步記錄在只附加的帳本裡，`fleet resume` 從你停下的地方繼續。`/goal` 持有一個跨回合持續逼近的目標——可暫停、可恢復，並隨工作階段在重開後一併還原；`/workflows` 則打開一個即時面板，展示這個工作區的日誌所保留的每一次執行。
-- **Agent 之間可以互相溝通——而且跨模型。** Codewhale 裡的每個 agent 在幹活時都構得著：`message` 給執行中的子 agent 排一條筆記，`followup` 在它的下一個安全邊界把它叫醒並送上筆記，`peek` 讀它的 transcript，打斷只停它自己的回合。它不止於父子樹：同一工作區的不同任務之間可以互發持久的 **Agent Mail**——一份排隊的交接摘要，能活過重開，在收件方的安全邊界恰好投遞一次，並對憑證與路徑遮蔽——於是兩個終端機裡的 GLM 工作階段和 Kimi 工作階段可以自己協調，不用你在中間當傳話筒。兩邊可以是不同的模型；Codewhale 負責把對話送到。
-- **由你親手寫就的 harness。** 角色就是你能讀、能改的檔案——每個角色一個模型、一套工具姿態和一份常駐指示——放在專案裡讓團隊共用，或放在你的其他個人設定旁邊，跟著你在不同倉庫之間走。constitution 記錄你希望智能體在每一次工作階段中如何行事，讓這套 harness 貼合你的做法，而不是我們的。
-- **預設唯讀，你允許之後才再放寬。** Plan 模式不能改檔案，核准把關高風險指令。當作業系統沙箱確實包住一條指令時，Codewhale 會說出來：macOS 上是可用時啟用的 Seatbelt，Linux 上是需自行開啟的 bubblewrap。倉庫的 `constitution.json` 會編譯成寫入鎖定，連 Full Access 也無法略過。
-- **隨時可以續跑的工作。** Fleet 把每一步記在只追加的帳本裡，`fleet resume` 從你停下的地方繼續。
+Codewhale 可以讀取你的程式碼儲存庫、編輯檔案、執行指令、檢查結果，並持續朝目標推進。你可以決定要授予它多少存取權限。
 
-## 整合
+## 為何選擇 Codewhale
 
-- **DeepSeek Harness（dsh）——透過 Codewhale 連接。**
-  `codewhale integrations dsh connect` 會把既有的 `@deepseek-ai/dsh`
-  安裝接到你的 Codewhale provider 路由、權限和工作區，而
-  `integrations dsh install-bundle` 會加入可選的 DSH 外掛套件，讓
-  `dsh --profile codewhale` 能獨自帶上同一身分。權限與生命週期由
-  Codewhale 負責；dsh 保留自己的工作階段、設定檔和憑證，不會被改動。見
-  [docs/INTEGRATIONS_DSH.md](docs/INTEGRATIONS_DSH.md)。
-- **VS Code。** 官方擴充功能鷹架（`extensions/vscode`）會在整合式終端機中開啟
-  Codewhale，並透過本機執行環境提供唯讀的 Agent View。目前仍是本機開發預覽，尚未上架市集。
+- **使用你想要的模型。** 連線至託管供應商，或透過 Ollama、vLLM、SGLang 使用本機模型。使用 `/model` 切換供應商與模型。
+- **掌控權始終在你手中。** Plan 模式為唯讀。Ask、Auto-Review 與 Full Access 會清楚呈現核准行為。`/undo` 可復原上一輪操作，`/restore` 可將工作區還原至較早的快照。
+- **讓長時間工作井然有序。** 儲存工作階段、設定持久的 `/goal`、在工作流程執行前加以審查，並協調多個代理，同時避免其內部指示混入你的對話記錄。
+- **擴充你已有的代理。** 連接 MCP 伺服器與技能、設定掛鉤，並將代理角色以可讀檔案保存在專案或個人設定中。
 
-## 了解更多
+在 TUI 中執行 `/help` 可查看指令與鍵盤快速鍵。
 
-- [docs/PROVIDERS.md](docs/PROVIDERS.md) — 每一條 provider 路由：託管、閘道與本機
-- [docs/FLEET.md](docs/FLEET.md) — Fleet、帳本與續跑
-- [docs/WORKFLOW_EXPERIMENTAL_SEARCH.md](docs/WORKFLOW_EXPERIMENTAL_SEARCH.md) — Workflow 內已凍結、對 provider 中立的實驗性搜尋
-- [docs/CONFIGURATION.md](docs/CONFIGURATION.md) — `config.toml`、hooks 與 constitution
-- [docs/AUTHORIZATION_ORDER.md](docs/AUTHORIZATION_ORDER.md) — 模式、hook、權限規則、安全下限、倉庫規範、核准和沙箱如何組合
-- [docs/HOOKS.md](docs/HOOKS.md) — 十一個 TUI 生命週期 hook 事件、其承載，以及其中可引導回合的三個事件（`codewhale exec` 和 CLI 子指令不會觸發 hooks）
-- [docs/WEB.md](docs/WEB.md) — 僅限回環位址的瀏覽器用戶端及其一次性驗證邊界
+## 安全性
 
-其餘內容——模式、快捷鍵、沙箱細節、MCP、執行環境 API、架構——見 [docs](docs) 與 [codewhale.net](https://codewhale.net/)。
+Codewhale 在你的電腦上執行，且只擁有你授予的存取權限。核准模式與儲存庫規則會限制代理可以執行的操作；在支援的平台上，選用的作業系統沙箱可提供更強的執行邊界。未知的模型價格會維持顯示為未知，而不會被誤報為免費。
 
-## 貢獻
+閱讀[授權順序](docs/AUTHORIZATION_ORDER.md)以了解確切的政策層級，並閱讀[設定](docs/CONFIGURATION.md)以了解本機設定。
 
-Issue、PR、重現步驟、紀錄檔和功能請求，在這裡都算真實的專案工作，也歡迎第一次貢獻。當一個 PR 無法原樣合併時，維護者會擷取其中可用的部分，並保留作者的署名——在提交、變更紀錄和 [docs/CONTRIBUTORS.md](docs/CONTRIBUTORS.md) 中。
+## 文件
 
-- [開放的 issue](https://github.com/Hmbown/CodeWhale/issues) —— 適合入門的貢獻在這裡
-- [CONTRIBUTING.md](CONTRIBUTING.md) —— 開發環境建置與 PR 流程
-- [docs/CONTRIBUTORS.md](docs/CONTRIBUTORS.md) —— 每一位形塑過這個專案的人
-- [請我喝杯咖啡](https://www.buymeacoffee.com/hmbown)
+- [供應商與本機模型](docs/PROVIDERS.md)
+- [代理團隊](docs/FLEET.md)
+- [MCP](docs/MCP.md)、[掛鉤](docs/HOOKS.md)與[設定](docs/CONFIGURATION.md)
+- [本機網頁用戶端](docs/WEB.md)
+- [所有文件](docs)
 
-感謝 [DeepSeek](https://github.com/deepseek-ai) 提供讓專案起步的模型與支援，感謝 [DataWhale](https://github.com/datawhalechina) 🐋 歡迎我們加入「鯨兄弟」大家庭，也感謝 [OpenWarp](https://github.com/zerx-lab/warp) 與 [Open Design](https://github.com/nexu-io/open-design) 在終端機智能體體驗上的合作。
+## 加入社群
 
-## 授權
+當人們使用 Codewhale、回報不順手之處並協助修正問題時，它就會變得更好。如果缺少某個供應商、工作流程操作不便，或終端機介面妨礙了你，請[提出 issue](https://github.com/Hmbown/CodeWhale/issues)。如果你知道如何改善，請[提出 pull request](CONTRIBUTING.md)。我們歡迎首次貢獻，貢獻者也會保留已合併工作的署名。
 
-[MIT](LICENSE)。獨立的社群專案，與任何模型 provider 均無隸屬關係。
+加入 [Discord](https://discord.gg/37gfS3ksug)，或在微信加入 Hunter（`hunterbown`）並申請加入 Whale Brothers 群組。
 
-![Codewhale 在終端機中並行派出三個唯讀 scout 子代理](assets/fanout.gif)
+## 專案歷史
 
-[![Star History Chart](https://star-history.dera.page/svg?repos=Hmbown/CodeWhale&type=date&legend=top-left)](https://star-history.dera.page/#Hmbown/CodeWhale&type=date)
+Codewhale 最初名為 `deepseek-tui`，至今仍保留與其設定及工作階段的相容性。現在它不偏向任何供應商，由社群獨立維護，也不隸屬於任何模型供應商。
+
+感謝每一位貢獻者，以及協助專案成長的開源社群。請參閱[貢獻者記錄](docs/CONTRIBUTORS.md)。
+
+## 授權條款
+
+[MIT](LICENSE)

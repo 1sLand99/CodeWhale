@@ -1,177 +1,77 @@
-<!-- source: README.md sha256:1f5bf984e975 -->
+<!-- source: README.md sha256:b092c34e8ca3 -->
 # Codewhale
 
-Un agent de programació de codi obert per al teu terminal — porta el teu propi model.
+Codewhale és un agent de programació de codi obert per al terminal, desenvolupat amb Rust i millorat públicament amb les persones que l’utilitzen.
 
-El Codewhale va començar com una experiència nativa per al DeepSeek. Des d'aleshores
-s'ha convertit en un projecte impulsat per la comunitat: un harness de programació
-que encaixa amb una comunitat internacional en creixement i admet tants models i
-proveïdors com sigui possible — els models oberts primer, allotjats o locals, sense
-privilegiar-ne cap.
+![Codewhale executant-se en un terminal](assets/screenshot.webp)
 
-Dona-li un proveïdor, un model i una tasca. Llegeix el teu codi, edita fitxers,
-executa ordres i comprova la seva pròpia feina, i s'atura quan la tasca s'ha acabat
-o et necessita. Canvia de model a mig camí amb `/model`. Treballa de forma
-interactiva a la TUI, o executa `codewhale exec` en scripts i CI. Està escrit en
-Rust, amb llicència MIT, i corre a la teva màquina.
-
-El que no tenen altres harnessos: **tu tries el model de cada rol — i no han
-de coincidir** — i **els agents de Codewhale es parlen entre ells, a través
-de models.** Una fleet fixa proveïdor, model i nivell de raonament per rol,
-així un model barat i ràpid pot dirigir-ne un de car i raonador, o un
-builder GLM pot treballar la mateixa tasca que un reviewer Kimi. Mentre
-funcionen, envia'ls una nota en ple vol, mira el seu transcript o
-interromp-ne un — i no és només de pare a fill: tasques Codewhale separades
-al mateix workspace intercanvien Agent Mail durador, que sobreviu reinicis,
-es lliura exactament un cop en una frontera segura i emmascara credencials.
-Un `/goal` manté un objectiu llarg al llarg dels torns fins que de veritat
-acaba. Els rols són fitxers que edites, i tot el harness segueix sent teu.
-
-Sempre busquem persones que hi contribueixin i maneres de millorar. Si falta un
-model o un proveïdor que uses, o alguna cosa es trenca, dir-nos-ho és una de les
-coses més útils que pots fer — mira [Contribuir](#contribuir).
-
-[English](README.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja-JP.md) · [Tiếng Việt](README.vi.md) · [Bahasa Indonesia](README.id.md) · [한국어](README.ko-KR.md) · [Español](README.es-419.md) · [Português](README.pt-BR.md) · [Русский](README.ru.md) · [Українська](README.uk.md) · [Français](README.fr.md) · [Deutsch](README.de.md) · [繁體中文](README.zh-TW.md) · [हिन्दी](README.hi.md) · [Türkçe](README.tr.md) · [Italiano](README.it.md) · [Polski](README.pl.md) · [العربية](README.ar.md) · [codewhale.net](https://codewhale.net/) · [Docs](docs) · [Changelog](CHANGELOG.md) · [Discord](https://discord.gg/37gfS3ksug)
+[English](README.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja-JP.md) · [Tiếng Việt](README.vi.md) · [Bahasa Indonesia](README.id.md) · [한국어](README.ko-KR.md) · [Español](README.es-419.md) · [Português](README.pt-BR.md) · [Русский](README.ru.md) · [Українська](README.uk.md) · [Français](README.fr.md) · [Deutsch](README.de.md) · [繁體中文](README.zh-TW.md) · [हिन्दी](README.hi.md) · [Türkçe](README.tr.md) · [Italiano](README.it.md) · [Polski](README.pl.md) · [العربية](README.ar.md)
 
 [![CI](https://github.com/Hmbown/CodeWhale/actions/workflows/ci.yml/badge.svg)](https://github.com/Hmbown/CodeWhale/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/codewhale-cli?label=crates.io)](https://crates.io/crates/codewhale-cli)
 [![npm](https://img.shields.io/npm/v/codewhale?label=npm)](https://www.npmjs.com/package/codewhale)
-[![Discord](https://img.shields.io/badge/Discord-join%20the%20community-5865F2?logo=discord&logoColor=white)](https://discord.gg/37gfS3ksug)
-
-![Codewhale en execució en un terminal](assets/screenshot.webp)
+[![Discord](https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/37gfS3ksug)
 
 ## Instal·lació
 
 ```bash
 npm install -g codewhale
+codewhale
 ```
 
-Cargo, Docker, Nix, Scoop, arxius precompilats, Android/Termux i un mirall CNB
-per a qui no pot arribar a GitHub són a
-[docs/INSTALL.md](docs/INSTALL.md). Vens de `deepseek-tui`? La configuració i
-les sessions es conserven — mira [docs/REBRAND.md](docs/REBRAND.md).
+En la primera execució, Codewhale t’ajuda a connectar un proveïdor o a continuar sense connexió. També admet Cargo, Docker, Nix, Scoop, arxius precompilats, Android/Termux i un mirall CNB. Consulta la [guia d’instal·lació](docs/INSTALL.md).
 
 ## Ús
 
-```bash
-codewhale auth set --provider deepseek   # or export ANTHROPIC_API_KEY, etc.
-codewhale                                # open the TUI
-codewhale exec "fix the failing test"    # headless
-codewhale web                            # local browser client on 127.0.0.1
+Parla amb Codewhale tal com parlaries amb una persona del teu equip:
+
+```text
+Fix the failing tests and explain what changed.
 ```
 
-A la TUI: `/model` canvia proveïdor i model alhora, `/fleet` construeix i
-executa l'equip — un rol cada vegada, cadascun amb el seu model —, `/undo`
-desfà l'últim torn i `/restore <N>` torna l'espai de treball a una instantània
-anterior (`/restore` sol els llista). `Tab` recorre Plan / Work / Operate quan
-el compositor és buit — amb text, `Tab` completa ordres slash i mencions `@`.
-`Shift+Tab` recorre en qualsevol moment la postura de permís Ask / Auto-Review /
-Full Access. `!` executa una ordre de l'intèrpret pel camí d'aprovació habitual.
+També pots executar una tasca sense obrir la TUI:
 
-## Què fa
+```bash
+codewhale exec "fix the failing tests and explain what changed"
+```
 
-- **Qualsevol model, qualsevol proveïdor — i qualsevol barreja.** DeepSeek,
-  Claude, GPT, Kimi, GLM i més de 30 proveïdors, a més del teu vLLM, SGLang o
-  Ollama sense clau, tot a través d'un sol runtime i un sol conjunt d'eines. El
-  catàleg segueix la línia en viu de cada proveïdor — el backend V4 Pro de
-  DeepSeek (etiquetat `DeepSeek-V4-Pro-0813`) continua sent invocable com
-  `deepseek-v4-pro`, Grok 4.6 és el predeterminat directe de xAI i OrcaRouter
-  enruta per `orcarouter/auto`. Un rol desat registra explícitament el
-  `provider`, el `model` i el nivell de raonament, de manera que una fleet pot
-  abastar diversos proveïdors en una sola execució i la ruta d'un rol no depèn
-  mai de quin proveïdor passa a estar actiu. Els límits de context i els preus
-  venen de la ruta real; un preu desconegut es mostra com a desconegut, no com
-  0 $.
-- **Agents que es parlen — a través de models.** Cada agent de Codewhale
-  és abastable mentre treballa: `message` posa una nota a la cua d'un
-  subagent en marxa, `followup` el desperta amb la teva nota a la seva
-  pròxima frontera segura, `peek` llegeix el seu transcript, i una
-  interrupció atura només el seu torn. Va més enllà de l'arbre pare-fill:
-  tasques separades al mateix workspace intercanvien **Agent Mail** durador
-  — un resum de relleu en cua que sobreviu al reinici, es lliura exactament
-  un cop a la frontera segura del destinatari i emmascara credencials i
-  camins — així una sessió GLM i una sessió Kimi es coordinen en dos
-  terminals sense que tu facis de pont. Cada banda pot ser un model
-  diferent; Codewhale porta la conversa.
-- **Un harness que escrius tu.** Els rols són fitxers que pots llegir i editar
-  — un model, una postura d'eines i instruccions permanents per rol — guardats
-  al projecte perquè l'equip els comparteixi, o al costat dels altres ajustos
-  personals perquè et segueixin entre repositoris. Una constitution registra com
-  vols que l'agent es comporti a cada sessió, de manera que el harness segueixi
-  la teva pràctica en lloc de la nostra.
-- **Feina que pots reprendre.** Una fleet registra cada pas en un registre
-  append-only, i `fleet resume` continua on el vas deixar. `/goal` manté un
-  objectiu persistent que l'agent persegueix torn rere torn — pausable,
-  reprenible i restaurat amb la sessió després d'un reinici — i `/workflows`
-  obre un tauler en directe de totes les execucions que conserva el journal
-  d'aquest workspace.
-- **Feina que pots reprendre.** Una fleet registra cada pas en un llibre major
-  de només afegir, així que `fleet resume` continua on et vas aturar.
+Codewhale pot llegir el teu repositori, editar fitxers, executar ordres, inspeccionar els resultats i continuar treballant cap a un objectiu. Tu decideixes quant accés li concedeixes.
 
-## Integracions
+## Per què Codewhale
 
-- **DeepSeek Harness (dsh) — connectat a través de Codewhale.**
-  `codewhale integrations dsh connect` enllaça una instal·lació existent de
-  `@deepseek-ai/dsh` a la teva ruta de proveïdor, permisos i espai de treball
-  de Codewhale, i `integrations dsh install-bundle` afegeix el paquet de
-  connectors DSH opcional perquè `dsh --profile codewhale` porti aquesta
-  identitat tot sol. El Codewhale té els permisos i l'autoritat del cicle de
-  vida; el dsh conserva les seves sessions, perfils i credencials intactes.
-  Mira [docs/INTEGRATIONS_DSH.md](docs/INTEGRATIONS_DSH.md).
-- **VS Code.** L'entramat oficial de l'extensió (`extensions/vscode`) obre el
-  Codewhale en un terminal integrat i exposa una Agent View de només lectura
-  sobre el runtime local. És una previsualització de desenvolupament local, no
-  encara una publicació al marketplace.
+- **Fes servir el model que vulguis.** Connecta proveïdors allotjats o models locals mitjançant Ollama, vLLM o SGLang. Canvia de proveïdor i de model amb `/model`.
+- **Mantén el control.** Plan és només de lectura. Ask, Auto-Review i Full Access fan visible el comportament de les aprovacions. `/undo` desfà l’últim torn i `/restore` retorna l’espai de treball a una instantània anterior.
+- **Mantén organitzades les feines llargues.** Desa sessions, defineix un `/goal` durador, revisa els fluxos de treball abans que s’executin i coordina agents sense convertir les seves instruccions internes en part de la teva conversa.
+- **Amplia l’agent que ja tens.** Connecta servidors MCP i habilitats, configura hooks i conserva els rols d’agent com a fitxers llegibles al projecte o a la configuració personal.
 
-## Per saber-ne més
+Executa `/help` a la TUI per veure les ordres i les dreceres de teclat.
 
-- [docs/PROVIDERS.md](docs/PROVIDERS.md) — cada ruta de proveïdor: allotjada,
-  passarel·la i local
-- [docs/FLEET.md](docs/FLEET.md) — les fleets, el llibre major i la represa
-- [docs/WORKFLOW_EXPERIMENTAL_SEARCH.md](docs/WORKFLOW_EXPERIMENTAL_SEARCH.md) — cerca experimental congelada i neutral respecte al proveïdor dins de Workflow
-- [docs/CONFIGURATION.md](docs/CONFIGURATION.md) — `config.toml`, ganxos i la
-  constitution
-- [docs/AUTHORIZATION_ORDER.md](docs/AUTHORIZATION_ORDER.md) — com es
-  combinen modes, ganxos, regles de permís, terres de seguretat, llei del
-  repositori, aprovacions i sandbox
-- [docs/HOOKS.md](docs/HOOKS.md) — els onze esdeveniments de ganxo del cicle
-  de vida de la TUI, les seves càrregues i quins tres poden orientar un torn
-  (`codewhale exec` i les subordres de la CLI no disparen ganxos)
-- [docs/WEB.md](docs/WEB.md) — el client de navegador només en loopback i el
-  seu límit d'autenticació d'un sol ús
+## Seguretat
 
-Tota la resta — modes, dreceres, detalls del sandbox, MCP, l'API del runtime
-i l'arquitectura — viu a [docs](docs) i a
-[codewhale.net](https://codewhale.net/).
+Codewhale s’executa a la teva màquina amb l’accés que li concedeixes. Els modes d’aprovació i les regles del repositori limiten què pot fer l’agent; l’aïllament opcional del sistema operatiu afegeix un límit d’execució més sòlid allà on és compatible. Els preus desconeguts dels models continuen indicant-se com a desconeguts en lloc de presentar-se com a gratuïts.
 
-## Contribuir
+Llegeix l’[ordre d’autorització](docs/AUTHORIZATION_ORDER.md) per conèixer la jerarquia exacta de polítiques i la [configuració](docs/CONFIGURATION.md) per als ajustos locals.
 
-Els issues, els PR, els passos de reproducció, els registres i les peticions
-de funcionalitat són feina real de projecte, i les primeres contribucions són
-benvingudes. Quan un PR no es pot fusionar tal com està, els mantenidors
-recullen el que funciona i l'autor resta acreditat — al commit, al changelog i
-a [docs/CONTRIBUTORS.md](docs/CONTRIBUTORS.md).
+## Documentació
 
-- [Issues oberts](https://github.com/Hmbown/CodeWhale/issues) — les bones
-  primeres contribucions són aquí
-- [CONTRIBUTING.md](CONTRIBUTING.md) — configuració de desenvolupament i flux
-  de PR
-- [docs/CONTRIBUTORS.md](docs/CONTRIBUTORS.md) — tothom qui ha donat forma a
-  això
-- [Convida'm a un cafè](https://www.buymeacoffee.com/hmbown)
+- [Proveïdors i models locals](docs/PROVIDERS.md)
+- [Equips d’agents](docs/FLEET.md)
+- [MCP](docs/MCP.md), [hooks](docs/HOOKS.md) i [configuració](docs/CONFIGURATION.md)
+- [Client web local](docs/WEB.md)
+- [Tota la documentació](docs)
 
-Gràcies a [DeepSeek](https://github.com/deepseek-ai) pels models i el suport
-que van iniciar el projecte, a [DataWhale](https://github.com/datawhalechina)
-🐋 per acollir-nos a la família Whale Brother, i a
-[OpenWarp](https://github.com/zerx-lab/warp) i
-[Open Design](https://github.com/nexu-io/open-design) per col·laborar en
-l'experiència d'agent al terminal.
+## Uneix-te a la comunitat
+
+Codewhale millora quan les persones l’utilitzen, expliquen què no funciona bé i ajuden a corregir-ho. Si falta un proveïdor, un flux de treball és incòmode o la interfície del terminal et dificulta la feina, [obre una incidència](https://github.com/Hmbown/CodeWhale/issues). Si saps com millorar-lo, [obre una pull request](CONTRIBUTING.md). Les primeres contribucions són benvingudes i qui hi contribueix conserva el reconeixement per la feina incorporada.
+
+Uneix-te al [Discord](https://discord.gg/37gfS3ksug), o afegeix Hunter a WeChat (`hunterbown`) i demana entrar al grup Whale Brothers.
+
+## Història del projecte
+
+Codewhale va començar com a `deepseek-tui` i encara manté la compatibilitat amb la seva configuració i les seves sessions. Ara és neutral pel que fa als proveïdors, es manté de manera independent i no està afiliat a cap proveïdor de models.
+
+Gràcies a totes les persones que hi han contribuït i a les comunitats de codi obert que han ajudat el projecte a créixer. Consulta el [registre de col·laboradors](docs/CONTRIBUTORS.md).
 
 ## Llicència
 
-[MIT](LICENSE). Projecte comunitari independent, no afiliat a cap proveïdor de
-models.
-
-![Codewhale desplegant tres subagents scout de només lectura en un terminal](assets/fanout.gif)
-
-[![Star History Chart](https://star-history.dera.page/svg?repos=Hmbown/CodeWhale&type=date&legend=top-left)](https://star-history.dera.page/#Hmbown/CodeWhale&type=date)
+[MIT](LICENSE)

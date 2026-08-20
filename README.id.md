@@ -1,123 +1,77 @@
-<!-- source: README.md sha256:1f5bf984e975 -->
+<!-- source: README.md sha256:b092c34e8ca3 -->
 # Codewhale
 
-Sebuah coding agent sumber terbuka untuk terminal Anda — bawa model pilihan Anda sendiri.
+Codewhale adalah agen pemrograman sumber terbuka untuk terminal Anda, dibuat dengan Rust dan dikembangkan secara terbuka bersama orang-orang yang menggunakannya.
 
-Codewhale berawal sebagai pengalaman asli (native) untuk DeepSeek. Sejak saat itu, proyek ini berkembang menjadi proyek yang didorong oleh komunitas: satu coding harness yang memenuhi kebutuhan komunitas internasional yang terus berkembang serta mendukung sebanyak mungkin model dan penyedia (provider) — mengutamakan model terbuka, baik yang di-host maupun lokal, tanpa membeda-bedakan satu sama lain.
+![Codewhale berjalan di terminal](assets/screenshot.webp)
 
-Berikan penyedia, model, dan tugas: Codewhale akan membaca kode Anda, mengedit berkas, menjalankan perintah, serta memeriksa hasil kerjanya sendiri, lalu berhenti setelah pekerjaan selesai atau ketika membutuhkan arahan Anda. Ganti model di tengah tugas dengan `/model`. Bekerja secara interaktif di TUI, atau jalankan `codewhale exec` dalam skrip dan CI. Dibuat menggunakan Rust, berlisensi MIT, dan berjalan langsung di mesin Anda sendiri.
-
-Yang membedakannya dari harness lain: **Anda memilih model untuk setiap
-peran — dan model-model itu tidak harus sama** — dan **para agent di
-Codewhale saling berbicara, lintas model.** Sebuah fleet menyematkan
-penyedia, model, dan tingkat penalaran per peran, sehingga model murah dan
-cepat bisa mengarahkan model penalaran yang mahal, atau seorang builder GLM
-bisa mengerjakan tugas yang sama dengan seorang reviewer Kimi. Selagi mereka
-bekerja, Anda bisa mengirim catatan ke salah satunya di tengah jalan,
-mengintip transcript-nya, atau menghentikannya — dan bukan hanya dari induk
-ke anak: task Codewhale terpisah di workspace yang sama saling bertukar
-Agent Mail yang tahan restart, terkirim tepat satu kali pada batas aman, dan
-menyamarkan kredensial. Sebuah `/goal` menahan tujuan panjang lintas giliran
-sampai benar-benar selesai. Peran adalah berkas yang Anda sunting, dan
-seluruh harness tetap milik Anda.
-
-Kami selalu membuka kesempatan bagi para kontributor dan cara untuk terus berkembang. Jika model atau penyedia yang Anda gunakan belum tersedia, atau ada hal yang tidak berjalan semestinya, memberi tahu kami adalah salah satu kontribusi paling berharga yang bisa Anda lakukan — lihat [Kontribusi](#kontribusi).
-
-[English](README.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja-JP.md) · [Tiếng Việt](README.vi.md) · [Bahasa Indonesia](README.id.md) · [한국어](README.ko-KR.md) · [Español](README.es-419.md) · [Português](README.pt-BR.md) · [Русский](README.ru.md) · [Українська](README.uk.md) · [Français](README.fr.md) · [Deutsch](README.de.md) · [繁體中文](README.zh-TW.md) · [हिन्दी](README.hi.md) · [Türkçe](README.tr.md) · [Italiano](README.it.md) · [Polski](README.pl.md) · [العربية](README.ar.md) · [Català](README.ca.md) · [codewhale.net](https://codewhale.net/) · [Docs](docs) · [Changelog](CHANGELOG.md) · [Discord](https://discord.gg/37gfS3ksug)
+[English](README.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja-JP.md) · [Tiếng Việt](README.vi.md) · [한국어](README.ko-KR.md) · [Español](README.es-419.md) · [Português](README.pt-BR.md) · [Русский](README.ru.md) · [Українська](README.uk.md) · [Français](README.fr.md) · [Deutsch](README.de.md) · [繁體中文](README.zh-TW.md) · [हिन्दी](README.hi.md) · [Türkçe](README.tr.md) · [Italiano](README.it.md) · [Polski](README.pl.md) · [العربية](README.ar.md) · [Català](README.ca.md)
 
 [![CI](https://github.com/Hmbown/CodeWhale/actions/workflows/ci.yml/badge.svg)](https://github.com/Hmbown/CodeWhale/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/codewhale-cli?label=crates.io)](https://crates.io/crates/codewhale-cli)
 [![npm](https://img.shields.io/npm/v/codewhale?label=npm)](https://www.npmjs.com/package/codewhale)
-[![Discord](https://img.shields.io/badge/Discord-join%20the%20community-5865F2?logo=discord&logoColor=white)](https://discord.gg/37gfS3ksug)
-
-![Codewhale running in a terminal](assets/screenshot.webp)
+[![Discord](https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/37gfS3ksug)
 
 ## Instalasi
 
 ```bash
 npm install -g codewhale
+codewhale
 ```
 
-Cargo, Docker, Nix, Scoop, arsip biner pra-kemas, Android/Termux, serta mirror CNB bagi siapa pun yang memiliki keterbatasan akses ke GitHub dibahas secara lengkap di [docs/id/INSTALL.md](docs/id/INSTALL.md) ([English](docs/INSTALL.md)). Bermigrasi dari `deepseek-tui`? Konfigurasi dan sesi Anda akan tetap dipertahankan — lihat [docs/id/REBRAND.md](docs/id/REBRAND.md) ([English](docs/REBRAND.md)).
+Saat pertama dijalankan, Codewhale membantu Anda menghubungkan penyedia atau tetap bekerja secara luring. Codewhale juga mendukung Cargo, Docker, Nix, Scoop, arsip siap pakai, Android/Termux, dan mirror CNB. Lihat [panduan instalasi](docs/INSTALL.md).
 
 ## Penggunaan
 
-```bash
-codewhale auth set --provider deepseek   # or export ANTHROPIC_API_KEY, etc.
-codewhale                                # open the TUI
-codewhale exec "fix the failing test"    # headless
-codewhale web                            # local browser client on 127.0.0.1
+Bicaralah dengan Codewhale seperti Anda berbicara dengan rekan satu tim:
+
+```text
+Fix the failing tests and explain what changed.
 ```
 
+Atau jalankan tugas tanpa membuka TUI:
 
-Di dalam TUI: `/model` mengganti penyedia dan model sekaligus, `/fleet` menjalankan tim pekerja (workers), `/undo` membatalkan langkah (turn) terakhir, dan `/restore <N>` mengembalikan workspace ke snapshot sebelumnya (`/restore` tanpa argumen hanya menampilkan daftarnya). Saat composer kosong, `Tab` beralih antar mode Plan / Work / Operate; bila composer berisi teks, `Tab` justru melengkapi perintah slash dan sebutan `@`. `Shift+Tab` beralih antar postur izin Ask / Auto-Review / Full Access kapan saja. `!` menjalankan perintah shell melalui alur persetujuan normal.
+```bash
+codewhale exec "fix the failing tests and explain what changed"
+```
 
-## Fitur & Kapabilitas
+Codewhale dapat membaca repositori Anda, mengedit berkas, menjalankan perintah, memeriksa hasil, dan terus bekerja menuju tujuan. Anda menentukan seberapa besar akses yang dimilikinya.
 
-- **Model mana saja, penyedia apa saja.** DeepSeek, Claude, GPT, Kimi, GLM, dan 30+ penyedia lainnya, ditambah vLLM, SGLang, atau Ollama milik Anda sendiri tanpa memerlukan API key — semuanya melalui satu runtime dan satu kumpulan alat. Katalog melacak jajaran live setiap penyedia — backend V4 Pro DeepSeek (berlabel `DeepSeek-V4-Pro-0813`) tetap dapat dipanggil sebagai `deepseek-v4-pro`, Grok 4.6 adalah default langsung xAI, dan OrcaRouter melakukan routing melalui `orcarouter/auto`. Batas konteks dan harga diambil dari rute sebenarnya, dan harga yang tidak diketahui ditampilkan sebagai *unknown* daripada $0.
-- **Agent yang saling berbicara — lintas model.** Setiap agent di
-  Codewhale bisa dijangkau selagi bekerja: `message` mengantrekan catatan
-  untuk sub-agent yang sedang berjalan, `followup` membangunkannya dengan
-  catatan Anda pada batas aman berikutnya, `peek` membaca transcript-nya,
-  dan interupsi hanya menghentikan gilirannya. Ini melampaui pohon
-  induk-anak: task terpisah di workspace yang sama saling bertukar **Agent
-  Mail** yang tahan restart — ringkasan serah terima yang mengantre, selamat
-  melewati restart, terkirim tepat satu kali pada batas aman penerima, dan
-  menyamarkan kredensial serta path — sehingga sesi GLM dan sesi Kimi bisa
-  berkoordinasi di dua terminal tanpa Anda menjadi perantara. Setiap sisi
-  boleh memakai model berbeda; Codewhale yang mengantar percakapannya.
-- **Kerja yang bisa dilanjutkan.** Sebuah fleet mencatat setiap langkah ke
-  buku besar append-only, sehingga `fleet resume` melanjutkan dari tempat
-  Anda berhenti. `/goal` menahan tujuan yang gigih dikerjakan agent dari
-  giliran ke giliran — bisa dijeda, dilanjutkan, dan dipulihkan bersama sesi
-  setelah restart — sedangkan `/workflows` membuka dasbor langsung atas
-  setiap eksekusi yang disimpan journal workspace ini.
-- **Read-only sampai Anda memberi izin lebih.** Mode Plan tidak dapat mengubah berkas, dan gerbang persetujuan memproteksi perintah berisiko. Ketika sandbox OS membungkus perintah, Codewhale akan menginformasikannya: Seatbelt pada macOS (jika tersedia), serta opsi bubblewrap di Linux. Berkas `constitution.json` repositori dikompilasi menjadi pembatas penulisan yang bahkan tidak dapat dilewati oleh mode Full Access.
-- **Pekerjaan yang dapat dilanjutkan.** Fleet mencatat setiap langkah ke ledger bertipe append-only, sehingga `fleet resume` dapat melanjutkan pekerjaan tepat di mana Anda meninggalkannya.
+## Mengapa Codewhale
 
-## Integrasi
+- **Gunakan model yang Anda inginkan.** Hubungkan penyedia terkelola atau model lokal melalui Ollama, vLLM, atau SGLang. Ganti penyedia dan model dengan `/model`.
+- **Tetap memegang kendali.** Plan hanya dapat membaca. Ask, Auto-Review, dan Full Access menampilkan perilaku persetujuan dengan jelas. `/undo` membatalkan giliran terakhir dan `/restore` mengembalikan ruang kerja ke snapshot sebelumnya.
+- **Jaga agar pekerjaan panjang tetap teratur.** Simpan sesi, tetapkan `/goal` yang bertahan lama, tinjau alur kerja sebelum dijalankan, dan koordinasikan agen tanpa memasukkan instruksi internal mereka ke transkrip Anda.
+- **Perluas agen yang sudah Anda miliki.** Hubungkan server MCP dan keterampilan, konfigurasikan hook, dan simpan peran agen sebagai berkas yang mudah dibaca di proyek atau pengaturan pribadi Anda.
 
-- **DeepSeek Harness (dsh) — terhubung melalui Codewhale.**
-  `codewhale integrations dsh connect` menghubungkan instalasi
-  `@deepseek-ai/dsh` yang sudah ada ke rute provider, izin, dan ruang kerja
-  Codewhale Anda; `integrations dsh install-bundle` menambahkan bundel plugin
-  DSH opsional sehingga `dsh --profile codewhale` membawa identitas itu secara
-  mandiri. Codewhale memegang izin dan otoritas siklus hidup; dsh tetap
-  mempertahankan sesi, profil, dan kredensialnya sendiri tanpa tersentuh.
-  Lihat [docs/INTEGRATIONS_DSH.md](docs/INTEGRATIONS_DSH.md).
-- **VS Code.** Kerangka ekstensi resmi (`extensions/vscode`) membuka
-  Codewhale di terminal terintegrasi dan menyajikan Agent View hanya-baca
-  melalui runtime lokal. Ini adalah pratinjau pengembangan lokal, bukan rilis
-  marketplace.
+Jalankan `/help` di TUI untuk melihat perintah dan pintasan papan ketik.
 
-## Pelajari Lebih Lanjut
+## Keamanan
 
-- [docs/id/PROVIDERS.md](docs/id/PROVIDERS.md) ([English](docs/PROVIDERS.md)) — setiap rute penyedia: hosted, gateway, dan lokal
-- [docs/id/FLEET.md](docs/id/FLEET.md) ([English](docs/FLEET.md)) — fleet, ledger, dan kelanjutan sesi (resume)
-- [docs/WORKFLOW_EXPERIMENTAL_SEARCH.md](docs/WORKFLOW_EXPERIMENTAL_SEARCH.md) — pencarian eksperimental yang dibekukan dan netral terhadap penyedia di dalam Workflow
-- [docs/id/CONFIGURATION.md](docs/id/CONFIGURATION.md) ([English](docs/CONFIGURATION.md)) — `config.toml`, hooks, dan konstitusi
-- [docs/AUTHORIZATION_ORDER.md](docs/AUTHORIZATION_ORDER.md) — bagaimana mode, hooks, aturan izin, batas keamanan, hukum repositori, persetujuan, dan sandbox saling menyusun
-- [docs/HOOKS.md](docs/HOOKS.md) — sebelas event hook siklus hidup TUI, payload-nya, dan tiga di antaranya yang dapat mengarahkan sebuah turn (`codewhale exec` dan subperintah CLI tidak memicu hooks)
-- [docs/id/WEB.md](docs/id/WEB.md) ([English](docs/WEB.md)) — klien browser berbasis loopback-only dan batas autentikasi sekali pakainya
-- [docs/id/LOCALIZATION.md](docs/id/LOCALIZATION.md) ([English](docs/LOCALIZATION.md)) — matriks lokalisasi & panduan terjemahan
+Codewhale berjalan di mesin Anda dengan akses yang Anda berikan. Mode persetujuan dan aturan repositori membatasi tindakan agen; sandbox OS opsional menambahkan batas eksekusi yang lebih kuat jika didukung. Harga model yang belum diketahui tetap ditampilkan sebagai tidak diketahui, bukan dilaporkan gratis.
 
-Topik lainnya — [mode eksekusi](docs/id/MODES.md) ([English](docs/MODES.md)), [pintasan tombol](docs/id/KEYBINDINGS.md) ([English](docs/KEYBINDINGS.md)), detail sandbox, [MCP](docs/id/MCP.md) ([English](docs/MCP.md)), runtime API, dan arsitektur — tersedia di dalam direktori [docs](docs) serta di [codewhale.net](https://codewhale.net/).
+Baca [urutan otorisasi](docs/AUTHORIZATION_ORDER.md) untuk susunan kebijakan yang tepat dan [konfigurasi](docs/CONFIGURATION.md) untuk pengaturan lokal.
 
-## Kontribusi
+## Dokumentasi
 
-Issue, PR, langkah reproduksi masalah, log, dan permintaan fitur semuanya merupakan kontribusi nyata pada proyek ini, dan kami sangat menyambut kontribusi pertama Anda. Jika sebuah PR tidak dapat di-merge secara langsung, maintainer akan memetik bagian yang berfungsi dan tetap memberikan kredit kepada pembuatnya — dalam commit, changelog, dan [docs/CONTRIBUTORS.md](docs/CONTRIBUTORS.md).
+- [Penyedia dan model lokal](docs/PROVIDERS.md)
+- [Tim agen](docs/FLEET.md)
+- [MCP](docs/MCP.md), [hook](docs/HOOKS.md), dan [konfigurasi](docs/CONFIGURATION.md)
+- [Klien web lokal](docs/WEB.md)
+- [Semua dokumentasi](docs)
 
-- [Open issues](https://github.com/Hmbown/CodeWhale/issues) — tempat awal yang baik untuk kontribusi pertama
-- [CONTRIBUTING.id.md](CONTRIBUTING.id.md) ([English](CONTRIBUTING.md)) — alur pengembangan dan prosedur PR
-- [docs/CONTRIBUTORS.md](docs/CONTRIBUTORS.md) — setiap orang yang telah membentuk proyek ini
-- [Dukung proyek ini](https://www.buymeacoffee.com/hmbown)
+## Bergabung dengan komunitas
 
-Terima kasih kepada [DeepSeek](https://github.com/deepseek-ai) untuk model dan dukungan yang mengawali proyek ini, [DataWhale](https://github.com/datawhalechina) 🐋 atas sambutan hangat ke dalam keluarga Whale Brother, serta [OpenWarp](https://github.com/zerx-lab/warp) dan [Open Design](https://github.com/nexu-io/open-design) atas kolaborasi dalam menghadirkan pengalaman terminal-agent yang lebih baik.
+Codewhale menjadi lebih baik ketika orang menggunakannya, melaporkan hal yang terasa kurang tepat, dan membantu memperbaikinya. Jika penyedia belum tersedia, alur kerja terasa janggal, atau UI terminal menghambat Anda, [buat issue](https://github.com/Hmbown/CodeWhale/issues). Jika Anda tahu cara memperbaikinya, [buat pull request](CONTRIBUTING.md). Kontribusi pertama sangat disambut, dan kontributor tetap menerima kredit untuk pekerjaan yang digabungkan.
+
+Bergabunglah di [Discord](https://discord.gg/37gfS3ksug), atau tambahkan Hunter di WeChat (`hunterbown`) dan mintalah untuk bergabung dengan grup Whale Brothers.
+
+## Riwayat proyek
+
+Codewhale bermula sebagai `deepseek-tui` dan tetap mempertahankan kompatibilitas konfigurasi serta sesinya. Kini Codewhale netral terhadap penyedia, dikelola secara independen, dan tidak berafiliasi dengan penyedia model mana pun.
+
+Terima kasih kepada setiap kontributor dan komunitas sumber terbuka yang membantu proyek ini tumbuh. Lihat [catatan kontributor](docs/CONTRIBUTORS.md).
 
 ## Lisensi
 
-[MIT](LICENSE). Sebuah proyek komunitas independen, tidak terafiliasi dengan penyedia model mana pun.
-
-![Codewhale memecah tiga subagent scout hanya-baca di terminal](assets/fanout.gif)
-
-[![Star History Chart](https://star-history.dera.page/svg?repos=Hmbown/CodeWhale&type=date&legend=top-left)](https://star-history.dera.page/#Hmbown/CodeWhale&type=date)
+[MIT](LICENSE)

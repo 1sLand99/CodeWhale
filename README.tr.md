@@ -1,179 +1,77 @@
-<!-- source: README.md sha256:1f5bf984e975 -->
+<!-- source: README.md sha256:b092c34e8ca3 -->
 # Codewhale
 
-Terminaliniz için açık kaynak bir kodlama ajanı — modeli siz getirin.
+Codewhale, terminaliniz için Rust ile geliştirilmiş ve kullanıcılarıyla birlikte açık biçimde iyileştirilen açık kaynaklı bir kodlama ajanıdır.
 
-Codewhale, DeepSeek için yerel bir deneyim olarak başladı. O zamandan beri
-topluluk güdümlü bir projeye dönüştü: büyüyen uluslararası bir topluluğa uyan
-ve olabildiğince çok modeli ve sağlayıcıyı destekleyen tek bir kodlama
-harness'i — önce açık modeller, barındırılan veya yerel, hiçbiri diğerinden
-ayrıcalıklı değil.
+![Terminalde çalışan Codewhale](assets/screenshot.webp)
 
-Ona bir sağlayıcı, bir model ve bir görev verin. Kodunuzu okur, dosyaları
-düzenler, komutları çalıştırır ve kendi işini denetler; iş bitince veya size
-ihtiyaç duyunca durur. Görev sırasında `/model` ile model değiştirin. TUI'de
-etkileşimli çalışın veya betiklerde ve CI'da `codewhale exec` çalıştırın. Rust
-ile yazılmıştır, MIT lisanslıdır ve sizin makinenizde çalışır.
-
-Diğer harness'lerin olmadığı yer: **her rol için modeli sen seçersin — ve
-aynı olmak zorunda değiller** — ve **Codewhale'daki agent'lar birbiriyle
-konuşur, modeller arası.** Bir fleet her role sağlayıcı, model ve akıl
-yürütme düzeyini sabitler; bu yüzden ucuz ve hızlı bir model pahalı bir akıl
-yürüten modeli yönetebilir ya da GLM builder, Kimi reviewer ile aynı işte
-çalışabilir. Çalışırken onlardan herhangi birine uçarken not bırakabilir,
-transcript'ine bakabilir veya kesebilirsin — üstelik bu sadece ebeveyn-çocuk
-ile sınırlı değil: aynı workspace'teki ayrı Codewhale görevleri, yeniden
-başlatmalara dayanan, tam olarak bir kez güvenli bir sınırdan teslim edilen
-ve kimlik bilgilerini maskeleyen kalıcı Agent Mail alışverişi yapar. Bir
-`/goal`, gerçekten bitene kadar uzun bir hedefi turlar boyunca taşır. Roller
-düzenlediğin dosyalardır ve bütün harness senin kalır.
-
-Her zaman katkıda bulunanlar ve iyileştirme yolları arıyoruz. Kullandığınız bir
-model veya sağlayıcı eksikse ya da bir şey bozulursa, bize söylemek
-yapabileceğiniz en yararlı şeylerden biridir — bkz.
-[Katkıda bulunma](#katkıda-bulunma).
-
-[English](README.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja-JP.md) · [Tiếng Việt](README.vi.md) · [Bahasa Indonesia](README.id.md) · [한국어](README.ko-KR.md) · [Español](README.es-419.md) · [Português](README.pt-BR.md) · [Русский](README.ru.md) · [Українська](README.uk.md) · [Français](README.fr.md) · [Deutsch](README.de.md) · [繁體中文](README.zh-TW.md) · [हिन्दी](README.hi.md) · [Italiano](README.it.md) · [Polski](README.pl.md) · [العربية](README.ar.md) · [Català](README.ca.md) · [codewhale.net](https://codewhale.net/) · [Docs](docs) · [Changelog](CHANGELOG.md) · [Discord](https://discord.gg/37gfS3ksug)
+[English](README.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja-JP.md) · [Tiếng Việt](README.vi.md) · [Bahasa Indonesia](README.id.md) · [한국어](README.ko-KR.md) · [Español](README.es-419.md) · [Português](README.pt-BR.md) · [Русский](README.ru.md) · [Українська](README.uk.md) · [Français](README.fr.md) · [Deutsch](README.de.md) · [繁體中文](README.zh-TW.md) · [हिन्दी](README.hi.md) · [Italiano](README.it.md) · [Polski](README.pl.md) · [العربية](README.ar.md) · [Català](README.ca.md)
 
 [![CI](https://github.com/Hmbown/CodeWhale/actions/workflows/ci.yml/badge.svg)](https://github.com/Hmbown/CodeWhale/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/codewhale-cli?label=crates.io)](https://crates.io/crates/codewhale-cli)
 [![npm](https://img.shields.io/npm/v/codewhale?label=npm)](https://www.npmjs.com/package/codewhale)
-[![Discord](https://img.shields.io/badge/Discord-join%20the%20community-5865F2?logo=discord&logoColor=white)](https://discord.gg/37gfS3ksug)
-
-![Terminalde çalışan Codewhale](assets/screenshot.webp)
+[![Discord](https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/37gfS3ksug)
 
 ## Kurulum
 
 ```bash
 npm install -g codewhale
+codewhale
 ```
 
-Cargo, Docker, Nix, Scoop, önceden derlenmiş arşivler, Android/Termux ve
-GitHub'a ulaşamayanlar için bir CNB aynası
-[docs/INSTALL.md](docs/INSTALL.md) içinde. `deepseek-tui`'den mi geliyorsunuz?
-Yapılandırmanız ve oturumlarınız taşınır — bkz.
-[docs/REBRAND.md](docs/REBRAND.md).
+Codewhale ilk çalıştırmada bir sağlayıcıya bağlanmanıza veya çevrimdışı kalmanıza yardımcı olur. Cargo, Docker, Nix, Scoop, önceden derlenmiş arşivler, Android/Termux ve CNB aynasını da destekler. [Kurulum kılavuzuna](docs/INSTALL.md) bakın.
 
 ## Kullanım
 
-```bash
-codewhale auth set --provider deepseek   # or export ANTHROPIC_API_KEY, etc.
-codewhale                                # open the TUI
-codewhale exec "fix the failing test"    # headless
-codewhale web                            # local browser client on 127.0.0.1
+Codewhale ile ekip arkadaşınızla konuşur gibi konuşun:
+
+```text
+Fix the failing tests and explain what changed.
 ```
 
-TUI'de: `/model` sağlayıcıyı ve modeli birlikte değiştirir, `/fleet` ekibi
-kurar ve çalıştırır — her seferinde bir rol, her biri kendi modeliyle —,
-`/undo` son turu geri alır ve `/restore <N>` çalışma alanını önceki bir
-anlık görüntüye döndürür (yalın `/restore` bunları listeler). Besteci boşken
-`Tab` Plan / Work / Operate arasında döner — içinde metin varken `Tab` slash
-komutlarını ve `@` bahsetmelerini tamamlar. `Shift+Tab` her an Ask /
-Auto-Review / Full Access izin duruşunu döngüler. `!` bir kabuk komutunu
-normal onay yolundan çalıştırır.
+TUI’yi açmadan da bir görev çalıştırabilirsiniz:
 
-## Ne yapar
+```bash
+codewhale exec "fix the failing tests and explain what changed"
+```
 
-- **Herhangi bir model, herhangi bir sağlayıcı — ve herhangi bir karışım.**
-  DeepSeek, Claude, GPT, Kimi, GLM ve 30'dan fazla sağlayıcı, ayrıca anahtarsız
-  kendi vLLM, SGLang veya Ollama'nız, hepsi tek bir çalışma zamanı ve tek bir
-  araç setinden. Katalog her sağlayıcının canlı kadrosunu izler — DeepSeek'in
-  V4 Pro arka ucu (`DeepSeek-V4-Pro-0813` etiketli) hâlâ `deepseek-v4-pro`
-  olarak çağrılabilir, Grok 4.6 doğrudan xAI varsayılanıdır ve OrcaRouter
-  `orcarouter/auto` üzerinden yönlendirir. Kaydedilmiş bir rol `provider`,
-  `model` ve akıl yürütme katmanını açıkça kaydeder; böylece bir fleet tek bir
-  çalıştırmada birden çok satıcıya yayılabilir ve bir rolün rotası o anda
-  hangi sağlayıcının etkin olduğuna bağlı olmaz. Bağlam sınırları ve fiyatlar
-  gerçek rotadan gelir; bilinmeyen bir fiyat $0 değil, bilinmiyor olarak
-  görünür.
-- **Birbiriyle konuşan agent'lar — modeller arası.** Codewhale'daki her
-  agent çalışırken ulaşılabilir: `message` çalışan bir sub-agent'a not
-  kuyruğa alır, `followup` onu senin notunla bir sonraki güvenli sınırlarda
-  uyandırır, `peek` transcript'ini okur, bir kesme yalnızca onun turunu
-  durdurur. Bu ebeveyn-çocuk ağacının ötesine geçer: aynı workspace'teki
-  ayrı görevler kalıcı **Agent Mail** alışverişi yapar — yeniden başlatmaya
-  dayanan, alıcının güvenli sınırında tam olarak bir kez teslim edilen ve
-  kimlik bilgileriyle yolları maskeleyen, kuyruğa alınmış bir devir özeti —
-  böylece bir GLM oturumu ve bir Kimi oturumu iki terminalde koordinasyon
-  kurar, sen aracı olmaktan çıkarsın. Taraflar farklı modeller olabilir;
-  konuşmayı Codewhale taşır.
-- **Sizin yazdığınız bir harness.** Roller okuyup düzenleyebileceğiniz
-  dosyalardır — rol başına bir model, bir araç duruşu ve kalıcı yönergeler —
-  ekibin paylaşması için projede veya sizi depolar arasında izlemesi için
-  diğer kişisel ayarlarınızın yanında tutulur. Bir constitution, ajanın her
-  oturumda nasıl davranmasını istediğinizi kaydeder; böylece harness bizim
-  değil sizin pratiğinize uyar.
-- **Kaldığın yerden süren iş.** Bir fleet her adımı append-only bir
-  deftere kaydeder, `fleet resume` kaldığın yerden devam eder. `/goal`,
-  agent'ın tur tur peşinden gittiği kalıcı bir hedefi tutar —
-  duraklatılabilir, sürdürülebilir ve yeniden başlatmada oturumla birlikte
-  geri yüklenir — `/workflows` ise bu workspace'in günlüğünde tuttuğu her
-  çalıştırmayı canlı gösteren bir panel açar.
-- **Kaldığınız yerden sürebileceğiniz iş.** Bir fleet her adımı yalnızca
-  eklenen bir deftere yazar, böylece `fleet resume` kaldığınız yerden devam
-  eder.
+Codewhale deponuzu okuyabilir, dosyaları düzenleyebilir, komutları çalıştırabilir, sonuçları inceleyebilir ve bir hedefe doğru çalışmayı sürdürebilir. Ne kadar erişime sahip olacağına siz karar verirsiniz.
 
-## Entegrasyonlar
+## Neden Codewhale
 
-- **DeepSeek Harness (dsh) — Codewhale üzerinden bağlı.**
-  `codewhale integrations dsh connect` mevcut bir `@deepseek-ai/dsh`
-  kurulumunu Codewhale sağlayıcı rotanıza, izinlerinize ve çalışma alanınıza
-  bağlar; `integrations dsh install-bundle` isteğe bağlı DSH eklenti paketini
-  ekler ki `dsh --profile codewhale` bu kimliği kendi başına taşısın.
-  İzinler ve yaşam döngüsü yetkisi Codewhale'dedir; dsh kendi oturumlarını,
-  profillerini ve kimlik bilgilerini olduğu gibi bırakır. Bkz.
-  [docs/INTEGRATIONS_DSH.md](docs/INTEGRATIONS_DSH.md).
-- **VS Code.** Resmi eklenti iskelesi (`extensions/vscode`) Codewhale'i
-  tümleşik bir terminalde açar ve yerel çalışma zamanı üzerinde salt okunur
-  bir Agent View sunar. Bu yerel geliştirme önizlemesidir, henüz bir
-  marketplace sürümü değildir.
+- **İstediğiniz modeli kullanın.** Barındırılan sağlayıcılara veya Ollama, vLLM ya da SGLang üzerinden yerel modellere bağlanın. Sağlayıcı ve modeli `/model` ile değiştirin.
+- **Kontrolü elinizde tutun.** Plan salt okunurdur. Ask, Auto-Review ve Full Access, onay davranışını görünür kılar. `/undo` son turu geri alır, `/restore` ise çalışma alanını önceki bir anlık görüntüye döndürür.
+- **Uzun süren işleri düzenli tutun.** Oturumları kaydedin, kalıcı bir `/goal` belirleyin, iş akışlarını çalışmadan önce gözden geçirin ve ajanların iç talimatlarını konuşmanıza taşımadan onları koordine edin.
+- **Elinizdeki ajanı genişletin.** MCP sunucularını ve becerileri bağlayın, hook’ları yapılandırın ve ajan rollerini projenizde veya kişisel ayarlarınızda okunabilir dosyalar olarak saklayın.
 
-## Daha fazla öğrenin
+Komutları ve klavye kısayollarını görmek için TUI’de `/help` komutunu çalıştırın.
 
-- [docs/PROVIDERS.md](docs/PROVIDERS.md) — her sağlayıcı rotası: barındırılan,
-  ağ geçidi ve yerel
-- [docs/FLEET.md](docs/FLEET.md) — fleet'ler, defter ve devam ettirme
-- [docs/WORKFLOW_EXPERIMENTAL_SEARCH.md](docs/WORKFLOW_EXPERIMENTAL_SEARCH.md) — Workflow içinde dondurulmuş, sağlayıcıdan bağımsız deneysel arama
-- [docs/CONFIGURATION.md](docs/CONFIGURATION.md) — `config.toml`, hook'lar ve
-  constitution
-- [docs/AUTHORIZATION_ORDER.md](docs/AUTHORIZATION_ORDER.md) — kipler,
-  hook'lar, izin kuralları, güvenlik tabanları, depo yasası, onaylar ve
-  sanal alanın nasıl birleştiği
-- [docs/HOOKS.md](docs/HOOKS.md) — on bir TUI yaşam döngüsü hook olayı,
-  yükleri ve bir turu yönlendirebilen üçü (`codewhale exec` ve CLI alt
-  komutları hook tetiklemez)
-- [docs/WEB.md](docs/WEB.md) — yalnızca döngü geri dönüşü tarayıcı istemcisi
-  ve tek kullanımlık kimlik doğrulama sınırı
+## Güvenlik
 
-Geri kalan her şey — kipler, tuş bağları, sanal alan ayrıntıları, MCP,
-çalışma zamanı API'si ve mimari — [docs](docs) ve
-[codewhale.net](https://codewhale.net/) üzerinde yaşar.
+Codewhale, verdiğiniz erişimle kendi makinenizde çalışır. Onay modları ve depo kuralları ajanın yapabileceklerini sınırlar; desteklenen ortamlarda isteğe bağlı işletim sistemi sandbox’ı daha güçlü bir yürütme sınırı ekler. Bilinmeyen model fiyatları ücretsiz olarak bildirilmek yerine bilinmeyen olarak kalır.
 
-## Katkıda bulunma
+Politikaların kesin sıralaması için [yetkilendirme sırasını](docs/AUTHORIZATION_ORDER.md), yerel ayarlar için [yapılandırmayı](docs/CONFIGURATION.md) okuyun.
 
-Issue'lar, PR'lar, yeniden üretim adımları, günlükler ve özellik istekleri
-gerçek proje işidir ve ilk katkılar hoş karşılanır. Bir PR olduğu gibi
-birleştirilemediğinde bakımcılar işe yarayanı alır ve yazarın kredisi kalır
-— commit'te, changelog'da ve
-[docs/CONTRIBUTORS.md](docs/CONTRIBUTORS.md) içinde.
+## Belgeler
 
-- [Açık issue'lar](https://github.com/Hmbown/CodeWhale/issues) — iyi ilk
-  katkılar burada
-- [CONTRIBUTING.md](CONTRIBUTING.md) — geliştirme kurulumu ve PR akışı
-- [docs/CONTRIBUTORS.md](docs/CONTRIBUTORS.md) — bunu şekillendiren herkes
-- [Bana bir kahve ısmarla](https://www.buymeacoffee.com/hmbown)
+- [Sağlayıcılar ve yerel modeller](docs/PROVIDERS.md)
+- [Ajan ekipleri](docs/FLEET.md)
+- [MCP](docs/MCP.md), [hook’lar](docs/HOOKS.md) ve [yapılandırma](docs/CONFIGURATION.md)
+- [Yerel web istemcisi](docs/WEB.md)
+- [Tüm belgeler](docs)
 
-Projeyi başlatan modeller ve destek için [DeepSeek](https://github.com/deepseek-ai)'e,
-bizi Whale Brother ailesine kabul ettiği için
-[DataWhale](https://github.com/datawhalechina) 🐋'e ve terminal ajanı
-deneyiminde iş birliği için [OpenWarp](https://github.com/zerx-lab/warp) ile
-[Open Design](https://github.com/nexu-io/open-design)'a teşekkürler.
+## Topluluğa katılın
+
+İnsanlar Codewhale’i kullandıkça, yanlış gelen noktaları bildirdikçe ve düzeltmeye yardımcı oldukça Codewhale daha iyi olur. Bir sağlayıcı eksikse, bir iş akışı kullanışsızsa veya terminal arayüzü işinizi zorlaştırıyorsa [bir issue açın](https://github.com/Hmbown/CodeWhale/issues). Nasıl iyileştirileceğini biliyorsanız [bir pull request açın](CONTRIBUTING.md). İlk katkılar memnuniyetle karşılanır ve katkıda bulunanların projeye alınan çalışmaları üzerindeki emeği kayda geçer.
+
+[Discord’a](https://discord.gg/37gfS3ksug) katılın veya WeChat’te Hunter’ı (`hunterbown`) ekleyip Whale Brothers grubuna katılmak istediğinizi belirtin.
+
+## Proje geçmişi
+
+Codewhale, `deepseek-tui` olarak başladı ve onun yapılandırması ile oturumlarıyla uyumluluğunu hâlâ koruyor. Artık sağlayıcılardan bağımsızdır, bağımsız olarak sürdürülür ve herhangi bir model sağlayıcısıyla bağlantılı değildir.
+
+Projeyi büyütmeye yardımcı olan tüm katkıcılara ve açık kaynak topluluklarına teşekkürler. [Katkıcı kaydına](docs/CONTRIBUTORS.md) bakın.
 
 ## Lisans
 
-[MIT](LICENSE). Bağımsız bir topluluk projesi; hiçbir model sağlayıcısıyla
-bağlı değildir.
-
-![Codewhale bir terminalde üç salt okunur scout alt ajanını açıyor](assets/fanout.gif)
-
-[![Star History Chart](https://star-history.dera.page/svg?repos=Hmbown/CodeWhale&type=date&legend=top-left)](https://star-history.dera.page/#Hmbown/CodeWhale&type=date)
+[MIT](LICENSE)

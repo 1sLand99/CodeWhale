@@ -1,166 +1,77 @@
-<!-- source: README.md sha256:1f5bf984e975 -->
+<!-- source: README.md sha256:b092c34e8ca3 -->
 # Codewhale
 
-आपके टर्मिनल के लिए एक ओपन सोर्स कोडिंग एजेंट — मॉडल आप लाएँ।
+Codewhale आपके टर्मिनल के लिए Rust में बना एक ओपन सोर्स कोडिंग एजेंट है, जिसे इसके उपयोगकर्ताओं के साथ सार्वजनिक रूप से बेहतर बनाया जाता है।
 
-Codewhale की शुरुआत DeepSeek के लिए एक नेटिव अनुभव के रूप में हुई। तब से यह एक
-समुदाय-संचालित परियोजना बन गई है: एक ऐसा कोडिंग harness जो बढ़ते अंतरराष्ट्रीय
-समुदाय के साथ बैठता है और जितने संभव हो उतने मॉडल और प्रदाताओं को सहारा देता है —
-पहले ओपन मॉडल, होस्टेड या लोकल, किसी को बाकियों से विशेष अधिकार नहीं।
+![टर्मिनल में चलता Codewhale](assets/screenshot.webp)
 
-इसे एक प्रदाता, एक मॉडल और एक कार्य दें। यह आपका कोड पढ़ता है, फ़ाइलें संपादित
-करता है, कमांड चलाता है और अपने काम की जाँच करता है, फिर रुक जाता है जब काम पूरा
-हो जाए या उसे आपकी ज़रूरत हो। कार्य के बीच में `/model` से मॉडल बदलें। TUI में
-इंटरैक्टिव काम करें, या स्क्रिप्ट और CI में `codewhale exec` चलाएँ। यह Rust में
-लिखा है, MIT लाइसेंस के तहत है, और आपकी मशीन पर चलता है।
-
-जो दूसरे हार्नेस में नहीं है: **हर भूमिका के लिए मॉडल आप चुनते हैं — और
-उन्हें एक जैसा होने की ज़रूरत नहीं** — और **Codewhale के एजेंट आपस में बात
-करते हैं, मॉडलों के आर-पार।** एक fleet हर भूमिका के लिए प्रोवाइडर, मॉडल और
-रीज़निंग स्तर अलग से तय करती है, इसलिए सस्ता और तेज़ मॉडल महँगे रीज़निंग
-मॉडल को निर्देशित कर सकता है, या GLM builder उसी काम पर Kimi reviewer के साथ
-काम कर सकता है। जब वे चल रहे हों, तब भी आप किसी भी एजेंट को बीच में संदेश
-भेज सकते हैं, उसका transcript देख सकते हैं या उसे रोक सकते हैं — और यह
-सिर्फ़ पैरेंट-चाइल्ड तक सीमित नहीं: एक ही workspace के अलग Codewhale टास्क
-आपस में टिकाऊ Agent Mail का आदान-प्रदान करते हैं, जो रीस्टार्ट से बच निकलता
-है, सुरक्षित सीमा पर ठीक एक बार पहुँचता है, और क्रेडेंशियल छिपा देता है। एक
-`/goal` लंबे उद्देश्य को टर्न-दर-टर्न थामे रखता है जब तक वह सच में पूरा न हो
-जाए। भूमिकाएँ फ़ाइलें हैं जिन्हें आप संपादित करते हैं, और पूरा हार्नेस आपका
-ही रहता है।
-
-हम हमेशा योगदानकर्ताओं और सुधार के रास्ते खोजते रहते हैं। अगर आप जिस मॉडल या
-प्रदाता का उपयोग करते हैं वह गायब है, या कुछ टूटता है, हमें बताना उन सबसे उपयोगी
-कामों में से एक है जो आप कर सकते हैं — देखें [योगदान](#योगदान)।
-
-[English](README.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja-JP.md) · [Tiếng Việt](README.vi.md) · [Bahasa Indonesia](README.id.md) · [한국어](README.ko-KR.md) · [Español](README.es-419.md) · [Português](README.pt-BR.md) · [Русский](README.ru.md) · [Українська](README.uk.md) · [Français](README.fr.md) · [Deutsch](README.de.md) · [繁體中文](README.zh-TW.md) · [Türkçe](README.tr.md) · [Italiano](README.it.md) · [Polski](README.pl.md) · [العربية](README.ar.md) · [Català](README.ca.md) · [codewhale.net](https://codewhale.net/) · [Docs](docs) · [Changelog](CHANGELOG.md) · [Discord](https://discord.gg/37gfS3ksug)
+[English](README.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja-JP.md) · [Tiếng Việt](README.vi.md) · [Bahasa Indonesia](README.id.md) · [한국어](README.ko-KR.md) · [Español](README.es-419.md) · [Português](README.pt-BR.md) · [Русский](README.ru.md) · [Українська](README.uk.md) · [Français](README.fr.md) · [Deutsch](README.de.md) · [繁體中文](README.zh-TW.md) · [Türkçe](README.tr.md) · [Italiano](README.it.md) · [Polski](README.pl.md) · [العربية](README.ar.md) · [Català](README.ca.md)
 
 [![CI](https://github.com/Hmbown/CodeWhale/actions/workflows/ci.yml/badge.svg)](https://github.com/Hmbown/CodeWhale/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/codewhale-cli?label=crates.io)](https://crates.io/crates/codewhale-cli)
 [![npm](https://img.shields.io/npm/v/codewhale?label=npm)](https://www.npmjs.com/package/codewhale)
-[![Discord](https://img.shields.io/badge/Discord-join%20the%20community-5865F2?logo=discord&logoColor=white)](https://discord.gg/37gfS3ksug)
+[![Discord](https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/37gfS3ksug)
 
-![टर्मिनल में चलता Codewhale](assets/screenshot.webp)
-
-## इंस्टॉल
+## इंस्टॉल करें
 
 ```bash
 npm install -g codewhale
+codewhale
 ```
 
-Cargo, Docker, Nix, Scoop, पहले से बने आर्काइव, Android/Termux, और उन लोगों के
-लिए एक CNB मिरर जो GitHub तक नहीं पहुँच सकते,
-[docs/INSTALL.md](docs/INSTALL.md) में हैं। `deepseek-tui` से आ रहे हैं? आपकी
-कॉन्फ़िग और सेशन साथ आते हैं — देखें [docs/REBRAND.md](docs/REBRAND.md)।
+पहली बार चलाने पर Codewhale आपको किसी प्रोवाइडर से जुड़ने या ऑफ़लाइन बने रहने में मदद करता है। यह Cargo, Docker, Nix, Scoop, पहले से बने आर्काइव, Android/Termux और CNB मिरर का भी समर्थन करता है। [इंस्टॉलेशन गाइड](docs/INSTALL.md) देखें।
 
 ## उपयोग
 
-```bash
-codewhale auth set --provider deepseek   # or export ANTHROPIC_API_KEY, etc.
-codewhale                                # open the TUI
-codewhale exec "fix the failing test"    # headless
-codewhale web                            # local browser client on 127.0.0.1
+Codewhale से वैसे ही बात करें जैसे आप अपनी टीम के किसी सदस्य से करेंगे:
+
+```text
+Fix the failing tests and explain what changed.
 ```
 
-TUI में: `/model` प्रदाता और मॉडल एक साथ बदलता है, `/fleet` टीम बनाता और चलाता है
-— एक समय में एक भूमिका, प्रत्येक अपने मॉडल के साथ —, `/undo` पिछली बारी वापस लेता
-है, और `/restore <N>` वर्कस्पेस को पहले के स्नैपशॉट पर लौटाता है (बिना तर्क का
-`/restore` उन्हें सूचीबद्ध करता है)। कंपोज़र खाली होने पर `Tab` Plan / Work /
-Operate घुमाता है — उसमें टेक्स्ट हो तो `Tab` स्लैश कमांड और `@` उल्लेख पूरे करता
-है। `Shift+Tab` किसी भी समय Ask / Auto-Review / Full Access अनुमति मुद्रा घुमाता
-है। `!` एक शेल कमांड सामान्य अनुमोदन पथ से चलाता है।
+या TUI खोले बिना कोई कार्य चलाएँ:
 
-## यह क्या करता है
+```bash
+codewhale exec "fix the failing tests and explain what changed"
+```
 
-- **कोई भी मॉडल, कोई भी प्रदाता — और उनका कोई भी मिश्रण।** DeepSeek, Claude, GPT,
-  Kimi, GLM और 30+ प्रदाता, साथ ही बिना कुंजी के आपका अपना vLLM, SGLang या Ollama,
-  सब एक ही रनटाइम और एक ही टूलसेट से। कैटलॉग हर प्रदाता की लाइव लाइनअप ट्रैक करता
-  है — DeepSeek का V4 Pro बैकएंड (लेबल `DeepSeek-V4-Pro-0813`) अब भी
-  `deepseek-v4-pro` के रूप में कॉल होता है, Grok 4.6 सीधा xAI डिफ़ॉल्ट है, और
-  OrcaRouter `orcarouter/auto` से रूट करता है। सहेजी गई भूमिका अपना `provider`,
-  `model` और रीज़निंग स्तर स्पष्ट रूप से दर्ज करती है, इसलिए एक fleet एक ही चलान
-  में कई विक्रेताओं तक फैल सकता है, और भूमिका का रूट इस पर निर्भर नहीं करता कि
-  कौन-सा प्रदाता उस समय सक्रिय हो। संदर्भ सीमाएँ और कीमतें असली रूट से आती हैं;
-  अज्ञात कीमत अज्ञात दिखती है, $0 नहीं।
-- **आपस में बात करते एजेंट — मॉडलों के आर-पार।** Codewhale का हर एजेंट काम
-  करते हुए भी पहुँच में रहता है: `message` चल रहे सब-एजेंट के लिए एक नोट
-  कतार में लगाता है, `followup` उसे आपके नोट के साथ अगली सुरक्षित सीमा पर
-  जगाता है, `peek` उसका transcript पढ़ता है, और इंटरप्ट सिर्फ़ उसका टर्न
-  रोकता है। यह पैरेंट-चाइल्ड पेड़ से आगे जाता है: एक ही workspace के अलग
-  टास्क टिकाऊ **Agent Mail** का आदान-प्रदान करते हैं — कतार में लगा हैंडऑफ़
-  सारांश, जो रीस्टार्ट से बच निकलता है, पाने वाले की सुरक्षित सीमा पर ठीक एक
-  बार पहुँचता है, और क्रेडेंशियल व पाथ छिपा देता है — इसलिए GLM सेशन और Kimi
-  सेशन दो टर्मिनलों में आपस में तालमेल बना सकते हैं और आप बिचौलिया नहीं
-  बनते। दोनों तरफ़ अलग मॉडल हो सकते हैं; बातचीत Codewhale पहुँचाता है।
-- **एक harness जिसे आप लिखते हैं।** भूमिकाएँ ऐसी फ़ाइलें हैं जिन्हें आप पढ़ और
-  संपादित कर सकते हैं — प्रति भूमिका एक मॉडल, एक टूल मुद्रा और स्थायी निर्देश —
-  प्रोजेक्ट में रखें ताकि टीम साझा करे, या अपनी दूसरी व्यक्तिगत सेटिंग्स के पास
-  रखें ताकि वे रेपो-दर-रेपो आपके साथ चलें। एक constitution दर्ज करता है कि आप
-  एजेंट को हर सेशन में कैसे व्यवहार कराना चाहते हैं, ताकि harness हमारी नहीं,
-  आपकी प्रथा से मेल खाए।
-- **काम जिसे आप वहीं से जारी रख सकते हैं।** एक fleet हर कदम append-only
-  बहीखाते में दर्ज करती है, इसलिए `fleet resume` वहीं से चलता है जहाँ आप
-  रुके थे। `/goal` एक स्थायी उद्देश्य थामे रखता है जिसे एजेंट टर्न दर टर्न
-  आगे बढ़ाता है — रोका जा सकता है, फिर चलाया जा सकता है, और रीस्टार्ट पर
-  सेशन के साथ पुनर्स्थापित होता है — जबकि `/workflows` इस workspace के
-  journal में संगठित हर रन का लाइव डैशबोर्ड खोलता है।
-- **काम जिसे आप फिर से उठा सकते हैं।** एक fleet हर कदम को केवल-जोड़ वाले लेजर में
-  लिखता है, इसलिए `fleet resume` वहीं से चलता है जहाँ आप रुके थे।
+Codewhale आपकी रिपॉज़िटरी पढ़ सकता है, फ़ाइलें संपादित कर सकता है, कमांड चला सकता है, परिणामों की जाँच कर सकता है और लक्ष्य की ओर काम जारी रख सकता है। उसे कितना एक्सेस देना है, यह आप तय करते हैं।
 
-## इंटीग्रेशन
+## Codewhale क्यों
 
-- **DeepSeek Harness (dsh) — Codewhale के माध्यम से जुड़ा।**
-  `codewhale integrations dsh connect` मौजूदा `@deepseek-ai/dsh` इंस्टॉल को आपके
-  Codewhale प्रदाता रूट, अनुमतियों और वर्कस्पेस से जोड़ता है, और
-  `integrations dsh install-bundle` वैकल्पिक DSH प्लगइन बंडल जोड़ता है ताकि
-  `dsh --profile codewhale` वह पहचान खुद ले जाए। अनुमतियाँ और जीवनचक्र अधिकार
-  Codewhale के पास रहते हैं; dsh अपने सेशन, प्रोफ़ाइल और क्रेडेंशियल अछूते रखता
-  है। देखें [docs/INTEGRATIONS_DSH.md](docs/INTEGRATIONS_DSH.md)।
-- **VS Code.** आधिकारिक एक्सटेंशन स्कैफ़ोल्ड (`extensions/vscode`) Codewhale को
-  इंटीग्रेटेड टर्मिनल में खोलता है और लोकल रनटाइम पर केवल-पढ़ने योग्य Agent View
-  देता है। यह लोकल-डेवलपमेंट पूर्वावलोकन है, अभी मार्केटप्लेस रिलीज़ नहीं।
+- **अपनी पसंद का मॉडल इस्तेमाल करें।** होस्ट किए गए प्रोवाइडर या Ollama, vLLM अथवा SGLang के माध्यम से लोकल मॉडल जोड़ें। `/model` से प्रोवाइडर और मॉडल बदलें।
+- **नियंत्रण अपने पास रखें।** Plan केवल पढ़ने के लिए है। Ask, Auto-Review और Full Access अनुमोदन के व्यवहार को स्पष्ट बनाते हैं। `/undo` पिछला टर्न वापस करता है और `/restore` वर्कस्पेस को पहले के स्नैपशॉट पर लौटाता है।
+- **लंबे काम को व्यवस्थित रखें।** सेशन सहेजें, स्थायी `/goal` तय करें, वर्कफ़्लो चलने से पहले उनकी समीक्षा करें और एजेंटों के आंतरिक निर्देशों को अपनी बातचीत में जोड़े बिना उनका समन्वय करें।
+- **अपने मौजूदा एजेंट को विस्तृत करें।** MCP सर्वर और स्किल जोड़ें, हुक कॉन्फ़िगर करें और एजेंट की भूमिकाओं को अपने प्रोजेक्ट या निजी सेटिंग में पढ़ने योग्य फ़ाइलों के रूप में रखें।
 
-## और जानें
+कमांड और कीबोर्ड शॉर्टकट देखने के लिए TUI में `/help` चलाएँ।
 
-- [docs/PROVIDERS.md](docs/PROVIDERS.md) — हर प्रदाता रूट: होस्टेड, गेटवे और लोकल
-- [docs/FLEET.md](docs/FLEET.md) — fleet, लेजर और फिर से शुरू करना
-- [docs/WORKFLOW_EXPERIMENTAL_SEARCH.md](docs/WORKFLOW_EXPERIMENTAL_SEARCH.md) — Workflow के भीतर जमा, प्रदाता-तटस्थ प्रयोगात्मक खोज
-- [docs/CONFIGURATION.md](docs/CONFIGURATION.md) — `config.toml`, hooks और
-  constitution
-- [docs/AUTHORIZATION_ORDER.md](docs/AUTHORIZATION_ORDER.md) — मोड, hooks,
-  अनुमति नियम, सुरक्षा तल, रेपो कानून, अनुमोदन और सैंडबॉक्सिंग कैसे जुड़ते हैं
-- [docs/HOOKS.md](docs/HOOKS.md) — ग्यारह TUI जीवनचक्र hook इवेंट, उनके payload,
-  और उनमें से कौन से तीन एक बारी मोड़ सकते हैं (`codewhale exec` और CLI
-  सबकमांड hooks नहीं चलाते)
-- [docs/WEB.md](docs/WEB.md) — केवल-लूपबैक ब्राउज़र क्लाइंट और उसकी एक-बार
-  प्रमाणीकरण सीमा
+## सुरक्षा
 
-बाकी सब — मोड, कीबाइंडिंग, सैंडबॉक्स विवरण, MCP, रनटाइम API और आर्किटेक्चर —
-[docs](docs) और [codewhale.net](https://codewhale.net/) पर है।
+Codewhale आपकी मशीन पर उतने ही एक्सेस के साथ चलता है जितना आप उसे देते हैं। अनुमोदन मोड और रिपॉज़िटरी के नियम एजेंट की गतिविधियों को सीमित करते हैं; समर्थित सिस्टम पर वैकल्पिक OS सैंडबॉक्सिंग अधिक मज़बूत निष्पादन सीमा जोड़ती है। जिन मॉडलों की कीमत ज्ञात नहीं है, उन्हें मुफ़्त बताने के बजाय अज्ञात ही दिखाया जाता है।
 
-## योगदान
+नीतियों का सटीक क्रम जानने के लिए [अधिकार क्रम](docs/AUTHORIZATION_ORDER.md) और लोकल सेटिंग के लिए [कॉन्फ़िगरेशन](docs/CONFIGURATION.md) पढ़ें।
 
-Issue, PR, पुनरुत्पादन चरण, लॉग और फ़ीचर अनुरोध सभी असली परियोजना कार्य हैं, और
-पहली बार योगदान स्वागतयोग्य हैं। जब कोई PR जैसा-का-तैसा मर्ज न हो सके, मेंटेनर
-जो काम करता है उसे सहेजते हैं और लेखक का श्रेय रहता है — कमिट में, changelog में
-और [docs/CONTRIBUTORS.md](docs/CONTRIBUTORS.md) में।
+## दस्तावेज़
 
-- [खुले issue](https://github.com/Hmbown/CodeWhale/issues) — अच्छे पहले योगदान
-  यहीं हैं
-- [CONTRIBUTING.md](CONTRIBUTING.md) — डेव सेटअप और PR प्रवाह
-- [docs/CONTRIBUTORS.md](docs/CONTRIBUTORS.md) — जिन्होंने इसे आकार दिया
-- [मुझे एक कॉफ़ी पिलाएँ](https://www.buymeacoffee.com/hmbown)
+- [प्रोवाइडर और लोकल मॉडल](docs/PROVIDERS.md)
+- [एजेंट टीमें](docs/FLEET.md)
+- [MCP](docs/MCP.md), [हुक](docs/HOOKS.md) और [कॉन्फ़िगरेशन](docs/CONFIGURATION.md)
+- [लोकल वेब क्लाइंट](docs/WEB.md)
+- [सभी दस्तावेज़](docs)
 
-[DeepSeek](https://github.com/deepseek-ai) का धन्यवाद उन मॉडलों और सहयोग के लिए
-जिनसे परियोजना शुरू हुई, [DataWhale](https://github.com/datawhalechina) 🐋 का
-Whale Brother परिवार में स्वागत के लिए, और
-[OpenWarp](https://github.com/zerx-lab/warp) तथा
-[Open Design](https://github.com/nexu-io/open-design) का टर्मिनल-एजेंट अनुभव पर
-सहयोग के लिए।
+## समुदाय से जुड़ें
+
+जब लोग Codewhale का उपयोग करते हैं, असुविधाओं की जानकारी देते हैं और उन्हें ठीक करने में मदद करते हैं, तब यह बेहतर बनता है। यदि कोई प्रोवाइडर उपलब्ध नहीं है, कोई वर्कफ़्लो असहज है या टर्मिनल UI आपके काम में बाधा डालता है, तो [issue खोलें](https://github.com/Hmbown/CodeWhale/issues)। यदि आप इसे बेहतर बनाने का तरीका जानते हैं, तो [pull request खोलें](CONTRIBUTING.md)। पहले योगदान का स्वागत है और स्वीकार किए गए काम का श्रेय योगदानकर्ताओं के पास रहता है।
+
+[Discord](https://discord.gg/37gfS3ksug) से जुड़ें, या WeChat पर Hunter (`hunterbown`) को जोड़कर Whale Brothers समूह में शामिल होने के लिए कहें।
+
+## प्रोजेक्ट का इतिहास
+
+Codewhale की शुरुआत `deepseek-tui` के रूप में हुई थी और यह आज भी उसके कॉन्फ़िगरेशन तथा सेशन के साथ संगतता बनाए रखता है। अब यह किसी प्रोवाइडर पर निर्भर नहीं है, स्वतंत्र रूप से अनुरक्षित है और किसी भी मॉडल प्रोवाइडर से संबद्ध नहीं है।
+
+हर योगदानकर्ता और प्रोजेक्ट को आगे बढ़ाने वाले ओपन सोर्स समुदायों का धन्यवाद। [योगदानकर्ताओं का रिकॉर्ड](docs/CONTRIBUTORS.md) देखें।
 
 ## लाइसेंस
 
-[MIT](LICENSE)। एक स्वतंत्र सामुदायिक परियोजना, किसी मॉडल प्रदाता से संबद्ध नहीं।
-
-![टर्मिनल में तीन केवल-पढ़ने योग्य scout सबएजेंट फैलाता Codewhale](assets/fanout.gif)
-
-[![Star History Chart](https://star-history.dera.page/svg?repos=Hmbown/CodeWhale&type=date&legend=top-left)](https://star-history.dera.page/#Hmbown/CodeWhale&type=date)
+[MIT](LICENSE)

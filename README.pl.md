@@ -1,176 +1,77 @@
-<!-- source: README.md sha256:1f5bf984e975 -->
+<!-- source: README.md sha256:b092c34e8ca3 -->
 # Codewhale
 
-Otwartoźródłowy agent programistyczny do Twojego terminala — model przynosisz sam.
+Codewhale to agent programistyczny o otwartym kodzie źródłowym do terminala, napisany w Rust i rozwijany publicznie wspólnie z osobami, które go używają.
 
-Codewhale zaczął jako natywne doświadczenie dla DeepSeek. Od tego czasu urósł
-do projektu prowadzonego przez społeczność: jednego harnessu programistycznego,
-który pasuje do rosnącej międzynarodowej społeczności i obsługuje tyle modeli
-i dostawców, ile się da — najpierw modele otwarte, hostowane albo lokalne,
-żaden nie jest uprzywilejowany wobec reszty.
+![Codewhale działający w terminalu](assets/screenshot.webp)
 
-Daj mu dostawcę, model i zadanie. Czyta Twój kod, edytuje pliki, uruchamia
-polecenia i sprawdza własną pracę, a potem się zatrzymuje, gdy zadanie jest
-skończone albo potrzebuje Ciebie. W trakcie zadania zmień model przez
-`/model`. Pracuj interaktywnie w TUI albo uruchamiaj `codewhale exec` w
-skryptach i CI. Napisany w Rust, na licencji MIT, działa na Twojej maszynie.
-
-Czego nie mają inne harnessy: **model dla każdej roli wybierasz ty — i nie
-muszą się zgadzać** — oraz **agenci w Codewhale rozmawiają ze sobą, różnych
-modeli.** Fleet przypina dostawcę, model i poziom rozumowania do każdej
-roli, więc tani szybki model może kierować drogim modelem rozumującym, a
-builder na GLM może robić to samo zadanie co reviewer na Kimi. Podczas pracy
-możesz wysłać notatkę do dowolnego z nich w locie, podejrzeć jego transcript
-albo go przerwać — i to nie tylko relacja rodzic–dziecko: osobne zadania
-Codewhale w tym samym workspace wymieniają się trwałym Agent Mail, który
-przeżywa restarty, jest dostarczany dokładnie raz na bezpiecznej granicy i
-maskuje poświadczenia. `/goal` trzyma długoterminowy cel przez wiele tur, aż
-naprawdę zostanie zakończony. Role to pliki, które edytujesz, a cały harness
-pozostaje twój.
-
-Zawsze szukamy osób, które chcą się przyczynić, i sposobów na ulepszenia. Jeśli
-brakuje modelu albo dostawcy, z którego korzystasz, albo coś się psuje,
-powiedzenie nam o tym jest jedną z najpożyteczniejszych rzeczy, które możesz
-zrobić — zobacz [Współtworzenie](#współtworzenie).
-
-[English](README.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja-JP.md) · [Tiếng Việt](README.vi.md) · [Bahasa Indonesia](README.id.md) · [한국어](README.ko-KR.md) · [Español](README.es-419.md) · [Português](README.pt-BR.md) · [Русский](README.ru.md) · [Українська](README.uk.md) · [Français](README.fr.md) · [Deutsch](README.de.md) · [繁體中文](README.zh-TW.md) · [हिन्दी](README.hi.md) · [Türkçe](README.tr.md) · [Italiano](README.it.md) · [العربية](README.ar.md) · [Català](README.ca.md) · [codewhale.net](https://codewhale.net/) · [Docs](docs) · [Changelog](CHANGELOG.md) · [Discord](https://discord.gg/37gfS3ksug)
+[English](README.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja-JP.md) · [Tiếng Việt](README.vi.md) · [Bahasa Indonesia](README.id.md) · [한국어](README.ko-KR.md) · [Español](README.es-419.md) · [Português](README.pt-BR.md) · [Русский](README.ru.md) · [Українська](README.uk.md) · [Français](README.fr.md) · [Deutsch](README.de.md) · [繁體中文](README.zh-TW.md) · [हिन्दी](README.hi.md) · [Türkçe](README.tr.md) · [Italiano](README.it.md) · [العربية](README.ar.md) · [Català](README.ca.md)
 
 [![CI](https://github.com/Hmbown/CodeWhale/actions/workflows/ci.yml/badge.svg)](https://github.com/Hmbown/CodeWhale/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/codewhale-cli?label=crates.io)](https://crates.io/crates/codewhale-cli)
 [![npm](https://img.shields.io/npm/v/codewhale?label=npm)](https://www.npmjs.com/package/codewhale)
-[![Discord](https://img.shields.io/badge/Discord-join%20the%20community-5865F2?logo=discord&logoColor=white)](https://discord.gg/37gfS3ksug)
-
-![Codewhale działający w terminalu](assets/screenshot.webp)
+[![Discord](https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/37gfS3ksug)
 
 ## Instalacja
 
 ```bash
 npm install -g codewhale
+codewhale
 ```
 
-Cargo, Docker, Nix, Scoop, gotowe archiwa, Android/Termux oraz lustro CNB
-dla tych, którzy nie dochodzą do GitHuba, są w
-[docs/INSTALL.md](docs/INSTALL.md). Przychodzisz z `deepseek-tui`? Konfiguracja
-i sesje przechodzą — zobacz [docs/REBRAND.md](docs/REBRAND.md).
+Przy pierwszym uruchomieniu Codewhale pomaga połączyć się z dostawcą lub pozostać w trybie offline. Obsługuje też Cargo, Docker, Nix, Scoop, gotowe archiwa, Android/Termux oraz serwer lustrzany CNB. Zobacz [instrukcję instalacji](docs/INSTALL.md).
 
 ## Użycie
 
-```bash
-codewhale auth set --provider deepseek   # or export ANTHROPIC_API_KEY, etc.
-codewhale                                # open the TUI
-codewhale exec "fix the failing test"    # headless
-codewhale web                            # local browser client on 127.0.0.1
+Rozmawiaj z Codewhale tak, jak z osobą ze swojego zespołu:
+
+```text
+Fix the failing tests and explain what changed.
 ```
 
-W TUI: `/model` przełącza dostawcę i model razem, `/fleet` buduje i uruchamia
-zespół — jedna rola na raz, każda z własnym modelem —, `/undo` cofa ostatnią
-turę, a `/restore <N>` cofa przestrzeń roboczą do wcześniejszego zrzutu
-(gołe `/restore` je wypisuje). `Tab` przełącza Plan / Work / Operate, gdy
-kompozytor jest pusty — z tekstem `Tab` uzupełnia polecenia slash i wzmianki
-`@`. `Shift+Tab` w każdej chwili przełącza postawę uprawnień Ask /
-Auto-Review / Full Access. `!` uruchamia polecenie powłoki zwykłą ścieżką
-zatwierdzeń.
+Możesz też uruchomić zadanie bez otwierania TUI:
 
-## Co robi
+```bash
+codewhale exec "fix the failing tests and explain what changed"
+```
 
-- **Dowolny model, dowolny dostawca — i dowolna mieszanka.** DeepSeek, Claude,
-  GPT, Kimi, GLM i ponad 30 dostawców, plus własne vLLM, SGLang albo Ollama
-  bez klucza, wszystko przez jedno środowisko uruchomieniowe i jeden zestaw
-  narzędzi. Katalog śledzi żywą ofertę każdego dostawcy — backend V4 Pro
-  DeepSeek (etykieta `DeepSeek-V4-Pro-0813`) nadal wywołuje się jako
-  `deepseek-v4-pro`, Grok 4.6 jest bezpośrednim domyślnym modelem xAI, a
-  OrcaRouter kieruje przez `orcarouter/auto`. Zapisana rola jawnie notuje
-  `provider`, `model` i poziom rozumowania, więc fleet może w jednym
-  uruchomieniu objąć wielu dostawców, a trasa roli nigdy nie zależy od tego,
-  który dostawca akurat jest aktywny. Limity kontekstu i ceny pochodzą z
-  prawdziwej trasy; nieznana cena pokazuje się jako nieznana, nie jako 0 $.
-- **Agenci, którzy rozmawiają ze sobą — różnych modeli.** Każdy agent w
-  Codewhale jest osiągalny, gdy pracuje: `message` kolejkuje notatkę dla
-  działającego subagenta, `followup` budzi go z twoją notatką na następnej
-  bezpiecznej granicy, `peek` czyta jego transcript, a przerwanie zatrzymuje
-  tylko jego turę. To wykracza poza drzewo rodzic–dziecko: osobne zadania w
-  tym samym workspace wymieniają się trwałym **Agent Mail** — podsumowanie
-  przekazania w kolejce, które przeżywa restart, jest dostarczane dokładnie
-  raz na bezpiecznej granicy odbiorcy i maskuje poświadczenia oraz ścieżki —
-  dzięki czemu sesja GLM i sesja Kimi koordynują się w dwóch terminalach bez
-  ciebie w roli przekaźnika. Każda strona może być innym modelem; Codewhale
-  przenosi tę rozmowę.
-- **Harness, który sam piszesz.** Role to pliki, które możesz czytać i
-  edytować — model, postawa narzędzi i stałe instrukcje na rolę — trzymane
-  w projekcie, żeby zespół je dzielił, albo obok innych ustawień osobistych,
-  żeby szły za Tobą między repozytoriami. Constitution zapisuje, jak agent
-  ma się zachowywać w każdej sesji, żeby harness pasował do Twojej praktyki,
-  nie do naszej.
-- **Praca, którą wznowisz.** Fleet zapisuje każdy krok w append-only
-  księdze, a `fleet resume` wraca tam, gdzie skończyłeś. `/goal` trzyma
-  trwały cel, do którego agent dąży turę za turą — pauzowalny, wznawialny i
-  przywracany wraz z sesją po restarcie — a `/workflows` otwiera panel na
-  żywo ze wszystkich uruchomień, które przechowuje dziennik tego workspace.
-- **Praca, którą możesz wznowić.** Fleet zapisuje każdy krok w rejestrze
-  tylko do dopisywania, więc `fleet resume` podejmuje tam, gdzie skończyłeś.
+Codewhale może czytać Twoje repozytorium, edytować pliki, wykonywać polecenia, sprawdzać wyniki i kontynuować pracę nad celem. Ty decydujesz, jaki poziom dostępu mu przyznasz.
 
-## Integracje
+## Dlaczego Codewhale
 
-- **DeepSeek Harness (dsh) — podłączony przez Codewhale.**
-  `codewhale integrations dsh connect` wiąże istniejącą instalację
-  `@deepseek-ai/dsh` z Twoją trasą dostawcy Codewhale, uprawnieniami i
-  przestrzenią roboczą, a `integrations dsh install-bundle` dodaje opcjonalny
-  pakiet wtyczek DSH, żeby `dsh --profile codewhale` nosił tę tożsamość sam.
-  Codewhale ma uprawnienia i władzę nad cyklem życia; dsh zostawia własne
-  sesje, profile i poświadczenia nietknięte. Zobacz
-  [docs/INTEGRATIONS_DSH.md](docs/INTEGRATIONS_DSH.md).
-- **VS Code.** Oficjalny szkielet rozszerzenia (`extensions/vscode`) otwiera
-  Codewhale w zintegrowanym terminalu i udostępnia Agent View tylko do odczytu
-  nad lokalnym środowiskiem. To lokalny podgląd deweloperski, jeszcze nie
-  wydanie na marketplace.
+- **Używaj wybranego modelu.** Połącz się z hostowanymi dostawcami lub lokalnymi modelami przez Ollama, vLLM albo SGLang. Dostawcę i model zmienisz za pomocą `/model`.
+- **Zachowaj kontrolę.** Tryb Plan jest tylko do odczytu. Ask, Auto-Review i Full Access jasno pokazują sposób zatwierdzania działań. `/undo` cofa ostatnią turę, a `/restore` przywraca przestrzeń roboczą do wcześniejszej migawki.
+- **Utrzymuj porządek w długich zadaniach.** Zapisuj sesje, ustawiaj trwały `/goal`, sprawdzaj przepływy pracy przed uruchomieniem i koordynuj agentów bez umieszczania ich wewnętrznych instrukcji w zapisie Twojej rozmowy.
+- **Rozszerzaj agenta, którego już masz.** Podłączaj serwery MCP i umiejętności, konfiguruj hooki oraz przechowuj role agentów jako czytelne pliki w projekcie lub ustawieniach osobistych.
 
-## Dowiedz się więcej
+Uruchom `/help` w TUI, aby zobaczyć polecenia i skróty klawiaturowe.
 
-- [docs/PROVIDERS.md](docs/PROVIDERS.md) — każda trasa dostawcy: hostowana,
-  bramka i lokalna
-- [docs/FLEET.md](docs/FLEET.md) — fleety, rejestr i wznawianie
-- [docs/WORKFLOW_EXPERIMENTAL_SEARCH.md](docs/WORKFLOW_EXPERIMENTAL_SEARCH.md) — zamrożone, niezależne od dostawcy eksperymentalne wyszukiwanie w Workflow
-- [docs/CONFIGURATION.md](docs/CONFIGURATION.md) — `config.toml`, hooki i
-  constitution
-- [docs/AUTHORIZATION_ORDER.md](docs/AUTHORIZATION_ORDER.md) — jak składają
-  się tryby, hooki, reguły uprawnień, podłogi bezpieczeństwa, prawo repo,
-  zatwierdzenia i sandbox
-- [docs/HOOKS.md](docs/HOOKS.md) — jedenaście zdarzeń hook cyklu życia TUI,
-  ich ładunki i które trzy mogą pokierować turą (`codewhale exec` i
-  podpolecenia CLI nie odpalają hooków)
-- [docs/WEB.md](docs/WEB.md) — przeglądarkowy klient tylko na loopback i jego
-  jednorazowa granica uwierzytelniania
+## Bezpieczeństwo
 
-Wszystko inne — tryby, skróty, szczegóły sandboxa, MCP, API środowiska
-uruchomieniowego i architektura — żyje w [docs](docs) i na
-[codewhale.net](https://codewhale.net/).
+Codewhale działa na Twoim komputerze z dostępem, który mu przyznasz. Tryby zatwierdzania i reguły repozytorium ograniczają działania agenta; opcjonalny sandbox systemu operacyjnego zapewnia mocniejszą granicę wykonywania tam, gdzie jest obsługiwany. Nieznane ceny modeli pozostają oznaczone jako nieznane, zamiast być przedstawiane jako bezpłatne.
 
-## Współtworzenie
+Przeczytaj o [kolejności autoryzacji](docs/AUTHORIZATION_ORDER.md), aby poznać dokładną hierarchię zasad, oraz o [konfiguracji](docs/CONFIGURATION.md), aby poznać ustawienia lokalne.
 
-Zgłoszenia, PR-y, kroki odtworzenia, logi i prośby o funkcje to prawdziwa
-praca projektowa, a pierwsze wkłady są mile widziane. Gdy PR nie da się
-włączyć w obecnym kształcie, opiekunowie zbierają to, co działa, a autor
-zostaje wymieniony — w commicie, w changelogu i w
-[docs/CONTRIBUTORS.md](docs/CONTRIBUTORS.md).
+## Dokumentacja
 
-- [Otwarte zgłoszenia](https://github.com/Hmbown/CodeWhale/issues) — dobre
-  pierwsze wkłady są tutaj
-- [CONTRIBUTING.md](CONTRIBUTING.md) — środowisko deweloperskie i przepływ PR
-- [docs/CONTRIBUTORS.md](docs/CONTRIBUTORS.md) — wszyscy, którzy to ukształtowali
-- [Postaw mi kawę](https://www.buymeacoffee.com/hmbown)
+- [Dostawcy i modele lokalne](docs/PROVIDERS.md)
+- [Zespoły agentów](docs/FLEET.md)
+- [MCP](docs/MCP.md), [hooki](docs/HOOKS.md) i [konfiguracja](docs/CONFIGURATION.md)
+- [Lokalny klient webowy](docs/WEB.md)
+- [Cała dokumentacja](docs)
 
-Dziękujemy [DeepSeek](https://github.com/deepseek-ai) za modele i wsparcie,
-które rozpoczęły projekt, [DataWhale](https://github.com/datawhalechina) 🐋
-za przyjęcie nas do rodziny Whale Brother oraz
-[OpenWarp](https://github.com/zerx-lab/warp) i
-[Open Design](https://github.com/nexu-io/open-design) za współpracę przy
-doświadczeniu agenta w terminalu.
+## Dołącz do społeczności
+
+Codewhale staje się lepszy, gdy ludzie go używają, zgłaszają niedogodności i pomagają je naprawiać. Jeśli brakuje dostawcy, przepływ pracy jest niewygodny albo interfejs terminala przeszkadza Ci w pracy, [otwórz issue](https://github.com/Hmbown/CodeWhale/issues). Jeśli wiesz, jak coś ulepszyć, [otwórz pull request](CONTRIBUTING.md). Pierwsze wkłady są mile widziane, a autorzy zachowują uznanie za pracę przyjętą do projektu.
+
+Dołącz do [Discorda](https://discord.gg/37gfS3ksug) albo dodaj Huntera na WeChat (`hunterbown`) i poproś o dołączenie do grupy Whale Brothers.
+
+## Historia projektu
+
+Codewhale rozpoczął się jako `deepseek-tui` i nadal zachowuje zgodność z jego konfiguracją oraz sesjami. Obecnie jest niezależny od dostawców, utrzymywany samodzielnie i nie jest powiązany z żadnym dostawcą modeli.
+
+Dziękujemy wszystkim współtwórcom oraz społecznościom open source, które pomogły projektowi się rozwijać. Zobacz [rejestr współtwórców](docs/CONTRIBUTORS.md).
 
 ## Licencja
 
-[MIT](LICENSE). Niezależny projekt społecznościowy, niezwiązany z żadnym
-dostawcą modeli.
-
-![Codewhale rozsyła trzech podrzędnych agentów scout tylko do odczytu w terminalu](assets/fanout.gif)
-
-[![Star History Chart](https://star-history.dera.page/svg?repos=Hmbown/CodeWhale&type=date&legend=top-left)](https://star-history.dera.page/#Hmbown/CodeWhale&type=date)
+[MIT](LICENSE)
