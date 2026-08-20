@@ -31,6 +31,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   names the exact key — and the override row is omitted entirely when the value
   is already configured, rather than advising you to set what you have set.
 
+- `/help` no longer truncates anything. Every label and description used to run
+  through a `truncate_to_width` that appended `…`, which in a two-hundred-row
+  list promises text no keystroke can reveal and lands mid-token:
+  `(aliases: /qin…` left the parenthesis hanging open. Descriptions now shed
+  whole fields — the alias parenthetical first, then trailing clauses at their
+  own joints, and only where there is no joint at all, the sentence's short form
+  on a whole word with no mark. The focused row's description is restated in
+  full under the filter *only when the row itself could not hold it*, so nothing
+  shed is unreachable and nothing is said twice on one screen.
+
+- The `/help` label column is measured instead of assumed. It was a flat 28
+  columns at every terminal size, so at 60 columns twenty blank cells sat
+  between `/advisor` and a description cut down to 21. Each group now sizes its
+  column to the labels it actually holds, which nearly doubles the description
+  column on a narrow terminal, and the label — the string you have to type —
+  reads one step brighter than the description that qualifies it.
+
+- `/help` stopped spending rows on itself. The match count moved onto the filter
+  row it describes, the blank spacer under it is gone, and the footer no longer
+  repeats `type to filter` while the filter box says `Type to filter` two lines
+  above — at 60 columns that duplicate was what pushed the footer onto a second
+  row. A group header also stopped printing `▸ ▾`: the selection cursor and the
+  collapsed chevron are the same glyph, and a focused collapsed group was
+  showing it twice for two different facts. Help now opens focused on the first
+  entry rather than the header above it.
+
 - The bottom status rail is no longer one run-on sentence. At 120 columns it
   read `▌· idle · Ollama · deepseek-v4-flash · max · Anonymous usage counts are
   on. … ⌥V:output · /context:context · fn+F1:keys` — live state, route
