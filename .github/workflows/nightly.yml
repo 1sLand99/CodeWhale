@@ -115,7 +115,7 @@ jobs:
         # RUST_MIN_STACK sizes the stack of the LLVM worker threads rustc
         # spawns to run `optimize module <crate>-cgu.N`. With `lto=off` the
         # per-CGU optimization pipeline runs while the *library* is compiled
-        # rather than being deferred to the ThinLTO stage, and one codewhale-tui
+        # rather than being deferred to the ThinLTO stage, and one crates/tui
         # codegen unit needs more stack than a 1 MiB thread provides. Measured
         # on aarch64 by holding the crate and every flag fixed and varying only
         # this value: 1 MiB crashes rustc, 2 MiB and 4 MiB succeed. Unix std
