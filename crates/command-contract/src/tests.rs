@@ -209,7 +209,8 @@ impl CommandPresentationContext for Presentation {
                 .unwrap_or("/mcp recommendations");
             return Ok(format!("Unknown recommended MCP ID (try {command})"));
         }
-        Err(format!("unknown presentation key {key:?}"))
+        // D3: unknown keys fail safely without echoing the raw lookup key.
+        Err("unknown translation key".to_string())
     }
 }
 
@@ -282,7 +283,10 @@ fn translation_contract_resolves_known_keys_and_fails_safely() {
     let unknown = presentation.translate("no_such_key", &[]);
     assert!(unknown.is_err(), "unknown key must fail safely");
     let err = unknown.unwrap_err();
-    assert!(!err.contains("raw"), "no raw lookup key exposure");
+    assert!(
+        !err.contains("no_such_key"),
+        "no raw lookup key exposure (D3)"
+    );
 }
 
 #[test]
