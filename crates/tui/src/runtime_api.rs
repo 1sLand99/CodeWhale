@@ -1669,6 +1669,13 @@ fn reject_parallel_write_collisions(tasks: &[FleetTaskSpec]) -> Result<(), ApiEr
 }
 
 fn managed_paths_overlap(left: &str, right: &str) -> bool {
+    // `normalize_fleet_relative_path` collapses the workspace root to ".", so
+    // a task claiming the whole tree presents as "." rather than as a textual
+    // prefix of its siblings. String containment alone never matched it, and
+    // two workers could be admitted to write the same tree in parallel.
+    if left == "." || right == "." {
+        return true;
+    }
     left == right
         || left
             .strip_prefix(right)

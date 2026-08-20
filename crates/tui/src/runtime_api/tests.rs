@@ -1987,6 +1987,42 @@ async fn fleet_status_runtime_api_exposes_state_and_actions() -> Result<()> {
     Ok(())
 }
 
+/// A Parallel Workflow task may claim the whole workspace by normalizing its
+/// write scope to `"."`. `managed_paths_overlap` compared normalized strings
+/// only, so `"."` never matched a sibling task's `"crates/tui"` claim and the
+/// admission gate let two workers write the same tree concurrently.
+#[test]
+fn workspace_root_write_claim_collides_with_a_subdirectory_claim() {
+    fn task(id: &str, writable: &str) -> FleetTaskSpec {
+        serde_json::from_value(json!({
+            "id": id,
+            "name": id,
+            "instructions": "work",
+            "workspace": { "writable_paths": [writable] },
+        }))
+        .expect("fleet task spec fixture")
+    }
+
+    let error = reject_parallel_write_collisions(&[task("root", "."), task("sub", "crates/tui")])
+        .expect_err("a whole-workspace claim overlaps every subdirectory claim");
+    assert_eq!(error.status, StatusCode::BAD_REQUEST);
+    assert!(
+        error.message.contains("write scope collision"),
+        "unexpected message: {}",
+        error.message
+    );
+
+    // The reverse order is the same collision.
+    assert!(
+        reject_parallel_write_collisions(&[task("sub", "crates/tui"), task("root", ".")]).is_err()
+    );
+    // Disjoint subdirectories still admit.
+    assert!(
+        reject_parallel_write_collisions(&[task("a", "crates/tui"), task("b", "crates/cli")])
+            .is_ok()
+    );
+}
+
 #[test]
 fn fleet_worker_json_includes_runtime_state_projection() {
     let inspection = FleetWorkerInspection {
