@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- `/status` was 31 rows. On an 80x24 terminal the transcript viewport is 18, so
+  typing `/status` landed you on the *tail* of the report: the version, route,
+  directory, mode and sandbox rows had already scrolled past, and what stayed on
+  screen was five `not reported` rows and a `$0.0000`. The report is 17 rows now
+  and fits that terminal whole. Provider, model and reasoning effort are one
+  `Route:` lockup, the way the header rail already writes them. Mode and its
+  permissions are one statement of posture. `Rate limits:` is gone — it was a
+  `push_row` of a string literal and could never say anything but "not available
+  from provider telemetry". The per-turn token ledger is gone too, because
+  `/tokens` is that ledger's whole subject and `/status` was printing six rows of
+  it at the same weight as the sandbox policy; the two facts that lived nowhere
+  else, the cumulative in/out split and the cumulative cache totals, survive on
+  one `Session tokens:` row. `Footer items:` no longer prints ten internal config
+  keys across the full width — `/statusline` owns them, and the report now points
+  there in the same row that points at `/tokens`. Two blank gutters do the
+  grouping; the `===================` rule under the title is gone.
+
+- The `/status` window-override key has its own labelled row. It used to be
+  parenthesised onto the end of the provenance row, which pushed
+  `context_window in config.toml` past the right edge at 80 columns and wrapped
+  the sentence. `Window source:` states the provenance and `Window override:`
+  names the exact key — and the override row is omitted entirely when the value
+  is already configured, rather than advising you to set what you have set.
+
 - The bottom status rail is no longer one run-on sentence. At 120 columns it
   read `▌· idle · Ollama · deepseek-v4-flash · max · Anonymous usage counts are
   on. … ⌥V:output · /context:context · fn+F1:keys` — live state, route
