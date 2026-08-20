@@ -4821,8 +4821,10 @@ impl Engine {
         )
         .await
         {
-            Ok(result) => {
+            Ok(mut result) => {
                 if !result.messages.is_empty() || self.session.messages.is_empty() {
+                    self.append_compaction_agent_topology(&mut result.messages)
+                        .await;
                     let messages_after = result.messages.len();
                     let retries_used = result.retries_used;
                     self.session.replace_messages(result.messages);
@@ -5090,6 +5092,8 @@ impl Engine {
         }
 
         if !compacted_messages.is_empty() || self.session.messages.is_empty() {
+            self.append_compaction_agent_topology(&mut compacted_messages)
+                .await;
             self.session.replace_messages(compacted_messages);
         }
         self.commit_compaction_checkpoint(summary_prompt);
@@ -5709,6 +5713,19 @@ impl Engine {
             return;
         };
         self.session.compaction_summary_prompt = Some(summary_prompt);
+    }
+
+    /// Capture the current session-owned Agent topology at the replacement
+    /// history boundary. This is the Codewhale equivalent of Codex clearing
+    /// its world-state reference after standalone compaction so the next turn
+    /// receives fresh environment/subagent context instead of trusting the
+    /// narrative summary as live process state.
+    async fn append_compaction_agent_topology(&self, messages: &mut Vec<Message>) {
+        let snapshots = {
+            let manager = self.subagent_manager.read().await;
+            manager.list_for_session(&self.session.id)
+        };
+        crate::runtime_handoff::replace_agent_topology_checkpoint(messages, &snapshots);
     }
 }
 

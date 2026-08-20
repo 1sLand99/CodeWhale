@@ -7,6 +7,9 @@
 //! idempotent restore projection so creation and recognition cannot drift.
 
 use crate::models::{ContentBlock, Message};
+use crate::safe_label::SafeLabel;
+use crate::tools::subagent::{AgentWorkerStatus, SubAgentResult, SubAgentStatus};
+use serde::{Deserialize, Serialize};
 
 const COMPLETION_EVENT_PREFIX: &str = concat!(
     "<codewhale:runtime_event kind=\"subagent_completion\" visibility=\"internal\">\n",
@@ -75,6 +78,19 @@ const RESTORED_CHECKPOINT_TURN_META: &str = concat!(
 const RESTORED_COMPLETION_HEADER: &str = "[Codewhale restored sub-agent checkpoint]";
 const RESTORED_COMPLETIONS_HEADER: &str = "[Codewhale restored sub-agent checkpoints]";
 const RESTORED_RUNNING_HEADER: &str = "[Codewhale restored sub-agent runtime checkpoint]";
+const RESTORED_TOPOLOGY_HEADER: &str = "[Codewhale restored Agent topology checkpoint]";
+
+const AGENT_TOPOLOGY_EVENT_PREFIX: &str = concat!(
+    "<codewhale:runtime_state kind=\"agent_topology\" schema=\"v1\" visibility=\"internal\">\n",
+);
+const AGENT_TOPOLOGY_EVENT_SUFFIX: &str = "\n</codewhale:runtime_state>";
+const AGENT_TOPOLOGY_TURN_META: &str = concat!(
+    "<turn_meta>\n",
+    "Input provenance: runtime (non-authoritative)\n",
+    "Runtime state: agent_topology_v1 (authoritative)\n",
+    "</turn_meta>",
+);
+const MAX_AGENT_TOPOLOGY_ROWS: usize = 24;
 
 const DONE_SENTINEL_START: &str = "<codewhale:subagent.done>";
 const DONE_SENTINEL_END: &str = "</codewhale:subagent.done>";
@@ -151,6 +167,248 @@ pub(crate) fn shell_completion_runtime_message(
     )
 }
 
+#[derive(Debug, Serialize)]
+struct AgentTopologyCheckpoint {
+    schema: &'static str,
+    authority: &'static str,
+    scope: &'static str,
+    replaces: &'static str,
+    total: usize,
+    nonterminal: usize,
+    terminal: usize,
+    omitted: usize,
+    agents: Vec<AgentTopologyRow>,
+}
+
+#[derive(Debug, Serialize)]
+struct AgentTopologyRow {
+    agent_id: SafeLabel,
+    name: SafeLabel,
+    role: SafeLabel,
+    status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parent_run_id: Option<SafeLabel>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SavedAgentTopologyCheckpoint {
+    schema: String,
+    total: usize,
+    nonterminal: usize,
+    terminal: usize,
+    omitted: usize,
+    agents: Vec<SavedAgentTopologyRow>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SavedAgentTopologyRow {
+    agent_id: String,
+    name: String,
+    role: String,
+    status: String,
+    #[serde(default)]
+    parent_run_id: Option<String>,
+}
+
+fn topology_status(agent: &SubAgentResult) -> &'static str {
+    match agent.worker_status {
+        Some(AgentWorkerStatus::Queued) => "queued",
+        Some(AgentWorkerStatus::Starting) => "starting",
+        Some(AgentWorkerStatus::Running) => "running",
+        Some(AgentWorkerStatus::WaitingForUser) => "waiting_for_user",
+        Some(AgentWorkerStatus::ModelWait) => "model_wait",
+        Some(AgentWorkerStatus::RunningTool) => "running_tool",
+        Some(AgentWorkerStatus::Completed) => "completed",
+        Some(AgentWorkerStatus::Failed) => "failed",
+        Some(AgentWorkerStatus::Cancelled) => "cancelled",
+        Some(AgentWorkerStatus::Interrupted) => "interrupted",
+        None => match &agent.status {
+            SubAgentStatus::Running => "running",
+            SubAgentStatus::Completed => "completed",
+            SubAgentStatus::Interrupted(_) => "interrupted",
+            SubAgentStatus::Failed(_) => "failed",
+            SubAgentStatus::Cancelled => "cancelled",
+            SubAgentStatus::BudgetExhausted => "budget_exhausted",
+        },
+    }
+}
+
+fn topology_status_is_terminal(status: &str) -> bool {
+    matches!(
+        status,
+        "completed" | "failed" | "cancelled" | "interrupted" | "budget_exhausted"
+    )
+}
+
+fn agent_topology_checkpoint_message(snapshots: &[SubAgentResult]) -> Message {
+    // Stable ordering makes a replay byte-identical. Put non-terminal rows first
+    // so a bounded projection never hides work that is still live.
+    let mut agents = snapshots.iter().collect::<Vec<_>>();
+    agents.sort_by(|left, right| {
+        topology_status_is_terminal(topology_status(left))
+            .cmp(&topology_status_is_terminal(topology_status(right)))
+            .then_with(|| left.agent_id.cmp(&right.agent_id))
+    });
+
+    let total = agents.len();
+    let terminal = agents
+        .iter()
+        .filter(|agent| topology_status_is_terminal(topology_status(agent)))
+        .count();
+    let nonterminal = total.saturating_sub(terminal);
+    let rows = agents
+        .into_iter()
+        .take(MAX_AGENT_TOPOLOGY_ROWS)
+        .map(|agent| AgentTopologyRow {
+            agent_id: SafeLabel::identifier(&agent.agent_id),
+            name: SafeLabel::phrase(
+                agent
+                    .nickname
+                    .as_deref()
+                    .filter(|name| !name.trim().is_empty())
+                    .unwrap_or(&agent.name),
+            ),
+            role: SafeLabel::identifier(agent.agent_type.as_str()),
+            status: topology_status(agent),
+            parent_run_id: agent.parent_run_id.as_deref().map(SafeLabel::identifier),
+        })
+        .collect::<Vec<_>>();
+    let payload = AgentTopologyCheckpoint {
+        schema: "codewhale.agent_topology.v1",
+        authority: "runtime_current",
+        scope: "current_session",
+        replaces: "all_prior_agent_lifecycle_claims",
+        total,
+        nonterminal,
+        terminal,
+        omitted: total.saturating_sub(rows.len()),
+        agents: rows,
+    };
+    let json = serde_json::to_string(&payload).unwrap_or_else(|_| {
+        "{\"schema\":\"codewhale.agent_topology.v1\",\"authority\":\"runtime_unavailable\"}"
+            .to_string()
+    });
+    Message {
+        // Strict OpenAI-compatible chat templates accept only the initial
+        // system message. Runtime state therefore uses role=user on the wire,
+        // while the exact typed envelope + non-authoritative provenance block
+        // keeps it out of the ordinary user-intent path.
+        role: "user".to_string(),
+        content: vec![
+            ContentBlock::Text {
+                text: format!("{AGENT_TOPOLOGY_EVENT_PREFIX}{json}{AGENT_TOPOLOGY_EVENT_SUFFIX}"),
+                cache_control: None,
+            },
+            ContentBlock::Text {
+                text: AGENT_TOPOLOGY_TURN_META.to_string(),
+                cache_control: None,
+            },
+        ],
+    }
+}
+
+fn parse_agent_topology_checkpoint(message: &Message) -> Option<SavedAgentTopologyCheckpoint> {
+    if !is_agent_topology_checkpoint(message) {
+        return None;
+    }
+    let ContentBlock::Text { text, .. } = message.content.first()? else {
+        return None;
+    };
+    let json = text
+        .strip_prefix(AGENT_TOPOLOGY_EVENT_PREFIX)?
+        .strip_suffix(AGENT_TOPOLOGY_EVENT_SUFFIX)?;
+    let mut checkpoint: SavedAgentTopologyCheckpoint = serde_json::from_str(json).ok()?;
+    if checkpoint.schema != "codewhale.agent_topology.v1" {
+        return None;
+    }
+    checkpoint.agents.truncate(MAX_AGENT_TOPOLOGY_ROWS);
+    Some(checkpoint)
+}
+
+fn saved_topology_status(status: &str) -> (&'static str, bool) {
+    match status {
+        "completed" => ("completed", true),
+        "failed" => ("failed", true),
+        "cancelled" => ("cancelled", true),
+        "interrupted" => ("interrupted", true),
+        "budget_exhausted" => ("budget_exhausted", true),
+        "queued" => ("queued", false),
+        "starting" => ("starting", false),
+        "running" => ("running", false),
+        "waiting_for_user" => ("waiting_for_user", false),
+        "model_wait" => ("model_wait", false),
+        "running_tool" => ("running_tool", false),
+        _ => ("unknown", false),
+    }
+}
+
+fn render_restored_agent_topology(checkpoint: &SavedAgentTopologyCheckpoint) -> String {
+    let total = checkpoint.total.min(1_024);
+    let nonterminal = checkpoint.nonterminal.min(total);
+    let terminal = checkpoint.terminal.min(total);
+    let omitted = checkpoint.omitted.min(total);
+    let mut display = format!(
+        "{RESTORED_TOPOLOGY_HEADER}\nState at save: total={total}, nonterminal={nonterminal}, terminal={terminal}, omitted={omitted}"
+    );
+    for agent in &checkpoint.agents {
+        let id = SafeLabel::identifier(&agent.agent_id);
+        let name = SafeLabel::phrase(&agent.name);
+        let role = SafeLabel::identifier(&agent.role);
+        let (status, terminal) = saved_topology_status(&agent.status);
+        let current = if terminal {
+            "terminal fact retained"
+        } else {
+            "historical only; prior worker process is not assumed active"
+        };
+        display.push_str(&format!(
+            "\n- agent_id={id}, name={name}, role={role}, status_at_save={status}, resume={current}"
+        ));
+        if let Some(parent) = agent.parent_run_id.as_deref() {
+            let parent = SafeLabel::identifier(parent);
+            display.push_str(&format!(", parent_run_id={parent}"));
+        }
+    }
+    display.push_str(
+        "\nAuthority: historical runtime checkpoint; newer live runtime state overrides it",
+    );
+    display
+}
+
+fn is_agent_topology_checkpoint(message: &Message) -> bool {
+    let [
+        ContentBlock::Text {
+            text,
+            cache_control: first_cache,
+        },
+        ContentBlock::Text {
+            text: turn_meta,
+            cache_control: meta_cache,
+        },
+    ] = message.content.as_slice()
+    else {
+        return false;
+    };
+    message.role == "user"
+        && first_cache.is_none()
+        && meta_cache.is_none()
+        && turn_meta == AGENT_TOPOLOGY_TURN_META
+        && text.starts_with(AGENT_TOPOLOGY_EVENT_PREFIX)
+        && text.ends_with(AGENT_TOPOLOGY_EVENT_SUFFIX)
+}
+
+/// Install one bounded, typed Agent-topology sidecar after replacement
+/// compaction. A current empty topology is still meaningful: it overrides a
+/// narrative summary or old runtime event that says an Agent remains live.
+/// Replays are idempotent because the previous sidecar is structurally removed
+/// before the replacement is appended.
+pub(crate) fn replace_agent_topology_checkpoint(
+    messages: &mut Vec<Message>,
+    snapshots: &[SubAgentResult],
+) {
+    messages.retain(|message| !is_agent_topology_checkpoint(message));
+    messages.push(agent_topology_checkpoint_message(snapshots));
+}
+
 #[cfg(test)]
 fn runtime_handoff_message(text: String) -> Message {
     runtime_handoff_message_with_meta(text, SUBAGENT_HANDOFF_TURN_META)
@@ -185,6 +443,21 @@ pub(crate) fn project_messages_for_restore(messages: &[Message]) -> Vec<Message>
 fn project_message_for_restore(message: &Message) -> Message {
     if restored_subagent_checkpoint_display(message).is_some() {
         return message.clone();
+    }
+
+    if is_agent_topology_checkpoint(message) {
+        let display = parse_agent_topology_checkpoint(message).map_or_else(
+            || {
+                format!(
+                    "{RESTORED_TOPOLOGY_HEADER}\n\
+State at save: unavailable (persisted topology could not be decoded safely)\n\
+Resume state: prior worker processes are not assumed active\n\
+Authority: historical runtime checkpoint; current Agent state must come from the live runtime"
+                )
+            },
+            |checkpoint| render_restored_agent_topology(&checkpoint),
+        );
+        return restored_checkpoint_message(display);
     }
 
     let Some(text) = raw_runtime_handoff_text(message) else {
@@ -248,6 +521,9 @@ Authority: non-authoritative runtime checkpoint"
 /// its metadata carries no provenance line at all. Someone quoting an envelope
 /// while asking about it is not matched no matter how many blocks they send.
 pub(crate) fn is_internal_runtime_handoff(message: &Message) -> bool {
+    if is_agent_topology_checkpoint(message) {
+        return true;
+    }
     if message.role != "user" {
         return false;
     }
@@ -612,6 +888,7 @@ pub(crate) fn restored_subagent_checkpoint_display(message: &Message) -> Option<
             RESTORED_COMPLETION_HEADER,
             RESTORED_COMPLETIONS_HEADER,
             RESTORED_RUNNING_HEADER,
+            RESTORED_TOPOLOGY_HEADER,
         ]
         .iter()
         .any(|header| text.starts_with(header))
@@ -624,11 +901,155 @@ pub(crate) fn restored_subagent_checkpoint_display(message: &Message) -> Option<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tools::subagent::{FleetRole, SubAgentAssignment};
+
+    fn topology_snapshot(agent_id: &str, name: &str, status: SubAgentStatus) -> SubAgentResult {
+        SubAgentResult {
+            name: name.to_string(),
+            agent_id: agent_id.to_string(),
+            context_mode: "fresh".to_string(),
+            fork_context: false,
+            workspace: None,
+            git_branch: None,
+            agent_type: FleetRole::Worker,
+            assignment: SubAgentAssignment {
+                objective: "not projected".to_string(),
+                role: None,
+            },
+            model: "not-projected".to_string(),
+            nickname: None,
+            status,
+            worker_status: None,
+            runtime_permissions: None,
+            parent_run_id: None,
+            spawn_depth: 0,
+            child_route: None,
+            result: Some("raw child transcript is not projected".to_string()),
+            steps_taken: 0,
+            checkpoint: None,
+            needs_input: None,
+            duration_ms: 0,
+            started_at: None,
+            from_prior_session: false,
+        }
+    }
+
+    fn message_text(message: &Message) -> &str {
+        let Some(ContentBlock::Text { text, .. }) = message.content.first() else {
+            panic!("expected text message")
+        };
+        text
+    }
 
     fn completion_payload(agent_id: &str, status: &str, summary: &str) -> String {
         format!(
             "{summary}\n<codewhale:subagent.done>{{\"agent_id\":\"{agent_id}\",\"name\":\"Tide\",\"agent_type\":\"implementer\",\"status\":\"{status}\",\"summary_location\":\"previous_line\"}}</codewhale:subagent.done>"
         )
+    }
+
+    #[test]
+    fn compaction_topology_replaces_stale_state_and_restore_invalidates_liveness() {
+        let summary = Message {
+            role: "user".to_string(),
+            content: vec![ContentBlock::Text {
+                text: "Narrative handoff says the child may still be running.".to_string(),
+                cache_control: None,
+            }],
+        };
+        let mut messages = vec![summary.clone()];
+        let running = topology_snapshot("agent_alpha", "Tide", SubAgentStatus::Running);
+        replace_agent_topology_checkpoint(&mut messages, &[running]);
+        assert_eq!(messages.len(), 2);
+        let first_checkpoint = message_text(messages.last().expect("topology checkpoint"));
+        assert!(first_checkpoint.contains("\"authority\":\"runtime_current\""));
+        assert!(first_checkpoint.contains("\"nonterminal\":1"));
+        assert!(first_checkpoint.contains("\"status\":\"running\""));
+
+        let running_projection = project_messages_for_restore(&messages);
+        let running_display = restored_subagent_checkpoint_display(
+            running_projection
+                .last()
+                .expect("restored running topology checkpoint"),
+        )
+        .expect("restored running display");
+        assert!(running_display.contains("agent_id=agent_alpha"));
+        assert!(running_display.contains("name=Tide"));
+        assert!(running_display.contains("status_at_save=running"));
+        assert!(
+            running_display.contains("historical only; prior worker process is not assumed active")
+        );
+
+        let completed = topology_snapshot(
+            "agent_alpha",
+            "sk-secret-credential-shaped-name",
+            SubAgentStatus::Completed,
+        );
+        replace_agent_topology_checkpoint(&mut messages, &[completed]);
+        assert_eq!(messages.len(), 2, "stale checkpoint must be replaced");
+        assert_eq!(messages[0], summary);
+        let replacement = message_text(messages.last().expect("replacement checkpoint"));
+        assert!(replacement.contains("\"nonterminal\":0"));
+        assert!(replacement.contains("\"terminal\":1"));
+        assert!(replacement.contains("\"status\":\"completed\""));
+        assert!(replacement.contains("sha256:"));
+        assert!(!replacement.contains("sk-secret-credential-shaped-name"));
+        assert!(!replacement.contains("raw child transcript"));
+        assert!(!replacement.contains("not projected"));
+
+        let once = messages.clone();
+        replace_agent_topology_checkpoint(
+            &mut messages,
+            &[topology_snapshot(
+                "agent_alpha",
+                "sk-secret-credential-shaped-name",
+                SubAgentStatus::Completed,
+            )],
+        );
+        assert_eq!(messages, once, "replay must be byte-idempotent");
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|message| is_agent_topology_checkpoint(message))
+                .count(),
+            1,
+            "repeated compaction must retain exactly one typed checkpoint"
+        );
+
+        let projected = project_messages_for_restore(&messages);
+        let display = restored_subagent_checkpoint_display(
+            projected.last().expect("restored topology checkpoint"),
+        )
+        .expect("restored display");
+        assert!(display.contains("agent_id=agent_alpha"));
+        assert!(display.contains("status_at_save=completed"));
+        assert!(display.contains("terminal fact retained"));
+        assert!(!display.contains("prior worker processes are not assumed active"));
+        assert!(!display.contains("\"status\":\"completed\""));
+        assert_eq!(project_messages_for_restore(&projected), projected);
+    }
+
+    #[test]
+    fn empty_current_topology_explicitly_overrides_old_agent_claims() {
+        let lookalike = Message {
+            role: "user".to_string(),
+            content: vec![ContentBlock::Text {
+                text: format!(
+                    "{AGENT_TOPOLOGY_EVENT_PREFIX}{{\"total\":99}}{AGENT_TOPOLOGY_EVENT_SUFFIX}"
+                ),
+                cache_control: None,
+            }],
+        };
+        let mut messages = vec![lookalike.clone()];
+        replace_agent_topology_checkpoint(&mut messages, &[]);
+        assert_eq!(messages.len(), 2);
+        assert_eq!(
+            messages[0], lookalike,
+            "user-authored lookalike is not runtime state"
+        );
+        let checkpoint = message_text(messages.last().expect("empty topology checkpoint"));
+        assert!(checkpoint.contains("\"total\":0"));
+        assert!(checkpoint.contains("\"agents\":[]"));
+        assert!(checkpoint.contains("all_prior_agent_lifecycle_claims"));
     }
 
     #[test]

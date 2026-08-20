@@ -735,9 +735,11 @@ impl Engine {
                 )
                 .await
                 {
-                    Ok(result) => {
+                    Ok(mut result) => {
                         // Only update if we got valid messages (never corrupt state)
                         if !result.messages.is_empty() || self.session.messages.is_empty() {
+                            self.append_compaction_agent_topology(&mut result.messages)
+                                .await;
                             let auto_messages_after = result.messages.len();
                             let retries_used = result.retries_used;
                             self.session.replace_messages(result.messages);
