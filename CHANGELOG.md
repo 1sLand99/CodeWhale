@@ -18,9 +18,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   nothing. The forwarded tree was also stale against the real CLI: it offered
   `pr`, `scorecard`, and `session-diagnostics`, which `codewhale` does not
   have, and omitted `run`, `rc`, `config`, `model`, `thread`, `lane`,
-  `workflow`, `web`, `account`, `app-server`, `mcp-server`, `metrics`, and
-  `update`, which it does. Completions are now rendered in-process from the
-  CLI's own command tree, and `completions` is an alias of the existing
+  `workflow`, `web`, `account`, `app-server`, `mcp-server`, `metrics`,
+  `update`, `cloud`, `completion`, and `lane-log-proxy`, which it does.
+  Completions are now rendered in-process from the CLI's own command tree,
+  and `completions` is an alias of the existing
   `completion` subcommand rather than a second, divergent path. Regenerate any
   script you installed from an earlier release. Reported by **RepentStar**
   (#5526); part of the `deepseek-tui`-era identifier retirement in #5443.
