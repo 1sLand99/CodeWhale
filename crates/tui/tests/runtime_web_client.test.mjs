@@ -570,7 +570,27 @@ test("assembles deltas and replaces the live item with its settled receipt", () 
     ),
   );
   assert.equal(state.items.get("item-stop").status, "interrupted");
-  assert.deepEqual(state.itemOrder, ["item-new", "item-stop"]);
+
+  applyRuntimeEvent(
+    state,
+    runtimeEvent(
+      7,
+      "item.canceled",
+      {
+        item: {
+          id: "item-compact",
+          turn_id: "turn-1",
+          kind: "compaction",
+          status: "canceled",
+          summary: "Compaction canceled",
+          detail: "Compaction canceled",
+        },
+      },
+      { item_id: "item-compact" },
+    ),
+  );
+  assert.equal(state.items.get("item-compact").status, "canceled");
+  assert.deepEqual(state.itemOrder, ["item-new", "item-stop", "item-compact"]);
 });
 
 test("projects agent lifecycle receipts live and settles them without a snapshot reload", () => {

@@ -10,6 +10,7 @@ export const STREAM_EVENT_NAMES = [
   "item.started",
   "item.delta",
   "item.completed",
+  "item.canceled",
   "item.failed",
   "item.interrupted",
   "approval.required",
@@ -117,6 +118,7 @@ export function applyRuntimeEvent(state, envelope) {
   } else if (
     eventName === "item.started"
     || eventName === "item.completed"
+    || eventName === "item.canceled"
     || eventName === "item.failed"
     || eventName === "item.interrupted"
     || eventName === "agent.spawned"
