@@ -7,11 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- `docs/constitution` and `docs/runtime-api` now route their localized
-  copy through the typed dictionary spine, retiring their inline
-  bilingual literals; this is another incremental phase of #5337, not
-  completion of the full epic (#5517).
-
 ## [0.9.10] - 2026-08-19
 
 - Show the full slash-command or `/model` completion row in a bounded, wrapping hover popover whenever narrow terminals truncate it, closing the remaining scoped gap from [#998](https://github.com/Hmbown/CodeWhale/issues/998). Thanks [@AiurArtanis](https://github.com/AiurArtanis) and [@formp3](https://github.com/formp3) for identifying the affected surfaces.
@@ -241,6 +236,10 @@ abort under load.
 - `feat(web): move docs/hooks and docs/troubleshooting onto the dictionary
   spine` (Lstarsky0) — both pages now read copy from the locale dictionaries
   instead of inline bilingual literals (#5337).
+- `feat(web): move docs/constitution and docs/runtime-api onto the dictionary
+  spine` (Lstarsky0) — both pages now read copy from the locale dictionaries
+  instead of inline bilingual literals; another incremental phase of #5337,
+  not completion of the full epic (#5517).
 - `docs(i18n): complete Tier 1 of Chinese docs localization` (SparkofSpike) —
   Chinese and Indonesian docs move to `docs/zh_hans/` and `docs/id/`, with
   redirect stubs at the old paths for one release cycle (#5482).
