@@ -11,7 +11,7 @@
 //!
 //! - **placement** — where it renders. `Top` (default) | `Left` | `Right` |
 //!   `Off`. Drag-resizing the divider persists `work_surface_top_height`
-//!   (2..=16) or `work_surface_side_width` (26..=80) to `settings.toml`.
+//!   (5..=16) or `work_surface_side_width` (26..=80) to `settings.toml`.
 //! - **panel** — what it shows. [`RailPanel`]: `Tasks` (default) | `Agents` |
 //!   `Context` | `Pinned`, from the `rail_panel` setting. The legacy
 //!   `sidebar_focus` key migrates into it.
@@ -576,13 +576,16 @@ mod tests {
 
     #[test]
     fn top_strip_auto_fits_step_count_up_to_caps() {
-        // Two steps: divider + progress receipt + 2 rows = 4 lines, not a
-        // fixed-height band of blank water.
+        // Two steps need four literal lines, but the readable surface floor
+        // wins so the same saved size can also seat goal + Agent state.
         let mut two_steps = app();
         two_steps.work_surface.top_height = 8;
         add_todos(&mut two_steps, 2);
         let budget = working_budget(&two_steps, 40);
-        assert_eq!(super::height(&mut two_steps, 100, 40, budget), 4);
+        assert_eq!(
+            super::height(&mut two_steps, 100, 40, budget),
+            super::model::TOP_HEIGHT_MIN
+        );
 
         // Ten steps: content wants 12 lines, the default 8-line cap wins.
         let mut ten_steps = app();
@@ -594,13 +597,14 @@ mod tests {
         // Short terminal: the transcript's spare rows beat both content and
         // the configured cap. A 12-row terminal spends 1 on the header, 1 on
         // the phase strip and 3 on the bordered composer, and owes the
-        // transcript its 3-row floor — so 4 rows are actually spare. (This
-        // used to be 6, half the terminal, which left the transcript 2 rows.)
+        // transcript its 3-row floor — so only 4 rows are spare. That is below
+        // the readable floor, so the whole rail yields rather than painting a
+        // divider over clipped work.
         let mut short_terminal = app();
         short_terminal.work_surface.top_height = 8;
         add_todos(&mut short_terminal, 10);
         let budget = working_budget(&short_terminal, 12);
-        assert_eq!(super::height(&mut short_terminal, 100, 12, budget), 4);
+        assert_eq!(super::height(&mut short_terminal, 100, 12, budget), 0);
 
         // Nothing to show: no strip at all.
         let mut empty = app();
@@ -676,28 +680,29 @@ mod tests {
         }
     }
 
-    /// `top_height` is a ceiling, not a fixed size. A short ceiling must still
-    /// render (not collapse), and content longer than the ceiling is clamped
-    /// to it rather than padded with blank water.
+    /// `top_height` is a ceiling, not a fixed size. The compact floor must
+    /// still seat the goal, work progress, and actionable rows; content longer
+    /// than the ceiling is clamped rather than padded with blank water.
     #[test]
     fn a_short_top_height_caps_content_rather_than_collapsing() {
         let mut capped = app();
         capped.work_surface.placement = WorkSurfacePlacement::Top;
         capped.work_surface.panel = super::RailPanel::Pinned;
-        capped.work_surface.top_height = 2;
+        capped.work_surface.top_height = super::model::TOP_HEIGHT_MIN;
         capped.composer_border = true;
-        // Goal + several checklist rows: content wants more than 2, the cap wins.
+        // Goal + several checklist rows: content wants more than the readable
+        // floor, so the cap wins without hiding every actionable row.
         capped.goal.objective = Some("ship the release".to_string());
         add_todos(&mut capped, 6);
         let budget = working_budget(&capped, 40);
         assert_eq!(
             super::height(&mut capped, 100, 40, budget),
-            2,
+            super::model::TOP_HEIGHT_MIN,
             "short top_height is a cap the strip must fit under, not a cliff"
         );
 
-        // Content shorter than the cap shrinks: a single goal line + divider
-        // is 2 rows, not a padded 8-row band.
+        // Content shorter than the cap shrinks to the readable floor rather
+        // than padding all the way out to the saved 8-row cap.
         let mut short = app();
         short.work_surface.placement = WorkSurfacePlacement::Top;
         short.work_surface.panel = super::RailPanel::Pinned;
@@ -705,10 +710,7 @@ mod tests {
         short.goal.objective = Some("one goal only".to_string());
         let budget = working_budget(&short, 40);
         let h = super::height(&mut short, 100, 40, budget);
-        assert!(
-            (2..=4).contains(&h),
-            "short content auto-fits under the cap, got {h}"
-        );
+        assert_eq!(h, super::model::TOP_HEIGHT_MIN);
     }
 
     /// Non-Tasks Top panels auto-fit the same way Tasks always did: content
@@ -2554,7 +2556,7 @@ mod tests {
     fn keyboard_navigation_is_panel_local_when_focused() {
         let mut app = app();
         add_todos(&mut app, 3);
-        app.work_surface.visible_rows = 2;
+        let _ = render_text(&mut app, 80, super::model::TOP_HEIGHT_MIN);
         assert!(
             super::handle_key(
                 &mut app,
@@ -2572,9 +2574,13 @@ mod tests {
     fn printable_keys_release_panel_focus_for_composer() {
         let mut app = app();
         add_todos(&mut app, 1);
-        let _ = super::handle_key(
-            &mut app,
-            KeyEvent::new(KeyCode::Char('w'), KeyModifiers::ALT),
+        let _ = render_text(&mut app, 80, super::model::TOP_HEIGHT_MIN);
+        assert!(
+            super::handle_key(
+                &mut app,
+                KeyEvent::new(KeyCode::Char('w'), KeyModifiers::ALT),
+            )
+            .is_some()
         );
 
         let outcome = super::handle_key(
@@ -2989,6 +2995,9 @@ mod tests {
             SubAgentStatus::Running,
         ));
 
+        let rendered = render_text(&mut app, 100, 8);
+        assert!(rendered.contains("builder"), "{rendered}");
+
         assert!(super::enter_agents(&mut app));
         assert_eq!(app.work_surface.panel, super::RailPanel::Agents);
         assert!(app.work_surface.focused);
@@ -3009,7 +3018,7 @@ mod tests {
     fn agent_entry_rejects_a_surface_that_is_not_rendered() {
         let mut app = app();
         app.work_surface.placement = super::WorkSurfacePlacement::Top;
-        app.work_surface.effective_placement = super::WorkSurfacePlacement::Off;
+        app.work_surface.effective_placement = super::WorkSurfacePlacement::Top;
         app.current_session_id = Some(SESSION.to_string());
         app.subagent_cache.push(cached_worker(
             "agent-live",
@@ -3018,12 +3027,93 @@ mod tests {
             None,
             SubAgentStatus::Running,
         ));
+        // A previous frame's rectangle is not evidence that this Agent row
+        // was painted. Only the renderer's current hitboxes may transfer
+        // keyboard ownership away from the composer.
+        app.work_surface.last_area = Some(ratatui::layout::Rect::new(0, 0, 100, 5));
+        assert!(app.work_surface.hitboxes.is_empty());
 
         assert!(!super::enter_agents(&mut app));
         assert!(
             !app.work_surface.focused,
             "hidden surface cannot own arrows"
         );
+    }
+
+    #[test]
+    fn compact_top_surface_keeps_goal_todos_and_named_agent_visible() {
+        for (width, terminal_height) in [(160, 48), (120, 32), (80, 24)] {
+            let mut app = app();
+            app.work_surface.placement = super::WorkSurfacePlacement::Top;
+            app.work_surface.panel = super::RailPanel::Pinned;
+            app.work_surface.top_height = super::model::TOP_HEIGHT_MIN;
+            app.goal.objective = Some("ship the release".to_string());
+            add_todos(&mut app, 3);
+            app.current_session_id = Some(SESSION.to_string());
+            app.subagent_cache.push(cached_worker(
+                "agent-harbor",
+                "builder",
+                Some("Harbor"),
+                None,
+                SubAgentStatus::Running,
+            ));
+
+            let budget = crate::tui::ui::rail_row_budget(&app, width, terminal_height, false);
+            let height = super::height(&mut app, width, terminal_height, budget);
+            assert_eq!(
+                height,
+                super::model::TOP_HEIGHT_MIN,
+                "{width}x{terminal_height} must seat the readable compact surface"
+            );
+            let rendered = render_text(&mut app, width, height);
+            assert!(
+                rendered.contains("ship the release"),
+                "{width}x{terminal_height}: {rendered}"
+            );
+            assert!(
+                rendered.contains("3 left"),
+                "{width}x{terminal_height}: {rendered}"
+            );
+            assert!(
+                rendered.contains("Harbor"),
+                "{width}x{terminal_height}: {rendered}"
+            );
+
+            assert!(super::enter_agents(&mut app));
+            assert_eq!(
+                app.work_surface.selected.as_ref().map(|row| row.0.as_str()),
+                Some("worker:agent-harbor"),
+                "the advertised Left control must focus the named visible Agent"
+            );
+        }
+    }
+
+    #[test]
+    fn starved_surface_cannot_take_keyboard_focus() {
+        let mut app = app();
+        app.work_surface.placement = super::WorkSurfacePlacement::Top;
+        app.work_surface.effective_placement = super::WorkSurfacePlacement::Top;
+        app.current_session_id = Some(SESSION.to_string());
+        app.subagent_cache.push(cached_worker(
+            "agent-hidden",
+            "builder",
+            Some("Harbor"),
+            None,
+            SubAgentStatus::Running,
+        ));
+
+        assert_eq!(super::height(&mut app, 80, 12, 0), 0);
+        assert!(app.work_surface.last_area.is_none());
+        assert!(!super::enter_agents(&mut app));
+        assert!(!app.work_surface.focused);
+        assert!(
+            super::handle_key(
+                &mut app,
+                KeyEvent::new(KeyCode::Char('w'), KeyModifiers::ALT),
+            )
+            .is_none()
+        );
+        assert!(!app.work_surface.focused);
     }
 
     /// Acceptance for owner regression A2: an agent row is a door in the
@@ -3201,6 +3291,7 @@ mod tests {
         app.current_session_id = Some(SESSION.to_string());
         app.work_surface.panel = super::RailPanel::Agents;
         add_todos(&mut app, 2);
+        let _ = render_text(&mut app, 100, 6);
 
         let rows = super::model::visible_rows_for_panel(&mut app);
         let todo_row = rows

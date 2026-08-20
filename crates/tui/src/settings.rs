@@ -16,6 +16,13 @@ use crate::palette::{normalize_hex_rgb_color, normalize_theme_setting};
 use crate::tui::app::ReasoningEffort;
 
 const SETTINGS_FILE_NAME: &str = "settings.toml";
+
+/// Smallest Top work surface that can show its divider plus the compact
+/// goal / to-do / Agent projection without turning the rail into invisible
+/// keyboard state. Older releases accepted two rows, which left only one
+/// content row and could hide every actionable item behind the goal title.
+pub(crate) const WORK_SURFACE_TOP_HEIGHT_MIN: u16 = 5;
+pub(crate) const WORK_SURFACE_TOP_HEIGHT_MAX: u16 = 16;
 const TUI_PREFS_FILE_NAME: &str = "tui.toml";
 
 /// How successful structured file mutations are represented in the live
@@ -900,7 +907,12 @@ impl Settings {
             s.work_surface_placement =
                 normalize_work_surface_placement(&s.work_surface_placement).to_string();
             s.rail_panel = normalize_rail_panel(&s.rail_panel).to_string();
-            s.work_surface_top_height = s.work_surface_top_height.clamp(2, 16);
+            // Migrate the unreadable 2..=4 legacy range in memory. The next
+            // ordinary settings transaction persists the normalized value;
+            // loading settings remains a read-only operation.
+            s.work_surface_top_height = s
+                .work_surface_top_height
+                .clamp(WORK_SURFACE_TOP_HEIGHT_MIN, WORK_SURFACE_TOP_HEIGHT_MAX);
             s.work_surface_side_width = s.work_surface_side_width.clamp(26, 80);
             s.inline_diffs = normalize_inline_diffs(&s.inline_diffs).to_string();
             s.synchronized_output =
@@ -1268,8 +1280,12 @@ impl Settings {
                 self.rail_panel_explicit = true;
             }
             "work_surface_top_height" | "work_top_height" => {
-                self.work_surface_top_height =
-                    parse_u16_range("work_surface_top_height", value, 2, 16)?;
+                self.work_surface_top_height = parse_u16_range(
+                    "work_surface_top_height",
+                    value,
+                    WORK_SURFACE_TOP_HEIGHT_MIN,
+                    WORK_SURFACE_TOP_HEIGHT_MAX,
+                )?;
             }
             "work_surface_side_width" | "work_side_width" => {
                 self.work_surface_side_width =
@@ -3135,7 +3151,30 @@ mod tests {
         assert_eq!(restored.work_surface_top_height, 9);
         assert_eq!(restored.work_surface_side_width, 54);
         assert!(settings.set("work_surface_top_height", "17").is_err());
+        assert!(settings.set("work_surface_top_height", "4").is_err());
         assert!(settings.set("work_surface_side_width", "25").is_err());
+    }
+
+    #[test]
+    fn settings_load_migrates_unreadable_top_work_surface_height() {
+        let _g = config_path_test_guard();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let settings_path = tmp.path().join("settings.toml");
+        let legacy = "work_surface_placement = \"top\"\nwork_surface_top_height = 2\nrail_panel = \"pinned\"\n";
+        std::fs::write(&settings_path, legacy).expect("settings");
+        let _config_override =
+            EnvVarRestore::set("DEEPSEEK_CONFIG_PATH", tmp.path().join("config.toml"));
+
+        let loaded = Settings::load().expect("load settings");
+
+        assert_eq!(loaded.work_surface_top_height, WORK_SURFACE_TOP_HEIGHT_MIN);
+        assert_eq!(loaded.work_surface_placement, "top");
+        assert_eq!(loaded.rail_panel, "pinned");
+        assert_eq!(
+            std::fs::read_to_string(settings_path).expect("read unchanged settings"),
+            legacy,
+            "normalizing a legacy height at read time must not rewrite the user's file"
+        );
     }
 
     #[test]

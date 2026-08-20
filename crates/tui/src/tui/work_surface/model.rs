@@ -194,8 +194,8 @@ impl WorkSourceState {
 pub(super) const RECENT_ONLY_TTL_MS: u64 = 4_000;
 /// Settled file/search/write receipt lifetime in the live strip (#4690).
 pub(super) const ACTIVITY_RECEIPT_TTL_MS: u64 = 3_000;
-pub(super) const TOP_HEIGHT_MIN: u16 = 2;
-pub(super) const TOP_HEIGHT_MAX: u16 = 16;
+pub(super) const TOP_HEIGHT_MIN: u16 = crate::settings::WORK_SURFACE_TOP_HEIGHT_MIN;
+pub(super) const TOP_HEIGHT_MAX: u16 = crate::settings::WORK_SURFACE_TOP_HEIGHT_MAX;
 pub(super) const SIDE_WIDTH_MIN: u16 = 26;
 pub(super) const SIDE_WIDTH_MAX: u16 = 80;
 
@@ -550,7 +550,7 @@ pub(super) fn project(app: &mut App) -> Vec<WorkRow> {
 /// strip because they still need attention.
 ///
 /// **The sub-agent group outranks the to-do list for strip rows.** The strip
-/// is a fixed-height viewport over this list (`top_height`, 2..=16 rows) and
+/// is a fixed-height viewport over this list (`top_height`, 5..=16 rows) and
 /// paints from the top, so whatever is ordered last is what falls off the
 /// bottom behind `↓ N more`. Putting the to-dos first meant a session that
 /// already had a checklist spent every row it had on to-dos and a running

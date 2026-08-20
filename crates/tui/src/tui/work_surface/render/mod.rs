@@ -42,7 +42,7 @@ use rows::{
 
 pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
     if area.width == 0 || area.height == 0 {
-        app.work_surface.last_area = None;
+        collapse_strip(app);
         return;
     }
 
@@ -55,7 +55,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
     let placement = app.work_surface.effective_placement;
     // Off renders no rail; height()/split_chat() never hand us an area for it.
     if placement == WorkSurfacePlacement::Off {
-        app.work_surface.last_area = None;
+        collapse_strip(app);
         return;
     }
     let body_area = match placement {

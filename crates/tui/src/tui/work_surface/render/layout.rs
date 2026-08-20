@@ -205,6 +205,7 @@ pub fn split_chat(app: &mut App, area: Rect, min_chat_width: u16) -> (Rect, Opti
     // Same empty-collapse rule as Top: a panel with nothing to show does not
     // spend columns on a blank (or "No agents") column.
     if !side_rail_has_content(app) {
+        collapse_strip(app);
         return (area, None);
     }
 
@@ -219,6 +220,7 @@ pub fn split_chat(app: &mut App, area: Rect, min_chat_width: u16) -> (Rect, Opti
         // re-ask height() with effective_placement Top so content auto-fits
         // as a strip instead of vanishing.
         app.work_surface.effective_placement = WorkSurfacePlacement::Top;
+        collapse_strip(app);
         return (area, None);
     }
 

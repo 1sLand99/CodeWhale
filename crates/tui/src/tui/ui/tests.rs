@@ -22416,10 +22416,9 @@ mod work_surface {
     use crate::tui::widgets::should_render_empty_state;
     use crate::tui::work_surface::{RailPanel, WorkSurfacePlacement};
 
-    /// The lowest strip a Top panel may render at: one content row plus the
-    /// divider. Mirrors `work_surface::model::TOP_HEIGHT_MIN`, which is
-    /// `pub(super)` to that module and so not nameable from here.
-    const TOP_HEIGHT_MIN: u16 = 2;
+    /// The lowest readable Top strip: enough room for the divider and the
+    /// compact goal / to-do / Agent projection.
+    const TOP_HEIGHT_MIN: u16 = crate::settings::WORK_SURFACE_TOP_HEIGHT_MIN;
 
     fn idle_rail_app(panel: RailPanel) -> App {
         let mut app = create_test_app();
@@ -22428,7 +22427,7 @@ mod work_surface {
         // shift every threshold below by a row.
         app.composer_border = true;
         // Same reason, and it bites harder: `work_surface_top_height` is
-        // user-settable over 2..=16 and drag-resizing the divider persists it. A
+        // user-settable over 5..=16 and drag-resizing the divider persists it. A
         // developer whose settings.toml carries a short strip asks for a short
         // strip and gets one, at a *lower* row threshold than the default 8 — so
         // leaving this unpinned makes the thresholds below depend on whoever runs
@@ -22473,6 +22472,14 @@ mod work_surface {
         // compact than the old line list.
         app.subagent_cache.push(make_subagent(
             "agent_rail_probe_b",
+            crate::tools::subagent::SubAgentStatus::Running,
+        ));
+        app.subagent_cache.push(make_subagent(
+            "agent_rail_probe_c",
+            crate::tools::subagent::SubAgentStatus::Running,
+        ));
+        app.subagent_cache.push(make_subagent(
+            "agent_rail_probe_d",
             crate::tools::subagent::SubAgentStatus::Running,
         ));
         assert!(
@@ -22546,12 +22553,8 @@ mod work_surface {
                 "at 80x{rows} the {panel:?} strip took {strip} rows out of a \
                  {budget}-row budget — those rows belong to the transcript"
             );
-            // The old fixed-height rail expressed "no stub" as "absent below the
-            // threshold": a four-row band squeezed to two was a title over one
-            // clipped line. Auto-fit made that framing obsolete — a two-row
-            // Agents strip is the running/done status plus the divider, the
-            // panel's most useful line, not a stub. What is still worth
-            // forbidding is a strip that is *only* its own divider.
+            // A surface below the readable floor is not a compact rail; it is
+            // a divider plus hidden work. Yield to zero instead.
             assert!(
                 strip == 0 || strip >= TOP_HEIGHT_MIN,
                 "at 80x{rows} the strip is {strip} row(s): a divider with no \
@@ -22567,7 +22570,7 @@ mod work_surface {
 
         // At and above the threshold the rows are genuinely spare, so the rail
         // takes its full auto-fit height over an intact 16-row ocean.
-        for rows in [26_u16, 27, 28, 30] {
+        for rows in [28_u16, 29, 30, 32] {
             let mut app = busy_rail_app(panel);
             let strip = strip_height(&mut app, 80, rows);
             assert_eq!(
@@ -22610,7 +22613,7 @@ mod work_surface {
         // "the strip must be absent at 22..=25" assertion was reaching for —
         // that framing only worked while the strip was a fixed four-row band,
         // and it now under-tests (four hand-picked sizes) and over-constrains
-        // (a two-row strip that costs the water nothing is fine).
+        // (a readable strip that costs the water nothing is fine).
         //
         // A rail that never renders costs the ocean nothing either, so pin that
         // there is a strip to compare against before comparing.
@@ -22783,12 +22786,10 @@ mod work_surface {
     }
 
     #[test]
-    fn a_user_who_asks_for_a_short_strip_keeps_it_at_every_terminal_size() {
-        // `work_surface_top_height` is a preference over 2..=16 that drag-resizing
-        // the divider persists to settings.toml. It must never be fed into the
-        // collapse cliff: a 4-row threshold charged against a 2-row *request*
-        // deletes the panel outright, at every size, for a user who explicitly
-        // asked for it.
+    fn readable_top_height_is_stable_and_yields_cleanly_when_starved() {
+        // `work_surface_top_height` is a preference over 5..=16 that drag-resizing
+        // persists. Every accepted value has room for actual work, while the
+        // ambient budget may still hide the whole rail to protect the ocean.
         let panel = RailPanel::Agents;
 
         // The cliff is charged against ambient room alone, so the size at which
@@ -22799,7 +22800,7 @@ mod work_surface {
         // ambient budget can clamp an auto-fitted strip to fewer rows than the
         // user's ceiling, which is the yield rule working, not the cliff.
         let mut first_visible_at: Option<(u16, u16)> = None;
-        for top_height in [2_u16, 3, 4, 8, 16] {
+        for top_height in [TOP_HEIGHT_MIN, 8, 16] {
             let mut first = None;
             let mut tallest = 0_u16;
             for rows in 8_u16..=48 {
@@ -22843,20 +22844,23 @@ mod work_surface {
             }
         }
 
-        // And it is still honoured end to end, with the ocean intact: the budget
-        // is what protects the whale, so a short strip costs it nothing.
+        // At the 80x24 ambient evidence size there are only two spare rows.
+        // That is below the readable floor, so the rail yields completely and
+        // cannot leave an invisible focus target behind.
         let mut app = busy_rail_app(panel);
-        app.work_surface.top_height = 2;
+        app.work_surface.top_height = TOP_HEIGHT_MIN;
         assert_eq!(
             strip_height(&mut app, 80, 24),
-            2,
-            "the 2-row strip the user asked for must render at 80x24"
+            0,
+            "an unreadable strip must yield rather than hide its work at 80x24"
         );
         let rendered = render_underwater_test_app(&mut app, 80, 24);
         assert!(
             has_idle_whale(&rendered),
-            "a 2-row strip must not cost the whale its rows at 80x24\n{rendered}"
+            "a yielded strip must leave the whale intact at 80x24\n{rendered}"
         );
+        assert!(app.work_surface.last_area.is_none());
+        assert!(!app.work_surface.focused);
     }
 
     #[test]

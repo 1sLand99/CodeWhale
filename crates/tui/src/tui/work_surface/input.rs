@@ -22,13 +22,23 @@ pub fn enter_agents(app: &mut App) -> bool {
     app.work_surface.panel = super::model::RailPanel::Agents;
     if app.work_surface.placement == WorkSurfacePlacement::Off
         || app.work_surface.effective_placement == WorkSurfacePlacement::Off
+        || app.work_surface.last_area.is_none()
     {
+        release_focus(app);
         return false;
     }
     let rows = visible_rows_for_panel(app);
     let first_agent = rows
         .iter()
-        .find(|row| row.selectable && row.id.0.starts_with("worker:"))
+        .find(|row| {
+            row.selectable
+                && row.id.0.starts_with("worker:")
+                && app
+                    .work_surface
+                    .hitboxes
+                    .iter()
+                    .any(|hitbox| hitbox.id == row.id)
+        })
         .map(|row| row.id.clone());
     let Some(first_agent) = first_agent else {
         return false;
@@ -37,6 +47,11 @@ pub fn enter_agents(app: &mut App) -> bool {
     let selected_agent_is_visible = app.work_surface.selected.as_ref().is_some_and(|selected| {
         rows.iter()
             .any(|row| row.selectable && row.id == *selected && row.id.0.starts_with("worker:"))
+            && app
+                .work_surface
+                .hitboxes
+                .iter()
+                .any(|hitbox| hitbox.id == *selected)
     });
     if !selected_agent_is_visible {
         app.work_surface.selected = Some(first_agent);
@@ -51,6 +66,15 @@ pub fn enter_agents(app: &mut App) -> bool {
 /// a local stop arm / open detail first). Plain printable input always returns
 /// ownership to the composer instead of becoming a hidden panel shortcut.
 pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<Option<SidebarRowAction>> {
+    // A starved, mini-window-hidden, or explicitly disabled rail owns no
+    // cells, so it cannot own keyboard focus. `collapse_strip` normally
+    // clears this at layout time; this guard also closes the pre-redraw race.
+    if app.work_surface.last_area.is_none() {
+        if app.work_surface.focused {
+            release_focus(app);
+        }
+        return None;
+    }
     // Keyboard and mouse share one row source per panel: Enter on the
     // selected row must open the same world a click would.
     let rows = visible_rows_for_panel(app);

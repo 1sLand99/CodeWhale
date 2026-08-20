@@ -3085,7 +3085,7 @@ fn config_literal_hint_for_key(key: &str) -> &'static str {
             "top | left | right | off · side rails require Ocean mode and at least 72 columns"
         }
         "rail_panel" => "tasks | agents | context | pinned · which panel the rail shows",
-        "work_surface_top_height" => "2..=16 rows · also adjustable by dragging the divider",
+        "work_surface_top_height" => "5..=16 rows · also adjustable by dragging the divider",
         "work_surface_side_width" => "26..=80 columns · also adjustable by dragging the divider",
         "base_url" => "global DeepSeek/root fallback; e.g. https://api.deepseek.com/beta",
         // #5134: the filter matches hint text, so the words a confused user
