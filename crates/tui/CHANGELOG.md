@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- xAI device login validated nothing about the URL it opened. The
+  `verification_uri` from the device-code response went straight to
+  `webbrowser::open` with no parse, no scheme check and no credential check, so a
+  spoofed or compromised issuer could hand the platform's "open this" call a
+  `file:` path, a custom application scheme (`vscode://`, `slack://`), or a
+  credential-bearing URL. The shared primitive now refuses anything that is not a
+  web page before the URI is printed or opened. **Behaviour change:** a
+  non-loopback plain-`http:` verification URI now aborts login where it
+  previously opened; `http:` on a loopback host is still allowed, because local
+  runtimes legitimately use it.
+- The xAI OAuth types no longer print bearer material through `Debug`. Five types
+  holding tokens (`GrokAuthEntry`, `TokenResponse`, `DeviceCodeResponse`,
+  `DeviceCodeGrant` and the poll outcome) either redact or no longer derive
+  `Debug` at all, so a token has no printable path through a `{:?}` on any
+  surrounding struct. The shared `DevicePollOutcome` derives nothing, which the
+  compiler enforces.
+- **Behaviour change:** an `interval` of `0` from the authorization server now
+  falls back to RFC 8628's five-second default rather than a one-second floor,
+  in both the xAI and account device flows.
+
 - OAuth device-code login is now one implementation. xAI/Grok device login and
   Codewhale account login each carried their own hand-rolled RFC 8628 polling
   loop with nothing shared between them; both now call a single primitive
