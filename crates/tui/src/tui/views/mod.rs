@@ -1752,6 +1752,13 @@ impl ConfigView {
             shell_row,
             ConfigRow {
                 section: ConfigSection::Network,
+                key: "telemetry".to_string(),
+                value: crate::telemetry_notice::saved_preference_enabled(&config).to_string(),
+                editable: true,
+                scope: ConfigScope::Saved,
+            },
+            ConfigRow {
+                section: ConfigSection::Network,
                 key: "stream_chunk_timeout_secs".to_string(),
                 value: app.stream_chunk_timeout_secs.to_string(),
                 editable: true,
@@ -2945,6 +2952,7 @@ fn config_label_message(key: &str) -> Option<MessageId> {
         "default_mode" => MessageId::ConfigLabelDefaultMode,
         "allow_shell" => MessageId::ConfigLabelAllowShell,
         "managed_allow_shell" => MessageId::ConfigLabelManagedAllowShell,
+        "telemetry" => MessageId::ConfigLabelTelemetry,
         "stream_chunk_timeout_secs" => MessageId::ConfigLabelStreamTimeout,
         "theme" => MessageId::ConfigLabelTheme,
         "locale" => MessageId::ConfigLabelLocale,
@@ -3024,6 +3032,9 @@ fn humanize_config_key(key: &str) -> String {
 }
 
 fn config_hint_for_key(locale: Locale, key: &str) -> Cow<'static, str> {
+    if key == "telemetry" {
+        return tr(locale, MessageId::ConfigHintTelemetry);
+    }
     if key == "provider_url" {
         return tr(locale, MessageId::ConfigHintProviderUrl);
     }
@@ -3052,6 +3063,7 @@ fn config_literal_hint_for_key(key: &str) -> &'static str {
             "a project, profile, environment, or managed config controls shell access"
         }
         "allow_shell" => "on exposes shell tools in Agent mode; permission rules still apply",
+        "telemetry" => "anonymous usage counts only; never conversations or code",
         "composer_multiline_mode" => {
             "off: Enter sends, Shift+Enter adds a line; on: Enter adds a line, Shift+Enter sends"
         }
@@ -3160,6 +3172,7 @@ fn config_boolean_key(key: &str) -> bool {
     matches!(
         key,
         "allow_shell"
+            | "telemetry"
             | "calm_mode"
             | "low_motion"
             | "fancy_animations"
@@ -3290,6 +3303,8 @@ fn canonical_config_choice(key: &str, value: &str) -> String {
 
 fn config_choice_label(locale: Locale, key: &str, value: &str) -> String {
     let label = match (key, value) {
+        ("telemetry", "true") => tr(locale, MessageId::ConfigValueTelemetryOn).to_string(),
+        ("telemetry", "false") => tr(locale, MessageId::ConfigValueTelemetryOff).to_string(),
         (key, "true") if config_boolean_key(key) => "On".to_string(),
         (key, "false") if config_boolean_key(key) => "Off".to_string(),
         ("approval_mode" | "permission_posture" | "approval_policy", "ask") => "Ask".to_string(),

@@ -1,13 +1,13 @@
 # Codewhale product telemetry
 
-**Status for 0.9.6: anonymous usage counting is on by default and can be
-disabled immediately.** The first interactive launch summarizes what is counted,
-links the exact field-by-field schema, and preselects "Keep on" in a native
-startup modal. Arrow keys or Tab choose, Enter confirms, and `Y`/`N` are direct
-shortcuts. Telemetry remains unarmed until that choice. Headless surfaces follow
-the same documented default without pretending an interactive notice was shown.
-Every decline recorded by the former 0.9.4 opt-in notice remains off after
-upgrade.
+**Status for 0.9.10: anonymous usage counting is on by default and can be
+disabled immediately.** The first interactive launch shows one localized,
+nonblocking notice after the terminal is ready. It says what is never collected,
+points to this field-by-field schema, and links the ordinary `/settings` toggle.
+Telemetry remains unarmed until that notice has actually been drawn. Headless
+surfaces follow the same documented default without pretending an interactive
+notice was shown. Every decline recorded by the former 0.9.4 opt-in notice
+remains off after upgrade.
 
 Codewhale does not collect conversations, code, prompts, files, file/repo/branch
 names, model content, or credentials. It sends no per-turn or per-tool timeline.
@@ -68,9 +68,9 @@ want the erasing kind, use the config file.
 A value this list cannot read also resolves to off — a typo in a kill switch
 must never resolve to "on".
 
-The first-run notice is not shown at all when either switch is already set:
-it never asks a question this environment would override, and answering it
-never rewrites a `telemetry = false` you put there yourself.
+The first-run notice is not shown when telemetry is already persistently off or
+a run-scoped kill switch is active. The notice never rewrites a
+`telemetry = false` you put there yourself.
 
 A repo-local `.codewhale/config.toml` can set neither `telemetry` nor
 `telemetry_endpoint`, and a workspace `.env` can set neither. Someone else's
@@ -178,8 +178,8 @@ most once per flush point and never grows a queue.
 A surface emits by default unless the machine has a persistent opt-out or the
 run has a kill switch. The notice is only rendered on a TTY. So:
 
-- **`tui`** — enters the native TUI first, shows the disclosure as a startup
-  modal, stays unarmed until the first interactive choice, then follows it.
+- **`tui`** — enters the native TUI first, draws the localized nonblocking
+  disclosure, and stays unarmed until that frame is visible.
 - **`exec`, `cli`, `app-server`, `mcp-server`, `serve`** — follow the documented
   default on a fresh home and every persistent/run-scoped opt-out on any home.
 - **Fleet workers never emit**, on any surface, by construction (`crates/tui/src/fleet/host.rs:1386-1388`).

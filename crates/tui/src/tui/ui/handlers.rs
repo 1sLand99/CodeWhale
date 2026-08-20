@@ -822,6 +822,18 @@ pub(crate) async fn handle_config_updated(
         commands::set_config_value(app, &key, &value, persist),
         persist,
     );
+    let telemetry_toast = (key == "telemetry")
+        .then(|| {
+            result.message.clone().map(|message| {
+                let level = if result.is_error {
+                    StatusToastLevel::Error
+                } else {
+                    StatusToastLevel::Success
+                };
+                (message, level)
+            })
+        })
+        .flatten();
     let normalized_value = value.trim().to_ascii_lowercase().replace([' ', '_'], "-");
     let cleared_root_approval = !result.is_error
         && persist
@@ -858,6 +870,12 @@ pub(crate) async fn handle_config_updated(
         &key
     };
     refresh_config_view_if_open(app, focus_key);
+    if let Some((message, level)) = telemetry_toast {
+        // The modal stays open, so a transcript-only command receipt would be
+        // invisible. Keep the durable disk truth in the rebuilt row and show
+        // the localized result above it.
+        app.push_status_toast(message, level, Some(12_000));
+    }
     Ok(false)
 }
 

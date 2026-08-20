@@ -203,17 +203,18 @@ pub(crate) async fn cycle_permission_posture(
     }
 }
 
-/// Open the one canonical provider setup surface for onboarding.  Fresh
-/// onboarding starts at the full catalog; missing-key recovery focuses the
-/// current route so an exact Kimi Code K3 configuration can expose its plan
-/// route before a secret is entered.  Either way the picker opens on the
-/// navigable list (#4763): onboarding never drops a user straight into a
-/// key/OAuth prompt for a route they were not shown.
+/// Open the one canonical provider setup surface for onboarding. Fresh
+/// onboarding starts with the small local-runtime list and leaves the full
+/// cloud catalog one explicit `A` away. Missing-key recovery instead focuses
+/// the already-configured route so an exact Kimi Code K3 configuration can
+/// expose its plan route before a secret is entered. Either way the picker
+/// opens on the navigable list (#4763): onboarding never drops a user straight
+/// into a key/OAuth prompt for a route they were not shown.
 pub(crate) async fn open_onboarding_provider_picker(
     app: &mut App,
     config: &Config,
     engine_handle: &EngineHandle,
-    focus_current_route: bool,
+    recover_configured_route: bool,
 ) {
     if app.onboarding != OnboardingState::Provider
         || app.view_stack.top_kind() == Some(ModalKind::ProviderPicker)
@@ -224,7 +225,7 @@ pub(crate) async fn open_onboarding_provider_picker(
     app.view_stack.push(
         crate::tui::provider_picker::ProviderPickerView::new_for_onboarding(
             app.api_provider,
-            focus_current_route.then_some(app.onboarding_provider),
+            recover_configured_route.then_some(app.onboarding_provider),
             config,
             runtime_status,
         )

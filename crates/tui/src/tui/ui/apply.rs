@@ -1681,7 +1681,14 @@ pub(crate) async fn apply_command_result(
             }
             AppAction::OpenProviderPicker => {
                 if app.onboarding == OnboardingState::Provider {
-                    open_onboarding_provider_picker(app, config, engine_handle, true).await;
+                    let recover_configured_route = app.onboarding_missing_key_recovery;
+                    open_onboarding_provider_picker(
+                        app,
+                        config,
+                        engine_handle,
+                        recover_configured_route,
+                    )
+                    .await;
                 } else if app.view_stack.top_kind() != Some(ModalKind::ProviderPicker) {
                     let runtime_status = query_provider_runtime_status(engine_handle).await;
                     app.view_stack.push(
