@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Split the coordination ledger out of `tools/subagent/coord.rs` into
+  `tools/subagent/coord/ledger.rs`. The file held two unrelated things: the
+  model-facing `agents/*` tool wrappers, and the durable decision/claim/
+  contention records those wrappers happen to write — records whose consumers
+  are mostly *not* in the tool layer (`tui::coordination_detail`,
+  `tui::work_surface`, `tui::ui::tests`, `core::engine::tests` all name these
+  types). At 3.8k lines, reading either one started by scrolling past the
+  other. A pure move with a glob re-export from `coord`, so every
+  `crate::tools::subagent::coord::{…}` path still resolves and no consumer file
+  was edited; the only content change the move required is one constant going
+  from private to `pub(super)` because its caller stayed behind. `coord.rs` is
+  now 2.3k lines and `ledger.rs` 1.6k.
+
 - `agent` is now the only sub-agent tool the model can see. `AGENTS.md` has
   said "the model-facing sub-agent surface is `agent` only" since the lifecycle
   tools were removed, but six more were reachable: `agents/list`,
