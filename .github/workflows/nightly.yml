@@ -108,11 +108,28 @@ jobs:
       - name: Build
         shell: bash
         # Nightly artifacts are disposable smoke binaries (14-day retention),
-        # so skip fat LTO + codegen-units=1; tagged releases keep the full
-        # optimized profile via the Release workflow.
+        # so skip fat LTO; tagged releases keep the full optimized profile via
+        # the Release workflow. (`codegen-units` is not overridden here --
+        # [profile.release] already sets 16, so restating it changed nothing.)
+        #
+        # RUST_MIN_STACK sizes the stack of the LLVM worker threads rustc
+        # spawns to run `optimize module <crate>-cgu.N`. With `lto=off` the
+        # per-CGU optimization pipeline runs while the *library* is compiled
+        # rather than being deferred to the ThinLTO stage, and one codewhale-tui
+        # codegen unit needs more stack than a 1 MiB thread provides. Measured
+        # on aarch64 by holding the crate and every flag fixed and varying only
+        # this value: 1 MiB crashes rustc, 2 MiB and 4 MiB succeed. Unix std
+        # defaults to 2 MiB and passes; windows-11-arm sat under the
+        # requirement and failed every nightly from 2026-08-16 with
+        # `thread 'optimize module codewhale_tui...-cgu.13' has overflowed its
+        # stack`, deterministically on the same codegen unit across all three
+        # build attempts. This is a property of the crate's size, not of
+        # Windows, so it is set for every target: at 788k lines in crates/tui
+        # the other platforms are one refactor away from crossing 2 MiB too.
+        # The value is reserved address space, not committed memory.
         env:
           CARGO_PROFILE_RELEASE_LTO: 'off'
-          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: '16'
+          RUST_MIN_STACK: '16777216'
         run: |
           for attempt in 1 2 3; do
             if cargo build --release --locked --target ${{ matrix.target }} -p codewhale-cli; then

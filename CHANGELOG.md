@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- The nightly Windows ARM64 artifact build works again. Every nightly from
+  2026-08-16 failed while compiling `codewhale-tui`, deterministically on the
+  same codegen unit across all three build attempts, with
+  `thread 'optimize module codewhale_tui...-cgu.13' has overflowed its stack`.
+  The trigger is stack depth in the LLVM worker threads that run per-codegen-unit
+  optimization, not the workflow's `lto=off` override: holding the crate and
+  every flag fixed and varying only `RUST_MIN_STACK` on aarch64 shows 1 MiB
+  crashes rustc while 2 MiB and 4 MiB succeed. Unix std defaults to 2 MiB and
+  passed; the Windows ARM64 runner sat under the requirement. Nightly now sets
+  `RUST_MIN_STACK` explicitly for every target, because the requirement follows
+  from the size of `crates/tui` rather than from the platform. The redundant
+  `codegen-units` override is gone -- `[profile.release]` already sets 16, so
+  restating it never changed anything. Shipped binaries were never affected;
+  `release-artifacts.yml` builds `--profile dist` with fat LTO and
+  `codegen-units = 1`.
+
 ## [0.9.10] - 2026-08-19
 
 - Show the full slash-command or `/model` completion row in a bounded, wrapping hover popover whenever narrow terminals truncate it, closing the remaining scoped gap from [#998](https://github.com/Hmbown/CodeWhale/issues/998). Thanks [@AiurArtanis](https://github.com/AiurArtanis) and [@formp3](https://github.com/formp3) for identifying the affected surfaces.
