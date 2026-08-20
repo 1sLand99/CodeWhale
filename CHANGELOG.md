@@ -153,14 +153,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   only assertion was `!text.is_empty()` under a name promising it checked the
   rendered tool id. Assertions like those break on every legitimate visual
   change and catch nothing a reader of the transcript would notice, which is
-  the liability `d64b9429b` named. The replacement is 39 tests over 2,214
-  lines, each named for the property it protects and asserting the property
-  instead of the token: reduced motion is checked by rendering the same
-  running card at two different elapsed times and requiring the frames to
-  match -- which also catches an animation leak the glyph constant missed --
-  and severity colors are checked by requiring warning not to read as error
-  rather than by naming a palette entry. Each of the invariants claimed was
-  verified to fail the new suite when deliberately broken in the renderer.
+  the liability `d64b9429b` named. The replacement is 40 tests, each named
+  for the property it protects and asserting the property instead of the
+  token: reduced motion is checked by rendering the same running card at two
+  different elapsed times and requiring the frames to match -- which also
+  catches an animation leak the glyph constant missed -- and a frozen marker
+  must stay visible rather than landing on the spinner's invisible blank
+  (U+2800). Severity colors are checked by requiring warning not to read as
+  error rather than by naming a palette entry. A streaming assistant glyph
+  must actually pulse when motion is allowed, checked against
+  `pulse_brightness` rather than by sleeping on the 2s sine. Each of the
+  invariants claimed was verified to fail the new suite when deliberately
+  broken in the renderer.
 
 ## [0.9.10] - 2026-08-19
 

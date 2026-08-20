@@ -23,11 +23,11 @@ use super::constants::{
     TOOL_SUCCESS_OUTPUT_PREVIEW_LINES,
 };
 use super::{
-    ASSISTANT_GLYPH, ExecCell, ExecSource, GenericToolCell, HistoryCell, PlanUpdateCell,
-    REASONING_CURSOR, REASONING_OPENER, REASONING_RAIL, RenderMode, ToolCell, ToolStatus,
-    TranscriptRenderOptions, WebSearchCell, assistant_label_style_for, extract_reasoning_summary,
-    render_spillover_annotation, render_thinking, render_thinking_with_analysis,
-    running_status_label_with_elapsed,
+    assistant_label_style_for, extract_reasoning_summary, render_spillover_annotation,
+    render_thinking, render_thinking_with_analysis, running_status_label_with_elapsed, ExecCell,
+    ExecSource, GenericToolCell, HistoryCell, PlanUpdateCell, RenderMode, ToolCell, ToolStatus,
+    TranscriptRenderOptions, WebSearchCell, ASSISTANT_GLYPH, REASONING_CURSOR, REASONING_OPENER,
+    REASONING_RAIL,
 };
 use crate::models::{ContentBlock, Message};
 use crate::tools::plan::{PlanSnapshot, StepStatus};
@@ -968,6 +968,11 @@ fn disabling_the_reasoning_highlight_leaves_no_span_with_a_background() {
 /// has been running once motion is reduced — and the full-motion case is
 /// asserted alongside it so a renderer that froze everything could not make
 /// this test vacuously true.
+///
+/// Stillness is not enough on its own. Animation frame 0 is U+2800 BRAILLE
+/// PATTERN BLANK, an invisible cell. Freezing there (or on the Still path)
+/// looks like a missing marker, which is why reduced motion must freeze on a
+/// filled, legible bubble rather than the blank the spinner starts on.
 #[test]
 fn reduced_and_still_motion_render_a_frame_that_does_not_move() {
     let frame_symbols = super::TOOL_RUNNING_SYMBOLS.len() as u64;
@@ -1003,10 +1008,15 @@ fn reduced_and_still_motion_render_a_frame_that_does_not_move() {
         (false, MotionMode::Reduced),
         (false, MotionMode::Still),
     ] {
+        let frozen = frame_at(early, low_motion, motion);
         assert_eq!(
-            frame_at(early, low_motion, motion),
+            frozen,
             frame_at(late, low_motion, motion),
             "low_motion={low_motion} / {motion:?} must not animate the live marker"
+        );
+        assert!(
+            !frozen.contains('\u{2800}'),
+            "a frozen marker must still be visible: low_motion={low_motion} / {motion:?}: {frozen:?}"
         );
     }
     assert_ne!(
@@ -1035,6 +1045,72 @@ fn reduced_and_still_motion_render_a_frame_that_does_not_move() {
         assistant_label_style_for(false, false).fg,
         "a streaming assistant marker under low motion must look exactly like an \
          idle one — no pulse"
+    );
+}
+
+/// Dual of the low-motion freeze above: when the cell is streaming and
+/// motion is allowed, the assistant marker must actually pulse. The deleted
+/// test slept up to 1s sampling `SystemTime` until the 2s sine dipped; the
+/// property is that the streaming+motion color is `pulse_brightness` of the
+/// idle source, which we can check without waiting on the wall clock.
+///
+/// Around the sine crest, `pulse_brightness` rounds back to the source
+/// (~70ms of a 2s cycle). Matching the current instant would then also pass
+/// a renderer that never pulsed, so we only compare once the pure function
+/// itself is off the crest — a busy wait, not a sleep.
+#[test]
+fn assistant_marker_pulses_when_streaming_and_motion_is_allowed() {
+    use crate::palette::{self, pulse_brightness};
+
+    let idle = assistant_label_style_for(false, false).fg;
+    assert_eq!(
+        idle,
+        Some(palette::WHALE_INFO),
+        "the idle marker is the unpulsed source; pulsing everything would make \
+         the streaming assertion vacuously true"
+    );
+    assert_eq!(
+        assistant_label_style_for(true, true).fg,
+        idle,
+        "low motion must keep the streaming marker at the unpulsed source"
+    );
+
+    let epoch_ms = || {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0)
+    };
+    let deadline = Instant::now() + Duration::from_millis(250);
+    let (t0, actual) = loop {
+        assert!(
+            Instant::now() < deadline,
+            "pulse_brightness stayed at the source color through a 250ms spin; \
+             the 2s cycle leaves the crest in ~70ms"
+        );
+        let t0 = epoch_ms();
+        // Skip the crest and a few ms of margin so the product read of
+        // SystemTime cannot land back on identity between this sample and
+        // the call under test.
+        let near_crest = (t0.saturating_sub(8)..=t0.saturating_add(8))
+            .any(|ms| pulse_brightness(palette::WHALE_INFO, ms) == palette::WHALE_INFO);
+        if near_crest {
+            continue;
+        }
+        break (t0, assistant_label_style_for(true, false).fg);
+    };
+    let t1 = epoch_ms();
+    let matches_pulse =
+        (t0..=t1.max(t0)).any(|ms| actual == Some(pulse_brightness(palette::WHALE_INFO, ms)));
+    assert!(
+        matches_pulse,
+        "streaming + motion must apply pulse_brightness to the assistant \
+         marker, got {actual:?}"
+    );
+    assert_ne!(
+        actual, idle,
+        "streaming + motion must not sit at the idle color once the pulse \
+         is off its crest"
     );
 }
 
