@@ -5051,14 +5051,7 @@ mod tests {
         let names: Vec<&str> = hints.iter().map(|hint| hint.name.as_str()).collect();
         assert_eq!(
             names,
-            [
-                "/help",
-                "/setup",
-                "/model",
-                "/settings",
-                "/resume",
-                "/rc",
-            ],
+            ["/help", "/setup", "/model", "/settings", "/resume", "/rc",],
             "bare / should offer the small starting set: {names:?}"
         );
         assert!(

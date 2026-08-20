@@ -64,9 +64,8 @@ pub(crate) const ORCHESTRATION_DISCOVERY_COMMANDS: &[&str] = &["workflow", "goal
 /// The full command catalog remains searchable through `/help`, the command
 /// palette, and by typing any command prefix. `agents` is the preferred alias
 /// for the compatibility-owned `subagents` command.
-pub(crate) const BARE_SLASH_DISCOVERY_COMMANDS: &[&str] = &[
-    "help", "setup", "model", "settings", "resume", "rc",
-];
+pub(crate) const BARE_SLASH_DISCOVERY_COMMANDS: &[&str] =
+    &["help", "setup", "model", "settings", "resume", "rc"];
 
 #[must_use]
 pub(crate) fn bare_slash_discovery_rank(name: &str) -> Option<usize> {
