@@ -822,7 +822,40 @@ fn convert_messages_to_responses_input(
                     }
                 }
             }
-            _ => {}
+            // In-history `system` / `developer` turns are not the system
+            // prompt (that rides on `instructions`): they are compaction
+            // summaries, branch summaries, and imported-journal system
+            // entries, and their position in the transcript is load-bearing.
+            // The Responses input schema accepts both roles on a message
+            // item, so they are carried natively rather than dropped — the
+            // Chat Completions adapter keeps them too.
+            role @ ("system" | "developer") => {
+                let content_items: Vec<Value> = msg
+                    .content
+                    .iter()
+                    .filter_map(|block| match block {
+                        ContentBlock::Text { text, .. } => Some(json!({
+                            "type": "input_text",
+                            "text": text,
+                        })),
+                        _ => None,
+                    })
+                    .collect();
+                if !content_items.is_empty() {
+                    items.push(json!({
+                        "type": "message",
+                        "role": role,
+                        "content": content_items,
+                    }));
+                }
+            }
+            other => {
+                // Nothing else has a Responses input representation. Say so
+                // rather than deleting the turn without a trace.
+                logging::warn(format!(
+                    "Responses adapter dropped a message with unsupported role {other:?}"
+                ));
+            }
         }
     }
 
