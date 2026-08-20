@@ -494,8 +494,11 @@ pub fn clear_taskbar_progress() {
     set_taskbar_progress(0, None);
 }
 
-/// Current session name, mirrored by the render loop so background title
-/// updates can identify their session without duplicating session state.
+/// User-configured window-title prefix, rendered as `[prefix] …` in front of
+/// every terminal window title. Empty means no prefix — the historical
+/// byte-for-byte behavior. Set via the `/title` command (session level) or
+/// the `title` config key (default level); the render loop syncs it here
+/// through [`set_title_prefix`].
 static TITLE_PREFIX: OnceLock<Mutex<String>> = OnceLock::new();
 
 pub(crate) fn title_prefix_slot() -> &'static Mutex<String> {
@@ -514,7 +517,7 @@ pub(crate) fn title_prefix_test_lock() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// Mirror the current session name into the background title renderer.
+/// Set the `[prefix] …` window-title prefix, or clear it with `None`/empty.
 ///
 /// Change detection keeps the per-frame render-loop sync free when the title
 /// did not move; on an actual change the running title is redrawn immediately

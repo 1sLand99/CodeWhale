@@ -614,12 +614,48 @@ fn persisted_session_title(ws: &SealedWorkspace) -> Result<(String, String)> {
     Ok(found.pop().expect("len checked"))
 }
 
+/// The persisted `window_title` of the single saved session in the sealed
+/// home's sessions directory (checkpoints and sidecars excluded).
+fn persisted_session_window_title(ws: &SealedWorkspace) -> Result<(String, Option<String>)> {
+    let sessions_dir = ws.home().join(".codewhale/sessions");
+    let mut found: Vec<(String, Option<String>)> = Vec::new();
+    for entry in std::fs::read_dir(&sessions_dir)? {
+        let path = entry?.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        let value: Value = serde_json::from_slice(&std::fs::read(&path)?)
+            .map_err(|err| anyhow!("session {path:?} is not valid JSON: {err}"))?;
+        let Some(id) = value["metadata"]["id"].as_str() else {
+            continue;
+        };
+        let window_title = value["window_title"].as_str().map(str::to_string);
+        found.push((id.to_string(), window_title));
+    }
+    anyhow::ensure!(
+        found.len() == 1,
+        "expected exactly one saved session, found {found:?}"
+    );
+    Ok(found.pop().expect("len checked"))
+}
+
+/// The `[prefix]` decoration of the most recent OSC 0 title, if any.
+fn last_osc0_prefix(transcript: &[u8]) -> Option<String> {
+    let titles = osc0_titles(transcript);
+    let last = titles.last()?;
+    let rest = last.strip_prefix('[')?;
+    let end = rest.find(']')?;
+    Some(rest[..end].to_string())
+}
+
 /// #5430: `/rename` and `/title` during a live turn must apply immediately
 /// (receipt + OSC 0 tab repaint while the stream is still open) and survive
-/// the turn's own autosave, the session listing, and the next launch. Both
-/// commands share one implementation, so one scenario drives both entry
-/// points: mid-turn on the session's first turn, mid-turn on a later turn,
-/// and at rest between turns.
+/// the turn's own autosave, the session listing, and the next launch. The
+/// two commands are deliberately independent: `/rename` changes the session
+/// *name* (composer border, picker, listing), while `/title` changes the
+/// terminal tab/window title (`[title] …` OSC 0 prefix) and is persisted on
+/// the session. One scenario drives both entry points: mid-turn on the
+/// session's first turn, mid-turn on a later turn, and at rest between turns.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn release_rename_title_mid_turn_and_mid_session_apply_and_survive() -> Result<()> {
     let _guard = RELEASE_RUNTIME_QA_LOCK.lock().await;
@@ -636,83 +672,126 @@ async fn release_rename_title_mid_turn_and_mid_session_apply_and_survive() -> Re
     let mut tui = compaction_tui_builder(&ws, &server).spawn()?;
     enter_launch_session(&mut tui)?;
 
-    // --- Phase 1: /rename mid-turn, during the session's FIRST turn (before
+    // --- Phase 1: /title mid-turn, during the session's FIRST turn (before
     // any completed-turn autosave has ever written the session file). ---
-    type_and_submit(&mut tui, "rename qa first turn")?;
+    type_and_submit(&mut tui, "title qa first turn")?;
     wait_for_counter(&mut tui, &responder.requests, 1, INTERACTION_TIMEOUT)?;
-    type_and_submit(&mut tui, "/rename PTY Midturn One")?;
+    type_and_submit(&mut tui, "/title PTY Midturn One")?;
     tui.wait_for_text(
-        "Session and terminal tab renamed to \"PTY Midturn One\"",
+        "Window title set to \"PTY Midturn One\"",
         INTERACTION_TIMEOUT,
     )?;
     // The tab repaint must land while the turn is still streaming: the
     // responder holds every response for three seconds.
     expect_osc0_prefix(&tui, "PTY Midturn One")?;
     tui.wait_for_text("rename-qa turn 1 complete", INTERACTION_TIMEOUT)?;
-    let (session_id, title) = persisted_session_title(&ws)?;
+    let (session_id, window_title) = persisted_session_window_title(&ws)?;
     assert_eq!(
-        title, "PTY Midturn One",
-        "first-turn mid-turn rename did not survive the turn's own autosave"
+        window_title.as_deref(),
+        Some("PTY Midturn One"),
+        "first-turn mid-turn /title did not survive the turn's own autosave"
+    );
+    let (_, name1) = persisted_session_title(&ws)?;
+    assert_ne!(
+        name1, "PTY Midturn One",
+        "/title must not change the session *name*; /rename owns that"
     );
 
-    // --- Phase 2: /rename mid-turn on a later turn of the same session. ---
+    // --- Phase 2: /rename mid-turn on a later turn of the same session.
+    // The tab prefix must keep the /title value — /rename does not drive it. ---
     type_and_submit(&mut tui, "rename qa second turn")?;
     wait_for_counter(&mut tui, &responder.requests, 2, INTERACTION_TIMEOUT)?;
     type_and_submit(&mut tui, "/rename PTY Midturn Two")?;
     tui.wait_for_text(
-        "Session and terminal tab renamed to \"PTY Midturn Two\"",
+        "Session renamed to \"PTY Midturn Two\"",
         INTERACTION_TIMEOUT,
     )?;
-    expect_osc0_prefix(&tui, "PTY Midturn Two")?;
     tui.wait_for_text("rename-qa turn 2 complete", INTERACTION_TIMEOUT)?;
-    let (id2, title2) = persisted_session_title(&ws)?;
+    let (id2, name2) = persisted_session_title(&ws)?;
     assert_eq!(
         id2, session_id,
         "a mid-turn rename must not fork a new session"
     );
     assert_eq!(
-        title2, "PTY Midturn Two",
-        "later-turn mid-turn rename did not survive the turn's own autosave"
+        name2, "PTY Midturn Two",
+        "later-turn mid-turn /rename did not survive the turn's own autosave"
+    );
+    let (_, window_title2) = persisted_session_window_title(&ws)?;
+    assert_eq!(
+        window_title2.as_deref(),
+        Some("PTY Midturn One"),
+        "/rename must leave the /title window title untouched"
+    );
+    assert_eq!(
+        last_osc0_prefix(&tui.transcript()).as_deref(),
+        Some("PTY Midturn One"),
+        "/rename must not repaint the tab prefix; that belongs to /title"
     );
 
-    // --- Phase 3: /title (the alias entry point) mid-turn. ---
+    // --- Phase 3: /title mid-turn on a later turn. ---
     type_and_submit(&mut tui, "title qa third turn")?;
     wait_for_counter(&mut tui, &responder.requests, 3, INTERACTION_TIMEOUT)?;
-    type_and_submit(&mut tui, "/title PTY Midturn Title")?;
+    type_and_submit(&mut tui, "/title PTY Midturn Three")?;
     tui.wait_for_text(
-        "Session and terminal tab renamed to \"PTY Midturn Title\"",
+        "Window title set to \"PTY Midturn Three\"",
         INTERACTION_TIMEOUT,
     )?;
-    expect_osc0_prefix(&tui, "PTY Midturn Title")?;
+    expect_osc0_prefix(&tui, "PTY Midturn Three")?;
     tui.wait_for_text("rename-qa turn 3 complete", INTERACTION_TIMEOUT)?;
-    let (_, title3) = persisted_session_title(&ws)?;
+    let (_, window_title3) = persisted_session_window_title(&ws)?;
     assert_eq!(
-        title3, "PTY Midturn Title",
+        window_title3.as_deref(),
+        Some("PTY Midturn Three"),
         "mid-turn /title did not survive the turn's own autosave"
+    );
+    let (_, name3) = persisted_session_title(&ws)?;
+    assert_eq!(
+        name3, "PTY Midturn Two",
+        "/title must not touch the session name"
     );
 
     // --- Phase 4: at rest (mid-session, no turn in flight), both commands. ---
     type_and_submit(&mut tui, "/rename PTY Resting Rename")?;
     tui.wait_for_text(
-        "Session and terminal tab renamed to \"PTY Resting Rename\"",
+        "Session renamed to \"PTY Resting Rename\"",
         INTERACTION_TIMEOUT,
     )?;
-    expect_osc0_prefix(&tui, "PTY Resting Rename")?;
-    let (_, title4) = persisted_session_title(&ws)?;
-    assert_eq!(title4, "PTY Resting Rename");
+    let (_, name4) = persisted_session_title(&ws)?;
+    assert_eq!(name4, "PTY Resting Rename");
+
+    type_and_submit(&mut tui, "/title off")?;
+    tui.wait_for_text("Window title cleared", INTERACTION_TIMEOUT)?;
+    let (_, window_title4) = persisted_session_window_title(&ws)?;
+    assert_eq!(
+        window_title4, None,
+        "/title off must clear the persisted window title"
+    );
+    // At rest the resting title repaints with no prefix.
+    let deadline = Instant::now() + INTERACTION_TIMEOUT;
+    loop {
+        match last_osc0_prefix(&tui.transcript()).as_deref() {
+            Some("PTY Midturn Three") if Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            Some(other) => {
+                anyhow::bail!("expected the tab prefix to clear after /title off, still {other:?}");
+            }
+            None => break,
+        }
+    }
 
     type_and_submit(&mut tui, "/title PTY Resting Title")?;
     tui.wait_for_text(
-        "Session and terminal tab renamed to \"PTY Resting Title\"",
+        "Window title set to \"PTY Resting Title\"",
         INTERACTION_TIMEOUT,
     )?;
     expect_osc0_prefix(&tui, "PTY Resting Title")?;
-    let (_, title5) = persisted_session_title(&ws)?;
-    assert_eq!(title5, "PTY Resting Title");
+    let (_, window_title5) = persisted_session_window_title(&ws)?;
+    assert_eq!(window_title5.as_deref(), Some("PTY Resting Title"));
 
-    // --- Phase 5: the session listing shows the live title. ---
+    // --- Phase 5: the session listing shows the live session *name*. ---
     type_and_submit(&mut tui, "/sessions")?;
-    tui.wait_for_text("PTY Resting Title", INTERACTION_TIMEOUT)?;
+    tui.wait_for_text("PTY Resting Rename", INTERACTION_TIMEOUT)?;
     tui.send(keys::key::esc())?;
     // The picker's action rail ("all workspaces") is picker chrome, never
     // transcript text, so its disappearance proves the overlay closed — the
@@ -723,14 +802,19 @@ async fn release_rename_title_mid_turn_and_mid_session_apply_and_survive() -> Re
     )?;
 
     // --- Phase 6: next launch — a fresh process over the same sealed home
-    // lists the renamed session. ---
+    // lists the renamed session; the /title override survives on disk. ---
     let _ = tui.shutdown();
     let mut next = compaction_tui_builder(&ws, &server).spawn()?;
     enter_launch_session(&mut next)?;
     type_and_submit(&mut next, "/sessions")?;
-    next.wait_for_text("PTY Resting Title", INTERACTION_TIMEOUT)?;
-    let (_, title6) = persisted_session_title(&ws)?;
-    assert_eq!(title6, "PTY Resting Title");
+    next.wait_for_text("PTY Resting Rename", INTERACTION_TIMEOUT)?;
+    let (_, name6) = persisted_session_title(&ws)?;
+    assert_eq!(name6, "PTY Resting Rename");
+    // The window_title override is on disk and survives relaunch. Restoring
+    // it onto the App (apply_loaded_session) and pushing it to OSC 0
+    // (sync_title_activity) are covered by unit tests.
+    let (_, window_title6) = persisted_session_window_title(&ws)?;
+    assert_eq!(window_title6.as_deref(), Some("PTY Resting Title"));
     let _ = next.shutdown();
     Ok(())
 }
