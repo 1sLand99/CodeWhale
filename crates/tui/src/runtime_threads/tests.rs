@@ -3441,14 +3441,14 @@ async fn seed_thread_keeps_tool_results_on_preceding_turn() -> Result<()> {
     manager.store.save_thread(&thread)?;
     let messages = vec![
         Message {
-            role: "user".to_string(),
+            role: Role::User,
             content: vec![ContentBlock::Text {
                 text: "check the files".to_string(),
                 cache_control: None,
             }],
         },
         Message {
-            role: "assistant".to_string(),
+            role: Role::Assistant,
             content: vec![
                 ContentBlock::Thinking {
                     thinking: "need a tool".to_string(),
@@ -3472,7 +3472,7 @@ async fn seed_thread_keeps_tool_results_on_preceding_turn() -> Result<()> {
             ],
         },
         Message {
-            role: "user".to_string(),
+            role: Role::User,
             content: vec![ContentBlock::ToolResult {
                 tool_use_id: "tool-1".to_string(),
                 content: "one".to_string(),
@@ -3484,7 +3484,7 @@ async fn seed_thread_keeps_tool_results_on_preceding_turn() -> Result<()> {
             }],
         },
         Message {
-            role: "user".to_string(),
+            role: Role::User,
             content: vec![ContentBlock::ToolResult {
                 tool_use_id: "tool-2".to_string(),
                 content: "two".to_string(),
@@ -3493,7 +3493,7 @@ async fn seed_thread_keeps_tool_results_on_preceding_turn() -> Result<()> {
             }],
         },
         Message {
-            role: "assistant".to_string(),
+            role: Role::Assistant,
             content: vec![ContentBlock::Text {
                 text: "done".to_string(),
                 cache_control: None,

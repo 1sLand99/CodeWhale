@@ -33,6 +33,8 @@ use crate::logging;
 use crate::models::{ContentBlock, MessageRequest, MessageResponse, StreamEvent, Usage};
 use crate::tools::schema_sanitize;
 
+use super::prepared::WireDialect;
+use super::role_placement::{RolePlacement, role_placement};
 use super::{DeepSeekClient, ERROR_BODY_MAX_BYTES, bounded_error_text};
 
 /// Maximum `cache_control` breakpoints Anthropic accepts per request.
@@ -548,8 +550,23 @@ fn anthropic_tool_choice(tool_choice: &Value) -> Value {
 }
 
 /// Convert one internal message to the Anthropic wire shape. Returns `None`
-/// when no blocks survive conversion (Anthropic rejects empty content).
-fn message_to_anthropic(message: &crate::models::Message) -> Option<Value> {
+/// when no blocks survive conversion (Anthropic rejects empty content) or
+/// when the role has no Anthropic channel.
+///
+/// The wire role used to be `message.role` forwarded verbatim, which is how a
+/// `system` message ended up on the wire for the provider to 400 on. It now
+/// comes from the shared placement table, and pairs the table rejects are
+/// refused at the outbound seam before this function ever runs.
+pub(super) fn message_to_anthropic(message: &crate::models::Message) -> Option<Value> {
+    let placement = role_placement(&message.role, WireDialect::AnthropicMessages);
+    let wire_role = match placement {
+        RolePlacement::User => "user",
+        RolePlacement::Assistant | RolePlacement::InterruptedAssistant => "assistant",
+        // Unreachable in production: `reject_unsupported_roles` refuses these
+        // pairs at the seam. Failing closed here keeps a future caller that
+        // skips the seam from putting an unrepresentable role on the wire.
+        RolePlacement::System | RolePlacement::Omitted | RolePlacement::Rejected => return None,
+    };
     let mut blocks: Vec<Value> = message
         .content
         .iter()
@@ -558,7 +575,7 @@ fn message_to_anthropic(message: &crate::models::Message) -> Option<Value> {
     if blocks.is_empty() {
         return None;
     }
-    if message.role == crate::models::INTERRUPTED_ASSISTANT_ROLE
+    if placement == RolePlacement::InterruptedAssistant
         && let Some(text) = blocks
             .iter_mut()
             .find(|block| block.get("type").and_then(Value::as_str) == Some("text"))
@@ -574,14 +591,7 @@ fn message_to_anthropic(message: &crate::models::Message) -> Option<Value> {
             existing
         ));
     }
-    Some(json!({
-        "role": if message.role == crate::models::INTERRUPTED_ASSISTANT_ROLE {
-            "assistant"
-        } else {
-            message.role.as_str()
-        },
-        "content": blocks
-    }))
+    Some(json!({ "role": wire_role, "content": blocks }))
 }
 
 /// Project the shared `ImageUrl` block onto Anthropic's tagged image source.
@@ -885,6 +895,7 @@ fn anthropic_error_fields(error: &Value) -> (String, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::Role;
     use crate::models::{CacheControl, Message, SystemBlock, SystemPrompt, Tool};
 
     fn request_with(
@@ -896,7 +907,7 @@ mod tests {
         MessageRequest {
             model: model.to_string(),
             messages: vec![Message {
-                role: "user".to_string(),
+                role: Role::User,
                 content: vec![ContentBlock::Text {
                     text: "hello".to_string(),
                     cache_control: None,
@@ -1180,14 +1191,14 @@ mod tests {
         let mut request = request_with("claude-sonnet-4-6", None, None, None);
         request.messages = vec![
             Message {
-                role: "user".to_string(),
+                role: Role::User,
                 content: vec![ContentBlock::Text {
                     text: "run both tools".to_string(),
                     cache_control: None,
                 }],
             },
             Message {
-                role: "assistant".to_string(),
+                role: Role::Assistant,
                 content: vec![
                     ContentBlock::ToolUse {
                         id: "toolu_ok".to_string(),
@@ -1207,7 +1218,7 @@ mod tests {
             },
             // Pre-dispatch failure left only one tool_result behind.
             Message {
-                role: "user".to_string(),
+                role: Role::User,
                 content: vec![ContentBlock::ToolResult {
                     tool_use_id: "toolu_ok".to_string(),
                     content: "contents".to_string(),
@@ -1217,7 +1228,7 @@ mod tests {
             },
             // Trailing assistant tool_use with no user turn at all.
             Message {
-                role: "assistant".to_string(),
+                role: Role::Assistant,
                 content: vec![ContentBlock::ToolUse {
                     id: "toolu_tail".to_string(),
                     name: "task".to_string(),
@@ -1498,14 +1509,14 @@ mod tests {
         let mut request = request_with("claude-sonnet-4-6", None, None, None);
         request.messages = vec![
             Message {
-                role: "user".to_string(),
+                role: Role::User,
                 content: vec![ContentBlock::Text {
                     text: "do the thing".to_string(),
                     cache_control: None,
                 }],
             },
             Message {
-                role: "assistant".to_string(),
+                role: Role::Assistant,
                 content: vec![
                     ContentBlock::Thinking {
                         thinking: "signed reasoning".to_string(),
@@ -1527,7 +1538,7 @@ mod tests {
                 ],
             },
             Message {
-                role: "user".to_string(),
+                role: Role::User,
                 content: vec![ContentBlock::ToolResult {
                     tool_use_id: "toolu_1".to_string(),
                     content: "contents".to_string(),
@@ -1563,7 +1574,7 @@ mod tests {
         // Five caller-marked user turns + the two placed breakpoints.
         request.messages = (0..5)
             .map(|i| Message {
-                role: "user".to_string(),
+                role: Role::User,
                 content: vec![ContentBlock::Text {
                     text: format!("turn {i}"),
                     cache_control: Some(CacheControl {

@@ -9,6 +9,7 @@ use super::dispatch::normalize_schema_json_containers;
 use super::*;
 use crate::core::authority::{ToolPermission, resolve_tool_permission};
 use crate::core::ops::UserInputProvenance;
+use crate::models::Role;
 use crate::prompt_zones::PinnedPrefix;
 use crate::runtime_handoff::{
     shell_completion_runtime_message, subagent_completion_runtime_message,
@@ -1421,7 +1422,7 @@ impl Engine {
                             // the transcript and to the provider request
                             // history as a user role.
                             self.add_session_message(Message {
-                                role: "assistant".to_string(),
+                                role: Role::Assistant,
                                 content: resume_blocks,
                             })
                             .await;
@@ -1557,7 +1558,7 @@ impl Engine {
             // Add assistant message to session
             if has_sendable_assistant_content {
                 self.add_session_message(Message {
-                    role: "assistant".to_string(),
+                    role: Role::Assistant,
                     content: content_blocks,
                 })
                 .await;
@@ -3494,7 +3495,7 @@ impl Engine {
                             .filter_map(|block| serde_json::to_value(block).ok())
                             .collect::<Vec<_>>();
                         self.add_session_message(Message {
-                            role: "user".to_string(),
+                            role: Role::User,
                             content: vec![ContentBlock::ToolResult {
                                 tool_use_id: outcome.id,
                                 content: output_for_context,
@@ -3529,7 +3530,7 @@ impl Engine {
                             &self.session.workspace,
                         );
                         self.add_session_message(Message {
-                            role: "user".to_string(),
+                            role: Role::User,
                             content: vec![ContentBlock::ToolResult {
                                 tool_use_id: outcome.id,
                                 content: format!("Error: {error}"),
@@ -5506,7 +5507,7 @@ mod tests {
     #[test]
     fn resolve_auto_effort_ignores_stored_turn_metadata() {
         let messages = vec![Message {
-            role: "user".to_string(),
+            role: Role::User,
             content: vec![
                 ContentBlock::Text {
                     text: "<turn_meta>\nRecent errors: src/failing.rs\n</turn_meta>".to_string(),
@@ -5535,7 +5536,7 @@ mod tests {
     #[test]
     fn resolve_auto_effort_selects_a_concrete_kimi_code_tier() {
         let messages = vec![Message {
-            role: "user".to_string(),
+            role: Role::User,
             content: vec![ContentBlock::Text {
                 text: "inspect this repository and fix the failing tests".to_string(),
                 cache_control: None,

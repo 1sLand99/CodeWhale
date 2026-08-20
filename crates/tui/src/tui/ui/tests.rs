@@ -36,6 +36,7 @@ use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::models::Role;
 use crate::tui::selection::{SelectionAutoscroll, TranscriptSelectionPoint};
 use tempfile::TempDir;
 
@@ -4525,7 +4526,7 @@ fn restored_reasoning_and_answer_clear_prior_fold_ownership() {
     let _ = render_underwater_test_app(&mut app, 80, 24);
     let old_epoch = app.transcript_identity_epoch;
     let session = saved_session_with_messages(vec![crate::models::Message {
-        role: "assistant".to_string(),
+        role: Role::Assistant,
         content: vec![
             crate::models::ContentBlock::Thinking {
                 thinking: (1..=20)
@@ -5737,7 +5738,7 @@ fn setup_presets_cannot_override_managed_runtime_requirements() {
 async fn tool_result_api_content_never_advertises_unowned_live_output_as_retrievable() {
     let mut app = App::new(create_test_options(), &Config::default());
     app.api_messages.push(Message {
-        role: "assistant".to_string(),
+        role: Role::Assistant,
         content: vec![ContentBlock::ToolUse {
             id: "call-live-big".to_string(),
             name: "exec_shell".to_string(),
@@ -5770,7 +5771,7 @@ async fn tool_result_api_content_never_advertises_unowned_live_output_as_retriev
 fn live_tool_receipt_messages_clones_only_matching_tool_use() {
     let mut app = App::new(create_test_options(), &Config::default());
     app.api_messages.push(Message {
-        role: "assistant".to_string(),
+        role: Role::Assistant,
         content: vec![ContentBlock::ToolUse {
             id: "call-old".to_string(),
             name: "exec_shell".to_string(),
@@ -5780,7 +5781,7 @@ fn live_tool_receipt_messages_clones_only_matching_tool_use() {
         }],
     });
     app.api_messages.push(Message {
-        role: "user".to_string(),
+        role: Role::User,
         content: vec![ContentBlock::ToolResult {
             tool_use_id: "call-old".to_string(),
             content: "OLD_RAW\n".repeat(2_000),
@@ -5789,7 +5790,7 @@ fn live_tool_receipt_messages_clones_only_matching_tool_use() {
         }],
     });
     app.api_messages.push(Message {
-        role: "assistant".to_string(),
+        role: Role::Assistant,
         content: vec![ContentBlock::ToolUse {
             id: "call-new".to_string(),
             name: "read_file".to_string(),
@@ -5815,7 +5816,7 @@ fn live_tool_receipt_messages_clones_only_matching_tool_use() {
 
 fn text_message(role: &str, text: &str) -> Message {
     Message {
-        role: role.to_string(),
+        role: Role::from(role),
         content: vec![ContentBlock::Text {
             text: text.to_string(),
             cache_control: None,
@@ -5825,7 +5826,7 @@ fn text_message(role: &str, text: &str) -> Message {
 
 fn authoritative_user_message(text: &str) -> Message {
     Message {
-        role: "user".to_string(),
+        role: Role::User,
         content: vec![
             ContentBlock::Text {
                 text: text.to_string(),
@@ -5940,7 +5941,7 @@ fn apply_loaded_session_never_restores_background_shell_event_as_composer_draft(
     // provenance and authority make them categorically different from input
     // submitted by the person at the composer.
     let shell_completion = Message {
-        role: "user".to_string(),
+        role: Role::User,
         content: vec![
             ContentBlock::Text {
                 text: concat!(
@@ -6018,7 +6019,7 @@ fn apply_loaded_session_hides_turn_metadata_without_mutating_api_history() {
         "</turn_meta>",
     );
     let user_message = Message {
-        role: "user".to_string(),
+        role: Role::User,
         content: vec![
             ContentBlock::Text {
                 text: "Keep the restored transcript calm".to_string(),
@@ -6063,7 +6064,7 @@ fn apply_loaded_session_projects_subagent_handoff_without_retry_draft_or_user_ce
     // producer so a producer/parser drift cannot make the regression test
     // self-fulfilling.
     let persisted_handoff = Message {
-        role: "user".to_string(),
+        role: Role::User,
         content: vec![
             ContentBlock::Text {
                 text: format!(
@@ -6426,7 +6427,7 @@ fn backtrack_prefill_rehydrates_attachment_rows() {
         content: user_text.to_string(),
     });
     app.api_messages.push(Message {
-        role: "user".to_string(),
+        role: Role::User,
         content: vec![ContentBlock::Text {
             text: user_text.to_string(),
             cache_control: None,
@@ -6437,7 +6438,7 @@ fn backtrack_prefill_rehydrates_attachment_rows() {
         streaming: false,
     });
     app.api_messages.push(Message {
-        role: "assistant".to_string(),
+        role: Role::Assistant,
         content: vec![ContentBlock::Text {
             text: "done".to_string(),
             cache_control: None,
@@ -9005,7 +9006,7 @@ fn context_override_drives_compaction_meter_and_preflight_budget() {
     );
 
     app.api_messages = vec![Message {
-        role: "user".to_string(),
+        role: Role::User,
         content: vec![ContentBlock::Text {
             text: "context ".repeat(2_000),
             cache_control: None,
@@ -9069,7 +9070,7 @@ fn compaction_trigger_meter_and_ladder_share_the_resolved_window() {
     );
 
     app.api_messages = vec![Message {
-        role: "user".to_string(),
+        role: Role::User,
         content: vec![ContentBlock::Text {
             text: "context ".repeat(2_000),
             cache_control: None,
@@ -12275,7 +12276,7 @@ fn context_usage_snapshot_prefers_estimate_when_reported_exceeds_window() {
     let mut app = create_test_app();
     app.session.last_prompt_tokens = Some(1_200_000);
     app.api_messages = vec![Message {
-        role: "user".to_string(),
+        role: Role::User,
         content: vec![ContentBlock::Text {
             text: "hello".to_string(),
             cache_control: None,
@@ -12294,7 +12295,7 @@ fn context_usage_snapshot_prefers_estimate_when_reported_exceeds_window() {
 fn context_usage_cache_tracks_append_and_compaction_lengths() {
     let mut app = create_test_app();
     app.api_messages = vec![Message {
-        role: "user".to_string(),
+        role: Role::User,
         content: vec![ContentBlock::Text {
             text: "first".to_string(),
             cache_control: None,
@@ -12304,7 +12305,7 @@ fn context_usage_cache_tracks_append_and_compaction_lengths() {
     assert_eq!(app.context_token_cache.borrow().message_tokens.len(), 1);
 
     app.api_messages.push(Message {
-        role: "assistant".to_string(),
+        role: Role::Assistant,
         content: vec![ContentBlock::Text {
             text: "second".to_string(),
             cache_control: None,
@@ -12323,7 +12324,7 @@ fn context_usage_cache_refreshes_after_compaction_replaces_messages() {
     let mut app = create_test_app();
     app.api_messages = (0..3)
         .map(|_| Message {
-            role: "user".to_string(),
+            role: Role::User,
             content: vec![ContentBlock::Text {
                 text: "context ".repeat(2_000),
                 cache_control: None,
@@ -12333,7 +12334,7 @@ fn context_usage_cache_refreshes_after_compaction_replaces_messages() {
     let (before, _, _) = context_usage_snapshot(&app).expect("context usage should be available");
 
     app.api_messages = vec![Message {
-        role: "assistant".to_string(),
+        role: Role::Assistant,
         content: vec![ContentBlock::Text {
             text: "compact summary".to_string(),
             cache_control: None,
@@ -12354,7 +12355,7 @@ fn context_usage_snapshot_prefers_estimate_when_reported_is_inflated_by_old_reas
     let mut app = create_test_app();
     app.session.last_prompt_tokens = Some(980_000);
     app.api_messages = vec![Message {
-        role: "user".to_string(),
+        role: Role::User,
         content: vec![ContentBlock::Text {
             text: "small current context".to_string(),
             cache_control: None,
@@ -12379,7 +12380,7 @@ fn context_usage_snapshot_prefers_estimate_when_reported_is_inflated_by_old_reas
 fn context_usage_does_not_drop_when_reported_shrinks_after_multi_round_turn() {
     let mut app = create_test_app();
     app.api_messages = vec![Message {
-        role: "user".to_string(),
+        role: Role::User,
         content: vec![ContentBlock::Text {
             text: "context ".repeat(2_000), // ~14k tokens estimated
             cache_control: None,
@@ -12413,7 +12414,7 @@ fn context_usage_snapshot_prefers_live_estimate_while_loading() {
     app.is_loading = true;
     app.session.last_prompt_tokens = Some(128);
     app.api_messages = vec![Message {
-        role: "user".to_string(),
+        role: Role::User,
         content: vec![ContentBlock::Text {
             text: "context ".repeat(6_000),
             cache_control: None,
@@ -12433,7 +12434,7 @@ fn context_usage_snapshot_prefers_live_estimate_while_loading() {
 fn should_auto_compact_before_send_uses_shared_token_threshold() {
     let mut app = create_test_app();
     app.api_messages = vec![Message {
-        role: "user".to_string(),
+        role: Role::User,
         content: vec![ContentBlock::Text {
             text: "context ".repeat(240_000),
             cache_control: None,
@@ -12458,7 +12459,7 @@ fn should_auto_compact_before_send_uses_shared_token_threshold() {
 fn context_pressure_warning_reflects_auto_compact_threshold_state() {
     let mut app = create_test_app();
     app.api_messages = vec![Message {
-        role: "user".to_string(),
+        role: Role::User,
         content: vec![ContentBlock::Text {
             text: "context ".repeat(240_000),
             cache_control: None,
@@ -16051,7 +16052,7 @@ fn stale_cached_placeholder_title_does_not_override_generated_title() {
     let manager = SessionManager::new(tempfile::tempdir().expect("tempdir").path().to_path_buf())
         .expect("session manager");
     app.api_messages.push(crate::models::Message {
-        role: "user".to_string(),
+        role: Role::User,
         content: vec![crate::models::ContentBlock::Text {
             text: "Please fix the login bug".to_string(),
             cache_control: None,
@@ -16104,7 +16105,7 @@ fn persisted_placeholder_title_yields_to_computed_title_when_conversation_has_co
     assert_eq!(stale.metadata.title, "New Session");
     manager.save_session(&stale).expect("save stale session");
     app.api_messages.push(crate::models::Message {
-        role: "user".to_string(),
+        role: Role::User,
         content: vec![crate::models::ContentBlock::Text {
             text: "fix me".to_string(),
             cache_control: None,
@@ -21143,21 +21144,21 @@ fn completed_turn_notification_uses_streaming_text() {
 fn completed_turn_notification_falls_back_to_latest_assistant_message() {
     let mut app = create_test_app();
     app.api_messages.push(crate::models::Message {
-        role: "assistant".to_string(),
+        role: Role::Assistant,
         content: vec![crate::models::ContentBlock::Text {
             text: "Earlier turn".to_string(),
             cache_control: None,
         }],
     });
     app.api_messages.push(crate::models::Message {
-        role: "user".to_string(),
+        role: Role::User,
         content: vec![crate::models::ContentBlock::Text {
             text: "next".to_string(),
             cache_control: None,
         }],
     });
     app.api_messages.push(crate::models::Message {
-        role: "assistant".to_string(),
+        role: Role::Assistant,
         content: vec![crate::models::ContentBlock::Text {
             text: "Latest reply".to_string(),
             cache_control: None,
@@ -22358,14 +22359,14 @@ fn backtrack_cut_index_skips_tool_result_user_messages() {
     // assistant text; then a second user prompt.
     let msgs = vec![
         Message {
-            role: "user".into(),
+            role: Role::User,
             content: vec![ContentBlock::Text {
                 text: "first".into(),
                 cache_control: None,
             }],
         },
         Message {
-            role: "assistant".into(),
+            role: Role::Assistant,
             content: vec![ContentBlock::ToolUse {
                 id: "t1".into(),
                 name: "read_file".into(),
@@ -22375,7 +22376,7 @@ fn backtrack_cut_index_skips_tool_result_user_messages() {
             }],
         },
         Message {
-            role: "user".into(),
+            role: Role::User,
             content: vec![ContentBlock::ToolResult {
                 tool_use_id: "t1".into(),
                 content: "data".into(),
@@ -22384,14 +22385,14 @@ fn backtrack_cut_index_skips_tool_result_user_messages() {
             }],
         },
         Message {
-            role: "assistant".into(),
+            role: Role::Assistant,
             content: vec![ContentBlock::Text {
                 text: "answer".into(),
                 cache_control: None,
             }],
         },
         Message {
-            role: "user".into(),
+            role: Role::User,
             content: vec![ContentBlock::Text {
                 text: "second".into(),
                 cache_control: None,

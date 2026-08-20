@@ -7,6 +7,7 @@ use futures_util::StreamExt;
 
 use crate::config::{Config, ProviderConfig, ProvidersConfig, RetryConfig};
 use crate::models::Message;
+use crate::models::Role;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
@@ -52,7 +53,7 @@ fn minimal_responses_request() -> MessageRequest {
     MessageRequest {
         model: "gpt-5.5".to_string(),
         messages: vec![Message {
-            role: "user".to_string(),
+            role: Role::User,
             content: vec![ContentBlock::Text {
                 text: "hello".to_string(),
                 cache_control: None,
@@ -540,7 +541,7 @@ fn deepseek_flash_responses_body_uses_stateless_0731_contract() {
     request.messages.insert(
         0,
         Message {
-            role: "assistant".to_string(),
+            role: Role::Assistant,
             content: vec![ContentBlock::Thinking {
                 thinking: "preserve this tool-loop reasoning".to_string(),
                 signature: None,
@@ -587,7 +588,7 @@ fn codex_replays_only_exact_model_opaque_reasoning_state() {
     request.messages.insert(
         0,
         Message {
-            role: "assistant".to_string(),
+            role: Role::Assistant,
             content: vec![ContentBlock::Thinking {
                 thinking: SENTINEL.to_string(),
                 signature: None,
@@ -703,7 +704,7 @@ fn codex_responses_body_uses_responses_reasoning_not_deepseek_thinking() {
     let request = MessageRequest {
         model: "gpt-5.5".to_string(),
         messages: vec![Message {
-            role: "user".to_string(),
+            role: Role::User,
             content: vec![ContentBlock::Text {
                 text: "hello".to_string(),
                 cache_control: None,
@@ -941,7 +942,7 @@ fn responses_input_includes_user_role_tool_results() {
         model: "gpt-5.5".to_string(),
         messages: vec![
             Message {
-                role: "assistant".to_string(),
+                role: Role::Assistant,
                 content: vec![ContentBlock::ToolUse {
                     id: "call_abc|fc_123".to_string(),
                     name: "checklist_write".to_string(),
@@ -951,7 +952,7 @@ fn responses_input_includes_user_role_tool_results() {
                 }],
             },
             Message {
-                role: "user".to_string(),
+                role: Role::User,
                 content: vec![ContentBlock::ToolResult {
                     tool_use_id: "call_abc|fc_123".to_string(),
                     content: "<6 items>".to_string(),
@@ -987,7 +988,7 @@ fn responses_input_encodes_tool_call_names() {
     let request = MessageRequest {
         model: "gpt-5.5".to_string(),
         messages: vec![Message {
-            role: "assistant".to_string(),
+            role: Role::Assistant,
             content: vec![ContentBlock::ToolUse {
                 id: "call_abc|fc_123".to_string(),
                 name: "web.run".to_string(),
@@ -1163,7 +1164,7 @@ fn tool_result_image_becomes_native_function_output_content() {
     let mut request = minimal_responses_request();
     request.messages = vec![
         Message {
-            role: "assistant".to_string(),
+            role: Role::Assistant,
             content: vec![ContentBlock::ToolUse {
                 id: "call_image_1".to_string(),
                 name: "read".to_string(),
@@ -1173,7 +1174,7 @@ fn tool_result_image_becomes_native_function_output_content() {
             }],
         },
         Message {
-            role: "user".to_string(),
+            role: Role::User,
             content: vec![ContentBlock::ToolResult {
                 tool_use_id: "call_image_1".to_string(),
                 content: "screenshot captured".to_string(),

@@ -82,6 +82,7 @@ use super::ops::{
 use super::session::Session;
 use super::tool_parser;
 use super::turn::{TurnContext, post_turn_snapshot, pre_turn_snapshot};
+use crate::models::Role;
 
 const ENGINE_OP_CHANNEL_CAPACITY: usize = 32;
 const GOAL_CONTINUATION_FAILURE_DETAIL_MAX_BYTES: usize = 512;
@@ -3060,7 +3061,7 @@ impl Engine {
         let mut messages: Vec<Message> = self.session.messages.clone().into();
         if !current_text.trim().is_empty() {
             messages.push(Message {
-                role: "user".to_string(),
+                role: Role::User,
                 content: vec![ContentBlock::Text {
                     text: current_text.to_string(),
                     cache_control: None,
@@ -3138,7 +3139,7 @@ impl Engine {
             return;
         }
         let message = Message {
-            role: crate::models::INTERRUPTED_ASSISTANT_ROLE.to_string(),
+            role: Role::InterruptedAssistant,
             content: vec![ContentBlock::Text {
                 text: text.to_string(),
                 cache_control: None,
@@ -3372,7 +3373,7 @@ impl Engine {
         let mut content = self.user_content_blocks(text);
         content.push(turn_metadata);
         Message {
-            role: "user".to_string(),
+            role: Role::User,
             content,
         }
     }
@@ -3449,7 +3450,7 @@ impl Engine {
         let mut content = self.user_content_blocks(text);
         content.push(turn_metadata);
         Message {
-            role: "user".to_string(),
+            role: Role::User,
             content,
         }
     }
@@ -4609,7 +4610,7 @@ impl Engine {
         let context_update = self.refresh_pinned_header_for_turn(&prompt_context);
         if let Some(update) = context_update {
             self.session.add_message(Message {
-                role: "user".to_string(),
+                role: Role::User,
                 content: vec![ContentBlock::Text {
                     text: update,
                     cache_control: None,

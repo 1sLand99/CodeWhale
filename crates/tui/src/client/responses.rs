@@ -19,6 +19,8 @@ use crate::models::{
 };
 use crate::tools::schema_sanitize;
 
+use super::prepared::WireDialect;
+use super::role_placement::{RolePlacement, role_placement};
 use super::{
     DeepSeekClient, ERROR_BODY_MAX_BYTES, bounded_error_text, from_api_tool_name,
     system_to_instructions, to_api_tool_name,
@@ -682,7 +684,7 @@ pub(super) fn responses_tool_output(content: &str, content_blocks: Option<&[Valu
 }
 
 /// Convert Codewhale messages to Responses API input items.
-fn convert_messages_to_responses_input(
+pub(super) fn convert_messages_to_responses_input(
     request: &MessageRequest,
     provider: ApiProvider,
 ) -> Vec<Value> {
@@ -690,8 +692,11 @@ fn convert_messages_to_responses_input(
     let mut items = Vec::new();
 
     for msg in &request.messages {
-        match msg.role.as_str() {
-            "user" => {
+        // Channel selection lives in the shared placement table; this adapter
+        // owns only the shape of each channel's items.
+        let placement = role_placement(&msg.role, WireDialect::OpenAiResponses);
+        match placement {
+            RolePlacement::User => {
                 let mut content_items = Vec::new();
                 for block in &msg.content {
                     match block {
@@ -739,11 +744,11 @@ fn convert_messages_to_responses_input(
                     }));
                 }
             }
-            "assistant" | crate::models::INTERRUPTED_ASSISTANT_ROLE => {
+            RolePlacement::Assistant | RolePlacement::InterruptedAssistant => {
                 for block in &msg.content {
                     match block {
                         ContentBlock::Text { text, .. } => {
-                            let text = if msg.role == crate::models::INTERRUPTED_ASSISTANT_ROLE {
+                            let text = if placement == RolePlacement::InterruptedAssistant {
                                 format!(
                                     "{}{}",
                                     crate::models::INTERRUPTED_ASSISTANT_CONTEXT_PREFIX,
@@ -804,25 +809,11 @@ fn convert_messages_to_responses_input(
                     }
                 }
             }
-            "tool" => {
-                for block in &msg.content {
-                    if let ContentBlock::ToolResult {
-                        tool_use_id,
-                        content,
-                        content_blocks,
-                        ..
-                    } = block
-                    {
-                        let (call_id, _item_id) = parse_tool_use_id(tool_use_id);
-                        items.push(json!({
-                            "type": "function_call_output",
-                            "call_id": call_id,
-                            "output": responses_tool_output(content, content_blocks.as_deref()),
-                        }));
-                    }
-                }
-            }
-            _ => {}
+            // In-transcript system messages have never been representable
+            // here and are dropped, as they always were. `Rejected` cannot
+            // occur: the outbound seam refuses those pairs before any body is
+            // built, and dropping one here would be a fail-open.
+            RolePlacement::System | RolePlacement::Omitted | RolePlacement::Rejected => {}
         }
     }
 

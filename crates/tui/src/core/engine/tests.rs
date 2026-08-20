@@ -281,7 +281,11 @@ async fn emergency_compaction_cancellation_drops_provider_and_never_mutates_cont
     let (mut engine, handle) = Engine::new(EngineConfig::default(), &route_config);
     engine.session.messages = (0..8)
         .map(|index| Message {
-            role: if index % 2 == 0 { "user" } else { "assistant" }.to_string(),
+            role: if index % 2 == 0 {
+                Role::User
+            } else {
+                Role::Assistant
+            },
             content: vec![ContentBlock::Text {
                 text: format!("preserve emergency context item {index}"),
                 cache_control: None,
@@ -4991,7 +4995,7 @@ async fn normal_repl_kernel_persists_across_user_turns() {
     let selected_model = engine.session.model.clone();
 
     engine.session.add_message(Message {
-        role: "user".to_string(),
+        role: Role::User,
         content: vec![ContentBlock::Text {
             text: "Prime the working kernel.".to_string(),
             cache_control: None,
@@ -5022,7 +5026,7 @@ async fn normal_repl_kernel_persists_across_user_turns() {
     assert_eq!(child_usage_event.output_tokens, 11);
 
     engine.session.add_message(Message {
-        role: "user".to_string(),
+        role: Role::User,
         content: vec![ContentBlock::Text {
             text: "Use the state from the prior turn.".to_string(),
             cache_control: None,
@@ -12585,7 +12589,7 @@ fn sandbox_policy_for_turn_returns_correct_default_policy_per_mode() {
 async fn session_update_preserves_reasoning_tool_only_turn() {
     let (mut engine, handle) = Engine::new(EngineConfig::default(), &Config::default());
     let assistant = Message {
-        role: "assistant".to_string(),
+        role: Role::Assistant,
         content: vec![
             ContentBlock::Thinking {
                 signature: None,
@@ -12824,7 +12828,7 @@ fn messages_with_turn_metadata_returns_stored_session_messages() {
     engine.current_mode = AppMode::Plan;
     engine.session.approval_mode = ApprovalMode::Suggest;
     engine.session.messages = vec![Message {
-        role: "user".to_string(),
+        role: Role::User,
         content: vec![ContentBlock::Text {
             text: "summary after compaction".to_string(),
             cache_control: None,
@@ -12876,7 +12880,7 @@ fn todo_engine() -> (
     };
     let (mut engine, handle) = Engine::new(config, &Config::default());
     engine.session.messages = vec![Message {
-        role: "user".to_string(),
+        role: Role::User,
         content: vec![ContentBlock::Text {
             text: "land the To-do seam".to_string(),
             cache_control: None,
@@ -13749,7 +13753,7 @@ async fn sync_session_projects_persisted_subagent_handoff_for_headless_restore()
     );
     let messages = vec![
         Message {
-            role: "user".to_string(),
+            role: Role::User,
             content: vec![ContentBlock::Text {
                 text: "Keep the original task".to_string(),
                 cache_control: None,
@@ -13880,14 +13884,14 @@ async fn edit_last_turn_preserves_current_mode() {
     let run = tokio::spawn(engine.run());
     let seeded_messages = vec![
         Message {
-            role: "user".to_string(),
+            role: Role::User,
             content: vec![ContentBlock::Text {
                 text: "draft the plan".to_string(),
                 cache_control: None,
             }],
         },
         Message {
-            role: "assistant".to_string(),
+            role: Role::Assistant,
             content: vec![ContentBlock::Text {
                 text: "initial response".to_string(),
                 cache_control: None,
@@ -15004,7 +15008,7 @@ fn turn_metadata_is_byte_identical_across_identical_consecutive_turns() {
     // Use explicit route limits so the fixture exercises the critical band
     // without depending on a model catalog entry or provider default.
     engine.session.messages.push(Message {
-        role: "user".to_string(),
+        role: Role::User,
         content: vec![ContentBlock::Text {
             text: "x".repeat(100_000),
             cache_control: None,
@@ -15759,7 +15763,7 @@ fn messages_with_turn_metadata_preserves_stored_messages_for_prefix_cache() {
     );
 
     engine.session.add_message(Message {
-        role: "assistant".to_string(),
+        role: Role::Assistant,
         content: vec![ContentBlock::Text {
             text: "I inspected it.".to_string(),
             cache_control: None,
@@ -15807,7 +15811,7 @@ fn turn_metadata_skips_tool_result_messages() {
     engine.session.add_message(user_msg);
     // Assistant tool-call.
     engine.session.add_message(Message {
-        role: "assistant".to_string(),
+        role: Role::Assistant,
         content: vec![ContentBlock::ToolUse {
             id: "call_42".to_string(),
             name: "read_file".to_string(),
@@ -15818,7 +15822,7 @@ fn turn_metadata_skips_tool_result_messages() {
     });
     // Tool result, stored as role="user" internally.
     engine.session.add_message(Message {
-        role: "user".to_string(),
+        role: Role::User,
         content: vec![ContentBlock::ToolResult {
             tool_use_id: "call_42".to_string(),
             content: "pub fn sample() {}".to_string(),
@@ -15919,7 +15923,7 @@ fn turn_metadata_skips_when_only_tool_results_trail() {
     // but a tool-result is still pending. We must not retroactively
     // inject.
     engine.session.add_message(Message {
-        role: "user".to_string(),
+        role: Role::User,
         content: vec![ContentBlock::ToolResult {
             tool_use_id: "call_42".to_string(),
             content: "pub fn sample() {}".to_string(),
@@ -16132,7 +16136,7 @@ async fn submitted_turn_appends_context_update_before_the_user_message() {
     // but only after history is assembled) and inspect the order.
     let update = engine.refresh_pinned_header_for_turn(&context).unwrap();
     engine.session.add_message(Message {
-        role: "user".to_string(),
+        role: Role::User,
         content: vec![ContentBlock::Text {
             text: update,
             cache_control: None,
@@ -19132,7 +19136,7 @@ async fn cacheable_prefix_is_byte_stable_across_unchanged_turns() {
 
     engine.session.add_message(first);
     engine.session.add_message(Message {
-        role: "assistant".to_string(),
+        role: Role::Assistant,
         content: vec![ContentBlock::Text {
             text: "first reply".to_string(),
             cache_control: None,

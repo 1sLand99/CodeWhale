@@ -86,6 +86,7 @@ use worktree::{SubAgentWorktreeRequest, prepare_child_workspace};
 #[cfg(test)]
 use worktree::{create_isolated_worktree, git_repo_root};
 
+use crate::models::Role;
 #[allow(unused_imports)] // re-exported for hosts / tests; registration uses concrete types
 pub use advisor::{
     AdvisorConfig, EmissionGuard, ToolCallPair, build_advisor_prompt, extract_tool_call_pairs,
@@ -1744,7 +1745,7 @@ fn append_subagent_inputs_as_user_messages(
     while let Some(input) = pending_inputs.pop_front() {
         if !input.text.trim().is_empty() {
             messages.push(Message {
-                role: "user".to_string(),
+                role: Role::User,
                 content: vec![ContentBlock::Text {
                     text: input.text,
                     cache_control: None,
@@ -9888,7 +9889,7 @@ fn build_initial_subagent_messages_with_system(
     }
 
     messages.push(Message {
-        role: "user".to_string(),
+        role: Role::User,
         content: vec![ContentBlock::Text {
             text: build_assignment_prompt(prompt, assignment, agent_type),
             cache_control: None,
@@ -9918,7 +9919,7 @@ fn work_state_worth_publishing(
 
 fn system_text_message(text: String) -> Message {
     Message {
-        role: "system".to_string(),
+        role: Role::System,
         content: vec![ContentBlock::Text {
             text,
             cache_control: None,
@@ -10981,7 +10982,7 @@ then re-plan dependent work before claiming completion.\n",
     text.push_str("</codewhale:runtime_event>");
 
     Message {
-        role: "user".to_string(),
+        role: Role::User,
         content: vec![ContentBlock::Text {
             text,
             cache_control: None,
@@ -11581,7 +11582,7 @@ async fn run_subagent(
         }
 
         messages.push(Message {
-            role: "assistant".to_string(),
+            role: Role::Assistant,
             content: response.content.clone(),
         });
         latest_checkpoint = Some(
@@ -11869,7 +11870,7 @@ async fn run_subagent(
 
         if !tool_results.is_empty() {
             messages.push(Message {
-                role: "user".to_string(),
+                role: Role::User,
                 content: tool_results,
             });
             latest_checkpoint = Some(

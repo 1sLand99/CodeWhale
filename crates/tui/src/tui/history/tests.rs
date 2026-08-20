@@ -11,6 +11,7 @@ use super::{
     running_status_label_with_elapsed,
 };
 use crate::deepseek_theme::Theme;
+use crate::models::Role;
 use crate::models::{ContentBlock, Message};
 use crate::palette;
 use crate::tools::plan::{PlanSnapshot, StepStatus};
@@ -46,7 +47,7 @@ fn web_search_cell_renders_receipt_source_degradation_and_citations() {
 #[test]
 fn restored_history_hides_wire_reasoning_placeholder_but_keeps_model_reasoning() {
     let message = Message {
-        role: "assistant".to_string(),
+        role: Role::Assistant,
         content: vec![
             ContentBlock::Thinking {
                 thinking: "(reasoning omitted)".to_string(),
@@ -944,7 +945,7 @@ fn extract_reasoning_summary_falls_back_to_full_text() {
 #[test]
 fn archived_context_metadata_preserves_spaces_in_attributes() {
     let msg = Message {
-        role: "assistant".to_string(),
+        role: Role::Assistant,
         content: vec![ContentBlock::Text {
             text: "<archived_context level=\"1\" range=\"msg 0-128\" tokens=\"2499\" density=\"~2,500 tokens\" model=\"deepseek-v4-flash\" timestamp=\"2026-04-28T00:00:00Z\">\nSummary body\n</archived_context>".to_string(),
             cache_control: None,
@@ -978,7 +979,7 @@ fn archived_context_metadata_preserves_spaces_in_attributes() {
 #[test]
 fn tool_history_repair_receipt_renders_as_system_history() {
     let msg = Message {
-        role: "assistant".to_string(),
+        role: Role::Assistant,
         content: vec![ContentBlock::Text {
             text: "[tool_history_repair] Repaired 1 crashed tool call(s); quarantined 0 duplicate and 0 orphan terminal result(s).".to_string(),
             cache_control: None,
@@ -1004,7 +1005,7 @@ fn user_history_hides_only_the_trailing_turn_metadata_block() {
         "</turn_meta>",
     );
     let msg = Message {
-        role: "user".to_string(),
+        role: Role::User,
         content: vec![
             ContentBlock::Text {
                 text: visible.to_string(),
@@ -1025,7 +1026,7 @@ fn user_history_hides_only_the_trailing_turn_metadata_block() {
     ));
 
     let literal_only = Message {
-        role: "user".to_string(),
+        role: Role::User,
         content: vec![ContentBlock::Text {
             text: "<turn_meta>user-authored example</turn_meta>".to_string(),
             cache_control: None,
@@ -1042,7 +1043,7 @@ fn user_history_hides_only_the_trailing_turn_metadata_block() {
 #[test]
 fn history_replays_update_plan_tool_use_as_plan_card() {
     let msg = Message {
-        role: "assistant".to_string(),
+        role: Role::Assistant,
         content: vec![ContentBlock::ToolUse {
             id: "plan-1".to_string(),
             name: "update_plan".to_string(),

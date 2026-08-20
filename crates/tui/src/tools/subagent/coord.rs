@@ -1349,6 +1349,7 @@ impl ToolSpec for AgentsCoordinateTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::Role;
     use crate::tools::spec::ToolContext;
     use std::collections::BTreeSet;
     use tempfile::tempdir;
@@ -1931,7 +1932,7 @@ mod tests {
                 "paused_child",
                 tmp.path(),
                 vec![crate::models::Message {
-                    role: "user".to_string(),
+                    role: Role::User,
                     content: vec![crate::models::ContentBlock::Text {
                         text: "prior work".to_string(),
                         cache_control: None,
@@ -2253,7 +2254,7 @@ mod tests {
                 "paused_child",
                 tmp.path(),
                 vec![crate::models::Message {
-                    role: "user".to_string(),
+                    role: Role::User,
                     content: vec![crate::models::ContentBlock::Text {
                         text: "prior work".to_string(),
                         cache_control: None,
