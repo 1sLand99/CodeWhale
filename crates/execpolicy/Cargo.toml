@@ -7,6 +7,9 @@ license.workspace = true
 repository.workspace = true
 description = "Execution policy and approval model for Codewhale"
 
+[lints]
+workspace = true
+
 [dependencies]
 anyhow.workspace = true
 codewhale-protocol = { path = "../protocol", version = "0.9.10" }

@@ -7,6 +7,9 @@ license.workspace = true
 repository.workspace = true
 description = "Agentic terminal facade for open-source and open-weight coding models"
 
+[lints]
+workspace = true
+
 [[bin]]
 name = "codewhale"
 path = "src/main.rs"

@@ -36,6 +36,13 @@ rust-version = "1.88"
 license = "MIT"
 repository = "https://github.com/Hmbown/CodeWhale"
 
+# Record the policy CI already applies via `RUSTFLAGS: -Dwarnings`.
+# Member crates opt in with `[lints] workspace = true`. This does not add
+# new lints; it makes the existing gate visible in the manifest so
+# `cargo check` without extra flags matches CI.
+[workspace.lints.rust]
+warnings = "deny"
+
 [workspace.dependencies]
 anyhow = "1.0.100"
 async-trait = "0.1.89"

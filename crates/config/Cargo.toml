@@ -7,6 +7,9 @@ license.workspace = true
 repository.workspace = true
 description = "Config schema and precedence model for Codewhale"
 
+[lints]
+workspace = true
+
 [dependencies]
 anyhow.workspace = true
 codewhale-execpolicy = { path = "../execpolicy", version = "0.9.10" }

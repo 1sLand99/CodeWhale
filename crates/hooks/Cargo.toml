@@ -7,6 +7,9 @@ license.workspace = true
 repository.workspace = true
 description = "Hook dispatch and notifications support for Codewhale"
 
+[lints]
+workspace = true
+
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
