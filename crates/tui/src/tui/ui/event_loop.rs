@@ -3877,13 +3877,6 @@ pub(crate) async fn run_event_loop(
                                         Some(2_500),
                                     );
                                     onboarding::advance_onboarding_after_language(app);
-                                    open_onboarding_provider_picker(
-                                        app,
-                                        config,
-                                        &engine_handle,
-                                        false,
-                                    )
-                                    .await;
                                 }
                                 Err(err) => {
                                     app.status_message =
@@ -3895,15 +3888,11 @@ pub(crate) async fn run_event_loop(
                     KeyCode::Enter => match app.onboarding {
                         OnboardingState::Welcome => {
                             onboarding::advance_onboarding_from_welcome(app);
-                            open_onboarding_provider_picker(app, config, &engine_handle, false)
-                                .await;
                         }
                         OnboardingState::Language => {
                             // Enter without a digit pick keeps the existing
                             // setting (which defaults to "auto").
                             onboarding::advance_onboarding_after_language(app);
-                            open_onboarding_provider_picker(app, config, &engine_handle, false)
-                                .await;
                         }
                         OnboardingState::Provider => {
                             open_onboarding_provider_picker(app, config, &engine_handle, false)
