@@ -3553,6 +3553,110 @@ async fn seed_thread_keeps_tool_results_on_preceding_turn() -> Result<()> {
     Ok(())
 }
 
+/// A resumed session is seeded with one `Utc::now()` shared by every turn and
+/// every item. `list_turns_for_thread` sorts on `created_at` and
+/// `list_items_for_turn` sorts on `started_at`, so both sorts were a single
+/// tie and the surviving order was whatever `read_dir` returned. That order
+/// reaches users: `get_thread_detail` feeds the web dashboard's transcript,
+/// and `fork_thread`/`fork_at_user_message` rebuild `item_ids` from it, which
+/// makes the scramble durable. Seeded records must carry a total order.
+#[tokio::test]
+async fn seeded_session_records_carry_a_total_order() -> Result<()> {
+    let dir = test_runtime_dir();
+    let manager = test_manager(dir.clone())?;
+    let thread = sample_thread("thr_seed_order");
+    manager.store.save_thread(&thread)?;
+    let messages = vec![
+        Message {
+            role: "user".to_string(),
+            content: vec![ContentBlock::Text {
+                text: "first question".to_string(),
+                cache_control: None,
+            }],
+        },
+        Message {
+            role: "assistant".to_string(),
+            content: vec![
+                ContentBlock::Thinking {
+                    thinking: "consider".to_string(),
+                    signature: None,
+                    state: None,
+                },
+                ContentBlock::ToolUse {
+                    id: "tool-1".to_string(),
+                    name: "shell".to_string(),
+                    input: json!({ "cmd": "ls" }),
+                    caller: None,
+                    thought_signature: None,
+                },
+            ],
+        },
+        Message {
+            role: "user".to_string(),
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "tool-1".to_string(),
+                content: "listing".to_string(),
+                is_error: None,
+                content_blocks: None,
+            }],
+        },
+        Message {
+            role: "assistant".to_string(),
+            content: vec![ContentBlock::Text {
+                text: "first answer".to_string(),
+                cache_control: None,
+            }],
+        },
+        Message {
+            role: "user".to_string(),
+            content: vec![ContentBlock::Text {
+                text: "second question".to_string(),
+                cache_control: None,
+            }],
+        },
+        Message {
+            role: "assistant".to_string(),
+            content: vec![ContentBlock::Text {
+                text: "second answer".to_string(),
+                cache_control: None,
+            }],
+        },
+    ];
+
+    manager
+        .seed_thread_from_messages(&thread.id, &messages)
+        .await?;
+
+    let turns = manager.store.list_turns_for_thread(&thread.id)?;
+    assert_eq!(turns.len(), 2);
+    assert!(
+        turns[0].created_at < turns[1].created_at,
+        "seeded turns must not tie on the only key list_turns_for_thread sorts by: {:?} vs {:?}",
+        turns[0].created_at,
+        turns[1].created_at
+    );
+    assert_eq!(turns[0].input_summary, "first question");
+    assert_eq!(turns[1].input_summary, "second question");
+
+    for turn in &turns {
+        let items = manager.store.list_items_for_turn(&turn.id)?;
+        for pair in items.windows(2) {
+            assert!(
+                pair[0].started_at < pair[1].started_at,
+                "seeded items must not tie on the only key list_items_for_turn sorts by"
+            );
+        }
+        let scanned = items.iter().map(|item| item.id.clone()).collect::<Vec<_>>();
+        assert_eq!(
+            scanned, turn.item_ids,
+            "the store scan must reproduce the order the turn recorded"
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(dir);
+    Ok(())
+}
+
 #[test]
 fn current_runtime_schema_version_is_two_on_v066() {
     // Locks the bump in (issue #124). Bump deliberately when persisted

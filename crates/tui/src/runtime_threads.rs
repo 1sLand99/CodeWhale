@@ -5185,7 +5185,22 @@ impl RuntimeThreadManager {
             .store
             .load_thread(thread_id)
             .with_context(|| format!("Thread not found: {thread_id}"))?;
-        let now = Utc::now();
+        // Seeded records are historical: their real wall-clock times are gone
+        // with the provider transcript. The store's only ordering keys are
+        // `TurnRecord::created_at` and `TurnItemRecord::started_at`, so
+        // stamping every seeded record with one `Utc::now()` made both sorts a
+        // single tie and left turn/item order to `read_dir`. That order is
+        // what `get_thread_detail` hands the dashboard transcript and what the
+        // fork paths freeze into the cloned `item_ids`. Hand out strictly
+        // increasing synthetic stamps instead so the recorded order survives
+        // every scan.
+        let seed_epoch = Utc::now();
+        let mut seed_step: i64 = 0;
+        let mut next_seed_stamp = move || {
+            let stamp = seed_epoch + chrono::Duration::microseconds(seed_step);
+            seed_step += 1;
+            stamp
+        };
 
         // Group messages into turns. A turn starts with a user message and
         // includes all subsequent assistant messages (which may contain
@@ -5302,6 +5317,7 @@ impl RuntimeThreadManager {
         }
 
         for turn_seed in turns {
+            let turn_at = next_seed_stamp();
             let turn_id = format!("turn_{}", &Uuid::new_v4().to_string()[..8]);
             let summary =
                 crate::utils::truncate_with_ellipsis(&turn_seed.user_text, SUMMARY_LIMIT, "...");
@@ -5310,6 +5326,7 @@ impl RuntimeThreadManager {
             // Save user message item.
             if !turn_seed.user_text.is_empty() {
                 let item_id = format!("item_{}", &Uuid::new_v4().to_string()[..8]);
+                let item_at = next_seed_stamp();
                 self.store.save_item(&TurnItemRecord {
                     schema_version: CURRENT_RUNTIME_SCHEMA_VERSION,
                     id: item_id.clone(),
@@ -5320,8 +5337,8 @@ impl RuntimeThreadManager {
                     detail: Some(turn_seed.user_text.clone()),
                     metadata: None,
                     artifact_refs: Vec::new(),
-                    started_at: Some(now),
-                    ended_at: Some(now),
+                    started_at: Some(item_at),
+                    ended_at: Some(item_at),
                 })?;
                 item_ids.push(item_id);
             }
@@ -5329,6 +5346,7 @@ impl RuntimeThreadManager {
             // Save assistant content items in order.
             for seed_item in &turn_seed.items {
                 let item_id = format!("item_{}", &Uuid::new_v4().to_string()[..8]);
+                let item_at = next_seed_stamp();
                 match seed_item {
                     SeedItem::Text(text) => {
                         let asst_summary = if text.len() > SUMMARY_LIMIT {
@@ -5346,8 +5364,8 @@ impl RuntimeThreadManager {
                             detail: Some(text.clone()),
                             metadata: None,
                             artifact_refs: Vec::new(),
-                            started_at: Some(now),
-                            ended_at: Some(now),
+                            started_at: Some(item_at),
+                            ended_at: Some(item_at),
                         })?;
                     }
                     SeedItem::Thinking(thinking) => {
@@ -5366,8 +5384,8 @@ impl RuntimeThreadManager {
                             detail: Some(thinking.clone()),
                             metadata: None,
                             artifact_refs: Vec::new(),
-                            started_at: Some(now),
-                            ended_at: Some(now),
+                            started_at: Some(item_at),
+                            ended_at: Some(item_at),
                         })?;
                     }
                     SeedItem::ToolUse {
@@ -5403,8 +5421,8 @@ impl RuntimeThreadManager {
                                 .clone(),
                             )),
                             artifact_refs: Vec::new(),
-                            started_at: Some(now),
-                            ended_at: Some(now),
+                            started_at: Some(item_at),
+                            ended_at: Some(item_at),
                         })?;
                     }
                     SeedItem::ToolResult {
@@ -5439,8 +5457,8 @@ impl RuntimeThreadManager {
                             detail: Some(content.clone()),
                             metadata: Some(Value::Object(metadata)),
                             artifact_refs: Vec::new(),
-                            started_at: Some(now),
-                            ended_at: Some(now),
+                            started_at: Some(item_at),
+                            ended_at: Some(item_at),
                         })?;
                     }
                 }
@@ -5455,9 +5473,9 @@ impl RuntimeThreadManager {
                     thread_id: thread_id.to_string(),
                     status: RuntimeTurnStatus::Completed,
                     input_summary: summary,
-                    created_at: now,
-                    started_at: Some(now),
-                    ended_at: Some(now),
+                    created_at: turn_at,
+                    started_at: Some(turn_at),
+                    ended_at: Some(turn_at),
                     duration_ms: Some(0),
                     usage: None,
                     permission_posture: None,
@@ -5478,7 +5496,7 @@ impl RuntimeThreadManager {
                 })?;
 
                 thread.latest_turn_id = Some(turn_id);
-                thread.updated_at = now;
+                thread.updated_at = turn_at;
             }
         }
 
