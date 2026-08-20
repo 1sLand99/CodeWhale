@@ -8,19 +8,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 - `codewhale completions <shell>` generated a script for the wrong program.
-  The subcommand forwarded to the internal `codewhale-tui` executable, which
+  The subcommand forwarded to the in-tree `codewhale-tui` binary, which
   rendered completions from *its own* clap tree under *its own* name, so the
   output ended in `complete -F _codewhale__tui ... codewhale-tui` (bash),
   `#compdef codewhale-tui` (zsh), and
   `Register-ArgumentCompleter -Native -CommandName 'codewhale-tui'`
   (PowerShell). Sourcing it registered nothing for `codewhale` or `codew` —
-  the two names releases actually publish — so tab completion appeared to do
-  nothing. The forwarded tree was also stale against the real CLI: it offered
+  the two commands current installers expose — so tab completion appeared to
+  do nothing. The forwarded tree was also stale against the real CLI: it offered
   `pr`, `scorecard`, and `session-diagnostics`, which `codewhale` does not
   have, and omitted `run`, `rc`, `config`, `model`, `thread`, `lane`,
-  `workflow`, `web`, `account`, `app-server`, `mcp-server`, `metrics`, and
-  `update`, which it does. Completions are now rendered in-process from the
-  CLI's own command tree, and `completions` is an alias of the existing
+  `workflow`, `web`, `account`, `app-server`, `mcp-server`, `metrics`,
+  `update`, `cloud`, `completion`, and `lane-log-proxy`, which it does.
+  Completions are now rendered in-process from the CLI's own command tree,
+  and `completions` is an alias of the existing
   `completion` subcommand rather than a second, divergent path. Regenerate any
   script you installed from an earlier release. Reported by **RepentStar**
   (#5526); part of the `deepseek-tui`-era identifier retirement in #5443.
@@ -31,8 +32,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   installed for anyone who types the short one. Each shell gets its own
   idiomatic hook rather than a second copy of the script: bash re-binds the
   generated function, zsh widens the `#compdef` tag line to
-  `#compdef codewhale codew`, fish adds `complete -c codew -w codewhale`, and
-  PowerShell registers `-CommandName 'codewhale','codew'`.
+  `#compdef codewhale codew`, fish adds `complete -c codew -w codewhale`,
+  PowerShell registers `-CommandName 'codewhale','codew'`, and Elvish aliases
+  the completer with
+  `set edit:completion:arg-completer[codew] = $edit:completion:arg-completer[codewhale]`.
 
 - Documented shell completions. `docs/INSTALL.md` § 8 now gives the generate
   and install commands for bash, zsh, fish, PowerShell, and Elvish, with a
