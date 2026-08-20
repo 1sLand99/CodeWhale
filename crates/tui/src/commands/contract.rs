@@ -26,7 +26,6 @@
 //! FEAT-015 intentionally wires no production contextual command. Some bridge
 //! helpers remain production-dead until the first slice migrates (FEAT-018+),
 //! so this transitional module keeps a bounded dead-code allow.
-#![allow(dead_code)]
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
@@ -37,7 +36,9 @@ use codewhale_command_contract::facets::{
     CommandPresentationContext, CommandSessionContext, CommandSkillsContext,
     CommandSystemPromptContext, CommandWorkspaceContext, MediaAttachmentReceipt,
 };
-use codewhale_command_contract::handler::{CommandContexts, ContextParts};
+use codewhale_command_contract::handler::CommandContexts;
+#[cfg(test)]
+use codewhale_command_contract::handler::ContextParts;
 use codewhale_command_contract::types::{
     CommandApprovalMode, CommandCurrency, CommandMode, CommandProviderId, CommandReasoningEffort,
 };
@@ -57,8 +58,13 @@ use crate::tui::app::{App, ReasoningEffort};
 /// handlers. This is the TUI-visible projection of the checked-in migration
 /// topology (`scripts/command-migration-topology.json`); the CI gate performs
 /// the authoritative bidirectional source scan against that artifact.
+///
+/// Not referenced by production dispatch code — the fail-closed Python gate
+/// (`scripts/check-command-migration-manifest.py`) reads this exact
+/// declaration by source regex and the Rust frontier tests assert it.
+#[allow(dead_code)]
 pub(crate) const PENDING_GROUPS: &[&str] = &[
-    "config", "core", "debug", "memory", "plugins", "project", "session", "skills", "utility",
+    "config", "core", "debug", "memory", "plugins", "project", "session", "skills",
 ];
 
 // ---------------------------------------------------------------------------
@@ -652,6 +658,8 @@ impl<'a> CommandContextBundle<'a> {
             .with_media(&mut self.media)
     }
 
+    /// Test-only: consume the bundle into independent facet parts.
+    #[cfg(test)]
     pub(crate) fn parts(&mut self) -> ContextParts<'_> {
         self.contexts().into_parts()
     }
