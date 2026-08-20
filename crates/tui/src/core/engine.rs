@@ -6587,8 +6587,8 @@ use self::streaming::filter_tool_call_delta;
 use self::streaming::{
     ContentBlockKind, FAKE_WRAPPER_NOTICE, MAX_STREAM_ERRORS_BEFORE_FAIL, MAX_STREAM_RETRIES,
     MAX_TRANSPARENT_STREAM_RETRIES, STREAM_MAX_CONTENT_BYTES, STREAM_MAX_DURATION_SECS,
-    ToolCallDeltaFilterState, ToolUseState, contains_fake_tool_wrapper,
-    filter_tool_call_delta_with_state, flush_tool_call_delta_state,
+    StreamResume, StreamRetryBudget, ToolCallDeltaFilterState, ToolUseState,
+    contains_fake_tool_wrapper, filter_tool_call_delta_with_state, flush_tool_call_delta_state,
     should_resume_after_network_drop, should_resume_after_sleep,
     should_resume_interactive_after_network_drop, should_transparently_retry_stream,
     sleep_gap_detected, stream_read_error_user_message,

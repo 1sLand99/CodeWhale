@@ -34,9 +34,9 @@ struct StreamOutcome {
     last_text_index: Option<usize>,
     stream_errors: u32,
     pending_steers: Vec<String>,
-    sleep_resume_pending: bool,
-    headless_stream_resume_pending: bool,
-    interactive_stream_resume_pending: bool,
+    /// Typed, engine-internal drop-recovery state. `Option` + consume-once
+    /// means one drop schedules exactly one resume; see [`StreamResume`].
+    pending_resume: Option<StreamResume>,
     stream_start: Instant,
     first_token_at: Option<Instant>,
     request_dispatched_at: Instant,
@@ -599,13 +599,14 @@ impl Engine {
         // across model steps so 3 consecutive empty blocks end the turn, not
         // just 3 blocks inside one message.
         let mut consecutive_empty_repl_rounds: u32 = 0;
-        // Outer stream-retry counter: when the chunked-transfer connection
+        // Outer stream-retry budget: when the chunked-transfer connection
         // dies mid-stream and either nothing useful was streamed (#103
-        // Phase 3), the host slept mid-turn (#2990), or a headless host hit
-        // a mid-stream network drop (v0.9.4 Terminal-Bench P0), we silently
-        // re-issue the SAME request up to MAX_STREAM_RETRIES times before
-        // surfacing the failure to the user.
-        let mut stream_retry_attempts: u32 = 0;
+        // Phase 3), the host slept mid-turn (#2990), or a host hit a
+        // mid-stream network drop (v0.9.4 Terminal-Bench P0), we re-issue
+        // the request up to MAX_STREAM_RETRIES times before surfacing the
+        // failure to the user. `StreamRetryBudget` enforces that bound in
+        // mechanism — `authorize()` is the only way to spend a resume.
+        let mut stream_retry_budget = StreamRetryBudget::default();
 
         loop {
             if self.cancel_token.is_cancelled() {
@@ -1133,9 +1134,7 @@ impl Engine {
                 last_text_index,
                 stream_errors,
                 mut pending_steers,
-                sleep_resume_pending,
-                headless_stream_resume_pending,
-                interactive_stream_resume_pending,
+                pending_resume,
                 stream_start,
                 first_token_at,
                 request_dispatched_at,
@@ -1146,7 +1145,7 @@ impl Engine {
                     stream,
                     &stream_request,
                     request_dispatched_at,
-                    stream_retry_attempts,
+                    stream_retry_budget.spent(),
                 )
                 .await;
             turn_error = turn_error.or(stream_error);
@@ -1243,29 +1242,37 @@ impl Engine {
             // streamed, ship the partial state to the rest of the turn
             // pipeline so we don't double-bill the user by re-running it.
             // The post-content exceptions to that rule are the #2990
-            // sleep-resume and the headless network-drop resume: both
-            // discard the uncommitted fragment because no operator is
-            // watching and no tool from the incomplete response has run.
+            // sleep-resume and the mid-stream network-drop resumes: those
+            // discard the uncommitted fragment unless an operator watched
+            // visible text land (see `StreamResume::InteractiveNetworkDrop`).
+            //
+            // The resume itself is typed state, consumed here by value, so
+            // one drop schedules exactly one retry; and no resume path
+            // appends a synthetic user message to the persisted
+            // conversation — the retried request is the persisted
+            // conversation re-issued, nothing else.
             let stream_died_with_nothing = stream_errors > 0
                 && tool_uses.is_empty()
                 && current_text_visible.trim().is_empty()
                 && current_thinking.trim().is_empty()
                 && !pending_message_complete;
-            if stream_died_with_nothing
-                || sleep_resume_pending
-                || headless_stream_resume_pending
-                || interactive_stream_resume_pending
+            let pending_resume = match pending_resume {
+                Some(resume) => Some(resume),
+                None if stream_died_with_nothing => Some(StreamResume::NoContentStreamDeath),
+                None => None,
+            };
+            if let Some(resume) = pending_resume
+                && let Some(attempt) = stream_retry_budget.authorize()
             {
-                if stream_retry_attempts < MAX_STREAM_RETRIES {
-                    stream_retry_attempts = stream_retry_attempts.saturating_add(1);
-                    if sleep_resume_pending {
+                match resume {
+                    StreamResume::AfterSleep => {
                         crate::logging::warn(format!(
-                            "Resuming after system sleep (attempt {stream_retry_attempts}/{MAX_STREAM_RETRIES}); discarding partial output and retrying request"
+                            "Resuming after system sleep (attempt {attempt}/{MAX_STREAM_RETRIES}); discarding partial output and retrying request"
                         ));
                         let _ = self
                             .tx_event
                             .send(Event::status(format!(
-                                "System sleep detected; connection lost — retrying request ({stream_retry_attempts}/{MAX_STREAM_RETRIES})"
+                                "System sleep detected; connection lost — retrying request ({attempt}/{MAX_STREAM_RETRIES})"
                             )))
                             .await;
                         // Finalize any partially-rendered assistant cell so
@@ -1275,37 +1282,24 @@ impl Engine {
                             let index = last_text_index.unwrap_or(0);
                             let _ = self.tx_event.send(Event::MessageComplete { index }).await;
                         }
-                    } else if headless_stream_resume_pending {
+                    }
+                    StreamResume::HeadlessNetworkDrop => {
                         crate::logging::warn(format!(
-                            "Resuming headless turn after mid-stream network drop (attempt {stream_retry_attempts}/{MAX_STREAM_RETRIES}); discarding partial output and retrying request"
+                            "Resuming headless turn after mid-stream network drop (attempt {attempt}/{MAX_STREAM_RETRIES}); discarding partial output and retrying request"
                         ));
                         let _ = self
                             .tx_event
                             .send(Event::status(format!(
-                                "Connection interrupted; retrying ({stream_retry_attempts}/{MAX_STREAM_RETRIES})"
+                                "Connection interrupted; retrying ({attempt}/{MAX_STREAM_RETRIES})"
                             )))
                             .await;
-                    } else if interactive_stream_resume_pending {
-                        crate::logging::warn(format!(
-                            "Resuming interactive turn after mid-stream network drop (attempt {stream_retry_attempts}/{MAX_STREAM_RETRIES}); preserving partial reply and retrying request"
-                        ));
-                        let _ = self
-                            .tx_event
-                            .send(Event::status(format!(
-                                "Connection interrupted; preserving partial reply and retrying ({stream_retry_attempts}/{MAX_STREAM_RETRIES})"
-                            )))
-                            .await;
-                        // Finalize the partial text cell so the UI stops
-                        // streaming and the retried content lands in a fresh
-                        // cell instead of appending to an unfinished one.
-                        if let Some(index) = last_text_index {
-                            let _ = self.tx_event.send(Event::MessageComplete { index }).await;
-                        }
-                        // Commit the partial assistant message to the
-                        // conversation so the retried request sees the prefix
-                        // as already delivered. Build the blocks inline; the
-                        // outer `content_blocks` variable is still empty at
-                        // this point and will be rebuilt on the next round.
+                    }
+                    StreamResume::InteractiveNetworkDrop => {
+                        // Commit the partial assistant message so the retried
+                        // request sees the prefix as already delivered. Build
+                        // the blocks inline; the outer `content_blocks`
+                        // variable is still empty at this point and will be
+                        // rebuilt on the next round.
                         let mut resume_blocks: Vec<ContentBlock> = Vec::new();
                         // A wire-only placeholder must not ride into the
                         // retry prefix as stored reasoning either.
@@ -1341,42 +1335,82 @@ impl Engine {
                                 ContentBlock::Text { .. } | ContentBlock::ToolUse { .. }
                             )
                         });
-                        if has_sendable_assistant_content {
+                        if !has_sendable_assistant_content {
+                            // Thinking-only drop: nothing visible streamed, so
+                            // nothing is preserved and nothing is committed.
+                            // The re-issued request is identical to the one
+                            // that died. Neither the log line nor the status
+                            // copy may claim a partial reply was preserved —
+                            // that claim is what minted the fake `[runtime]`
+                            // user turn in session 1589c05d.
+                            crate::logging::warn(format!(
+                                "Resuming interactive turn after mid-stream network drop (attempt {attempt}/{MAX_STREAM_RETRIES}); only hidden reasoning streamed — no partial reply to preserve, retrying request"
+                            ));
+                            let _ = self
+                                .tx_event
+                                .send(Event::status(format!(
+                                    "Connection interrupted; retrying ({attempt}/{MAX_STREAM_RETRIES})"
+                                )))
+                                .await;
+                        } else {
+                            crate::logging::warn(format!(
+                                "Resuming interactive turn after mid-stream network drop (attempt {attempt}/{MAX_STREAM_RETRIES}); preserving partial reply and retrying request"
+                            ));
+                            let _ = self
+                                .tx_event
+                                .send(Event::status(format!(
+                                    "Connection interrupted; preserving partial reply and retrying ({attempt}/{MAX_STREAM_RETRIES})"
+                                )))
+                                .await;
+                            // Finalize the partial text cell so the UI stops
+                            // streaming and the retried content lands in a
+                            // fresh cell instead of appending to an
+                            // unfinished one.
+                            if let Some(index) = last_text_index {
+                                let _ = self.tx_event.send(Event::MessageComplete { index }).await;
+                            }
+                            // Persist the fragment the operator already saw —
+                            // exactly one assistant cell for it, and no
+                            // synthetic user turn after it. The retried
+                            // request therefore ends with this fragment, which
+                            // is the provider-neutral "continue from here"
+                            // contract; the recovery itself stays invisible to
+                            // the transcript and to the provider request
+                            // history as a user role.
                             self.add_session_message(Message {
                                 role: "assistant".to_string(),
                                 content: resume_blocks,
                             })
                             .await;
                         }
-                        self.add_session_message(self.runtime_text_message_with_turn_metadata(
-                            "[runtime] The provider stream dropped mid-response. The partial reply above is preserved verbatim. Continue where you left off; do not repeat content already delivered.".to_string(),
-                            UserInputProvenance::Runtime,
-                        ))
-                        .await;
-                    } else {
+                    }
+                    StreamResume::NoContentStreamDeath => {
                         crate::logging::warn(format!(
-                            "Stream died with no content (attempt {stream_retry_attempts}/{MAX_STREAM_RETRIES}); retrying request"
+                            "Stream died with no content (attempt {attempt}/{MAX_STREAM_RETRIES}); retrying request"
                         ));
                         let _ = self
                             .tx_event
                             .send(Event::status(format!(
-                                "Connection interrupted; retrying ({stream_retry_attempts}/{MAX_STREAM_RETRIES})"
+                                "Connection interrupted; retrying ({attempt}/{MAX_STREAM_RETRIES})"
                             )))
                             .await;
                     }
-                    // Don't preserve the per-stream `turn_error` — we're
-                    // about to retry, and a successful retry should not
-                    // surface the transient error as the turn outcome.
-                    turn_error = None;
-                    continue;
                 }
+                // Don't preserve the per-stream `turn_error` — we're
+                // about to retry, and a successful retry should not
+                // surface the transient error as the turn outcome.
+                turn_error = None;
+                continue;
+            }
+            if pending_resume.is_some() {
                 crate::logging::warn(format!(
-                    "Stream retry budget exhausted ({stream_retry_attempts} attempts); failing turn"
+                    "Stream retry budget exhausted ({} attempts); failing turn",
+                    stream_retry_budget.spent()
                 ));
             } else if stream_errors == 0 {
                 // Healthy round → reset retry budget so we don't carry over
                 // state from a previous bad round.
-                stream_retry_attempts = 0;
+                stream_retry_budget.reset();
             }
 
             // Persist only reasoning the provider actually emitted. Some chat
@@ -3520,7 +3554,7 @@ impl Engine {
         stream: crate::llm_client::StreamEventBox,
         stream_request: &crate::models::MessageRequest,
         mut request_dispatched_at: Instant,
-        stream_retry_attempts: u32,
+        drop_resumes_spent: u32,
     ) -> StreamOutcome {
         // The stream value is itself `Pin<Box<dyn Stream + Send>>`, which
         // is `Unpin`, so we can rebind it on a transparent retry without
@@ -3567,7 +3601,7 @@ impl Engine {
         // #103 transparent retry bookkeeping. `any_content_received` flips
         // on the first non-MessageStart event so we know whether DeepSeek
         // billed us / the user has seen any output for this turn yet.
-        // This is distinct from the outer `stream_retry_attempts` (which
+        // This is distinct from the outer drop-resume budget (which
         // restarts the whole turn-step when a stream died with no
         // content-block delta delivered to the consumer).
         let mut any_content_received = false;
@@ -3584,17 +3618,10 @@ impl Engine {
         // the next error tells "machine slept" apart from "network died".
         let mut last_progress_mono = Instant::now();
         let mut last_progress_wall = std::time::SystemTime::now();
-        let mut sleep_resume_pending = false;
-        // Headless mid-stream network-drop resume (Terminal-Bench P0,
-        // v0.9.4): set when a network-class stream error arrives after
-        // partial content in a headless host; the post-loop block then
-        // discards the fragment and re-issues the request instead of
-        // forfeiting the whole exec session.
-        let mut headless_stream_resume_pending = false;
-        // Interactive mid-stream network-drop resume (0.9.4): preserve the
-        // partial reply as a committed assistant message, append a runtime
-        // user continuation message, and re-issue the request.
-        let mut interactive_stream_resume_pending = false;
+        // Typed drop-recovery state: at most one `StreamResume` is ever
+        // scheduled per stream, and it is consumed exactly once by the
+        // post-loop block. It never becomes a synthetic user message.
+        let mut pending_resume: Option<StreamResume> = None;
         let mut stream_content_bytes: usize = 0;
         let (chunk_timeout_secs, chunk_timeout) = stream_chunk_timeout_budget(&self.config);
         let max_duration = Duration::from_secs(STREAM_MAX_DURATION_SECS);
@@ -3700,7 +3727,7 @@ impl Engine {
                         .unwrap_or_else(|_| last_progress_mono.elapsed());
                     if should_resume_after_sleep(
                         sleep_gap_detected(last_progress_mono.elapsed(), wall_elapsed),
-                        stream_retry_attempts,
+                        drop_resumes_spent,
                         self.cancel_token.is_cancelled(),
                     ) {
                         crate::logging::warn(format!(
@@ -3708,7 +3735,7 @@ impl Engine {
                             last_progress_mono.elapsed(),
                             wall_elapsed,
                         ));
-                        sleep_resume_pending = true;
+                        pending_resume = Some(StreamResume::AfterSleep);
                         break;
                     }
                     // #103: when the stream errors before any content was
@@ -3779,7 +3806,7 @@ impl Engine {
                     if should_resume_after_network_drop(
                         !self.config.terminal_chrome_enabled,
                         network_class_error,
-                        stream_retry_attempts,
+                        drop_resumes_spent,
                         self.cancel_token.is_cancelled(),
                     ) {
                         crate::logging::warn(format!(
@@ -3793,31 +3820,32 @@ impl Engine {
                             &message,
                             any_content_received,
                         ));
-                        headless_stream_resume_pending = true;
+                        pending_resume = Some(StreamResume::HeadlessNetworkDrop);
                         break;
                     }
                     // Interactive TUI: a network/timeout-class stream drop
                     // after partial text (but before any tool call) should
-                    // preserve the partial reply and re-issue the request
-                    // with a runtime continuation message, bounded by
-                    // MAX_STREAM_RETRIES. This keeps the turn alive instead
-                    // of failing with a terminal-looking error.
+                    // preserve the visible fragment and re-issue the
+                    // request, bounded by MAX_STREAM_RETRIES. This keeps the
+                    // turn alive instead of failing with a terminal-looking
+                    // error. The resume is typed state — no synthetic user
+                    // continuation message is appended.
                     if should_resume_interactive_after_network_drop(
                         self.config.terminal_chrome_enabled,
                         network_class_error,
                         any_content_received,
                         tool_uses.is_empty(),
-                        stream_retry_attempts,
+                        drop_resumes_spent,
                         self.cancel_token.is_cancelled(),
                     ) {
                         crate::logging::warn(format!(
-                            "Interactive stream resume: network drop after partial content; preserving fragment and scheduling request retry: {message}"
+                            "Interactive stream resume: network drop after partial content; scheduling typed resume: {message}"
                         ));
                         stream_error.get_or_insert(stream_read_error_user_message(
                             &message,
                             any_content_received,
                         ));
-                        interactive_stream_resume_pending = true;
+                        pending_resume = Some(StreamResume::InteractiveNetworkDrop);
                         break;
                     }
                     let user_message =
@@ -4119,9 +4147,7 @@ impl Engine {
             last_text_index,
             stream_errors,
             pending_steers,
-            sleep_resume_pending,
-            headless_stream_resume_pending,
-            interactive_stream_resume_pending,
+            pending_resume,
             stream_start,
             first_token_at,
             request_dispatched_at,

@@ -17038,13 +17038,15 @@ fn network_drop_resume_respects_budget_and_cancellation() {
     );
 }
 
-// === interactive mid-stream network-drop resume (0.9.4) ======================
+// === interactive mid-stream network-drop resume (0.9.4; reworked 0.9.10) =========
 //
 // The interactive TUI used to fail the turn when a provider stream dropped
 // after partial output because the #103 policy treated any post-content error
-// as terminal. The model now preserves the partial reply, commits it as an
-// assistant message, appends a runtime continuation user message, and re-issues
-// the request.
+// as terminal. The model now preserves a visible partial reply as a committed
+// assistant message and re-issues the request. Since 0.9.10 the recovery is
+// typed engine-internal state (`StreamResume`): no synthetic `[runtime]` user
+// continuation message is appended, and a thinking-only drop preserves
+// nothing and never claims it did.
 
 #[test]
 fn interactive_network_drop_resume_only_fires_for_interactive_hosts() {
@@ -17106,6 +17108,29 @@ fn interactive_network_drop_resume_respects_budget_and_cancellation() {
         !super::should_resume_interactive_after_network_drop(true, true, true, true, 0, true),
         "cancelled turn must not resume"
     );
+}
+
+#[test]
+fn stream_retry_budget_caps_resumes_in_mechanism() {
+    // "At most one bounded retry per drop" is enforced by types, not by a
+    // comment: `authorize()` is the only way to spend a resume and it refuses
+    // once MAX_STREAM_RETRIES resumes have been issued, whatever the guard
+    // predicates say. A healthy round resets the chain.
+    let mut budget = super::StreamRetryBudget::default();
+    assert_eq!(budget.spent(), 0);
+    assert_eq!(budget.authorize(), Some(1));
+    assert_eq!(budget.authorize(), Some(2));
+    assert_eq!(budget.authorize(), Some(3));
+    assert_eq!(
+        budget.authorize(),
+        None,
+        "authorize() must refuse past MAX_STREAM_RETRIES"
+    );
+    assert_eq!(budget.authorize(), None, "and keep refusing");
+    assert_eq!(budget.spent(), super::MAX_STREAM_RETRIES);
+    budget.reset();
+    assert_eq!(budget.spent(), 0);
+    assert_eq!(budget.authorize(), Some(1));
 }
 
 /// Model client whose first `failures` streams emit partial content and then
@@ -17633,7 +17658,7 @@ async fn run_interactive_turn_with_flaky_network(
 }
 
 #[tokio::test]
-async fn interactive_turn_preserves_partial_reply_and_recoveries_after_network_drop() {
+async fn interactive_turn_preserves_partial_reply_and_recovers_after_network_drop() {
     let (model, events) = run_interactive_turn_with_flaky_network(1).await;
 
     assert_eq!(
@@ -17668,15 +17693,45 @@ async fn interactive_turn_preserves_partial_reply_and_recoveries_after_network_d
         "a transient drop that the retry recovers must not surface an error event: {events:?}"
     );
 
-    // The partial reply must survive in the transcript, followed by a runtime
-    // continuation user message and the retried assistant content.
-    let transcript_text = events
+    // The visible fragment must survive as an assistant message, followed by
+    // the retried assistant content — and nothing else. The recovery is
+    // typed internal state, so no synthetic `[runtime]` user turn may appear.
+    let transcript = events
         .iter()
-        .filter_map(|event| match event {
-            Event::SessionUpdated { messages, .. } => Some(messages),
+        .rev()
+        .find_map(|event| match event {
+            Event::SessionUpdated { messages, .. } => Some(messages.clone()),
             _ => None,
         })
-        .flatten()
+        .expect("final SessionUpdated");
+    assert!(
+        transcript
+            .iter()
+            .flat_map(|message| message.content.iter())
+            .all(|block| match block {
+                ContentBlock::Text { text, .. } => !text.contains("[runtime]"),
+                _ => true,
+            }),
+        "a retried turn must not insert a synthetic [runtime] user message: {transcript:?}"
+    );
+    assert_eq!(
+        transcript
+            .iter()
+            .filter(|message| message.role == "user")
+            .count(),
+        1,
+        "the operator's own turn must be the only user message: {transcript:?}"
+    );
+    let assistant_cells = transcript
+        .iter()
+        .filter(|message| message.role == "assistant")
+        .count();
+    assert_eq!(
+        assistant_cells, 2,
+        "preserved fragment + one authoritative continuation: {transcript:?}"
+    );
+    let transcript_text = transcript
+        .iter()
         .flat_map(|message| message.content.iter())
         .filter_map(|block| match block {
             ContentBlock::Text { text, .. } => Some(text.as_str()),
@@ -17686,15 +17741,237 @@ async fn interactive_turn_preserves_partial_reply_and_recoveries_after_network_d
         .join("\n");
     assert!(
         transcript_text.contains("partial answer that must be discarded"),
-        "the partial reply must be preserved in the session: {transcript_text}"
+        "the visible partial reply must be preserved in the session: {transcript_text}"
+    );
+    assert_eq!(
+        transcript_text.matches("recovered after retry").count(),
+        1,
+        "exactly one authoritative final answer, not a duplicate: {transcript_text}"
+    );
+}
+
+/// Streams only hidden reasoning and then dies with the network-class read
+/// error; later streams complete a normal text turn. This is the shape of the
+/// 0.9.10 regression: a thinking-only drop used to persist a synthetic
+/// `[runtime]` user message claiming a partial answer had been preserved.
+struct ThinkingOnlyDropModelClient {
+    calls: std::sync::atomic::AtomicUsize,
+    failures: usize,
+}
+
+#[async_trait::async_trait]
+impl crate::core::model_client::ModelClient for ThinkingOnlyDropModelClient {
+    fn provider_name(&self) -> &str {
+        "flaky-network"
+    }
+
+    fn model(&self) -> &str {
+        "local-model"
+    }
+
+    async fn create_message(
+        &self,
+        _request: crate::models::MessageRequest,
+    ) -> anyhow::Result<crate::models::MessageResponse> {
+        anyhow::bail!("thinking-only drop regression uses the streaming model boundary")
+    }
+
+    async fn create_message_stream(
+        &self,
+        _request: crate::models::MessageRequest,
+    ) -> anyhow::Result<crate::llm_client::StreamEventBox> {
+        use crate::llm_client::mock::canned;
+        let call = self
+            .calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            .saturating_add(1);
+        if call <= self.failures {
+            // Hidden reasoning only — no text block is ever opened, so nothing
+            // visible streams before the transport dies. This still flips
+            // `any_content_received`, which is what routes the drop to the
+            // interactive resume path instead of the transparent retry.
+            let events: Vec<anyhow::Result<crate::models::StreamEvent>> = vec![
+                Ok(canned::message_start("thinking_only_msg")),
+                Ok(StreamEvent::ContentBlockStart {
+                    index: 0,
+                    content_block: crate::models::ContentBlockStart::Thinking {
+                        thinking: String::new(),
+                    },
+                }),
+                Ok(canned::thinking_delta(
+                    0,
+                    "hidden reasoning that no operator ever saw",
+                )),
+                Err(anyhow::anyhow!(
+                    "Stream read error: error decoding response body"
+                )),
+            ];
+            return Ok(Box::pin(futures_util::stream::iter(events)));
+        }
+        let events = canned::simple_text_turn("the one authoritative answer")
+            .into_iter()
+            .map(Ok);
+        Ok(Box::pin(futures_util::stream::iter(events)))
+    }
+
+    async fn health_check(&self) -> anyhow::Result<bool> {
+        Ok(true)
+    }
+}
+
+/// A thinking-only mid-stream drop must recover without ever claiming a
+/// visible partial reply was preserved, and must leave exactly one
+/// authoritative assistant answer in the persisted conversation.
+#[tokio::test]
+async fn interactive_thinking_only_drop_preserves_nothing_and_never_claims_it_did() {
+    let model = std::sync::Arc::new(ThinkingOnlyDropModelClient {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        failures: 1,
+    });
+    let client: crate::core::model_client::SharedModelClient = model.clone();
+    let config = Config::default();
+    let engine_config = EngineConfig {
+        max_steps: 1,
+        snapshots_enabled: false,
+        subagents_enabled: false,
+        terminal_chrome_enabled: true,
+        ..EngineConfig::default()
+    };
+    let (engine, handle) = Engine::new_with_model_client(engine_config, &config, client);
+    let run_task = tokio::spawn(engine.run());
+
+    handle
+        .send(Op::SendMessage {
+            content: "solve the task".to_string(),
+            mode: AppMode::Agent,
+            route: resolved_route_for_test(&config, crate::config::DEFAULT_TEXT_MODEL),
+            compaction: Box::new(CompactionConfig::default()),
+            goal_objective: None,
+            goal_token_budget: None,
+            goal_status: crate::tools::goal::GoalStatus::Active,
+            reasoning_effort: None,
+            reasoning_effort_auto: false,
+            auto_model: false,
+            allow_shell: false,
+            trust_mode: false,
+            auto_approve: false,
+            approval_mode: crate::tui::approval::ApprovalMode::Suggest,
+            translation_enabled: false,
+            allowed_tools: None,
+            dynamic_tools: Vec::new(),
+            hook_executor: None,
+            verbosity: None,
+            provenance: UserInputProvenance::ExternalUser,
+        })
+        .await
+        .expect("send thinking-only drop turn");
+
+    let mut events = Vec::new();
+    loop {
+        let event = tokio::time::timeout(model_turn_event_timeout(), async {
+            handle.rx_event.write().await.recv().await
+        })
+        .await
+        .expect("thinking-only drop event timeout")
+        .expect("thinking-only drop event");
+        let terminal = matches!(event, Event::TurnComplete { .. });
+        events.push(event);
+        if terminal {
+            break;
+        }
+    }
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    run_task.await.expect("engine task");
+
+    assert_eq!(
+        model.calls.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "the thinking-only drop must be re-issued exactly once"
+    );
+    let status = events
+        .iter()
+        .find_map(|event| match event {
+            Event::TurnComplete { status, .. } => Some(*status),
+            _ => None,
+        })
+        .expect("terminal TurnComplete");
+    assert_eq!(status, TurnOutcomeStatus::Completed);
+
+    // Only hidden reasoning streamed, so the recovery copy must say "retrying"
+    // and must never claim a partial reply was preserved.
+    let retry_statuses = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::Status { message } if message.contains("Connection interrupted") => {
+                Some(message.clone())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        retry_statuses.len(),
+        1,
+        "exactly one bounded retry per drop: {events:?}"
     );
     assert!(
-        transcript_text.contains("recovered after retry"),
-        "retried content must be committed: {transcript_text}"
+        retry_statuses[0].contains("retrying (1/"),
+        "the retry status must be announced: {retry_statuses:?}"
     );
     assert!(
-        transcript_text.contains("provider stream dropped mid-response"),
-        "the runtime continuation message must be appended: {transcript_text}"
+        !retry_statuses[0].contains("preserving partial reply"),
+        "a thinking-only drop has no visible text to preserve: {retry_statuses:?}"
+    );
+
+    // The persisted conversation keeps the operator's turn and exactly one
+    // authoritative assistant answer — no synthetic `[runtime]` user message,
+    // no duplicated answer, no orphaned thinking-only assistant cell.
+    let transcript = events
+        .iter()
+        .rev()
+        .find_map(|event| match event {
+            Event::SessionUpdated { messages, .. } => Some(messages.clone()),
+            _ => None,
+        })
+        .expect("final SessionUpdated");
+    assert_eq!(
+        transcript
+            .iter()
+            .filter(|message| message.role == "user")
+            .count(),
+        1,
+        "the operator's own turn must be the only user message: {transcript:?}"
+    );
+    assert_eq!(
+        transcript
+            .iter()
+            .filter(|message| message.role == "assistant")
+            .count(),
+        1,
+        "exactly one authoritative assistant answer after recovery: {transcript:?}"
+    );
+    let transcript_text = transcript
+        .iter()
+        .flat_map(|message| message.content.iter())
+        .filter_map(|block| match block {
+            ContentBlock::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        !transcript_text.contains("[runtime]"),
+        "a retried turn must not insert a synthetic user message: {transcript_text}"
+    );
+    assert!(
+        !transcript_text.contains("hidden reasoning that no operator ever saw"),
+        "an invisible thinking-only fragment must not be persisted as reply text: {transcript_text}"
+    );
+    assert_eq!(
+        transcript_text
+            .matches("the one authoritative answer")
+            .count(),
+        1,
+        "the recovered answer must be persisted exactly once: {transcript_text}"
     );
 }
 
