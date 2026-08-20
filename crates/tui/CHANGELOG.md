@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- One placement table now decides which wire channel a message role belongs
+  in, and unrepresentable role/dialect pairs are refused at the outbound seam
+  (`DeepSeekClient::prepare_outbound_request`) instead of at the provider.
+  Chat Completions and OpenAI Responses used to drop an unfamiliar role
+  silently, Anthropic Messages forwarded `message.role` verbatim and took an
+  opaque provider 400 for it, and Google cloud-code was alone in failing
+  closed. Two behaviour changes fall out of writing that down:
+  an in-transcript `system` message on an Anthropic route (a compaction or
+  branch summary) and any unknown role on that route are now refused locally
+  with an error naming the message index, the role, and the wire — where
+  before they were sent and rejected remotely. Dropping them instead would
+  have silently deleted a whole compacted history, so this cell fails closed.
+  The dialects that already dropped these keep dropping them; nothing that
+  used to succeed now fails. The dead `"tool"` arm in the Responses adapter
+  is gone — nothing constructs that role.
+
 - Message roles are a closed `Role` enum (`crates/core/src/role.rs`) instead of
   a free-form `String` on `Message`. Four wire adapters each decided
   independently what an unfamiliar role meant, and a typo in a role string was

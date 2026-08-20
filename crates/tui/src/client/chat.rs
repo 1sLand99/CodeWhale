@@ -45,6 +45,8 @@ use crate::models::{
     model_is_openai_reasoning_family, model_supports_reasoning,
 };
 
+use super::prepared::WireDialect;
+use super::role_placement::{RolePlacement, role_placement};
 use super::{
     DeepSeekClient, ERROR_BODY_MAX_BYTES, SSE_BACKPRESSURE_HIGH_WATERMARK,
     SSE_BACKPRESSURE_SLEEP_MS, SSE_MAX_LINES_PER_CHUNK, acquire_stream_buffer,
@@ -2434,7 +2436,9 @@ fn build_chat_messages_with_reasoning(
     }
 
     for (message_index, message) in messages.iter().enumerate() {
-        let role = message.role.as_str();
+        // Which wire channel this message belongs in is decided by the shared
+        // placement table, not by an `if` chain local to this adapter.
+        let placement = role_placement(&message.role, WireDialect::ChatCompletions);
         let mut text_parts = Vec::new();
         let mut image_parts = Vec::new();
         let mut thinking_parts = Vec::new();
@@ -2518,8 +2522,8 @@ fn build_chat_messages_with_reasoning(
             }
         }
 
-        if role == "assistant" || role == crate::models::INTERRUPTED_ASSISTANT_ROLE {
-            let content = if role == crate::models::INTERRUPTED_ASSISTANT_ROLE {
+        if placement.is_assistant_channel() {
+            let content = if placement == RolePlacement::InterruptedAssistant {
                 format!(
                     "{}{}",
                     crate::models::INTERRUPTED_ASSISTANT_CONTEXT_PREFIX,
@@ -2579,7 +2583,7 @@ fn build_chat_messages_with_reasoning(
                 pending_tool_calls.clear();
             }
             out.push(msg);
-        } else if role == "system" {
+        } else if placement == RolePlacement::System {
             let content = text_parts.join("\n");
             if !content.trim().is_empty() {
                 let mut msg = json!({
@@ -2591,7 +2595,7 @@ fn build_chat_messages_with_reasoning(
                 }
                 out.push(msg);
             }
-        } else if role == "user" {
+        } else if placement == RolePlacement::User {
             let content = text_parts.join("\n");
             let has_text = !content.trim().is_empty();
             let has_images = !image_parts.is_empty();
@@ -2678,7 +2682,7 @@ fn build_chat_messages_with_reasoning(
                     out.push(json!({ "role": "user", "content": tool_result_images }));
                 }
             }
-        } else if role != "assistant" && role != crate::models::INTERRUPTED_ASSISTANT_ROLE {
+        } else if !placement.is_assistant_channel() {
             pending_tool_calls.clear();
         }
     }

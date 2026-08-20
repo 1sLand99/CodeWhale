@@ -1831,6 +1831,17 @@ impl DeepSeekClient {
         request: MessageRequest,
         stream: bool,
     ) -> Result<PreparedOutboundRequest> {
+        // Step 0: refuse role/dialect pairs this wire cannot represent, before
+        // any dialect builds a body. Doing it here rather than inside each
+        // adapter is what stops an unrepresentable role from being discovered
+        // as an opaque provider 400 (Anthropic) or from vanishing silently
+        // (the OpenAI-shaped dialects) depending on which adapter ran.
+        let outbound_dialect = if self.api_provider == crate::config::ApiProvider::Antigravity {
+            WireDialect::GoogleCloudCode
+        } else {
+            WireDialect::from_wire_format(self.wire_format)
+        };
+        role_placement::reject_unsupported_roles(&request.messages, outbound_dialect)?;
         let clamp_output_cap = |mut request: MessageRequest, route_limits: Option<RouteLimits>| {
             let route_cap =
                 self.effective_max_output_tokens_with_limits(&request.model, route_limits);
@@ -1871,7 +1882,8 @@ impl DeepSeekClient {
             }
         }
         let requested_effort = request.reasoning_effort.clone();
-        let dialect = WireDialect::from_wire_format(self.wire_format);
+        // Same value computed for the seam above; Antigravity already returned.
+        let dialect = outbound_dialect;
         // `stream` is the caller's entry point, not a wire fact: each dialect
         // decides for itself what the body's `stream` field says.
         let entrypoint = CallerStreamMode::from_stream_flag(stream);
@@ -3760,6 +3772,7 @@ mod ds4_tests;
 mod prepared;
 mod provider_native_search;
 mod responses;
+mod role_placement;
 mod stream_entry;
 
 #[cfg(test)]
