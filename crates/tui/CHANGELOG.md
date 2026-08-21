@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   output cap; the backend applies its own. Every other Responses route keeps
   the central cap on the wire, exactly as before.
 
+- The model-facing `lsp` tool now supports a bounded `read_lints` operation
+  for multi-file, workspace-relative LSP diagnostics without adding another
+  tool catalog entry (#4070).
+
 - HTTP 400 classification no longer calls an unsupported-parameter error a
   context-window overflow. Responses shape errors such as "Unsupported
   parameter: max_output_tokens" name a token-shaped field, which the generic
@@ -452,7 +456,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `pulse_brightness` rather than by sleeping on the 2s sine. Each of the
   invariants claimed was verified to fail the new suite when deliberately
   broken in the renderer.
-
 ## [0.9.10] - 2026-08-19
 
 - Show the full slash-command or `/model` completion row in a bounded, wrapping hover popover whenever narrow terminals truncate it, closing the remaining scoped gap from [#998](https://github.com/Hmbown/CodeWhale/issues/998). Thanks [@AiurArtanis](https://github.com/AiurArtanis) and [@formp3](https://github.com/formp3) for identifying the affected surfaces.
