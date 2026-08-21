@@ -755,6 +755,11 @@ async fn drain_remote_control_events(
             crate::remote_control::RemoteEvent::RuntimeCursor { .. } => {
                 // The controller has already retired the acknowledged prefix.
             }
+            crate::remote_control::RemoteEvent::FailedPreLease(error) => {
+                let status = format!("WEB MIRROR · could not start · {error} · /rc to retry");
+                app.status_message = Some(status.clone());
+                app.sticky_status = Some(StatusToast::new(status, StatusToastLevel::Error, None));
+            }
             crate::remote_control::RemoteEvent::Failed(error) => {
                 let status = format!(
                     "WEB MIRROR LOST · {error} · this terminal is unaffected; reconnecting waits briefly for the server lease to drain"
@@ -878,12 +883,11 @@ async fn drain_remote_control_events(
                         };
                         match result {
                             Ok(()) => {
-                                // First decision wins: the web answered, so
-                                // dismiss the local card for the same gate if
-                                // it is still up.
-                                if app.view_stack.top_kind()
-                                    == Some(crate::tui::views::ModalKind::Approval)
-                                {
+                                // First decision wins: the web answered this
+                                // gate, so dismiss exactly the matching card —
+                                // never an unrelated approval that happens to
+                                // be on top (concurrent approvals, fleet).
+                                if app.view_stack.top_matches_approval_gate(&gate) {
                                     app.view_stack.pop();
                                     app.needs_redraw = true;
                                 }
