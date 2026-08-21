@@ -1992,15 +1992,7 @@ pub(crate) async fn apply_command_result(
                 crate::remote_control::RemoteControlAction::Stop => {
                     app.remote_control.stop();
                     let status = app.remote_control.status_line();
-                    if app.remote_control.blocks_local_input() {
-                        app.sticky_status = Some(StatusToast::new(
-                            status.clone(),
-                            StatusToastLevel::Warning,
-                            None,
-                        ));
-                    } else {
-                        app.sticky_status = None;
-                    }
+                    app.sticky_status = None;
                     app.status_message = Some(status);
                 }
             },
@@ -2227,6 +2219,10 @@ pub(crate) async fn apply_approval_decision(
 
     match event.decision {
         ReviewDecision::Approved | ReviewDecision::ApprovedForSession => {
+            // Mirror mode: clear the shared-approval gate so a late web
+            // decision acks "no longer pending" instead of double-answering.
+            app.remote_control
+                .resolve_pending_approval(&event.tool_id, true);
             let _ = engine_handle.approve_tool_call(event.tool_id).await;
         }
         ReviewDecision::Denied => {
@@ -2237,6 +2233,8 @@ pub(crate) async fn apply_approval_decision(
             if !event.timed_out {
                 app.approval_session_denied.insert(event.approval_key);
             }
+            app.remote_control
+                .resolve_pending_approval(&event.tool_id, false);
             let _ = engine_handle.deny_tool_call(event.tool_id).await;
         }
         ReviewDecision::Abort => {

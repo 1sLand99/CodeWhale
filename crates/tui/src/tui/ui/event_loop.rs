@@ -2563,8 +2563,13 @@ pub(crate) async fn run_event_loop(
                         // user- or model-authored strings.
                         codewhale_telemetry::session_counters()
                             .bump(codewhale_telemetry::Counter::ApprovalModalShown);
-                        if app.remote_control.web_owns_turn_input() {
-                            let gate = app.remote_control.record_remote_approval(
+                        // Mirror semantics: the approval is always shown
+                        // locally. When the web mirror is attached to this
+                        // turn, ALSO record it so the web can answer; the
+                        // first decision wins (`resolve_pending_approval`
+                        // vs `take_pending_approval`).
+                        let shared_with_web = if app.remote_control.can_share_approval_with_web() {
+                            app.remote_control.record_remote_approval(
                                 &id,
                                 &tool_name,
                                 &description,
@@ -2572,18 +2577,10 @@ pub(crate) async fn run_event_loop(
                                 &approval_key,
                                 intent_summary.as_deref(),
                             );
-                            app.status_message = Some(format!(
-                                "Remote approval required for '{tool_name}' ({gate}); decide in the web session."
-                            ));
-                            app.sticky_status = Some(StatusToast::new(
-                                format!(
-                                    "REMOTE CONTROL · approval waiting in web · {tool_name} · /rc stop"
-                                ),
-                                StatusToastLevel::Warning,
-                                None,
-                            ));
-                            continue;
-                        }
+                            true
+                        } else {
+                            false
+                        };
                         use crate::core::authority::ApprovalRequestDisposition;
                         // One disposition path for every ApprovalRequired (#4412):
                         // session denial, Full Access policy hold, session/FA
@@ -2719,33 +2716,18 @@ pub(crate) async fn run_event_loop(
                                     );
                                 }
                                 app.status_message = Some(format!(
-                                    "Approval required for '{tool_name}': {description}"
+                                    "Approval required for '{tool_name}': {description}{}",
+                                    if shared_with_web {
+                                        " — decide here or on the web"
+                                    } else {
+                                        ""
+                                    }
                                 ));
                             }
                         }
                     }
                     EngineEvent::UserInputRequired { id, request } => {
-                        if app.remote_control.web_owns_turn_input() {
-                            // Remote-control v1 deliberately admits only prompts, approval
-                            // decisions, and run control. Do not leak a second controller
-                            // through a local structured-question modal.
-                            log_sensitive_event(
-                                "tool.user_input.cancelled_remote_control",
-                                serde_json::json!({
-                                    "tool_id": id.clone(),
-                                    "session_id": app.current_session_id,
-                                }),
-                            );
-                            let _ = engine_handle.cancel_user_input(id).await;
-                            app.pending_user_input_prompt = None;
-                            let notice = "A structured question was cancelled because the web owns input; ask it as a normal web prompt instead.".to_string();
-                            app.push_status_toast(
-                                notice.clone(),
-                                StatusToastLevel::Warning,
-                                Some(8_000),
-                            );
-                            app.status_message = Some(notice);
-                        } else if should_suppress_user_input_prompt(app) {
+                        if should_suppress_user_input_prompt(app) {
                             // A question may have been planned just before the
                             // user switched to Auto-Review. Cancel the stale
                             // request instead of opening a modal under an Auto
@@ -4966,9 +4948,6 @@ pub(crate) async fn run_event_loop(
                 _ if is_forced_submit_key(key) => {
                     let action = app.decide_composer_submit(ComposerSubmitChord::CtrlEnter);
                     if let Some(input) = app.submit_input() {
-                        if reject_local_input_while_remote(app, &input) {
-                            continue;
-                        }
                         if handle_bang_shell_input(app, &engine_handle, &input).await? {
                             continue;
                         }
@@ -5023,9 +5002,6 @@ pub(crate) async fn run_event_loop(
                         }
                     }
                     if let Some(input) = app.handle_composer_enter() {
-                        if reject_local_input_while_remote(app, &input) {
-                            continue;
-                        }
                         // `# foo` quick-add (#492) — when memory is enabled,
                         // a single line starting with `#` (but not `##` /
                         // `#!` shebangs / Markdown headings the user might

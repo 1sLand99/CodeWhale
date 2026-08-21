@@ -459,11 +459,6 @@ struct ActiveRelayRun {
 #[derive(Debug, Clone)]
 pub struct PendingRemoteApproval {
     pub tool_id: String,
-    pub tool_name: String,
-    pub description: String,
-    pub input: Value,
-    pub approval_key: String,
-    pub intent_summary: Option<String>,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -724,7 +719,7 @@ impl RemoteControlController {
                 // beyond this attachment; resend every pending run now.
                 self.flush_all_pending();
                 self.status = Status::Connected;
-                self.status_detail = "web owns prompts and approvals".to_string();
+                self.status_detail = "web mirror connected".to_string();
                 self.ownership_blocked_until = None;
                 self.account_ref = Some(account_ref.clone());
                 self.target_ref = Some(target_ref.clone());
@@ -821,43 +816,67 @@ impl RemoteControlController {
         }
     }
 
-    pub fn blocks_local_input(&self) -> bool {
-        let server_may_still_own = match self.status {
-            Status::Connecting | Status::Connected | Status::Stopping => true,
-            Status::Failed => self
-                .ownership_blocked_until
-                .is_some_and(|deadline| Instant::now() < deadline),
-            Status::Off => false,
+    /// Whether the web mirror can carry an approval decision right now.
+    ///
+    /// `Connecting` deliberately does not qualify: there is not yet an
+    /// attachment/run cursor able to carry a typed approval, so the local
+    /// card stays the only actionable surface until `Connected`. A
+    /// transport failure also disqualifies — a dead relay cannot deliver a
+    /// decision, and the local card remains the source of truth either way.
+    ///
+    /// Mirror semantics: this never gates *local* input. It only decides
+    /// whether the approval card is *also* shared with the web.
+    pub fn can_share_approval_with_web(&self) -> bool {
+        let attached = match self.status {
+            // A connection alone is not enough. Until a concrete typed turn
+            // id is bound, `record_remote_approval` has nowhere safe to send
+            // a decision, so the card stays local-only.
+            Status::Connected | Status::Stopping => self.active_run.is_some(),
+            Status::Off | Status::Connecting | Status::Failed => false,
         };
-        server_may_still_own && !self.applying_remote_command
+        attached && !self.applying_remote_command
     }
 
-    /// Whether an approval or structured question can be handed to the web.
-    ///
-    /// `Connecting` deliberately does not qualify. A server lease may be in
-    /// flight, so new local prompts stay blocked, but there is not yet an
-    /// attachment/run cursor able to carry a typed approval. Keeping the
-    /// approval local until `Connected` avoids hiding an actionable decision
-    /// behind a web surface that cannot receive it yet.
-    pub fn web_owns_turn_input(&self) -> bool {
-        let server_owns = match self.status {
-            // A connection alone is not a turn owner. Until a concrete typed
-            // turn id is bound, `record_remote_approval` has nowhere safe to
-            // send a decision and the local card must remain actionable.
-            Status::Connected | Status::Stopping => self.active_run.is_some(),
-            // After transport failure the old server lease may still own the
-            // turn. Keep decisions fail-closed; `OwnershipRestored` reopens
-            // every pending approval after the lease deadline.
-            Status::Failed => self
-                .ownership_blocked_until
-                .is_some_and(|deadline| Instant::now() < deadline),
-            Status::Off | Status::Connecting => false,
-        };
-        server_owns && !self.applying_remote_command
+    /// Record that the *local* surface answered an approval, so a late web
+    /// decision for the same tool is acknowledged as "no longer pending"
+    /// instead of double-answering the engine. First decision wins; the
+    /// other surface is told.
+    pub fn resolve_pending_approval(&mut self, tool_id: &str, approved: bool) -> bool {
+        let gate = projected_approval_id(tool_id);
+        if self.pending_approvals.remove(&gate).is_none() {
+            return false;
+        }
+        if let Some(active) = self.active_run.clone() {
+            self.upload_envelope(
+                &active.run_id,
+                "approval.resolved",
+                Some(&active.turn_id),
+                json!({
+                    "id": gate,
+                    "approval_id": gate,
+                    "decision": if approved { "approved" } else { "denied" },
+                    "decided_by": "terminal",
+                }),
+            );
+        }
+        true
     }
 
     pub fn set_applying_remote_command(&mut self, value: bool) {
         self.applying_remote_command = value;
+    }
+
+    /// Test-only: put the controller into the exact state a live connected
+    /// mirror with an attached run would be in, without a relay worker.
+    #[cfg(test)]
+    pub(crate) fn force_mirror_connected_for_tests(&mut self, run_id: &str, turn_id: &str) {
+        self.status = Status::Connected;
+        self.status_detail = "web mirror connected".to_string();
+        self.attached_run_id = Some(run_id.to_string());
+        self.active_run = Some(ActiveRelayRun {
+            run_id: run_id.to_string(),
+            turn_id: turn_id.to_string(),
+        });
     }
 
     pub fn claim_command(
@@ -1000,20 +1019,15 @@ impl RemoteControlController {
         tool_id: &str,
         tool_name: &str,
         description: &str,
-        input: &Value,
-        approval_key: &str,
-        intent_summary: Option<&str>,
+        _input: &Value,
+        _approval_key: &str,
+        _intent_summary: Option<&str>,
     ) -> String {
         let gate = projected_approval_id(tool_id);
         self.pending_approvals.insert(
             gate.clone(),
             PendingRemoteApproval {
                 tool_id: tool_id.to_string(),
-                tool_name: tool_name.to_string(),
-                description: description.to_string(),
-                input: input.clone(),
-                approval_key: approval_key.to_string(),
-                intent_summary: intent_summary.map(ToString::to_string),
             },
         );
         if let Some(active) = self.active_run.clone() {
@@ -1572,17 +1586,15 @@ pub fn target_ref(workspace: &Path) -> String {
 /// falls back to the opaque account and runner receipts.
 pub fn remote_control_banner(account_ref: &str, runner_id: &str, run_url: Option<&str>) -> String {
     match run_url {
-        Some(url) => format!("REMOTE CONTROL · {url} · /rc stop returns input here"),
-        None => format!(
-            "REMOTE CONTROL · account {account_ref} · runner {runner_id} · /rc stop returns input here"
-        ),
+        Some(url) => format!("WEB MIRROR · {url} · /rc stop"),
+        None => format!("WEB MIRROR · account {account_ref} · runner {runner_id} · /rc stop"),
     }
 }
 
 /// Transcript note announcing where the live session can be followed.
 pub fn remote_control_link_notice(run_url: &str) -> String {
     format!(
-        "Remote control is live at {run_url} — run /rc open to open it in your browser, or /rc link to print it."
+        "Remote control is live at {run_url} — run /rc open to open it in your browser, or /rc link to print it. Both surfaces stay usable; one turn runs at a time."
     )
 }
 
@@ -3548,12 +3560,12 @@ mod tests {
         );
         assert_eq!(
             with_link,
-            "REMOTE CONTROL · https://app.codewhale.net/session?run=run_fixture · /rc stop returns input here"
+            "WEB MIRROR · https://app.codewhale.net/session?run=run_fixture · /rc stop"
         );
         let without_link = remote_control_banner("account_fixture", "runner_fixture", None);
         assert_eq!(
             without_link,
-            "REMOTE CONTROL · account account_fixture · runner runner_fixture · /rc stop returns input here"
+            "WEB MIRROR · account account_fixture · runner runner_fixture · /rc stop"
         );
         let notice =
             remote_control_link_notice("https://app.codewhale.net/session?run=run_fixture");
@@ -3613,27 +3625,26 @@ mod tests {
     }
 
     #[test]
-    fn connecting_blocks_new_prompts_but_keeps_approvals_local_until_attached() {
+    fn connecting_never_blocks_local_prompts_and_shares_approvals_only_once_attached() {
         let mut controller = RemoteControlController::default();
         controller.status = Status::Connecting;
         controller.status_detail = "waiting for account authorization".to_string();
+        // Mirror semantics: there is no local-input gate at all. The only
+        // shared-decision surface is the approval card, and only once a
+        // typed turn is bound.
         assert!(
-            controller.blocks_local_input(),
-            "a possible server lease must prevent a second local prompt"
-        );
-        assert!(
-            !controller.web_owns_turn_input(),
+            !controller.can_share_approval_with_web(),
             "without a confirmed run cursor the web cannot receive an approval"
         );
 
         controller.status = Status::Connected;
         controller.attached_run_id = Some("run_fixture".to_string());
         assert!(
-            !controller.web_owns_turn_input(),
+            !controller.can_share_approval_with_web(),
             "a connected idle session has no typed turn to receive approvals"
         );
         assert!(controller.attach_current_local_turn(Some("turn_fixture")));
-        assert!(controller.web_owns_turn_input());
+        assert!(controller.can_share_approval_with_web());
     }
 
     #[test]
@@ -3761,12 +3772,12 @@ mod tests {
             Some(RemoteEvent::Connected { .. })
         ));
         assert!(
-            !controller.web_owns_turn_input(),
+            !controller.can_share_approval_with_web(),
             "a connected attachment without a bound typed turn keeps approvals local"
         );
         assert!(controller.attach_current_local_turn(Some("turn_existing")));
         assert!(
-            controller.web_owns_turn_input(),
+            controller.can_share_approval_with_web(),
             "the bound active turn can carry typed approvals to the web"
         );
         assert!(controller.has_active_run());
@@ -3853,7 +3864,7 @@ mod tests {
         );
         assert!(controller.active_run_matches("run_fixture"));
         assert!(
-            !controller.web_owns_turn_input(),
+            !controller.can_share_approval_with_web(),
             "a pending dispatch has no typed turn id, so approvals stay local"
         );
         assert!(worker_rx.try_recv().is_err());
@@ -3874,7 +3885,7 @@ mod tests {
         assert_eq!(envelopes[0]["turn_id"], "turn_started_later");
         let started_envelope = envelopes[0].clone();
         assert!(
-            controller.web_owns_turn_input(),
+            controller.can_share_approval_with_web(),
             "typed TurnStarted promotes the dispatch into a web-owned active turn"
         );
 
@@ -3939,7 +3950,7 @@ mod tests {
         assert!(controller.has_active_run());
         assert!(controller.release_unstarted_local_turn());
         assert!(!controller.has_active_run());
-        assert!(!controller.web_owns_turn_input());
+        assert!(!controller.can_share_approval_with_web());
         assert!(
             !controller.release_unstarted_local_turn(),
             "reconciling the same idle boundary is idempotent"
@@ -4414,14 +4425,28 @@ mod tests {
         );
     }
 
-    #[test]
-    fn disconnected_remote_owner_keeps_local_input_locked_until_lease_expiry() {
+    #[tokio::test]
+    async fn failed_relay_keeps_reconnect_blocked_until_lease_expiry() {
         let mut controller = RemoteControlController::default();
         controller.status = Status::Failed;
         controller.ownership_blocked_until = Some(Instant::now() + Duration::from_secs(90));
-        assert!(controller.blocks_local_input());
+        // Mirror semantics: local input is never locked, but reconnecting
+        // while the server lease may still be live is refused — the web must
+        // not see two runners for the same session.
+        let start = RemoteStart {
+            workspace_label: "fixture".to_string(),
+            target_ref: "target_fixture".to_string(),
+            session_id: "session_fixture".to_string(),
+            runtime_version: "0.9.1".to_string(),
+            runtime_commit: "a".repeat(40),
+            journal_dir: None,
+            git_remote: None,
+        };
+        assert!(controller.start(start.clone()).is_err());
+        // The web cannot answer shared approvals while the relay is failed.
+        assert!(!controller.can_share_approval_with_web());
         controller.ownership_blocked_until = Some(Instant::now() - Duration::from_secs(1));
-        assert!(!controller.blocks_local_input());
+        assert!(controller.start(start).is_ok());
     }
 
     #[test]
@@ -4433,11 +4458,6 @@ mod tests {
             "approval_fixture".to_string(),
             PendingRemoteApproval {
                 tool_id: "tool_fixture".to_string(),
-                tool_name: "edit".to_string(),
-                description: "Edit fixture".to_string(),
-                input: Value::Null,
-                approval_key: "approval_fixture".to_string(),
-                intent_summary: Some("fixture".to_string()),
             },
         );
 
@@ -4449,22 +4469,21 @@ mod tests {
         assert!(matches!(
             event,
             Some(RemoteEvent::OwnershipRestored { approvals })
-                if approvals.len() == 1
-                    && approvals[0].approval_key == "approval_fixture"
-                    && approvals[0].tool_id == "tool_fixture"
+                if approvals.len() == 1 && approvals[0].tool_id == "tool_fixture"
         ));
         assert_eq!(controller.status, Status::Off);
         assert!(controller.pending_approvals.is_empty());
     }
 
     #[test]
-    fn cancelling_a_connect_keeps_input_locked_and_reconnect_blocked() {
+    fn cancelling_a_connect_keeps_reconnect_blocked_until_lease_drain() {
         let mut controller = RemoteControlController::default();
         controller.status = Status::Connecting;
         controller.stop();
 
         assert_eq!(controller.status, Status::Failed);
-        assert!(controller.blocks_local_input());
+        // Mirror semantics: nothing about a cancelled connect locks local
+        // input; reconnect stays blocked until the possible lease drains.
         let result = controller.start(RemoteStart {
             workspace_label: "fixture".to_string(),
             target_ref: "target_fixture".to_string(),
@@ -4507,7 +4526,10 @@ mod tests {
                 .map(|entry| &entry.envelope),
             Some(&exact)
         );
-        assert!(controller.blocks_local_input());
+        // Fail-closed: the web can no longer answer shared approvals, and
+        // reconnecting waits out the possible server lease.
+        assert!(!controller.can_share_approval_with_web());
+        assert!(controller.ownership_blocked_until.is_some());
     }
 
     #[tokio::test]
@@ -4663,14 +4685,14 @@ mod tests {
     }
 
     #[test]
-    fn failed_stop_keeps_ownership_locked_with_no_dual_ownership() {
+    fn failed_stop_stays_fail_closed_with_no_dual_ownership() {
         let (mut controller, _worker_rx, event_tx) = wired_controller();
         controller.status = Status::Connected;
         controller.stop();
         assert_eq!(controller.status, Status::Stopping);
         assert!(
-            controller.blocks_local_input(),
-            "stopping must not return local input before confirmation"
+            !controller.can_share_approval_with_web(),
+            "stopping must close the shared-decision channel before confirmation"
         );
 
         // The worker could not confirm the drain or the offline heartbeat.
@@ -4682,8 +4704,8 @@ mod tests {
         let event = controller.try_next_event().unwrap();
         assert!(matches!(event, RemoteEvent::Failed(_)));
         assert!(
-            controller.blocks_local_input(),
-            "an unconfirmed stop must keep ownership locked through the lease expiry"
+            !controller.can_share_approval_with_web(),
+            "an unconfirmed stop must stay fail-closed through the lease expiry"
         );
         assert!(controller.ownership_blocked_until.is_some());
         assert!(controller.status_line().contains("disconnected"));
@@ -5112,8 +5134,8 @@ mod tests {
             "losing integrity state can never be silent"
         );
         assert!(
-            controller.blocks_local_input(),
-            "a failed-closed relay keeps ownership locked"
+            !controller.can_share_approval_with_web(),
+            "a failed-closed relay keeps the shared-decision channel closed"
         );
     }
 

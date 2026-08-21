@@ -1171,16 +1171,9 @@ pub(crate) async fn dispatch_composer_message(
     recovery: DispatchRecovery,
     action: ComposerSubmitAction,
 ) -> Result<()> {
-    if app.remote_control.blocks_local_input() {
-        app.input = message.display;
-        app.cursor_position = app.input.chars().count();
-        let status =
-            "Web remote control owns prompts. Use /rc stop to return input to this terminal."
-                .to_string();
-        app.status_message = Some(status.clone());
-        app.push_status_toast(status, StatusToastLevel::Warning, Some(6_000));
-        return Ok(());
-    }
+    // Mirror semantics: a connected web mirror never blocks local prompts.
+    // One-turn-at-a-time is enforced by is_loading/dispatch_in_flight below,
+    // which equally governs local and remote prompts.
     // Agent focus: the composer addresses one child's fork, not the main
     // session. The follow-up is real runtime work (Op::FollowUpSubAgent); the
     // main transcript keeps a receipt line and the focused view echoes the

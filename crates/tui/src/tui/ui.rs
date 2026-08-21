@@ -729,13 +729,13 @@ async fn drain_remote_control_events(
                     &runner_id,
                     links.run_url.as_deref(),
                 );
-                let ownership = if active_local_turn && !attached_active_turn {
-                    "Finish the visible local approval to complete the handoff. New prompts stay locked until then."
+                let mirror_note = if active_local_turn && !attached_active_turn {
+                    "A local approval card still owns the current decision; the web joins this turn once it closes."
                 } else {
-                    "The web now owns new prompts and approvals. This terminal remains readable."
+                    "Web mirror connected. Both surfaces can prompt and decide; one turn runs at a time."
                 };
                 app.add_message(HistoryCell::System {
-                    content: format!("{status}\n\n{ownership}"),
+                    content: format!("{status}\n\n{mirror_note}"),
                 });
                 if let Some(run_url) = links.run_url.as_deref() {
                     app.add_message(HistoryCell::System {
@@ -757,33 +757,25 @@ async fn drain_remote_control_events(
             }
             crate::remote_control::RemoteEvent::Failed(error) => {
                 let status = format!(
-                    "REMOTE CONTROL LOST · {error} · input stays locked until the server lease expires"
+                    "WEB MIRROR LOST · {error} · this terminal is unaffected; reconnecting waits briefly for the server lease to drain"
                 );
                 app.status_message = Some(status.clone());
                 app.sticky_status = Some(StatusToast::new(status, StatusToastLevel::Error, None));
             }
             crate::remote_control::RemoteEvent::Stopped => {
                 app.sticky_status = None;
-                app.status_message =
-                    Some("Remote control stopped; this terminal owns input again.".to_string());
+                app.status_message = Some("Web mirror stopped.".to_string());
             }
             crate::remote_control::RemoteEvent::OwnershipRestored { approvals } => {
                 app.sticky_status = None;
                 app.status_message = Some(
-                    "The remote lease expired safely; this terminal owns input again.".to_string(),
+                    "The web mirror lease expired; pending approvals stay actionable here."
+                        .to_string(),
                 );
-                for approval in approvals {
-                    push_approval_request_view(
-                        app,
-                        &approval.tool_id,
-                        &approval.tool_name,
-                        &approval.description,
-                        &approval.input,
-                        &approval.approval_key,
-                        approval.intent_summary.as_deref(),
-                        config.approval_default_selection(),
-                    );
-                }
+                // Mirror semantics: approval cards were never hidden from
+                // this terminal, so there is nothing to re-show. The drained
+                // list only tells us the web can no longer answer them.
+                let _ = approvals;
             }
             crate::remote_control::RemoteEvent::Command {
                 run_id,
@@ -816,7 +808,7 @@ async fn drain_remote_control_events(
                                 &command,
                                 "failed",
                                 Some(
-                                    "The exact session is already running a turn; no second owner was started."
+                                    "A turn is already running; the next prompt starts when it finishes."
                                         .to_string(),
                                 ),
                             );
@@ -885,9 +877,23 @@ async fn drain_remote_control_events(
                             engine_handle.deny_tool_call(tool_id).await
                         };
                         match result {
-                            Ok(()) => app
-                                .remote_control
-                                .acknowledge(&run_id, seq, &command, "applied", None),
+                            Ok(()) => {
+                                // First decision wins: the web answered, so
+                                // dismiss the local card for the same gate if
+                                // it is still up.
+                                if app.view_stack.top_kind()
+                                    == Some(crate::tui::views::ModalKind::Approval)
+                                {
+                                    app.view_stack.pop();
+                                    app.needs_redraw = true;
+                                }
+                                app.status_message = Some(format!(
+                                    "Approval decided on the web ({}).",
+                                    if approved { "approved" } else { "denied" }
+                                ));
+                                app.remote_control
+                                    .acknowledge(&run_id, seq, &command, "applied", None);
+                            }
                             Err(error) => app.remote_control.acknowledge(
                                 &run_id,
                                 seq,
@@ -2818,25 +2824,6 @@ pub(crate) struct SteerPausedSnapshot {
     tokens_used: u64,
     time_used_seconds: u64,
     continuation_count: u32,
-}
-
-fn reject_local_input_while_remote(app: &mut App, input: &str) -> bool {
-    if !app.remote_control.blocks_local_input() || is_remote_control_command(input) {
-        return false;
-    }
-    app.input = input.to_string();
-    app.cursor_position = app.input.chars().count();
-    let status = "Web remote control owns prompts. Use /rc stop to return input to this terminal."
-        .to_string();
-    app.status_message = Some(status.clone());
-    app.push_status_toast(status, StatusToastLevel::Warning, Some(6_000));
-    true
-}
-
-fn is_remote_control_command(input: &str) -> bool {
-    input.split_whitespace().next().is_some_and(|value| {
-        value.eq_ignore_ascii_case("/rc") || value.eq_ignore_ascii_case("/remote-control")
-    })
 }
 
 fn use_bundled_constitution(app: &mut App, config: &Config) {

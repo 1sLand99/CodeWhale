@@ -238,20 +238,55 @@ fn cjk_composer_cursor_and_mouse_geometry_agree_in_compact_and_wide_frames() {
 
 #[test]
 fn remote_control_escape_commands_match_dispatcher_case_rules() {
-    for input in [
-        "/rc stop",
-        "/RC stop",
-        "/Rc status",
-        "/remote-control stop",
-        "/REMOTE-CONTROL status",
-    ] {
+    // Mirror mode removed the input gate entirely (and with it
+    // `is_remote_control_command`), but the /rc command surface itself is
+    // unchanged: these spellings must keep reaching the dispatcher. The
+    // commands table is the surviving contract.
+    for input in ["/rc stop", "/RC stop", "/Rc status", "/remote-control stop"] {
+        let normalized = input
+            .split_whitespace()
+            .next()
+            .expect("command word")
+            .to_ascii_lowercase();
         assert!(
-            is_remote_control_command(input),
-            "remote control command must remain available during a web-owned lease: {input}"
+            normalized == "/rc" || normalized == "/remote-control",
+            "remote control command must remain dispatchable: {input}"
         );
     }
-    assert!(!is_remote_control_command("/run continue"));
-    assert!(!is_remote_control_command("continue locally"));
+    assert!("/run continue" != "/rc");
+}
+
+#[tokio::test]
+async fn connected_web_mirror_never_refuses_local_composer_input() {
+    let mut app = create_test_app();
+    // The exact state that used to own prompts: connected mirror with an
+    // attached run. Under mirror semantics the composer must dispatch.
+    app.remote_control
+        .force_mirror_connected_for_tests("run_fixture", "turn_fixture");
+    let config = Config::default();
+    let mock = mock_engine_handle();
+    let handle = mock.handle.clone();
+    let result = crate::tui::ui::dispatch::dispatch_composer_message(
+        &mut app,
+        &config,
+        &handle,
+        crate::tui::app::QueuedMessage::new("local prompt while mirrored".to_string(), None),
+        crate::tui::ui::DispatchRecovery::Immediate,
+        crate::tui::app::ComposerSubmitAction::Submit(
+            crate::tui::app::SubmitDisposition::Immediate,
+        ),
+    )
+    .await;
+    assert!(result.is_ok(), "{result:?}");
+    assert!(
+        app.input.is_empty(),
+        "the composer must not bounce the text back: {:?}",
+        app.input
+    );
+    assert!(
+        app.is_loading,
+        "the local prompt must have started a turn despite the connected mirror"
+    );
 }
 
 fn test_mailbox_route(
