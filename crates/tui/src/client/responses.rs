@@ -55,8 +55,12 @@ pub(super) fn build_responses_body_for_provider(
     // Every Responses route receives the same resolved request envelope as
     // Chat and Messages. Omitting this field let auxiliary Responses calls
     // escape the central route cap and made preview unable to prove the wire
-    // allowance.
-    if request.max_tokens > 0 {
+    // allowance. The Codex OAuth backend is the exception: its Responses
+    // endpoint rejects the field outright ("Unsupported parameter:
+    // max_output_tokens"), so its requests carry no client-side output cap
+    // instead of failing every call — the same lesson the Chat path learned
+    // in `apply_provider_token_limit`.
+    if request.max_tokens > 0 && provider != ApiProvider::OpenaiCodex {
         body["max_output_tokens"] = json!(request.max_tokens);
     }
     if is_deepseek {

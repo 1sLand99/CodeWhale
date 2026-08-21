@@ -118,7 +118,10 @@ async fn responses_stream_retries_rate_limited_request() {
     let prepared = client
         .prepare_outbound_request(request, true)
         .expect("responses request prepares");
-    assert_eq!(prepared.body["max_output_tokens"], json!(4_096));
+    // The Codex OAuth Responses endpoint rejects `max_output_tokens`
+    // ("Unsupported parameter"), so the prepared body must omit it even
+    // though the resolved request envelope carries a cap.
+    assert!(prepared.body.get("max_output_tokens").is_none());
     let mut stream = client.handle_responses_stream(&prepared).await.unwrap();
 
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
@@ -137,7 +140,10 @@ async fn responses_stream_retries_rate_limited_request() {
     assert_eq!(requests.len(), 2);
     for request in requests {
         let body: Value = serde_json::from_slice(&request.body).expect("Responses JSON");
-        assert_eq!(body["max_output_tokens"], json!(4_096));
+        assert!(
+            body.get("max_output_tokens").is_none(),
+            "Codex Responses body must not name the unsupported output cap: {body}"
+        );
     }
 }
 
@@ -571,6 +577,29 @@ fn deepseek_flash_responses_body_uses_stateless_0731_contract() {
         body.pointer("/input/0/content/0/text"),
         Some(&json!("preserve this tool-loop reasoning"))
     );
+}
+
+#[test]
+fn codex_responses_body_omits_the_output_cap_the_backend_rejects() {
+    // The Codex OAuth Responses endpoint answers `max_output_tokens` with
+    // "Unsupported parameter: max_output_tokens", which killed every
+    // gpt-5.6-sol sub-agent turn. The omission must be route-specific:
+    // other Responses providers keep the central cap on the wire.
+    let mut request = minimal_responses_request();
+    request.max_tokens = 4_096;
+
+    let codex = build_responses_body_for_provider(&request, ApiProvider::OpenaiCodex);
+    assert!(
+        codex.get("max_output_tokens").is_none(),
+        "Codex Responses body names a parameter its backend rejects: {codex}"
+    );
+    assert!(
+        codex.get("max_tokens").is_none() && codex.get("max_completion_tokens").is_none(),
+        "no alternate output-cap spelling may sneak onto the Codex wire: {codex}"
+    );
+
+    let deepseek = build_responses_body_for_provider(&request, ApiProvider::Deepseek);
+    assert_eq!(deepseek["max_output_tokens"], json!(4_096));
 }
 
 #[test]

@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Every Codex OAuth Responses request carried `max_output_tokens`, a parameter
+  that endpoint rejects outright ("Unsupported parameter: max_output_tokens"),
+  so every gpt-5.6-sol turn — including every sub-agent on that route — failed
+  at the first request. Codex Responses bodies now ship without a client-side
+  output cap; the backend applies its own. Every other Responses route keeps
+  the central cap on the wire, exactly as before.
+
 - xAI device login validated nothing about the URL it opened. The
   `verification_uri` from the device-code response went straight to
   `webbrowser::open` with no parse, no scheme check and no credential check, so a
