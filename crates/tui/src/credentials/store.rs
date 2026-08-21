@@ -102,6 +102,33 @@ pub(crate) fn with_provider_write_lock<T>(provider_id: &str, body: impl FnOnce()
     body()
 }
 
+/// Run `body` holding every listed provider's write lock.
+///
+/// Locks are acquired in sorted, deduplicated order so a full logout that
+/// covers every slot cannot deadlock with a per-provider save (which holds
+/// only one). Callers that also take the xAI OAuth lifecycle lock must take
+/// that lock first, matching the documented xAI-then-config order.
+pub(crate) fn with_provider_write_locks<T>(
+    provider_ids: impl IntoIterator<Item = impl AsRef<str>>,
+    body: impl FnOnce() -> T,
+) -> T {
+    let mut ids: Vec<String> = provider_ids
+        .into_iter()
+        .map(|id| id.as_ref().to_string())
+        .collect();
+    ids.sort();
+    ids.dedup();
+    let locks: Vec<Arc<Mutex<()>>> = ids.iter().map(|id| provider_lock(id)).collect();
+    let _guards: Vec<_> = locks
+        .iter()
+        .map(|lock| {
+            lock.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+        })
+        .collect();
+    body()
+}
+
 /// Default in-memory store. Real stores are injected; this one backs tests and
 /// keeps the trait honest about its own contract — including the serialization
 /// guarantee, which is only observable through `modify`.

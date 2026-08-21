@@ -11991,6 +11991,16 @@ pub fn clear_api_key() -> Result<()> {
 }
 
 fn clear_api_key_unlocked() -> Result<()> {
+    // Same read-modify-write as the saves: hold every durable slot's write
+    // lock across the config-document mutation and the store deletes so a
+    // concurrent save cannot interleave and leave the two disagreeing.
+    crate::credentials::store::with_provider_write_locks(
+        known_secret_store_slots(),
+        clear_api_key_under_slot_locks,
+    )
+}
+
+fn clear_api_key_under_slot_locks() -> Result<()> {
     // Strip api_key entries from config.toml, including provider-scoped
     // nested entries. Clearing a config file must not trigger platform
     // credential prompts. Clears target the same user-global document that
@@ -12057,8 +12067,10 @@ fn clear_all_provider_api_keys_from_secret_store(
     secrets: codewhale_secrets::Secrets,
 ) -> Vec<String> {
     let mut failures = Vec::new();
-    let store =
-        crate::credentials::store::SecretStoreCredentials::new(secrets, known_secret_store_slots());
+    let store = crate::credentials::store::SecretStoreCredentials::new(
+        secrets.clone(),
+        known_secret_store_slots(),
+    );
     // `list` enumerates the slots that actually hold something, without
     // exposing any value — the deduplication that used to live here is now the
     // slot table's job.
@@ -12070,9 +12082,10 @@ fn clear_all_provider_api_keys_from_secret_store(
         }
     };
     for entry in stored {
-        // Delete goes through the store's own per-provider write lock, so a
-        // logout racing a save cannot delete the key that save just wrote.
-        if let Err(error) = store.delete(&entry.provider_id) {
+        // The caller already holds this slot's write lock for the whole
+        // logout. Delete through the backend rather than `store.delete`,
+        // which would re-acquire the same non-reentrant mutex and deadlock.
+        if let Err(error) = secrets.delete(&entry.provider_id) {
             failures.push(format!("{}: {error}", entry.provider_id));
         }
     }
@@ -12094,6 +12107,19 @@ pub fn clear_active_provider_api_key(provider: &str) -> Result<()> {
 }
 
 fn clear_active_provider_api_key_unlocked(provider: &str) -> Result<()> {
+    let slot = ApiProvider::all()
+        .iter()
+        .find(|candidate| candidate.as_str() == provider)
+        .map(|candidate| provider_secret_store_slot(*candidate));
+    match slot {
+        Some(slot) => crate::credentials::store::with_provider_write_lock(slot, || {
+            clear_active_provider_api_key_under_lock(provider)
+        }),
+        None => clear_active_provider_api_key_under_lock(provider),
+    }
+}
+
+fn clear_active_provider_api_key_under_lock(provider: &str) -> Result<()> {
     let config_path = credential_config_path()
         .context("Failed to resolve config path while clearing API keys.")?;
 

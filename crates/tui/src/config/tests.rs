@@ -1,5 +1,5 @@
 use super::*;
-use crate::test_support::{EnvVarGuard, lock_test_env};
+use crate::test_support::{EnvVarGuard, env_scope_ticket, join_env_scope, lock_test_env};
 use std::collections::HashMap;
 use std::env;
 use std::ffi::OsString;
@@ -3218,6 +3218,186 @@ fn single_provider_logout_clears_secret_store_slot() -> Result<()> {
         provider_secret_store_api_key(&Config::default(), ApiProvider::Openrouter),
         None,
         "the read chain must not find a cleared credential"
+    );
+    Ok(())
+}
+
+fn inject_plaintext_openrouter_key(config_path: &std::path::Path) -> Result<()> {
+    let contents = fs::read_to_string(config_path)?;
+    anyhow::ensure!(
+        contents.contains("[providers.openrouter]"),
+        "save must have created the provider table: {contents}"
+    );
+    fs::write(
+        config_path,
+        contents.replace(
+            "[providers.openrouter]",
+            "[providers.openrouter]\napi_key = \"logout-lock-plaintext\"",
+        ),
+    )?;
+    Ok(())
+}
+
+struct ReleaseOnDrop(Option<mpsc::Sender<()>>);
+
+impl Drop for ReleaseOnDrop {
+    fn drop(&mut self) {
+        if let Some(tx) = self.0.take() {
+            let _ = tx.send(());
+        }
+    }
+}
+
+/// Logout used to mutate the config document and (for `/logout`) the durable
+/// slot with no write lock held, so a save racing a logout on one slot could
+/// leave the store and the config file disagreeing. Both logout paths now
+/// hold that provider's lock across the whole sequence.
+#[test]
+fn single_provider_logout_holds_the_slot_write_lock_across_config_and_store() -> Result<()> {
+    let _lock = lock_test_env();
+    let temp_root = tempfile::tempdir()?;
+    let temp_root = temp_root.path().canonicalize()?;
+    let _guard = EnvGuard::new(&temp_root);
+    let codewhale_home = temp_root.join("codewhale-home");
+    let config_path = codewhale_home.join("config.toml");
+    let _codewhale_home = EnvVarGuard::set("CODEWHALE_HOME", codewhale_home.as_os_str());
+    let _config_path = EnvVarGuard::set("CODEWHALE_CONFIG_PATH", config_path.as_os_str());
+    let _backend = EnvVarGuard::set("CODEWHALE_SECRET_BACKEND", "file");
+
+    save_api_key_for(ApiProvider::Openrouter, "openrouter-lock-credential")?;
+    inject_plaintext_openrouter_key(&config_path)?;
+
+    let (held_tx, held_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let holder = std::thread::spawn(move || {
+        crate::credentials::store::with_provider_write_lock("openrouter", || {
+            let _ = held_tx.send(());
+            let _ = release_rx.recv();
+        });
+    });
+    held_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("holder acquired the slot lock");
+    let release = ReleaseOnDrop(Some(release_tx));
+
+    let ticket = env_scope_ticket();
+    let (done_tx, done_rx) = mpsc::channel();
+    let logout = std::thread::spawn(move || {
+        let _membership = join_env_scope(ticket);
+        done_tx
+            .send(clear_active_provider_api_key("openrouter"))
+            .expect("send logout result");
+    });
+
+    let deadline = std::time::Instant::now() + Duration::from_millis(400);
+    while std::time::Instant::now() < deadline {
+        assert!(
+            matches!(done_rx.try_recv(), Err(mpsc::TryRecvError::Empty)),
+            "single-provider logout finished while the slot write lock was held"
+        );
+        let config = fs::read_to_string(&config_path)?;
+        assert!(
+            config.contains("logout-lock-plaintext"),
+            "logout must not mutate the config document before it holds the slot lock: {config}"
+        );
+        assert_eq!(
+            codewhale_secrets::Secrets::auto_detect().get("openrouter")?,
+            Some("openrouter-lock-credential".to_string()),
+            "logout must not delete the slot while the write lock is held"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    drop(release);
+    holder.join().expect("holder thread");
+    done_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("logout finished")?;
+    logout.join().expect("logout thread");
+
+    assert_eq!(
+        codewhale_secrets::Secrets::auto_detect().get("openrouter")?,
+        None,
+        "logout must delete the durable slot once the lock is released"
+    );
+    let config = fs::read_to_string(&config_path)?;
+    assert!(
+        !config.contains("logout-lock-plaintext"),
+        "logout must strip the injected plaintext once the lock is released: {config}"
+    );
+    Ok(())
+}
+
+#[test]
+fn full_logout_holds_every_slot_write_lock_across_config_and_store() -> Result<()> {
+    let _lock = lock_test_env();
+    let temp_root = tempfile::tempdir()?;
+    let temp_root = temp_root.path().canonicalize()?;
+    let _guard = EnvGuard::new(&temp_root);
+    let codewhale_home = temp_root.join("codewhale-home");
+    let config_path = codewhale_home.join("config.toml");
+    let _codewhale_home = EnvVarGuard::set("CODEWHALE_HOME", codewhale_home.as_os_str());
+    let _config_path = EnvVarGuard::set("CODEWHALE_CONFIG_PATH", config_path.as_os_str());
+    let _backend = EnvVarGuard::set("CODEWHALE_SECRET_BACKEND", "file");
+
+    save_api_key_for(ApiProvider::Openrouter, "openrouter-lock-credential")?;
+    inject_plaintext_openrouter_key(&config_path)?;
+
+    let (held_tx, held_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let holder = std::thread::spawn(move || {
+        crate::credentials::store::with_provider_write_lock("openrouter", || {
+            let _ = held_tx.send(());
+            let _ = release_rx.recv();
+        });
+    });
+    held_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("holder acquired the slot lock");
+    let release = ReleaseOnDrop(Some(release_tx));
+
+    let ticket = env_scope_ticket();
+    let (done_tx, done_rx) = mpsc::channel();
+    let logout = std::thread::spawn(move || {
+        let _membership = join_env_scope(ticket);
+        done_tx.send(clear_api_key()).expect("send logout result");
+    });
+
+    let deadline = std::time::Instant::now() + Duration::from_millis(400);
+    while std::time::Instant::now() < deadline {
+        assert!(
+            matches!(done_rx.try_recv(), Err(mpsc::TryRecvError::Empty)),
+            "full logout finished while a slot write lock was held"
+        );
+        let config = fs::read_to_string(&config_path)?;
+        assert!(
+            config.contains("logout-lock-plaintext"),
+            "full logout must not mutate the config document before it holds the slot locks: {config}"
+        );
+        assert_eq!(
+            codewhale_secrets::Secrets::auto_detect().get("openrouter")?,
+            Some("openrouter-lock-credential".to_string()),
+            "full logout must not delete a slot while that slot's write lock is held"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    drop(release);
+    holder.join().expect("holder thread");
+    done_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("logout finished")?;
+    logout.join().expect("logout thread");
+
+    assert_eq!(
+        codewhale_secrets::Secrets::auto_detect().get("openrouter")?,
+        None,
+        "full logout must delete the durable slot once the lock is released"
+    );
+    let config = fs::read_to_string(&config_path)?;
+    assert!(
+        !config.contains("logout-lock-plaintext"),
+        "full logout must strip the injected plaintext once the lock is released: {config}"
     );
     Ok(())
 }
