@@ -135,6 +135,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   gate instead of sitting quiet. The same gate is recorded in
   `[workspace.lints]` so member crates inherit it from the manifest rather
   than only from CI `RUSTFLAGS`.
+- "missing key" now says where it looked. The provider picker reported
+  credential readiness as the bare strings `missing key` / `key:not-set`,
+  which named no source at all — so a home whose secret store held a working
+  DeepSeek key could show `DeepSeek  missing key` in the picker while a real
+  turn from that same home completed, and nothing on screen said which layer
+  disagreed. Every row now resolves through one sourced resolver and states
+  the place its credential came from ("OPENROUTER_API_KEY", `secret store
+  "deepseek"`, `[providers.x] api_key`, "xAI OAuth", a consented external CLI
+  file); a row without a credential lists the places that were probed, in
+  precedence order, and the command that fixes the first of them. Where a
+  durable slot is deliberately *not* read — an inactive provider whose config
+  table carries no api-key marker — the row says so rather than implying an
+  empty slot.
+
+- Provider credential precedence is now stated once, in a doc comment beside
+  the single resolver that enforces it, instead of being implied by a
+  150-line cascade of provider special cases. No precedence decision changed:
+  `has_api_key_for` is now a wrapper over that resolver, and a test asserts
+  the two agree for every provider.
+
+- Credential saves and logouts no longer interleave. Both took a snapshot of
+  the durable slot, wrote it, mutated the config document, and rolled back on
+  failure, with no lock held across the sequence — so a save racing a logout
+  on the same slot could leave the secret store and the config file
+  disagreeing. Both now hold that provider's credential write lock for the
+  whole read-modify-write.
+
+  Design ported from pi-mono (MIT, Copyright (c) 2025 Mario Zechner); see
+  `docs/THIRD_PARTY_NOTICES.md`.
+
+- Enumerating stored credentials no longer fails closed on one bad slot.
+  Listing used to propagate a backend read error, so a single unreadable
+  secret-store entry made `/provider` and logout treat every other stored
+  credential as missing. Enumeration now skips the unreadable slot and
+  continues, matching the probe loop it replaced.
 
 - The first screen of first run no longer cuts its own headline. The welcome
   and ready titles, and the provider-step heading, were emitted as single

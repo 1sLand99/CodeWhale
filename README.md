@@ -100,4 +100,5 @@ project grow. See [the contributor record](docs/CONTRIBUTORS.md).
 
 ## License
 
-[MIT](LICENSE)
+[MIT](LICENSE). Portions adapted from other open-source projects are recorded
+in [third-party notices](docs/THIRD_PARTY_NOTICES.md).

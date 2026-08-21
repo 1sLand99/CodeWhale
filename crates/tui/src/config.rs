@@ -14,6 +14,7 @@ use serde_json::json;
 use std::os::unix::fs::PermissionsExt;
 
 use crate::audit::log_sensitive_event;
+use crate::credentials::CredentialStore;
 use crate::features::{Feature, Features, FeaturesToml, is_known_feature_key};
 use crate::hooks::HooksConfig;
 
@@ -24,6 +25,11 @@ use crate::hooks::HooksConfig;
 // (#3311).
 #[cfg(test)]
 mod scope_tests;
+// The single place provider credential precedence is decided. Lives inside
+// `config` so it can walk the private probe helpers without widening their
+// visibility; `has_api_key_for` is a thin wrapper over it (#pi-auth-port).
+mod credential_resolve;
+pub(crate) use credential_resolve::resolve_credential_source;
 mod subagent_limits;
 pub use subagent_limits::*;
 use subagent_limits::{resolve_subagent_api_timeout_secs, resolve_subagent_heartbeat_timeout_secs};
@@ -10716,21 +10722,24 @@ fn save_root_api_key_for_secret_slot(
     let path = credential_config_path().context("Failed to resolve config path for API key.")?;
 
     if let Some(secrets) = credential_secret_store() {
-        let prior_secret = secrets.get(secret_slot);
-        match prior_secret.as_ref() {
-            Ok(prior) => match secrets.set(secret_slot, trimmed) {
-                Ok(()) => {
-                    if let Err(error) = save_root_api_key_metadata_without_plaintext(
-                        &path,
-                        clear_deepseek_provider_slot,
-                    ) {
-                        let current = secrets.get(secret_slot).map_err(|rollback| {
+        // Same read-modify-write as the per-provider save below; hold the slot's
+        // write lock across snapshot, store write, config write, and rollback.
+        return crate::credentials::store::with_provider_write_lock(secret_slot, || {
+            let prior_secret = secrets.get(secret_slot);
+            match prior_secret.as_ref() {
+                Ok(prior) => match secrets.set(secret_slot, trimmed) {
+                    Ok(()) => {
+                        if let Err(error) = save_root_api_key_metadata_without_plaintext(
+                            &path,
+                            clear_deepseek_provider_slot,
+                        ) {
+                            let current = secrets.get(secret_slot).map_err(|rollback| {
                         anyhow::anyhow!(
                             "{error}; additionally could not verify secret-store rollback for {secret_slot}: {rollback}"
                         )
                     })?;
-                        if current.as_deref() == Some(trimmed) {
-                            match prior {
+                            if current.as_deref() == Some(trimmed) {
+                                match prior {
                             Some(previous) => secrets.set(secret_slot, previous),
                             None => secrets.delete(secret_slot),
                         }
@@ -10739,31 +10748,32 @@ fn save_root_api_key_for_secret_slot(
                                 "{error}; additionally failed to restore prior secret-store state for {secret_slot}: {rollback}"
                             )
                         })?;
+                            }
+                            return Err(error);
                         }
-                        return Err(error);
+                        codewhale_config::scrub_plaintext_api_keys_from_config_backup(&path)?;
+                        let backend = secrets.backend_name().to_string();
+                        log_sensitive_event(
+                            "credential.save",
+                            json!({
+                                "backend": backend.clone(),
+                                "config_path": path.display().to_string(),
+                                "plaintext_config_fallback": false,
+                            }),
+                        );
+                        return Ok(SavedCredential::KeyringAndConfigFile { backend, path });
                     }
-                    codewhale_config::scrub_plaintext_api_keys_from_config_backup(&path)?;
-                    let backend = secrets.backend_name().to_string();
-                    log_sensitive_event(
-                        "credential.save",
-                        json!({
-                            "backend": backend.clone(),
-                            "config_path": path.display().to_string(),
-                            "plaintext_config_fallback": false,
-                        }),
-                    );
-                    return Ok(SavedCredential::KeyringAndConfigFile { backend, path });
+                    Err(err) => {
+                        return Err(plaintext_credential_fallback_refused("write", &path, &err));
+                    }
+                },
+                Err(error) => {
+                    return Err(plaintext_credential_fallback_refused(
+                        "snapshot", &path, &error,
+                    ));
                 }
-                Err(err) => {
-                    return Err(plaintext_credential_fallback_refused("write", &path, &err));
-                }
-            },
-            Err(error) => {
-                return Err(plaintext_credential_fallback_refused(
-                    "snapshot", &path, &error,
-                ));
             }
-        }
+        });
     }
 
     let path = save_api_key_to_config_file(trimmed)?;
@@ -11088,154 +11098,7 @@ fn user_global_config_api_key(provider: ApiProvider) -> Option<String> {
 /// prompt for a key inline.
 #[must_use]
 pub fn has_api_key_for(config: &Config, provider: ApiProvider) -> bool {
-    let auth_mode = config.auth_mode_for_provider(provider);
-    if auth_mode_disables_api_key(auth_mode.as_deref()) {
-        return true;
-    }
-
-    if provider == config.api_provider()
-        && !provider_uses_oauth_credentials(config, provider)
-        && explicit_cli_api_key_override().is_some()
-    {
-        return true;
-    }
-    if provider_config_env_api_key(config, provider).is_some() {
-        return true;
-    }
-
-    if !config.should_skip_secret_store_for_provider(provider)
-        && provider
-            .env_vars()
-            .iter()
-            .any(|var| std::env::var(var).is_ok_and(|k| !k.trim().is_empty()))
-    {
-        return true;
-    }
-
-    if provider == ApiProvider::Moonshot && provider_uses_oauth_credentials(config, provider) {
-        return false;
-    }
-    if provider == ApiProvider::OpenaiCodex && !config.provider_uses_custom_endpoint(provider) {
-        // Token env overrides are checked above. An external Codex login is
-        // considered only after exact read-only consent has been validated.
-        let path = crate::oauth::auth_file_path();
-        return config
-            .external_credential_read_grant(
-                provider,
-                codewhale_config::ExternalCredentialSource::CodexCli,
-                &path,
-            )
-            .is_ok_and(|grant| crate::oauth::stored_credentials_present(&grant));
-    }
-    if provider == ApiProvider::Xai
-        && !config.provider_uses_custom_endpoint(provider)
-        && crate::xai_oauth::credentials_present(config)
-    {
-        // xAI supports both API keys and OAuth. A Grok-compatible token file is
-        // sufficient, but its absence must fall through to the ordinary API-key
-        // checks below instead of masking a configured key.
-        return true;
-    }
-    if provider == ApiProvider::Antigravity && !config.provider_uses_custom_endpoint(provider) {
-        let path = codewhale_config::default_agy_credentials_path();
-        if config
-            .external_credential_read_grant(
-                provider,
-                codewhale_config::ExternalCredentialSource::AgyCli,
-                &path,
-            )
-            .is_ok_and(|grant| {
-                crate::agy_credentials::antigravity_oauth_token_from_grant(&grant)
-                    .ok()
-                    .flatten()
-                    .is_some()
-            })
-        {
-            return true;
-        }
-    }
-    if matches!(
-        provider,
-        ApiProvider::Deepseek | ApiProvider::DeepseekAnthropic
-    ) && !config.provider_uses_custom_endpoint(provider)
-    {
-        let path = codewhale_config::default_dsh_credentials_path();
-        if config
-            .external_credential_read_grant(
-                provider,
-                codewhale_config::ExternalCredentialSource::DshCli,
-                &path,
-            )
-            .is_ok_and(|grant| {
-                crate::dsh_credentials::deepseek_api_key_from_grant(&grant)
-                    .ok()
-                    .flatten()
-                    .is_some()
-            })
-        {
-            return true;
-        }
-    }
-
-    if !auth_mode_requires_api_key(auth_mode.as_deref())
-        && (provider_route_is_keyless_self_hosted(provider, &config.base_url_for_route(provider))
-            || (provider == config.api_provider()
-                && base_url_uses_local_host(&config.deepseek_base_url())))
-    {
-        return true;
-    }
-
-    if config.config_credentials_are_bound_to_provider_endpoint(provider)
-        && config
-            .provider_config_string_with_runtime_fallback(provider, |entry| entry.api_key.clone())
-            .is_some_and(|key| {
-                classify_config_api_key_value(&key) == ConfigApiKeyValueKind::Literal
-            })
-    {
-        return true;
-    }
-    // Probe the active provider, plus any provider whose persisted
-    // `[providers.<name>]` table carries the marker the secret-store save
-    // path itself writes (an api-key auth mode with no config literal). A
-    // configured-but-inactive provider must not render as unconfigured just
-    // because the operator switched providers after saving its key (#5033).
-    // Shared-slot families (one account, several provider variants — e.g.
-    // Model Studio Token/Coding Plan × OpenAI/Anthropic dialects) honor the
-    // marker written by ANY sibling variant, since the save path stores one
-    // key under the family's canonical slot. The probe stays bounded to
-    // explicitly configured providers, and the non-active case is strictly
-    // read-only so rendering the catalog never migrates a legacy store or
-    // opens a write-capable backend.
-    if !config.should_skip_secret_store_for_provider(provider) {
-        if provider == config.api_provider() {
-            if provider_secret_store_api_key(config, provider).is_some() {
-                return true;
-            }
-        } else if secret_slot_save_marker_on_shared_slot(config, provider)
-            && provider_secret_store_api_key_with_mode(config, provider, true).is_some()
-        {
-            return true;
-        }
-    }
-
-    if (matches!(provider, ApiProvider::Deepseek | ApiProvider::DeepseekCN)
-        || (provider == ApiProvider::Custom && config.uses_legacy_literal_custom_route()))
-        && config.config_credentials_are_bound_to_provider_endpoint(provider)
-        && config
-            .api_key
-            .as_ref()
-            .is_some_and(|key| classify_config_api_key_value(key) == ConfigApiKeyValueKind::Literal)
-    {
-        return true;
-    }
-
-    // Last resort: the user-global config file. A key saved there must not
-    // disappear just because this process loaded a workspace config.
-    if user_global_config_api_key(provider).is_some() {
-        return true;
-    }
-
-    false
+    credential_resolve::resolve_credential_source(config, provider).is_present()
 }
 
 impl Config {
@@ -11458,51 +11321,60 @@ fn save_api_key_for_identity_unlocked(
         && let Some(secrets) = credential_secret_store()
     {
         let secret_slot = provider_secret_store_slot(provider);
-        let prior_secret = secrets.get(secret_slot);
-        match prior_secret.as_ref() {
-            Ok(prior) => match secrets.set(secret_slot, api_key) {
-                Ok(()) => {
-                    let config_result =
-                        crate::config_persistence::mutate_config_document(&config_path, |doc| {
-                            if pin_kimi_code_base_url {
+        // Snapshot -> write -> config-write -> rollback is a read-modify-write.
+        // Hold this provider's credential write lock across the whole sequence
+        // so a concurrent save or logout on the same slot cannot interleave and
+        // leave the secret store and the config document disagreeing. This is
+        // the `modify`-is-the-only-write-path rule ported from pi-mono; see
+        // `crate::credentials::store`.
+        return crate::credentials::store::with_provider_write_lock(secret_slot, || {
+            let prior_secret = secrets.get(secret_slot);
+            match prior_secret.as_ref() {
+                Ok(prior) => match secrets.set(secret_slot, api_key) {
+                    Ok(()) => {
+                        let config_result = crate::config_persistence::mutate_config_document(
+                            &config_path,
+                            |doc| {
+                                if pin_kimi_code_base_url {
+                                    crate::config_persistence::set_document_value(
+                                        doc,
+                                        &["providers", key_inside, "base_url"],
+                                        DEFAULT_KIMI_CODE_BASE_URL,
+                                    )?;
+                                }
                                 crate::config_persistence::set_document_value(
                                     doc,
-                                    &["providers", key_inside, "base_url"],
-                                    DEFAULT_KIMI_CODE_BASE_URL,
+                                    &["providers", key_inside, "auth_mode"],
+                                    "api_key",
                                 )?;
-                            }
-                            crate::config_persistence::set_document_value(
-                                doc,
-                                &["providers", key_inside, "auth_mode"],
-                                "api_key",
-                            )?;
-                            crate::config_persistence::unset_document_value(
-                                doc,
-                                &["providers", key_inside, "external_credentials"],
-                            )?;
-                            if provider == ApiProvider::Xai {
                                 crate::config_persistence::unset_document_value(
                                     doc,
-                                    &["providers", key_inside, "oauth_credential_generation"],
+                                    &["providers", key_inside, "external_credentials"],
                                 )?;
-                            }
-                            crate::config_persistence::unset_document_value(
-                                doc,
-                                &["providers", key_inside, "api_key"],
-                            )?;
-                            Ok(())
-                        })
+                                if provider == ApiProvider::Xai {
+                                    crate::config_persistence::unset_document_value(
+                                        doc,
+                                        &["providers", key_inside, "oauth_credential_generation"],
+                                    )?;
+                                }
+                                crate::config_persistence::unset_document_value(
+                                    doc,
+                                    &["providers", key_inside, "api_key"],
+                                )?;
+                                Ok(())
+                            },
+                        )
                         .with_context(|| {
                             format!("Failed to write config to {}", config_path.display())
                         });
-                    if let Err(error) = config_result {
-                        let current = secrets.get(secret_slot).map_err(|rollback| {
+                        if let Err(error) = config_result {
+                            let current = secrets.get(secret_slot).map_err(|rollback| {
                         anyhow::anyhow!(
                             "{error}; additionally could not verify secret-store rollback for {secret_slot}: {rollback}"
                         )
                     })?;
-                        if current.as_deref() == Some(api_key) {
-                            match prior {
+                            if current.as_deref() == Some(api_key) {
+                                match prior {
                             Some(previous) => secrets.set(secret_slot, previous),
                             None => secrets.delete(secret_slot),
                         }
@@ -11511,41 +11383,44 @@ fn save_api_key_for_identity_unlocked(
                                 "{error}; additionally failed to restore prior secret-store state for {secret_slot}: {rollback}"
                             )
                         })?;
+                            }
+                            return Err(error);
                         }
-                        return Err(error);
+                        codewhale_config::scrub_plaintext_api_keys_from_config_backup(
+                            &config_path,
+                        )?;
+                        let backend = secrets.backend_name().to_string();
+                        log_sensitive_event(
+                            "credential.save",
+                            json!({
+                                "backend": backend.clone(),
+                                "provider": identity.key,
+                                "config_path": config_path.display().to_string(),
+                                "plaintext_config_fallback": false,
+                            }),
+                        );
+                        return Ok(SavedCredential::KeyringAndConfigFile {
+                            backend,
+                            path: config_path,
+                        });
                     }
-                    codewhale_config::scrub_plaintext_api_keys_from_config_backup(&config_path)?;
-                    let backend = secrets.backend_name().to_string();
-                    log_sensitive_event(
-                        "credential.save",
-                        json!({
-                            "backend": backend.clone(),
-                            "provider": identity.key,
-                            "config_path": config_path.display().to_string(),
-                            "plaintext_config_fallback": false,
-                        }),
-                    );
-                    return Ok(SavedCredential::KeyringAndConfigFile {
-                        backend,
-                        path: config_path,
-                    });
-                }
-                Err(err) => {
+                    Err(err) => {
+                        return Err(plaintext_credential_fallback_refused(
+                            "write",
+                            &config_path,
+                            &err,
+                        ));
+                    }
+                },
+                Err(error) => {
                     return Err(plaintext_credential_fallback_refused(
-                        "write",
+                        "snapshot",
                         &config_path,
-                        &err,
+                        &error,
                     ));
                 }
-            },
-            Err(error) => {
-                return Err(plaintext_credential_fallback_refused(
-                    "snapshot",
-                    &config_path,
-                    &error,
-                ));
             }
-        }
+        });
     }
 
     // Edit the `[providers.<name>]` table in place so unrelated sections,
@@ -11939,11 +11814,17 @@ fn provider_secret_store_api_key_with_mode(
     } else {
         codewhale_secrets::Secrets::auto_detect()
     };
-    let primary = secrets
-        .get(provider_secret_store_slot(provider))
+    // Read through the credential-store trait so every read of a durable slot
+    // goes through one adapter (`crate::credentials::store`), and the value is
+    // carried as a type-tagged `Credential` rather than a bare String that can
+    // drift into a log line.
+    let store =
+        crate::credentials::store::SecretStoreCredentials::new(secrets, known_secret_store_slots());
+    let primary = store
+        .read(provider_secret_store_slot(provider))
         .ok()
         .flatten()
-        .filter(|value| !value.trim().is_empty());
+        .map(|credential| credential.expose_secret().to_string());
     if primary.is_some() {
         return primary;
     }
@@ -11954,13 +11835,31 @@ fn provider_secret_store_api_key_with_mode(
     // selection, and never write/copy/delete either slot while resolving.
     (provider == ApiProvider::OllamaCloud && config.selects_legacy_ollama_cloud_route())
         .then(|| {
-            secrets
-                .get(ApiProvider::Ollama.as_str())
+            store
+                .read(ApiProvider::Ollama.as_str())
                 .ok()
                 .flatten()
-                .filter(|value| !value.trim().is_empty())
+                .map(|credential| credential.expose_secret().to_string())
         })
         .flatten()
+}
+
+/// Every durable credential slot CodeWhale knows how to write.
+///
+/// The backing keyring exposes no key enumeration, so
+/// [`crate::credentials::store::SecretStoreCredentials::list`] is given the
+/// slot names to probe. Deduplicated because shared-account families collapse
+/// several providers onto one slot.
+fn known_secret_store_slots() -> Vec<String> {
+    let mut slots: Vec<String> = ApiProvider::all()
+        .iter()
+        .copied()
+        .chain(std::iter::once(ApiProvider::DeepseekCN))
+        .map(|provider| provider_secret_store_slot(provider).to_string())
+        .collect();
+    slots.sort();
+    slots.dedup();
+    slots
 }
 
 /// The shadowing warning for a config-file `api_key` that wins over a live
@@ -12092,6 +11991,16 @@ pub fn clear_api_key() -> Result<()> {
 }
 
 fn clear_api_key_unlocked() -> Result<()> {
+    // Same read-modify-write as the saves: hold every durable slot's write
+    // lock across the config-document mutation and the store deletes so a
+    // concurrent save cannot interleave and leave the two disagreeing.
+    crate::credentials::store::with_provider_write_locks(
+        known_secret_store_slots(),
+        clear_api_key_under_slot_locks,
+    )
+}
+
+fn clear_api_key_under_slot_locks() -> Result<()> {
     // Strip api_key entries from config.toml, including provider-scoped
     // nested entries. Clearing a config file must not trigger platform
     // credential prompts. Clears target the same user-global document that
@@ -12134,7 +12043,7 @@ fn clear_api_key_unlocked() -> Result<()> {
     // even when the config file is absent: the slot survives independently
     // of the file.
     if let Some(secrets) = credential_secret_store() {
-        let failures = clear_all_provider_api_keys_from_secret_store(&secrets);
+        let failures = clear_all_provider_api_keys_from_secret_store(secrets);
         if !failures.is_empty() {
             anyhow::bail!(
                 "failed to delete stored credentials for: {}",
@@ -12155,25 +12064,29 @@ fn clear_api_key_unlocked() -> Result<()> {
 /// the caller can fail loudly instead of claiming a clean logout while
 /// credentials linger in the store (#5196).
 fn clear_all_provider_api_keys_from_secret_store(
-    secrets: &codewhale_secrets::Secrets,
+    secrets: codewhale_secrets::Secrets,
 ) -> Vec<String> {
     let mut failures = Vec::new();
-    let mut cleared_slots = std::collections::HashSet::new();
-    for provider in ApiProvider::all() {
-        let slot = provider_secret_store_slot(*provider);
-        if !cleared_slots.insert(slot) {
-            continue;
+    let store = crate::credentials::store::SecretStoreCredentials::new(
+        secrets.clone(),
+        known_secret_store_slots(),
+    );
+    // `list` enumerates the slots that actually hold something, without
+    // exposing any value — the deduplication that used to live here is now the
+    // slot table's job.
+    let stored: Vec<crate::credentials::CredentialInfo> = match store.list() {
+        Ok(stored) => stored,
+        Err(error) => {
+            failures.push(format!("secret store enumeration: {error}"));
+            return failures;
         }
-        let has_value = secrets
-            .get(slot)
-            .ok()
-            .flatten()
-            .is_some_and(|value| !value.trim().is_empty());
-        if !has_value {
-            continue;
-        }
-        if let Err(error) = secrets.delete(slot) {
-            failures.push(format!("{slot}: {error}"));
+    };
+    for entry in stored {
+        // The caller already holds this slot's write lock for the whole
+        // logout. Delete through the backend rather than `store.delete`,
+        // which would re-acquire the same non-reentrant mutex and deadlock.
+        if let Err(error) = secrets.delete(&entry.provider_id) {
+            failures.push(format!("{}: {error}", entry.provider_id));
         }
     }
     failures
@@ -12194,6 +12107,19 @@ pub fn clear_active_provider_api_key(provider: &str) -> Result<()> {
 }
 
 fn clear_active_provider_api_key_unlocked(provider: &str) -> Result<()> {
+    let slot = ApiProvider::all()
+        .iter()
+        .find(|candidate| candidate.as_str() == provider)
+        .map(|candidate| provider_secret_store_slot(*candidate));
+    match slot {
+        Some(slot) => crate::credentials::store::with_provider_write_lock(slot, || {
+            clear_active_provider_api_key_under_lock(provider)
+        }),
+        None => clear_active_provider_api_key_under_lock(provider),
+    }
+}
+
+fn clear_active_provider_api_key_under_lock(provider: &str) -> Result<()> {
     let config_path = credential_config_path()
         .context("Failed to resolve config path while clearing API keys.")?;
 

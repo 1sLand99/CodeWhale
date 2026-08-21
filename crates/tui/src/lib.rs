@@ -43,6 +43,7 @@ mod context_report;
 mod continual_harness;
 mod core;
 mod cost_status;
+mod credentials;
 mod deepseek_theme;
 mod dependencies;
 mod doctor;
