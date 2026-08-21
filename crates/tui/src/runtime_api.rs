@@ -1351,6 +1351,11 @@ async fn list_threads_summary(
     // `limit` threads, so any older match — the row the caller typed the query
     // to find — was invisible. Unsearched listings keep the cheap bounded read;
     // a search scans in newest-first order and stops at `limit` matches.
+    //
+    // Match on the thread record *before* `get_thread_detail`. Detail is a
+    // whole-store turns+items walk, so loading it for every thread made a
+    // non-matching dashboard keystroke O(threads × (all_turns + all_items))
+    // JSON reads. Preview is filled only for matches; it is not a search key.
     let scan_limit = if search.is_some() { None } else { Some(limit) };
     let threads = state
         .runtime_threads
@@ -1362,6 +1367,13 @@ async fn list_threads_summary(
     for thread in threads {
         if summaries.len() >= limit {
             break;
+        }
+        if let Some(search) = &search
+            && !state
+                .runtime_threads
+                .thread_matches_summary_search(&thread, search)
+        {
+            continue;
         }
         let detail = state
             .runtime_threads
@@ -1406,19 +1418,6 @@ async fn list_threads_summary(
                 _ => None,
             })
             .unwrap_or_else(|| title.clone());
-
-        if let Some(search) = &search {
-            let haystack = format!(
-                "{} {} {} {}",
-                thread.id.to_ascii_lowercase(),
-                title.to_ascii_lowercase(),
-                preview.to_ascii_lowercase(),
-                thread.model.to_ascii_lowercase()
-            );
-            if !haystack.contains(search) {
-                continue;
-            }
-        }
 
         let workspace_git = collect_workspace_git_metadata(&thread.workspace);
         summaries.push(ThreadSummary {

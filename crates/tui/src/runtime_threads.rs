@@ -1028,6 +1028,15 @@ pub struct RuntimeThreadStore {
     /// the queue; this guard prevents concurrent replay/wake requests from
     /// starting more than one turn for the same message.
     mail_mutation: Arc<parking_lot::Mutex<()>>,
+    /// Files read by whole-directory turn scans (`list_all_turns`). Shared
+    /// across store clones so a `spawn_blocking` snapshot still counts against
+    /// the manager the test holds. Per-store so parallel tests do not collide.
+    #[cfg(test)]
+    turn_dir_files_read: Arc<std::sync::atomic::AtomicU64>,
+    /// Files read by whole-directory item scans (`list_items_for_turn` and
+    /// `list_items_for_turns_map`).
+    #[cfg(test)]
+    item_dir_files_read: Arc<std::sync::atomic::AtomicU64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1083,6 +1092,10 @@ impl RuntimeThreadStore {
             thread_mutation: Arc::new(parking_lot::Mutex::new(())),
             turn_mutation: Arc::new(parking_lot::Mutex::new(())),
             mail_mutation: Arc::new(parking_lot::Mutex::new(())),
+            #[cfg(test)]
+            turn_dir_files_read: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            #[cfg(test)]
+            item_dir_files_read: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         };
         store.with_event_transaction(EVENT_TRANSACTION_LOCK_TIMEOUT, || {
             repair_torn_event_log_tails(&store.events_dir)?;
@@ -1382,6 +1395,9 @@ impl RuntimeThreadStore {
             }
             let raw = read_store_file(&path)
                 .with_context(|| format!("Failed to read {}", path.display()))?;
+            #[cfg(test)]
+            self.turn_dir_files_read
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let turn: TurnRecord = serde_json::from_str(&raw)
                 .with_context(|| format!("Failed to parse {}", path.display()))?;
             if turn.schema_version > CURRENT_RUNTIME_SCHEMA_VERSION {
@@ -1411,6 +1427,9 @@ impl RuntimeThreadStore {
             }
             let raw = read_store_file(&path)
                 .with_context(|| format!("Failed to read {}", path.display()))?;
+            #[cfg(test)]
+            self.item_dir_files_read
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let item: TurnItemRecord = serde_json::from_str(&raw)
                 .with_context(|| format!("Failed to parse {}", path.display()))?;
             if item.schema_version > CURRENT_RUNTIME_SCHEMA_VERSION {
@@ -1453,6 +1472,9 @@ impl RuntimeThreadStore {
             }
             let raw = read_store_file(&path)
                 .with_context(|| format!("Failed to read {}", path.display()))?;
+            #[cfg(test)]
+            self.item_dir_files_read
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let item: TurnItemRecord = serde_json::from_str(&raw)
                 .with_context(|| format!("Failed to parse {}", path.display()))?;
             if item.schema_version > CURRENT_RUNTIME_SCHEMA_VERSION {
@@ -2505,6 +2527,33 @@ pub(crate) struct SnapshotTestPoint {
     pub thread_id: String,
     pub latest_seq: u64,
     pub resume: oneshot::Sender<()>,
+}
+
+#[cfg(test)]
+impl RuntimeThreadManager {
+    pub(crate) fn test_store(&self) -> &RuntimeThreadStore {
+        &self.store
+    }
+
+    pub(crate) fn reset_whole_store_scan_file_reads(&self) {
+        self.store
+            .turn_dir_files_read
+            .store(0, std::sync::atomic::Ordering::SeqCst);
+        self.store
+            .item_dir_files_read
+            .store(0, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub(crate) fn whole_store_scan_file_reads(&self) -> (u64, u64) {
+        (
+            self.store
+                .turn_dir_files_read
+                .load(std::sync::atomic::Ordering::SeqCst),
+            self.store
+                .item_dir_files_read
+                .load(std::sync::atomic::Ordering::SeqCst),
+        )
+    }
 }
 
 /// Helper types for `seed_thread_from_messages` — intermediate representation
@@ -4525,6 +4574,39 @@ impl RuntimeThreadManager {
             threads.truncate(limit);
         }
         Ok(threads)
+    }
+
+    /// Whether `/v1/threads/summary?search=` should keep this thread.
+    ///
+    /// Matches fields already on the thread record (`id`, explicit `title`,
+    /// `model`). When the title is unset, peeks the latest turn file for the
+    /// displayed title (`input_summary`) — one JSON read, not a whole-store
+    /// scan. Preview text lives on items and is not a search key: using it as
+    /// one forced `get_thread_detail` (itself a full turns+items directory
+    /// walk) on every thread, including non-matches.
+    pub(crate) fn thread_matches_summary_search(
+        &self,
+        thread: &ThreadRecord,
+        search: &str,
+    ) -> bool {
+        if thread.id.to_ascii_lowercase().contains(search)
+            || thread.model.to_ascii_lowercase().contains(search)
+        {
+            return true;
+        }
+        if let Some(title) = thread
+            .title
+            .as_deref()
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+        {
+            return title.to_ascii_lowercase().contains(search);
+        }
+        thread
+            .latest_turn_id
+            .as_deref()
+            .and_then(|turn_id| self.store.load_turn(turn_id).ok())
+            .is_some_and(|turn| turn.input_summary.to_ascii_lowercase().contains(search))
     }
 
     /// Aggregate token + cost usage across all threads/turns inside the time
