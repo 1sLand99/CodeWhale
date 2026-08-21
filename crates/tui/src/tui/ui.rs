@@ -1,6 +1,5 @@
 //! TUI event loop and rendering logic for `DeepSeek` CLI.
 
-use std::cell::Cell;
 use std::collections::{HashSet, VecDeque};
 use std::fmt::Write as _;
 use std::future::Future;
@@ -11,7 +10,6 @@ use std::sync::{
     Arc, LazyLock,
     atomic::{AtomicBool, Ordering},
 };
-use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use crate::error_taxonomy::{ErrorCategory, ErrorEnvelope, ErrorSeverity};
@@ -264,116 +262,6 @@ const REQUIRED_RELEASE_ASSETS: &[&str] = &[
     "codewhale-artifacts-sha256.txt",
 ];
 
-fn is_session_approved_for_tool(app: &App, tool_name: &str, grouping_key: &str) -> bool {
-    app.approval_session_approved.contains(grouping_key)
-        || app.approval_session_approved.contains(tool_name)
-}
-
-fn is_session_denied_for_key(app: &App, approval_key: &str) -> bool {
-    app.approval_session_denied.contains(approval_key)
-}
-
-fn session_denied_notice(app: &App, tool_name: &str) -> String {
-    app.tr(MessageId::ApprovalAutoDeniedSession)
-        .replace("{tool}", tool_name)
-}
-
-fn surface_session_denied_notice(app: &mut App, tool_name: &str) {
-    let notice = session_denied_notice(app, tool_name);
-    app.status_message = Some(notice.clone());
-    app.push_status_toast(notice.clone(), StatusToastLevel::Warning, Some(12_000));
-
-    // Tool completion and turn completion can replace the one-line status
-    // before the next frame is painted. Keep the recovery path in the
-    // transcript as a settled receipt as well, where it survives that event
-    // ordering and remains available to screen readers and scrollback.
-    let latest_transcript_cell = app
-        .active_cell
-        .as_ref()
-        .and_then(|cell| cell.entries().last())
-        .or_else(|| app.history.last());
-    let already_latest_receipt = matches!(
-        latest_transcript_cell,
-        Some(HistoryCell::System { content }) if content == &notice
-    );
-    if !already_latest_receipt {
-        let receipt = HistoryCell::System { content: notice };
-        if let Some(active_cell) = app.active_cell.as_mut() {
-            // Never grow committed history underneath an active cell: tool
-            // lookup indices address `history ++ active_cell`, so changing
-            // history.len() mid-turn would retarget the pending completion.
-            active_cell.push_untracked(receipt);
-            app.bump_active_cell_revision();
-        } else {
-            app.add_message(receipt);
-        }
-    }
-}
-
-async fn auto_deny_session_approval(
-    app: &mut App,
-    engine_handle: &EngineHandle,
-    id: &str,
-    tool_name: &str,
-    approval_key: &str,
-) {
-    log_sensitive_event(
-        "tool.approval.auto_deny_session",
-        serde_json::json!({
-            "tool_name": tool_name,
-            "approval_key": approval_key,
-            "session_id": app.current_session_id,
-        }),
-    );
-    let _ = engine_handle.deny_tool_call(id.to_string()).await;
-    surface_session_denied_notice(app, tool_name);
-}
-
-fn app_auto_approve_enabled(app: &App) -> bool {
-    app.mode == AppMode::Yolo || app.approval_mode == ApprovalMode::Bypass
-}
-
-/// Build the UI-side TurnAuthority for approval disposition (#4412).
-///
-/// Shell/trust bits do not affect disposition; mode + approval_mode + the
-/// full-access shape (Yolo/Bypass) are what the shared resolver consults.
-fn app_turn_authority_for_approvals(app: &App) -> crate::core::authority::TurnAuthority {
-    crate::core::authority::TurnAuthority::from_effective_fields(
-        app.mode,
-        true,
-        false,
-        app_auto_approve_enabled(app),
-        app.approval_mode,
-    )
-}
-
-fn resolve_ui_approval_disposition(
-    app: &App,
-    tool_name: &str,
-    grouping_key: &str,
-    approval_key: &str,
-    approval_force_prompt: bool,
-) -> crate::core::authority::ApprovalRequestDisposition {
-    crate::core::authority::resolve_approval_request_disposition(
-        &app_turn_authority_for_approvals(app),
-        is_session_approved_for_tool(app, tool_name, grouping_key),
-        is_session_denied_for_key(app, approval_key),
-        approval_force_prompt,
-    )
-}
-
-fn should_suppress_user_input_prompt(app: &App) -> bool {
-    // Legacy hosts may still report Yolo/auto-approve with a stale `Auto`
-    // enum. Canonicalize that shape to Full Access before applying the one
-    // posture that suppresses questions: genuine Auto-Review.
-    let effective_posture = if app_auto_approve_enabled(app) {
-        ApprovalMode::Bypass
-    } else {
-        app.approval_mode
-    };
-    !crate::core::authority::permission_posture_allows_questions(effective_posture)
-}
-
 type AppTerminal = Terminal<ColorCompatBackend<Stdout>>;
 
 type PendingToolUses = Vec<(String, String, serde_json::Value)>;
@@ -420,253 +308,8 @@ const BEGIN_SYNC_UPDATE: &[u8] = b"\x1b[?2026h";
 /// End synchronized update (DEC 2026): tell the terminal to render
 /// the complete frame now.
 const END_SYNC_UPDATE: &[u8] = b"\x1b[?2026l";
-const TERMINAL_INPUT_POLL_INTERVAL: Duration = Duration::from_millis(50);
-const TERMINAL_INPUT_HEARTBEAT_INTERVAL: Duration = Duration::from_millis(500);
-const TERMINAL_INPUT_STALL_TIMEOUT: Duration = Duration::from_secs(5);
-const TERMINAL_INPUT_RECOVERY_COOLDOWN: Duration = Duration::from_secs(10);
-const TERMINAL_INPUT_CHILD_PAUSE_TIMEOUT: Duration = Duration::from_millis(500);
-const TERMINAL_INPUT_CHILD_PAUSE_POLL_INTERVAL: Duration = Duration::from_millis(5);
-/// Upper bound on engine events processed before yielding to terminal input.
-const MAX_ENGINE_EVENTS_PER_DRAIN: usize = 16;
-/// Wall-clock budget for one engine drain batch (#1830 / #2317 input fairness).
-const ENGINE_DRAIN_TIME_BUDGET: Duration = Duration::from_millis(8);
 /// Throttled in-progress checkpoint while a turn is live (#1830 progress loss).
 const RECOVERY_SNAPSHOT_INTERVAL: Duration = Duration::from_secs(45);
-
-enum TerminalInputMessage {
-    Event(Event),
-    Heartbeat,
-    Error(io::Error),
-}
-
-pub(crate) struct TerminalInputPump {
-    rx: std::sync::mpsc::Receiver<TerminalInputMessage>,
-    stop: Arc<AtomicBool>,
-    paused: Arc<AtomicBool>,
-    paused_ack: Arc<AtomicBool>,
-    handle: Option<JoinHandle<()>>,
-    last_alive_at: Cell<Instant>,
-}
-
-struct TerminalInputPumpParts {
-    rx: std::sync::mpsc::Receiver<TerminalInputMessage>,
-    stop: Arc<AtomicBool>,
-    paused: Arc<AtomicBool>,
-    paused_ack: Arc<AtomicBool>,
-    handle: JoinHandle<()>,
-}
-
-impl TerminalInputPump {
-    fn spawn() -> io::Result<Self> {
-        let parts = Self::spawn_parts()?;
-        Ok(Self {
-            rx: parts.rx,
-            stop: parts.stop,
-            paused: parts.paused,
-            paused_ack: parts.paused_ack,
-            handle: Some(parts.handle),
-            last_alive_at: Cell::new(Instant::now()),
-        })
-    }
-
-    fn spawn_parts() -> io::Result<TerminalInputPumpParts> {
-        let (tx, rx) = std::sync::mpsc::channel();
-        let stop = Arc::new(AtomicBool::new(false));
-        let paused = Arc::new(AtomicBool::new(false));
-        let paused_ack = Arc::new(AtomicBool::new(false));
-        let thread_stop = Arc::clone(&stop);
-        let thread_paused = Arc::clone(&paused);
-        let thread_paused_ack = Arc::clone(&paused_ack);
-        let handle = thread::Builder::new()
-            .name("codewhale-terminal-input".to_string())
-            .spawn(move || {
-                let mut last_heartbeat = Instant::now();
-                while !thread_stop.load(Ordering::Acquire) {
-                    if thread_paused.load(Ordering::Acquire) {
-                        thread_paused_ack.store(true, Ordering::Release);
-                        thread::sleep(TERMINAL_INPUT_CHILD_PAUSE_POLL_INTERVAL);
-                        continue;
-                    }
-                    thread_paused_ack.store(false, Ordering::Release);
-                    match event::poll(TERMINAL_INPUT_POLL_INTERVAL) {
-                        Ok(true) => match event::read() {
-                            Ok(event) => {
-                                last_heartbeat = Instant::now();
-                                if tx.send(TerminalInputMessage::Event(event)).is_err() {
-                                    break;
-                                }
-                            }
-                            Err(err) => {
-                                let _ = tx.send(TerminalInputMessage::Error(err));
-                                break;
-                            }
-                        },
-                        Ok(false) => {
-                            let now = Instant::now();
-                            if now.duration_since(last_heartbeat)
-                                >= TERMINAL_INPUT_HEARTBEAT_INTERVAL
-                            {
-                                last_heartbeat = now;
-                                if tx.send(TerminalInputMessage::Heartbeat).is_err() {
-                                    break;
-                                }
-                            }
-                        }
-                        Err(err) => {
-                            let _ = tx.send(TerminalInputMessage::Error(err));
-                            break;
-                        }
-                    }
-                }
-            })?;
-        Ok(TerminalInputPumpParts {
-            rx,
-            stop,
-            paused,
-            paused_ack,
-            handle,
-        })
-    }
-
-    fn recv_timeout(&self, timeout: Duration) -> io::Result<Option<Event>> {
-        let deadline = Instant::now() + timeout;
-        loop {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            match self.rx.recv_timeout(remaining) {
-                Ok(TerminalInputMessage::Event(event)) => {
-                    self.mark_alive();
-                    return Ok(Some(event));
-                }
-                Ok(TerminalInputMessage::Heartbeat) => {
-                    self.mark_alive();
-                    if remaining.is_zero() {
-                        return Ok(None);
-                    }
-                }
-                Ok(TerminalInputMessage::Error(err)) => {
-                    self.mark_alive();
-                    return Err(err);
-                }
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => return Ok(None),
-                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::BrokenPipe,
-                        "terminal input pump disconnected",
-                    ));
-                }
-            }
-        }
-    }
-
-    fn try_recv(&self) -> io::Result<Option<Event>> {
-        loop {
-            match self.rx.try_recv() {
-                Ok(TerminalInputMessage::Event(event)) => {
-                    self.mark_alive();
-                    return Ok(Some(event));
-                }
-                Ok(TerminalInputMessage::Heartbeat) => {
-                    self.mark_alive();
-                }
-                Ok(TerminalInputMessage::Error(err)) => {
-                    self.mark_alive();
-                    return Err(err);
-                }
-                Err(std::sync::mpsc::TryRecvError::Empty) => return Ok(None),
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => return Ok(None),
-            }
-        }
-    }
-
-    fn mark_alive(&self) {
-        self.last_alive_at.set(Instant::now());
-    }
-
-    fn stalled_for(&self, now: Instant) -> Duration {
-        now.saturating_duration_since(self.last_alive_at.get())
-    }
-
-    fn pause_for_child_terminal(&self) -> io::Result<()> {
-        self.paused.store(true, Ordering::Release);
-        if self.handle.is_none() {
-            self.paused_ack.store(true, Ordering::Release);
-            self.mark_alive();
-            return Ok(());
-        }
-
-        let deadline = Instant::now() + TERMINAL_INPUT_CHILD_PAUSE_TIMEOUT;
-        while !self.paused_ack.load(Ordering::Acquire) {
-            if Instant::now() >= deadline {
-                self.paused_ack.store(false, Ordering::Release);
-                self.paused.store(false, Ordering::Release);
-                return Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "terminal input pump did not pause before launching editor",
-                ));
-            }
-            thread::sleep(TERMINAL_INPUT_CHILD_PAUSE_POLL_INTERVAL);
-        }
-        self.mark_alive();
-        Ok(())
-    }
-
-    fn resume_after_child_terminal(&self) {
-        self.paused_ack.store(false, Ordering::Release);
-        self.paused.store(false, Ordering::Release);
-        self.mark_alive();
-    }
-
-    /// Replace a wedged pump thread with a freshly spawned one.
-    ///
-    /// The old thread may be blocked forever inside crossterm's blocking
-    /// `event::read` (a stalled Windows console poll, or a Unix tty that
-    /// stopped delivering bytes), so it can never be joined. Instead it is
-    /// detached: `stop` is flagged and the `JoinHandle` dropped, so if the
-    /// thread ever wakes it exits on its own (its send fails once `rx` is
-    /// replaced, and the stop flag covers the poll loop).
-    fn restart_detached(&mut self) -> io::Result<()> {
-        self.detach_current_thread();
-        let parts = Self::spawn_parts()?;
-        self.install_parts(parts);
-        Ok(())
-    }
-
-    /// Flag the current pump thread to stop and drop its handle without
-    /// joining (the thread may be wedged in a blocking terminal read).
-    fn detach_current_thread(&mut self) {
-        self.stop.store(true, Ordering::Release);
-        let _ = self.handle.take();
-    }
-
-    /// Adopt freshly spawned pump parts and reset the liveness clock.
-    fn install_parts(&mut self, parts: TerminalInputPumpParts) {
-        self.rx = parts.rx;
-        self.stop = parts.stop;
-        self.paused = parts.paused;
-        self.paused_ack = parts.paused_ack;
-        self.handle = Some(parts.handle);
-        self.last_alive_at.set(Instant::now());
-    }
-}
-
-impl Drop for TerminalInputPump {
-    fn drop(&mut self) {
-        self.stop.store(true, Ordering::Release);
-        if let Some(handle) = self.handle.take() {
-            #[cfg(target_os = "windows")]
-            {
-                drop(handle);
-            }
-            #[cfg(not(target_os = "windows"))]
-            let _ = handle.join();
-        }
-    }
-}
-
-fn engine_drain_budget_exhausted(events_drained: usize, started: Instant, now: Instant) -> bool {
-    events_drained >= MAX_ENGINE_EVENTS_PER_DRAIN
-        || now.saturating_duration_since(started) >= ENGINE_DRAIN_TIME_BUDGET
-}
 
 /// Where a key goes while onboarding owns the screen (#4763).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2729,6 +2372,8 @@ use std::process::{Command, Stdio};
 // `ui.rs` had grown past 19k lines. These three modules hold the same code,
 // moved verbatim, and are re-exported so every existing path still resolves.
 mod apply;
+mod approval_routing;
+use approval_routing::*;
 mod event_loop;
 mod handlers;
 
@@ -2744,6 +2389,8 @@ pub(crate) mod fatal_signal_guard;
 mod motion;
 mod release_check;
 mod terminal;
+mod terminal_input;
+use terminal_input::*;
 
 pub(crate) use dispatch::*;
 pub(crate) use motion::*;
