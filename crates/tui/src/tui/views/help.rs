@@ -716,8 +716,9 @@ fn shed_to_width(text: &str, max_width: usize) -> Cow<'_, str> {
         // session". Shedding the whole field there left a bare `/advisor`
         // beside rows that still had text, which reads as a broken renderer
         // rather than as a decision. So the last resort is the sentence's
-        // own short form: whole words, no mark, and the full text one row
-        // up in the detail slot. What is never done is append `…`, which
+        // own short form: whole words, no mark, and the same text restated
+        // at panel width one row up in the detail slot. What is never done
+        // is append `…`, which
         // would claim text this overlay has no way to reveal.
         let source = if oversize_clause.is_empty() {
             trimmed
@@ -1034,7 +1035,7 @@ impl ModalView for HelpView {
         };
         let rows = self.render_rows();
         // Two header rows: the filter with its count, and the detail row
-        // that carries the focused entry's description in full.
+        // that restates the focused entry's description at panel width.
         let visible_rows = content.height.saturating_sub(2) as usize;
         let row_start = Self::visible_row_start(&rows, self.focus.as_ref(), visible_rows.max(1));
         // Reserve the rail before calculating column widths. Otherwise the

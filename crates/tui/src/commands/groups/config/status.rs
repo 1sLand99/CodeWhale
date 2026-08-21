@@ -342,6 +342,11 @@ mod tests {
     /// rows — a user who typed `/status` landed on the *tail*: the version,
     /// route, directory, mode and sandbox rows had already scrolled off, and
     /// what remained on screen was five "not reported" rows and a `$0.0000`.
+    ///
+    /// A fresh session is 18 rows, not 17: `Window override:` is present
+    /// unless the value is already configured. That matches the viewport
+    /// height, so the title still scrolls off once `/status` occupies a
+    /// history cell.
     #[test]
     fn status_report_fits_a_short_terminal() {
         let tmpdir = TempDir::new().expect("temp dir");
@@ -349,8 +354,12 @@ mod tests {
         let msg = status(&mut app).message.expect("status message");
         let rows = msg.lines().count();
         assert!(
-            rows <= 18,
-            "status must fit the transcript viewport of an 80x24 terminal, got {rows} rows:\n{msg}"
+            msg.contains("Window override:"),
+            "fresh session keeps the override row: {msg}"
+        );
+        assert_eq!(
+            rows, 18,
+            "fresh session is 18 rows with Window override present, got {rows} rows:\n{msg}"
         );
     }
 

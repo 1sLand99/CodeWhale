@@ -10,19 +10,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `/status` was 31 rows. On an 80x24 terminal the transcript viewport is 18, so
   typing `/status` landed you on the *tail* of the report: the version, route,
   directory, mode and sandbox rows had already scrolled past, and what stayed on
-  screen was five `not reported` rows and a `$0.0000`. The report is 17 rows now
-  and fits that terminal whole. Provider, model and reasoning effort are one
-  `Route:` lockup, the way the header rail already writes them. Mode and its
-  permissions are one statement of posture. `Rate limits:` is gone — it was a
-  `push_row` of a string literal and could never say anything but "not available
-  from provider telemetry". The per-turn token ledger is gone too, because
-  `/tokens` is that ledger's whole subject and `/status` was printing six rows of
-  it at the same weight as the sandbox policy; the two facts that lived nowhere
-  else, the cumulative in/out split and the cumulative cache totals, survive on
-  one `Session tokens:` row. `Footer items:` no longer prints ten internal config
-  keys across the full width — `/statusline` owns them, and the report now points
-  there in the same row that points at `/tokens`. Two blank gutters do the
-  grouping; the `===================` rule under the title is gone.
+  screen was five `not reported` rows and a `$0.0000`. The report is 18 rows on a
+  fresh session — `Window override:` is present unless the value is already
+  configured. That is the viewport's height, so once `/status` itself occupies a
+  history cell the title row still scrolls off; it does not fit that terminal
+  whole. Provider, model and reasoning effort are one `Route:` lockup, the way
+  the header rail already writes them. Mode and its permissions are one statement
+  of posture. `Rate limits:` is gone — it was a `push_row` of a string literal
+  and could never say anything but "not available from provider telemetry". The
+  per-turn token ledger is gone too, because `/tokens` is that ledger's whole
+  subject and `/status` was printing six rows of it at the same weight as the
+  sandbox policy; the two facts that lived nowhere else, the cumulative in/out
+  split and the cumulative cache totals, survive on one `Session tokens:` row.
+  `Footer items:` no longer prints ten internal config keys across the full
+  width — `/statusline` owns them, and the report now points there in the same
+  row that points at `/tokens`. Two blank gutters do the grouping; the
+  `===================` rule under the title is gone.
 
 - The `/status` window-override key has its own labelled row. It used to be
   parenthesised onto the end of the provenance row, which pushed
@@ -37,9 +40,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `(aliases: /qin…` left the parenthesis hanging open. Descriptions now shed
   whole fields — the alias parenthetical first, then trailing clauses at their
   own joints, and only where there is no joint at all, the sentence's short form
-  on a whole word with no mark. The focused row's description is restated in
-  full under the filter *only when the row itself could not hold it*, so nothing
-  shed is unreachable and nothing is said twice on one screen.
+  on a whole word with no mark, keeping the head noun of a simple verb +
+  modifier + noun phrase rather than the adjectives that qualified it. The
+  focused row's description is restated under the filter at the panel's full
+  width, *only when the row itself could not hold it*, so a wide terminal does
+  not say the same sentence twice. At 60 columns that restatement is itself
+  shed — the `/advisor` detail stops before `session` — so the detail is longer
+  than the row, not a copy of the original sentence.
 
 - The `/help` label column is measured instead of assumed. It was a flat 28
   columns at every terminal size, so at 60 columns twenty blank cells sat
