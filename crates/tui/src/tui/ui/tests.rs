@@ -23196,3 +23196,133 @@ fn subagent_event_ownership_fails_closed_across_session_switches() {
         "A -> B -> A restores eligibility only after the active id is A again"
     );
 }
+
+/// Seed a worker's resident transcript with `message_count` one-line
+/// assistant messages — long enough that the focused pane must scroll.
+fn seed_focused_agent_transcript(app: &mut App, agent_id: &str, message_count: usize) {
+    let messages: Vec<_> = (0..message_count)
+        .map(|i| {
+            serde_json::json!({
+                "role": "assistant",
+                "content": [{"type": "text", "text": format!("child line {i}"), "cache_control": null}]
+            })
+        })
+        .collect();
+    let mut store = app
+        .runtime_services
+        .handle_store
+        .try_lock()
+        .expect("handle store");
+    let _ = store.insert_json(
+        format!("agent:{agent_id}"),
+        "full_transcript",
+        serde_json::json!({ "message_count": messages.len(), "messages": messages }),
+    );
+}
+
+#[test]
+fn focused_agent_transcript_receives_page_scroll_through_the_frame() {
+    let mut app = create_test_app();
+    app.onboarding = OnboardingState::None;
+    app.launch.visible = false;
+    // A non-empty main conversation is the production shape under focus:
+    // the dispatch prompt that spawned the worker is already in history, so
+    // the ChatWidget sampled for the ocean column takes its full (non-empty)
+    // path — the exact path that used to swallow the scroll delta.
+    app.history = vec![HistoryCell::User {
+        content: "dispatch a scout".to_string(),
+    }];
+    app.resync_history_revisions();
+    seed_focused_agent_transcript(&mut app, "agent_page", 40);
+    crate::tui::agent_focus::focus_agent(&mut app, "agent_page");
+
+    let config = Config::default();
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("test terminal");
+    terminal
+        .draw(|frame| {
+            super::frame::render(frame, &mut app, &config);
+        })
+        .expect("first frame");
+    let tail_top = app.viewport.last_transcript_top;
+    let page = app.viewport.last_transcript_visible.max(1);
+    assert!(
+        tail_top > 0,
+        "fixture must overflow the viewport for scrolling to be observable"
+    );
+
+    // PageUp accumulates into the shared pending delta exactly as the key
+    // loop does for the main transcript.
+    app.scroll_up(page);
+    terminal
+        .draw(|frame| {
+            super::frame::render(frame, &mut app, &config);
+        })
+        .expect("second frame");
+
+    let focus = app.agent_focus.as_ref().expect("focus survives the frame");
+    assert!(
+        focus.scroll_top.is_some(),
+        "PageUp must pin the focused transcript like the main transcript"
+    );
+    assert!(
+        app.viewport.last_transcript_top < tail_top,
+        "the focused pane's viewport must actually move up"
+    );
+    assert!(
+        app.viewport.transcript_scroll.is_at_tail(),
+        "the invisible main transcript must not consume the focused pane's scroll"
+    );
+}
+
+#[test]
+fn focused_agent_transcript_receives_wheel_scroll_through_the_frame() {
+    let mut app = create_test_app();
+    app.onboarding = OnboardingState::None;
+    app.launch.visible = false;
+    app.history = vec![HistoryCell::User {
+        content: "dispatch a scout".to_string(),
+    }];
+    app.resync_history_revisions();
+    seed_focused_agent_transcript(&mut app, "agent_wheel", 40);
+    crate::tui::agent_focus::focus_agent(&mut app, "agent_wheel");
+
+    let config = Config::default();
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("test terminal");
+    terminal
+        .draw(|frame| {
+            super::frame::render(frame, &mut app, &config);
+        })
+        .expect("first frame");
+    let tail_top = app.viewport.last_transcript_top;
+    assert!(tail_top > 0, "fixture must overflow the viewport");
+
+    let events = handle_mouse_event(
+        &mut app,
+        MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            column: 4,
+            row: 4,
+            modifiers: KeyModifiers::NONE,
+        },
+    );
+    assert!(events.is_empty());
+    terminal
+        .draw(|frame| {
+            super::frame::render(frame, &mut app, &config);
+        })
+        .expect("second frame");
+
+    let focus = app.agent_focus.as_ref().expect("focus survives the frame");
+    assert!(
+        focus.scroll_top.is_some(),
+        "the mouse wheel must scroll the focused transcript like the main transcript"
+    );
+    assert!(
+        app.viewport.last_transcript_top < tail_top,
+        "the focused pane's viewport must actually move up"
+    );
+    assert!(
+        app.viewport.transcript_scroll.is_at_tail(),
+        "the invisible main transcript must not consume the focused pane's scroll"
+    );
+}
