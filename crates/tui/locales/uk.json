@@ -574,6 +574,7 @@
   "KbAltJumpPlanAgentYolo": "Альтернативний перехід до режиму Plan / Act / Operate",
   "KbFocusSidebar": "Фокус на панелі рейки Tasks / Agents / Context / Pinned",
   "KbSessionPicker": "Відкрити вибір сеансу",
+  "KbUpdateInstall": "Перевірити й встановити останнє оновлення CodeWhale (`/update install`)",
   "KbTerminalPaste": "Вставити текст через локальний термінал",
   "KbPasteAttach": "Вставити текст або додати зображення з локального чи перенаправленого графічного буфера обміну",
   "KbCopySelection": "Скопіювати поточне виділення Codewhale",

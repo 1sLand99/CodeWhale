@@ -591,6 +591,7 @@
   "KbAltJumpPlanAgentYolo": "Plan / Act / Operate モードへの代替ジャンプ",
   "KbFocusSidebar": "Tasks / Agents / Context / Pinned レールパネルにフォーカス",
   "KbSessionPicker": "セッションピッカーを開く",
+  "KbUpdateInstall": "最新のCodeWhaleアップデートを確認してインストールする（`/update install`）",
   "KbTerminalPaste": "ローカル端末を使ってテキストを貼り付け",
   "KbPasteAttach": "ローカルまたは転送されたグラフィカルクリップボードからテキストを貼り付けるか画像を添付",
   "KbCopySelection": "Codewhale の現在の選択をコピー",

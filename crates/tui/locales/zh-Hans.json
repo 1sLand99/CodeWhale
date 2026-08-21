@@ -591,6 +591,7 @@
   "KbAltJumpPlanAgentYolo": "替代快捷键跳转到 Plan / Act / Operate 模式",
   "KbFocusSidebar": "聚焦 Tasks / Agents / Context / Pinned 工作栏面板",
   "KbSessionPicker": "打开会话选择器",
+  "KbUpdateInstall": "检查并安装最新的 CodeWhale 更新（`/update install`）",
   "KbTerminalPaste": "使用本地终端粘贴文本",
   "KbPasteAttach": "从本地或转发的图形剪贴板粘贴文本或附加图片",
   "KbCopySelection": "复制 Codewhale 当前选中内容",

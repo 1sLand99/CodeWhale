@@ -574,6 +574,7 @@
   "KbAltJumpPlanAgentYolo": "Saut alternatif vers le mode Plan / Act / Operate",
   "KbFocusSidebar": "Cibler le panneau du rail Tasks / Agents / Context / Pinned",
   "KbSessionPicker": "Ouvrir le sélecteur de sessions",
+  "KbUpdateInstall": "Rechercher et installer la dernière mise à jour de CodeWhale (`/update install`)",
   "KbTerminalPaste": "Coller du texte avec votre terminal local",
   "KbPasteAttach": "Coller du texte ou joindre une image depuis un presse-papiers graphique local ou transféré",
   "KbCopySelection": "Copier la sélection Codewhale actuelle",

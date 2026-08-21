@@ -591,6 +591,7 @@
   "KbAltJumpPlanAgentYolo": "Jump to Plan / Work, or request Full Access (legacy alias, not a mode)",
   "KbFocusSidebar": "Focus the Tasks / Agents / Context / Pinned rail panel",
   "KbSessionPicker": "Open the session picker",
+  "KbUpdateInstall": "Check for and install the latest CodeWhale update (`/update install`)",
   "KbTerminalPaste": "Paste text using your local terminal",
   "KbPasteAttach": "Paste text or attach an image from a local or forwarded graphical clipboard",
   "KbCopySelection": "Copy the current Codewhale selection",
