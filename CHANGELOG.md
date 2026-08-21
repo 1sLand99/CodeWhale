@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Diagnostic lines that mention token *counts* are no longer swallowed by
+  secret redaction. A stream error such as `max tokens = 8192 but budget =
+  4096` was matching the `token` hint as a substring of the English word
+  `tokens`, and the spaced-assignment pass then dropped the rest of the
+  line, leaving `max tokens = [redacted]`. Token counts are not credentials;
+  the hint now matches a credential identifier (`token`, `api_token`) rather
+  than an English word, so the numbers survive while `token = Bearer …` is
+  still redacted.
+
 - Silent `#[allow(dead_code)]` suppressions on the modules AGENTS.md warns
   auditors not to delete — prompt zones, context budget, the route seam —
   and on the next-largest holders (palette tokens, hotbar actions, core
