@@ -665,15 +665,16 @@ const FIELD_JOINTS: [&str; 6] = [" (", "; ", " — ", ". ", ": ", ", "];
 /// share prefixes. So the description sheds its alias parenthetical first,
 /// then trailing clauses at its own joints, and finally itself. The label is
 /// never shed at all: it is the string the user has to type.
-fn shed_to_width(text: &str, max_width: usize) -> &str {
+fn shed_to_width(text: &str, max_width: usize) -> Cow<'_, str> {
     let trimmed = text.trim_end();
     if max_width == 0 {
-        return "";
+        return Cow::Borrowed("");
     }
     if trimmed.width() <= max_width {
-        return trimmed;
+        return Cow::Borrowed(trimmed);
     }
     let mut best = "";
+    let mut oversize_clause = "";
     let mut depth = 0usize;
     for (idx, ch) in trimmed.char_indices() {
         match ch {
@@ -693,9 +694,20 @@ fn shed_to_width(text: &str, max_width: usize) -> &str {
             continue;
         }
         let head = trimmed[..idx].trim_end_matches([' ', ',', ';', ':', '—', '-']);
+        if head.is_empty() {
+            continue;
+        }
         let width = head.width();
-        if !head.is_empty() && width <= max_width && width > best.width() {
-            best = head;
+        if width <= max_width {
+            if width > best.width() {
+                best = head;
+            }
+        } else if width > oversize_clause.width() {
+            // The main clause was one column over, so the joint itself did
+            // not fire. Word-shed that clause rather than the alias list
+            // hanging off it — otherwise `/automation` keeps the adjectives
+            // and loses `automations`.
+            oversize_clause = head;
         }
     }
     if best.is_empty() {
@@ -707,9 +719,15 @@ fn shed_to_width(text: &str, max_width: usize) -> &str {
         // own short form: whole words, no mark, and the full text one row
         // up in the detail slot. What is never done is append `…`, which
         // would claim text this overlay has no way to reveal.
-        best = shed_to_words(trimmed, max_width);
+        let source = if oversize_clause.is_empty() {
+            trimmed
+        } else {
+            oversize_clause
+        };
+        shed_to_words(source, max_width)
+    } else {
+        Cow::Borrowed(best)
     }
-    best
 }
 
 /// Longest prefix of `text` that fits `max_width` display columns, cut on a
@@ -728,12 +746,23 @@ fn widest_char_prefix(text: &str, max_width: usize) -> &str {
 
 /// Longest whole-word prefix of `text` that fits, with trailing short
 /// function words dropped so the phrase does not end on `to an`.
-fn shed_to_words(text: &str, max_width: usize) -> &str {
+///
+/// The scan used to stop on a space, so the last word was never included
+/// even when it fitted, and the two-pass short-word trim then left a simple
+/// verb + modifier + noun phrase without the noun — `/automation` read
+/// `Manage durable scheduled`. If that prefix lost the head noun, intervening
+/// modifiers are dropped so the noun survives.
+fn shed_to_words(text: &str, max_width: usize) -> Cow<'_, str> {
     let mut end = 0usize;
     for (idx, ch) in text.char_indices() {
         if ch == ' ' && text[..idx].width() <= max_width {
             end = idx;
         }
+    }
+    // Include the last word when the whole phrase fits. The loop above only
+    // fires on spaces, so without this the head noun was always eaten.
+    if text.width() <= max_width {
+        end = text.len();
     }
     if end == 0 {
         // No usable space boundary. That is the normal case for Japanese,
@@ -742,8 +771,9 @@ fn shed_to_words(text: &str, max_width: usize) -> &str {
         // description in those locales rendered blank. It also happens in
         // English whenever the first space falls beyond `max_width`.
         // Fall back to the widest whole-character prefix that fits.
-        return widest_char_prefix(text, max_width)
-            .trim_end_matches([' ', ',', ';', ':', '—', '-']);
+        return Cow::Borrowed(
+            widest_char_prefix(text, max_width).trim_end_matches([' ', ',', ';', ':', '—', '-']),
+        );
     }
     let mut head = &text[..end];
     // Two passes at most: enough for `to an`, not enough to eat a real word.
@@ -754,7 +784,76 @@ fn shed_to_words(text: &str, max_width: usize) -> &str {
         }
         head = &head[..cut];
     }
-    head.trim_end_matches([' ', ',', ';', ':', '—', '-'])
+    let head = head.trim_end_matches([' ', ',', ';', ':', '—', '-']);
+    if let Some(kept) = keep_simple_head_noun(text, head, max_width) {
+        return kept;
+    }
+    Cow::Borrowed(head)
+}
+
+fn is_short_function_word(word: &str) -> bool {
+    !word.is_empty() && word.len() <= 3
+}
+
+fn is_plain_content_word(word: &str) -> bool {
+    !word.is_empty()
+        && word
+            .chars()
+            .all(|ch| ch.is_ascii_alphabetic() || matches!(ch, '-' | '/'))
+}
+
+/// Restore the head noun of a simple `verb modifier* noun` phrase when the
+/// prefix trim dropped it. Phrases with a short function word after the verb
+/// (`Toggle the background advisor for this session`) stay prefix-trimmed,
+/// as do rows that carry punctuation (`(aliases: /image, /media)`).
+fn keep_simple_head_noun<'a>(
+    text: &'a str,
+    prefix: &'a str,
+    max_width: usize,
+) -> Option<Cow<'a, str>> {
+    let words: Vec<&str> = text.split(' ').filter(|word| !word.is_empty()).collect();
+    if words.len() < 2 {
+        return None;
+    }
+    let noun = *words.last()?;
+    if is_short_function_word(noun) || prefix.ends_with(noun) {
+        return None;
+    }
+    if !words.iter().all(|word| is_plain_content_word(word)) {
+        return None;
+    }
+    if words[1..words.len() - 1]
+        .iter()
+        .any(|word| is_short_function_word(word))
+    {
+        return None;
+    }
+    if noun.width() > max_width {
+        return None;
+    }
+    let verb = words[0];
+    let modifiers = &words[1..words.len() - 1];
+    for skip in 0..=modifiers.len() {
+        let mut candidate = String::from(verb);
+        for modifier in &modifiers[skip..] {
+            candidate.push(' ');
+            candidate.push_str(modifier);
+        }
+        candidate.push(' ');
+        candidate.push_str(noun);
+        if candidate.width() <= max_width {
+            if text.starts_with(&candidate)
+                && text
+                    .as_bytes()
+                    .get(candidate.len())
+                    .is_none_or(|byte| *byte == b' ')
+            {
+                return Some(Cow::Borrowed(&text[..candidate.len()]));
+            }
+            return Some(Cow::Owned(candidate));
+        }
+    }
+    Some(Cow::Borrowed(noun))
 }
 
 impl ModalView for HelpView {
@@ -1478,7 +1577,7 @@ mod tests {
     fn a_jointless_description_sheds_to_whole_words() {
         let text = "Move the active branch to an existing session entry";
         let shed = shed_to_width(text, 26);
-        assert!(text.starts_with(shed), "{shed:?}");
+        assert!(text.starts_with(&*shed), "{shed:?}");
         assert!(!shed.is_empty());
         assert!(!shed.ends_with(" an"), "{shed:?}");
         assert!(!shed.ends_with(" to"), "{shed:?}");
@@ -1520,6 +1619,24 @@ mod tests {
             description_at - label_at <= widest + 2,
             "description must start right after the widest label in the group, \
              not after a flat 28-column gutter: {row:?}"
+        );
+    }
+
+    /// At 60x20 the description slot is 35 columns. `/automation`'s
+    /// "Manage durable scheduled automations" is 36, so the last-resort
+    /// word shed printed "Manage durable scheduled" — the adjectives
+    /// without the noun that says what is being managed.
+    #[test]
+    fn sixty_column_help_keeps_the_automation_noun() {
+        let view = HelpView::new();
+        let rows = rows_at(&view, 60, 20);
+        let row = rows
+            .iter()
+            .find(|row| row.contains("/automation"))
+            .expect("/automation is a registered command");
+        assert!(
+            row.contains("automations"),
+            "/automation lost the noun it manages: {row:?}"
         );
     }
 
@@ -2078,7 +2195,10 @@ mod shed_to_words_script_tests {
                     "{text:?} at {width}: {shed:?} overflows ({} cols)",
                     shed.width(),
                 );
-                assert!(text.starts_with(shed), "{shed:?} is not a prefix of {text:?}");
+                assert!(
+                    text.starts_with(&*shed),
+                    "{shed:?} is not a prefix of {text:?}"
+                );
             }
         }
     }
@@ -2102,7 +2222,7 @@ mod shed_to_words_script_tests {
         assert!(shed.width() <= 24, "{shed:?}");
         assert!(!shed.ends_with(' '), "{shed:?}");
         assert!(
-            shed.split(' ').count() > 1 && text.starts_with(shed),
+            shed.split(' ').count() > 1 && text.starts_with(&*shed),
             "{shed:?} should be a whole-word prefix",
         );
     }
@@ -2115,5 +2235,44 @@ mod shed_to_words_script_tests {
             assert!(text.starts_with(prefix));
             assert!(prefix.width() <= width);
         }
+    }
+
+    /// The last-resort word shed always ended on a space, so the last word
+    /// of a simple verb + modifier + noun phrase was dropped even when it
+    /// fitted, and when it overflowed by one column the two-pass short-word
+    /// trim left the adjectives without the noun they qualify.
+    #[test]
+    fn a_simple_noun_phrase_keeps_the_head_noun() {
+        let text = "Manage durable scheduled automations";
+        // 24 fits "Manage durable scheduled" exactly and not the noun.
+        // 35 is the description slot at 60 columns (measured).
+        // 36 is the full phrase.
+        for width in [24usize, 28, 32, 35, 36] {
+            let shed = shed_to_words(text, width);
+            assert!(
+                shed.contains("automations"),
+                "width {width} dropped the head noun: {shed:?}"
+            );
+            assert!(
+                shed.width() <= width,
+                "width {width} overflowed: {shed:?} ({} cols)",
+                shed.width()
+            );
+        }
+
+        // Help appends `  (aliases: …)` onto the same row. The joint head is
+        // one column over the 35-column slot, so last-resort word shed must
+        // run on that clause, not on the alias list.
+        let aliased = "Manage durable scheduled automations  (aliases: /automations, /scheduled)";
+        let shed = super::shed_to_width(aliased, 35);
+        assert!(
+            shed.contains("automations"),
+            "aliased row dropped the head noun: {shed:?}"
+        );
+        assert!(
+            !shed.contains("aliases"),
+            "aliased row kept the alias list instead of the clause: {shed:?}"
+        );
+        assert!(shed.width() <= 35, "{shed:?}");
     }
 }
