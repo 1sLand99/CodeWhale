@@ -8,6 +8,7 @@ use super::observer_hooks::{
     execute_turn_end_observer_hook, subagent_failure_notice,
     subagent_status_from_completion_result, surface_observer_hook_submission_failure,
 };
+use super::task_projection::{refresh_active_task_panel, refresh_shell_exec_live_output};
 use super::*;
 
 pub(super) fn event_owner_is_active(

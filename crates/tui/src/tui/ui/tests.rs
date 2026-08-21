@@ -3,6 +3,10 @@ use super::observer_hooks::{
     bounded_subagent_hook_preview, subagent_completion_status, subagent_failure_notice,
     subagent_status_from_completion_result, turn_end_observer_metadata,
 };
+use super::task_projection::{
+    ShellExecLiveUpdate, active_rlm_task_entries, newly_completed_id,
+    refresh_shell_exec_live_output, shell_exec_live_update,
+};
 use super::*;
 use crate::config::{
     ApiProvider, Config, DEFAULT_OPENROUTER_MODEL, DEFAULT_TEXT_MODEL, DEFAULT_ZAI_MODEL,

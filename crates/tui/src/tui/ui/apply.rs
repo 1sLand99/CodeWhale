@@ -6,6 +6,7 @@
 use super::observer_hooks::{
     execute_subagent_observer_hook, surface_observer_hook_submission_failure,
 };
+use super::task_projection::refresh_active_task_panel;
 use super::*;
 
 /// Record the model frozen into a child's runtime at spawn time.
