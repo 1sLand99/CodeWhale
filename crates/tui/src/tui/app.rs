@@ -3222,6 +3222,14 @@ impl App {
             && !self.viewport.transcript_selection.dragging
             && !selection_has_range
             && !self.user_scrolled_during_stream
+            // While a worker's transcript owns the conversation area, its
+            // pin governs the visible viewport: main-conversation activity
+            // must not yank the user's read position in the focused
+            // transcript (same stick-to-bottom rule as the main pane).
+            && self
+                .agent_focus
+                .as_ref()
+                .is_none_or(|focus| focus.scroll_top.is_none())
         {
             self.scroll_to_bottom();
         }
@@ -4395,6 +4403,14 @@ impl App {
             && !self.viewport.transcript_selection.dragging
             && !selection_has_range
             && !self.user_scrolled_during_stream
+            // While a worker's transcript owns the conversation area, its
+            // pin governs the visible viewport: main-conversation activity
+            // must not yank the user's read position in the focused
+            // transcript (same stick-to-bottom rule as the main pane).
+            && self
+                .agent_focus
+                .as_ref()
+                .is_none_or(|focus| focus.scroll_top.is_none())
         {
             self.scroll_to_bottom();
         }
@@ -4694,6 +4710,14 @@ impl App {
         self.viewport.pending_scroll_delta = 0;
         self.viewport.jump_to_latest_button_area = None;
         self.user_scrolled_during_stream = false;
+        // While a worker's transcript owns the conversation area, the
+        // jump-to-bottom affordances (Ctrl+End, Alt+G, the jump-to-latest
+        // button, sending a follow-up) must release its pin too: the two
+        // surfaces share one command set, so returning to the live tail has
+        // to mean the tail the user is actually looking at.
+        if let Some(focus) = self.agent_focus.as_mut() {
+            focus.scroll_top = None;
+        }
         self.needs_redraw = true;
     }
 

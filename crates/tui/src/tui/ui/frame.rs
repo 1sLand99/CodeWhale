@@ -970,10 +970,21 @@ pub(crate) fn render(f: &mut Frame, app: &mut App, _config: &Config) -> Option<(
         if app.agent_focus.is_some() {
             // A focused worker's full transcript owns the conversation area;
             // the ocean column and every other shell surface stay as they are.
+            //
+            // The widget below is built only to sample the ocean column, but
+            // its constructor also consumes `pending_scroll_delta` into the
+            // (invisible) main-transcript scroll state — which would starve
+            // the focused transcript of every PageUp/PageDown and wheel
+            // event. Park the delta across the sample so `render_focus`
+            // receives it and the focused pane scrolls exactly like the main
+            // transcript.
+            let parked_scroll_delta = app.viewport.pending_scroll_delta;
+            app.viewport.pending_scroll_delta = 0;
             {
                 let chat_widget = ChatWidget::new(app, chat_area).with_ocean_viewport(size);
                 shell_ocean = chat_widget.ocean_column();
             }
+            app.viewport.pending_scroll_delta = parked_scroll_delta;
             crate::tui::agent_focus::refresh_focus(app);
             let buf = f.buffer_mut();
             crate::tui::agent_focus::render_focus(app, chat_area, buf);
