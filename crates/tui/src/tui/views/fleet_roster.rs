@@ -336,7 +336,7 @@ impl FleetRosterView {
     fn selected_fleet_line(&self) -> String {
         match &self.selected_fleet {
             Some(sel) => format!("Fleet `{}` · {}", sel.name, sel.scope.long_label()),
-            None => "no saved Fleet selected · legacy roster".to_string(),
+            None => "No Fleet selected — built-in team".to_string(),
         }
     }
 
@@ -572,10 +572,10 @@ fn operator_detail_lines(operator: &OperatorInfo) -> Vec<Line<'static>> {
     detail_field(
         &mut lines,
         "Role",
-        "operator · Fleet leader (session route)".to_string(),
+        "Coordinator — this session's model leads the Fleet".to_string(),
     );
-    detail_field(&mut lines, "Origin", "session".to_string());
-    detail_field(&mut lines, "Posture", "full session authority".to_string());
+    detail_field(&mut lines, "Saved for", "this session only".to_string());
+    detail_field(&mut lines, "Access", "full session access".to_string());
     detail_field(&mut lines, "Provider", operator.provider.clone());
     detail_field(&mut lines, "Model", operator.model.clone());
     // Session-route capability badges (#5038). Use the exact route key rather
@@ -591,10 +591,9 @@ fn operator_detail_lines(operator: &OperatorInfo) -> Vec<Line<'static>> {
     detail_field(
         &mut lines,
         "Description",
-        "The operator is the Fleet leader — your main session model. Every member \
-         below works for this route. It dispatches workers via `agent` profile \
-         spawns and Workflow task({profile}). Change its route with /model or \
-         /provider; persist with /fleet save."
+        "The Coordinator is this Fleet's leader — your main session model. Every \
+         member below works for it. Change the model with /model or /provider; \
+         persist with /fleet save."
             .to_string(),
     );
     lines
@@ -603,28 +602,35 @@ fn operator_detail_lines(operator: &OperatorInfo) -> Vec<Line<'static>> {
 /// The resolved worker posture for a roster member: what the runtime would
 /// actually grant when this member is dispatched (role posture, not the
 /// profile's requested permissions).
-fn member_posture(member: &AgentProfile) -> String {
+/// Plain-Access summary for a roster member: what it may do, derived from the
+/// same runtime profile dispatch would grant. No internal role/posture words.
+fn member_access_summary(member: &AgentProfile) -> String {
     let agent_type = roster_member_agent_type(member);
     let runtime = WorkerRuntimeProfile::for_role(agent_type.clone());
     let write = if runtime.permissions.write {
-        "write"
+        "can edit files"
     } else {
-        "read-only"
+        "read-only files"
     };
     let shell = match runtime.shell {
-        ShellPolicy::None => "shell none",
-        ShellPolicy::ReadOnly => "shell read-only",
-        ShellPolicy::Full => "shell full",
+        ShellPolicy::None => "cannot run commands",
+        ShellPolicy::ReadOnly => "read-only commands",
+        ShellPolicy::Full => "can run commands",
     };
-    format!("{} worker · {write} · {shell}", agent_type.as_str())
+    let network = if runtime.permissions.network {
+        "network"
+    } else {
+        "no network"
+    };
+    format!("{write} · {shell} · {network}")
 }
 
-/// The routing truth for a member: explicit model pin, else route preset, else
-/// same-route inheritance. `[subagents]` overrides still win at dispatch.
+/// The model truth for a member: explicit model choice, else saved model set,
+/// else the session's model. `[subagents]` overrides still win at dispatch.
 ///
-/// When the loadout is `fast`, show that the runtime resolves the **fast
-/// sibling of the active session model** — not a stale on-disk profile name —
-/// so the roster matches what Fleet will actually launch.
+/// When the loadout is `fast`, show that the runtime picks the **fast sibling
+/// of the active session model** — not a stale on-disk profile name — so the
+/// roster matches what Fleet will actually launch.
 fn member_routing(member: &AgentProfile) -> String {
     member_routing_with_session(member, None)
 }
@@ -637,15 +643,15 @@ fn member_routing_with_session(member: &AgentProfile, session_model: Option<&str
         .map(str::trim)
         .filter(|model| !model.is_empty())
     {
-        return format!("model {model} (pinned)");
+        return format!("model {model}");
     }
     match member.profile.loadout.as_str() {
-        "inherit" => "inherit session route".to_string(),
+        "inherit" => "same model as this session".to_string(),
         "fast" => match session_model.map(str::trim).filter(|m| !m.is_empty()) {
-            Some(session) => format!("fast sibling of {session} (resolved)"),
-            None => "route preset fast (resolved at launch)".to_string(),
+            Some(session) => format!("fast model for {session}"),
+            None => "fast model, picked at launch".to_string(),
         },
-        loadout => format!("route preset {loadout}"),
+        loadout => format!("saved model set {loadout}"),
     }
 }
 
@@ -700,9 +706,10 @@ fn member_detail_lines_with_session(
     detail_field(&mut lines, "Member", name);
     detail_field(
         &mut lines,
-        "Origin",
+        "Saved for",
         match member.origin {
-            ProfileOrigin::BuiltIn => "built-in (default party)".to_string(),
+            ProfileOrigin::BuiltIn => "all projects (built-in team)".to_string(),
+            ProfileOrigin::Workspace => "this project".to_string(),
             _ => format!("{} · {}", member.origin, member.source.display()),
         },
     );
@@ -722,11 +729,11 @@ fn member_detail_lines_with_session(
             body,
         );
     }
-    detail_field(&mut lines, "Slot", member.profile.slot.as_str().to_string());
-    detail_field(&mut lines, "Posture", member_posture(member));
+    // Slot is internal dispatch vocabulary and duplicates Role — never shown.
+    detail_field(&mut lines, "Access", member_access_summary(member));
     detail_field(
         &mut lines,
-        "Routing",
+        "Model",
         member_routing_with_session(member, session_model),
     );
 
