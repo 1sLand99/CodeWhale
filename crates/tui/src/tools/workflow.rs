@@ -7254,12 +7254,12 @@ workflow({
 
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
-    async fn declarative_max_steps_zero_stops_before_provider_call() {
+    async fn declarative_max_steps_zero_runs_without_a_turn_cap() {
         let _retry_guard = workflow_test_retry_guard();
         let tmp = tempfile::tempdir().expect("tempdir");
         let ctx = ToolContext::new(tmp.path().to_path_buf());
         let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 2);
-        let (client, calls) = fake_chat_client("must not be called").await;
+        let (client, calls) = fake_chat_client("Completed without a turn cap.").await;
         let runtime = SubAgentRuntime::new(
             client,
             "deepseek-v4-flash".to_string(),
@@ -7276,11 +7276,11 @@ workflow({
                     "action": "run",
                     "script": r#"
                     workflow({
-                      "goal": "prove the child step cap reaches runtime",
+                      "goal": "prove zero means an unbounded child loop",
                       "nodes": [{
                         "agent": {
                           "id": "zero-step",
-                          "prompt": "Do not start a model turn.",
+                          "prompt": "Complete this task.",
                           "budget": { "max_steps": 0, "timeout_secs": 90 }
                         }
                       }]
@@ -7290,17 +7290,17 @@ workflow({
                 &ctx,
             )
             .await
-            .expect("failed workflow still returns its terminal receipt");
+            .expect("workflow returns its terminal receipt");
         let payload: Value = serde_json::from_str(&result.content).expect("workflow JSON");
 
         assert_eq!(
             calls.load(Ordering::SeqCst),
-            0,
-            "provider must not be called"
+            1,
+            "an unbounded child must be allowed to start a model turn"
         );
-        assert_eq!(payload["status"], "failed", "{payload}");
+        assert_eq!(payload["status"], "completed", "{payload}");
         assert_eq!(
-            payload["execution"]["leaf_results"][0]["status"], "failed",
+            payload["execution"]["leaf_results"][0]["status"], "succeeded",
             "{payload}"
         );
     }

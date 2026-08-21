@@ -13598,7 +13598,7 @@ async fn run_subagent_task_claims_before_delivery_and_then_finalizes() {
         allowed_tools: None,
         fork_context: false,
         started_at: Instant::now(),
-        max_steps: 0,
+        max_steps: 1,
         token_budget: None,
         wall_time: DEFAULT_CHILD_WALL_TIME,
         input_rx: task_input_rx,
@@ -13635,8 +13635,8 @@ async fn run_subagent_task_claims_before_delivery_and_then_finalizes() {
         .get_result(&agent_id)
         .expect("completed agent should be present");
     assert!(
-        matches!(snapshot.status, SubAgentStatus::Failed(_)),
-        "0 max_steps cannot produce a final summary, so the child must fail: {:?}",
+        !matches!(snapshot.status, SubAgentStatus::Running),
+        "the child should publish one terminal result after the claim commits: {:?}",
         snapshot.status
     );
 }
@@ -13685,7 +13685,7 @@ async fn cancellation_wins_task_race_but_still_fans_in_exactly_once() {
         allowed_tools: None,
         fork_context: false,
         started_at: Instant::now(),
-        max_steps: 0,
+        max_steps: 1,
         token_budget: None,
         wall_time: DEFAULT_CHILD_WALL_TIME,
         input_rx: task_input_rx,
@@ -13698,9 +13698,8 @@ async fn cancellation_wins_task_race_but_still_fans_in_exactly_once() {
     manager_lock.agents.insert(agent_id.clone(), agent);
     let task_handle = tokio::spawn(run_subagent_task(task));
 
-    // max_steps=0 reaches the task epilogue without provider I/O. Keep the
-    // terminal lock occupied long enough for that epilogue to queue behind us,
-    // then let cancellation win the same transition point deterministically.
+    // Keep the terminal lock occupied so the model completion queues behind
+    // us, then let cancellation win the same transition point deterministically.
     tokio::time::sleep(Duration::from_millis(100)).await;
     let cancelled = manager_lock
         .cancel_agent(&agent_id)
@@ -14761,8 +14760,7 @@ fn normalize_requested_subagent_model_is_provider_aware() {
 
 #[test]
 fn format_step_counter_hides_unbounded_sentinel() {
-    // Concrete role defaults keep progress truthful.
-    assert_eq!(format_step_counter(16, 60), "step 16/60");
+    assert_eq!(format_step_counter(16, 0), "step 16");
 }
 
 #[test]
@@ -14773,7 +14771,8 @@ fn format_step_counter_keeps_concrete_budgets() {
 
 #[test]
 fn child_step_override_wins_and_clamps_to_hard_ceiling() {
-    assert_eq!(resolve_max_steps(FleetRole::Scout, None, None), 60);
+    assert_eq!(resolve_max_steps(FleetRole::Scout, None, None), 0);
+    assert_eq!(resolve_max_steps(FleetRole::Scout, Some(0), Some(90)), 0);
     assert_eq!(resolve_max_steps(FleetRole::Builder, Some(7), None), 7);
     assert_eq!(
         resolve_max_steps(FleetRole::Worker, Some(u32::MAX), None),

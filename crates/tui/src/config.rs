@@ -7177,9 +7177,8 @@ impl Config {
 
     /// Default per-child model-turn budget from `[subagents]
     /// default_max_steps`, applied when an `agent` start carries no explicit
-    /// `max_steps` (#5324). `None` or `0` keep the Fleet role defaults
-    /// (60 read-only roles / 120 builder/worker/custom); the resolved value
-    /// is clamped to the runtime ceiling when applied.
+    /// `max_steps` (#5324). `None` or `0` mean unbounded; a positive value is
+    /// clamped to the runtime ceiling when applied.
     #[must_use]
     pub fn subagent_default_max_steps(&self) -> Option<u32> {
         self.subagents

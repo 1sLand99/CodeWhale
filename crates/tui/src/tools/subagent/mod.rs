@@ -242,8 +242,8 @@ fn read_bounded_resident_context(
     })
 }
 
-/// Child model-turn budgets are finite by role; explicit spawn values are
-/// clamped to the hard ceiling below.
+/// Positive child model-turn budgets are clamped to this hard ceiling. Zero is
+/// the unbounded sentinel used by the default agent loop.
 const MAX_SUBAGENT_STEPS: u32 = 2_000;
 /// Default wall-clock budget for one child run, including model and tool work.
 const DEFAULT_CHILD_WALL_TIME: Duration = Duration::from_secs(30 * 60);
@@ -265,7 +265,11 @@ const MIN_EVENT_CHANNEL_HEADROOM_FOR_ROUTINE_PROGRESS: usize = 32;
 /// Format a step counter for sub-agent progress messages.
 ///
 fn format_step_counter(steps: u32, max_steps: u32) -> String {
-    format!("step {steps}/{max_steps}")
+    if max_steps == 0 {
+        format!("step {steps}")
+    } else {
+        format!("step {steps}/{max_steps}")
+    }
 }
 
 fn resolve_max_steps(role: FleetRole, explicit: Option<u32>, configured: Option<u32>) -> u32 {
@@ -3222,9 +3226,8 @@ pub struct SubAgentManager {
     coordination_process_lock: std::sync::Mutex<Option<CoordinationProcessLock>>,
     coordination_process_lock_required: bool,
     /// Configured default per-child model-turn budget (`[subagents]
-    /// default_max_steps`, #5324). `None` keeps the Fleet role defaults
-    /// (`WorkerRuntimeProfile::default_max_steps`); an explicit spawn
-    /// `max_steps` still wins.
+    /// default_max_steps`, #5324). `None` keeps the unbounded Fleet default;
+    /// an explicit spawn `max_steps` still wins. Zero means unbounded.
     max_steps: Option<u32>,
     /// Configured default per-child wall-clock budget (`[subagents]
     /// default_wall_time_secs`, #5324). `None` keeps
@@ -3411,8 +3414,8 @@ impl SubAgentManager {
     }
 
     /// Set the configured default per-child model-turn budget applied when a
-    /// spawn carries no explicit `max_steps` (#5324). `None` keeps the Fleet
-    /// role defaults.
+    /// spawn carries no explicit `max_steps` (#5324). `None` keeps the
+    /// unbounded default; a positive explicit/configured value still caps it.
     #[must_use]
     pub fn with_default_max_steps(mut self, max_steps: Option<u32>) -> Self {
         self.max_steps = max_steps;
@@ -11040,11 +11043,8 @@ async fn run_subagent(
     let mut latest_checkpoint: Option<SubAgentCheckpoint> = None;
     let mut tokens_used: u64 = 0;
     let mut terminal_failure_reason: Option<String> = None;
-    // #4050: distinguish a real "the model chose to stop" exit (the `break`
-    // below) from loop exhaustion (running out of `max_steps` while still
-    // tool-calling). Only the former, with a non-empty final summary, is a
-    // genuine success; everything else must surface its stop reason instead of
-    // reporting a completed child with no payload.
+    // Distinguish a real "the model chose to stop" exit from an explicitly
+    // configured step-cap exit. The normal loop is unbounded (max_steps == 0).
     let mut stopped_naturally = false;
     // A worker is inspectable as soon as it is launched, not only after its
     // first model round trip. This gives Open a real conversation destination
@@ -11064,7 +11064,10 @@ async fn run_subagent(
     )
     .await;
 
-    for _step in 0..max_steps {
+    loop {
+        if max_steps > 0 && steps >= max_steps {
+            break;
+        }
         // Cooperative cancellation: bail if this session's token was cancelled
         // while we were between steps. Top-level model-visible sub-agents use
         // a detached token so parent turn cancellation does not stop them.
@@ -11124,7 +11127,7 @@ async fn run_subagent(
             });
         }
 
-        steps += 1;
+        steps = steps.saturating_add(1);
         record_agent_progress(
             runtime,
             &agent_id,
