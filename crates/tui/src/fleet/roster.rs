@@ -980,6 +980,12 @@ mod tests {
 
     #[test]
     fn broken_workspace_dir_degrades_to_built_ins_and_config() {
+        // `load` reads the real personal agent dir under CODEWHALE_HOME; a
+        // developer's own extra profiles must not change this assertion.
+        let _env_lock = crate::test_support::lock_test_env();
+        let isolated_home = TempDir::new().unwrap();
+        let _codewhale_home =
+            crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", isolated_home.path());
         let tmp = TempDir::new().unwrap();
         // A malformed provider token is still a load failure (#4093 / #3965):
         // profile pins may name built-ins or simple custom ids like
