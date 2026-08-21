@@ -956,6 +956,7 @@
   "KbSendDraft": "閒置時傳送，忙碌時排隊；輸入框為空時立即傳送下一條排隊訊息",
   "KbSessionPicker": "開啟工作階段選擇器",
   "KbUpdateInstall": "檢查並安裝最新的 CodeWhale 更新（`/update install`）",
+  "UpdateChangedHint": "CodeWhale 已更新：{previous} → {current}。執行 /change 可選擇其他模型或版本。",
   "KbSettings": "開啟類型化設定編輯器",
   "KbShellControls": "將正在等待的 shell 移到 /jobs",
   "KbStashDraft": "先傳送排隊的跟進內容；否則暫存目前草稿（用 `/stash pop` 還原）",

@@ -149,8 +149,7 @@ pub(super) fn is_select_all_shortcut(key: &KeyEvent) -> bool {
 /// never collide with window-management shortcuts.
 pub(super) fn is_update_install_shortcut(key: &KeyEvent) -> bool {
     let is_u = matches!(key.code, KeyCode::Char('u') | KeyCode::Char('U'));
-    is_u
-        && key.modifiers.contains(KeyModifiers::CONTROL)
+    is_u && key.modifiers.contains(KeyModifiers::CONTROL)
         && key.modifiers.contains(KeyModifiers::SHIFT)
         && !key
             .modifiers

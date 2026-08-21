@@ -575,6 +575,7 @@
   "KbFocusSidebar": "Фокус на панели рейки Tasks / Agents / Context / Pinned",
   "KbSessionPicker": "Открыть выбор сессии",
   "KbUpdateInstall": "Проверить и установить последнее обновление CodeWhale (`/update install`)",
+  "UpdateChangedHint": "CodeWhale обновлён: {previous} → {current}. Запустите /change, чтобы выбрать другую модель или версию.",
   "KbTerminalPaste": "Вставить текст через локальный терминал",
   "KbPasteAttach": "Вставить текст или прикрепить изображение из локального или проброшенного графического буфера обмена",
   "KbCopySelection": "Скопировать текущее выделение Codewhale",

@@ -592,6 +592,7 @@
   "KbFocusSidebar": "Tasks / Agents / Context / Pinned 레일 패널에 포커스",
   "KbSessionPicker": "세션 선택 화면 열기",
   "KbUpdateInstall": "최신 CodeWhale 업데이트를 확인하고 설치 (`/update install`)",
+  "UpdateChangedHint": "CodeWhale가 업데이트되었습니다: {previous} → {current}. 다른 모델이나 버전을 선택하려면 /change를 실행하세요.",
   "KbTerminalPaste": "로컬 터미널로 텍스트 붙여넣기",
   "KbPasteAttach": "로컬 또는 전달된 그래픽 클립보드에서 텍스트를 붙여넣거나 이미지 첨부",
   "KbCopySelection": "현재 Codewhale 선택 영역 복사",

@@ -592,6 +592,7 @@
   "KbFocusSidebar": "Focar o painel do trilho Tasks / Agents / Context / Pinned",
   "KbSessionPicker": "Abrir seletor de sessões",
   "KbUpdateInstall": "Verificar e instalar a atualização mais recente do CodeWhale (`/update install`)",
+  "UpdateChangedHint": "O CodeWhale foi atualizado: {previous} → {current}. Execute /change para escolher outro modelo ou versão.",
   "KbTerminalPaste": "Colar texto usando o terminal local",
   "KbPasteAttach": "Colar texto ou anexar uma imagem de uma área de transferência gráfica local ou encaminhada",
   "KbCopySelection": "Copiar a seleção atual do Codewhale",

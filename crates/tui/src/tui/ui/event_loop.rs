@@ -753,6 +753,26 @@ pub(crate) async fn run_event_loop(
     let mut version_check: Option<tokio::task::JoinHandle<Option<UpdateNotice>>> =
         spawn_startup_version_check(config.update_config());
 
+    // Startup version-change hint: once per version, never on first run.
+    // `record_launch` owns the semantics (strict semver forward move, corrupt
+    // record = silent rewrite, downgrade records without hinting); this only
+    // renders the outcome. Local bookkeeping — independent of the network
+    // update check, and skipped entirely when home cannot be resolved.
+    if let Ok(home) = codewhale_config::codewhale_home() {
+        let outcome = codewhale_release::record_launch(&home, env!("CARGO_PKG_VERSION"));
+        if let Some(record_error) = outcome.record_error {
+            tracing::debug!(error = %record_error, "could not persist the last-launch record");
+        }
+        if let Some(change) = outcome.change {
+            let content = app
+                .tr(MessageId::UpdateChangedHint)
+                .replace("{previous}", &change.previous)
+                .replace("{current}", &change.current);
+            app.add_message(HistoryCell::System { content });
+            app.needs_redraw = true;
+        }
+    }
+
     // Fire a one-shot initial balance fetch for DeepSeek providers
     // so the footer chip shows balance on the first frame without
     // waiting for a turn to complete.
