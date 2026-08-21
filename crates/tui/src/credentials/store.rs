@@ -40,14 +40,19 @@ pub(crate) struct CredentialInfo {
 /// read-modify-write. Callers that need to refresh a rotated token run the
 /// refresh *inside* `modify` so concurrent requests cannot double-refresh.
 ///
-/// Error semantics: `read` yields `Ok(None)` for a missing entry; methods fail
-/// only on storage failure. `list` must not execute configured API-key
-/// commands or open network flows.
+/// Error semantics: `read` yields `Ok(None)` for a missing entry and `Err`
+/// on storage failure. `list` is best-effort per slot: a single unreadable
+/// entry is omitted so one corrupt slot cannot hide every other stored
+/// credential from enumeration (status, `/provider`, logout). `list` fails
+/// only when enumeration itself cannot run. `list` must not execute
+/// configured API-key commands or open network flows.
 pub(crate) trait CredentialStore: Send + Sync {
     /// Read the stored credential, possibly expired. Display/status use.
     fn read(&self, provider_id: &str) -> Result<Option<Credential>>;
 
     /// List stored credential metadata without exposing secrets.
+    ///
+    /// Per-slot read failures are omitted rather than propagated.
     fn list(&self) -> Result<Vec<CredentialInfo>>;
 
     /// Serialized write — the only write path. `f` sees the current
@@ -246,11 +251,23 @@ impl CredentialStore for SecretStoreCredentials {
     fn list(&self) -> Result<Vec<CredentialInfo>> {
         let mut infos = Vec::new();
         for slot in &self.known_slots {
-            if self.read(slot)?.is_some() {
-                infos.push(CredentialInfo {
+            match self.read(slot) {
+                Ok(Some(_)) => infos.push(CredentialInfo {
                     provider_id: slot.clone(),
                     kind: CredentialKind::ApiKey,
-                });
+                }),
+                Ok(None) => {}
+                Err(error) => {
+                    // Deliberate: skip the bad slot and keep going. Propagating
+                    // `read`'s error used to fail the whole enumeration, so one
+                    // unreadable entry hid every other credential from
+                    // `/provider` and left logout unable to delete the rest.
+                    tracing::warn!(
+                        slot,
+                        error = %error,
+                        "skipping unreadable credential slot during enumeration"
+                    );
+                }
             }
         }
         Ok(infos)

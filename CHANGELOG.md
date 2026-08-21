@@ -37,6 +37,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Design ported from pi-mono (MIT, Copyright (c) 2025 Mario Zechner); see
   `docs/THIRD_PARTY_NOTICES.md`.
 
+- Enumerating stored credentials no longer fails closed on one bad slot.
+  Listing used to propagate a backend read error, so a single unreadable
+  secret-store entry made `/provider` and logout treat every other stored
+  credential as missing. Enumeration now skips the unreadable slot and
+  continues, matching the probe loop it replaced.
+
 - The first screen of first run no longer cuts its own headline. The welcome
   and ready titles, and the provider-step heading, were emitted as single
   unwrapped lines while the sentence beneath them wrapped, so at 40 columns

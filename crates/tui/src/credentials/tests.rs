@@ -1,8 +1,10 @@
 //! Coverage for the ported credential store contract.
 
 use super::context::MapAuthContext;
-use super::store::{CredentialStore, InMemoryCredentialStore};
+use super::store::{CredentialStore, InMemoryCredentialStore, SecretStoreCredentials};
 use super::{AuthContext, Credential, CredentialKind};
+use codewhale_secrets::{InMemoryKeyringStore, KeyringStore, Secrets, SecretsError};
+use std::sync::Arc;
 
 #[test]
 fn credential_debug_never_prints_secret_material() {
@@ -194,6 +196,73 @@ fn list_reports_metadata_without_secrets() {
     assert_eq!(listed[0].kind, CredentialKind::ApiKey);
     assert_eq!(listed[1].provider_id, "beta");
     assert_eq!(listed[1].kind, CredentialKind::OAuth);
+}
+
+/// One slot whose backend `get` fails must not hide the others. The adapter
+/// that replaced the old `.ok().flatten()` probe loop used `read(slot)?`,
+/// which turned a single corrupt entry into an empty `/provider` list.
+struct UnreadableSlotStore {
+    inner: InMemoryKeyringStore,
+    unreadable: &'static str,
+}
+
+impl KeyringStore for UnreadableSlotStore {
+    fn get(&self, key: &str) -> Result<Option<String>, SecretsError> {
+        if key == self.unreadable {
+            return Err(SecretsError::Keyring(format!("slot {key} is unreadable")));
+        }
+        self.inner.get(key)
+    }
+
+    fn set(&self, key: &str, value: &str) -> Result<(), SecretsError> {
+        self.inner.set(key, value)
+    }
+
+    fn delete(&self, key: &str) -> Result<(), SecretsError> {
+        self.inner.delete(key)
+    }
+
+    fn backend_name(&self) -> &'static str {
+        "unreadable-slot (test)"
+    }
+}
+
+#[test]
+fn list_skips_an_unreadable_slot_instead_of_failing_the_enumeration() {
+    let backend = UnreadableSlotStore {
+        inner: InMemoryKeyringStore::new(),
+        unreadable: "deepseek",
+    };
+    backend
+        .set("deepseek", "deepseek-secret")
+        .expect("seed unreadable slot");
+    backend
+        .set("openrouter", "openrouter-secret")
+        .expect("seed readable slot");
+    let store = SecretStoreCredentials::new(
+        Secrets::new(Arc::new(backend)),
+        vec![
+            "deepseek".to_string(),
+            "openrouter".to_string(),
+            "xai".to_string(),
+        ],
+    );
+
+    assert!(
+        store.read("deepseek").is_err(),
+        "the bad slot must still fail when asked for by name"
+    );
+    let listed = store
+        .list()
+        .expect("one unreadable slot must not fail the whole list");
+    assert_eq!(
+        listed
+            .iter()
+            .map(|info| info.provider_id.as_str())
+            .collect::<Vec<_>>(),
+        ["openrouter"],
+        "the readable slot must still appear; the empty slot and the bad slot must not"
+    );
 }
 
 #[test]
