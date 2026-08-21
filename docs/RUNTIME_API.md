@@ -473,9 +473,12 @@ and live state comes only from a resumed thread's SSE stream.
 - `POST /v1/threads/{id}/fork`
 
 `GET /v1/threads/summary` is the read-only summary surface used by the VS Code
-Agent View. Each item includes `id`, `title`, `preview`, `model`, `mode`,
-`archived`, `updated_at`, `latest_turn_id`, `latest_turn_status`, plus
-workspace metadata:
+Agent View. `search` matches thread `id`, `title`, and `model` (and, when the
+title is unset, the latest turn's input summary — the displayed title). It
+does not scan turn or item bodies: `preview` is filled only after a match, so
+a dashboard keystroke is not a whole-store read per thread. Each item includes
+`id`, `title`, `preview`, `model`, `mode`, `archived`, `updated_at`,
+`latest_turn_id`, `latest_turn_status`, plus workspace metadata:
 
 ```json
 {

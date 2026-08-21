@@ -1346,14 +1346,35 @@ async fn list_threads_summary(
     let limit = query.limit.unwrap_or(50).clamp(1, 500);
     let search = query.search.as_deref().map(str::to_ascii_lowercase);
     let filter = resolve_thread_filter(query.include_archived, query.archived_only);
+    // `limit` bounds the rows this route returns, not how far a search looks.
+    // Passing it to the store read as well matched only inside the newest
+    // `limit` threads, so any older match — the row the caller typed the query
+    // to find — was invisible. Unsearched listings keep the cheap bounded read;
+    // a search scans in newest-first order and stops at `limit` matches.
+    //
+    // Match on the thread record *before* `get_thread_detail`. Detail is a
+    // whole-store turns+items walk, so loading it for every thread made a
+    // non-matching dashboard keystroke O(threads × (all_turns + all_items))
+    // JSON reads. Preview is filled only for matches; it is not a search key.
+    let scan_limit = if search.is_some() { None } else { Some(limit) };
     let threads = state
         .runtime_threads
-        .list_threads(filter, Some(limit))
+        .list_threads(filter, scan_limit)
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
 
     let mut summaries = Vec::new();
     for thread in threads {
+        if summaries.len() >= limit {
+            break;
+        }
+        if let Some(search) = &search
+            && !state
+                .runtime_threads
+                .thread_matches_summary_search(&thread, search)
+        {
+            continue;
+        }
         let detail = state
             .runtime_threads
             .get_thread_detail(&thread.id)
@@ -1398,19 +1419,6 @@ async fn list_threads_summary(
             })
             .unwrap_or_else(|| title.clone());
 
-        if let Some(search) = &search {
-            let haystack = format!(
-                "{} {} {} {}",
-                thread.id.to_ascii_lowercase(),
-                title.to_ascii_lowercase(),
-                preview.to_ascii_lowercase(),
-                thread.model.to_ascii_lowercase()
-            );
-            if !haystack.contains(search) {
-                continue;
-            }
-        }
-
         let workspace_git = collect_workspace_git_metadata(&thread.workspace);
         summaries.push(ThreadSummary {
             id: thread.id,
@@ -1427,10 +1435,6 @@ async fn list_threads_summary(
             latest_turn_id: thread.latest_turn_id,
             latest_turn_status: latest_status,
         });
-    }
-
-    if summaries.len() > limit {
-        summaries.truncate(limit);
     }
 
     Ok(Json(summaries))
@@ -1669,6 +1673,13 @@ fn reject_parallel_write_collisions(tasks: &[FleetTaskSpec]) -> Result<(), ApiEr
 }
 
 fn managed_paths_overlap(left: &str, right: &str) -> bool {
+    // `normalize_fleet_relative_path` collapses the workspace root to ".", so
+    // a task claiming the whole tree presents as "." rather than as a textual
+    // prefix of its siblings. String containment alone never matched it, and
+    // two workers could be admitted to write the same tree in parallel.
+    if left == "." || right == "." {
+        return true;
+    }
     left == right
         || left
             .strip_prefix(right)

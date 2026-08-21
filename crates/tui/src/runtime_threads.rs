@@ -1028,6 +1028,15 @@ pub struct RuntimeThreadStore {
     /// the queue; this guard prevents concurrent replay/wake requests from
     /// starting more than one turn for the same message.
     mail_mutation: Arc<parking_lot::Mutex<()>>,
+    /// Files read by whole-directory turn scans (`list_all_turns`). Shared
+    /// across store clones so a `spawn_blocking` snapshot still counts against
+    /// the manager the test holds. Per-store so parallel tests do not collide.
+    #[cfg(test)]
+    turn_dir_files_read: Arc<std::sync::atomic::AtomicU64>,
+    /// Files read by whole-directory item scans (`list_items_for_turn` and
+    /// `list_items_for_turns_map`).
+    #[cfg(test)]
+    item_dir_files_read: Arc<std::sync::atomic::AtomicU64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1083,6 +1092,10 @@ impl RuntimeThreadStore {
             thread_mutation: Arc::new(parking_lot::Mutex::new(())),
             turn_mutation: Arc::new(parking_lot::Mutex::new(())),
             mail_mutation: Arc::new(parking_lot::Mutex::new(())),
+            #[cfg(test)]
+            turn_dir_files_read: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            #[cfg(test)]
+            item_dir_files_read: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         };
         store.with_event_transaction(EVENT_TRANSACTION_LOCK_TIMEOUT, || {
             repair_torn_event_log_tails(&store.events_dir)?;
@@ -1382,6 +1395,9 @@ impl RuntimeThreadStore {
             }
             let raw = read_store_file(&path)
                 .with_context(|| format!("Failed to read {}", path.display()))?;
+            #[cfg(test)]
+            self.turn_dir_files_read
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let turn: TurnRecord = serde_json::from_str(&raw)
                 .with_context(|| format!("Failed to parse {}", path.display()))?;
             if turn.schema_version > CURRENT_RUNTIME_SCHEMA_VERSION {
@@ -1411,6 +1427,9 @@ impl RuntimeThreadStore {
             }
             let raw = read_store_file(&path)
                 .with_context(|| format!("Failed to read {}", path.display()))?;
+            #[cfg(test)]
+            self.item_dir_files_read
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let item: TurnItemRecord = serde_json::from_str(&raw)
                 .with_context(|| format!("Failed to parse {}", path.display()))?;
             if item.schema_version > CURRENT_RUNTIME_SCHEMA_VERSION {
@@ -1453,6 +1472,9 @@ impl RuntimeThreadStore {
             }
             let raw = read_store_file(&path)
                 .with_context(|| format!("Failed to read {}", path.display()))?;
+            #[cfg(test)]
+            self.item_dir_files_read
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let item: TurnItemRecord = serde_json::from_str(&raw)
                 .with_context(|| format!("Failed to parse {}", path.display()))?;
             if item.schema_version > CURRENT_RUNTIME_SCHEMA_VERSION {
@@ -2505,6 +2527,33 @@ pub(crate) struct SnapshotTestPoint {
     pub thread_id: String,
     pub latest_seq: u64,
     pub resume: oneshot::Sender<()>,
+}
+
+#[cfg(test)]
+impl RuntimeThreadManager {
+    pub(crate) fn test_store(&self) -> &RuntimeThreadStore {
+        &self.store
+    }
+
+    pub(crate) fn reset_whole_store_scan_file_reads(&self) {
+        self.store
+            .turn_dir_files_read
+            .store(0, std::sync::atomic::Ordering::SeqCst);
+        self.store
+            .item_dir_files_read
+            .store(0, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub(crate) fn whole_store_scan_file_reads(&self) -> (u64, u64) {
+        (
+            self.store
+                .turn_dir_files_read
+                .load(std::sync::atomic::Ordering::SeqCst),
+            self.store
+                .item_dir_files_read
+                .load(std::sync::atomic::Ordering::SeqCst),
+        )
+    }
 }
 
 /// Helper types for `seed_thread_from_messages` — intermediate representation
@@ -4527,6 +4576,39 @@ impl RuntimeThreadManager {
         Ok(threads)
     }
 
+    /// Whether `/v1/threads/summary?search=` should keep this thread.
+    ///
+    /// Matches fields already on the thread record (`id`, explicit `title`,
+    /// `model`). When the title is unset, peeks the latest turn file for the
+    /// displayed title (`input_summary`) — one JSON read, not a whole-store
+    /// scan. Preview text lives on items and is not a search key: using it as
+    /// one forced `get_thread_detail` (itself a full turns+items directory
+    /// walk) on every thread, including non-matches.
+    pub(crate) fn thread_matches_summary_search(
+        &self,
+        thread: &ThreadRecord,
+        search: &str,
+    ) -> bool {
+        if thread.id.to_ascii_lowercase().contains(search)
+            || thread.model.to_ascii_lowercase().contains(search)
+        {
+            return true;
+        }
+        if let Some(title) = thread
+            .title
+            .as_deref()
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+        {
+            return title.to_ascii_lowercase().contains(search);
+        }
+        thread
+            .latest_turn_id
+            .as_deref()
+            .and_then(|turn_id| self.store.load_turn(turn_id).ok())
+            .is_some_and(|turn| turn.input_summary.to_ascii_lowercase().contains(search))
+    }
+
     /// Aggregate token + cost usage across all threads/turns inside the time
     /// range `[since, until]`. Each parent, child, and compaction call is
     /// computed via provider-aware pricing using its persisted concrete route.
@@ -5185,7 +5267,22 @@ impl RuntimeThreadManager {
             .store
             .load_thread(thread_id)
             .with_context(|| format!("Thread not found: {thread_id}"))?;
-        let now = Utc::now();
+        // Seeded records are historical: their real wall-clock times are gone
+        // with the provider transcript. The store's only ordering keys are
+        // `TurnRecord::created_at` and `TurnItemRecord::started_at`, so
+        // stamping every seeded record with one `Utc::now()` made both sorts a
+        // single tie and left turn/item order to `read_dir`. That order is
+        // what `get_thread_detail` hands the dashboard transcript and what the
+        // fork paths freeze into the cloned `item_ids`. Hand out strictly
+        // increasing synthetic stamps instead so the recorded order survives
+        // every scan.
+        let seed_epoch = Utc::now();
+        let mut seed_step: i64 = 0;
+        let mut next_seed_stamp = move || {
+            let stamp = seed_epoch + chrono::Duration::microseconds(seed_step);
+            seed_step += 1;
+            stamp
+        };
 
         // Group messages into turns. A turn starts with a user message and
         // includes all subsequent assistant messages (which may contain
@@ -5302,6 +5399,7 @@ impl RuntimeThreadManager {
         }
 
         for turn_seed in turns {
+            let turn_at = next_seed_stamp();
             let turn_id = format!("turn_{}", &Uuid::new_v4().to_string()[..8]);
             let summary =
                 crate::utils::truncate_with_ellipsis(&turn_seed.user_text, SUMMARY_LIMIT, "...");
@@ -5310,6 +5408,7 @@ impl RuntimeThreadManager {
             // Save user message item.
             if !turn_seed.user_text.is_empty() {
                 let item_id = format!("item_{}", &Uuid::new_v4().to_string()[..8]);
+                let item_at = next_seed_stamp();
                 self.store.save_item(&TurnItemRecord {
                     schema_version: CURRENT_RUNTIME_SCHEMA_VERSION,
                     id: item_id.clone(),
@@ -5320,8 +5419,8 @@ impl RuntimeThreadManager {
                     detail: Some(turn_seed.user_text.clone()),
                     metadata: None,
                     artifact_refs: Vec::new(),
-                    started_at: Some(now),
-                    ended_at: Some(now),
+                    started_at: Some(item_at),
+                    ended_at: Some(item_at),
                 })?;
                 item_ids.push(item_id);
             }
@@ -5329,6 +5428,7 @@ impl RuntimeThreadManager {
             // Save assistant content items in order.
             for seed_item in &turn_seed.items {
                 let item_id = format!("item_{}", &Uuid::new_v4().to_string()[..8]);
+                let item_at = next_seed_stamp();
                 match seed_item {
                     SeedItem::Text(text) => {
                         let asst_summary = if text.len() > SUMMARY_LIMIT {
@@ -5346,8 +5446,8 @@ impl RuntimeThreadManager {
                             detail: Some(text.clone()),
                             metadata: None,
                             artifact_refs: Vec::new(),
-                            started_at: Some(now),
-                            ended_at: Some(now),
+                            started_at: Some(item_at),
+                            ended_at: Some(item_at),
                         })?;
                     }
                     SeedItem::Thinking(thinking) => {
@@ -5366,8 +5466,8 @@ impl RuntimeThreadManager {
                             detail: Some(thinking.clone()),
                             metadata: None,
                             artifact_refs: Vec::new(),
-                            started_at: Some(now),
-                            ended_at: Some(now),
+                            started_at: Some(item_at),
+                            ended_at: Some(item_at),
                         })?;
                     }
                     SeedItem::ToolUse {
@@ -5403,8 +5503,8 @@ impl RuntimeThreadManager {
                                 .clone(),
                             )),
                             artifact_refs: Vec::new(),
-                            started_at: Some(now),
-                            ended_at: Some(now),
+                            started_at: Some(item_at),
+                            ended_at: Some(item_at),
                         })?;
                     }
                     SeedItem::ToolResult {
@@ -5439,8 +5539,8 @@ impl RuntimeThreadManager {
                             detail: Some(content.clone()),
                             metadata: Some(Value::Object(metadata)),
                             artifact_refs: Vec::new(),
-                            started_at: Some(now),
-                            ended_at: Some(now),
+                            started_at: Some(item_at),
+                            ended_at: Some(item_at),
                         })?;
                     }
                 }
@@ -5455,9 +5555,9 @@ impl RuntimeThreadManager {
                     thread_id: thread_id.to_string(),
                     status: RuntimeTurnStatus::Completed,
                     input_summary: summary,
-                    created_at: now,
-                    started_at: Some(now),
-                    ended_at: Some(now),
+                    created_at: turn_at,
+                    started_at: Some(turn_at),
+                    ended_at: Some(turn_at),
                     duration_ms: Some(0),
                     usage: None,
                     permission_posture: None,
@@ -5478,7 +5578,7 @@ impl RuntimeThreadManager {
                 })?;
 
                 thread.latest_turn_id = Some(turn_id);
-                thread.updated_at = now;
+                thread.updated_at = turn_at;
             }
         }
 

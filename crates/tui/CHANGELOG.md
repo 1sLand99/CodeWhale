@@ -115,6 +115,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the hint now matches a credential identifier (`token`, `api_token`) rather
   than an English word, so the numbers survive while `token = Bearer …` is
   still redacted.
+- Dashboard thread search no longer loads every thread's transcript to decide
+  whether the row matches. `GET /v1/threads/summary?search=` walked the full
+  thread list and called `get_thread_detail` on each row before matching, and
+  that detail read is itself a whole-store walk of every turn JSON and every
+  item JSON. A non-matching keystroke was therefore
+  O(threads × (all_turns + all_items)) file reads — on the order of 10^8 JSON
+  parses at a few thousand threads. Search now matches `id`, title, and model
+  from the thread record (and, when the title is unset, the single latest-turn
+  file that supplies the displayed title) and loads detail only for matches, so
+  preview stays a display field rather than a search key. Session summary
+  already refused to search last-message text for the same reason.
 
 - Silent `#[allow(dead_code)]` suppressions on the modules AGENTS.md warns
   auditors not to delete — prompt zones, context budget, the route seam —
