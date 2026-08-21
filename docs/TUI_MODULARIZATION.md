@@ -6,9 +6,11 @@ Turn `crates/tui/src/tui/ui.rs` into a small composition root without changing
 the observable terminal contract or creating a second turn loop. The final file
 should own shared UI types, module wiring, and top-level orchestration only.
 
-The baseline at `c93d21373` was 4,248 lines. The first extraction checkpoint
-moves terminal input/fairness and approval disposition into owned modules,
-leaving 3,895 lines in `ui.rs` after rebasing onto the latest integration head.
+The baseline at `c93d21373` was 4,248 lines. Slices 1–9 are all extracted
+(2026-08-21): `ui.rs` is now 2,130 lines of shared UI types, module wiring, and
+top-level orchestration. Follow-on debt (partitioning `ui/event_loop.rs` and
+`ui/tests.rs` by event source) is deliberately a second phase so it does not
+hide the `ui.rs` extraction behind a wholesale rewrite.
 
 ## Rules for every extraction
 
@@ -33,34 +35,34 @@ leaving 3,895 lines in `ui.rs` after rebasing onto the latest integration head.
    `ui/approval_routing.rs` owns session approval/denial resolution and durable
    denial receipts.
 
-3. **Remote-control bridge**
+3. **Remote-control bridge — extracted**
    Move enrollment events, local-turn attachment, command acknowledgement, and
    start/stop UI projection to `ui/remote_control_bridge.rs`. Do this after the
    active `/rc` changes in the v0.9.11 integration lane are committed, because
    those edits currently overlap this exact block.
 
-4. **Observer hooks**
+4. **Observer hooks — extracted**
    Move subagent and turn-end hook payload construction, preview bounding, and
    completion classification to `ui/observer_hooks.rs`.
 
-5. **Task and shell projection**
+5. **Task and shell projection — extracted**
    Move task-panel refresh, shell live-output reconciliation, detached-job
    projection, and RLM task entries to `ui/task_projection.rs`.
 
-6. **Paused-command and dispatch preparation**
+6. **Paused-command and dispatch preparation — extracted**
    Move pause/resume planning and the dispatch preparation/outcome types to
    `ui/dispatch_prepare.rs`; keep actual dispatch execution in `dispatch.rs`.
 
-7. **Compaction UI state**
+7. **Compaction UI state — extracted**
    Move manual/automatic compaction queueing, settlement, receipts, and cancel
    behavior to `ui/compaction_flow.rs`.
 
-8. **Provider configuration**
+8. **Provider configuration — extracted**
    Move web-config event draining, rollback snapshots, key verification, and
    provider setup tests to `ui/provider_setup.rs` and
    `ui/provider_setup/tests.rs`.
 
-9. **Small residual policies**
+9. **Small residual policies — extracted**
    Move context-pressure warnings, update notices, and notification decisions
    into their existing domain modules. Leave `ui.rs` as wiring plus genuinely
    shared aliases.
