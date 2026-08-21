@@ -4610,12 +4610,12 @@ mod tests {
         // parses into the value; the strip must remove it. A raw NUL byte
         // makes serde_json reject the body outright, which is also safe
         // (no excerpt) — assert both directions.
-        let with_control = format!("{{\"error\":\"bad\\u0000opaque\"}}");
+        let with_control = "{\"error\":\"bad\\u0000opaque\"}".to_string();
         assert_eq!(
             sanitized_rejection_excerpt(with_control.as_bytes()).as_deref(),
             Some("badopaque")
         );
-        let raw_nul = format!("{{\"error\":\"bad\u{0}opaque\"}}");
+        let raw_nul = "{\"error\":\"bad\u{0}opaque\"}".to_string();
         assert_eq!(sanitized_rejection_excerpt(raw_nul.as_bytes()), None);
         // Non-JSON bodies yield no excerpt.
         assert_eq!(sanitized_rejection_excerpt(b"<html>403</html>"), None);

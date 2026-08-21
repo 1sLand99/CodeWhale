@@ -2132,6 +2132,7 @@ impl Engine {
     /// Auto-Review gates, accounts for the per-turn call budget, and updates
     /// deferred-tool activation state. It returns the executable plans together
     /// with the hook context and batch sandbox policy consumed by later phases.
+    #[allow(clippy::too_many_arguments)] // phase fns mirror the turn pipeline shape
     async fn plan_tool_calls(
         &mut self,
         client: &dyn crate::core::model_client::ModelClient,
@@ -2734,6 +2735,7 @@ impl Engine {
     /// runtime authority and tool-search activation state, but it does not append
     /// model-visible tool-result messages; those are handled by the result phase.
     /// The optional outcome slots retain the existing index-based collector shape.
+    #[allow(clippy::too_many_arguments)] // phase fns mirror the turn pipeline shape
     async fn execute_planned_tools(
         &mut self,
         plans: Vec<ToolExecutionPlan>,

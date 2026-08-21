@@ -13148,16 +13148,20 @@ fn picker_and_request_path_disagree_when_the_secret_slot_marker_is_missing() -> 
     // written by an older CodeWhale or replaced by a workspace-scoped file.
     fs::write(&config_path, "provider = \"openrouter\"\n")?;
 
-    let mut active_deepseek = Config::default();
-    active_deepseek.provider = Some("deepseek".to_string());
+    let active_deepseek = Config {
+        provider: Some("deepseek".to_string()),
+        ..Config::default()
+    };
     assert_eq!(
         active_deepseek.deepseek_api_key().ok(),
         Some("deepseek-working-key".to_string()),
         "the request path still resolves the stored key"
     );
 
-    let mut viewing_config = Config::default();
-    viewing_config.provider = Some("openrouter".to_string());
+    let viewing_config = Config {
+        provider: Some("openrouter".to_string()),
+        ..Config::default()
+    };
     assert!(
         !has_api_key_for(&viewing_config, ApiProvider::Deepseek),
         "the reported contradiction: readiness reports no key for the same home"

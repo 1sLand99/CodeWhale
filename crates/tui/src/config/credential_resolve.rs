@@ -351,9 +351,10 @@ mod tests {
     use crate::test_support::{EnvVarGuard, lock_test_env};
 
     fn deepseek_config() -> Config {
-        let mut config = Config::default();
-        config.provider = Some("deepseek".to_string());
-        config
+        Config {
+            provider: Some("deepseek".to_string()),
+            ..Config::default()
+        }
     }
 
     /// The precedence rule has to be enforced somewhere a test can see it.
@@ -361,12 +362,14 @@ mod tests {
     fn a_named_env_binding_resolves_and_names_itself() {
         let _lock = lock_test_env();
         let _key = EnvVarGuard::set("CW_TEST_BOUND_KEY", "bound-value");
-        let mut config = Config::default();
-        config.provider = Some("openrouter".to_string());
-        config.providers = Some(
-            toml::from_str("[openrouter]\napi_key_env = \"CW_TEST_BOUND_KEY\"\n")
-                .expect("provider table"),
-        );
+        let config = Config {
+            provider: Some("openrouter".to_string()),
+            providers: Some(
+                toml::from_str("[openrouter]\napi_key_env = \"CW_TEST_BOUND_KEY\"\n")
+                    .expect("provider table"),
+            ),
+            ..Config::default()
+        };
         let resolution = resolve_credential_source(&config, ApiProvider::Openrouter);
         assert_eq!(
             resolution.source,
@@ -450,9 +453,12 @@ mod tests {
     #[test]
     fn no_auth_routes_resolve_to_the_auth_mode_itself() {
         let _lock = lock_test_env();
-        let mut config = Config::default();
-        config.providers =
-            Some(toml::from_str("[openrouter]\nauth_mode = \"none\"\n").expect("provider table"));
+        let config = Config {
+            providers: Some(
+                toml::from_str("[openrouter]\nauth_mode = \"none\"\n").expect("provider table"),
+            ),
+            ..Config::default()
+        };
         let resolution = resolve_credential_source(&config, ApiProvider::Openrouter);
         assert_eq!(resolution.source, CredentialSource::AuthModeNone);
         assert!(resolution.is_present());

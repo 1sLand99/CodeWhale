@@ -10761,16 +10761,16 @@ fn save_root_api_key_for_secret_slot(
                                 "plaintext_config_fallback": false,
                             }),
                         );
-                        return Ok(SavedCredential::KeyringAndConfigFile { backend, path });
+                        Ok(SavedCredential::KeyringAndConfigFile { backend, path })
                     }
                     Err(err) => {
-                        return Err(plaintext_credential_fallback_refused("write", &path, &err));
+                        Err(plaintext_credential_fallback_refused("write", &path, &err))
                     }
                 },
                 Err(error) => {
-                    return Err(plaintext_credential_fallback_refused(
+                    Err(plaintext_credential_fallback_refused(
                         "snapshot", &path, &error,
-                    ));
+                    ))
                 }
             }
         });
@@ -11399,25 +11399,25 @@ fn save_api_key_for_identity_unlocked(
                                 "plaintext_config_fallback": false,
                             }),
                         );
-                        return Ok(SavedCredential::KeyringAndConfigFile {
+                        Ok(SavedCredential::KeyringAndConfigFile {
                             backend,
                             path: config_path,
-                        });
+                        })
                     }
                     Err(err) => {
-                        return Err(plaintext_credential_fallback_refused(
+                        Err(plaintext_credential_fallback_refused(
                             "write",
                             &config_path,
                             &err,
-                        ));
+                        ))
                     }
                 },
                 Err(error) => {
-                    return Err(plaintext_credential_fallback_refused(
+                    Err(plaintext_credential_fallback_refused(
                         "snapshot",
                         &config_path,
                         &error,
-                    ));
+                    ))
                 }
             }
         });
