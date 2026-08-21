@@ -338,6 +338,98 @@ pub(crate) fn try_cancel_compaction(app: &mut App, engine_handle: &EngineHandle)
 }
 
 #[cfg(test)]
+pub(crate) fn maybe_warn_context_pressure(app: &mut App) {
+    let config = app.compaction_config();
+    maybe_warn_context_pressure_for_config(app, &config);
+}
+
+pub(crate) fn maybe_warn_context_pressure_for_config(
+    app: &mut App,
+    config: &crate::compaction::CompactionConfig,
+) {
+    let max = config.effective_context_window.unwrap_or_else(|| {
+        crate::route_budget::route_context_window_tokens(
+            app.api_provider,
+            app.effective_model_for_budget(),
+            app.active_route_limits,
+        )
+    });
+    let Some((used, max, percent)) = context_usage_snapshot_for_window(app, max) else {
+        return;
+    };
+
+    let configured_threshold = app.auto_compact_threshold_percent.clamp(10.0, 100.0);
+    let warning_threshold = CONTEXT_SUGGEST_COMPACT_THRESHOLD_PERCENT.min(configured_threshold);
+    let will_auto_compact = config.enabled && used.max(0) as usize >= config.token_threshold;
+    if percent < warning_threshold && !will_auto_compact {
+        return;
+    }
+
+    // #5239: the meter drives real budgets off this window, so an unverified
+    // one must say so next to the numbers that depend on it.
+    let window_note = if app.active_context_window_source.is_verified() {
+        ""
+    } else {
+        ", unverified window"
+    };
+
+    let recommendation = if !config.enabled {
+        "Consider enabling auto_compact or use /compact."
+    } else if will_auto_compact {
+        "Auto-compaction will run before the next send."
+    } else {
+        "Auto-compaction is enabled."
+    };
+
+    if percent >= CONTEXT_CRITICAL_THRESHOLD_PERCENT {
+        app.status_message = Some(format!(
+            "Context critical: {percent:.0}% ({used}/{max} tokens{window_note}). {recommendation}"
+        ));
+        return;
+    }
+
+    if app.status_message.is_none() {
+        let status_prefix = if percent >= CONTEXT_WARNING_THRESHOLD_PERCENT {
+            "Context high"
+        } else {
+            "Context building"
+        };
+        app.status_message = Some(format!(
+            "{status_prefix}: {percent:.0}% ({used}/{max} tokens{window_note}). {recommendation}"
+        ));
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn should_auto_compact_before_send(app: &App) -> bool {
+    let config = app.compaction_config();
+    should_auto_compact_before_send_with_config(app, &config)
+}
+
+#[cfg(test)]
+pub(crate) fn should_auto_compact_before_send_with_config(
+    app: &App,
+    config: &crate::compaction::CompactionConfig,
+) -> bool {
+    if !config.enabled {
+        return false;
+    }
+    // Use the same ceiling-anchored token threshold as the engine. Comparing
+    // against a raw percentage of the input-plus-output window can delay this
+    // gate until after the spendable input budget has already been exhausted.
+    let max = config.effective_context_window.unwrap_or_else(|| {
+        crate::route_budget::route_context_window_tokens(
+            app.api_provider,
+            app.effective_model_for_budget(),
+            app.active_route_limits,
+        )
+    });
+    context_usage_snapshot_for_window(app, max)
+        .map(|(used, _, _)| used.max(0) as usize >= config.token_threshold)
+        .unwrap_or(false)
+}
+
+#[cfg(test)]
 mod config_update_tests {
     use super::*;
     use crate::core::engine::mock_engine_handle;

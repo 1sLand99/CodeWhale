@@ -1,4 +1,8 @@
 use super::activity_detail::*;
+use super::compaction_flow::{
+    maybe_warn_context_pressure, should_auto_compact_before_send,
+    should_auto_compact_before_send_with_config,
+};
 use super::observer_hooks::{
     bounded_subagent_hook_preview, subagent_completion_status, subagent_failure_notice,
     subagent_status_from_completion_result, turn_end_observer_metadata,

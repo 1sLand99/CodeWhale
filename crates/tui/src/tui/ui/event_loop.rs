@@ -4,6 +4,7 @@
 //! owns terminal setup and teardown; `run_event_loop` is the frame, input, and
 //! engine-event pump it drives.
 
+use super::clamp_event_poll_timeout;
 use super::observer_hooks::{
     execute_turn_end_observer_hook, subagent_failure_notice,
     subagent_status_from_completion_result, surface_observer_hook_submission_failure,
