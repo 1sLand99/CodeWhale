@@ -330,6 +330,39 @@ fn fingerprint_of_an_empty_base_url_is_the_redacted_constant() {
     for url in ["", "   ", "?api_key=secret"] {
         assert_eq!(base_url_fingerprint(url), redacted, "{url:?}");
     }
+    // SHA-256("") is what empty/whitespace hashed to before the sentinel
+    // mapping. That digest is a persisted cache/receipt key, so flipping it
+    // back would be another undeclared persisted-key change.
+    const EMPTY_SHA256: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+    assert_ne!(redacted, EMPTY_SHA256);
+}
+
+#[test]
+fn changelog_declares_fingerprint_persisted_key_change() {
+    // `base_url_fingerprint` is serde-serialized (catalog cache, LiveOffering,
+    // pricing receipts, TurnRecord.routed_usage_source_ids). Empty input and
+    // scheme-less URLs with `@` hash differently than they did before
+    // 388125491. The Unreleased section must say so, or a stale cache looks
+    // like corruption.
+    let changelog = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../CHANGELOG.md"));
+    let unreleased = changelog
+        .split_once("## [Unreleased]")
+        .expect("CHANGELOG has an Unreleased section")
+        .1
+        .split_once("\n## [")
+        .expect("Unreleased is followed by a released section")
+        .0;
+    for needle in [
+        "base_url_fingerprint",
+        "persisted-key",
+        "scheme-less",
+        "routed_usage_source_ids",
+    ] {
+        assert!(
+            unreleased.contains(needle),
+            "Unreleased must declare the {needle} persisted-key change:\n{unreleased}"
+        );
+    }
 }
 
 #[test]

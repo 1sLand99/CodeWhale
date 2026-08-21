@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- `base_url_fingerprint` is a persisted-key change for two input shapes.
+  The digest is serde-serialized into `ProviderCatalogCache` and
+  `LiveOffering`, pricing defect receipts, and
+  `TurnRecord.routed_usage_source_ids` — it is not an in-memory-only cache
+  label. Empty or whitespace-only values (and scheme-less query-only strings
+  that strip to an empty authority) now hash the invalid-or-secret-bearing
+  sentinel instead of SHA-256 of the empty string. Scheme-less URLs that
+  contain `@` now strip `userinfo` before hashing, matching the
+  scheme-bearing branch, so a typed `user:pass@host/v1` no longer embeds the
+  password in a stored digest. `routed_usage_source_fingerprint` feeds
+  arbitrary scheme-less source ids into the same function, so a turn
+  rehydrated from an older build can fail to dedupe one routed-usage row.
+  Recovery is a cache miss and a re-fetch, not corruption. Empty input was
+  not restored to the old digest: an empty authority is not a usable
+  endpoint, and mapping it to the same sentinel the scheme branch already
+  uses for an empty host keeps invalid inputs from minting a unique cache
+  scope.
+
 - Diagnostic lines that mention token *counts* are no longer swallowed by
   secret redaction. A stream error such as `max tokens = 8192 but budget =
   4096` was matching the `token` hint as a substring of the English word
