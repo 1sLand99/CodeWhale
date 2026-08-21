@@ -116,6 +116,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   now wrap through the same helper the rest of onboarding uses, which also
   means they wrap correctly in Japanese and Chinese. Verified across all
   fifteen shipped locales at 40, 60, 80 and 120 columns.
+- `codewhale completions <shell>` generated a script for the wrong program.
+  The subcommand forwarded to the in-tree `codewhale-tui` binary, which
+  rendered completions from *its own* clap tree under *its own* name, so the
+  output ended in `complete -F _codewhale__tui ... codewhale-tui` (bash),
+  `#compdef codewhale-tui` (zsh), and
+  `Register-ArgumentCompleter -Native -CommandName 'codewhale-tui'`
+  (PowerShell). Sourcing it registered nothing for `codewhale` or `codew` —
+  the two commands current installers expose — so tab completion appeared to
+  do nothing. The forwarded tree was also stale against the real CLI: it offered
+  `pr`, `scorecard`, and `session-diagnostics`, which `codewhale` does not
+  have, and omitted `run`, `rc`, `config`, `model`, `thread`, `lane`,
+  `workflow`, `web`, `account`, `app-server`, `mcp-server`, `metrics`,
+  `update`, `cloud`, `completion`, and `lane-log-proxy`, which it does.
+  Completions are now rendered in-process from the CLI's own command tree,
+  and `completions` is an alias of the existing
+  `completion` subcommand rather than a second, divergent path. Regenerate any
+  script you installed from an earlier release. Reported by **RepentStar**
+  (#5526); part of the `deepseek-tui`-era identifier retirement in #5443.
+
+- Completion scripts now fire for the `codew` shorthand as well as
+  `codewhale`. Releases publish `codew` as a byte-identical copy of the
+  `codewhale` binary, so a script bound to only one of the two names was half
+  installed for anyone who types the short one. Each shell gets its own
+  idiomatic hook rather than a second copy of the script: bash re-binds the
+  generated function, zsh widens the `#compdef` tag line to
+  `#compdef codewhale codew`, fish adds `complete -c codew -w codewhale`,
+  PowerShell registers `-CommandName 'codewhale','codew'`, and Elvish aliases
+  the completer with
+  `set edit:completion:arg-completer[codew] = $edit:completion:arg-completer[codewhale]`.
+
+- Documented shell completions. `docs/INSTALL.md` § 8 now gives the generate
+  and install commands for bash, zsh, fish, PowerShell, and Elvish, with a
+  note to regenerate after upgrading and to delete scripts produced by
+  v0.9.10 or earlier. There was previously no completion documentation
+  anywhere in the repository, which is how #5526 was reported as three
+  problems instead of one.
 
 - The bottom status rail is no longer one run-on sentence. At 120 columns it
   read `▌· idle · Ollama · deepseek-v4-flash · max · Anonymous usage counts are

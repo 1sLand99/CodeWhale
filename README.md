@@ -23,6 +23,9 @@ The first run helps you connect a provider or stay offline. Codewhale also
 supports Cargo, Docker, Nix, Scoop, prebuilt archives, Android/Termux, and a CNB
 mirror. See [the installation guide](docs/INSTALL.md).
 
+Tab completion is one command per shell — `codewhale completion bash|zsh|fish|powershell|elvish`.
+See [shell completions](docs/INSTALL.md#8-shell-completions).
+
 ## Use
 
 Talk to Codewhale the same way you would talk to a teammate:

@@ -774,7 +774,80 @@ packaging separately exposes the same executable as `codew.exe`.
 
 ---
 
-## 8. Troubleshooting
+## 8. Shell completions
+
+Codewhale generates its own completion scripts. One command per shell; each
+script completes **both** `codewhale` and the `codew` shorthand.
+
+```bash
+codewhale completion <bash|zsh|fish|powershell|elvish>
+```
+
+`codewhale completions` is an accepted alias for the same command.
+
+The script is written to stdout, so installing it is a redirect to wherever
+your shell loads completions from.
+
+**Bash** — needs the `bash-completion` package loaded by your shell:
+
+```bash
+mkdir -p ~/.local/share/bash-completion/completions
+codewhale completion bash > ~/.local/share/bash-completion/completions/codewhale
+```
+
+For the current shell only: `source <(codewhale completion bash)`.
+
+**Zsh** — the script's `#compdef` line already covers both command names:
+
+```bash
+mkdir -p ~/.zfunc
+codewhale completion zsh > ~/.zfunc/_codewhale
+```
+
+If `~/.zfunc` is not already on `fpath`, add this to `~/.zshrc`:
+
+```zsh
+fpath=(~/.zfunc $fpath)
+autoload -Uz compinit && compinit
+```
+
+**Fish**:
+
+```fish
+mkdir -p ~/.config/fish/completions
+codewhale completion fish > ~/.config/fish/completions/codewhale.fish
+```
+
+**PowerShell** — append to your profile so it loads in every session:
+
+```powershell
+New-Item -ItemType Directory -Force -Path (Split-Path -Parent $PROFILE)
+codewhale completion powershell >> $PROFILE
+```
+
+For the current session only:
+
+```powershell
+codewhale completion powershell | Out-String | Invoke-Expression
+```
+
+**Elvish** — the script registers both command names:
+
+```elvish
+codewhale completion elvish >> ~/.config/elvish/rc.elv
+```
+
+Regenerate the script after upgrading Codewhale — it is a snapshot of the
+command surface at the version that produced it, not a live query.
+
+> Upgrading from v0.9.10 or earlier? Those releases emitted a script that
+> registered the internal `codewhale-tui` executable, so nothing completed for
+> `codewhale` or `codew` ([#5526](https://github.com/Hmbown/CodeWhale/issues/5526)).
+> Delete the old file and regenerate it with the commands above.
+
+---
+
+## 9. Troubleshooting
 
 ### `Unsupported architecture: arm64 on platform linux`
 
@@ -1002,7 +1075,7 @@ Use one of these paths:
 
 ---
 
-## 9. Verifying your install
+## 10. Verifying your install
 
 ```bash
 codewhale --version
