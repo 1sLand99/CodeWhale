@@ -224,6 +224,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   v0.9.10 or earlier. There was previously no completion documentation
   anywhere in the repository, which is how #5526 was reported as three
   problems instead of one.
+- `/status` was 31 rows. On an 80x24 terminal the transcript viewport is 18, so
+  typing `/status` landed you on the *tail* of the report: the version, route,
+  directory, mode and sandbox rows had already scrolled past, and what stayed on
+  screen was five `not reported` rows and a `$0.0000`. The report is 18 rows on a
+  fresh session — `Window override:` is present unless the value is already
+  configured. That is the viewport's height, so once `/status` itself occupies a
+  history cell the title row still scrolls off; it does not fit that terminal
+  whole. Provider, model and reasoning effort are one `Route:` lockup, the way
+  the header rail already writes them. Mode and its permissions are one statement
+  of posture. `Rate limits:` is gone — it was a `push_row` of a string literal
+  and could never say anything but "not available from provider telemetry". The
+  per-turn token ledger is gone too, because `/tokens` is that ledger's whole
+  subject and `/status` was printing six rows of it at the same weight as the
+  sandbox policy; the two facts that lived nowhere else, the cumulative in/out
+  split and the cumulative cache totals, survive on one `Session tokens:` row.
+  `Footer items:` no longer prints ten internal config keys across the full
+  width — `/statusline` owns them, and the report now points there in the same
+  row that points at `/tokens`. Two blank gutters do the grouping; the
+  `===================` rule under the title is gone.
+
+- The `/status` window-override key has its own labelled row. It used to be
+  parenthesised onto the end of the provenance row, which pushed
+  `context_window in config.toml` past the right edge at 80 columns and wrapped
+  the sentence. `Window source:` states the provenance and `Window override:`
+  names the exact key — and the override row is omitted entirely when the value
+  is already configured, rather than advising you to set what you have set.
+
+- `/help` no longer truncates anything. Every label and description used to run
+  through a `truncate_to_width` that appended `…`, which in a two-hundred-row
+  list promises text no keystroke can reveal and lands mid-token:
+  `(aliases: /qin…` left the parenthesis hanging open. Descriptions now shed
+  whole fields — the alias parenthetical first, then trailing clauses at their
+  own joints, and only where there is no joint at all, the sentence's short form
+  on a whole word with no mark, keeping the head noun of a simple verb +
+  modifier + noun phrase rather than the adjectives that qualified it. The
+  focused row's description is restated under the filter at the panel's full
+  width, *only when the row itself could not hold it*, so a wide terminal does
+  not say the same sentence twice. At 60 columns that restatement is itself
+  shed — the `/advisor` detail stops before `session` — so the detail is longer
+  than the row, not a copy of the original sentence.
+
+- The `/help` label column is measured instead of assumed. It was a flat 28
+  columns at every terminal size, so at 60 columns twenty blank cells sat
+  between `/advisor` and a description cut down to 21. Each group now sizes its
+  column to the labels it actually holds, which nearly doubles the description
+  column on a narrow terminal, and the label — the string you have to type —
+  reads one step brighter than the description that qualifies it.
+
+- `/help` stopped spending rows on itself. The match count moved onto the filter
+  row it describes, the blank spacer under it is gone, and the footer no longer
+  repeats `type to filter` while the filter box says `Type to filter` two lines
+  above — at 60 columns that duplicate was what pushed the footer onto a second
+  row. A group header also stopped printing `▸ ▾`: the selection cursor and the
+  collapsed chevron are the same glyph, and a focused collapsed group was
+  showing it twice for two different facts. Help now opens focused on the first
+  entry rather than the header above it.
 
 - The bottom status rail is no longer one run-on sentence. At 120 columns it
   read `▌· idle · Ollama · deepseek-v4-flash · max · Anonymous usage counts are
