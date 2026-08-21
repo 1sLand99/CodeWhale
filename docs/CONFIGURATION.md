@@ -318,6 +318,30 @@ development fallback. `codewhale account keys list|set|remove` manages the
 signed-in account's BYOK vault without displaying secret values. The older
 `codewhale cloud ...` spelling remains a command alias.
 
+### Portable config bundles
+
+`codewhale config export --portable [--project] [--out FILE]` writes a
+portable, secret-free bundle of your configuration: sorted TOML with
+credential and machine-specific keys (API keys, base URLs, socket paths)
+dropped, never a redacted placeholder in their place. Without `--out` the
+bundle goes to stdout.
+
+`codewhale config import <FILE|HTTPS_URL|-> [--dry-run] [--yes] [--project]`
+applies a bundle. The envelope is strict (`schema_version = 1`, kind
+`codewhale.portable-config`; unknown fields fail). Import prints a
+deterministic plan — added / changed / skipped / conflicting / rejected —
+then asks for consent unless `--yes` is given; headless use requires it.
+Credential-shaped entries are rejected by key name and by value shape;
+rejections name the field, never a value. Remote bundles come from HTTPS
+only (loopback http excepted) with a 5 MiB cap. Application backs up the
+target document to `<config>.bundle-backup-<timestamp>`, rolls back on any
+failure, and re-importing an applied bundle changes nothing.
+
+Sections map to scope: `[project]` entries land only in the workspace
+document (`--project`, which must target an actual workspace config),
+`[global]` only in the user-global one; `preferences`, `profiles`, and
+`plugins` apply at either scope.
+
 ### Credential read precedence (#5197)
 
 Credential reads are **folder-independent by default**: every layer below is

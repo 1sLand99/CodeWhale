@@ -1236,11 +1236,10 @@ log_level = "debug"
     /// leaked deliberately (tests are short-lived; explicit cleanup would need
     /// to thread the guard through every call site).
     fn isolated_store() -> ConfigStore {
-        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-        let _guard = LOCK
-            .get_or_init(|| std::sync::Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // Serialize with every other env-mutating test in this crate: a private
+        // lock here would still race `ScopedEnvVar` users (observed as a flaky
+        // credentials-dir failure in `api_key_config_failure_restores_*`).
+        let _guard = crate::tests::env_lock();
 
         let dir = {
             // TempDir::keep() is the non-deprecated ownership transfer.

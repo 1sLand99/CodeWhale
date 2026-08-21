@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Portable config bundles: `codewhale config export --portable` writes a
+  deterministic, secret-free bundle (credential and machine-specific keys
+  dropped), and `codewhale config import <FILE|URL|->` applies one with a
+  strict versioned envelope, a printed added/changed/skipped/conflicting/
+  rejected plan, consent gating (`--yes` required headless), a timestamped
+  backup with rollback, and idempotent re-import. Credential-shaped entries
+  are rejected by key name and value shape — rejections name the field,
+  never the value.
+
 - `/rc` is now a shared-session mirror instead of a terminal takeover.
   Attaching the web app no longer locks the local composer or hides
   approvals: both surfaces can prompt while idle (one turn runs at a
