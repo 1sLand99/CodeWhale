@@ -574,6 +574,8 @@
   "KbAltJumpPlanAgentYolo": "Lompatan alternatif ke mode Plan / Act / Operate",
   "KbFocusSidebar": "Fokuskan panel rail Tasks / Agents / Context / Pinned",
   "KbSessionPicker": "Buka pemilih sesi",
+  "KbUpdateInstall": "Periksa dan pasang pembaruan CodeWhale terbaru (`/update install`)",
+  "UpdateChangedHint": "CodeWhale telah diperbarui: {previous} → {current}. Jalankan /change untuk memilih model atau versi lain.",
   "KbTerminalPaste": "Tempel teks memakai terminal lokal Anda",
   "KbPasteAttach": "Tempel teks atau lampirkan gambar dari papan klip grafis lokal atau yang diteruskan",
   "KbCopySelection": "Salin pilihan Codewhale saat ini",

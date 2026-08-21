@@ -746,6 +746,9 @@ pub enum MessageId {
     KbAltJumpPlanAgentYolo,
     KbFocusSidebar,
     KbSessionPicker,
+    KbUpdateInstall,
+    /// Startup hint: the running version is newer than the last-launched one.
+    UpdateChangedHint,
     KbTerminalPaste,
     KbPasteAttach,
     KbCopySelection,
@@ -2449,6 +2452,8 @@ pub const ALL_MESSAGE_IDS: &[MessageId] = &[
     MessageId::KbAltJumpPlanAgentYolo,
     MessageId::KbFocusSidebar,
     MessageId::KbSessionPicker,
+    MessageId::KbUpdateInstall,
+    MessageId::UpdateChangedHint,
     MessageId::KbTerminalPaste,
     MessageId::KbPasteAttach,
     MessageId::KbCopySelection,

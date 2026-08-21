@@ -753,6 +753,26 @@ pub(crate) async fn run_event_loop(
     let mut version_check: Option<tokio::task::JoinHandle<Option<UpdateNotice>>> =
         spawn_startup_version_check(config.update_config());
 
+    // Startup version-change hint: once per version, never on first run.
+    // `record_launch` owns the semantics (strict semver forward move, corrupt
+    // record = silent rewrite, downgrade records without hinting); this only
+    // renders the outcome. Local bookkeeping — independent of the network
+    // update check, and skipped entirely when home cannot be resolved.
+    if let Ok(home) = codewhale_config::codewhale_home() {
+        let outcome = codewhale_release::record_launch(&home, env!("CARGO_PKG_VERSION"));
+        if let Some(record_error) = outcome.record_error {
+            tracing::debug!(error = %record_error, "could not persist the last-launch record");
+        }
+        if let Some(change) = outcome.change {
+            let content = app
+                .tr(MessageId::UpdateChangedHint)
+                .replace("{previous}", &change.previous)
+                .replace("{current}", &change.current);
+            app.add_message(HistoryCell::System { content });
+            app.needs_redraw = true;
+        }
+    }
+
     // Fire a one-shot initial balance fetch for DeepSeek providers
     // so the footer chip shows balance on the first frame without
     // waiting for a turn to complete.
@@ -5289,6 +5309,28 @@ pub(crate) async fn run_event_loop(
                 KeyCode::Down => {
                     let _ =
                         handle_composer_history_arrow(app, key, slash_menu_open, mention_menu_open);
+                }
+                // Ctrl+Shift+U is the shifted-Ctrl chord for `/update install`
+                // (same family as Ctrl+Shift+A/E/O). It routes through the
+                // exact typed-command path, so the managed-install gate and
+                // the "already up to date" outcome are inherited from
+                // `commands::update` rather than reimplemented here. Placed
+                // above the readline Ctrl+U arm so the shifted chord is never
+                // swallowed by clear-input.
+                _ if key_shortcuts::is_update_install_shortcut(&key) => {
+                    if execute_command_input(
+                        terminal,
+                        app,
+                        &mut engine_handle,
+                        &task_manager,
+                        config,
+                        &mut web_config_session,
+                        "/update install",
+                    )
+                    .await?
+                    {
+                        return Ok(());
+                    }
                 }
                 KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     app.clear_input_recoverable();
