@@ -358,6 +358,12 @@ async fn emergency_compaction_cancellation_drops_provider_and_never_mutates_cont
 const REPRESENTATIVE_HANDOFF_RELAY: &str = "REPRESENTATIVE_HANDOFF_RELAY";
 
 #[test]
+fn ordinary_engine_default_has_no_hidden_step_budget() {
+    assert_eq!(UNBOUNDED_MODEL_STEPS, u32::MAX);
+    assert_eq!(EngineConfig::default().max_steps, UNBOUNDED_MODEL_STEPS);
+}
+
+#[test]
 fn registry_first_policy_is_in_the_initial_prompt_only_when_mcp_is_enabled() {
     let enabled = EngineConfig::default();
     let (engine, _handle) = Engine::new(enabled, &Config::default());

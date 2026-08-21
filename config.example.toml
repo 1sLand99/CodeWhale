@@ -1536,7 +1536,8 @@ default_text_model = "deepseek-ai/deepseek-v4-pro"
 # allowed_tools = []
 # # Tools always disallowed (overrides role and task spec)
 # disallowed_tools = ["exec_shell"]
-# # Hard ceiling on worker steps (tool calls + model turns)
+# # Optional hard ceiling on worker steps (tool calls + model turns).
+# # Omit or set 0 for the unbounded default; use a positive value to opt in.
 # max_turns = 500
 # # Recursive child-agent depth for fleet workers. Shares ONE recursion axis
 # # with standalone sub-agents (a fleet worker IS a headless sub-agent).

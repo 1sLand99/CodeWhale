@@ -32,7 +32,7 @@ use crate::compaction::CompactionConfig;
 use crate::config::DEFAULT_TEXT_MODEL;
 use crate::config::{ApiProvider, Config, MAX_SUBAGENTS, ProviderIdentity};
 use crate::core::engine::{
-    EngineConfig, EngineHandle, spawn_engine_with_authoritative_route_config,
+    EngineConfig, EngineHandle, UNBOUNDED_MODEL_STEPS, spawn_engine_with_authoritative_route_config,
 };
 use crate::core::events::{Event as EngineEvent, TurnOutcomeStatus};
 use crate::core::ops::Op;
@@ -6736,7 +6736,9 @@ impl RuntimeThreadManager {
                     .collect(),
                 project_context_pack_enabled: cfg.project_context_pack_enabled(),
                 translation_enabled: false,
-                max_steps: 100,
+                // Runtime/API turns follow the same no-hidden-step-budget
+                // contract as the ordinary interactive engine.
+                max_steps: UNBOUNDED_MODEL_STEPS,
                 max_subagents,
                 max_admitted_subagents: cfg
                     .max_admitted_subagents_for_provider(provider)

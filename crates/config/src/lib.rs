@@ -1759,9 +1759,9 @@ pub struct FleetExecConfig {
     /// Tools that are always disallowed, overriding role and task spec.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub disallowed_tools: Vec<String>,
-    /// Hard ceiling on sub-agent steps (tool calls + model turns).
-    /// Workers that exceed this are terminated. Default: [`FLEET_DEFAULT_MAX_TURNS`] (500).
-    /// Set to 0 to disable the per-session ceiling.
+    /// Optional hard ceiling on sub-agent steps (tool calls + model turns).
+    /// Zero keeps the normal agent loop unbounded; a positive value terminates
+    /// workers that exceed the explicit operator cap.
     #[serde(default = "default_fleet_max_turns")]
     pub max_turns: u32,
     /// Recursive child-agent budget for headless fleet workers.
@@ -1781,10 +1781,10 @@ pub struct FleetExecConfig {
     pub output_format: String,
 }
 
-/// Default finite step budget for Fleet workers. Individual tasks can lower
-/// this via `budget.max_tool_calls`; the session-level config `max_turns`
-/// acts as the hard ceiling. Set the config value to 0 to disable the cap.
-pub const FLEET_DEFAULT_MAX_TURNS: u32 = 500;
+/// Fleet workers run until the model finishes unless an operator supplies a
+/// positive `max_turns` value. Individual task budgets may still opt into a
+/// narrower explicit cap through `budget.max_tool_calls`.
+pub const FLEET_DEFAULT_MAX_TURNS: u32 = 0;
 
 fn default_fleet_max_turns() -> u32 {
     FLEET_DEFAULT_MAX_TURNS

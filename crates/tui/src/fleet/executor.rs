@@ -1316,16 +1316,14 @@ mod tests {
     }
 
     #[test]
-    fn default_max_turns_is_passed_as_bounded_flag() {
-        // The default is now FLEET_DEFAULT_MAX_TURNS (500), so --max-turns IS passed
-        // to ensure workers respect the finite budget (#3885).
+    fn default_max_turns_does_not_add_a_hidden_worker_cap() {
         let exec = FleetExecConfig::default();
         let joined = build_worker_exec_command("codewhale", &task("x"), &exec, None)
             .args
             .join(" ");
         assert!(
-            joined.contains("--max-turns"),
-            "default finite budget should be forwarded to the subprocess: {joined}"
+            !joined.contains("--max-turns"),
+            "the unbounded default must not become a subprocess cap: {joined}"
         );
     }
 

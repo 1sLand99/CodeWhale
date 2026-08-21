@@ -285,7 +285,9 @@ pub struct EngineConfig {
     /// and a post-hoc translation layer replaces remaining English output.
     pub translation_enabled: bool,
     pub verbosity: Option<String>,
-    /// Maximum number of assistant steps before stopping.
+    /// Maximum number of assistant steps before stopping. Ordinary interactive
+    /// hosts use [`UNBOUNDED_MODEL_STEPS`]; explicit test/embed callers may
+    /// still install a finite boundary.
     pub max_steps: u32,
     /// Maximum number of concurrently active subagents.
     pub max_subagents: usize,
@@ -438,6 +440,10 @@ pub struct EngineConfig {
     pub advisor_config: crate::tools::subagent::AdvisorConfig,
 }
 
+/// Sentinel used by ordinary interactive hosts: model work has no hidden
+/// step-budget ceiling. Progress/stationarity controls live at the tool loop.
+pub(crate) const UNBOUNDED_MODEL_STEPS: u32 = u32::MAX;
+
 impl Default for EngineConfig {
     fn default() -> Self {
         Self {
@@ -455,12 +461,10 @@ impl Default for EngineConfig {
             instructions: Vec::new(),
             project_context_pack_enabled: false,
             translation_enabled: false,
-            // High backstop rather than a working ceiling: the in-turn
-            // loop_guard that used to brake repetition is gone, so this only
-            // exists to terminate a pathological runaway turn via
-            // `at_max_steps()`. 1000 stays high enough to never gate real work
-            // while still guaranteeing the turn ends.
-            max_steps: 1000,
+            // Ordinary interactive turns have no hidden model-step budget.
+            // Callers that need a finite safety boundary set one explicitly;
+            // progress-based stationarity belongs at the tool-loop layer.
+            max_steps: UNBOUNDED_MODEL_STEPS,
             max_subagents: DEFAULT_MAX_SUBAGENTS,
             max_admitted_subagents: DEFAULT_MAX_SUBAGENTS,
             launch_concurrency: DEFAULT_MAX_SUBAGENTS,
