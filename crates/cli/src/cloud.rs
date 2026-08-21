@@ -327,28 +327,25 @@ impl<'a, T: CloudTransport> CloudClient<'a, T> {
         )
         .interval_seconds(Some(device.interval))
         .max_interval_seconds(10)
-        .run(
-            |duration| sleep(duration),
-            || {
-                let response = self.transport.execute(CloudRequest {
-                    method: HttpMethod::Post,
-                    path: "/api/cli/device/token".to_string(),
-                    bearer: None,
-                    body: Some(json_body(&DeviceTokenRequest {
-                        device_code: &device.device_code,
-                    })?),
-                })?;
-                match response.status {
-                    200 => {
-                        let bundle: AuthBundle = parse_json_body(&response.body)?;
-                        validate_auth_bundle(&bundle)?;
-                        Ok(DevicePollOutcome::Complete(bundle))
-                    }
-                    202 => Ok(DevicePollOutcome::Pending),
-                    _ => Err(response_error(&response)),
+        .run(sleep, || {
+            let response = self.transport.execute(CloudRequest {
+                method: HttpMethod::Post,
+                path: "/api/cli/device/token".to_string(),
+                bearer: None,
+                body: Some(json_body(&DeviceTokenRequest {
+                    device_code: &device.device_code,
+                })?),
+            })?;
+            match response.status {
+                200 => {
+                    let bundle: AuthBundle = parse_json_body(&response.body)?;
+                    validate_auth_bundle(&bundle)?;
+                    Ok(DevicePollOutcome::Complete(bundle))
                 }
-            },
-        )?;
+                202 => Ok(DevicePollOutcome::Pending),
+                _ => Err(response_error(&response)),
+            }
+        })?;
         self.save_auth(bundle.clone())?;
         Ok(bundle)
     }
