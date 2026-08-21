@@ -726,8 +726,12 @@ PASSWORD=hunter2hunter2";
         // Counterpart of the diagnostic test above: a real credential keyed
         // as `token` (or `api_token`) must still be dropped, including a
         // multi-word Bearer value that is not a known bare-token prefix.
-        let out = redact_secrets("stream error: token = Bearer eyJhbGciOiJIUzI1NiJ9.e30.signature");
-        assert!(!out.contains("eyJhbGciOiJIUzI1NiJ9.e30.signature"), "{out}");
+        // The JWT is assembled at runtime so no scanner-shaped literal sits
+        // in the source tree — same precedent as the AWS fixture in
+        // `crates/workflow/src/redaction.rs`.
+        let jwt = ["eyJhbGciOiJIUzI1NiJ9", "e30", "c2lnbmF0dXJl"].join(".");
+        let out = redact_secrets(&format!("stream error: token = Bearer {jwt}"));
+        assert!(!out.contains(&jwt), "{out}");
         assert!(!out.contains("Bearer"), "{out}");
         assert!(out.starts_with("stream error: token = "), "{out}");
         assert!(out.contains(REDACTED), "{out}");
