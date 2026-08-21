@@ -1634,6 +1634,59 @@ fn workflow_cards_report_lifecycle_children_phases_and_failures() {
     }
 }
 
+#[test]
+fn degraded_workflow_receipt_is_terminal_warning_not_running_or_success() {
+    let output = serde_json::json!({
+        "run_id": "workflow_partial",
+        "status": "degraded",
+        "workflow_goal": "review the release",
+        "started_at_ms": 1_000,
+        "completed_at_ms": 2_000,
+        "dispatch_failure_count": 1,
+        "dispatch_failures": [{
+            "label": "review docs",
+            "message": "profile unavailable",
+            "at_ms": 1_500,
+        }],
+    })
+    .to_string();
+    let mut run = generic_tool("workflow", ToolStatus::Success);
+    run.output = Some(output);
+
+    let lines = run.lines_with_mode(120, false, RenderMode::Live);
+    let text = lines_text(&lines);
+    assert!(text.contains("issue"), "warning receipt missing: {text:?}");
+    assert!(
+        !text.contains(" done"),
+        "must not read as success: {text:?}"
+    );
+    assert!(
+        !text.contains(" running"),
+        "must not read as live: {text:?}"
+    );
+
+    let warning = lines
+        .iter()
+        .flat_map(|line| line.spans.iter())
+        .find(|span| span.content.as_ref() == "issue")
+        .expect("terminal warning status span");
+    assert_eq!(
+        warning.style.fg,
+        Some(crate::deepseek_theme::active_theme().tool_warning_accent),
+        "degraded receipt must use the terminal warning accent"
+    );
+    assert!(
+        lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .all(|span| !span
+                .content
+                .chars()
+                .any(|ch| ('\u{2800}'..='\u{28ff}').contains(&ch))),
+        "terminal receipt must not retain a spinner: {text:?}"
+    );
+}
+
 /// A checklist update names one item. Showing the rest would make every
 /// single-item edit cost the height of the whole list; showing none would make
 /// the row unreadable. An id past the end of the list falls back to a

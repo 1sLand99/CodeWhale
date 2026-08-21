@@ -1246,10 +1246,17 @@ fn render_header_with_git_status(
     // classic header shows, so a collapsed run stays visible on the ocean
     // shell too. No workflow panel means no chip. The cramped-layout rebuild
     // below keeps the chip in `suffix` alongside the goal chip.
-    let workflow_chip = app
-        .workflow_panel
-        .as_ref()
-        .map(|panel| (panel.top_bar_chip(), ChromeInk::Info.color(&app.ui_theme)));
+    let workflow_chip = app.workflow_panel.as_ref().map(|panel| {
+        let ink = if matches!(
+            panel.lifecycle,
+            crate::tui::widgets::workflow_panel::WorkflowPanelLifecycle::Degraded
+        ) {
+            ChromeInk::Attention
+        } else {
+            ChromeInk::Info
+        };
+        (panel.top_bar_chip(), ink.color(&app.ui_theme))
+    });
     if let Some((text, color)) = &workflow_chip {
         left.push(Span::raw(GROUP_GAP));
         left.push(Span::styled(
@@ -1872,8 +1879,10 @@ mod empty_state_caption_tests {
 #[cfg(test)]
 mod header_tests {
     use super::{FIELD_JOIN, GROUP_GAP, filesystem_scope_notice, render_header_with_git_status};
+    use crate::palette::ChromeInk;
     use crate::tui::app::{App, AppMode};
     use crate::tui::approval::ApprovalMode;
+    use crate::tui::widgets::workflow_panel::{WorkflowPanel, WorkflowPanelLifecycle};
     use ratatui::{buffer::Buffer, layout::Rect};
 
     fn app() -> App {
@@ -1998,6 +2007,36 @@ mod header_tests {
                 > unicode_width::UnicodeWidthStr::width(FIELD_JOIN),
             "the group gap must out-space the phrase join or nothing groups",
         );
+    }
+
+    #[test]
+    fn collapsed_degraded_workflow_chip_uses_attention_ink() {
+        let mut app = app();
+        let mut panel = WorkflowPanel::new("workflow-partial", "review release", 1_000);
+        panel.lifecycle = WorkflowPanelLifecycle::Degraded;
+        panel.expanded = false;
+        panel.completed_at_ms = Some(2_000);
+        app.workflow_panel = Some(panel);
+
+        let width = 200;
+        let area = Rect::new(0, 0, width, 1);
+        let mut buf = Buffer::empty(area);
+        render_header_with_git_status(
+            area,
+            &mut buf,
+            &app,
+            &crate::tui::git_status::GitStatusSnapshot::default(),
+        );
+        let text = (0..width).map(|x| buf[(x, 0)].symbol()).collect::<String>();
+        let start = text.find("wf degraded").expect("degraded workflow chip");
+        let expected = ChromeInk::Attention.color(&app.ui_theme);
+        for x in start..start + "wf degraded".len() {
+            assert_eq!(
+                buf[(x as u16, 0)].fg,
+                expected,
+                "collapsed degraded chip must stay amber at column {x}: {text:?}"
+            );
+        }
     }
 
     #[test]

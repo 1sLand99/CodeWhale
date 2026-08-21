@@ -4431,17 +4431,38 @@ impl App {
         }
     }
 
-    /// Apply a workflow panel event, creating the panel on first `RunStarted`.
+    /// Apply a workflow panel event for one immutable workflow run, creating
+    /// the panel on first `RunStarted`.
     ///
-    /// Returns whether this event should request an immediate repaint.
-    /// Budget-only updates always mutate panel state but leave repaint to the
-    /// caller so high-frequency fan-out budget ticks can be paced (#4095).
+    /// Returns whether the event belonged to the displayed run and was
+    /// applied. Budget-only updates still return `true`, but leave repaint to
+    /// the caller so high-frequency fan-out budget ticks can be paced (#4095).
+    /// A `RunStarted` event may select a different run only when its start is
+    /// strictly newer; every other cross-run event fails closed.
     pub fn apply_workflow_panel_event(
         &mut self,
+        event_run_id: &str,
         event: crate::tui::widgets::workflow_panel::WorkflowPanelEvent,
     ) -> bool {
         use crate::tui::widgets::workflow_panel::{WorkflowPanel, WorkflowPanelEvent};
-        let budget_only = matches!(event, WorkflowPanelEvent::BudgetUpdated { .. });
+        if event_run_id.trim().is_empty() {
+            return false;
+        }
+        if let WorkflowPanelEvent::RunStarted { run_id, .. } = &event
+            && run_id != event_run_id
+        {
+            return false;
+        }
+        if let Some(panel) = self.workflow_panel.as_ref()
+            && panel.run_id != event_run_id
+        {
+            match &event {
+                WorkflowPanelEvent::RunStarted { at_ms, .. } if *at_ms > panel.started_at_ms => {}
+                _ => return false,
+            }
+        }
+
+        let budget_only = matches!(&event, WorkflowPanelEvent::BudgetUpdated { .. });
         match (&mut self.workflow_panel, &event) {
             (
                 None,
@@ -4467,7 +4488,7 @@ impl App {
             (None, _) => {
                 // No panel yet and event is not a start — seed a shell panel
                 // so late events still surface rather than being dropped.
-                let mut panel = WorkflowPanel::new("workflow", "workflow", 0);
+                let mut panel = WorkflowPanel::new(event_run_id, event_run_id, 0);
                 panel.locale = self.ui_locale;
                 panel.apply_event(event);
                 self.workflow_panel = Some(panel);
@@ -4479,7 +4500,7 @@ impl App {
         if !budget_only {
             self.needs_redraw = true;
         }
-        !budget_only
+        true
     }
 
     /// Toggle the workflow panel expand/collapse state. Returns true when a

@@ -1359,13 +1359,19 @@ fn workflow_ui_events_apply_only_to_the_active_session_owner() {
         Some("workflow-b")
     );
 
-    // A -> B -> A restores A's event lane; it never replays through B.
+    // A -> B -> A restores A's event lane with a new chronological start; it
+    // never replays an older start through B.
     app.current_session_id = Some("session-a".to_string());
+    let a_resumed = serde_json::json!({
+        "type": "run_started",
+        "at_ms": 3,
+        "workflow_goal": "A workflow resumed"
+    });
     assert!(apply_owned_workflow_ui_event(
         &mut app,
         "session-a",
         "workflow-a",
-        &a_started,
+        &a_resumed,
     ));
     assert_eq!(
         app.workflow_panel
