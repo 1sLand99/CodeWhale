@@ -2176,7 +2176,7 @@ impl App {
                 persist_route_as_startup_default(&pending.provider_identity, &pending.model)
             }
             RouteSaveChoice::SessionOnly => {
-                format!("Route {route} kept for this session only — nothing was written.")
+                format!("Model {route} kept for this session only — nothing was written.")
             }
         }
     }

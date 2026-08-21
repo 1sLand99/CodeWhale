@@ -1,6 +1,6 @@
 //! Fleet detail — open a saved named Fleet and edit it.
 //!
-//! Row 0 is the Fleet's own operator route; below it one row per member.
+//! Row 0 is the Coordinator's own model; below it one row per member.
 //! Editing a Fleet edits that Fleet's file — never the live session route and
 //! never a global collection of role profiles. Every write goes through
 //! [`crate::fleet::store`] with an atomic save and a receipt naming the exact
@@ -440,12 +440,12 @@ impl FleetDetailView {
             DetailStep::Overview => {
                 let mut hints = vec![
                     ActionHint::new("↑/↓", "move"),
-                    ActionHint::new("o", "operator route"),
-                    ActionHint::new("e", "member route"),
+                    ActionHint::new("o", "Coordinator model"),
+                    ActionHint::new("e", "member model"),
                     ActionHint::new("t", "reasoning"),
                     ActionHint::new("r", "rename"),
                     ActionHint::new("s", "save"),
-                    ActionHint::new("c", "copy scope"),
+                    ActionHint::new("c", "copy destination"),
                     ActionHint::new("u/w", "select"),
                 ];
                 if self.selected > 0 {
@@ -613,8 +613,8 @@ impl ModalView for FleetDetailView {
             Line::from(""),
         ];
         let operator_line = match &self.fleet.operator {
-            Some(op) => format!("  operator: {}/{}", op.provider, op.model),
-            None => "  operator: inherits session route".to_string(),
+            Some(op) => format!("  Coordinator: {}/{}", op.provider, op.model),
+            None => "  Coordinator: uses the session's model".to_string(),
         };
         header.push(Line::from(Span::styled(
             operator_line,
@@ -688,8 +688,8 @@ impl FleetDetailView {
                 Style::default().fg(palette::TEXT_SECONDARY)
             };
             let route = match (&member.provider, &member.model) {
-                (Some(p), Some(m)) => format!("{p}/{m} (pinned)"),
-                _ => "inherits session route".to_string(),
+                (Some(p), Some(m)) => format!("model {p}/{m}"),
+                _ => "same model as this session".to_string(),
             };
             let reasoning = member.reasoning.as_deref().unwrap_or("inherit");
             let vision = if member.requires.iter().any(|r| r == "vision") {
@@ -735,7 +735,7 @@ impl FleetDetailView {
         };
         let mut lines: Vec<Line<'static>> = Vec::new();
         lines.push(Line::from(Span::styled(
-            format!("  Route for {target_label} — Enter picks, Esc back."),
+            format!("  Model for {target_label} — Enter picks, Esc back."),
             Style::default().fg(palette::TEXT_MUTED),
         )));
         lines.push(Line::from(""));
@@ -763,12 +763,12 @@ impl FleetDetailView {
     }
 }
 
-/// Build the route-picker rows: "inherit session route" first, then every
+/// Build the model-picker rows: "same as session" first, then every
 /// concrete model across configured providers, with its readiness label —
-/// the same route list the fleet setup wizard's Model step shows.
+/// the same list the fleet setup wizard's Model step shows.
 fn build_route_rows(config: &Config) -> Vec<RouteRow> {
     let mut rows = vec![RouteRow {
-        label: "inherit session route".to_string(),
+        label: "same as session".to_string(),
         summary: String::new(),
         provider: None,
         model: None,

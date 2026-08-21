@@ -132,10 +132,10 @@ const ROLES: [Choice; 9] = [
 /// (#4093), so the user picks a real route — including cross-provider ones —
 /// instead of an abstract class or only the active provider's models.
 const MODEL_INHERIT: Choice = Choice {
-    label: Cow::Borrowed("inherit"),
+    label: Cow::Borrowed("same as session"),
     summary: Cow::Borrowed("Same model as now"),
     description: Cow::Borrowed(
-        "Use the operator's current route — provider, model, and reasoning included. Recommended default.",
+        "Use your current model — provider and reasoning included. Recommended default.",
     ),
 };
 
@@ -1175,7 +1175,7 @@ impl FleetSetupView {
 
     fn selected_thinking_label(&self) -> String {
         self.selected_reasoning_effort()
-            .unwrap_or_else(|| format!("inherit ({})", self.snapshot.reasoning))
+            .unwrap_or_else(|| format!("same as session ({})", self.snapshot.reasoning))
     }
 
     fn scope_preview_header(&self, header: String) -> String {
@@ -1800,7 +1800,7 @@ impl ModalView for FleetSetupView {
                     )
                 } else {
                     format!(
-                        "Type / to filter {} routes by provider or model",
+                        "Type / to filter {} models by provider or name",
                         self.model_choices.len()
                     )
                 };
@@ -1810,12 +1810,12 @@ impl ModalView for FleetSetupView {
                 }
                 context.push(filter_line);
                 context.push(format!(
-                    "Current route: {} / {}  ·  reasoning {}",
+                    "Current model: {} / {}  ·  reasoning {}",
                     self.snapshot.provider, self.snapshot.model, self.snapshot.reasoning
                 ));
                 context.push(match self.selected_model() {
-                    Some(model) => format!("This worker will run on {model}."),
-                    None => "This worker inherits your current route.".to_string(),
+                    Some(model) => format!("This member will run on {model}."),
+                    None => "This member uses your current model.".to_string(),
                 });
                 render_choice_step(chunks[1], buf, &filtered_choices, selected, &context);
                 register_choice_hitboxes(
@@ -2162,7 +2162,7 @@ impl FleetSetupView {
         section(
             &mut lines,
             "Permissions",
-            "Inherit the parent envelope and narrow only. Children cannot widen approval, trust, or secrets, and required approvals stay on.".to_string(),
+            "Access: members can only narrow what the session allows. They cannot widen approval, trust, or secrets, and required approvals stay on.".to_string(),
         );
         section(
             &mut lines,
@@ -4152,7 +4152,10 @@ mod tests {
         // permission posture stays governed by the sections below it.
         assert!(top.contains("Personal · "), "{top}");
         assert!(top.contains("agents"), "{top}");
-        assert!(top.contains("Inherit the parent envelope"), "{top}");
+        assert!(
+            top.contains("can only narrow what the session allows"),
+            "{top}"
+        );
 
         // The review is intentionally scrollable; scrolling to the bottom reveals
         // the workspace/org execution policy, review policy, and honest save note.

@@ -248,7 +248,7 @@ impl ModalView for FleetListView {
                                 Some((model, provider)) => {
                                     format!("{provider}/{model}")
                                 }
-                                None => "inherit session route".to_string(),
+                                None => "same model as this session".to_string(),
                             };
                             content.push_str(&format!("- {} → {pin}", row.id));
                             if let Some(shadow) = &row.conflicting_shadow {
@@ -326,8 +326,7 @@ impl ModalView for FleetListView {
         // Header: name + selected summary.
         let selected_line = match &self.selected {
             Some(sel) => format!("Selected: `{}` ({})", sel.name, sel.scope.label()),
-            None => "No Fleet selected — the session uses its own route and the legacy roster."
-                .to_string(),
+            None => "No Fleet selected — built-in team".to_string(),
         };
         let mut header = vec![
             Line::from(vec![
@@ -376,7 +375,7 @@ impl FleetListView {
                     Style::default().fg(palette::TEXT_MUTED),
                 ),
                 Span::styled(
-                    "  Select a route with /model and /provider, then /fleet save or \
+                    "  Select a model with /model and /provider, then /fleet save or \
                      /fleet save-as. Editing stays on /fleet setup.",
                     Style::default().fg(palette::TEXT_DIM),
                 ),
@@ -474,11 +473,14 @@ impl FleetListView {
         };
         match crate::fleet::store::FleetFile::parse(&text) {
             Ok(fleet) => {
-                let operator = match &fleet.operator {
+                let coordinator = match &fleet.operator {
                     Some(op) => format!("{}/{}", op.provider, op.model),
-                    None => "inherits session route".to_string(),
+                    None => "uses the session's model".to_string(),
                 };
-                format!("operator: {operator} · members: {}", fleet.members.len())
+                format!(
+                    "Coordinator: {coordinator} · members: {}",
+                    fleet.members.len()
+                )
             }
             Err(err) => format!("unreadable: {err}"),
         }
