@@ -404,14 +404,11 @@ mod tests {
         let error = DeviceCodePoll::new(Duration::from_millis(5), "plain timeout")
             .interval_seconds(Some(1))
             .slow_down_timeout_message("clock drift timeout")
-            .run(
-                |duration| std::thread::sleep(duration),
-                || {
-                    Ok(DevicePollOutcome::<()>::SlowDown {
-                        interval_seconds: None,
-                    })
-                },
-            )
+            .run(std::thread::sleep, || {
+                Ok(DevicePollOutcome::<()>::SlowDown {
+                    interval_seconds: None,
+                })
+            })
             .expect_err("deadline stops the loop");
         assert_eq!(error.to_string(), "clock drift timeout");
     }
@@ -421,10 +418,7 @@ mod tests {
         let error = DeviceCodePoll::new(Duration::from_millis(5), "plain timeout")
             .interval_seconds(Some(1))
             .slow_down_timeout_message("clock drift timeout")
-            .run(
-                |duration| std::thread::sleep(duration),
-                || Ok(DevicePollOutcome::<()>::Pending),
-            )
+            .run(std::thread::sleep, || Ok(DevicePollOutcome::<()>::Pending))
             .expect_err("deadline stops the loop");
         assert_eq!(error.to_string(), "plain timeout");
     }
