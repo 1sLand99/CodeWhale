@@ -241,13 +241,6 @@ fn context_usage(app: &App) -> (usize, u32, f64) {
     (used, max, percent)
 }
 
-/// Name where the effective context window came from, the honesty marker for
-/// a guess (#5239), and the exact key that changes it.
-///
-/// #5134: `/status` printed the window as a bare number, so a user watching
-/// auto-compaction fire at 128K on a 1M-capable model had no way to learn that
-/// `context_window` exists, let alone which table it belongs on. The
-/// provenance label alone is not enough — the actionable half is the key path.
 /// Where the effective context window came from.
 ///
 /// #5134: `/status` printed the window as a bare number, so a user watching
