@@ -14,6 +14,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   output cap; the backend applies its own. Every other Responses route keeps
   the central cap on the wire, exactly as before.
 
+- HTTP 400 classification no longer calls an unsupported-parameter error a
+  context-window overflow. Responses shape errors such as "Unsupported
+  parameter: max_output_tokens" name a token-shaped field, which the generic
+  keyword rules read as prompt-size exhaustion and pointed users at compaction
+  that could never help. Such responses now classify as invalid requests.
+
 - xAI device login validated nothing about the URL it opened. The
   `verification_uri` from the device-code response went straight to
   `webbrowser::open` with no parse, no scheme check and no credential check, so a
