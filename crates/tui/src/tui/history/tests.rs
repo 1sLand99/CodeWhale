@@ -23,11 +23,11 @@ use super::constants::{
     TOOL_SUCCESS_OUTPUT_PREVIEW_LINES,
 };
 use super::{
-    assistant_label_style_for, extract_reasoning_summary, render_spillover_annotation,
-    render_thinking, render_thinking_with_analysis, running_status_label_with_elapsed, ExecCell,
-    ExecSource, GenericToolCell, HistoryCell, PlanUpdateCell, RenderMode, ToolCell, ToolStatus,
-    TranscriptRenderOptions, WebSearchCell, ASSISTANT_GLYPH, REASONING_CURSOR, REASONING_OPENER,
-    REASONING_RAIL,
+    ASSISTANT_GLYPH, ExecCell, ExecSource, GenericToolCell, HistoryCell, PlanUpdateCell,
+    REASONING_CURSOR, REASONING_OPENER, REASONING_RAIL, RenderMode, ToolCell, ToolStatus,
+    TranscriptRenderOptions, WebSearchCell, assistant_label_style_for, extract_reasoning_summary,
+    render_spillover_annotation, render_thinking, render_thinking_with_analysis,
+    running_status_label_with_elapsed,
 };
 use crate::models::{ContentBlock, Message};
 use crate::tools::plan::{PlanSnapshot, StepStatus};

@@ -76,6 +76,13 @@ pub(crate) trait CredentialStore: Send + Sync {
     ) -> Result<Option<Credential>>;
 
     /// Remove a credential (logout). Serialized against `modify`.
+    ///
+    /// Exercised by the store tests but not yet on the production logout path:
+    /// the full-wipe logout in `config.rs` still deletes slots directly rather
+    /// than through this trait. Routing it here is the remaining half of the
+    /// port and is deliberately not folded into this change — logout is
+    /// security-sensitive and deserves its own commit and its own tests.
+    #[cfg_attr(not(test), expect(dead_code))]
     fn delete(&self, provider_id: &str) -> Result<()>;
 }
 
