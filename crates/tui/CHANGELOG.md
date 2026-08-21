@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- `/rc` is now a shared-session mirror instead of a terminal takeover.
+  Attaching the web app no longer locks the local composer or hides
+  approvals: both surfaces can prompt while idle (one turn runs at a
+  time), approval cards stay visible in the terminal and are shared with
+  the web with first-decision-wins semantics (the losing side is told, a
+  web decision dismisses the local card), and structured questions are
+  answered locally instead of cancelled. Fail-closed behavior survives —
+  the post-failure reconnect lockout, integrity-gated `/rc stop`, and the
+  fail-closed shared-approval channel on transport loss are unchanged.
+  The takeover vocabulary ("web owns prompts and approvals") is gone from
+  every surface.
+
+- Auto-mode provider readiness no longer reports "key saved · not checked"
+  forever. Readiness checks are recorded against the concrete model the
+  router ran, but auto-mode reads resolved against the literal `auto`
+  identity, which never matched any recorded check — so the setup receipt,
+  model picker, and fleet setup view showed an eternal unchecked badge
+  even after hundreds of successful turns. The read now falls back to the
+  most recent check on the same route (provider + endpoint + auth class);
+  concrete-model reads keep exact per-model scoping.
+
+- The focused sub-agent transcript now scrolls like the main transcript.
+  The frame renderer sampled the ocean column through a `ChatWidget` whose
+  constructor consumed `pending_scroll_delta` — every PageUp/PageDown and
+  wheel event was swallowed by an invisible widget before the focused pane
+  could read it. The delta is now parked across the sample; the pane pins
+  on user scroll-up, follows new child activity at tail, and
+  jump-to-bottom releases the pin.
+
 - Every Codex OAuth Responses request carried `max_output_tokens`, a parameter
   that endpoint rejects outright ("Unsupported parameter: max_output_tokens"),
   so every gpt-5.6-sol turn — including every sub-agent on that route — failed
