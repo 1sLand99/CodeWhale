@@ -3878,6 +3878,9 @@ fn deepseek_family_model_id(model: &str) -> Option<String> {
     match trimmed.to_ascii_lowercase().as_str() {
         "pro" | "deepseek-v4pro" => return Some("deepseek-v4-pro".to_string()),
         "flash" | "deepseek-v4flash" => return Some("deepseek-v4-flash".to_string()),
+        "flash-vision" | "deepseek-v4flashvisionexp" => {
+            return Some("deepseek-v4-flash-vision-exp".to_string());
+        }
         _ => {}
     }
 

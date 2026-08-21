@@ -6513,7 +6513,11 @@ fn model_completion_names_for_xiaomi_mimo_include_chat_models() {
 fn model_completion_names_for_deepseek_api_are_deduplicated_bare_ids() {
     assert_eq!(
         model_completion_names_for_provider(ApiProvider::Deepseek),
-        vec!["deepseek-v4-pro", "deepseek-v4-flash"]
+        vec![
+            "deepseek-v4-pro",
+            "deepseek-v4-flash",
+            "deepseek-v4-flash-vision-exp"
+        ]
     );
 }
 
