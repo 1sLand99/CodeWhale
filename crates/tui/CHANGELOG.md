@@ -254,6 +254,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `release-artifacts.yml` builds `--profile dist` with fat LTO and
   `codegen-units = 1`.
 
+- Test debt: the transcript history-cell suite has been rebuilt. It was 123
+  tests across 3,964 lines, and about a third of it pinned the current skin
+  rather than any behavior -- `assert_eq!(spans[1], "⣤")` for the
+  reduced-motion marker, `title_span.style.fg == theme.tool_title_color`,
+  `visible[1] == "▏ done: scan repo"`, four separate tests each asserting one
+  shape of fenced code never takes the transcript rail, and one test whose
+  only assertion was `!text.is_empty()` under a name promising it checked the
+  rendered tool id. Assertions like those break on every legitimate visual
+  change and catch nothing a reader of the transcript would notice, which is
+  the liability `d64b9429b` named. The replacement is 40 tests, each named
+  for the property it protects and asserting the property instead of the
+  token: reduced motion is checked by rendering the same running card at two
+  different elapsed times and requiring the frames to match -- which also
+  catches an animation leak the glyph constant missed -- and a frozen marker
+  must stay visible rather than landing on the spinner's invisible blank
+  (U+2800). Severity colors are checked by requiring warning not to read as
+  error rather than by naming a palette entry. A streaming assistant glyph
+  must actually pulse when motion is allowed, checked against
+  `pulse_brightness` rather than by sleeping on the 2s sine. Each of the
+  invariants claimed was verified to fail the new suite when deliberately
+  broken in the renderer.
+
 ## [0.9.10] - 2026-08-19
 
 - Show the full slash-command or `/model` completion row in a bounded, wrapping hover popover whenever narrow terminals truncate it, closing the remaining scoped gap from [#998](https://github.com/Hmbown/CodeWhale/issues/998). Thanks [@AiurArtanis](https://github.com/AiurArtanis) and [@formp3](https://github.com/formp3) for identifying the affected surfaces.
