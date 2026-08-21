@@ -733,81 +733,6 @@ fn is_model_visible_tool_call(id: &str) -> bool {
     !id.starts_with(USER_SHELL_TOOL_ID_PREFIX)
 }
 
-async fn drain_web_config_events(
-    web_config_session: &mut Option<WebConfigSession>,
-    app: &mut App,
-    config: &mut Config,
-    engine_handle: &EngineHandle,
-) -> bool {
-    let Some(session) = web_config_session.as_mut() else {
-        return true;
-    };
-
-    let mut keep_session = true;
-    while let Ok(event) = session.receiver.try_recv() {
-        match event {
-            WebConfigSessionEvent::Draft(doc) => {
-                match config_ui::apply_document(doc, app, config, false) {
-                    Ok(outcome) if outcome.changed => {
-                        if outcome.requires_engine_sync {
-                            apply_model_and_compaction_update(
-                                engine_handle,
-                                app.compaction_config(),
-                                app.mode,
-                                app.active_route_limits,
-                            )
-                            .await;
-                        }
-                        app.status_message = Some(format!(
-                            "Web config draft applied: {}",
-                            outcome.final_message
-                        ));
-                    }
-                    Ok(_) => {}
-                    Err(err) => {
-                        app.add_message(HistoryCell::System {
-                            content: format!("Web config draft apply failed: {err}"),
-                        });
-                    }
-                }
-            }
-            WebConfigSessionEvent::Committed(doc) => {
-                keep_session = false;
-                match config_ui::apply_document(doc, app, config, true) {
-                    Ok(outcome) => {
-                        if outcome.requires_engine_sync {
-                            apply_model_and_compaction_update(
-                                engine_handle,
-                                app.compaction_config(),
-                                app.mode,
-                                app.active_route_limits,
-                            )
-                            .await;
-                        }
-                        app.add_message(HistoryCell::System {
-                            content: outcome.final_message.clone(),
-                        });
-                        app.status_message = Some(outcome.final_message);
-                    }
-                    Err(err) => {
-                        app.add_message(HistoryCell::System {
-                            content: format!("Web config commit failed: {err}"),
-                        });
-                    }
-                }
-            }
-            WebConfigSessionEvent::Failed(err) => {
-                keep_session = false;
-                app.add_message(HistoryCell::System {
-                    content: format!("Web config session failed: {err}"),
-                });
-            }
-        }
-    }
-
-    keep_session
-}
-
 /// Tell the operator that an explicit "make this my default" request did not
 /// take effect, instead of leaving a normal apply summary that reads like
 /// success. Silence here is what made the sticky-default bug so confusing.
@@ -850,12 +775,14 @@ pub use event_loop::run_tui;
 
 mod compaction_flow;
 pub(crate) use compaction_flow::*;
+pub(crate) use provider_setup::*;
 mod dispatch;
 mod dispatch_prepare;
 pub(crate) use dispatch_prepare::*;
 pub(crate) mod fatal_signal_guard;
 mod motion;
 mod observer_hooks;
+mod provider_setup;
 mod release_check;
 mod remote_control_bridge;
 mod task_projection;
@@ -1008,58 +935,6 @@ pub(crate) struct ApprovalDecisionEvent {
     persistent_rules: Vec<codewhale_config::ToolAskRule>,
 }
 
-struct RuntimePresetFileSnapshot {
-    path: PathBuf,
-    contents: Option<Vec<u8>>,
-}
-
-impl RuntimePresetFileSnapshot {
-    fn capture(path: PathBuf) -> Result<Self> {
-        let contents = match std::fs::read(&path) {
-            Ok(contents) => Some(contents),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
-            Err(error) => {
-                return Err(error)
-                    .with_context(|| format!("failed to snapshot {}", path.display()));
-            }
-        };
-        Ok(Self { path, contents })
-    }
-
-    fn restore(&self) -> Result<()> {
-        match &self.contents {
-            Some(contents) => crate::utils::write_atomic(&self.path, contents)
-                .with_context(|| format!("failed to restore {}", self.path.display())),
-            None => match std::fs::remove_file(&self.path) {
-                Ok(()) => Ok(()),
-                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-                Err(error) => {
-                    Err(error).with_context(|| format!("failed to remove {}", self.path.display()))
-                }
-            },
-        }
-    }
-}
-
-fn runtime_preset_error_with_rollback(
-    error: anyhow::Error,
-    snapshots: &[&RuntimePresetFileSnapshot],
-) -> anyhow::Error {
-    let rollback_errors = snapshots
-        .iter()
-        .filter_map(|snapshot| snapshot.restore().err())
-        .map(|error| format!("{error:#}"))
-        .collect::<Vec<_>>();
-    if rollback_errors.is_empty() {
-        error
-    } else {
-        anyhow::anyhow!(
-            "{error:#}; runtime preset rollback also failed: {}",
-            rollback_errors.join("; ")
-        )
-    }
-}
-
 fn mark_active_turn_cancelled_locally(app: &mut App) {
     // #2739: every local cancel surface (Esc, Ctrl+C, approval abort, paused
     // command abort) must snapshot before it clears turn state. Otherwise
@@ -1118,30 +993,6 @@ fn ignore_stale_stream_event_while_idle(event: &EngineEvent) -> bool {
 }
 
 type ProviderKeyVerification<'a> = Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>>;
-
-pub(crate) trait ProviderKeyVerifier {
-    fn verify<'a>(
-        &'a self,
-        provider: ApiProvider,
-        api_key: &'a str,
-        base_url: &'a str,
-    ) -> ProviderKeyVerification<'a>;
-}
-
-struct LiveProviderKeyVerifier;
-
-impl ProviderKeyVerifier for LiveProviderKeyVerifier {
-    fn verify<'a>(
-        &'a self,
-        provider: ApiProvider,
-        api_key: &'a str,
-        base_url: &'a str,
-    ) -> ProviderKeyVerification<'a> {
-        Box::pin(crate::client::verify_provider_api_key(
-            provider, api_key, base_url,
-        ))
-    }
-}
 
 pub(crate) fn request_foreground_shell_background(app: &mut App) {
     if !app.is_loading {
