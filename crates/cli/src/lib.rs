@@ -1,6 +1,7 @@
 #![allow(clippy::uninlined_format_args)]
 
 mod cloud;
+mod config_bundles;
 mod credential_handoff;
 mod metrics;
 #[cfg(not(target_env = "ohos"))]
@@ -1637,11 +1638,22 @@ struct ConfigArgs {
 
 #[derive(Debug, Subcommand)]
 enum ConfigCommand {
-    Get { key: String },
-    Set { key: String, value: String },
-    Unset { key: String },
+    Get {
+        key: String,
+    },
+    Set {
+        key: String,
+        value: String,
+    },
+    Unset {
+        key: String,
+    },
     List,
     Path,
+    /// Import a portable config bundle from a file, HTTPS URL, or stdin (-).
+    Import(config_bundles::ImportArgs),
+    /// Export a portable, secret-free config bundle.
+    Export(config_bundles::ExportArgs),
 }
 
 #[derive(Debug, Args)]
@@ -4213,6 +4225,11 @@ fn run_config_command(store: &mut ConfigStore, command: ConfigCommand) -> Result
             println!("{}", store.path().display());
             Ok(())
         }
+        ConfigCommand::Import(args) => {
+            let workspace = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            config_bundles::run_import(&args, store, &workspace)
+        }
+        ConfigCommand::Export(args) => config_bundles::run_export(&args, store),
     }
 }
 

@@ -829,6 +829,7 @@ dependencies = [
  "sha2 0.11.0",
  "tempfile",
  "tokio",
+ "toml 1.1.4+spec-1.1.0",
  "tracing",
  "webbrowser",
  "windows 0.62.2",
