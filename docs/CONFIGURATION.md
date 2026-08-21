@@ -299,11 +299,15 @@ If a repo-local config declares `api_key`, `base_url`, `provider`,
 Codewhale ignores that key and keeps the user's global setting.
 
 The `codewhale` facade and `codewhale-tui` binary share the same config file for
-DeepSeek auth and model defaults. `codewhale auth set --provider deepseek` (and
-the legacy `codewhale login --api-key ...` alias) saves the key to
-`~/.codewhale/config.toml` (migrating legacy `~/.deepseek/config.toml` on first
-launch when needed), and `codewhale --model deepseek-v4-flash` is forwarded to
-the TUI as `DEEPSEEK_MODEL`.
+DeepSeek auth and model defaults. `codewhale auth set --provider deepseek` saves
+the key to `~/.codewhale/config.toml` (migrating legacy `~/.deepseek/config.toml`
+on first launch when needed), and `codewhale --model deepseek-v4-flash` is
+forwarded to the TUI as `DEEPSEEK_MODEL`.
+
+`codewhale login` signs in to the Codewhale account — it is the same browser
+device flow as `codewhale account login`, not a provider-key command. Provider
+credentials are configured exclusively through `codewhale auth set
+--provider <provider>`.
 
 That provider credential is distinct from the optional managed-product
 account. `codewhale account login` starts the Codewhale browser device flow;

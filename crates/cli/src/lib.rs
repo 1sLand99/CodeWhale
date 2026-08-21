@@ -385,7 +385,7 @@ New integrations should prefer `codewhale app-server`.")]
         after_help = "The browser receives a one-time loopback bootstrap capability, never the Runtime token.\nThe capability is exchanged for a bounded, process-local HttpOnly, SameSite=Strict web session and then invalidated."
     )]
     Web(WebArgs),
-    /// Configure provider credentials.
+    /// Sign in to your Codewhale account (browser device flow).
     Login(LoginArgs),
     /// Remove saved authentication state.
     Logout,
@@ -1517,10 +1517,22 @@ fn remote_setup_tui_args(args: RemoteSetupArgs) -> Vec<String> {
 
 #[derive(Debug, Args)]
 struct LoginArgs {
+    /// Print the verification URL without trying to open a browser.
+    #[arg(long, default_value_t = false)]
+    no_open: bool,
+    /// Maximum time to wait for browser authorization.
+    #[arg(
+        long = "timeout-seconds",
+        default_value_t = cloud::DEFAULT_LOGIN_TIMEOUT_SECONDS,
+        value_parser = clap::value_parser!(u64).range(1..=cloud::MAX_LOGIN_TIMEOUT_SECONDS)
+    )]
+    timeout_seconds: u64,
+    /// Legacy provider-key flag: rejected with a redirect to `auth set`.
+    #[arg(long, hide = true)]
+    api_key: Option<String>,
+    /// Legacy provider flag: rejected with a redirect to `auth set`.
     #[arg(long, value_enum, hide = true)]
     provider: Option<ProviderArg>,
-    #[arg(long)]
-    api_key: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -1963,7 +1975,16 @@ fn run() -> Result<()> {
             let resolved_runtime = resolve_runtime_for_dispatch(&mut store, &runtime_overrides);
             run_tui_server_in_process(&cli, &resolved_runtime, web_serve_passthrough(&args))
         }
-        Some(Commands::Login(args)) => run_login_command(&mut store, args),
+        Some(Commands::Login(args)) => {
+            reject_legacy_login_provider_args(&args)?;
+            cloud::reject_inline_api_key(cli.api_key.as_deref())?;
+            cloud::run_account_login(
+                args.no_open,
+                args.timeout_seconds,
+                cli.profile.as_deref(),
+                &store,
+            )
+        }
         Some(Commands::Logout) => run_logout_command(&mut store),
         Some(Commands::Auth(args)) => match args.command {
             AuthCommand::XaiDevice => {
@@ -2271,39 +2292,18 @@ fn reject_exec_global_flags(args: &[String]) -> Result<()> {
     Ok(())
 }
 
-fn run_login_command(store: &mut ConfigStore, args: LoginArgs) -> Result<()> {
-    run_login_command_with_secrets(store, args, &Secrets::auto_detect())
-}
-
-fn run_login_command_with_secrets(
-    store: &mut ConfigStore,
-    args: LoginArgs,
-    secrets: &Secrets,
-) -> Result<()> {
-    let provider: ProviderKind = args.provider.unwrap_or(ProviderArg::Deepseek).into();
-    let api_key = match args.api_key {
-        Some(v) => v,
-        None => read_api_key_from_stdin()?,
-    };
-    let mut credential_store = credential_metadata_store(store)?;
-    let store = credential_store.as_mut().unwrap_or(store);
-    store.config.provider = provider;
-
-    let secret_store_saved = persist_provider_api_key(store, secrets, provider, &api_key)?;
-    let destination = if secret_store_saved {
-        secrets.backend_name().to_string()
-    } else {
-        codewhale_config::quote_os_path(store.path())
-    };
-    if provider == ProviderKind::Deepseek {
-        println!("logged in using API key mode (deepseek); saved key to {destination}");
-    } else {
-        println!(
-            "logged in using API key mode ({}); saved key to {destination}",
-            provider.as_str(),
-        );
+/// `codewhale login` used to configure provider API keys; that surface moved
+/// to `auth set --provider`. The hidden legacy flags stay parseable so the
+/// redirect below can name the replacement instead of an unknown-flag error.
+fn reject_legacy_login_provider_args(args: &LoginArgs) -> Result<()> {
+    if args.api_key.is_none() && args.provider.is_none() {
+        return Ok(());
     }
-    Ok(())
+    bail!(
+        "`codewhale login` now signs in to your Codewhale account via the browser device flow. \
+         To configure a provider key, run `codewhale auth set --provider <provider>` (hidden prompt) \
+         or `codewhale auth set --provider <provider> --api-key-stdin`."
+    )
 }
 
 fn run_logout_command(store: &mut ConfigStore) -> Result<()> {
@@ -6317,7 +6317,7 @@ mod tests {
     }
 
     #[test]
-    fn deepseek_login_uses_isolated_file_store_and_preserves_tui_defaults() {
+    fn auth_set_uses_isolated_file_store_and_preserves_tui_defaults() {
         let _lock = env_lock();
         let dir = tempfile::TempDir::new().expect("tempdir");
         let codewhale_home = dir.path().join("codewhale-home");
@@ -6328,15 +6328,16 @@ mod tests {
         let mut store = ConfigStore::load(Some(path.clone())).expect("store should load");
         let secrets = Secrets::auto_detect();
 
-        run_login_command_with_secrets(
+        run_auth_command_with_secrets(
             &mut store,
-            LoginArgs {
-                provider: Some(ProviderArg::Deepseek),
+            AuthCommand::Set {
+                provider: ProviderArg::Deepseek,
                 api_key: Some("sk-test".to_string()),
+                api_key_stdin: false,
             },
             &secrets,
         )
-        .expect("login should persist credential");
+        .expect("auth set should persist credential");
 
         assert!(store.config.api_key.is_none());
         assert!(store.config.providers.deepseek.api_key.is_none());
@@ -6349,7 +6350,7 @@ mod tests {
         assert!(
             !saved
                 .lines()
-                .any(|line| line.trim_start().starts_with("api_key ="))
+                .any(|line| line.trim_start().starts_with("api_key="))
         );
         assert!(saved.contains("default_text_model = \"deepseek-v4-pro\""));
         assert_eq!(
@@ -6358,57 +6359,77 @@ mod tests {
         );
     }
 
-    /// #5198: with CODEWHALE_CONFIG_PATH pointing at a workspace-scoped
-    /// `<repo>/.codewhale/config.toml`, login must write the provider binding
-    /// and auth markers to the user-global document, never the repo file.
+    /// `codewhale login` now means the Codewhale account device flow: the
+    /// account-login flags parse through and reach the cloud path.
     #[test]
-    fn login_with_repo_scoped_ambient_config_writes_user_global_metadata() {
-        let _lock = env_lock();
-        let dir = tempfile::TempDir::new().expect("tempdir");
-        let repo = dir.path().join("repo");
-        std::fs::create_dir_all(repo.join(".git")).expect("git marker");
-        let repo_config_dir = repo.join(".codewhale");
-        std::fs::create_dir_all(&repo_config_dir).expect("repo config dir");
-        let repo_config = repo_config_dir.join("config.toml");
-        std::fs::write(&repo_config, "approval_policy = \"never\"\n").expect("repo config");
+    fn login_parses_account_device_flow_flags() {
+        let cli = parse_ok(&["codewhale", "login", "--no-open", "--timeout-seconds", "5"]);
+        let Some(Commands::Login(args)) = cli.command else {
+            panic!("expected Login");
+        };
+        assert!(args.no_open);
+        assert_eq!(args.timeout_seconds, 5);
+        assert!(args.api_key.is_none());
+        assert!(args.provider.is_none());
 
-        let codewhale_home = dir.path().join("codewhale-home");
-        let _home = ScopedEnvVar::set("CODEWHALE_HOME", &codewhale_home.to_string_lossy());
-        let _config = ScopedEnvVar::set("CODEWHALE_CONFIG_PATH", &repo_config.to_string_lossy());
-        let _legacy_config = ScopedEnvVar::remove("DEEPSEEK_CONFIG_PATH");
-        let _backend = ScopedEnvVar::set("CODEWHALE_SECRET_BACKEND", "file");
-        let mut store = ConfigStore::load(None).expect("ambient store should load");
-        let secrets = Secrets::auto_detect();
+        let cli = parse_ok(&["codewhale", "login"]);
+        let Some(Commands::Login(args)) = cli.command else {
+            panic!("expected Login");
+        };
+        assert!(!args.no_open);
+        assert_eq!(args.timeout_seconds, 600);
+    }
 
-        run_login_command_with_secrets(
-            &mut store,
-            LoginArgs {
-                provider: Some(ProviderArg::Deepseek),
-                api_key: Some("sk-repo-scoped".to_string()),
-            },
-            &secrets,
-        )
-        .expect("login should persist credential");
-
-        assert_eq!(
-            secrets.get("deepseek").expect("read secret").as_deref(),
-            Some("sk-repo-scoped")
-        );
-        let global_config = codewhale_home.join("config.toml");
-        let global = std::fs::read_to_string(&global_config).expect("user-global config");
+    /// The provider-key surface moved to `auth set --provider`; the hidden
+    /// legacy flags must redirect loudly instead of silently configuring a key.
+    #[test]
+    fn login_rejects_legacy_provider_flags_with_redirect() {
+        let err = reject_legacy_login_provider_args(&LoginArgs {
+            no_open: false,
+            timeout_seconds: 600,
+            api_key: Some("sk-x".to_string()),
+            provider: None,
+        })
+        .expect_err("legacy --api-key must be rejected");
+        let rendered = err.to_string();
         assert!(
-            global.contains("auth_mode = \"api_key\""),
-            "user-global config must carry the auth marker: {global}"
+            rendered.contains("auth set --provider"),
+            "redirect must name `auth set --provider`: {rendered}"
+        );
+
+        let err = reject_legacy_login_provider_args(&LoginArgs {
+            no_open: false,
+            timeout_seconds: 600,
+            api_key: None,
+            provider: Some(ProviderArg::Deepseek),
+        })
+        .expect_err("legacy --provider must be rejected");
+        assert!(
+            err.to_string().contains("auth set --provider"),
+            "redirect must name `auth set --provider`"
+        );
+
+        reject_legacy_login_provider_args(&LoginArgs {
+            no_open: false,
+            timeout_seconds: 600,
+            api_key: None,
+            provider: None,
+        })
+        .expect("plain account login carries no legacy flags");
+    }
+
+    /// Root help keeps the `login` token, but its meaning is now the account
+    /// sign-in; the subcommand help must say so.
+    #[test]
+    fn login_help_describes_account_signin() {
+        let help = help_for(&["codewhale", "login", "--help"]);
+        assert!(
+            help.contains("Codewhale account"),
+            "login help must describe account sign-in: {help}"
         );
         assert!(
-            global.contains("provider = \"deepseek\""),
-            "user-global config must carry the provider binding: {global}"
-        );
-        assert!(!global.contains("sk-repo-scoped"), "{global}");
-        let repo_after = std::fs::read_to_string(&repo_config).expect("repo config");
-        assert_eq!(
-            repo_after, "approval_policy = \"never\"\n",
-            "workspace config must stay untouched by credential metadata: {repo_after}"
+            !help.to_lowercase().contains("api key"),
+            "login help must not advertise provider API keys: {help}"
         );
     }
 

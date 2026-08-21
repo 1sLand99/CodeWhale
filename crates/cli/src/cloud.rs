@@ -16,7 +16,6 @@ use codewhale_config::device_code::DevicePollOutcome;
 use codewhale_config::{ConfigStore, ProviderKind};
 use codewhale_secrets::Secrets;
 use codewhale_secrets::account::{
-    ACCOUNT_ALLOW_FILE_SESSION_STORE_ENV as CLOUD_ALLOW_FILE_SESSION_STORE_ENV,
     ACCOUNT_API_BASE_ENV as CLOUD_API_BASE_ENV, AccountAuthBundle as AuthBundle,
     AccountSessionStore, AccountUser as CloudUser, DEFAULT_ACCOUNT_API_BASE as DEFAULT_API_BASE,
     StoredAccountAuth as StoredCloudAuth, normalize_account_profile as normalized_profile,
@@ -30,8 +29,8 @@ const MIN_API_KEY_BYTES: usize = 8;
 const MAX_API_KEY_BYTES: u64 = 4096;
 const MAX_API_KEY_STDIN_BYTES: u64 = MAX_API_KEY_BYTES + 1024;
 const MAX_KEY_LABEL_CHARS: usize = 80;
-const DEFAULT_LOGIN_TIMEOUT_SECONDS: u64 = 600;
-const MAX_LOGIN_TIMEOUT_SECONDS: u64 = 3600;
+pub(crate) const DEFAULT_LOGIN_TIMEOUT_SECONDS: u64 = 600;
+pub(crate) const MAX_LOGIN_TIMEOUT_SECONDS: u64 = 3600;
 
 #[derive(Debug, Args)]
 pub(crate) struct CloudArgs {
@@ -529,19 +528,31 @@ pub(crate) fn run(args: CloudArgs, profile: Option<&str>, config: &ConfigStore) 
 }
 
 fn cloud_session_secrets() -> Result<Secrets> {
-    match secure_account_session_secrets() {
-        Ok(secrets) => {
-            if secrets.backend_name().starts_with("file-based") {
-                eprintln!(
-                    "warning: OS credential manager unavailable; {CLOUD_ALLOW_FILE_SESSION_STORE_ENV}=1 explicitly enables the local 0600 Codewhale secrets file for cloud session tokens"
-                );
-            }
-            Ok(secrets)
-        }
-        Err(_) => bail!(
-            "Codewhale account login requires an OS credential manager for session tokens. Configure Keychain, Credential Manager, or Secret Service and try again. Headless users may explicitly opt into the local 0600 secrets file with {CLOUD_ALLOW_FILE_SESSION_STORE_ENV}=1"
-        ),
-    }
+    // Codex-style storage contract: the OS credential manager is preferred
+    // but never required; without one, sessions live in the private 0600
+    // Codewhale secrets file. Only an unresolvable store path fails here.
+    secure_account_session_secrets().map_err(|err| anyhow!(err.to_string()))
+}
+
+/// `codewhale login` is a convenience entry to the account device flow — the
+/// same path as `codewhale account login`, without re-spelling the subcommand.
+pub(crate) fn run_account_login(
+    no_open: bool,
+    timeout_seconds: u64,
+    profile: Option<&str>,
+    config: &ConfigStore,
+) -> Result<()> {
+    run(
+        CloudArgs {
+            api_base: None,
+            command: CloudCommand::Login(CloudLoginArgs {
+                no_open,
+                timeout_seconds,
+            }),
+        },
+        profile,
+        config,
+    )
 }
 
 pub(crate) fn reject_inline_api_key(api_key: Option<&str>) -> Result<()> {
