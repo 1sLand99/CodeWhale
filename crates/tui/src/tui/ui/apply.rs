@@ -3,6 +3,9 @@
 //!
 //! Moved verbatim out of `ui.rs`.
 
+use super::observer_hooks::{
+    execute_subagent_observer_hook, surface_observer_hook_submission_failure,
+};
 use super::*;
 
 /// Record the model frozen into a child's runtime at spawn time.

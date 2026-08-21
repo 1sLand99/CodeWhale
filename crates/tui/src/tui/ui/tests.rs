@@ -1,4 +1,8 @@
 use super::activity_detail::*;
+use super::observer_hooks::{
+    bounded_subagent_hook_preview, subagent_completion_status, subagent_failure_notice,
+    subagent_status_from_completion_result, turn_end_observer_metadata,
+};
 use super::*;
 use crate::config::{
     ApiProvider, Config, DEFAULT_OPENROUTER_MODEL, DEFAULT_TEXT_MODEL, DEFAULT_ZAI_MODEL,
