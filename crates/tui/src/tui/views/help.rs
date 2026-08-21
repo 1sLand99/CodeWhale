@@ -712,6 +712,20 @@ fn shed_to_width(text: &str, max_width: usize) -> &str {
     best
 }
 
+/// Longest prefix of `text` that fits `max_width` display columns, cut on a
+/// character boundary. Used when there is no word boundary to cut on.
+fn widest_char_prefix(text: &str, max_width: usize) -> &str {
+    let mut fitted = 0usize;
+    for (idx, ch) in text.char_indices() {
+        let next = idx + ch.len_utf8();
+        if text[..next].width() > max_width {
+            break;
+        }
+        fitted = next;
+    }
+    &text[..fitted]
+}
+
 /// Longest whole-word prefix of `text` that fits, with trailing short
 /// function words dropped so the phrase does not end on `to an`.
 fn shed_to_words(text: &str, max_width: usize) -> &str {
@@ -720,6 +734,16 @@ fn shed_to_words(text: &str, max_width: usize) -> &str {
         if ch == ' ' && text[..idx].width() <= max_width {
             end = idx;
         }
+    }
+    if end == 0 {
+        // No usable space boundary. That is the normal case for Japanese,
+        // Chinese and Thai, which do not delimit words with spaces at all —
+        // the loop above can never fire, so this used to return "" and every
+        // description in those locales rendered blank. It also happens in
+        // English whenever the first space falls beyond `max_width`.
+        // Fall back to the widest whole-character prefix that fits.
+        return widest_char_prefix(text, max_width)
+            .trim_end_matches([' ', ',', ';', ':', '—', '-']);
     }
     let mut head = &text[..end];
     // Two passes at most: enough for `to an`, not enough to eat a real word.
@@ -2025,5 +2049,71 @@ mod tests {
             out.push('\n');
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod shed_to_words_script_tests {
+    use super::{shed_to_words, widest_char_prefix};
+    use unicode_width::UnicodeWidthStr;
+
+    /// Japanese, Chinese and Thai do not put spaces between words, so a
+    /// word-boundary scan finds nothing and used to yield an empty string —
+    /// every help description rendered blank in those locales.
+    #[test]
+    fn a_script_without_spaces_still_gets_a_description() {
+        for text in [
+            "バックグラウンドのアドバイザーを切り替える",
+            "切换后台顾问",
+            "切換背景顧問",
+        ] {
+            for width in [8usize, 12, 20, 30] {
+                let shed = shed_to_words(text, width);
+                assert!(
+                    !shed.is_empty(),
+                    "{text:?} at {width}: description rendered blank",
+                );
+                assert!(
+                    shed.width() <= width,
+                    "{text:?} at {width}: {shed:?} overflows ({} cols)",
+                    shed.width(),
+                );
+                assert!(text.starts_with(shed), "{shed:?} is not a prefix of {text:?}");
+            }
+        }
+    }
+
+    /// The same hole opens in English whenever the first space sits past the
+    /// budget: the scan never fires and the row goes blank.
+    #[test]
+    fn an_overlong_first_word_sheds_to_characters_rather_than_nothing() {
+        let text = "Internationalisation settings";
+        let shed = shed_to_words(text, 10);
+        assert!(!shed.is_empty(), "long first word rendered blank");
+        assert!(shed.width() <= 10, "{shed:?}");
+    }
+
+    /// Ordinary English is unchanged: still cut on a word boundary, still
+    /// drops a trailing short function word.
+    #[test]
+    fn english_still_sheds_on_word_boundaries() {
+        let text = "Toggle the background advisor for this session";
+        let shed = shed_to_words(text, 24);
+        assert!(shed.width() <= 24, "{shed:?}");
+        assert!(!shed.ends_with(' '), "{shed:?}");
+        assert!(
+            shed.split(' ').count() > 1 && text.starts_with(shed),
+            "{shed:?} should be a whole-word prefix",
+        );
+    }
+
+    #[test]
+    fn widest_char_prefix_never_splits_a_character() {
+        let text = "日本語テキスト";
+        for width in 0..=14 {
+            let prefix = widest_char_prefix(text, width);
+            assert!(text.starts_with(prefix));
+            assert!(prefix.width() <= width);
+        }
     }
 }
