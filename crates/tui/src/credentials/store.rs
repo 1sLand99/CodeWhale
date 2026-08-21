@@ -7,12 +7,17 @@
 //!
 //! pi's rule, kept verbatim in spirit: every mutation is a serialized
 //! read-modify-write whose closure sees the current credential, so a refresh
-//! and a concurrent login cannot clobber each other. CodeWhale has no such
-//! guarantee today — `xai_oauth`'s refresh reads the token file, calls the
-//! network, and writes back with no lock held, so two concurrent requests that
-//! both observe a near-expiry token both refresh and the loser's rotated
-//! refresh token is written over. This trait is the shape that fixes it; the
-//! xAI flow is **not** rewritten in this change (see the lane notes).
+//! and a concurrent login cannot clobber each other.
+//!
+//! CodeWhale already serializes the xAI OAuth refresh that way, but not
+//! through this store: `xai_oauth` holds `with_xai_oauth_lifecycle_lock`
+//! across the token-file read, the refresh request, and the write-back, so
+//! two concurrent near-expiry observers share one rotated epoch rather than
+//! overwriting each other's refresh token. That lock is process- and
+//! file-level, not this registry's per-provider mutex, and the xAI flow is
+//! **not** rewritten onto [`CredentialStore::modify`] here. This trait is
+//! the shape that would put API-key slots and that OAuth flow on one write
+//! path.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
