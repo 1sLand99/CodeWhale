@@ -26,14 +26,9 @@ impl ToolSpec for LspTool {
     }
 
     fn description(&self) -> &'static str {
-        "Query language-server intelligence for a file: diagnostics, document \
-         or workspace symbols, go-to-definition, find-references, or bounded \
-         multi-file read_lints. read_lints accepts 1-16 newline-separated \
-         workspace-relative files, returns per-file success/error/timeout \
-         status with returned/total counts and truncation, and follows the \
-         configured severity policy (errors plus warnings when \
-         `[lsp] include_warnings = true`). Reuses the session LSP manager and \
-         requires `[lsp] enabled = true` plus a configured language server."
+        "Query the configured session LSP for diagnostics, symbols, definitions, \
+         references, or read_lints: 1-16 newline-separated files with \
+         success/error/timeout; warnings follow include_warnings."
     }
 
     fn input_schema(&self) -> Value {
@@ -43,26 +38,26 @@ impl ToolSpec for LspTool {
                 "operation": {
                     "type": "string",
                     "enum": ["diagnostics", "read_lints", "symbols", "definition", "references"],
-                    "description": "Intelligence operation to run. read_lints reports per-file status, counts/count_complete, and truncation."
+                    "description": "Operation. read_lints reports per-file status, counts/count_complete, and truncation."
                 },
                 "path": {
                     "type": "string",
-                    "description": "Workspace-relative or absolute source file path. For read_lints, pass 1-16 newline-separated workspace-relative existing files; errors are included and warnings follow [lsp] include_warnings."
+                    "description": "Source path. For read_lints: 1-16 newline-separated workspace-relative files."
                 },
                 "line": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": "1-based line for definition/references."
+                    "description": "1-based line."
                 },
                 "character": {
                     "type": "integer",
                     "minimum": 1,
                     "default": 1,
-                    "description": "1-based column for definition/references (default 1)."
+                    "description": "1-based column (default 1)."
                 },
                 "query": {
                     "type": "string",
-                    "description": "Optional workspace symbol query when operation=symbols."
+                    "description": "Workspace symbol query."
                 }
             },
             "required": ["operation", "path"]
@@ -501,18 +496,15 @@ mod tests {
                 .unwrap()
                 .contains("1-16 newline-separated")
         );
-        assert_eq!(
-            properties["line"]["description"],
-            "1-based line for definition/references."
-        );
+        assert_eq!(properties["line"]["description"], "1-based line.");
         assert_eq!(properties["character"]["default"], 1);
         assert_eq!(
             properties["character"]["description"],
-            "1-based column for definition/references (default 1)."
+            "1-based column (default 1)."
         );
         assert_eq!(
             properties["query"]["description"],
-            "Optional workspace symbol query when operation=symbols."
+            "Workspace symbol query."
         );
     }
 

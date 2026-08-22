@@ -882,7 +882,7 @@ impl ToolSpec for WorkflowTool {
                 },
                 "fleet": {
                     "type": "string",
-                    "description": "Named Fleet to resolve task({ role }) declarations, loaded from $CODEWHALE_HOME/fleets/ or workspace fleets/. Accepts a qualified origin/name. A legacy roster maps roles to profiles. An exact Fleet (schema = \"exact\") freezes member identity, provider, model, and reasoning at start; Runtime derives authority from the selected role and live parent, and per-task route/authority overrides are rejected."
+                    "description": "Named Fleet from $CODEWHALE_HOME/fleets/ or workspace fleets/; qualified origin/name accepted. Exact Fleets freeze member identity, route, and reasoning. Runtime derives authority from role and live parent; per-task route/authority overrides are rejected."
                 },
                 "plan": {
                     "type": "object",
