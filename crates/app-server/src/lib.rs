@@ -2200,7 +2200,12 @@ async fn process_app_request(
                 data: json!({
                     "error": "user_input_reply_unsupported",
                     "request_id": request_id,
-                    "message": "the app-server control transport cannot deliver                                 clarification answers: only `thread/interrupt` runs                                 while a turn is streaming, so an answer sent here would                                 queue behind the turn waiting for it. Reply on the                                 runtime API instead: POST /v1/user-input/{thread_id}/{request_id}.",
+                    "message": concat!(
+                        "the app-server control transport cannot deliver clarification answers: ",
+                        "only `thread/interrupt` runs while a turn is streaming, so an answer sent ",
+                        "here would queue behind the turn waiting for it. Reply on the runtime API ",
+                        "instead: POST /v1/user-input/{thread_id}/{request_id}."
+                    ),
                 }),
                 events: Vec::new(),
             }
@@ -3594,6 +3599,13 @@ mod tests {
                 .expect("message")
                 .contains("/v1/user-input/"),
             "the refusal must name the transport that can accept the answer"
+        );
+        assert!(
+            !response.data["message"]
+                .as_str()
+                .expect("message")
+                .contains("  "),
+            "the refusal must not expose source-formatting whitespace"
         );
     }
 

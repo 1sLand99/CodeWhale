@@ -187,8 +187,8 @@ erase behavior, migration, security, compatibility, or verification details.
   everything else, so an answer sent there would wait on the very turn
   waiting for it. The refusal names the surface that does accept it,
   `POST /v1/user-input/{thread_id}/{request_id}` on the runtime API. The
-  `/tool` path that mints the `UserInputRequest` is unchanged and still
-  genuine.
+  client-visible refusal is whitespace-clean, and the `/tool` path that mints
+  the `UserInputRequest` is unchanged and still genuine.
 - Split the coordination ledger out of `tools/subagent/coord.rs` into
   `tools/subagent/coord/ledger.rs`. The file held two unrelated things: the
   model-facing `agents/*` tool wrappers, and the durable decision/claim/
@@ -265,7 +265,10 @@ erase behavior, migration, security, compatibility, or verification details.
   rejected plan, consent gating (`--yes` required headless), a timestamped
   backup with rollback, and idempotent re-import. Credential-shaped entries
   are rejected by key name and value shape — rejections name the field,
-  never the value.
+  never the value. Remote imports revalidate the HTTPS-or-loopback-HTTP policy
+  on every same-scheme redirect hop, and duplicate keys across applicable
+  section labels fail before any backup or write instead of silently resolving
+  by section order.
 
 - `/rc` is now a shared-session mirror instead of a terminal takeover.
   Attaching the web app no longer locks the local composer or hides
@@ -395,6 +398,11 @@ erase behavior, migration, security, compatibility, or verification details.
   than an empty success. It previously reached the model as a successful tool
   call with a `null` payload, indistinguishable from a tool that did nothing.
   An explicit `"result": null` is still a valid empty success.
+- Stdio MCP server requests are answered while the client is idle instead of
+  blocking behind the zero-capacity response rendezvous until an unrelated
+  client call. `ping` receives its prompt empty result, unsupported methods
+  receive JSON-RPC `-32601`, and the reader keeps only a weak stdin handle so
+  dropping the client still delivers graceful EOF.
 - `base_url_fingerprint` is a persisted-key change for two input shapes.
   The digest is serde-serialized into `ProviderCatalogCache` and
   `LiveOffering`, pricing defect receipts, and

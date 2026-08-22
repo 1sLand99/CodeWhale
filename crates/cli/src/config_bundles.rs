@@ -22,7 +22,7 @@
 use std::io::{IsTerminal, Read};
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 
 use codewhale_config::{ConfigToml, is_sensitive_config_key};
@@ -253,6 +253,28 @@ pub fn plan_import(bundle: &PortableBundle, config: &ConfigToml, scope: BundleSc
         .iter()
         .map(|entry| entry.key.as_str())
         .collect();
+    // Sections are presentation and scope labels over one flat ConfigToml
+    // keyspace. Two applicable sections naming the same key would otherwise
+    // make apply order decide which value wins. Detect that ambiguity before
+    // classifying or writing any entry.
+    let mut applicable_key_counts = std::collections::BTreeMap::<&str, usize>::new();
+    for (section, table) in [
+        ("preferences", &bundle.preferences),
+        ("profiles", &bundle.profiles),
+        ("plugins", &bundle.plugins),
+        ("project", &bundle.project),
+        ("global", &bundle.global),
+    ] {
+        if section_applies(section, scope) {
+            for key in table.entries.keys() {
+                *applicable_key_counts.entry(key.as_str()).or_default() += 1;
+            }
+        }
+    }
+    let colliding_keys: std::collections::BTreeSet<&str> = applicable_key_counts
+        .into_iter()
+        .filter_map(|(key, count)| (count > 1).then_some(key))
+        .collect();
 
     for (section, table) in [
         ("preferences", &bundle.preferences),
@@ -262,14 +284,12 @@ pub fn plan_import(bundle: &PortableBundle, config: &ConfigToml, scope: BundleSc
         ("global", &bundle.global),
     ] {
         let dotted = |key: &str| format!("{section}.{key}");
-        let applies = match section {
-            "project" => scope == BundleScope::Project,
-            "global" => scope == BundleScope::Global,
-            _ => true,
-        };
+        let applies = section_applies(section, scope);
         for (key, value) in &table.entries {
             let dotted = dotted(key);
-            if rejected_keys.contains(dotted.as_str()) {
+            if rejected_keys.contains(dotted.as_str())
+                || (applies && colliding_keys.contains(key.as_str()))
+            {
                 plan.conflicting.push(dotted);
                 continue;
             }
@@ -290,6 +310,14 @@ pub fn plan_import(bundle: &PortableBundle, config: &ConfigToml, scope: BundleSc
         }
     }
     plan
+}
+
+fn section_applies(section: &str, scope: BundleScope) -> bool {
+    match section {
+        "project" => scope == BundleScope::Project,
+        "global" => scope == BundleScope::Global,
+        _ => true,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -372,48 +400,100 @@ pub fn resolve_bounded_path(base_dir: &Path, candidate: &str) -> Result<PathBuf>
 /// size cap, a timeout, and bounded redirects. Mirrors the skill installer's
 /// fetch bounds.
 pub fn fetch_bundle(url: &str) -> Result<Vec<u8>> {
-    let (scheme, rest) = url
-        .split_once("://")
-        .context("invalid bundle URL: missing scheme")?;
-    match scheme {
-        "https" => {}
-        "http" => {
-            let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
-            let host = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
-            let host = host.split(':').next().unwrap_or(host);
-            let loopback = host == "localhost"
-                || host == "127.0.0.1"
-                || host == "[::1]"
-                || host == "::1"
-                || host.ends_with(".localhost");
-            if !loopback {
-                bail!("plain http is only allowed for loopback hosts; use https for {host}");
-            }
-        }
-        other => bail!("unsupported bundle URL scheme {other:?}; use https"),
-    }
+    let mut current_url = reqwest::Url::parse(url).map_err(|_| anyhow!("invalid bundle URL"))?;
+    validate_bundle_url(&current_url)?;
+    let initial_scheme = current_url.scheme().to_string();
 
-    let client = reqwest::blocking::Client::builder()
+    let client = codewhale_release::platform_blocking_http_client_builder()
         .timeout(std::time::Duration::from_secs(FETCH_TIMEOUT_SECS))
-        .redirect(reqwest::redirect::Policy::limited(MAX_REDIRECTS))
+        // Redirect targets must pass the same scheme/host policy as the
+        // initial request, so redirects are followed explicitly below.
+        .redirect(reqwest::redirect::Policy::none())
         .build()
-        .context("building bundle fetch client")?;
-    let response = client
-        .get(url)
-        .send()
-        .context("fetching bundle")?
-        .error_for_status()
-        .context("bundle fetch failed")?;
+        .map_err(|_| anyhow!("building bundle fetch client failed"))?;
+    let mut redirects = 0usize;
+    let response = loop {
+        let response = client
+            .get(current_url.clone())
+            .send()
+            // reqwest errors can include the full URL (including its query or
+            // userinfo), so keep transport failures deliberately URL-free.
+            .map_err(|_| anyhow!("bundle fetch request failed"))?;
+
+        if !response.status().is_redirection() {
+            break response;
+        }
+        if redirects >= MAX_REDIRECTS {
+            bail!("bundle fetch exceeded the five-redirect limit");
+        }
+        let location = response
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .ok_or_else(|| anyhow!("bundle redirect is missing a valid Location header"))?
+            .to_str()
+            .map_err(|_| anyhow!("bundle redirect is missing a valid Location header"))?;
+        let next_url = current_url
+            .join(location)
+            .map_err(|_| anyhow!("bundle redirect Location is invalid"))?;
+        validate_bundle_redirect(&initial_scheme, &next_url)?;
+        current_url = next_url;
+        redirects += 1;
+    };
+
+    if !response.status().is_success() {
+        bail!(
+            "bundle fetch failed with HTTP status {}",
+            response.status().as_u16()
+        );
+    }
 
     // Read at most MAX_BUNDLE_BYTES + 1 so an oversize body is detected
     // rather than silently truncated.
     let mut buffer = Vec::new();
     let body = response;
-    body.take(MAX_BUNDLE_BYTES + 1).read_to_end(&mut buffer)?;
+    body.take(MAX_BUNDLE_BYTES + 1)
+        .read_to_end(&mut buffer)
+        .map_err(|_| anyhow!("reading remote bundle failed"))?;
     if buffer.len() as u64 > MAX_BUNDLE_BYTES {
         bail!("remote bundle exceeds the {MAX_BUNDLE_BYTES} byte limit; refused");
     }
     Ok(buffer)
+}
+
+fn validate_bundle_url(url: &reqwest::Url) -> Result<()> {
+    if !matches!(url.scheme(), "http" | "https") {
+        bail!("unsupported bundle URL scheme; use https");
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        bail!("bundle URLs may not include credentials");
+    }
+    let host = url.host_str().context("bundle URL must include a host")?;
+    match url.scheme() {
+        "https" => Ok(()),
+        "http" if is_loopback_bundle_host(host) => Ok(()),
+        "http" => bail!("plain http is only allowed for loopback hosts; use https"),
+        _ => unreachable!("scheme was validated above"),
+    }
+}
+
+fn validate_bundle_redirect(initial_scheme: &str, next_url: &reqwest::Url) -> Result<()> {
+    validate_bundle_url(next_url)?;
+    if next_url.scheme() != initial_scheme {
+        bail!("bundle redirects may not change URL scheme");
+    }
+    Ok(())
+}
+
+fn is_loopback_bundle_host(host: &str) -> bool {
+    let normalized = host
+        .strip_prefix('[')
+        .and_then(|value| value.strip_suffix(']'))
+        .unwrap_or(host);
+    normalized.eq_ignore_ascii_case("localhost")
+        || normalized.to_ascii_lowercase().ends_with(".localhost")
+        || normalized
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
 }
 
 // ---------------------------------------------------------------------------
@@ -583,7 +663,7 @@ pub fn apply_bundle(
     let plan = plan_import(bundle, &store.config, scope);
     if !plan.conflicting.is_empty() {
         bail!(
-            "bundle contains rejected credential-shaped entries: {}; remove them and re-export",
+            "bundle contains conflicting or rejected entries: {}; remove duplicate keys or credential-shaped entries and re-export",
             plan.conflicting.join(", ")
         );
     }
@@ -764,6 +844,14 @@ pub fn run_import(
     } else {
         BundleScope::Global
     };
+    let remote_source = args.source.starts_with("https://") || args.source.starts_with("http://");
+    let source_label = if args.source == "-" {
+        "stdin"
+    } else if remote_source {
+        "remote bundle"
+    } else {
+        args.source.as_str()
+    };
     let raw = if args.source == "-" {
         let mut buffer = Vec::new();
         std::io::stdin()
@@ -775,7 +863,7 @@ pub fn run_import(
             bail!("stdin bundle exceeds the {MAX_BUNDLE_BYTES} byte limit; refused");
         }
         buffer
-    } else if args.source.starts_with("https://") || args.source.starts_with("http://") {
+    } else if remote_source {
         fetch_bundle(&args.source)?
     } else {
         let path = PathBuf::from(&args.source);
@@ -791,10 +879,10 @@ pub fn run_import(
         std::fs::read(&path).with_context(|| format!("reading bundle at {}", path.display()))?
     };
 
-    let bundle = parse_bundle_bytes(&raw, &args.source)?;
+    let bundle = parse_bundle_bytes(&raw, source_label)?;
     let plan = plan_import(&bundle, &store.config, scope);
 
-    println!("import plan ({} scope, {}):", scope.label(), args.source);
+    println!("import plan ({} scope, {source_label}):", scope.label());
     println!("  added:       {}", plan.added.len());
     println!("  changed:     {}", plan.changed.len());
     println!("  skipped:     {}", plan.skipped.len());
@@ -875,6 +963,8 @@ pub fn run_export(args: &ExportArgs, store: &codewhale_config::ConfigStore) -> R
 mod tests {
     use super::*;
     use codewhale_config::ConfigStore;
+    use std::io::Write;
+    use std::net::{Ipv4Addr, TcpListener};
 
     const VALID_TOML: &str = r#"
 schema_version = 1
@@ -1040,6 +1130,45 @@ api_key = "never-echoed"
     }
 
     #[test]
+    fn duplicate_flat_keys_across_applicable_sections_fail_before_apply() {
+        let mut store = isolated_store();
+        let before = std::fs::read(store.path()).expect("config before import");
+        let text = r#"
+schema_version = 1
+kind = "codewhale.portable-config"
+
+[preferences]
+verbosity = "quiet"
+
+[global]
+verbosity = "verbose"
+"#;
+        let bundle = parse_bundle_str(text, "collision.toml").expect("bundle parses");
+        let plan = plan_import(&bundle, &store.config, BundleScope::Global);
+
+        assert_eq!(
+            plan.conflicting,
+            ["preferences.verbosity", "global.verbosity"]
+        );
+        assert!(plan.added.is_empty(), "{plan:?}");
+        assert!(plan.changed.is_empty(), "{plan:?}");
+        assert!(plan.skipped.is_empty(), "{plan:?}");
+
+        let workspace = tempfile::tempdir().expect("workspace");
+        let error = apply_bundle(&bundle, &mut store, BundleScope::Global, workspace.path())
+            .expect_err("ambiguous flat key must fail closed");
+        let rendered = error.to_string();
+        assert!(rendered.contains("conflicting"), "{error:#}");
+        assert!(!rendered.contains("quiet"), "{error:#}");
+        assert!(!rendered.contains("verbose"), "{error:#}");
+        assert_eq!(
+            std::fs::read(store.path()).expect("config after refused import"),
+            before,
+            "collision must be refused before any write"
+        );
+    }
+
+    #[test]
     fn dry_run_semantics_plan_never_mutates() {
         let store = isolated_store();
         let before = std::fs::read_to_string(store.path()).expect("read config");
@@ -1195,6 +1324,74 @@ log_level = "debug"
         let err = fetch_bundle("http://example.com/bundle.toml")
             .expect_err("plain http to a public host must be refused");
         assert!(err.to_string().contains("loopback"), "{err:#}");
+        assert!(!err.to_string().contains("example.com"), "{err:#}");
+    }
+
+    #[test]
+    fn redirect_to_non_loopback_http_is_refused_without_leaking_location() {
+        let secret = "location-secret-must-not-leak";
+        let location = format!("http://example.com/internal?token={secret}");
+        let response = http_response("302 Found", &[("Location", location.as_str())], b"");
+        let (url, server) = spawn_bundle_http_server(vec![response]);
+
+        let error = fetch_bundle(&url).expect_err("redirect target must be revalidated");
+        let rendered = format!("{error:#}");
+        assert!(rendered.contains("loopback"), "{rendered}");
+        assert!(!rendered.contains("example.com"), "{rendered}");
+        assert!(!rendered.contains(secret), "{rendered}");
+        assert_eq!(server.join().expect("server joins"), 1);
+    }
+
+    #[test]
+    fn https_redirect_cannot_downgrade_to_loopback_http() {
+        let secret = "downgrade-secret-must-not-leak";
+        let target = reqwest::Url::parse(&format!("http://127.0.0.1/internal?token={secret}"))
+            .expect("test target URL");
+
+        let error = validate_bundle_redirect("https", &target)
+            .expect_err("HTTPS redirect must not downgrade to loopback HTTP");
+        let rendered = format!("{error:#}");
+        assert!(rendered.contains("scheme"), "{rendered}");
+        assert!(!rendered.contains(secret), "{rendered}");
+        assert!(!rendered.contains("127.0.0.1"), "{rendered}");
+    }
+
+    #[test]
+    fn relative_loopback_redirect_fetches_bundle() {
+        let redirect = http_response("302 Found", &[("Location", "/bundle.toml")], b"");
+        let body = VALID_TOML.as_bytes();
+        let success = http_response("200 OK", &[("Content-Type", "text/plain")], body);
+        let (url, server) = spawn_bundle_http_server(vec![redirect, success]);
+
+        let fetched = fetch_bundle(&url).expect("relative redirect remains allowed");
+        assert_eq!(fetched, body);
+        assert_eq!(server.join().expect("server joins"), 2);
+    }
+
+    #[test]
+    fn redirect_limit_is_enforced_before_a_sixth_hop() {
+        let responses = (0..=MAX_REDIRECTS)
+            .map(|hop| {
+                let location = format!("/hop-{}", hop + 1);
+                http_response("302 Found", &[("Location", location.as_str())], b"")
+            })
+            .collect();
+        let (url, server) = spawn_bundle_http_server(responses);
+
+        let error = fetch_bundle(&url).expect_err("sixth redirect must be refused");
+        assert!(error.to_string().contains("five-redirect"), "{error:#}");
+        assert_eq!(server.join().expect("server joins"), MAX_REDIRECTS + 1);
+    }
+
+    #[test]
+    fn bundle_url_credentials_are_rejected_without_echoing_them() {
+        let secret = "credential-secret-must-not-leak";
+        let error = fetch_bundle(&format!("https://user:{secret}@example.com/bundle.toml"))
+            .expect_err("URL userinfo must be refused");
+        let rendered = format!("{error:#}");
+        assert!(rendered.contains("credentials"), "{rendered}");
+        assert!(!rendered.contains(secret), "{rendered}");
+        assert!(!rendered.contains("example.com"), "{rendered}");
     }
 
     #[test]
@@ -1234,6 +1431,49 @@ log_level = "debug"
     }
 
     // -- helpers ------------------------------------------------------------
+
+    fn http_response(status: &str, headers: &[(&str, &str)], body: &[u8]) -> Vec<u8> {
+        let mut response = format!(
+            "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n",
+            body.len()
+        )
+        .into_bytes();
+        for (name, value) in headers {
+            response.extend_from_slice(format!("{name}: {value}\r\n").as_bytes());
+        }
+        response.extend_from_slice(b"\r\n");
+        response.extend_from_slice(body);
+        response
+    }
+
+    fn spawn_bundle_http_server(
+        responses: Vec<Vec<u8>>,
+    ) -> (String, std::thread::JoinHandle<usize>) {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind HTTP fixture");
+        let address = listener.local_addr().expect("fixture address");
+        let handle = std::thread::spawn(move || {
+            let mut served = 0usize;
+            for response in responses {
+                let (mut stream, _) = listener.accept().expect("accept fixture request");
+                stream
+                    .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                    .expect("fixture read timeout");
+                let mut request = Vec::new();
+                let mut chunk = [0_u8; 1024];
+                while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    let read = stream.read(&mut chunk).expect("read fixture request");
+                    if read == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&chunk[..read]);
+                }
+                stream.write_all(&response).expect("write fixture response");
+                served += 1;
+            }
+            served
+        });
+        (format!("http://{address}/start"), handle)
+    }
 
     /// A store over a config file that outlives the helper: the tempdir is
     /// leaked deliberately (tests are short-lived; explicit cleanup would need

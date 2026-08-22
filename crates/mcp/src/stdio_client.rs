@@ -11,8 +11,8 @@
 use std::collections::HashSet;
 use std::io::{self, BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::Mutex;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, sync_channel};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -268,6 +268,30 @@ enum ChildStdoutMessage {
     Invalid(String),
 }
 
+fn response_to_server_request(message: &Value) -> Option<Value> {
+    let method = message.get("method").and_then(Value::as_str)?;
+    let id = message.get("id")?;
+    Some(match method {
+        "ping" => json!({"jsonrpc": "2.0", "id": id, "result": {}}),
+        _ => json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": {
+                "code": -32601,
+                "message": format!("Method not found: {method}")
+            }
+        }),
+    })
+}
+
+fn write_jsonrpc_line<W: Write>(writer: &mut W, message: &Value) -> Result<()> {
+    let mut line = serde_json::to_string(message)?;
+    line.push('\n');
+    writer.write_all(line.as_bytes())?;
+    writer.flush()?;
+    Ok(())
+}
+
 struct ListBudget {
     method: String,
     pages: usize,
@@ -502,12 +526,49 @@ impl ChildProcessMcpClient {
         // that a blocking read on the child would not. The custom line reader
         // also caps memory before a hostile child can complete an oversized
         // stdout line.
+        let stdin = Arc::new(Mutex::new(stdin));
+        let response_stdin = Arc::downgrade(&stdin);
+        let response_server_name = server_name.clone();
         let (sender, responses) = sync_channel(MAX_PENDING_CHILD_MESSAGES);
         thread::spawn(move || {
             let mut reader = BufReader::new(stdout);
             loop {
                 match read_bounded_line(&mut reader, MAX_JSONRPC_LINE_BYTES) {
                     Ok(Some(line)) => {
+                        // Server requests must be answered even while no
+                        // client request is in flight. Route them before the
+                        // zero-capacity response channel: blocking there until
+                        // the next client call would violate MCP ping's prompt
+                        // response requirement. Valid notifications need no
+                        // response and likewise must not occupy the rendezvous.
+                        if let Ok(message) = serde_json::from_str::<Value>(&line)
+                            && message.get("jsonrpc").and_then(Value::as_str) == Some("2.0")
+                            && message.get("method").and_then(Value::as_str).is_some()
+                        {
+                            let Some(response) = response_to_server_request(&message) else {
+                                continue;
+                            };
+                            let Some(stdin) = response_stdin.upgrade() else {
+                                break;
+                            };
+                            let result = stdin
+                                .lock()
+                                .map_err(|_| {
+                                    anyhow!("connection stdin poisoned by an earlier panic")
+                                })
+                                .and_then(|mut stdin| write_jsonrpc_line(&mut *stdin, &response));
+                            // Never retain the temporary strong handle while a
+                            // failure waits on the rendezvous channel. Drop
+                            // must remain able to close child stdin promptly.
+                            drop(stdin);
+                            if let Err(error) = result {
+                                let _ = sender.send(ChildStdoutMessage::Invalid(format!(
+                                    "MCP server '{response_server_name}': failed to answer idle child request: {error:#}"
+                                )));
+                                break;
+                            }
+                            continue;
+                        }
                         if sender.send(ChildStdoutMessage::Line(line)).is_err() {
                             break;
                         }
@@ -681,7 +742,7 @@ impl McpManagedClient for ChildProcessMcpClient {
 
 struct Connection {
     child: Child,
-    stdin: Option<ChildStdin>,
+    stdin: Option<Arc<Mutex<ChildStdin>>>,
     responses: Receiver<ChildStdoutMessage>,
     next_id: u64,
 }
@@ -690,13 +751,12 @@ impl Connection {
     fn send(&mut self, message: &Value) -> Result<()> {
         let stdin = self
             .stdin
-            .as_mut()
+            .as_ref()
             .context("connection stdin already closed")?;
-        let mut line = serde_json::to_string(message)?;
-        line.push('\n');
-        stdin.write_all(line.as_bytes())?;
-        stdin.flush()?;
-        Ok(())
+        let mut stdin = stdin
+            .lock()
+            .map_err(|_| anyhow!("connection stdin poisoned by an earlier panic"))?;
+        write_jsonrpc_line(&mut *stdin, message)
     }
 
     fn request(
@@ -754,9 +814,10 @@ impl Connection {
                 }
             };
 
-            // Servers occasionally emit banners or log lines on stdout, and
-            // notifications carry no id. Both are skipped; only the matching
-            // response ends the wait.
+            // Servers occasionally emit banners or log lines on stdout. They
+            // are skipped; only the matching response ends the wait. Valid
+            // requests and notifications are handled by the reader before
+            // they reach this rendezvous.
             let Ok(message) = serde_json::from_str::<Value>(&line) else {
                 continue;
             };
@@ -764,10 +825,6 @@ impl Connection {
                 bail!(
                     "MCP server '{server}': {method} received a child message without jsonrpc \"2.0\""
                 );
-            }
-            if message.get("method").and_then(Value::as_str).is_some() {
-                self.answer_server_request(server, &message)?;
-                continue;
             }
             if message.get("id").and_then(Value::as_u64) != Some(id) {
                 continue;
@@ -781,33 +838,6 @@ impl Connection {
                 )
             });
         }
-    }
-
-    /// MCP is bidirectional. A child may ping its client while a request is in
-    /// flight; ignoring that request can deadlock the child, and treating a
-    /// same-ID request as our response fabricates a successful `null` result.
-    fn answer_server_request(&mut self, server: &str, message: &Value) -> Result<()> {
-        let Some(method) = message.get("method").and_then(Value::as_str) else {
-            return Ok(());
-        };
-        let Some(id) = message.get("id") else {
-            // Notifications do not receive responses.
-            return Ok(());
-        };
-        let response = match method {
-            "ping" => json!({"jsonrpc": "2.0", "id": id, "result": {}}),
-            _ => json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "error": {
-                    "code": -32601,
-                    "message": format!("Method not found: {method}")
-                }
-            }),
-        };
-        self.send(&response).with_context(|| {
-            format!("MCP server '{server}': failed to answer child request {method}")
-        })
     }
 
     /// The child's exit status, when it has one, for appending to a failure
@@ -1226,6 +1256,80 @@ while IFS= read -r _line; do :; done
         )
         .expect("the child ping must be answered during initialize");
         assert!(client.supports_tools());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn idle_child_requests_are_answered_before_the_next_client_request() {
+        let script = r#"
+ready=0
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+  method=$(printf '%s' "$line" | sed -n 's/.*"method":"\([^"]*\)".*/\1/p')
+  case "$method" in
+    initialize)
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"idle-request-child","version":"1"}}}\n' "$id"
+      ;;
+    notifications/initialized)
+      printf '{"jsonrpc":"2.0","id":"idle-ping","method":"ping"}\n'
+      (sleep 1; kill -KILL "$$") &
+      watchdog=$!
+      IFS= read -r pong || exit 9
+      kill "$watchdog" 2>/dev/null || :
+      wait "$watchdog" 2>/dev/null || :
+      case "$pong" in *'"id":"idle-ping"'*) ;; *) exit 10 ;; esac
+      case "$pong" in *'"result":{}'*) ;; *) exit 11 ;; esac
+
+      printf '{"jsonrpc":"2.0","id":"idle-unsupported","method":"client/unsupported"}\n'
+      (sleep 1; kill -KILL "$$") &
+      watchdog=$!
+      IFS= read -r unsupported || exit 12
+      kill "$watchdog" 2>/dev/null || :
+      wait "$watchdog" 2>/dev/null || :
+      case "$unsupported" in *'"id":"idle-unsupported"'*) ;; *) exit 13 ;; esac
+      case "$unsupported" in *'"code":-32601'*) ;; *) exit 14 ;; esac
+      ready=1
+      ;;
+    tools/list)
+      [ "$ready" = 1 ] || exit 15
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[]}}\n' "$id"
+      ;;
+  esac
+done
+printf 'stdin closed\n' > "$CODEWHALE_MCP_TEST_MARKER"
+"#;
+        let marker = std::env::temp_dir().join(format!(
+            "codewhale-mcp-idle-drop-{}-{}.marker",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock after epoch")
+                .as_nanos()
+        ));
+        let mut child_config = config("/bin/sh", &["-c", script]);
+        child_config.env.insert(
+            "CODEWHALE_MCP_TEST_MARKER".to_string(),
+            marker.to_string_lossy().into_owned(),
+        );
+        let client = ChildProcessMcpClient::spawn_with_timeouts(
+            &child_config,
+            Duration::from_secs(2),
+            Duration::from_secs(2),
+        )
+        .expect("handshake");
+
+        // The child terminates if either server-initiated request remains
+        // unanswered for one second. Keep the client genuinely idle beyond
+        // that deadline before making the next ordinary client request.
+        thread::sleep(Duration::from_millis(1_500));
+        assert!(client.list_tools().unwrap().is_empty());
+
+        // The reader owns only a weak stdin handle. Dropping the client must
+        // therefore still deliver EOF to the child and let it exit cleanly;
+        // a strong reader-thread handle would force Drop's kill fallback.
+        drop(client);
+        assert_eq!(std::fs::read_to_string(&marker).unwrap(), "stdin closed\n");
+        std::fs::remove_file(marker).unwrap();
     }
 
     #[cfg(unix)]
