@@ -66,6 +66,16 @@ item-level change record is retained below the categorized release highlights.
 
 ### Fixed
 
+- Chat Completions streams now require terminal proof from `[DONE]` or a
+  non-empty `finish_reason`. Protocol-only frames no longer count as answer
+  content or time-to-first-token, and a provider continuation that ends after
+  tool results with no answer or tool call fails durably instead of producing
+  a false `Completed` receipt.
+- A selected v2 Fleet now drives one bounded, deterministic Agent roster across
+  terminal and runtime surfaces. Fleet operator/member/explicit-route
+  precedence, resolved member identity, and exact `vision` requirement
+  admission now fail visibly instead of silently falling back, first-matching,
+  or rerouting.
 - A workflow whose `task()` dispatch was rejected no longer loses that failure
   inside a `parallel()` null slot or presents a successful-looking run. Rejected
   dispatches now fail the run, persist as typed bounded receipts with an exact
@@ -102,6 +112,28 @@ item-level change record is retained below the categorized release highlights.
 
 The notes below are preserved in full so the categorized highlights do not
 erase behavior, migration, security, compatibility, or verification details.
+
+- Provider completion is now evidence-based. A Chat Completions stream reaches
+  `MessageStop` only after `[DONE]` or a non-empty `finish_reason`; raw EOF
+  without either is a typed failure. Message-start, ping, usage/terminal
+  deltas, block-stop, and message-stop frames do not count as productive
+  content or mint time-to-first-token. After tool results, a terminal provider
+  step with no answer or tool call now emits a durable failed turn and never
+  fabricates an empty assistant message.
+
+- A selected v2 Fleet is the single effective Agent roster across terminal,
+  Runtime threads, direct Workflow, Fleet execution, doctor, and
+  setup/readiness; legacy profile layers are consulted only when no Fleet is
+  selected, and invalid selections fail visibly with bounded, redacted errors.
+  Member references resolve exact id first and otherwise require a unique
+  display name, role, pinned model, offline model name, or provider/model route;
+  `agent action=roster` exposes that same bounded roster. The Fleet operator
+  supplies fresh-root and inherited-member routing unless an explicit launch
+  route or member pin wins, the resolved member is shown separately from the
+  requested alias, and `requires = ["vision"]` is admitted only on an exact
+  route with verified offline `image_input` support—never by silent rerouting
+  or custom-proxy inference. Fleet selection remains an explicit user/folder
+  contract independent of legacy project-profile loading.
 
 - **Breaking (app-server):** `/prompt`, `prompt/request` and `prompt/run` now
   execute a real model turn instead of reporting success for work they never
