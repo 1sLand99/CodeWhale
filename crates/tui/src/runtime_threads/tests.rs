@@ -1108,7 +1108,7 @@ async fn thread_updates_while_start_waits_for_capacity_survive_latest_turn_write
         harness.rx_op.recv().await,
         Some(Op::ListSubAgents)
     ));
-    let turn = tokio::time::timeout(Duration::from_secs(2), start_task).await???;
+    let turn = tokio::time::timeout(TURN_SETTLEMENT_DEADLOCK_TIMEOUT, start_task).await???;
     let mut saw_send = false;
     for _ in 0..32 {
         if matches!(harness.rx_op.recv().await, Some(Op::SendMessage { .. })) {
@@ -1146,7 +1146,8 @@ async fn thread_updates_while_start_waits_for_capacity_survive_latest_turn_write
             base_url: None,
         })
         .await?;
-    let terminal = wait_for_terminal_turn(&manager, &turn.id, Duration::from_secs(2)).await?;
+    let terminal =
+        wait_for_terminal_turn(&manager, &turn.id, TURN_SETTLEMENT_DEADLOCK_TIMEOUT).await?;
     assert_eq!(terminal.status, RuntimeTurnStatus::Completed);
     assert_eq!(turn.item_ids.len(), 1);
     assert!(
@@ -2707,7 +2708,7 @@ async fn wait_for_sender_strong_count<T>(
     sender: &tokio::sync::mpsc::Sender<T>,
     minimum: usize,
 ) -> Result<()> {
-    tokio::time::timeout(Duration::from_secs(2), async {
+    tokio::time::timeout(TURN_SETTLEMENT_DEADLOCK_TIMEOUT, async {
         while sender.strong_count() < minimum {
             tokio::task::yield_now().await;
         }

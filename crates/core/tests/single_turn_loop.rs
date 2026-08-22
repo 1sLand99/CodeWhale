@@ -66,10 +66,9 @@ fn workspace_declares_exactly_one_turn_loop() {
                 || trimmed.starts_with("pub(crate) async fn run_turn")
                 || trimmed.starts_with("pub(super) async fn run_turn")
             {
-                found.push(format!(
-                    "{}:{}",
-                    file.strip_prefix(&root).unwrap_or(file).display(),
-                    idx + 1
+                found.push((
+                    file.strip_prefix(&root).unwrap_or(file).to_path_buf(),
+                    idx + 1,
                 ));
             }
         }
@@ -84,11 +83,20 @@ fn workspace_declares_exactly_one_turn_loop() {
          another beside it.",
         found.len()
     );
-    assert!(
-        found[0].contains("crates/tui/src/core/engine/turn_loop.rs"),
-        "the turn loop moved to {} — update this guard and docs/ARCHITECTURE.md \
+    let expected_owner = Path::new("crates")
+        .join("tui")
+        .join("src")
+        .join("core")
+        .join("engine")
+        .join("turn_loop.rs");
+    let (owner_path, owner_line) = &found[0];
+    assert_eq!(
+        owner_path,
+        &expected_owner,
+        "the turn loop moved to {}:{} — update this guard and docs/ARCHITECTURE.md \
          together so the documented owner stays true",
-        found[0]
+        owner_path.display(),
+        owner_line
     );
 }
 

@@ -1225,7 +1225,9 @@ log_level = "debug"
             err.to_string().contains("escapes") || err.to_string().contains("absolute"),
             "{err:#}"
         );
-        let err = resolve_bounded_path(base.path(), "/etc/passwd").expect_err("absolute refused");
+        let absolute = base.path().join("absolute.toml");
+        let err = resolve_bounded_path(base.path(), absolute.to_string_lossy().as_ref())
+            .expect_err("absolute refused");
         assert!(err.to_string().contains("absolute"), "{err:#}");
         let ok = resolve_bounded_path(base.path(), "nested/thing.toml").expect("inside ok");
         assert!(ok.starts_with(base.path()));
