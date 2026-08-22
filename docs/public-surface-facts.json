@@ -221,12 +221,10 @@
       "web/lib/release-credits.ts"
     ],
     "requiredCandidateCredits": [
-      "@cyq1017",
+      "@bistack",
       "@aboimpinto",
       "@wuisabel-gif",
-      "@SparkofSpike",
-      "@Lstarsky0",
-      "@thejayjetson"
+      "@RepentStar"
     ]
   },
   "screenshot": {

@@ -107,6 +107,9 @@ item-level change record is retained below the categorized release highlights.
 - **Paulo Aboim Pinto ([@aboimpinto](https://github.com/aboimpinto))** — portable
   presentation/media/digest facets and the seven utility-handler migrations
   (#5525).
+- **RepentStar ([@RepentStar](https://github.com/RepentStar))** — reported and
+  reproduced the stale completion-generator path and missing `codew`
+  registration fixed for #5526.
 
 ### Detailed change record
 
