@@ -14613,6 +14613,15 @@ fn trust_directory_completion_advances_to_ready() {
     app.onboarding_missing_key_recovery = false;
     app.onboarding_had_trust_step = true;
     app.trust_mode = false;
+    let enter_hint = app.tr(MessageId::OnboardTrustEnterHint).into_owned();
+    app.status_message = Some(enter_hint.clone());
+    app.sync_status_message_to_toasts();
+    assert!(
+        app.status_toasts
+            .iter()
+            .any(|toast| toast.text == enter_hint),
+        "the invalid Enter hint should reproduce in the activity-toast queue"
+    );
 
     complete_trust_directory_onboarding(&mut app, &Config::default())
         .expect("trust completion should succeed");
@@ -14620,6 +14629,13 @@ fn trust_directory_completion_advances_to_ready() {
     assert!(app.trust_mode);
     assert_eq!(app.onboarding, OnboardingState::Ready);
     assert!(app.runtime_services.hook_executor.is_some());
+    assert!(app.status_message.is_none());
+    assert!(
+        app.status_toasts
+            .iter()
+            .all(|toast| toast.text != enter_hint),
+        "successful trust must retire the invalid Enter hint before the composer"
+    );
 }
 
 #[test]

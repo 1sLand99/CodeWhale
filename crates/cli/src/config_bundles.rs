@@ -1089,6 +1089,7 @@ approval_policy = "unless-allowed"
         assert_eq!(global_before, global_after);
     }
 
+    #[cfg(unix)]
     #[test]
     fn failed_apply_rolls_back_to_the_prior_document() {
         let mut store = isolated_store();
