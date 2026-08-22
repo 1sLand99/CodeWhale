@@ -1549,6 +1549,16 @@ impl Engine {
                     ContentBlock::Text { .. } | ContentBlock::ToolUse { .. }
                 )
             });
+            let has_provider_reasoning = content_blocks.iter().any(|block| {
+                matches!(
+                    block,
+                    ContentBlock::Thinking {
+                        thinking,
+                        state,
+                        ..
+                    } if !thinking.trim().is_empty() || state.is_some()
+                )
+            });
 
             // Issue #1727: did this turn produce ONLY a reasoning/thinking
             // block — empty content, no tool calls (e.g. gpt-oss via ollama's
@@ -1559,7 +1569,7 @@ impl Engine {
             // before the turn resumes. Capture the fact and decide later, at
             // the point the turn is certain to be finishing with no sendable
             // content (see the `tool_uses.is_empty()` tail).
-            let thinking_only_no_sendable = !has_sendable_assistant_content;
+            let no_sendable_assistant_content = !has_sendable_assistant_content;
 
             // Add assistant message to session
             if has_sendable_assistant_content {
@@ -1966,8 +1976,8 @@ impl Engine {
                     continue;
                 }
 
-                if thinking_only_no_sendable
-                    && should_emit_thinking_only_status(
+                if no_sendable_assistant_content
+                    && should_fail_no_sendable_content(
                         tool_uses.is_empty(),
                         turn_error.is_none(),
                         self.cancel_token.is_cancelled(),
@@ -1975,11 +1985,22 @@ impl Engine {
                         false,
                     )
                 {
-                    let message = "Model returned reasoning but no answer or tool call; \
-                                   turn ended without output. Send a follow-up to retry."
-                        .to_string();
+                    let message = if has_provider_reasoning {
+                        "Model returned reasoning but no answer or tool call; the provider response was incomplete."
+                            .to_string()
+                    } else if let Some(reason) = stop_reason.as_deref() {
+                        format!(
+                            "Model returned terminal stop reason `{reason}` with no answer or tool call."
+                        )
+                    } else {
+                        "Model stream ended with no answer or tool call.".to_string()
+                    };
                     crate::logging::warn(&message);
-                    let _ = self.tx_event.send(Event::status(message)).await;
+                    turn_error = Some(message.clone());
+                    let _ = self
+                        .tx_event
+                        .send(Event::error(ErrorEnvelope::classify(message, true)))
+                        .await;
                 }
 
                 // Honest exit: only now, after every resume check has failed,
@@ -3838,11 +3859,12 @@ impl Engine {
                 Ok(e) => {
                     last_progress_mono = Instant::now();
                     last_progress_wall = std::time::SystemTime::now();
-                    // Flip on the first non-MessageStart event — that's
-                    // the moment we cross from "stream not yet productive"
-                    // (eligible for transparent retry) into "DeepSeek has
-                    // billed us / user has seen output" (must surface).
-                    if !any_content_received && !matches!(e, StreamEvent::MessageStart { .. }) {
+                    // Only content-bearing events make a stream productive.
+                    // Ping, usage/terminal deltas, block stops, and MessageStop
+                    // are protocol bookkeeping; counting them as content hid
+                    // empty/truncated provider responses from retry policy and
+                    // produced false time-to-first-token measurements.
+                    if !any_content_received && stream_event_has_actionable_content(&e) {
                         any_content_received = true;
                         first_token_at.get_or_insert_with(Instant::now);
                     }
@@ -5089,18 +5111,18 @@ fn resolve_tool_definition<'a>(
     tool_def
 }
 
-/// Issue #1727: decide whether to surface a "thinking-only, no output" status.
+/// Decide whether a no-sendable-content provider step must fail the turn.
 ///
 /// Reached when the assistant turn had no sendable content (no Text, no
-/// ToolUse — only a reasoning/thinking block). We notify the user *only* when
+/// ToolUse — either reasoning-only or completely empty). We fail *only* when
 /// the turn is genuinely finishing: no tool uses to dispatch, no `turn_error`
 /// already surfaced for this turn, the request wasn't cancelled, AND the turn
 /// is not about to CONTINUE — there are no pending steers and we are not
-/// holding the turn open for running sub-agents. The status must fire at the
+/// holding the turn open for running sub-agents. The failure must fire at the
 /// point the turn truly ends; emitting it earlier (at the persist site) would
-/// show a spurious "turn ended" notice immediately before the turn resumed
-/// for a steer or a sub-agent completion.
-fn should_emit_thinking_only_status(
+/// show a spurious terminal error immediately before the turn resumed for a
+/// steer or a sub-agent completion.
+fn should_fail_no_sendable_content(
     tool_uses_empty: bool,
     turn_error_is_none: bool,
     cancelled: bool,
@@ -5108,6 +5130,31 @@ fn should_emit_thinking_only_status(
     holding_for_subagents: bool,
 ) -> bool {
     tool_uses_empty && turn_error_is_none && !cancelled && !steers_pending && !holding_for_subagents
+}
+
+/// Whether a provider stream event carries answer/tool/reasoning content.
+/// Protocol-only frames must not suppress empty-stream recovery or mint TTFT.
+fn stream_event_has_actionable_content(event: &StreamEvent) -> bool {
+    match event {
+        StreamEvent::ContentBlockStart { content_block, .. } => match content_block {
+            ContentBlockStart::Text { text } => !text.is_empty(),
+            ContentBlockStart::Thinking { thinking } => !thinking.is_empty(),
+            ContentBlockStart::ToolUse { .. } | ContentBlockStart::ServerToolUse { .. } => true,
+        },
+        StreamEvent::ContentBlockDelta { delta, .. } => match delta {
+            Delta::TextDelta { text } => !text.is_empty(),
+            Delta::ThinkingDelta { thinking } => !thinking.is_empty(),
+            Delta::InputJsonDelta { partial_json } => !partial_json.is_empty(),
+            Delta::SignatureDelta { signature } => !signature.is_empty(),
+            Delta::ReasoningStateDelta { .. } => true,
+        },
+        StreamEvent::MessageStart { .. }
+        | StreamEvent::ContentBlockStop { .. }
+        | StreamEvent::MessageDelta { .. }
+        | StreamEvent::MessageStop
+        | StreamEvent::Ping
+        | StreamEvent::Error { .. } => false,
+    }
 }
 
 /// Sentinel reasoning-effort value meaning "let the auto-reasoning system
@@ -5478,7 +5525,7 @@ mod tests {
     ///
     /// This pins the decision: a clean turn end (no tool uses to dispatch, no
     /// `turn_error`, not cancelled, no pending steers, not holding for
-    /// sub-agents) must surface a status. We must NOT spam the status when the
+    /// sub-agents) must fail visibly. We must NOT double-report when the
     /// turn is ending for another reason (error already shown, cancelled),
     /// when there are tool uses still to dispatch, or — critically (the
     /// MEDIUM review finding) — when the turn is about to CONTINUE because a
@@ -5493,42 +5540,62 @@ mod tests {
     /// live steer/sub-agent signals) is reviewed by inspection — consistent
     /// with how the other turn-loop helpers in this module are tested.
     #[test]
-    fn thinking_only_turn_emits_status_only_on_clean_end() {
+    fn no_sendable_content_fails_only_on_clean_end() {
         // Thinking-only response, turn genuinely ending (no tool uses, no
         // error, not cancelled, no steers pending, not holding for
-        // sub-agents) → surface a status so the user isn't left staring at a
-        // hung spinner.
-        assert!(should_emit_thinking_only_status(
+        // sub-agents) → fail visibly so the user is not left with a false
+        // successful completion.
+        assert!(should_fail_no_sendable_content(
             true, true, false, false, false
         ));
 
         // Tool uses still pending → the normal dispatch path handles it; no
-        // thinking-only status.
-        assert!(!should_emit_thinking_only_status(
+        // no-sendable-content failure.
+        assert!(!should_fail_no_sendable_content(
             false, true, false, false, false
         ));
 
         // A turn_error was already surfaced → don't double-report.
-        assert!(!should_emit_thinking_only_status(
+        assert!(!should_fail_no_sendable_content(
             true, false, false, false, false
         ));
 
         // Request was cancelled → cancellation status already covers it.
-        assert!(!should_emit_thinking_only_status(
+        assert!(!should_fail_no_sendable_content(
             true, true, true, false, false
         ));
 
         // A steer is pending → the turn will resume with the steer; emitting
         // "turn ended" now would be a spurious notice right before the turn
         // continues (the MEDIUM correctness finding).
-        assert!(!should_emit_thinking_only_status(
+        assert!(!should_fail_no_sendable_content(
             true, true, false, true, false
         ));
 
         // Sub-agents are still running / completions queued → the turn is
         // held open and will resume; do not claim it ended.
-        assert!(!should_emit_thinking_only_status(
+        assert!(!should_fail_no_sendable_content(
             true, true, false, false, true
+        ));
+    }
+
+    #[test]
+    fn protocol_only_stream_events_do_not_count_as_content_or_ttft() {
+        use crate::llm_client::mock::canned;
+
+        assert!(!stream_event_has_actionable_content(
+            &canned::message_start("protocol-only")
+        ));
+        assert!(!stream_event_has_actionable_content(
+            &canned::message_delta("stop", None)
+        ));
+        assert!(!stream_event_has_actionable_content(&canned::message_stop()));
+        assert!(!stream_event_has_actionable_content(&StreamEvent::Ping));
+        assert!(stream_event_has_actionable_content(&canned::text_delta(
+            0, "answer"
+        )));
+        assert!(stream_event_has_actionable_content(
+            &canned::tool_use_block_start(0, "call-1", "read_file")
         ));
     }
 

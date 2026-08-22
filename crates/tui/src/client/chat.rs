@@ -1295,6 +1295,14 @@ impl DeepSeekClient {
             // Set when a `[DONE]` sentinel was seen, so the post-loop flush does
             // not re-process trailing post-DONE bytes.
             let mut saw_done = false;
+            // A number of OpenAI-compatible providers omit `[DONE]` but send a
+            // terminal `finish_reason`. Either is valid terminal proof. A raw
+            // HTTP EOF with neither is not: treating that as MessageStop turns
+            // a truncated provider response into a successful empty turn.
+            let mut saw_finish_reason = false;
+            // Once an error has been emitted, do not follow it with a synthetic
+            // MessageStop (or a second, less-specific premature-EOF error).
+            let mut stream_failed = false;
             // Set when a complete line or unterminated flush failed UTF-8.
             // Skip further data-frame parsing so U+FFFD cannot enter the transcript.
             let mut decode_failed = false;
@@ -1304,6 +1312,7 @@ impl DeepSeekClient {
                     Ok(Some(result)) => result,
                     Ok(None) => break, // Stream ended normally
                     Err(_elapsed) => {
+                        stream_failed = true;
                         yield Err(anyhow::anyhow!(stream_idle_timeout_message(
                             idle,
                             bytes_received,
@@ -1316,6 +1325,7 @@ impl DeepSeekClient {
                 let chunk = match chunk_result {
                     Ok(bytes) => bytes,
                     Err(e) => {
+                        stream_failed = true;
                         // Walk the error source chain so reqwest's underlying
                         // hyper / h2 / io error is visible — without this the
                         // outer "error decoding response body" message tells
@@ -1347,6 +1357,7 @@ impl DeepSeekClient {
                 // Guard against unbounded buffer growth (e.g., malformed stream without newlines)
                 const MAX_SSE_BUF: usize = 10 * 1024 * 1024; // 10 MB
                 if byte_buf.len() > MAX_SSE_BUF {
+                    stream_failed = true;
                     yield Err(anyhow::anyhow!("SSE buffer exceeded {MAX_SSE_BUF} bytes — aborting stream"));
                     break;
                 }
@@ -1365,6 +1376,7 @@ impl DeepSeekClient {
                         Ok(None) => break,
                         Err(err) => {
                             decode_failed = true;
+                            stream_failed = true;
                             yield Err(anyhow::anyhow!("{err}"));
                             break 'stream;
                         }
@@ -1390,6 +1402,11 @@ impl DeepSeekClient {
                                 }
                                 SseDataFrame::Events(events) => {
                                     for mut event in events {
+                                        saw_finish_reason |= matches!(
+                                            &event,
+                                            StreamEvent::MessageDelta { delta, .. }
+                                                if delta.stop_reason.as_deref().is_some_and(|reason| !reason.trim().is_empty())
+                                        );
                                         // Stamp the client-side replay-token estimate
                                         // onto the final usage so the UI can surface
                                         // it (#30). We compute it pre-request and
@@ -1457,12 +1474,13 @@ impl DeepSeekClient {
                     Ok(None) => {}
                     Err(err) => {
                         decode_failed = true;
+                        stream_failed = true;
                         yield Err(anyhow::anyhow!("{err}"));
                     }
                 }
                 if !decode_failed && !line_buf.is_empty() {
                     let data = std::mem::take(&mut line_buf);
-                    if let SseDataFrame::Events(events) = parse_sse_data_frame(
+                    match parse_sse_data_frame(
                         &data,
                         &mut content_index,
                         &mut text_started,
@@ -1472,15 +1490,23 @@ impl DeepSeekClient {
                         &mut inline_reasoning_tags,
                         reasoning_stream_style,
                     ) {
-                        for mut event in events {
-                            if let Some(tokens) = replay_input_tokens
-                                && let StreamEvent::MessageDelta {
-                                    usage: Some(usage), ..
-                                } = &mut event
-                            {
-                                usage.reasoning_replay_tokens = Some(tokens);
+                        SseDataFrame::Done => saw_done = true,
+                        SseDataFrame::Events(events) => {
+                            for mut event in events {
+                                saw_finish_reason |= matches!(
+                                    &event,
+                                    StreamEvent::MessageDelta { delta, .. }
+                                        if delta.stop_reason.as_deref().is_some_and(|reason| !reason.trim().is_empty())
+                                );
+                                if let Some(tokens) = replay_input_tokens
+                                    && let StreamEvent::MessageDelta {
+                                        usage: Some(usage), ..
+                                    } = &mut event
+                                {
+                                    usage.reasoning_replay_tokens = Some(tokens);
+                                }
+                                yield Ok(event);
                             }
-                            yield Ok(event);
                         }
                     }
                 }
@@ -1494,7 +1520,13 @@ impl DeepSeekClient {
             }
 
             release_stream_buffer(byte_buf);
-            yield Ok(StreamEvent::MessageStop);
+            if !stream_failed && (saw_done || saw_finish_reason) {
+                yield Ok(StreamEvent::MessageStop);
+            } else if !stream_failed {
+                yield Err(anyhow::anyhow!(
+                    "Chat Completions stream closed before [DONE] or finish_reason"
+                ));
+            }
         };
 
         Ok(Pin::from(Box::new(stream)

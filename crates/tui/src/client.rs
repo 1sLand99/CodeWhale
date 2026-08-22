@@ -4288,6 +4288,124 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn chat_stream_eof_without_done_or_finish_reason_is_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(": provider heartbeat\n\n"),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = deepseek_request_boundary_client("https://api.deepseek.com/v1", server.uri());
+        let request = MessageRequest {
+            model: "deepseek-v4-pro".to_string(),
+            messages: vec![Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: "premature EOF regression".to_string(),
+                    cache_control: None,
+                }],
+            }],
+            max_tokens: 64,
+            system: None,
+            tools: None,
+            tool_choice: None,
+            metadata: None,
+            thinking: None,
+            reasoning_effort: Some("off".to_string()),
+            stream: Some(true),
+            temperature: None,
+            top_p: None,
+        };
+
+        let mut stream = client
+            .create_message_stream(request)
+            .await
+            .expect("HTTP request succeeds before the stream closes");
+        let mut saw_stop = false;
+        let mut failure = None;
+        while let Some(event) = stream.next().await {
+            match event {
+                Ok(StreamEvent::MessageStop) => saw_stop = true,
+                Ok(_) => {}
+                Err(error) => failure = Some(error.to_string()),
+            }
+        }
+
+        assert!(
+            !saw_stop,
+            "premature EOF must not be reported as MessageStop"
+        );
+        assert!(
+            failure
+                .as_deref()
+                .is_some_and(|message| message.contains("before [DONE] or finish_reason")),
+            "premature EOF must remain a typed stream failure: {failure:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn chat_stream_finish_reason_without_done_is_terminal() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(concat!(
+                        "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"},\"finish_reason\":null}]}\n\n",
+                        "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+                    )),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = deepseek_request_boundary_client("https://api.deepseek.com/v1", server.uri());
+        let request = MessageRequest {
+            model: "deepseek-v4-pro".to_string(),
+            messages: vec![Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: "finish reason regression".to_string(),
+                    cache_control: None,
+                }],
+            }],
+            max_tokens: 64,
+            system: None,
+            tools: None,
+            tool_choice: None,
+            metadata: None,
+            thinking: None,
+            reasoning_effort: Some("off".to_string()),
+            stream: Some(true),
+            temperature: None,
+            top_p: None,
+        };
+
+        let mut stream = client
+            .create_message_stream(request)
+            .await
+            .expect("streaming request succeeds");
+        let mut saw_stop = false;
+        while let Some(event) = stream.next().await {
+            if matches!(
+                event.expect("terminal stream stays valid"),
+                StreamEvent::MessageStop
+            ) {
+                saw_stop = true;
+            }
+        }
+        assert!(
+            saw_stop,
+            "finish_reason is valid terminal proof without [DONE]"
+        );
+    }
+
     async fn capture_deepseek_chat_request(
         route_base_url: &str,
         strict: bool,

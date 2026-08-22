@@ -5176,6 +5176,70 @@ async fn request_snapshots_advance_to_the_latest_tool_step() {
 }
 
 #[tokio::test]
+async fn tool_result_followed_by_terminal_empty_assistant_fails_turn() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let workspace = tempdir().expect("tempdir");
+    fs::write(workspace.path().join("README.md"), "fixture\n").expect("write fixture");
+    let empty_terminal_turn = vec![
+        canned::message_start("mock_empty_after_tool"),
+        canned::message_delta("stop", None),
+        canned::message_stop(),
+    ];
+    let mock = std::sync::Arc::new(MockLlmClient::new(vec![
+        canned::tool_call_turn("call-read", "read_file", r#"{"path":"README.md"}"#),
+        empty_terminal_turn,
+    ]));
+    let client: crate::core::model_client::SharedModelClient = mock.clone();
+    let (mut engine, handle) = Engine::new_with_model_client(
+        deterministic_engine_config(workspace.path()),
+        &Config::default(),
+        client,
+    );
+    let context = crate::tools::ToolContext::new(workspace.path().to_path_buf());
+    let mut registry = crate::tools::ToolRegistry::new(context);
+    registry.register(std::sync::Arc::new(crate::tools::file::ReadFileTool));
+    let tools = Some(registry.to_api_tools_with_cache(true));
+    let surface = test_tool_surface(&engine, registry, tools, AppMode::Agent);
+    let mut turn = crate::core::turn::TurnContext::new(4);
+
+    let (status, error) = engine.run_turn(&mut turn, surface, None).await;
+    assert_eq!(status, TurnOutcomeStatus::Failed);
+    assert_eq!(mock.call_count(), 2, "tool step then empty provider step");
+    assert!(
+        error
+            .as_deref()
+            .is_some_and(|message| message.contains("terminal stop reason `stop`")),
+        "terminal empty response must produce a precise failure: {error:?}"
+    );
+
+    let mut events = handle.rx_event.write().await;
+    let events = std::iter::from_fn(|| events.try_recv().ok()).collect::<Vec<_>>();
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::ToolCallComplete { id, result, .. }
+                if id == "call-read" && result.is_ok()
+        )),
+        "the successful tool result must remain durable: {events:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, Event::Error { .. })),
+        "the empty provider response must be visible as an error: {events:?}"
+    );
+    assert!(
+        engine
+            .session
+            .messages
+            .iter()
+            .all(|message| { message.role != Role::Assistant || !message.content.is_empty() }),
+        "the engine must not fabricate an empty assistant message"
+    );
+}
+
+#[tokio::test]
 async fn request_snapshot_reports_registry_provenance_for_the_transmitted_catalog() {
     use crate::llm_client::mock::{MockLlmClient, canned};
 
