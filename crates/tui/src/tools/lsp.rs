@@ -36,7 +36,7 @@ impl ToolSpec for LspTool {
                 "operation": {
                     "type": "string",
                     "enum": ["diagnostics", "read_lints", "symbols", "definition", "references"],
-                    "description": "Intelligence operation to run."
+                    "description": "Operation to run."
                 },
                 "path": {
                     "type": "string",
@@ -50,10 +50,11 @@ impl ToolSpec for LspTool {
                 "character": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": "1-based column."
+                    "description": "1-based column, default 1."
                 },
                 "query": {
-                    "type": "string"
+                    "type": "string",
+                    "description": "Workspace symbol query when operation=symbols."
                 }
             },
             "required": ["operation", "path"]
@@ -140,43 +141,63 @@ async fn execute_read_lints(input: Value, context: &ToolContext) -> Result<ToolR
             "LSP manager is not attached to this tool context; enable LSP for this session",
         )
     })?;
-    let blocks = manager
+    let (include_warnings, reports) = manager
         .diagnostics_for_paths(&paths)
         .await
         .map_err(ToolError::execution_failed)?;
 
-    let mut files = Vec::with_capacity(blocks.len());
+    let mut files = Vec::with_capacity(reports.len());
     let mut diagnostic_count = 0usize;
     let mut truncated = false;
-    for block in blocks {
+    for report in reports {
+        let file_display = report.block.file.display().to_string();
         let mut items = Vec::new();
-        for diagnostic in block.items {
-            if diagnostic_count >= MAX_LINT_DIAGNOSTICS {
-                truncated = true;
-                break;
+        let mut file_truncated = report.truncated;
+        if report.unavailable.is_none() {
+            for diagnostic in report.block.items {
+                if diagnostic_count >= MAX_LINT_DIAGNOSTICS {
+                    truncated = true;
+                    file_truncated = true;
+                    break;
+                }
+                diagnostic_count += 1;
+                items.push(json!({
+                    "line": diagnostic.line,
+                    "column": diagnostic.column,
+                    "severity": format!("{:?}", diagnostic.severity).to_ascii_lowercase(),
+                    "message": diagnostic
+                        .message
+                        .chars()
+                        .take(MAX_LINT_MESSAGE_CHARS)
+                        .collect::<String>(),
+                }));
             }
-            diagnostic_count += 1;
-            items.push(json!({
-                "line": diagnostic.line,
-                "column": diagnostic.column,
-                "severity": format!("{:?}", diagnostic.severity).to_ascii_lowercase(),
-                "message": diagnostic
-                    .message
-                    .chars()
-                    .take(MAX_LINT_MESSAGE_CHARS)
-                    .collect::<String>(),
-            }));
         }
-        files.push(json!({
-            "file": block.file.display().to_string(),
+        let mut entry = json!({
+            "file": file_display,
+            "status": if report.unavailable.is_some() {
+                "unavailable"
+            } else if items.is_empty() {
+                "clean"
+            } else {
+                "ok"
+            },
             "diagnostics": items,
-        }));
+        });
+        if let Some(note) = report.unavailable {
+            entry["note"] = json!(note);
+        }
+        if file_truncated {
+            entry["truncated"] = Value::Bool(true);
+        }
+        files.push(entry);
     }
 
     let mut output = json!({
         "files": files,
         "diagnostic_count": diagnostic_count,
         "truncated": truncated,
+        "warnings_included": include_warnings,
     });
     while serde_json::to_string(&output)
         .map(|value| value.len() > MAX_LINT_OUTPUT_CHARS)
@@ -429,6 +450,8 @@ mod tests {
         let payload: Value = serde_json::from_str(&result.content).unwrap();
         assert_eq!(payload["files"].as_array().unwrap().len(), 2);
         assert_eq!(payload["diagnostic_count"], 2);
+        assert_eq!(payload["files"][0]["status"], "ok");
+        assert_eq!(payload["warnings_included"], false);
         assert_eq!(payload["files"][0]["diagnostics"][0]["line"], 1);
         assert_eq!(payload["files"][0]["diagnostics"][0]["severity"], "error");
         assert_eq!(payload["files"][0]["diagnostics"][0]["message"], "boom");
@@ -456,6 +479,7 @@ mod tests {
         let payload: Value = serde_json::from_str(&result.content).unwrap();
         assert_eq!(payload["diagnostic_count"], 0);
         assert_eq!(payload["files"][0]["diagnostics"], json!([]));
+        assert_eq!(payload["files"][0]["status"], "clean");
     }
 
     #[tokio::test]
@@ -492,5 +516,233 @@ mod tests {
             .await
             .expect_err("path traversal must fail closed");
         assert!(path_error.to_string().contains("cannot contain"));
+    }
+
+    struct StubTransport {
+        diagnostics: Vec<Diagnostic>,
+        fail: bool,
+        stall: Duration,
+    }
+
+    #[async_trait]
+    impl crate::lsp::LspTransport for StubTransport {
+        async fn diagnostics_for(
+            &self,
+            _path: &Path,
+            _text: &str,
+            _wait: Duration,
+        ) -> anyhow::Result<Vec<Diagnostic>> {
+            if !self.stall.is_zero() {
+                tokio::time::sleep(self.stall).await;
+            }
+            if self.fail {
+                return Err(anyhow::anyhow!("kaboom"));
+            }
+            Ok(self.diagnostics.clone())
+        }
+
+        async fn request(
+            &self,
+            _method: &str,
+            _params: Value,
+            _wait: Duration,
+        ) -> anyhow::Result<Value> {
+            Ok(json!({}))
+        }
+
+        async fn shutdown(&self) {}
+    }
+
+    #[tokio::test]
+    async fn read_lints_reports_timeout_as_unavailable_not_clean() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("lib.rs");
+        tokio::fs::write(&path, b"fn main() {}\n").await.unwrap();
+
+        let mgr = Arc::new(LspManager::new(
+            LspConfig {
+                poll_after_edit_ms: 40,
+                ..LspConfig::default()
+            },
+            dir.path().to_path_buf(),
+        ));
+        mgr.install_test_transport(
+            Language::Rust,
+            Arc::new(StubTransport {
+                diagnostics: Vec::new(),
+                fail: false,
+                stall: Duration::from_millis(250),
+            }),
+        )
+        .await;
+        let mut ctx = ToolContext::new(dir.path());
+        ctx = ctx.with_lsp_manager(mgr);
+
+        let result = LspTool
+            .execute(json!({"operation": "read_lints", "path": "lib.rs"}), &ctx)
+            .await
+            .expect("degraded polls still succeed with a visible note");
+        let payload: Value = serde_json::from_str(&result.content).unwrap();
+        assert_eq!(payload["files"][0]["status"], "unavailable");
+        assert!(
+            payload["files"][0]["note"]
+                .as_str()
+                .is_some_and(|note| note.contains("timed out")),
+            "unexpected note: {payload}"
+        );
+        assert_eq!(payload["diagnostic_count"], 0);
+    }
+
+    #[tokio::test]
+    async fn read_lints_reports_transport_errors_as_unavailable() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("lib.rs");
+        tokio::fs::write(&path, b"fn main() {}\n").await.unwrap();
+
+        let mgr = Arc::new(LspManager::new(
+            LspConfig::default(),
+            dir.path().to_path_buf(),
+        ));
+        mgr.install_test_transport(
+            Language::Rust,
+            Arc::new(StubTransport {
+                diagnostics: Vec::new(),
+                fail: true,
+                stall: Duration::ZERO,
+            }),
+        )
+        .await;
+        let mut ctx = ToolContext::new(dir.path());
+        ctx = ctx.with_lsp_manager(mgr);
+
+        let result = LspTool
+            .execute(json!({"operation": "read_lints", "path": "lib.rs"}), &ctx)
+            .await
+            .expect("transport errors surface as unavailable, not clean");
+        let payload: Value = serde_json::from_str(&result.content).unwrap();
+        assert_eq!(payload["files"][0]["status"], "unavailable");
+        assert!(
+            payload["files"][0]["note"]
+                .as_str()
+                .is_some_and(|note| note.contains("kaboom")),
+            "unexpected note: {payload}"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_lints_flags_config_cap_truncation() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("lib.rs");
+        tokio::fs::write(&path, b"fn main() {}\n").await.unwrap();
+
+        let mgr = Arc::new(LspManager::new(
+            LspConfig {
+                max_diagnostics_per_file: 2,
+                ..LspConfig::default()
+            },
+            dir.path().to_path_buf(),
+        ));
+        mgr.install_test_transport(
+            Language::Rust,
+            Arc::new(StubTransport {
+                diagnostics: (1..=3)
+                    .map(|line| Diagnostic {
+                        line,
+                        column: 1,
+                        severity: Severity::Error,
+                        message: format!("err {line}"),
+                    })
+                    .collect(),
+                fail: false,
+                stall: Duration::ZERO,
+            }),
+        )
+        .await;
+        let mut ctx = ToolContext::new(dir.path());
+        ctx = ctx.with_lsp_manager(mgr);
+
+        let result = LspTool
+            .execute(json!({"operation": "read_lints", "path": "lib.rs"}), &ctx)
+            .await
+            .expect("capped lists stay readable");
+        let payload: Value = serde_json::from_str(&result.content).unwrap();
+        assert_eq!(
+            payload["files"][0]["diagnostics"].as_array().unwrap().len(),
+            2
+        );
+        assert_eq!(payload["files"][0]["truncated"], true);
+        assert_eq!(payload["diagnostic_count"], 2);
+        assert_eq!(payload["truncated"], false, "tool caps were not reached");
+    }
+
+    #[tokio::test]
+    async fn read_lints_surfaces_warning_visibility() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("lib.rs");
+        tokio::fs::write(&path, b"fn main() {}\n").await.unwrap();
+        let stub = || -> Arc<StubTransport> {
+            Arc::new(StubTransport {
+                diagnostics: vec![
+                    Diagnostic {
+                        line: 1,
+                        column: 1,
+                        severity: Severity::Error,
+                        message: "e1".into(),
+                    },
+                    Diagnostic {
+                        line: 2,
+                        column: 1,
+                        severity: Severity::Warning,
+                        message: "w1".into(),
+                    },
+                ],
+                fail: false,
+                stall: Duration::ZERO,
+            })
+        };
+
+        let errors_only = Arc::new(LspManager::new(
+            LspConfig::default(),
+            dir.path().to_path_buf(),
+        ));
+        errors_only
+            .install_test_transport(Language::Rust, stub())
+            .await;
+        let mut ctx = ToolContext::new(dir.path());
+        ctx = ctx.with_lsp_manager(Arc::clone(&errors_only));
+        let result = LspTool
+            .execute(json!({"operation": "read_lints", "path": "lib.rs"}), &ctx)
+            .await
+            .expect("default filter read");
+        let payload: Value = serde_json::from_str(&result.content).unwrap();
+        assert_eq!(payload["warnings_included"], false);
+        assert_eq!(
+            payload["files"][0]["diagnostics"].as_array().unwrap().len(),
+            1
+        );
+        assert_eq!(payload["files"][0]["diagnostics"][0]["severity"], "error");
+
+        let with_warnings = Arc::new(LspManager::new(
+            LspConfig {
+                include_warnings: true,
+                ..LspConfig::default()
+            },
+            dir.path().to_path_buf(),
+        ));
+        with_warnings
+            .install_test_transport(Language::Rust, stub())
+            .await;
+        let mut ctx = ToolContext::new(dir.path());
+        ctx = ctx.with_lsp_manager(with_warnings);
+        let result = LspTool
+            .execute(json!({"operation": "read_lints", "path": "lib.rs"}), &ctx)
+            .await
+            .expect("warnings-included read");
+        let payload: Value = serde_json::from_str(&result.content).unwrap();
+        assert_eq!(payload["warnings_included"], true);
+        assert_eq!(
+            payload["files"][0]["diagnostics"].as_array().unwrap().len(),
+            2
+        );
     }
 }
