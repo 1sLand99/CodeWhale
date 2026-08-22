@@ -3694,9 +3694,9 @@ impl App {
         (!name.is_empty() && name != agent.agent_id).then(|| name.to_string())
     }
 
-    /// Resolve the most specific role/profile token for an agent, in priority
-    /// order: the advisory `assignment.role`, the resolved profile name, the
-    /// canonical route role, and finally the Fleet type. `None` only for a
+    /// Resolve the most specific member/role token for an agent, in priority
+    /// order: resolved profile id, advisory assignment role, requested alias,
+    /// canonical route role, then Fleet type. `None` only for a
     /// progress-only agent whose dispatch metadata has not arrived yet.
     fn agent_role_label(&self, agent_id: &str) -> Option<String> {
         let agent = self
@@ -3704,12 +3704,21 @@ impl App {
             .iter()
             .find(|agent| agent.agent_id == agent_id)?;
         agent
-            .assignment
-            .role
-            .as_deref()
+            .child_route
+            .as_ref()
+            .and_then(|route| route.resolved_profile_id.as_deref())
             .map(str::trim)
-            .filter(|role| !role.is_empty())
+            .filter(|profile| !profile.is_empty())
             .map(str::to_string)
+            .or_else(|| {
+                agent
+                    .assignment
+                    .role
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|role| !role.is_empty())
+                    .map(str::to_string)
+            })
             .or_else(|| {
                 agent
                     .child_route

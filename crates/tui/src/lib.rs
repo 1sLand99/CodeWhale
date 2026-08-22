@@ -2093,12 +2093,12 @@ async fn run_async_main_dispatch(
                 if let Some(provider_arg) = explicit_provider {
                     apply_exec_provider_override(&mut config, provider_arg)?;
                 }
-                if let Some(reasoning_arg) = args
+                let explicit_reasoning = args
                     .reasoning_effort
                     .as_deref()
                     .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                {
+                    .filter(|value| !value.is_empty());
+                if let Some(reasoning_arg) = explicit_reasoning {
                     config.reasoning_effort = normalize_cli_reasoning_effort(reasoning_arg)?;
                     config.reasoning_effort_inferred_from_legacy_alias = false;
                 }
@@ -2117,6 +2117,18 @@ async fn run_async_main_dispatch(
                     .as_deref()
                     .map(str::trim)
                     .filter(|model| !model.is_empty());
+                if resume_session.is_none() {
+                    let explicit_route_override = explicit_provider.is_some()
+                        || explicit_model.is_some()
+                        || crate::config::explicit_launch_provider_override().is_some()
+                        || crate::config::explicit_launch_model_override().is_some();
+                    apply_selected_fleet_operator_for_launch(
+                        &mut config,
+                        &workspace,
+                        explicit_route_override,
+                        explicit_reasoning.is_some(),
+                    )?;
+                }
                 let model = if let Some(saved) = resume_session.as_ref() {
                     resolve_exec_resume_route(
                         &mut config,
@@ -2254,8 +2266,17 @@ async fn run_async_main_dispatch(
                 if args.mcp {
                     tokio::task::block_in_place(|| mcp_server::run_mcp_server(workspace))
                 } else if http_selected {
-                    let (config, config_profile) =
+                    let (mut config, config_profile) =
                         load_config_from_cli_with_effective_profile(&cli)?;
+                    let explicit_route_override =
+                        crate::config::explicit_launch_provider_override().is_some()
+                            || crate::config::explicit_launch_model_override().is_some();
+                    apply_selected_fleet_operator_for_launch(
+                        &mut config,
+                        &workspace,
+                        explicit_route_override,
+                        false,
+                    )?;
                     let cors_origins = resolve_cors_origins(&config, &args.cors_origin);
                     let bind_host = resolve_serve_bind_host(args.mobile, args.host);
                     if args.web && bind_host.host != "127.0.0.1" {
@@ -5885,9 +5906,14 @@ fn print_doctor_setup_report(
 fn print_doctor_fleet_roster_layers(config: &Config, workspace: &Path) {
     use colored::Colorize;
 
-    let roster = crate::fleet::roster::FleetRoster::load(&config.fleet_config(), workspace);
+    let roster =
+        crate::fleet::identity::load_effective_roster(&config.fleet_config(), workspace, None);
     println!();
     println!("{}", "Fleet roster layers:".bold());
+    if let Some(error) = roster.load_error() {
+        println!("  ! {error}");
+        return;
+    }
     let lines = roster.doctor_layer_lines();
     if lines.is_empty() {
         println!("  · no profile id is defined in more than one layer");
@@ -6086,7 +6112,8 @@ fn doctor_operate_fleet_report_json(config: &Config, workspace: &Path) -> serde_
     let launch_concurrency = config.launch_concurrency_for_provider(provider);
     let max_admitted = config.max_admitted_subagents_for_provider(provider);
     let max_spawn_depth = config.subagent_max_spawn_depth_for_provider(provider);
-    let roster = crate::fleet::roster::FleetRoster::load(&config.fleet_config(), workspace);
+    let roster =
+        crate::fleet::identity::load_effective_roster(&config.fleet_config(), workspace, None);
     let mut built_in_members = 0usize;
     let mut plugin_members = 0usize;
     let mut config_members = 0usize;
@@ -6103,7 +6130,7 @@ fn doctor_operate_fleet_report_json(config: &Config, workspace: &Path) -> serde_
     }
     let roster_members = roster.members().len();
     let custom_members = plugin_members + config_members + personal_members + workspace_members;
-    let roster_ready = roster_members > 0;
+    let roster_ready = roster.load_error().is_none() && roster_members > 0;
     let runtime_ready =
         subagents_enabled && max_subagents > 0 && launch_concurrency > 0 && max_spawn_depth > 0;
     let multi_layer: Vec<serde_json::Value> = roster
@@ -6151,6 +6178,7 @@ fn doctor_operate_fleet_report_json(config: &Config, workspace: &Path) -> serde_
         },
         "roster": {
             "ready": roster_ready,
+            "error": roster.load_error(),
             "total": roster_members,
             "built_in": built_in_members,
             "config": config_members,
@@ -7751,6 +7779,98 @@ fn load_config_from_cli_with_effective_profile(cli: &Cli) -> Result<(Config, Opt
     // the loader never has to be handed the setting at each of its call sites.
     install_foreign_instruction_imports(&config);
     Ok((config, profile))
+}
+
+/// Apply the selected v2 Fleet's operator to a fresh root session.
+///
+/// Provider/model are one atomic route: any explicit launch override for
+/// either half keeps the caller's full route and bypasses the saved operator.
+/// Reasoning is independent, so an explicit reasoning flag keeps its value
+/// while the Fleet may still select the provider/model pair. Resumes call
+/// this helper only for fresh sessions and therefore retain their saved route.
+fn apply_selected_fleet_operator_for_launch(
+    config: &mut Config,
+    workspace: &Path,
+    explicit_route_override: bool,
+    explicit_reasoning_override: bool,
+) -> Result<bool> {
+    if explicit_route_override {
+        return Ok(false);
+    }
+    let Some(selected) = crate::fleet::store::resolve_selected_fleet(workspace).map_err(|_| {
+        anyhow!(
+            "Selected Fleet is missing or unreadable; inspect /fleet and repair or clear the selection."
+        )
+    })?
+    else {
+        return Ok(false);
+    };
+    let fleet_name = crate::safe_label::SafeLabel::phrase(&selected.name);
+    let (fleet, _) = crate::fleet::store::load_fleet_at(&selected.path).map_err(|_| {
+        anyhow!(
+            "selected Fleet '{}' ({}) is invalid or unreadable; inspect /fleet and repair or clear the selection.",
+            fleet_name,
+            selected.scope.label()
+        )
+    })?;
+    let Some(operator) = fleet.operator.as_ref() else {
+        return Ok(false);
+    };
+    let provider_id = operator.provider.trim();
+    let model_id = operator.model.trim();
+    if provider_id.is_empty() || model_id.is_empty() {
+        bail!(
+            "selected Fleet '{}' has an incomplete operator route; provider and model must both be non-empty",
+            fleet_name
+        );
+    }
+    let safe_provider_id = crate::safe_label::SafeLabel::identifier(provider_id);
+    let safe_model_id = crate::safe_label::SafeLabel::catalog_model(model_id);
+
+    let identity = config
+        .resolve_provider_pin_identity(provider_id)
+        .map_err(|error| {
+            anyhow!(
+                "selected Fleet '{}' operator provider '{}' is unavailable: {}",
+                fleet_name,
+                safe_provider_id,
+                crate::safe_label::safe_error_text(&error)
+            )
+        })?;
+    let resolved =
+        crate::route_runtime::resolve_runtime_route_for_identity(config, &identity, Some(model_id))
+            .map_err(|error| {
+                anyhow!(
+                    "selected Fleet '{}' operator route {}/{} is invalid: {}",
+                    fleet_name,
+                    safe_provider_id,
+                    safe_model_id,
+                    crate::safe_label::safe_error_text(&error)
+                )
+            })?;
+    let mut selected_config = *resolved.config;
+    selected_config.fleet_operator_route_applied = true;
+    selected_config.fleet_operator_reasoning_applied = false;
+    if !explicit_reasoning_override
+        && let Some(reasoning) = operator
+            .reasoning
+            .as_deref()
+            .map(str::trim)
+            .filter(|reasoning| !reasoning.is_empty())
+        && let Some(reasoning) = normalize_cli_reasoning_effort(reasoning).map_err(|error| {
+            anyhow!(
+                "selected Fleet '{}' has invalid operator reasoning: {}",
+                fleet_name,
+                crate::safe_label::safe_error_text(&error.to_string())
+            )
+        })?
+    {
+        selected_config.reasoning_effort = Some(reasoning);
+        selected_config.reasoning_effort_inferred_from_legacy_alias = false;
+        selected_config.fleet_operator_reasoning_applied = true;
+    }
+    *config = selected_config;
+    Ok(true)
 }
 
 /// Resolve `project_instruction_imports` into the loader's opt-in set.
@@ -9851,6 +9971,16 @@ async fn run_interactive_with_notice(
             saved_permission_posture.as_deref(),
         );
     }
+    if resume_session_id.is_none() {
+        let explicit_route_override = crate::config::explicit_launch_provider_override().is_some()
+            || crate::config::explicit_launch_model_override().is_some();
+        apply_selected_fleet_operator_for_launch(
+            &mut merged_config,
+            &workspace,
+            explicit_route_override,
+            false,
+        )?;
+    }
     let config = &merged_config;
 
     if !cli.skip_onboarding {
@@ -10874,7 +11004,6 @@ async fn build_direct_workflow_tool(
 
     use crate::client::DeepSeekClient;
     use crate::core::authority::shell_policy_for_mode;
-    use crate::fleet::roster::FleetRoster;
     use crate::tools::AgentToolSurfaceOptions;
     use crate::tools::goal::new_shared_goal_state;
     use crate::tools::subagent::{SubAgentRuntime, new_shared_subagent_manager_with_timeout};
@@ -10960,7 +11089,11 @@ async fn build_direct_workflow_tool(
         config.launch_concurrency_for_provider(provider),
         config.subagent_token_budget_for_provider(provider),
     );
-    let roster = Arc::new(FleetRoster::load(&config.fleet_config(), workspace));
+    let roster = Arc::new(crate::fleet::identity::load_effective_roster(
+        &config.fleet_config(),
+        workspace,
+        Some(plugin_registry.as_ref()),
+    ));
     let mut role_models = roster.model_overrides();
     role_models.extend(config.subagent_model_overrides());
 
@@ -11598,10 +11731,10 @@ async fn run_exec_agent(
         lsp_config,
         runtime_services,
         subagent_model_overrides: execution_config.subagent_model_overrides(),
-        fleet_roster: std::sync::Arc::new(crate::fleet::roster::FleetRoster::load_with_plugins(
+        fleet_roster: std::sync::Arc::new(crate::fleet::identity::load_effective_roster(
             &execution_config.fleet_config(),
             &workspace,
-            engine_plugin_registry.as_ref(),
+            Some(engine_plugin_registry.as_ref()),
         )),
         subagent_api_timeout: std::time::Duration::from_secs(
             execution_config.subagent_api_timeout_secs_for_provider(effective_provider),
@@ -14548,6 +14681,113 @@ mod terminal_mode_tests {
             resolve_exec_model(&config, None),
             crate::config::DEFAULT_ZAI_MODEL
         );
+    }
+
+    #[test]
+    fn fresh_launch_uses_selected_fleet_operator_unless_route_is_explicit() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let fleets = workspace.path().join(".codewhale").join("fleets");
+        std::fs::create_dir_all(&fleets).expect("fleet directory");
+        std::fs::write(fleets.join("selected"), "Launch\n").expect("selection");
+        std::fs::write(
+            fleets.join("launch.toml"),
+            r#"schema = "fleet"
+schema_revision = 2
+name = "Launch"
+
+[operator]
+provider = "deepseek"
+model = "deepseek-v4-flash-vision-exp"
+reasoning = "high"
+"#,
+        )
+        .expect("fleet file");
+
+        let base = Config {
+            api_key: Some("test-key".to_string()),
+            provider: Some("openrouter".to_string()),
+            reasoning_effort: Some("off".to_string()),
+            ..Default::default()
+        };
+        let mut explicit = base.clone();
+        assert!(
+            !apply_selected_fleet_operator_for_launch(
+                &mut explicit,
+                workspace.path(),
+                true,
+                false,
+            )
+            .expect("explicit route bypasses Fleet operator")
+        );
+        assert_eq!(
+            explicit.api_provider(),
+            crate::config::ApiProvider::Openrouter
+        );
+
+        let mut selected = base;
+        assert!(
+            apply_selected_fleet_operator_for_launch(
+                &mut selected,
+                workspace.path(),
+                false,
+                false,
+            )
+            .expect("selected operator applies")
+        );
+        assert_eq!(
+            selected.api_provider(),
+            crate::config::ApiProvider::Deepseek
+        );
+        assert_eq!(selected.default_model(), "deepseek-v4-flash-vision-exp");
+        assert_eq!(selected.reasoning_effort(), Some("high"));
+        assert!(selected.fleet_operator_route_applied);
+        assert!(selected.fleet_operator_reasoning_applied);
+
+        let mut reasoning_override = Config {
+            api_key: Some("test-key".to_string()),
+            reasoning_effort: Some("off".to_string()),
+            ..Default::default()
+        };
+        apply_selected_fleet_operator_for_launch(
+            &mut reasoning_override,
+            workspace.path(),
+            false,
+            true,
+        )
+        .expect("explicit reasoning coexists with Fleet route");
+        assert_eq!(
+            reasoning_override.default_model(),
+            "deepseek-v4-flash-vision-exp"
+        );
+        assert_eq!(reasoning_override.reasoning_effort(), Some("off"));
+        assert!(reasoning_override.fleet_operator_route_applied);
+        assert!(!reasoning_override.fleet_operator_reasoning_applied);
+    }
+
+    #[test]
+    fn selected_fleet_operator_load_error_redacts_paths_excerpts_and_opaque_name() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let fleets = workspace.path().join(".codewhale").join("fleets");
+        std::fs::create_dir_all(&fleets).expect("fleet directory");
+        let secret_marker = "sk-live-abcdef0123456789abcdef";
+        std::fs::write(fleets.join("selected"), format!("{secret_marker}\n")).expect("selection");
+        std::fs::write(
+            fleets.join(format!("{secret_marker}.toml")),
+            format!("invalid TOML /Users/operator/private {secret_marker}\n"),
+        )
+        .expect("invalid Fleet");
+
+        let mut config = Config::default();
+        let message =
+            apply_selected_fleet_operator_for_launch(&mut config, workspace.path(), false, false)
+                .expect_err("invalid selected Fleet must fail")
+                .to_string();
+
+        assert!(!message.contains(&workspace.path().display().to_string()));
+        assert!(!message.contains("/Users/operator"));
+        assert!(!message.contains(secret_marker));
+        assert!(!message.contains("invalid TOML"));
+        assert!(message.chars().count() <= 700, "{message}");
     }
 
     #[tokio::test]

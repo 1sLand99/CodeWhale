@@ -1694,6 +1694,7 @@ fn exact_member_profile(
             "Exact fleet member `{}` (role `{}`), pinned to {provider}/{wire_model}.",
             member.id, member.role
         )),
+        requires: Vec::new(),
         profile,
         source: source
             .map(std::path::Path::to_path_buf)

@@ -748,6 +748,55 @@ fn note_startup_default_not_saved(app: &mut App, save_as_startup_default: bool) 
     });
 }
 
+/// Route every Fleet-setup entry point to the storage surface that actually
+/// controls the effective roster. A selected v2 Fleet always opens its exact
+/// named editor; the legacy profile wizard is reachable only with no selected
+/// Fleet. Selection resolution deliberately does not consult project trust.
+fn open_fleet_setup_target(app: &mut App, config: &Config, member_id: Option<&str>) {
+    use crate::tui::views::fleet_setup::{FleetSetupEditTarget, resolve_fleet_setup_edit_target};
+
+    match resolve_fleet_setup_edit_target(&app.workspace) {
+        Ok(FleetSetupEditTarget::SelectedFleet { name, scope }) => {
+            if app.view_stack.top_kind() == Some(ModalKind::FleetDetail) {
+                return;
+            }
+            let Some(view) = crate::tui::views::fleet_detail::FleetDetailView::open_for_member(
+                app, config, &name, scope, member_id,
+            ) else {
+                app.set_sticky_status(
+                    "Selected Fleet is invalid or unreadable; open /fleet fleets to repair or clear the selection. Legacy profiles were not opened."
+                        .to_string(),
+                    StatusToastLevel::Error,
+                    None,
+                );
+                return;
+            };
+            let fleet_name = crate::safe_label::SafeLabel::phrase(&name);
+            app.view_stack.push(view);
+            app.status_message = Some(format!(
+                "Editing selected Fleet `{fleet_name}` ({}) — legacy profiles will not be changed.",
+                scope.label()
+            ));
+        }
+        Ok(FleetSetupEditTarget::LegacyProfiles) => {
+            if app.view_stack.top_kind() == Some(ModalKind::FleetSetup) {
+                return;
+            }
+            let _ = app.next_draft_gen();
+            let view = match member_id {
+                Some(member_id) => crate::tui::views::fleet_setup::FleetSetupView::new_for_role(
+                    app, config, member_id,
+                ),
+                None => crate::tui::views::fleet_setup::FleetSetupView::new(app, config),
+            };
+            app.view_stack.push(view);
+        }
+        Err(message) => {
+            app.set_sticky_status(message, StatusToastLevel::Error, None);
+        }
+    }
+}
+
 pub(crate) struct ProviderFallbackRollback {
     identity: ProviderIdentity,
     chain: Option<codewhale_config::ProviderChain>,

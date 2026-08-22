@@ -92,6 +92,18 @@ impl FleetDetailView {
     /// Open a saved Fleet by name and scope. The caller (the list view) names
     /// the scope explicitly, so ambiguity is impossible here.
     pub fn open(app: &App, config: &Config, name: &str, scope: FleetScope) -> Option<Self> {
+        Self::open_for_member(app, config, name, scope, None)
+    }
+
+    /// Open the exact named Fleet and, when the request came from a roster
+    /// member, focus that member in the v2 editor.
+    pub(crate) fn open_for_member(
+        app: &App,
+        config: &Config,
+        name: &str,
+        scope: FleetScope,
+        member_id: Option<&str>,
+    ) -> Option<Self> {
         let (fleet, source) = load_fleet_in_scope(name, scope, &app.workspace).ok()?;
         let session_provider = if app.auto_model {
             app.last_effective_provider_identity
@@ -107,7 +119,7 @@ impl FleetDetailView {
         } else {
             app.model.clone()
         };
-        Some(Self::from_parts(
+        let mut view = Self::from_parts(
             fleet,
             scope,
             source,
@@ -115,7 +127,17 @@ impl FleetDetailView {
             config,
             &session_provider,
             &session_model,
-        ))
+        );
+        if let Some(member_id) = member_id.map(str::trim).filter(|id| !id.is_empty())
+            && let Some(index) = view
+                .fleet
+                .members
+                .iter()
+                .position(|member| member.id.eq_ignore_ascii_case(member_id))
+        {
+            view.selected = index + 1;
+        }
+        Some(view)
     }
 
     fn from_parts(
@@ -703,9 +725,19 @@ impl FleetDetailView {
                     Style::default().fg(palette::WHALE_ERROR),
                 )]));
             } else {
+                let role = member.role.trim();
+                let role = if role.is_empty() {
+                    member.id.as_str()
+                } else {
+                    role
+                };
                 lines.push(Line::from(vec![
                     Span::styled(if selected { "» " } else { "  " }, base),
                     Span::styled(member.id.clone(), base),
+                    Span::styled(
+                        format!(" · role {role}"),
+                        Style::default().fg(palette::TEXT_SECONDARY),
+                    ),
                     Span::styled("  ", Style::default()),
                     Span::styled(route, Style::default().fg(palette::TEXT_MUTED)),
                     Span::styled(
@@ -874,6 +906,32 @@ mod tests {
         assert_eq!(view.scope, FleetScope::Workspace);
         assert_eq!(view.source, path);
         assert_eq!(view.row_count(), 2); // operator + scout
+
+        let mut duplicate_roles = sample_fleet("Duplicate Roles");
+        duplicate_roles.members.push(FleetMember {
+            id: "fast-scout".to_string(),
+            role: "scout".to_string(),
+            provider: None,
+            model: None,
+            reasoning: None,
+            instructions: None,
+            requires: Vec::new(),
+        });
+        save_fleet(&duplicate_roles, FleetScope::Workspace, ws.path())
+            .expect("save duplicate-role Fleet");
+        let focused = FleetDetailView::open_for_member(
+            &app,
+            &Config::default(),
+            "Duplicate Roles",
+            FleetScope::Workspace,
+            Some("fast-scout"),
+        )
+        .expect("open focused member");
+        assert_eq!(focused.selected, 2);
+        assert_eq!(
+            focused.selected_member().map(|member| member.id.as_str()),
+            Some("fast-scout")
+        );
 
         // A missing fleet fails to open (the host shows the error receipt).
         app.workspace = ws.path().to_path_buf();

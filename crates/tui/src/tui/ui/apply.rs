@@ -1878,13 +1878,7 @@ pub(crate) async fn apply_command_result(
                 }
             }
             AppAction::OpenFleetSetup => {
-                if app.view_stack.top_kind() != Some(ModalKind::FleetSetup) {
-                    let _ = app.next_draft_gen();
-                    app.view_stack
-                        .push(crate::tui::views::fleet_setup::FleetSetupView::new(
-                            app, config,
-                        ));
-                }
+                open_fleet_setup_target(app, config, None);
             }
             AppAction::OpenHotbarSetup => {
                 if app.view_stack.top_kind() != Some(ModalKind::HotbarSetup) {

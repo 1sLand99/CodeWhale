@@ -1,4 +1,9 @@
-//! `/fleet setup` — a progressive "set up your agent team" flow.
+//! Legacy-profile setup — a progressive "set up your agent team" flow.
+//!
+//! `/fleet setup` routes here only when no named v2 Fleet is selected. When a
+//! v2 Fleet is selected, the host opens that Fleet's exact detail editor so a
+//! save can never appear to update a member while writing an ignored legacy
+//! `.codewhale/agents/*.toml` profile.
 //!
 //! Replaces the old six-column config matrix (#3791). Fleet is presented as an
 //! agent team: the shortest valid path remains role → provider/model →
@@ -45,6 +50,38 @@ use crate::tui::views::{
 };
 
 const PROFILE_DIR: &str = ".codewhale/agents";
+
+/// The only two truthful destinations for `/fleet setup`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum FleetSetupEditTarget {
+    /// No named v2 Fleet is selected, so the legacy profile wizard remains
+    /// the effective roster-authoring surface.
+    LegacyProfiles,
+    /// A named v2 Fleet is selected; edit that exact file and scope.
+    SelectedFleet {
+        name: String,
+        scope: crate::fleet::store::FleetScope,
+    },
+}
+
+/// Resolve setup independently of project-profile trust. A broken explicit
+/// selection fails closed instead of being mistaken for "no Fleet" and
+/// silently opening the legacy profile writer.
+pub(crate) fn resolve_fleet_setup_edit_target(
+    workspace: &Path,
+) -> Result<FleetSetupEditTarget, String> {
+    match crate::fleet::store::resolve_selected_fleet(workspace) {
+        Ok(Some(selected)) => Ok(FleetSetupEditTarget::SelectedFleet {
+            name: selected.name,
+            scope: selected.scope,
+        }),
+        Ok(None) => Ok(FleetSetupEditTarget::LegacyProfiles),
+        Err(_) => Err(
+            "Selected Fleet is missing or unreadable; open /fleet fleets to repair or clear the selection. Legacy profiles were not opened."
+                .to_string(),
+        ),
+    }
+}
 
 /// A selectable choice in a wizard step: a short identifier `label`, a one-line
 /// `summary`, and a longer `description` shown (wrapped) in the detail pane.
@@ -2532,6 +2569,47 @@ mod tests {
                 ),
             ],
         }
+    }
+
+    #[test]
+    fn setup_target_routes_selected_v2_and_fails_closed_for_stale_selection() {
+        let _lock = crate::test_support::lock_test_env();
+        let workspace = tempfile::TempDir::new().expect("workspace");
+        let personal_home = workspace.path().join("personal-home");
+        std::fs::create_dir_all(&personal_home).expect("personal home");
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", &personal_home);
+        assert_eq!(
+            resolve_fleet_setup_edit_target(workspace.path()).expect("no selection"),
+            FleetSetupEditTarget::LegacyProfiles
+        );
+
+        let fleet =
+            crate::fleet::store::FleetFile::new("Launch".to_string(), None).expect("valid Fleet");
+        let fleet_path = crate::fleet::store::save_fleet(
+            &fleet,
+            crate::fleet::store::FleetScope::Workspace,
+            workspace.path(),
+        )
+        .expect("save Fleet");
+        crate::fleet::store::set_selected(
+            "Launch",
+            crate::fleet::store::FleetScope::Workspace,
+            workspace.path(),
+        )
+        .expect("select Fleet");
+
+        assert_eq!(
+            resolve_fleet_setup_edit_target(workspace.path()).expect("selected Fleet"),
+            FleetSetupEditTarget::SelectedFleet {
+                name: "Launch".to_string(),
+                scope: crate::fleet::store::FleetScope::Workspace,
+            }
+        );
+
+        std::fs::remove_file(fleet_path).expect("make selection stale");
+        let error = resolve_fleet_setup_edit_target(workspace.path())
+            .expect_err("a stale selection must not open legacy setup");
+        assert!(error.contains("Legacy profiles were not opened"), "{error}");
     }
 
     fn key(code: KeyCode) -> KeyEvent {

@@ -919,13 +919,13 @@ pub enum ViewEvent {
         reasoning_effort: Option<String>,
         locale: crate::localization::Locale,
     },
-    /// Emitted by the `/fleet` roster view (`s` / Enter) to hand off to the
-    /// setup wizard for authoring or overriding a roster member. The roster
-    /// view itself never writes anything.
+    /// Emitted by the `/fleet` roster view (`s` / Enter) to edit a member.
+    /// The host routes a selected v2 Fleet to its exact editor and uses the
+    /// legacy profile wizard only when no named Fleet is selected.
     FleetRosterOpenSetupRequested {
-        /// Canonical Fleet role carried from the selected roster member so
-        /// setup can continue at model selection without asking twice.
-        role: String,
+        /// Exact Fleet member id; roles are not unique and therefore cannot
+        /// identify which row the operator selected.
+        member_id: String,
     },
     /// Open the live workers tab from the unified Fleet surface.
     FleetRosterOpenWorkersRequested,

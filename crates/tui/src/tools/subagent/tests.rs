@@ -3572,6 +3572,7 @@ fn isolated_fleet_roster_with(
         id: id.to_string(),
         display_name: Some(id.to_string()),
         description: None,
+        requires: Vec::new(),
         profile,
         source: std::path::PathBuf::from("test"),
         origin: crate::fleet::roster::ProfileOrigin::Config,
@@ -3592,42 +3593,126 @@ fn custom_fleet_profile(role: &str) -> codewhale_config::FleetProfile {
 }
 
 #[test]
-fn test_parse_spawn_request_accepts_profile_and_normalizes() {
+fn test_parse_spawn_request_accepts_profile_and_preserves_safe_selector() {
     let input = json!({
         "prompt": "review the diff",
         "profile": "  Reviewer  "
     });
     let parsed = parse_spawn_request(&input).expect("spawn request should parse");
-    assert_eq!(parsed.profile.as_deref(), Some("reviewer"));
+    assert_eq!(parsed.profile.as_deref(), Some("Reviewer"));
     assert!(!parsed.agent_type_explicit);
     assert!(!parsed.model_strength_explicit);
 
     let parsed = parse_spawn_request(&json!({"prompt": "x", "fleet_profile": "Scout"}))
         .expect("fleet_profile alias should parse");
-    assert_eq!(parsed.profile.as_deref(), Some("scout"));
+    assert_eq!(parsed.profile.as_deref(), Some("Scout"));
 
     let parsed = parse_spawn_request(&json!({"prompt": "x", "roster_profile": "BUILDER"}))
         .expect("roster_profile alias should parse");
-    assert_eq!(parsed.profile.as_deref(), Some("builder"));
+    assert_eq!(parsed.profile.as_deref(), Some("BUILDER"));
+
+    let parsed = parse_spawn_request(&json!({
+        "prompt": "x",
+        "profile": "DeepSeek V4 Flash"
+    }))
+    .expect("human model label should parse");
+    assert_eq!(parsed.profile.as_deref(), Some("DeepSeek V4 Flash"));
 }
 
 #[test]
 fn test_parse_spawn_request_rejects_invalid_profile_token() {
-    for bad in [
-        "rev iewer",
-        "rev\"iewer",
-        "rev'iewer",
-        "rev`iewer",
-        "rev=er",
-    ] {
+    for bad in ["reviewer\nscout", "reviewer\tscout"] {
         let err = parse_spawn_request(&json!({"prompt": "x", "profile": bad}))
             .expect_err("invalid profile token should fail");
         assert!(
-            err.to_string()
-                .contains("profile must be a bare roster member id"),
+            err.to_string().contains("control characters"),
             "{bad}: {err}"
         );
     }
+
+    let oversized = "x".repeat(129);
+    let err = parse_spawn_request(&json!({"prompt": "x", "profile": oversized}))
+        .expect_err("oversized selector should fail");
+    assert!(err.to_string().contains("at most 128"), "{err}");
+}
+
+#[tokio::test]
+async fn agent_roster_action_and_spawn_resolve_the_same_member() {
+    let tmp = tempdir().expect("tempdir");
+    let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 1);
+    let mut profile = custom_fleet_profile("scout");
+    profile.provider = Some("deepseek".to_string());
+    profile.model = Some("deepseek-v4-flash".to_string());
+    let roster = std::sync::Arc::new(isolated_fleet_roster_with("flash-scout", profile));
+    let mut runtime = stub_runtime();
+    // No Config snapshot: action=roster and spawn both consume this exact
+    // installed roster rather than independently reloading test disk state.
+    runtime.api_config = None;
+    runtime.fleet_roster = roster.clone();
+    let tool = AgentTool::new(manager, runtime);
+    let result = tool
+        .execute(json!({"action": "roster"}), &ToolContext::new(tmp.path()))
+        .await
+        .expect("roster action");
+    let payload: Value = serde_json::from_str(&result.content).expect("roster JSON");
+    assert_eq!(payload["count"], json!(1));
+    assert_eq!(payload["total_count"], json!(1));
+    assert_eq!(payload["truncated"], json!(false));
+    assert_eq!(payload["members"][0]["member_id"], "flash-scout");
+    assert_eq!(payload["members"][0]["model_name"], "DeepSeek V4 Flash");
+
+    let mut request = parse_spawn_request(&json!({
+        "prompt": "inspect",
+        "profile": "DeepSeek V4 Flash"
+    }))
+    .expect("human selector parses");
+    let resolved = apply_spawn_profile(&mut request, &roster)
+        .expect("same roster resolves")
+        .expect("member");
+    assert_eq!(resolved.id, "flash-scout");
+    assert_eq!(request.profile.as_deref(), Some("flash-scout"));
+}
+
+#[tokio::test]
+async fn agent_roster_action_redacts_selected_fleet_load_details() {
+    let tmp = tempdir().expect("tempdir");
+    let fleets = tmp.path().join(".codewhale/fleets");
+    std::fs::create_dir_all(&fleets).expect("fleet dir");
+    std::fs::write(fleets.join("selected"), "Broken\n").expect("selection");
+    let secret_marker = "sk-live-abcdef0123456789abcdef";
+    std::fs::write(
+        fleets.join("broken.toml"),
+        format!("not valid TOML /Users/operator/private {secret_marker}\n"),
+    )
+    .expect("broken Fleet");
+
+    let roster = crate::fleet::identity::load_effective_roster(
+        &codewhale_config::FleetConfigToml::default(),
+        tmp.path(),
+        None,
+    );
+    let mut runtime = stub_runtime();
+    runtime.api_config = None;
+    runtime.fleet_roster = std::sync::Arc::new(roster);
+    let tool = AgentTool::new(
+        new_shared_subagent_manager(tmp.path().to_path_buf(), 1),
+        runtime,
+    );
+    let message = tool
+        .execute(json!({"action": "roster"}), &ToolContext::new(tmp.path()))
+        .await
+        .expect_err("invalid selected Fleet must fail visibly")
+        .to_string();
+
+    assert!(
+        message.contains("Selected folder Fleet `Broken`"),
+        "{message}"
+    );
+    assert!(!message.contains(&tmp.path().display().to_string()));
+    assert!(!message.contains("/Users/operator"));
+    assert!(!message.contains(secret_marker));
+    assert!(!message.contains("not valid TOML"));
+    assert!(message.chars().count() <= 300, "{message}");
 }
 
 #[test]
@@ -3653,6 +3738,28 @@ fn test_apply_spawn_profile_unknown_lists_available_members() {
     ] {
         assert!(message.contains(member), "missing {member}: {message}");
     }
+}
+
+#[test]
+fn test_apply_spawn_profile_unknown_bounds_available_members() {
+    let members = (0..(crate::fleet::identity::MAX_ROSTER_DISCOVERY_MEMBERS + 6))
+        .map(|index| {
+            let mut member = member_pinning_provider("deepseek", "deepseek-v4-flash");
+            member.id = format!("member-{index}-{}", "x".repeat(220));
+            member
+        })
+        .collect();
+    let roster = FleetRoster::from_members(members);
+    let mut request =
+        parse_spawn_request(&json!({"prompt": "x", "profile": "missing"})).expect("parse");
+    let message = apply_spawn_profile(&mut request, &roster)
+        .expect_err("unknown profile should fail")
+        .to_string();
+
+    assert!(message.contains("Showing the first 64 of 70"), "{message}");
+    assert!(message.contains("member-63-"), "{message}");
+    assert!(!message.contains("member-64-"), "{message}");
+    assert!(message.chars().count() <= 12_000, "{}", message.len());
 }
 
 #[test]
@@ -5158,6 +5265,7 @@ fn agent_tool_schema_advertises_lifecycle_and_coordination_actions() {
     let agent_schema = AgentTool::new(manager, stub_runtime()).input_schema();
 
     let action = schema_property_description(&agent_schema, "action");
+    assert!(action.contains("roster"));
     assert!(action.contains("status"));
     assert!(action.contains("peek"));
     assert!(action.contains("message"));
@@ -5207,7 +5315,7 @@ fn agent_tool_schema_bounds_fields_by_explicit_action() {
             ])
         );
     }
-    for action in ["status", "wait"] {
+    for action in ["roster", "status", "wait"] {
         assert!(branch(action).get("required").is_none());
         assert!(branch(action).get("anyOf").is_none());
     }
@@ -5266,6 +5374,10 @@ fn agent_tool_schema_rejects_empty_input_across_provider_forms() {
         assert!(
             validator.is_valid(&json!({"action": "status"})),
             "{provider} agent schema must retain unscoped status"
+        );
+        assert!(
+            validator.is_valid(&json!({"action": "roster"})),
+            "{provider} agent schema must retain read-only roster discovery"
         );
         assert!(
             validator.is_valid(&json!({"action": "start", "prompt": "inspect this"})),
@@ -11448,13 +11560,17 @@ fn write_capable_or_unproven_starts_keep_the_approval_gate() {
             "{input} must keep the approval gate"
         );
     }
-    // Non-start actions are untouched: cancel stays gated, status stays free.
+    // Non-start actions are untouched: cancel stays gated; roster/status stay free.
     assert_eq!(
         tool.approval_requirement_for(&json!({"action": "cancel", "agent_id": "a"})),
         ApprovalRequirement::Required
     );
     assert_eq!(
         tool.approval_requirement_for(&json!({"action": "status"})),
+        ApprovalRequirement::Auto
+    );
+    assert_eq!(
+        tool.approval_requirement_for(&json!({"action": "roster"})),
         ApprovalRequirement::Auto
     );
 }
@@ -12452,11 +12568,64 @@ fn member_pinning_provider(provider: &str, model: &str) -> crate::fleet::profile
         id: format!("{provider}-worker"),
         display_name: Some(format!("{provider} worker")),
         description: None,
+        requires: Vec::new(),
         profile,
         source: std::path::PathBuf::from(format!("{provider}-worker.toml")),
         origin: crate::fleet::roster::ProfileOrigin::Workspace,
         plugin_authority: None,
     }
+}
+
+#[test]
+fn vision_requirement_accepts_only_the_exact_supported_route() {
+    let mut member = member_pinning_provider("deepseek", "deepseek-v4-flash-vision-exp");
+    member.requires = vec!["vision".to_string()];
+
+    enforce_fleet_member_route_requirements(
+        Some(&member),
+        &stub_runtime(),
+        "deepseek-v4-flash-vision-exp",
+    )
+    .expect("official DeepSeek vision route has exact image_input support");
+}
+
+#[test]
+fn vision_requirement_rejects_known_text_only_route_without_rerouting() {
+    let mut member = member_pinning_provider("deepseek", "deepseek-v4-pro");
+    member.requires = vec!["vision".to_string()];
+
+    let error =
+        enforce_fleet_member_route_requirements(Some(&member), &stub_runtime(), "deepseek-v4-pro")
+            .expect_err("known text-only route must fail capability admission");
+    let message = error.to_string();
+    assert!(message.contains("requires vision"), "{message}");
+    assert!(message.contains("image_input=unsupported"), "{message}");
+    assert!(message.contains("will not reroute"), "{message}");
+}
+
+#[test]
+fn vision_requirement_rejects_same_name_custom_proxy_as_unknown() {
+    let config = crate::config::Config {
+        api_key: Some("test-key".to_string()),
+        base_url: Some("https://deepseek-proxy.example.test/v1".to_string()),
+        default_text_model: Some("deepseek-v4-flash-vision-exp".to_string()),
+        ..crate::config::Config::default()
+    };
+    let client = DeepSeekClient::new(&config).expect("proxy test client");
+    let mut runtime = stub_runtime().with_api_config(config);
+    runtime.client = client;
+    let mut member = member_pinning_provider("deepseek", "deepseek-v4-flash-vision-exp");
+    member.requires = vec!["vision".to_string()];
+
+    let error = enforce_fleet_member_route_requirements(
+        Some(&member),
+        &runtime,
+        "deepseek-v4-flash-vision-exp",
+    )
+    .expect_err("same-name custom proxy has no verified image_input fact");
+    let message = error.to_string();
+    assert!(message.contains("image_input=unknown"), "{message}");
+    assert!(message.contains("will not reroute"), "{message}");
 }
 
 #[test]

@@ -2823,6 +2823,17 @@ pub struct Config {
     /// from a user override during an in-session provider switch.
     #[serde(skip)]
     pub(crate) reasoning_effort_inferred_from_legacy_alias: bool,
+    /// Runtime-only receipt that a fresh launch adopted the selected Fleet's
+    /// operator provider/model pair. App initialization uses it to prevent
+    /// generic remembered `/model` preferences from replacing that selected
+    /// Fleet route later in the same launch.
+    #[serde(skip)]
+    pub(crate) fleet_operator_route_applied: bool,
+    /// Runtime-only receipt that the selected Fleet also supplied a reasoning
+    /// tier. Kept separate because an operator with no tier deliberately
+    /// inherits the ordinary session/settings reasoning preference.
+    #[serde(skip)]
+    pub(crate) fleet_operator_reasoning_applied: bool,
     /// Original first-party DeepSeek alias captured before model normalization.
     /// This runtime-only receipt lets diagnostics explain why the resolved
     /// model changed without persisting compatibility state back to config.
@@ -10044,6 +10055,10 @@ fn merge_config(base: Config, override_cfg: Config) -> Config {
         reasoning_effort_inferred_from_legacy_alias: override_cfg
             .reasoning_effort_inferred_from_legacy_alias
             || base.reasoning_effort_inferred_from_legacy_alias,
+        fleet_operator_route_applied: override_cfg.fleet_operator_route_applied
+            || base.fleet_operator_route_applied,
+        fleet_operator_reasoning_applied: override_cfg.fleet_operator_reasoning_applied
+            || base.fleet_operator_reasoning_applied,
         migrated_legacy_ollama_cloud_route: override_cfg.migrated_legacy_ollama_cloud_route
             || base.migrated_legacy_ollama_cloud_route,
         migrated_deepseek_model_alias: override_cfg

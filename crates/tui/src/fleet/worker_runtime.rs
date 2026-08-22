@@ -1560,6 +1560,7 @@ mod tests {
             id: id.to_string(),
             display_name: Some(format!("{role} profile")),
             description: Some(format!("{role} description")),
+            requires: Vec::new(),
             profile: codewhale_config::FleetProfile {
                 slot: codewhale_config::FleetSlot::from_name(role),
                 role: codewhale_config::FleetRole {

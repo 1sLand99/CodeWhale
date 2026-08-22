@@ -258,10 +258,10 @@ pub(crate) fn build_engine_config(app: &App, config: &Config) -> EngineConfig {
             .map(crate::config::LspConfigToml::into_runtime),
         runtime_services: app.runtime_services.clone(),
         subagent_model_overrides: config.subagent_model_overrides(),
-        fleet_roster: std::sync::Arc::new(crate::fleet::roster::FleetRoster::load_with_plugins(
+        fleet_roster: std::sync::Arc::new(crate::fleet::identity::load_effective_roster(
             &config.fleet_config(),
             &app.workspace,
-            app.plugin_registry.as_ref(),
+            Some(app.plugin_registry.as_ref()),
         )),
         subagent_api_timeout: Duration::from_secs(
             config.subagent_api_timeout_secs_for_provider(provider),

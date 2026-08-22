@@ -636,7 +636,7 @@ mod tests {
 
         // The selection really persisted, at the personal scope. The
         // SelectedFleet path is the fleet file the marker names.
-        let sel = selected_fleet(ws.path()).expect("selection");
+        let sel = crate::fleet::store::selected_fleet(ws.path()).expect("selection");
         assert_eq!(sel.name, "DeepSeek Flash");
         assert_eq!(sel.scope, FleetScope::Personal);
         assert!(
@@ -718,7 +718,7 @@ mod tests {
         };
         assert!(message.contains("Folder Fleet"), "{message}");
         assert!(message.contains("folder"), "{message}");
-        let sel = selected_fleet(ws.path()).expect("selection");
+        let sel = crate::fleet::store::selected_fleet(ws.path()).expect("selection");
         assert_eq!(sel.name, "Folder Fleet");
         assert_eq!(sel.scope, FleetScope::Workspace);
 
@@ -818,7 +818,8 @@ provider = "deepseek"
             entries.iter().any(|e| e.name == "Default" && !e.legacy),
             "{entries:?}"
         );
-        let sel = selected_fleet(ws.path()).expect("selection after migration");
+        let sel =
+            crate::fleet::store::selected_fleet(ws.path()).expect("selection after migration");
         assert_eq!(sel.name, "Default");
 
         // SAFETY: serialised by lock_test_env.

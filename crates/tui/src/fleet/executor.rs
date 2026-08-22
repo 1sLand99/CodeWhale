@@ -821,6 +821,7 @@ mod tests {
             id: id.to_string(),
             display_name: Some(format!("{role} profile")),
             description: Some(format!("{role} description")),
+            requires: Vec::new(),
             profile: FleetProfile {
                 slot: FleetSlot::from_name(role),
                 role: FleetRole {

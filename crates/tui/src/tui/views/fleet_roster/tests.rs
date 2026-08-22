@@ -45,6 +45,7 @@ fn view_with_overrides() -> FleetRosterView {
         members,
         shadowed: Vec::new(),
         selected_fleet: None,
+        load_error: None,
         selected: 0,
         detail_scroll: 0,
         locale: Locale::En,
@@ -166,11 +167,12 @@ fn enter_and_s_open_the_setup_wizard_for_members_only() {
         // Member row: hands off to the setup wizard.
         view.handle_key(key(KeyCode::Down));
         let action = view.handle_key(key(code));
-        let ViewAction::EmitAndClose(ViewEvent::FleetRosterOpenSetupRequested { role }) = action
+        let ViewAction::EmitAndClose(ViewEvent::FleetRosterOpenSetupRequested { member_id }) =
+            action
         else {
             panic!("{code:?} should hand off to the setup wizard");
         };
-        assert_eq!(role, "manager");
+        assert_eq!(member_id, "manager");
     }
 }
 
