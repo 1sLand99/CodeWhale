@@ -1297,10 +1297,10 @@ pub(super) fn apply_workflow_ui_event(app: &mut App, run_id: &str, event: &serde
             serde_json::Value::String(run_id.to_string()),
         );
     }
-    if let Some(panel_event) = WorkflowPanelEvent::from_json_value(&event) {
-        if !app.apply_workflow_panel_event(run_id, panel_event) {
-            return;
-        }
+    if let Some(panel_event) = WorkflowPanelEvent::from_json_value(&event)
+        && !app.apply_workflow_panel_event(run_id, panel_event)
+    {
+        return;
     }
     sync_workflow_history_card_from_panel(app);
 }

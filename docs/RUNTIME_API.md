@@ -365,9 +365,10 @@ exact local web origin, and Fetch Metadata identifying a cross-origin cookie
 request is rejected. Explicit bearer and Runtime-token header clients keep
 their existing behavior.
 
-The v0.9.1 client provides a responsive thread/search rail, Runtime-owned
+The embedded client provides a responsive thread/search rail, Runtime-owned
 session facts, transcript and tool receipts, and a bottom composer. It can
-create, select, rename, and archive threads; start or steer turns; interrupt
+create, select, rename, and archive threads; choose a provider and model for a
+new thread without changing Runtime defaults; start or steer turns; interrupt
 work; resolve approvals; and answer Runtime user-input requests. Selection
 loads `GET /v1/threads/{id}` first, then opens the replayable event stream with
 `since_seq=latest_seq`; reconnection advances from the newest accepted sequence
@@ -379,10 +380,11 @@ subscribing so a reload cannot strand work whose request event is at or before
 `user_input.answered`, `user_input.canceled`, `tool_call.resolved`,
 `tool_call.canceled`, or `tool_call.timeout` for already-connected clients.
 
-Model, mode, permission posture, workspace, and branch are display-only in this
-client. Files/Changes, PTY/terminal, preview, artifacts, provider login/model
-selection, Fleet creation, and undo/retry/restore controls are intentionally
-absent until the Runtime publishes explicit contracts for them.
+An existing thread's model, mode, permission posture, workspace, and branch are
+display-only in this client. Files/Changes, PTY/terminal, preview, artifacts,
+provider login or global-default switching, Fleet creation, and
+undo/retry/restore controls are intentionally absent until the Runtime publishes
+explicit contracts for them.
 
 ### Mobile control page
 
@@ -700,6 +702,7 @@ client probed `/v1/models`, `/v1/runtime/models`, and `/v1/runtime/providers`
   "providers": [
     {
       "id": "modelstudio-token-plan",
+      "model_provider_id": "modelstudio-token-plan",
       "display_name": "Alibaba Cloud Model Studio",
       "default_base_url": "https://…/compatible-mode/v1",
       "default_model": "qwen3.8-max",
@@ -710,29 +713,64 @@ client probed `/v1/models`, `/v1/runtime/models`, and `/v1/runtime/providers`
 }
 ```
 
-`current` is the active provider id. Treat `default_base_url` and `env_vars` as
-runtime-local detail: they are endpoint and credential *names*, and a browser
-layer has no use for either. Project only `id`, `display_name`,
-`default_model`, and `has_model_catalog` across a UI bridge.
+`current` is the active generic provider id. Only the active entry carries an
+exact identity: an active built-in normally repeats its canonical id in
+`model_provider_id`, while an active named custom route has `current` set to
+`custom` and the exact configured key there (for example `lm-studio`). Other
+entries have a null exact id; a null id on the active `custom` entry identifies
+the released legacy root-level custom route. Preserve both fields from the
+selected entry and send a non-null exact id back as `POST /v1/threads`'s
+`model_provider_id`; dropping a named custom id would collapse the selection to
+the legacy root custom route. Treat
+`default_base_url` and `env_vars` as runtime-local detail: they are an endpoint
+and credential *names*, and a browser layer has no use for either. A UI bridge
+should project `id`, `model_provider_id`, `display_name`, `default_model`, and
+`has_model_catalog`.
 
 There is deliberately no credential-presence field yet — this route reports what
-the runtime can *represent*, not what it can currently serve. A client that
-needs "is this route usable here" can call the models route below and treat an
-empty list as unusable, at the cost of one request per provider.
+the runtime can *represent*, not what it can currently serve. The models route
+below is also a selection catalog, not a credential-readiness probe: a non-empty
+list does not prove that the route can currently serve a request.
 
 ### `GET /v1/providers/{id}/models`
 
 ```json
-{ "provider": "modelstudio-token-plan", "models": [{ "id": "qwen3.8-max" }] }
+{
+  "provider": "deepseek",
+  "models": [
+    {
+      "id": "deepseek-v4-flash-vision-exp",
+      "image_input": "supported"
+    }
+  ]
+}
 ```
 
 The catalog for one provider. Returns `400` for an unknown id, and for the
 legacy `deepseek-cn` alias, which has no provider metadata — use `deepseek`.
-An empty `models` array means the provider is not configured on this machine
-(no credential), not that the provider has no models.
+An empty `models` array means the Runtime has no discoverable or configured
+model ids for that provider; it does not report credential presence.
 
 The ids returned here are exactly the values accepted by `POST /v1/threads`'s
-`model` field and by the switch route below.
+`model` field and by the switch route below. `image_input` is the exact resolved
+provider/model route's capability state: `supported`, `unsupported`, or
+`unknown`. Keep `unknown` unknown rather than inferring from the model name or
+wire protocol. `supported` describes the model route; it does not mean a given
+client implements an image-upload control.
+
+For a thread-scoped choice, send the provider fields from the selected entry
+alongside the selected model. Omit `model_provider_id` when it is null:
+
+```json
+{
+  "model_provider": "custom",
+  "model_provider_id": "lm-studio",
+  "model": "local-vision-model"
+}
+```
+
+This creates one thread on the exact named custom route without changing the
+Runtime's provider or model defaults.
 
 ### `POST /v1/providers/{id}/switch`
 
@@ -755,8 +793,9 @@ Rejects an unknown provider id and the `deepseek-cn` alias with `400`.
 
 The runtime uses a durable Thread/Turn/Item lifecycle.
 
-- **ThreadRecord** — `id`, `created_at`, `updated_at`, `model`, `workspace`,
-  `mode`, `task_id`, `system_prompt`, `latest_turn_id`,
+- **ThreadRecord** — `id`, `created_at`, `updated_at`, `model`,
+  `model_provider` (generic kind), `model_provider_id` (optional exact configured
+  route), `workspace`, `mode`, `task_id`, `system_prompt`, `latest_turn_id`,
   `latest_response_bookmark`, `archived`
 - **TurnRecord** — `id`, `thread_id`, `status` (`queued|in_progress|completed|
   failed|interrupted|canceled`), `effective_provider`, `effective_model`,

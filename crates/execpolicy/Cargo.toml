@@ -12,5 +12,5 @@ workspace = true
 
 [dependencies]
 anyhow.workspace = true
-codewhale-protocol = { path = "../protocol", version = "0.9.10" }
+codewhale-protocol = { path = "../protocol", version = "0.9.11" }
 serde.workspace = true

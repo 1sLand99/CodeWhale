@@ -592,7 +592,7 @@
   "KbFocusSidebar": "Tasks / Agents / Context / Pinned レールパネルにフォーカス",
   "KbSessionPicker": "セッションピッカーを開く",
   "KbUpdateInstall": "最新のCodeWhaleアップデートを確認してインストールする（`/update install`）",
-  "UpdateChangedHint": "CodeWhale が更新されました: {previous} → {current}。別のモデルやバージョンを選ぶには /change を実行してください。",
+  "UpdateChangedHint": "CodeWhale が更新されました: {previous} → {current}。/change を実行して更新内容を確認してください。",
   "KbTerminalPaste": "ローカル端末を使ってテキストを貼り付け",
   "KbPasteAttach": "ローカルまたは転送されたグラフィカルクリップボードからテキストを貼り付けるか画像を添付",
   "KbCopySelection": "Codewhale の現在の選択をコピー",

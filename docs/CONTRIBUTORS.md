@@ -53,6 +53,12 @@ notes, and relevant issue/PR comments.
   lane, so the PR is recorded here as reviewed project work rather than counted
   as a second merged contribution.
 
+**Reports and reproductions**
+
+- **[RepentStar](https://github.com/RepentStar)** — reported the stale shell-
+  completion generator and missing `codew` registration that led to the
+  completion fixes and upgrade guidance in #5526.
+
 </details>
 
 <details>

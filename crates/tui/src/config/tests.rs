@@ -5952,6 +5952,21 @@ fn normalize_model_name_preserves_v_series_snapshots() {
         normalize_model_name("flash").as_deref(),
         Some("deepseek-v4-flash")
     );
+    for alias in ["flash-vision", "deepseek-v4flashvisionexp"] {
+        assert_eq!(
+            canonical_model_name(alias),
+            Some("deepseek-v4-flash-vision-exp")
+        );
+        assert_eq!(
+            normalize_model_name(alias).as_deref(),
+            Some("deepseek-v4-flash-vision-exp")
+        );
+        assert_eq!(
+            normalize_model_name_for_provider(ApiProvider::Deepseek, alias).as_deref(),
+            Some("deepseek-v4-flash-vision-exp")
+        );
+        assert!(validate_route(ApiProvider::Deepseek, alias).is_ok());
+    }
     // v-series dated snapshots pass through unchanged
     assert_eq!(
         normalize_model_name("deepseek-v4-flash-20260423").as_deref(),

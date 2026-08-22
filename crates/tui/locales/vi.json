@@ -592,7 +592,7 @@
   "KbFocusSidebar": "Focus vào bảng thanh ray Tasks / Agents / Context / Pinned",
   "KbSessionPicker": "Mở bảng chọn phiên làm việc",
   "KbUpdateInstall": "Kiểm tra và cài đặt bản cập nhật CodeWhale mới nhất (`/update install`)",
-  "UpdateChangedHint": "CodeWhale đã được cập nhật: {previous} → {current}. Chạy /change để chọn mô hình hoặc phiên bản khác.",
+  "UpdateChangedHint": "CodeWhale đã được cập nhật: {previous} → {current}. Chạy /change để xem nội dung mới.",
   "KbTerminalPaste": "Dán văn bản bằng terminal cục bộ",
   "KbPasteAttach": "Dán văn bản hoặc đính kèm ảnh từ bộ nhớ tạm đồ họa cục bộ hoặc được chuyển tiếp",
   "KbCopySelection": "Sao chép vùng chọn Codewhale hiện tại",

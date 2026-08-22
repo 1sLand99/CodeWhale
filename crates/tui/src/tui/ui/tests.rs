@@ -177,6 +177,109 @@ fn frame_cursor_is_hidden_during_diff_then_positioned_before_reveal() {
 }
 
 #[test]
+fn composer_rows_stay_pinned_across_turn_state_transitions() {
+    // The two bands bracketing the composer are reserved in every frame:
+    // activity above, identity below. Sending a prompt must not relocate
+    // the route identity, displace the composer, or duplicate the route
+    // into the activity row.
+    fn frame_app() -> App {
+        let mut app = crate::test_support::test_app_with_options(crate::tui::app::TuiOptions {
+            model: "deepseek-v4-flash".to_string(),
+            start_in_agent_mode: true,
+            ..crate::test_support::test_tui_options(PathBuf::from("."))
+        });
+        app.onboarding = crate::tui::app::OnboardingState::None;
+        app.launch.visible = false;
+        app.ui_locale = crate::localization::Locale::En;
+        app
+    }
+
+    fn draw(app: &mut App, width: u16, height: u16) -> Vec<String> {
+        let config = Config::default();
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| {
+                let _ = super::frame::render(frame, app, &config);
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        (0..height)
+            .map(|y| (0..width).map(|x| buf[(x, y)].symbol()).collect::<String>())
+            .collect()
+    }
+
+    for (width, height) in [(100u16, 30u16), (60, 24), (140, 45)] {
+        let mut idle = frame_app();
+        let idle_rows = draw(&mut idle, width, height);
+        let composer = idle
+            .viewport
+            .last_composer_area
+            .expect("idle frame records the composer area");
+
+        // The identity row is the screen's bottom row and owns the route.
+        // Its route prefix (everything through the model name) is the part
+        // that must never move; right-aligned key hints may differ by phase.
+        let (_, model) = idle.effective_route_identity_display();
+        let route_prefix = |row: &str| -> String {
+            let end = row
+                .find(model.as_str())
+                .map(|start| start + model.len())
+                .unwrap_or(0);
+            row[..end].to_string()
+        };
+        let identity_row = idle_rows.last().expect("identity row");
+        let identity_route = route_prefix(identity_row);
+        assert!(
+            !identity_route.is_empty(),
+            "{width}x{height} idle identity row lost the route {model:?}: {identity_row:?}"
+        );
+
+        // A live turn: the composer keeps its exact rows, the identity row
+        // keeps the route, and the activity row above the composer carries
+        // the phase verb without duplicating the route.
+        let mut working = frame_app();
+        working.is_loading = true;
+        working.turn_started_at = Some(std::time::Instant::now());
+        let working_rows = draw(&mut working, width, height);
+        assert_eq!(
+            working.viewport.last_composer_area,
+            Some(composer),
+            "{width}x{height}: sending a prompt displaced the composer"
+        );
+        let working_identity = working_rows.last().expect("identity row");
+        assert_eq!(
+            route_prefix(working_identity),
+            identity_route,
+            "{width}x{height}: sending a prompt rewrote the identity row"
+        );
+        let activity_row = &working_rows[usize::from(composer.y.saturating_sub(1))];
+        assert!(
+            !activity_row.contains(model.as_str()),
+            "{width}x{height} activity row duplicated the route: {activity_row:?}"
+        );
+        assert!(
+            !activity_row.contains("DeepSeek"),
+            "{width}x{height} activity row duplicated the provider: {activity_row:?}"
+        );
+
+        // A settled turn keeps the same geometry.
+        let mut done = frame_app();
+        done.runtime_turn_status = Some("completed".to_string());
+        let done_rows = draw(&mut done, width, height);
+        assert_eq!(
+            done.viewport.last_composer_area,
+            Some(composer),
+            "{width}x{height}: completion displaced the composer"
+        );
+        assert_eq!(
+            route_prefix(done_rows.last().expect("identity row")),
+            identity_route,
+            "{width}x{height}: completion rewrote the identity row"
+        );
+    }
+}
+
+#[test]
 fn cjk_composer_cursor_and_mouse_geometry_agree_in_compact_and_wide_frames() {
     for (width, height) in [(40, 12), (140, 40)] {
         let mut app = create_test_app();
@@ -22631,8 +22734,10 @@ mod work_surface {
         }
 
         // At and above the threshold the rows are genuinely spare, so the rail
-        // takes its full auto-fit height over an intact 16-row ocean.
-        for rows in [28_u16, 29, 30, 32] {
+        // takes its full auto-fit height over an intact 16-row ocean. The
+        // two standing bands bracketing the composer cost one more row than
+        // the single legacy strip did, so the threshold sits one row higher.
+        for rows in [29_u16, 30, 32] {
             let mut app = busy_rail_app(panel);
             let strip = strip_height(&mut app, 80, rows);
             assert_eq!(

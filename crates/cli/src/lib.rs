@@ -4270,6 +4270,16 @@ fn provider_source_label(source: ProviderSource) -> String {
     }
 }
 
+fn canonical_model_for_set(model: &str) -> &str {
+    match model.to_ascii_lowercase().as_str() {
+        "pro" | "deepseek-v4pro" => "deepseek-v4-pro",
+        "flash" | "deepseek-v4flash" => "deepseek-v4-flash",
+        "flash-vision" | "deepseek-v4flashvisionexp" => "deepseek-v4-flash-vision-exp",
+        "auto" => "auto",
+        _ => model,
+    }
+}
+
 fn run_model_command(
     store: &mut ConfigStore,
     command: ModelCommand,
@@ -4368,12 +4378,7 @@ fn run_model_command(
             if trimmed.is_empty() {
                 bail!("Model name cannot be empty");
             }
-            let canonical = match trimmed.to_ascii_lowercase().as_str() {
-                "pro" | "deepseek-v4pro" => "deepseek-v4-pro",
-                "flash" | "deepseek-v4flash" => "deepseek-v4-flash",
-                "auto" => "auto",
-                _ => trimmed,
-            };
+            let canonical = canonical_model_for_set(trimmed);
             store.config.default_text_model = Some(canonical.to_string());
             store.save()?;
             println!("Default model set to '{canonical}'");
@@ -5372,6 +5377,20 @@ mod tests {
                 command: ModelCommand::List { provider: None }
             }))
         ));
+    }
+
+    #[test]
+    fn model_set_canonicalizes_deepseek_vision_aliases() {
+        for alias in ["flash-vision", "deepseek-v4flashvisionexp"] {
+            assert_eq!(
+                canonical_model_for_set(alias),
+                "deepseek-v4-flash-vision-exp"
+            );
+        }
+        assert_eq!(
+            canonical_model_for_set("deepseek-v4-flash-vision-exp"),
+            "deepseek-v4-flash-vision-exp"
+        );
     }
 
     #[test]

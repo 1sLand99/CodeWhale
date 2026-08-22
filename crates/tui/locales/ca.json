@@ -575,7 +575,7 @@
   "KbFocusSidebar": "Enfoca el panell del rail Tasks / Agents / Context / Pinned",
   "KbSessionPicker": "Obre el selector de sessions",
   "KbUpdateInstall": "Comprova i instal·la l'última actualització de CodeWhale (`/update install`)",
-  "UpdateChangedHint": "CodeWhale s'ha actualitzat: {previous} → {current}. Executa /change per triar un altre model o versió.",
+  "UpdateChangedHint": "CodeWhale s'ha actualitzat: {previous} → {current}. Executa /change per veure les novetats.",
   "KbTerminalPaste": "Enganxa text amb el teu terminal local",
   "KbPasteAttach": "Enganxa text o adjunta una imatge des d'un porta-retalls gràfic local o reenviat",
   "KbCopySelection": "Copia la selecció actual de Codewhale",

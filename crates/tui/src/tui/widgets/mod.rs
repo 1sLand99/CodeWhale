@@ -6710,18 +6710,23 @@ mod tests {
         let mut header = Buffer::empty(header_area);
         crate::tui::underwater::render_header(header_area, &mut header, &app);
 
-        // Footer while working carries the braille state marker.
+        // Activity band while working carries the braille state marker;
+        // the identity band below the composer carries the route.
         app.is_loading = true;
-        let footer_area = Rect::new(0, 0, 100, 1);
-        let mut footer = Buffer::empty(footer_area);
-        crate::tui::underwater::render_footer(footer_area, &mut footer, &mut app);
+        let activity_area = Rect::new(0, 0, 100, 1);
+        let mut activity = Buffer::empty(activity_area);
+        crate::tui::phase_strip::render_activity(activity_area, &mut activity, &mut app);
+        let identity_area = Rect::new(0, 0, 100, 1);
+        let mut identity = Buffer::empty(identity_area);
+        crate::tui::phase_strip::render_identity(identity_area, &mut identity, &mut app);
         app.is_loading = false;
 
         for (surface, buf, rect) in [
             ("idle transcript", &transcript, transcript_area),
             ("launch", &launch, launch_area),
             ("header", &header, header_area),
-            ("footer", &footer, footer_area),
+            ("activity band", &activity, activity_area),
+            ("identity band", &identity, identity_area),
         ] {
             for y in rect.y..rect.bottom() {
                 for x in rect.x..rect.right() {

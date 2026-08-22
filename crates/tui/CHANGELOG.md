@@ -7,6 +7,102 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.11] - 2026-08-21
+
+Codewhale v0.9.11 tightens the long-running agent loop, makes workflow
+failures visible instead of successful-looking, adds an experimental
+vision-capable DeepSeek route, and prepares reproducible Codewhale-versus-Pi
+evaluation without publishing a result before a real run. The complete
+item-level change record is retained below the categorized release highlights.
+
+### Added
+
+- Added first-party `deepseek-v4-flash-vision-exp` discovery and selection for
+  DeepSeek, including the `flash-vision` alias, bundled offline metadata,
+  registry and picker entries, and image-input capability on the chat route.
+  Context and output limits inherit from V4 Flash until DeepSeek publishes
+  distinct values; pricing remains unknown rather than guessed.
+- Added a provider-controlled Codewhale-versus-Pi parity harness with three
+  hermetic coding tasks, route and reasoning-effort receipts, doctor/dry-run
+  modes, and bounded result artifacts. The repository ships the harness, not a
+  benchmark verdict; comparable real runs remain an acceptance gate.
+- Added portable, secret-free config export/import with a reviewable plan,
+  explicit headless consent, backup and rollback, and idempotent re-import.
+- Added bounded multi-file diagnostics through the existing model-facing `lsp`
+  tool without increasing the tool-catalog count. Thanks to **Isabel Wu
+  ([@wuisabel-gif](https://github.com/wuisabel-gif))** for PR #5524.
+- Added portable presentation, media-attachment, and operation-digest facets to
+  the command contract, then moved all seven utility handlers onto the
+  contract-backed dispatch path. Thanks to **Paulo Aboim Pinto
+  ([@aboimpinto](https://github.com/aboimpinto))** for PR #5525.
+
+### Changed
+
+- Sub-agent, Fleet-worker, workflow-task, and thread-runtime model turns no
+  longer inherit a hidden role-based step ceiling. An omitted or zero
+  `max_steps` is unbounded; a positive user/config value remains an explicit
+  cap and is still clamped to the runtime safety ceiling. Wall-clock, provider,
+  heartbeat, cancellation, and admission safeguards are unchanged.
+- `/rc` now mirrors one shared session rather than transferring terminal
+  ownership: local and web prompts remain available while idle, approvals use
+  first-decision-wins semantics, and transport/integrity failures remain
+  fail-closed.
+- The terminal status rows around the composer are now two stable bands:
+  `provider · model · thinking level` is the persistent identity row below
+  the composer in every phase, and a separate activity row above the
+  composer carries the live phase, notices, and cost/metrics. Sending a
+  prompt no longer relocates the route identity above the composer, and
+  neither row ever duplicates it.
+- The embedded local Web client now uses the current CWC Ocean hierarchy and
+  readable control sizing, follows the shared Enter/Shift+Enter composer
+  grammar, and chooses a provider plus model per new thread without mutating
+  Runtime defaults. Exact image-input capability is labelled honestly; a
+  vision-capable route does not imply that browser attachments exist.
+- The runtime now has one authoritative model-turn loop. The placeholder
+  `crates/core` engine tree is gone, while the active TUI loop and its extracted
+  tool-call stages retain existing policy, hook, cancellation, and budget
+  behavior. Thanks to **Sun Zhenyuan
+  ([@bistack](https://github.com/bistack))** for PR #5523.
+
+### Fixed
+
+- A workflow whose `task()` dispatch was rejected no longer loses that failure
+  inside a `parallel()` null slot or presents a successful-looking run. Rejected
+  dispatches now fail the run, persist as typed bounded receipts with an exact
+  count, and appear in transcript, activity detail, and workflow-panel views.
+- Provider readiness, credential-source explanations, focused-agent scrolling,
+  compact `/status` and `/help` rendering, shell/web output bounds, MCP
+  lifecycle reporting, and narrow-terminal onboarding received the detailed
+  fixes recorded below.
+- Localized READMEs again match the English install and third-party-notice
+  surface, including shell-completion guidance in all 18 translations.
+
+### Security
+
+- Unified OAuth device-code polling now validates verification URLs before
+  opening them, redacts token-bearing types, honors server slowdown intervals,
+  and keeps credential save/logout mutations serialized.
+- Project instructions, rules-directory traversal, secret-shaped config data,
+  URL fingerprints, and shell network authority now retain the explicit bounds
+  and fail-closed behavior described in the detailed record.
+
+### Contributors
+
+- **Sun Zhenyuan ([@bistack](https://github.com/bistack))** — tool-call stage
+  extraction with the existing execution and policy contracts preserved
+  (#5523).
+- **Isabel Wu ([@wuisabel-gif](https://github.com/wuisabel-gif))** — bounded
+  multi-file `read_lints` support (#5524), plus independently reviewed
+  completion-routing overlap in #5530.
+- **Paulo Aboim Pinto ([@aboimpinto](https://github.com/aboimpinto))** — portable
+  presentation/media/digest facets and the seven utility-handler migrations
+  (#5525).
+
+### Detailed change record
+
+The notes below are preserved in full so the categorized highlights do not
+erase behavior, migration, security, compatibility, or verification details.
+
 - Portable config bundles: `codewhale config export --portable` writes a
   deterministic, secret-free bundle (credential and machine-specific keys
   dropped), and `codewhale config import <FILE|URL|->` applies one with a
@@ -4533,135 +4629,6 @@ reproductions shaped v0.9.0:
   `AssistantGenerated` inputs remain guarded (#3817).
 - Approval honesty: labeled session-scoped approvals accurately instead of
   "always", and surfaced approval decisions in tool results (#3766).
-
-## [0.8.65] - 2026-06-24
-
-### Added
-
-- **Provider/model/route resolution (EPIC #2608).** Canonical provider, model,
-  offering, and route types with a single `RouteResolver` that produces a
-  resolved `ReadyRouteCandidate` (endpoint, wire protocol, model id, context
-  limit, price) for every switch (#3458, #3084, #3384). The executing client is
-  now constructed from the resolved candidate rather than re-derived from config
-  (#3384). A committed, network-free Models.dev-shaped catalog gives models real
-  context windows and pricing, with a secret-free live cache (#3497, #3498,
-  #3385). Offering pricing with provenance is projected onto candidates (#3501,
-  #3085), and route limits feed a route-aware context-budget service (#3508,
-  #3523, #3086).
-- **Fleet execution substrate (EPIC #3154).** Fleet profile types and config
-  (#3469), durable manager resume, workspace agent-profile loading resolved into
-  the worker runtime (#3367), loadout intent carried in task specs (#3512), and
-  receipts that persist the resolved route for inspection (#3154, #3166). Worker
-  status is folded into the unified `/fleet` surface and exposed through the
-  Runtime API.
-- **Provider surfaces.** A `/provider` readiness dashboard with reasoning
-  readiness, an experimental/supported maturity marker, and an "open models for
-  this provider" action (#3083, #2984, #3485); cross-provider `/model` search
-  with scroll and provider type-ahead (#3484, #3075); inline `<think>`
-  reasoning-stream routing with per-provider overrides (#3222); usage telemetry
-  normalized into canonical token classes including Responses cache-miss and
-  reasoning tokens (#2961, #3509); and remote MCP OAuth login with bearer/header
-  auth precedence (#3527).
-- **More providers and routes.** User-defined OpenAI-compatible custom providers
-  via `[providers.<name>]` (#1519); a DeepSeek Anthropic-compatible route (#2963,
-  #3449); a Qianfan route (#3425); Zhipu folded into Z.ai with equal-treatment
-  model normalization (#3539); DashScope/Together fixtures.
-- **Localized mode picker and composer indicators.** The `/mode` picker prompt,
-  mode names, and hints, plus the composer's Vim mode indicator, now render in
-  all seven shipped locales (model-facing mode labels stay English). Harvested
-  from #2239 by @gordonlu.
-- **Website and automation.** A runtime/integrations page, provenance and
-  mirror-trust copy, a fact-drift CI gate, a published install script, and a
-  weekly community digest archive on codewhale.net (#3419, #3421, #3415, #3482,
-  #3420); per-automation mode/shell/trust/approval settings (#3467).
-- **Model reference browser.** A read-only `/modeldb` command (aliases
-  `model-reference`, `modelref`) opens a pager over the bundled catalog — every
-  model's factual context window, max output, modality, and price, grouped by
-  provider/kind. Labels only: it never selects, routes, or tiers a model
-  (#3205, #2300).
-- **Transcript presets.** A `/config preset <name> [--save]` mechanism with a
-  first `calm` preset — calm mode, calm tool collapse, comfortable spacing, and
-  low motion — presentation-only and evidence-preserving (#3478).
-- **Model capability profiles.** A typed `model_profile` module separates
-  intrinsic model facts from resolved provider-route capability, so compact
-  routes defer heavier nonessential tools while standard/full routes keep the
-  eager tool surface (#3451, #3365).
-- **Live provider catalog refresh.** A secret-free `/models` live-fetch layer
-  (401/403/404/429 mapped to typed outcomes) feeds the catalog cache; the API
-  key authorizes the request but is never persisted into the delta or cache
-  (#3385).
-
-### Changed
-
-- **Config modularization (#3311).** `ProviderKind` (#3505), harness posture
-  (#3507), and provider default seeds (#3503) moved into dedicated modules, and
-  the `config.rs` monolith split into clean leaf modules (paths, search,
-  model/base-URL constants, sub-agent limits) behind a `pub use` facade.
-  `AppMode` helpers were centralized (#3510), and mode-vs-permission policy is
-  now derived through a single `base_policy_for_mode` resolver instead of
-  scattered mutation (#3386, advisory review-intent behavior preserved).
-- **Leaner tool surface.** Dropped `task_shell_*` from the active set and folded
-  `tool_search_*` (#3463); ablated the in-turn loop_guard and encoded reasoning
-  dispositions (#3462); added the Orchestration disposition to the constitution.
-- **Routing.** Provider/model switches and the capability-aware fallback chain
-  resolve through `RouteResolver`; reasoning effort is normalized for the
-  *resolved* provider; the fallback chain now skips providers that lack auth
-  (#2574); and context window and memory-pressure come from the resolved route
-  (#3086).
-- **UX.** Approval modal gained a group divider and selected-row caret (#3515);
-  picker scroll/type-ahead and selection contrast hardened (#3500); the README
-  was rewritten as an architecture end-cap (#3087); and repo agent guidance was
-  de-hardcoded to live truth.
-- **Fleet identity and defaults.** Fleet workers now enter with an explicit
-  "summoned Fleet member" operating contract, setup/profile prompts keep the
-  default model behavior as same-route inheritance, and generated worker
-  instructions avoid leaking recursive topology that only the orchestrator
-  needs.
-- **Legacy swarm cleanup.** Removed the obsolete `/swarm` core command/menu
-  registration so `/fleet` is the product surface, while `/subagents` remains a
-  compatibility shortcut to worker status.
-- **Running-state animation.** Tool cards and background-task rows now share one
-  faster braille spinner cadence, so Bash/background work reads consistently
-  alive across the transcript and sidebar.
-- **Restored contributor credit.** Threaded machine-readable credit
-  (`docs/CONTRIBUTORS.md` + `.github/AUTHOR_MAP`) for earlier merged work that
-  shipped without it, including the `/jobs cancel-all` action and the npm
-  retry-timeout hint (#1538) by @jieshu666, and the community ACP adapter
-  reference by @rockeverm3m.
-
-### Fixed
-
-- **Release hygiene.** The strict `cargo clippy --workspace --all-targets --locked
-  -- -D warnings` gate passes; `npm run build` no longer dirties the generated
-  web facts; the site sets `metadataBase`; the community digest page parses each
-  record independently and localizes its chrome; and `cargo audit` is clean with
-  the starlark-transitive unmaintained advisories documented.
-- **Routing and mode correctness.** Ordinary prompt text is no longer
-  interpreted as a mode switch (#3387, #3491); model candidates are scoped to the
-  active provider; Together-owned DeepSeek routes are accepted (#3426); insecure
-  `http://` custom endpoints raise an advisory warning (#1519); and the Fleet
-  setup planner's role/model selection now drives the generated profile.
-- **Runtime stability.** MCP connection drops are explicit (#3524), HTTP API
-  calls reuse a shared MCP pool (#3532), and per-agent sub-agent mailbox
-  telemetry is throttled to cut UI lag (#3454).
-- **YOLO background-shell approvals.** A background shell command no longer pops
-  an approval modal in YOLO mode. `classify_risk` marks all shell commands
-  destructive, so the auto-review safety floor held every *background* shell for
-  review, and the `ForcePrompt` site never checked `auto_approve` — only
-  background commands surfaced it, since foreground shells take the
-  `Interactive` origin and skip that branch.
-- **Bash approval modal fit.** The shell approval modal now labels Bash
-  commands directly, avoids repeating command/workdir in the impact summary,
-  wraps long commands, and switches to compact controls on short terminals so
-  the decision keys stay visible.
-- **Custom-provider picker rows.** Concrete `[providers.<name>]` entries now
-  appear in the provider picker (id, endpoint, auth readiness, wire protocol,
-  current model) instead of only the generic placeholder; auth readiness honors
-  per-entry key/env/metadata/no-auth/loopback.
-- **Passive MCP tool discovery.** Runtime API-owned stdio MCP processes are no
-  longer spawned from passive `/v1/apps/mcp/tools` requests; live discovery
-  remains available through `?connect=true`. `doctor` now warns on relative-path
-  stdio MCP commands without `cwd`.
 
 ---
 

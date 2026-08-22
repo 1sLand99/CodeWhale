@@ -1444,13 +1444,12 @@ fn render_header_with_git_status(
     }
 }
 
-/// Render the fixed one-line phase band.
-///
-/// Ocean placement (above vs below the composer) is owned by
-/// [`crate::tui::phase_strip`]; this entry point only paints the band so
-/// classic callers and tests keep a stable name.
+/// Render the identity band: the persistent one-line route rail below the
+/// composer. This row is the canonical home for
+/// `provider · model · thinking level` and never trades places with the
+/// composer or the activity band above it.
 pub fn render_footer(area: Rect, buf: &mut Buffer, app: &mut App) {
-    crate::tui::phase_strip::render(area, buf, app);
+    crate::tui::phase_strip::render_identity(area, buf, app);
 }
 
 /// The transcript rows the idle brand mark needs before it will draw at all.

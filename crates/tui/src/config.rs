@@ -810,12 +810,14 @@ fn deepseek_alias_deprecation(model_lower: &str) -> Option<ModelAliasDeprecation
 /// Canonicalize compact DeepSeek model aliases to stable IDs.
 ///
 /// Already-valid model IDs pass through unchanged. Only the compact
-/// `v4pro`/`v4flash` spellings are rewritten to their hyphenated forms.
+/// `v4pro`/`v4flash` spellings and the experimental vision shorthand are
+/// rewritten to their hyphenated forms.
 #[must_use]
 pub fn canonical_model_name(model: &str) -> Option<&'static str> {
     match model.trim().to_ascii_lowercase().as_str() {
         "pro" | "deepseek-v4pro" => Some("deepseek-v4-pro"),
         "flash" | "deepseek-v4flash" => Some("deepseek-v4-flash"),
+        "flash-vision" | "deepseek-v4flashvisionexp" => Some("deepseek-v4-flash-vision-exp"),
         _ => None,
     }
 }
@@ -2558,10 +2560,9 @@ pub struct SubagentsConfig {
     #[serde(default)]
     pub heartbeat_timeout_secs: Option<u64>,
     /// Default per-child model-turn budget applied when an `agent` start
-    /// carries no explicit `max_steps` (#5324). When unset, the Fleet role
-    /// default applies (60 turns for read-only roles, 120 for
-    /// builder/worker/custom); values are clamped to the runtime ceiling
-    /// (2000) at resolution.
+    /// carries no explicit `max_steps` (#5324). Unset or zero remains
+    /// unbounded for every Fleet role; positive values are clamped to the
+    /// runtime ceiling (2000) at resolution.
     #[serde(default)]
     pub default_max_steps: Option<u32>,
     /// Default per-child wall-clock budget in seconds applied when an

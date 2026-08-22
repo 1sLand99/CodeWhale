@@ -5944,6 +5944,39 @@ mod image_block_wire_tests {
     }
 
     #[test]
+    fn deepseek_vision_exp_uses_chat_image_url_request_shape() {
+        let mut request = request_with_image();
+        request.model = "deepseek-v4-flash-vision-exp".to_string();
+
+        let body = build_chat_wire_body(
+            &request,
+            ApiProvider::Deepseek,
+            "https://api.deepseek.com/beta",
+            false,
+        )
+        .expect("DeepSeek vision wire body");
+
+        assert_eq!(body.body["model"], "deepseek-v4-flash-vision-exp");
+        let messages = body.body["messages"].as_array().expect("messages");
+        let user = messages
+            .iter()
+            .find(|message| message["role"] == "user")
+            .expect("a user message");
+        let parts = user["content"]
+            .as_array()
+            .expect("DeepSeek vision content must use multimodal parts");
+
+        assert!(parts.iter().any(|part| {
+            part["type"] == "text" && part["text"] == "what is in this screenshot?"
+        }));
+        assert!(
+            parts.iter().any(|part| {
+                part["type"] == "image_url" && part["image_url"]["url"] == DATA_URL
+            })
+        );
+    }
+
+    #[test]
     fn a_message_with_no_image_keeps_its_plain_string_content() {
         // Promoting every user turn to a parts array would change the request
         // bytes for every text-only route, and with them the prompt-cache

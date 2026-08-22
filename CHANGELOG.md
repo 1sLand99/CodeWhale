@@ -7,6 +7,102 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.11] - 2026-08-21
+
+Codewhale v0.9.11 tightens the long-running agent loop, makes workflow
+failures visible instead of successful-looking, adds an experimental
+vision-capable DeepSeek route, and prepares reproducible Codewhale-versus-Pi
+evaluation without publishing a result before a real run. The complete
+item-level change record is retained below the categorized release highlights.
+
+### Added
+
+- Added first-party `deepseek-v4-flash-vision-exp` discovery and selection for
+  DeepSeek, including the `flash-vision` alias, bundled offline metadata,
+  registry and picker entries, and image-input capability on the chat route.
+  Context and output limits inherit from V4 Flash until DeepSeek publishes
+  distinct values; pricing remains unknown rather than guessed.
+- Added a provider-controlled Codewhale-versus-Pi parity harness with three
+  hermetic coding tasks, route and reasoning-effort receipts, doctor/dry-run
+  modes, and bounded result artifacts. The repository ships the harness, not a
+  benchmark verdict; comparable real runs remain an acceptance gate.
+- Added portable, secret-free config export/import with a reviewable plan,
+  explicit headless consent, backup and rollback, and idempotent re-import.
+- Added bounded multi-file diagnostics through the existing model-facing `lsp`
+  tool without increasing the tool-catalog count. Thanks to **Isabel Wu
+  ([@wuisabel-gif](https://github.com/wuisabel-gif))** for PR #5524.
+- Added portable presentation, media-attachment, and operation-digest facets to
+  the command contract, then moved all seven utility handlers onto the
+  contract-backed dispatch path. Thanks to **Paulo Aboim Pinto
+  ([@aboimpinto](https://github.com/aboimpinto))** for PR #5525.
+
+### Changed
+
+- Sub-agent, Fleet-worker, workflow-task, and thread-runtime model turns no
+  longer inherit a hidden role-based step ceiling. An omitted or zero
+  `max_steps` is unbounded; a positive user/config value remains an explicit
+  cap and is still clamped to the runtime safety ceiling. Wall-clock, provider,
+  heartbeat, cancellation, and admission safeguards are unchanged.
+- `/rc` now mirrors one shared session rather than transferring terminal
+  ownership: local and web prompts remain available while idle, approvals use
+  first-decision-wins semantics, and transport/integrity failures remain
+  fail-closed.
+- The terminal status rows around the composer are now two stable bands:
+  `provider · model · thinking level` is the persistent identity row below
+  the composer in every phase, and a separate activity row above the
+  composer carries the live phase, notices, and cost/metrics. Sending a
+  prompt no longer relocates the route identity above the composer, and
+  neither row ever duplicates it.
+- The embedded local Web client now uses the current CWC Ocean hierarchy and
+  readable control sizing, follows the shared Enter/Shift+Enter composer
+  grammar, and chooses a provider plus model per new thread without mutating
+  Runtime defaults. Exact image-input capability is labelled honestly; a
+  vision-capable route does not imply that browser attachments exist.
+- The runtime now has one authoritative model-turn loop. The placeholder
+  `crates/core` engine tree is gone, while the active TUI loop and its extracted
+  tool-call stages retain existing policy, hook, cancellation, and budget
+  behavior. Thanks to **Sun Zhenyuan
+  ([@bistack](https://github.com/bistack))** for PR #5523.
+
+### Fixed
+
+- A workflow whose `task()` dispatch was rejected no longer loses that failure
+  inside a `parallel()` null slot or presents a successful-looking run. Rejected
+  dispatches now fail the run, persist as typed bounded receipts with an exact
+  count, and appear in transcript, activity detail, and workflow-panel views.
+- Provider readiness, credential-source explanations, focused-agent scrolling,
+  compact `/status` and `/help` rendering, shell/web output bounds, MCP
+  lifecycle reporting, and narrow-terminal onboarding received the detailed
+  fixes recorded below.
+- Localized READMEs again match the English install and third-party-notice
+  surface, including shell-completion guidance in all 18 translations.
+
+### Security
+
+- Unified OAuth device-code polling now validates verification URLs before
+  opening them, redacts token-bearing types, honors server slowdown intervals,
+  and keeps credential save/logout mutations serialized.
+- Project instructions, rules-directory traversal, secret-shaped config data,
+  URL fingerprints, and shell network authority now retain the explicit bounds
+  and fail-closed behavior described in the detailed record.
+
+### Contributors
+
+- **Sun Zhenyuan ([@bistack](https://github.com/bistack))** — tool-call stage
+  extraction with the existing execution and policy contracts preserved
+  (#5523).
+- **Isabel Wu ([@wuisabel-gif](https://github.com/wuisabel-gif))** — bounded
+  multi-file `read_lints` support (#5524), plus independently reviewed
+  completion-routing overlap in #5530.
+- **Paulo Aboim Pinto ([@aboimpinto](https://github.com/aboimpinto))** — portable
+  presentation/media/digest facets and the seven utility-handler migrations
+  (#5525).
+
+### Detailed change record
+
+The notes below are preserved in full so the categorized highlights do not
+erase behavior, migration, security, compatibility, or verification details.
+
 - Portable config bundles: `codewhale config export --portable` writes a
   deterministic, secret-free bundle (credential and machine-specific keys
   dropped), and `codewhale config import <FILE|URL|->` applies one with a
@@ -7025,7 +7121,8 @@ overflow report and `/theme` picker edge-wrapping patch in #1814.
 
 Older releases (v0.8.39 and earlier) are archived in [docs/CHANGELOG_ARCHIVE.md](docs/CHANGELOG_ARCHIVE.md).
 
-[Unreleased]: https://github.com/Hmbown/CodeWhale/compare/v0.9.9...HEAD
+[Unreleased]: https://github.com/Hmbown/CodeWhale/compare/v0.9.11...HEAD
+[0.9.11]: https://github.com/Hmbown/CodeWhale/compare/v0.9.10...v0.9.11
 [0.9.10]: https://github.com/Hmbown/CodeWhale/compare/v0.9.9...v0.9.10
 [0.9.9]: https://github.com/Hmbown/CodeWhale/compare/v0.9.8...v0.9.9
 [0.9.8]: https://github.com/Hmbown/CodeWhale/compare/v0.9.7...v0.9.8

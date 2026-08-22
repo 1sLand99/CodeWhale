@@ -5465,6 +5465,64 @@ async fn mobile_insecure_mode_allows_page_and_v1_routes_without_token() -> Resul
     Ok(())
 }
 
+#[tokio::test]
+async fn thread_summary_projects_typed_pending_attention_count() -> Result<()> {
+    let Some((addr, runtime_threads, handle)) = spawn_test_server().await? else {
+        return Ok(());
+    };
+    let client = crate::tls::reqwest_client();
+
+    let attention_thread: serde_json::Value = client
+        .post(format!("http://{addr}/v1/threads"))
+        .json(&json!({}))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let attention_id = attention_thread["id"]
+        .as_str()
+        .context("missing attention thread id")?;
+    let _approval_rx = runtime_threads
+        .register_pending_approval_for_thread_for_test(attention_id, "approval-summary-attention");
+    runtime_threads
+        .register_pending_user_input_for_thread_for_test(attention_id, "input-summary-attention");
+
+    let recent_thread: serde_json::Value = client
+        .post(format!("http://{addr}/v1/threads"))
+        .json(&json!({}))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let recent_id = recent_thread["id"]
+        .as_str()
+        .context("missing recent thread id")?;
+
+    let summaries: serde_json::Value = client
+        .get(format!("http://{addr}/v1/threads/summary?limit=100"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let rows = summaries.as_array().context("summary should be an array")?;
+    let attention = rows
+        .iter()
+        .find(|row| row["id"] == attention_id)
+        .context("attention thread summary")?;
+    let recent = rows
+        .iter()
+        .find(|row| row["id"] == recent_id)
+        .context("recent thread summary")?;
+    assert_eq!(attention["pending_attention_count"], 2);
+    assert_eq!(recent["pending_attention_count"], 0);
+
+    handle.abort();
+    Ok(())
+}
+
 /// `GET /v1/threads/summary?search=` bounded the *store read* by `limit`
 /// before matching, so a thread older than the newest `limit` rows could not
 /// be found by searching for it — the embedded dashboard's search box asks
@@ -6729,6 +6787,191 @@ async fn api_surfaces_only_active_model_when_runtime_route_passes_ids_through() 
         .filter_map(|entry| entry["id"].as_str())
         .collect();
     assert_eq!(model_ids, vec!["glm-5.2"]);
+
+    handle.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn provider_models_expose_exact_image_input_facts_and_thread_selection_stays_local()
+-> Result<()> {
+    let root = std::env::temp_dir().join(format!(
+        "codewhale-provider-model-capabilities-{}",
+        Uuid::new_v4()
+    ));
+    fs::create_dir_all(&root)?;
+    let config_file = root.join("custom-config.toml");
+    fs::write(
+        &config_file,
+        "provider = \"deepseek\"\ndefault_text_model = \"deepseek-v4-pro\"\n",
+    )?;
+
+    let Some((addr, _runtime_threads, handle)) =
+        spawn_test_server_with_config_path(config_file).await?
+    else {
+        return Ok(());
+    };
+    let client = crate::tls::reqwest_client();
+
+    let models = get_provider_models(&client, &addr, "deepseek").await;
+    let entries = models["models"].as_array().context("models array")?;
+    let vision = entries
+        .iter()
+        .find(|entry| entry["id"] == "deepseek-v4-flash-vision-exp")
+        .context("DeepSeek vision model entry")?;
+    assert_eq!(vision["image_input"], "supported");
+    let text_only = entries
+        .iter()
+        .find(|entry| entry["id"] == "deepseek-v4-pro")
+        .context("DeepSeek text model entry")?;
+    assert_eq!(text_only["image_input"], "unsupported");
+
+    let config_before = get_config(&client, &addr).await;
+    let response = client
+        .post(format!("http://{addr}/v1/threads"))
+        .json(&json!({
+            "model_provider": "deepseek",
+            "model": "deepseek-v4-flash-vision-exp",
+        }))
+        .send()
+        .await?;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let thread: serde_json::Value = response.json().await?;
+    assert_eq!(thread["model_provider"], "deepseek");
+    assert_eq!(thread["model"], "deepseek-v4-flash-vision-exp");
+
+    let config_after = get_config(&client, &addr).await;
+    assert_eq!(config_after["provider"], config_before["provider"]);
+    assert_eq!(config_after["model"], config_before["model"]);
+
+    handle.abort();
+    Ok(())
+}
+
+#[test]
+fn provider_catalog_keeps_official_deepseek_facts_but_not_custom_proxy_claims() {
+    for official_base_url in [
+        "https://api.deepseek.com/v1",
+        "https://api.deepseek.com/beta/",
+    ] {
+        let mut config = Config {
+            provider: Some("deepseek".to_string()),
+            default_text_model: Some("deepseek-v4-pro".to_string()),
+            ..Config::default()
+        };
+        let provider_config = config.provider_config_for_mut(ApiProvider::Deepseek);
+        provider_config.base_url = Some(official_base_url.to_string());
+        provider_config.model = Some("deepseek-v4-pro".to_string());
+
+        assert!(
+            !provider_uses_custom_route_for_api(&config, ApiProvider::Deepseek),
+            "official DeepSeek endpoint must retain the shared model catalog: {official_base_url}"
+        );
+        let models = provider_models_for_api(&config, ApiProvider::Deepseek, ApiProvider::Deepseek);
+        assert!(
+            models
+                .iter()
+                .any(|model| model == "deepseek-v4-flash-vision-exp"),
+            "official DeepSeek endpoint must expose the experimental vision model: {official_base_url}"
+        );
+    }
+
+    let mut custom = Config {
+        provider: Some("deepseek".to_string()),
+        default_text_model: Some("private-deepseek-deployment".to_string()),
+        ..Config::default()
+    };
+    let provider_config = custom.provider_config_for_mut(ApiProvider::Deepseek);
+    provider_config.base_url = Some("https://deepseek-proxy.example.test/v1".to_string());
+    provider_config.model = Some("private-deepseek-deployment".to_string());
+
+    assert!(provider_uses_custom_route_for_api(
+        &custom,
+        ApiProvider::Deepseek
+    ));
+    assert_eq!(
+        provider_models_for_api(&custom, ApiProvider::Deepseek, ApiProvider::Deepseek),
+        vec!["private-deepseek-deployment".to_string()],
+        "a real custom endpoint must expose only its explicitly configured model namespace"
+    );
+
+    custom.default_text_model = Some("deepseek-v4-flash-vision-exp".to_string());
+    custom.provider_config_for_mut(ApiProvider::Deepseek).model =
+        Some("deepseek-v4-flash-vision-exp".to_string());
+    assert_eq!(
+        provider_models_for_api(&custom, ApiProvider::Deepseek, ApiProvider::Deepseek),
+        vec!["deepseek-v4-flash-vision-exp".to_string()],
+        "a custom proxy may legitimately reuse a first-party model id"
+    );
+    assert_eq!(
+        provider_model_image_input_for_api(
+            &custom,
+            ApiProvider::Deepseek,
+            "deepseek-v4-flash-vision-exp",
+        ),
+        codewhale_config::route::CapabilityState::Unknown,
+        "same-name custom proxy must not surface first-party vision capability as verified"
+    );
+}
+
+#[tokio::test]
+async fn provider_catalog_preserves_named_custom_identity_for_new_threads() -> Result<()> {
+    let root = std::env::temp_dir().join(format!(
+        "codewhale-provider-named-custom-{}",
+        Uuid::new_v4()
+    ));
+    fs::create_dir_all(&root)?;
+    let config_file = root.join("custom-config.toml");
+    fs::write(
+        &config_file,
+        r#"provider = "lm-studio"
+
+[providers.lm-studio]
+kind = "openai-compatible"
+base_url = "http://127.0.0.1:18190/v1"
+model = "local-vision-model"
+api_key = "local-test-key"
+"#,
+    )?;
+
+    let Some((addr, _runtime_threads, handle)) =
+        spawn_test_server_with_config_path(config_file).await?
+    else {
+        return Ok(());
+    };
+    let client = crate::tls::reqwest_client();
+
+    let config_before = get_config(&client, &addr).await;
+    assert_eq!(config_before["provider"], "lm-studio");
+    assert_eq!(config_before["model"], "local-vision-model");
+
+    let providers = get_providers(&client, &addr).await;
+    assert_eq!(providers["current"], "custom");
+    let custom = providers["providers"]
+        .as_array()
+        .and_then(|entries| entries.iter().find(|entry| entry["id"] == "custom"))
+        .context("custom provider entry")?;
+    assert_eq!(custom["model_provider_id"], "lm-studio");
+    assert_eq!(custom["default_model"], "local-vision-model");
+
+    let response = client
+        .post(format!("http://{addr}/v1/threads"))
+        .json(&json!({
+            "model_provider": "custom",
+            "model_provider_id": custom["model_provider_id"],
+            "model": custom["default_model"],
+        }))
+        .send()
+        .await?;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let thread: serde_json::Value = response.json().await?;
+    assert_eq!(thread["model_provider"], "custom");
+    assert_eq!(thread["model_provider_id"], "lm-studio");
+    assert_eq!(thread["model"], "local-vision-model");
+
+    let config_after = get_config(&client, &addr).await;
+    assert_eq!(config_after["provider"], config_before["provider"]);
+    assert_eq!(config_after["model"], config_before["model"]);
 
     handle.abort();
     Ok(())

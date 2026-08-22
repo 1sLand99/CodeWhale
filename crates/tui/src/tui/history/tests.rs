@@ -22,6 +22,7 @@ use super::constants::{
     TOOL_OUTPUT_HEAD_LINES, TOOL_OUTPUT_LINE_LIMIT, TOOL_OUTPUT_TAIL_LINES,
     TOOL_SUCCESS_OUTPUT_PREVIEW_LINES,
 };
+use super::thinking::cached_color_depth;
 use super::{
     ASSISTANT_GLYPH, ExecCell, ExecSource, GenericToolCell, HistoryCell, PlanUpdateCell,
     REASONING_CURSOR, REASONING_OPENER, REASONING_RAIL, RenderMode, ToolCell, ToolStatus,
@@ -924,8 +925,9 @@ fn reasoning_is_marked_apart_from_both_the_prompt_and_the_answer() {
 /// A filled background behind reasoning is unreadable on a transparent or
 /// light terminal, so the highlight is configurable. With it off, not one span
 /// may carry a background — a single tinted span is the bug. The enabled case
-/// is asserted alongside it so a renderer that stopped tinting entirely could
-/// not make this pass by accident.
+/// follows the terminal's actual color depth: capable terminals tint the body,
+/// while ANSI-16 intentionally stays untinted because it cannot render the
+/// subtle surface faithfully.
 #[test]
 fn disabling_the_reasoning_highlight_leaves_no_span_with_a_background() {
     let render = |highlight: bool| {
@@ -948,12 +950,14 @@ fn disabling_the_reasoning_highlight_leaves_no_span_with_a_background() {
             .all(|span| span.style.bg.is_none()),
         "a disabled highlight must not tint any span"
     );
-    assert!(
-        render(true)
-            .iter()
-            .flat_map(|line| line.spans.iter())
-            .any(|span| span.style.bg.is_some()),
-        "the enabled highlight must actually tint something"
+    let enabled_has_background = render(true)
+        .iter()
+        .flat_map(|line| line.spans.iter())
+        .any(|span| span.style.bg.is_some());
+    assert_eq!(
+        enabled_has_background,
+        crate::palette::reasoning_surface_tint(cached_color_depth()).is_some(),
+        "the enabled highlight must follow the terminal color-depth contract"
     );
 }
 

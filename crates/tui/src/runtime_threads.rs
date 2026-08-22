@@ -3493,8 +3493,17 @@ impl RuntimeThreadManager {
         &self,
         approval_id: &str,
     ) -> oneshot::Receiver<ExternalApprovalDecision> {
+        self.register_pending_approval_for_thread_for_test("test-thread", approval_id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn register_pending_approval_for_thread_for_test(
+        &self,
+        thread_id: &str,
+        approval_id: &str,
+    ) -> oneshot::Receiver<ExternalApprovalDecision> {
         self.register_pending_approval(
-            "test-thread",
+            thread_id,
             PendingApprovalRequest {
                 id: approval_id.to_string(),
                 turn_id: "test-turn".to_string(),
@@ -3503,6 +3512,24 @@ impl RuntimeThreadManager {
                 intent_summary: None,
             },
         )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn register_pending_user_input_for_thread_for_test(
+        &self,
+        thread_id: &str,
+        input_id: &str,
+    ) {
+        self.register_pending_user_input(
+            thread_id,
+            PendingUserInputRequest {
+                id: input_id.to_string(),
+                turn_id: "test-turn".to_string(),
+                request: crate::tools::user_input::UserInputRequest {
+                    questions: Vec::new(),
+                },
+            },
+        );
     }
 
     #[cfg(test)]
