@@ -623,21 +623,21 @@ pub fn resolve_selected_fleet(workspace: &Path) -> Result<Option<SelectedFleet>,
             ws_dir.join(SELECTED_FILE).display()
         )));
     }
-    if let Ok(dir) = personal_fleets_dir() {
-        if let Some(name) = read_selection_result(&dir)? {
-            let path = dir.join(format!("{}.toml", slugify(&name)));
-            if path.is_file() {
-                return Ok(Some(SelectedFleet {
-                    name,
-                    scope: FleetScope::Personal,
-                    path,
-                }));
-            }
-            return Err(FleetStoreError::NotFound(format!(
-                "selected Fleet `{name}` (user selection at {})",
-                dir.join(SELECTED_FILE).display()
-            )));
+    if let Ok(dir) = personal_fleets_dir()
+        && let Some(name) = read_selection_result(&dir)?
+    {
+        let path = dir.join(format!("{}.toml", slugify(&name)));
+        if path.is_file() {
+            return Ok(Some(SelectedFleet {
+                name,
+                scope: FleetScope::Personal,
+                path,
+            }));
         }
+        return Err(FleetStoreError::NotFound(format!(
+            "selected Fleet `{name}` (user selection at {})",
+            dir.join(SELECTED_FILE).display()
+        )));
     }
     Ok(None)
 }
