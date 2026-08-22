@@ -8918,11 +8918,13 @@ async fn run_mcp_command(
                 .map_err(|e| anyhow!("Cannot resolve current binary path: {e}"))?;
             let exe_str = exe_path.to_string_lossy().to_string();
 
-            let mut args = vec!["serve".to_string(), "--mcp".to_string()];
+            let mut args = Vec::with_capacity(if workspace.is_some() { 4 } else { 2 });
             if let Some(ref ws) = workspace {
                 args.push("--workspace".to_string());
                 args.push(ws.clone());
             }
+            args.push("serve".to_string());
+            args.push("--mcp".to_string());
 
             let mut cfg = load_mcp_config(&config_path)?;
             if cfg.servers.contains_key(&name) {
@@ -8964,8 +8966,8 @@ async fn run_mcp_command(
             );
             println!("  command: {exe_str}");
             println!(
-                "  args:    serve --mcp{}",
-                workspace.map_or(String::new(), |ws| format!(" --workspace {ws}"))
+                "  args:    {}serve --mcp",
+                workspace.map_or(String::new(), |ws| format!("--workspace {ws} "))
             );
             println!();
             println!("Tip: Use `codewhale mcp validate` to test the connection.");
