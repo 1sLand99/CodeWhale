@@ -4716,17 +4716,24 @@ fn test_parse_spawn_request_rejects_text_and_items_together() {
 }
 
 #[test]
-fn test_parse_spawn_request_rejects_invalid_role() {
+fn test_parse_spawn_request_accepts_human_role_selector_for_runtime_resolution() {
     let input = json!({
         "prompt": "do work",
-        "role": "unknown role"
+        "role": "DeepSeek V4 Flash"
     });
-    let err = parse_spawn_request(&input).expect_err("invalid role should fail");
-    assert!(
-        err.to_string()
-            .contains("role must be a bare roster member id"),
-        "{err}"
-    );
+    let mut parsed = parse_spawn_request(&input).expect("human role selector should parse");
+    assert_eq!(parsed.profile.as_deref(), Some("DeepSeek V4 Flash"));
+    assert_eq!(parsed.assignment.role.as_deref(), Some("DeepSeek V4 Flash"));
+
+    let mut profile = custom_fleet_profile("scout");
+    profile.provider = Some("deepseek".to_string());
+    profile.model = Some("deepseek-v4-flash".to_string());
+    let roster = isolated_fleet_roster_with("flash-scout", profile);
+    let member = apply_spawn_profile(&mut parsed, &roster)
+        .expect("human role selector should resolve")
+        .expect("matching Fleet member");
+    assert_eq!(member.id, "flash-scout");
+    assert_eq!(parsed.profile.as_deref(), Some("flash-scout"));
 }
 
 #[test]
