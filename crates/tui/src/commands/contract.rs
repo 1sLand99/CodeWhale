@@ -690,6 +690,7 @@ impl App {
 mod tests {
     use super::*;
     use crate::localization::Locale;
+    use crate::models::Role;
 
     fn test_app() -> App {
         crate::test_support::test_app_with_options(crate::test_support::test_tui_options(
@@ -830,7 +831,7 @@ mod tests {
             let session = parts.session.as_mut().expect("session facet");
             assert_eq!(session.session_id().as_deref(), Some("s1"));
             session.add_message(Message {
-                role: "user".to_string(),
+                role: Role::User,
                 content: vec![],
             });
             assert_eq!(session.api_messages().len(), 1);

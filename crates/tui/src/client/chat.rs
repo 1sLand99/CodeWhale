@@ -45,12 +45,15 @@ use crate::models::{
     model_is_openai_reasoning_family, model_supports_reasoning,
 };
 
+use super::prepared::WireDialect;
+use super::role_placement::{RolePlacement, role_placement};
 use super::{
     DeepSeekClient, ERROR_BODY_MAX_BYTES, SSE_BACKPRESSURE_HIGH_WATERMARK,
     SSE_BACKPRESSURE_SLEEP_MS, SSE_MAX_LINES_PER_CHUNK, acquire_stream_buffer,
     apply_reasoning_effort, bounded_error_text, from_api_tool_name, parse_usage,
     release_stream_buffer, system_to_instructions, to_api_tool_name,
 };
+use crate::models::Role;
 
 fn apply_provider_token_limit(
     body: &mut Value,
@@ -1632,7 +1635,7 @@ impl<'a> PromptBuilder<'a> {
             .map(<[Tool]>::to_vec);
         let tool_choice = tools.as_ref().map(|_| json!("none"));
         messages.push(Message {
-            role: "user".to_string(),
+            role: Role::User,
             content: vec![ContentBlock::Text {
                 text: CACHE_WARMUP_USER_TAIL.to_string(),
                 cache_control: None,
@@ -2440,7 +2443,9 @@ fn build_chat_messages_with_reasoning(
     }
 
     for (message_index, message) in messages.iter().enumerate() {
-        let role = message.role.as_str();
+        // Which wire channel this message belongs in is decided by the shared
+        // placement table, not by an `if` chain local to this adapter.
+        let placement = role_placement(&message.role, WireDialect::ChatCompletions);
         let mut text_parts = Vec::new();
         let mut image_parts = Vec::new();
         let mut thinking_parts = Vec::new();
@@ -2524,8 +2529,8 @@ fn build_chat_messages_with_reasoning(
             }
         }
 
-        if role == "assistant" || role == crate::models::INTERRUPTED_ASSISTANT_ROLE {
-            let content = if role == crate::models::INTERRUPTED_ASSISTANT_ROLE {
+        if placement.is_assistant_channel() {
+            let content = if placement == RolePlacement::InterruptedAssistant {
                 format!(
                     "{}{}",
                     crate::models::INTERRUPTED_ASSISTANT_CONTEXT_PREFIX,
@@ -2585,11 +2590,15 @@ fn build_chat_messages_with_reasoning(
                 pending_tool_calls.clear();
             }
             out.push(msg);
-        } else if role == "system" {
+        } else if matches!(placement, RolePlacement::System | RolePlacement::Developer) {
             let content = text_parts.join("\n");
             if !content.trim().is_empty() {
                 let mut msg = json!({
-                    "role": "system",
+                    "role": if placement == RolePlacement::Developer {
+                        "developer"
+                    } else {
+                        "system"
+                    },
                     "content": content,
                 });
                 if include_tool_budget_metadata && let Some(turn_meta) = &turn_meta_budget {
@@ -2597,7 +2606,7 @@ fn build_chat_messages_with_reasoning(
                 }
                 out.push(msg);
             }
-        } else if role == "user" {
+        } else if placement == RolePlacement::User {
             let content = text_parts.join("\n");
             let has_text = !content.trim().is_empty();
             let has_images = !image_parts.is_empty();
@@ -2684,7 +2693,7 @@ fn build_chat_messages_with_reasoning(
                     out.push(json!({ "role": "user", "content": tool_result_images }));
                 }
             }
-        } else if role != "assistant" && role != crate::models::INTERRUPTED_ASSISTANT_ROLE {
+        } else if !placement.is_assistant_channel() {
             pending_tool_calls.clear();
         }
     }
@@ -4259,13 +4268,14 @@ mod minimax_reasoning_replay_tests {
         ApiProvider, DEFAULT_KIMI_CODE_BASE_URL, DEFAULT_MINIMAX_MODEL,
         DEFAULT_MODELSTUDIO_TOKEN_PLAN_BASE_URL, DEFAULT_MOONSHOT_BASE_URL, KIMI_CODE_K3_MODEL,
     };
+    use crate::models::Role;
     use crate::models::{ContentBlock, Message, MessageRequest};
 
     fn request_with_assistant_thinking() -> MessageRequest {
         MessageRequest {
             model: DEFAULT_MINIMAX_MODEL.to_string(),
             messages: vec![Message {
-                role: "assistant".to_string(),
+                role: Role::Assistant,
                 content: vec![
                     ContentBlock::Thinking {
                         thinking: "Inspect tool state".to_string(),
@@ -4357,14 +4367,14 @@ mod minimax_reasoning_replay_tests {
         request.model = "qwen3.8-max".to_string();
         request.messages = vec![
             Message {
-                role: "user".to_string(),
+                role: Role::User,
                 content: vec![ContentBlock::Text {
                     text: "HANDOFF-SENTINEL: fix the widget.".to_string(),
                     cache_control: None,
                 }],
             },
             Message {
-                role: "assistant".to_string(),
+                role: Role::Assistant,
                 content: vec![
                     ContentBlock::Thinking {
                         thinking: "stale thinking from the prior turn".to_string(),
@@ -4385,7 +4395,7 @@ mod minimax_reasoning_replay_tests {
                 ],
             },
             Message {
-                role: "user".to_string(),
+                role: Role::User,
                 content: vec![ContentBlock::ToolResult {
                     tool_use_id: "call_qwen38_001".to_string(),
                     content: "widget.rs: struct Widget { .. }".to_string(),
@@ -5871,6 +5881,7 @@ mod image_block_wire_tests {
     //! message whose `content` is an array of parts, with the image as
     //! `{"type":"image_url","image_url":{"url":…}}`.
     use super::{ApiProvider, build_chat_wire_body};
+    use crate::models::Role;
     use crate::models::{ContentBlock, ImageUrlContent, Message, MessageRequest};
 
     const DATA_URL: &str = "data:image/png;base64,QUJD";
@@ -5879,7 +5890,7 @@ mod image_block_wire_tests {
         MessageRequest {
             model: "gpt-4o".to_string(),
             messages: vec![Message {
-                role: "user".to_string(),
+                role: Role::User,
                 content: vec![
                     ContentBlock::Text {
                         text: "what is in this screenshot?".to_string(),
@@ -6010,7 +6021,7 @@ mod image_block_wire_tests {
         let mut request = request_with_image();
         request.messages = vec![
             Message {
-                role: "assistant".to_string(),
+                role: Role::Assistant,
                 content: vec![ContentBlock::ToolUse {
                     id: "call_image_1".to_string(),
                     name: "read".to_string(),
@@ -6020,7 +6031,7 @@ mod image_block_wire_tests {
                 }],
             },
             Message {
-                role: "user".to_string(),
+                role: Role::User,
                 content: vec![ContentBlock::ToolResult {
                     tool_use_id: "call_image_1".to_string(),
                     content: "screenshot captured".to_string(),
@@ -6071,7 +6082,7 @@ mod mistral_reasoning_tests {
             model: "mistral-medium-latest".to_string(),
             messages: vec![
                 Message {
-                    role: "assistant".to_string(),
+                    role: Role::Assistant,
                     content: vec![
                         ContentBlock::Thinking {
                             thinking: "Inspect the current state before calling the tool."
@@ -6093,7 +6104,7 @@ mod mistral_reasoning_tests {
                     ],
                 },
                 Message {
-                    role: "user".to_string(),
+                    role: Role::User,
                     content: vec![ContentBlock::ToolResult {
                         tool_use_id: "call-1".to_string(),
                         content: "contents".to_string(),
@@ -6487,14 +6498,14 @@ mod google_thought_signature_tests {
             model: "gemini-3.1-pro-preview".to_string(),
             messages: vec![
                 Message {
-                    role: "user".to_string(),
+                    role: Role::User,
                     content: vec![ContentBlock::Text {
                         text: "Read the config.".to_string(),
                         cache_control: None,
                     }],
                 },
                 Message {
-                    role: "assistant".to_string(),
+                    role: Role::Assistant,
                     content: vec![
                         ContentBlock::Text {
                             text: "Reading now.".to_string(),
@@ -6510,7 +6521,7 @@ mod google_thought_signature_tests {
                     ],
                 },
                 Message {
-                    role: "user".to_string(),
+                    role: Role::User,
                     content: vec![ContentBlock::ToolResult {
                         tool_use_id: "call-g-1".to_string(),
                         content: "key = \"value\"".to_string(),

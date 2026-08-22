@@ -74,7 +74,7 @@ fn workspace_with_one_user_message(world: &mut SessionCommandWorld) {
     let tmpdir = TempDir::new().expect("session workflow TempDir");
     let mut app = create_test_app_with_tmpdir(&tmpdir);
     app.api_messages.push(Message {
-        role: "user".to_string(),
+        role: Role::User,
         content: vec![ContentBlock::Text {
             text: "Remember the whale migration".to_string(),
             cache_control: None,

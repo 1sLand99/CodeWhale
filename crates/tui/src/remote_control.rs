@@ -3410,6 +3410,7 @@ fn epoch_seconds() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::Role;
     use std::sync::{Arc, Mutex};
     use wiremock::{
         Mock, MockServer, Request, Respond, ResponseTemplate,
@@ -3442,7 +3443,7 @@ mod tests {
 
     fn text_message(role: &str, text: impl Into<String>) -> Message {
         Message {
-            role: role.to_string(),
+            role: Role::from(role),
             content: vec![ContentBlock::Text {
                 text: text.into(),
                 cache_control: None,

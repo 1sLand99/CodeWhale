@@ -39,6 +39,7 @@ use crate::core::ops::Op;
 use crate::cost_status::{
     EffectiveRouteEnvelope, EffectiveRouteUsage, RouteBillingMode, RuntimeUsageRecord,
 };
+use crate::models::Role;
 use crate::models::{ContentBlock, Message, SystemPrompt, Usage};
 use crate::route_budget::{
     auto_compact_default_for_route, compaction_threshold_for_route_at_percent, known_route_limits,
@@ -7021,7 +7022,7 @@ impl RuntimeThreadManager {
             let flush_assistant = |blocks: &mut Vec<ContentBlock>, msgs: &mut Vec<Message>| {
                 if !blocks.is_empty() {
                     msgs.push(Message {
-                        role: "assistant".to_string(),
+                        role: Role::Assistant,
                         content: std::mem::take(blocks),
                     });
                 }
@@ -7029,7 +7030,7 @@ impl RuntimeThreadManager {
             let flush_user = |blocks: &mut Vec<ContentBlock>, msgs: &mut Vec<Message>| {
                 if !blocks.is_empty() {
                     msgs.push(Message {
-                        role: "user".to_string(),
+                        role: Role::User,
                         content: std::mem::take(blocks),
                     });
                 }

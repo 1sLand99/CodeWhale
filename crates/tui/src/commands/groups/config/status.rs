@@ -271,6 +271,7 @@ fn context_window_override_key(app: &App) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use crate::models::Role;
     use std::path::PathBuf;
 
     use tempfile::TempDir;
@@ -303,7 +304,7 @@ mod tests {
         app.session.last_prompt_cache_hit_tokens = Some(70);
         app.session.last_prompt_cache_miss_tokens = Some(30);
         app.api_messages.push(Message {
-            role: "user".to_string(),
+            role: Role::User,
             content: vec![ContentBlock::Text {
                 text: "hello".to_string(),
                 cache_control: None,
@@ -564,7 +565,7 @@ mod tests {
         let mut app = create_test_app(tmpdir.path().to_path_buf());
         let raw = "RAW_STATUS_PRESSURE\n".repeat(2_000);
         app.api_messages.push(Message {
-            role: "user".to_string(),
+            role: Role::User,
             content: vec![ContentBlock::ToolResult {
                 tool_use_id: "call-big".to_string(),
                 content: raw,

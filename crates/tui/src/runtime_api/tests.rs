@@ -1,6 +1,7 @@
 use super::*;
 use crate::core::events::{Event as EngineEvent, TurnOutcomeStatus};
 use crate::core::ops::Op;
+use crate::models::Role;
 use crate::models::Usage;
 use crate::runtime_threads::RuntimeEventRecord;
 use crate::test_support::{EnvVarGuard, lock_test_env};
@@ -229,7 +230,7 @@ fn saved_session_with_blocks(blocks: Vec<crate::models::ContentBlock>) -> SavedS
         journal: None,
         leaf_id: None,
         messages: vec![crate::models::Message {
-            role: "assistant".to_string(),
+            role: Role::Assistant,
             content: blocks,
         }],
         system_prompt: None,
@@ -3994,14 +3995,14 @@ async fn session_create_from_completed_thread_saves_messages() -> Result<()> {
             &thread_id,
             &[
                 Message {
-                    role: "user".to_string(),
+                    role: Role::User,
                     content: vec![ContentBlock::Text {
                         text: "Please save this runtime thread".to_string(),
                         cache_control: None,
                     }],
                 },
                 Message {
-                    role: "assistant".to_string(),
+                    role: Role::Assistant,
                     content: vec![ContentBlock::Text {
                         text: "Saved replies should round-trip.".to_string(),
                         cache_control: None,
@@ -4132,14 +4133,14 @@ async fn create_seeded_thread(
             &thread_id,
             &[
                 Message {
-                    role: "user".to_string(),
+                    role: Role::User,
                     content: vec![ContentBlock::Text {
                         text: user_text.to_string(),
                         cache_control: None,
                     }],
                 },
                 Message {
-                    role: "assistant".to_string(),
+                    role: Role::Assistant,
                     content: vec![ContentBlock::Text {
                         text: "Done — anything else?".to_string(),
                         cache_control: None,
@@ -4478,14 +4479,14 @@ async fn spawn_server_with_saved_sessions(
             (*id).to_string(),
             &[
                 crate::models::Message {
-                    role: "user".to_string(),
+                    role: Role::User,
                     content: vec![crate::models::ContentBlock::Text {
                         text: format!("prompt for {title} with token=hunter2"),
                         cache_control: None,
                     }],
                 },
                 crate::models::Message {
-                    role: "assistant".to_string(),
+                    role: Role::Assistant,
                     content: vec![crate::models::ContentBlock::Text {
                         text: "acknowledged".to_string(),
                         cache_control: None,

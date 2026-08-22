@@ -30,7 +30,7 @@ use super::{
     render_spillover_annotation, render_thinking, render_thinking_with_analysis,
     running_status_label_with_elapsed,
 };
-use crate::models::{ContentBlock, Message};
+use crate::models::{ContentBlock, Message, Role};
 use crate::tools::plan::{PlanSnapshot, StepStatus};
 use crate::tui::motion::MotionMode;
 use crate::tui::ui_text::{line_to_plain, slice_text, text_display_width};
@@ -1869,7 +1869,7 @@ fn an_activity_group_renders_as_a_single_metadata_line() {
 #[test]
 fn restored_history_drops_the_wire_reasoning_placeholder() {
     let message = Message {
-        role: "assistant".to_string(),
+        role: Role::Assistant,
         content: vec![
             ContentBlock::Thinking {
                 thinking: "(reasoning omitted)".to_string(),
@@ -1898,7 +1898,7 @@ fn restored_history_drops_the_wire_reasoning_placeholder() {
 #[test]
 fn archived_context_metadata_survives_spaces_inside_attribute_values() {
     let msg = Message {
-        role: "assistant".to_string(),
+        role: Role::Assistant,
         content: vec![ContentBlock::Text {
             text: "<archived_context level=\"1\" range=\"msg 0-128\" tokens=\"2499\" \
                    density=\"~2,500 tokens\" model=\"deepseek-v4-flash\" \
@@ -1938,7 +1938,7 @@ fn archived_context_metadata_survives_spaces_inside_attribute_values() {
 #[test]
 fn replay_routes_repair_receipts_and_plan_calls_to_typed_cells() {
     let repair = Message {
-        role: "assistant".to_string(),
+        role: Role::Assistant,
         content: vec![ContentBlock::Text {
             text: "[tool_history_repair] Repaired 1 crashed tool call(s); quarantined 0 \
                    duplicate and 0 orphan terminal result(s)."
@@ -1952,7 +1952,7 @@ fn replay_routes_repair_receipts_and_plan_calls_to_typed_cells() {
     ));
 
     let plan = Message {
-        role: "assistant".to_string(),
+        role: Role::Assistant,
         content: vec![ContentBlock::ToolUse {
             id: "plan-1".to_string(),
             name: "update_plan".to_string(),
@@ -1997,7 +1997,7 @@ fn user_history_hides_only_the_trailing_turn_metadata_block() {
         "</turn_meta>",
     );
     let msg = Message {
-        role: "user".to_string(),
+        role: Role::User,
         content: vec![
             ContentBlock::Text {
                 text: visible.to_string(),
@@ -2015,7 +2015,7 @@ fn user_history_hides_only_the_trailing_turn_metadata_block() {
     ));
 
     let literal_only = Message {
-        role: "user".to_string(),
+        role: Role::User,
         content: vec![ContentBlock::Text {
             text: "<turn_meta>user-authored example</turn_meta>".to_string(),
             cache_control: None,

@@ -6,7 +6,9 @@
 //!
 //! The model-facing creation surface is the `agent` tool. Narrow coordination
 //! tools (`agents/list`, `agents/message`, `agents/followup`,
-//! `agents/interrupt`, `agents/coordinate`, `agents/wait`) wrap the same runtime without restoring
+//! `agents/interrupt`, `agents/coordinate`, `agents/wait`) are retired from
+//! the model catalog (#5462) — still registered and executable by name so
+//! persisted transcripts replay, never advertised — and wrap the same runtime without restoring
 //! the retired lifecycle theater. Older manager helpers remain executable for
 //! persisted records and internal recovery.
 
@@ -84,6 +86,7 @@ use worktree::{SubAgentWorktreeRequest, prepare_child_workspace};
 #[cfg(test)]
 use worktree::{create_isolated_worktree, git_repo_root};
 
+use crate::models::Role;
 #[allow(unused_imports)] // re-exported for hosts / tests; registration uses concrete types
 pub use advisor::{
     AdvisorConfig, EmissionGuard, ToolCallPair, build_advisor_prompt, extract_tool_call_pairs,
@@ -1746,7 +1749,7 @@ fn append_subagent_inputs_as_user_messages(
     while let Some(input) = pending_inputs.pop_front() {
         if !input.text.trim().is_empty() {
             messages.push(Message {
-                role: "user".to_string(),
+                role: Role::User,
                 content: vec![ContentBlock::Text {
                     text: input.text,
                     cache_control: None,
@@ -3983,7 +3986,7 @@ impl SubAgentManager {
         )?;
         if let Some(path) = paths.iter().find(|path| !claim.claim.contains_path(path)) {
             return Err(format!(
-                "write '{path}' is outside agent '{owner}' scope (roots: {:?}, files: {:?}); expand it first with agents/coordinate action=claim",
+                "write '{path}' is outside agent '{owner}' scope (roots: {:?}, files: {:?}); expand it first with agent action=claim",
                 claim.claim.roots, claim.claim.exact_files
             ));
         }
@@ -6424,7 +6427,7 @@ impl SubAgentManager {
         }
         if let Some(claim) = persisted_claim.as_ref().map(|record| &record.claim) {
             prompt.push_str(&format!(
-                "\n\nWrite scope (enforced; coordination-root-relative): roots={:?}; exact_files={:?}; contracts={:?}. Expand it with agents/coordinate action=claim before mutating anything outside this scope.",
+                "\n\nWrite scope (enforced; coordination-root-relative): roots={:?}; exact_files={:?}; contracts={:?}. Expand it with agent action=claim before mutating anything outside this scope.",
                 claim.roots, claim.exact_files, claim.contracts
             ));
             agent.prompt = prompt.clone();
@@ -8068,6 +8071,13 @@ enum AgentToolAction {
     Interrupt,
     Wait,
     Cancel,
+    /// Expand this caller's write claim before mutating outside it (#5462).
+    ///
+    /// The one coordination action that had no equivalent on `agent`: write
+    /// scope could only be widened through `agents/coordinate action=claim`,
+    /// so retiring that tool from the catalog without this action would have
+    /// left fail-closed write enforcement with no in-band way to satisfy it.
+    Claim,
 }
 
 fn parse_agent_tool_action(input: &Value) -> Result<AgentToolAction, ToolError> {
@@ -8083,10 +8093,48 @@ fn parse_agent_tool_action(input: &Value) -> Result<AgentToolAction, ToolError> 
         "interrupt" | "pause" => Ok(AgentToolAction::Interrupt),
         "wait" | "join" | "await" | "block" => Ok(AgentToolAction::Wait),
         "cancel" | "stop" | "abort" => Ok(AgentToolAction::Cancel),
+        "claim" => Ok(AgentToolAction::Claim),
         other => Err(ToolError::invalid_input(format!(
-            "Invalid agent action '{other}'. Use start, status, peek, message, followup, interrupt, wait, or cancel."
+            "Invalid agent action '{other}'. Use start, status, peek, message, followup, interrupt, wait, claim, or cancel."
         ))),
     }
+}
+
+/// Translate `agent{action:"claim", ...}` into the `agents/coordinate` wire.
+///
+/// Two things this function exists to get right, both of which fail *silently*
+/// when they are wrong:
+///
+/// 1. The coordinate wire key is `roots`, not `write_roots`
+///    ([`AgentsCoordinateTool::execute`] reads `roots`). A translation that
+///    forwarded `write_roots` would hand `expand_write_claim` three empty
+///    lists, which returns the unchanged claim with `Ok` — a successful
+///    receipt for an expansion that never happened, and then a fail-closed
+///    write refusal the model cannot explain.
+/// 2. An all-empty claim is refused here. `expand_write_claim` treats it as a
+///    no-op success for the same reason, so without this check a call that
+///    forgot its scope would read as "claim granted".
+///
+/// The three field names are the ones `agent action=start` already uses for
+/// write scope (`write_roots` advertised; `exact_files` and
+/// `coordination_contracts` parse-accepted), so one vocabulary describes a
+/// child's scope whether it is declared at launch or widened later.
+fn agent_claim_coordinate_input(input: &Value) -> Result<Value, ToolError> {
+    let roots = parse_coordination_paths(input, "write_roots")?;
+    let exact_files = parse_coordination_paths(input, "exact_files")?;
+    let contracts = parse_bounded_strings(input, "coordination_contracts", 16)?;
+    if roots.is_empty() && exact_files.is_empty() && contracts.is_empty() {
+        return Err(ToolError::invalid_input(
+            "agent action=claim needs at least one scope entry: write_roots, exact_files, or coordination_contracts. An empty claim would report success while expanding nothing."
+                .to_string(),
+        ));
+    }
+    Ok(json!({
+        "action": "claim",
+        "roots": roots,
+        "exact_files": exact_files,
+        "contracts": contracts,
+    }))
 }
 
 fn parse_agent_ref(input: &Value) -> Result<Option<String>, ToolError> {
@@ -8170,8 +8218,9 @@ impl ToolSpec for AgentTool {
             "A write-capable child defaults write scope to the parent workspace; narrow it with write_roots (repo-relative directory trees) so parallel children claim disjoint scope. ",
             "Prefer type=builder for write work and type=verifier (or the Run tool with action=\"verifiers\") after writes settle — dispatch is not completion. ",
             "Coordinate through this same tool: action=message queues a note without waking the child; action=followup delivers queued notes and wakes a running child for its next user-provenance turn; action=interrupt stops the current child turn while preserving its checkpoint; action=wait blocks without changing child state, and until=\"all\" joins a whole fan-out in one call. ",
-            "Action contract: start requires prompt; message/followup require a target and message; peek/interrupt/cancel require a target; status and wait may be unscoped. ",
-            "The narrow agents/list, agents/message, agents/followup, agents/interrupt, and agents/wait tools expose the same semantics directly; there is no second transport. ",
+            "action=claim widens your own enforced write scope: pass write_roots (and optionally exact_files, coordination_contracts) before mutating anything a fail-closed write refusal named. It records a durable claim receipt and fails on contention with a peer claim; it never touches another agent's scope. ",
+            "Action contract: start requires prompt; message/followup require a target and message; peek/interrupt/cancel require a target; claim requires at least one scope entry; status and wait may be unscoped. ",
+            "This is the whole model-facing sub-agent surface; there is no second transport. ",
             "In Operate, use detached=true only for independent or long work that must outlive the active turn; a write-capable root start defaults write scope to the parent workspace unless narrowed with write_roots; arbitrary shell remains gated. ",
             "Legacy action=status|peek|cancel remain for compatibility."
         )
@@ -8201,8 +8250,8 @@ impl ToolSpec for AgentTool {
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["start", "status", "peek", "message", "followup", "interrupt", "wait", "cancel"],
-                    "description": "start launches a turn-owned worker and returns immediately. status/peek inspect. message queues a note without waking a running child. followup delivers queued notes and wakes a running child for its next user-provenance model turn. interrupt stops the current turn while preserving the child checkpoint. wait only observes; see until. cancel permanently cancels a running child."
+                    "enum": ["start", "status", "peek", "message", "followup", "interrupt", "wait", "claim", "cancel"],
+                    "description": "start launches a turn-owned worker and returns immediately. status/peek inspect. message queues a note without waking a running child. followup delivers queued notes and wakes a running child for its next user-provenance model turn. interrupt stops the current turn while preserving the child checkpoint. wait only observes; see until. claim widens your own enforced write scope (see write_roots). cancel permanently cancels a running child."
                 },
                 "until": {
                     "type": "string",
@@ -8245,7 +8294,7 @@ impl ToolSpec for AgentTool {
                 "write_roots": {
                     "type": "array",
                     "items": { "type": "string" },
-                    "description": "Expected repo-relative directory trees this child may mutate. Defaults to the parent workspace ('.') when omitted on a write-capable start. Shared write-capable children claim these before launch; scope expansion must use agents/coordinate before mutation. Paths outside the parent workspace are refused."
+                    "description": "Repo-relative directory trees a write-capable agent may mutate. On action=start: the scope this child claims, defaulting to the parent workspace ('.') when omitted. On action=claim: the trees to add to your own enforced scope, which you must do before mutating anything outside it. Paths outside the parent workspace are refused."
                 },
                 "resume_from": {
                     "type": "string",
@@ -8293,6 +8342,14 @@ impl ToolSpec for AgentTool {
                             "properties": {"action": {"const": "wait"}}
                         },
                         {
+                            // `claim` names no agent: it always widens the
+                            // caller's own scope. Which of the three scope
+                            // lists carries the entries is left to the call —
+                            // `execute` refuses an empty claim rather than
+                            // silently succeeding with no expansion.
+                            "properties": {"action": {"const": "claim"}}
+                        },
+                        {
                             "properties": {"action": {"const": "cancel"}},
                             "anyOf": target_required
                         }
@@ -8330,6 +8387,14 @@ impl ToolSpec for AgentTool {
             Ok(AgentToolAction::Start) if start_requests_read_only_role(input) => {
                 ApprovalRequirement::Auto
             }
+            // #5462: `agents/coordinate` declared `Auto` because gating a
+            // coordination record deadlocks autonomous fan-in — a child that
+            // must widen its scope to proceed cannot raise a modal in a
+            // parent UI nobody is watching. Inheriting the action must
+            // inherit that reasoning, not quietly upgrade it to `Required`.
+            // Authority is unchanged: `claim` can only widen the *caller's
+            // own* scope, and contention with a peer claim still fails.
+            Ok(AgentToolAction::Claim) => ApprovalRequirement::Auto,
             _ => ApprovalRequirement::Required,
         }
     }
@@ -8405,6 +8470,14 @@ impl ToolSpec for AgentTool {
                     context,
                     self.runtime.parent_agent_id.as_deref(),
                 )
+                .await;
+            }
+            AgentToolAction::Claim => {
+                return AgentsCoordinateTool::new(
+                    self.manager.clone(),
+                    self.runtime.parent_agent_id.clone(),
+                )
+                .execute(agent_claim_coordinate_input(&input)?, context)
                 .await;
             }
         }
@@ -9819,7 +9892,7 @@ fn build_initial_subagent_messages_with_system(
     }
 
     messages.push(Message {
-        role: "user".to_string(),
+        role: Role::User,
         content: vec![ContentBlock::Text {
             text: build_assignment_prompt(prompt, assignment, agent_type),
             cache_control: None,
@@ -9849,7 +9922,7 @@ fn work_state_worth_publishing(
 
 fn system_text_message(text: String) -> Message {
     Message {
-        role: "system".to_string(),
+        role: Role::System,
         content: vec![ContentBlock::Text {
             text,
             cache_control: None,
@@ -10912,7 +10985,7 @@ then re-plan dependent work before claiming completion.\n",
     text.push_str("</codewhale:runtime_event>");
 
     Message {
-        role: "user".to_string(),
+        role: Role::User,
         content: vec![ContentBlock::Text {
             text,
             cache_control: None,
@@ -11512,7 +11585,7 @@ async fn run_subagent(
         }
 
         messages.push(Message {
-            role: "assistant".to_string(),
+            role: Role::Assistant,
             content: response.content.clone(),
         });
         latest_checkpoint = Some(
@@ -11800,7 +11873,7 @@ async fn run_subagent(
 
         if !tool_results.is_empty() {
             messages.push(Message {
-                role: "user".to_string(),
+                role: Role::User,
                 content: tool_results,
             });
             latest_checkpoint = Some(
@@ -14588,6 +14661,42 @@ impl SubAgentToolRegistry {
             && crate::tools::shell::agent_readonly_bash_input(input)
     }
 
+    /// Per-role gating for the single multi-action model-facing tool.
+    ///
+    /// Every other capability gate in this file keys off a *tool name*: the
+    /// registry allow/deny lists, `posture_permits_tool`, the execution
+    /// envelope. That worked while each coordination capability had its own
+    /// name, and it is exactly what breaks when six tools collapse into one —
+    /// `agent` is deliberately exempt from both name-keyed gates (
+    /// `posture_permits_tool` short-circuits it so delegation depth, not write
+    /// posture, governs spawning; `execution_envelope::is_delegation_tool`
+    /// classifies it `Bounded` so a read-only member can still fan out
+    /// read-only work). A capability folded into `agent` therefore inherits
+    /// *no* gate at all unless one is written for the action.
+    ///
+    /// So the answer is per-action, and it reproduces the gate the retired
+    /// tool actually had rather than inventing a new one:
+    ///
+    /// - `claim` carried `agents/coordinate`'s authority, and that tool was
+    ///   kept off a read-only child's catalog by declaring
+    ///   `ToolCapability::WritesFiles` against `envelope.write`. The same
+    ///   question is asked here directly. A read-only role has no write scope
+    ///   to widen, so the action is meaningless to it, not merely refused.
+    /// - Every other action keeps exactly today's visibility. `agent` already
+    ///   offered message/followup/interrupt to read-only roles even while the
+    ///   narrow tools were posture-gated; narrowing that here would be an
+    ///   unrelated behavior change smuggled in behind a catalog cleanup.
+    ///
+    /// An operator deny rule naming the retired tool still removes the
+    /// action, so a ceiling written against `agents/coordinate` keeps meaning
+    /// what it meant.
+    fn agent_action_permitted(&self, action: &str) -> bool {
+        if action != "claim" {
+            return true;
+        }
+        !self.write_is_denied() && !self.is_tool_denied("agents/coordinate")
+    }
+
     fn visibility_representative_input(&self, name: &str) -> Option<Value> {
         // Visibility and dispatch consult the same capability guard. These
         // representative calls let a read-only bash schema survive catalog
@@ -14694,6 +14803,28 @@ impl SubAgentToolRegistry {
                     && self.envelope_permits(&tool.name, &representative)
             });
         }
+        // `agent` is not a `CANONICAL_ACTION_ALIASES` family, so the pruner
+        // above never reaches it — and it must not become one, because
+        // `canonical_action_alias` feeds `execution_envelope`, where `agent`'s
+        // `ExecutesCode` capability is deliberately reclassified `Bounded`.
+        // Shape its enum explicitly instead.
+        for tool in &mut tools {
+            if tool.name != "agent" {
+                continue;
+            }
+            let Some(actions) = tool
+                .input_schema
+                .pointer_mut("/properties/action/enum")
+                .and_then(serde_json::Value::as_array_mut)
+            else {
+                continue;
+            };
+            actions.retain(|action| {
+                action
+                    .as_str()
+                    .is_some_and(|action| self.agent_action_permitted(action))
+            });
+        }
         tools.retain(|tool| {
             tool.input_schema["properties"]["action"]["enum"]
                 .as_array()
@@ -14753,6 +14884,19 @@ impl SubAgentToolRegistry {
         {
             return Err(anyhow!(
                 "Tool Web is limited to search/fetch in the read-only evidence profile"
+            ));
+        }
+        // Catalog shaping is not authority. `agent` clears both name-keyed
+        // gates below by design, so the per-action gate has to be repeated
+        // here or a hand-written call would reach an action the role's own
+        // catalog withheld.
+        if name == "agent"
+            && matches!(parse_agent_tool_action(&input), Ok(AgentToolAction::Claim))
+            && !self.agent_action_permitted("claim")
+        {
+            return Err(anyhow!(
+                "agent action=claim widens an enforced write scope, and the Fleet role `{role}` has no write authority to widen. Use a `builder` or `worker` role.",
+                role = self.agent_type.as_str()
             ));
         }
         let family_action_allowed = if !Self::ACTION_ALIASES

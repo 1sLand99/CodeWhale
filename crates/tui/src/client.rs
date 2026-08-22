@@ -34,6 +34,7 @@ use crate::llm_client::{
     sanitize_http_error_body, with_retry,
 };
 use crate::logging;
+use crate::models::Role;
 use crate::models::{
     ContentBlock, Message, MessageRequest, MessageResponse, ServerToolUsage, SystemPrompt, Usage,
 };
@@ -1750,7 +1751,7 @@ fn translation_message_request(
     MessageRequest {
         model,
         messages: vec![Message {
-            role: "user".to_string(),
+            role: Role::User,
             content: vec![ContentBlock::Text {
                 text: text.to_string(),
                 cache_control: None,
@@ -1837,6 +1838,17 @@ impl DeepSeekClient {
         request: MessageRequest,
         stream: bool,
     ) -> Result<PreparedOutboundRequest> {
+        // Step 0: refuse role/dialect pairs this wire cannot represent, before
+        // any dialect builds a body. Doing it here rather than inside each
+        // adapter is what stops an unrepresentable role from being discovered
+        // as an opaque provider 400 (Anthropic) or from vanishing silently
+        // (the OpenAI-shaped dialects) depending on which adapter ran.
+        let outbound_dialect = if self.api_provider == crate::config::ApiProvider::Antigravity {
+            WireDialect::GoogleCloudCode
+        } else {
+            WireDialect::from_wire_format(self.wire_format)
+        };
+        role_placement::reject_unsupported_roles(&request.messages, outbound_dialect)?;
         let clamp_output_cap = |mut request: MessageRequest, route_limits: Option<RouteLimits>| {
             let route_cap =
                 self.effective_max_output_tokens_with_limits(&request.model, route_limits);
@@ -1877,7 +1889,8 @@ impl DeepSeekClient {
             }
         }
         let requested_effort = request.reasoning_effort.clone();
-        let dialect = WireDialect::from_wire_format(self.wire_format);
+        // Same value computed for the seam above; Antigravity already returned.
+        let dialect = outbound_dialect;
         // `stream` is the caller's entry point, not a wire fact: each dialect
         // decides for itself what the body's `stream` field says.
         let entrypoint = CallerStreamMode::from_stream_flag(stream);
@@ -3766,6 +3779,7 @@ mod ds4_tests;
 mod prepared;
 mod provider_native_search;
 mod responses;
+mod role_placement;
 mod stream_entry;
 
 #[cfg(test)]
@@ -4235,7 +4249,7 @@ mod tests {
         let request = MessageRequest {
             model: "deepseek-v4-pro".to_string(),
             messages: vec![Message {
-                role: "user".to_string(),
+                role: Role::User,
                 content: vec![ContentBlock::Text {
                     text: "sse drain regression".to_string(),
                     cache_control: None,
@@ -4314,7 +4328,7 @@ mod tests {
         let request = MessageRequest {
             model: "deepseek-v4-pro".to_string(),
             messages: vec![Message {
-                role: "user".to_string(),
+                role: Role::User,
                 content: vec![ContentBlock::Text {
                     text: "provider-free DeepSeek route fixture".to_string(),
                     cache_control: None,
@@ -4372,7 +4386,7 @@ mod tests {
             codewhale_core::request::PrimaryTurnRequest {
                 model: "deepseek-v4-pro".to_string(),
                 messages: vec![Message {
-                    role: "user".to_string(),
+                    role: Role::User,
                     content: vec![ContentBlock::Text {
                         text: "core request boundary".to_string(),
                         cache_control: None,
@@ -4452,7 +4466,7 @@ mod tests {
                 .create_message(MessageRequest {
                     model: "gpt-oss:120b".to_string(),
                     messages: vec![Message {
-                        role: "user".to_string(),
+                        role: Role::User,
                         content: vec![ContentBlock::Text {
                             text: "Ollama Cloud request boundary".to_string(),
                             cache_control: None,
@@ -4524,7 +4538,7 @@ mod tests {
         let request = MessageRequest {
             model: "deepseek-v4-pro".to_string(),
             messages: vec![Message {
-                role: "user".to_string(),
+                role: Role::User,
                 content: vec![ContentBlock::Text {
                     text: "preview-router-cache-isolation-regression".to_string(),
                     cache_control: None,
@@ -4622,7 +4636,7 @@ mod tests {
         let request = MessageRequest {
             model: "deepseek-v4-pro".to_string(),
             messages: vec![Message {
-                role: "user".to_string(),
+                role: Role::User,
                 content: vec![ContentBlock::Text {
                     text: "preview-router-429-isolation-regression".to_string(),
                     cache_control: None,
@@ -4704,7 +4718,7 @@ mod tests {
         MessageRequest {
             model: model.to_string(),
             messages: vec![Message {
-                role: "user".to_string(),
+                role: Role::User,
                 content: vec![ContentBlock::Text {
                     text: "request-boundary fixture".to_string(),
                     cache_control: None,
@@ -5254,7 +5268,7 @@ mod tests {
             k3_request_fixture(crate::config::KIMI_CODE_K3_MODEL, Some("off"), streaming);
         request.messages = vec![
             Message {
-                role: "assistant".to_string(),
+                role: Role::Assistant,
                 content: vec![
                     ContentBlock::Thinking {
                         thinking: "Inspect the saved tool state".to_string(),
@@ -5271,7 +5285,7 @@ mod tests {
                 ],
             },
             Message {
-                role: "user".to_string(),
+                role: Role::User,
                 content: vec![ContentBlock::ToolResult {
                     tool_use_id: "call-k3-replay".to_string(),
                     content: "file contents".to_string(),
@@ -6022,7 +6036,7 @@ mod tests {
             model: "glm-5.2".to_string(),
             messages: vec![
                 Message {
-                    role: "assistant".to_string(),
+                    role: Role::Assistant,
                     content: vec![ContentBlock::ToolUse {
                         id: "call-secret-test".to_string(),
                         name: "read_file".to_string(),
@@ -6032,7 +6046,7 @@ mod tests {
                     }],
                 },
                 Message {
-                    role: "user".to_string(),
+                    role: Role::User,
                     content: vec![ContentBlock::ToolResult {
                         tool_use_id: "call-secret-test".to_string(),
                         content: content.into(),
@@ -7165,7 +7179,7 @@ mod tests {
             .create_message(MessageRequest {
                 model: "MiniMax-M3".to_string(),
                 messages: vec![Message {
-                    role: "user".to_string(),
+                    role: Role::User,
                     content: vec![ContentBlock::Text {
                         text: "hello".to_string(),
                         cache_control: None,
@@ -7258,7 +7272,7 @@ mod tests {
     #[test]
     fn chat_messages_keep_current_turn_reasoning_content() {
         let message = Message {
-            role: "assistant".to_string(),
+            role: Role::Assistant,
             content: vec![
                 ContentBlock::Thinking {
                     signature: None,
@@ -7298,7 +7312,7 @@ mod tests {
         let request = MessageRequest {
             model: "qwen3-coder".to_string(),
             messages: vec![Message {
-                role: "assistant".to_string(),
+                role: Role::Assistant,
                 content: vec![
                     ContentBlock::Thinking {
                         signature: None,
@@ -7342,14 +7356,14 @@ mod tests {
     fn chat_messages_replay_tool_round_reasoning_before_new_user_turn() {
         let messages = vec![
             Message {
-                role: "user".to_string(),
+                role: Role::User,
                 content: vec![ContentBlock::Text {
                     text: "Need the date".to_string(),
                     cache_control: None,
                 }],
             },
             Message {
-                role: "assistant".to_string(),
+                role: Role::Assistant,
                 content: vec![
                     ContentBlock::Thinking {
                         signature: None,
@@ -7366,7 +7380,7 @@ mod tests {
                 ],
             },
             Message {
-                role: "user".to_string(),
+                role: Role::User,
                 content: vec![ContentBlock::ToolResult {
                     tool_use_id: "tool-1".to_string(),
                     content: "2026-04-23".to_string(),
@@ -7396,14 +7410,14 @@ mod tests {
     fn chat_messages_replay_prior_tool_round_reasoning_after_new_user_turn() {
         let messages = vec![
             Message {
-                role: "user".to_string(),
+                role: Role::User,
                 content: vec![ContentBlock::Text {
                     text: "Need the date".to_string(),
                     cache_control: None,
                 }],
             },
             Message {
-                role: "assistant".to_string(),
+                role: Role::Assistant,
                 content: vec![
                     ContentBlock::Thinking {
                         signature: None,
@@ -7420,7 +7434,7 @@ mod tests {
                 ],
             },
             Message {
-                role: "user".to_string(),
+                role: Role::User,
                 content: vec![ContentBlock::ToolResult {
                     tool_use_id: "tool-1".to_string(),
                     content: "2026-04-23".to_string(),
@@ -7429,14 +7443,14 @@ mod tests {
                 }],
             },
             Message {
-                role: "assistant".to_string(),
+                role: Role::Assistant,
                 content: vec![ContentBlock::Text {
                     text: "It is 2026-04-23.".to_string(),
                     cache_control: None,
                 }],
             },
             Message {
-                role: "user".to_string(),
+                role: Role::User,
                 content: vec![ContentBlock::Text {
                     text: "Thanks. Next question.".to_string(),
                     cache_control: None,
@@ -7469,14 +7483,14 @@ mod tests {
         // and busts the prefix cache from that message onwards. (#583)
         let messages = vec![
             Message {
-                role: "user".to_string(),
+                role: Role::User,
                 content: vec![ContentBlock::Text {
                     text: "Explain it".to_string(),
                     cache_control: None,
                 }],
             },
             Message {
-                role: "assistant".to_string(),
+                role: Role::Assistant,
                 content: vec![
                     ContentBlock::Thinking {
                         signature: None,
@@ -7490,7 +7504,7 @@ mod tests {
                 ],
             },
             Message {
-                role: "user".to_string(),
+                role: Role::User,
                 content: vec![ContentBlock::Text {
                     text: "Next question".to_string(),
                     cache_control: None,
@@ -7521,7 +7535,7 @@ mod tests {
         // built on turn N must equal the JSON for the same assistant message
         // built on turn N+1, after a new user message has been appended.
         let assistant = Message {
-            role: "assistant".to_string(),
+            role: Role::Assistant,
             content: vec![
                 ContentBlock::Thinking {
                     signature: None,
@@ -7535,14 +7549,14 @@ mod tests {
             ],
         };
         let user_initial = Message {
-            role: "user".to_string(),
+            role: Role::User,
             content: vec![ContentBlock::Text {
                 text: "Explain it".to_string(),
                 cache_control: None,
             }],
         };
         let user_follow_up = Message {
-            role: "user".to_string(),
+            role: Role::User,
             content: vec![ContentBlock::Text {
                 text: "Next question".to_string(),
                 cache_control: None,
@@ -7581,7 +7595,7 @@ mod tests {
             model: "deepseek-v4-pro".to_string(),
             messages: vec![
                 Message {
-                    role: "assistant".to_string(),
+                    role: Role::Assistant,
                     content: vec![ContentBlock::ToolUse {
                         id: "call-no-thinking".to_string(),
                         name: "read_file".to_string(),
@@ -7591,7 +7605,7 @@ mod tests {
                     }],
                 },
                 Message {
-                    role: "user".to_string(),
+                    role: Role::User,
                     content: vec![ContentBlock::ToolResult {
                         tool_use_id: "call-no-thinking".to_string(),
                         content: "workspace manifest".to_string(),
@@ -7633,14 +7647,14 @@ mod tests {
             model: "deepseek-v4-pro".to_string(),
             messages: vec![
                 Message {
-                    role: "assistant".to_string(),
+                    role: Role::Assistant,
                     content: vec![ContentBlock::Text {
                         text: "Previous answer".to_string(),
                         cache_control: None,
                     }],
                 },
                 Message {
-                    role: "user".to_string(),
+                    role: Role::User,
                     content: vec![
                         ContentBlock::Text {
                             text: "<turn_meta>\nCurrent local date: 2026-05-08\n</turn_meta>"
@@ -7691,14 +7705,14 @@ mod tests {
             model: "deepseek-v4-pro".to_string(),
             messages: vec![
                 Message {
-                    role: "assistant".to_string(),
+                    role: Role::Assistant,
                     content: vec![ContentBlock::Text {
                         text: "Prior answer".to_string(),
                         cache_control: None,
                     }],
                 },
                 Message {
-                    role: "user".to_string(),
+                    role: Role::User,
                     content: vec![ContentBlock::Text {
                         text: "Current task".to_string(),
                         cache_control: None,
@@ -7753,14 +7767,14 @@ mod tests {
                 model: "deepseek-v4-pro".to_string(),
                 messages: vec![
                     Message {
-                        role: "assistant".to_string(),
+                        role: Role::Assistant,
                         content: vec![ContentBlock::Text {
                             text: "Prior answer".to_string(),
                             cache_control: None,
                         }],
                     },
                     Message {
-                        role: "user".to_string(),
+                        role: Role::User,
                         content: vec![ContentBlock::Text {
                             text: task.to_string(),
                             cache_control: None,
@@ -7787,7 +7801,7 @@ mod tests {
         let second = inspect_prompt_for_request(&request_with_user_task("Second task"));
         let mut changed_history_request = request_with_user_task("Second task");
         changed_history_request.messages[0] = Message {
-            role: "assistant".to_string(),
+            role: Role::Assistant,
             content: vec![ContentBlock::Text {
                 text: "Different prior answer".to_string(),
                 cache_control: None,
@@ -7826,7 +7840,7 @@ mod tests {
         let request = MessageRequest {
             model: "deepseek-v4-pro".to_string(),
             messages: vec![Message {
-                role: "user".to_string(),
+                role: Role::User,
                 content: vec![ContentBlock::Text {
                     text: "Current task".to_string(),
                     cache_control: None,
@@ -7870,14 +7884,14 @@ mod tests {
             model: "deepseek-v4-pro".to_string(),
             messages: vec![
                 Message {
-                    role: "assistant".to_string(),
+                    role: Role::Assistant,
                     content: vec![ContentBlock::Text {
                         text: "Stable prior answer".to_string(),
                         cache_control: None,
                     }],
                 },
                 Message {
-                    role: "user".to_string(),
+                    role: Role::User,
                     content: vec![ContentBlock::Text {
                         text: "Dynamic latest user task".to_string(),
                         cache_control: None,
@@ -8077,7 +8091,7 @@ mod tests {
         let request = MessageRequest {
             model: "deepseek-v4-pro".to_string(),
             messages: vec![Message {
-                role: "user".to_string(),
+                role: Role::User,
                 content: vec![ContentBlock::Text {
                     text: "effort ladder capture".to_string(),
                     cache_control: None,
@@ -8679,7 +8693,7 @@ mod tests {
     #[test]
     fn chat_messages_drop_thinking_only_assistant_for_non_reasoning_model() {
         let message = Message {
-            role: "assistant".to_string(),
+            role: Role::Assistant,
             content: vec![ContentBlock::Thinking {
                 signature: None,
                 state: None,
@@ -8807,7 +8821,7 @@ mod tests {
     #[test]
     fn chat_messages_drop_orphan_tool_results() {
         let messages = vec![Message {
-            role: "user".to_string(),
+            role: Role::User,
             content: vec![ContentBlock::ToolResult {
                 tool_use_id: "tool-1".to_string(),
                 content: "ok".to_string(),
@@ -8827,7 +8841,7 @@ mod tests {
     fn chat_messages_include_tool_results_when_call_present() {
         let messages = vec![
             Message {
-                role: "assistant".to_string(),
+                role: Role::Assistant,
                 content: vec![
                     ContentBlock::Thinking {
                         signature: None,
@@ -8844,7 +8858,7 @@ mod tests {
                 ],
             },
             Message {
-                role: "user".to_string(),
+                role: Role::User,
                 content: vec![ContentBlock::ToolResult {
                     tool_use_id: "tool-1".to_string(),
                     content: "ok".to_string(),
@@ -8870,7 +8884,7 @@ mod tests {
     fn chat_messages_encode_tool_call_names() {
         let messages = vec![
             Message {
-                role: "assistant".to_string(),
+                role: Role::Assistant,
                 content: vec![
                     ContentBlock::Thinking {
                         signature: None,
@@ -8887,7 +8901,7 @@ mod tests {
                 ],
             },
             Message {
-                role: "user".to_string(),
+                role: Role::User,
                 content: vec![ContentBlock::ToolResult {
                     tool_use_id: "tool-1".to_string(),
                     content: "ok".to_string(),
@@ -8922,7 +8936,7 @@ mod tests {
         // tool result messages were summarized away.
         let messages = vec![
             Message {
-                role: "assistant".to_string(),
+                role: Role::Assistant,
                 content: vec![ContentBlock::ToolUse {
                     id: "tool-orphan".to_string(),
                     name: "read_file".to_string(),
@@ -8933,7 +8947,7 @@ mod tests {
             },
             // No tool result follows — it was removed by compaction.
             Message {
-                role: "user".to_string(),
+                role: Role::User,
                 content: vec![ContentBlock::Text {
                     text: "continue".to_string(),
                     cache_control: None,
@@ -8963,7 +8977,7 @@ mod tests {
         // Complete call+result pair should NOT be stripped.
         let messages = vec![
             Message {
-                role: "assistant".to_string(),
+                role: Role::Assistant,
                 content: vec![
                     ContentBlock::Thinking {
                         signature: None,
@@ -8980,7 +8994,7 @@ mod tests {
                 ],
             },
             Message {
-                role: "user".to_string(),
+                role: Role::User,
                 content: vec![ContentBlock::ToolResult {
                     tool_use_id: "tool-ok".to_string(),
                     content: "files".to_string(),
@@ -9010,7 +9024,7 @@ mod tests {
     fn chat_messages_strips_partial_tool_results() {
         let messages = vec![
             Message {
-                role: "assistant".to_string(),
+                role: Role::Assistant,
                 content: vec![
                     ContentBlock::ToolUse {
                         id: "t1".to_string(),
@@ -9036,7 +9050,7 @@ mod tests {
                 ],
             },
             Message {
-                role: "user".to_string(),
+                role: Role::User,
                 content: vec![ContentBlock::ToolResult {
                     tool_use_id: "t1".to_string(),
                     content: "content a".to_string(),
@@ -9045,7 +9059,7 @@ mod tests {
                 }],
             },
             Message {
-                role: "user".to_string(),
+                role: Role::User,
                 content: vec![ContentBlock::ToolResult {
                     tool_use_id: "t2".to_string(),
                     content: "content b".to_string(),
@@ -9055,7 +9069,7 @@ mod tests {
             },
             // No result for t3
             Message {
-                role: "user".to_string(),
+                role: Role::User,
                 content: vec![ContentBlock::Text {
                     text: "continue".to_string(),
                     cache_control: None,
@@ -10657,7 +10671,7 @@ mod tests {
                         MessageRequest {
                             model: "DeepSeek-V4-Flash".to_string(),
                             messages: vec![Message {
-                                role: "user".to_string(),
+                                role: Role::User,
                                 content: vec![ContentBlock::Text {
                                     text: "route cap".to_string(),
                                     cache_control: None,
@@ -10732,7 +10746,7 @@ mod tests {
                 MessageRequest {
                     model: OPENROUTER_QWEN_3_6_FLASH_MODEL.to_string(),
                     messages: vec![Message {
-                        role: "user".to_string(),
+                        role: Role::User,
                         content: vec![ContentBlock::Text {
                             text: "alternate route cap".to_string(),
                             cache_control: None,
@@ -10820,7 +10834,7 @@ mod tests {
                 MessageRequest {
                     model: "deepseek-v4-flash".to_string(),
                     messages: vec![Message {
-                        role: "user".to_string(),
+                        role: Role::User,
                         content: vec![ContentBlock::Text {
                             text: "hello".to_string(),
                             cache_control: None,
