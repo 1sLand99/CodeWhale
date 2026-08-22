@@ -130,7 +130,13 @@ impl codewhale_command_contract::metadata::RegisterCommand<CommandResult> for Fe
     }
 
     fn handler() -> codewhale_command_contract::handler::CommandHandler<CommandResult> {
-        codewhale_command_contract::handler::CommandHandler::Contextual(feat015_contextual)
+        use codewhale_command_contract::handler::{CommandCapabilities, CommandHandler};
+        CommandHandler::Contextual {
+            capabilities: CommandCapabilities::WORKSPACE
+                .union(CommandCapabilities::MODE_POLICY)
+                .union(CommandCapabilities::COST),
+            handler: feat015_contextual,
+        }
     }
 }
 
@@ -260,19 +266,21 @@ pub fn execute(cmd: &str, app: &mut App) -> CommandResult {
         } else {
             arg
         };
-        // FEAT-015 dual-path seam (D2): a migrated entry with a
-        // capability-scoped handler receives the envelope built from `app`;
-        // everything else keeps the legacy `execute(app, args)` path. No
-        // production entry is migrated in FEAT-015, so the contextual branch
-        // is only reachable by the test-only fixture (D6).
+        // FEAT-015 introduced this dual-path seam (D2); FEAT-018 is the first
+        // production slice to use it. A migrated entry receives only its
+        // declared capabilities, while every unmigrated entry keeps the
+        // legacy `execute(app, args)` path.
         if let Some(handler) = command_object.contextual_handler() {
-            let mut bundle = app.command_contexts();
             return match handler {
                 codewhale_command_contract::handler::CommandHandler::Pure(pure_fn) => {
                     pure_fn(command_arg)
                 }
-                codewhale_command_contract::handler::CommandHandler::Contextual(contextual) => {
-                    contextual(bundle.contexts(), command_arg)
+                codewhale_command_contract::handler::CommandHandler::Contextual {
+                    capabilities,
+                    handler: contextual,
+                } => {
+                    let mut bundle = app.command_contexts();
+                    contextual(bundle.contexts(capabilities), command_arg)
                 }
             };
         }

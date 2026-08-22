@@ -1,20 +1,22 @@
 //! FEAT-015 TUI command-boundary surface.
 //!
 //! This module holds the TUI-owned pieces of the staged command migration:
-//! the pending-frontier projection (D4), the seven capability facet adapters
+//! the pending-frontier projection (D4), the capability facet adapters
 //! (D1), boundary-value and localization-key mappings (D3/D8), the envelope
 //! construction helper (D1), and the seam helpers (D7-D9). It is deliberately
 //! the only new TUI module for the migration surface; the production
 //! registry/dispatch stay in `traits.rs` / `mod.rs`.
 //!
-//! FEAT-015 does NOT migrate any production command. The adapters below wrap
-//! App-owned state behind the FEAT-014 contract shapes so later FEATs
-//! (FEAT-018+) can adopt them one group at a time. Handlers only ever see
-//! `&mut dyn` facets — concrete `App` is never exposed through an envelope.
+//! FEAT-015 introduced this boundary without migrating a production command;
+//! FEAT-018 is the first production slice to adopt it. The adapters below wrap
+//! App-owned state behind the FEAT-014 contract shapes so later FEATs can adopt
+//! them one group at a time. Handlers only ever see `&mut dyn` facets — concrete
+//! `App` is never exposed through an envelope.
 //!
 //! ## Authoritative host-proxy design (D1)
 //!
-//! `CommandContexts` holds seven independently borrowed facet objects, while
+//! `CommandContexts` holds only the independently borrowed facets declared by
+//! the active command registration, while
 //! important behavior (mode transitions, model invalidation, cost accounting,
 //! skill refresh) is authoritative on `App`. The adapters therefore share a
 //! synchronous TUI-owned host proxy. Each trait call borrows `App` only for the
@@ -23,9 +25,9 @@
 //!
 //! ## Dead-code note
 //!
-//! FEAT-015 intentionally wires no production contextual command. Some bridge
-//! helpers remain production-dead until the first slice migrates (FEAT-018+),
-//! so this transitional module keeps a bounded dead-code allow.
+//! FEAT-015 intentionally wired no production contextual command. FEAT-018
+//! removes that limitation for the utility group; any remaining dead-code
+//! allowance is bounded to still-transitional bridge helpers.
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
@@ -36,9 +38,9 @@ use codewhale_command_contract::facets::{
     CommandPresentationContext, CommandSessionContext, CommandSkillsContext,
     CommandSystemPromptContext, CommandWorkspaceContext, MediaAttachmentReceipt,
 };
-use codewhale_command_contract::handler::CommandContexts;
 #[cfg(test)]
 use codewhale_command_contract::handler::ContextParts;
+use codewhale_command_contract::handler::{CommandCapabilities, CommandContexts};
 use codewhale_command_contract::types::{
     CommandApprovalMode, CommandCurrency, CommandMode, CommandProviderId, CommandReasoningEffort,
 };
@@ -46,7 +48,7 @@ use codewhale_config::AppMode;
 use codewhale_core::request::{Message, SystemPrompt};
 use codewhale_execpolicy::ApprovalMode;
 
-use crate::localization::{MessageId, tr};
+use crate::localization::{Locale, MessageId, tr};
 use crate::pricing::CostCurrency;
 use crate::tui::app::{App, ReasoningEffort};
 
@@ -255,7 +257,7 @@ pub(crate) fn key_to_message_id(key: &'static str) -> Option<MessageId> {
 
 /// Shared TUI host hidden behind the portable command facets.
 ///
-/// The envelope needs seven independently borrowed facet objects, while the
+/// The envelope needs nine independently borrowed facet objects, while the
 /// authoritative mutation methods live on `App`. Each adapter therefore owns
 /// an `Rc` clone of this synchronous host proxy. Trait calls borrow `App` only
 /// for the duration of one method, delegate to the real TUI authority, and
@@ -508,9 +510,9 @@ impl CommandWorkspaceContext for WorkspaceAdapter<'_> {
 /// Stable-key translation adapter (FEAT-018 D3).
 ///
 /// Maps stable snake_case utility message keys to the current catalog and
-/// preserves the existing English fallback for intentionally incomplete locale
-/// packs. Unknown keys and invalid replacement contracts fail safely; a raw
-/// lookup key is never exposed.
+/// preserves the existing English fallback for intentionally incomplete or
+/// malformed locale entries. Unknown keys and invalid replacement contracts
+/// fail safely; a raw lookup key is never exposed.
 pub(crate) struct PresentationAdapter<'a> {
     host: SharedCommandHost<'a>,
 }
@@ -522,7 +524,8 @@ impl CommandPresentationContext for PresentationAdapter<'_> {
         };
         let locale = self.host.app.borrow().ui_locale;
         let template = tr(locale, message_id);
-        apply_named_replacements(&template, replacements)
+        let english = tr(Locale::En, message_id);
+        apply_named_replacements_with_english_fallback(&template, &english, replacements)
             .ok_or_else(|| "invalid translation replacement contract".to_string())
     }
 }
@@ -576,6 +579,17 @@ fn apply_named_replacements(template: &str, replacements: &[(&str, &str)]) -> Op
     Some(out)
 }
 
+/// Render the selected locale, falling back through the authoritative English
+/// catalog entry when that locale's placeholder contract is malformed.
+fn apply_named_replacements_with_english_fallback(
+    localized: &str,
+    english: &str,
+    replacements: &[(&str, &str)],
+) -> Option<String> {
+    apply_named_replacements(localized, replacements)
+        .or_else(|| apply_named_replacements(english, replacements))
+}
+
 /// Atomic composer/media adapter (FEAT-018 D4).
 ///
 /// Performs media validation and composer insertion as one host operation by
@@ -599,6 +613,11 @@ impl CommandMediaContext for MediaAdapter<'_> {
                     .to_string(),
             );
         };
+        // Validate an image here, not only at send time. The extension check
+        // above trusts the filename; this reads the bytes, so a mislabelled,
+        // oversized or corrupt file is refused while the user is still
+        // looking at the command that caused it, rather than becoming a notice
+        // buried in a turn they have already sent.
         if kind == "image"
             && let Err(error) = crate::image_attach::attach_image_from_path(&path)
         {
@@ -627,7 +646,7 @@ fn media_kind(path: &Path) -> Option<&'static str> {
 // Envelope construction (D1)
 // ---------------------------------------------------------------------------
 
-/// Owns seven facet objects sharing one synchronous TUI host proxy.
+/// Owns nine facet objects sharing one synchronous TUI host proxy.
 ///
 /// Handlers borrow only these adapters. Every method delegates to the real App
 /// authority and releases its `RefCell` borrow before returning, so facets can
@@ -645,23 +664,52 @@ pub(crate) struct CommandContextBundle<'a> {
 }
 
 impl<'a> CommandContextBundle<'a> {
-    pub(crate) fn contexts(&mut self) -> CommandContexts<'_> {
-        CommandContexts::empty()
-            .with_session(&mut self.session)
-            .with_model(&mut self.model)
-            .with_cost(&mut self.cost)
-            .with_mode_policy(&mut self.mode_policy)
-            .with_system_prompt(&mut self.system_prompt)
-            .with_skills(&mut self.skills)
-            .with_workspace(&mut self.workspace)
-            .with_presentation(&mut self.presentation)
-            .with_media(&mut self.media)
+    /// Expose exactly the capabilities declared by the command registration.
+    pub(crate) fn contexts(&mut self, capabilities: CommandCapabilities) -> CommandContexts<'_> {
+        let mut contexts = CommandContexts::empty();
+        if capabilities.contains(CommandCapabilities::SESSION) {
+            contexts = contexts.with_session(&mut self.session);
+        }
+        if capabilities.contains(CommandCapabilities::MODEL) {
+            contexts = contexts.with_model(&mut self.model);
+        }
+        if capabilities.contains(CommandCapabilities::COST) {
+            contexts = contexts.with_cost(&mut self.cost);
+        }
+        if capabilities.contains(CommandCapabilities::MODE_POLICY) {
+            contexts = contexts.with_mode_policy(&mut self.mode_policy);
+        }
+        if capabilities.contains(CommandCapabilities::SYSTEM_PROMPT) {
+            contexts = contexts.with_system_prompt(&mut self.system_prompt);
+        }
+        if capabilities.contains(CommandCapabilities::SKILLS) {
+            contexts = contexts.with_skills(&mut self.skills);
+        }
+        if capabilities.contains(CommandCapabilities::WORKSPACE) {
+            contexts = contexts.with_workspace(&mut self.workspace);
+        }
+        if capabilities.contains(CommandCapabilities::PRESENTATION) {
+            contexts = contexts.with_presentation(&mut self.presentation);
+        }
+        if capabilities.contains(CommandCapabilities::MEDIA) {
+            contexts = contexts.with_media(&mut self.media);
+        }
+        contexts
     }
 
-    /// Test-only: consume the bundle into independent facet parts.
+    /// Test-only: expose every adapter for focused delegation tests.
     #[cfg(test)]
     pub(crate) fn parts(&mut self) -> ContextParts<'_> {
-        self.contexts().into_parts()
+        let all_test_capabilities = CommandCapabilities::SESSION
+            .union(CommandCapabilities::MODEL)
+            .union(CommandCapabilities::COST)
+            .union(CommandCapabilities::MODE_POLICY)
+            .union(CommandCapabilities::SYSTEM_PROMPT)
+            .union(CommandCapabilities::SKILLS)
+            .union(CommandCapabilities::WORKSPACE)
+            .union(CommandCapabilities::PRESENTATION)
+            .union(CommandCapabilities::MEDIA);
+        self.contexts(all_test_capabilities).into_parts()
     }
 }
 
@@ -689,7 +737,6 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::localization::Locale;
 
     fn test_app() -> App {
         crate::test_support::test_app_with_options(crate::test_support::test_tui_options(
@@ -912,16 +959,22 @@ mod tests {
     }
 
     #[test]
-    fn envelope_exposes_all_facets_without_app_in_handler_surface() {
+    fn envelope_exposes_only_declared_facets_without_app_in_handler_surface() {
         let mut app = test_app();
         let mut bundle = app.command_contexts();
-        let parts = bundle.parts();
-        assert!(parts.session.is_some());
-        assert!(parts.model.is_some());
-        assert!(parts.cost.is_some());
-        assert!(parts.mode_policy.is_some());
-        assert!(parts.system_prompt.is_some());
-        assert!(parts.skills.is_some());
+        let parts = bundle
+            .contexts(
+                CommandCapabilities::WORKSPACE
+                    .union(CommandCapabilities::PRESENTATION)
+                    .union(CommandCapabilities::MEDIA),
+            )
+            .into_parts();
+        assert!(parts.session.is_none());
+        assert!(parts.model.is_none());
+        assert!(parts.cost.is_none());
+        assert!(parts.mode_policy.is_none());
+        assert!(parts.system_prompt.is_none());
+        assert!(parts.skills.is_none());
         assert!(parts.workspace.is_some());
         assert!(parts.presentation.is_some());
         assert!(parts.media.is_some());
@@ -1023,6 +1076,25 @@ mod tests {
                 )
                 .is_err()
         );
+    }
+
+    #[test]
+    fn malformed_localized_placeholders_use_authoritative_english_fallback() {
+        let rendered = apply_named_replacements_with_english_fallback(
+            "Prüfen Sie vor dem Neustart.",
+            "Review before {restart_command} connects the server.",
+            &[("restart_command", "/mcp restart")],
+        )
+        .expect("valid English catalog fallback");
+        assert_eq!(rendered, "Review before /mcp restart connects the server.");
+
+        let localized = apply_named_replacements_with_english_fallback(
+            "Vor {restart_command} prüfen.",
+            "Review before {restart_command}.",
+            &[("restart_command", "/mcp restart")],
+        )
+        .expect("valid localized template");
+        assert_eq!(localized, "Vor /mcp restart prüfen.");
     }
 
     #[test]

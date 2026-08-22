@@ -156,17 +156,34 @@ fn contextual(_contexts: CommandContexts<'_>, value: Option<&str>) -> String {
 #[test]
 fn handlers_are_plain_function_pointers() {
     let pure_handler = CommandHandler::Pure(pure);
-    let contextual_handler = CommandHandler::Contextual(contextual);
+    let contextual_handler = CommandHandler::Contextual {
+        capabilities: CommandCapabilities::WORKSPACE,
+        handler: contextual,
+    };
     match pure_handler {
         CommandHandler::Pure(handler) => assert_eq!(handler(Some("x")), "x"),
         _ => unreachable!(),
     }
     match contextual_handler {
-        CommandHandler::Contextual(handler) => {
+        CommandHandler::Contextual {
+            capabilities,
+            handler,
+        } => {
+            assert_eq!(capabilities, CommandCapabilities::WORKSPACE);
             assert_eq!(handler(CommandContexts::empty(), Some("y")), "y")
         }
         _ => unreachable!(),
     }
+}
+
+#[test]
+fn capability_sets_compose_without_host_types() {
+    let attach = CommandCapabilities::WORKSPACE.union(CommandCapabilities::MEDIA);
+    assert!(attach.contains(CommandCapabilities::WORKSPACE));
+    assert!(attach.contains(CommandCapabilities::MEDIA));
+    assert!(!attach.contains(CommandCapabilities::PRESENTATION));
+    assert!(!attach.is_empty());
+    assert!(CommandCapabilities::NONE.is_empty());
 }
 
 struct Sample;

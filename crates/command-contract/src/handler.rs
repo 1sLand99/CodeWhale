@@ -10,11 +10,47 @@ use crate::facets::{
     CommandSystemPromptContext, CommandWorkspaceContext,
 };
 
+/// Exact host capabilities exposed to one contextual command handler.
+///
+/// The set lives in the external contract crate so command registrations can
+/// declare least authority without naming the TUI host. The dispatcher uses
+/// the declaration to populate only those slots in [`CommandContexts`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CommandCapabilities(u16);
+
+impl CommandCapabilities {
+    pub const NONE: Self = Self(0);
+    pub const SESSION: Self = Self(1 << 0);
+    pub const MODEL: Self = Self(1 << 1);
+    pub const COST: Self = Self(1 << 2);
+    pub const MODE_POLICY: Self = Self(1 << 3);
+    pub const SYSTEM_PROMPT: Self = Self(1 << 4);
+    pub const SKILLS: Self = Self(1 << 5);
+    pub const WORKSPACE: Self = Self(1 << 6);
+    pub const PRESENTATION: Self = Self(1 << 7);
+    pub const MEDIA: Self = Self(1 << 8);
+
+    pub const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    pub const fn contains(self, capability: Self) -> bool {
+        self.0 & capability.0 == capability.0
+    }
+
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+}
+
 /// A command handler that is either argument-only or capability-scoped.
 #[derive(Clone, Copy)]
 pub enum CommandHandler<R> {
     Pure(fn(Option<&str>) -> R),
-    Contextual(fn(CommandContexts<'_>, Option<&str>) -> R),
+    Contextual {
+        capabilities: CommandCapabilities,
+        handler: fn(CommandContexts<'_>, Option<&str>) -> R,
+    },
 }
 
 /// Transport envelope with one independently optional facet slot.
