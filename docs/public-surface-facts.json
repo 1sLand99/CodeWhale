@@ -20,7 +20,7 @@
     ]
   },
   "sourceCandidate": {
-    "version": "0.9.10",
+    "version": "0.9.11",
     "providerCount": 45,
     "toolCount": 75,
     "sandboxBackends": [
@@ -221,12 +221,10 @@
       "web/lib/release-credits.ts"
     ],
     "requiredCandidateCredits": [
-      "@cyq1017",
+      "@bistack",
       "@aboimpinto",
       "@wuisabel-gif",
-      "@SparkofSpike",
-      "@Lstarsky0",
-      "@thejayjetson"
+      "@RepentStar"
     ]
   },
   "screenshot": {
