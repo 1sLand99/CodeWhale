@@ -104,7 +104,7 @@
       </main>
     </div>
 
-    <dialog class="rename-dialog new-thread-dialog" id="new-thread-dialog" aria-labelledby="new-thread-title" aria-describedby="new-thread-help">
+    <dialog class="rename-dialog new-thread-dialog" id="new-thread-dialog" tabindex="-1" aria-labelledby="new-thread-title" aria-describedby="new-thread-help">
       <form id="new-thread-form">
         <p class="eyebrow">New thread</p>
         <h2 id="new-thread-title">Choose a provider and model</h2>
@@ -129,7 +129,7 @@
         <p class="dialog-status" id="new-thread-status" role="status" aria-live="polite"></p>
 
         <div class="dialog-actions">
-          <button class="quiet-button" id="new-thread-cancel" type="button">Cancel</button>
+          <button class="quiet-button" id="new-thread-cancel" type="button" autofocus>Cancel</button>
           <button class="primary-button" id="new-thread-create" type="submit" disabled>Create thread</button>
         </div>
       </form>

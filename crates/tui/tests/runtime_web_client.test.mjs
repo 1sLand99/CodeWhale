@@ -188,7 +188,8 @@ test("mobile drawer owns focus and background interaction while it is open", asy
   assert.match(source, /function openRail\(\)[\s\S]*dom\.railClose\.focus/);
   assert.match(source, /dom\.session\.setAttribute\("aria-hidden", "true"\)[\s\S]*setInert\(dom\.session, true\)/);
   assert.match(source, /function closeRail[\s\S]*returnTarget\.focus[\s\S]*applyClosedMobileRailAccessibility/);
-  assert.match(source, /function trapRailFocus[\s\S]*event\.key !== "Tab"[\s\S]*first\.focus/);
+  assert.match(source, /function trapFocusWithin[\s\S]*event\.key !== "Tab"[\s\S]*first\.focus/);
+  assert.match(source, /function trapRailFocus[\s\S]*trapFocusWithin\(event, dom\.rail\)/);
   assert.match(source, /document\.addEventListener\("keydown", \(event\) => \{\s+if \(dom\.newThreadDialog\.open\) return;\s+if \(trapRailFocus\(event\)\) return;/);
   assert.match(source, /event\.key === "Escape"[\s\S]*closeRail\(\)/);
 });
@@ -399,7 +400,8 @@ test("new thread dialog labels exact vision capability without exposing attachme
   assert.equal(imageInputPresentation("unsupported").label, "Text only");
   assert.equal(imageInputPresentation("unknown").state, "unknown");
 
-  assert.match(html, /id="new-thread-dialog"[^>]+aria-labelledby="new-thread-title"/);
+  assert.match(html, /id="new-thread-dialog"[^>]+tabindex="-1"[^>]+aria-labelledby="new-thread-title"/);
+  assert.match(html, /id="new-thread-cancel"[^>]+autofocus/);
   assert.match(html, /id="new-thread-provider" required disabled/);
   assert.match(html, /id="new-thread-model" required disabled/);
   assert.match(html, /does not change your Runtime defaults/);
@@ -407,6 +409,9 @@ test("new thread dialog labels exact vision capability without exposing attachme
   assert.match(source, /api\("\/v1\/providers"\)/);
   assert.match(source, /\/v1\/providers\/\$\{encodeURIComponent\(provider\.id\)\}\/models/);
   assert.match(source, /body: JSON\.stringify\(request\)/);
+  assert.match(source, /function trapFocusWithin\(event, container\)/);
+  assert.match(source, /dom\.newThreadCancel\.focus\(\{ preventScroll: true \}\)/);
+  assert.match(source, /trapFocusWithin\(event, dom\.newThreadDialog\)/);
   assert.doesNotMatch(source, /\/v1\/providers\/[^`"']+\/switch/);
 });
 

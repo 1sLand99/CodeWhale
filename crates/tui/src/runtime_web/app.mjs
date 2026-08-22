@@ -810,30 +810,43 @@ function startBrowserClient() {
     dom.shell.style.setProperty("--visual-viewport-offset-top", `${Math.max(0, Math.round(offsetTop))}px`);
   }
 
+  function focusableWithin(container) {
+    return [...container.querySelectorAll(
+      'button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])',
+    )].filter((node) => !node.closest("[hidden]") && node.getAttribute("aria-hidden") !== "true");
+  }
+
+  function trapFocusWithin(event, container) {
+    if (event.key !== "Tab") return false;
+    const focusable = focusableWithin(container);
+    if (focusable.length === 0) {
+      event.preventDefault();
+      container.focus({ preventScroll: true });
+      return true;
+    }
+    const first = focusable[0];
+    const last = focusable.at(-1);
+    const active = document.activeElement;
+    if (event.shiftKey && (active === first || !container.contains(active))) {
+      event.preventDefault();
+      last.focus({ preventScroll: true });
+      return true;
+    }
+    if (!event.shiftKey && (active === last || !container.contains(active))) {
+      event.preventDefault();
+      first.focus({ preventScroll: true });
+      return true;
+    }
+    return false;
+  }
+
   function trapRailFocus(event) {
     if (
       event.key !== "Tab"
       || !narrowRail.matches
       || !dom.shell.classList.contains("rail-visible")
     ) return false;
-    const focusable = [...dom.rail.querySelectorAll(
-      'button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])',
-    )].filter((node) => !node.hidden && node.getAttribute("aria-hidden") !== "true");
-    if (focusable.length === 0) return false;
-    const first = focusable[0];
-    const last = focusable.at(-1);
-    const active = document.activeElement;
-    if (event.shiftKey && (active === first || !dom.rail.contains(active))) {
-      event.preventDefault();
-      last.focus({ preventScroll: true });
-      return true;
-    }
-    if (!event.shiftKey && (active === last || !dom.rail.contains(active))) {
-      event.preventDefault();
-      first.focus({ preventScroll: true });
-      return true;
-    }
-    return false;
+    return trapFocusWithin(event, dom.rail);
   }
 
   function setConnection(kind, message) {
@@ -1802,7 +1815,7 @@ function startBrowserClient() {
     const provider = selectedNewThreadProvider();
     const hasCatalog = Boolean(provider?.has_model_catalog);
     const busy = app.newThreadLoading || app.creatingThread;
-    dom.newThreadProvider.disabled = busy || !app.providerCatalog?.providers?.length;
+    dom.newThreadProvider.disabled = app.creatingThread || !app.providerCatalog?.providers?.length;
     dom.newThreadModel.disabled = busy || !hasCatalog || app.newThreadModels.length === 0;
     dom.newThreadModelInput.disabled = busy || !provider || hasCatalog;
     dom.newThreadCancel.disabled = app.creatingThread;
@@ -1890,6 +1903,7 @@ function startBrowserClient() {
   async function openNewThreadDialog() {
     if (dom.newThreadDialog.open || app.creatingThread) return;
     dom.newThreadDialog.showModal();
+    dom.newThreadCancel.focus({ preventScroll: true });
     const generation = ++app.newThreadGeneration;
     app.providerCatalog = null;
     app.newThreadModels = [];
@@ -1943,6 +1957,7 @@ function startBrowserClient() {
     }
     app.creatingThread = true;
     setNewThreadStatus("Creating thread…");
+    dom.newThreadDialog.focus({ preventScroll: true });
     syncNewThreadControls();
     const thread = await createThread(
       request,
@@ -1955,6 +1970,7 @@ function startBrowserClient() {
       return;
     }
     syncNewThreadControls();
+    dom.newThreadProvider.focus({ preventScroll: true });
   }
 
   async function createThread(request = {}, reportError = showStatus) {
@@ -2120,6 +2136,9 @@ function startBrowserClient() {
   });
   dom.newThreadDialog.addEventListener("cancel", (event) => {
     if (app.creatingThread) event.preventDefault();
+  });
+  dom.newThreadDialog.addEventListener("keydown", (event) => {
+    trapFocusWithin(event, dom.newThreadDialog);
   });
   dom.newThreadDialog.addEventListener("close", () => {
     app.newThreadGeneration += 1;
