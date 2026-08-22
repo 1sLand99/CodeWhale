@@ -440,6 +440,9 @@ struct ExecArgs {
     /// Maximum number of model steps before the run ends. Omitted means unlimited.
     #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
     max_turns: Option<u32>,
+    /// Maximum number of tool calls admitted in one model turn. Omitted means unlimited.
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
+    max_tool_calls: Option<u32>,
     /// Extra text appended to the system prompt for this run.
     #[arg(long)]
     append_system_prompt: Option<String>,
@@ -2154,6 +2157,7 @@ async fn run_async_main_dispatch(
                     || resume_session_id.is_some()
                     || args.output_format == ExecOutputFormat::StreamJson
                     || args.max_turns.is_some()
+                    || args.max_tool_calls.is_some()
                     || args.allowed_tools.is_some()
                     || args.disallowed_tools.is_some()
                     || args.append_system_prompt.is_some()
@@ -2190,6 +2194,7 @@ async fn run_async_main_dispatch(
                         force_configured_route,
                         args.output_format,
                         max_turns,
+                        args.max_tool_calls,
                         allowed_tools,
                         disallowed_tools,
                         args.append_system_prompt.clone(),
@@ -11521,6 +11526,7 @@ async fn run_exec_agent(
     force_configured_route: bool,
     output_format: ExecOutputFormat,
     max_turns: u32,
+    max_tool_calls: Option<u32>,
     allowed_tools: Option<Vec<String>>,
     disallowed_tools: Option<Vec<String>>,
     append_system_prompt: Option<String>,
@@ -11764,7 +11770,7 @@ async fn run_exec_agent(
         goal_continuation_delay_seconds: execution_config.goal_continuation_delay_seconds(),
         allowed_tools: allowed_tools.clone(),
         disallowed_tools: disallowed_tools.clone(),
-        max_tool_calls: None,
+        max_tool_calls,
         hook_executor: None,
         locale_tag: crate::localization::resolve_locale(&settings.locale)
             .tag()
@@ -15634,6 +15640,8 @@ reasoning = "high"
             "Bash",
             "--max-turns",
             "7",
+            "--max-tool-calls",
+            "9",
             "--append-system-prompt",
             "extra rules",
             "--tool-authority-json",
@@ -15653,9 +15661,18 @@ reasoning = "high"
             Some(&["Bash".to_string()][..])
         );
         assert_eq!(args.max_turns, Some(7));
+        assert_eq!(args.max_tool_calls, Some(9));
         assert_eq!(args.append_system_prompt.as_deref(), Some("extra rules"));
         assert_eq!(args.tool_authority_json.as_deref(), Some(envelope));
         assert_eq!(args.prompt, vec!["do the thing"]);
+    }
+
+    #[test]
+    fn exec_rejects_zero_max_tool_calls() {
+        let err =
+            Cli::try_parse_from(["codewhale", "exec", "--max-tool-calls", "0", "do the thing"])
+                .expect_err("max-tool-calls must be >= 1");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
     }
 
     #[test]

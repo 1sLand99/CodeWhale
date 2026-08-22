@@ -131,6 +131,39 @@ fn contract_bash_foreground_without_a_timeout_is_bounded_not_endless() {
     );
 }
 
+#[cfg(all(unix, not(target_env = "ohos")))]
+#[test]
+fn inherited_interactive_terminal_fails_closed_before_spawn() {
+    let workspace = tempdir().expect("workspace");
+    let mut manager = ShellManager::new(workspace.path().to_path_buf());
+    let err = manager
+        .execute_interactive_with_policy_env("codew", None, 10_000, None, HashMap::new())
+        .expect_err("Unix inherited-terminal takeover must not spawn");
+    let message = err.to_string();
+    assert!(message.contains("foreground TTY ownership"), "{message}");
+    assert!(message.contains("background: true, tty: true"), "{message}");
+    assert!(message.contains("action: \"interact\""), "{message}");
+    assert!(message.contains("task_id"), "{message}");
+    assert!(message.contains("terminal/run"), "{message}");
+    assert!(message.contains("terminal/send"), "{message}");
+}
+
+#[cfg(all(unix, target_env = "ohos"))]
+#[test]
+fn inherited_interactive_terminal_offers_only_ohos_recovery_paths() {
+    let workspace = tempdir().expect("workspace");
+    let mut manager = ShellManager::new(workspace.path().to_path_buf());
+    let err = manager
+        .execute_interactive_with_policy_env("codew", None, 10_000, None, HashMap::new())
+        .expect_err("OHOS inherited-terminal takeover must not spawn");
+    let message = err.to_string();
+    assert!(message.contains("foreground TTY ownership"), "{message}");
+    assert!(message.contains("new terminal"), "{message}");
+    assert!(message.contains("omit `interactive: true`"), "{message}");
+    assert!(!message.contains("background: true"), "{message}");
+    assert!(!message.contains("terminal/run"), "{message}");
+}
+
 #[test]
 fn contract_bash_nonzero_is_an_error_with_status_after_output() {
     let error = finish_contract_bash_result(

@@ -882,7 +882,7 @@ impl ToolSpec for WorkflowTool {
                 },
                 "fleet": {
                     "type": "string",
-                    "description": "Named Fleet to resolve task({ role }) declarations, loaded from $CODEWHALE_HOME/fleets/ or workspace fleets/. Accepts a qualified origin/name. A legacy roster maps roles to profiles. An exact Fleet (schema = \"exact\") is frozen at start: each member's provider, model, reasoning, and permission ceiling are fixed, and per-task model/thinking overrides are rejected."
+                    "description": "Named Fleet to resolve task({ role }) declarations, loaded from $CODEWHALE_HOME/fleets/ or workspace fleets/. Accepts a qualified origin/name. A legacy roster maps roles to profiles. An exact Fleet (schema = \"exact\") freezes member identity, provider, model, and reasoning at start; Runtime derives authority from the selected role and live parent, and per-task route/authority overrides are rejected."
                 },
                 "plan": {
                     "type": "object",
@@ -1504,7 +1504,7 @@ fn apply_named_fleet_to_task_request(
 }
 
 /// **Phase one** of an exact-Fleet task: resolve the member and stamp its
-/// clamped authority onto the request, contacting nobody.
+/// Runtime-derived authority onto the request, contacting nobody.
 ///
 /// This runs *before* gate evaluation and before a concurrency slot is taken,
 /// which is what makes it safe: a task that is about to be rejected or queued
@@ -1518,13 +1518,11 @@ fn bind_exact_fleet_task_request(
 ) -> Result<crate::fleet::exact::ExactMemberBinding, DriverError> {
     let fleet = operation.snapshot().fleet().qualified();
 
-    // A saved exact Fleet is the authority on routing and on posture. A task
-    // that tries to re-route a member — or to widen it by asking for a
-    // different agent type or a broader tool surface — is rejected outright
-    // rather than silently ignored. `subagent_type` and `allowed_tools` matter
-    // as much as `model` here: the member's posture role is derived from its
-    // saved permission ceiling, and a task-supplied type would otherwise pick
-    // a different tool surface than the one the operator saved.
+    // The exact Fleet owns member identity, route, and reasoning. Runtime owns
+    // authority: after selection it derives the closed role posture and
+    // intersects it with the live parent. A task may override neither side of
+    // that boundary; `subagent_type`, tool lists, and write authority would
+    // otherwise substitute a different Runtime posture per task.
     for (field, present) in [
         ("model", request.model.is_some()),
         ("model_strength", request.model_strength.is_some()),
@@ -1536,9 +1534,10 @@ fn bind_exact_fleet_task_request(
         if present {
             return Err(DriverError::Rejected(format!(
                 "fleet `{fleet}` is an exact fleet: task option `{field}` is not allowed. Every \
-                 member's provider, model, reasoning, and permission ceiling are fixed by the \
-                 saved Fleet — switch Fleets or edit the Fleet, do not override a member per \
-                 task."
+                 member's identity, provider, model, and reasoning are fixed by the saved Fleet, \
+                 while Runtime derives authority from its role and the live parent. Switch \
+                 Fleets/edit the Fleet for identity or route changes; do not override either \
+                 contract per task."
             )));
         }
     }
@@ -1557,13 +1556,11 @@ fn bind_exact_fleet_task_request(
     request.profile = Some(binding.member_id.clone());
     request.role = Some(binding.member_role.clone());
 
-    // Ceilings narrow the child; they never widen it. `subagent_type` is
-    // cleared rather than defaulted so the roster profile's posture role — the
-    // one derived from the saved ceiling — is what picks the tool surface.
+    // `subagent_type` is cleared rather than defaulted so the selected roster
+    // profile's Runtime role is what picks the child posture.
     request.subagent_type = None;
-    // The clamped authority becomes an actual tool policy the child runtime
-    // enforces: an empty allowlist when `tools = false`, and a deny list that
-    // removes every model-visible network surface when `network_tool = false`.
+    // The Runtime/parent intersection becomes an actual tool policy the child
+    // enforces, not a Fleet identity label.
     request.allowed_tools = binding.authority.allowed_tools.clone();
     request.disallowed_tools = binding.authority.disallowed_tools.clone();
     request.write_authority = Some(binding.authority.write_authority.to_string());
@@ -1587,8 +1584,8 @@ fn bind_exact_fleet_task_request(
 /// Which role a `task_started` event displays.
 ///
 /// An exact-Fleet receipt wins over the spawn metadata, because the metadata's
-/// role is the roster profile's **permission posture** — the tool surface the
-/// clamped ceiling permits — and rendering that where the member's role belongs
+/// role is the roster profile's **Runtime posture** — the closed role policy
+/// selected after identity resolution — and rendering that where the member's role belongs
 /// renames the operator's `auditor` to `scout` in the panel, the history card,
 /// and the journal. The posture is not lost: it rides the same receipt in its
 /// own field. Non-Fleet tasks keep the previous metadata-then-request order
@@ -1638,7 +1635,7 @@ fn validate_exact_write_scope(
     if binding.authority.write_authority == "read_only" {
         if declares_scope {
             return Err(DriverError::Rejected(format!(
-                "fleet `{fleet}`: member `{}` is read-only under the clamped ceiling, so this \
+                "fleet `{fleet}`: member `{}` is read-only under the effective Runtime posture, so this \
                  task may not declare write_roots, exact_files, or coordination_contracts.",
                 binding.member_id
             )));
@@ -3794,8 +3791,8 @@ impl SubAgentWorkflowDriver {
                 // Prefer spawn metadata (fleet-resolved); fall back to request.
                 //
                 // An exact-Fleet receipt overrides both, because the spawn
-                // metadata's role is the roster profile's **posture** role —
-                // the tool surface the clamped ceiling permits — and displaying
+                // metadata's role is the roster profile's **Runtime posture** —
+                // the closed role policy selected after member identity — and displaying
                 // that where the member's role belongs silently renames the
                 // operator's `auditor` to `scout`. The posture is not lost: it
                 // rides the receipt as its own field.
@@ -6546,7 +6543,13 @@ permissions = "read_only"
     }
 
     fn exact_session() -> codewhale_workflow::PermissionCeiling {
-        codewhale_workflow::PermissionCeiling::preset("full").expect("preset")
+        codewhale_workflow::PermissionCeiling {
+            write: true,
+            network_tool: true,
+            shell: codewhale_workflow::ShellCeiling::Full,
+            delegation_depth: codewhale_config::DEFAULT_SPAWN_DEPTH,
+            tools: true,
+        }
     }
 
     fn exact_workflow_with(
@@ -6573,10 +6576,10 @@ permissions = "read_only"
         )
     }
 
-    /// Binding resolves the member and its ceiling; routing resolves reasoning.
+    /// Binding resolves the member and Runtime authority; routing resolves reasoning.
     /// Both halves land on the request, in that order.
     #[tokio::test]
-    async fn exact_fleet_task_launch_resolves_the_member_route_and_ceiling() {
+    async fn exact_fleet_task_launch_resolves_member_route_and_runtime_authority() {
         let operation = exact_workflow(EXACT_GLM_FLEET);
         let mut request = exact_write_task_request("builder");
 
@@ -6593,9 +6596,12 @@ permissions = "read_only"
         assert_eq!(member.profile.provider.as_deref(), Some("zai"));
         assert_eq!(member.profile.model.as_deref(), Some("glm-5"));
 
-        // The saved ceiling reached the spawn request before any routing.
+        // Runtime's role/parent intersection reached the request before routing.
         assert_eq!(request.write_authority.as_deref(), Some("workspace_write"));
-        assert_eq!(request.max_depth, Some(0));
+        assert_eq!(
+            request.max_depth,
+            Some(codewhale_config::DEFAULT_SPAWN_DEPTH)
+        );
         assert!(request.thinking.is_none(), "reasoning is not decided yet");
 
         route_admitted_exact_task(&operation, &binding, &mut request)
@@ -6817,8 +6823,8 @@ permissions = "read_only"
         }
     }
 
-    /// A task must not be able to widen a member's saved ceiling by asking for
-    /// a different agent type, a broader tool surface, or write authority.
+    /// A task must not be able to replace Runtime's role/parent authority by
+    /// asking for a different agent type, tool surface, or write authority.
     #[test]
     fn exact_fleet_rejects_task_level_posture_widening() {
         let operation = exact_workflow(EXACT_GLM_FLEET);
@@ -6837,12 +6843,11 @@ permissions = "read_only"
                 request.write_authority = Some("workspace_write".to_string());
             }),
         ] {
-            // The read-only auditor is the interesting victim: its saved
-            // ceiling is the narrowest in the fleet.
+            // The Runtime reviewer posture is read-only.
             let mut request = exact_task_request("reviewer");
             mutate(&mut request);
             let err = bind_exact_fleet_task_request(&operation, exact_session(), &mut request)
-                .expect_err("an exact ceiling must win over a task option");
+                .expect_err("Runtime authority must win over a task option");
             let message = format!("{err:?}");
             assert!(
                 message.contains(field) && message.contains("not allowed"),
@@ -6850,7 +6855,7 @@ permissions = "read_only"
             );
         }
 
-        // And with no task options at all, the saved ceiling is what lands.
+        // With no task options, Runtime's reviewer posture is what lands.
         let mut clean = exact_task_request("reviewer");
         bind_exact_fleet_task_request(&operation, exact_session(), &mut clean)
             .expect("clean launch");
@@ -6858,40 +6863,59 @@ permissions = "read_only"
         assert_eq!(clean.subagent_type, None);
     }
 
-    /// The saved ceiling becomes a real tool policy on the spawn request: a
-    /// member with no network tool carries a deny list the child enforces.
+    /// Runtime's reviewer posture becomes a real tool policy, and the legacy
+    /// Fleet `permissions` key cannot turn network reach off or rewrite it.
     #[test]
-    fn exact_fleet_ceilings_reach_the_spawn_request_as_a_tool_policy() {
+    fn exact_fleet_runtime_authority_reaches_the_spawn_request() {
         let operation = exact_workflow(EXACT_GLM_FLEET);
         let mut request = exact_task_request("reviewer");
 
         bind_exact_fleet_task_request(&operation, exact_session(), &mut request).expect("bind");
 
-        // `read_only` has tools but no network tool.
         assert_eq!(
             request.allowed_tools, None,
-            "a tool-using member keeps full inheritance, narrowed by the deny list"
+            "Runtime reviewer inherits the parent tool surface"
         );
-        // The Web family *name* survives so the read-only search/fetch actions
-        // stay reachable; every reaching spelling is denied by the list the
-        // child registry enforces.
-        for denied in [
-            "web.run",
-            "web_search",
-            "fetch_url",
-            "wait_for_dev_server",
-            "mcp*",
-        ] {
+        for denied in ["write_file", "apply_patch", "exec_shell"] {
             assert!(
                 request.disallowed_tools.iter().any(|name| name == denied),
                 "{denied} must be denied: {:?}",
                 request.disallowed_tools
             );
         }
-        assert!(
-            !request.disallowed_tools.iter().any(|name| name == "Web"),
-            "the Web family name must stay reachable so search/fetch survive: {:?}",
-            request.disallowed_tools
+        for available in ["Bash", "Web", "web.run", "fetch_url", "mcp*"] {
+            assert!(
+                !request
+                    .disallowed_tools
+                    .iter()
+                    .any(|name| name.eq_ignore_ascii_case(available)),
+                "Runtime reviewer keeps {available}: {:?}",
+                request.disallowed_tools
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_fleet_permissions_cannot_change_runtime_authority() {
+        let narrow = exact_workflow(EXACT_GLM_FLEET);
+        let legacy_full_text =
+            EXACT_GLM_FLEET.replace("permissions = \"read_only\"", "permissions = \"full\"");
+        let legacy_full = exact_workflow(&legacy_full_text);
+        let mut narrow_request = exact_task_request("reviewer");
+        let mut full_request = exact_task_request("reviewer");
+
+        let narrow_binding =
+            bind_exact_fleet_task_request(&narrow, exact_session(), &mut narrow_request)
+                .expect("legacy narrow value loads");
+        let full_binding =
+            bind_exact_fleet_task_request(&legacy_full, exact_session(), &mut full_request)
+                .expect("legacy full value loads");
+
+        assert_eq!(narrow_binding.authority, full_binding.authority);
+        assert_eq!(narrow_request.write_authority, full_request.write_authority);
+        assert_eq!(
+            narrow_request.disallowed_tools,
+            full_request.disallowed_tools
         );
     }
 
@@ -6974,8 +6998,9 @@ permissions = "read_only"
     }
 
     /// A member's semantic role is what the operator named and what gates key
-    /// on; the roster profile's role is the permission **posture** the clamped
-    /// ceiling permits. The started event must show the first, not the second.
+    /// on; the roster profile's role is the Runtime **posture** selected after
+    /// identity resolution. The started event must show the first, not the
+    /// second.
     #[tokio::test]
     async fn a_started_event_shows_the_members_role_not_its_permission_posture() {
         const AUDIT_FLEET: &str = r#"
@@ -6991,7 +7016,10 @@ reasoning = "high"
 permissions = "read_only"
 "#;
         let operation = exact_workflow_with(AUDIT_FLEET, None);
-        let mut request = exact_task_request("auditor");
+        // Free-form Fleet roles map to Runtime `custom`, whose baseline is
+        // write-capable under this full parent. Keep the production write-scope
+        // gate intact by declaring an exact scope in the fixture.
+        let mut request = exact_write_task_request("auditor");
         let binding =
             bind_exact_fleet_task_request(&operation, exact_session(), &mut request).expect("bind");
         let receipt = route_admitted_exact_task(&operation, &binding, &mut request)
@@ -7008,8 +7036,8 @@ permissions = "read_only"
             .role
             .name
             .clone();
-        assert_eq!(posture, "scout");
-        assert_eq!(receipt.posture_role.as_deref(), Some("scout"));
+        assert_eq!(posture, "custom");
+        assert_eq!(receipt.posture_role.as_deref(), Some("custom"));
 
         // What the run displays is the member's role, not that posture.
         assert_eq!(

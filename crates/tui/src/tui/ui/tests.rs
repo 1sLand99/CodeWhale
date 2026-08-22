@@ -22377,8 +22377,10 @@ fn terminal_input_child_pause_drains_codewhale_events_before_editor_handoff() {
     input
         .pause_for_child_terminal()
         .expect("synthetic pump can pause");
-    drain_terminal_input_queue(&input, &mut pending_terminal_events)
-        .expect("queued terminal events drain before launching child editor");
+    assert!(
+        prepare_terminal_input_handoff(&input, &mut pending_terminal_events)
+            .expect("queued terminal events drain before launching child editor")
+    );
 
     assert!(
         pending_terminal_events.is_empty(),
@@ -22392,6 +22394,50 @@ fn terminal_input_child_pause_drains_codewhale_events_before_editor_handoff() {
     input.resume_after_child_terminal();
     assert!(!input.paused.load(std::sync::atomic::Ordering::Acquire));
     assert!(!input.paused_ack.load(std::sync::atomic::Ordering::Acquire));
+}
+
+#[test]
+fn terminal_input_handoff_preserves_pending_cancellation_keys() {
+    let (tx, rx) = std::sync::mpsc::channel();
+    tx.send(TerminalInputMessage::Event(Event::Key(KeyEvent::new(
+        KeyCode::Char('\u{3}'),
+        KeyModifiers::NONE,
+    ))))
+    .expect("send raw Ctrl+C");
+    let input = TerminalInputPump {
+        rx,
+        stop: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        paused: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        paused_ack: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        handle: None,
+        last_alive_at: std::cell::Cell::new(Instant::now()),
+    };
+    let mut pending_terminal_events = VecDeque::from([
+        Event::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)),
+        Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+    ]);
+
+    input
+        .pause_for_child_terminal()
+        .expect("synthetic pump can pause");
+    assert!(
+        !prepare_terminal_input_handoff(&input, &mut pending_terminal_events)
+            .expect("handoff inspection succeeds"),
+        "pending cancellation must refuse the child handoff"
+    );
+    assert_eq!(pending_terminal_events.len(), 3);
+    assert!(
+        pending_terminal_events
+            .iter()
+            .any(|event| { matches!(event, Event::Key(key) if key.code == KeyCode::Esc) })
+    );
+    assert!(
+        pending_terminal_events.iter().any(|event| {
+            matches!(event, Event::Key(key) if key.code == KeyCode::Char('\u{3}'))
+        })
+    );
+
+    input.resume_after_child_terminal();
 }
 
 #[test]

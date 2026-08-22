@@ -247,37 +247,55 @@ fn jellyfish_tentacles_sway_out_of_phase_and_dome_pulses() {
 const JELLY_TENTACLE_COLUMNS: usize = 2;
 
 #[test]
-fn life_defers_to_every_row_the_composition_touches() {
-    // The vertical contract: a mark may not land on a row that carries text,
-    // nor on either neighbour of one. This is the rule that stopped a fish
-    // surfacing in the single blank row between the idle caption and the
-    // invitation — a gap the old fifths-of-the-field guess left wide open.
-    let area = Rect::new(0, 0, 100, 30);
-    let mut lines: Vec<Line<'static>> = vec![Line::default(); usize::from(area.height)];
-    for row in [20usize, 22, 26] {
-        lines[row] = Line::from(Span::raw("                    Codewhale"));
+fn short_transcript_rows_leave_a_safe_ocean_corridor() {
+    // The active transcript commonly puts short status/tool lines on every
+    // visible row. They own their cells and a one-column gutter, not the whole
+    // terminal width: fish and the t=0 jellyfish remain eligible in the clear
+    // right-hand water without touching a single transcript cell.
+    let area = Rect::new(0, 0, 80, 24);
+    let lines: Vec<Line<'static>> = (0..usize::from(area.height))
+        .map(|row| Line::from(Span::raw(format!("status row {row:02}"))))
+        .collect();
+    let mut buf = Buffer::empty(area);
+    for (row, line) in lines.iter().enumerate() {
+        buf.set_line(area.x, area.y + row as u16, line, area.width);
     }
-    for probe in 0..600u128 {
-        let mut stats = AmbientFrameStats::default();
-        let frame = build_frame_marks(
-            area,
-            probe * 250,
-            LifeDensity::from_area(area),
-            &lines,
-            AmbientCursor::default(),
-            WhaleCameo::default(),
-            &mut stats,
-        );
-        for mark in &frame.marks {
-            for row in [19u16, 20, 21, 22, 23, 25, 26, 27] {
-                assert_ne!(
-                    mark.y,
-                    row,
-                    "ambient mark {:?} landed on a composed row at t={}",
-                    mark.glyph,
-                    probe * 250
-                );
-            }
+
+    let stats = render_ambient_life(
+        area,
+        &mut buf,
+        (Color::Cyan, Color::Blue),
+        &lines,
+        0,
+        1.0,
+        AmbientCursor::default(),
+        WhaleCameo::default(),
+    );
+    let rendered: String = (0..area.height)
+        .map(|row| {
+            (0..area.width)
+                .map(|column| buf[(column, row)].symbol())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("><") || rendered.contains("<o"),
+        "short active rows should leave room for fish:\n{rendered}"
+    );
+    assert!(
+        rendered.contains(JELLY_DOME_TOP_FRAMES[0]) || rendered.contains(JELLY_DOME_TOP_FRAMES[1]),
+        "the right corridor should keep the rare visitor eligible at t=0:\n{rendered}"
+    );
+    assert!(stats.marks_painted > 0, "{stats:?}");
+    for (row, line) in lines.iter().enumerate() {
+        let text = line.spans[0].content.as_ref();
+        for (column, ch) in text.chars().enumerate() {
+            assert_eq!(
+                buf[(column as u16, row as u16)].symbol(),
+                ch.to_string(),
+                "ambient life overwrote transcript cell ({column},{row})"
+            );
         }
     }
 }
@@ -290,9 +308,10 @@ fn a_jellyfish_needs_water_deep_enough_to_hold_it_and_the_school() {
     let area = Rect::new(0, 0, 80, 18);
     let mut lines: Vec<Line<'static>> = vec![Line::default(); usize::from(area.height)];
     for row in [9usize, 10, 12] {
-        lines[row] = Line::from(Span::raw("             What do you want to accomplish?"));
+        lines[row] = Line::from(Span::raw("X".repeat(75)));
     }
-    assert!(deep_water_rows(area, &lines) < JELLY_MIN_DEEP_ROWS);
+    let jelly_lane = area.width.saturating_mul(5) / 6;
+    assert!(deep_water_rows(area, &lines, jelly_lane, 5) < JELLY_MIN_DEEP_ROWS);
     let mut saw_fish = false;
     for probe in 0..600u128 {
         let mut stats = AmbientFrameStats::default();
@@ -536,11 +555,7 @@ fn frame_stats_never_overwrite_text() {
     let area = Rect::new(0, 0, 100, 30);
     let mut buf = Buffer::empty(area);
     let lines: Vec<Line<'static>> = (0..usize::from(area.height))
-        .map(|i| {
-            Line::from(Span::raw(format!(
-                "transcript row {i:02} occupies the water"
-            )))
-        })
+        .map(|_| Line::from(Span::raw("X".repeat(usize::from(area.width)))))
         .collect();
     for (i, line) in lines.iter().enumerate() {
         buf.set_line(area.x, area.y + i as u16, line, area.width);
@@ -561,7 +576,7 @@ fn frame_stats_never_overwrite_text() {
     );
     assert!(
         stats.marks_skipped_text > 0,
-        "text-covered water should skip some marks: {stats:?}"
+        "full-width text should skip colliding marks: {stats:?}"
     );
     assert_eq!(
         stats.marks_painted, 0,

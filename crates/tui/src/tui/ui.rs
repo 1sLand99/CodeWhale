@@ -348,6 +348,18 @@ fn tui_launch_preflight_explains_non_tty_failure() {
     }
 }
 
+#[cfg(unix)]
+#[test]
+fn tui_launch_preflight_rejects_background_process_group() {
+    assert!(validate_foreground_process_group(41, 41).is_ok());
+    let err = validate_foreground_process_group(41, 42)
+        .expect_err("a background process group must fail before raw mode");
+    let message = err.to_string();
+    assert!(message.contains("background or suspended"), "{message}");
+    assert!(message.contains("Run `fg`"), "{message}");
+    assert!(message.contains("codewhale exec"), "{message}");
+}
+
 fn should_show_resume_hint(session_id: Option<&str>) -> bool {
     session_id.is_some_and(|id| !id.trim().is_empty())
 }

@@ -71,6 +71,11 @@ impl std::fmt::Display for ProfileOrigin {
 #[derive(Debug, Clone)]
 pub struct FleetRoster {
     members: Vec<AgentProfile>,
+    /// True when `members` is the exact roster from one explicitly selected
+    /// v2 Fleet rather than the compatibility merge of built-ins and profile
+    /// layers. Exact rosters require every dispatched task to resolve one
+    /// deterministic member.
+    exact_selection: bool,
     /// Lower-precedence profiles displaced by a higher layer for the same id
     /// (#5098). Shadowing is normal precedence, but it must be VISIBLE: a
     /// personal edit that loses to a stale project copy otherwise changes
@@ -149,6 +154,7 @@ impl FleetRoster {
     pub fn built_ins_only() -> Self {
         Self {
             members: Self::built_in_members(),
+            exact_selection: false,
             shadowed: Vec::new(),
             load_error: None,
         }
@@ -163,6 +169,7 @@ impl FleetRoster {
     pub fn from_members(members: Vec<AgentProfile>) -> Self {
         Self {
             members,
+            exact_selection: true,
             shadowed: Vec::new(),
             load_error: None,
         }
@@ -175,6 +182,7 @@ impl FleetRoster {
     pub fn failed(error: impl Into<String>) -> Self {
         Self {
             members: Vec::new(),
+            exact_selection: true,
             shadowed: Vec::new(),
             load_error: Some(error.into()),
         }
@@ -373,6 +381,7 @@ impl FleetRoster {
         members.extend(extras);
         Self {
             members,
+            exact_selection: false,
             shadowed,
             load_error: None,
         }
@@ -535,6 +544,12 @@ impl FleetRoster {
     #[must_use]
     pub fn load_error(&self) -> Option<&str> {
         self.load_error.as_deref()
+    }
+
+    /// Whether this roster came from one explicitly selected v2 Fleet.
+    #[must_use]
+    pub fn is_exact_selection(&self) -> bool {
+        self.exact_selection
     }
 
     /// Per-member explicit model pins, keyed by lowercased member id.

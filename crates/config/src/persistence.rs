@@ -519,6 +519,10 @@ mod tests {
         fs::read_to_string(path).unwrap()
     }
 
+    fn synthetic_secret_fixture() -> String {
+        ["abc123", "def456", "ghi"].concat()
+    }
+
     #[test]
     fn atomic_write_creates_parent_dirs_and_content() {
         let tmp = tempfile::tempdir().unwrap();
@@ -632,15 +636,18 @@ mod tests {
 
     #[test]
     fn redact_masks_keyed_secrets_toml_and_json() {
-        let input = "\
+        let synthetic_secret = synthetic_secret_fixture();
+        let input = format!(
+            "\
 api_key = \"sk-supersecretvalue123\"
 provider = \"openai\"
-  \"token\": \"abc123def456ghi\",
+  \"token\": \"{synthetic_secret}\",
 model = \"mimo-ultraspeed\"
-PASSWORD=hunter2hunter2";
-        let out = redact_secrets(input);
+PASSWORD=hunter2hunter2"
+        );
+        let out = redact_secrets(&input);
         assert!(!out.contains("sk-supersecretvalue123"), "{out}");
-        assert!(!out.contains("abc123def456ghi"), "{out}");
+        assert!(!out.contains(&synthetic_secret), "{out}");
         assert!(!out.contains("hunter2hunter2"), "{out}");
         // Non-secret values survive untouched.
         assert!(out.contains("provider = \"openai\""));
@@ -677,8 +684,9 @@ PASSWORD=hunter2hunter2";
         assert!(!out.contains("AIzaSyDeadBeefLeak"), "{out}");
         assert!(out.contains(REDACTED), "{out}");
 
-        let out = redact_secrets("note: the token = abc123def456ghi");
-        assert!(!out.contains("abc123def456ghi"), "{out}");
+        let synthetic_secret = synthetic_secret_fixture();
+        let out = redact_secrets(&format!("note: the token = {synthetic_secret}"));
+        assert!(!out.contains(&synthetic_secret), "{out}");
         assert!(out.contains(REDACTED), "{out}");
     }
 
@@ -742,8 +750,9 @@ PASSWORD=hunter2hunter2";
         assert!(out.starts_with("stream error: token = "), "{out}");
         assert!(out.contains(REDACTED), "{out}");
 
-        let out = redact_secrets("note: api_token = abc123def456ghi");
-        assert!(!out.contains("abc123def456ghi"), "{out}");
+        let synthetic_secret = synthetic_secret_fixture();
+        let out = redact_secrets(&format!("note: api_token = {synthetic_secret}"));
+        assert!(!out.contains(&synthetic_secret), "{out}");
         assert!(out.contains(REDACTED), "{out}");
     }
 

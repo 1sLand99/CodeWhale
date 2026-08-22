@@ -528,8 +528,10 @@ when you need the newest version immediately.
 
 ### Windows winget (v0.9.5+)
 
-CodeWhale publishes a winget manifest for `Hmbown.CodeWhale` (resolves #1561). The
-single-binary release ships only `codewhale` + `codew` — no `codewhale-tui` asset.
+CodeWhale publishes a winget manifest for `Hmbown.CodeWhale` (resolves #1561).
+Winget installs only the `codewhale` + `codew` commands. GitHub Releases retain
+byte-identical `codewhale-tui-*` filenames only for legacy updater compatibility;
+they are not a third installed command.
 
 ```powershell
 winget install Hmbown.CodeWhale

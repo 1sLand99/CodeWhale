@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.9.11] - 2026-08-21
+## [0.9.11] - 2026-08-22
 
 Codewhale v0.9.11 tightens the long-running agent loop, makes workflow
 failures visible instead of successful-looking, adds an experimental
@@ -104,6 +104,8 @@ item-level change record is retained below the categorized release highlights.
 - **Isabel Wu ([@wuisabel-gif](https://github.com/wuisabel-gif))** — bounded
   multi-file `read_lints` support (#5524), plus independently reviewed
   completion-routing overlap in #5530.
+- **Lstarsky0 ([@Lstarsky0](https://github.com/Lstarsky0))** — maintainer review
+  hardening for truthful per-file states and truncation metadata in #5524.
 - **Paulo Aboim Pinto ([@aboimpinto](https://github.com/aboimpinto))** — portable
   presentation/media/digest facets and the seven utility-handler migrations
   (#5525).
@@ -2022,9 +2024,9 @@ could end productive work without a final assistant response.
 
 - `codewhale-cli` now contains the terminal runtime directly. Release installers
   expose byte-identical `codewhale` and `codew` commands without a separate TUI
-  executable. The v0.9.5 asset set alone retains deprecated
-  `codewhale-tui-*` filenames as byte-identical compatibility copies so
-  installed v0.9.4 clients can discover and complete this upgrade.
+  executable. v0.9.5 introduced deprecated `codewhale-tui-*` release filenames
+  as byte-identical compatibility copies; later releases retain those filenames
+  while installed v0.9.4 clients remain supported upgrade sources.
 - Startup release checks cache successful lookups for one hour. The updater
   downloads and verifies the primary runtime once, then refreshes any existing
   `codew` or legacy `codewhale-tui` command paths from the same bytes.

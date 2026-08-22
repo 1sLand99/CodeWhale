@@ -799,7 +799,7 @@ listing when available.
 
 ## Capability Metadata
 
-`codewhale-tui doctor --json` exposes the `capability` object. It is static
+`codewhale doctor --json` exposes the `capability` object. It is static
 metadata, not a live API probe. Current fields are:
 
 `resolved_provider`, `resolved_model`, `context_window`, `max_output`,

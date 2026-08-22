@@ -379,6 +379,7 @@ impl FleetDetailView {
         };
         self.fleet.members.push(FleetMember {
             id: role.to_string(),
+            display_name: None,
             role: role.to_string(),
             provider: None,
             model: None,
@@ -731,9 +732,18 @@ impl FleetDetailView {
                 } else {
                     role
                 };
+                let member_label = member
+                    .display_name
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|name| !name.is_empty() && !name.eq_ignore_ascii_case(&member.id))
+                    .map_or_else(
+                        || member.id.clone(),
+                        |name| format!("{name} ({})", member.id),
+                    );
                 lines.push(Line::from(vec![
                     Span::styled(if selected { "» " } else { "  " }, base),
-                    Span::styled(member.id.clone(), base),
+                    Span::styled(member_label, base),
                     Span::styled(
                         format!(" · role {role}"),
                         Style::default().fg(palette::TEXT_SECONDARY),
@@ -874,6 +884,7 @@ mod tests {
         });
         fleet.members.push(FleetMember {
             id: "scout".to_string(),
+            display_name: Some("Flash Scout".to_string()),
             role: "scout".to_string(),
             provider: None,
             model: None,
@@ -910,6 +921,7 @@ mod tests {
         let mut duplicate_roles = sample_fleet("Duplicate Roles");
         duplicate_roles.members.push(FleetMember {
             id: "fast-scout".to_string(),
+            display_name: Some("Fast Scout".to_string()),
             role: "scout".to_string(),
             provider: None,
             model: None,

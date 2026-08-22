@@ -5113,7 +5113,7 @@ async fn runtime_info_reports_bind_state() -> Result<()> {
         .as_str()
         .expect("runtime build commit must be a string");
     // Since #5245 the commit is env-stamped only: a stamped build (CI /
-    // release / a `DEEPSEEK_BUILD_SHA=…` dogfood build) reports a full 40-hex
+    // release / a `CODEWHALE_BUILD_SHA=…` dogfood build) reports a full 40-hex
     // sha; an unstamped local build honestly reports "unknown" rather than
     // reading the checkout. Both are valid provenance — a fabricated sha
     // would be the bug.

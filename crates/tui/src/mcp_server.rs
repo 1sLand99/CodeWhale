@@ -585,7 +585,7 @@ fn initialize_response() -> Value {
     json!({
         "protocolVersion": "2024-11-05",
         "serverInfo": {
-            "name": "deepseek-mcp-server",
+            "name": "codewhale-mcp-server",
             "version": env!("CARGO_PKG_VERSION"),
         },
         "capabilities": {
@@ -691,6 +691,15 @@ mod tests {
             resources.get("nextCursor").is_none(),
             "resources/list must omit nextCursor when there are no more pages"
         );
+    }
+
+    #[test]
+    fn initialize_uses_standard_mcp_shape_and_codewhale_identity() {
+        let response = initialize_response();
+        assert_eq!(response["protocolVersion"], "2024-11-05");
+        assert_eq!(response["serverInfo"]["name"], "codewhale-mcp-server");
+        assert_eq!(response["serverInfo"]["version"], env!("CARGO_PKG_VERSION"));
+        assert!(response["capabilities"]["tools"].is_object());
     }
 
     #[test]

@@ -108,7 +108,7 @@ pub fn roster_from_fleet(fleet: &FleetFile, scope: FleetScope, source: &Path) ->
                     .or_else(|| operator.and_then(|operator| operator.reasoning.clone()));
                 AgentProfile {
                     id: member.id.trim().to_string(),
-                    display_name: None,
+                    display_name: member.display_name.clone(),
                     description: None,
                     requires: member.requires.clone(),
                     profile: FleetProfile {
@@ -295,6 +295,17 @@ pub fn resolve_member<'a>(
     roster: &'a FleetRoster,
     selector: &str,
 ) -> Result<Option<&'a AgentProfile>, FleetSelectorError> {
+    resolve_member_in_profiles(roster.members(), selector)
+}
+
+/// Resolve a member selector against an already-loaded profile slice.
+///
+/// Fleet task dispatch uses this entry point so CLI task specs and interactive
+/// `agent` calls share one deterministic identity resolver.
+pub fn resolve_member_in_profiles<'a>(
+    profiles: &'a [AgentProfile],
+    selector: &str,
+) -> Result<Option<&'a AgentProfile>, FleetSelectorError> {
     let selector = selector.trim();
     if selector.is_empty() {
         return Err(FleetSelectorError::Blank);
@@ -309,13 +320,15 @@ pub fn resolve_member<'a>(
     if kind
         .as_deref()
         .is_none_or(|kind| kind == "member" || kind == "id")
-        && let Some(member) = roster.get(value)
+        && let Some(member) = profiles
+            .iter()
+            .find(|member| member.id.eq_ignore_ascii_case(value))
     {
         return Ok(Some(member));
     }
 
     let mut candidates = Vec::new();
-    for member in roster.members() {
+    for member in profiles {
         let matches = match kind.as_deref() {
             Some("member" | "id") => false,
             Some("name") => matches_display_name(member, value),
@@ -346,7 +359,11 @@ pub fn resolve_member<'a>(
             "general" | "default" => Some("worker"),
             _ => None,
         };
-        if let Some(member) = alias.and_then(|alias| roster.get(alias)) {
+        if let Some(member) = alias.and_then(|alias| {
+            profiles
+                .iter()
+                .find(|member| member.id.eq_ignore_ascii_case(alias))
+        }) {
             candidates.push(member);
         }
     }
@@ -466,6 +483,19 @@ mod tests {
         }
     }
 
+    fn stored_member(id: &str, display_name: Option<&str>, role: &str) -> FleetMember {
+        FleetMember {
+            id: id.to_string(),
+            display_name: display_name.map(str::to_string),
+            role: role.to_string(),
+            model: None,
+            provider: None,
+            reasoning: None,
+            instructions: None,
+            requires: Vec::new(),
+        }
+    }
+
     #[test]
     fn selected_v2_members_project_exact_identity_and_route() {
         let fleet = FleetFile {
@@ -476,6 +506,7 @@ mod tests {
             operator: None,
             members: vec![FleetMember {
                 id: "Scout-One".to_string(),
+                display_name: Some("Flash Scout".to_string()),
                 role: "scout".to_string(),
                 model: Some("deepseek-v4-flash".to_string()),
                 provider: Some("deepseek".to_string()),
@@ -490,6 +521,7 @@ mod tests {
             Path::new(".codewhale/fleets/launch.toml"),
         );
         let projected = roster.get("scout-one").expect("case-insensitive id");
+        assert_eq!(projected.display_name.as_deref(), Some("Flash Scout"));
         assert_eq!(projected.profile.role.name, "scout");
         assert_eq!(projected.profile.provider.as_deref(), Some("deepseek"));
         assert_eq!(
@@ -523,6 +555,7 @@ mod tests {
             members: vec![
                 FleetMember {
                     id: "inherited".to_string(),
+                    display_name: None,
                     role: "scout".to_string(),
                     model: None,
                     provider: None,
@@ -532,6 +565,7 @@ mod tests {
                 },
                 FleetMember {
                     id: "pinned".to_string(),
+                    display_name: None,
                     role: "reviewer".to_string(),
                     model: Some("gpt-5.6".to_string()),
                     provider: Some("openrouter".to_string()),
@@ -589,6 +623,47 @@ mod tests {
                 "selector {selector}"
             );
         }
+    }
+
+    #[test]
+    fn selected_v2_friendly_name_selector_is_deterministic() {
+        let fleet = FleetFile {
+            schema: FLEET_SCHEMA_KIND.to_string(),
+            schema_revision: FLEET_SCHEMA_REVISION,
+            name: "Named members".to_string(),
+            description: None,
+            operator: None,
+            members: vec![
+                stored_member("release-lead", Some("Release Lead"), "manager"),
+                stored_member("scout-a", Some("Flash Scout"), "scout"),
+                stored_member("scout-b", Some("Flash Scout"), "reviewer"),
+            ],
+        };
+        let roster = roster_from_fleet(
+            &fleet,
+            FleetScope::Workspace,
+            Path::new(".codewhale/fleets/named-members.toml"),
+        );
+
+        for selector in ["Release Lead", "name:Release Lead"] {
+            assert_eq!(
+                resolve_member(&roster, selector)
+                    .expect("unique friendly name")
+                    .map(|member| member.id.as_str()),
+                Some("release-lead"),
+                "selector {selector}"
+            );
+        }
+        let error = resolve_member(&roster, "name:Flash Scout")
+            .expect_err("duplicate friendly name must be ambiguous");
+        let FleetSelectorError::Ambiguous { candidates, .. } = error else {
+            panic!("expected ambiguity");
+        };
+        assert!(candidates.contains("scout-a"), "{candidates}");
+        assert!(candidates.contains("scout-b"), "{candidates}");
+
+        let identities = roster_identities(&roster);
+        assert_eq!(identities[0].display_name.as_deref(), Some("Release Lead"));
     }
 
     #[test]

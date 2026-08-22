@@ -24,10 +24,12 @@
 //! fully off-screen.
 //!
 //! The aquarium has a habitat and it defers to whatever is composed above it.
-//! Vertically that is one rule — [`is_open_water`]: a mark may only land on a
-//! row that carries no text and has none within [`TEXT_CLEARANCE_ROWS`] of it,
-//! measured off the rendered lines rather than guessed from fractions of the
-//! field. Everything else follows from it. The school rides a band off the
+//! Collision is one rule — [`is_open_water`]: a mark may only land in a
+//! horizontal span that carries no text and has none within
+//! [`TEXT_CLEARANCE_ROWS`] of it, measured off the rendered lines rather than
+//! guessed from fractions of the field. Everything else follows from it. A
+//! short status line therefore leaves honest water beside it instead of
+//! claiming the whole row. The school rides a band off the
 //! floor ([`SCHOOL_FLOOR_GAP`]); bubbles rise a few rows from the floor and
 //! dissolve ([`BUBBLE_MAX_RISE_ROWS`]); the jellyfish only surfaces where
 //! [`deep_water_rows`] says the water is deep enough to hold it *and* the
@@ -261,7 +263,7 @@ fn build_frame_marks(
     // surfaced in the one-row gap between the caption and the invitation.
     // Now the field is measured, not guessed: [`is_open_water`] asks the
     // rendered lines directly.
-    let water = |y: u16| is_open_water(lines, y);
+    let water = |x: u16, y: u16, width: u16| is_open_water(lines, x, y, width);
 
     // --- One loose fish school along the floor ---
     // The school enters one edge, crosses, and exits the other; direction
@@ -330,7 +332,7 @@ fn build_frame_marks(
         }
         let y = y_i32 as u16;
         // Never swim through the composition or the row of air around it.
-        if !water(y) {
+        if !water(x_i32 as u16, y, body_w) {
             continue;
         }
         let brightness = FISH_BRIGHTNESS_FLOOR
@@ -368,11 +370,7 @@ fn build_frame_marks(
     // silhouette and a wedge of fish sharing four rows of a 24-row terminal
     // is the definition of not earning the space. Below the budget it simply
     // does not come up.
-    let jellyfish_count = if deep_water_rows(area, lines) >= JELLY_MIN_DEEP_ROWS {
-        density.jellyfish_count()
-    } else {
-        0
-    };
+    let jellyfish_count = density.jellyfish_count();
     for j in 0..jellyfish_count {
         let phase = 3_100u128.saturating_add((j as u128) * 4_700);
         let lane_x = if j % 2 == 0 {
@@ -395,6 +393,9 @@ fn build_frame_marks(
         let x = lane_x
             .saturating_add(wobble)
             .min(area.width.saturating_sub(dome_w + 1));
+        if deep_water_rows(area, lines, x, dome_w) < JELLY_MIN_DEEP_ROWS {
+            continue;
+        }
         // A visit is a short, slow rise near the floor followed by a long
         // absence: the jelly climbs [`JELLY_VISIT_ROWS`] rows and then spends
         // the rest of the cycle out of sight. Rows are discrete cells, so the
@@ -410,7 +411,7 @@ fn build_frame_marks(
             .height
             .saturating_sub(JELLY_FLOOR_GAP)
             .saturating_sub(risen);
-        if y == 0 || !water(y) {
+        if y == 0 || !water(x, y, dome_w) {
             continue;
         }
         let dome_brightness = jelly_glow(wave01(t, JELLY_PULSE_MS, phase));
@@ -428,7 +429,11 @@ fn build_frame_marks(
         // band checks deliberately allowed the dome, skirt, or tentacles to
         // disappear independently, which is exactly the broken punctuation
         // visible in the v0.9.2 dogfood screenshot.
-        if tentacle_row >= area.height || ![y, skirt_row, tentacle_row].into_iter().all(water) {
+        if tentacle_row >= area.height
+            || ![y, skirt_row, tentacle_row]
+                .into_iter()
+                .all(|row| water(x, row, dome_w))
+        {
             continue;
         }
         for (row, glyph) in [
@@ -495,7 +500,7 @@ fn build_frame_marks(
             .saturating_add(boost)
             .min(BUBBLE_MAX_RISE_ROWS);
         let y = area.height.saturating_sub(2).saturating_sub(rise);
-        if !water(y) {
+        if !water(column, y, 1) {
             continue;
         }
         // Size is a function of height risen, not of the clock: the old
@@ -777,27 +782,38 @@ fn school_swims_right(cycle_index: u128) -> bool {
 /// invitation.
 const TEXT_CLEARANCE_ROWS: u16 = 1;
 
-/// True when row `y` — and every row within [`TEXT_CLEARANCE_ROWS`] of it —
-/// carries no rendered text. This is the whole vertical contract between the
-/// aquarium and the composition: the water is measured off what was actually
-/// laid out, so life defers to any composition, present or future, without
-/// either side knowing the other's layout.
+/// True when the horizontal span at `(x, y)` — and the same span on every row
+/// within [`TEXT_CLEARANCE_ROWS`] — carries no rendered text. One column of
+/// horizontal air is reserved on both sides so a fish never touches the prose,
+/// while short left-aligned transcript lines still leave real water to their
+/// right.
 #[must_use]
-fn is_open_water(lines: &[Line<'_>], y: u16) -> bool {
+fn is_open_water(lines: &[Line<'_>], x: u16, y: u16, width: u16) -> bool {
     let first = usize::from(y.saturating_sub(TEXT_CLEARANCE_ROWS));
     let last = usize::from(y.saturating_add(TEXT_CLEARANCE_ROWS));
-    !(first..=last).any(|row| lines.get(row).and_then(occupied_text_bounds).is_some())
+    !(first..=last).any(|row| {
+        lines
+            .get(row)
+            .and_then(occupied_text_bounds)
+            .is_some_and(|(start, end)| span_touches_text(x, width, start, end))
+    })
+}
+
+#[must_use]
+fn span_touches_text(x: u16, width: u16, start: usize, end: usize) -> bool {
+    usize::from(x) < end.saturating_add(1)
+        && usize::from(x).saturating_add(usize::from(width)) > start.saturating_sub(1)
 }
 
 /// Unbroken open-water rows measured up from the bottom of the field: how much
 /// deep water the composition has left for the aquarium to live in.
 #[must_use]
-fn deep_water_rows(area: Rect, lines: &[Line<'_>]) -> u16 {
+fn deep_water_rows(area: Rect, lines: &[Line<'_>], x: u16, width: u16) -> u16 {
     let mut rows = 0u16;
     let mut y = area.height;
     while y > 0 {
         y -= 1;
-        if !is_open_water(lines, y) {
+        if !is_open_water(lines, x, y, width) {
             break;
         }
         rows = rows.saturating_add(1);
@@ -830,12 +846,6 @@ fn paint_marks(
         Anchor { original: u16, placed: u16 },
         Skip(SkipReason),
     }
-    #[derive(Clone, Copy)]
-    struct RowBounds {
-        y: u16,
-        protected: Option<(usize, usize)>,
-    }
-
     let mut placements: [Option<Placement>; 2] = [None, None];
     let population_overflow = frame
         .marks
@@ -856,40 +866,11 @@ fn paint_marks(
         let Some(original) = marks().map(|mark| mark.x).min() else {
             continue;
         };
-        let mut rows: [Option<RowBounds>; MAX_FRAME_MARKS as usize] =
-            [None; MAX_FRAME_MARKS as usize];
-        let mut row_count = 0usize;
-        let mut row_overflow = false;
         let mut group_end = 0u16;
         for mark in marks() {
             let offset = mark.x.saturating_sub(original);
             let width = u16::try_from(UnicodeWidthStr::width(mark.glyph)).unwrap_or(u16::MAX);
             group_end = group_end.max(offset.saturating_add(width));
-            if rows[..row_count]
-                .iter()
-                .flatten()
-                .all(|row| row.y != mark.y)
-            {
-                if row_count == rows.len() {
-                    debug_assert!(
-                        row_count < rows.len(),
-                        "jellyfish rows exceeded the ambient mark budget"
-                    );
-                    row_overflow = true;
-                    break;
-                }
-                rows[row_count] = Some(RowBounds {
-                    y: mark.y,
-                    protected: lines
-                        .get(usize::from(mark.y))
-                        .and_then(occupied_text_bounds),
-                });
-                row_count += 1;
-            }
-        }
-        if row_overflow {
-            *placement = Some(Placement::Skip(SkipReason::Clipped));
-            continue;
         }
         let Some(right_edge) = area.width.checked_sub(group_end) else {
             *placement = Some(Placement::Skip(SkipReason::Clipped));
@@ -911,16 +892,9 @@ fn paint_marks(
             let fits = candidate <= right_edge
                 && marks().all(|mark| {
                     let x = candidate.saturating_add(mark.x.saturating_sub(original));
-                    let width = UnicodeWidthStr::width(mark.glyph);
-                    !rows[..row_count]
-                        .iter()
-                        .flatten()
-                        .find(|row| row.y == mark.y)
-                        .and_then(|row| row.protected)
-                        .is_some_and(|(start, end)| {
-                            usize::from(x) < end.saturating_add(1)
-                                && usize::from(x) + width > start.saturating_sub(1)
-                        })
+                    let width =
+                        u16::try_from(UnicodeWidthStr::width(mark.glyph)).unwrap_or(u16::MAX);
+                    is_open_water(lines, x, mark.y, width)
                 });
             if fits {
                 let ranked = (dodge, candidate);
@@ -933,23 +907,21 @@ fn paint_marks(
         consider(0);
         consider(i64::from(right_edge));
         for mark in marks() {
-            let Some((start, end)) = rows[..row_count]
-                .iter()
-                .flatten()
-                .find(|row| row.y == mark.y)
-                .and_then(|row| row.protected)
-            else {
-                continue;
-            };
             let offset = mark.x.saturating_sub(original);
             let mark_end = offset.saturating_add(
                 u16::try_from(UnicodeWidthStr::width(mark.glyph)).unwrap_or(u16::MAX),
             );
-            if let Ok(start) = i64::try_from(start) {
-                consider(start - 1 - i64::from(mark_end));
-            }
-            if let Ok(end) = i64::try_from(end) {
-                consider(end + 1 - i64::from(offset));
+            let first = usize::from(mark.y.saturating_sub(TEXT_CLEARANCE_ROWS));
+            let last = usize::from(mark.y.saturating_add(TEXT_CLEARANCE_ROWS));
+            for (start, end) in
+                (first..=last).filter_map(|row| lines.get(row).and_then(occupied_text_bounds))
+            {
+                if let Ok(start) = i64::try_from(start) {
+                    consider(start - 1 - i64::from(mark_end));
+                }
+                if let Ok(end) = i64::try_from(end) {
+                    consider(end + 1 - i64::from(offset));
+                }
             }
         }
         *placement = Some(match best {
@@ -991,14 +963,12 @@ fn paint_marks(
                 stats.marks_clipped += 1;
                 continue;
             }
-            let protected = lines
-                .get(usize::from(mark.y))
-                .and_then(occupied_text_bounds);
-            let collides = protected.is_some_and(|(start, end)| {
-                usize::from(mark_x) < end.saturating_add(1)
-                    && usize::from(mark_x) + mark_width > start.saturating_sub(1)
-            });
-            if collides {
+            if !is_open_water(
+                lines,
+                mark_x,
+                mark.y,
+                u16::try_from(mark_width).unwrap_or(u16::MAX),
+            ) {
                 stats.marks_skipped_text += 1;
                 continue;
             }

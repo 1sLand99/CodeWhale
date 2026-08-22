@@ -145,6 +145,8 @@ impl ChatWidget {
             .map(|started| started.elapsed().as_millis());
         let completion_elapsed_ms = completion_life_clock
             .filter(|elapsed| *elapsed < crate::tui::ocean::COMPLETION_BREATH_MS);
+        let completion_life_active = completion_life_clock
+            .is_some_and(|elapsed| elapsed < crate::tui::ocean::COMPLETION_SETTLE_MS);
         let render_empty_state = should_render_empty_state(app);
         let phase = ShellPhase::from_app(app);
         // Keep the water alive while a turn is doing work, even after the
@@ -620,7 +622,8 @@ impl ChatWidget {
             // legible while the ocean remains playful when scrolling upward.
             ambient_life: !app.attention_hold_active()
                 && (browsing_history
-                    || matches!(phase, ShellPhase::Working | ShellPhase::Verifying)),
+                    || matches!(phase, ShellPhase::Working | ShellPhase::Verifying)
+                    || completion_life_active),
             scroll_track,
             scroll_thumb,
             jump_border,
@@ -6930,41 +6933,97 @@ mod tests {
 
     #[test]
     fn browsing_history_keeps_fish_in_available_water() {
-        // Open water below a short transcript still holds the school, and a
-        // fish never shares a row with the text — not even the row above or
-        // below it. That clearance is the whole point: a fish in the gap
-        // between two lines is inside the writing, not behind it.
+        // Short transcript rows own their text plus a quiet gutter, not the
+        // entire width. Browsing still holds the school in the clear water.
         let rows = history_field_rows(4);
         let rendered = rows.join("\n");
         assert!(
             rendered.contains("><>") || rendered.contains("<><"),
             "open water below the transcript should hold fish:\n{rendered}"
         );
-        let text_rows: Vec<usize> = rows
-            .iter()
-            .enumerate()
-            .filter(|(_, row)| row.contains("history row"))
-            .map(|(index, _)| index)
-            .collect();
-        assert!(!text_rows.is_empty(), "fixture rendered no history");
-        for (index, row) in rows.iter().enumerate() {
-            if !(row.contains("><") || row.contains("<>")) {
-                continue;
-            }
+        for index in 0..4 {
             assert!(
-                text_rows.iter().all(|text| index.abs_diff(*text) > 1),
-                "a fish surfaced inside the transcript at row {index}:\n{rendered}"
+                rendered.contains(&format!("history row {index}")),
+                "ambient life damaged history row {index}:\n{rendered}"
             );
         }
     }
 
     #[test]
+    fn active_tail_keeps_fish_after_message_submit() {
+        let mut app = create_test_app();
+        app.low_motion = false;
+        app.fancy_animations = true;
+        for index in 0..18 {
+            app.add_message(HistoryCell::Assistant {
+                content: format!("release check {index:02}"),
+                streaming: false,
+            });
+        }
+        app.is_loading = true;
+        app.runtime_turn_status = Some("in_progress".to_string());
+        app.turn_started_at = Some(
+            Instant::now()
+                .checked_sub(std::time::Duration::from_millis(900))
+                .expect("recent turn start"),
+        );
+        let area = Rect::new(0, 0, 80, 24);
+        let widget = ChatWidget::new_with_ocean_elapsed(&mut app, area, 0);
+        assert!(widget.ambient_life);
+        assert!(widget.ocean_animated);
+        let mut buf = Buffer::empty(area);
+        widget.render(area, &mut buf);
+        let rendered = buffer_text(&buf, area);
+        assert!(
+            rendered.contains("><") || rendered.contains("<o"),
+            "submitting a message must not empty the ocean:\n{rendered}"
+        );
+        assert!(rendered.contains("release check 17"), "{rendered}");
+    }
+
+    #[test]
+    fn completed_turn_keeps_bounded_ocean_settle() {
+        let mut app = create_test_app();
+        app.low_motion = false;
+        app.fancy_animations = true;
+        app.add_message(HistoryCell::Assistant {
+            content: "release receipt".to_string(),
+            streaming: false,
+        });
+        app.runtime_turn_status = Some("completed".to_string());
+        app.ocean_completion_started_at = Some(Instant::now());
+        let area = Rect::new(0, 0, 80, 24);
+        let widget = ChatWidget::new_with_ocean_elapsed(&mut app, area, 0);
+        assert!(widget.ambient_life);
+        let mut buf = Buffer::empty(area);
+        widget.render(area, &mut buf);
+        let rendered = buffer_text(&buf, area);
+        assert!(
+            rendered.contains("><") || rendered.contains("<o"),
+            "the completion settle must not snap the ocean empty:\n{rendered}"
+        );
+        assert!(rendered.contains("release receipt"), "{rendered}");
+    }
+
+    #[test]
     fn a_field_full_of_transcript_holds_no_fish() {
-        // The other end of the same rule. When the reader has filled the
-        // field there is no water left, and the honest answer is stillness:
-        // motion beside the line someone is reading is the same failure as
-        // clutter, just harder to argue with.
-        let rendered = history_field_rows(30).join("\n");
+        // Full-width prose really does claim the whole field; short status
+        // lines no longer impersonate this fixture.
+        let mut app = create_test_app();
+        app.low_motion = false;
+        app.fancy_animations = true;
+        for _ in 0..30 {
+            app.add_message(HistoryCell::Assistant {
+                content: "X".repeat(100),
+                streaming: false,
+            });
+        }
+        app.viewport.transcript_scroll = TranscriptScroll::at_line(0);
+        let area = Rect::new(0, 0, 100, 20);
+        let widget = ChatWidget::new_with_ocean_elapsed(&mut app, area, 0);
+        let mut buf = Buffer::empty(area);
+        widget.render(area, &mut buf);
+        let rendered = buffer_text(&buf, area);
         assert!(
             !rendered.contains("><>") && !rendered.contains("<><"),
             "a full transcript is not an aquarium:\n{rendered}"

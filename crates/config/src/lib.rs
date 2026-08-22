@@ -1689,31 +1689,32 @@ impl std::error::Error for FleetResolutionError {}
 
 /// On-disk schema for the `[fleet]` table (#3165). See `config.example.toml`
 /// and `docs/FLEET.md` for documentation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct FleetConfigToml {
-    /// Default trust level for fleet workers. One of `"sandbox"`, `"local"`,
-    /// `"remote-verified"`, or `"operator"`. Defaults to `"sandbox"`.
-    #[serde(default = "default_fleet_trust_level_str")]
+    /// Legacy ignored input retained only so pre-0.9.11 configuration can be
+    /// read without failing. Fleet does not own Runtime trust or authority.
+    #[doc(hidden)]
+    #[serde(default, skip_serializing)]
     pub default_trust_level: String,
-    /// Require identity verification for remote (SSH) workers before
-    /// granting them `remote-verified` trust. Defaults to true.
-    #[serde(default = "default_fleet_require_identity")]
+    /// Legacy ignored input; host identity verification belongs to Runtime.
+    #[doc(hidden)]
+    #[serde(default, skip_serializing)]
     pub require_identity_verification: bool,
-    /// Maximum trust level any worker may have (`"sandbox"`, `"local"`,
-    /// `"remote-verified"`, or `"operator"`). Defaults to `"operator"`.
-    #[serde(default = "default_fleet_max_trust_level_str")]
+    /// Legacy ignored input; Fleet membership never grants Runtime trust.
+    #[doc(hidden)]
+    #[serde(default, skip_serializing)]
     pub max_trust_level: String,
     /// User-defined and built-in role presets.
     ///
-    /// Each role defines default tool profiles, capabilities, budgets, and
-    /// trust settings that task specs can reference by name. Built-in roles
+    /// Each role defines default tool profiles, capabilities, and execution
+    /// requests that task specs can reference by name. Built-in roles
     /// (`smoke-runner`, `reviewer`, `builder`, `read-only`) are always
     /// available; user-defined roles in config override or extend them.
     #[serde(default)]
     pub roles: BTreeMap<String, FleetRolePreset>,
     /// Fleet profile vocabulary (#3167). Profiles group role semantics,
-    /// loadout hints, permission defaults, and delegation bounds. They are
-    /// config-only in this slice; executor/model routing wiring lands later.
+    /// loadout hints, route identity, and delegation bounds. Runtime authority
+    /// is intentionally not a profile property.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub profiles: BTreeMap<String, FleetProfile>,
     /// Headless worker execution hardening (#3027).
@@ -1783,7 +1784,8 @@ pub struct FleetExecConfig {
 
 /// Fleet workers run until the model finishes unless an operator supplies a
 /// positive `max_turns` value. Individual task budgets may still opt into a
-/// narrower explicit cap through `budget.max_tool_calls`.
+/// narrower explicit model-turn cap through `budget.max_steps`; tool-call
+/// admission is enforced independently through `budget.max_tool_calls`.
 pub const FLEET_DEFAULT_MAX_TURNS: u32 = 0;
 
 fn default_fleet_max_turns() -> u32 {
@@ -1854,8 +1856,11 @@ pub struct FleetProfile {
     /// TUI loader before they are used at runtime.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
-    /// Permission defaults requested by the profile.
-    #[serde(default)]
+    /// Legacy ignored input retained for old Fleet-profile files. Runtime
+    /// authority is derived after identity selection and is never persisted in
+    /// this profile.
+    #[doc(hidden)]
+    #[serde(default, skip_serializing)]
     pub permissions: FleetProfilePermissions,
     /// Delegation hints for future manager policy.
     #[serde(default)]
@@ -2053,17 +2058,18 @@ impl<'de> Deserialize<'de> for FleetLoadout {
     }
 }
 
-/// Safe permission defaults attached to a fleet profile.
+/// Legacy Fleet-profile permission payload retained only for source and input
+/// compatibility. Runtime ignores it; Fleet identity cannot grant authority.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FleetProfilePermissions {
-    /// Permit shell-capable tools for this profile when later consumed.
-    #[serde(default)]
+    #[doc(hidden)]
+    #[serde(default, skip_serializing)]
     pub allow_shell: bool,
-    /// Permit trusted/elevated execution for this profile when later consumed.
-    #[serde(default)]
+    #[doc(hidden)]
+    #[serde(default, skip_serializing)]
     pub trust: bool,
-    /// Require approval by default. This intentionally defaults on.
-    #[serde(default = "default_fleet_profile_approval_required")]
+    #[doc(hidden)]
+    #[serde(default = "default_fleet_profile_approval_required", skip_serializing)]
     pub approval_required: bool,
 }
 
@@ -2122,34 +2128,11 @@ pub struct FleetRolePreset {
     /// Default timeout in seconds for tasks using this role.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeout_seconds: Option<u64>,
-    /// Default trust level override for this role.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Legacy ignored input retained for old config deserialization. Runtime
+    /// derives execution authority independently of Fleet role identity.
+    #[doc(hidden)]
+    #[serde(default, skip_serializing)]
     pub trust_level: Option<String>,
-}
-
-fn default_fleet_trust_level_str() -> String {
-    "sandbox".to_string()
-}
-
-fn default_fleet_require_identity() -> bool {
-    true
-}
-
-fn default_fleet_max_trust_level_str() -> String {
-    "operator".to_string()
-}
-
-impl Default for FleetConfigToml {
-    fn default() -> Self {
-        Self {
-            default_trust_level: default_fleet_trust_level_str(),
-            require_identity_verification: default_fleet_require_identity(),
-            max_trust_level: default_fleet_max_trust_level_str(),
-            roles: BTreeMap::new(),
-            profiles: BTreeMap::new(),
-            exec: FleetExecConfig::default(),
-        }
-    }
 }
 
 impl FleetConfigToml {
@@ -2166,20 +2149,16 @@ impl FleetConfigToml {
 
 /// On-disk schema for a single named Fleet entry under `[fleets.<name>]` (#5039).
 ///
-/// A named Fleet is a superset of [`FleetConfigToml`]: it carries a mandatory
-/// `operator` identity and independently configured trust, roles, profiles, and
-/// exec policy. Multiple named Fleets may coexist; each is uniquely addressed by
-/// its TOML key. The existing `[fleet]` table remains the backward-compatible
-/// default and is always accessible without a name.
+/// A named Fleet carries a mandatory `operator` identity plus independently
+/// configured roles, profiles, and execution requests. Multiple named Fleets
+/// may coexist; each is uniquely addressed by its TOML key. Runtime trust and
+/// authority are deliberately not Fleet variables.
 ///
 /// # TOML example
 ///
 /// ```toml
 /// [fleets.alice-team]
 /// operator = "alice"
-/// default_trust_level = "local"
-/// max_trust_level = "operator"
-///
 /// [fleets.alice-team.exec]
 /// max_turns = 200
 ///
@@ -2194,16 +2173,17 @@ pub struct NamedFleetConfigToml {
     /// Used to scope fleet selection: `config.resolve_fleet_for_operator("alice")`
     /// returns the fleet whose `operator` field matches. Must be non-empty.
     pub operator: String,
-    /// Default trust level for fleet workers (`"sandbox"`, `"local"`,
-    /// `"remote-verified"`, or `"operator"`). Defaults to `"sandbox"`.
-    #[serde(default = "default_fleet_trust_level_str")]
+    /// Legacy ignored input retained only for pre-0.9.11 config reads.
+    #[doc(hidden)]
+    #[serde(default, skip_serializing)]
     pub default_trust_level: String,
-    /// Require identity verification for remote (SSH) workers before
-    /// granting them `remote-verified` trust. Defaults to `true`.
-    #[serde(default = "default_fleet_require_identity")]
+    /// Legacy ignored input; Runtime owns host identity verification.
+    #[doc(hidden)]
+    #[serde(default, skip_serializing)]
     pub require_identity_verification: bool,
-    /// Maximum trust level any worker may have. Defaults to `"operator"`.
-    #[serde(default = "default_fleet_max_trust_level_str")]
+    /// Legacy ignored input; Fleet identity never grants Runtime trust.
+    #[doc(hidden)]
+    #[serde(default, skip_serializing)]
     pub max_trust_level: String,
     /// User-defined and built-in role presets for this fleet.
     #[serde(default)]
@@ -2275,7 +2255,10 @@ pub struct WorkflowConfigToml {
     /// Maximum concurrently live agents inside one Workflow run (product: 16).
     #[serde(default = "default_workflow_max_concurrent")]
     pub max_concurrent: u32,
-    /// Maximum nested Workflow / child-orchestration depth.
+    /// Maximum structural nesting depth accepted for Workflow IR.
+    ///
+    /// This is independent of Runtime child delegation, whose default is 3
+    /// and whose opt-in hard ceiling is 8.
     #[serde(default = "default_workflow_max_depth")]
     pub max_depth: u32,
     /// Default shared token budget for a Workflow run and its children.
@@ -2321,7 +2304,7 @@ fn default_workflow_max_concurrent() -> u32 {
 }
 
 fn default_workflow_max_depth() -> u32 {
-    2
+    5
 }
 
 fn default_workflow_default_token_budget() -> u64 {
@@ -2371,7 +2354,7 @@ pub fn built_in_role_presets() -> BTreeMap<String, FleetRolePreset> {
                 tools: vec![],
                 capabilities: vec![],
                 timeout_seconds: Some(300),
-                trust_level: Some("local".to_string()),
+                trust_level: None,
             },
         ),
         (
@@ -2395,7 +2378,7 @@ pub fn built_in_role_presets() -> BTreeMap<String, FleetRolePreset> {
                 tools: vec![],
                 capabilities: vec![],
                 timeout_seconds: Some(1800),
-                trust_level: Some("local".to_string()),
+                trust_level: None,
             },
         ),
         (
@@ -2408,7 +2391,7 @@ pub fn built_in_role_presets() -> BTreeMap<String, FleetRolePreset> {
                 tools: vec![],
                 capabilities: vec![],
                 timeout_seconds: Some(300),
-                trust_level: Some("sandbox".to_string()),
+                trust_level: None,
             },
         ),
     ]

@@ -164,6 +164,7 @@ pub async fn run_tui(
     // with opaque "Device not configured" / "Input/output error" and some
     // terminal hosts surface only "[Process completed]".
     require_interactive_terminal(io::stdin().is_terminal(), io::stdout().is_terminal())?;
+    require_foreground_terminal_owner()?;
 
     // Terminal probe with timeout to prevent hanging on unresponsive terminals.
     //
@@ -2229,12 +2230,92 @@ pub(crate) async fn run_event_loop(
                     }
                     EngineEvent::PauseEvents { ack } => {
                         if !event_broker.is_paused() {
-                            pause_terminal(
+                            let input_handoff =
+                                terminal_input.pause_for_child_terminal().and_then(|()| {
+                                    prepare_terminal_input_handoff(
+                                        &terminal_input,
+                                        &mut pending_terminal_events,
+                                    )
+                                });
+                            match input_handoff {
+                                Ok(true) => {}
+                                Ok(false) => {
+                                    terminal_input.resume_after_child_terminal();
+                                    tracing::debug!(
+                                        "refusing interactive child because cancellation input is pending"
+                                    );
+                                    // Preserve Esc/Ctrl+C for the ordinary
+                                    // key path and withhold the ack so the
+                                    // child cannot race ahead of cancellation.
+                                    continue;
+                                }
+                                Err(err) => {
+                                    terminal_input.resume_after_child_terminal();
+                                    tracing::warn!(
+                                        error = %err,
+                                        "refusing interactive child after terminal input handoff failed"
+                                    );
+                                    let recovery = match terminal_input.restart_detached() {
+                                        Ok(()) => "Terminal input recovered.".to_string(),
+                                        Err(restart_err) => {
+                                            tracing::warn!(
+                                                error = %restart_err,
+                                                "failed to restart terminal input after handoff refusal"
+                                            );
+                                            format!(
+                                                "Terminal input recovery also failed ({restart_err}); restart Codewhale if keys stop responding."
+                                            )
+                                        }
+                                    };
+                                    app.push_status_toast(
+                                        format!(
+                                            "Interactive terminal handoff refused ({err}). {recovery}"
+                                        ),
+                                        StatusToastLevel::Error,
+                                        None,
+                                    );
+                                    app.needs_redraw = true;
+                                    last_terminal_input_recovery = Instant::now();
+                                    // Do not acknowledge the pause. The
+                                    // engine guard times out, refuses the
+                                    // child, and queues a harmless resume.
+                                    continue;
+                                }
+                            }
+                            if let Err(err) = pause_terminal(
                                 terminal,
                                 app.use_alt_screen,
                                 app.use_mouse_capture,
                                 app.use_bracketed_paste,
-                            )?;
+                            ) {
+                                terminal_input.resume_after_child_terminal();
+                                tracing::warn!(
+                                    error = %err,
+                                    "refusing interactive child after terminal mode handoff failed"
+                                );
+                                resume_terminal(
+                                    terminal,
+                                    app.use_alt_screen,
+                                    app.use_mouse_capture,
+                                    app.use_bracketed_paste,
+                                    app.synchronized_output_enabled,
+                                )
+                                .with_context(|| {
+                                    format!(
+                                        "terminal handoff failed ({err}) and Codewhale could not restore terminal controls"
+                                    )
+                                })?;
+                                app.push_status_toast(
+                                    format!("Interactive terminal handoff refused ({err})."),
+                                    StatusToastLevel::Error,
+                                    None,
+                                );
+                                app.needs_redraw = true;
+                                force_terminal_repaint = true;
+                                // As above, withholding the acknowledgement
+                                // keeps the child from launching.
+                                continue;
+                            }
                             event_broker.pause_events();
                             terminal_paused_at = Some(Instant::now());
                         }
@@ -2252,6 +2333,7 @@ pub(crate) async fn run_event_loop(
                                 app.synchronized_output_enabled,
                             )?;
                             event_broker.resume_events();
+                            terminal_input.resume_after_child_terminal();
                             terminal_paused_at = None;
                         }
                     }
@@ -2445,6 +2527,7 @@ pub(crate) async fn run_event_loop(
                                 app.synchronized_output_enabled,
                             )?;
                             event_broker.resume_events();
+                            terminal_input.resume_after_child_terminal();
                             terminal_paused_at = None;
                             app.needs_redraw = true;
                         }
@@ -3187,6 +3270,7 @@ pub(crate) async fn run_event_loop(
                 app.synchronized_output_enabled,
             )?;
             event_broker.resume_events();
+            terminal_input.resume_after_child_terminal();
             terminal_paused_at = None;
             app.status_message = Some("Terminal controls restored".to_string());
             app.needs_redraw = true;
@@ -5265,18 +5349,25 @@ pub(crate) async fn run_event_loop(
                     // editing the buffer never disturbs in-flight work.
                     let seed = app.input.clone();
                     let editor_result = terminal_input.pause_for_child_terminal().and_then(|()| {
-                        let result = drain_terminal_input_queue(
+                        let result = prepare_terminal_input_handoff(
                             &terminal_input,
                             &mut pending_terminal_events,
                         )
-                        .and_then(|()| {
-                            crate::tui::external_editor::spawn_editor_for_input(
-                                terminal,
-                                app.use_alt_screen,
-                                app.use_mouse_capture,
-                                app.use_bracketed_paste,
-                                &seed,
-                            )
+                        .and_then(|ready| {
+                            if ready {
+                                crate::tui::external_editor::spawn_editor_for_input(
+                                    terminal,
+                                    app.use_alt_screen,
+                                    app.use_mouse_capture,
+                                    app.use_bracketed_paste,
+                                    &seed,
+                                )
+                            } else {
+                                Err(io::Error::new(
+                                    io::ErrorKind::Interrupted,
+                                    "editor handoff cancelled by pending terminal input",
+                                ))
+                            }
                         });
                         terminal_input.resume_after_child_terminal();
                         force_terminal_repaint = true;

@@ -190,7 +190,7 @@ impl TerminalInputPump {
                 self.paused.store(false, Ordering::Release);
                 return Err(io::Error::new(
                     io::ErrorKind::TimedOut,
-                    "terminal input pump did not pause before launching editor",
+                    "terminal input pump did not pause before child terminal handoff",
                 ));
             }
             thread::sleep(TERMINAL_INPUT_CHILD_PAUSE_POLL_INTERVAL);

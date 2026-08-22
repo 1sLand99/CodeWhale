@@ -17535,18 +17535,21 @@ async fn an_exact_member_without_a_network_tool_really_loses_the_network_surface
     );
 }
 
-/// A read-only inspection Fleet member (scout role under a read_only ceiling) gets exactly
-/// the read-only web surface an ordinary scout holds — `Web` with
+/// A Runtime scout under a network-denied parent gets exactly the bounded web
+/// surface — `Web` with
 /// `search`/`fetch` — while every reaching spelling (`web.run`, `fetch_url`,
-/// `github`, `mcp*`) stays denied, and a `full` member is untouched.
+/// `github`, `mcp*`) stays denied, and a builder under a full parent is untouched.
 #[tokio::test]
 async fn a_read_only_inspection_member_gets_only_bounded_web_search() {
     let tmp = tempdir().expect("tempdir");
-    let authority = crate::fleet::exact::ChildAuthority::clamp_for_role(
-        "scout",
-        codewhale_workflow::PermissionCeiling::preset("read_only").expect("preset"),
-        codewhale_workflow::PermissionCeiling::preset("full").expect("preset"),
-    );
+    let parent = codewhale_workflow::PermissionCeiling {
+        write: true,
+        network_tool: false,
+        shell: codewhale_workflow::ShellCeiling::Full,
+        delegation_depth: codewhale_config::DEFAULT_SPAWN_DEPTH,
+        tools: true,
+    };
+    let authority = crate::fleet::exact::ChildAuthority::from_runtime_role("scout", parent);
     assert_eq!(authority.posture_role, "scout");
     assert!(!authority.ceiling.network_tool);
 
@@ -17607,15 +17610,12 @@ async fn a_read_only_inspection_member_gets_only_bounded_web_search() {
     );
     assert!(
         registry.network_is_denied(),
-        "read-only inspection under a network_tool = false ceiling is network-denied"
+        "a Runtime scout under a network-denied parent stays network-denied"
     );
 
-    // A `full` member keeps the whole family, browse tool included: the
-    // change grants read-only inspection nothing beyond search/fetch and takes nothing from
-    // the network ceiling.
-    let full_authority = crate::fleet::exact::ChildAuthority::clamp_for_role(
+    // A Runtime builder under a full parent keeps the whole family.
+    let full_authority = crate::fleet::exact::ChildAuthority::from_runtime_role(
         "builder",
-        codewhale_workflow::PermissionCeiling::preset("full").expect("preset"),
         codewhale_workflow::PermissionCeiling::preset("full").expect("preset"),
     );
     assert!(full_authority.ceiling.network_tool);
@@ -17988,8 +17988,7 @@ fn the_session_ceiling_reflects_the_live_parent_posture() {
 // ── Indirect execution seams, at both enforcement layers ────────────────────
 //
 // The escape these cover is not a missing deny-list entry, it is a *category*:
-// a member saved read-only-with-checks (`write = false`, `shell = "full"` — the
-// `tester`/`verifier` preset and any `custom` member shaped like it) loses the
+// a Runtime verifier (`write = false`, `shell = "full"`) loses the
 // raw shell and keeps every execution primitive spelled as something else.
 // `tasks{action:"gate_run"}` runs an operator command line,
 // `automation{action:"run"}` executes a stored automation, `start_mcp_server`
@@ -18002,18 +18001,16 @@ fn the_session_ceiling_reflects_the_live_parent_posture() {
 // name still wins, and dispatch without visibility means the model is offered a
 // capability it will be refused for using.
 
-/// The child registry a read-only-with-checks exact member actually runs with:
-/// the `verifier` preset, clamped against a full session.
+/// The child registry a Runtime verifier under a full parent actually runs with.
 fn read_only_with_shell_registry() -> (tempfile::TempDir, SubAgentToolRegistry) {
     let tmp = tempdir().expect("tempdir");
-    let authority = crate::fleet::exact::ChildAuthority::clamp_for_role(
+    let authority = crate::fleet::exact::ChildAuthority::from_runtime_role(
         "verifier",
-        codewhale_workflow::PermissionCeiling::preset("verifier").expect("preset"),
         codewhale_workflow::PermissionCeiling::preset("full").expect("preset"),
     );
     assert!(
         !authority.ceiling.write,
-        "the preset under test is the read-only one"
+        "Runtime's verifier posture is read-only"
     );
     assert_eq!(
         authority.ceiling.shell,
@@ -18025,7 +18022,7 @@ fn read_only_with_shell_registry() -> (tempfile::TempDir, SubAgentToolRegistry) 
         stub_runtime().with_agent_tool_surface_options(enabled_agent_surface_options());
     runtime.context = ToolContext::new(tmp.path().to_path_buf());
     runtime.allow_shell = true;
-    // The posture reaches the child the way a spawn-time ceiling does.
+    // The posture reaches the child through the Runtime authority envelope.
     runtime.worker_profile = WorkerRuntimeProfile::for_role(FleetRole::Verifier);
     runtime.worker_profile.denied_tools = authority.disallowed_tools.clone();
 
@@ -18266,14 +18263,13 @@ fn bounded_read_only_and_verification_paths_survive_the_ceiling() {
     );
 }
 
-/// A write-capable member is unaffected. The guard narrows a clamped ceiling;
+/// A write-capable Runtime builder is unaffected. The guard narrows authority;
 /// it is not a new global restriction.
 #[test]
 fn a_write_capable_member_keeps_every_execution_gate() {
     let tmp = tempdir().expect("tempdir");
-    let authority = crate::fleet::exact::ChildAuthority::clamp_for_role(
+    let authority = crate::fleet::exact::ChildAuthority::from_runtime_role(
         "builder",
-        codewhale_workflow::PermissionCeiling::preset("full").expect("preset"),
         codewhale_workflow::PermissionCeiling::preset("full").expect("preset"),
     );
     assert!(authority.ceiling.write);
@@ -18402,53 +18398,45 @@ fn posture_denials_survive_a_child_that_declines_to_inherit() {
 #[test]
 fn the_authority_fingerprint_distinguishes_every_envelope_it_names() {
     let session = codewhale_workflow::PermissionCeiling::preset("full").expect("preset");
-    let fingerprint = |preset: &str, role: &str| {
-        crate::fleet::exact::ChildAuthority::clamp_for_role(
-            role,
-            codewhale_workflow::PermissionCeiling::preset(preset).expect("preset"),
-            session,
-        )
-        .fingerprint()
+    let fingerprint = |role: &str| {
+        crate::fleet::exact::ChildAuthority::from_runtime_role(role, session).fingerprint()
     };
 
     let mut seen = HashSet::new();
-    for (preset, role) in [
-        ("none", "scout"),
-        ("analyst", "scout"),
-        ("read_only", "scout"),
-        ("verifier", "verifier"),
-        ("read_write", "builder"),
-        ("full", "builder"),
+    for role in [
+        "scout",
+        "planner",
+        "reviewer",
+        "verifier",
+        "consultant",
+        "builder",
+        "worker",
+        "custom",
     ] {
         assert!(
-            seen.insert(fingerprint(preset, role)),
-            "{preset}/{role} must not collide with another envelope"
+            seen.insert(fingerprint(role)),
+            "Runtime role {role} must not collide with another envelope"
         );
     }
     // Stable across recomputation: the launch check compares two independent
     // derivations, so an unstable fingerprint would fail every launch.
-    assert_eq!(
-        fingerprint("verifier", "verifier"),
-        fingerprint("verifier", "verifier")
-    );
-    // The session posture is part of it: the same saved member clamped against
-    // a narrower session is a different envelope.
-    let narrow = crate::fleet::exact::ChildAuthority::clamp_for_role(
+    assert_eq!(fingerprint("verifier"), fingerprint("verifier"));
+    // The parent posture is part of it: the same Runtime role under a narrower
+    // parent is a different envelope.
+    let narrow = crate::fleet::exact::ChildAuthority::from_runtime_role(
         "builder",
-        codewhale_workflow::PermissionCeiling::preset("full").expect("preset"),
         codewhale_workflow::PermissionCeiling::preset("read_only").expect("preset"),
     );
-    assert_ne!(narrow.fingerprint(), fingerprint("full", "builder"));
+    assert_ne!(narrow.fingerprint(), fingerprint("builder"));
 }
 
 /// The spawn boundary itself. A missing, unparseable, or mismatched fingerprint
-/// must refuse the launch — a Fleet ceiling that does not reach the runtime is
-/// not a ceiling.
+/// must refuse the launch — a Runtime envelope that does not reach the child
+/// is not enforced authority.
 #[test]
 fn the_spawn_boundary_fails_closed_on_a_missing_or_mismatched_authority() {
-    let authority = crate::fleet::exact::ChildAuthority::clamp_for_role(
+    let authority = crate::fleet::exact::ChildAuthority::from_runtime_role(
         "verifier",
-        codewhale_workflow::PermissionCeiling::preset("verifier").expect("preset"),
         codewhale_workflow::PermissionCeiling::preset("full").expect("preset"),
     );
     let fingerprint = authority.fingerprint();
@@ -18509,14 +18497,13 @@ fn the_spawn_boundary_fails_closed_on_a_missing_or_mismatched_authority() {
 /// and that fingerprint is what the spawn boundary accepts.
 #[test]
 fn the_launched_authority_is_the_one_the_spawn_boundary_accepts() {
-    let authority = crate::fleet::exact::ChildAuthority::clamp_for_role(
+    let authority = crate::fleet::exact::ChildAuthority::from_runtime_role(
         "auditor",
         codewhale_workflow::PermissionCeiling::preset("analyst").expect("preset"),
-        codewhale_workflow::PermissionCeiling::preset("full").expect("preset"),
     );
-    // An arbitrary fleet role falls back to the ceiling-derived posture rather
-    // than to the full-write General surface.
-    assert_eq!(authority.posture_role, "scout");
+    // Free-form Fleet identity maps to Runtime `custom`; the read-only parent
+    // still narrows the effective capability envelope.
+    assert_eq!(authority.posture_role, "custom");
     assert_eq!(authority.write_authority, "read_only");
 
     let mut deny = authority.disallowed_tools.clone();
@@ -18531,9 +18518,8 @@ fn the_launched_authority_is_the_one_the_spawn_boundary_accepts() {
         .expect("the launched envelope must satisfy its own receipt");
 
     // A different member's envelope must not satisfy it.
-    let other = crate::fleet::exact::ChildAuthority::clamp_for_role(
+    let other = crate::fleet::exact::ChildAuthority::from_runtime_role(
         "builder",
-        codewhale_workflow::PermissionCeiling::preset("full").expect("preset"),
         codewhale_workflow::PermissionCeiling::preset("full").expect("preset"),
     );
     assert!(
