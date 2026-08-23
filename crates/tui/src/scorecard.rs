@@ -343,9 +343,12 @@ fn provider_scoped_cost(
     let model_lower = normalized_model.to_ascii_lowercase();
     // Every direct DeepSeek first-party rate is time-windowed now — the
     // V4 flash/pro rows carry peak/off-peak tiers (01:00–04:00 and
-    // 06:00–10:00 UTC), and the retired `deepseek-chat` / `deepseek-reasoner`
-    // aliases price through them — so an undated DeepSeek turn cannot be
-    // resolved to one price. `claude-sonnet-5` keeps the same recorded-time
+    // 06:00–10:00 UTC on weekdays, with the whole of a Beijing-time Saturday
+    // and Sunday billing off-peak from 2026-08-23), and the retired
+    // `deepseek-chat` / `deepseek-reasoner` aliases price through them — so an
+    // undated DeepSeek turn cannot be resolved to one price. The weekend is
+    // bounded in Beijing time, which is why the window it covers is not the
+    // one a UTC weekday would give. `claude-sonnet-5` keeps the same recorded-time
     // contract it had during its introductory window (Anthropic later made
     // that $2/$10 rate permanent; the row still prices at the turn's own time
     // rather than the wall clock, and undated turns still fail closed).
