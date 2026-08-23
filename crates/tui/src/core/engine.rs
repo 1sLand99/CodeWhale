@@ -6876,6 +6876,8 @@ use self::tool_catalog::{
 };
 pub(crate) use self::tool_execution::emit_tool_audit;
 use self::tool_preparation::{prepare_tool_call, reprepare_tool_call_after_hook};
+#[cfg(test)]
+use self::turn_loop::MAX_REASONING_ONLY_REPROMPTS;
 use crate::tools::js_execution::execute_js_execution_tool;
 
 #[cfg(test)]
