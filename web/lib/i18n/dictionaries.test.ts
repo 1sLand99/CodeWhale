@@ -250,28 +250,24 @@ describe("website dictionaries", () => {
   });
 
   it("holds the docs page-body dictionaries to the same contract (#5337)", () => {
-    // The probe is the key checked for a real zh translation. It is
-    // `overviewTitle` everywhere except docs/mcp, whose heading is the
-    // code-owned literal `MCP` and stays in the page.
-    for (const [label, get, reference, probe] of [
-      ["docs-hooks", getDocsHooks, EN_DOCS_HOOKS, "overviewTitle"],
-      ["docs-troubleshooting", getDocsTroubleshooting, EN_DOCS_TROUBLESHOOTING, "overviewTitle"],
-      ["docs-constitution", getDocsConstitution, EN_DOCS_CONSTITUTION, "overviewTitle"],
-      ["docs-runtime-api", getDocsRuntimeApi, EN_DOCS_RUNTIME_API, "overviewTitle"],
-      ["docs-sandbox", getDocsSandbox, EN_DOCS_SANDBOX, "overviewTitle"],
-      ["docs-subagents", getDocsSubagents, EN_DOCS_SUBAGENTS, "overviewTitle"],
-      ["docs-mcp", getDocsMcp, EN_DOCS_MCP, "metaTitle"],
-      ["docs-web", getDocsWeb, EN_DOCS_WEB, "overviewTitle"],
+    for (const [label, get, reference] of [
+      ["docs-hooks", getDocsHooks, EN_DOCS_HOOKS],
+      ["docs-troubleshooting", getDocsTroubleshooting, EN_DOCS_TROUBLESHOOTING],
+      ["docs-constitution", getDocsConstitution, EN_DOCS_CONSTITUTION],
+      ["docs-runtime-api", getDocsRuntimeApi, EN_DOCS_RUNTIME_API],
+      ["docs-sandbox", getDocsSandbox, EN_DOCS_SANDBOX],
+      ["docs-subagents", getDocsSubagents, EN_DOCS_SUBAGENTS],
+      ["docs-mcp", getDocsMcp, EN_DOCS_MCP],
+      ["docs-web", getDocsWeb, EN_DOCS_WEB],
     ] as const) {
       const enKeys = Object.keys(reference).sort();
       for (const locale of [...DICTIONARY_LOCALES, "fr", "und"]) {
         expect(Object.keys(get(locale)).sort(), `${locale} ${label} keys`).toEqual(enKeys);
       }
-      // zh ships a real translation, not an English pass-through.
-      expect(
-        (get("zh") as Record<string, unknown>)[probe],
-        `zh ${label} ${probe}`,
-      ).not.toBe((reference as Record<string, unknown>)[probe]);
+      // zh ships a real translation, not an English pass-through. The probe is
+      // `metaTitle` rather than `overviewTitle` because docs/mcp's heading is
+      // the code-owned literal `MCP` and stays in the page.
+      expect(get("zh").metaTitle, `zh ${label}`).not.toBe(reference.metaTitle);
       // Every other locale renders English today, exactly as the `isZh`
       // ternaries in the page did before the move.
       for (const locale of ["ja", "fr", "ar", "und"]) {
