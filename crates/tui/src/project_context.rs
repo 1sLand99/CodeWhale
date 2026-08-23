@@ -259,6 +259,29 @@ fn rules_dirs_for(imports: &ForeignInstructionImports) -> Vec<&'static str> {
     dirs
 }
 
+fn rules_dir_has_loadable_content(workspace: &Path, rules_dir_name: &str) -> bool {
+    let rules_dir = workspace.join(rules_dir_name);
+    if fs::symlink_metadata(&rules_dir).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        return false;
+    }
+    let Ok(entries) = fs::read_dir(rules_dir) else {
+        return false;
+    };
+    let mut candidates = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.extension().is_some_and(|extension| extension == "md")
+                && context_candidate_exists(path)
+        })
+        .collect::<Vec<_>>();
+    candidates.sort();
+    candidates
+        .into_iter()
+        .take(MAX_RULES_FILES)
+        .any(|path| load_context_file(&path).is_ok())
+}
+
 /// Foreign instruction files that exist in the workspace but were not
 /// imported, so the user can discover the opt-in instead of wondering why
 /// their `CLAUDE.md` is being ignored.
@@ -271,11 +294,27 @@ fn unimported_foreign_warnings(
         if imports.is_enabled(*format) {
             continue;
         }
-        let present = format
+        let direct_context_present = format
             .context_files()
             .iter()
-            .chain(format.rules_dirs().iter())
-            .any(|relative| workspace.join(relative).exists());
+            .any(|relative| load_context_file(&workspace.join(relative)).is_ok());
+        let rules_present = format
+            .rules_dirs()
+            .iter()
+            .any(|relative| rules_dir_has_loadable_content(workspace, relative));
+        let fragment_present =
+            codewhale_core::fragments::load_selected_project_instruction_fragment(
+                workspace,
+                format.fragment_candidates(),
+            )
+            .is_some();
+        // Keep discovery aligned with the loaders. A path can exist without
+        // being importable (for example an empty or unreadable file, a rules
+        // directory containing no Markdown, an oversized file, or a symlink
+        // that the loaders deliberately refuse to follow). Warning for those
+        // paths would claim there is content available to import when there is
+        // not.
+        let present = direct_context_present || rules_present || fragment_present;
         if present {
             seen.push(format.key());
         }
@@ -744,6 +783,21 @@ pub(crate) fn project_context_cache_candidate_paths(
                 }
             }
         }
+    }
+
+    // The warning for unimported foreign formats is part of the cached
+    // ProjectContext. Fingerprint exactly the safe, capped fragment files the
+    // bounded loader can select so creating, changing, removing, or making one
+    // unusable invalidates a previously cached warning decision. Enumerating
+    // every format is intentional: changing the opt-in set clears the cache,
+    // and the superset keeps disabled-format discovery correct.
+    for format in ForeignInstructionFormat::ALL {
+        paths.extend(
+            codewhale_core::fragments::selected_project_instruction_candidate_files(
+                &workspace,
+                format.fragment_candidates(),
+            ),
+        );
     }
 
     paths
@@ -2277,6 +2331,104 @@ mod tests {
         let ctx = load_project_context_with_imports(tmp.path(), &imports);
         let rules = ctx.rules_block.as_ref().expect("rules should be loaded");
         assert!(rules.contains("Use tabs"), "expected .claude/rules/ import");
+    }
+
+    #[test]
+    fn fragment_backed_foreign_instructions_warn_until_imported() {
+        let tmp = tempdir().expect("tempdir");
+        fs::write(tmp.path().join(".cursorrules"), "Cursor-only law").expect("write cursor");
+        let copilot_dir = tmp.path().join(".github");
+        fs::create_dir_all(&copilot_dir).expect("mkdir github");
+        fs::write(
+            copilot_dir.join("copilot-instructions.md"),
+            "Copilot-only law",
+        )
+        .expect("write copilot");
+
+        let ctx = load_project_context_with_imports(tmp.path(), &ForeignInstructionImports::none());
+        let warning = ctx
+            .warnings
+            .iter()
+            .find(|warning| warning.contains("project_instruction_imports"))
+            .expect("foreign fragment warning");
+        assert!(warning.contains("cursor"), "{warning}");
+        assert!(warning.contains("copilot"), "{warning}");
+
+        let (imports, unknown) =
+            ForeignInstructionImports::from_config(&["cursor".to_string(), "copilot".to_string()]);
+        assert!(unknown.is_empty());
+        let ctx = load_project_context_with_imports(tmp.path(), &imports);
+        assert!(
+            ctx.warnings
+                .iter()
+                .all(|warning| !warning.contains("project_instruction_imports")),
+            "opted-in formats must not keep warning: {:?}",
+            ctx.warnings
+        );
+    }
+
+    #[test]
+    fn unusable_foreign_fragments_do_not_claim_importable_instructions() {
+        let tmp = tempdir().expect("tempdir");
+        fs::write(tmp.path().join(".cursorrules"), "   \n").expect("write empty cursor file");
+        let cursor_rules = tmp.path().join(".cursor/rules");
+        fs::create_dir_all(&cursor_rules).expect("mkdir cursor rules");
+        fs::write(cursor_rules.join("settings.json"), "{}").expect("write non-markdown file");
+
+        let ctx = load_project_context_with_imports(tmp.path(), &ForeignInstructionImports::none());
+        assert!(
+            ctx.warnings
+                .iter()
+                .all(|warning| !warning.contains("project_instruction_imports")),
+            "empty and non-Markdown fragments are not importable: {:?}",
+            ctx.warnings
+        );
+    }
+
+    #[test]
+    fn unusable_direct_foreign_instructions_do_not_claim_importable_content() {
+        let tmp = tempdir().expect("tempdir");
+        fs::write(tmp.path().join("CLAUDE.md"), "\n\t ").expect("write empty claude file");
+        let claude_rules = tmp.path().join(".claude/rules");
+        fs::create_dir_all(&claude_rules).expect("mkdir claude rules");
+        fs::write(claude_rules.join("settings.json"), "{}").expect("write non-markdown file");
+
+        let ctx = load_project_context_with_imports(tmp.path(), &ForeignInstructionImports::none());
+        assert!(
+            ctx.warnings
+                .iter()
+                .all(|warning| !warning.contains("project_instruction_imports")),
+            "empty files and rules directories without Markdown are not importable: {:?}",
+            ctx.warnings
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_foreign_fragment_does_not_claim_importable_instructions() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempdir().expect("tempdir");
+        let outside = tempdir().expect("outside tempdir");
+        let outside_claude = outside.path().join("CLAUDE.md");
+        fs::write(&outside_claude, "outside Claude law").expect("write outside Claude file");
+        let outside_rules = outside.path().join("rules");
+        fs::create_dir_all(&outside_rules).expect("mkdir outside rules");
+        fs::write(outside_rules.join("law.md"), "outside law").expect("write outside rule");
+        fs::create_dir_all(tmp.path().join(".cursor")).expect("mkdir cursor");
+        fs::create_dir_all(tmp.path().join(".claude")).expect("mkdir claude");
+        symlink(&outside_rules, tmp.path().join(".cursor/rules")).expect("symlink cursor rules");
+        symlink(&outside_rules, tmp.path().join(".claude/rules")).expect("symlink claude rules");
+        symlink(&outside_claude, tmp.path().join("CLAUDE.md")).expect("symlink Claude file");
+
+        let ctx = load_project_context_with_imports(tmp.path(), &ForeignInstructionImports::none());
+        assert!(
+            ctx.warnings
+                .iter()
+                .all(|warning| !warning.contains("project_instruction_imports")),
+            "the bounded loader rejects symlinked foreign fragments: {:?}",
+            ctx.warnings
+        );
     }
 
     #[test]

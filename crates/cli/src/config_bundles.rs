@@ -155,9 +155,10 @@ pub struct RejectedEntry {
     pub reason: String,
 }
 
-/// Scan every section of the bundle for secret-bearing entries. Rejection is
-/// by key name (via the config crate's own denylist, so bundle policy and
-/// `config set` policy cannot drift) and by value shape for string leaves.
+/// Scan every section of the bundle for non-portable entries. Import and
+/// export use the same path predicate, so machine-local route/execution/trust
+/// authority cannot be stripped in one direction but accepted in the other.
+/// String leaves are additionally rejected by credential shape.
 pub fn find_rejected_entries(bundle: &PortableBundle) -> Vec<RejectedEntry> {
     let mut rejected = Vec::new();
     for (section, table) in [
@@ -169,14 +170,14 @@ pub fn find_rejected_entries(bundle: &PortableBundle) -> Vec<RejectedEntry> {
     ] {
         for (key, value) in &table.entries {
             let dotted = format!("{section}.{key}");
-            if is_sensitive_config_key(&dotted) || is_sensitive_config_key(key) {
+            if let Some(reason) = nonportable_path_reason(key) {
                 rejected.push(RejectedEntry {
                     key: dotted,
-                    reason: "key names a credential field".to_string(),
+                    reason: reason.to_string(),
                 });
                 continue;
             }
-            if let Some(reason) = value_shape_secret_reason(value) {
+            if let Some(reason) = value_rejection_reason(key, value) {
                 rejected.push(RejectedEntry {
                     key: dotted,
                     reason,
@@ -187,25 +188,29 @@ pub fn find_rejected_entries(bundle: &PortableBundle) -> Vec<RejectedEntry> {
     rejected
 }
 
-/// Why a value looks like a bare credential, or `None` when it does not.
-fn value_shape_secret_reason(value: &toml::Value) -> Option<String> {
+/// Why a value carries nested non-portable authority or looks like a bare
+/// credential, or `None` when it is safe to move between machines.
+fn value_rejection_reason(path: &str, value: &toml::Value) -> Option<String> {
+    if let Some(reason) = nonportable_value_reason(path, value) {
+        return Some(reason.to_string());
+    }
     match value {
-        toml::Value::String(text) => SECRET_VALUE_PREFIXES
-            .iter()
-            .find(|prefix| text.trim().starts_with(*prefix))
-            .map(|prefix| {
-                format!("value has the shape of a credential (prefix {prefix:?} redacted)")
-            }),
+        toml::Value::String(text) => string_secret_reason(text),
         toml::Value::Array(items) => items
             .iter()
-            .find_map(value_shape_secret_reason)
+            .find_map(|value| value_rejection_reason(path, value))
             .map(|reason| format!("array contains an entry where {reason}")),
         toml::Value::Table(map) => {
             for (key, nested_value) in map {
-                if is_sensitive_config_key(key) {
-                    return Some(format!("nested key {key:?} names a credential field"));
+                let child_path = if path.is_empty() {
+                    key.clone()
+                } else {
+                    format!("{path}.{key}")
+                };
+                if let Some(reason) = nonportable_path_reason(&child_path) {
+                    return Some(format!("nested key {key:?} {reason}"));
                 }
-                if let Some(reason) = value_shape_secret_reason(nested_value) {
+                if let Some(reason) = value_rejection_reason(&child_path, nested_value) {
                     return Some(format!("nested under {key:?}, {reason}"));
                 }
             }
@@ -213,6 +218,202 @@ fn value_shape_secret_reason(value: &toml::Value) -> Option<String> {
         }
         _ => None,
     }
+}
+
+fn string_secret_reason(text: &str) -> Option<String> {
+    if let Some(prefix) = SECRET_VALUE_PREFIXES
+        .iter()
+        .find(|prefix| text.trim().starts_with(*prefix))
+    {
+        return Some(format!(
+            "value has the shape of a credential (prefix {prefix:?} redacted)"
+        ));
+    }
+    if text.contains(codewhale_config::persistence::REDACTED) {
+        // A placeholder is the residue of redaction, never a real setting;
+        // exporting it would carry nothing and importing it would write the
+        // placeholder into the live document.
+        return Some("value contains a redaction placeholder".to_string());
+    }
+    if codewhale_config::persistence::redact_secrets(text) != text {
+        return Some("value contains credential-shaped text".to_string());
+    }
+    None
+}
+
+fn is_sensitive_bundle_key(key: &str) -> bool {
+    if is_sensitive_config_key(key) || is_credential_authority_key(key) {
+        return true;
+    }
+    // Normalize the complete dotted path, not only its final component. A
+    // quoted TOML key such as `"api.key"` reaches us without its quotes and
+    // is otherwise indistinguishable from two structural components. Either
+    // representation names credential material and must fail closed.
+    let normalized = normalize_bundle_key(key);
+
+    matches!(
+        normalized.as_str(),
+        "access_key"
+            | "access_token"
+            | "api_key"
+            | "api_keys"
+            | "apikey"
+            | "authorization"
+            | "bearer"
+            | "client_secret"
+            | "cookie"
+            | "credential"
+            | "credentials"
+            | "id_token"
+            | "password"
+            | "passwords"
+            | "passwd"
+            | "private_key"
+            | "proxy_authorization"
+            | "refresh_token"
+            | "secret"
+            | "secrets"
+            | "set_cookie"
+            | "token"
+            | "tokens"
+    ) || normalized.ends_with("_access_key")
+        || normalized.ends_with("_api_key")
+        || normalized.ends_with("_authorization")
+        || normalized.ends_with("_cookie")
+        || normalized.ends_with("_password")
+        || normalized.ends_with("_private_key")
+        || normalized.ends_with("_secret")
+        || normalized.ends_with("_token")
+}
+
+fn normalize_bundle_key(key: &str) -> String {
+    let segment = key.trim().trim_matches('"');
+    let chars: Vec<char> = segment.chars().collect();
+    let mut normalized = String::with_capacity(segment.len());
+    for (index, character) in chars.iter().copied().enumerate() {
+        if !character.is_ascii_alphanumeric() {
+            if !normalized.ends_with('_') {
+                normalized.push('_');
+            }
+            continue;
+        }
+        if character.is_ascii_uppercase() {
+            let previous = index.checked_sub(1).and_then(|index| chars.get(index));
+            let next = chars.get(index + 1);
+            let starts_word = previous.is_some_and(|character| {
+                character.is_ascii_lowercase() || character.is_ascii_digit()
+            }) || (previous
+                .is_some_and(|character| character.is_ascii_uppercase())
+                && next.is_some_and(|character| character.is_ascii_lowercase()));
+            if starts_word && !normalized.ends_with('_') {
+                normalized.push('_');
+            }
+            normalized.push(character.to_ascii_lowercase());
+        } else {
+            normalized.push(character.to_ascii_lowercase());
+        }
+    }
+    normalized.trim_matches('_').to_string()
+}
+
+fn is_credential_authority_key(key: &str) -> bool {
+    let normalized = normalize_bundle_key(key);
+    if normalized == "external_credentials"
+        || normalized.ends_with("_external_credentials")
+        || normalized == "oauth_credential_generation"
+        || normalized.ends_with("_oauth_credential_generation")
+    {
+        return true;
+    }
+    // `auth_mode` is a declarative protocol selection; an `auth` table is
+    // executable or secret-store authority and is intentionally non-portable.
+    key.split('.')
+        .map(normalize_bundle_key)
+        .any(|segment| segment == "auth")
+}
+
+fn is_machine_bound_top_level_key(key: &str) -> bool {
+    key.split('.')
+        .next()
+        .map(normalize_bundle_key)
+        .is_some_and(|root| {
+            matches!(
+                root.as_str(),
+                "auto_review"
+                    | "hooks"
+                    | "instructions"
+                    | "managed_config_path"
+                    | "project_instruction_imports"
+                    | "projects"
+                    | "requirements_path"
+                    | "runtime_api"
+                    | "workspace"
+            )
+        })
+}
+
+fn is_nonportable_lsp_authority_key(key: &str) -> bool {
+    let mut segments = key.split('.').map(normalize_bundle_key);
+    matches!(segments.next().as_deref(), Some("lsp"))
+        && matches!(segments.next().as_deref(), Some("custom" | "servers"))
+}
+
+fn is_nonportable_nested_authority_key(key: &str) -> bool {
+    let segments = key.split('.').map(normalize_bundle_key).collect::<Vec<_>>();
+    match segments.as_slice() {
+        [root, field, ..]
+            if root == "tools" && matches!(field.as_str(), "overrides" | "plugin_dir") =>
+        {
+            true
+        }
+        [root, field, ..] if root == "update" && field == "update_uri" => true,
+        [root, field, ..] if root == "notifications" && field == "sound_file" => true,
+        [root, field, ..] if root == "speech" && field == "output_dir" => true,
+        [root, .., field] if root == "providers" && field == "api_key_env" => true,
+        _ => false,
+    }
+}
+
+fn is_machine_specific_config_path(path: &str) -> bool {
+    let path = normalize_bundle_key(path);
+    MACHINE_SPECIFIC_KEYS.iter().any(|key| {
+        let key = normalize_bundle_key(key);
+        path == key
+            || path
+                .strip_suffix(&key)
+                .is_some_and(|prefix| prefix.ends_with('_'))
+    })
+}
+
+fn nonportable_path_reason(path: &str) -> Option<&'static str> {
+    if is_machine_bound_top_level_key(path) {
+        return Some("carries machine-bound execution or trust authority");
+    }
+    if is_nonportable_lsp_authority_key(path) {
+        return Some("carries executable LSP authority");
+    }
+    if is_nonportable_nested_authority_key(path) {
+        return Some("carries machine-local route or execution authority");
+    }
+    if is_machine_specific_config_path(path) {
+        return Some("carries machine-local route or filesystem authority");
+    }
+    if is_credential_authority_key(path) {
+        return Some("carries machine-local credential authority");
+    }
+    if is_sensitive_bundle_key(path) {
+        return Some("names credential material");
+    }
+    None
+}
+
+/// Telemetry opt-out is safe to move between machines, but opt-in is durable
+/// user consent coupled to SetupState. A portable bundle may tighten that
+/// consent (`false`); it must never manufacture or transfer `true`.
+fn nonportable_value_reason(path: &str, value: &toml::Value) -> Option<&'static str> {
+    let top_level_telemetry = !path.contains('.') && normalize_bundle_key(path) == "telemetry";
+    (top_level_telemetry && matches!(value, toml::Value::Boolean(true)))
+        .then_some("would port telemetry opt-in consent between machines")
 }
 
 // ---------------------------------------------------------------------------
@@ -297,19 +498,37 @@ pub fn plan_import(bundle: &PortableBundle, config: &ConfigToml, scope: BundleSc
                 plan.skipped.push(dotted);
                 continue;
             }
-            match config.get_value(key) {
-                Some(current) => {
-                    if render_toml_value(value).ok().as_deref() == Some(current.as_str()) {
-                        plan.skipped.push(dotted);
-                    } else {
-                        plan.changed.push(dotted);
-                    }
-                }
-                None => plan.added.push(dotted),
+            if config_value_matches(config, key, value) {
+                plan.skipped.push(dotted);
+            } else if config_has_value(config, key) {
+                plan.changed.push(dotted);
+            } else {
+                plan.added.push(dotted);
             }
         }
     }
     plan
+}
+
+fn config_value_matches(config: &ConfigToml, key: &str, value: &toml::Value) -> bool {
+    let semantically_equal = (|| {
+        let current = config_document(config).ok()?;
+        let mut candidate = config.clone();
+        apply_config_value(&mut candidate, key, value).ok()?;
+        Some(config_document(&candidate).ok()? == current)
+    })()
+    .unwrap_or(false);
+    semantically_equal
+        || config.get_value(key).is_some_and(|current| {
+            render_toml_value(value).ok().as_deref() == Some(current.as_str())
+        })
+}
+
+fn config_has_value(config: &ConfigToml, key: &str) -> bool {
+    config_document(config)
+        .ok()
+        .is_some_and(|table| table.contains_key(key))
+        || config.get_value(key).is_some()
 }
 
 fn section_applies(section: &str, scope: BundleScope) -> bool {
@@ -341,6 +560,22 @@ impl BundleScope {
             Self::Project => "project",
         }
     }
+}
+
+fn validate_scope_target(scope: BundleScope, target: &Path) -> Result<()> {
+    let workspace_scoped = codewhale_config::config_path_is_workspace_scoped(target);
+    match (scope, workspace_scoped) {
+        (BundleScope::Project, false) => bail!(
+            "--project requires a workspace config ({} is the user-global document)",
+            target.display()
+        ),
+        (BundleScope::Global, true) => bail!(
+            "global bundle operations cannot target workspace config {}; rerun with --project or select the user-global config",
+            target.display()
+        ),
+        _ => {}
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -515,14 +750,8 @@ pub fn export_bundle(
     let mut global = BundleTable::default();
     let mut project = BundleTable::default();
 
-    for (key, _display) in config.list_values() {
-        if is_sensitive_config_key(&key) {
-            continue;
-        }
-        if MACHINE_SPECIFIC_KEYS.contains(&key.as_str()) {
-            continue;
-        }
-        if let Some(value) = value_for_export(config, &key) {
+    for (key, value) in config_document(config)? {
+        if let Some(value) = sanitize_export_value(&key, &value) {
             match export_section_for(&key, scope) {
                 ExportSection::Preferences => {
                     preferences.entries.insert(key, value);
@@ -541,7 +770,7 @@ pub fn export_bundle(
         }
     }
 
-    Ok(PortableBundle {
+    let bundle = PortableBundle {
         schema_version: BUNDLE_SCHEMA_VERSION,
         kind: BUNDLE_KIND.to_string(),
         metadata,
@@ -550,7 +779,19 @@ pub fn export_bundle(
         plugins: BundleTable::default(),
         project,
         global,
-    })
+    };
+    let rejected = find_rejected_entries(&bundle);
+    if !rejected.is_empty() {
+        bail!(
+            "portable export refused credential-bearing config paths: {}",
+            rejected
+                .iter()
+                .map(|entry| entry.key.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    Ok(bundle)
 }
 
 /// Serialize a bundle deterministically (sorted keys, TOML).
@@ -559,11 +800,21 @@ pub fn serialize_bundle(bundle: &PortableBundle) -> Result<String> {
 }
 
 /// Config keys that name a machine-local location and must never be exported.
-const MACHINE_SPECIFIC_KEYS: [&str; 4] = [
-    "hook_sinks.unix_socket_path",
+const MACHINE_SPECIFIC_KEYS: [&str; 14] = [
     "base_url",
-    "telemetry_endpoint",
+    "bwrap_dev_roots",
+    "bwrap_ro_roots",
+    "hook_sinks.unix_socket_path",
     "mcp_config_path",
+    "mcp_oauth_callback_port",
+    "mcp_oauth_callback_url",
+    "memory_path",
+    "network.proxy",
+    "notes_path",
+    "sandbox_backend",
+    "sandbox_url",
+    "skills_dir",
+    "telemetry_endpoint",
 ];
 
 enum ExportSection {
@@ -581,11 +832,6 @@ fn export_section_for(key: &str, scope: BundleScope) -> ExportSection {
     if key.starts_with("skills") || key.starts_with("tools") || key.starts_with("snapshots") {
         return ExportSection::Preferences;
     }
-    if key.starts_with("providers.") {
-        // Provider tables carry base_url/api-key metadata; only the model
-        // selection is portable, and it is exported via `preferences` keys.
-        return ExportSection::Drop;
-    }
     if key.starts_with("auth.") {
         return ExportSection::Drop;
     }
@@ -595,18 +841,52 @@ fn export_section_for(key: &str, scope: BundleScope) -> ExportSection {
     }
 }
 
-/// The exportable value for `key`, or `None` when the key is not portable.
-/// Redacted display values are never exported: a redacted placeholder would
-/// re-import as literal data.
-fn value_for_export(config: &ConfigToml, key: &str) -> Option<toml::Value> {
-    let text = config.get_value(key)?;
-    let raw = toml::Value::String(text);
-    if let toml::Value::String(text) = &raw
-        && (text.contains("[redacted]") || text.contains(codewhale_config::persistence::REDACTED))
-    {
+fn config_document(config: &ConfigToml) -> Result<toml::map::Map<String, toml::Value>> {
+    // Serialize through TOML text before parsing to Value. Direct
+    // `Value::try_from` double-encodes datetime values held inside flattened
+    // `toml::Value` extras as the serializer's private marker table.
+    let text = toml::to_string(config).context("serializing typed config for bundle")?;
+    let value: toml::Value =
+        toml::from_str(&text).map_err(|_| anyhow!("serialized typed config was not valid TOML"))?;
+    let toml::Value::Table(mut table) = value else {
+        bail!("typed config did not serialize to a TOML table");
+    };
+    // `selected_provider_id` is runtime parse state and is skipped by serde;
+    // restore the exact named-provider identity that ConfigStore writes.
+    table.insert(
+        "provider".to_string(),
+        toml::Value::String(config.provider_id().to_string()),
+    );
+    Ok(table)
+}
+
+/// Return a recursively scrubbed export value. Secret-bearing leaves and
+/// machine-local paths are omitted rather than replaced with a placeholder,
+/// because a placeholder would become literal config on re-import.
+fn sanitize_export_value(path: &str, value: &toml::Value) -> Option<toml::Value> {
+    if nonportable_path_reason(path).is_some() || nonportable_value_reason(path, value).is_some() {
         return None;
     }
-    Some(raw)
+    match value {
+        toml::Value::String(text) if string_secret_reason(text).is_some() => None,
+        toml::Value::Array(values) => Some(toml::Value::Array(
+            values
+                .iter()
+                .filter_map(|value| sanitize_export_value(path, value))
+                .collect(),
+        )),
+        toml::Value::Table(table) => {
+            let mut scrubbed = toml::map::Map::new();
+            for (key, value) in table {
+                let child_path = format!("{path}.{key}");
+                if let Some(value) = sanitize_export_value(&child_path, value) {
+                    scrubbed.insert(key.clone(), value);
+                }
+            }
+            Some(toml::Value::Table(scrubbed))
+        }
+        _ => Some(value.clone()),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -623,7 +903,7 @@ pub struct ImportReceipt {
 
 /// Apply a validated bundle to `store` transactionally.
 ///
-/// The current document is backed up to `<target>.bundle-backup-<timestamp>`,
+/// The current document is backed up to `<target>.bundle-backup-<timestamp>-<random>`,
 /// entries are applied through `ConfigStore::set_value`, and any failure
 /// restores the backup before returning the error. The receipt redacts by
 /// construction: it carries only key paths and counts, never values.
@@ -633,6 +913,25 @@ pub fn apply_bundle(
     scope: BundleScope,
     workspace: &Path,
 ) -> Result<ImportReceipt> {
+    apply_bundle_with(bundle, store, scope, workspace, apply_entries)
+}
+
+fn apply_bundle_with<F>(
+    bundle: &PortableBundle,
+    store: &mut codewhale_config::ConfigStore,
+    scope: BundleScope,
+    workspace: &Path,
+    apply: F,
+) -> Result<ImportReceipt>
+where
+    F: FnOnce(
+        &PortableBundle,
+        &mut codewhale_config::ConfigStore,
+        BundleScope,
+        &Path,
+        &mut bool,
+    ) -> Result<()>,
+{
     // Scope isolation is structural: project entries belong only in a
     // project document, global entries only in the user-global one. A bundle
     // carrying the other scope's section is refused up front rather than
@@ -640,7 +939,7 @@ pub fn apply_bundle(
     match scope {
         BundleScope::Global if !bundle.project.entries.is_empty() => {
             bail!(
-                "bundle carries [project] entries; import it with --scope project from the workspace instead"
+                "bundle carries [project] entries; import it with --project from the workspace instead"
             );
         }
         BundleScope::Project if !bundle.global.entries.is_empty() => {
@@ -652,14 +951,7 @@ pub fn apply_bundle(
     }
     // A project-scoped import must target an actual workspace document — the
     // user-global file is never a landing zone for [project] entries.
-    if scope == BundleScope::Project
-        && !codewhale_config::config_path_is_workspace_scoped(store.path())
-    {
-        bail!(
-            "--scope project requires a workspace config ({} is the user-global document)",
-            store.path().display()
-        );
-    }
+    validate_scope_target(scope, store.path())?;
     let plan = plan_import(bundle, &store.config, scope);
     if !plan.conflicting.is_empty() {
         bail!(
@@ -676,30 +968,69 @@ pub fn apply_bundle(
     }
 
     let target = store.path().to_path_buf();
-    let backup_path = backup_path_for(&target)?;
-    std::fs::copy(&target, &backup_path)
-        .with_context(|| format!("backing up {} before bundle apply", target.display()))?;
+    let original_config = store.config.clone();
+    let backup_path = if target
+        .try_exists()
+        .with_context(|| format!("checking config target {}", target.display()))?
+    {
+        Some(create_collision_safe_backup(&target)?)
+    } else {
+        None
+    };
 
-    let apply_result = apply_entries(bundle, store, scope, workspace);
+    let mut target_written = false;
+    let apply_result = apply(bundle, store, scope, workspace, &mut target_written);
     if let Err(error) = apply_result {
-        // Rollback: restore the exact prior bytes.
-        let restore = std::fs::read(&backup_path)
-            .ok()
-            .map(|bytes| std::fs::write(&target, bytes));
-        match restore {
-            Some(Ok(())) => bail!("{error:#}; rolled back to the pre-import document"),
-            _ => bail!(
+        store.config = original_config;
+        let rollback = rollback_import_target(&target, backup_path.as_deref(), target_written)
+            .and_then(|()| store.reload());
+        match rollback {
+            Ok(()) => bail!("{error:#}; rolled back to the pre-import document"),
+            Err(_) => bail!(
                 "{error:#}; ROLLBACK FAILED — the pre-import document is preserved at {}",
-                backup_path.display()
+                backup_path
+                    .as_deref()
+                    .map(Path::display)
+                    .map(|path| path.to_string())
+                    .unwrap_or_else(
+                        || "<no prior file; remove the new target manually>".to_string()
+                    )
             ),
         }
     }
 
     Ok(ImportReceipt {
         plan,
-        backup_path: Some(backup_path),
+        backup_path,
         target,
     })
+}
+
+fn rollback_import_target(
+    target: &Path,
+    backup_path: Option<&Path>,
+    target_written: bool,
+) -> Result<()> {
+    // ConfigStore fails closed before replacing a stale target. If it did not
+    // report a successful write, leave a concurrently-created or edited file
+    // alone instead of mistaking somebody else's bytes for ours.
+    if !target_written {
+        return Ok(());
+    }
+    if let Some(backup_path) = backup_path {
+        let bytes = std::fs::read(backup_path)
+            .with_context(|| format!("reading pre-import backup {}", backup_path.display()))?;
+        std::fs::write(target, bytes)
+            .with_context(|| format!("restoring pre-import config {}", target.display()))?;
+        return Ok(());
+    }
+
+    match std::fs::remove_file(target) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error)
+            .with_context(|| format!("removing newly-created config {}", target.display())),
+    }
 }
 
 fn apply_entries(
@@ -707,7 +1038,9 @@ fn apply_entries(
     store: &mut codewhale_config::ConfigStore,
     scope: BundleScope,
     workspace: &Path,
+    target_written: &mut bool,
 ) -> Result<()> {
+    let mut candidate = store.config.clone();
     for (section, table) in [
         ("preferences", &bundle.preferences),
         ("profiles", &bundle.profiles),
@@ -724,19 +1057,85 @@ fn apply_entries(
             continue;
         }
         for (key, value) in &table.entries {
-            let dotted = format!("{section}.{key}");
-            if is_sensitive_config_key(key) {
-                bail!("refusing to import credential-shaped key {dotted}");
+            if key == "provider" {
+                continue;
             }
-            let rendered = render_toml_value(value)?;
-            // The bundle key is the config key as written; the section groups
-            // entries for scoping and display only.
-            store.config.set_value(key, &rendered)?;
+            let dotted = format!("{section}.{key}");
+            if nonportable_path_reason(key).is_some()
+                || value_rejection_reason(key, value).is_some()
+            {
+                bail!("refusing to import non-portable config path {dotted}");
+            }
+            apply_config_value(&mut candidate, key, value)?;
         }
     }
+    // Apply provider selection after provider tables so an exact named custom
+    // provider exported with its definition can validate successfully.
+    for (section, table) in [
+        ("preferences", &bundle.preferences),
+        ("profiles", &bundle.profiles),
+        ("plugins", &bundle.plugins),
+        ("project", &bundle.project),
+        ("global", &bundle.global),
+    ] {
+        if !section_applies(section, scope) {
+            continue;
+        }
+        if let Some(value) = table.entries.get("provider") {
+            apply_config_value(&mut candidate, "provider", value)?;
+        }
+    }
+    store.config = candidate;
     store.save().context("saving imported bundle")?;
+    *target_written = true;
     let _ = workspace;
     Ok(())
+}
+
+fn apply_config_value(config: &mut ConfigToml, key: &str, value: &toml::Value) -> Result<()> {
+    if key == "provider"
+        || key == "auth.mode"
+        || key == "hook_sinks.unix_socket_path"
+        || key.starts_with("providers.")
+    {
+        return config.set_value(key, &render_toml_value(value)?);
+    }
+
+    let selected_provider_id = config.selected_provider_id.clone();
+    let mut document = config_document(config)?;
+    if let Some(current) = document.get_mut(key) {
+        deep_merge_toml_value(current, value);
+    } else {
+        document.insert(key.to_string(), value.clone());
+    }
+    // As in `config_document`, round-trip through TOML text so datetimes in
+    // flattened extras stay TOML datetimes instead of serde-private marker
+    // tables or strings.
+    let text = toml::to_string(&toml::Value::Table(document))
+        .with_context(|| format!("config entry {key:?} could not be serialized"))?;
+    let mut updated: ConfigToml = toml::from_str(&text)
+        .map_err(|_| anyhow!("config entry {key:?} has an invalid TOML type"))?;
+    updated.selected_provider_id = selected_provider_id;
+    *config = updated;
+    Ok(())
+}
+
+/// Merge a portable value into the target document without treating omitted
+/// table leaves as deletions. Tables recurse; arrays and scalars represent an
+/// explicit portable choice and replace the corresponding target value.
+fn deep_merge_toml_value(target: &mut toml::Value, incoming: &toml::Value) {
+    match (target, incoming) {
+        (toml::Value::Table(target), toml::Value::Table(incoming)) => {
+            for (key, value) in incoming {
+                if let Some(current) = target.get_mut(key) {
+                    deep_merge_toml_value(current, value);
+                } else {
+                    target.insert(key.clone(), value.clone());
+                }
+            }
+        }
+        (target, incoming) => *target = incoming.clone(),
+    }
 }
 
 /// Render a TOML value into the scalar text `config set` accepts.
@@ -753,7 +1152,7 @@ fn render_toml_value(value: &toml::Value) -> Result<String> {
     })
 }
 
-fn backup_path_for(target: &Path) -> Result<PathBuf> {
+fn create_collision_safe_backup(target: &Path) -> Result<PathBuf> {
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|since| since.as_secs())
@@ -762,7 +1161,44 @@ fn backup_path_for(target: &Path) -> Result<PathBuf> {
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| "config.toml".to_string());
-    Ok(target.with_file_name(format!("{file_name}.bundle-backup-{timestamp}")))
+    let parent = target.parent().unwrap_or_else(|| Path::new("."));
+    let prefix = format!("{file_name}.bundle-backup-{timestamp}-");
+    // NamedTempFile uses exclusive creation and restrictive initial
+    // permissions, so concurrent same-second imports cannot clobber an older
+    // receipt or expose config bytes before target permissions are applied.
+    let mut backup = tempfile::Builder::new()
+        .prefix(&prefix)
+        .tempfile_in(parent)
+        .with_context(|| {
+            format!(
+                "creating a collision-safe backup beside {}",
+                target.display()
+            )
+        })?;
+    let mut source = std::fs::File::open(target)
+        .with_context(|| format!("opening {} for bundle backup", target.display()))?;
+    std::io::copy(&mut source, backup.as_file_mut())
+        .with_context(|| format!("copying {} into its bundle backup", target.display()))?;
+    use std::io::Write as _;
+    backup
+        .as_file_mut()
+        .flush()
+        .context("flushing bundle backup")?;
+    let permissions = source
+        .metadata()
+        .with_context(|| format!("reading permissions for {}", target.display()))?
+        .permissions();
+    std::fs::set_permissions(backup.path(), permissions)
+        .context("preserving config permissions on bundle backup")?;
+    backup
+        .as_file()
+        .sync_all()
+        .context("syncing bundle backup")?;
+    let (_file, path) = backup
+        .keep()
+        .map_err(|error| error.error)
+        .context("persisting bundle backup")?;
+    Ok(path)
 }
 
 // ---------------------------------------------------------------------------
@@ -844,6 +1280,7 @@ pub fn run_import(
     } else {
         BundleScope::Global
     };
+    validate_scope_target(scope, store.path())?;
     let remote_source = args.source.starts_with("https://") || args.source.starts_with("http://");
     let source_label = if args.source == "-" {
         "stdin"
@@ -934,6 +1371,7 @@ pub fn run_export(args: &ExportArgs, store: &codewhale_config::ConfigStore) -> R
     } else {
         BundleScope::Global
     };
+    validate_scope_target(scope, store.path())?;
     let metadata = BundleMetadata {
         name: None,
         created_at: Some(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
@@ -1072,6 +1510,226 @@ note = "sk-abcdefghij0123456789"
     }
 
     #[test]
+    fn nested_secret_keys_and_values_are_rejected_without_echoing_values() {
+        let shaped_value = ["Bear", "er nested-token-must-not-leak"].concat();
+        let text = format!(
+            r#"
+schema_version = 1
+kind = "codewhale.portable-config"
+
+[preferences.with_key.nested]
+password = "nested-password-must-not-leak"
+
+[preferences.with_value.nested]
+note = "{shaped_value}"
+"#
+        );
+        let bundle = parse_bundle_str(&text, "nested.toml").expect("bundle parses");
+        let rejected = find_rejected_entries(&bundle);
+        assert_eq!(rejected.len(), 2, "{rejected:?}");
+        assert!(
+            rejected
+                .iter()
+                .any(|entry| entry.key == "preferences.with_key")
+        );
+        assert!(
+            rejected
+                .iter()
+                .any(|entry| entry.key == "preferences.with_value")
+        );
+        let rendered = format!("{rejected:?}");
+        assert!(!rendered.contains("nested-password-must-not-leak"));
+        assert!(!rendered.contains("nested-token-must-not-leak"));
+    }
+
+    #[test]
+    fn network_proxy_routes_are_rejected_on_import_and_scrubbed_on_export() {
+        let proxy_url = ["http://proxy-user:proxy-", "pass@proxy.internal:3128"].concat();
+        let text = format!(
+            r#"
+schema_version = 1
+kind = "codewhale.portable-config"
+
+[global.network]
+default = "prompt"
+allow = ["registry.example"]
+proxy = ["{proxy_url}"]
+"#
+        );
+        let bundle = parse_bundle_str(&text, "network-proxy.toml").expect("bundle parses");
+        let rejected = find_rejected_entries(&bundle);
+        assert_eq!(rejected.len(), 1, "{rejected:?}");
+        assert_eq!(rejected[0].key, "global.network");
+        let rendered = format!("{rejected:?}");
+        assert!(!rendered.contains("proxy-pass"), "{rendered}");
+        assert!(!rendered.contains("proxy.internal"), "{rendered}");
+
+        let config: ConfigToml = toml::from_str(&format!(
+            r#"
+[network]
+default = "prompt"
+allow = ["registry.example"]
+proxy = ["{proxy_url}"]
+"#
+        ))
+        .expect("network config parses");
+        let exported = export_bundle(&config, BundleScope::Global, BundleMetadata::default())
+            .expect("network proxy is scrubbed");
+        let body = serialize_bundle(&exported).expect("serialize network export");
+        assert!(!body.contains("proxy-user"), "{body}");
+        assert!(!body.contains("proxy.internal"), "{body}");
+        let reparsed: toml::Value = toml::from_str(&body).expect("export reparses");
+        let network = reparsed
+            .get("global")
+            .and_then(|global| global.get("network"))
+            .expect("portable network policy is kept");
+        assert!(network.get("proxy").is_none(), "{body}");
+        assert_eq!(
+            network.get("default").and_then(toml::Value::as_str),
+            Some("prompt")
+        );
+        assert!(body.contains("registry.example"), "{body}");
+    }
+
+    #[test]
+    fn redaction_placeholders_are_rejected_on_import_and_export() {
+        let placeholder = codewhale_config::persistence::REDACTED;
+        let text = format!(
+            r#"
+schema_version = 1
+kind = "codewhale.portable-config"
+
+[preferences]
+verbosity = "quiet"
+note = "prefix {placeholder} suffix"
+"#
+        );
+        let bundle = parse_bundle_str(&text, "placeholder.toml").expect("bundle parses");
+        let rejected = find_rejected_entries(&bundle);
+        assert_eq!(rejected.len(), 1, "{rejected:?}");
+        assert_eq!(rejected[0].key, "preferences.note");
+        assert!(
+            rejected[0].reason.contains("redaction placeholder"),
+            "{rejected:?}"
+        );
+
+        let config: ConfigToml = toml::from_str(&format!(
+            "verbosity = \"quiet\"\nnote = \"prefix {placeholder} suffix\"\n"
+        ))
+        .expect("placeholder config parses");
+        let exported = export_bundle(&config, BundleScope::Global, BundleMetadata::default())
+            .expect("placeholder is scrubbed");
+        let body = serialize_bundle(&exported).expect("serialize placeholder export");
+        assert!(!body.contains(placeholder), "{body}");
+        assert!(body.contains("quiet"), "{body}");
+    }
+
+    #[test]
+    fn camel_case_and_dotted_secret_keys_avoid_token_count_false_positives() {
+        for key in [
+            "accessToken",
+            "refreshToken",
+            "clientSecret",
+            "apiKey",
+            "api.key",
+            "private.key",
+            "accessKey",
+            "aws_access_key",
+            "awsSecretAccessKey",
+            "Cookie",
+            "Set-Cookie",
+            "providers.xai.auth.command",
+            "providers.xai.external_credentials",
+            "providers.xai.oauth_credential_generation",
+            "nested.service.accessToken",
+            "nested.service.refreshToken",
+        ] {
+            assert!(is_sensitive_bundle_key(key), "must reject {key}");
+        }
+        for key in [
+            "auth_mode",
+            "maxTokens",
+            "tokenizer",
+            "tokenBudget",
+            "max_tokens",
+        ] {
+            assert!(!is_sensitive_bundle_key(key), "must preserve {key}");
+        }
+    }
+
+    #[test]
+    fn compound_and_access_keys_are_rejected_before_import_without_mutation() {
+        let api_dot = ["api", ".key"].concat();
+        let private_dot = ["private", ".key"].concat();
+        let access_camel = ["access", "Key"].concat();
+        let aws_snake = ["aws", "_access_key"].concat();
+        let aws_camel = ["aws", "SecretAccessKey"].concat();
+        let cookie = ["Coo", "kie"].concat();
+        let set_cookie = ["Set-", "Cookie"].concat();
+        let text = format!(
+            r#"
+schema_version = 1
+kind = "codewhale.portable-config"
+
+[preferences]
+"{api_dot}" = "opaque-api-value"
+"{private_dot}" = "opaque-private-value"
+{access_camel} = "opaque-access-value"
+{aws_snake} = "opaque-aws-access-value"
+{aws_camel} = "opaque-aws-secret-access-value"
+maxTokens = 8192
+tokenizer = "bpe"
+
+[preferences.http_headers]
+{cookie} = "opaque-cookie-import-value"
+{set_cookie} = "opaque-set-cookie-import-value"
+"#
+        );
+        let bundle =
+            parse_bundle_str(&text, "compound-secrets.toml").expect("compound-key bundle parses");
+        let rejected = find_rejected_entries(&bundle);
+        assert_eq!(rejected.len(), 6, "{rejected:?}");
+        assert!(
+            rejected
+                .iter()
+                .any(|entry| entry.key == "preferences.http_headers"),
+            "{rejected:?}"
+        );
+        assert!(
+            rejected
+                .iter()
+                .all(|entry| !entry.key.contains("maxTokens") && !entry.key.contains("tokenizer")),
+            "{rejected:?}"
+        );
+
+        let dir = tempfile::tempdir().expect("config dir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "verbosity = \"quiet\"\n").expect("seed config");
+        let before = std::fs::read(&path).expect("config before import");
+        let mut store = ConfigStore::load(Some(path.clone())).expect("store loads");
+        let error = apply_bundle(&bundle, &mut store, BundleScope::Global, dir.path())
+            .expect_err("credential keys must refuse the entire import");
+        let rendered = format!("{error:#}");
+        assert!(rendered.contains("conflicting or rejected"), "{rendered}");
+        for secret in [
+            "opaque-api-value",
+            "opaque-private-value",
+            "opaque-access-value",
+            "opaque-aws-access-value",
+            "opaque-aws-secret-access-value",
+            "opaque-cookie-import-value",
+            "opaque-set-cookie-import-value",
+        ] {
+            assert!(
+                !rendered.contains(secret),
+                "error leaked {secret}: {rendered}"
+            );
+        }
+        assert_eq!(std::fs::read(path).expect("config after refusal"), before);
+        assert_eq!(store.config.verbosity.as_deref(), Some("quiet"));
+    }
+
+    #[test]
     fn plan_reports_added_changed_skipped_deterministically() {
         let store = isolated_store();
         let bundle_text = r#"
@@ -1199,6 +1857,143 @@ verbosity = "verbose"
     }
 
     #[test]
+    fn immediate_mutating_imports_create_distinct_no_clobber_backups() {
+        let dir = tempfile::tempdir().expect("config dir");
+        let path = dir.path().join("config.toml");
+        let original = b"verbosity = \"quiet\"\n";
+        std::fs::write(&path, original).expect("seed config");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+                .expect("restrict target permissions");
+        }
+        let mut store = ConfigStore::load(Some(path.clone())).expect("store loads");
+        let first_bundle = parse_bundle_str(
+            r#"
+schema_version = 1
+kind = "codewhale.portable-config"
+
+[global]
+verbosity = "verbose"
+"#,
+            "first.toml",
+        )
+        .expect("first bundle parses");
+        let first = apply_bundle(&first_bundle, &mut store, BundleScope::Global, dir.path())
+            .expect("first import");
+        let first_backup = first.backup_path.expect("first backup receipt");
+        assert_eq!(
+            std::fs::read(&first_backup).expect("first backup"),
+            original
+        );
+        let after_first = std::fs::read(&path).expect("target after first import");
+
+        let second_bundle = parse_bundle_str(
+            r#"
+schema_version = 1
+kind = "codewhale.portable-config"
+
+[global]
+output_mode = "plain"
+"#,
+            "second.toml",
+        )
+        .expect("second bundle parses");
+        let second = apply_bundle(&second_bundle, &mut store, BundleScope::Global, dir.path())
+            .expect("second import");
+        let second_backup = second.backup_path.expect("second backup receipt");
+        assert_ne!(first_backup, second_backup, "backups must never collide");
+        assert_eq!(
+            std::fs::read(&second_backup).expect("second backup"),
+            after_first,
+            "second receipt must preserve its exact pre-import document"
+        );
+        assert_eq!(
+            std::fs::read(&first_backup).expect("first backup remains"),
+            original,
+            "second import must not overwrite the first receipt"
+        );
+        for backup in [&first_backup, &second_backup] {
+            assert!(
+                backup
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.contains(".bundle-backup-")),
+                "unexpected backup name: {}",
+                backup.display()
+            );
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                assert_eq!(
+                    std::fs::metadata(backup)
+                        .expect("backup metadata")
+                        .permissions()
+                        .mode()
+                        & 0o777,
+                    0o600,
+                    "backup must preserve restrictive target permissions"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn non_no_op_import_creates_a_missing_config_without_a_backup() {
+        let dir = tempfile::tempdir().expect("config dir");
+        let path = dir.path().join("config.toml");
+        let mut store = ConfigStore::load(Some(path.clone())).expect("missing config loads");
+        assert!(!path.exists(), "load must not create the config");
+
+        let receipt = apply_bundle(
+            &sample_bundle(),
+            &mut store,
+            BundleScope::Global,
+            dir.path(),
+        )
+        .expect("import creates config");
+
+        assert!(path.is_file(), "non-no-op import must create the config");
+        assert!(
+            receipt.backup_path.is_none(),
+            "no prior file means no backup"
+        );
+        let reloaded = ConfigStore::load(Some(path)).expect("created config reloads");
+        assert_eq!(reloaded.config.verbosity.as_deref(), Some("quiet"));
+        assert_eq!(reloaded.config.output_mode.as_deref(), Some("plain"));
+    }
+
+    #[test]
+    fn failed_import_removes_a_config_created_during_the_transaction() {
+        let dir = tempfile::tempdir().expect("config dir");
+        let path = dir.path().join("config.toml");
+        let mut store = ConfigStore::load(Some(path.clone())).expect("missing config loads");
+
+        let error = apply_bundle_with(
+            &sample_bundle(),
+            &mut store,
+            BundleScope::Global,
+            dir.path(),
+            |bundle, store, scope, workspace, target_written| {
+                apply_entries(bundle, store, scope, workspace, target_written)?;
+                bail!("forced failure after the new document was saved")
+            },
+        )
+        .expect_err("forced post-save failure must roll back");
+
+        assert!(error.to_string().contains("rolled back"), "{error:#}");
+        assert!(
+            !path.exists(),
+            "rollback must remove the newly-created file"
+        );
+        assert_eq!(
+            store.config.verbosity, None,
+            "in-memory state also rolls back"
+        );
+    }
+
+    #[test]
     fn project_scope_never_touches_the_global_document() {
         let mut store = isolated_store();
         let global_before = std::fs::read_to_string(store.path()).expect("global doc");
@@ -1292,6 +2087,1131 @@ log_level = "debug"
         // No machine-specific absolute paths in the body.
         assert!(!one.contains("/Users/"), "{one}");
         assert!(!one.contains("/home/"), "{one}");
+    }
+
+    #[test]
+    fn export_preserves_typed_structured_config_and_toml_value_kinds() {
+        let config: ConfigToml = toml::from_str(
+            r#"
+provider = "deepseek"
+telemetry = false
+retry_count = 3
+ratio = 1.25
+started_at = 1979-05-27T07:32:00Z
+labels = ["alpha", "beta"]
+
+[skills]
+registry_url = "https://registry.example/skills.json"
+max_install_size_bytes = 12345
+
+[snapshots]
+enabled = false
+max_age_days = 11
+
+[portable_table]
+enabled = true
+count = 4
+
+[[harness_profiles]]
+provider_route = "deepseek"
+model_pattern = "deepseek-v4-*"
+
+[harness_profiles.posture]
+kind = "custom"
+max_subagents = 3
+prefer_codebase_search = true
+compaction_strategy = "prefix-cache"
+tool_surface = "read-only"
+safety_posture = "strict"
+"#,
+        )
+        .expect("typed config parses");
+
+        let bundle = export_bundle(&config, BundleScope::Global, BundleMetadata::default())
+            .expect("typed export");
+        assert!(matches!(
+            bundle.profiles.entries.get("harness_profiles"),
+            Some(toml::Value::Array(_))
+        ));
+        assert!(matches!(
+            bundle.preferences.entries.get("skills"),
+            Some(toml::Value::Table(_))
+        ));
+        assert!(matches!(
+            bundle.preferences.entries.get("snapshots"),
+            Some(toml::Value::Table(_))
+        ));
+        assert!(matches!(
+            bundle.global.entries.get("telemetry"),
+            Some(toml::Value::Boolean(false))
+        ));
+        assert!(matches!(
+            bundle.global.entries.get("retry_count"),
+            Some(toml::Value::Integer(3))
+        ));
+        assert!(matches!(
+            bundle.global.entries.get("ratio"),
+            Some(toml::Value::Float(value)) if *value == 1.25
+        ));
+        assert!(
+            matches!(
+                bundle.global.entries.get("started_at"),
+                Some(toml::Value::Datetime(_))
+            ),
+            "{bundle:#?}"
+        );
+
+        let dir = tempfile::tempdir().expect("round-trip dir");
+        let path = dir.path().join("config.toml");
+        let mut store = ConfigStore::load(Some(path.clone())).expect("fresh store");
+        apply_bundle(&bundle, &mut store, BundleScope::Global, dir.path())
+            .expect("typed bundle imports");
+        let reloaded = ConfigStore::load(Some(path)).expect("typed config reloads");
+        let reexported = export_bundle(
+            &reloaded.config,
+            BundleScope::Global,
+            BundleMetadata::default(),
+        )
+        .expect("round-trip export");
+        assert_eq!(
+            serialize_bundle(&reexported).expect("serialize round trip"),
+            serialize_bundle(&bundle).expect("serialize original"),
+            "typed portable config must round-trip without stringification or loss"
+        );
+        let plan = plan_import(&bundle, &reloaded.config, BundleScope::Global);
+        assert!(
+            plan.is_no_op(),
+            "typed re-import must be idempotent: {plan:?}"
+        );
+    }
+
+    #[test]
+    fn typed_reimport_normalizes_omitted_serde_defaults_before_comparison() {
+        let bundle = parse_bundle_str(
+            r#"
+schema_version = 1
+kind = "codewhale.portable-config"
+
+[preferences.snapshots]
+enabled = false
+"#,
+            "defaults.toml",
+        )
+        .expect("bundle with omitted typed default");
+        let dir = tempfile::tempdir().expect("config dir");
+        let path = dir.path().join("config.toml");
+        let mut store = ConfigStore::load(Some(path)).expect("fresh store");
+        apply_bundle(&bundle, &mut store, BundleScope::Global, dir.path())
+            .expect("first typed import");
+
+        assert_eq!(
+            store
+                .config
+                .snapshots
+                .as_ref()
+                .expect("snapshots configured")
+                .max_age_days,
+            7,
+            "serde default must be materialized"
+        );
+        let plan = plan_import(&bundle, &store.config, BundleScope::Global);
+        assert!(
+            plan.is_no_op(),
+            "normalized re-import must be a no-op: {plan:?}"
+        );
+    }
+
+    #[test]
+    fn telemetry_opt_out_round_trips_but_opt_in_consent_never_does() {
+        let opted_in = ConfigToml {
+            telemetry: Some(true),
+            ..ConfigToml::default()
+        };
+        let exported = export_bundle(&opted_in, BundleScope::Global, BundleMetadata::default())
+            .expect("opt-in export is safely omitted");
+        assert!(
+            !exported.global.entries.contains_key("telemetry"),
+            "opt-in consent must not be portable: {exported:?}"
+        );
+
+        let opt_in_bundle = parse_bundle_str(
+            r#"
+schema_version = 1
+kind = "codewhale.portable-config"
+
+[global]
+telemetry = true
+"#,
+            "telemetry-opt-in.toml",
+        )
+        .expect("opt-in bundle parses before policy validation");
+        let rejected = find_rejected_entries(&opt_in_bundle);
+        assert_eq!(rejected.len(), 1, "{rejected:?}");
+        assert!(
+            rejected[0].reason.contains("opt-in consent"),
+            "{rejected:?}"
+        );
+
+        let dir = tempfile::tempdir().expect("config dir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "verbosity = \"quiet\"\n").expect("seed config");
+        let before = std::fs::read(&path).expect("config before refusal");
+        let mut store = ConfigStore::load(Some(path.clone())).expect("store loads");
+        apply_bundle(&opt_in_bundle, &mut store, BundleScope::Global, dir.path())
+            .expect_err("portable opt-in consent must be refused");
+        assert_eq!(std::fs::read(&path).expect("config after refusal"), before);
+        assert_eq!(store.config.telemetry, None);
+
+        let opt_out_bundle = parse_bundle_str(
+            r#"
+schema_version = 1
+kind = "codewhale.portable-config"
+
+[global]
+telemetry = false
+"#,
+            "telemetry-opt-out.toml",
+        )
+        .expect("opt-out bundle parses");
+        assert!(find_rejected_entries(&opt_out_bundle).is_empty());
+        apply_bundle(&opt_out_bundle, &mut store, BundleScope::Global, dir.path())
+            .expect("portable opt-out applies");
+        assert_eq!(store.config.telemetry, Some(false));
+        let reloaded = ConfigStore::load(Some(path)).expect("opt-out config reloads");
+        let plan = plan_import(&opt_out_bundle, &reloaded.config, BundleScope::Global);
+        assert!(
+            plan.is_no_op(),
+            "opt-out re-import must be idempotent: {plan:?}"
+        );
+        let reexported = export_bundle(
+            &reloaded.config,
+            BundleScope::Global,
+            BundleMetadata::default(),
+        )
+        .expect("opt-out re-exports");
+        assert_eq!(
+            reexported.global.entries.get("telemetry"),
+            Some(&toml::Value::Boolean(false))
+        );
+    }
+
+    #[test]
+    fn structured_import_deep_merges_without_erasing_local_authority() {
+        let dir = tempfile::tempdir().expect("config dir");
+        let path = dir.path().join("config.toml");
+        let api_key_name = ["api", "_key"].concat();
+        let api_key_env_name = ["api", "_key_env"].concat();
+        let target = format!(
+            r#"
+provider = "acme_gateway"
+
+[providers.acme_gateway]
+kind = "openai-compatible"
+base_url = "https://local-only.invalid/v1"
+model = "old-model"
+{api_key_name} = "opaque-local-api-value"
+{api_key_env_name} = "LOCAL_ACME_GATEWAY_KEY"
+
+[providers.acme_gateway.auth]
+source = "command"
+command = ["/synthetic/local-credential-helper"]
+
+[lsp]
+enabled = true
+include_warnings = false
+
+[lsp.servers]
+rust = ["/synthetic/local-rust-analyzer", "--stdio"]
+
+[lsp.custom.foo]
+language_id = "foo-language"
+command = "/synthetic/local-foo-lsp"
+args = ["--stdio"]
+
+[hook_sinks]
+unix_socket_path = "/synthetic/local-codewhale.sock"
+"#
+        );
+        std::fs::write(&path, target).expect("seed local-authority config");
+        let mut store = ConfigStore::load(Some(path.clone())).expect("target config loads");
+        let bundle = parse_bundle_str(
+            r#"
+schema_version = 1
+kind = "codewhale.portable-config"
+
+[global]
+provider = "acme_gateway"
+
+[global.providers.acme_gateway]
+kind = "openai-compatible"
+model = "new-portable-model"
+
+[global.lsp]
+enabled = false
+include_warnings = true
+"#,
+            "deep-merge.toml",
+        )
+        .expect("portable update parses");
+        assert!(find_rejected_entries(&bundle).is_empty(), "{bundle:?}");
+
+        let receipt = apply_bundle(&bundle, &mut store, BundleScope::Global, dir.path())
+            .expect("portable values merge into target");
+        assert_eq!(
+            receipt.plan.changed,
+            ["global.lsp", "global.providers"],
+            "{:?}",
+            receipt.plan
+        );
+        assert_eq!(
+            receipt.plan.skipped,
+            ["global.provider"],
+            "{:?}",
+            receipt.plan
+        );
+        assert_eq!(store.config.provider_id(), "acme_gateway");
+        let document = config_document(&store.config).expect("merged typed document");
+        let acme = document
+            .get("providers")
+            .and_then(toml::Value::as_table)
+            .and_then(|providers| providers.get("acme_gateway"))
+            .and_then(toml::Value::as_table)
+            .expect("custom provider survives");
+        assert_eq!(
+            acme.get("model").and_then(toml::Value::as_str),
+            Some("new-portable-model")
+        );
+        assert_eq!(
+            acme.get("base_url").and_then(toml::Value::as_str),
+            Some("https://local-only.invalid/v1")
+        );
+        assert_eq!(
+            acme.get("api_key").and_then(toml::Value::as_str),
+            Some("opaque-local-api-value")
+        );
+        assert_eq!(
+            acme.get("api_key_env").and_then(toml::Value::as_str),
+            Some("LOCAL_ACME_GATEWAY_KEY")
+        );
+        assert_eq!(
+            acme.get("auth")
+                .and_then(toml::Value::as_table)
+                .and_then(|auth| auth.get("command"))
+                .and_then(toml::Value::as_array)
+                .and_then(|command| command.first())
+                .and_then(toml::Value::as_str),
+            Some("/synthetic/local-credential-helper")
+        );
+        let lsp = store.config.lsp.as_ref().expect("LSP config survives");
+        assert_eq!(lsp.enabled, Some(false));
+        assert_eq!(lsp.include_warnings, Some(true));
+        assert!(lsp.servers.as_ref().is_some_and(|servers| {
+            servers
+                .get("rust")
+                .is_some_and(|command| command.first().is_some_and(|part| part.contains("rust")))
+        }));
+        assert!(
+            lsp.custom
+                .as_ref()
+                .is_some_and(|custom| custom.contains_key("foo"))
+        );
+        assert_eq!(
+            store
+                .config
+                .hook_sinks
+                .as_ref()
+                .and_then(|sinks| sinks.unix_socket_path.as_deref()),
+            Some(Path::new("/synthetic/local-codewhale.sock"))
+        );
+
+        let reloaded = ConfigStore::load(Some(path)).expect("merged config reloads");
+        assert_eq!(reloaded.config.provider_id(), "acme_gateway");
+        let plan = plan_import(&bundle, &reloaded.config, BundleScope::Global);
+        assert!(
+            plan.is_no_op(),
+            "deep-merged re-import must be idempotent: {plan:?}"
+        );
+    }
+
+    #[test]
+    fn export_recursively_drops_nested_secrets_but_keeps_safe_typed_siblings() {
+        let provider_prefix = ["s", "k-"].concat();
+        let bearer_prefix = ["Bear", "er "].concat();
+        let access_key = ["access", "Token"].concat();
+        let dotted_refresh_key = ["service.refresh", "Token"].concat();
+        let refresh_key = ["refresh", "Token"].concat();
+        let fixture = format!(
+            r#"
+[tools]
+always_load = ["read_file", "{provider_prefix}nested-tool-value-must-not-leak", "write_file"]
+
+[portable]
+safe_count = 7
+note = "{bearer_prefix}nested-export-value-must-not-leak"
+values = ["plain", "{provider_prefix}nested-array-value-must-not-leak"]
+
+[portable.nested]
+{access_key} = "nested-export-key-must-not-leak"
+"{dotted_refresh_key}" = "nested-dotted-value-must-not-leak"
+label = "keep-me"
+
+[[portable.records]]
+{refresh_key} = "nested-record-value-must-not-leak"
+count = 2
+
+[[portable.records]]
+label = "safe-record"
+"#
+        );
+        let config: ConfigToml = toml::from_str(&fixture).expect("secret-bearing config parses");
+        let bundle = export_bundle(&config, BundleScope::Global, BundleMetadata::default())
+            .expect("safe export");
+        let body = serialize_bundle(&bundle).expect("serialize export");
+        for secret in [
+            "nested-export-value-must-not-leak",
+            "nested-array-value-must-not-leak",
+            "nested-tool-value-must-not-leak",
+            "nested-export-key-must-not-leak",
+            "nested-dotted-value-must-not-leak",
+            "nested-record-value-must-not-leak",
+        ] {
+            assert!(!body.contains(secret), "export leaked {secret}: {body}");
+        }
+        assert!(body.contains("safe_count = 7"), "{body}");
+        assert!(body.contains("label = \"keep-me\""), "{body}");
+        assert!(body.contains("label = \"safe-record\""), "{body}");
+        assert!(body.contains("values = [\"plain\"]"), "{body}");
+        assert!(find_rejected_entries(&bundle).is_empty(), "{bundle:?}");
+
+        let dir = tempfile::tempdir().expect("sanitized import dir");
+        let path = dir.path().join("config.toml");
+        let mut store = ConfigStore::load(Some(path)).expect("fresh store");
+        apply_bundle(&bundle, &mut store, BundleScope::Global, dir.path())
+            .expect("sanitized typed arrays re-import");
+        assert_eq!(
+            store
+                .config
+                .tools
+                .as_ref()
+                .expect("tools preserved")
+                .always_load
+                .as_slice(),
+            ["read_file", "write_file"],
+            "dropping a secret array element must preserve a valid typed array"
+        );
+        let plan = plan_import(&bundle, &store.config, BundleScope::Global);
+        assert!(
+            plan.is_no_op(),
+            "sanitized re-import must be idempotent: {plan:?}"
+        );
+    }
+
+    #[test]
+    fn compound_access_and_cookie_fields_are_scrubbed_on_export() {
+        let cookie = ["Coo", "kie"].concat();
+        let set_cookie = ["Set-", "Cookie"].concat();
+        let api_dot = ["api", ".key"].concat();
+        let private_dot = ["private", ".key"].concat();
+        let access_camel = ["access", "Key"].concat();
+        let aws_snake = ["aws", "_access_key"].concat();
+        let aws_camel = ["aws", "SecretAccessKey"].concat();
+        let fixture = format!(
+            r#"
+[http_headers]
+{cookie} = "opaque-cookie-value"
+{set_cookie} = "opaque-set-cookie-value"
+X-Safe = "portable-header"
+
+[portable]
+"{api_dot}" = "opaque-api-value"
+"{private_dot}" = "opaque-private-value"
+{access_camel} = "opaque-access-value"
+{aws_snake} = "opaque-aws-access-value"
+{aws_camel} = "opaque-aws-secret-access-value"
+maxTokens = 8192
+tokenizer = "bpe"
+"#
+        );
+        let config: ConfigToml = toml::from_str(&fixture).expect("credential-key config parses");
+        let bundle = export_bundle(&config, BundleScope::Global, BundleMetadata::default())
+            .expect("credential fields are scrubbed");
+        let body = serialize_bundle(&bundle).expect("serialize scrubbed export");
+        for forbidden in [
+            "opaque-cookie-value",
+            "opaque-set-cookie-value",
+            "opaque-api-value",
+            "opaque-private-value",
+            "opaque-access-value",
+            "opaque-aws-access-value",
+            "opaque-aws-secret-access-value",
+            "api.key",
+            "private.key",
+            "accessKey",
+            "aws_access_key",
+            "awsSecretAccessKey",
+            "Cookie",
+            "Set-Cookie",
+        ] {
+            assert!(
+                !body.contains(forbidden),
+                "export retained {forbidden}: {body}"
+            );
+        }
+        assert!(body.contains("X-Safe = \"portable-header\""), "{body}");
+        assert!(body.contains("maxTokens = 8192"), "{body}");
+        assert!(body.contains("tokenizer = \"bpe\""), "{body}");
+        assert!(find_rejected_entries(&bundle).is_empty(), "{bundle:?}");
+    }
+
+    #[test]
+    fn provider_credential_authority_is_rejected_on_import_and_scrubbed_on_export() {
+        let dir = tempfile::tempdir().expect("config dir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "verbosity = \"quiet\"\n").expect("seed config");
+        let before = std::fs::read(&path).expect("config before imports");
+        let mut store = ConfigStore::load(Some(path.clone())).expect("store loads");
+        let api_key_env_name = ["api", "_key_env"].concat();
+
+        for (name, body) in [
+            (
+                "auth",
+                r#"
+[global.providers.xai.auth]
+source = "command"
+command = ["synthetic-credential-helper"]
+"#
+                .to_string(),
+            ),
+            (
+                "external",
+                r#"
+[global.providers.xai.external_credentials]
+access = "read_only"
+provider = "xai"
+source = "grok_cli"
+path = "/synthetic/external/auth.json"
+consent_version = 1
+"#
+                .to_string(),
+            ),
+            (
+                "oauth-generation",
+                r#"
+[global.providers.xai]
+oauth_credential_generation = "synthetic-owned-generation.toml"
+"#
+                .to_string(),
+            ),
+            (
+                "api-key-env",
+                format!(
+                    r#"
+[global.providers.xai]
+{api_key_env_name} = "SYNTHETIC_RANDOM_PROVIDER_KEY"
+"#
+                ),
+            ),
+        ] {
+            let text = format!("schema_version = 1\nkind = \"codewhale.portable-config\"\n{body}");
+            let bundle = parse_bundle_str(&text, name).expect("authority bundle parses");
+            assert_eq!(find_rejected_entries(&bundle).len(), 1, "{name}");
+            let error = apply_bundle(&bundle, &mut store, BundleScope::Global, dir.path())
+                .expect_err("authority-bearing import must fail");
+            assert!(
+                error.to_string().contains("conflicting or rejected"),
+                "{name}: {error:#}"
+            );
+            assert_eq!(std::fs::read(&path).expect("config after refusal"), before);
+            assert_eq!(store.config.verbosity.as_deref(), Some("quiet"));
+        }
+
+        let fixture = format!(
+            r#"
+provider = "xai"
+
+[providers.xai]
+model = "grok-safe-model"
+oauth_credential_generation = "synthetic-owned-generation.toml"
+{api_key_env_name} = "SYNTHETIC_RANDOM_PROVIDER_KEY"
+
+[providers.xai.auth]
+source = "command"
+command = ["synthetic-credential-helper"]
+
+[providers.xai.external_credentials]
+access = "read_only"
+provider = "xai"
+source = "grok_cli"
+path = "/synthetic/external/auth.json"
+consent_version = 1
+"#
+        );
+        let config: ConfigToml =
+            toml::from_str(&fixture).expect("provider authority config parses");
+        let exported = export_bundle(&config, BundleScope::Global, BundleMetadata::default())
+            .expect("provider authority is scrubbed");
+        let body = serialize_bundle(&exported).expect("serialize provider export");
+        for forbidden in [
+            "external_credentials",
+            "oauth_credential_generation",
+            "synthetic-credential-helper",
+            "synthetic-owned-generation.toml",
+            "SYNTHETIC_RANDOM_PROVIDER_KEY",
+            api_key_env_name.as_str(),
+            "/synthetic/external/auth.json",
+        ] {
+            assert!(
+                !body.contains(forbidden),
+                "export retained {forbidden}: {body}"
+            );
+        }
+        assert!(body.contains("model = \"grok-safe-model\""), "{body}");
+        assert!(find_rejected_entries(&exported).is_empty(), "{exported:?}");
+    }
+
+    #[test]
+    fn machine_local_route_and_path_fields_are_rejected_and_scrubbed_symmetrically() {
+        let bundle = parse_bundle_str(
+            r#"
+schema_version = 1
+kind = "codewhale.portable-config"
+
+[global]
+telemetry_endpoint = "https://synthetic.invalid/telemetry"
+mcpConfigPath = "/synthetic/import-mcp.json"
+
+[global.providers.deepseek]
+baseUrl = "https://synthetic.invalid/provider/v1"
+model = "safe-model"
+
+[global.hook_sinks]
+unix_socket_path = "/synthetic/import-codewhale.sock"
+"#,
+            "machine-local-paths.toml",
+        )
+        .expect("machine-local bundle parses");
+        let rejected = find_rejected_entries(&bundle);
+        assert_eq!(rejected.len(), 4, "{rejected:?}");
+        for key in [
+            "global.telemetry_endpoint",
+            "global.mcpConfigPath",
+            "global.providers",
+            "global.hook_sinks",
+        ] {
+            assert!(
+                rejected.iter().any(|entry| entry.key == key),
+                "{rejected:?}"
+            );
+        }
+
+        let dir = tempfile::tempdir().expect("config dir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "verbosity = \"quiet\"\n").expect("seed config");
+        let before = std::fs::read(&path).expect("config before import");
+        let mut store = ConfigStore::load(Some(path.clone())).expect("store loads");
+        let error = apply_bundle(&bundle, &mut store, BundleScope::Global, dir.path())
+            .expect_err("machine-local paths must refuse the entire import");
+        assert!(
+            error.to_string().contains("conflicting or rejected"),
+            "{error:#}"
+        );
+        assert_eq!(std::fs::read(&path).expect("config after refusal"), before);
+        assert_eq!(store.config.verbosity.as_deref(), Some("quiet"));
+
+        let config: ConfigToml = toml::from_str(
+            r#"
+telemetry_endpoint = "https://synthetic.invalid/telemetry"
+mcp_config_path = "/synthetic/export-mcp.json"
+
+[providers.deepseek]
+base_url = "https://synthetic.invalid/provider/v1"
+model = "safe-model"
+
+[hook_sinks]
+unix_socket_path = "/synthetic/export-codewhale.sock"
+"#,
+        )
+        .expect("machine-local config parses");
+        let exported = export_bundle(&config, BundleScope::Global, BundleMetadata::default())
+            .expect("machine-local paths are scrubbed");
+        let body = serialize_bundle(&exported).expect("serialize machine-local export");
+        for forbidden in [
+            "synthetic.invalid",
+            "/synthetic/export-mcp.json",
+            "/synthetic/export-codewhale.sock",
+            "telemetry_endpoint",
+            "mcp_config_path",
+            "unix_socket_path",
+            "base_url",
+        ] {
+            assert!(
+                !body.contains(forbidden),
+                "export retained {forbidden}: {body}"
+            );
+        }
+        assert!(body.contains("model = \"safe-model\""), "{body}");
+        assert!(find_rejected_entries(&exported).is_empty(), "{exported:?}");
+    }
+
+    #[test]
+    fn remaining_local_authority_is_rejected_while_safe_policy_stays_portable() {
+        for safe in [
+            "databaseUrl",
+            "baseUrlTemplate",
+            "memoryPathology",
+            "sandboxUrlTemplate",
+            "skills.registry_url",
+            "network.allow",
+            "workflow.automatic",
+            "fleet.exec.allowed_tools",
+        ] {
+            assert_eq!(nonportable_path_reason(safe), None, "must preserve {safe}");
+        }
+
+        let bundle = parse_bundle_str(
+            r#"
+schema_version = 1
+kind = "codewhale.portable-config"
+
+[global]
+instructions = "/synthetic/import-instructions.md"
+project_instruction_imports = "all"
+projectInstructionImports = "all"
+sandbox_backend = "synthetic-local-backend"
+sandboxUrl = "http://127.0.0.1:47891"
+bwrapRoRoots = ["/synthetic/import-ro"]
+bwrap_dev_roots = ["/synthetic/import-dev"]
+skills_dir = "/synthetic/import-skills"
+memoryPath = "/synthetic/import-memory.md"
+mcpOauthCallbackUrl = "http://127.0.0.1:47892/callback"
+mcp_oauth_callback_port = 47892
+notes_path = "/synthetic/import-notes.md"
+
+[global.runtime_api]
+bind = "127.0.0.1:47893"
+
+[global.auto_review]
+allow = ["synthetic-shell-action"]
+
+[global.tools]
+always_load = ["read_file"]
+plugin_dir = "/synthetic/import-plugins"
+
+[global.tools.overrides.shell]
+command = "/synthetic/import-tool-override"
+
+[global.update]
+channel = "stable"
+update_uri = "file:///synthetic/import-update"
+
+[global.notifications]
+enabled = true
+sound_file = "/synthetic/import-sound.wav"
+
+[global.speech]
+enabled = true
+output_dir = "/synthetic/import-speech"
+
+[global.skills]
+registry_url = "https://registry.example/skills.json"
+
+[global.network]
+default = "prompt"
+allow = ["registry.example"]
+
+[global.workflow]
+automatic = false
+
+[global.fleet.exec]
+allowed_tools = ["read_file"]
+"#,
+            "remaining-local-authority.toml",
+        )
+        .expect("remaining authority bundle parses");
+        let rejected = find_rejected_entries(&bundle);
+        assert_eq!(rejected.len(), 18, "{rejected:?}");
+        for safe in [
+            "global.skills",
+            "global.network",
+            "global.workflow",
+            "global.fleet",
+        ] {
+            assert!(
+                rejected.iter().all(|entry| entry.key != safe),
+                "safe entry {safe} was rejected: {rejected:?}"
+            );
+        }
+
+        let dir = tempfile::tempdir().expect("config dir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "verbosity = \"quiet\"\n").expect("seed config");
+        let before = std::fs::read(&path).expect("config before import");
+        let mut store = ConfigStore::load(Some(path.clone())).expect("store loads");
+        apply_bundle(&bundle, &mut store, BundleScope::Global, dir.path())
+            .expect_err("remaining local authority import must fail");
+        assert_eq!(std::fs::read(&path).expect("config after refusal"), before);
+        assert_eq!(store.config.verbosity.as_deref(), Some("quiet"));
+
+        let config: ConfigToml = toml::from_str(
+            r#"
+instructions = "/synthetic/export-instructions.md"
+project_instruction_imports = "all"
+projectInstructionImports = "all"
+sandbox_backend = "synthetic-local-backend"
+sandboxUrl = "http://127.0.0.1:47894"
+bwrapRoRoots = ["/synthetic/export-ro"]
+bwrap_dev_roots = ["/synthetic/export-dev"]
+skills_dir = "/synthetic/export-skills"
+memoryPath = "/synthetic/export-memory.md"
+mcpOauthCallbackUrl = "http://127.0.0.1:47895/callback"
+mcp_oauth_callback_port = 47895
+notes_path = "/synthetic/export-notes.md"
+
+[runtime_api]
+bind = "127.0.0.1:47896"
+
+[auto_review]
+allow = ["synthetic-shell-action"]
+
+[tools]
+always_load = ["read_file"]
+plugin_dir = "/synthetic/export-plugins"
+
+[tools.overrides.shell]
+command = "/synthetic/export-tool-override"
+
+[update]
+channel = "stable"
+update_uri = "file:///synthetic/export-update"
+
+[notifications]
+enabled = true
+sound_file = "/synthetic/export-sound.wav"
+
+[speech]
+enabled = true
+output_dir = "/synthetic/export-speech"
+
+[skills]
+registry_url = "https://registry.example/skills.json"
+max_install_size_bytes = 12345
+
+[network]
+default = "prompt"
+allow = ["registry.example"]
+
+[workflow]
+automatic = false
+
+[fleet.exec]
+allowed_tools = ["read_file"]
+"#,
+        )
+        .expect("remaining authority config parses");
+        let exported = export_bundle(&config, BundleScope::Global, BundleMetadata::default())
+            .expect("remaining authority is scrubbed");
+        for key in [
+            "instructions",
+            "project_instruction_imports",
+            "projectInstructionImports",
+            "sandbox_backend",
+            "sandboxUrl",
+            "bwrapRoRoots",
+            "bwrap_dev_roots",
+            "skills_dir",
+            "memoryPath",
+            "mcpOauthCallbackUrl",
+            "mcp_oauth_callback_port",
+            "notes_path",
+            "runtime_api",
+            "auto_review",
+        ] {
+            assert!(!exported.global.entries.contains_key(key), "retained {key}");
+        }
+        let body = serialize_bundle(&exported).expect("serialize safe policy export");
+        for forbidden in [
+            "/synthetic/export-instructions.md",
+            "/synthetic/export-ro",
+            "/synthetic/export-dev",
+            "/synthetic/export-skills",
+            "/synthetic/export-memory.md",
+            "/synthetic/export-notes.md",
+            "/synthetic/export-sound.wav",
+            "/synthetic/export-speech",
+            "file:///synthetic/export-update",
+            "127.0.0.1:47896",
+        ] {
+            assert!(
+                !body.contains(forbidden),
+                "export retained {forbidden}: {body}"
+            );
+        }
+        for safe in [
+            "https://registry.example/skills.json",
+            "registry.example",
+            "automatic = false",
+            "allowed_tools = [\"read_file\"]",
+            "channel = \"stable\"",
+            "enabled = true",
+        ] {
+            assert!(body.contains(safe), "export lost {safe}: {body}");
+        }
+
+        // ToolsToml currently ignores these legacy fields while parsing, so
+        // exercise the recursive export sanitizer directly as defense in depth.
+        let raw: toml::Value = toml::from_str(
+            r#"
+[tools]
+always_load = ["read_file"]
+plugin_dir = "/synthetic/direct-plugin-dir"
+
+[tools.overrides.shell]
+command = "/synthetic/direct-tool-override"
+"#,
+        )
+        .expect("raw tools table parses");
+        let scrubbed =
+            sanitize_export_value("tools", raw.get("tools").expect("raw tools table exists"))
+                .expect("safe tools sibling remains");
+        let scrubbed = scrubbed.to_string();
+        assert!(scrubbed.contains("read_file"), "{scrubbed}");
+        assert!(!scrubbed.contains("plugin_dir"), "{scrubbed}");
+        assert!(!scrubbed.contains("overrides"), "{scrubbed}");
+        assert!(find_rejected_entries(&exported).is_empty(), "{exported:?}");
+    }
+
+    #[test]
+    fn lsp_executable_authority_is_rejected_while_inert_settings_remain_portable() {
+        let config: ConfigToml = toml::from_str(
+            r#"
+[lsp]
+enabled = true
+poll_after_edit_ms = 250
+max_diagnostics_per_file = 12
+include_warnings = true
+
+[lsp.servers]
+rust = ["/synthetic/rust-analyzer", "--stdio"]
+
+[lsp.custom.foo]
+language_id = "foo-language"
+command = "/synthetic/foo-language-server"
+args = ["--stdio", "--synthetic"]
+"#,
+        )
+        .expect("LSP config parses");
+        let exported = export_bundle(&config, BundleScope::Global, BundleMetadata::default())
+            .expect("LSP executable authority is scrubbed");
+        let body = serialize_bundle(&exported).expect("serialize LSP export");
+        for forbidden in [
+            "/synthetic/rust-analyzer",
+            "/synthetic/foo-language-server",
+            "foo-language",
+            "--stdio",
+            "--synthetic",
+        ] {
+            assert!(
+                !body.contains(forbidden),
+                "export retained {forbidden}: {body}"
+            );
+        }
+        for inert in [
+            "enabled = true",
+            "poll_after_edit_ms = 250",
+            "max_diagnostics_per_file = 12",
+            "include_warnings = true",
+        ] {
+            assert!(body.contains(inert), "export lost {inert}: {body}");
+        }
+        assert!(find_rejected_entries(&exported).is_empty(), "{exported:?}");
+
+        let dir = tempfile::tempdir().expect("config dir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "verbosity = \"quiet\"\n").expect("seed config");
+        let before = std::fs::read(&path).expect("config before imports");
+        let mut store = ConfigStore::load(Some(path.clone())).expect("store loads");
+        for (name, body) in [
+            (
+                "servers",
+                r#"
+[global.lsp]
+enabled = true
+
+[global.lsp.servers]
+rust = ["/synthetic/import-rust-analyzer", "--stdio"]
+"#,
+            ),
+            (
+                "custom",
+                r#"
+[global.lsp]
+include_warnings = true
+
+[global.lsp.custom.foo]
+language_id = "foo-language"
+command = "/synthetic/import-foo-server"
+args = ["--stdio"]
+"#,
+            ),
+        ] {
+            let text = format!("schema_version = 1\nkind = \"codewhale.portable-config\"\n{body}");
+            let bundle = parse_bundle_str(&text, name).expect("LSP bundle parses");
+            assert_eq!(find_rejected_entries(&bundle).len(), 1, "{name}");
+            apply_bundle(&bundle, &mut store, BundleScope::Global, dir.path())
+                .expect_err("LSP executable authority import must fail");
+            assert_eq!(std::fs::read(&path).expect("config after refusal"), before);
+            assert_eq!(store.config.verbosity.as_deref(), Some("quiet"));
+        }
+    }
+
+    #[test]
+    fn machine_bound_authority_subtrees_are_rejected_and_never_exported() {
+        let config: ConfigToml = toml::from_str(
+            r#"
+managed_config_path = "/synthetic/managed-config.toml"
+requirements_path = "/synthetic/requirements.md"
+
+[workspace]
+root = "/synthetic/workspace-root"
+trust = "trusted"
+allow_shell = true
+
+[projects."/synthetic/project-root"]
+trust = "trusted"
+allow_shell = true
+
+[hooks.session_start]
+command = "/synthetic/session-start"
+
+[portable.workspace]
+label = "safe-nested-workspace-label"
+
+[portable.projects]
+label = "safe-nested-projects-label"
+
+[portable.hooks]
+label = "safe-nested-hooks-label"
+"#,
+        )
+        .expect("machine-bound authority config parses");
+        let exported = export_bundle(&config, BundleScope::Global, BundleMetadata::default())
+            .expect("machine-bound authority is scrubbed");
+        assert!(!exported.global.entries.contains_key("workspace"));
+        assert!(!exported.global.entries.contains_key("projects"));
+        assert!(!exported.global.entries.contains_key("hooks"));
+        assert!(!exported.global.entries.contains_key("managed_config_path"));
+        assert!(!exported.global.entries.contains_key("requirements_path"));
+        let body = serialize_bundle(&exported).expect("serialize machine-bound export");
+        for path in [
+            "/synthetic/workspace-root",
+            "/synthetic/project-root",
+            "/synthetic/session-start",
+            "/synthetic/managed-config.toml",
+            "/synthetic/requirements.md",
+        ] {
+            assert!(!body.contains(path), "export retained {path}: {body}");
+        }
+        assert!(body.contains("safe-nested-workspace-label"), "{body}");
+        assert!(body.contains("safe-nested-projects-label"), "{body}");
+        assert!(body.contains("safe-nested-hooks-label"), "{body}");
+
+        let bundle = parse_bundle_str(
+            r#"
+schema_version = 1
+kind = "codewhale.portable-config"
+
+[global]
+managed_config_path = "/synthetic/import-managed-config.toml"
+requirements_path = "/synthetic/import-requirements.md"
+
+[global.workspace]
+root = "/synthetic/import-workspace"
+trust = "trusted"
+allow_shell = true
+
+[global.projects."/synthetic/import-project"]
+trust = "trusted"
+allow_shell = true
+
+[global.hooks.session_start]
+command = "/synthetic/import-session-start"
+
+[global.portable.workspace]
+label = "safe-nested-workspace-label"
+"#,
+            "machine-bound-authority.toml",
+        )
+        .expect("machine-bound authority bundle parses");
+        let rejected = find_rejected_entries(&bundle);
+        assert_eq!(rejected.len(), 5, "{rejected:?}");
+        assert!(rejected.iter().any(|entry| entry.key == "global.workspace"));
+        assert!(rejected.iter().any(|entry| entry.key == "global.projects"));
+        assert!(rejected.iter().any(|entry| entry.key == "global.hooks"));
+        assert!(
+            rejected
+                .iter()
+                .any(|entry| entry.key == "global.managed_config_path")
+        );
+        assert!(
+            rejected
+                .iter()
+                .any(|entry| entry.key == "global.requirements_path")
+        );
+
+        let dir = tempfile::tempdir().expect("config dir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "verbosity = \"quiet\"\n").expect("seed config");
+        let before = std::fs::read(&path).expect("config before import");
+        let mut store = ConfigStore::load(Some(path.clone())).expect("store loads");
+        apply_bundle(&bundle, &mut store, BundleScope::Global, dir.path())
+            .expect_err("machine-bound authority import must fail");
+        assert_eq!(std::fs::read(path).expect("config after refusal"), before);
+        assert_eq!(store.config.verbosity.as_deref(), Some("quiet"));
+    }
+
+    #[test]
+    fn bundle_scope_must_match_the_target_for_import_and_export() {
+        let dir = tempfile::tempdir().expect("config dir");
+        let global_path = dir.path().join("config.toml");
+        let error = validate_scope_target(BundleScope::Project, &global_path)
+            .expect_err("global path cannot masquerade as project scope");
+        assert!(error.to_string().contains("workspace config"), "{error:#}");
+        validate_scope_target(BundleScope::Global, &global_path)
+            .expect("global config accepts global scope");
+
+        let project_path = dir.path().join(".codewhale").join("config.toml");
+        std::fs::create_dir(dir.path().join(".git")).expect("checkout marker");
+        validate_scope_target(BundleScope::Project, &project_path)
+            .expect("workspace config accepts project scope");
+        let error = validate_scope_target(BundleScope::Global, &project_path)
+            .expect_err("workspace path cannot masquerade as global scope");
+        assert!(error.to_string().contains("--project"), "{error:#}");
+
+        let mut store = ConfigStore::load(Some(project_path)).expect("workspace store loads");
+        let import = ImportArgs {
+            source: dir
+                .path()
+                .join("must-not-be-read.toml")
+                .display()
+                .to_string(),
+            dry_run: true,
+            yes: true,
+            project: false,
+        };
+        let error = run_import(&import, &mut store, dir.path())
+            .expect_err("global import must refuse a workspace config before reading input");
+        assert!(error.to_string().contains("--project"), "{error:#}");
+
+        let output = dir.path().join("must-not-be-written.toml");
+        let export = ExportArgs {
+            portable: true,
+            project: false,
+            out: Some(output.clone()),
+        };
+        let error = run_export(&export, &store)
+            .expect_err("global export must refuse a workspace config before writing output");
+        assert!(error.to_string().contains("--project"), "{error:#}");
+        assert!(!output.exists(), "refused export must not create an output");
     }
 
     #[test]

@@ -84,6 +84,18 @@ item-level change record is retained below the categorized release highlights.
   compact `/status` and `/help` rendering, shell/web output bounds, MCP
   lifecycle reporting, and narrow-terminal onboarding received the detailed
   fixes recorded below.
+- Portable config import/export now preserves typed tables, arrays, numbers,
+  booleans, and datetimes without stringifying them, while refusing
+  machine-bound trust overlays, credential readers, automatically executable
+  hooks/LSP definitions, local-path authority, machine-local network proxy
+  routes, cookies, redaction placeholders, and nested or camel/dotted
+  credential keys. Project and global bundle operations now load and validate
+  the document for their actual scope in both directions, including a
+  workspace whose document still lives under the legacy app directory.
+- Terminal input shutdown no longer waits forever on a wedged TTY read,
+  Windows launch receipts can atomically replace an existing record, and the
+  complete `/status` report now follows the active locale without rewriting
+  exact custom-provider identities that contain brace-like text.
 - Localized READMEs again match the English install and third-party-notice
   surface, including shell-completion guidance in all 18 translations.
 
@@ -268,7 +280,17 @@ erase behavior, migration, security, compatibility, or verification details.
   never the value. Remote imports revalidate the HTTPS-or-loopback-HTTP policy
   on every same-scheme redirect hop, and duplicate keys across applicable
   section labels fail before any backup or write instead of silently resolving
-  by section order.
+  by section order. Structured TOML values round-trip with their original
+  types and exact named-provider identity; recursive sanitization covers
+  arrays/tables and camel-case, dotted, cookie, and access-key spellings while
+  retaining ordinary token-count metrics. Machine-bound project trust,
+  credential-source consent, automatic hook/LSP execution, and local-path
+  authority are non-portable and fail before mutation. A missing target is
+  created transactionally and removed again on rollback, and project/global
+  scope validation rejects the wrong document before import or export.
+  Imported tables deep-merge portable fields into the target, so omitted
+  machine-local provider credentials, endpoints, and executable definitions
+  remain intact instead of being erased by a sanitized bundle.
 
 - `/rc` is now a shared-session mirror instead of a terminal takeover.
   Attaching the web app no longer locks the local composer or hides

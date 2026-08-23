@@ -324,7 +324,11 @@ signed-in account's BYOK vault without displaying secret values. The older
 portable, secret-free bundle of your configuration: sorted TOML with
 credential and machine-specific keys (API keys, base URLs, socket paths)
 dropped, never a redacted placeholder in their place. Without `--out` the
-bundle goes to stdout.
+bundle goes to stdout. Typed tables, arrays, numbers, booleans, and datetimes
+remain typed. Machine-bound authority is deliberately non-portable: project
+trust overlays, credential readers, auto-running hooks, executable LSP
+definitions, and local path bindings are omitted rather than copied to a new
+host.
 
 `codewhale config import <FILE|HTTPS_URL|-> [--dry-run] [--yes] [--project]`
 applies a bundle. The envelope is strict (`schema_version = 1`, kind
@@ -334,13 +338,24 @@ then asks for consent unless `--yes` is given; headless use requires it.
 Credential-shaped entries are rejected by key name and by value shape;
 rejections name the field, never a value. Remote bundles come from HTTPS
 only (loopback http excepted) with a 5 MiB cap. Application backs up the
-target document to `<config>.bundle-backup-<timestamp>`, rolls back on any
+target document to `<config>.bundle-backup-<timestamp>-<random>`, rolls back on any
 failure, and re-importing an applied bundle changes nothing.
+
+Import also rejects the non-portable authority classes omitted by export,
+including nested/camel/dotted credential keys and cookie headers. This keeps a
+hand-authored or remote bundle from reintroducing machine trust, local
+credential access, or automatically executable commands that a local export
+would refuse to carry. Structured tables are deep-merged: a portable model or
+preference update does not erase target-local provider credentials, endpoints,
+hooks, or executable definitions that were deliberately omitted from the
+bundle. Arrays and scalar values still replace the corresponding portable
+value.
 
 Sections map to scope: `[project]` entries land only in the workspace
 document (`--project`, which must target an actual workspace config),
 `[global]` only in the user-global one; `preferences`, `profiles`, and
-`plugins` apply at either scope.
+`plugins` apply at either scope. A global bundle operation refuses a workspace
+document just as a project operation refuses the user-global document.
 
 ### Credential read precedence (#5197)
 

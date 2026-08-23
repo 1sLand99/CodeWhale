@@ -372,6 +372,23 @@ fn collect_candidate_files(workspace: &Path, candidates: &[&str]) -> Vec<PathBuf
     files
 }
 
+/// Enumerate the safe, bounded file paths selected for a caller-provided set
+/// of project-instruction candidates.
+///
+/// This is the same traversal used by
+/// [`load_selected_project_instruction_fragment`]. Callers that cache the
+/// loader's result can fingerprint these paths without maintaining a second,
+/// subtly different directory walk. Content validation still happens in the
+/// loader: an empty, unreadable, or non-UTF-8 file may be selected here and
+/// then contribute no fragment.
+#[must_use]
+pub fn selected_project_instruction_candidate_files(
+    workspace: &Path,
+    candidates: &[&str],
+) -> Vec<PathBuf> {
+    collect_candidate_files(workspace, candidates)
+}
+
 fn load_project_instruction_fragment_from_candidates(
     workspace: &Path,
     candidates: &[&str],

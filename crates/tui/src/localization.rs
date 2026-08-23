@@ -1393,6 +1393,59 @@ pub enum MessageId {
     SessionMetricsCache,
     SessionMetricsInput,
     SessionMetricsStatusLine,
+    // `/status` report labels and runtime summaries.
+    StatusLabelRoute,
+    StatusLabelDirectory,
+    StatusLabelProjectDocs,
+    StatusLabelMode,
+    StatusLabelSafety,
+    StatusLabelMcp,
+    StatusLabelContextWindow,
+    StatusLabelWindowSource,
+    StatusLabelWindowOverride,
+    StatusLabelSession,
+    StatusLabelSessionTokens,
+    StatusLabelSessionCost,
+    StatusLabelToolOutputs,
+    StatusRouteSummary,
+    StatusProjectDocsNone,
+    StatusPostureSummary,
+    StatusShellOn,
+    StatusShellOff,
+    StatusTrustedWorkspace,
+    StatusWorkspace,
+    StatusApprovalAsk,
+    StatusApprovalAuto,
+    StatusApprovalFullAccess,
+    StatusApprovalNever,
+    StatusMcpConfigured,
+    StatusContextUsage,
+    StatusContextSourceConfigured,
+    StatusContextSourceProviderReported,
+    StatusContextSourceKimiSafeFloor,
+    StatusContextSourceCatalog,
+    StatusContextSourceModelHint,
+    StatusContextSourceFallback,
+    StatusWindowOverrideProvider,
+    StatusWindowOverrideActiveProvider,
+    StatusSessionNotSaved,
+    StatusSessionSummary,
+    StatusSessionTokensSummary,
+    StatusCacheNotReported,
+    StatusCacheSummary,
+    StatusToolRawPressure,
+    StatusToolCompactReceipts,
+    StatusToolArtifacts,
+    StatusToolNone,
+    StatusSafetyReadOnlyUnenforced,
+    StatusSafetyReadOnly,
+    StatusSafetyWorkspaceWriteUnenforcedNetworkOn,
+    StatusSafetyWorkspaceWriteUnenforcedNetworkOff,
+    StatusSafetyWorkspaceWriteNetworkOn,
+    StatusSafetyWorkspaceWriteNetworkOff,
+    StatusSafetyDisabled,
+    StatusSafetyExternal,
+    StatusPointers,
     // Underwater post-launch empty state.
     EmptyStateNoGit,
     EmptyStateMcpLabel,
@@ -3055,6 +3108,58 @@ pub const ALL_MESSAGE_IDS: &[MessageId] = &[
     MessageId::SessionMetricsCache,
     MessageId::SessionMetricsInput,
     MessageId::SessionMetricsStatusLine,
+    MessageId::StatusLabelRoute,
+    MessageId::StatusLabelDirectory,
+    MessageId::StatusLabelProjectDocs,
+    MessageId::StatusLabelMode,
+    MessageId::StatusLabelSafety,
+    MessageId::StatusLabelMcp,
+    MessageId::StatusLabelContextWindow,
+    MessageId::StatusLabelWindowSource,
+    MessageId::StatusLabelWindowOverride,
+    MessageId::StatusLabelSession,
+    MessageId::StatusLabelSessionTokens,
+    MessageId::StatusLabelSessionCost,
+    MessageId::StatusLabelToolOutputs,
+    MessageId::StatusRouteSummary,
+    MessageId::StatusProjectDocsNone,
+    MessageId::StatusPostureSummary,
+    MessageId::StatusShellOn,
+    MessageId::StatusShellOff,
+    MessageId::StatusTrustedWorkspace,
+    MessageId::StatusWorkspace,
+    MessageId::StatusApprovalAsk,
+    MessageId::StatusApprovalAuto,
+    MessageId::StatusApprovalFullAccess,
+    MessageId::StatusApprovalNever,
+    MessageId::StatusMcpConfigured,
+    MessageId::StatusContextUsage,
+    MessageId::StatusContextSourceConfigured,
+    MessageId::StatusContextSourceProviderReported,
+    MessageId::StatusContextSourceKimiSafeFloor,
+    MessageId::StatusContextSourceCatalog,
+    MessageId::StatusContextSourceModelHint,
+    MessageId::StatusContextSourceFallback,
+    MessageId::StatusWindowOverrideProvider,
+    MessageId::StatusWindowOverrideActiveProvider,
+    MessageId::StatusSessionNotSaved,
+    MessageId::StatusSessionSummary,
+    MessageId::StatusSessionTokensSummary,
+    MessageId::StatusCacheNotReported,
+    MessageId::StatusCacheSummary,
+    MessageId::StatusToolRawPressure,
+    MessageId::StatusToolCompactReceipts,
+    MessageId::StatusToolArtifacts,
+    MessageId::StatusToolNone,
+    MessageId::StatusSafetyReadOnlyUnenforced,
+    MessageId::StatusSafetyReadOnly,
+    MessageId::StatusSafetyWorkspaceWriteUnenforcedNetworkOn,
+    MessageId::StatusSafetyWorkspaceWriteUnenforcedNetworkOff,
+    MessageId::StatusSafetyWorkspaceWriteNetworkOn,
+    MessageId::StatusSafetyWorkspaceWriteNetworkOff,
+    MessageId::StatusSafetyDisabled,
+    MessageId::StatusSafetyExternal,
+    MessageId::StatusPointers,
     MessageId::EmptyStateNoGit,
     MessageId::EmptyStateMcpLabel,
     MessageId::EmptyStatePrompt,
@@ -4143,6 +4248,81 @@ mod tests {
                 "{} defines key(s) en.json lacks: {extra:?}",
                 locale.tag()
             );
+        }
+    }
+
+    #[test]
+    fn status_report_copy_has_placeholder_parity_across_complete_packs() {
+        let english = raw_locale_messages(Locale::En);
+        let status_ids = ALL_MESSAGE_IDS
+            .iter()
+            .filter(|id| format!("{id:?}").starts_with("Status"));
+
+        for id in status_ids {
+            let key = format!("{id:?}");
+            let english_value = english
+                .get(&key)
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_else(|| panic!("English {key} must be a string"));
+            for locale in Locale::shipped_complete() {
+                let pack = raw_locale_messages(*locale);
+                let translated = pack
+                    .get(&key)
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_else(|| panic!("{} is missing raw key {key}", locale.tag()));
+                assert_eq!(
+                    message_placeholders(translated),
+                    message_placeholders(english_value),
+                    "{} changed placeholders for {key}",
+                    locale.tag()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn status_report_copy_preserves_technical_identities_across_complete_packs() {
+        let required: &[(MessageId, &[&str])] = &[
+            (MessageId::StatusLabelMcp, &["MCP"]),
+            (MessageId::StatusContextSourceKimiSafeFloor, &["Kimi Code"]),
+            (
+                MessageId::StatusWindowOverrideProvider,
+                &["[providers.{table}]", "context_window", "config.toml"],
+            ),
+            (
+                MessageId::StatusWindowOverrideActiveProvider,
+                &["context_window", "config.toml"],
+            ),
+            (
+                MessageId::StatusSafetyWorkspaceWriteUnenforcedNetworkOn,
+                &["workspace-write"],
+            ),
+            (
+                MessageId::StatusSafetyWorkspaceWriteUnenforcedNetworkOff,
+                &["workspace-write"],
+            ),
+            (
+                MessageId::StatusSafetyWorkspaceWriteNetworkOn,
+                &["workspace-write"],
+            ),
+            (
+                MessageId::StatusSafetyWorkspaceWriteNetworkOff,
+                &["workspace-write"],
+            ),
+            (MessageId::StatusPointers, &["/tokens", "/statusline"]),
+        ];
+
+        for locale in Locale::shipped_complete() {
+            for (id, literals) in required {
+                let translated = tr(*locale, *id);
+                for literal in *literals {
+                    assert!(
+                        translated.contains(literal),
+                        "{} changed protected literal {literal:?} in {id:?}: {translated}",
+                        locale.tag()
+                    );
+                }
+            }
         }
     }
 

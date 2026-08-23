@@ -78,6 +78,7 @@ impl TerminalInputPump {
                     }
                     thread_paused_ack.store(false, Ordering::Release);
                     match event::poll(TERMINAL_INPUT_POLL_INTERVAL) {
+                        Ok(true) if thread_stop.load(Ordering::Acquire) => break,
                         Ok(true) => match event::read() {
                             Ok(event) => {
                                 last_heartbeat = Instant::now();
@@ -240,15 +241,13 @@ impl TerminalInputPump {
 
 impl Drop for TerminalInputPump {
     fn drop(&mut self) {
+        // `event::read` can remain blocked forever after a tty disconnect on
+        // every supported desktop platform. Joining here would turn an input
+        // failure into an application shutdown hang. Flag the cooperative
+        // stop and detach; if the read ever wakes, the loop observes `stop`
+        // (or its send fails because `rx` was dropped) and exits on its own.
         self.stop.store(true, Ordering::Release);
-        if let Some(handle) = self.handle.take() {
-            #[cfg(target_os = "windows")]
-            {
-                drop(handle);
-            }
-            #[cfg(not(target_os = "windows"))]
-            let _ = handle.join();
-        }
+        let _ = self.handle.take();
     }
 }
 

@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, anyhow, bail};
-use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
+use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use clap_complete::{Shell, generate};
 use codewhale_agent::ModelRegistry;
 use codewhale_app_server::{
@@ -1827,8 +1827,52 @@ fn split_lane_log_proxy_command(
     }
 }
 
+fn config_command_targets_project(matches: &clap::ArgMatches) -> bool {
+    let Some(config_matches) = matches.subcommand_matches("config") else {
+        return false;
+    };
+    let Some((command, command_matches)) = config_matches.subcommand() else {
+        return false;
+    };
+    if !matches!(command, "import" | "export") {
+        return false;
+    }
+    command_matches
+        .try_get_one::<bool>("project")
+        .ok()
+        .flatten()
+        .copied()
+        .unwrap_or(false)
+}
+
+fn config_store_path_for_dispatch(
+    explicit_path: Option<PathBuf>,
+    project_bundle_scope: bool,
+    cwd: &Path,
+) -> Option<PathBuf> {
+    if explicit_path.is_none() && project_bundle_scope {
+        // Mirror the project-config loader: the current app dir wins, but a
+        // workspace that still keeps its document under the legacy app dir
+        // must be read and updated in place rather than shadowed by a new
+        // empty document.
+        let current = cwd
+            .join(codewhale_config::CODEWHALE_APP_DIR)
+            .join(codewhale_config::CONFIG_FILE_NAME);
+        let legacy = cwd
+            .join(codewhale_config::LEGACY_APP_DIR)
+            .join(codewhale_config::CONFIG_FILE_NAME);
+        if !current.is_file() && legacy.is_file() {
+            return Some(legacy);
+        }
+        return Some(current);
+    }
+    explicit_path
+}
+
 fn run() -> Result<()> {
-    let mut cli = Cli::parse();
+    let matches = Cli::command().get_matches();
+    let project_bundle_scope = config_command_targets_project(&matches);
+    let mut cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit());
 
     // The detached log proxy must not depend on user config parsing: its job
     // is to frame child output and publish a terminal receipt even when the
@@ -1870,7 +1914,10 @@ fn run() -> Result<()> {
         return run_tui_in_process(&cli, &resolved_runtime, passthrough);
     }
 
-    let mut store = ConfigStore::load(cli.config.clone()).map_err(|error| {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let config_path =
+        config_store_path_for_dispatch(cli.config.clone(), project_bundle_scope, &cwd);
+    let mut store = ConfigStore::load(config_path).map_err(|error| {
         if pipe_api_key_handoff {
             anyhow!("unavailable credential")
         } else {
@@ -2060,7 +2107,7 @@ fn run() -> Result<()> {
                 Some(store.path().to_path_buf()),
                 Surface::Cli,
             );
-            let outcome = run_config_command(&mut store, args.command);
+            let outcome = run_config_command(&mut store, args.command, project_bundle_scope);
             finish_cli_telemetry(session, &outcome);
             outcome
         }
@@ -4185,7 +4232,17 @@ fn run_auth_migrate(store: &mut ConfigStore, secrets: &Secrets, dry_run: bool) -
     Ok(())
 }
 
-fn run_config_command(store: &mut ConfigStore, command: ConfigCommand) -> Result<()> {
+fn run_config_command(
+    store: &mut ConfigStore,
+    command: ConfigCommand,
+    project_bundle_scope: bool,
+) -> Result<()> {
+    if project_bundle_scope && !codewhale_config::config_path_is_workspace_scoped(store.path()) {
+        bail!(
+            "--project requires a workspace config ({} is the user-global document)",
+            store.path().display()
+        );
+    }
     match command {
         ConfigCommand::Get { key } => {
             if let Some(value) = store.config.get_display_value(&key) {
@@ -5259,6 +5316,216 @@ mod tests {
                 command: ConfigCommand::Path
             }))
         ));
+    }
+
+    fn config_dispatch_from(
+        argv: &[OsString],
+        cwd: &Path,
+    ) -> (Option<PathBuf>, ConfigCommand, bool) {
+        let matches = Cli::command()
+            .try_get_matches_from(argv.iter().cloned())
+            .unwrap_or_else(|error| panic!("config command should parse: {error}"));
+        let project_bundle_scope = config_command_targets_project(&matches);
+        let cli = Cli::from_arg_matches(&matches)
+            .unwrap_or_else(|error| panic!("config command should decode: {error}"));
+        let selected_path = config_store_path_for_dispatch(cli.config, project_bundle_scope, cwd);
+        let Some(Commands::Config(ConfigArgs { command })) = cli.command else {
+            panic!("expected config command");
+        };
+        (selected_path, command, project_bundle_scope)
+    }
+
+    fn write_config_fixture(path: &Path, body: &str) {
+        std::fs::create_dir_all(path.parent().expect("config should have a parent"))
+            .expect("create config parent");
+        std::fs::write(path, body).expect("write config fixture");
+    }
+
+    #[test]
+    fn project_config_dispatch_prefers_current_app_dir_and_falls_back_to_legacy() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        let current = workspace.join(".codewhale/config.toml");
+        let legacy = workspace.join(".deepseek/config.toml");
+
+        // Fresh workspace: create under the current app dir.
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        assert_eq!(
+            config_store_path_for_dispatch(None, true, &workspace),
+            Some(current.clone())
+        );
+
+        // Legacy-only workspace: operate on the legacy document in place.
+        write_config_fixture(&legacy, "verbosity = \"legacy\"\n");
+        assert_eq!(
+            config_store_path_for_dispatch(None, true, &workspace),
+            Some(legacy.clone())
+        );
+
+        // Both present: the current app dir wins, matching the loader.
+        write_config_fixture(&current, "verbosity = \"current\"\n");
+        assert_eq!(
+            config_store_path_for_dispatch(None, true, &workspace),
+            Some(current.clone())
+        );
+
+        // An explicit --config path always wins; without --project nothing is selected.
+        let explicit = temp.path().join("explicit.toml");
+        assert_eq!(
+            config_store_path_for_dispatch(Some(explicit.clone()), true, &workspace),
+            Some(explicit)
+        );
+        assert_eq!(
+            config_store_path_for_dispatch(None, false, &workspace),
+            None
+        );
+    }
+
+    #[test]
+    fn project_config_import_dispatches_to_the_cwd_document() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(workspace.join(".git")).expect("create checkout marker");
+        let project_path = workspace.join(".codewhale/config.toml");
+        let global_path = temp.path().join("global-config.toml");
+        write_config_fixture(&project_path, "verbosity = \"project-before\"\n");
+        write_config_fixture(&global_path, "verbosity = \"global-only\"\n");
+
+        let bundle_path = temp.path().join("project-bundle.toml");
+        std::fs::write(
+            &bundle_path,
+            r#"schema_version = 1
+kind = "codewhale.portable-config"
+
+[project]
+verbosity = "project-imported"
+"#,
+        )
+        .expect("write project bundle");
+        let argv = [
+            OsString::from("codewhale"),
+            OsString::from("config"),
+            OsString::from("import"),
+            bundle_path.as_os_str().to_owned(),
+            OsString::from("--yes"),
+            OsString::from("--project"),
+        ];
+        let (selected_path, command, project_bundle_scope) =
+            config_dispatch_from(&argv, &workspace);
+        assert_eq!(selected_path.as_deref(), Some(project_path.as_path()));
+
+        let mut store = ConfigStore::load(selected_path).expect("load selected project config");
+        run_config_command(&mut store, command, project_bundle_scope)
+            .expect("import project bundle");
+        let project = ConfigStore::load(Some(project_path.clone())).expect("reload project");
+        let global = ConfigStore::load(Some(global_path.clone())).expect("reload global");
+        assert_eq!(
+            project.config.verbosity.as_deref(),
+            Some("project-imported")
+        );
+        assert_eq!(global.config.verbosity.as_deref(), Some("global-only"));
+
+        let explicit_argv = [
+            OsString::from("codewhale"),
+            OsString::from("--config"),
+            global_path.as_os_str().to_owned(),
+            OsString::from("config"),
+            OsString::from("import"),
+            bundle_path.as_os_str().to_owned(),
+            OsString::from("--yes"),
+            OsString::from("--project"),
+        ];
+        let global_before = std::fs::read(&global_path).expect("read global before refusal");
+        let (selected_path, command, project_bundle_scope) =
+            config_dispatch_from(&explicit_argv, &workspace);
+        assert_eq!(selected_path.as_deref(), Some(global_path.as_path()));
+        let mut explicit_store =
+            ConfigStore::load(selected_path).expect("load explicit global config");
+        let error = run_config_command(&mut explicit_store, command, project_bundle_scope)
+            .expect_err("project import must reject an explicit non-workspace config");
+        assert!(
+            error
+                .to_string()
+                .contains("--project requires a workspace config"),
+            "{error:#}"
+        );
+        assert_eq!(
+            std::fs::read(&global_path).expect("read global after refusal"),
+            global_before
+        );
+    }
+
+    #[test]
+    fn project_config_export_reads_the_cwd_document() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(workspace.join(".git")).expect("create checkout marker");
+        let project_path = workspace.join(".codewhale/config.toml");
+        let global_path = temp.path().join("global-config.toml");
+        let output_path = temp.path().join("portable.toml");
+        write_config_fixture(&project_path, "verbosity = \"project-only\"\n");
+        write_config_fixture(&global_path, "verbosity = \"global-only\"\n");
+
+        let argv = [
+            OsString::from("codewhale"),
+            OsString::from("config"),
+            OsString::from("export"),
+            OsString::from("--portable"),
+            OsString::from("--project"),
+            OsString::from("--out"),
+            output_path.as_os_str().to_owned(),
+        ];
+        let (selected_path, command, project_bundle_scope) =
+            config_dispatch_from(&argv, &workspace);
+        assert_eq!(selected_path.as_deref(), Some(project_path.as_path()));
+
+        let mut store = ConfigStore::load(selected_path).expect("load selected project config");
+        run_config_command(&mut store, command, project_bundle_scope)
+            .expect("export project bundle");
+        let body = std::fs::read_to_string(&output_path).expect("read portable export");
+        let bundle = config_bundles::parse_bundle_str(&body, "portable.toml")
+            .expect("parse portable export");
+        assert_eq!(
+            bundle
+                .project
+                .entries
+                .get("verbosity")
+                .and_then(toml::Value::as_str),
+            Some("project-only")
+        );
+        assert!(bundle.global.entries.is_empty());
+
+        let explicit_output_path = temp.path().join("explicit-portable.toml");
+        let explicit_argv = [
+            OsString::from("codewhale"),
+            OsString::from("--config"),
+            global_path.as_os_str().to_owned(),
+            OsString::from("config"),
+            OsString::from("export"),
+            OsString::from("--portable"),
+            OsString::from("--project"),
+            OsString::from("--out"),
+            explicit_output_path.as_os_str().to_owned(),
+        ];
+        let global_before = std::fs::read(&global_path).expect("read global before refusal");
+        let (selected_path, command, project_bundle_scope) =
+            config_dispatch_from(&explicit_argv, &workspace);
+        assert_eq!(selected_path.as_deref(), Some(global_path.as_path()));
+        let mut explicit_store =
+            ConfigStore::load(selected_path).expect("load explicit global config");
+        let error = run_config_command(&mut explicit_store, command, project_bundle_scope)
+            .expect_err("project export must reject an explicit non-workspace config");
+        assert!(
+            error
+                .to_string()
+                .contains("--project requires a workspace config"),
+            "{error:#}"
+        );
+        assert!(!explicit_output_path.exists());
+        assert_eq!(
+            std::fs::read(&global_path).expect("read global after refusal"),
+            global_before
+        );
     }
 
     #[test]

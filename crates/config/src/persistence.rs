@@ -428,13 +428,48 @@ fn trim_word_punctuation(word: &str) -> &str {
 /// Whether `raw`, normalized the way a config/env/JSON key is, matches a
 /// [`SENSITIVE_KEY_HINTS`] credential identifier.
 fn key_is_sensitive(raw: &str) -> bool {
-    let key_norm = raw
-        .trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '-')
-        .to_ascii_lowercase();
+    let key_norm = normalize_sensitive_key(raw);
     !key_norm.is_empty()
         && SENSITIVE_KEY_HINTS
             .iter()
             .any(|hint| key_matches_sensitive_hint(&key_norm, hint))
+}
+
+/// Normalize the identifier boundaries commonly used by config, env, and JSON
+/// keys without turning English plurals such as `tokens` into `token`.
+///
+/// Punctuation and case transitions become `_`, so `oauth.token`,
+/// `accessToken`, and `APIKey` share the same matching surface as
+/// `oauth_token`, `access_token`, and `api_key`.
+fn normalize_sensitive_key(raw: &str) -> String {
+    let mut normalized = String::with_capacity(raw.len());
+    let mut chars = raw.chars().peekable();
+    let mut previous = None;
+
+    while let Some(ch) = chars.next() {
+        if ch.is_ascii_alphanumeric() {
+            let next = chars.peek().copied();
+            let starts_case_segment = ch.is_ascii_uppercase()
+                && previous.is_some_and(|previous: char| {
+                    previous.is_ascii_lowercase()
+                        || previous.is_ascii_digit()
+                        || (previous.is_ascii_uppercase()
+                            && next.is_some_and(|next| next.is_ascii_lowercase()))
+                });
+            if starts_case_segment && !normalized.is_empty() && !normalized.ends_with('_') {
+                normalized.push('_');
+            }
+            normalized.push(ch.to_ascii_lowercase());
+        } else if !normalized.is_empty() && !normalized.ends_with('_') {
+            normalized.push('_');
+        }
+        previous = Some(ch);
+    }
+
+    while normalized.ends_with('_') {
+        normalized.pop();
+    }
+    normalized
 }
 
 fn key_matches_sensitive_hint(key_norm: &str, hint: &str) -> bool {
@@ -445,6 +480,42 @@ fn key_matches_sensitive_hint(key_norm: &str, hint: &str) -> bool {
     // Substring is the right match: `openai_api_key` contains `api_key`.
     if hint.contains('_') || hint.contains('-') {
         return key_norm.contains(hint);
+    }
+    if hint == "token" {
+        // Camel-case normalization turns both credentials (`accessToken`) and
+        // ordinary usage metrics (`tokenBudget`, `tokenCount`) into segmented
+        // identifiers. A credential token is either the whole key, a suffix
+        // such as `access_token`, or an explicitly value-bearing `token_*`
+        // field. Metrics must stay visible in diagnostics and tool previews.
+        let is_metric_suffix = |suffix: &str| {
+            matches!(
+                suffix.split('_').next(),
+                Some(
+                    "budget"
+                        | "budgets"
+                        | "count"
+                        | "counts"
+                        | "limit"
+                        | "limits"
+                        | "total"
+                        | "totals"
+                        | "usage"
+                        | "used"
+                        | "window"
+                        | "windows"
+                )
+            )
+        };
+        if key_norm.ends_with("_token") {
+            return true;
+        }
+        if let Some(suffix) = key_norm.strip_prefix("token_") {
+            return !is_metric_suffix(suffix);
+        }
+        if let Some((_, suffix)) = key_norm.rsplit_once("_token_") {
+            return !is_metric_suffix(suffix);
+        }
+        return false;
     }
     // Single-word hints must be a whole identifier segment so `token`
     // redacts `token` / `api_token` and not English `tokens`.
@@ -653,6 +724,47 @@ PASSWORD=hunter2hunter2"
         assert!(out.contains("provider = \"openai\""));
         assert!(out.contains("model = \"mimo-ultraspeed\""));
         assert!(out.matches(REDACTED).count() >= 3, "{out}");
+    }
+
+    #[test]
+    fn redact_json_masks_camel_case_and_dotted_secret_keys() {
+        let synthetic_secret = synthetic_secret_fixture();
+        let input = serde_json::json!({
+            "accessToken": synthetic_secret.clone(),
+            "refreshToken": synthetic_secret_fixture(),
+            "oauth.token": synthetic_secret_fixture(),
+            "APIKey": synthetic_secret_fixture(),
+            "maxTokens": 8192,
+            "tokenBudget": 4096,
+            "tokenCount": 1024,
+            "token_count": 512,
+            "tokenizer": "sentencepiece",
+        });
+
+        let out = redact_json_secrets(&input);
+        for key in ["accessToken", "refreshToken", "oauth.token", "APIKey"] {
+            assert_eq!(out[key], REDACTED, "{key}: {out}");
+        }
+        assert_eq!(out["maxTokens"], 8192);
+        assert_eq!(out["tokenBudget"], 4096);
+        assert_eq!(out["tokenCount"], 1024);
+        assert_eq!(out["token_count"], 512);
+        assert_eq!(out["tokenizer"], "sentencepiece");
+        assert!(!out.to_string().contains(&synthetic_secret), "{out}");
+    }
+
+    #[test]
+    fn redact_text_masks_camel_case_and_dotted_secret_assignments() {
+        let synthetic_secret = synthetic_secret_fixture();
+        for key in ["accessToken", "refreshToken", "oauth.token", "APIKey"] {
+            let out = redact_secrets(&format!("request failed: {key} = {synthetic_secret}"));
+            assert!(!out.contains(&synthetic_secret), "{key}: {out}");
+            assert!(out.contains(REDACTED), "{key}: {out}");
+        }
+        for key in ["tokenBudget", "tokenCount", "token_count"] {
+            let input = format!("model usage: {key} = 8192");
+            assert_eq!(redact_secrets(&input), input, "{key}");
+        }
     }
 
     #[test]

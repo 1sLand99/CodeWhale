@@ -1,11 +1,14 @@
 //! Runtime status command.
 
+use std::borrow::Cow;
 use std::fmt::Write as _;
 use std::path::Path;
 
 use super::CommandResult;
 use crate::compaction::estimate_input_tokens_conservative;
-use crate::tui::app::App;
+use crate::localization::{Locale, MessageId, tr};
+use crate::tui::app::{App, AppModeUi};
+use crate::tui::approval::ApprovalMode;
 use crate::utils::{display_path, estimate_message_chars};
 
 /// Show a compact runtime status report for the current TUI session.
@@ -13,13 +16,14 @@ pub fn status(app: &mut App) -> CommandResult {
     CommandResult::message(format_status(app))
 }
 
-/// Row label column, in columns. Widest label is `Context window:` (15);
-/// the tail space in [`push_row`] makes the value column start at 19, which
-/// is where the localized `Session metrics:` line already lands.
+/// Row label column, in columns. English's widest label is `Context window:`
+/// (15); the tail space in [`push_row`] makes its value start at column 19.
+/// Longer localized labels extend naturally rather than being truncated.
 const LABEL_WIDTH: usize = 16;
 
 fn format_status(app: &App) -> String {
     let mut out = String::new();
+    let locale = app.ui_locale;
     let (context_used, context_max, context_percent) = context_usage(app);
 
     // A transcript cell has no ink and no rules, so the only grouping mark
@@ -29,42 +33,92 @@ fn format_status(app: &App) -> String {
     let _ = writeln!(out, "codewhale {}", env!("CARGO_PKG_VERSION"));
     let _ = writeln!(out);
 
-    push_row(&mut out, "Route:", &route_summary(app));
-    push_row(&mut out, "Directory:", &display_path(&app.workspace));
-    push_row(&mut out, "Project docs:", &project_docs(&app.workspace));
-    push_row(&mut out, "Mode:", &posture_summary(app));
-    push_row(&mut out, "Safety:", safety_summary(app));
     push_row(
         &mut out,
-        "MCP:",
-        &format!("{} configured", app.mcp_configured_count),
+        locale,
+        MessageId::StatusLabelRoute,
+        &route_summary(app),
+    );
+    push_row(
+        &mut out,
+        locale,
+        MessageId::StatusLabelDirectory,
+        &display_path(&app.workspace),
+    );
+    push_row(
+        &mut out,
+        locale,
+        MessageId::StatusLabelProjectDocs,
+        &project_docs(&app.workspace, locale),
+    );
+    push_row(
+        &mut out,
+        locale,
+        MessageId::StatusLabelMode,
+        &posture_summary(app),
+    );
+    push_row(
+        &mut out,
+        locale,
+        MessageId::StatusLabelSafety,
+        safety_summary(app).as_ref(),
+    );
+    push_row(
+        &mut out,
+        locale,
+        MessageId::StatusLabelMcp,
+        &localized(
+            locale,
+            MessageId::StatusMcpConfigured,
+            &[("{count}", &app.mcp_configured_count.to_string())],
+        ),
     );
     let _ = writeln!(out);
 
     push_row(
         &mut out,
-        "Context window:",
-        &format!("{context_percent:.1}% used ({context_used} / {context_max} tokens)"),
+        locale,
+        MessageId::StatusLabelContextWindow,
+        &localized(
+            locale,
+            MessageId::StatusContextUsage,
+            &[
+                ("{percent}", &format!("{context_percent:.1}")),
+                ("{used}", &context_used.to_string()),
+                ("{max}", &context_max.to_string()),
+            ],
+        ),
     );
     push_row(
         &mut out,
-        "Window source:",
-        &context_window_source(app).display_label(),
+        locale,
+        MessageId::StatusLabelWindowSource,
+        context_window_source_label(context_window_source(app), locale).as_ref(),
     );
-    if let Some(key) = context_window_override_key(app) {
-        push_row(&mut out, "Window override:", &key);
+    if let Some(key) = context_window_override_key(app, locale) {
+        push_row(&mut out, locale, MessageId::StatusLabelWindowOverride, &key);
     }
-    push_row(&mut out, "Session:", &session_summary(app));
-    push_row(&mut out, "Session tokens:", &session_tokens(app));
     push_row(
         &mut out,
-        "Session cost:",
+        locale,
+        MessageId::StatusLabelSession,
+        &session_summary(app),
+    );
+    push_row(
+        &mut out,
+        locale,
+        MessageId::StatusLabelSessionTokens,
+        &session_tokens(app),
+    );
+    push_row(
+        &mut out,
+        locale,
+        MessageId::StatusLabelSessionCost,
         &app.format_cost_amount_precise(app.session_cost_for_currency(app.cost_currency)),
     );
     // The full, untrimmed session metrics strip (the footer sheds groups to
-    // fit; here every group that has evidence is printed). This is the one
-    // localized label in the report, so it keeps its own writeln rather than
-    // being re-spelled in English by `push_row`.
+    // fit; here every group that has evidence is printed). It keeps its own
+    // template because the label and metrics form one localized sentence.
     let snapshot = crate::tui::session_metrics::snapshot_from_app(app);
     if !snapshot.is_empty() {
         let metrics = crate::tui::session_metrics::full_text(
@@ -75,19 +129,16 @@ fn format_status(app: &App) -> String {
         let _ = writeln!(
             out,
             "  {}",
-            crate::localization::tr(
-                app.ui_locale,
-                crate::localization::MessageId::SessionMetricsStatusLine
-            )
-            .replace("{metrics}", &metrics)
+            tr(locale, MessageId::SessionMetricsStatusLine).replace("{metrics}", &metrics)
         );
     }
     let tool_output_status =
         crate::tool_output_receipts::tool_output_status(&app.api_messages, &app.session_artifacts);
     push_row(
         &mut out,
-        "Tool outputs:",
-        &crate::tool_output_receipts::format_tool_output_status(&tool_output_status),
+        locale,
+        MessageId::StatusLabelToolOutputs,
+        &crate::tool_output_receipts::format_tool_output_status(&tool_output_status, locale),
     );
     let _ = writeln!(out);
     // Two whole fields left this report rather than being printed at the same
@@ -95,10 +146,7 @@ fn format_status(app: &App) -> String {
     // already prints in full, and the list of enabled footer item keys, which
     // is `/statusline`'s own subject. The pointer costs one row; they cost
     // seven.
-    let _ = writeln!(
-        out,
-        "  Per-turn tokens: /tokens · Footer items: /statusline"
-    );
+    let _ = writeln!(out, "  {}", tr(locale, MessageId::StatusPointers));
 
     out
 }
@@ -109,42 +157,71 @@ fn format_status(app: &App) -> String {
 /// for one fact — which route is this turn going to. The header already joins
 /// them with a middle dot; `/status` now agrees with it.
 fn route_summary(app: &App) -> String {
-    format!(
-        "{} · {} · reasoning {}",
-        app.provider_identity_for_persistence(),
-        app.model_display_label(),
-        app.reasoning_effort_display_label()
+    let model = app.model_display_label();
+    let reasoning = app.reasoning_effort_display_label();
+    localized(
+        app.ui_locale,
+        MessageId::StatusRouteSummary,
+        &[
+            ("{provider}", app.provider_identity_for_persistence()),
+            ("{model}", &model),
+            ("{reasoning}", &reasoning),
+        ],
     )
 }
 
 /// Mode and the permissions that qualify it, as one statement of posture.
 fn posture_summary(app: &App) -> String {
     let trust = if app.trust_mode {
-        "trusted workspace"
+        tr(app.ui_locale, MessageId::StatusTrustedWorkspace)
     } else {
-        "workspace"
+        tr(app.ui_locale, MessageId::StatusWorkspace)
     };
     let shell = if app.allow_shell {
-        "shell on"
+        tr(app.ui_locale, MessageId::StatusShellOn)
     } else {
-        "shell off"
+        tr(app.ui_locale, MessageId::StatusShellOff)
     };
-    format!(
-        "{} · approvals {} · {shell} · {trust}",
-        app.mode.label(),
-        app.approval_mode
-            .permission_chip_label()
-            .to_ascii_lowercase()
+    let mode = app.mode.display_name_localized(app.ui_locale);
+    let approval = approval_summary(app.approval_mode, app.ui_locale);
+    localized(
+        app.ui_locale,
+        MessageId::StatusPostureSummary,
+        &[
+            ("{mode}", mode.as_ref()),
+            ("{approval}", approval.as_ref()),
+            ("{shell}", shell.as_ref()),
+            ("{trust}", trust.as_ref()),
+        ],
+    )
+}
+
+fn approval_summary(mode: ApprovalMode, locale: Locale) -> Cow<'static, str> {
+    tr(
+        locale,
+        match mode {
+            ApprovalMode::Suggest => MessageId::StatusApprovalAsk,
+            ApprovalMode::Auto => MessageId::StatusApprovalAuto,
+            ApprovalMode::Bypass => MessageId::StatusApprovalFullAccess,
+            ApprovalMode::Never => MessageId::StatusApprovalNever,
+        },
     )
 }
 
 /// Session identity and the size of the conversation it names.
 fn session_summary(app: &App) -> String {
-    format!(
-        "{} · {} cells · {} API messages",
-        app.current_session_id.as_deref().unwrap_or("not saved yet"),
-        app.history.len(),
-        app.api_messages.len()
+    let session = app
+        .current_session_id
+        .clone()
+        .unwrap_or_else(|| tr(app.ui_locale, MessageId::StatusSessionNotSaved).into_owned());
+    localized(
+        app.ui_locale,
+        MessageId::StatusSessionSummary,
+        &[
+            ("{session}", &session),
+            ("{cells}", &app.history.len().to_string()),
+            ("{messages}", &app.api_messages.len().to_string()),
+        ],
     )
 }
 
@@ -155,24 +232,35 @@ fn session_summary(app: &App) -> String {
 fn session_tokens(app: &App) -> String {
     let cache =
         if app.session.total_cache_hit_tokens == 0 && app.session.total_cache_miss_tokens == 0 {
-            "cache not reported".to_string()
+            tr(app.ui_locale, MessageId::StatusCacheNotReported).into_owned()
         } else {
-            format!(
-                "cache {} hit / {} miss",
-                app.session.total_cache_hit_tokens, app.session.total_cache_miss_tokens
+            localized(
+                app.ui_locale,
+                MessageId::StatusCacheSummary,
+                &[
+                    ("{hit}", &app.session.total_cache_hit_tokens.to_string()),
+                    ("{miss}", &app.session.total_cache_miss_tokens.to_string()),
+                ],
             )
         };
-    format!(
-        "{} in · {} out · {} total · {cache}",
-        app.session.total_input_tokens, app.session.total_output_tokens, app.session.total_tokens
+    localized(
+        app.ui_locale,
+        MessageId::StatusSessionTokensSummary,
+        &[
+            ("{input}", &app.session.total_input_tokens.to_string()),
+            ("{output}", &app.session.total_output_tokens.to_string()),
+            ("{total}", &app.session.total_tokens.to_string()),
+            ("{cache}", &cache),
+        ],
     )
 }
 
-fn push_row(out: &mut String, label: &str, value: &str) {
+fn push_row(out: &mut String, locale: Locale, label: MessageId, value: &str) {
+    let label = format!("{}:", tr(locale, label));
     let _ = writeln!(out, "  {label:<LABEL_WIDTH$} {value}");
 }
 
-fn safety_summary(app: &App) -> &'static str {
+fn safety_summary(app: &App) -> Cow<'static, str> {
     let policy = crate::core::authority::sandbox_policy_for_turn(
         app.mode,
         app.approval_mode,
@@ -186,42 +274,41 @@ fn safety_summary(app: &App) -> &'static str {
     // while nothing was restricted (2026-08-04 audit). `doctor` has always
     // been honest about this; /status now agrees with it.
     let unenforced = app.sandbox_backend.is_none();
-    match policy {
+    let message = match policy {
         crate::sandbox::SandboxPolicy::ReadOnly if unenforced => {
-            "no OS sandbox on this platform (read-only requested, not enforced), network off"
+            MessageId::StatusSafetyReadOnlyUnenforced
         }
-        crate::sandbox::SandboxPolicy::ReadOnly => "sandbox read-only, network off",
+        crate::sandbox::SandboxPolicy::ReadOnly => MessageId::StatusSafetyReadOnly,
         // Read the flag rather than assuming it. Workspace-write defaults to
         // network-restricted, so a hardcoded "network on" here named a
         // boundary the policy does not grant.
         crate::sandbox::SandboxPolicy::WorkspaceWrite { network_access, .. } if unenforced => {
             if network_access {
-                "no OS sandbox on this platform (workspace-write requested, not enforced), network on"
+                MessageId::StatusSafetyWorkspaceWriteUnenforcedNetworkOn
             } else {
-                "no OS sandbox on this platform (workspace-write requested, not enforced), network requested off, not enforced"
+                MessageId::StatusSafetyWorkspaceWriteUnenforcedNetworkOff
             }
         }
         crate::sandbox::SandboxPolicy::WorkspaceWrite { network_access, .. } => {
             if network_access {
-                "sandbox workspace-write, network on"
+                MessageId::StatusSafetyWorkspaceWriteNetworkOn
             } else {
-                "sandbox workspace-write, network off"
+                MessageId::StatusSafetyWorkspaceWriteNetworkOff
             }
         }
-        crate::sandbox::SandboxPolicy::DangerFullAccess => "sandbox disabled, network unrestricted",
-        crate::sandbox::SandboxPolicy::ExternalSandbox { .. } => {
-            "external sandbox, network delegated to host"
-        }
-    }
+        crate::sandbox::SandboxPolicy::DangerFullAccess => MessageId::StatusSafetyDisabled,
+        crate::sandbox::SandboxPolicy::ExternalSandbox { .. } => MessageId::StatusSafetyExternal,
+    };
+    tr(app.ui_locale, message)
 }
 
-fn project_docs(workspace: &Path) -> String {
+fn project_docs(workspace: &Path, locale: Locale) -> String {
     let docs: Vec<&str> = ["AGENTS.md", "CLAUDE.md"]
         .into_iter()
         .filter(|name| workspace.join(name).is_file())
         .collect();
     if docs.is_empty() {
-        "no project docs".to_string()
+        tr(locale, MessageId::StatusProjectDocsNone).into_owned()
     } else {
         docs.join(", ")
     }
@@ -253,9 +340,38 @@ fn context_window_source(app: &App) -> crate::route_runtime::ContextWindowSource
     app.active_context_window_source
 }
 
+fn context_window_source_label(
+    source: crate::route_runtime::ContextWindowSource,
+    locale: Locale,
+) -> Cow<'static, str> {
+    tr(
+        locale,
+        match source {
+            crate::route_runtime::ContextWindowSource::Configured => {
+                MessageId::StatusContextSourceConfigured
+            }
+            crate::route_runtime::ContextWindowSource::ProviderReported => {
+                MessageId::StatusContextSourceProviderReported
+            }
+            crate::route_runtime::ContextWindowSource::StaticKimiCodeSafeFloor => {
+                MessageId::StatusContextSourceKimiSafeFloor
+            }
+            crate::route_runtime::ContextWindowSource::Catalog => {
+                MessageId::StatusContextSourceCatalog
+            }
+            crate::route_runtime::ContextWindowSource::NameSuffixHint => {
+                MessageId::StatusContextSourceModelHint
+            }
+            crate::route_runtime::ContextWindowSource::Fallback => {
+                MessageId::StatusContextSourceFallback
+            }
+        },
+    )
+}
+
 /// The exact key that changes the window, or `None` when the user already set
 /// it and the row would be naming a key they have already used.
-fn context_window_override_key(app: &App) -> Option<String> {
+fn context_window_override_key(app: &App, locale: Locale) -> Option<String> {
     if app.active_context_window_source == crate::route_runtime::ContextWindowSource::Configured {
         return None;
     }
@@ -264,9 +380,43 @@ fn context_window_override_key(app: &App) -> Option<String> {
         .metadata()
         .map(|metadata| metadata.provider_config_key());
     Some(match table {
-        Some(table) => format!("[providers.{table}] context_window in config.toml"),
-        None => "`context_window` on the active provider table in config.toml".to_string(),
+        Some(table) => localized(
+            locale,
+            MessageId::StatusWindowOverrideProvider,
+            &[("{table}", table)],
+        ),
+        None => tr(locale, MessageId::StatusWindowOverrideActiveProvider).into_owned(),
     })
+}
+
+fn localized(locale: Locale, id: MessageId, replacements: &[(&str, &str)]) -> String {
+    let template = tr(locale, id);
+    let mut message = String::with_capacity(template.len());
+    let mut cursor = 0;
+
+    while let Some(relative_start) = template[cursor..].find('{') {
+        let start = cursor + relative_start;
+        message.push_str(&template[cursor..start]);
+
+        let Some(relative_end) = template[start..].find('}') else {
+            message.push_str(&template[start..]);
+            return message;
+        };
+        let end = start + relative_end + 1;
+        let placeholder = &template[start..end];
+        if let Some(value) = replacements
+            .iter()
+            .find_map(|(candidate, value)| (*candidate == placeholder).then_some(*value))
+        {
+            message.push_str(value);
+        } else {
+            message.push_str(placeholder);
+        }
+        cursor = end;
+    }
+
+    message.push_str(&template[cursor..]);
+    message
 }
 
 #[cfg(test)]
@@ -502,6 +652,33 @@ mod tests {
     }
 
     #[test]
+    fn status_report_interpolation_preserves_braces_in_runtime_values() {
+        let tmpdir = TempDir::new().expect("temp dir");
+        let mut app = create_test_app(tmpdir.path().to_path_buf());
+        app.set_provider_identity(ApiProvider::Custom, "acme-{model}");
+        app.model = "vision-{reasoning}".to_string();
+        app.current_session_id = Some("session-{cells}-{messages}".to_string());
+
+        let msg = format_status(&app);
+        let route_row = msg
+            .lines()
+            .find(|line| line.trim_start().starts_with("Route:"))
+            .expect("route row");
+        assert!(
+            route_row.contains("acme-{model} · vision-{reasoning} ·"),
+            "{route_row}"
+        );
+        let session_row = msg
+            .lines()
+            .find(|line| line.trim_start().starts_with("Session:"))
+            .expect("session row");
+        assert!(
+            session_row.contains("session-{cells}-{messages}"),
+            "{session_row}"
+        );
+    }
+
+    #[test]
     fn status_report_surfaces_effective_safety_policy() {
         let tmpdir = TempDir::new().expect("temp dir");
         let mut app = create_test_app(tmpdir.path().to_path_buf());
@@ -596,8 +773,81 @@ mod tests {
     }
 
     #[test]
+    fn status_report_localizes_the_complete_japanese_surface() {
+        let tmpdir = TempDir::new().expect("temp dir");
+        let mut app = create_test_app(tmpdir.path().to_path_buf());
+        app.ui_locale = Locale::Ja;
+        app.approval_mode = ApprovalMode::Bypass;
+        app.active_context_window_source =
+            crate::route_runtime::ContextWindowSource::ProviderReported;
+
+        let msg = format_status(&app);
+
+        for id in [
+            MessageId::StatusLabelRoute,
+            MessageId::StatusLabelDirectory,
+            MessageId::StatusLabelProjectDocs,
+            MessageId::StatusLabelMode,
+            MessageId::StatusLabelSafety,
+            MessageId::StatusLabelContextWindow,
+            MessageId::StatusLabelWindowSource,
+            MessageId::StatusLabelWindowOverride,
+            MessageId::StatusLabelSession,
+            MessageId::StatusLabelSessionTokens,
+            MessageId::StatusLabelSessionCost,
+            MessageId::StatusLabelToolOutputs,
+            MessageId::StatusProjectDocsNone,
+            MessageId::StatusContextSourceProviderReported,
+            MessageId::StatusSessionNotSaved,
+            MessageId::StatusToolNone,
+            MessageId::StatusSafetyDisabled,
+        ] {
+            let japanese = tr(Locale::Ja, id);
+            assert_ne!(japanese, tr(Locale::En, id), "{id:?} copied English");
+            assert!(msg.contains(japanese.as_ref()), "missing {id:?}: {msg}");
+        }
+
+        for english in [
+            "Route:",
+            "Directory:",
+            "Project docs:",
+            "Mode:",
+            "Safety:",
+            "Context window:",
+            "Window source:",
+            "Window override:",
+            "Session:",
+            "Session tokens:",
+            "Session cost:",
+            "Tool outputs:",
+            "reasoning ",
+            "no project docs",
+            "not saved yet",
+            "no large outputs tracked",
+            "Per-turn tokens:",
+        ] {
+            assert!(
+                !msg.contains(english),
+                "English leaked as {english:?}: {msg}"
+            );
+        }
+
+        // Protocol/config identities and commands remain literal inside the
+        // translated prose.
+        for literal in [
+            "deepseek",
+            "context_window",
+            "config.toml",
+            "/tokens",
+            "/statusline",
+        ] {
+            assert!(msg.contains(literal), "missing literal {literal:?}: {msg}");
+        }
+    }
+
+    #[test]
     fn project_docs_reports_missing_docs() {
         let tmpdir = TempDir::new().expect("temp dir");
-        assert_eq!(project_docs(tmpdir.path()), "no project docs");
+        assert_eq!(project_docs(tmpdir.path(), Locale::En), "no project docs");
     }
 }

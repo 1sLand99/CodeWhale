@@ -85,14 +85,30 @@ impl LastLaunch {
     /// Write the record atomically (temp file, then rename), creating the
     /// parent directory if needed.
     pub fn store(&self, path: &Path) -> Result<()> {
-        if let Some(dir) = path.parent() {
+        let parent = path.parent().filter(|dir| !dir.as_os_str().is_empty());
+        if let Some(dir) = parent {
             std::fs::create_dir_all(dir)
                 .with_context(|| format!("failed to create {}", dir.display()))?;
         }
-        let tmp = path.with_extension("json.tmp");
         let body = serde_json::to_vec_pretty(self).context("failed to serialize launch record")?;
-        std::fs::write(&tmp, body).with_context(|| format!("failed to write {}", tmp.display()))?;
-        std::fs::rename(&tmp, path)
+        let dir = parent.unwrap_or_else(|| Path::new("."));
+        let mut tmp = tempfile::NamedTempFile::new_in(dir).with_context(|| {
+            format!(
+                "failed to create launch-record temp file in {}",
+                dir.display()
+            )
+        })?;
+        use std::io::Write as _;
+        tmp.write_all(&body)
+            .with_context(|| format!("failed to write launch record for {}", path.display()))?;
+        tmp.flush()
+            .with_context(|| format!("failed to flush launch record for {}", path.display()))?;
+        // `persist` replaces an existing record on every platform
+        // (`MOVEFILE_REPLACE_EXISTING` on Windows) from a uniquely named temp
+        // file, so concurrent launches cannot clobber each other's partial
+        // writes and a failed write leaves no dangling `*.tmp` behind.
+        tmp.persist(path)
+            .map_err(|error| error.error)
             .with_context(|| format!("failed to install {}", path.display()))?;
         Ok(())
     }
@@ -260,6 +276,26 @@ mod tests {
         assert_eq!(record_launch(home.path(), "0.9.11").change, None);
         assert_eq!(
             LastLaunch::load(&path).map(|r| r.version),
+            Some("0.9.11".to_string())
+        );
+    }
+
+    #[test]
+    fn store_replaces_an_existing_record() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let path = record_path_in(home.path());
+        LastLaunch {
+            version: "0.9.10".to_string(),
+        }
+        .store(&path)
+        .expect("seed record");
+        LastLaunch {
+            version: "0.9.11".to_string(),
+        }
+        .store(&path)
+        .expect("replace record");
+        assert_eq!(
+            LastLaunch::load(&path).map(|record| record.version),
             Some("0.9.11".to_string())
         );
     }
