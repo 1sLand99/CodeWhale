@@ -1,6 +1,6 @@
 # Codewhale product telemetry
 
-**Status for 0.9.10: anonymous usage counting is on by default and can be
+**Status for 0.9.11: anonymous usage counting is on by default and can be
 disabled immediately.** The first interactive launch shows one localized,
 nonblocking notice after the terminal is ready. It says what is never collected,
 points to this field-by-field schema, and links the ordinary `/settings` toggle.

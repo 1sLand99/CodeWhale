@@ -274,8 +274,9 @@ impl AccountSessionStore {
 
 /// Select the approved account-session backend shared by CLI, TUI, and Runtime.
 ///
-/// The native credential manager is required unless the user explicitly opts
-/// into the private `0600` file store for a headless environment.
+/// The native credential manager is preferred; when it is unavailable the
+/// private `0600` Codewhale secrets file is used automatically, so headless
+/// hosts can sign in without any opt-in.
 pub fn secure_account_session_secrets() -> Result<Secrets, AccountSessionError> {
     // Codex-style storage contract: prefer the OS credential manager, fall
     // back to the private 0600 file store when it is unavailable. Account

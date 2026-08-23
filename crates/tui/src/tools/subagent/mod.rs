@@ -6851,9 +6851,8 @@ impl SubAgentManager {
         if let Some(record) = self.worker_records.get(&agent.id) {
             snap.worker_status = Some(record.status);
             snap.runtime_permissions = Some(
-                crate::fleet::worker_runtime::fleet_effective_permissions_from_runtime_profile(
-                    &record.spec.runtime_profile,
-                    None,
+                crate::fleet::worker_runtime::fleet_effective_permissions_from_worker_spec(
+                    &record.spec,
                 ),
             );
             snap.parent_run_id = record
@@ -14069,10 +14068,8 @@ impl SubAgentToolRegistry {
         // has a full shell.
         let parent_shell = ShellPolicy::from_legacy_allow_shell(runtime.allow_shell);
         let mut child_shell = runtime.worker_profile.shell.min_with(parent_shell);
-        if matches!(
-            &agent_type,
-            FleetRole::Scout | FleetRole::Reviewer | FleetRole::Planner
-        ) && child_shell.allows_shell()
+        if crate::fleet::worker_runtime::role_requires_read_only_shell(&agent_type)
+            && child_shell.allows_shell()
         {
             child_shell = ShellPolicy::ReadOnly;
         }

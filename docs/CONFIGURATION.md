@@ -312,9 +312,12 @@ credentials are configured exclusively through `codewhale auth set
 That provider credential is distinct from the optional managed-product
 account. `codewhale account login` starts the Codewhale browser device flow;
 `codewhale account status` and `codewhale account logout` inspect or remove the
-session for the selected `--profile`. Account sessions are stored in the OS
-credential manager. A file-backed session store exists only as an explicit
-development fallback. `codewhale account keys list|set|remove` manages the
+session for the selected `--profile`. Account sessions prefer the OS
+credential manager and fall back automatically to the private `0600`
+Codewhale secrets file when no credential manager is available (headless
+hosts, SSH, containers); the former
+`CODEWHALE_CLOUD_ALLOW_FILE_SESSION_STORE` opt-in is deprecated and ignored.
+`codewhale account keys list|set|remove` manages the
 signed-in account's BYOK vault without displaying secret values. The older
 `codewhale cloud ...` spelling remains a command alias.
 

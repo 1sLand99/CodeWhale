@@ -113,10 +113,12 @@ pub fn parse_bundle_bytes(raw: &[u8], source: &str) -> Result<PortableBundle> {
 /// `.json` or the document starts with `{`.
 pub fn parse_bundle_str(text: &str, source: &str) -> Result<PortableBundle> {
     let trimmed = text.trim_start();
-    let bundle = if trimmed.starts_with('{') {
-        serde_json::from_str::<PortableBundle>(text)
-            .with_context(|| format!("bundle at {source} is not valid JSON"))?
-    } else if source.ends_with(".json") {
+    let bundle = if trimmed.starts_with('{') || source.ends_with(".json") {
+        // serde_json keeps the last of two identical object keys. A bundle is
+        // a reviewed plan, so a repeated key must fail before anything is
+        // planned or written, exactly as TOML already refuses duplicates.
+        reject_duplicate_json_keys(text)
+            .with_context(|| format!("bundle at {source} is not valid JSON"))?;
         serde_json::from_str::<PortableBundle>(text)
             .with_context(|| format!("bundle at {source} is not valid JSON"))?
     } else {
@@ -125,6 +127,103 @@ pub fn parse_bundle_str(text: &str, source: &str) -> Result<PortableBundle> {
     };
     validate_bundle(&bundle, source)?;
     Ok(bundle)
+}
+
+/// Fail closed on a JSON document that repeats an object key at any depth.
+///
+/// The document is walked with a deserializer seed that never materializes
+/// values, so the check costs one pass and reports the first offending key
+/// path without echoing any value.
+fn reject_duplicate_json_keys(text: &str) -> Result<()> {
+    use serde::de::{DeserializeSeed, Error as _, MapAccess, SeqAccess, Visitor};
+    use std::fmt;
+
+    struct NoDuplicates<'a> {
+        path: &'a mut Vec<String>,
+    }
+
+    impl<'de> DeserializeSeed<'de> for NoDuplicates<'_> {
+        type Value = ();
+
+        fn deserialize<D>(self, deserializer: D) -> Result<(), D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            deserializer.deserialize_any(self)
+        }
+    }
+
+    impl<'de> Visitor<'de> for NoDuplicates<'_> {
+        type Value = ();
+
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("a JSON value without duplicate object keys")
+        }
+
+        fn visit_bool<E: serde::de::Error>(self, _: bool) -> Result<(), E> {
+            Ok(())
+        }
+        fn visit_i64<E: serde::de::Error>(self, _: i64) -> Result<(), E> {
+            Ok(())
+        }
+        fn visit_u64<E: serde::de::Error>(self, _: u64) -> Result<(), E> {
+            Ok(())
+        }
+        fn visit_f64<E: serde::de::Error>(self, _: f64) -> Result<(), E> {
+            Ok(())
+        }
+        fn visit_str<E: serde::de::Error>(self, _: &str) -> Result<(), E> {
+            Ok(())
+        }
+        fn visit_unit<E: serde::de::Error>(self) -> Result<(), E> {
+            Ok(())
+        }
+        fn visit_none<E: serde::de::Error>(self) -> Result<(), E> {
+            Ok(())
+        }
+
+        fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<(), A::Error> {
+            let mut index = 0usize;
+            loop {
+                self.path.push(format!("[{index}]"));
+                let next = seq.next_element_seed(NoDuplicates { path: self.path });
+                self.path.pop();
+                if next?.is_none() {
+                    return Ok(());
+                }
+                index += 1;
+            }
+        }
+
+        fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<(), A::Error> {
+            let mut seen = std::collections::BTreeSet::new();
+            while let Some(key) = map.next_key::<String>()? {
+                if !seen.insert(key.clone()) {
+                    let mut path = self.path.clone();
+                    path.push(key);
+                    return Err(A::Error::custom(format!(
+                        "duplicate key {:?}",
+                        path.join(".")
+                    )));
+                }
+                self.path.push(key);
+                let nested = map.next_value_seed(NoDuplicates { path: self.path });
+                self.path.pop();
+                nested?;
+            }
+            Ok(())
+        }
+    }
+
+    let mut deserializer = serde_json::Deserializer::from_str(text);
+    let mut path = Vec::new();
+    NoDuplicates { path: &mut path }
+        .deserialize(&mut deserializer)
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    deserializer
+        .end()
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    Ok(())
 }
 
 fn validate_bundle(bundle: &PortableBundle, source: &str) -> Result<()> {
@@ -1540,6 +1639,27 @@ note = "{shaped_value}"
         let rendered = format!("{rejected:?}");
         assert!(!rendered.contains("nested-password-must-not-leak"));
         assert!(!rendered.contains("nested-token-must-not-leak"));
+    }
+
+    #[test]
+    fn json_bundles_with_duplicate_keys_fail_before_parse() {
+        let duplicate = r#"{"schema_version":1,"kind":"codewhale.portable-config","preferences":{"verbosity":"quiet","verbosity":"loud"}}"#;
+        let error = parse_bundle_str(duplicate, "dup.json").expect_err("duplicate key must fail");
+        let rendered = format!("{error:#}");
+        assert!(rendered.contains("duplicate key"), "{rendered}");
+        assert!(rendered.contains("preferences.verbosity"), "{rendered}");
+        assert!(!rendered.contains("loud"), "{rendered}");
+
+        let nested_array = r#"{"schema_version":1,"kind":"codewhale.portable-config","preferences":{"list":[{"a":1,"a":2}]}}"#;
+        let error = parse_bundle_str(nested_array, "dup-array.json")
+            .expect_err("nested duplicate must fail");
+        assert!(
+            format!("{error:#}").contains("preferences.list.[0].a"),
+            "{error:#}"
+        );
+
+        let clean = r#"{"schema_version":1,"kind":"codewhale.portable-config","preferences":{"verbosity":"quiet","profiles":{"verbosity":"loud"}}}"#;
+        parse_bundle_str(clean, "clean.json").expect("same key under different parents is fine");
     }
 
     #[test]

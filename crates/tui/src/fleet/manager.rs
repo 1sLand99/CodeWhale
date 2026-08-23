@@ -4644,11 +4644,12 @@ esac
                         !permissions.write,
                         "scout receipt {key} must stay read-only"
                     );
-                    // Scout/reviewer lanes now carry the read-only inspection posture:
-                    // network reach + bounded verification surface, so the
-                    // receipt records full shell authority (raw shell still
-                    // requires write and stays denied by the clamp).
-                    assert_eq!(permissions.shell, "full");
+                    // Scout/reviewer/planner lanes are narrowed to a read-only
+                    // shell at spawn (network reach + bounded verification
+                    // surface, never a mutating shell). The receipt records
+                    // that effective posture rather than the requested
+                    // profile, so headers and ledgers cannot overclaim.
+                    assert_eq!(permissions.shell, "read_only");
                 }
                 Some("verifier") => {
                     assert!(

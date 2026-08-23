@@ -1433,7 +1433,35 @@ pub fn apply_exec_hardening(
 pub(crate) fn fleet_effective_permissions_from_worker_spec(
     spec: &AgentWorkerSpec,
 ) -> FleetEffectivePermissions {
-    fleet_effective_permissions_from_runtime_profile(&spec.runtime_profile, None)
+    fleet_effective_permissions_from_runtime_profile(
+        &effective_runtime_profile_for_role(&spec.agent_type, &spec.runtime_profile),
+        None,
+    )
+}
+
+/// Whether a Fleet role is never allowed a mutating shell, whatever its
+/// requested runtime profile says. Spawn narrows the child to a read-only
+/// shell for these roles, and every receipt must report that same posture.
+pub(crate) fn role_requires_read_only_shell(role: &crate::tools::subagent::FleetRole) -> bool {
+    use crate::tools::subagent::FleetRole;
+    matches!(
+        role,
+        FleetRole::Scout | FleetRole::Reviewer | FleetRole::Planner
+    )
+}
+
+/// The runtime profile a worker of `role` actually runs under: the requested
+/// profile with the shell narrowed for read-only roles. Receipts and headers
+/// derive from this, never from the requested profile alone (#5542 review).
+pub(crate) fn effective_runtime_profile_for_role(
+    role: &crate::tools::subagent::FleetRole,
+    requested: &WorkerRuntimeProfile,
+) -> WorkerRuntimeProfile {
+    let mut effective = requested.clone();
+    if role_requires_read_only_shell(role) && effective.shell.allows_shell() {
+        effective.shell = crate::worker_profile::ShellPolicy::ReadOnly;
+    }
+    effective
 }
 
 pub(crate) fn fleet_effective_permissions_for_task(
@@ -1445,7 +1473,7 @@ pub(crate) fn fleet_effective_permissions_for_task(
         .ok()
         .flatten();
     fleet_effective_permissions_from_runtime_profile(
-        &spec.runtime_profile,
+        &effective_runtime_profile_for_role(&spec.agent_type, &spec.runtime_profile),
         agent_profile.as_deref(),
     )
 }
@@ -1600,6 +1628,35 @@ mod tests {
     use super::*;
     use codewhale_protocol::fleet::{FleetHostSpec, FleetTaskBudget, FleetWorkspaceRequirements};
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn read_only_roles_report_the_narrowed_shell_they_actually_run_under() {
+        use crate::tools::subagent::FleetRole;
+        use crate::worker_profile::ShellPolicy;
+        let mut requested = WorkerRuntimeProfile {
+            shell: ShellPolicy::Full,
+            ..WorkerRuntimeProfile::default()
+        };
+
+        for role in [FleetRole::Scout, FleetRole::Reviewer, FleetRole::Planner] {
+            let effective = effective_runtime_profile_for_role(&role, &requested);
+            assert_eq!(effective.shell, ShellPolicy::ReadOnly, "{role:?}");
+            assert_eq!(
+                fleet_effective_permissions_from_runtime_profile(&effective, None).shell,
+                "read_only",
+                "{role:?}"
+            );
+        }
+        let worker = effective_runtime_profile_for_role(&FleetRole::Worker, &requested);
+        assert_eq!(worker.shell, ShellPolicy::Full);
+
+        // A role that was already narrower than read-only keeps its posture.
+        requested.shell = ShellPolicy::None;
+        assert_eq!(
+            effective_runtime_profile_for_role(&FleetRole::Scout, &requested).shell,
+            ShellPolicy::None
+        );
+    }
 
     #[test]
     fn worker_workspace_isolation_requires_linked_worktree_outside_manager() {
