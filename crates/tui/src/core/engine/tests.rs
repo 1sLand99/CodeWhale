@@ -18290,6 +18290,232 @@ async fn interactive_thinking_only_drop_preserves_nothing_and_never_claims_it_di
     );
 }
 
+/// A model client that answers with ONLY hidden reasoning and a clean stop for
+/// its first `reasoning_only` calls, then a real text answer. No transport
+/// error: the stream completes normally but carries no sendable content — the
+/// reasoning-model failure mode #5546-adjacent that used to dead-end the turn.
+struct ReasoningOnlyCleanFinishModelClient {
+    calls: std::sync::atomic::AtomicUsize,
+    reasoning_only: usize,
+    stop_reason: &'static str,
+}
+
+#[async_trait::async_trait]
+impl crate::core::model_client::ModelClient for ReasoningOnlyCleanFinishModelClient {
+    fn provider_name(&self) -> &str {
+        "reasoning-only"
+    }
+
+    fn model(&self) -> &str {
+        "local-model"
+    }
+
+    async fn create_message(
+        &self,
+        _request: crate::models::MessageRequest,
+    ) -> anyhow::Result<crate::models::MessageResponse> {
+        anyhow::bail!("reasoning-only recovery uses the streaming model boundary")
+    }
+
+    async fn create_message_stream(
+        &self,
+        _request: crate::models::MessageRequest,
+    ) -> anyhow::Result<crate::llm_client::StreamEventBox> {
+        use crate::llm_client::mock::canned;
+        let call = self
+            .calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            .saturating_add(1);
+        if call <= self.reasoning_only {
+            // A protocol-complete response that opened and closed only a
+            // thinking block: no text, no tool call, and a clean stop reason.
+            let events: Vec<anyhow::Result<crate::models::StreamEvent>> = vec![
+                Ok(canned::message_start("reasoning_only_msg")),
+                Ok(StreamEvent::ContentBlockStart {
+                    index: 0,
+                    content_block: crate::models::ContentBlockStart::Thinking {
+                        thinking: String::new(),
+                    },
+                }),
+                Ok(canned::thinking_delta(0, "reasoning with no final channel")),
+                Ok(canned::block_stop(0)),
+                Ok(canned::message_delta(self.stop_reason, None)),
+                Ok(canned::message_stop()),
+            ];
+            return Ok(Box::pin(futures_util::stream::iter(events)));
+        }
+        let events = canned::simple_text_turn("the recovered answer")
+            .into_iter()
+            .map(Ok);
+        Ok(Box::pin(futures_util::stream::iter(events)))
+    }
+
+    async fn health_check(&self) -> anyhow::Result<bool> {
+        Ok(true)
+    }
+}
+
+async fn run_reasoning_only_turn(
+    reasoning_only: usize,
+    stop_reason: &'static str,
+) -> (
+    std::sync::Arc<ReasoningOnlyCleanFinishModelClient>,
+    Vec<Event>,
+) {
+    let model = std::sync::Arc::new(ReasoningOnlyCleanFinishModelClient {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        reasoning_only,
+        stop_reason,
+    });
+    let client: crate::core::model_client::SharedModelClient = model.clone();
+    let config = Config::default();
+    let engine_config = EngineConfig {
+        max_steps: 1,
+        snapshots_enabled: false,
+        subagents_enabled: false,
+        terminal_chrome_enabled: true,
+        ..EngineConfig::default()
+    };
+    let (engine, handle) = Engine::new_with_model_client(engine_config, &config, client);
+    let run_task = tokio::spawn(engine.run());
+    handle
+        .send(Op::SendMessage {
+            content: "solve the task".to_string(),
+            mode: AppMode::Agent,
+            route: resolved_route_for_test(&config, crate::config::DEFAULT_TEXT_MODEL),
+            compaction: Box::new(CompactionConfig::default()),
+            goal_objective: None,
+            goal_token_budget: None,
+            goal_status: crate::tools::goal::GoalStatus::Active,
+            reasoning_effort: None,
+            reasoning_effort_auto: false,
+            auto_model: false,
+            allow_shell: false,
+            trust_mode: false,
+            auto_approve: false,
+            approval_mode: crate::tui::approval::ApprovalMode::Suggest,
+            translation_enabled: false,
+            allowed_tools: None,
+            dynamic_tools: Vec::new(),
+            hook_executor: None,
+            verbosity: None,
+            provenance: UserInputProvenance::ExternalUser,
+        })
+        .await
+        .expect("send reasoning-only turn");
+    let mut events = Vec::new();
+    loop {
+        let event = tokio::time::timeout(model_turn_event_timeout(), async {
+            handle.rx_event.write().await.recv().await
+        })
+        .await
+        .expect("reasoning-only event timeout")
+        .expect("reasoning-only event");
+        let terminal = matches!(event, Event::TurnComplete { .. });
+        events.push(event);
+        if terminal {
+            break;
+        }
+    }
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    run_task.await.expect("engine task");
+    (model, events)
+}
+
+/// A reasoning-only clean-stop response is re-requested (cheap: the prefix is
+/// cached) and the turn recovers with the real answer instead of dead-ending.
+#[tokio::test]
+async fn reasoning_only_clean_stop_is_retried_and_recovers() {
+    let (model, events) = run_reasoning_only_turn(1, "stop").await;
+
+    assert_eq!(
+        model.calls.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "the reasoning-only response must be re-requested exactly once"
+    );
+    let status = events
+        .iter()
+        .find_map(|event| match event {
+            Event::TurnComplete { status, .. } => Some(*status),
+            _ => None,
+        })
+        .expect("terminal TurnComplete");
+    assert_eq!(status, TurnOutcomeStatus::Completed);
+
+    let recovery = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::Status { message } if message.contains("re-requesting the answer") => {
+                Some(message.clone())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(recovery.len(), 1, "exactly one recovery notice: {events:?}");
+    assert!(
+        recovery[0].contains("(1/"),
+        "attempt announced: {recovery:?}"
+    );
+
+    // No hard failure surfaced.
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            Event::Error { envelope, .. } if envelope.message.contains("no answer or tool call")
+        )),
+        "a recovered turn must not surface the incomplete-response error: {events:?}"
+    );
+}
+
+/// An output-length stop is a real budget hit, not a transient — it must NOT
+/// be retried and must fail honestly.
+#[tokio::test]
+async fn reasoning_only_length_stop_fails_without_retry() {
+    let (model, events) = run_reasoning_only_turn(1, "length").await;
+
+    assert_eq!(
+        model.calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "a length stop must not be retried"
+    );
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            Event::Status { message } if message.contains("re-requesting the answer")
+        )),
+        "a length stop must not announce a retry: {events:?}"
+    );
+    let status = events
+        .iter()
+        .find_map(|event| match event {
+            Event::TurnComplete { status, .. } => Some(*status),
+            _ => None,
+        })
+        .expect("terminal TurnComplete");
+    assert_eq!(status, TurnOutcomeStatus::Failed);
+}
+
+/// A model that only ever returns reasoning is bounded: it retries up to the
+/// ceiling and then fails honestly rather than looping forever.
+#[tokio::test]
+async fn reasoning_only_forever_is_bounded_then_fails() {
+    let (model, events) = run_reasoning_only_turn(usize::MAX, "stop").await;
+
+    assert_eq!(
+        model.calls.load(std::sync::atomic::Ordering::SeqCst),
+        1 + super::MAX_REASONING_ONLY_REPROMPTS as usize,
+        "reasoning-only retries are bounded by MAX_REASONING_ONLY_REPROMPTS"
+    );
+    let status = events
+        .iter()
+        .find_map(|event| match event {
+            Event::TurnComplete { status, .. } => Some(*status),
+            _ => None,
+        })
+        .expect("terminal TurnComplete");
+    assert_eq!(status, TurnOutcomeStatus::Failed);
+}
+
 #[tokio::test]
 async fn headless_turn_fails_with_real_error_after_network_drop_budget_exhausted() {
     let (model, events) =

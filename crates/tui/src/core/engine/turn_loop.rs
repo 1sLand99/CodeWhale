@@ -606,6 +606,14 @@ impl Engine {
         // across model steps so 3 consecutive empty blocks end the turn, not
         // just 3 blocks inside one message.
         let mut consecutive_empty_repl_rounds: u32 = 0;
+        // Turn-scoped budget for reasoning-only recovery. Some reasoning models
+        // (and OpenAI-shim routes) close a turn after emitting only hidden
+        // reasoning — a protocol-complete but answerless response that reaches
+        // the failure tail with `stream_errors == 0`, so the transport resume
+        // path above never sees it. A clean stop there is almost always
+        // transient; re-request a bounded number of times (the prefix is
+        // cached, so each retry is cheap) before surfacing a hard failure.
+        let mut reasoning_only_reprompts: u32 = 0;
         // Outer stream-retry budget: when the chunked-transfer connection
         // dies mid-stream and either nothing useful was streamed (#103
         // Phase 3), the host slept mid-turn (#2990), or a host hit a
@@ -1973,6 +1981,39 @@ impl Engine {
                         )))
                         .await;
                     turn.next_step();
+                    continue;
+                }
+
+                if no_sendable_assistant_content
+                    && has_provider_reasoning
+                    && should_fail_no_sendable_content(
+                        tool_uses.is_empty(),
+                        turn_error.is_none(),
+                        self.cancel_token.is_cancelled(),
+                        !pending_steers.is_empty(),
+                        false,
+                    )
+                    && !stop_reason_is_output_limit(stop_reason.as_deref())
+                    && reasoning_only_reprompts < MAX_REASONING_ONLY_REPROMPTS
+                {
+                    // Reasoning-only, clean stop: recover instead of dead-ending
+                    // the turn. Nothing was persisted for this response (a bare
+                    // Thinking block is not sendable), so re-issuing the request
+                    // is an exact cached-prefix retry — no synthetic message,
+                    // no prefix churn. An output-length stop is excluded above
+                    // because retrying would only reproduce it.
+                    reasoning_only_reprompts += 1;
+                    let attempt = reasoning_only_reprompts;
+                    crate::logging::warn(format!(
+                        "Model returned only reasoning with no answer or tool call (attempt {attempt}/{MAX_REASONING_ONLY_REPROMPTS}); re-requesting the answer"
+                    ));
+                    let _ = self
+                        .tx_event
+                        .send(Event::status(format!(
+                            "Model returned only reasoning; re-requesting the answer ({attempt}/{MAX_REASONING_ONLY_REPROMPTS})"
+                        )))
+                        .await;
+                    turn_error = None;
                     continue;
                 }
 
@@ -5122,6 +5163,31 @@ fn resolve_tool_definition<'a>(
 /// point the turn truly ends; emitting it earlier (at the persist site) would
 /// show a spurious terminal error immediately before the turn resumed for a
 /// steer or a sub-agent completion.
+/// Ceiling on reasoning-only auto re-requests within a single turn. A reasoning
+/// model that answers with only hidden reasoning is recovered up to this many
+/// times before the turn fails honestly; the prefix is cached, so each retry is
+/// cheap, and the bound keeps a persistently-answerless model from looping.
+pub(super) const MAX_REASONING_ONLY_REPROMPTS: u32 = 2;
+
+/// Whether a provider stop reason names an output-length cap. Re-requesting
+/// after one only reproduces it, so those fail honestly (the user needs a
+/// larger max-tokens or a shorter turn) rather than retry.
+fn stop_reason_is_output_limit(stop_reason: Option<&str>) -> bool {
+    matches!(
+        stop_reason
+            .map(|reason| reason.trim().to_ascii_lowercase())
+            .as_deref(),
+        Some(
+            "length"
+                | "max_tokens"
+                | "max_output_tokens"
+                | "model_length"
+                | "output_limit"
+                | "max_completion_tokens"
+        )
+    )
+}
+
 fn should_fail_no_sendable_content(
     tool_uses_empty: bool,
     turn_error_is_none: bool,

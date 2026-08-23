@@ -110,6 +110,12 @@ item-level change record is retained below the categorized release highlights.
   Fleet / Member / Role / Model / Access / Saved consistently so a user can
   say "scout", "DeepSeek V4 Flash", or the member name and mean the same
   thing.
+- A reasoning model that returns only hidden reasoning and a clean stop (no
+  answer, no tool call) is now re-requested automatically up to twice before
+  the turn fails, instead of dead-ending with "the provider response was
+  incomplete." The retry reuses the cached prefix so it is cheap; an
+  output-length stop (`length`/`max_tokens`) is never retried, and a
+  persistently answerless model still fails honestly after the bound.
 - Model-bound tool results now use a credential-shaped redaction policy:
   only values that look like secrets (known prefixes, JWTs, bearer tokens,
   PEM private-key blocks, long opaque strings) are masked before a `read` or
