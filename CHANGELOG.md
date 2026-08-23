@@ -92,6 +92,32 @@ item-level change record is retained below the categorized release highlights.
   credential keys. Project and global bundle operations now load and validate
   the document for their actual scope in both directions, including a
   workspace whose document still lives under the legacy app directory.
+- `codewhale login` now means Codewhale account sign-in (the same browser
+  device flow as `codewhale account login`, with `--no-open` and
+  `--timeout-seconds`); provider API keys are configured exclusively through
+  `codewhale auth set --provider <provider>`, and the hidden legacy
+  `--api-key`/`--provider` flags redirect loudly instead of silently writing
+  a key.
+- Account sessions prefer the OS credential manager and now fall back
+  automatically to the private `0600` Codewhale secrets file on headless
+  hosts, SSH boxes, and containers; the `CODEWHALE_CLOUD_ALLOW_FILE_SESSION_STORE`
+  opt-in is deprecated and ignored.
+- `/update` gained a `Ctrl+Shift+U` install chord (catalogued in
+  `docs/KEYBINDINGS.md`, localized in all 15 packs) and a startup hint that
+  names the previous and current version on the first launch of a newer
+  build, pointing at `/change`.
+- Fleet product-model copy pass: the TUI, docs, and locale packs now use
+  Fleet / Member / Role / Model / Access / Saved consistently so a user can
+  say "scout", "DeepSeek V4 Flash", or the member name and mean the same
+  thing.
+- Model-bound tool results now use a credential-shaped redaction policy:
+  only values that look like secrets (known prefixes, JWTs, bearer tokens,
+  PEM private-key blocks, long opaque strings) are masked before a `read` or
+  shell result reaches the model, so code such as `password:
+  credentials?.password` or `"password-validator": "^5.3.0"` stays byte-exact
+  for edits and read-back. Exact configured credential values are still always
+  replaced, and logs/previews/exports keep the broad key-based scrubber. (#5546,
+  reported by @ronohara)
 - Terminal input shutdown no longer waits forever on a wedged TTY read,
   Windows launch receipts can atomically replace an existing record, and the
   complete `/status` report now follows the active locale without rewriting

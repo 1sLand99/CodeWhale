@@ -638,7 +638,10 @@ fn redact_model_bound_text(text: &str, exact_secret_values: &[String]) -> String
     for secret in exact_secret_values {
         redacted = redacted.replace(secret, codewhale_config::persistence::REDACTED);
     }
-    codewhale_config::persistence::redact_secrets(&redacted)
+    // Tool results feed exact-match edits, so only credential-shaped values
+    // are masked here; key-only hits (`password: credentials?.password`) stay
+    // byte-exact. Logs and previews keep the broad key-based scrubber.
+    codewhale_config::persistence::redact_model_bound_secrets(&redacted)
 }
 
 // === Helpers ===
@@ -6233,6 +6236,40 @@ mod tests {
                 )
             })
         }));
+    }
+
+    #[test]
+    fn model_bound_tool_results_keep_ordinary_code_byte_exact() {
+        // #5546: key-only hits in source files must reach the model unchanged
+        // so exact-match edits and read-back verification keep working.
+        let client = client_with_config_secret_sentinels();
+        let source = "\
+    \"jsonwebtoken\": \"^9.0.2\",
+      password: credentials?.password,
+    token = generate_verification_token()
+  secret: process.env.NEXTAUTH_SECRET!,
+{\"id\":1, \"password\": \"x\", \"language\": \"en\"}
+";
+        let prepared =
+            client.prepare_model_bound_request(request_with_tool_result(source.to_string()));
+        assert_eq!(tool_result_content(&prepared), source);
+
+        // A configured credential and a credential-shaped value are still hidden.
+        let leaking = format!(
+            "api_key = \"{}\"\nsession = \"{}\"\n",
+            CONFIG_SECRET_SENTINELS[0],
+            ["sk-", "abcdef1234567890abcdef"].concat()
+        );
+        let prepared = client.prepare_model_bound_request(request_with_tool_result(leaking));
+        let content = tool_result_content(&prepared);
+        assert!(!content.contains(CONFIG_SECRET_SENTINELS[0]));
+        assert!(!content.contains("abcdef1234567890abcdef"));
+        assert_eq!(
+            content
+                .matches(codewhale_config::persistence::REDACTED)
+                .count(),
+            2
+        );
     }
 
     #[test]
