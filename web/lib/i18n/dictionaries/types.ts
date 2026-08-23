@@ -62,6 +62,12 @@ export interface ChromeDict {
   /** Mobile-menu and masthead call to action, e.g. "Install →". */
   installCta: string;
 
+  /** Header account links to the Codewhale app (app.codewhale.net). */
+  authSignIn: string;
+  authRegister: string;
+  /** aria-label for the header account link group. */
+  authGroupAria: string;
+
   /** Wordmark seal glyph beside the masthead brand (components/seal.tsx). */
   wordmarkSeal: string;
   /** Wordmark strapline under the brand, e.g. "any model, on your machine". */

@@ -39,6 +39,10 @@ export const chrome: ChromeDict = {
 
   installCta: "Installieren →",
 
+  authSignIn: "Anmelden",
+  authRegister: "Registrieren",
+  authGroupAria: "Konto",
+
   wordmarkSeal: "深",
   wordmarkTag: "jedes Modell, auf deiner Maschine",
 

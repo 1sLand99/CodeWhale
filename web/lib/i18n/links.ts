@@ -17,6 +17,11 @@ export const REPO_LICENSE_URL = `${REPO_URL}/blob/main/LICENSE`;
 /** Community chat. A brand name, so it is not a dictionary string. */
 export const DISCORD_URL = "https://discord.gg/37gfS3ksug";
 
+/** The hosted Codewhale app (account sign-in / sign-up). */
+export const APP_URL = "https://app.codewhale.net";
+export const APP_LOGIN_URL = `${APP_URL}/login`;
+export const APP_SIGNUP_URL = `${APP_URL}/signup`;
+
 /** A chrome link. `secondary` is the small bilingual companion label. */
 export interface ChromeLink {
   href: string;

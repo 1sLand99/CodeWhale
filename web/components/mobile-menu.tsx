@@ -10,6 +10,10 @@ export function MobileMenu({
   links,
   installHref,
   installLabel,
+  signInHref,
+  signInLabel,
+  registerHref,
+  registerLabel,
   openLabel,
   closeLabel,
   navAria,
@@ -17,6 +21,10 @@ export function MobileMenu({
   links: ChromeLink[];
   installHref: string;
   installLabel: string;
+  signInHref: string;
+  signInLabel: string;
+  registerHref: string;
+  registerLabel: string;
   openLabel: string;
   closeLabel: string;
   /** Accessible name for the dialog's navigation landmark. */
@@ -222,6 +230,22 @@ export function MobileMenu({
             >
               {installLabel}
             </Link>
+            <div className="mt-3 grid grid-cols-2 gap-3">
+              <Link
+                href={signInHref}
+                onClick={() => setOpen(false)}
+                className="block text-center px-5 py-3 hairline-t hairline-b hairline-l hairline-r font-mono text-sm uppercase tracking-wider hover:bg-paper-deep transition-colors"
+              >
+                {signInLabel}
+              </Link>
+              <Link
+                href={registerHref}
+                onClick={() => setOpen(false)}
+                className="block text-center px-5 py-3 hairline-t hairline-b hairline-l hairline-r font-mono text-sm uppercase tracking-wider text-indigo hover:bg-paper-deep transition-colors"
+              >
+                {registerLabel}
+              </Link>
+            </div>
           </nav>
         </div>, document.body)}
     </>

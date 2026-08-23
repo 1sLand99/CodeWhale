@@ -30,6 +30,10 @@ export const chrome: ChromeDict = {
 
   installCta: "安装 →",
 
+  authSignIn: "登录",
+  authRegister: "注册",
+  authGroupAria: "账户",
+
   wordmarkSeal: "深",
   wordmarkTag: "任意模型，本机运行",
 

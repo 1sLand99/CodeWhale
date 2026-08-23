@@ -528,6 +528,43 @@ mark.search-highlight {
   color: var(--paper);
 }
 
+.paper-auth {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.paper-auth-signin,
+.paper-auth-register {
+  align-items: center;
+  min-height: 2.25rem;
+  padding: 0.35rem 0.75rem;
+  font-family: var(--font-mono), "JetBrains Mono", monospace;
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  transition: background-color 150ms ease, color 150ms ease, border-color 150ms ease;
+}
+
+.paper-auth-signin {
+  color: var(--ink);
+}
+
+.paper-auth-signin:hover {
+  color: var(--indigo);
+}
+
+.paper-auth-register {
+  color: var(--indigo);
+  border: 1px solid var(--indigo);
+}
+
+.paper-auth-register:hover {
+  background: var(--indigo);
+  color: var(--paper);
+}
+
 .site-nav-actions {
   display: flex;
   flex-shrink: 0;
