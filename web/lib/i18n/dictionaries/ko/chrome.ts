@@ -42,6 +42,10 @@ export const chrome: ChromeDict = {
 
   installCta: "설치 →",
 
+  authSignIn: "로그인",
+  authRegister: "회원가입",
+  authGroupAria: "계정",
+
   wordmarkSeal: "深",
   wordmarkTag: "어떤 모델이든, 당신의 머신에서",
 

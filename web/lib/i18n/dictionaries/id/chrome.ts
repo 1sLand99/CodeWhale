@@ -38,6 +38,10 @@ export const chrome: ChromeDict = {
 
   installCta: "Instal →",
 
+  authSignIn: "Masuk",
+  authRegister: "Daftar",
+  authGroupAria: "Akun",
+
   wordmarkSeal: "深",
   wordmarkTag: "model apa pun, di mesin Anda",
 

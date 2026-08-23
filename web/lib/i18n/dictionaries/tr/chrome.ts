@@ -36,6 +36,10 @@ export const chrome: ChromeDict = {
 
   installCta: "Kur →",
 
+  authSignIn: "Giriş yap",
+  authRegister: "Kayıt ol",
+  authGroupAria: "Hesap",
+
   wordmarkSeal: "深",
   wordmarkTag: "istediğin model, senin makinen",
 
