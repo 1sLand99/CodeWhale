@@ -464,7 +464,8 @@ jobs:
     # "Test (windows-latest)" derive from job name + matrix.os and are
     # independent of runs-on. For light changes the macOS/Windows legs only
     # echo a skip line, so run them on ubuntu instead of queueing for scarce
-    # macOS/Windows runners. Heavy changes use the real matrix OS as before.
+    # macOS/Windows runners. Heavy pull requests run the Linux lane directly;
+    # non-PR release/main pushes use CNB for Linux.
     # The ternary is safe: matrix.os is always a non-empty literal, so
     # runs-on can never evaluate to empty.
     timeout-minutes: 90
@@ -474,15 +475,15 @@ jobs:
       # other one. We need both conclusions to diagnose and release safely.
       fail-fast: false
       matrix:
-        # Linux workspace tests moved to CNB; GitHub keeps the platform
-        # coverage CNB cannot provide.
+        # Linux workspace tests run directly for pull requests. CNB remains
+        # the Linux lane for non-PR release/main pushes.
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - name: Skip tests for light change
         if: needs.changes.outputs.heavy != 'true'
         run: echo "No executable Rust changes detected; preserving required Test context."
       - uses: actions/checkout@v7
-        if: needs.changes.outputs.heavy == 'true' && (matrix.os != 'ubuntu-latest' || github.event_name == 'workflow_dispatch')
+        if: needs.changes.outputs.heavy == 'true' && (matrix.os != 'ubuntu-latest' || github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request')
       - name: Test Windows installer PATH helper
         if: needs.changes.outputs.heavy == 'true' && matrix.os == 'windows-latest'
         shell: pwsh
@@ -519,20 +520,20 @@ jobs:
         shell: pwsh
         run: ./scripts/installer/installer-path-regression.tests.ps1 -AllowUserPathMutation
       - uses: dtolnay/rust-toolchain@stable
-        if: needs.changes.outputs.heavy == 'true' && (matrix.os != 'ubuntu-latest' || github.event_name == 'workflow_dispatch')
+        if: needs.changes.outputs.heavy == 'true' && (matrix.os != 'ubuntu-latest' || github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request')
       - uses: mozilla-actions/sccache-action@v0.0.11
         id: sccache
         continue-on-error: true
-        if: needs.changes.outputs.heavy == 'true' && (matrix.os != 'ubuntu-latest' || github.event_name == 'workflow_dispatch')
+        if: needs.changes.outputs.heavy == 'true' && (matrix.os != 'ubuntu-latest' || github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request')
       - name: Enable sccache
-        if: needs.changes.outputs.heavy == 'true' && (matrix.os != 'ubuntu-latest' || github.event_name == 'workflow_dispatch') && steps.sccache.outcome == 'success'
+        if: needs.changes.outputs.heavy == 'true' && (matrix.os != 'ubuntu-latest' || github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request') && steps.sccache.outcome == 'success'
         shell: bash
         run: |
           echo "SCCACHE_GHA_ENABLED=true" >> "${GITHUB_ENV}"
           echo "RUSTC_WRAPPER=sccache" >> "${GITHUB_ENV}"
           echo "SCCACHE_IGNORE_SERVER_IO_ERROR=1" >> "${GITHUB_ENV}"
       - name: Install Linux system dependencies
-        if: needs.changes.outputs.heavy == 'true' && matrix.os == 'ubuntu-latest' && github.event_name == 'workflow_dispatch'
+        if: needs.changes.outputs.heavy == 'true' && matrix.os == 'ubuntu-latest' && (github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request')
         run: |
           for i in 1 2 3 4 5; do
             sudo apt-get update && break
@@ -541,12 +542,12 @@ jobs:
           done
           sudo apt-get install -y libdbus-1-dev pkg-config
       - uses: Swatinem/rust-cache@v2
-        if: needs.changes.outputs.heavy == 'true' && (matrix.os != 'ubuntu-latest' || github.event_name == 'workflow_dispatch')
+        if: needs.changes.outputs.heavy == 'true' && (matrix.os != 'ubuntu-latest' || github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request')
         with:
           cache-bin: false
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: taiki-e/install-action@nextest
-        if: needs.changes.outputs.heavy == 'true' && (matrix.os != 'ubuntu-latest' || github.event_name == 'workflow_dispatch')
+        if: needs.changes.outputs.heavy == 'true' && (matrix.os != 'ubuntu-latest' || github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request')
       - name: Run tests
         # Same test binaries as `cargo test`, run by cargo-nextest: one
         # process per test, all runner cores busy, slow tests named instead
@@ -554,7 +555,7 @@ jobs:
         # binary and bounds the integration binary that spawns the real
         # executable; retries are off, so a flake is a red run, not a hidden
         # one. nextest does not run doctests — the next step keeps them.
-        if: needs.changes.outputs.heavy == 'true' && (matrix.os != 'ubuntu-latest' || github.event_name == 'workflow_dispatch')
+        if: needs.changes.outputs.heavy == 'true' && (matrix.os != 'ubuntu-latest' || github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request')
         run: cargo nextest run --workspace --all-features --locked --profile ci
         env:
           # Give test threads the stack the product gives itself. main.rs runs
@@ -571,7 +572,7 @@ jobs:
           # both libtest's per-test threads and tokio's workers.
           RUST_MIN_STACK: '16777216'
       - name: Run doctests
-        if: needs.changes.outputs.heavy == 'true' && (matrix.os != 'ubuntu-latest' || github.event_name == 'workflow_dispatch')
+        if: needs.changes.outputs.heavy == 'true' && (matrix.os != 'ubuntu-latest' || github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request')
         run: cargo test --workspace --all-features --locked --doc
         env:
           RUST_MIN_STACK: '16777216'
@@ -582,7 +583,7 @@ jobs:
         if: needs.changes.outputs.heavy == 'true' && matrix.os == 'macos-latest'
         run: python3 scripts/check-persistence-backlog-budget.py
       - name: Lockfile drift guard
-        if: needs.changes.outputs.heavy == 'true' && (matrix.os != 'ubuntu-latest' || github.event_name == 'workflow_dispatch')
+        if: needs.changes.outputs.heavy == 'true' && (matrix.os != 'ubuntu-latest' || github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request')
         run: git diff --exit-code -- Cargo.lock
       - name: Run Offline Eval Harness
         # The eval harness is OS-independent prompt/composition checking;
@@ -592,13 +593,13 @@ jobs:
         if: needs.changes.outputs.heavy == 'true' && matrix.os == 'macos-latest'
         run: cargo run -p codewhale-tui --all-features -- eval
       - name: sccache stats
-        if: needs.changes.outputs.heavy == 'true' && (matrix.os != 'ubuntu-latest' || github.event_name == 'workflow_dispatch') && steps.sccache.outcome == 'success'
+        if: needs.changes.outputs.heavy == 'true' && (matrix.os != 'ubuntu-latest' || github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request') && steps.sccache.outcome == 'success'
         continue-on-error: true
         shell: bash
         run: sccache --show-stats
-      - name: Linux test location
-        if: needs.changes.outputs.heavy == 'true' && matrix.os == 'ubuntu-latest' && github.event_name != 'workflow_dispatch'
-        run: echo "Linux workspace tests run on CNB for mirrored first-party branches."
+      - name: Linux test location (CNB)
+        if: needs.changes.outputs.heavy == 'true' && matrix.os == 'ubuntu-latest' && github.event_name != 'workflow_dispatch' && github.event_name != 'pull_request'
+        run: echo "Linux workspace tests run on CNB for non-PR release/main pushes; pull requests run directly on Ubuntu."
 
   npm-wrapper-smoke:
     name: npm wrapper smoke
