@@ -5,6 +5,7 @@ use crate::artifacts::{ArtifactKind, ArtifactRecord};
 use serde_json::Value;
 
 use crate::fast_hash::FastHashMap;
+use crate::localization::{Locale, MessageId, tr};
 use crate::models::{ContentBlock, Message};
 
 /// Match the provider-wire budget so persisted/resumed history does not keep a
@@ -151,27 +152,33 @@ pub fn tool_output_status(messages: &[Message], artifacts: &[ArtifactRecord]) ->
     status
 }
 
-pub fn format_tool_output_status(status: &ToolOutputStatus) -> String {
+pub fn format_tool_output_status(status: &ToolOutputStatus, locale: Locale) -> String {
     let mut parts = Vec::new();
     if status.raw_large_count > 0 {
-        parts.push(format!(
-            "{} raw over cap (~{} chars) adding context pressure",
-            status.raw_large_count,
-            format_count(status.raw_large_chars)
-        ));
+        parts.push(
+            tr(locale, MessageId::StatusToolRawPressure)
+                .replace("{count}", &status.raw_large_count.to_string())
+                .replace("{chars}", &format_count(status.raw_large_chars)),
+        );
     }
     if status.receipt_count > 0 {
-        parts.push(format!("{} compact receipt(s)", status.receipt_count));
+        parts.push(
+            tr(locale, MessageId::StatusToolCompactReceipts)
+                .replace("{count}", &status.receipt_count.to_string()),
+        );
     }
     if status.artifact_count > 0 {
-        parts.push(format!(
-            "{} artifact(s), {} stored",
-            status.artifact_count,
-            crate::artifacts::format_byte_size(status.artifact_bytes)
-        ));
+        parts.push(
+            tr(locale, MessageId::StatusToolArtifacts)
+                .replace("{count}", &status.artifact_count.to_string())
+                .replace(
+                    "{bytes}",
+                    &crate::artifacts::format_byte_size(status.artifact_bytes),
+                ),
+        );
     }
     if parts.is_empty() {
-        "no large outputs tracked".to_string()
+        tr(locale, MessageId::StatusToolNone).into_owned()
     } else {
         parts.join("; ")
     }
@@ -303,6 +310,7 @@ fn format_count(value: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    use crate::models::Role;
     use std::path::{Path, PathBuf};
 
     use super::*;
@@ -311,7 +319,7 @@ mod tests {
 
     fn tool_use_message(id: &str, name: &str, input: Value) -> Message {
         Message {
-            role: "assistant".to_string(),
+            role: Role::Assistant,
             content: vec![ContentBlock::ToolUse {
                 id: id.to_string(),
                 name: name.to_string(),
@@ -324,7 +332,7 @@ mod tests {
 
     fn tool_result_message(id: &str, content: &str) -> Message {
         Message {
-            role: "user".to_string(),
+            role: Role::User,
             content: vec![ContentBlock::ToolResult {
                 tool_use_id: id.to_string(),
                 content: content.to_string(),
@@ -436,7 +444,7 @@ mod tests {
         assert_eq!(status.receipt_count, 1);
         assert_eq!(status.artifact_count, 1);
 
-        let rendered = format_tool_output_status(&status);
+        let rendered = format_tool_output_status(&status, Locale::En);
         assert!(rendered.contains("raw over cap"));
         assert!(rendered.contains("compact receipt"));
         assert!(rendered.contains("artifact"));

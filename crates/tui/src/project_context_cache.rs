@@ -61,7 +61,11 @@ pub(crate) fn store(key: CacheKey, value: ProjectContext) {
     });
 }
 
-#[cfg(test)]
+/// Drop every cached entry.
+///
+/// Used by tests, and by `set_foreign_instruction_imports`: changing which
+/// foreign instruction formats are imported changes what the loader would
+/// return for an otherwise-unchanged workspace, so the cache cannot survive it.
 pub(crate) fn clear() {
     CACHE.with(|cache| {
         let mut cache = cache.borrow_mut();
@@ -253,6 +257,60 @@ mod tests {
         assert_ne!(
             before, after,
             "cache key must change when rules file is added"
+        );
+    }
+
+    #[test]
+    fn signature_tracks_foreign_fragment_add_change_and_remove() {
+        let workspace = tempdir().expect("workspace");
+        let home = tempdir().expect("home");
+        let cursor_rules = workspace.path().join(".cursor/rules");
+        fs::create_dir_all(cursor_rules.join("nested")).expect("mkdir cursor rules");
+
+        let before = compute_cache_key(workspace.path(), Some(home.path()));
+
+        // Files the bounded fragment loader cannot select must not churn the
+        // project-context cache.
+        fs::write(cursor_rules.join("settings.json"), "{}").expect("write ignored settings");
+        let ignored = compute_cache_key(workspace.path(), Some(home.path()));
+        assert_eq!(before, ignored, "non-Markdown fragment files are ignored");
+
+        let rule = cursor_rules.join("nested/law.md");
+        fs::write(&rule, "alpha").expect("write cursor rule");
+        let added = compute_cache_key(workspace.path(), Some(home.path()));
+        assert_ne!(ignored, added, "adding a loadable fragment must invalidate");
+
+        fs::write(&rule, "bravo").expect("change cursor rule");
+        let changed = compute_cache_key(workspace.path(), Some(home.path()));
+        assert_ne!(added, changed, "changing a fragment must invalidate");
+
+        fs::remove_file(&rule).expect("remove cursor rule");
+        let removed = compute_cache_key(workspace.path(), Some(home.path()));
+        assert_eq!(
+            ignored, removed,
+            "removing the fragment restores the prior key"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn signature_does_not_follow_symlinked_foreign_fragment_directories() {
+        use std::os::unix::fs::symlink;
+
+        let workspace = tempdir().expect("workspace");
+        let home = tempdir().expect("home");
+        let outside = tempdir().expect("outside");
+        fs::write(outside.path().join("law.md"), "outside law").expect("write outside rule");
+        fs::create_dir_all(workspace.path().join(".cursor")).expect("mkdir cursor");
+
+        let before = compute_cache_key(workspace.path(), Some(home.path()));
+        symlink(outside.path(), workspace.path().join(".cursor/rules"))
+            .expect("symlink outside rules");
+        let after = compute_cache_key(workspace.path(), Some(home.path()));
+
+        assert_eq!(
+            before, after,
+            "cache fingerprinting must not read through a rejected fragment-directory symlink"
         );
     }
 }
