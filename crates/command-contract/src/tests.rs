@@ -891,4 +891,3 @@ fn envelope_rejects_duplicate_memory_slot_deterministically() {
     }));
     assert!(result.is_err(), "duplicate memory slot must assert");
 }
-}

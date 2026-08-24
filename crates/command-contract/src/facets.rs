@@ -338,4 +338,3 @@ pub trait CommandMemoryContext {
     /// Delete the given workspace scope; workspace path is the first argument.
     fn delete_workspace(&self, workspace: &Path) -> Result<MemoryDelete, String>;
 }
-}
