@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Heavy pull requests now run the real Linux workspace nextest, doctest, and
+  lockfile lanes directly on GitHub Actions instead of reporting a green
+  placeholder while waiting for a branch-specific CNB mirror (#5547).
+
 ## [0.9.11] - 2026-08-22
 
 Codewhale v0.9.11 tightens the long-running agent loop, makes workflow
