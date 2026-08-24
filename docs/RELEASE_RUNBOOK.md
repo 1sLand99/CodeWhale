@@ -445,7 +445,7 @@ for that version — bump to the next patch instead.
 - **npm:** the OIDC job publishes only if the npmjs.com Trusted Publisher for
   `Hmbown` / `CodeWhale` / workflow `release.yml` / blank environment is
   configured. Missing config → the `npm` job fails `E404 No match found`. Fix
-  the binding (or use the manual WebAuthn recovery below), then re-run the
+  the binding (or use the manual WebAuthn recovery above), then re-run the
   failed `npm` job: `gh run rerun <release-run-id> --failed`.
 
 - User-facing rollback:
