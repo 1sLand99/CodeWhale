@@ -3712,6 +3712,8 @@ async fn started_nonretryable_continuation_failure_blocks_goal_with_bounded_reas
 
 #[tokio::test]
 async fn host_managed_engine_does_not_self_dispatch_goal_continuation() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
     let mut custom = HashMap::new();
     custom.insert(
         "custom-a".to_string(),
@@ -3743,7 +3745,11 @@ async fn host_managed_engine_does_not_self_dispatch_goal_continuation() {
         runtime_services,
         ..EngineConfig::default()
     };
-    let (engine, handle) = Engine::new(engine_config, &config);
+    let mock = Arc::new(MockLlmClient::new(vec![canned::simple_text_turn(
+        "host-managed turn complete",
+    )]));
+    let client: crate::core::model_client::SharedModelClient = mock.clone();
+    let (engine, handle) = Engine::new_with_model_client(engine_config, &config, client);
     let run_task = tokio::spawn(engine.run());
 
     handle
@@ -3787,6 +3793,11 @@ async fn host_managed_engine_does_not_self_dispatch_goal_continuation() {
         }
     }
     assert_eq!(starts, 1);
+    assert_eq!(
+        mock.call_count(),
+        1,
+        "the host-owned turn runs exactly once"
+    );
     assert!(
         tokio::time::timeout(Duration::from_millis(200), async {
             handle.rx_event.write().await.recv().await
