@@ -3865,6 +3865,16 @@ fn enforce_readonly_workspace_operands(
             .split_once('=')
             .map_or(token.as_str(), |(_, value)| value)
             .trim();
+        // Windows `Path::canonicalize` returns verbatim device paths
+        // (`\\?\C:\...`), which `Path::is_absolute` does not recognize; without
+        // stripping the prefix the operand falls into the shape refusal and
+        // every canonical absolute read is denied on Windows. The stripped
+        // form resolves to the same location, so location-based judgement is
+        // unchanged. On unix hosts such spellings stay fail-closed below.
+        let value = value
+            .strip_prefix(r"\\?\")
+            .or_else(|| value.strip_prefix(r"\\.\"))
+            .unwrap_or(value);
         if value.is_empty() || value == "-" {
             continue;
         }

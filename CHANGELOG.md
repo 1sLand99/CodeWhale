@@ -30,6 +30,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   self-updater refuses to fight an Omarchy/package-manager installation.
 - Added a Fleet run-wide cost/token usage ceiling (R6, #5567): an accumulator
   plus admission gate and alert bound a whole run's spend across workers.
+- Added the real provider cache hit rate to `/context` (C3, DSH #3): the
+  token-weighted provider-reported rate from the same telemetry `/cache`
+  aggregates, plus an honest "no cache telemetry yet" state when nothing is
+  recorded.
 - Added per-step cost movement: `TurnUsage` receipts are priced as they land
   so the live cost surface moves during long agentic turns instead of only at
   `TurnComplete` (#5578), and the footer now honestly shows `cost: unknown`
