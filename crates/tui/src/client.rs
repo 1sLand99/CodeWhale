@@ -5567,8 +5567,11 @@ mod tests {
                 membership.get("max_completion_tokens").is_none(),
                 "{membership}"
             );
-            assert_eq!(membership["temperature"], json!(0.25), "{membership}");
-            assert_eq!(membership["top_p"], json!(0.75), "{membership}");
+            // Kimi Code's documented membership models own their sampling
+            // behavior: the exact first-party membership route strips generic
+            // controls (apply_kimi_code_fixed_sampling).
+            assert!(membership.get("temperature").is_none(), "{membership}");
+            assert!(membership.get("top_p").is_none(), "{membership}");
         }
 
         let provider_default = capture_moonshot_chat_request(
