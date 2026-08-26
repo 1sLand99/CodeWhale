@@ -170,6 +170,11 @@ pub fn context_window_for_model(model: &str) -> Option<u32> {
         return Some(window);
     }
     let lower = model.to_lowercase();
+    // Concrete model facts take precedence over vendor-agnostic suffix
+    // inference (`k3-256k` means 262,144 tokens, not 256,000).
+    if let Some(window) = known_context_window_for_model(&lower) {
+        return Some(window);
+    }
     if let Some(explicit_window) = explicit_context_window_hint(&lower) {
         return Some(explicit_window);
     }
@@ -184,9 +189,6 @@ pub fn context_window_for_model(model: &str) -> Option<u32> {
     }
     if is_openai_codex_model(&lower) {
         return Some(400_000);
-    }
-    if let Some(window) = known_context_window_for_model(&lower) {
-        return Some(window);
     }
     if lower.contains("claude") {
         return Some(200_000);
@@ -229,11 +231,9 @@ fn known_context_window_for_model(model_lower: &str) -> Option<u32> {
         "moonshotai/kimi-k3" | "kimi-k3" | "opencode-go/kimi-k3" => {
             Some(KIMI_K3_CONTEXT_WINDOW_TOKENS)
         }
-        // Bare `k3` is the Kimi Code membership route id whose context is
-        // plan-tier dependent (256K on lower tiers, up to 1M on higher ones)
-        // — keep the safe floor, and never fall through to the 128K legacy
-        // default.
-        "k3" => Some(KIMI_CODE_K3_CONTEXT_WINDOW_TOKENS),
+        // Bare `k3` is plan-tier dependent; `k3-256k` is fixed at 256 KiTok.
+        // Neither may fall through to the generic suffix heuristic.
+        "k3" | "k3-256k" => Some(KIMI_CODE_K3_CONTEXT_WINDOW_TOKENS),
         // `kimi-k2.7-code-highspeed` is the same model on the direct
         // platform's high-speed tier (262,144 context), per
         // https://platform.kimi.ai/docs/pricing/chat-k27-code (2026-08-17).
@@ -363,7 +363,7 @@ pub fn max_output_tokens_for_model(model: &str) -> Option<u32> {
         // default generation ceiling. The exact direct route's 1M maximum is
         // applied later with endpoint-aware provenance; membership and
         // neighboring routes must not inherit it.
-        "moonshotai/kimi-k3" | "kimi-k3" | "k3" | "opencode-go/kimi-k3" => {
+        "moonshotai/kimi-k3" | "kimi-k3" | "k3" | "k3-256k" | "opencode-go/kimi-k3" => {
             Some(KIMI_K3_DEFAULT_MAX_COMPLETION_TOKENS)
         }
         // Kimi K2.7 Code has a 256K context window but its documented default
@@ -1236,7 +1236,9 @@ mod tests {
         // keeps the documented safe floor — and must never fall through to
         // the 128K legacy default.
         assert_eq!(context_window_for_model("k3"), Some(262_144));
+        assert_eq!(context_window_for_model("k3-256k"), Some(262_144));
         assert_eq!(max_output_tokens_for_model("k3"), Some(131_072));
+        assert_eq!(max_output_tokens_for_model("k3-256k"), Some(131_072));
         assert_eq!(max_output_tokens_for_model("kimi-k3"), Some(131_072));
         // Never project max output as the context window.
         assert_ne!(

@@ -5920,23 +5920,21 @@ mod tests {
 
     #[tokio::test]
     async fn kimi_code_compaction_shape_omits_sampling_parameters_on_wire() {
-        let mut request = k3_request_fixture(
-            crate::config::KIMI_CODE_K3_MODEL,
-            None,
-            /*stream*/ false,
-        );
-        request.temperature = None;
-        request.top_p = None;
-        let body = capture_moonshot_chat_request_body(
-            crate::config::DEFAULT_KIMI_CODE_BASE_URL,
-            crate::config::KIMI_CODE_K3_MODEL,
-            request,
-        )
-        .await;
+        for model in crate::config::KIMI_CODE_MEMBERSHIP_MODELS {
+            let mut request = k3_request_fixture(model, None, /*stream*/ false);
+            request.temperature = Some(0.3);
+            request.top_p = Some(0.8);
+            let body = capture_moonshot_chat_request_body(
+                crate::config::DEFAULT_KIMI_CODE_BASE_URL,
+                model,
+                request,
+            )
+            .await;
 
-        assert_eq!(body["model"], crate::config::KIMI_CODE_K3_MODEL);
-        assert!(body.get("temperature").is_none(), "{body}");
-        assert!(body.get("top_p").is_none(), "{body}");
+            assert_eq!(body["model"], model);
+            assert!(body.get("temperature").is_none(), "{model}: {body}");
+            assert!(body.get("top_p").is_none(), "{model}: {body}");
+        }
     }
 
     /// v0.9.1 kimi-k3 dogfood report: the id the user selects has to be the id on the wire. A
