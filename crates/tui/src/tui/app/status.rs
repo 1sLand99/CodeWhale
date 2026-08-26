@@ -42,6 +42,15 @@ impl StatusToast {
     }
 }
 
+/// Whether a status message is one of the context-pressure messages emitted
+/// by the compaction flow. Keeping this predicate here lets dismissal,
+/// replacement, and compaction clearing share one identity check.
+pub(crate) fn is_context_pressure_status(text: &str) -> bool {
+    text.starts_with("Context building:")
+        || text.starts_with("Context high:")
+        || text.starts_with("Context critical:")
+}
+
 impl App {
     pub fn push_status_toast(
         &mut self,
@@ -90,13 +99,13 @@ impl App {
     /// Dismiss the persistent context-pressure warning without dismissing
     /// unrelated error/status chrome. Returns whether anything was cleared.
     pub fn dismiss_context_pressure_warning(&mut self) -> bool {
-        let is_context_pressure = self.sticky_status.as_ref().is_some_and(|status| {
-            status.text.starts_with("Context building:")
-                || status.text.starts_with("Context high:")
-                || status.text.starts_with("Context critical:")
-        });
+        let is_context_pressure = self
+            .sticky_status
+            .as_ref()
+            .is_some_and(|status| is_context_pressure_status(&status.text));
         if is_context_pressure {
             self.clear_sticky_status();
+            self.context_pressure_warning_dismissed = true;
             return true;
         }
         false
@@ -220,8 +229,14 @@ impl App {
         let now = Instant::now();
         self.prune_expired_status_toasts(now);
 
-        self.sticky_status
-            .clone()
-            .or_else(|| self.status_toasts.back().cloned())
+        let sticky = self.sticky_status.clone();
+        let latest = self.status_toasts.back().cloned();
+        match (sticky, latest) {
+            (Some(sticky), Some(latest)) if is_context_pressure_status(&sticky.text) => {
+                Some(latest)
+            }
+            (Some(sticky), _) => Some(sticky),
+            (None, latest) => latest,
+        }
     }
 }

@@ -204,10 +204,11 @@ pub(crate) fn apply_compaction_started(app: &mut App, id: String, auto: bool) {
     if app
         .sticky_status
         .as_ref()
-        .is_some_and(|status| is_context_pressure_status(&status.text))
+        .is_some_and(|status| crate::tui::app::is_context_pressure_status(&status.text))
     {
         app.clear_sticky_status();
     }
+    app.context_pressure_warning_dismissed = false;
     if !auto {
         app.manual_compaction_queued = false;
         if app.manual_compaction_id.as_deref() == Some(id.as_str()) {
@@ -373,6 +374,17 @@ pub(crate) fn maybe_warn_context_pressure_for_config(
     let warning_threshold = CONTEXT_SUGGEST_COMPACT_THRESHOLD_PERCENT.min(configured_threshold);
     let will_auto_compact = config.enabled && used.max(0) as usize >= config.token_threshold;
     if percent < warning_threshold && !will_auto_compact {
+        app.context_pressure_warning_dismissed = false;
+        if app
+            .sticky_status
+            .as_ref()
+            .is_some_and(|status| crate::tui::app::is_context_pressure_status(&status.text))
+        {
+            app.clear_sticky_status();
+        }
+        return;
+    }
+    if app.context_pressure_warning_dismissed {
         return;
     }
 
@@ -415,17 +427,11 @@ pub(crate) fn maybe_warn_context_pressure_for_config(
     );
 }
 
-fn is_context_pressure_status(text: &str) -> bool {
-    text.starts_with("Context building:")
-        || text.starts_with("Context high:")
-        || text.starts_with("Context critical:")
-}
-
 fn set_context_pressure_status(app: &mut App, text: String) {
     let can_replace = app
         .sticky_status
         .as_ref()
-        .is_none_or(|status| is_context_pressure_status(&status.text));
+        .is_none_or(|status| crate::tui::app::is_context_pressure_status(&status.text));
     if !can_replace {
         return;
     }

@@ -12837,10 +12837,21 @@ fn context_pressure_warning_survives_later_status_and_can_be_dismissed() {
     app.status_message = Some("A later transcript status".to_string());
     let visible = app
         .active_status_toast()
-        .expect("sticky warning remains active");
-    assert_eq!(visible.text, warning);
+        .expect("a later transient status is visible");
+    assert_eq!(visible.text, "A later transcript status");
+    assert_eq!(
+        app.sticky_status.as_ref().map(|toast| toast.text.as_str()),
+        Some(warning.as_str()),
+        "the persistent pressure warning remains behind the transient status"
+    );
     assert!(app.dismiss_context_pressure_warning());
     assert!(app.sticky_status.is_none());
+    app.status_message = None;
+    maybe_warn_context_pressure(&mut app);
+    assert!(
+        app.sticky_status.is_none(),
+        "explicit dismissal must not re-arm on the next pressure check"
+    );
 }
 
 #[test]

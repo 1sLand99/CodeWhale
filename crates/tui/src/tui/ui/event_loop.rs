@@ -4787,18 +4787,6 @@ pub(crate) async fn run_event_loop(
                     crate::tui::agent_focus::exit_focus(app);
                     continue;
                 }
-                // An idle operator can dismiss the persistent context warning
-                // without affecting unrelated error/status chrome. While a
-                // turn is active Esc retains its cancellation meaning.
-                KeyCode::Esc
-                    if !app.is_loading
-                        && app.input.is_empty()
-                        && !slash_menu_open
-                        && !mention_menu_open
-                        && app.dismiss_context_pressure_warning() =>
-                {
-                    continue;
-                }
                 // Vim composer mode: Esc from Insert/Visual → Normal.
                 // This arm runs before the generic Esc handler so Insert mode
                 // Esc doesn't accidentally cancel an in-flight request.
@@ -4810,6 +4798,18 @@ pub(crate) async fn run_event_loop(
                     continue;
                 }
                 KeyCode::Esc if app.clear_composer_attachment_selection() => {
+                    continue;
+                }
+                // An idle operator can dismiss the persistent context warning
+                // without affecting vim or attachment handling. While a turn
+                // is active Esc retains its cancellation meaning.
+                KeyCode::Esc
+                    if !app.is_loading
+                        && app.input.is_empty()
+                        && !slash_menu_open
+                        && !mention_menu_open
+                        && app.dismiss_context_pressure_warning() =>
+                {
                     continue;
                 }
                 KeyCode::Esc if mention_menu_open => {
