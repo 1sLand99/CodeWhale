@@ -6,7 +6,8 @@
 
 use crate::facets::{
     CommandCostContext, CommandMediaContext, CommandMemoryContext, CommandModePolicyContext,
-    CommandModelContext, CommandPresentationContext, CommandProjectContext, CommandSessionContext,
+    CommandModelContext, CommandPluginContext, CommandPresentationContext, CommandProjectContext,
+    CommandSessionContext,
     CommandSkillGroupContext, CommandSkillsContext, CommandSystemPromptContext,
     CommandWorkspaceContext,
 };
@@ -36,6 +37,8 @@ impl CommandCapabilities {
     pub const PROJECT: Self = Self(1 << 10);
     /// Skills-group host data (FEAT-022 D1).
     pub const SKILL_GROUP: Self = Self(1 << 11);
+    /// Plugin-group host data (FEAT-020 D1), appended after current main capabilities.
+    pub const PLUGIN: Self = Self(1 << 12);
 
     pub const fn union(self, other: Self) -> Self {
         Self(self.0 | other.0)
@@ -82,6 +85,7 @@ pub struct CommandContexts<'a> {
     memory: Option<&'a mut dyn CommandMemoryContext>,
     project: Option<&'a mut dyn CommandProjectContext>,
     skill_group: Option<&'a mut dyn CommandSkillGroupContext>,
+    plugin: Option<&'a mut dyn CommandPluginContext>,
 }
 
 /// Consumed envelope used when one handler needs several independent facets.
@@ -98,6 +102,7 @@ pub struct ContextParts<'a> {
     pub memory: Option<&'a mut dyn CommandMemoryContext>,
     pub project: Option<&'a mut dyn CommandProjectContext>,
     pub skill_group: Option<&'a mut dyn CommandSkillGroupContext>,
+    pub plugin: Option<&'a mut dyn CommandPluginContext>,
 }
 
 impl<'a> CommandContexts<'a> {
@@ -115,6 +120,7 @@ impl<'a> CommandContexts<'a> {
             memory: None,
             project: None,
             skill_group: None,
+            plugin: None,
         }
     }
 
@@ -132,6 +138,7 @@ impl<'a> CommandContexts<'a> {
             memory: self.memory,
             project: self.project,
             skill_group: self.skill_group,
+            plugin: self.plugin,
         }
     }
 
@@ -224,6 +231,14 @@ impl<'a> CommandContexts<'a> {
         assert!(
             self.skill_group.replace(value).is_none(),
             "skill-group facet already set"
+        );
+        self
+    }
+
+    pub fn with_plugin(mut self, value: &'a mut dyn CommandPluginContext) -> Self {
+        assert!(
+            self.plugin.replace(value).is_none(),
+            "plugin facet already set"
         );
         self
     }
