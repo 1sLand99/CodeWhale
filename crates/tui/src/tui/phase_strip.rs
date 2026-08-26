@@ -71,8 +71,8 @@ fn working_detail(app: &App, activity: LiveActivity) -> Option<String> {
 }
 
 fn session_cache_hit_percentage(app: &App) -> Option<u8> {
-    let hit = u64::from(app.session.total_cache_hit_tokens);
-    let miss = u64::from(app.session.total_cache_miss_tokens);
+    let hit = u64::from(app.session.displayed_total_cache_hit_tokens());
+    let miss = u64::from(app.session.displayed_total_cache_miss_tokens());
     let total = hit + miss;
     if total == 0 {
         return None;

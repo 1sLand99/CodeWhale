@@ -1131,9 +1131,11 @@ fn session_token_breakdown(app: &App) -> Option<Span<'static>> {
         Span::styled(
             format!(
                 "{} in · {} cch · {} out",
-                format_token_count_compact(u64::from(app.session.total_input_tokens)),
-                format_token_count_compact(u64::from(app.session.total_cache_hit_tokens)),
-                format_token_count_compact(u64::from(app.session.total_output_tokens)),
+                format_token_count_compact(u64::from(app.session.displayed_total_input_tokens())),
+                format_token_count_compact(u64::from(
+                    app.session.displayed_total_cache_hit_tokens(),
+                )),
+                format_token_count_compact(u64::from(app.session.displayed_total_output_tokens())),
             ),
             header_fg(app, ChromeInk::Info),
         )

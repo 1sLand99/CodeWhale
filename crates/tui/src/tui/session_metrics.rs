@@ -491,8 +491,8 @@ pub fn fit_to_width(
 /// Snapshot the live app state into the strip's inputs.
 #[must_use]
 pub fn snapshot_from_app(app: &crate::tui::app::App) -> MetricsSnapshot {
-    let hit = u64::from(app.session.total_cache_hit_tokens);
-    let miss = u64::from(app.session.total_cache_miss_tokens);
+    let hit = u64::from(app.session.displayed_total_cache_hit_tokens());
+    let miss = u64::from(app.session.displayed_total_cache_miss_tokens());
     let cache_hit_percent = (hit + miss > 0).then(|| {
         // Widen before adding so saturated counters never exceed 100%.
         u8::try_from((hit * 100 + (hit + miss) / 2) / (hit + miss)).unwrap_or(100)
@@ -505,7 +505,7 @@ pub fn snapshot_from_app(app: &crate::tui::app::App) -> MetricsSnapshot {
         ttft_avg: app.session_metrics.ttft_average(),
         tokens_per_second: app.session_metrics.tokens_per_second(),
         cache_hit_percent,
-        input_tokens: u64::from(app.session.total_input_tokens),
+        input_tokens: u64::from(app.session.displayed_total_input_tokens()),
     }
 }
 
