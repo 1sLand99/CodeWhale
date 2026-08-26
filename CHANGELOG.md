@@ -65,6 +65,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Session token totals now include display-only per-model-call deltas while a
+  turn is running, including input/output and cache-class counters; the
+  authoritative `TurnComplete` totals still reconcile exactly once (#5581).
 - Provider neutrality (#5588): model resolution of omitted/aliased models is
   now provider-relative, OpenAI-native defaults no longer route through
   another provider's table, CLI credentials stay provider-scoped, and NVIDIA

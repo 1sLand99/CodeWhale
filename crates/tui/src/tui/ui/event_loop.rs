@@ -1485,6 +1485,7 @@ pub(crate) async fn run_event_loop(
                         app.turn_started_at = Some(now);
                         app.turn_last_activity_at = Some(now);
                         app.session.last_output_throughput = None;
+                        app.session.clear_pending_turn_usage();
                         app.streaming_output_token_estimate = 0;
                         app.provider_wait_incident_logged = false;
                         // Discoverability hint for users who don't know how
@@ -1528,6 +1529,7 @@ pub(crate) async fn run_event_loop(
                         // high-water mark keeps the displayed total monotonic
                         // through the swap (#244).
                         app.clear_pending_turn_cost();
+                        app.session.clear_pending_turn_usage();
                         app.session.last_tool_catalog = tool_catalog;
                         // The endpoint this turn's client actually used. Kept
                         // separately from the mutable session/config surfaces
@@ -3000,6 +3002,7 @@ pub(crate) async fn run_event_loop(
                         if let Some(cost) = step_cost {
                             app.accrue_pending_turn_cost_estimate(cost);
                         }
+                        app.session.accrue_pending_turn_usage(&usage);
                     }
                     EngineEvent::AdvisoryNote { note, .. } => {
                         // Advisor background watcher note. Display as a

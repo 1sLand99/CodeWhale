@@ -1136,7 +1136,7 @@ pub(crate) fn context_panel_lines(app: &App, content_width: usize) -> Vec<Line<'
     // ── Token usage ──────────────────────────────────────────────
     // Context % is disclosed in the header; the sidebar keeps the raw token
     // counts for at-a-glance reference without duplicating the bar.
-    let total_tokens = app.session.total_conversation_tokens;
+    let total_tokens = app.session.displayed_total_conversation_tokens();
     let window = crate::route_budget::route_context_window_tokens(
         app.api_provider,
         app.effective_model_for_budget(),

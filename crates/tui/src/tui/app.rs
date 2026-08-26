@@ -24,7 +24,7 @@ use crate::core::authority::{ModeSessionPrefs, base_policy_for_mode};
 use crate::core::events::TurnRoute;
 use crate::hooks::{HookContext, HookEvent, HookExecutor, HookResult};
 use crate::localization::{Locale, MessageId, resolve_locale, tr};
-use crate::models::{Message, SystemPrompt, Tool};
+use crate::models::{Message, SystemPrompt, Tool, Usage};
 use crate::palette::{self, UiTheme};
 use crate::pricing::{CostCurrency, CostEstimate};
 use crate::resource_telemetry::TokenThroughput;
@@ -783,6 +783,14 @@ pub struct SessionState {
     /// `session_cost`. Never persisted.
     pub pending_turn_cost: f64,
     pub pending_turn_cost_cny: f64,
+    /// Display-only per-step token deltas for the active turn. These are
+    /// cleared at `TurnComplete` before authoritative cumulative totals land.
+    pub pending_turn_total_tokens: u32,
+    pub pending_turn_input_tokens: u32,
+    pub pending_turn_output_tokens: u32,
+    pub pending_turn_cache_hit_tokens: u32,
+    pub pending_turn_cache_miss_tokens: u32,
+    pub pending_turn_cache_write_tokens: u32,
     pub subagent_cost: f64,
     pub subagent_cost_cny: f64,
     /// Redacted provider-response identities already accrued. The same
@@ -968,6 +976,12 @@ impl Default for SessionState {
             session_cost_cny: 0.0,
             pending_turn_cost: 0.0,
             pending_turn_cost_cny: 0.0,
+            pending_turn_total_tokens: 0,
+            pending_turn_input_tokens: 0,
+            pending_turn_output_tokens: 0,
+            pending_turn_cache_hit_tokens: 0,
+            pending_turn_cache_miss_tokens: 0,
+            pending_turn_cache_write_tokens: 0,
             subagent_cost: 0.0,
             subagent_cost_cny: 0.0,
             subagent_usage_sources: HashSet::new(),
@@ -1016,7 +1030,84 @@ impl SessionState {
         self.total_cache_miss_tokens = 0;
         self.total_cache_write_tokens = 0;
         self.total_output_tokens = 0;
+        self.clear_pending_turn_usage();
         self.last_output_throughput = None;
+    }
+
+    /// Add one provider-reported model-call receipt to the display-only
+    /// in-flight ledger. The cache split mirrors the authoritative
+    /// `TurnComplete` accounting path.
+    pub fn accrue_pending_turn_usage(&mut self, usage: &Usage) {
+        self.pending_turn_total_tokens = self
+            .pending_turn_total_tokens
+            .saturating_add(usage.input_tokens.saturating_add(usage.output_tokens));
+        self.pending_turn_input_tokens = self
+            .pending_turn_input_tokens
+            .saturating_add(usage.input_tokens);
+        self.pending_turn_output_tokens = self
+            .pending_turn_output_tokens
+            .saturating_add(usage.output_tokens);
+        if usage.prompt_cache_hit_tokens.is_some()
+            || usage.prompt_cache_miss_tokens.is_some()
+            || usage.prompt_cache_write_tokens.is_some()
+        {
+            let classes = crate::pricing::token_usage_for_pricing(usage);
+            self.pending_turn_cache_hit_tokens = self
+                .pending_turn_cache_hit_tokens
+                .saturating_add(u32::try_from(classes.cache_read).unwrap_or(u32::MAX));
+            self.pending_turn_cache_miss_tokens = self
+                .pending_turn_cache_miss_tokens
+                .saturating_add(u32::try_from(classes.input).unwrap_or(u32::MAX));
+            self.pending_turn_cache_write_tokens = self
+                .pending_turn_cache_write_tokens
+                .saturating_add(u32::try_from(classes.cache_write).unwrap_or(u32::MAX));
+        }
+    }
+
+    /// Clear the active turn's display-only token deltas before the
+    /// authoritative cumulative usage is reconciled.
+    pub fn clear_pending_turn_usage(&mut self) {
+        self.pending_turn_total_tokens = 0;
+        self.pending_turn_input_tokens = 0;
+        self.pending_turn_output_tokens = 0;
+        self.pending_turn_cache_hit_tokens = 0;
+        self.pending_turn_cache_miss_tokens = 0;
+        self.pending_turn_cache_write_tokens = 0;
+    }
+
+    pub fn displayed_total_tokens(&self) -> u32 {
+        self.total_tokens
+            .saturating_add(self.pending_turn_total_tokens)
+    }
+
+    pub fn displayed_total_conversation_tokens(&self) -> u32 {
+        self.total_conversation_tokens
+            .saturating_add(self.pending_turn_total_tokens)
+    }
+
+    pub fn displayed_total_input_tokens(&self) -> u32 {
+        self.total_input_tokens
+            .saturating_add(self.pending_turn_input_tokens)
+    }
+
+    pub fn displayed_total_output_tokens(&self) -> u32 {
+        self.total_output_tokens
+            .saturating_add(self.pending_turn_output_tokens)
+    }
+
+    pub fn displayed_total_cache_hit_tokens(&self) -> u32 {
+        self.total_cache_hit_tokens
+            .saturating_add(self.pending_turn_cache_hit_tokens)
+    }
+
+    pub fn displayed_total_cache_miss_tokens(&self) -> u32 {
+        self.total_cache_miss_tokens
+            .saturating_add(self.pending_turn_cache_miss_tokens)
+    }
+
+    pub fn displayed_total_cache_write_tokens(&self) -> u32 {
+        self.total_cache_write_tokens
+            .saturating_add(self.pending_turn_cache_write_tokens)
     }
 }
 

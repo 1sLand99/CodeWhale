@@ -230,26 +230,39 @@ fn session_summary(app: &App) -> String {
 /// The session input/output split and the cumulative cache totals live only
 /// here; the per-turn figures they used to sit beside are `/tokens`.
 fn session_tokens(app: &App) -> String {
-    let cache =
-        if app.session.total_cache_hit_tokens == 0 && app.session.total_cache_miss_tokens == 0 {
-            tr(app.ui_locale, MessageId::StatusCacheNotReported).into_owned()
-        } else {
-            localized(
-                app.ui_locale,
-                MessageId::StatusCacheSummary,
-                &[
-                    ("{hit}", &app.session.total_cache_hit_tokens.to_string()),
-                    ("{miss}", &app.session.total_cache_miss_tokens.to_string()),
-                ],
-            )
-        };
+    let cache = if app.session.displayed_total_cache_hit_tokens() == 0
+        && app.session.displayed_total_cache_miss_tokens() == 0
+    {
+        tr(app.ui_locale, MessageId::StatusCacheNotReported).into_owned()
+    } else {
+        localized(
+            app.ui_locale,
+            MessageId::StatusCacheSummary,
+            &[
+                (
+                    "{hit}",
+                    &app.session.displayed_total_cache_hit_tokens().to_string(),
+                ),
+                (
+                    "{miss}",
+                    &app.session.displayed_total_cache_miss_tokens().to_string(),
+                ),
+            ],
+        )
+    };
     localized(
         app.ui_locale,
         MessageId::StatusSessionTokensSummary,
         &[
-            ("{input}", &app.session.total_input_tokens.to_string()),
-            ("{output}", &app.session.total_output_tokens.to_string()),
-            ("{total}", &app.session.total_tokens.to_string()),
+            (
+                "{input}",
+                &app.session.displayed_total_input_tokens().to_string(),
+            ),
+            (
+                "{output}",
+                &app.session.displayed_total_output_tokens().to_string(),
+            ),
+            ("{total}", &app.session.displayed_total_tokens().to_string()),
             ("{cache}", &cache),
         ],
     )
