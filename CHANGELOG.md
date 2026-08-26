@@ -65,6 +65,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Context-pressure warnings and critical alerts now remain visible in sticky UI
+  status until compaction or explicit dismissal, instead of disappearing into
+  scrolling turn metadata (#5620).
 - Session token totals now include display-only per-model-call deltas while a
   turn is running, including input/output and cache-class counters; the
   authoritative `TurnComplete` totals still reconcile exactly once (#5581).

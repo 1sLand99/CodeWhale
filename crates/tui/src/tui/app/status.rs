@@ -87,6 +87,21 @@ impl App {
         }
     }
 
+    /// Dismiss the persistent context-pressure warning without dismissing
+    /// unrelated error/status chrome. Returns whether anything was cleared.
+    pub fn dismiss_context_pressure_warning(&mut self) -> bool {
+        let is_context_pressure = self.sticky_status.as_ref().is_some_and(|status| {
+            status.text.starts_with("Context building:")
+                || status.text.starts_with("Context high:")
+                || status.text.starts_with("Context critical:")
+        });
+        if is_context_pressure {
+            self.clear_sticky_status();
+            return true;
+        }
+        false
+    }
+
     /// Drop sticky error chrome when the user resumes typing so a prior
     /// workflow/provider failure does not linger over the next draft.
     pub fn acknowledge_sticky_on_composer_activity(&mut self) {

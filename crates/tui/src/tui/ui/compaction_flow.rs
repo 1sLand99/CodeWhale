@@ -201,6 +201,13 @@ pub(crate) fn flush_deferred_manual_compaction(
 }
 
 pub(crate) fn apply_compaction_started(app: &mut App, id: String, auto: bool) {
+    if app
+        .sticky_status
+        .as_ref()
+        .is_some_and(|status| is_context_pressure_status(&status.text))
+    {
+        app.clear_sticky_status();
+    }
     if !auto {
         app.manual_compaction_queued = false;
         if app.manual_compaction_id.as_deref() == Some(id.as_str()) {
@@ -386,22 +393,47 @@ pub(crate) fn maybe_warn_context_pressure_for_config(
     };
 
     if percent >= CONTEXT_CRITICAL_THRESHOLD_PERCENT {
-        app.status_message = Some(format!(
-            "Context critical: {percent:.0}% ({used}/{max} tokens{window_note}). {recommendation}"
-        ));
+        set_context_pressure_status(
+            app,
+            format!(
+                "Context critical: {percent:.0}% ({used}/{max} tokens{window_note}). {recommendation}"
+            ),
+        );
         return;
     }
 
-    if app.status_message.is_none() {
-        let status_prefix = if percent >= CONTEXT_WARNING_THRESHOLD_PERCENT {
-            "Context high"
-        } else {
-            "Context building"
-        };
-        app.status_message = Some(format!(
+    let status_prefix = if percent >= CONTEXT_WARNING_THRESHOLD_PERCENT {
+        "Context high"
+    } else {
+        "Context building"
+    };
+    set_context_pressure_status(
+        app,
+        format!(
             "{status_prefix}: {percent:.0}% ({used}/{max} tokens{window_note}). {recommendation}"
-        ));
+        ),
+    );
+}
+
+fn is_context_pressure_status(text: &str) -> bool {
+    text.starts_with("Context building:")
+        || text.starts_with("Context high:")
+        || text.starts_with("Context critical:")
+}
+
+fn set_context_pressure_status(app: &mut App, text: String) {
+    let can_replace = app
+        .sticky_status
+        .as_ref()
+        .is_none_or(|status| is_context_pressure_status(&status.text));
+    if !can_replace {
+        return;
     }
+    app.status_message = Some(text.clone());
+    app.last_status_message_seen = Some(text.clone());
+    // No TTL: this warning stays visible until compaction or explicit Esc
+    // dismissal instead of being pushed out by later transcript activity.
+    app.set_sticky_status(text, StatusToastLevel::Warning, None);
 }
 
 #[cfg(test)]
