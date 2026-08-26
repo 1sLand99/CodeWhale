@@ -311,7 +311,7 @@ pub(super) fn escape_review_text(value: &str) -> String {
     escaped
 }
 
-pub(super) fn review_token(plugin: &LoadedPlugin) -> String {
+pub(crate) fn review_token(plugin: &LoadedPlugin) -> String {
     // One implementation lives on `LoadedPlugin`; the TUI command and the
     // Runtime API trust endpoint must agree byte-for-byte.
     plugin.review_token()
