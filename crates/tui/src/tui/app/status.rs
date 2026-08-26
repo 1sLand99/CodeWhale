@@ -22,6 +22,13 @@ pub struct StatusToast {
     pub level: StatusToastLevel,
     pub created_at: Instant,
     pub ttl_ms: Option<u64>,
+    pub(crate) kind: StatusToastKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StatusToastKind {
+    Ordinary,
+    ContextPressure(crate::context_budget::PressureLevel),
 }
 
 impl StatusToast {
@@ -32,6 +39,21 @@ impl StatusToast {
             level,
             created_at: Instant::now(),
             ttl_ms,
+            kind: StatusToastKind::Ordinary,
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn context_pressure(
+        text: impl Into<String>,
+        level: crate::context_budget::PressureLevel,
+    ) -> Self {
+        Self {
+            text: text.into(),
+            level: StatusToastLevel::Warning,
+            created_at: Instant::now(),
+            ttl_ms: None,
+            kind: StatusToastKind::ContextPressure(level),
         }
     }
 
@@ -40,15 +62,6 @@ impl StatusToast {
         self.ttl_ms
             .is_some_and(|ttl| now.duration_since(self.created_at).as_millis() >= u128::from(ttl))
     }
-}
-
-/// Whether a status message is one of the context-pressure messages emitted
-/// by the compaction flow. Keeping this predicate here lets dismissal,
-/// replacement, and compaction clearing share one identity check.
-pub(crate) fn is_context_pressure_status(text: &str) -> bool {
-    text.starts_with("Context building:")
-        || text.starts_with("Context high:")
-        || text.starts_with("Context critical:")
 }
 
 impl App {
@@ -102,10 +115,14 @@ impl App {
         let is_context_pressure = self
             .sticky_status
             .as_ref()
-            .is_some_and(|status| is_context_pressure_status(&status.text));
+            .is_some_and(|status| matches!(status.kind, StatusToastKind::ContextPressure(_)));
         if is_context_pressure {
+            if let Some(StatusToastKind::ContextPressure(level)) =
+                self.sticky_status.as_ref().map(|status| status.kind)
+            {
+                self.context_pressure_warning_dismissed = Some(level);
+            }
             self.clear_sticky_status();
-            self.context_pressure_warning_dismissed = true;
             return true;
         }
         false
@@ -232,7 +249,15 @@ impl App {
         let sticky = self.sticky_status.clone();
         let latest = self.status_toasts.back().cloned();
         match (sticky, latest) {
-            (Some(sticky), Some(latest)) if is_context_pressure_status(&sticky.text) => {
+            (Some(sticky), Some(latest))
+                if matches!(
+                    sticky.kind,
+                    StatusToastKind::ContextPressure(crate::context_budget::PressureLevel::High)
+                        | StatusToastKind::ContextPressure(
+                            crate::context_budget::PressureLevel::Medium
+                        )
+                ) =>
+            {
                 Some(latest)
             }
             (Some(sticky), _) => Some(sticky),

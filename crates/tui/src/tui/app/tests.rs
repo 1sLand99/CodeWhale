@@ -1921,6 +1921,40 @@ fn pending_turn_usage_moves_token_surfaces_without_double_counting() {
 }
 
 #[test]
+fn context_pressure_toast_kind_is_not_inferred_from_display_text() {
+    let mut app = App::new(test_options(false), &Config::default());
+    app.sticky_status = Some(StatusToast::new(
+        "Context high: 90%",
+        StatusToastLevel::Warning,
+        None,
+    ));
+    assert!(!app.dismiss_context_pressure_warning());
+    assert!(app.sticky_status.is_some());
+
+    app.sticky_status = Some(StatusToast::context_pressure(
+        "localized pressure warning",
+        crate::context_budget::PressureLevel::High,
+    ));
+    assert!(app.dismiss_context_pressure_warning());
+    assert!(app.sticky_status.is_none());
+}
+
+#[test]
+fn critical_context_pressure_remains_visible_over_transient_info_toasts() {
+    let mut app = App::new(test_options(false), &Config::default());
+    app.sticky_status = Some(StatusToast::context_pressure(
+        "Context critical: 95%",
+        crate::context_budget::PressureLevel::Critical,
+    ));
+    app.push_status_toast("Saved", StatusToastLevel::Info, None);
+
+    assert_eq!(
+        app.active_status_toast().map(|toast| toast.text),
+        Some("Context critical: 95%".to_string())
+    );
+}
+
+#[test]
 fn cny_display_falls_back_to_usd_for_usd_only_costs() {
     let mut app = App::new(test_options(false), &Config::default());
     app.cost_currency = CostCurrency::Cny;
