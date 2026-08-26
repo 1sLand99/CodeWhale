@@ -14000,6 +14000,57 @@ async fn compaction_keeps_todos_out_of_the_prefix() {
     assert!(!checkpoint.contains("### Todos"), "{checkpoint}");
 }
 
+#[tokio::test]
+async fn compaction_completed_reports_complete_post_input_tokens() {
+    let tmp = tempdir().expect("tempdir");
+    let config = EngineConfig {
+        workspace: tmp.path().to_path_buf(),
+        ..Default::default()
+    };
+    let (mut engine, handle) = Engine::new(config, &Config::default());
+    engine.session.system_prompt = Some(SystemPrompt::Text("stable system context ".repeat(400)));
+    engine.session.replace_messages(vec![Message {
+        role: Role::User,
+        content: vec![ContentBlock::Text {
+            text: "post-compaction message".to_string(),
+            cache_control: None,
+        }],
+    }]);
+    engine.commit_compaction_checkpoint(Some(SystemPrompt::Text(format!(
+        "{COMPACTION_SUMMARY_MARKER}\npost-compaction summary"
+    ))));
+
+    let messages_only =
+        crate::compaction::estimate_input_tokens_conservative(&engine.session.messages, None);
+    let expected = engine.estimated_input_tokens();
+    assert!(expected > messages_only);
+
+    engine
+        .emit_compaction_completed(
+            "compact_test".to_string(),
+            false,
+            "Compaction complete".to_string(),
+            Some(4),
+            Some(1),
+        )
+        .await;
+
+    let event = handle
+        .rx_event
+        .write()
+        .await
+        .recv()
+        .await
+        .expect("compaction completed event");
+    let Event::CompactionCompleted {
+        post_input_tokens, ..
+    } = event
+    else {
+        panic!("expected CompactionCompleted, got {event:?}");
+    };
+    assert_eq!(post_input_tokens, Some(expected as u64));
+}
+
 /// `fork_context` is captured once at turn start, so a `work_update` followed
 /// by an `agent` spawn *in the same turn* must still hand the child the
 /// current snapshot. Only the To-do portion is refreshed; the inherited

@@ -1074,6 +1074,9 @@ impl Engine {
         messages_after: Option<usize>,
     ) {
         let summary_prompt = self.rendered_compaction_summary();
+        // Every call site runs after message replacement and checkpoint
+        // commit. Reuse the same complete estimate as context pressure.
+        let post_input_tokens = Some(self.estimated_input_tokens() as u64);
         let _ = self
             .tx_event
             .send(Event::CompactionCompleted {
@@ -1083,6 +1086,7 @@ impl Engine {
                 messages_before,
                 messages_after,
                 summary_prompt,
+                post_input_tokens,
             })
             .await;
     }
