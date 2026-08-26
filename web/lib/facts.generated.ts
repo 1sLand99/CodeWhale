@@ -27,7 +27,7 @@ export interface RepoFacts {
 }
 
 export const FACTS: RepoFacts = {
-  "generatedAt": "2026-08-22T09:28:59.794Z",
+  "generatedAt": "2026-08-25T09:50:23.220Z",
   "sourceRevision": null,
   "sourceCommittedAt": null,
   "version": "0.9.11",
@@ -287,12 +287,12 @@ export const FACTS: RepoFacts = {
   ],
   "defaultModel": "deepseek-v4-pro",
   "nodeEngines": ">=18",
-  "toolCount": 75,
+  "toolCount": 74,
   "license": "MIT",
   "latestPublishedRelease": {
-    "tag": "v0.9.10",
-    "version": "0.9.10",
-    "publishedAt": "2026-08-20T09:58:55Z",
-    "url": "https://github.com/Hmbown/CodeWhale/releases/tag/v0.9.10"
+    "tag": "v0.9.11",
+    "version": "0.9.11",
+    "publishedAt": "2026-08-23T17:39:46Z",
+    "url": "https://github.com/Hmbown/CodeWhale/releases/tag/v0.9.11"
   }
 };

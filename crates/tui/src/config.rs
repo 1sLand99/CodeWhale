@@ -1506,7 +1506,8 @@ pub fn model_completion_names_for_provider(provider: ApiProvider) -> Vec<&'stati
         ApiProvider::Vllm => vec![DEFAULT_VLLM_MODEL, DEFAULT_VLLM_FLASH_MODEL],
         ApiProvider::Volcengine => vec![DEFAULT_VOLCENGINE_MODEL, DEFAULT_VOLCENGINE_FLASH_MODEL],
         ApiProvider::Ollama | ApiProvider::OllamaCloud => Vec::new(),
-        ApiProvider::Openai | ApiProvider::Atlascloud => OFFICIAL_DEEPSEEK_MODELS.to_vec(),
+        ApiProvider::Openai => OFFICIAL_OPENAI_MODELS.to_vec(),
+        ApiProvider::Atlascloud => vec![DEFAULT_ATLASCLOUD_MODEL],
         ApiProvider::Together => vec![DEFAULT_TOGETHER_MODEL, DEFAULT_TOGETHER_FLASH_MODEL],
         ApiProvider::Qianfan => vec![DEFAULT_QIANFAN_MODEL],
         ApiProvider::OpenaiCodex => vec![DEFAULT_OPENAI_CODEX_MODEL],
@@ -2848,6 +2849,22 @@ pub struct Config {
     /// selection.
     #[serde(skip)]
     pub(crate) migrated_legacy_ollama_cloud_route: bool,
+    /// Runtime-only isolation boundary for account-owned managed Chat.
+    ///
+    /// This is never user-configurable or serialized. The Runtime Chat relay
+    /// sets it on its private config clone so the Engine suppresses all host
+    /// workspace metadata and constructs no model-visible MCP, sub-agent, or
+    /// native tool surface for those turns.
+    #[serde(skip)]
+    pub(crate) runtime_chat_isolated: bool,
+    /// Runtime-only marker for an independent RuntimeThreadManager store.
+    ///
+    /// Those threads are not projected into the interactive TUI's attached
+    /// CWC run, so their provider requests do not participate in that run's
+    /// exclusive Chat ownership gate. RuntimeThreadManager sets this marker on
+    /// its private config clone; it is never user-configurable or serialized.
+    #[serde(skip)]
+    pub(crate) runtime_thread_inference_unrelated: bool,
     /// Native tool catalog controls. This table controls built-in
     /// tool loading policy.
     #[serde(default)]
@@ -2934,6 +2951,15 @@ pub struct Config {
     /// provides fresh device nodes, so most users never need this.
     #[serde(default, alias = "bwrapDevRoots")]
     pub bwrap_dev_roots: Vec<std::path::PathBuf>,
+    /// Opt-in sandbox read deny-list (S1, #5568). Listed subpaths are
+    /// unreadable inside sandboxed shell commands even though the sandbox
+    /// otherwise grants full-disk read: Seatbelt appends last-match-wins
+    /// deny rules; bubblewrap masks each existing path with an empty tmpfs
+    /// (directories) or a /dev/null bind (files). A leading `~` expands to
+    /// the user's home. Empty (the default) preserves current behavior.
+    /// Example: `sandbox_denied_read_paths = ["~/.ssh", "~/.aws"]`.
+    #[serde(default, alias = "sandboxDeniedReadPaths")]
+    pub sandbox_denied_read_paths: Vec<std::path::PathBuf>,
     #[serde(alias = "managedConfigPath")]
     pub managed_config_path: Option<String>,
     #[serde(alias = "requirementsPath")]
@@ -6450,13 +6476,13 @@ impl Config {
         // named/custom-table routes so a stale root key is not sent elsewhere.
         //
         // However, when the CLI dispatcher forwards an explicit `--api-key`
-        // through `DEEPSEEK_API_KEY` with the dispatcher source marker, that
+        // through the provider-neutral CLI bridge with its source marker, that
         // intentional override must win over the saved root key. This is
         // essential for DeepSeek-compatible subscription endpoints where the
         // user runs something like:
         //   codewhale --provider deepseek --api-key ark-... --base-url ... --model auto
         if matches!(provider, ApiProvider::Deepseek | ApiProvider::DeepseekCN)
-            && std::env::var("DEEPSEEK_API_KEY_SOURCE").as_deref() == Ok("cli")
+            && cli_api_key_source().as_deref() == Some("cli")
             && let Some(env_key) = explicit_cli_key
                 .as_ref()
                 .cloned()
@@ -9520,12 +9546,24 @@ pub(crate) fn is_exact_xai_grok_4_6_route(
         && model.trim().eq_ignore_ascii_case(XAI_GROK_4_6_MODEL)
 }
 
-/// Whether a route is exactly the Kimi Code K3 membership-plan route.
-///
-/// Keep the bare `k3` identifier route-owned. In particular, do not infer a
-/// Kimi Code plan entitlement for direct Moonshot `kimi-k3`, generic `k3`, or
-/// `kimi-for-coding` routes.
+/// Whether a route uses either official Kimi Code K3 membership model.
 pub(crate) fn is_exact_kimi_code_k3_route(
+    provider: ApiProvider,
+    base_url: &str,
+    model: &str,
+) -> bool {
+    provider == ApiProvider::Moonshot
+        && moonshot_base_url_is_exact_kimi_code(base_url)
+        && [KIMI_CODE_K3_MODEL, KIMI_CODE_K3_256K_MODEL]
+            .iter()
+            .any(|id| model.trim().eq_ignore_ascii_case(id))
+}
+
+/// Whether a route uses plan-tier-dependent bare `k3`.
+///
+/// Keep entitlement handling separate from `k3-256k`, whose window is fixed.
+#[must_use]
+pub(crate) fn is_exact_kimi_code_bare_k3_route(
     provider: ApiProvider,
     base_url: &str,
     model: &str,
@@ -9657,8 +9695,9 @@ pub(crate) fn minimax_m3_route_uses_max_completion_tokens(
 /// model picker labels them as plan routes. Those sites previously kept
 /// independent literal lists and had already drifted (`kimi-for-coding` was
 /// missing from the picker label), so the roster lives here and nowhere else.
-pub(crate) const KIMI_CODE_MEMBERSHIP_MODELS: [&str; 3] = [
+pub(crate) const KIMI_CODE_MEMBERSHIP_MODELS: [&str; 4] = [
     KIMI_CODE_K3_MODEL,
+    KIMI_CODE_K3_256K_MODEL,
     DEFAULT_KIMI_CODE_MODEL,
     KIMI_CODE_HIGHSPEED_MODEL,
 ];
@@ -9716,7 +9755,7 @@ pub(crate) fn validate_kimi_code_api_model_id(
         for direct_id in MOONSHOT_DIRECT_PLATFORM_MODELS {
             if model.eq_ignore_ascii_case(direct_id) {
                 return Err(format!(
-                    "Kimi Code membership route (api.kimi.com/coding/v1) does not accept model = \"{model}\": it is a direct Moonshot platform id. Use a Kimi Code membership model (\"k3\", \"kimi-for-coding\", or \"kimi-for-coding-highspeed\") for this base_url. Direct Moonshot pay-as-you-go uses base_url = \"https://api.moonshot.ai/v1\" with model = \"{direct_id}\"."
+                    "Kimi Code membership route (api.kimi.com/coding/v1) does not accept model = \"{model}\": it is a direct Moonshot platform id. Use a Kimi Code membership model (\"k3\", \"k3-256k\", \"kimi-for-coding\", or \"kimi-for-coding-highspeed\") for this base_url. Direct Moonshot pay-as-you-go uses base_url = \"https://api.moonshot.ai/v1\" with model = \"{direct_id}\"."
                 ));
             }
         }
@@ -9744,6 +9783,7 @@ mod kimi_code_pairing_tests {
     fn membership_roster_passes_on_kimi_code_endpoint() {
         for model in [
             KIMI_CODE_K3_MODEL,
+            KIMI_CODE_K3_256K_MODEL,
             DEFAULT_KIMI_CODE_MODEL,
             KIMI_CODE_HIGHSPEED_MODEL,
         ] {
@@ -9781,6 +9821,7 @@ mod kimi_code_pairing_tests {
     fn membership_ids_fail_on_direct_moonshot_endpoint() {
         for model in [
             KIMI_CODE_K3_MODEL,
+            KIMI_CODE_K3_256K_MODEL,
             DEFAULT_KIMI_CODE_MODEL,
             KIMI_CODE_HIGHSPEED_MODEL,
         ] {
@@ -9800,6 +9841,7 @@ mod kimi_code_pairing_tests {
         // Canonical pairs pass on both endpoints.
         for (base_url, model) in [
             (DEFAULT_KIMI_CODE_BASE_URL, KIMI_CODE_K3_MODEL),
+            (DEFAULT_KIMI_CODE_BASE_URL, KIMI_CODE_K3_256K_MODEL),
             (DEFAULT_KIMI_CODE_BASE_URL, DEFAULT_KIMI_CODE_MODEL),
             (DEFAULT_KIMI_CODE_BASE_URL, KIMI_CODE_HIGHSPEED_MODEL),
             (DEFAULT_MOONSHOT_BASE_URL, MOONSHOT_KIMI_K3_MODEL),
@@ -9832,6 +9874,7 @@ mod kimi_code_pairing_tests {
         // included: only the two canonical endpoints enforce pairings.
         for model in [
             KIMI_CODE_K3_MODEL,
+            KIMI_CODE_K3_256K_MODEL,
             DEFAULT_KIMI_CODE_MODEL,
             KIMI_CODE_HIGHSPEED_MODEL,
             MOONSHOT_KIMI_K3_MODEL,
@@ -9851,8 +9894,11 @@ mod kimi_code_pairing_tests {
 
 /// Short route label for header/diagnostics without credentials (#4687).
 pub(crate) fn moonshot_k3_route_display_name(base_url: &str, model: &str) -> Option<&'static str> {
-    if is_exact_kimi_code_k3_route(ApiProvider::Moonshot, base_url, model) {
+    if is_exact_kimi_code_bare_k3_route(ApiProvider::Moonshot, base_url, model) {
         return Some("Kimi Code membership / k3");
+    }
+    if is_exact_kimi_code_k3_route(ApiProvider::Moonshot, base_url, model) {
+        return Some("Kimi Code membership / k3-256k");
     }
     if is_exact_direct_moonshot_k3_route(ApiProvider::Moonshot, base_url, model) {
         return Some("Moonshot direct / kimi-k3");
@@ -10114,6 +10160,11 @@ fn merge_config(base: Config, override_cfg: Config) -> Config {
         } else {
             override_cfg.bwrap_dev_roots
         },
+        sandbox_denied_read_paths: if override_cfg.sandbox_denied_read_paths.is_empty() {
+            base.sandbox_denied_read_paths
+        } else {
+            override_cfg.sandbox_denied_read_paths
+        },
         managed_config_path: override_cfg
             .managed_config_path
             .or(base.managed_config_path),
@@ -10186,6 +10237,9 @@ fn merge_config(base: Config, override_cfg: Config) -> Config {
                 recorded => recorded,
             }
         },
+        runtime_chat_isolated: override_cfg.runtime_chat_isolated || base.runtime_chat_isolated,
+        runtime_thread_inference_unrelated: override_cfg.runtime_thread_inference_unrelated
+            || base.runtime_thread_inference_unrelated,
         mini_window: override_cfg.mini_window.or(base.mini_window),
         title: override_cfg.title.or(base.title),
     }
@@ -11950,13 +12004,21 @@ pub(crate) fn explicit_launch_provider_override() -> Option<String> {
 }
 
 pub(crate) fn explicit_cli_api_key_override() -> Option<String> {
-    (std::env::var("DEEPSEEK_API_KEY_SOURCE").as_deref() == Ok("cli"))
+    (cli_api_key_source().as_deref() == Some("cli"))
         .then(|| {
-            std::env::var("CODEWHALE_CLI_API_KEY")
+            std::env::var(codewhale_config::CLI_API_KEY_ENV)
                 .ok()
                 .filter(|value| !value.trim().is_empty())
         })
         .flatten()
+}
+
+pub(crate) fn cli_api_key_source() -> Option<String> {
+    codewhale_env_var(
+        codewhale_config::CLI_API_KEY_SOURCE_ENV,
+        codewhale_config::LEGACY_CLI_API_KEY_SOURCE_ENV,
+    )
+    .ok()
 }
 
 fn missing_provider_api_key_message(provider: ApiProvider) -> Result<String> {

@@ -2159,7 +2159,7 @@ impl ProviderPickerView {
         let Some(model) = self.selected_model.as_deref() else {
             return false;
         };
-        crate::config::is_exact_kimi_code_k3_route(
+        crate::config::is_exact_kimi_code_bare_k3_route(
             self.selected_provider(),
             &self.rows[self.selected_idx].base_url,
             model,
@@ -4786,7 +4786,7 @@ mod tests {
     fn key_entry_hint_uses_metadata_env_vars() {
         assert_eq!(
             ProviderPickerView::env_var_for(ApiProvider::NvidiaNim),
-            "NVIDIA_API_KEY / NVIDIA_NIM_API_KEY / DEEPSEEK_API_KEY"
+            "NVIDIA_API_KEY / NVIDIA_NIM_API_KEY"
         );
     }
 
@@ -4799,7 +4799,7 @@ mod tests {
 
         let rendered = render_text(&picker, 120, 20);
 
-        assert!(rendered.contains("NVIDIA_API_KEY / NVIDIA_NIM_API_KEY / DEEPSEEK_API_KEY"));
+        assert!(rendered.contains("NVIDIA_API_KEY / NVIDIA_NIM_API_KEY"));
         assert!(rendered.contains("https://build.nvidia.com/settings/api-keys"));
     }
 

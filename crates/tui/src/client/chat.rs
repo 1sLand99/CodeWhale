@@ -17,7 +17,8 @@ use tokio::time::timeout as tokio_timeout;
 use crate::config::{
     TOGETHER_INKLING_MODEL, is_exact_direct_moonshot_k3_route, is_exact_kimi_code_k3_route,
     is_exact_xai_grok_4_6_route, is_exact_zai_chat_route, is_exact_zai_tiered_effort_route,
-    minimax_m3_route_uses_max_completion_tokens, wire_model_for_provider_route,
+    is_kimi_code_membership_model, minimax_m3_route_uses_max_completion_tokens,
+    moonshot_base_url_is_exact_kimi_code, wire_model_for_provider_route,
 };
 
 // The bounded response-header wait (`stream_open_timeout`) and its env
@@ -864,6 +865,29 @@ fn apply_direct_moonshot_k3_fixed_sampling(
     }
 }
 
+/// Kimi Code's documented membership models own their sampling behavior.
+/// Strip generic controls only on the exact first-party membership route;
+/// custom gateways and unknown model ids retain their own wire contract.
+/// Source: <https://www.kimi.com/code/docs/en/third-party-tools/codex.html>
+/// (verified 2026-08-26).
+fn apply_kimi_code_fixed_sampling(
+    body: &mut Value,
+    provider: ApiProvider,
+    base_url: &str,
+    model: &str,
+) {
+    if provider != ApiProvider::Moonshot
+        || !moonshot_base_url_is_exact_kimi_code(base_url)
+        || !is_kimi_code_membership_model(model)
+    {
+        return;
+    }
+    if let Some(object) = body.as_object_mut() {
+        object.remove("temperature");
+        object.remove("top_p");
+    }
+}
+
 fn openai_compatible_reasoning_effort(
     effort: &str,
     supports_max: bool,
@@ -1071,6 +1095,7 @@ pub(crate) fn build_chat_wire_body(
         request.reasoning_effort.as_deref(),
     );
     apply_direct_moonshot_k3_fixed_sampling(&mut body, provider, base_url, &model);
+    apply_kimi_code_fixed_sampling(&mut body, provider, base_url, &model);
 
     // Bulletproof final sanitizer: walk the wire payload and force
     // `reasoning_content` onto any assistant message that has tool_calls
@@ -1141,7 +1166,10 @@ impl DeepSeekClient {
                 status.as_u16(),
                 &raw_error_text,
             );
-            anyhow::bail!("Failed to call DeepSeek Chat API: HTTP {status}: {error_text}");
+            anyhow::bail!(
+                "Failed to call {} Chat Completions API: HTTP {status}: {error_text}",
+                self.api_provider.display_name()
+            );
         }
 
         let response_text = response
@@ -3802,6 +3830,22 @@ fn parse_sse_chunk_with_reasoning_style(
 ) -> Vec<StreamEvent> {
     let mut events = Vec::new();
 
+    // OpenAI-compatible providers surface mid-stream failures as a chunk-level
+    // `error` object (sometimes with `type: "error"`), delivered before
+    // `[DONE]`. Silently dropping it turned rate-limit / context-length /
+    // server errors into a truncated turn that looked successful — the frame
+    // is now surfaced through the same `StreamEvent::Error` contract the
+    // Anthropic path uses (#3014, ops R3).
+    if let Some(error) = chunk.get("error") {
+        let error = match error {
+            Value::Object(_) => error.clone(),
+            Value::String(message) => serde_json::json!({ "message": message }),
+            _ => serde_json::json!({ "message": "provider stream error" }),
+        };
+        events.push(StreamEvent::Error { error });
+        return events;
+    }
+
     let Some(choices) = chunk.get("choices").and_then(Value::as_array) else {
         // Usage-only chunk (sent at end with stream_options)
         if let Some(usage_val) = chunk.get("usage") {
@@ -4116,6 +4160,65 @@ mod stream_diagnostics_tests {
             message,
             "SSE stream idle timeout after 240s — no data received \
              (bytes_received=8192, stream_age_ms=73500, ms_since_last_chunk=41250)"
+        );
+    }
+
+    #[test]
+    fn chat_completions_error_frames_surface_as_stream_events() {
+        let mut content_index = 0u32;
+        let mut text_started = false;
+        let mut thinking_started = false;
+        let mut tool_indices = std::collections::HashMap::new();
+        let mut reasoning_buffers = std::collections::HashMap::new();
+        for chunk in [
+            json!({ "error": { "message": "rate limit exceeded", "type": "rate_limit_error" } }),
+            json!({ "type": "error", "error": { "message": "context length exceeded" } }),
+            json!({ "error": "server error" }),
+        ] {
+            let events = parse_sse_chunk(
+                &chunk,
+                &mut content_index,
+                &mut text_started,
+                &mut thinking_started,
+                &mut tool_indices,
+                &mut reasoning_buffers,
+                false,
+            );
+            assert_eq!(
+                events.len(),
+                1,
+                "a chunk-level error frame must not be swallowed ({chunk})"
+            );
+            match &events[0] {
+                StreamEvent::Error { error } => assert!(
+                    !error.is_null()
+                        && (error.get("message").and_then(Value::as_str).is_some()
+                            || error.is_string()),
+                    "the provider error message must survive parsing: {error}"
+                ),
+                other => panic!("expected StreamEvent::Error, got {other:?}"),
+            }
+        }
+        // A normal content chunk still parses as a delta after the error path.
+        let deltas = parse_sse_chunk(
+            &json!({"choices": [{"index": 0, "delta": {"content": "ok"}}]}),
+            &mut content_index,
+            &mut text_started,
+            &mut thinking_started,
+            &mut tool_indices,
+            &mut reasoning_buffers,
+            false,
+        );
+        assert!(
+            deltas.iter().any(|event| {
+                matches!(
+                    event,
+                    StreamEvent::ContentBlockDelta {
+                        delta: Delta::TextDelta { text }, ..
+                    } if text == "ok"
+                )
+            }),
+            "content deltas still parse: {deltas:?}"
         );
     }
 
@@ -4554,12 +4657,12 @@ mod alias_thinking_detection_tests {
     //! <https://api-docs.deepseek.com/guides/thinking_mode>
     use super::{
         ReasoningStreamStyle, apply_direct_moonshot_k3_fixed_sampling,
-        apply_inkling_reasoning_effort, apply_kimi_code_k3_reasoning_effort,
-        apply_openai_reasoning_effort, apply_provider_token_limit, apply_route_reasoning_controls,
-        is_reasoning_model_for_stream, is_reasoning_model_for_stream_on_route,
-        provider_accepts_reasoning_content, reasoning_stream_style_for_route,
-        requires_reasoning_content, should_replay_reasoning_content,
-        should_replay_reasoning_content_for_provider,
+        apply_inkling_reasoning_effort, apply_kimi_code_fixed_sampling,
+        apply_kimi_code_k3_reasoning_effort, apply_openai_reasoning_effort,
+        apply_provider_token_limit, apply_route_reasoning_controls, is_reasoning_model_for_stream,
+        is_reasoning_model_for_stream_on_route, provider_accepts_reasoning_content,
+        reasoning_stream_style_for_route, requires_reasoning_content,
+        should_replay_reasoning_content, should_replay_reasoning_content_for_provider,
         should_replay_reasoning_content_for_provider_on_route,
     };
     use crate::config::ApiProvider;
@@ -5445,6 +5548,62 @@ mod alias_thinking_detection_tests {
 
             assert_eq!(body["thinking"], expected, "requested {requested}");
             assert!(body.get("reasoning_effort").is_none());
+        }
+    }
+
+    #[test]
+    fn kimi_code_k3_256k_uses_k3_reasoning_and_membership_sampling_contracts() {
+        let mut body = json!({
+            "reasoning_effort": "stale",
+            "temperature": 0.3,
+            "top_p": 0.8,
+        });
+        apply_kimi_code_k3_reasoning_effort(
+            &mut body,
+            ApiProvider::Moonshot,
+            crate::config::DEFAULT_KIMI_CODE_BASE_URL,
+            crate::config::KIMI_CODE_K3_256K_MODEL,
+            Some("max"),
+        );
+        apply_kimi_code_fixed_sampling(
+            &mut body,
+            ApiProvider::Moonshot,
+            crate::config::DEFAULT_KIMI_CODE_BASE_URL,
+            crate::config::KIMI_CODE_K3_256K_MODEL,
+        );
+
+        assert_eq!(
+            body["thinking"],
+            json!({ "type": "enabled", "effort": "max" })
+        );
+        assert!(body.get("reasoning_effort").is_none());
+        assert!(body.get("temperature").is_none());
+        assert!(body.get("top_p").is_none());
+    }
+
+    #[test]
+    fn kimi_code_fixed_sampling_does_not_leak_to_neighbor_routes() {
+        for (provider, base_url, model) in [
+            (
+                ApiProvider::Moonshot,
+                crate::config::DEFAULT_MOONSHOT_BASE_URL,
+                crate::config::KIMI_CODE_K3_256K_MODEL,
+            ),
+            (
+                ApiProvider::Openrouter,
+                crate::config::DEFAULT_KIMI_CODE_BASE_URL,
+                crate::config::KIMI_CODE_K3_256K_MODEL,
+            ),
+            (
+                ApiProvider::Moonshot,
+                crate::config::DEFAULT_KIMI_CODE_BASE_URL,
+                "k3-256k-preview",
+            ),
+        ] {
+            let mut body = json!({ "temperature": 0.3, "top_p": 0.8 });
+            apply_kimi_code_fixed_sampling(&mut body, provider, base_url, model);
+            assert_eq!(body["temperature"], json!(0.3));
+            assert_eq!(body["top_p"], json!(0.8));
         }
     }
 
