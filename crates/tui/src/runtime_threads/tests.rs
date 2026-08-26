@@ -1919,6 +1919,7 @@ async fn compact_lifecycle_outlives_caller_and_preserves_concurrent_thread_updat
             messages_before: Some(4),
             messages_after: Some(2),
             summary_prompt: None,
+            post_input_tokens: None,
         })
         .await?;
     harness
@@ -9982,6 +9983,7 @@ async fn compaction_lifecycle_emits_item_events_with_compaction_counts() -> Resu
                             messages_before: Some(7),
                             messages_after: Some(3),
                             summary_prompt: None,
+                            post_input_tokens: None,
                         })
                         .await;
                     let _ = tx_event
@@ -10018,6 +10020,7 @@ async fn compaction_lifecycle_emits_item_events_with_compaction_counts() -> Resu
                                 "## 📋 Conversation Summary (Auto-Generated)\n\nkey facts."
                                     .to_string(),
                             ),
+                            post_input_tokens: None,
                         })
                         .await;
                     let _ = tx_event

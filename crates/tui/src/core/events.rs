@@ -294,6 +294,10 @@ pub enum Event {
         /// summary lives only in engine memory and is lost on LRU eviction
         /// or restart (SyncSession re-extracts it from the record prompt).
         summary_prompt: Option<String>,
+        /// Conservative input-token estimate for the complete post-compaction
+        /// request, including its system prompt. Hosts can use this until the
+        /// next provider-reported usage arrives.
+        post_input_tokens: Option<u64>,
     },
 
     /// Context compaction was canceled before it could commit a checkpoint.

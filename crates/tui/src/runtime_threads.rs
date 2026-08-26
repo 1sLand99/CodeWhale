@@ -8219,6 +8219,7 @@ impl RuntimeThreadManager {
                     messages_before,
                     messages_after,
                     summary_prompt,
+                    post_input_tokens: _,
                 } => {
                     // Persist the summary in the legacy thread-record carrier
                     // so reloads survive LRU eviction/restart. SyncSession
