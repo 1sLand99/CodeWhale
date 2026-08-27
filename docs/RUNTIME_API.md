@@ -750,6 +750,10 @@ returns `{"restored": "<snapshot-id>"}`.
 - `POST /v1/automations/{id}/resume`
 - `GET /v1/automations/{id}/runs?limit=20`
 
+Create and update requests accept an optional `model`. When present, each
+scheduled or manually triggered run uses that model; omitting it keeps the
+runtime's default task model.
+
 **Introspection**
 - `GET /v1/workspace/status`
 - `GET /v1/skills`
