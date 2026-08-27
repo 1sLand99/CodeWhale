@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Baseten, Groq, and Cerebras are bundled OpenAI-compatible setup templates
+  (`[providers.<id>] kind = "openai-compatible"`), not new `ProviderKind`
+  variants. `/provider` fills URL, model, and env from one catalog row.
+- MCP manager copy now names the server, the failure, and one recovery
+  command (`The X MCP server requires OAuth reauthentication. Run /mcp login X`).
+
 - Added `/import-claude` (#5557): reads `~/.claude.json` and
   `~/.claude/settings.json` read-only and renders an explicit, reviewable
   migration plan plus a written report. MCP servers route through the
@@ -71,6 +77,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   alongside token pressure.
 
 ### Changed
+
+- Idle session metrics omit zero facts (`0 turns`, `LLM 0s`) until the
+  runtime has evidence. Working chrome says `in the current` instead of a
+  generic `working`.
+- Deleted nine uncompiled `runtime_contract/` staging files. Live contracts
+  remain `model.rs` and `termination.rs`.
 
 - The first #5587 dead-code sweep converts audited test-only helpers to
   `#[cfg(test)]`, keeping production builds free of test-only APIs without

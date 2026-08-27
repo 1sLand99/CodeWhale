@@ -3169,7 +3169,7 @@ impl Engine {
             .sum();
         let own = current_text.len() / 4;
         let mut inflated_delta = own * 3 / 2;
-        if sum % 2 == 0 && own % 2 == 1 {
+        if sum.is_multiple_of(2) && own % 2 == 1 {
             inflated_delta += 1;
         }
         base.saturating_add(inflated_delta).saturating_add(12)
