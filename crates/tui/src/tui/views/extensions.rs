@@ -5,6 +5,7 @@
 //! database, installer, or network fetch of its own. Future actions emitted by
 //! this view must delegate to the existing command/mutation controllers.
 
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
@@ -935,8 +936,13 @@ fn mcp_model(app: &App, locale: Locale) -> ExtensionsTabModel {
                 .map(|server| server.enabled)
                 .or_else(|| config.map(crate::mcp::McpServerConfig::is_enabled))
                 .unwrap_or(true);
+            let initializing = app.mcp_initializing
+                && enabled
+                && observed.is_none_or(|server| !server.connected && server.error.is_none());
             let state = if !enabled {
                 tr(locale, MessageId::HotbarSetupStatusDisabled)
+            } else if initializing {
+                Cow::Borrowed("connecting")
             } else if observed.is_some_and(|server| server.connected) {
                 tr(locale, MessageId::ExtensionsStateConnected)
             } else if observed.is_some_and(|server| server.error.is_some()) {
@@ -955,13 +961,18 @@ fn mcp_model(app: &App, locale: Locale) -> ExtensionsTabModel {
                 observed.and_then(|server| server.error.as_deref()),
                 oauth_capable,
             );
-            let action = if crate::mcp::mcp_name_is_command_safe(&name)
+            let action = if initializing {
+                ExtensionAction::Status {
+                    label: state.clone(),
+                }
+            } else if crate::mcp::mcp_name_is_command_safe(&name)
                 || matches!(
                     recovery,
                     crate::mcp::McpRecoveryKind::Connect
                         | crate::mcp::McpRecoveryKind::Reconnect
                         | crate::mcp::McpRecoveryKind::Diagnose
-                ) {
+                )
+            {
                 ExtensionAction::Command {
                     label: tr(locale, recovery.label_key()).into_owned(),
                     command: recovery.slash_command(&name),
