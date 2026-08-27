@@ -58,7 +58,13 @@ pub enum PluginNextStep {
     Trust,
     Enable,
     Inspect,
-    MarketplaceInstall { catalog_id: String },
+    MarketplaceInstall {
+        catalog_id: String,
+    },
+    /// `/plugin install` only when a catalog entry carries a real source spec.
+    SourceInstall {
+        spec: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -82,8 +88,215 @@ impl PluginTaskRecommendation {
             PluginNextStep::MarketplaceInstall { catalog_id } => {
                 format!("/plugin marketplace install {catalog_id} {}", self.name)
             }
+            PluginNextStep::SourceInstall { spec } => format!("/plugin install {spec}"),
         }
     }
+}
+
+const RECOMMENDED_PLUGINS_INTRO: &str =
+    "Here is a list of plugins that are available but not installed.";
+const MAX_RECOMMENDED_PLUGINS: usize = 8;
+
+/// One matcher-driven candidate for the live composer CTA or the
+/// append-only `<recommended_plugins>` user fragment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginKeywordMatch {
+    pub name: String,
+    pub id: String,
+    pub next_step: PluginNextStep,
+    keywords: Vec<String>,
+    domains: Vec<String>,
+}
+
+impl PluginKeywordMatch {
+    #[must_use]
+    pub fn command(&self) -> String {
+        PluginTaskRecommendation {
+            name: self.name.clone(),
+            source: match &self.next_step {
+                PluginNextStep::MarketplaceInstall { catalog_id } => {
+                    PluginMatchSource::Marketplace {
+                        catalog_id: catalog_id.clone(),
+                    }
+                }
+                _ => PluginMatchSource::Installed {
+                    id: self.id.clone(),
+                },
+            },
+            matched_terms: Vec::new(),
+            score: 0,
+            next_step: self.next_step.clone(),
+        }
+        .command()
+    }
+}
+
+/// Load marketplace catalogs the user added locally. Never invents a remote
+/// official marketplace URL.
+#[must_use]
+pub fn load_marketplace_candidates(
+    state_path: Option<&std::path::Path>,
+) -> Vec<MarketplaceCandidate> {
+    let Some(store) = crate::plugins::marketplace::store::MarketplaceStore::open(state_path) else {
+        return Vec::new();
+    };
+    let Ok(state) = store.load() else {
+        return Vec::new();
+    };
+    state
+        .catalogs()
+        .values()
+        .flat_map(|catalog| catalog.catalog.candidates.iter().cloned())
+        .collect()
+}
+
+/// Keyword candidates that can still be reviewed: installed-but-idle plugins
+/// and uninstalled catalog entries. Already-active plugins are omitted.
+#[must_use]
+pub fn idle_and_catalog_keyword_matches(
+    registry: &PluginRegistry,
+    marketplace: &[MarketplaceCandidate],
+) -> Vec<PluginKeywordMatch> {
+    let installed = registry.list();
+    let installed_names = installed
+        .iter()
+        .map(|plugin| plugin.name().to_ascii_lowercase())
+        .collect::<BTreeSet<_>>();
+    let mut out = Vec::new();
+    for plugin in &installed {
+        if plugin.active() {
+            continue;
+        }
+        let next_step = if !plugin.trusted() {
+            PluginNextStep::Trust
+        } else if !plugin.enabled {
+            PluginNextStep::Enable
+        } else {
+            continue;
+        };
+        let mut keywords = plugin.manifest.plugin.keywords.clone();
+        keywords.push(plugin.name().to_string());
+        out.push(PluginKeywordMatch {
+            name: plugin.name().to_string(),
+            id: plugin.id.as_str().to_string(),
+            next_step,
+            keywords,
+            domains: plugin.inventory.network_hosts.clone(),
+        });
+    }
+    for candidate in marketplace {
+        if candidate.has_errors() {
+            continue;
+        }
+        if installed_names.contains(&candidate.name.to_ascii_lowercase()) {
+            continue;
+        }
+        let mut keywords = candidate.keywords.clone();
+        keywords.push(candidate.name.clone());
+        if let Some(display) = &candidate.display_name {
+            keywords.push(display.clone());
+        }
+        keywords.extend(candidate.categories.iter().cloned());
+        let mut domains = Vec::new();
+        if let Some(homepage) = &candidate.homepage {
+            domains.push(homepage.clone());
+        }
+        if let Some(repository) = &candidate.repository {
+            domains.push(repository.clone());
+        }
+        let next_step = match &candidate.install_plan {
+            crate::plugins::marketplace::types::MarketplaceInstallPlan::Supported {
+                spec, ..
+            } if candidate.catalog_id.as_str().is_empty() => {
+                PluginNextStep::SourceInstall { spec: spec.clone() }
+            }
+            _ => PluginNextStep::MarketplaceInstall {
+                catalog_id: candidate.catalog_id.as_str().to_string(),
+            },
+        };
+        out.push(PluginKeywordMatch {
+            name: candidate.name.clone(),
+            id: candidate.id.as_str().to_string(),
+            next_step,
+            keywords,
+            domains,
+        });
+    }
+    out
+}
+
+/// One matcher-driven hit for a live draft. Already-active plugins never
+/// match. `/plugin install` is returned only when a catalog entry carries a
+/// real install spec.
+#[must_use]
+pub fn match_plugin_for_draft(
+    draft: &str,
+    registry: &PluginRegistry,
+    marketplace: &[MarketplaceCandidate],
+) -> Option<PluginKeywordMatch> {
+    let candidates = idle_and_catalog_keyword_matches(registry, marketplace);
+    match_plugin_for_draft_among(draft, &candidates)
+}
+
+#[must_use]
+pub fn match_plugin_for_draft_among(
+    draft: &str,
+    candidates: &[PluginKeywordMatch],
+) -> Option<PluginKeywordMatch> {
+    let keyword_candidates = candidates
+        .iter()
+        .map(|candidate| crate::plugins::matcher::KeywordCandidate {
+            name: candidate.name.as_str(),
+            domains: &candidate.domains,
+            keywords: &candidate.keywords,
+        })
+        .collect::<Vec<_>>();
+    let idx = crate::plugins::matcher::match_plugin_keyword(draft, &keyword_candidates)?;
+    candidates.get(idx).cloned()
+}
+
+/// Append-only user-turn fragment. Never part of the pinned system prefix.
+/// Bounded, omitted when nothing matches.
+#[must_use]
+pub fn recommended_plugins_user_fragment(
+    draft: &str,
+    registry: &PluginRegistry,
+    marketplace: &[MarketplaceCandidate],
+) -> Option<String> {
+    let candidates = idle_and_catalog_keyword_matches(registry, marketplace);
+    if candidates.is_empty() {
+        return None;
+    }
+    let matched = match_plugin_for_draft_among(draft, &candidates)?;
+    let mut listed = vec![matched];
+    listed.truncate(MAX_RECOMMENDED_PLUGINS);
+    let body = listed
+        .iter()
+        .map(|plugin| format!("- {} ({})", plugin.name, plugin.id))
+        .collect::<Vec<_>>()
+        .join("\n");
+    Some(format!(
+        "<recommended_plugins>\n{RECOMMENDED_PLUGINS_INTRO}\n\n{body}\n</recommended_plugins>"
+    ))
+}
+
+/// Resolve a model-requested plugin name against installed and catalog
+/// entries. Fails closed (None) when the name is unknown.
+#[must_use]
+pub fn lookup_reviewable_plugin(
+    name: &str,
+    registry: &PluginRegistry,
+    marketplace: &[MarketplaceCandidate],
+) -> Option<PluginKeywordMatch> {
+    let needle = name.trim();
+    if needle.is_empty() {
+        return None;
+    }
+    idle_and_catalog_keyword_matches(registry, marketplace)
+        .into_iter()
+        .find(|candidate| {
+            candidate.name.eq_ignore_ascii_case(needle) || candidate.id.eq_ignore_ascii_case(needle)
+        })
 }
 
 #[must_use]
@@ -416,5 +629,44 @@ mod tests {
             RecommendOptions::proactive(),
         );
         assert!(recs.is_empty(), "{recs:?}");
+    }
+
+    #[test]
+    fn recommended_plugins_fragment_present_for_matching_idle_plugin() {
+        let _lock = lock_test_env();
+        let root = TempDir::new().unwrap();
+        let _home = EnvVarGuard::set("CODEWHALE_HOME", root.path().join("home"));
+        write_keyword_bundle(root.path(), "supabase", "Hosted Postgres", &["supabase"]);
+        let registry = crate::plugins::PluginDiscoveryContext::capture_pre_dotenv()
+            .registry_for_workspace(root.path());
+
+        let fragment =
+            recommended_plugins_user_fragment("add supabase auth to login", &registry, &[])
+                .expect("idle plugin should produce a fragment");
+        assert!(fragment.starts_with("<recommended_plugins>"));
+        assert!(fragment.contains("- supabase ("));
+        assert!(fragment.contains("</recommended_plugins>"));
+        assert!(
+            recommended_plugins_user_fragment("fix the failing test", &registry, &[]).is_none()
+        );
+    }
+
+    #[test]
+    fn matcher_driven_cta_skips_already_active_plugins() {
+        let _lock = lock_test_env();
+        let root = TempDir::new().unwrap();
+        let _home = EnvVarGuard::set("CODEWHALE_HOME", root.path().join("home"));
+        write_keyword_bundle(root.path(), "supabase", "Hosted Postgres", &["supabase"]);
+        let mut registry = crate::plugins::PluginDiscoveryContext::capture_pre_dotenv()
+            .registry_for_workspace(root.path())
+            .as_ref()
+            .clone();
+        registry.trust("supabase").unwrap();
+        registry.enable("supabase").unwrap();
+
+        assert!(
+            match_plugin_for_draft("add supabase auth", &registry, &[]).is_none(),
+            "active plugins must not produce a live CTA"
+        );
     }
 }

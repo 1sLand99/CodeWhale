@@ -17,9 +17,15 @@ Sending a task also surfaces one quiet toast when the prompt strongly matches
 an installed-but-idle plugin or a catalog candidate you do not have yet — for
 example a prompt about Supabase suggesting `/plugin trust supabase` or
 `/plugin marketplace install <catalog> supabase`. Description-only matches do
-not toast. Codewhale does not invent a remote plugin URL; missing plugins are
-suggested only from catalogs you added. On-disk bundle changes still toast
-`/plugin reload` on send and between turns.
+not toast. While you type, a one-line composer CTA (`Install {name} plugin?`)
+offers the same review command after a short debounce; it never auto-installs,
+hides when the plugin is already active, and stays dismissed for that name
+this session. Matching idle or catalog plugins are also appended on send as
+an `<recommended_plugins>` user-turn block (not the pinned system prefix);
+the model can call `request_plugin_install` to surface review for the human
+without changing disk. Codewhale does not invent a remote plugin URL; missing
+plugins are suggested only from catalogs you added. On-disk bundle changes
+still toast `/plugin reload` on send and between turns.
 
 ## Sources
 

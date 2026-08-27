@@ -40,7 +40,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Plugin prompt matching (#5579): sending a task can toast the next review
   step when the prompt strongly matches an installed-but-idle plugin or a
   marketplace catalog you added (for example a Supabase prompt suggesting
-  `/plugin trust supabase`). `/plugin suggest` now ranks manifest keywords and
+  `/plugin trust supabase`). A live composer CTA offers the same review
+  command while you type, matching turns append a bounded
+  `<recommended_plugins>` user block, and `request_plugin_install` surfaces
+  review without installing. `/plugin suggest` now ranks manifest keywords and
   catalog candidates, never auto-installs, and on-disk plugin changes also
   nudge `/plugin reload` between turns.
 

@@ -8,6 +8,7 @@ pub mod export;
 pub mod install;
 pub mod manifest;
 pub mod marketplace;
+pub mod matcher;
 pub mod mutation;
 mod path_identity;
 pub mod recommend;

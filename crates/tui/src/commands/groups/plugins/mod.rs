@@ -157,7 +157,8 @@ fn suggest_bundles(app: &App, task: &str) -> CommandResult {
         return CommandResult::error("Usage: /plugin suggest <task of at least 3 characters>");
     }
 
-    let marketplace = load_marketplace_candidates(app);
+    let marketplace =
+        crate::plugins::recommend::load_marketplace_candidates(app.plugin_registry.state_path());
     let recommendations = crate::plugins::recommend::recommend_plugins_for_task(
         task,
         app.plugin_registry.as_ref(),
@@ -220,24 +221,6 @@ fn suggest_bundles(app: &App, task: &str) -> CommandResult {
     }
     output.push_str("\nNothing was installed, trusted, or enabled.");
     CommandResult::message(output)
-}
-
-fn load_marketplace_candidates(
-    app: &App,
-) -> Vec<crate::plugins::marketplace::types::MarketplaceCandidate> {
-    let Some(store) = crate::plugins::marketplace::store::MarketplaceStore::open(
-        app.plugin_registry.state_path(),
-    ) else {
-        return Vec::new();
-    };
-    let Ok(state) = store.load() else {
-        return Vec::new();
-    };
-    state
-        .catalogs()
-        .values()
-        .flat_map(|catalog| catalog.catalog.candidates.iter().cloned())
-        .collect()
 }
 
 fn list_bundles_and_legacy_tools(app: &mut App) -> CommandResult {

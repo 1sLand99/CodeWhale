@@ -769,6 +769,7 @@ impl App {
             plugin_prompt_suggest_names: HashSet::new(),
             plugin_prompt_suggest_count: 0,
             last_plugin_catalog_poll: None,
+            plugin_cta: crate::tui::plugin_suggestions::PluginCtaState::default(),
             model,
             provider_models,
             enabled_provider_models,
