@@ -413,6 +413,10 @@ pub(crate) async fn run_exec_agent(
         turn_id: None,
         item_id: None,
         payload: serde_json::json!({
+            "model": codewhale_hooks::bounded_text(
+                &effective_model,
+                codewhale_hooks::OUTBOX_DETAIL_MAX_CHARS,
+            ),
             "workspace": workspace.display().to_string(),
         }),
     });
