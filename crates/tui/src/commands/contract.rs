@@ -80,7 +80,7 @@ use crate::tui::history::HistoryCell;
 /// (`scripts/check-command-migration-manifest.py`) reads this exact
 /// declaration by source regex and the Rust frontier tests assert it.
 #[allow(dead_code)]
-pub(crate) const PENDING_GROUPS: &[&str] = &["config", "core", "debug", "plugins", "session"];
+pub(crate) const PENDING_GROUPS: &[&str] = &["config", "core", "debug", "session"];
 
 // ---------------------------------------------------------------------------
 // Boundary-value mappings (D8)
