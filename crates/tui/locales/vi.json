@@ -968,6 +968,7 @@
   "CtxInspSystemPrompt": "Cấu trúc lời nhắc hệ thống",
   "CtxInspReferences": "Tham chiếu",
   "CtxInspRecentTools": "Công cụ gần đây",
+  "CtxInspToolSchemaCosts": "Chi phí lược đồ công cụ",
   "CtxInspModel": "Mô hình",
   "CtxInspWorkspace": "Không gian làm việc",
   "CtxInspSession": "Phiên",

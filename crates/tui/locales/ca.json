@@ -947,6 +947,7 @@
   "CtxInspSystemPrompt": "Estructura del prompt del sistema",
   "CtxInspReferences": "Referències",
   "CtxInspRecentTools": "Eines recents",
+  "CtxInspToolSchemaCosts": "Costos dels esquemes d’eines",
   "CtxInspModel": "Model",
   "CtxInspWorkspace": "Espai de treball",
   "CtxInspSession": "Sessió",

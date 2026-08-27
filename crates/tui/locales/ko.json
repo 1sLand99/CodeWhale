@@ -970,6 +970,7 @@
   "CtxInspSystemPrompt": "시스템 프롬프트 구조",
   "CtxInspReferences": "참조",
   "CtxInspRecentTools": "최근 도구",
+  "CtxInspToolSchemaCosts": "도구 스키마 비용",
   "CtxInspModel": "모델",
   "CtxInspWorkspace": "작업 공간",
   "CtxInspSession": "세션",

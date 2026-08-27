@@ -947,6 +947,7 @@
   "CtxInspSystemPrompt": "Struktur System Prompt",
   "CtxInspReferences": "Referensi",
   "CtxInspRecentTools": "Tool Terbaru",
+  "CtxInspToolSchemaCosts": "Biaya skema tool",
   "CtxInspModel": "Model",
   "CtxInspWorkspace": "Workspace",
   "CtxInspSession": "Sesi",

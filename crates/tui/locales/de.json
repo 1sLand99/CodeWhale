@@ -947,6 +947,7 @@
   "CtxInspSystemPrompt": "System-Prompt-Struktur",
   "CtxInspReferences": "Referenzen",
   "CtxInspRecentTools": "Letzte Tools",
+  "CtxInspToolSchemaCosts": "Kosten der Tool-Schemata",
   "CtxInspModel": "Modell",
   "CtxInspWorkspace": "Workspace",
   "CtxInspSession": "Sitzung",

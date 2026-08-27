@@ -947,6 +947,7 @@
   "CtxInspSystemPrompt": "सिस्टम प्रॉम्प्ट संरचना",
   "CtxInspReferences": "संदर्भ",
   "CtxInspRecentTools": "हाल के टूल",
+  "CtxInspToolSchemaCosts": "टूल स्कीमा की लागत",
   "CtxInspModel": "मॉडल",
   "CtxInspWorkspace": "वर्कस्पेस",
   "CtxInspSession": "सत्र",

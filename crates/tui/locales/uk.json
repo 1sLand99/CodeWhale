@@ -947,6 +947,7 @@
   "CtxInspSystemPrompt": "Структура системного промпту",
   "CtxInspReferences": "Посилання",
   "CtxInspRecentTools": "Недавні інструменти",
+  "CtxInspToolSchemaCosts": "Вартість схем інструментів",
   "CtxInspModel": "Модель",
   "CtxInspWorkspace": "Робочий простір",
   "CtxInspSession": "Сесія",

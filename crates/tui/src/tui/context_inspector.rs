@@ -571,9 +571,10 @@ fn push_tool_schema_costs(out: &mut String, app: &App, locale: Locale) {
         return;
     };
 
+    let _ = writeln!(out);
     let tokens = tr(locale, MessageId::CtxInspTokens);
-    let tools_label = tr(locale, MessageId::CtxInspRecentTools);
-    let _ = writeln!(out, "{} ({})", tools_label, tokens);
+    let schema_costs_label = tr(locale, MessageId::CtxInspToolSchemaCosts);
+    let _ = writeln!(out, "{} ({})", schema_costs_label, tokens);
     let _ = writeln!(out, "------------");
 
     let mut built_in: Vec<(String, usize)> = catalog
@@ -1057,6 +1058,15 @@ mod tests {
         });
 
         let text = build_context_inspector_text(&app, Locale::En);
+        assert_eq!(
+            text.matches("Recent Tools").count(),
+            1,
+            "schema costs need a distinct section heading: {text}"
+        );
+        assert!(
+            text.contains("\n\nTool schema costs (tokens)\n------------"),
+            "schema costs need a separated localized section: {text}"
+        );
         assert!(text.contains("[catalog]"), "catalog total missing: {text}");
         assert!(text.contains("tool_25"), "catalog row missing: {text}");
         assert!(

@@ -968,6 +968,7 @@
   "CtxInspSystemPrompt": "システムプロンプト構造",
   "CtxInspReferences": "参照",
   "CtxInspRecentTools": "最近のツール",
+  "CtxInspToolSchemaCosts": "ツールスキーマのコスト",
   "CtxInspModel": "モデル",
   "CtxInspWorkspace": "ワークスペース",
   "CtxInspSession": "セッション",
