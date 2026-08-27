@@ -237,8 +237,9 @@ pub(crate) fn freeze_fleet_task_members(
 /// no provider, when Luna lives on a different configured provider). The
 /// runtime never infers a provider from a model's spelling (#4093/#2608), so a
 /// pinned model that does not resolve is rejected here with a clear error
-/// instead of failing silently inside the worker. Models inherited from the
-/// session/run route (`run.model`) are not pins and are left alone.
+/// instead of failing silently inside the worker. Every task must have either
+/// the resolved session config or an explicit profile provider; inherited
+/// session/run models are validated within that already-authorized scope.
 pub fn validate_fleet_task_routes(
     tasks: &[FleetTaskSpec],
     agent_profiles: &[AgentProfile],
@@ -253,14 +254,25 @@ pub fn validate_fleet_task_routes(
             effective_fleet_model_with_source(run_model, task.worker.as_ref(), agent_profile);
         let pinned_model = matches!(source, "task.model" | "agent_profile.model");
         let explicit_provider = explicit_fleet_provider_id(agent_profile);
-        if pinned_model && explicit_provider.is_none() {
-            let (provider, base_url) = config.map_or_else(
-                || {
-                    let provider = ApiProvider::Deepseek;
-                    (provider, provider.default_base_url().to_string())
-                },
-                |config| (config.api_provider(), config.deepseek_base_url()),
+        if config.is_none() && explicit_provider.is_none() {
+            bail!(
+                "Fleet task `{}` has no provider authority for model `{model}` (source={source}); attach the resolved route config or set the agent profile provider explicitly",
+                task.id,
             );
+        }
+        if config.is_none()
+            && let Some(provider_id) = explicit_provider.as_deref()
+            && ApiProvider::parse(provider_id)
+                .is_none_or(|provider| provider == ApiProvider::Custom)
+        {
+            bail!(
+                "Fleet task `{}` names custom provider=`{provider_id}`, but a provider name alone does not prove its endpoint or model; attach the live route config before creating the run",
+                task.id,
+            );
+        }
+        if pinned_model && explicit_provider.is_none() {
+            let config = config.expect("provider authority checked above");
+            let (provider, base_url) = (config.api_provider(), config.deepseek_base_url());
             if let Err(reason) =
                 crate::route_runtime::validate_unpinned_model_provider(provider, &model, &base_url)
             {
@@ -269,31 +281,31 @@ pub fn validate_fleet_task_routes(
         }
 
         let route = resolve_fleet_route_with_config(task, agent_profiles, session_model, config);
-        if route.is_some() {
-            validate_fleet_reasoning_effort(task, agent_profiles, session_model, config)?;
-        }
-        if !pinned_model {
-            continue;
-        }
-        // A concrete model is pinned at the task/profile level; it must resolve
-        // to a real provider route or the worker cannot launch.
-        if route.is_some() {
-            continue;
-        }
         let provider = explicit_provider
             .map(|provider| format!("provider=`{provider}`"))
             .unwrap_or_else(|| {
                 "no explicit provider (resolves against the session/default provider)".to_string()
             });
-        bail!(
-            "Fleet task `{}` pins model `{}` with {} (source={source}), but that route does not \
-             resolve to a real model on any configured provider, so the worker cannot launch. \
-             The runtime never infers a provider from a model's spelling — set an explicit \
-             provider for this model in the profile, or switch the role to `inherit`.",
-            task.id,
-            model,
-            provider
-        );
+        if route.is_none() {
+            if pinned_model {
+                bail!(
+                    "Fleet task `{}` pins model `{}` with {} (source={source}), but that route does not \
+                     resolve to a real model on any configured provider, so the worker cannot launch. \
+                     The runtime never infers a provider from a model's spelling — set an explicit \
+                     provider for this model in the profile, or switch the role to `inherit`.",
+                    task.id,
+                    model,
+                    provider
+                );
+            }
+            bail!(
+                "Fleet task `{}` cannot resolve its inherited model `{model}` with {provider} \
+                 (source={source}); attach the live route config for custom providers before \
+                 creating the run",
+                task.id,
+            );
+        }
+        validate_fleet_reasoning_effort(task, agent_profiles, session_model, config)?;
     }
     Ok(())
 }
@@ -605,12 +617,11 @@ fn fleet_coordination_contracts(task_spec: &FleetTaskSpec) -> Result<Vec<String>
 /// - The provider comes from the resolved agent profile's own explicit
 ///   `provider` field when it has one (#4093) — a Fleet worker profile can be
 ///   pinned to a route independent of the parent/current session provider.
-///   Absent an explicit pin, the worker profile carries no provider authority
-///   and resolution falls back to the existing default scope. Either way, the
-///   provider is NEVER inferred by sniffing a substring/prefix out of `model`
-///   (EPIC #2608: explicit config only). A task-level `model` selector is
-///   forwarded as the model selector. No reasoning/pricing fields are
-///   fabricated.
+///   Absent an explicit pin, the worker profile carries no provider authority;
+///   callers must supply the resolved live [`Config`]. The provider is NEVER
+///   inferred by sniffing a substring/prefix out of `model` (EPIC #2608:
+///   explicit config only). A task-level `model` selector is forwarded as the
+///   model selector. No reasoning/pricing fields are fabricated.
 ///
 /// Returns `None` (never a fabricated route) when resolution fails, so callers
 /// degrade gracefully without inventing detail.
@@ -672,16 +683,11 @@ pub(crate) fn resolve_fleet_route_with_config(
             "runtime_route",
         )
     } else {
-        let provider = match explicit_provider_id.as_deref() {
-            Some(provider_id) => {
-                let provider = ApiProvider::parse(provider_id)?;
-                if provider == ApiProvider::Custom {
-                    return None;
-                }
-                provider
-            }
-            None => ApiProvider::Deepseek,
-        };
+        let provider_id = explicit_provider_id.as_deref()?;
+        let provider = ApiProvider::parse(provider_id)?;
+        if provider == ApiProvider::Custom {
+            return None;
+        }
         let candidate = resolve_route_candidate(provider, model_selector, None, None, None).ok()?;
         let provider_id = candidate.provider_id().as_str().to_string();
         (candidate, provider_id, None, "resolver")
@@ -1629,6 +1635,14 @@ mod tests {
     use codewhale_protocol::fleet::{FleetHostSpec, FleetTaskBudget, FleetWorkspaceRequirements};
     use std::path::{Path, PathBuf};
 
+    fn explicit_deepseek_config() -> Config {
+        Config {
+            provider: Some("deepseek".to_string()),
+            api_key: Some("test-key".to_string()),
+            ..Config::default()
+        }
+    }
+
     #[test]
     fn read_only_roles_report_the_narrowed_shell_they_actually_run_under() {
         use crate::tools::subagent::FleetRole;
@@ -2058,7 +2072,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_fleet_route_mints_secret_free_snapshot_from_resolver() {
+    fn resolved_config_mints_secret_free_fleet_route_snapshot() {
         let task = fleet_task(
             "route-1",
             Some(worker_profile(
@@ -2070,8 +2084,9 @@ mod tests {
                 vec!["read_file"],
             )),
         );
-        let route =
-            resolve_fleet_route(&task, &[], None).expect("default route should resolve offline");
+        let config = explicit_deepseek_config();
+        let route = resolve_fleet_route_with_config(&task, &[], None, Some(&config))
+            .expect("explicit default route should resolve offline");
 
         // Honest, non-empty route shape from the resolver.
         assert!(!route.provider_id.is_empty());
@@ -2087,7 +2102,7 @@ mod tests {
         assert_eq!(route.loadout_source.as_deref(), Some("task.loadout"));
         assert_eq!(route.model_class_source, None);
         assert_eq!(route.model_source.as_deref(), Some("resolver.default"));
-        assert_eq!(route.source, "resolver");
+        assert_eq!(route.source, "runtime_route");
 
         // No-secrets: the serialized snapshot carries no credential markers.
         let json = serde_json::to_string(&route).unwrap();
@@ -2129,7 +2144,9 @@ mod tests {
                 vec!["read_file"],
             )),
         );
-        let route = resolve_fleet_route(&task, &[], None).expect("route should resolve");
+        let config = explicit_deepseek_config();
+        let route = resolve_fleet_route_with_config(&task, &[], None, Some(&config))
+            .expect("route should resolve");
         assert_eq!(route.role.as_deref(), Some("scout"));
         assert!(route.loadout.is_none());
         assert_eq!(route.loadout_source, None);
@@ -2162,7 +2179,8 @@ mod tests {
                 "prompt must not emit compatibility alias {alias}: {prompt}"
             );
 
-            let resolved = resolve_fleet_route(&task, &[], None)
+            let config = explicit_deepseek_config();
+            let resolved = resolve_fleet_route_with_config(&task, &[], None, Some(&config))
                 .expect("compatibility role should resolve a receipt route");
             assert_eq!(resolved.role.as_deref(), Some("consultant"));
             assert_eq!(resolved.role_source.as_deref(), Some("task.role"));
@@ -2201,8 +2219,9 @@ mod tests {
                 vec!["read_file"],
             )),
         );
-        let route =
-            resolve_fleet_route(&task, &[profile], None).expect("profile route should resolve");
+        let config = explicit_deepseek_config();
+        let route = resolve_fleet_route_with_config(&task, &[profile], None, Some(&config))
+            .expect("profile route should resolve");
 
         assert_eq!(route.role.as_deref(), Some("reviewer"));
         assert_eq!(route.role_source.as_deref(), Some("agent_profile.role"));
@@ -2465,8 +2484,14 @@ mod tests {
                     fleet_worker_launch_reasoning_effort(&task, &[]).as_deref(),
                     Some("high")
                 );
-                let route = resolve_fleet_route(&task, &[], Some("deepseek-v4-pro"))
-                    .expect("receipt route resolves");
+                let config = explicit_deepseek_config();
+                let route = resolve_fleet_route_with_config(
+                    &task,
+                    &[],
+                    Some("deepseek-v4-pro"),
+                    Some(&config),
+                )
+                .expect("receipt route resolves");
                 assert_eq!(route.role.as_deref(), Some("consultant"));
                 assert_eq!(route.reasoning_effort.as_deref(), Some("high"));
             }
@@ -2523,10 +2548,15 @@ mod tests {
     fn resolve_fleet_route_uses_session_model_as_run_fallback() {
         // Route receipts must agree with dispatch: when neither the task nor
         // a roster profile pins a model, the session route is the run-level
-        // fallback and the receipt records it came from `run.model`.
+        // fallback and the receipt records it came from `run.model`. A model
+        // name alone is not provider authority, so the config-less helper
+        // refuses to invent a route.
         let task = fleet_task("route-session", None);
-        let route = resolve_fleet_route(&task, &[], Some("deepseek-v4-flash"))
-            .expect("session-model route should resolve offline");
+        assert!(resolve_fleet_route(&task, &[], Some("deepseek-v4-flash")).is_none());
+        let config = explicit_deepseek_config();
+        let route =
+            resolve_fleet_route_with_config(&task, &[], Some("deepseek-v4-flash"), Some(&config))
+                .expect("resolved config should authorize the session-model route");
         assert_eq!(route.model_source.as_deref(), Some("run.model"));
         assert_eq!(route.wire_model_id, "deepseek-v4-flash");
 
@@ -2549,8 +2579,13 @@ mod tests {
                 vec![],
             )),
         );
-        let pinned = resolve_fleet_route(&pinned_task, &[profile], Some("deepseek-v4-flash"))
-            .expect("pinned route should resolve");
+        let pinned = resolve_fleet_route_with_config(
+            &pinned_task,
+            &[profile],
+            Some("deepseek-v4-flash"),
+            Some(&config),
+        )
+        .expect("pinned route should resolve under the configured provider");
         assert_eq!(pinned.model_source.as_deref(), Some("agent_profile.model"));
         assert_eq!(pinned.wire_model_id, "deepseek-v4-pro");
     }
@@ -2588,6 +2623,121 @@ mod tests {
             msg.contains("provider") || msg.contains("inherit"),
             "error tells the user how to fix it: {msg}"
         );
+    }
+
+    #[test]
+    fn configless_fleet_rejects_providerless_deepseek_named_work() {
+        let mut profile = agent_profile(
+            "unscoped",
+            "builder",
+            None,
+            codewhale_config::FleetLoadout::Inherit,
+        );
+        profile.profile.model = Some("deepseek-v4-flash".to_string());
+        let task = fleet_task(
+            "unscoped-build",
+            Some(worker_profile(
+                Some("unscoped"),
+                None,
+                None,
+                None,
+                None,
+                vec![],
+            )),
+        );
+
+        let error = validate_fleet_task_routes(
+            std::slice::from_ref(&task),
+            std::slice::from_ref(&profile),
+            Some("deepseek-v4-flash"),
+            None,
+        )
+        .expect_err("model spelling must not select a provider");
+        let message = error.to_string();
+        assert!(message.contains("no provider authority"), "{message}");
+        assert!(
+            message.contains("set the agent profile provider"),
+            "{message}"
+        );
+        assert!(resolve_fleet_route(&task, &[profile], Some("deepseek-v4-flash")).is_none());
+    }
+
+    #[test]
+    fn configless_fleet_keeps_explicit_non_deepseek_provider_authority() {
+        let mut profile = agent_profile(
+            "grok-builder",
+            "builder",
+            None,
+            codewhale_config::FleetLoadout::Inherit,
+        );
+        profile.profile.provider = Some("xai".to_string());
+        let task = fleet_task(
+            "grok-build",
+            Some(worker_profile(
+                Some("grok-builder"),
+                None,
+                None,
+                None,
+                None,
+                vec![],
+            )),
+        );
+
+        validate_fleet_task_routes(
+            std::slice::from_ref(&task),
+            std::slice::from_ref(&profile),
+            None,
+            None,
+        )
+        .expect("an explicit built-in provider is route authority");
+        let route = resolve_fleet_route(&task, &[profile], None)
+            .expect("explicit xAI route should resolve without borrowing session config");
+        assert_eq!(route.provider_id, "xai");
+        assert_eq!(route.provider_kind, "xai");
+        assert_eq!(route.wire_model_id, "grok-4.6");
+        assert!(
+            !serde_json::to_string(&route)
+                .expect("route json")
+                .to_ascii_lowercase()
+                .contains("credential")
+        );
+    }
+
+    #[test]
+    fn configless_fleet_rejects_explicit_custom_provider_without_live_route_config() {
+        let mut profile = agent_profile(
+            "private-gateway-builder",
+            "builder",
+            None,
+            codewhale_config::FleetLoadout::Inherit,
+        );
+        profile.profile.provider = Some("private-gateway".to_string());
+        let task = fleet_task(
+            "private-build",
+            Some(worker_profile(
+                Some("private-gateway-builder"),
+                None,
+                None,
+                None,
+                None,
+                vec![],
+            )),
+        );
+
+        let error = validate_fleet_task_routes(
+            std::slice::from_ref(&task),
+            std::slice::from_ref(&profile),
+            None,
+            None,
+        )
+        .expect_err("a custom provider name is not endpoint or model authority");
+        let message = error.to_string();
+        assert!(message.contains("provider=`private-gateway`"), "{message}");
+        assert!(
+            message.contains("attach the live route config"),
+            "{message}"
+        );
+        assert!(resolve_fleet_route(&task, &[profile], None).is_none());
     }
 
     #[test]
@@ -2645,6 +2795,7 @@ mod tests {
             codewhale_config::FleetLoadout::Inherit,
         );
         good.profile.model = Some("deepseek-v4-flash".to_string());
+        good.profile.provider = Some("deepseek".to_string());
         let good_task = fleet_task(
             "ds-build",
             Some(worker_profile(
@@ -2677,8 +2828,13 @@ mod tests {
                 vec![],
             )),
         );
-        validate_fleet_task_routes(&[inherit_task], &[inherit], None, None)
-            .expect("inherit (no model pin) must pass");
+        validate_fleet_task_routes(
+            &[inherit_task],
+            &[inherit],
+            None,
+            Some(&explicit_deepseek_config()),
+        )
+        .expect("inherit (no model pin) must pass");
     }
 
     #[test]
@@ -2720,6 +2876,7 @@ mod tests {
             codewhale_config::FleetLoadout::Inherit,
         );
         profile.profile.model = Some("deepseek-v4-flash".to_string());
+        profile.profile.provider = Some("deepseek".to_string());
         profile.profile.reasoning_effort = Some("high".to_string());
         let task = fleet_task(
             "deep-build",
