@@ -685,6 +685,14 @@ pub fn auto_compact_default_for_model(model: &str) -> bool {
 #[serde(tag = "type")]
 /// Streaming event types for SSE responses.
 pub enum StreamEvent {
+    /// Local pre-stream receipt: the provider request was sent with a reduced
+    /// tool surface. This is not provider SSE and must not count as content.
+    #[serde(rename = "tool_projection_warning")]
+    ToolProjectionWarning {
+        provider: String,
+        omitted_tool_names: Vec<String>,
+        omitted_tool_count: usize,
+    },
     #[serde(rename = "message_start")]
     MessageStart { message: MessageResponse },
     #[serde(rename = "content_block_start")]

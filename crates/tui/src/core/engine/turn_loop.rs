@@ -4369,6 +4369,20 @@ impl Engine {
             };
 
             match event {
+                StreamEvent::ToolProjectionWarning {
+                    provider,
+                    omitted_tool_names,
+                    omitted_tool_count,
+                } => {
+                    let _ = self
+                        .tx_event
+                        .send(Event::ToolProjectionWarning {
+                            provider,
+                            omitted_tool_names,
+                            omitted_tool_count,
+                        })
+                        .await;
+                }
                 StreamEvent::MessageStart { message } => {
                     // The chat-completions adapter emits a synthetic
                     // MessageStart with a zeroed usage; only a usage that
@@ -5606,7 +5620,8 @@ fn stream_event_has_actionable_content(event: &StreamEvent) -> bool {
             Delta::SignatureDelta { signature } => !signature.is_empty(),
             Delta::ReasoningStateDelta { .. } => true,
         },
-        StreamEvent::MessageStart { .. }
+        StreamEvent::ToolProjectionWarning { .. }
+        | StreamEvent::MessageStart { .. }
         | StreamEvent::ContentBlockStop { .. }
         | StreamEvent::MessageDelta { .. }
         | StreamEvent::MessageStop

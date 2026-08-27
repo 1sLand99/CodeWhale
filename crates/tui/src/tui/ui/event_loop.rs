@@ -2203,6 +2203,21 @@ pub(crate) async fn run_event_loop(
                     EngineEvent::Status { message } => {
                         app.status_message = Some(message);
                     }
+                    EngineEvent::ToolProjectionWarning {
+                        provider,
+                        omitted_tool_names,
+                        omitted_tool_count,
+                    } => {
+                        let tools = crate::core::events::tool_projection_warning_tool_list(
+                            &omitted_tool_names,
+                            omitted_tool_count,
+                        );
+                        let message = app
+                            .tr(MessageId::ToolProjectionWarning)
+                            .replace("{provider}", &provider)
+                            .replace("{tools}", &tools);
+                        app.push_status_toast(message, StatusToastLevel::Warning, Some(12_000));
+                    }
                     EngineEvent::RequestManifestReady { rendered } => {
                         // Typed manifest text, or the explicitly requested
                         // base-prompt-only disclosure. Rendered as a system cell.
