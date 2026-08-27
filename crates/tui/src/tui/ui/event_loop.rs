@@ -112,6 +112,23 @@ pub(super) fn handle_plain_key_before_composer(
     crate::tui::paste::handle_paste_burst_key(app, key, now)
 }
 
+/// Handle transcript actions after the paste-burst ambiguity window has
+/// resolved a typed character. The real transcript selection is required;
+/// `detail_target_cell_index` alone falls back to the latest cell and would
+/// arm these shortcuts while the composer is simply being typed into.
+fn handle_focused_transcript_action_char(app: &mut App, ch: char) -> bool {
+    if !app.input.is_empty() || !app.viewport.transcript_selection.is_active() {
+        return false;
+    }
+    match ch {
+        'y' => copy_focused_cell(app),
+        'Y' => copy_focused_cell_metadata(app),
+        'r' => detail_target_cell_index(app)
+            .is_some_and(|index| open_details_pager_for_cell(app, index)),
+        _ => false,
+    }
+}
+
 /// Flush a raw-paste ambiguity window without losing a leading Space.
 ///
 /// `FlushResult::Paste` is always composer payload. A lone typed Space is a
@@ -121,6 +138,11 @@ pub(super) fn flush_paste_burst_before_composer(app: &mut App, now: Instant) -> 
     match app.take_paste_burst_flush_if_enabled(now) {
         crate::tui::paste_burst::FlushResult::Paste(text) => {
             app.insert_str(&text);
+            true
+        }
+        crate::tui::paste_burst::FlushResult::Typed(ch)
+            if handle_focused_transcript_action_char(app, ch) =>
+        {
             true
         }
         crate::tui::paste_burst::FlushResult::Typed(' ')
@@ -4692,6 +4714,14 @@ pub(crate) async fn run_event_loop(
                         && app.input.is_empty()
                         && app.viewport.transcript_selection.is_active()
                         && open_pager_for_selection(app) =>
+                {
+                    continue;
+                }
+                KeyCode::Enter
+                    if key.modifiers == KeyModifiers::NONE
+                        && app.input.is_empty()
+                        && detail_target_cell_index(app).is_some()
+                        && open_focused_cell_pager(app) =>
                 {
                     continue;
                 }
