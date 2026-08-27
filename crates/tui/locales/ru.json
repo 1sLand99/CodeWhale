@@ -948,6 +948,7 @@
   "CtxInspSystemPrompt": "Структура системного промпта",
   "CtxInspReferences": "Ссылки",
   "CtxInspRecentTools": "Недавние инструменты",
+  "CtxInspToolSchemaCosts": "Стоимость схем инструментов",
   "CtxInspModel": "Модель",
   "CtxInspWorkspace": "Рабочая область",
   "CtxInspSession": "Сессия",

@@ -969,6 +969,7 @@
   "CtxInspSystemPrompt": "系统提示结构",
   "CtxInspReferences": "引用",
   "CtxInspRecentTools": "最近使用的工具",
+  "CtxInspToolSchemaCosts": "工具架构成本",
   "CtxInspModel": "模型",
   "CtxInspWorkspace": "工作区",
   "CtxInspSession": "会话",
