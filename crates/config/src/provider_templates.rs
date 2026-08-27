@@ -44,6 +44,7 @@ pub const BASETEN_MODELS: &[&str] = &[
     "deepseek-ai/DeepSeek-V4-Flash-0731",
     "deepseek-ai/DeepSeek-V4-Pro-0813",
     "zai-org/GLM-5.2",
+    "zai-org/GLM-5.3-Flash",
     "moonshotai/Kimi-K2.7-Code",
 ];
 

@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Z.ai `GLM-5.3-Flash` and OpenRouter `z-ai/glm-5.3-flash` are first-class
+  picker rows (`/model GLM-5.3-Flash`). Flash is the faster/explore sibling
+  of `GLM-5.3`; the Z.ai default stays `GLM-5.3`. List price is $0.15/$0.50
+  per 1M (durable; the 50% promo through 2026-09-09 is not the catalog row).
 - Baseten, Groq, and Cerebras are bundled OpenAI-compatible setup templates
   (`[providers.<id>] kind = "openai-compatible"`), not new `ProviderKind`
   variants. `/provider` fills URL, model, and env from one catalog row.

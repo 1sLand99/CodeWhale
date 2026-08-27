@@ -4364,6 +4364,9 @@ fn canonical_zai_model_id(model: &str) -> Option<&'static str> {
         // moving the default (now GLM-5.3) must not silently re-point an
         // explicit GLM-5.2 route.
         "glm-5.2" | "glm-5-2" | "zai-glm-5.2" | "zai-glm-5-2" => Some(ZAI_GLM_5_2_MODEL),
+        "glm-5.3-flash" | "glm-5-3-flash" | "zai-glm-5.3-flash" | "zai-glm-5-3-flash" => {
+            Some(ZAI_GLM_5_3_FLASH_MODEL)
+        }
         "glm-5.3" | "glm-5-3" | "zai-glm-5.3" | "zai-glm-5-3" => Some(ZAI_GLM_5_3_MODEL),
         "glm-5-turbo" | "glm-5turbo" | "zai-glm-5-turbo" => Some(ZAI_GLM_5_TURBO_MODEL),
         _ => None,
@@ -4391,6 +4394,11 @@ fn canonical_openrouter_recent_model_id(model: &str) -> Option<&'static str> {
         OPENROUTER_GLM_5_2_MODEL | "glm-5.2" | "glm-5-2" | "zai-glm-5.2" | "zai-glm-5-2" => {
             Some(OPENROUTER_GLM_5_2_MODEL)
         }
+        OPENROUTER_GLM_5_3_FLASH_MODEL
+        | "glm-5.3-flash"
+        | "glm-5-3-flash"
+        | "zai-glm-5.3-flash"
+        | "zai-glm-5-3-flash" => Some(OPENROUTER_GLM_5_3_FLASH_MODEL),
         OPENROUTER_GLM_5_3_MODEL | "glm-5.3" | "glm-5-3" | "zai-glm-5.3" | "zai-glm-5-3" => {
             Some(OPENROUTER_GLM_5_3_MODEL)
         }
