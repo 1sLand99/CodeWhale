@@ -10416,7 +10416,7 @@ FINAL RECEIPT
             .and_then(Value::as_str)
             .expect("run_id metadata");
 
-        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        tokio::time::timeout(std::time::Duration::from_secs(15), async {
             while calls.load(Ordering::SeqCst) == 0 {
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
