@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added `/import-claude` (#5557): reads `~/.claude.json` and
+  `~/.claude/settings.json` read-only and renders an explicit, reviewable
+  migration plan plus a written report. MCP servers route through the
+  existing `/mcp import <name> --approve` consent flow, allowlisted env keys
+  become an unapplied portable bundle for `codewhale config import`, and
+  permissions/hooks map to manual follow-ups; secret-shaped values are named
+  but never echoed or imported.
 - Added the managed Chat relay: account-owned Chat commands now execute on the
   native runtime thread engine through a new `runtime_chat_relay` module
   instead of a second execution path. Each Chat thread is a dedicated,
