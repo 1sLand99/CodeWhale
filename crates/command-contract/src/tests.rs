@@ -926,6 +926,7 @@ impl FakePlugin {
             detail: Some(PluginDetail {
                 name: "demo".to_string(),
                 id: "demo@1.0.0".to_string(),
+                inventory_summary: "skills=1 mcp=0".to_string(),
                 version: "1.0.0".to_string(),
                 origin: "local".to_string(),
                 scope: "user".to_string(),
@@ -981,6 +982,10 @@ impl CommandPluginContext for FakePlugin {
         self.summaries.len()
     }
 
+    fn reload(&mut self) -> Result<usize, String> {
+        Ok(self.summaries.len())
+    }
+
     fn is_empty(&self) -> bool {
         self.summaries.is_empty()
     }
@@ -995,6 +1000,7 @@ impl CommandPluginContext for FakePlugin {
         }
         Ok(vec![PluginSuggestion {
             name: "demo".to_string(),
+            state_label: "active".to_string(),
             description: "Demo bundle".to_string(),
             why: vec![task.to_string()],
             next_step: "Already active: /plugin show demo".to_string(),
@@ -1105,6 +1111,7 @@ impl CommandPluginContext for FakePlugin {
         Ok(PluginMarketplaceState {
             official: PluginMarketplaceCatalog {
                 id: "official".to_string(),
+                source_path: None,
                 display_name: None,
                 description: Some("Built into this release".to_string()),
                 format: "codewhale".to_string(),
@@ -1135,6 +1142,7 @@ impl CommandPluginContext for FakePlugin {
             warning_count: 0,
             catalog: PluginMarketplaceCatalog {
                 id: name.to_string(),
+                source_path: None,
                 display_name: None,
                 description: None,
                 format: "kimi".to_string(),
