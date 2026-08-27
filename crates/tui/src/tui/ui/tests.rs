@@ -4540,6 +4540,12 @@ fn typed_command_burst_keeps_r_and_y_out_of_transcript_actions() {
         streaming: false,
     }];
     app.resync_history_revisions();
+    let _ = render_underwater_test_app(&mut app, 60, 16);
+    select_original_cell(&mut app, 0);
+    assert!(
+        app.viewport.transcript_selection.is_active(),
+        "precondition: a standing transcript selection must arm block actions"
+    );
 
     let now = Instant::now();
     let command = "/plugin trust demo";
