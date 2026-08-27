@@ -6163,7 +6163,7 @@ impl Engine {
             }
         };
 
-        let (pending, auth_errors, timeouts, network_policy, catalog_generation, connecting) = {
+        let (pending, auth_errors, timeouts, network_policy, catalog_generation) = {
             let mut pool = pool.lock().await;
             if let Err(error) = pool.reload_if_config_changed().await {
                 tracing::debug!(
@@ -6172,17 +6172,12 @@ impl Engine {
                 );
             }
             let (pending, auth_errors) = pool.collect_pending_connects();
-            let connecting = pending
-                .iter()
-                .map(|(name, _)| name.clone())
-                .collect::<Vec<_>>();
             (
                 pending,
                 auth_errors,
                 pool.connect_timeouts(),
                 pool.cloned_network_policy(),
                 pool.current_catalog_generation(),
-                connecting,
             )
         };
 
@@ -6203,7 +6198,6 @@ impl Engine {
         self.mcp_boot_rx = Some(progress_rx);
         self.mcp_boot_done = Some(done_rx);
 
-        let _ = connecting;
         self.emit_mcp_session_boot(false).await;
 
         let pool_for_task = Arc::clone(&pool);
