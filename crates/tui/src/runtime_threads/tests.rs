@@ -3397,12 +3397,28 @@ async fn aggregate_usage_marks_bounded_journal_truncation_incomplete() -> Result
         .await?;
     assert_eq!(report.totals.dropped_usage_records, 2);
     assert_eq!(report.totals.unpriced_turns, 2);
+    assert_eq!(report.totals.cny_unpriced_turns, 2);
     assert_eq!(report.totals.turns, 2);
     assert!(!report.totals.cost_complete);
     assert!(
         report
             .totals
             .unpriced_reasons
+            .contains("runtime_usage_journal_truncated")
+    );
+    assert!(
+        report
+            .totals
+            .cny_unpriced_reasons
+            .contains("runtime_usage_journal_truncated")
+    );
+    let bucket = report.buckets.first().expect("thread usage bucket");
+    assert_eq!(bucket.dropped_usage_records, 2);
+    assert_eq!(bucket.unpriced_turns, 2);
+    assert_eq!(bucket.cny_unpriced_turns, 2);
+    assert!(
+        bucket
+            .cny_unpriced_reasons
             .contains("runtime_usage_journal_truncated")
     );
     Ok(())
