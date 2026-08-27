@@ -61,6 +61,7 @@ pub(crate) use composer::{InputHistoryDraft, char_count};
 pub(crate) use composer::{
     MAX_SUBMITTED_INPUT_CHARS, next_grapheme_boundary, prev_grapheme_boundary,
 };
+pub(crate) use status::StatusToastKind;
 pub use status::{StatusToast, StatusToastLevel};
 pub use types::{
     AppAction, AppMode, AppModeUi, AutomationAction, ComposerDensity, ComposerSubmitAction,
@@ -1285,6 +1286,10 @@ pub struct App {
     pub sticky_status: Option<StatusToast>,
     /// Last status text already promoted from `status_message` into toast state.
     pub last_status_message_seen: Option<String>,
+    /// Prevents the same pressure condition from immediately re-arming after
+    /// the operator explicitly dismisses its sticky warning. Reset when the
+    /// pressure falls below the warning threshold or compaction starts.
+    pub context_pressure_warning_dismissed: Option<crate::context_budget::PressureLevel>,
     pub model: String,
     /// Persisted model selections by provider name. Loaded from settings so
     /// `/model` and the picker can surface saved provider-specific choices.

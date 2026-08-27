@@ -4800,6 +4800,18 @@ pub(crate) async fn run_event_loop(
                 KeyCode::Esc if app.clear_composer_attachment_selection() => {
                     continue;
                 }
+                // An idle operator can dismiss the persistent context warning
+                // without affecting vim or attachment handling. While a turn
+                // is active Esc retains its cancellation meaning.
+                KeyCode::Esc
+                    if !app.is_loading
+                        && app.input.is_empty()
+                        && !slash_menu_open
+                        && !mention_menu_open
+                        && app.dismiss_context_pressure_warning() =>
+                {
+                    continue;
+                }
                 KeyCode::Esc if mention_menu_open => {
                     app.mention_menu_hidden = true;
                     app.mention_menu_selected = 0;

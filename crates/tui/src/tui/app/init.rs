@@ -739,6 +739,7 @@ impl App {
             update_available: None,
             sticky_status: None,
             last_status_message_seen: None,
+            context_pressure_warning_dismissed: None,
             model,
             provider_models,
             enabled_provider_models,

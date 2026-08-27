@@ -1,6 +1,6 @@
 use super::activity_detail::*;
 use super::compaction_flow::{
-    maybe_warn_context_pressure, should_auto_compact_before_send,
+    apply_compaction_started, maybe_warn_context_pressure, should_auto_compact_before_send,
     should_auto_compact_before_send_with_config,
 };
 use super::observer_hooks::{
@@ -12799,10 +12799,104 @@ fn context_pressure_warning_reflects_auto_compact_threshold_state() {
 
     maybe_warn_context_pressure(&mut app);
 
-    let status = app.status_message.expect("context warning");
+    let status = app.status_message.as_deref().expect("context warning");
     assert!(
         status.contains("Auto-compaction will run before the next send."),
         "unexpected status: {status}"
+    );
+    assert!(
+        app.sticky_status
+            .as_ref()
+            .is_some_and(|toast| toast.text == status),
+        "context pressure must remain visible in sticky status: {status}"
+    );
+}
+
+#[test]
+fn context_pressure_warning_survives_later_status_and_can_be_dismissed() {
+    let mut app = create_test_app();
+    app.api_messages = vec![Message {
+        role: Role::User,
+        content: vec![ContentBlock::Text {
+            text: "context ".repeat(240_000),
+            cache_control: None,
+        }],
+    }];
+    app.auto_compact = true;
+    app.auto_compact_threshold_percent = 100.0;
+    let (used, _, _) = context_usage_snapshot(&app).expect("context snapshot");
+    app.compact_threshold = usize::try_from(used).expect("non-negative context estimate");
+    maybe_warn_context_pressure(&mut app);
+    let warning = app
+        .sticky_status
+        .as_ref()
+        .expect("sticky context warning")
+        .text
+        .clone();
+
+    app.status_message = Some("A later transcript status".to_string());
+    let visible = app
+        .active_status_toast()
+        .expect("a later transient status is visible");
+    assert_eq!(visible.text, "A later transcript status");
+    assert_eq!(
+        app.sticky_status.as_ref().map(|toast| toast.text.as_str()),
+        Some(warning.as_str()),
+        "the persistent pressure warning remains behind the transient status"
+    );
+    assert!(app.dismiss_context_pressure_warning());
+    assert!(app.sticky_status.is_none());
+    app.status_message = None;
+    maybe_warn_context_pressure(&mut app);
+    assert!(
+        app.sticky_status.is_none(),
+        "explicit dismissal must not re-arm on the next pressure check"
+    );
+}
+
+#[test]
+fn context_pressure_warning_clears_when_compaction_starts() {
+    let mut app = create_test_app();
+    app.api_messages = vec![Message {
+        role: Role::User,
+        content: vec![ContentBlock::Text {
+            text: "context ".repeat(240_000),
+            cache_control: None,
+        }],
+    }];
+    app.auto_compact = true;
+    app.auto_compact_threshold_percent = 100.0;
+    let (used, _, _) = context_usage_snapshot(&app).expect("context snapshot");
+    app.compact_threshold = usize::try_from(used).expect("non-negative context estimate");
+    maybe_warn_context_pressure(&mut app);
+    assert!(
+        app.sticky_status
+            .as_ref()
+            .is_some_and(|toast| toast.text.starts_with("Context "))
+    );
+
+    apply_compaction_started(&mut app, "compaction-1".to_string(), false);
+    assert!(
+        app.sticky_status.is_none(),
+        "pressure warning should be cleared"
+    );
+    assert!(
+        app.status_message
+            .as_deref()
+            .is_some_and(|text| text.to_ascii_lowercase().contains("compacting")),
+        "compaction status should replace the pressure warning"
+    );
+}
+
+#[test]
+fn context_pressure_warning_stays_absent_below_threshold() {
+    let mut app = create_test_app();
+    maybe_warn_context_pressure(&mut app);
+
+    assert!(app.sticky_status.is_none());
+    assert!(
+        app.status_message.is_none(),
+        "low-pressure sessions should not create warning chrome"
     );
 }
 
