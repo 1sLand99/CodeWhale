@@ -8,11 +8,18 @@ the trust/enable lifecycle — this document covers how bits get onto disk in
 the first place.
 
 `/plugin suggest <task>` is a local, read-only companion: it ranks already
-installed bundles by their validated name, description, bundled skill names,
-and declared hosts. It explains the match and gives the next review/enable
-step, but never installs, trusts, or enables a bundle. Codewhale deliberately
-does not treat arbitrary remote archives as a plugin marketplace; a remote
-catalog needs publisher and provenance policy before it can make suggestions.
+installed bundles (name, keywords, description, bundled skill names, declared
+hosts) and any marketplace catalogs you have added with `/plugin marketplace add`.
+It explains the match and gives the next review, enable, or catalog-install
+step, but never installs, trusts, or enables a bundle on its own.
+
+Sending a task also surfaces one quiet toast when the prompt strongly matches
+an installed-but-idle plugin or a catalog candidate you do not have yet — for
+example a prompt about Supabase suggesting `/plugin trust supabase` or
+`/plugin marketplace install <catalog> supabase`. Description-only matches do
+not toast. Codewhale does not invent a remote plugin URL; missing plugins are
+suggested only from catalogs you added. On-disk bundle changes still toast
+`/plugin reload` on send and between turns.
 
 ## Sources
 

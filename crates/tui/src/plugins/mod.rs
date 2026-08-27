@@ -10,6 +10,7 @@ pub mod manifest;
 pub mod marketplace;
 pub mod mutation;
 mod path_identity;
+pub mod recommend;
 pub mod registry;
 pub mod runtime;
 pub mod types;

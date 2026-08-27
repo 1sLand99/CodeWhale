@@ -1136,6 +1136,7 @@ pub(crate) async fn run_event_loop(
         // #1830/#2317: service any already-arrived terminal keys before a
         // potentially long engine batch so composer/modal input stays live.
         collect_pending_terminal_events(&terminal_input, &mut pending_terminal_events)?;
+        app.maybe_poll_plugin_catalog_idle();
 
         if drain_remote_control_events(app, config, &engine_handle).await? {
             app.needs_redraw = true;

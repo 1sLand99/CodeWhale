@@ -1302,6 +1302,11 @@ pub struct App {
     pub context_pressure_warning_dismissed: Option<crate::context_budget::PressureLevel>,
     /// Last on-disk plugin catalog stamp we already nudged `/plugin reload` for.
     pub plugin_reload_nudge_stamp: Option<crate::plugins::PluginCatalogStamp>,
+    /// Plugin names already toasted for this session's prompt matching.
+    pub plugin_prompt_suggest_names: HashSet<String>,
+    pub plugin_prompt_suggest_count: u8,
+    /// Last idle catalog fingerprint poll, so disk changes can surface between turns.
+    pub last_plugin_catalog_poll: Option<Instant>,
     pub model: String,
     /// Persisted model selections by provider name. Loaded from settings so
     /// `/model` and the picker can surface saved provider-specific choices.

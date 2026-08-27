@@ -258,8 +258,9 @@ Then run `/plugin enable example` again. Trust and enablement are separate:
 
 (`/plugin install`, `update`, and `uninstall` place, replace, and remove the
 bits themselves and always drop into this same review — see
-[PLUGINS.md](PLUGINS.md). `/plugin suggest` only ranks what is already
-installed.)
+[PLUGINS.md](PLUGINS.md). `/plugin suggest` ranks installed bundles and
+any locally added marketplace catalogs; sending a matching task can toast the
+same next step without installing anything.)
 
 Trust, enable, disable, revoke, and reload rebuild the current workspace's
 Skills, MCP, Commands, Agent profiles, and Hooks immediately. Each persisted
