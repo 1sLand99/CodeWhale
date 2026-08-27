@@ -97,6 +97,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Hardened the dispatcher-side config parse the same way: `ConfigStore`
+  loads and project-config parsing now deserialize `ConfigToml` on a
+  dedicated 16 MiB-stack thread (the guided-setup save path could overflow
+  a 2 MiB worker stack the same way the TUI's `ConfigFile` parse did), and
+  the #5585 setup-confirm toast test runs its runtime on an equally sized
+  thread instead of overflowing the default libtest stack.
 - Fixed detached interactive agents reporting worker usage after the parent
   turn ends with the usage missing from the session/live `/cost` total
   (#5597): interactive turns acquire an owner-scoped runtime usage lease,
