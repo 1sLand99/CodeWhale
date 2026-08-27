@@ -1945,6 +1945,19 @@ async fn workspace_and_automation_endpoints_work() -> Result<()> {
     Ok(())
 }
 
+fn test_fleet_route_config() -> crate::config::Config {
+    let mut providers = crate::config::ProvidersConfig::default();
+    providers.deepseek.api_key = Some("test-key".to_string());
+    providers.xai.api_key = Some("test-key".to_string());
+    providers.zai.api_key = Some("test-key".to_string());
+    crate::config::Config {
+        provider: Some("deepseek".to_string()),
+        api_key: Some("test-key".to_string()),
+        providers: Some(providers),
+        ..crate::config::Config::default()
+    }
+}
+
 #[tokio::test]
 async fn fleet_status_runtime_api_exposes_state_and_actions() -> Result<()> {
     let root = std::env::temp_dir().join(format!("codewhale-fleet-api-{}", Uuid::new_v4()));
@@ -1953,7 +1966,8 @@ async fn fleet_status_runtime_api_exposes_state_and_actions() -> Result<()> {
     let sub_agent_manager = runtime_api_sub_agent_manager(&workspace, 2);
     let manager = FleetManager::open(&workspace)?
         .with_sub_agent_manager(sub_agent_manager.clone())
-        .with_session_model(DEFAULT_TEXT_MODEL);
+        .with_session_model(DEFAULT_TEXT_MODEL)
+        .with_route_config(test_fleet_route_config());
     let task = codewhale_protocol::fleet::FleetTaskSpec {
         id: "task-a".to_string(),
         name: "Task A".to_string(),
@@ -8939,7 +8953,8 @@ async fn fleet_receipt_api_list_and_get_round_trip() -> Result<()> {
         metadata: std::collections::BTreeMap::new(),
     };
     let manager = crate::fleet::manager::FleetManager::open(&workspace)?
-        .with_session_model(crate::config::DEFAULT_TEXT_MODEL);
+        .with_session_model(crate::config::DEFAULT_TEXT_MODEL)
+        .with_route_config(test_fleet_route_config());
     let report = manager.create_run(
         FleetTaskSpecDocument {
             name: Some("receipt-api-smoke".to_string()),
