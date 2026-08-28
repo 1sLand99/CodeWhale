@@ -12,6 +12,8 @@ use crate::config::ApiProvider;
 
 use super::{DeepSeekClient, api_url};
 
+mod zai;
+
 const MAX_NATIVE_ANSWER_CHARS: usize = 4_000;
 
 #[derive(Clone)]
@@ -45,7 +47,7 @@ impl ProviderNativeSearchClient {
     pub(crate) fn new(inner: DeepSeekClient) -> Option<Self> {
         matches!(
             inner.api_provider,
-            ApiProvider::Openai | ApiProvider::Anthropic | ApiProvider::Xai
+            ApiProvider::Openai | ApiProvider::Anthropic | ApiProvider::Xai | ApiProvider::Zai
         )
         .then_some(Self { inner })
     }
@@ -118,11 +120,13 @@ impl ProviderNativeSearchClient {
                     2_048_u32.min(route_cap),
                 )
             }
+            ApiProvider::Zai => zai::build_body(request, &self.inner.base_url)?,
             _ => bail!("active provider has no native web-search adapter"),
         };
         let url = match self.inner.api_provider {
             ApiProvider::Openai | ApiProvider::Xai => api_url(&self.inner.base_url, "responses"),
             ApiProvider::Anthropic => anthropic_messages_url(&self.inner.base_url),
+            ApiProvider::Zai => api_url(&self.inner.base_url, "web_search"),
             _ => unreachable!("provider checked above"),
         };
         let body_bytes = serde_json::to_vec(&body)
@@ -145,6 +149,7 @@ impl ProviderNativeSearchClient {
         let mut parsed = match self.inner.api_provider {
             ApiProvider::Openai | ApiProvider::Xai => parse_responses_search(&payload),
             ApiProvider::Anthropic => parse_anthropic_search(&payload),
+            ApiProvider::Zai => zai::parse(&payload),
             _ => unreachable!("provider checked above"),
         };
         parsed.citations.truncate(usize::from(request.max_results));
