@@ -38,22 +38,26 @@ pub enum ShellTier {
     Wide,
 }
 
-const LAUNCH_ROWS: [(MessageId, &str); 6] = [
-    (MessageId::LaunchMenuWork, "Enter"),
-    (MessageId::LaunchMenuChat, "C"),
+const LAUNCH_ROWS: [(MessageId, &str); 7] = [
+    (MessageId::LaunchMenuConnect, "P"),
     (MessageId::LaunchMenuResumeSession, "Ctrl+R"),
+    (MessageId::LaunchMenuWork, "W"),
     (MessageId::LaunchMenuNewWorktree, "Ctrl+N"),
-    (MessageId::LaunchMenuChangelog, "Ctrl+L"),
-    (MessageId::LaunchMenuQuit, "Ctrl+Q"),
+    (MessageId::LaunchMenuChat, "C"),
+    (MessageId::LaunchMenuTheme, "T"),
+    (MessageId::LaunchMenuHelp, "F1"),
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LaunchAction {
     None,
+    Connect,
     NewSession,
     NewChat,
     CreateWorktree(String),
     Resume,
+    Theme,
+    Help,
     Changelog,
     Quit,
 }
@@ -113,17 +117,50 @@ pub fn handle_launch_key(
     }
 
     let direct = match key.code {
+        KeyCode::Char('p') | KeyCode::Char('P')
+            if !key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER) =>
+        {
+            Some(0)
+        }
+        KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => Some(1),
+        KeyCode::Char('w') | KeyCode::Char('W')
+            if !key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER) =>
+        {
+            Some(2)
+        }
+        KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => Some(3),
         KeyCode::Char('c') | KeyCode::Char('C')
             if !key
                 .modifiers
                 .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER) =>
         {
-            Some(1)
+            Some(4)
         }
-        KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => Some(2),
-        KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => Some(3),
-        KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => Some(4),
-        KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => Some(5),
+        KeyCode::Char('t') | KeyCode::Char('T')
+            if !key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER) =>
+        {
+            Some(5)
+        }
+        KeyCode::F(1) => Some(6),
+        // Changelog and quit remain stable keyboard-only shell actions. They
+        // are intentionally outside the seven startup choices in the Tideline
+        // contract, so invoking either must not move visible row focus.
+        KeyCode::Char('l') | KeyCode::Char('L')
+            if key.modifiers.contains(KeyModifiers::CONTROL) =>
+        {
+            return LaunchAction::Changelog;
+        }
+        KeyCode::Char('q') | KeyCode::Char('Q')
+            if key.modifiers.contains(KeyModifiers::CONTROL) =>
+        {
+            return LaunchAction::Quit;
+        }
         _ => None,
     };
     if let Some(selected) = direct {
@@ -144,9 +181,9 @@ pub fn handle_launch_key(
     }
 
     match launch.selected {
-        0 => LaunchAction::NewSession,
-        1 => LaunchAction::NewChat,
-        2 => LaunchAction::Resume,
+        0 => LaunchAction::Connect,
+        1 => LaunchAction::Resume,
+        2 => LaunchAction::NewSession,
         3 if launch.worktree_available => {
             launch.worktree_input = Some(String::new());
             launch.status = Some(tr(locale, MessageId::LaunchWorktreePrompt).into_owned());
@@ -156,8 +193,9 @@ pub fn handle_launch_key(
             launch.status = Some(tr(locale, MessageId::LaunchWorktreeNeedsGit).into_owned());
             LaunchAction::None
         }
-        4 => LaunchAction::Changelog,
-        5 => LaunchAction::Quit,
+        4 => LaunchAction::NewChat,
+        5 => LaunchAction::Theme,
+        6 => LaunchAction::Help,
         _ => LaunchAction::None,
     }
 }
@@ -815,15 +853,20 @@ fn launch_has_detail(area: Rect) -> bool {
     area.width >= 60 && area.height >= 22
 }
 
-fn launch_content_start(_area: Rect) -> u16 {
+fn launch_content_start(area: Rect) -> u16 {
     // Keep the decision block anchored just below the shell header at every
     // detailed size. Vertically centering it made a wide terminal look like
     // an old fixed-height menu floating in decorative emptiness.
-    3
+    // At the supported 40x12 floor, begin immediately after the header rule so
+    // all seven startup choices remain reachable rather than clipping Help.
+    if area.height <= 12 { 2 } else { 3 }
 }
 
 fn launch_row_y(area: Rect, index: usize) -> u16 {
-    const DETAIL_ROW_OFFSETS: [u16; 6] = [4, 7, 11, 12, 15, 16];
+    // Three primary actions followed by the four secondary options from the
+    // authoritative Tideline startup contract. The gaps are deliberate group
+    // seams; row hitboxes use this same function.
+    const DETAIL_ROW_OFFSETS: [u16; 7] = [4, 6, 8, 12, 13, 14, 15];
     let start = launch_content_start(area);
     if launch_has_detail(area) {
         start.saturating_add(DETAIL_ROW_OFFSETS[index])
@@ -937,24 +980,9 @@ pub fn render_launch_screen(area: Rect, buf: &mut Buffer, app: &App) {
                 }),
             )],
         );
-        for (row, description_id) in [
-            (launch_row_y(area, 0), MessageId::LaunchWorkDescription),
-            (launch_row_y(area, 1), MessageId::LaunchChatDescription),
-        ] {
-            render_launch_content_line(
-                area,
-                buf,
-                row.saturating_add(1),
-                4,
-                vec![Span::styled(
-                    tr(app.ui_locale, description_id).into_owned(),
-                    Style::default().fg(app.ui_theme.text_muted),
-                )],
-            );
-        }
         for (row, heading_id) in [
-            (launch_row_y(area, 2), MessageId::LaunchGroupContinue),
-            (launch_row_y(area, 4), MessageId::LaunchGroupMore),
+            (launch_row_y(area, 0), MessageId::LaunchGroupContinue),
+            (launch_row_y(area, 3), MessageId::LaunchGroupMore),
         ] {
             render_launch_content_line(
                 area,
@@ -984,7 +1012,7 @@ pub fn render_launch_screen(area: Rect, buf: &mut Buffer, app: &App) {
                 tr(app.ui_locale, MessageId::LaunchMenuUnavailable)
             ));
         }
-        if index == 2 {
+        if index == 1 {
             label.push_str(&format!(
                 " · {}",
                 tr(app.ui_locale, MessageId::LaunchMenuSavedCount)
@@ -1846,6 +1874,137 @@ pub fn empty_state_lines(app: &App, area: Rect) -> Vec<Line<'static>> {
         )));
     }
     lines
+}
+
+#[cfg(test)]
+mod launch_contract_tests {
+    use super::{LaunchAction, handle_launch_key, record_launch_row_areas};
+    use crate::localization::Locale;
+    use crate::tui::app::LaunchState;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::layout::Rect;
+
+    fn launch_state() -> LaunchState {
+        LaunchState {
+            visible: true,
+            selected: 0,
+            worktree_input: None,
+            status: None,
+            workspace_session_count: 2,
+            worktree_available: true,
+            row_areas: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn seven_tideline_rows_have_exact_detailed_and_compact_hitboxes() {
+        let mut launch = launch_state();
+        record_launch_row_areas(Rect::new(0, 0, 80, 24), &mut launch);
+        assert_eq!(
+            launch.row_areas,
+            [7, 9, 11, 15, 16, 17, 18]
+                .map(|y| Rect::new(2, y, 76, 1))
+                .to_vec()
+        );
+
+        record_launch_row_areas(Rect::new(0, 0, 40, 12), &mut launch);
+        assert_eq!(
+            launch.row_areas,
+            (2..=8).map(|y| Rect::new(2, y, 36, 1)).collect::<Vec<_>>(),
+            "the supported 40x12 floor must retain every startup choice"
+        );
+    }
+
+    #[test]
+    fn selected_rows_and_direct_keys_dispatch_the_same_startup_actions() {
+        let cases = [
+            (
+                0,
+                KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE),
+                LaunchAction::Connect,
+            ),
+            (
+                1,
+                KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL),
+                LaunchAction::Resume,
+            ),
+            (
+                2,
+                KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE),
+                LaunchAction::NewSession,
+            ),
+            (
+                4,
+                KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE),
+                LaunchAction::NewChat,
+            ),
+            (
+                5,
+                KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE),
+                LaunchAction::Theme,
+            ),
+            (
+                6,
+                KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE),
+                LaunchAction::Help,
+            ),
+        ];
+        for (index, direct, expected) in cases {
+            let mut selected = launch_state();
+            selected.selected = index;
+            assert_eq!(
+                handle_launch_key(
+                    &mut selected,
+                    KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+                    Locale::En,
+                ),
+                expected
+            );
+
+            let mut shortcut = launch_state();
+            assert_eq!(
+                handle_launch_key(&mut shortcut, direct, Locale::En),
+                expected
+            );
+            assert_eq!(shortcut.selected, index);
+        }
+
+        let mut worktree = launch_state();
+        worktree.selected = 3;
+        assert_eq!(
+            handle_launch_key(
+                &mut worktree,
+                KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+                Locale::En,
+            ),
+            LaunchAction::None
+        );
+        assert_eq!(worktree.worktree_input.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn changelog_and_quit_remain_keyboard_actions_without_claiming_a_row() {
+        let mut launch = launch_state();
+        launch.selected = 4;
+        assert_eq!(
+            handle_launch_key(
+                &mut launch,
+                KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL),
+                Locale::En,
+            ),
+            LaunchAction::Changelog
+        );
+        assert_eq!(launch.selected, 4);
+        assert_eq!(
+            handle_launch_key(
+                &mut launch,
+                KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL),
+                Locale::En,
+            ),
+            LaunchAction::Quit
+        );
+        assert_eq!(launch.selected, 4);
+    }
 }
 
 #[cfg(test)]

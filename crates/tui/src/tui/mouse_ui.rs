@@ -1873,25 +1873,31 @@ mod tests {
     }
 
     #[test]
-    fn launch_mouse_rows_dispatch_the_same_work_and_chat_actions_as_keyboard() {
-        let mut app = create_test_app();
-        app.launch.visible = true;
-        app.launch.worktree_available = true;
-        crate::tui::underwater::record_launch_row_areas(Rect::new(0, 0, 80, 24), &mut app.launch);
+    fn all_seven_launch_mouse_rows_dispatch_the_same_actions_as_keyboard() {
+        for index in 0..7 {
+            let mut app = create_test_app();
+            app.launch.visible = true;
+            app.launch.worktree_available = true;
+            crate::tui::underwater::record_launch_row_areas(
+                Rect::new(0, 0, 80, 24),
+                &mut app.launch,
+            );
 
-        handle_mouse_event(&mut app, left_click(10, 10));
-        assert_eq!(app.launch.selected, 1);
-        assert_eq!(
-            app.pending_launch_action.take(),
-            Some(crate::tui::underwater::LaunchAction::NewChat)
-        );
+            let mut keyboard = app.launch.clone();
+            keyboard.selected = index;
+            let keyboard_action = crate::tui::underwater::handle_launch_key(
+                &mut keyboard,
+                KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+                app.ui_locale,
+            );
 
-        handle_mouse_event(&mut app, left_click(10, 7));
-        assert_eq!(app.launch.selected, 0);
-        assert_eq!(
-            app.pending_launch_action.take(),
-            Some(crate::tui::underwater::LaunchAction::NewSession)
-        );
+            let row = app.launch.row_areas[index];
+            handle_mouse_event(&mut app, left_click(row.x, row.y));
+            assert_eq!(app.launch.selected, index);
+            assert_eq!(app.pending_launch_action.take(), Some(keyboard_action));
+            assert_eq!(app.launch.worktree_input, keyboard.worktree_input);
+            assert_eq!(app.launch.status, keyboard.status);
+        }
     }
 
     #[test]

@@ -581,6 +581,19 @@ fn settings_toggle_opens_and_closes_without_stacking_duplicates() {
 }
 
 #[test]
+fn launch_help_uses_the_same_toggle_and_shortcut_ordering_as_the_live_shell() {
+    let _lock = crate::test_support::lock_test_env();
+    let mut app = create_test_app();
+    app.launch.visible = true;
+
+    toggle_help_view(&mut app);
+    assert_eq!(app.view_stack.top_kind(), Some(ModalKind::Help));
+
+    toggle_help_view(&mut app);
+    assert!(app.view_stack.is_empty());
+}
+
+#[test]
 fn ctrl_t_key_event_reaches_reasoning_effort_cycle() {
     let mut app = create_test_app();
     app.api_provider = crate::config::ApiProvider::Deepseek;

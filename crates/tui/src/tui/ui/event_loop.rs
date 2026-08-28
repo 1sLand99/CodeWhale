@@ -3863,6 +3863,9 @@ pub(crate) async fn run_event_loop(
                     }
                     match action {
                         crate::tui::underwater::LaunchAction::None => {}
+                        crate::tui::underwater::LaunchAction::Connect => {
+                            open_launch_provider_picker(app, config, &engine_handle).await;
+                        }
                         crate::tui::underwater::LaunchAction::NewSession => {
                             let result = begin_launch_session(app, None);
                             if apply_command_result(
@@ -3931,6 +3934,12 @@ pub(crate) async fn run_event_loop(
                                 app.view_stack
                                     .push(SessionPickerView::new(&app.workspace, app.ui_locale));
                             }
+                        }
+                        crate::tui::underwater::LaunchAction::Theme => {
+                            open_theme_picker(app);
+                        }
+                        crate::tui::underwater::LaunchAction::Help => {
+                            toggle_help_view(app);
                         }
                         crate::tui::underwater::LaunchAction::Changelog => {
                             let title = app.tr(MessageId::LaunchMenuChangelog).into_owned();
@@ -4079,17 +4088,7 @@ pub(crate) async fn run_event_loop(
             // surfaces. `/help` remains the guaranteed textual route; this
             // handles function-key and control-key terminal encodings.
             if crate::tui::shell_key_routing::is_help_shortcut(&key) {
-                if app.view_stack.top_kind() == Some(ModalKind::Help) {
-                    app.view_stack.pop();
-                } else {
-                    let help = HelpView::new_for_shortcuts(
-                        app.ui_locale,
-                        &app.workspace,
-                        &app.cached_skills,
-                    )
-                    .with_groups_expanded(app.help_expand_groups);
-                    app.view_stack.push(help);
-                }
+                toggle_help_view(app);
                 continue;
             }
 
@@ -4310,6 +4309,9 @@ pub(crate) async fn run_event_loop(
                 }
                 match action {
                     crate::tui::underwater::LaunchAction::None => {}
+                    crate::tui::underwater::LaunchAction::Connect => {
+                        open_launch_provider_picker(app, config, &engine_handle).await;
+                    }
                     crate::tui::underwater::LaunchAction::NewSession => {
                         let result = begin_launch_session(app, None);
                         if apply_command_result(
@@ -4378,6 +4380,12 @@ pub(crate) async fn run_event_loop(
                             app.view_stack
                                 .push(SessionPickerView::new(&app.workspace, app.ui_locale));
                         }
+                    }
+                    crate::tui::underwater::LaunchAction::Theme => {
+                        open_theme_picker(app);
+                    }
+                    crate::tui::underwater::LaunchAction::Help => {
+                        toggle_help_view(app);
                     }
                     crate::tui::underwater::LaunchAction::Changelog => {
                         let title = app.tr(MessageId::LaunchMenuChangelog).into_owned();

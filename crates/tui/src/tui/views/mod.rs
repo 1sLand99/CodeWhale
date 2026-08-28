@@ -680,6 +680,15 @@ pub enum ViewEvent {
         value: String,
         persist: bool,
     },
+    /// The canonical `/theme` picker owns theme and underwater treatment as
+    /// one selection. Keeping the pair in one event lets its command owner
+    /// preview, roll back, and persist both fields without an observable
+    /// half-selected Deepsea state.
+    ThemeSelectionUpdated {
+        theme: String,
+        ocean_treatment: String,
+        persist: bool,
+    },
     SubAgentsRefresh,
     SidebarAgentCancel {
         agent_id: String,
