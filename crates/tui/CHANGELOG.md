@@ -86,6 +86,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Provider-native web search now applies domain constraints before accepting an
+  attempt, discards generated answers when returned citations violate those
+  constraints, and preserves the caller's configured/local timeout as an
+  independent fallback budget (#5681).
 - Idle session metrics omit zero facts (`0 turns`, `LLM 0s`) until the
   runtime has evidence. Working chrome says `in the current` instead of a
   generic `working`.
