@@ -6,17 +6,20 @@
 //! first-party wire contracts.
 
 use anyhow::{Context, Result, bail};
+use reqwest::header::{HeaderName, HeaderValue};
 use serde_json::{Value, json};
 
 use crate::config::ApiProvider;
 
 use super::{DeepSeekClient, api_url};
 
+mod kimi;
+
 const MAX_NATIVE_ANSWER_CHARS: usize = 4_000;
 
 #[derive(Clone)]
 pub(crate) struct ProviderNativeSearchClient {
-    inner: DeepSeekClient,
+    pub(super) inner: DeepSeekClient,
 }
 
 #[derive(Clone)]
@@ -45,7 +48,7 @@ impl ProviderNativeSearchClient {
     pub(crate) fn new(inner: DeepSeekClient) -> Option<Self> {
         matches!(
             inner.api_provider,
-            ApiProvider::Openai | ApiProvider::Anthropic | ApiProvider::Xai
+            ApiProvider::Openai | ApiProvider::Anthropic | ApiProvider::Xai | ApiProvider::Moonshot
         )
         .then_some(Self { inner })
     }
@@ -97,58 +100,85 @@ impl ProviderNativeSearchClient {
         // retained through response decode so a relay writer cannot start
         // while this result is still able to feed the interactive turn.
         let _inference = self.inner.acquire_remote_control_inference_permit().await;
-        let body = match self.inner.api_provider {
-            ApiProvider::Openai => build_responses_search_body(
-                &self.inner.default_model,
-                request,
-                ResponsesSearchDialect::Openai,
-            ),
-            ApiProvider::Xai => build_responses_search_body(
-                &self.inner.default_model,
-                request,
-                ResponsesSearchDialect::Xai,
-            ),
+        let mut parsed = match self.inner.api_provider {
+            ApiProvider::Openai | ApiProvider::Xai => {
+                let dialect = if self.inner.api_provider == ApiProvider::Openai {
+                    ResponsesSearchDialect::Openai
+                } else {
+                    ResponsesSearchDialect::Xai
+                };
+                let body = build_responses_search_body(&self.inner.default_model, request, dialect);
+                let url = api_url(&self.inner.base_url, "responses");
+                let payload = self.post_json(&url, &body, &[]).await?;
+                parse_responses_search(&payload)
+            }
             ApiProvider::Anthropic => {
                 let route_cap = self
                     .inner
                     .effective_max_output_tokens(&self.inner.default_model);
-                build_anthropic_search_body(
+                let body = build_anthropic_search_body(
                     &self.inner.default_model,
                     request,
                     2_048_u32.min(route_cap),
-                )
+                );
+                let payload = self
+                    .post_json(&anthropic_messages_url(&self.inner.base_url), &body, &[])
+                    .await?;
+                parse_anthropic_search(&payload)
             }
+            ApiProvider::Moonshot => kimi::search(self, request).await?,
             _ => bail!("active provider has no native web-search adapter"),
         };
-        let url = match self.inner.api_provider {
-            ApiProvider::Openai | ApiProvider::Xai => api_url(&self.inner.base_url, "responses"),
-            ApiProvider::Anthropic => anthropic_messages_url(&self.inner.base_url),
-            _ => unreachable!("provider checked above"),
-        };
+        parsed.citations.truncate(usize::from(request.max_results));
+        Ok(parsed)
+    }
+
+    pub(super) async fn post_json(
+        &self,
+        url: &str,
+        body: &Value,
+        headers: &[(HeaderName, HeaderValue)],
+    ) -> Result<Value> {
         let body_bytes = serde_json::to_vec(&body)
             .context("failed to serialize provider-native web-search request")?;
+        let headers = headers.to_vec();
+        let response = self
+            .inner
+            .send_with_retry(|| {
+                let mut request = self
+                    .inner
+                    .http_client
+                    .post(url)
+                    .header("Accept", "application/json")
+                    .body(body_bytes.clone());
+                for (name, value) in &headers {
+                    request = request.header(name, value);
+                }
+                request
+            })
+            .await
+            .context("provider-native web search request failed")?;
+        response
+            .json::<Value>()
+            .await
+            .context("provider-native web search returned invalid JSON")
+    }
+
+    pub(super) async fn get_json(&self, url: &str) -> Result<Value> {
         let response = self
             .inner
             .send_with_retry(|| {
                 self.inner
                     .http_client
-                    .post(&url)
+                    .get(url)
                     .header("Accept", "application/json")
-                    .body(body_bytes.clone())
             })
             .await
             .context("provider-native web search request failed")?;
-        let payload = response
+        response
             .json::<Value>()
             .await
-            .context("provider-native web search returned invalid JSON")?;
-        let mut parsed = match self.inner.api_provider {
-            ApiProvider::Openai | ApiProvider::Xai => parse_responses_search(&payload),
-            ApiProvider::Anthropic => parse_anthropic_search(&payload),
-            _ => unreachable!("provider checked above"),
-        };
-        parsed.citations.truncate(usize::from(request.max_results));
-        Ok(parsed)
+            .context("provider-native web search returned invalid JSON")
     }
 }
 
@@ -383,6 +413,38 @@ fn push_citation(
         return;
     }
     citations.push(candidate);
+}
+
+fn citations_from_text(text: &str) -> Vec<ProviderNativeCitation> {
+    let mut citations = Vec::new();
+    let mut offset = 0;
+    while offset < text.len() {
+        let remaining = &text[offset..];
+        let relative_start = match (remaining.find("https://"), remaining.find("http://")) {
+            (Some(https), Some(http)) => Some(https.min(http)),
+            (Some(https), None) => Some(https),
+            (None, Some(http)) => Some(http),
+            (None, None) => None,
+        };
+        let Some(relative_start) = relative_start else {
+            break;
+        };
+        let start = offset + relative_start;
+        let tail = &text[start..];
+        let end = tail
+            .char_indices()
+            .find_map(|(index, ch)| {
+                (index > 0
+                    && (ch.is_whitespace()
+                        || matches!(ch, ')' | ']' | '}' | '>' | '"' | '\'' | '`')))
+                .then_some(index)
+            })
+            .unwrap_or(tail.len());
+        let url = tail[..end].trim_end_matches(['.', ',', ';', ':', '!', '?']);
+        push_citation(&mut citations, citation_from_url(url, None, None, None));
+        offset = start + end.max(1);
+    }
+    citations
 }
 
 fn fallback_title(url: &str) -> String {
