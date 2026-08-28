@@ -52,6 +52,7 @@ impl CapabilityState {
 /// - OpenAI Responses web search: <https://developers.openai.com/api/docs/guides/tools-web-search>
 /// - Anthropic web search tool: <https://platform.claude.com/docs/en/agents-and-tools/tool-use/web-search-tool>
 /// - xAI web search tool: <https://docs.x.ai/developers/tools/web-search>
+/// - Xiaomi MiMo web search: <https://mimo.mi.com/docs/en-US/usage-guide/tool-calling/web-search>
 /// - Z.AI Web Search API: <https://docs.z.ai/api-reference/tools/web-search>
 /// - Zhipu Web Search API: <https://docs.bigmodel.cn/api-reference/工具-api/网络搜索>
 /// - Alibaba Model Studio Token Plan Harness tools: <https://help.aliyun.com/en/model-studio/token-plan-harness-tool>
@@ -80,6 +81,7 @@ pub(crate) fn documented_server_side_web_search(
                 | "claude-sonnet-4-6"
         ),
         "xai" => matches!(wire_model_id.as_str(), "grok-4.6" | "grok-4.5"),
+        "xiaomi-mimo" => matches!(wire_model_id.as_str(), "mimo-v2.5-pro" | "mimo-v2.5"),
         "zai" => matches!(
             wire_model_id.as_str(),
             "glm-5.3" | "glm-5.3-flash" | "glm-5.2" | "glm-5.1" | "glm-5-turbo"
@@ -199,6 +201,10 @@ mod tests {
             CapabilityState::Supported
         );
         assert_eq!(
+            documented_server_side_web_search("xiaomi-mimo", "mimo-v2.5-pro"),
+            CapabilityState::Supported
+        );
+        assert_eq!(
             documented_server_side_web_search("zai", "GLM-5.3"),
             CapabilityState::Supported
         );
@@ -219,6 +225,7 @@ mod tests {
             ("xai", "grok-4.6-latest"),
             ("xai", "grok-4.5-fast"),
             ("anthropic", "claude-haiku-4-5"),
+            ("xiaomi-mimo", "mimo-v2.5-pro-ultraspeed"),
             ("zai", "glm-5.3-preview"),
             ("modelstudio-coding-plan", "qwen3.8-max"),
             ("modelstudio-token-plan", "qwen3.8-max-preview"),
