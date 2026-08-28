@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Add provider-native web search for documented Qwen models on ModelStudio
+  Token Plan's Responses Harness, without enabling Coding Plan or Anthropic
+  routes.
 - Z.ai `GLM-5.3-Flash` and OpenRouter `z-ai/glm-5.3-flash` are first-class
   picker rows (`/model GLM-5.3-Flash`). Flash is the faster/explore sibling
   of `GLM-5.3`; the Z.ai default stays `GLM-5.3`. List price is $0.15/$0.50

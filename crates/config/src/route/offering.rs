@@ -311,6 +311,10 @@ pub fn bundled_offerings() -> Vec<ProviderModelOffering> {
             structured_output: CapabilityState::Supported,
             streaming: CapabilityState::Supported,
             image_input,
+            server_side_web_search: super::documented_server_side_web_search(
+                "modelstudio-token-plan",
+                model,
+            ),
             ..RouteCapabilities::default()
         }
     }

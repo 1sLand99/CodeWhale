@@ -45,7 +45,10 @@ impl ProviderNativeSearchClient {
     pub(crate) fn new(inner: DeepSeekClient) -> Option<Self> {
         matches!(
             inner.api_provider,
-            ApiProvider::Openai | ApiProvider::Anthropic | ApiProvider::Xai
+            ApiProvider::Openai
+                | ApiProvider::Anthropic
+                | ApiProvider::Xai
+                | ApiProvider::ModelstudioTokenPlan
         )
         .then_some(Self { inner })
     }
@@ -108,6 +111,11 @@ impl ProviderNativeSearchClient {
                 request,
                 ResponsesSearchDialect::Xai,
             ),
+            ApiProvider::ModelstudioTokenPlan => build_responses_search_body(
+                &self.inner.default_model,
+                request,
+                ResponsesSearchDialect::ModelStudio,
+            ),
             ApiProvider::Anthropic => {
                 let route_cap = self
                     .inner
@@ -121,7 +129,9 @@ impl ProviderNativeSearchClient {
             _ => bail!("active provider has no native web-search adapter"),
         };
         let url = match self.inner.api_provider {
-            ApiProvider::Openai | ApiProvider::Xai => api_url(&self.inner.base_url, "responses"),
+            ApiProvider::Openai | ApiProvider::Xai | ApiProvider::ModelstudioTokenPlan => {
+                api_url(&self.inner.base_url, "responses")
+            }
             ApiProvider::Anthropic => anthropic_messages_url(&self.inner.base_url),
             _ => unreachable!("provider checked above"),
         };
@@ -143,7 +153,9 @@ impl ProviderNativeSearchClient {
             .await
             .context("provider-native web search returned invalid JSON")?;
         let mut parsed = match self.inner.api_provider {
-            ApiProvider::Openai | ApiProvider::Xai => parse_responses_search(&payload),
+            ApiProvider::Openai | ApiProvider::Xai | ApiProvider::ModelstudioTokenPlan => {
+                parse_responses_search(&payload)
+            }
             ApiProvider::Anthropic => parse_anthropic_search(&payload),
             _ => unreachable!("provider checked above"),
         };
@@ -156,6 +168,7 @@ impl ProviderNativeSearchClient {
 enum ResponsesSearchDialect {
     Openai,
     Xai,
+    ModelStudio,
 }
 
 fn search_prompt(request: &ProviderNativeSearchRequest) -> String {
@@ -172,7 +185,12 @@ fn build_responses_search_body(
     dialect: ResponsesSearchDialect,
 ) -> Value {
     let mut tool = json!({ "type": "web_search" });
-    if !request.domains.is_empty() {
+    if !request.domains.is_empty()
+        && matches!(
+            dialect,
+            ResponsesSearchDialect::Openai | ResponsesSearchDialect::Xai
+        )
+    {
         tool["filters"] = json!({ "allowed_domains": request.domains });
     }
     let mut body = json!({
@@ -462,6 +480,20 @@ mod tests {
     }
 
     #[test]
+    fn modelstudio_payload_uses_required_harness_search_without_filters() {
+        let body = build_responses_search_body(
+            "qwen3.8-max",
+            &request(),
+            ResponsesSearchDialect::ModelStudio,
+        );
+        assert_eq!(body["tools"][0]["type"], "web_search");
+        assert!(body["tools"][0].get("filters").is_none());
+        assert_eq!(body["tool_choice"], "required");
+        assert!(body.get("include").is_none());
+        assert!(body.get("store").is_none());
+    }
+
+    #[test]
     fn anthropic_payload_uses_basic_direct_search_contract() {
         let body = build_anthropic_search_body("claude-opus-4-8", &request(), 2_048);
         assert_eq!(body["tools"][0]["type"], "web_search_20250305");
@@ -593,6 +625,53 @@ mod tests {
         assert_eq!(response.answer.as_deref(), Some("Grounded answer."));
         assert_eq!(response.citations.len(), 1);
         assert_eq!(response.citations[0].url, "https://example.com/source");
+    }
+
+    #[tokio::test]
+    async fn modelstudio_adapter_uses_token_plan_responses_contract() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/responses"))
+            .and(header("authorization", "Bearer modelstudio-test-key"))
+            .and(body_partial_json(json!({
+                "model": "qwen3.8-max",
+                "tools": [{ "type": "web_search" }],
+                "tool_choice": "required"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "output": [{
+                    "type": "web_search_call",
+                    "action": {
+                        "sources": [{
+                            "url": "https://example.com/qwen",
+                            "title": "Qwen source"
+                        }]
+                    }
+                }]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let config = Config {
+            provider: Some("modelstudio-token-plan".to_string()),
+            providers: Some(ProvidersConfig {
+                modelstudio_token_plan: ProviderConfig {
+                    api_key: Some("modelstudio-test-key".to_string()),
+                    base_url: Some(format!("{}/v1", server.uri())),
+                    model: Some("qwen3.8-max".to_string()),
+                    ..ProviderConfig::default()
+                },
+                ..ProvidersConfig::default()
+            }),
+            ..Config::default()
+        };
+        let inner = DeepSeekClient::new(&config).expect("test ModelStudio client");
+        let client = ProviderNativeSearchClient::new(inner).expect("Qwen native adapter");
+
+        let response = client.search(&request()).await.expect("native search");
+
+        assert_eq!(response.citations.len(), 1);
+        assert_eq!(response.citations[0].url, "https://example.com/qwen");
     }
 
     #[tokio::test]

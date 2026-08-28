@@ -1422,6 +1422,55 @@ fn provider_native_web_search_requires_exact_direct_endpoint_offering() {
 }
 
 #[test]
+fn qwen_native_search_is_exact_to_token_plan_responses_routes() {
+    use crate::route::CapabilityState;
+
+    let resolver = RouteResolver::new();
+    let direct = resolver
+        .resolve(&req(
+            Some(ProviderKind::ModelstudioTokenPlan),
+            Some("qwen3.8-max"),
+        ))
+        .expect("Token Plan Qwen route resolves");
+    assert_eq!(
+        direct.capabilities().server_side_web_search,
+        CapabilityState::Supported
+    );
+
+    let preview = resolver
+        .resolve(&req(
+            Some(ProviderKind::ModelstudioTokenPlan),
+            Some("qwen3.8-max-preview"),
+        ))
+        .expect("neighboring preview route resolves");
+    assert_eq!(
+        preview.capabilities().server_side_web_search,
+        CapabilityState::Unknown
+    );
+
+    for base_url in [
+        "https://coding-intl.dashscope.aliyuncs.com/v1",
+        "https://token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic",
+        "https://compatible.example.test/v1",
+    ] {
+        let alternate = resolver
+            .resolve(&RouteRequest {
+                explicit_provider: Some(ProviderKind::ModelstudioTokenPlan),
+                model_selector: Some(LogicalModelRef::from("qwen3.8-max")),
+                saved_provider_model: None,
+                base_url_override: Some(base_url.to_string()),
+                limit_overrides: Vec::new(),
+            })
+            .expect("alternate product route resolves");
+        assert_eq!(
+            alternate.capabilities().server_side_web_search,
+            CapabilityState::Unknown,
+            "{base_url} must not inherit Token Plan Responses search"
+        );
+    }
+}
+
+#[test]
 fn priced_offering_yields_token_pricing_sku() {
     use super::candidate::PricingSku;
 
