@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Add provider-native web search for documented Qwen models on ModelStudio
+  Token Plan's Responses Harness, without enabling Coding Plan or Anthropic
+  routes.
 - Add provider-native web search for documented DeepSeek V4 routes through the
   Responses API, with fail-closed capability gating for compatible custom
   endpoints.

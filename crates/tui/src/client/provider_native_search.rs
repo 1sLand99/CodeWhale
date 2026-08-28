@@ -48,6 +48,7 @@ impl ProviderNativeSearchClient {
             ApiProvider::Openai
                 | ApiProvider::Anthropic
                 | ApiProvider::Xai
+                | ApiProvider::ModelstudioTokenPlan
                 | ApiProvider::Deepseek
                 | ApiProvider::DeepseekCN
         )
@@ -117,6 +118,11 @@ impl ProviderNativeSearchClient {
                 request,
                 ResponsesSearchDialect::Xai,
             ),
+            ApiProvider::ModelstudioTokenPlan => build_responses_search_body(
+                &self.inner.default_model,
+                request,
+                ResponsesSearchDialect::ModelStudio,
+            ),
             ApiProvider::Deepseek | ApiProvider::DeepseekCN => build_responses_search_body(
                 &self.inner.default_model,
                 request,
@@ -135,7 +141,9 @@ impl ProviderNativeSearchClient {
             _ => bail!("active provider has no native web-search adapter"),
         };
         let url = match self.inner.api_provider {
-            ApiProvider::Openai | ApiProvider::Xai => api_url(&self.inner.base_url, "responses"),
+            ApiProvider::Openai | ApiProvider::Xai | ApiProvider::ModelstudioTokenPlan => {
+                api_url(&self.inner.base_url, "responses")
+            }
             ApiProvider::Deepseek | ApiProvider::DeepseekCN => {
                 responses_api_url(&self.inner.base_url, self.inner.api_provider)
             }
@@ -162,6 +170,7 @@ impl ProviderNativeSearchClient {
         let mut parsed = match self.inner.api_provider {
             ApiProvider::Openai
             | ApiProvider::Xai
+            | ApiProvider::ModelstudioTokenPlan
             | ApiProvider::Deepseek
             | ApiProvider::DeepseekCN => parse_responses_search(&payload),
             ApiProvider::Anthropic => parse_anthropic_search(&payload),
@@ -176,6 +185,7 @@ impl ProviderNativeSearchClient {
 enum ResponsesSearchDialect {
     Openai,
     Xai,
+    ModelStudio,
     Deepseek,
 }
 
@@ -213,6 +223,9 @@ fn build_responses_search_body(
             body["include"] = json!(["web_search_call.action.sources"]);
         }
         ResponsesSearchDialect::Xai => {
+            body["tool_choice"] = json!("required");
+        }
+        ResponsesSearchDialect::ModelStudio => {
             body["tool_choice"] = json!("required");
         }
         ResponsesSearchDialect::Deepseek => {
@@ -538,6 +551,20 @@ mod tests {
     }
 
     #[test]
+    fn modelstudio_payload_uses_required_harness_search_without_filters() {
+        let body = build_responses_search_body(
+            "qwen3.8-max",
+            &request(),
+            ResponsesSearchDialect::ModelStudio,
+        );
+        assert_eq!(body["tools"][0]["type"], "web_search");
+        assert!(body["tools"][0].get("filters").is_none());
+        assert_eq!(body["tool_choice"], "required");
+        assert!(body.get("include").is_none());
+        assert!(body.get("store").is_none());
+    }
+
+    #[test]
     fn deepseek_payload_uses_its_responses_search_contract() {
         let body = build_responses_search_body(
             "deepseek-v4-flash",
@@ -736,6 +763,52 @@ mod tests {
         assert_eq!(response.citations[0].url, "https://example.com/source");
     }
 
+    #[tokio::test]
+    async fn modelstudio_adapter_uses_token_plan_responses_contract() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/responses"))
+            .and(header("authorization", "Bearer modelstudio-test-key"))
+            .and(body_partial_json(json!({
+                "model": "qwen3.8-max",
+                "tools": [{ "type": "web_search" }],
+                "tool_choice": "required"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "output": [{
+                    "type": "web_search_call",
+                    "action": {
+                        "sources": [{
+                            "url": "https://example.com/qwen",
+                            "title": "Qwen source"
+                        }]
+                    }
+                }]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let config = Config {
+            provider: Some("modelstudio-token-plan".to_string()),
+            providers: Some(ProvidersConfig {
+                modelstudio_token_plan: ProviderConfig {
+                    api_key: Some("modelstudio-test-key".to_string()),
+                    base_url: Some(format!("{}/v1", server.uri())),
+                    model: Some("qwen3.8-max".to_string()),
+                    ..ProviderConfig::default()
+                },
+                ..ProvidersConfig::default()
+            }),
+            ..Config::default()
+        };
+        let inner = DeepSeekClient::new(&config).expect("test ModelStudio client");
+        let client = ProviderNativeSearchClient::new(inner).expect("Qwen native adapter");
+
+        let response = client.search(&request()).await.expect("native search");
+
+        assert_eq!(response.citations.len(), 1);
+        assert_eq!(response.citations[0].url, "https://example.com/qwen");
+    }
     #[tokio::test]
     async fn deepseek_adapter_uses_authenticated_responses_endpoint() {
         let server = MockServer::start().await;
