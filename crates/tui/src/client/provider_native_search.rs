@@ -61,6 +61,11 @@ impl ProviderNativeSearchClient {
     }
 
     #[must_use]
+    pub(crate) fn base_url(&self) -> &str {
+        &self.inner.base_url
+    }
+
+    #[must_use]
     pub(crate) fn host(&self) -> Option<String> {
         reqwest::Url::parse(&self.inner.base_url)
             .ok()

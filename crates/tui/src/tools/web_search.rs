@@ -42,6 +42,7 @@ const VOLCENGINE_RESPONSES_ENDPOINT: &str = "https://ark.cn-beijing.volces.com/a
 const SOFYA_ENDPOINT: &str = "https://sofya.co/v1/search";
 const ERROR_BODY_PREVIEW_BYTES: usize = 512;
 const PROVIDER_NATIVE_MIN_TIMEOUT_MS: u64 = 45_000;
+const KIMI_K3_FORMULA_MIN_TIMEOUT_MS: u64 = 180_000;
 const VOLCENGINE_MIN_TIMEOUT_MS: u64 = 90_000;
 
 /// Credential-free endpoint selected for an explicit doctor reachability
@@ -909,8 +910,15 @@ pub(crate) async fn execute_search(
 
     let started = Instant::now();
     let requested_timeout = Duration::from_millis(timeout_ms.max(1));
-    let (total_timeout, first_attempt_budget, fallback_budget_after_first) =
-        search_timeout_budgets(initial_backend, requested_timeout);
+    let provider_native_timeout_floor = context
+        .provider_native_search
+        .as_ref()
+        .and_then(provider_native_timeout_floor);
+    let (total_timeout, first_attempt_budget, fallback_budget_after_first) = search_timeout_budgets(
+        initial_backend,
+        requested_timeout,
+        provider_native_timeout_floor,
+    );
     let deadline = started + total_timeout;
     let chained = chain
         .search(
@@ -936,6 +944,7 @@ pub(crate) async fn execute_search(
 fn search_timeout_budgets(
     initial_backend: BackendId,
     requested_timeout: Duration,
+    provider_native_timeout_floor: Option<Duration>,
 ) -> (Duration, Option<Duration>, Option<Duration>) {
     match initial_backend {
         BackendId::Volcengine => {
@@ -950,8 +959,10 @@ fn search_timeout_budgets(
             // Provider-native search performs a model-backed request. Give it
             // a dedicated minimum without donating unused time to the
             // configured/local fallback selected by the caller.
-            let provider_budget =
-                requested_timeout.max(Duration::from_millis(PROVIDER_NATIVE_MIN_TIMEOUT_MS));
+            let provider_budget = requested_timeout.max(
+                provider_native_timeout_floor
+                    .unwrap_or(Duration::from_millis(PROVIDER_NATIVE_MIN_TIMEOUT_MS)),
+            );
             (
                 provider_budget.saturating_add(requested_timeout),
                 Some(provider_budget),
@@ -960,6 +971,17 @@ fn search_timeout_budgets(
         }
         _ => (requested_timeout, None, None),
     }
+}
+
+fn provider_native_timeout_floor(
+    client: &crate::client::ProviderNativeSearchClient,
+) -> Option<Duration> {
+    crate::config::is_exact_direct_moonshot_k3_route(
+        client.provider(),
+        client.base_url(),
+        client.model(),
+    )
+    .then_some(Duration::from_millis(KIMI_K3_FORMULA_MIN_TIMEOUT_MS))
 }
 
 fn register_search_citations(response: &mut SearchResponse, context: &ToolContext) {
@@ -2134,14 +2156,15 @@ fn duckduckgo_allows_bing_fallback(base_url: Option<&str>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        ERROR_BODY_PREVIEW_BYTES, ScrapeEndpoints, SearchProbeTargetError, WebSearchTool,
-        acquire_model_backed_search_inference_participant, baidu_search_payload,
-        bocha_error_message, domain_matches, duckduckgo_search_url, extract_search_query,
-        finalize_search_response, optional_search_max_results, parse_baidu_results,
-        parse_bocha_results, parse_metaso_results, parse_searxng_results, parse_sofya_results,
-        parse_tavily_results, parse_volcengine_results, register_search_citations, rerank,
-        run_scrape_search_with_endpoints, sanitize_error_body, search_probe_target,
-        search_timeout_budgets, searxng_search_url, truncate_error_body, volcengine_extract_text,
+        ERROR_BODY_PREVIEW_BYTES, KIMI_K3_FORMULA_MIN_TIMEOUT_MS, ScrapeEndpoints,
+        SearchProbeTargetError, WebSearchTool, acquire_model_backed_search_inference_participant,
+        baidu_search_payload, bocha_error_message, domain_matches, duckduckgo_search_url,
+        extract_search_query, finalize_search_response, optional_search_max_results,
+        parse_baidu_results, parse_bocha_results, parse_metaso_results, parse_searxng_results,
+        parse_sofya_results, parse_tavily_results, parse_volcengine_results,
+        register_search_citations, rerank, run_scrape_search_with_endpoints, sanitize_error_body,
+        search_probe_target, search_timeout_budgets, searxng_search_url, truncate_error_body,
+        volcengine_extract_text,
     };
     use crate::config::SearchProvider;
     use crate::tools::web::contract::{
@@ -2155,10 +2178,20 @@ mod tests {
     #[test]
     fn provider_native_receives_dedicated_budget_without_extending_fallback() {
         let requested = Duration::from_millis(15_000);
-        let (total, first, fallback) = search_timeout_budgets(BackendId::ProviderNative, requested);
+        let (total, first, fallback) =
+            search_timeout_budgets(BackendId::ProviderNative, requested, None);
 
         assert_eq!(total, Duration::from_millis(60_000));
         assert_eq!(first, Some(Duration::from_millis(45_000)));
+        assert_eq!(fallback, Some(requested));
+
+        let (total, first, fallback) = search_timeout_budgets(
+            BackendId::ProviderNative,
+            requested,
+            Some(Duration::from_millis(KIMI_K3_FORMULA_MIN_TIMEOUT_MS)),
+        );
+        assert_eq!(total, Duration::from_millis(195_000));
+        assert_eq!(first, Some(Duration::from_millis(180_000)));
         assert_eq!(fallback, Some(requested));
     }
 
