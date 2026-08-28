@@ -7,6 +7,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::ProviderKind;
+
 /// Whether a resolved provider/model offering supports one capability.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -50,6 +52,8 @@ impl CapabilityState {
 /// - OpenAI Responses web search: <https://developers.openai.com/api/docs/guides/tools-web-search>
 /// - Anthropic web search tool: <https://platform.claude.com/docs/en/agents-and-tools/tool-use/web-search-tool>
 /// - xAI web search tool: <https://docs.x.ai/developers/tools/web-search>
+/// - Z.AI Web Search API: <https://docs.z.ai/api-reference/tools/web-search>
+/// - Zhipu Web Search API: <https://docs.bigmodel.cn/api-reference/工具-api/网络搜索>
 /// - Alibaba Model Studio Token Plan Harness tools: <https://help.aliyun.com/en/model-studio/token-plan-harness-tool>
 /// - DeepSeek Responses web search: <https://api-docs.deepseek.com/api/create-response/>
 #[must_use]
@@ -76,6 +80,10 @@ pub(crate) fn documented_server_side_web_search(
                 | "claude-sonnet-4-6"
         ),
         "xai" => matches!(wire_model_id.as_str(), "grok-4.6" | "grok-4.5"),
+        "zai" => matches!(
+            wire_model_id.as_str(),
+            "glm-5.3" | "glm-5.3-flash" | "glm-5.2" | "glm-5.1" | "glm-5-turbo"
+        ),
         "modelstudio-token-plan" => matches!(
             wire_model_id.as_str(),
             "qwen3.8-max" | "qwen3.7-plus" | "qwen3.7-max"
@@ -91,6 +99,27 @@ pub(crate) fn documented_server_side_web_search(
     } else {
         CapabilityState::Unknown
     }
+}
+
+/// Return the Z.AI/Zhipu search fact only for the two exact general API
+/// products that expose the structured `/web_search` endpoint.
+#[must_use]
+pub(crate) fn documented_zai_web_search_for_route(
+    provider: ProviderKind,
+    wire_model_id: &str,
+    base_url: &str,
+) -> CapabilityState {
+    if provider != ProviderKind::Zai {
+        return CapabilityState::Unknown;
+    }
+    let normalized = base_url.trim().trim_end_matches('/').to_ascii_lowercase();
+    if !matches!(
+        normalized.as_str(),
+        "https://api.z.ai/api/paas/v4" | "https://open.bigmodel.cn/api/paas/v4"
+    ) {
+        return CapabilityState::Unknown;
+    }
+    documented_server_side_web_search("zai", wire_model_id)
 }
 
 /// Capability facts owned by one provider/model route offering.
@@ -170,6 +199,10 @@ mod tests {
             CapabilityState::Supported
         );
         assert_eq!(
+            documented_server_side_web_search("zai", "GLM-5.3"),
+            CapabilityState::Supported
+        );
+        assert_eq!(
             documented_server_side_web_search("modelstudio-token-plan", "qwen3.8-max"),
             CapabilityState::Supported
         );
@@ -186,6 +219,7 @@ mod tests {
             ("xai", "grok-4.6-latest"),
             ("xai", "grok-4.5-fast"),
             ("anthropic", "claude-haiku-4-5"),
+            ("zai", "glm-5.3-preview"),
             ("modelstudio-coding-plan", "qwen3.8-max"),
             ("modelstudio-token-plan", "qwen3.8-max-preview"),
             ("deepseek", "deepseek-v4-flash-preview"),
@@ -194,6 +228,29 @@ mod tests {
                 documented_server_side_web_search(provider, model),
                 CapabilityState::Unknown,
                 "{provider}/{model} must not inherit a capability by similarity"
+            );
+        }
+    }
+
+    #[test]
+    fn zai_route_fact_rejects_coding_and_neighboring_endpoints() {
+        for base_url in [
+            "https://api.z.ai/api/paas/v4",
+            "https://open.bigmodel.cn/api/paas/v4/",
+        ] {
+            assert_eq!(
+                documented_zai_web_search_for_route(ProviderKind::Zai, "GLM-5.3", base_url),
+                CapabilityState::Supported
+            );
+        }
+        for base_url in [
+            "https://api.z.ai/api/coding/paas/v4",
+            "https://open.bigmodel.cn/api/paas/v4/preview",
+            "https://gateway.example.test/v4",
+        ] {
+            assert_eq!(
+                documented_zai_web_search_for_route(ProviderKind::Zai, "GLM-5.3", base_url),
+                CapabilityState::Unknown
             );
         }
     }
