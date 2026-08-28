@@ -1349,7 +1349,9 @@ impl Engine {
                     turn_error = Some(message.clone());
                     let _ = self
                         .tx_event
-                        .send(Event::error(ErrorEnvelope::classify(message, true)))
+                        .send(Event::error(crate::error_taxonomy::envelope_for_llm_error(
+                            e, message,
+                        )))
                         .await;
                     return (TurnOutcomeStatus::Failed, turn_error);
                 }
@@ -4283,7 +4285,11 @@ impl Engine {
                                 stream_error.get_or_insert(retry_msg.clone());
                                 let _ = self
                                     .tx_event
-                                    .send(Event::error(ErrorEnvelope::classify(retry_msg, true)))
+                                    .send(Event::error(
+                                        crate::error_taxonomy::envelope_for_llm_error(
+                                            retry_err, retry_msg,
+                                        ),
+                                    ))
                                     .await;
                                 break;
                             }
@@ -4359,7 +4365,10 @@ impl Engine {
                     stream_error.get_or_insert(user_message.clone());
                     let _ = self
                         .tx_event
-                        .send(Event::error(ErrorEnvelope::classify(user_message, true)))
+                        .send(Event::error(crate::error_taxonomy::envelope_for_llm_error(
+                            e,
+                            user_message,
+                        )))
                         .await;
                     if stream_errors >= MAX_STREAM_ERRORS_BEFORE_FAIL {
                         break;
