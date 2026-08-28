@@ -1731,7 +1731,7 @@ fn run_async_main(
     plugin_discovery: Arc<crate::plugins::PluginDiscoveryContext>,
     plugin_registry: Arc<crate::plugins::PluginRegistry>,
 ) -> Result<()> {
-    build_runtime()?.block_on(run_async_main_inner(
+    build_runtime(command.as_ref())?.block_on(run_async_main_inner(
         cli,
         command,
         plugin_discovery,
@@ -1755,14 +1755,70 @@ fn run_async_main(
 /// raises SIGABRT, so `spawn_supervised`'s `catch_unwind` cannot see it and the
 /// process dies with 134 mid-dispatch.
 ///
+/// Build the runtime that owns every async task in this binary.
+///
+/// `command` selects the worker-count policy: read-only diagnostic commands
+/// run on a small fixed pool instead of tokio's one-worker-per-CPU default
+/// (see [`diagnostic_worker_count`]). Interactive sessions and servers keep
+/// the default sizing unchanged.
+///
+/// `#[tokio::main]` used to expand here, which left every worker thread on
+/// tokio's 2 MiB default while only the `codewhale-main` owner thread above
+/// received `CODEWHALE_MAIN_STACK_BYTES`. The engine does not run on that owner
+/// thread — `core::engine::spawn_engine` hands `Engine::run` to
+/// `utils::spawn_supervised`, a bare `tokio::spawn` — so the explicit stack
+/// never applied where the depth actually is.
+///
+/// A debug-build `agent` dispatch (turn_loop -> FuturesUnordered ->
+/// execute_full_with_context -> AgentTool::execute -> spawn_subagent_from_input)
+/// measured a stack high-water mark between 2.25 and 2.5 MiB and aborted the
+/// whole process on the guard page. A Rust stack overflow is not a panic: it
+/// raises SIGABRT, so `spawn_supervised`'s `catch_unwind` cannot see it and the
+/// process dies with 134 mid-dispatch.
+///
 /// This is behavior-identical to the old `#[tokio::main]` expansion apart from
 /// the stack size, and it makes the knob greppable.
-pub(crate) fn build_runtime() -> Result<tokio::runtime::Runtime> {
-    tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .thread_stack_size(CODEWHALE_MAIN_STACK_BYTES)
+pub(crate) fn build_runtime(command: Option<&Commands>) -> Result<tokio::runtime::Runtime> {
+    let mut builder = tokio_runtime_builder();
+    if let Some(workers) = diagnostic_worker_count(command) {
+        builder.worker_threads(workers);
+    }
+    builder
         .build()
         .context("Failed to build the Codewhale Tokio runtime")
+}
+
+/// Number of async workers to request from tokio.
+///
+/// Unset means tokio's default: one worker per CPU. That default is right for
+/// interactive sessions and long-running servers, but short-lived offline
+/// commands gain nothing from a full-CPU pool — they pay thread spawn, stack
+/// reservation, and teardown futex traffic for capacity they never use (perf
+/// attribution: pthread_create under `Builder::build` dominates init samples).
+const DIAGNOSTIC_WORKER_CAP: usize = 2;
+
+fn diagnostic_worker_count(command: Option<&Commands>) -> Option<usize> {
+    let capped = match command {
+        // Read-only diagnostic surfaces (doctor family).
+        Some(
+            Commands::Doctor(_)
+            | Commands::Eval(_)
+            | Commands::SessionDiagnostics(_)
+            | Commands::Sessions { .. },
+        ) => true,
+        // Only the read-only status report; mutating setup keeps defaults.
+        Some(Commands::Setup(args)) => args.status,
+        _ => false,
+    };
+    capped.then_some(DIAGNOSTIC_WORKER_CAP)
+}
+
+fn tokio_runtime_builder() -> tokio::runtime::Builder {
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder
+        .enable_all()
+        .thread_stack_size(CODEWHALE_MAIN_STACK_BYTES);
+    builder
 }
 
 /// Which product surface this process is serving.
@@ -7634,15 +7690,13 @@ async fn test_api_connectivity(config: &Config) -> Result<()> {
 }
 
 fn rustc_version() -> String {
-    let Some(mut cmd) = crate::dependencies::RustC::command() else {
+    // `RustC::available()` resolves the tool once, capturing the `--version`
+    // banner as a side effect of the probe; reuse it instead of launching a
+    // second rustc process (each launch loads libLLVM).
+    if !crate::dependencies::RustC::available() {
         return "unknown".to_string();
-    };
-    let Ok(output) = cmd.arg("--version").output() else {
-        return "unknown".to_string();
-    };
-    String::from_utf8(output.stdout)
-        .map(|s| s.trim().to_string())
-        .unwrap_or_else(|_| "unknown".to_string())
+    }
+    crate::dependencies::rustc_version_banner().unwrap_or_else(|| "unknown".to_string())
 }
 
 /// List saved sessions

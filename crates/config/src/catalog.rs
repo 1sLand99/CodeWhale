@@ -32,6 +32,7 @@
 //! [`ProviderCatalogCache`] tests).
 
 use std::collections::BTreeMap;
+use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -186,16 +187,30 @@ impl CatalogOffering {
 /// honesty rule on omitted pricing (`UnknownOrStale`, never a fabricated zero).
 pub const BUNDLED_MODELS_DEV_JSON: &str = include_str!("../assets/models_dev.bundled.json");
 
+/// Parse-once cache for the committed bundled Models.dev snapshot.
+///
+/// The bundled asset is compile-time constant (`include_str!`), so its parsed
+/// form is immutable and safe to share process-wide. Before this cache, every
+/// call site parsed the full snapshot independently — the client route path,
+/// pickers, provider lake, and fleet identity each paid a full serde parse of
+/// ~50KB on their own first use (perf-attributed during the 0.9.x perf
+/// gauntlet: `ModelsDevCost` serde frames in startup profiles).
+static BUNDLED_MODELS_DEV_CATALOG: OnceLock<ModelsDevCatalog> = OnceLock::new();
+
 /// Parse the committed bundled Models.dev snapshot.
+///
+/// The first call parses; later calls return the shared parsed catalog.
 ///
 /// # Panics
 /// Panics only if the committed asset is not valid Models.dev JSON. The
 /// `tests::bundled_asset_parses` guard makes that a build-time failure, so this
 /// never panics in shipped builds.
 #[must_use]
-pub fn bundled_models_dev_catalog() -> ModelsDevCatalog {
-    ModelsDevCatalog::parse_json(BUNDLED_MODELS_DEV_JSON)
-        .expect("committed bundled Models.dev asset must be valid JSON")
+pub fn bundled_models_dev_catalog() -> &'static ModelsDevCatalog {
+    BUNDLED_MODELS_DEV_CATALOG.get_or_init(|| {
+        ModelsDevCatalog::parse_json(BUNDLED_MODELS_DEV_JSON)
+            .expect("committed bundled Models.dev asset must be valid JSON")
+    })
 }
 
 /// Bundled-layer [`CatalogOffering`] rows from the offline snapshot (#4188).
@@ -205,7 +220,7 @@ pub fn bundled_models_dev_catalog() -> ModelsDevCatalog {
 /// rows override these on `(provider, wire_model_id)` when available.
 #[must_use]
 pub fn bundled_catalog_offerings() -> Vec<CatalogOffering> {
-    bundled_offerings_from_models_dev(&bundled_models_dev_catalog())
+    bundled_offerings_from_models_dev(bundled_models_dev_catalog())
 }
 
 /// Hydrate bundled [`CatalogOffering`] rows from a parsed Models.dev catalog.

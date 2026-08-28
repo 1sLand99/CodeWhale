@@ -5339,6 +5339,23 @@ fn zai_aliases_resolve_to_canonical_models() {
             "{alias} must not resolve to the Z.ai default"
         );
     }
+    for alias in [
+        "glm-5.3-flash",
+        "glm-5-3-flash",
+        "zai-glm-5.3-flash",
+        "GLM-5.3-Flash",
+    ] {
+        assert_eq!(
+            normalize_model_for_provider(ProviderKind::Zai, alias),
+            ZAI_GLM_5_3_FLASH_MODEL,
+            "{alias} must canonicalize to GLM-5.3-Flash"
+        );
+        assert_ne!(
+            normalize_model_for_provider(ProviderKind::Zai, alias),
+            ZAI_GLM_5_3_MODEL,
+            "{alias} must not collapse onto GLM-5.3"
+        );
+    }
     assert_eq!(
         normalize_model_for_provider(ProviderKind::Zai, "glm-5-turbo"),
         ZAI_GLM_5_TURBO_MODEL
@@ -7107,6 +7124,7 @@ fn openrouter_provider_normalizes_recent_large_model_aliases() {
         ("glm-5.1", OPENROUTER_GLM_5_1_MODEL),
         ("glm-5.2", OPENROUTER_GLM_5_2_MODEL),
         ("glm-5.3", OPENROUTER_GLM_5_3_MODEL),
+        ("glm-5.3-flash", OPENROUTER_GLM_5_3_FLASH_MODEL),
     ] {
         let cli = CliRuntimeOverrides {
             provider: Some(ProviderKind::Openrouter),

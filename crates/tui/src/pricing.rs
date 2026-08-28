@@ -625,6 +625,9 @@ fn known_pricing_for_model(model_lower: &str) -> Option<ModelPricing> {
         // Z.ai GLM-5.2 cache-read rate per https://docs.z.ai/guides/overview/pricing
         // (cache storage limited-time free).
         "z-ai/glm-5.2" | "glm-5.2" => Some(usd_only_pricing(0.26, 1.40, 4.40)),
+        // GLM-5.3-Flash list rates (2026-08-26). Promo 50% off until
+        // 2026-09-09 UTC+8 is not the durable row.
+        "z-ai/glm-5.3-flash" | "glm-5.3-flash" => Some(usd_only_pricing(0.03, 0.15, 0.50)),
         // Moonshot K2.7 Code cache-read rate per
         // https://platform.kimi.ai/docs/pricing/chat-k27-code
         "moonshotai/kimi-k2.7-code" | "kimi-k2.7-code" => Some(usd_only_pricing(0.19, 0.95, 4.00)),
@@ -1835,7 +1838,11 @@ fn provider_owned_hand_pricing_at(
         // owns a *hand-written price row* for the model, and no GLM-5.3 rate
         // has been published. An absent price is honest; an owned-but-empty
         // row is not. See `glm_5_3_has_no_hardcoded_price` below.
-        ApiProvider::Zai => matches!(model_lower.as_str(), "glm-5.1" | "glm-5.2" | "glm-5-turbo"),
+        // GLM-5.3-Flash *does* have a published USD list (2026-08-26).
+        ApiProvider::Zai => matches!(
+            model_lower.as_str(),
+            "glm-5.1" | "glm-5.2" | "glm-5.3-flash" | "glm-5-turbo"
+        ),
         // `k3` (Kimi Code membership) is deliberately absent: it is quota
         // billed and must never inherit the direct-platform kimi-k3 rate.
         ApiProvider::Moonshot => matches!(
@@ -3298,6 +3305,8 @@ mod tests {
             ("z-ai/glm-5.1", 0.26, 1.40, 4.40),
             ("glm-5.2", 0.26, 1.40, 4.40),
             ("z-ai/glm-5.2", 0.26, 1.40, 4.40),
+            ("glm-5.3-flash", 0.03, 0.15, 0.50),
+            ("z-ai/glm-5.3-flash", 0.03, 0.15, 0.50),
             ("glm-5-turbo", 0.24, 1.20, 4.00),
             ("z-ai/glm-5-turbo", 0.24, 1.20, 4.00),
             ("qwen/qwen3.6-plus", 0.325, 0.325, 1.95),

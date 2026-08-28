@@ -32,6 +32,7 @@ pub const OPENROUTER_GEMMA_4_26B_A4B_MODEL: &str = "google/gemma-4-26b-a4b-it";
 pub const OPENROUTER_GLM_5_1_MODEL: &str = "z-ai/glm-5.1";
 pub const OPENROUTER_GLM_5_2_MODEL: &str = "z-ai/glm-5.2";
 pub const OPENROUTER_GLM_5_3_MODEL: &str = "z-ai/glm-5.3";
+pub const OPENROUTER_GLM_5_3_FLASH_MODEL: &str = "z-ai/glm-5.3-flash";
 pub const OPENROUTER_GLM_5_TURBO_MODEL: &str = "z-ai/glm-5-turbo";
 pub const OPENROUTER_KIMI_K2_7_CODE_MODEL: &str = "moonshotai/kimi-k2.7-code";
 pub const OPENROUTER_KIMI_K2_6_MODEL: &str = "moonshotai/kimi-k2.6";
@@ -71,6 +72,7 @@ pub const RECENT_OPENROUTER_LARGE_MODELS: &[&str] = &[
     OPENROUTER_GLM_5_1_MODEL,
     OPENROUTER_GLM_5_2_MODEL,
     OPENROUTER_GLM_5_3_MODEL,
+    OPENROUTER_GLM_5_3_FLASH_MODEL,
     OPENROUTER_TENCENT_HY3_PREVIEW_MODEL,
     OPENROUTER_GEMMA_4_31B_MODEL,
     OPENROUTER_GEMMA_4_26B_A4B_MODEL,
@@ -196,6 +198,7 @@ pub const DEFAULT_ZAI_MODEL: &str = ZAI_GLM_5_3_MODEL;
 pub const ZAI_GLM_5_1_MODEL: &str = "GLM-5.1";
 pub const ZAI_GLM_5_2_MODEL: &str = "GLM-5.2";
 pub const ZAI_GLM_5_3_MODEL: &str = "GLM-5.3";
+pub const ZAI_GLM_5_3_FLASH_MODEL: &str = "GLM-5.3-Flash";
 pub const ZAI_GLM_5_TURBO_MODEL: &str = "GLM-5-Turbo";
 pub const DEFAULT_ZAI_BASE_URL: &str = "https://api.z.ai/api/coding/paas/v4";
 pub const DEFAULT_STEPFUN_MODEL: &str = "step-3.7-flash";

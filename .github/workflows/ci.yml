@@ -131,7 +131,7 @@ jobs:
                 ;;
             esac
             case "${path}" in
-              crates/workflow/*|workflows/rlm_cache_change.star|.github/workflows/ci.yml)
+              crates/workflow/*|.github/workflows/ci.yml)
                 workflow=true
                 ;;
             esac
@@ -484,8 +484,8 @@ jobs:
         with:
           cache-bin: false
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: Run RLM cache workflow mock/replay tests
-        run: cargo test -p codewhale-workflow --locked rlm_cache_change
+      - name: Run workflow crate tests
+        run: cargo test -p codewhale-workflow --locked
 
   test:
     name: Test

@@ -5994,11 +5994,12 @@ mod alias_thinking_detection_tests {
     #[test]
     fn zai_tiered_effort_applies_to_glm_5_2_and_glm_5_3_but_not_5_1() {
         let zai = crate::config::DEFAULT_ZAI_BASE_URL;
-        // GLM-5.3 inherits GLM-5.2's reasoning_options (effort high/max), so it
-        // must take the same tiered wire path — not the generic toggle.
+        // GLM-5.3 and GLM-5.3-Flash inherit GLM-5.2's reasoning_options
+        // (effort high/max), so they must take the same tiered wire path.
         for model in [
             crate::config::ZAI_GLM_5_2_MODEL,
             crate::config::ZAI_GLM_5_3_MODEL,
+            crate::config::ZAI_GLM_5_3_FLASH_MODEL,
         ] {
             let mut body = json!({});
             apply_route_reasoning_controls(&mut body, ApiProvider::Zai, zai, model, Some("max"));
