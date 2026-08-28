@@ -45,7 +45,10 @@ impl ProviderNativeSearchClient {
     pub(crate) fn new(inner: DeepSeekClient) -> Option<Self> {
         matches!(
             inner.api_provider,
-            ApiProvider::Openai | ApiProvider::Anthropic | ApiProvider::Xai
+            ApiProvider::Openai
+                | ApiProvider::Anthropic
+                | ApiProvider::Xai
+                | ApiProvider::XiaomiMimo
         )
         .then_some(Self { inner })
     }
@@ -118,11 +121,13 @@ impl ProviderNativeSearchClient {
                     2_048_u32.min(route_cap),
                 )
             }
+            ApiProvider::XiaomiMimo => build_mimo_search_body(&self.inner.default_model, request),
             _ => bail!("active provider has no native web-search adapter"),
         };
         let url = match self.inner.api_provider {
             ApiProvider::Openai | ApiProvider::Xai => api_url(&self.inner.base_url, "responses"),
             ApiProvider::Anthropic => anthropic_messages_url(&self.inner.base_url),
+            ApiProvider::XiaomiMimo => api_url(&self.inner.base_url, "chat/completions"),
             _ => unreachable!("provider checked above"),
         };
         let body_bytes = serde_json::to_vec(&body)
@@ -145,6 +150,7 @@ impl ProviderNativeSearchClient {
         let mut parsed = match self.inner.api_provider {
             ApiProvider::Openai | ApiProvider::Xai => parse_responses_search(&payload),
             ApiProvider::Anthropic => parse_anthropic_search(&payload),
+            ApiProvider::XiaomiMimo => parse_mimo_search(&payload),
             _ => unreachable!("provider checked above"),
         };
         parsed.citations.truncate(usize::from(request.max_results));
@@ -213,6 +219,23 @@ fn build_anthropic_search_body(
         "max_tokens": max_tokens,
         "messages": [{ "role": "user", "content": search_prompt(request) }],
         "tools": [tool],
+    })
+}
+
+fn build_mimo_search_body(model: &str, request: &ProviderNativeSearchRequest) -> Value {
+    json!({
+        "model": model,
+        "messages": [{ "role": "user", "content": search_prompt(request) }],
+        "tools": [{
+            "type": "web_search",
+            "max_keyword": 1,
+            "force_search": true,
+            "limit": request.max_results,
+        }],
+        "tool_choice": "auto",
+        "max_completion_tokens": 2_048,
+        "stream": false,
+        "thinking": { "type": "disabled" },
     })
 }
 
@@ -321,6 +344,48 @@ fn parse_anthropic_search(payload: &Value) -> ProviderNativeSearchResponse {
     }
     ProviderNativeSearchResponse {
         answer: bounded_answer(answer_parts),
+        citations,
+    }
+}
+
+fn parse_mimo_search(payload: &Value) -> ProviderNativeSearchResponse {
+    let message = payload.pointer("/choices/0/message");
+    let answer = message
+        .and_then(|value| value.get("content"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_string);
+    let mut citations = Vec::new();
+    if let Some(annotations) = message
+        .and_then(|value| value.get("annotations"))
+        .and_then(Value::as_array)
+        .or_else(|| payload.get("annotations").and_then(Value::as_array))
+    {
+        for annotation in annotations {
+            let Some(url) = annotation.get("url").and_then(Value::as_str) else {
+                continue;
+            };
+            let title = annotation
+                .get("title")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            let snippet = annotation
+                .get("summary")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            let published = annotation
+                .get("publish_time")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            push_citation(
+                &mut citations,
+                citation_from_url(url, title, snippet, published),
+            );
+        }
+    }
+    ProviderNativeSearchResponse {
+        answer: bounded_answer(answer.into_iter().collect()),
         citations,
     }
 }
@@ -474,6 +539,16 @@ mod tests {
     }
 
     #[test]
+    fn mimo_payload_forces_bounded_web_search_plugin() {
+        let body = build_mimo_search_body("mimo-v2.5-pro", &request());
+        assert_eq!(body["tools"][0]["type"], "web_search");
+        assert_eq!(body["tools"][0]["force_search"], true);
+        assert_eq!(body["tools"][0]["limit"], 3);
+        assert_eq!(body["max_completion_tokens"], 2_048);
+        assert_eq!(body["thinking"]["type"], "disabled");
+    }
+
+    #[test]
     fn responses_parser_separates_answer_and_deduplicated_citations() {
         let payload = json!({
             "output": [
@@ -539,6 +614,28 @@ mod tests {
             parsed.citations[0].snippet.as_deref(),
             Some("Supporting passage")
         );
+    }
+
+    #[test]
+    fn mimo_parser_keeps_non_streaming_annotations() {
+        let parsed = parse_mimo_search(&json!({
+            "choices": [{
+                "message": {
+                    "content": "Grounded answer.",
+                    "annotations": [{
+                        "type": "url_citation",
+                        "url": "https://example.com/weather",
+                        "title": "Weather",
+                        "summary": "Forecast",
+                        "publish_time": "2026-08-28"
+                    }]
+                }
+            }]
+        }));
+        assert_eq!(parsed.answer.as_deref(), Some("Grounded answer."));
+        assert_eq!(parsed.citations.len(), 1);
+        assert_eq!(parsed.citations[0].snippet.as_deref(), Some("Forecast"));
+        assert_eq!(parsed.citations[0].published.as_deref(), Some("2026-08-28"));
     }
 
     #[test]

@@ -50,6 +50,7 @@ impl CapabilityState {
 /// - OpenAI Responses web search: <https://developers.openai.com/api/docs/guides/tools-web-search>
 /// - Anthropic web search tool: <https://platform.claude.com/docs/en/agents-and-tools/tool-use/web-search-tool>
 /// - xAI web search tool: <https://docs.x.ai/developers/tools/web-search>
+/// - Xiaomi MiMo web search: <https://mimo.mi.com/docs/en-US/usage-guide/tool-calling/web-search>
 #[must_use]
 pub(crate) fn documented_server_side_web_search(
     provider_id: &str,
@@ -74,6 +75,7 @@ pub(crate) fn documented_server_side_web_search(
                 | "claude-sonnet-4-6"
         ),
         "xai" => matches!(wire_model_id.as_str(), "grok-4.6" | "grok-4.5"),
+        "xiaomi-mimo" => matches!(wire_model_id.as_str(), "mimo-v2.5-pro" | "mimo-v2.5"),
         _ => false,
     };
     if supported {
@@ -159,6 +161,10 @@ mod tests {
             documented_server_side_web_search("anthropic", "claude-sonnet-4-6"),
             CapabilityState::Supported
         );
+        assert_eq!(
+            documented_server_side_web_search("xiaomi-mimo", "mimo-v2.5-pro"),
+            CapabilityState::Supported
+        );
 
         for (provider, model) in [
             ("openrouter", "openai/gpt-5.6"),
@@ -168,6 +174,7 @@ mod tests {
             ("xai", "grok-4.6-latest"),
             ("xai", "grok-4.5-fast"),
             ("anthropic", "claude-haiku-4-5"),
+            ("xiaomi-mimo", "mimo-v2.5-pro-ultraspeed"),
         ] {
             assert_eq!(
                 documented_server_side_web_search(provider, model),
