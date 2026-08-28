@@ -12,12 +12,11 @@ use std::io::Write;
 use std::path::Path;
 
 use codewhale_command_contract::facets::CommandProjectContext;
-use codewhale_command_contract::handler::{CommandCapabilities, CommandContexts};
+use codewhale_command_contract::handler::{CommandCapabilities, CommandContexts, CommandHandler};
+use codewhale_command_contract::metadata::{CommandInfo, RegisterCommand};
 
 use crate::commands::CommandResult;
-use crate::commands::traits::{CommandInfo, RegisterCommand};
 use crate::dependencies::ExternalTool;
-use crate::localization::MessageId;
 use crate::tui::app::AppAction;
 
 /// Share the current session as a web URL.
@@ -191,25 +190,25 @@ async fn upload_gist(path: &Path) -> Result<String, String> {
     Ok(stdout)
 }
 
-pub(in crate::commands) const COMMAND_INFO: CommandInfo = CommandInfo {
+pub(in crate::commands) const SHARE_INFO: CommandInfo = CommandInfo {
     name: "share",
     aliases: &[],
     usage: "/share",
-    description_id: MessageId::CmdShareDescription,
+    description_key: "cmd_share_description",
 };
 
 pub(in crate::commands) struct ShareCmd;
 
-impl RegisterCommand for ShareCmd {
+impl RegisterCommand<CommandResult> for ShareCmd {
     fn info() -> &'static CommandInfo {
-        &COMMAND_INFO
+        &SHARE_INFO
     }
 
-    fn execute(app: &mut crate::tui::app::App, arg: Option<&str>) -> CommandResult {
-        // Transitional shell: build the capability bundle and delegate to the
-        // contextual dispatch. Phase 6 replaces this with the contract bridge.
-        let mut bundle = app.command_contexts();
-        share_contextual(bundle.contexts(CommandCapabilities::PROJECT), arg)
+    fn handler() -> CommandHandler<CommandResult> {
+        CommandHandler::Contextual {
+            capabilities: CommandCapabilities::PROJECT,
+            handler: share_contextual,
+        }
     }
 }
 

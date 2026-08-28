@@ -12,10 +12,9 @@
 use codewhale_command_contract::facets::{
     CommandPresentationContext, ProjectGoalState, ProjectGoalStatus,
 };
-use codewhale_command_contract::handler::{CommandCapabilities, CommandContexts};
+use codewhale_command_contract::handler::{CommandCapabilities, CommandContexts, CommandHandler};
+use codewhale_command_contract::metadata::{CommandInfo, RegisterCommand};
 
-use crate::commands::traits::{CommandInfo, RegisterCommand};
-use crate::localization::MessageId;
 use crate::tui::app::AppAction;
 
 use crate::commands::CommandResult;
@@ -275,26 +274,25 @@ fn parse_goal_budget(text: &str) -> (String, Option<u32>) {
     (text.trim().to_string(), None)
 }
 
-pub(in crate::commands) const COMMAND_INFO: CommandInfo = CommandInfo {
+pub(in crate::commands) const GOAL_INFO: CommandInfo = CommandInfo {
     name: "goal",
     aliases: &[],
     usage: "/goal [objective|status|pause|resume|done|blocked|clear] [budget: N]",
-    description_id: MessageId::CmdGoalDescription,
+    description_key: "cmd_goal_description",
 };
 
 pub(in crate::commands) struct GoalCmd;
 
-impl RegisterCommand for GoalCmd {
+impl RegisterCommand<CommandResult> for GoalCmd {
     fn info() -> &'static CommandInfo {
-        &COMMAND_INFO
+        &GOAL_INFO
     }
 
-    fn execute(app: &mut crate::tui::app::App, arg: Option<&str>) -> CommandResult {
-        // Transitional shell: build the capability bundle and delegate to the
-        // contextual dispatch. Phase 6 replaces this with the contract bridge.
-        let mut bundle = app.command_contexts();
-        let capabilities = CommandCapabilities::PROJECT.union(CommandCapabilities::PRESENTATION);
-        goal_contextual(bundle.contexts(capabilities), arg)
+    fn handler() -> CommandHandler<CommandResult> {
+        CommandHandler::Contextual {
+            capabilities: CommandCapabilities::PROJECT.union(CommandCapabilities::PRESENTATION),
+            handler: goal_contextual,
+        }
     }
 }
 

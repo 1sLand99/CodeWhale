@@ -10,7 +10,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use codewhale_command_contract::handler::{CommandCapabilities, CommandContexts};
+use codewhale_command_contract::handler::CommandContexts;
 
 use crate::project_context;
 use crate::tui::app::AppAction;
@@ -802,30 +802,30 @@ fn build_init_prompt(
     prompt
 }
 
-pub(in crate::commands) const COMMAND_INFO: crate::commands::traits::CommandInfo =
-    crate::commands::traits::CommandInfo {
+pub(in crate::commands) const INIT_INFO: codewhale_command_contract::metadata::CommandInfo =
+    codewhale_command_contract::metadata::CommandInfo {
         name: "init",
         aliases: &[],
         usage: "/init",
-        description_id: crate::localization::MessageId::CmdInitDescription,
+        description_key: "cmd_init_description",
     };
 
 pub(in crate::commands) struct InitCmd;
 
-impl crate::commands::traits::RegisterCommand for InitCmd {
-    fn info() -> &'static crate::commands::traits::CommandInfo {
-        &COMMAND_INFO
+impl codewhale_command_contract::metadata::RegisterCommand<crate::commands::CommandResult>
+    for InitCmd
+{
+    fn info() -> &'static codewhale_command_contract::metadata::CommandInfo {
+        &INIT_INFO
     }
 
-    fn execute(
-        app: &mut crate::tui::app::App,
-        _arg: Option<&str>,
-    ) -> crate::commands::CommandResult {
-        // Transitional shell: build the capability bundle and delegate to the
-        // contextual dispatch. Phase 6 replaces this with the contract bridge.
-        let mut bundle = app.command_contexts();
-        let capabilities = CommandCapabilities::PROJECT.union(CommandCapabilities::WORKSPACE);
-        init_contextual(bundle.contexts(capabilities))
+    fn handler()
+    -> codewhale_command_contract::handler::CommandHandler<crate::commands::CommandResult> {
+        codewhale_command_contract::handler::CommandHandler::Contextual {
+            capabilities: codewhale_command_contract::handler::CommandCapabilities::PROJECT
+                .union(codewhale_command_contract::handler::CommandCapabilities::WORKSPACE),
+            handler: init_contextual,
+        }
     }
 }
 
@@ -835,7 +835,7 @@ impl crate::commands::traits::RegisterCommand for InitCmd {
 /// missing-facet error. The workspace path is consumed via the `WORKSPACE`
 /// facet (D2); the `PROJECT` capability is declared per D4 even though init
 /// consumes no project-facet method.
-fn init_contextual(contexts: CommandContexts<'_>) -> CommandResult {
+fn init_contextual(contexts: CommandContexts<'_>, _arg: Option<&str>) -> CommandResult {
     let parts = contexts.into_parts();
     let Some(workspace) = parts.workspace.as_deref() else {
         return crate::commands::CommandResult::error("Command capability unavailable: workspace");
@@ -933,7 +933,7 @@ mod tests {
     fn missing_workspace_facet_fails_safely() {
         // An empty envelope must fail safely — never panic and never perform a
         // partial workspace mutation.
-        let result = init_contextual(CommandContexts::empty());
+        let result = init_contextual(CommandContexts::empty(), None);
         assert!(result.is_error);
         assert!(
             result

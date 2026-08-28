@@ -5,32 +5,30 @@
 //! status/set delegates; the TUI adapter owns all host-side LSP behavior.
 
 use codewhale_command_contract::facets::CommandProjectContext;
-use codewhale_command_contract::handler::{CommandCapabilities, CommandContexts};
-
-use crate::commands::traits::{CommandInfo, RegisterCommand};
-use crate::localization::MessageId;
+use codewhale_command_contract::handler::{CommandCapabilities, CommandContexts, CommandHandler};
+use codewhale_command_contract::metadata::{CommandInfo, RegisterCommand};
 
 use crate::commands::CommandResult;
 
-pub(in crate::commands) const COMMAND_INFO: CommandInfo = CommandInfo {
+pub(in crate::commands) const LSP_INFO: CommandInfo = CommandInfo {
     name: "lsp",
     aliases: &[],
     usage: "/lsp [on|off|status]",
-    description_id: MessageId::CmdLspDescription,
+    description_key: "cmd_lsp_description",
 };
 
 pub(in crate::commands) struct LspCmd;
 
-impl RegisterCommand for LspCmd {
+impl RegisterCommand<CommandResult> for LspCmd {
     fn info() -> &'static CommandInfo {
-        &COMMAND_INFO
+        &LSP_INFO
     }
 
-    fn execute(app: &mut crate::tui::app::App, arg: Option<&str>) -> CommandResult {
-        // Transitional shell: build the capability bundle and delegate to the
-        // contextual dispatch. Phase 6 replaces this with the contract bridge.
-        let mut bundle = app.command_contexts();
-        lsp_contextual(bundle.contexts(CommandCapabilities::PROJECT), arg)
+    fn handler() -> CommandHandler<CommandResult> {
+        CommandHandler::Contextual {
+            capabilities: CommandCapabilities::PROJECT,
+            handler: lsp_contextual,
+        }
     }
 }
 
