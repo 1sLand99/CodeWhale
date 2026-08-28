@@ -44,6 +44,14 @@ pub(crate) async fn run_exec_agent(
     use crate::tools::todo::new_shared_todo_list;
     use crate::tui::app::AppMode;
 
+    // Headless exec registers the model-facing notify tool too. Project the
+    // final merged config before tool setup so `off`, quiet/category gates,
+    // and explicit `always` are truthful outside the interactive TUI. With no
+    // focus-reporting channel, fail closed to focused; only explicit `always`
+    // may authorize a headless desktop notification.
+    crate::tui::notifications::set_terminal_focused(true);
+    let _ = crate::tui::notifications::settings(config);
+
     validate_exec_tool_authority_resume(tool_authority_json.as_deref(), resume_session.is_some())?;
     let fleet_authority = tool_authority_json
         .as_deref()

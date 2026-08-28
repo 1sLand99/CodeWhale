@@ -11,6 +11,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Add provider-native web search for documented Xiaomi MiMo 2.5 Pro and 2.5
   chat routes while keeping neighboring models and custom gateways fail-closed.
+- Add structured provider-native web search for exact Z.AI global and Zhipu
+  China general API routes, using each site's documented search engine value.
+  Existing `open.bigmodel.cn` configurations now share Z.AI's official model
+  namespace and credential scope; unknown model IDs still pass through.
+- Add provider-native web search for documented Qwen models on ModelStudio
+  Token Plan's Responses Harness, without enabling Coding Plan or Anthropic
+  routes.
+- Add provider-native web search for documented DeepSeek V4 routes through the
+  Responses API, with fail-closed capability gating for compatible custom
+  endpoints.
 - Z.ai `GLM-5.3-Flash` and OpenRouter `z-ai/glm-5.3-flash` are first-class
   picker rows (`/model GLM-5.3-Flash`). Flash is the faster/explore sibling
   of `GLM-5.3`; the Z.ai default stays `GLM-5.3`. List price is $0.15/$0.50
@@ -88,6 +98,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Provider-native web search now applies domain constraints before accepting an
+  attempt, discards generated answers when returned citations violate those
+  constraints, and preserves the caller's configured/local timeout as an
+  independent fallback budget (#5681).
 - Idle session metrics omit zero facts (`0 turns`, `LLM 0s`) until the
   runtime has evidence. Working chrome says `in the current` instead of a
   generic `working`.

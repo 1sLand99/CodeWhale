@@ -1324,9 +1324,15 @@ fn live_search_provider_update_preserves_environment_precedence() {
 fn notification_defaults_and_live_updates_share_one_consistent_model() {
     let mut notifications = NotificationsConfig::default();
     assert_eq!(notifications.threshold_secs, 30);
+    assert_eq!(notifications.completion_sound, CompletionSound::Off);
     assert_eq!(
         Config::default().notifications_config().threshold_secs,
         notifications.threshold_secs
+    );
+    assert_eq!(
+        Config::default().notifications_config().completion_sound,
+        CompletionSound::Off,
+        "a fresh install must never opt itself into an audible completion cue"
     );
 
     notifications.apply_update(NotificationConfigUpdate::Method(NotificationMethod::Osc9));
@@ -1337,6 +1343,22 @@ fn notification_defaults_and_live_updates_share_one_consistent_model() {
     assert_eq!(
         notifications.threshold_secs, 30,
         "field deltas must preserve both defaults and earlier live edits"
+    );
+}
+
+#[test]
+fn notification_condition_accepts_background_only_policy() {
+    let config: Config = toml::from_str(
+        r#"
+        [tui]
+        notification_condition = "unfocused"
+        "#,
+    )
+    .expect("unfocused attention policy should parse");
+
+    assert_eq!(
+        config.tui.and_then(|tui| tui.notification_condition),
+        Some(NotificationCondition::Unfocused)
     );
 }
 
