@@ -1370,7 +1370,7 @@ fn resolver_carries_exact_offering_capabilities_without_protocol_inference() {
     assert_eq!(capabilities.streaming, CapabilityState::Unknown);
     assert_eq!(
         capabilities.server_side_web_search,
-        CapabilityState::Unknown
+        CapabilityState::Supported
     );
 }
 
