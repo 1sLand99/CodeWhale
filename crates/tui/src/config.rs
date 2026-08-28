@@ -1022,6 +1022,11 @@ fn canonical_openrouter_recent_model_id(model: &str) -> Option<&'static str> {
         OPENROUTER_GLM_5_2_MODEL | "glm-5.2" | "glm-5-2" | "zai-glm-5.2" | "zai-glm-5-2" => {
             Some(OPENROUTER_GLM_5_2_MODEL)
         }
+        OPENROUTER_GLM_5_3_FLASH_MODEL
+        | "glm-5.3-flash"
+        | "glm-5-3-flash"
+        | "zai-glm-5.3-flash"
+        | "zai-glm-5-3-flash" => Some(OPENROUTER_GLM_5_3_FLASH_MODEL),
         OPENROUTER_GLM_5_3_MODEL | "glm-5.3" | "glm-5-3" | "zai-glm-5.3" | "zai-glm-5-3" => {
             Some(OPENROUTER_GLM_5_3_MODEL)
         }
@@ -1083,9 +1088,16 @@ fn canonical_openrouter_recent_model_id(model: &str) -> Option<&'static str> {
         OPENROUTER_QWEN_3_7_MAX_MODEL | "qwen3.7-max" | "qwen-3.7-max" => {
             Some(OPENROUTER_QWEN_3_7_MAX_MODEL)
         }
-        OPENROUTER_TENCENT_HY3_PREVIEW_MODEL | "hy3-preview" | "tencent-hy3-preview" => {
-            Some(OPENROUTER_TENCENT_HY3_PREVIEW_MODEL)
+        OPENROUTER_QWEN_3_8_FLASH_MODEL | "qwen3.8-flash" | "qwen-3.8-flash" => {
+            Some(OPENROUTER_QWEN_3_8_FLASH_MODEL)
         }
+        OPENROUTER_TENCENT_HY3_PREVIEW_MODEL
+        | "hy3-preview"
+        | "tencent-hy3-preview"
+        | "hy3"
+        | "hunyuan"
+        | "tencent-hunyuan"
+        | "hunyuan-hy3" => Some(OPENROUTER_TENCENT_HY3_PREVIEW_MODEL),
         OPENROUTER_XIAOMI_MIMO_V2_5_PRO_MODEL
         | "mimo-v2.5-pro"
         | "mimo-v2-5-pro"
@@ -1197,6 +1209,9 @@ fn canonical_zai_model_id(model: &str) -> Option<&'static str> {
         // `DEFAULT_ZAI_MODEL`: moving the default (now GLM-5.3) must not
         // silently re-point an explicit GLM-5.2 request.
         "glm-5.2" | "glm-5-2" | "zai-glm-5.2" | "zai-glm-5-2" => Some(ZAI_GLM_5_2_MODEL),
+        "glm-5.3-flash" | "glm-5-3-flash" | "zai-glm-5.3-flash" | "zai-glm-5-3-flash" => {
+            Some(ZAI_GLM_5_3_FLASH_MODEL)
+        }
         "glm-5.3" | "glm-5-3" | "zai-glm-5.3" | "zai-glm-5-3" => Some(ZAI_GLM_5_3_MODEL),
         "glm-5-turbo" | "glm-5turbo" | "zai-glm-5-turbo" => Some(ZAI_GLM_5_TURBO_MODEL),
         _ => None,
@@ -1514,6 +1529,7 @@ pub fn model_completion_names_for_provider(provider: ApiProvider) -> Vec<&'stati
         ApiProvider::Openmodel => vec![DEFAULT_OPENMODEL_MODEL],
         ApiProvider::Zai => vec![
             DEFAULT_ZAI_MODEL,
+            ZAI_GLM_5_3_FLASH_MODEL,
             ZAI_GLM_5_2_MODEL,
             ZAI_GLM_5_1_MODEL,
             ZAI_GLM_5_TURBO_MODEL,
@@ -2986,6 +3002,12 @@ pub struct Config {
     /// Lifecycle hooks configuration
     #[serde(default)]
     pub hooks: Option<HooksConfig>,
+
+    /// Lifecycle event outbox (`[lifecycle_outbox]`). Opt-in: an unset or
+    /// empty `path` disables the feature and leaves behavior unchanged.
+    /// Fires for interactive TUI sessions and headless `codewhale exec` runs.
+    #[serde(default)]
+    pub lifecycle_outbox: Option<codewhale_config::LifecycleOutboxToml>,
 
     /// Provider-specific credentials and defaults shared with the `codewhale` facade.
     #[serde(default)]
@@ -9546,12 +9568,24 @@ pub(crate) fn is_exact_xai_grok_4_6_route(
         && model.trim().eq_ignore_ascii_case(XAI_GROK_4_6_MODEL)
 }
 
-/// Whether a route is exactly the Kimi Code K3 membership-plan route.
-///
-/// Keep the bare `k3` identifier route-owned. In particular, do not infer a
-/// Kimi Code plan entitlement for direct Moonshot `kimi-k3`, generic `k3`, or
-/// `kimi-for-coding` routes.
+/// Whether a route uses either official Kimi Code K3 membership model.
 pub(crate) fn is_exact_kimi_code_k3_route(
+    provider: ApiProvider,
+    base_url: &str,
+    model: &str,
+) -> bool {
+    provider == ApiProvider::Moonshot
+        && moonshot_base_url_is_exact_kimi_code(base_url)
+        && [KIMI_CODE_K3_MODEL, KIMI_CODE_K3_256K_MODEL]
+            .iter()
+            .any(|id| model.trim().eq_ignore_ascii_case(id))
+}
+
+/// Whether a route uses plan-tier-dependent bare `k3`.
+///
+/// Keep entitlement handling separate from `k3-256k`, whose window is fixed.
+#[must_use]
+pub(crate) fn is_exact_kimi_code_bare_k3_route(
     provider: ApiProvider,
     base_url: &str,
     model: &str,
@@ -9575,10 +9609,10 @@ pub(crate) fn is_exact_zai_chat_route(provider: ApiProvider, base_url: &str) -> 
 /// reasoning effort (`reasoning_effort: high | max`) rather than only the
 /// generic thinking toggle.
 ///
-/// GLM-5.2 is the verified member. GLM-5.3 inherits it because its catalog row
-/// inherits GLM-5.2's `reasoning_options` wholesale — see the
-/// `INHERITED FROM glm-5.2` marker in `config/models.rs`. If Z.ai publishes
-/// different reasoning controls for 5.3, this predicate is where they split.
+/// GLM-5.2 is the verified member. GLM-5.3 and GLM-5.3-Flash inherit it
+/// because their catalog rows inherit GLM-5.2's `reasoning_options`
+/// wholesale. If Z.ai publishes different reasoning controls, this
+/// predicate is where they split.
 #[must_use]
 pub(crate) fn is_exact_zai_tiered_effort_route(
     provider: ApiProvider,
@@ -9587,7 +9621,8 @@ pub(crate) fn is_exact_zai_tiered_effort_route(
 ) -> bool {
     is_exact_zai_chat_route(provider, base_url)
         && (model.trim().eq_ignore_ascii_case(ZAI_GLM_5_2_MODEL)
-            || model.trim().eq_ignore_ascii_case(ZAI_GLM_5_3_MODEL))
+            || model.trim().eq_ignore_ascii_case(ZAI_GLM_5_3_MODEL)
+            || model.trim().eq_ignore_ascii_case(ZAI_GLM_5_3_FLASH_MODEL))
 }
 
 /// Whether a route is exactly first-party Z.ai GLM-5-Turbo.
@@ -9602,8 +9637,8 @@ pub(crate) fn is_exact_zai_glm_5_turbo_route(
 }
 
 /// Whether a route is an exact first-party Z.ai model with a verified
-/// reasoning control. GLM-5.2 and GLM-5.3 have tiered effort; GLM-5.1 and
-/// GLM-5-Turbo only expose the generic thinking toggle.
+/// reasoning control. GLM-5.2, GLM-5.3, and GLM-5.3-Flash have tiered
+/// effort; GLM-5.1 and GLM-5-Turbo only expose the generic thinking toggle.
 #[must_use]
 pub(crate) fn is_exact_known_zai_reasoning_route(
     provider: ApiProvider,
@@ -9683,8 +9718,9 @@ pub(crate) fn minimax_m3_route_uses_max_completion_tokens(
 /// model picker labels them as plan routes. Those sites previously kept
 /// independent literal lists and had already drifted (`kimi-for-coding` was
 /// missing from the picker label), so the roster lives here and nowhere else.
-pub(crate) const KIMI_CODE_MEMBERSHIP_MODELS: [&str; 3] = [
+pub(crate) const KIMI_CODE_MEMBERSHIP_MODELS: [&str; 4] = [
     KIMI_CODE_K3_MODEL,
+    KIMI_CODE_K3_256K_MODEL,
     DEFAULT_KIMI_CODE_MODEL,
     KIMI_CODE_HIGHSPEED_MODEL,
 ];
@@ -9742,7 +9778,7 @@ pub(crate) fn validate_kimi_code_api_model_id(
         for direct_id in MOONSHOT_DIRECT_PLATFORM_MODELS {
             if model.eq_ignore_ascii_case(direct_id) {
                 return Err(format!(
-                    "Kimi Code membership route (api.kimi.com/coding/v1) does not accept model = \"{model}\": it is a direct Moonshot platform id. Use a Kimi Code membership model (\"k3\", \"kimi-for-coding\", or \"kimi-for-coding-highspeed\") for this base_url. Direct Moonshot pay-as-you-go uses base_url = \"https://api.moonshot.ai/v1\" with model = \"{direct_id}\"."
+                    "Kimi Code membership route (api.kimi.com/coding/v1) does not accept model = \"{model}\": it is a direct Moonshot platform id. Use a Kimi Code membership model (\"k3\", \"k3-256k\", \"kimi-for-coding\", or \"kimi-for-coding-highspeed\") for this base_url. Direct Moonshot pay-as-you-go uses base_url = \"https://api.moonshot.ai/v1\" with model = \"{direct_id}\"."
                 ));
             }
         }
@@ -9770,6 +9806,7 @@ mod kimi_code_pairing_tests {
     fn membership_roster_passes_on_kimi_code_endpoint() {
         for model in [
             KIMI_CODE_K3_MODEL,
+            KIMI_CODE_K3_256K_MODEL,
             DEFAULT_KIMI_CODE_MODEL,
             KIMI_CODE_HIGHSPEED_MODEL,
         ] {
@@ -9807,6 +9844,7 @@ mod kimi_code_pairing_tests {
     fn membership_ids_fail_on_direct_moonshot_endpoint() {
         for model in [
             KIMI_CODE_K3_MODEL,
+            KIMI_CODE_K3_256K_MODEL,
             DEFAULT_KIMI_CODE_MODEL,
             KIMI_CODE_HIGHSPEED_MODEL,
         ] {
@@ -9826,6 +9864,7 @@ mod kimi_code_pairing_tests {
         // Canonical pairs pass on both endpoints.
         for (base_url, model) in [
             (DEFAULT_KIMI_CODE_BASE_URL, KIMI_CODE_K3_MODEL),
+            (DEFAULT_KIMI_CODE_BASE_URL, KIMI_CODE_K3_256K_MODEL),
             (DEFAULT_KIMI_CODE_BASE_URL, DEFAULT_KIMI_CODE_MODEL),
             (DEFAULT_KIMI_CODE_BASE_URL, KIMI_CODE_HIGHSPEED_MODEL),
             (DEFAULT_MOONSHOT_BASE_URL, MOONSHOT_KIMI_K3_MODEL),
@@ -9858,6 +9897,7 @@ mod kimi_code_pairing_tests {
         // included: only the two canonical endpoints enforce pairings.
         for model in [
             KIMI_CODE_K3_MODEL,
+            KIMI_CODE_K3_256K_MODEL,
             DEFAULT_KIMI_CODE_MODEL,
             KIMI_CODE_HIGHSPEED_MODEL,
             MOONSHOT_KIMI_K3_MODEL,
@@ -9877,8 +9917,11 @@ mod kimi_code_pairing_tests {
 
 /// Short route label for header/diagnostics without credentials (#4687).
 pub(crate) fn moonshot_k3_route_display_name(base_url: &str, model: &str) -> Option<&'static str> {
-    if is_exact_kimi_code_k3_route(ApiProvider::Moonshot, base_url, model) {
+    if is_exact_kimi_code_bare_k3_route(ApiProvider::Moonshot, base_url, model) {
         return Some("Kimi Code membership / k3");
+    }
+    if is_exact_kimi_code_k3_route(ApiProvider::Moonshot, base_url, model) {
+        return Some("Kimi Code membership / k3-256k");
     }
     if is_exact_direct_moonshot_k3_route(ApiProvider::Moonshot, base_url, model) {
         return Some("Moonshot direct / kimi-k3");
@@ -10155,6 +10198,7 @@ fn merge_config(base: Config, override_cfg: Config) -> Config {
         tui: override_cfg.tui.or(base.tui),
         transcript: override_cfg.transcript.or(base.transcript),
         hooks: override_cfg.hooks.or(base.hooks),
+        lifecycle_outbox: override_cfg.lifecycle_outbox.or(base.lifecycle_outbox),
         providers: merge_providers(base.providers, override_cfg.providers),
         features: merge_features(base.features, override_cfg.features),
         notifications: override_cfg.notifications.or(base.notifications),

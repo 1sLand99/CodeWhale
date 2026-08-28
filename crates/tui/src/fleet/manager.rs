@@ -2549,7 +2549,29 @@ mod tests {
     use serde_json::json;
     use tempfile::TempDir;
 
+    fn test_manager(workspace: impl AsRef<Path>) -> Result<FleetManager> {
+        let mut providers = crate::config::ProvidersConfig::default();
+        providers.deepseek.api_key = Some("test-key".to_string());
+        providers.xai.api_key = Some("test-key".to_string());
+        providers.zai.api_key = Some("test-key".to_string());
+        let route_config = Config {
+            provider: Some("deepseek".to_string()),
+            api_key: Some("test-key".to_string()),
+            providers: Some(providers),
+            ..Config::default()
+        };
+        FleetManager::open(workspace).map(|manager| manager.with_route_config(route_config))
+    }
+
     fn select_test_fleet(workspace: &Path, members: &[(&str, &str)]) {
+        select_test_fleet_with_provider(workspace, members, None);
+    }
+
+    fn select_test_fleet_with_provider(
+        workspace: &Path,
+        members: &[(&str, &str)],
+        provider: Option<&str>,
+    ) {
         use crate::fleet::store::{FleetFile, FleetMember, FleetScope, save_fleet, set_selected};
 
         let mut fleet = FleetFile::new("Manager Test Fleet".to_string(), None).unwrap();
@@ -2559,8 +2581,8 @@ mod tests {
                 id: (*id).to_string(),
                 display_name: None,
                 role: (*role).to_string(),
-                model: None,
-                provider: None,
+                model: provider.map(|_| "private-model".to_string()),
+                provider: provider.map(str::to_string),
                 reasoning: None,
                 instructions: None,
                 requires: Vec::new(),
@@ -2638,7 +2660,7 @@ mod tests {
         std::fs::create_dir(tmp.path().join("nested")).unwrap();
         let coordination =
             crate::tools::subagent::new_shared_subagent_manager(tmp.path().to_path_buf(), 4);
-        let manager = FleetManager::open(tmp.path())
+        let manager = test_manager(tmp.path())
             .unwrap()
             .with_sub_agent_manager(coordination.clone());
         let mut nested = task("nested");
@@ -2709,7 +2731,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let coordination =
             crate::tools::subagent::new_shared_subagent_manager(tmp.path().to_path_buf(), 4);
-        let manager = FleetManager::open(tmp.path())
+        let manager = test_manager(tmp.path())
             .unwrap()
             .with_sub_agent_manager(coordination.clone());
         let mut spec = task("read-only");
@@ -2753,7 +2775,7 @@ mod tests {
     #[test]
     fn invalid_worker_identity_is_rejected_before_run_journal_creation() {
         let tmp = TempDir::new().unwrap();
-        let manager = FleetManager::open(tmp.path()).unwrap();
+        let manager = test_manager(tmp.path()).unwrap();
         let error = manager
             .create_run(
                 FleetTaskSpecDocument {
@@ -2779,11 +2801,77 @@ mod tests {
     }
 
     #[test]
+    fn configless_manager_rejects_ambiguous_route_before_run_journal_creation() {
+        let tmp = TempDir::new().unwrap();
+        select_test_fleet(tmp.path(), &[("reviewer", "reviewer")]);
+        let manager = FleetManager::open(tmp.path()).expect("config-less manager");
+
+        let error = manager
+            .create_queued_run(
+                FleetTaskSpecDocument {
+                    name: Some("ambiguous route".to_string()),
+                    labels: BTreeMap::new(),
+                    security_policy: None,
+                    workers: Vec::new(),
+                    tasks: vec![task("task-a")],
+                    usage_ceiling: None,
+                },
+                1,
+            )
+            .expect_err("Fleet creation must not invent a default provider");
+        let message = error.to_string();
+        assert!(message.contains("no provider authority"), "{message}");
+        assert!(
+            message.contains("attach the resolved route config"),
+            "{message}"
+        );
+
+        let state = manager.rebuild_state().unwrap();
+        assert!(state.runs.is_empty());
+        assert!(state.tasks.is_empty());
+    }
+
+    #[test]
+    fn configless_manager_rejects_custom_provider_before_run_journal_creation() {
+        let tmp = TempDir::new().unwrap();
+        select_test_fleet_with_provider(
+            tmp.path(),
+            &[("private-reviewer", "reviewer")],
+            Some("private-gateway"),
+        );
+        let manager = FleetManager::open(tmp.path()).expect("config-less manager");
+
+        let error = manager
+            .create_queued_run(
+                FleetTaskSpecDocument {
+                    name: Some("unresolved custom route".to_string()),
+                    labels: BTreeMap::new(),
+                    security_policy: None,
+                    workers: Vec::new(),
+                    tasks: vec![task("task-a")],
+                    usage_ceiling: None,
+                },
+                1,
+            )
+            .expect_err("custom provider without live config must fail before journaling");
+        let message = error.to_string();
+        assert!(message.contains("provider=`private-gateway`"), "{message}");
+        assert!(
+            message.contains("attach the live route config"),
+            "{message}"
+        );
+
+        let state = manager.rebuild_state().unwrap();
+        assert!(state.runs.is_empty());
+        assert!(state.tasks.is_empty());
+    }
+
+    #[test]
     fn queued_creation_waits_for_explicit_idempotent_start() {
         let tmp = TempDir::new().unwrap();
         let coordination =
             crate::tools::subagent::new_shared_subagent_manager(tmp.path().to_path_buf(), 4);
-        let manager = FleetManager::open(tmp.path())
+        let manager = test_manager(tmp.path())
             .unwrap()
             .with_sub_agent_manager(coordination.clone());
         let report = manager
@@ -2872,7 +2960,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let coordination =
             crate::tools::subagent::new_shared_subagent_manager(tmp.path().to_path_buf(), 4);
-        let manager = FleetManager::open(tmp.path())
+        let manager = test_manager(tmp.path())
             .unwrap()
             .with_sub_agent_manager(coordination.clone());
         let prepared = manager
@@ -2908,7 +2996,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let coordination =
             crate::tools::subagent::new_shared_subagent_manager(tmp.path().to_path_buf(), 4);
-        let manager = FleetManager::open(tmp.path())
+        let manager = test_manager(tmp.path())
             .unwrap()
             .with_sub_agent_manager(coordination);
         let write_task = |id: &str| {
@@ -2968,7 +3056,7 @@ mod tests {
             .try_read()
             .unwrap()
             .coordination_registration_snapshot();
-        let manager = FleetManager::open(tmp.path())
+        let manager = test_manager(tmp.path())
             .unwrap()
             .with_sub_agent_manager(coordination.clone());
         let mut spec = task("task-a");
@@ -3089,12 +3177,12 @@ mod tests {
         let tmp = TempDir::new().unwrap();
 
         // No session: legacy auto sentinel.
-        let manager = FleetManager::open(tmp.path()).unwrap();
+        let manager = test_manager(tmp.path()).unwrap();
         assert_eq!(manager.run_model(), "auto");
         assert_eq!(manager.session_model(), None);
 
         // The session route becomes the run model — the operator's model.
-        let manager = FleetManager::open(tmp.path())
+        let manager = test_manager(tmp.path())
             .unwrap()
             .with_session_model("deepseek-v4-pro");
         assert_eq!(manager.run_model(), "deepseek-v4-pro");
@@ -3102,9 +3190,7 @@ mod tests {
 
         // "auto" and empty/whitespace inputs keep the resolver default.
         for noop in ["auto", "AUTO", "", "   "] {
-            let manager = FleetManager::open(tmp.path())
-                .unwrap()
-                .with_session_model(noop);
+            let manager = test_manager(tmp.path()).unwrap().with_session_model(noop);
             assert_eq!(manager.run_model(), "auto");
             assert_eq!(manager.session_model(), None);
         }
@@ -3360,7 +3446,7 @@ mod tests {
         );
 
         // Restart: a fresh manager over the same workspace resumes from ledger.
-        let manager = FleetManager::open(tmp.path())
+        let manager = test_manager(tmp.path())
             .unwrap()
             .with_stale_after(Duration::from_secs(5));
         let outcome = manager.resume_run_at(&run_id, resume_now(30)).unwrap();
@@ -3421,7 +3507,7 @@ mod tests {
             RESUME_T0,
         );
 
-        let manager = FleetManager::open(tmp.path())
+        let manager = test_manager(tmp.path())
             .unwrap()
             .with_stale_after(Duration::from_secs(5));
         let outcome = manager.resume_run_at(&run_id, resume_now(30)).unwrap();
@@ -3474,7 +3560,7 @@ mod tests {
             RESUME_T0,
         );
 
-        let manager = FleetManager::open(tmp.path())
+        let manager = test_manager(tmp.path())
             .unwrap()
             .with_stale_after(Duration::from_secs(5));
         let first = manager.resume_run_at(&run_id, resume_now(30)).unwrap();
@@ -3515,7 +3601,7 @@ mod tests {
             &stale_ts,
         );
 
-        let manager = FleetManager::open(tmp.path())
+        let manager = test_manager(tmp.path())
             .unwrap()
             .with_stale_after(Duration::from_secs(5));
         let outcome = manager.resume_run(&run_id).unwrap();
@@ -3527,7 +3613,7 @@ mod tests {
     #[test]
     fn fleet_manager_creates_run_and_starts_workers_up_to_cap() {
         let tmp = TempDir::new().unwrap();
-        let manager = FleetManager::open(tmp.path()).unwrap();
+        let manager = test_manager(tmp.path()).unwrap();
         let path = task_spec_file(&tmp, vec![task("task-a"), task("task-b"), task("task-c")]);
 
         let report = manager.create_run_from_task_spec_path(&path, 2).unwrap();
@@ -3546,7 +3632,7 @@ mod tests {
     fn fleet_manager_rejects_unknown_agent_profile_before_run_creation() {
         let tmp = TempDir::new().unwrap();
         select_test_fleet(tmp.path(), &[("reviewer", "reviewer")]);
-        let manager = FleetManager::open(tmp.path()).unwrap();
+        let manager = test_manager(tmp.path()).unwrap();
         let mut task = task("task-a");
         task.worker = Some(FleetTaskWorkerProfile {
             role: None,
@@ -3581,7 +3667,7 @@ mod tests {
     #[test]
     fn fleet_manager_inspect_exposes_heartbeat_artifacts_and_errors() {
         let tmp = TempDir::new().unwrap();
-        let manager = FleetManager::open(tmp.path()).unwrap();
+        let manager = test_manager(tmp.path()).unwrap();
         let path = task_spec_file(&tmp, vec![task("task-a")]);
         let report = manager.create_run_from_task_spec_path(&path, 1).unwrap();
         let worker_id = &report.worker_ids[0];
@@ -3608,7 +3694,7 @@ mod tests {
         for alias in ["oracle", "advisor"] {
             let tmp = TempDir::new().unwrap();
             select_test_fleet(tmp.path(), &[(alias, alias)]);
-            let manager = FleetManager::open(tmp.path()).unwrap();
+            let manager = test_manager(tmp.path()).unwrap();
             let path = task_spec_file(&tmp, vec![role_task_with_retry("advice", alias, 1)]);
             let report = manager.create_run_from_task_spec_path(&path, 1).unwrap();
 
@@ -3644,8 +3730,8 @@ mod tests {
             return;
         }
         let tmp = TempDir::new().unwrap();
-        let manager = FleetManager::open(tmp.path()).unwrap();
-        let controller = FleetManager::open(tmp.path()).unwrap();
+        let manager = test_manager(tmp.path()).unwrap();
+        let controller = test_manager(tmp.path()).unwrap();
         let path = task_spec_file(&tmp, vec![task("task-a"), task("task-b")]);
         let pid_path = tmp.path().join("live-worker.pid");
         let first_worker_marker = tmp.path().join("first-worker-started");
@@ -3738,8 +3824,8 @@ sleep 30
             return;
         }
         let tmp = TempDir::new().unwrap();
-        let manager = FleetManager::open(tmp.path()).unwrap();
-        let controller = FleetManager::open(tmp.path()).unwrap();
+        let manager = test_manager(tmp.path()).unwrap();
+        let controller = test_manager(tmp.path()).unwrap();
         let path = task_spec_file(&tmp, vec![task("task-a")]);
         let first_worker_marker = tmp.path().join("first-attempt-started");
         let stopped_marker = tmp.path().join("first-attempt-stopped");
@@ -3822,7 +3908,7 @@ while :; do sleep 1; done
     #[test]
     fn fleet_manager_restart_and_stop_all_are_ledgered() {
         let tmp = TempDir::new().unwrap();
-        let manager = FleetManager::open(tmp.path()).unwrap();
+        let manager = test_manager(tmp.path()).unwrap();
         let path = task_spec_file(&tmp, vec![task("task-a"), task("task-b")]);
         let report = manager.create_run_from_task_spec_path(&path, 1).unwrap();
         let worker_id = &report.worker_ids[0];
@@ -3849,7 +3935,7 @@ while :; do sleep 1; done
         let tmp = TempDir::new().unwrap();
         let coordination =
             crate::tools::subagent::new_shared_subagent_manager(tmp.path().to_path_buf(), 2);
-        let manager = FleetManager::open(tmp.path())
+        let manager = test_manager(tmp.path())
             .unwrap()
             .with_sub_agent_manager(coordination.clone());
         let path = task_spec_file(&tmp, vec![task("task-a")]);
@@ -3917,7 +4003,7 @@ exit 0
         let tmp = TempDir::new().unwrap();
         let coordination =
             crate::tools::subagent::new_shared_subagent_manager(tmp.path().to_path_buf(), 2);
-        let manager = FleetManager::open(tmp.path())
+        let manager = test_manager(tmp.path())
             .unwrap()
             .with_sub_agent_manager(coordination.clone());
         let path = task_spec_file(&tmp, vec![task("task-a")]);
@@ -3958,7 +4044,7 @@ exit 0
 
         let reloaded_coordination =
             crate::tools::subagent::new_shared_subagent_manager(tmp.path().to_path_buf(), 2);
-        let reloaded = FleetManager::open(tmp.path())
+        let reloaded = test_manager(tmp.path())
             .unwrap()
             .with_sub_agent_manager(reloaded_coordination.clone());
         reloaded
@@ -3992,7 +4078,7 @@ exit 0
         let tmp = TempDir::new().unwrap();
         let coordination =
             crate::tools::subagent::new_shared_subagent_manager(tmp.path().to_path_buf(), 2);
-        let manager = FleetManager::open(tmp.path())
+        let manager = test_manager(tmp.path())
             .unwrap()
             .with_sub_agent_manager(coordination.clone());
         let path = task_spec_file(&tmp, vec![task("task-a")]);
@@ -4016,7 +4102,7 @@ exit 0
 
         let reloaded_coordination =
             crate::tools::subagent::new_shared_subagent_manager(tmp.path().to_path_buf(), 2);
-        let reloaded = FleetManager::open(tmp.path())
+        let reloaded = test_manager(tmp.path())
             .unwrap()
             .with_sub_agent_manager(reloaded_coordination);
         let error = reloaded
@@ -4043,7 +4129,7 @@ exit 0
         let tmp = TempDir::new().unwrap();
         let coordination =
             crate::tools::subagent::new_shared_subagent_manager(tmp.path().to_path_buf(), 2);
-        let manager = FleetManager::open(tmp.path())
+        let manager = test_manager(tmp.path())
             .unwrap()
             .with_stale_after(Duration::from_secs(5))
             .with_sub_agent_manager(coordination.clone());
@@ -4068,7 +4154,7 @@ exit 0
 
         let reloaded_coordination =
             crate::tools::subagent::new_shared_subagent_manager(tmp.path().to_path_buf(), 2);
-        let reloaded = FleetManager::open(tmp.path())
+        let reloaded = test_manager(tmp.path())
             .unwrap()
             .with_stale_after(Duration::from_secs(5))
             .with_sub_agent_manager(reloaded_coordination.clone());
@@ -4111,8 +4197,8 @@ exit 0
     #[test]
     fn concurrent_manager_loops_launch_each_attempt_once() {
         let tmp = TempDir::new().unwrap();
-        let manager = FleetManager::open(tmp.path()).unwrap();
-        let standby = FleetManager::open(tmp.path()).unwrap();
+        let manager = test_manager(tmp.path()).unwrap();
+        let standby = test_manager(tmp.path()).unwrap();
         let path = task_spec_file(&tmp, vec![task("task-a")]);
         let starts = tmp.path().join("worker-starts");
         let fake = fake_codewhale(
@@ -4173,7 +4259,7 @@ exit 0
     #[test]
     fn fleet_manager_can_record_completed_local_smoke_tasks() {
         let tmp = TempDir::new().unwrap();
-        let manager = FleetManager::open(tmp.path()).unwrap();
+        let manager = test_manager(tmp.path()).unwrap();
         let path = task_spec_file(&tmp, vec![task("task-a"), task("task-b"), task("task-c")]);
         let fake = fake_codewhale(
             &tmp,
@@ -4198,7 +4284,7 @@ exit 0
     #[test]
     fn fleet_task_spec_sample_launches_independent_worker_tasks() {
         let tmp = TempDir::new().unwrap();
-        let manager = FleetManager::open(tmp.path()).unwrap();
+        let manager = test_manager(tmp.path()).unwrap();
         let path = task_spec_file(
             &tmp,
             vec![
@@ -4236,7 +4322,7 @@ exit 0
     #[test]
     fn fleet_task_spec_local_scorer_records_receipt_artifact() {
         let tmp = TempDir::new().unwrap();
-        let manager = FleetManager::open(tmp.path()).unwrap();
+        let manager = test_manager(tmp.path()).unwrap();
         let mut completed = task("task-a");
         completed.scorer = Some(FleetScorerSpec::ExitCode);
         let path = task_spec_file(&tmp, vec![completed]);
@@ -4275,7 +4361,7 @@ exit 0
     #[test]
     fn fleet_task_spec_unscored_zero_exit_records_partial_receipt() {
         let tmp = TempDir::new().unwrap();
-        let manager = FleetManager::open(tmp.path()).unwrap();
+        let manager = test_manager(tmp.path()).unwrap();
         let path = task_spec_file(&tmp, vec![task("task-a")]);
         let fake = fake_codewhale(
             &tmp,
@@ -4320,7 +4406,7 @@ exit 0
     #[test]
     fn fleet_task_spec_unscored_worker_error_records_failed_receipt() {
         let tmp = TempDir::new().unwrap();
-        let manager = FleetManager::open(tmp.path()).unwrap();
+        let manager = test_manager(tmp.path()).unwrap();
         let path = task_spec_file(&tmp, vec![task("task-a")]);
         let fake = fake_codewhale(
             &tmp,
@@ -4347,7 +4433,7 @@ exit 7
     #[test]
     fn fleet_task_spec_status_distinguishes_failure_sources() {
         let tmp = TempDir::new().unwrap();
-        let manager = FleetManager::open(tmp.path()).unwrap();
+        let manager = test_manager(tmp.path()).unwrap();
         let mut task_failed = task("a-task-failure");
         task_failed.scorer = Some(FleetScorerSpec::ExitCode);
         task_failed.instructions = "task-failure".to_string();
@@ -4429,7 +4515,7 @@ esac
             }),
             ..Default::default()
         };
-        let manager = FleetManager::open(tmp.path())
+        let manager = test_manager(tmp.path())
             .unwrap()
             .with_session_model("manager-model-y")
             .with_route_config(manager_config);
@@ -4492,7 +4578,7 @@ printf '%s\n' '{"type":"done"}'
     fn headless_terminal_with_invalid_route_metadata_does_not_fall_back_to_manager_config() {
         let tmp = TempDir::new().unwrap();
         select_test_fleet(tmp.path(), &[("reviewer", "reviewer")]);
-        let manager = FleetManager::open(tmp.path())
+        let manager = test_manager(tmp.path())
             .unwrap()
             .with_session_model("manager-model-y")
             .with_route_config(Config {
@@ -4548,7 +4634,7 @@ printf '%s\n' '{"type":"done"}'
     #[test]
     fn fleet_smoke_runs_three_roles_ten_tasks_with_receipts_and_failure() {
         let tmp = TempDir::new().unwrap();
-        let manager = FleetManager::open(tmp.path()).unwrap();
+        let manager = test_manager(tmp.path()).unwrap();
         let fake = fake_codewhale(
             &tmp,
             r#"#!/bin/sh
@@ -4865,7 +4951,7 @@ esac
     #[test]
     fn fleet_status_counts_restarted_and_escalated_events() {
         let tmp = TempDir::new().unwrap();
-        let manager = FleetManager::open(tmp.path()).unwrap();
+        let manager = test_manager(tmp.path()).unwrap();
         let path = task_spec_file(&tmp, vec![task("task-a")]);
         let report = manager.create_run_from_task_spec_path(&path, 1).unwrap();
         let worker_id = &report.worker_ids[0];
@@ -4896,7 +4982,7 @@ esac
     #[test]
     fn fleet_status_inspect_exposes_task_context_host_and_alert() {
         let tmp = TempDir::new().unwrap();
-        let manager = FleetManager::open(tmp.path()).unwrap();
+        let manager = test_manager(tmp.path()).unwrap();
         let mut contextual = task("task-a");
         contextual.objective = Some("Review the release ledger".to_string());
         contextual.worker = Some(FleetTaskWorkerProfile {
@@ -5041,7 +5127,7 @@ esac
             },
         ];
 
-        let manager = FleetManager::open(&workspace).unwrap();
+        let manager = test_manager(&workspace).unwrap();
         let report = manager
             .create_run(
                 FleetTaskSpecDocument {
@@ -5068,7 +5154,7 @@ esac
     #[test]
     fn fleet_security_policy_is_rejected_for_new_runs() {
         let tmp = TempDir::new().unwrap();
-        let manager = FleetManager::open(tmp.path()).unwrap();
+        let manager = test_manager(tmp.path()).unwrap();
         // Rewrite the spec file with a security_policy block.
         let doc = serde_json::json!({
             "name": "secure smoke",
@@ -5112,7 +5198,7 @@ esac
             "schema = \"fleet\"\nschema_revision = 2\nname = \"Broken\"\n[[members]]\nid = \"scout\"\nprovider = \"deepseek\"\n",
         )
         .unwrap();
-        let manager = FleetManager::open(tmp.path()).unwrap();
+        let manager = test_manager(tmp.path()).unwrap();
         let error = manager
             .create_queued_run(
                 FleetTaskSpecDocument {

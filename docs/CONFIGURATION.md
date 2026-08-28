@@ -1128,6 +1128,13 @@ the `CODEWHALE_*` value wins.
 - `CODEWHALE_TASKS_DIR` (runtime task queue/artifact storage, default
   `~/.codewhale/tasks`, with legacy `~/.deepseek/tasks` fallback when only the
   legacy directory exists)
+- `CODEWHALE_RUNTIME_DIR` (override the runtime thread store root). Interactive
+  sessions default to `$CODEWHALE_HOME/sessions/<session-id>/runtime` so each
+  Codewhale process owns its own store (#5630). The store is single-owner: a
+  second process on the **same** root fails at startup. Set this variable to
+  share one store across processes, or when the runtime API server should use a
+  stable non-session path. Unset, the API/server path remains
+  `$CODEWHALE_HOME/tasks/runtime`. Legacy alias: `DEEPSEEK_RUNTIME_DIR`.
 - `CODEWHALE_ALLOW_INSECURE_HTTP` (`1`/`true` allows non-local `http://` base URLs; default is reject)
 - `CODEWHALE_FORCE_HTTP1` (`1|true|yes|on` pins the HTTP client to HTTP/1.1, disabling HTTP/2; useful on Windows or behind proxies that mishandle long-lived H2 streams)
 - `CODEWHALE_HOME` (override the base data directory; defaults to `~/.codewhale`).
@@ -1769,6 +1776,14 @@ If you are upgrading from older releases:
 
 ## Key Reference
 
+### Kimi Code membership model IDs
+
+The exact `https://api.kimi.com/coding/v1` endpoint accepts `k3`, `k3-256k`,
+`kimi-for-coding`, and `kimi-for-coding-highspeed`. Use `k3-256k` for a fixed
+262,144-token K3 window; use bare `k3` with `context_window = 1048576` only
+when the membership plan includes the 1M entitlement. Both K3 ids use the same
+reasoning contract, and all four membership ids omit generic sampling fields.
+
 ### Core keys (used by the TUI/engine)
 
 - `provider` (string, optional): `deepseek` (default), `deepseek-anthropic`, `nvidia-nim`, `openai`, `atlascloud`, `wanjie-ark`, `volcengine`, `openrouter`, `xiaomi-mimo`, `novita`, `fireworks`, `siliconflow`, `arcee`, `siliconflow-CN`, `moonshot`, `sglang`, `vllm`, `ollama`, `ollama-cloud`, `huggingface`, `together`, `qianfan`, `openai-codex`, `anthropic`, `openmodel`, `zai`, `stepfun`, `minimax`, `deepinfra`, `sakana`, `longcat`, `opencode-go`, `meta`, `mistral`, `telecomjs`, `xai`, `orcarouter`, `modelstudio-token-plan`, `google`, `antigravity`, `edenai`, or `custom`. Legacy `deepseek-cn` configs are still accepted as an alias for `deepseek`; DeepSeek uses the same official host [`https://api.deepseek.com`](https://api-docs.deepseek.com/) worldwide. `deepseek-anthropic` targets DeepSeek's Anthropic Messages-compatible endpoint at `https://api.deepseek.com/anthropic` using `DEEPSEEK_API_KEY`; `nvidia-nim` targets NVIDIA's NIM-hosted DeepSeek endpoints through `https://integrate.api.nvidia.com/v1`; `openai` targets a generic OpenAI-compatible endpoint, defaulting to `https://api.openai.com/v1`; `atlascloud` targets AtlasCloud's OpenAI-compatible endpoint at `https://api.atlascloud.ai/v1`; `wanjie-ark` targets Wanjie Ark's OpenAI-compatible endpoint at `https://maas-openapi.wanjiedata.com/api/v1`; `volcengine` targets Volcengine Ark's OpenAI-compatible coding endpoint at `https://ark.cn-beijing.volces.com/api/coding/v3`; `openrouter` targets `https://openrouter.ai/api/v1`; `xiaomi-mimo` targets Xiaomi MiMo's OpenAI-compatible endpoint, using `https://token-plan-sgp.xiaomimimo.com/v1` by default for Token Plan keys (`tp-...`) and `https://api.xiaomimimo.com/v1` for pay-as-you-go keys. For Token Plan accounts outside the Singapore default, set `base_url` explicitly or use `mode = "token-plan-cn"` for China and `mode = "token-plan-ams"` for Europe/Amsterdam; `novita` targets `https://api.novita.ai/openai/v1`; `fireworks` targets `https://api.fireworks.ai/inference/v1`; `siliconflow` targets SiliconFlow, defaulting to `https://api.siliconflow.com/v1`; `arcee` targets Arcee AI's OpenAI-compatible endpoint at `https://api.arcee.ai/api/v1`; `siliconflow-CN` targets the SiliconFlow China regional endpoint through `[providers.siliconflow_cn]`; `moonshot` targets Moonshot/Kimi, defaulting to `https://api.moonshot.ai/v1`; `sglang` targets a self-hosted OpenAI-compatible endpoint, defaulting to `http://localhost:30000/v1`; `vllm` targets a self-hosted vLLM OpenAI-compatible endpoint, defaulting to `http://localhost:8000/v1`; `ollama` targets Ollama's OpenAI-compatible endpoint, defaulting to `http://localhost:11434/v1`; `huggingface` targets Hugging Face Inference Providers at `https://router.huggingface.co/v1`; `together` targets Together AI at `https://api.together.xyz/v1`; `qianfan` targets Baidu Qianfan at `https://api.baiduqianfan.ai/v1`; `openai-codex` targets ChatGPT/Codex OAuth; `anthropic` targets Claude's native Messages API; `openmodel` targets OpenModel's Anthropic-compatible Messages API at `https://api.openmodel.ai`; `zai` targets Z.ai at `https://api.z.ai/api/coding/paas/v4`; `stepfun` targets StepFun at `https://api.stepfun.ai/v1`; `minimax` targets MiniMax at `https://api.minimax.io/v1`; `deepinfra` targets DeepInfra at `https://api.deepinfra.com/v1/openai`; `sakana` targets Sakana AI Fugu at `https://api.sakana.ai/v1`; `longcat` targets Meituan LongCat at `https://api.longcat.chat/openai/v1`; `opencode-go` targets the subscription-backed OpenCode Go Chat Completions route at `https://opencode.ai/zen/go/v1`; `meta` targets Meta Model API; `mistral` targets Mistral AI's OpenAI-compatible endpoint at `https://api.mistral.ai/v1`; `telecomjs` targets TelecomJS TokenHub at `https://aigw.telecomjs.com/v1`; and `xai` targets xAI's API-key or OAuth route.
@@ -2399,6 +2414,70 @@ needs Codewhale to ship a real `.app` bundle. Tracked in
 iTerm2, WezTerm, Ghostty, and kitty are matched first and use their own
 notification protocols, and `method = "osc9"` / `"bel"` / `"off"` opt out
 of the `osascript` path explicitly.
+
+## Lifecycle Outbox (`[lifecycle_outbox]`)
+
+The lifecycle outbox is an opt-in, machine-readable stream of session,
+turn, and sub-agent lifecycle events. With a path configured, Codewhale
+appends one JSON line per event to that file — for interactive TUI
+sessions *and* headless `codewhale exec` runs — so a supervisor
+(terminal multiplexer wrapper, automation harness, alerting setup) can
+react to what happened without scraping the screen or installing per-hook
+shell commands. Unset or empty `path` = the feature is **off** and
+behavior is unchanged.
+
+```toml
+[lifecycle_outbox]
+path = "~/.codewhale/notifications/outbox.jsonl" # unset/empty = OFF
+webhook_url = ""     # optional; POSTs events as JSON when set
+webhook_token = ""   # optional bearer token for webhook_url
+```
+
+### Events emitted
+
+| Event | Kind | Fired at |
+|---|---|---|
+| `turn_start` | `turn.started` | a new turn begins (TUI TurnStarted; `exec` at message dispatch) |
+| `turn_end` | `turn.completed` / `turn.failed` / `turn.interrupted` | turn completion, kind projected from the turn status |
+| `turn_stalled` | `turn.stalled` | the stall watchdog recovers a wedged turn |
+| `subagent_spawn` | `subagent.spawned` | a sub-agent is spawned |
+| `subagent_complete` | `subagent.completed` | a sub-agent reaches a terminal state |
+| `session_start` | `session.started` | interactive session start |
+| `session_end` | `session.ended` | interactive session end |
+
+### File contract
+
+Each line is a `RuntimeEventEnvelope`:
+
+```json
+{"schema_version": 1, "seq": 3, "event": "turn_start", "kind": "turn.started",
+ "thread_id": "…", "turn_id": "…", "item_id": null, "timestamp": "…",
+ "created_at": "…", "payload": {…}}
+```
+
+- `seq` is monotonic per outbox file and recovers from the last written
+  line when a new process opens the file.
+- Lines are written one complete JSON line per append, serialized by an
+  internal writer task and flushed before the next event; concurrent
+  sessions writing the same path do not interleave bytes mid-line, but
+  separate processes each continue from their own recovered `seq`, so seqs
+  can repeat across processes sharing one file — prefer one file per
+  process for strict uniqueness.
+- Parent directories are created lazily on the first event.
+- Payloads are constructed from bounded, pre-redacted fields only — never
+  raw tool arguments, environment, or full transcript text. Free-form
+  fields (error messages, previews) are capped at the notification limits
+  (80 headline / 120 detail / 200 preview characters) and stripped of
+  control bytes.
+
+### Webhook delivery
+
+With `webhook_url` set, every event is additionally POSTed as
+`{"at": "<ISO 8601 timestamp>", "event": {…}}` with
+`Authorization: Bearer <webhook_token>` when a token is configured.
+Delivery is best-effort: failures are logged and dropped, never retried
+into the agent loop, and a failing webhook never blocks the local file
+append.
 
 ## Tool Catalog
 

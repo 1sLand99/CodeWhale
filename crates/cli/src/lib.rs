@@ -4392,22 +4392,11 @@ fn run_model_command(
             }
 
             // An explicit model or provider makes this a hypothetical query
-            // ("what would this name resolve to"), so answer it against the
-            // registry — but default the provider to the configured one rather
-            // than to any single vendor.
+            // inside a named route. The subcommand provider wins; otherwise
+            // the configured runtime provider remains authoritative. Model
+            // text never authorizes switching providers or credential slots.
             let provider_hint = subcommand_provider.or(Some(resolved_runtime.provider));
-            let mut resolved = registry.resolve(queried, provider_hint);
-            // The registry refuses to answer a provider-scoped question with
-            // another vendor's model. That is right when the *user* named the
-            // provider, but the hint above is often ours: when only a model was
-            // named, "what does this id mean" is still a global question, so
-            // retry unhinted rather than substituting the configured provider's
-            // default for the id the user typed.
-            let provider_named_by_user =
-                subcommand_provider.is_some() || top_level_provider.is_some();
-            if !provider_named_by_user && queried.is_some() && resolved.used_fallback {
-                resolved = registry.resolve(queried, None);
-            }
+            let resolved = registry.resolve(queried, provider_hint)?;
             println!("requested: {}", resolved.requested.unwrap_or_default());
             println!("resolved: {}", resolved.resolved.id);
             println!("provider: {}", resolved.resolved.provider.as_str());
@@ -4425,7 +4414,11 @@ fn run_model_command(
                 if queried.is_some() {
                     "argument"
                 } else {
-                    resolved_runtime.model_source.as_str()
+                    // This branch is reachable only for an explicit
+                    // subcommand provider with no requested model. The model
+                    // therefore came from that provider's default, not from
+                    // the configured runtime route we deliberately overrode.
+                    "provider default"
                 }
             );
             Ok(())

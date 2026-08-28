@@ -611,7 +611,7 @@ pub fn home_dashboard(app: &mut App) -> CommandResult {
 
     // Session stats
     let history_count = app.history.len();
-    let total_tokens = app.session.total_conversation_tokens;
+    let total_tokens = app.session.displayed_total_conversation_tokens();
     let queued_messages = app.queued_messages.len();
     let _ = writeln!(
         stats,

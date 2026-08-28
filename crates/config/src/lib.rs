@@ -30,9 +30,13 @@ pub use model_reference::{Modality, ModelReferenceCard, ModelReferenceDatabase};
 pub(crate) use provider_defaults::*;
 pub use provider_kind::ProviderKind;
 pub use provider_templates::{
-    AGNES_TEMPLATE_ID, ProviderSetupApply, ProviderSetupTemplate, SENSENOVA_API_KEY_ENV,
-    SENSENOVA_BASE_URL, SENSENOVA_DEFAULT_MODEL, SENSENOVA_MODELS, SENSENOVA_TEMPLATE_ID,
-    compatible_provider_setup_templates, provider_setup_template, provider_setup_templates,
+    AGNES_TEMPLATE_ID, BASETEN_API_KEY_ENV, BASETEN_BASE_URL, BASETEN_DEFAULT_MODEL,
+    BASETEN_MODELS, BASETEN_TEMPLATE_ID, CEREBRAS_API_KEY_ENV, CEREBRAS_BASE_URL,
+    CEREBRAS_DEFAULT_MODEL, CEREBRAS_MODELS, CEREBRAS_TEMPLATE_ID, GROQ_API_KEY_ENV, GROQ_BASE_URL,
+    GROQ_DEFAULT_MODEL, GROQ_MODELS, GROQ_TEMPLATE_ID, ProviderSetupApply, ProviderSetupTemplate,
+    SENSENOVA_API_KEY_ENV, SENSENOVA_BASE_URL, SENSENOVA_DEFAULT_MODEL, SENSENOVA_MODELS,
+    SENSENOVA_TEMPLATE_ID, compatible_provider_setup_templates, provider_setup_template,
+    provider_setup_templates,
 };
 pub use setup_state::{
     ConstitutionAuthoring, ConstitutionChoice, ConstitutionSource, ConstitutionValidity,
@@ -853,6 +857,10 @@ pub struct ConfigToml {
     /// lifecycle `[hooks]` table so config rewrites preserve existing hooks.
     #[serde(default)]
     pub hook_sinks: Option<HookSinksToml>,
+    /// Lifecycle event outbox (`[lifecycle_outbox]`). Opt-in: an unset or
+    /// empty `path` disables the feature and leaves behavior unchanged.
+    #[serde(default)]
+    pub lifecycle_outbox: Option<LifecycleOutboxToml>,
     /// Agent Fleet trust and security policy (#3165). When absent, fleet
     /// workers inherit conservative Sandbox defaults.
     #[serde(default)]
@@ -1551,6 +1559,31 @@ pub struct HookSinksToml {
     /// shared `/tmp` default because socket ownership should be explicit.
     #[serde(default)]
     pub unix_socket_path: Option<PathBuf>,
+}
+
+/// On-disk schema for the `[lifecycle_outbox]` table.
+///
+/// Opt-in lifecycle event outbox: every emitted event is appended as one
+/// JSONL line to `path` in the `RuntimeEventEnvelope` shape
+/// (`schema_version, seq, event, kind, thread_id, turn_id, item_id,
+/// timestamp, payload`), and optionally POSTed to `webhook_url`. An unset or
+/// empty `path` disables the feature entirely — behavior is unchanged from a
+/// release without the table.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct LifecycleOutboxToml {
+    /// Path to the JSONL outbox file. Parent directories are created lazily
+    /// on the first event. Unset or empty = feature OFF.
+    #[serde(default)]
+    pub path: Option<PathBuf>,
+    /// Optional webhook URL. Events are POSTed as `{"at", "event"}` JSON
+    /// only when this is set (in addition to, never instead of, `path`).
+    /// Delivery is best-effort: failures are logged and dropped.
+    #[serde(default)]
+    pub webhook_url: Option<String>,
+    /// Optional bearer token sent as `Authorization: Bearer <token>` on
+    /// webhook POSTs. Ignored when `webhook_url` is unset.
+    #[serde(default)]
+    pub webhook_token: Option<String>,
 }
 
 /// On-disk schema for the `[skills]` table (#140). See `config.example.toml`
@@ -3796,7 +3829,7 @@ pub fn load_project_config_outcome(workspace: &Path) -> ProjectConfigOutcome {
                 };
             }
         };
-        match toml::from_str::<ConfigToml>(&raw) {
+        match parse_config_toml_str(&raw) {
             Ok(config) => {
                 let raw_provider = toml::from_str::<toml::Value>(&raw)
                     .ok()
@@ -4331,6 +4364,9 @@ fn canonical_zai_model_id(model: &str) -> Option<&'static str> {
         // moving the default (now GLM-5.3) must not silently re-point an
         // explicit GLM-5.2 route.
         "glm-5.2" | "glm-5-2" | "zai-glm-5.2" | "zai-glm-5-2" => Some(ZAI_GLM_5_2_MODEL),
+        "glm-5.3-flash" | "glm-5-3-flash" | "zai-glm-5.3-flash" | "zai-glm-5-3-flash" => {
+            Some(ZAI_GLM_5_3_FLASH_MODEL)
+        }
         "glm-5.3" | "glm-5-3" | "zai-glm-5.3" | "zai-glm-5-3" => Some(ZAI_GLM_5_3_MODEL),
         "glm-5-turbo" | "glm-5turbo" | "zai-glm-5-turbo" => Some(ZAI_GLM_5_TURBO_MODEL),
         _ => None,
@@ -4358,6 +4394,11 @@ fn canonical_openrouter_recent_model_id(model: &str) -> Option<&'static str> {
         OPENROUTER_GLM_5_2_MODEL | "glm-5.2" | "glm-5-2" | "zai-glm-5.2" | "zai-glm-5-2" => {
             Some(OPENROUTER_GLM_5_2_MODEL)
         }
+        OPENROUTER_GLM_5_3_FLASH_MODEL
+        | "glm-5.3-flash"
+        | "glm-5-3-flash"
+        | "zai-glm-5.3-flash"
+        | "zai-glm-5-3-flash" => Some(OPENROUTER_GLM_5_3_FLASH_MODEL),
         OPENROUTER_GLM_5_3_MODEL | "glm-5.3" | "glm-5-3" | "zai-glm-5.3" | "zai-glm-5-3" => {
             Some(OPENROUTER_GLM_5_3_MODEL)
         }
@@ -4410,9 +4451,16 @@ fn canonical_openrouter_recent_model_id(model: &str) -> Option<&'static str> {
         OPENROUTER_QWEN_3_7_MAX_MODEL | "qwen3.7-max" | "qwen-3.7-max" => {
             Some(OPENROUTER_QWEN_3_7_MAX_MODEL)
         }
-        OPENROUTER_TENCENT_HY3_PREVIEW_MODEL | "hy3-preview" | "tencent-hy3-preview" => {
-            Some(OPENROUTER_TENCENT_HY3_PREVIEW_MODEL)
+        OPENROUTER_QWEN_3_8_FLASH_MODEL | "qwen3.8-flash" | "qwen-3.8-flash" => {
+            Some(OPENROUTER_QWEN_3_8_FLASH_MODEL)
         }
+        OPENROUTER_TENCENT_HY3_PREVIEW_MODEL
+        | "hy3-preview"
+        | "tencent-hy3-preview"
+        | "hy3"
+        | "hunyuan"
+        | "tencent-hunyuan"
+        | "hunyuan-hy3" => Some(OPENROUTER_TENCENT_HY3_PREVIEW_MODEL),
         OPENROUTER_XIAOMI_MIMO_V2_5_PRO_MODEL
         | "mimo-v2.5-pro"
         | "mimo-v2-5-pro"
@@ -5123,12 +5171,39 @@ pub struct ConfigStore {
     original_raw: Option<String>,
 }
 
+/// Parse a [`ConfigToml`] on a dedicated thread with an explicit stack size.
+///
+/// `ConfigToml` nests the per-provider tables, fleet trust policy, and every
+/// typed sub-table in one struct, and the monomorphized toml/serde
+/// deserializer frames for a struct this large overflow the 2 MiB default
+/// stack of libtest and tokio worker threads in debug builds (the same
+/// hazard the TUI fixed for its `ConfigFile`; reproduced as the #5585 stack
+/// overflow through the guided-setup save path). Every production
+/// `ConfigToml` parse goes through here so config-store loads stay safe
+/// regardless of the calling thread's stack budget.
+fn parse_config_toml_str(contents: &str) -> Result<ConfigToml, toml::de::Error> {
+    std::thread::scope(|scope| {
+        match std::thread::Builder::new()
+            .name("config-toml-parse".to_string())
+            .stack_size(16 * 1024 * 1024)
+            .spawn_scoped(scope, || toml::from_str::<ConfigToml>(contents))
+        {
+            Ok(handle) => handle
+                .join()
+                .unwrap_or_else(|panic| std::panic::resume_unwind(panic)),
+            // Spawning can only fail under resource exhaustion; parsing on
+            // the caller's stack is still the best remaining option.
+            Err(_) => toml::from_str::<ConfigToml>(contents),
+        }
+    })
+}
+
 impl ConfigStore {
     pub fn load(path: Option<PathBuf>) -> Result<Self> {
         let path = resolve_config_path(path)?;
         let (config, original_raw) = if checked_path_exists(&path)? {
             let raw = read_checked_config_file(&path)?;
-            let mut parsed: ConfigToml = toml::from_str(&raw).map_err(|_| {
+            let mut parsed: ConfigToml = parse_config_toml_str(&raw).map_err(|_| {
                 anyhow::anyhow!(
                     "failed to parse config at {}; file contents were omitted",
                     quote_os_path(&path)

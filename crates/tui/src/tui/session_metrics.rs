@@ -300,46 +300,68 @@ pub fn format_rate(rate: f64) -> String {
 /// A cell whose evidence has not arrived is omitted — never a placeholder:
 /// `TTFT avg` / `tok/s` appear only once a model call reported them, `Cache
 /// hit` only when a provider reported cache classes, `Input` only after the
-/// first usage receipt. Turn, step, and time cells are always present once
-/// the session has started (zero is a real count).
+/// first usage receipt. Turn cells are present once the session has started
+/// (zero turns is a real count). Step cells wait for the first completed
+/// model or tool call so `0 steps` cannot look like a stalled scoreboard.
 #[must_use]
 pub fn build_groups(snapshot: MetricsSnapshot, locale: Locale) -> Vec<MetricGroupCells> {
     let label = |id: MessageId| tr(locale, id).into_owned();
     let mut groups = Vec::new();
     for group in GROUP_ORDER {
         let cells = match group {
-            MetricGroup::Turns => vec![
-                MetricCell {
-                    label: label(if snapshot.turns == 1 {
-                        MessageId::SessionMetricsTurn
-                    } else {
-                        MessageId::SessionMetricsTurns
-                    }),
-                    value: snapshot.turns.to_string(),
-                    value_first: true,
-                },
-                MetricCell {
-                    label: label(if snapshot.steps == 1 {
-                        MessageId::SessionMetricsStep
-                    } else {
-                        MessageId::SessionMetricsSteps
-                    }),
-                    value: snapshot.steps.to_string(),
-                    value_first: true,
-                },
-            ],
-            MetricGroup::Llm => vec![
-                MetricCell {
-                    label: label(MessageId::SessionMetricsLlm),
-                    value: format_duration(snapshot.llm_time),
-                    value_first: false,
-                },
-                MetricCell {
-                    label: label(MessageId::SessionMetricsTools),
-                    value: format_duration(snapshot.tool_time),
-                    value_first: false,
-                },
-            ],
+            MetricGroup::Turns => {
+                if snapshot.turns == 0 && snapshot.steps == 0 {
+                    continue;
+                }
+                let mut cells = Vec::new();
+                if snapshot.turns > 0 {
+                    cells.push(MetricCell {
+                        label: label(if snapshot.turns == 1 {
+                            MessageId::SessionMetricsTurn
+                        } else {
+                            MessageId::SessionMetricsTurns
+                        }),
+                        value: snapshot.turns.to_string(),
+                        value_first: true,
+                    });
+                }
+                if snapshot.steps > 0 {
+                    cells.push(MetricCell {
+                        label: label(if snapshot.steps == 1 {
+                            MessageId::SessionMetricsStep
+                        } else {
+                            MessageId::SessionMetricsSteps
+                        }),
+                        value: snapshot.steps.to_string(),
+                        value_first: true,
+                    });
+                }
+                if cells.is_empty() {
+                    continue;
+                }
+                cells
+            }
+            MetricGroup::Llm => {
+                let mut cells = Vec::new();
+                if !snapshot.llm_time.is_zero() {
+                    cells.push(MetricCell {
+                        label: label(MessageId::SessionMetricsLlm),
+                        value: format_duration(snapshot.llm_time),
+                        value_first: false,
+                    });
+                }
+                if !snapshot.tool_time.is_zero() {
+                    cells.push(MetricCell {
+                        label: label(MessageId::SessionMetricsTools),
+                        value: format_duration(snapshot.tool_time),
+                        value_first: false,
+                    });
+                }
+                if cells.is_empty() {
+                    continue;
+                }
+                cells
+            }
             MetricGroup::Latency => {
                 let mut cells = Vec::new();
                 if let Some(ttft) = snapshot.ttft_avg {
@@ -491,8 +513,8 @@ pub fn fit_to_width(
 /// Snapshot the live app state into the strip's inputs.
 #[must_use]
 pub fn snapshot_from_app(app: &crate::tui::app::App) -> MetricsSnapshot {
-    let hit = u64::from(app.session.total_cache_hit_tokens);
-    let miss = u64::from(app.session.total_cache_miss_tokens);
+    let hit = u64::from(app.session.displayed_total_cache_hit_tokens());
+    let miss = u64::from(app.session.displayed_total_cache_miss_tokens());
     let cache_hit_percent = (hit + miss > 0).then(|| {
         // Widen before adding so saturated counters never exceed 100%.
         u8::try_from((hit * 100 + (hit + miss) / 2) / (hit + miss)).unwrap_or(100)
@@ -505,7 +527,7 @@ pub fn snapshot_from_app(app: &crate::tui::app::App) -> MetricsSnapshot {
         ttft_avg: app.session_metrics.ttft_average(),
         tokens_per_second: app.session_metrics.tokens_per_second(),
         cache_hit_percent,
-        input_tokens: u64::from(app.session.total_input_tokens),
+        input_tokens: u64::from(app.session.displayed_total_input_tokens()),
     }
 }
 
@@ -636,6 +658,12 @@ mod tests {
     }
 
     #[test]
+    fn idle_snapshot_paints_nothing() {
+        let text = full_text(MetricsSnapshot::default(), Locale::En, false);
+        assert_eq!(text, "");
+    }
+
+    #[test]
     fn absent_evidence_omits_the_cell_instead_of_a_placeholder() {
         let mut snapshot = sample();
         snapshot.cache_hit_percent = None;
@@ -664,7 +692,7 @@ mod tests {
             ..MetricsSnapshot::default()
         };
         let text = full_text(snapshot, Locale::En, false);
-        assert!(text.starts_with("1 turn · 1 step │"), "{text}");
+        assert_eq!(text, "1 turn · 1 step", "{text}");
     }
 
     #[test]

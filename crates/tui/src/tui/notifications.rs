@@ -598,7 +598,7 @@ fn title_animation_base() -> &'static Mutex<String> {
 }
 
 fn title_activity_verb() -> &'static Mutex<String> {
-    TITLE_ACTIVITY_VERB.get_or_init(|| Mutex::new("working…".to_string()))
+    TITLE_ACTIVITY_VERB.get_or_init(|| Mutex::new("in the current…".to_string()))
 }
 
 /// Configure whether the title whale cycles frames.
@@ -610,7 +610,7 @@ pub fn set_title_motion_enabled(enabled: bool) {
 }
 
 /// Update the truthful activity verb shown next to the title whale
-/// (`working…`, `reasoning…`, `using tool…`, `verifying…`, `waiting on you…`).
+/// (`in the current…`, `reasoning…`, `using tool…`, `verifying…`, `waiting on you…`).
 pub fn set_title_activity_verb(verb: &str) {
     let verb = verb.trim();
     if verb.is_empty() {
@@ -640,7 +640,7 @@ pub fn set_title_activity_verb(verb: &str) {
 fn title_activity_label(base: &str, elapsed: Duration, focused: bool, motion: bool) -> String {
     let verb = title_activity_verb()
         .lock()
-        .map_or_else(|_| "working…".to_string(), |v| v.clone());
+        .map_or_else(|_| "in the current…".to_string(), |v| v.clone());
     let body = if verb.is_empty() {
         base.to_string()
     } else {
@@ -698,7 +698,7 @@ pub fn start_title_animation(original: &str) {
     if let Ok(mut verb) = title_activity_verb().lock()
         && verb.is_empty()
     {
-        "working…".clone_into(&mut *verb);
+        "in the current…".clone_into(&mut *verb);
     }
     COMPLETION_MARKER_SHOWN.store(false, Ordering::SeqCst);
     TITLE_ANIMATION_RUNNING.store(true, Ordering::SeqCst);
@@ -1234,23 +1234,23 @@ mod tests {
     fn title_whale_is_static_when_focused_or_motion_disabled() {
         let _guard = prefix_lock();
         if let Ok(mut verb) = title_activity_verb().lock() {
-            "working…".clone_into(&mut *verb);
+            "in the current…".clone_into(&mut *verb);
         }
         assert_eq!(
             title_activity_label("Codewhale", Duration::ZERO, true, true),
-            "🐳 working…"
+            "🐳 in the current…"
         );
         assert_eq!(
             title_activity_label("Codewhale", Duration::ZERO, false, false),
-            "🐳 working…"
+            "🐳 in the current…"
         );
         assert_eq!(
             title_activity_label("Codewhale", Duration::ZERO, false, true),
-            "🐳 working…"
+            "🐳 in the current…"
         );
         assert_eq!(
             title_activity_label("Codewhale", Duration::from_millis(800), false, true),
-            "🐋 working…"
+            "🐋 in the current…"
         );
     }
 
@@ -1557,8 +1557,8 @@ mod tests {
         assert_eq!(taskbar_progress_sequence(1, Some(42)), "\x1b]9;4;1;42\x07");
         assert_eq!(taskbar_progress_sequence(0, None), "\x1b]9;4;0\x07");
         assert_eq!(
-            terminal_title_sequence("🐳 working…"),
-            "\x1b]0;🐳 working…\x07"
+            terminal_title_sequence("🐳 in the current…"),
+            "\x1b]0;🐳 in the current…\x07"
         );
     }
 

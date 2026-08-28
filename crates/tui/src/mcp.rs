@@ -3587,6 +3587,105 @@ pub struct McpManagerSnapshot {
     pub servers: Vec<McpServerSnapshot>,
 }
 
+/// First-class recovery for a configured MCP server. Commands named here exist:
+/// `/mcp login`, `/mcp reload`, `/mcp validate`, `/mcp enable`. There is no
+/// `/mcp auth`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McpRecoveryKind {
+    Enable,
+    Connect,
+    Reconnect,
+    Reauth,
+    Diagnose,
+}
+
+impl McpRecoveryKind {
+    #[must_use]
+    pub fn slash_command(self, name: &str) -> String {
+        match self {
+            Self::Enable => format!("/mcp enable {name}"),
+            Self::Connect | Self::Reconnect => "/mcp reload".to_string(),
+            Self::Reauth => format!("/mcp login {name}"),
+            Self::Diagnose => "/mcp validate".to_string(),
+        }
+    }
+
+    #[must_use]
+    pub fn label_key(self) -> crate::localization::MessageId {
+        match self {
+            Self::Enable => crate::localization::MessageId::ExtensionsActionEnable,
+            Self::Connect => crate::localization::MessageId::ExtensionsActionConnect,
+            Self::Reconnect => crate::localization::MessageId::ExtensionsActionReconnect,
+            Self::Reauth => crate::localization::MessageId::ExtensionsActionReauth,
+            Self::Diagnose => crate::localization::MessageId::ExtensionsActionDiagnose,
+        }
+    }
+}
+
+#[must_use]
+pub fn mcp_name_is_command_safe(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+}
+
+#[must_use]
+pub fn mcp_server_oauth_capable(config: &McpServerConfig) -> bool {
+    config.url.is_some()
+        && (config.oauth.is_some() || !config.scopes.is_empty() || config.oauth_resource.is_some())
+}
+
+#[must_use]
+pub fn mcp_recovery_kind(
+    enabled: bool,
+    inspected: bool,
+    connected: bool,
+    error: Option<&str>,
+    oauth_capable: bool,
+) -> McpRecoveryKind {
+    if !enabled {
+        return McpRecoveryKind::Enable;
+    }
+    if let Some(error) = error {
+        if oauth::error_text_looks_auth_required(error) {
+            return McpRecoveryKind::Reauth;
+        }
+        return McpRecoveryKind::Diagnose;
+    }
+    if !inspected {
+        return McpRecoveryKind::Connect;
+    }
+    if connected {
+        return McpRecoveryKind::Diagnose;
+    }
+    if oauth_capable {
+        return McpRecoveryKind::Reauth;
+    }
+    McpRecoveryKind::Reconnect
+}
+
+/// Session-start / manager line: name the server, name the failure, one command.
+/// Matches the Codex shape (`The X MCP server requires OAuth reauthentication. Run …`
+/// / `MCP startup incomplete (failed: X)`).
+#[must_use]
+pub fn mcp_startup_warning(name: &str, kind: McpRecoveryKind, failed: bool) -> String {
+    let command = kind.slash_command(name);
+    match kind {
+        McpRecoveryKind::Reauth => {
+            format!("The {name} MCP server requires OAuth reauthentication. Run `{command}`.")
+        }
+        McpRecoveryKind::Enable => {
+            format!("The {name} MCP server is disabled. Run `{command}`.")
+        }
+        _ if failed => format!("MCP startup incomplete (failed: {name}). Run `{command}`."),
+        McpRecoveryKind::Connect => {
+            format!("The {name} MCP server is not connected yet. Run `{command}`.")
+        }
+        _ => format!("The {name} MCP server needs attention. Run `{command}`."),
+    }
+}
+
 pub fn load_config(path: &Path) -> Result<McpConfig> {
     validate_mcp_config_path(path)?;
     let Some(contents) = read_mcp_config_file(path)? else {

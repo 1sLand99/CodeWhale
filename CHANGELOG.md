@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Z.ai `GLM-5.3-Flash` and OpenRouter `z-ai/glm-5.3-flash` are first-class
+  picker rows (`/model GLM-5.3-Flash`). Flash is the faster/explore sibling
+  of `GLM-5.3`; the Z.ai default stays `GLM-5.3`. List price is $0.15/$0.50
+  per 1M (durable; the 50% promo through 2026-09-09 is not the catalog row).
+- Baseten, Groq, and Cerebras are bundled OpenAI-compatible setup templates
+  (`[providers.<id>] kind = "openai-compatible"`), not new `ProviderKind`
+  variants. `/provider` fills URL, model, and env from one catalog row.
+- MCP manager copy now names the server, the failure, and one recovery
+  command (`The X MCP server requires OAuth reauthentication. Run /mcp login X`).
+- Settings Advanced exposes clickable MCP Connect, Reconnect, and Diagnose
+  actions, while Extensions and Problems route recovery through the existing
+  `/mcp login`, `/mcp reload`, `/mcp validate`, and `/plugin validate` commands
+  (#5643, #5655).
+
+- Added `/import-claude` (#5557): reads `~/.claude.json` and
+  `~/.claude/settings.json` read-only and renders an explicit, reviewable
+  migration plan plus a written report. MCP servers route through the
+  existing `/mcp import <name> --approve` consent flow, allowlisted env keys
+  become an unapplied portable bundle for `codewhale config import`, and
+  permissions/hooks map to manual follow-ups; secret-shaped values are named
+  but never echoed or imported.
 - Added the managed Chat relay: account-owned Chat commands now execute on the
   native runtime thread engine through a new `runtime_chat_relay` module
   instead of a second execution path. Each Chat thread is a dedicated,
@@ -65,6 +86,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Idle session metrics omit zero facts (`0 turns`, `LLM 0s`) until the
+  runtime has evidence. Working chrome says `in the current` instead of a
+  generic `working`.
+- Deleted nine uncompiled `runtime_contract/` staging files. Live contracts
+  remain `model.rs` and `termination.rs`.
+
+- The first #5587 dead-code sweep converts audited test-only helpers to
+  `#[cfg(test)]`, keeping production builds free of test-only APIs without
+  changing runtime behavior.
+- `/plugin reload` is now discoverable when on-disk plugin bundles change: the
+  next send and `/plugin list` nudge once with `Run /plugin reload to apply`
+  instead of silently keeping the stale catalog (#5579). Trust is unchanged;
+  this does not auto-reload.
+- Context-pressure warnings and critical alerts now remain visible in sticky UI
+  status until compaction or explicit dismissal, instead of disappearing into
+  scrolling turn metadata (#5620).
+- The Runtime thread store defaults to a per-session root
+  (`$CODEWHALE_HOME/sessions/<id>/runtime`) so multiple Codewhale processes on
+  one machine no longer share one owner lock (#5630). The exclusive lock is
+  unchanged; `CODEWHALE_RUNTIME_DIR` still selects a shared root when that is
+  intended.
+- Session token totals now include display-only per-model-call deltas while a
+  turn is running, including input/output and cache-class counters; the
+  authoritative `TurnComplete` totals still reconcile exactly once (#5581).
+- Transcript focus now exposes per-block actions: `y` copies content, `Y`
+  copies the rendered metadata view, Enter opens a fullscreen block pager, and
+  `r` opens raw detail; the existing Tasks rail shortcuts remain unchanged
+  (#5551).
 - Provider neutrality (#5588): model resolution of omitted/aliased models is
   now provider-relative, OpenAI-native defaults no longer route through
   another provider's table, CLI credentials stay provider-scoped, and NVIDIA
@@ -86,6 +135,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Account sessions no longer read the macOS Keychain. Unsigned or rebuilt
+  `codewhale` binaries were a new Keychain ACL principal every time, so
+  `codewhale web` and the TUI popped a password dialog on start. Sessions
+  now use `~/.codewhale/secrets/secrets.json` (mode 0600), the same store
+  as provider keys. Extracted from the Keychain-retirement half of #5632.
+- Hardened the dispatcher-side config parse the same way: `ConfigStore`
+  loads and project-config parsing now deserialize `ConfigToml` on a
+  dedicated 16 MiB-stack thread (the guided-setup save path could overflow
+  a 2 MiB worker stack the same way the TUI's `ConfigFile` parse did), and
+  the #5585 setup-confirm toast test runs its runtime on an equally sized
+  thread instead of overflowing the default libtest stack.
 - Fixed detached interactive agents reporting worker usage after the parent
   turn ends with the usage missing from the session/live `/cost` total
   (#5597): interactive turns acquire an owner-scoped runtime usage lease,
@@ -137,6 +197,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fleet roster members in a selected Fleet now expose a visible edit affordance
   and a direct `m` model-picker shortcut, while the coordinator row remains
   read-only (#5604, covers #5589).
+- The context inspector now attributes bounded tool-schema cost to the built-in
+  catalog and each discovered MCP server without changing prompt assembly or
+  cache behavior (#5553).
 - The goal-continuation quiet period (`[goal] continuation_delay_seconds`,
   added in #5508) now applies on every dispatch path. Previously the
   within-turn dispatch hook fired the next continuation prompt immediately

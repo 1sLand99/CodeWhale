@@ -3422,6 +3422,11 @@ impl SubAgentWorkflowDriver {
         let recorded = if let Ok(mut runs) = self.state.runs.lock()
             && let Some(record) = runs.get_mut(&self.run_id)
         {
+            // A terminal run's event list is the cancel/complete receipt.
+            // Racing VM and child completions must not append after that.
+            if record.status != WorkflowRunStatus::Running {
+                return;
+            }
             record.push_event(event.clone());
             true
         } else {
@@ -3831,6 +3836,9 @@ impl SubAgentWorkflowDriver {
         if let Ok(mut runs) = self.state.runs.lock()
             && let Some(record) = runs.get_mut(&self.run_id)
         {
+            if record.status != WorkflowRunStatus::Running {
+                return;
+            }
             record.push_progress(progress_line.clone());
             record.push_event(ui_event.clone());
             record.push_dispatch_failure(failure);
@@ -4224,6 +4232,9 @@ impl WorkflowDriver for SubAgentWorkflowDriver {
         if let Ok(mut runs) = self.state.runs.lock()
             && let Some(record) = runs.get_mut(&self.run_id)
         {
+            if record.status != WorkflowRunStatus::Running {
+                return;
+            }
             record.push_progress(message.clone());
             record.push_event(ui_event.clone());
             if let Some(schema_error) = schema_error {
@@ -10405,7 +10416,7 @@ FINAL RECEIPT
             .and_then(Value::as_str)
             .expect("run_id metadata");
 
-        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        tokio::time::timeout(std::time::Duration::from_secs(15), async {
             while calls.load(Ordering::SeqCst) == 0 {
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }

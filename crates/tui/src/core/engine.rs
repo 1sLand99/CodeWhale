@@ -28,7 +28,7 @@ use crate::client::DeepSeekClient;
 use crate::compaction::{CompactionConfig, PreparedCompactionEnvelope, compact_messages_safe};
 use crate::config::{ApiProvider, Config, DEFAULT_MAX_SUBAGENTS, DEFAULT_TEXT_MODEL};
 use crate::core::model_client::SharedModelClient;
-use crate::error_taxonomy::{ErrorCategory, ErrorEnvelope, StreamError};
+use crate::error_taxonomy::{ErrorCategory, ErrorEnvelope, ErrorSeverity, StreamError};
 use crate::features::{Feature, Features};
 use crate::mcp::{McpConfig, McpPool};
 #[cfg(test)]
@@ -1074,6 +1074,9 @@ impl Engine {
         messages_after: Option<usize>,
     ) {
         let summary_prompt = self.rendered_compaction_summary();
+        // Every call site runs after message replacement and checkpoint
+        // commit. Reuse the same complete estimate as context pressure.
+        let post_input_tokens = Some(self.estimated_input_tokens() as u64);
         let _ = self
             .tx_event
             .send(Event::CompactionCompleted {
@@ -1083,6 +1086,7 @@ impl Engine {
                 messages_before,
                 messages_after,
                 summary_prompt,
+                post_input_tokens,
             })
             .await;
     }
@@ -2837,6 +2841,14 @@ impl Engine {
                                 .push(crate::compaction::compaction_checkpoint_message(checkpoint));
                         }
                         self.session.messages = restored_messages.into();
+                        // Direct field assignment bypasses `add_message` /
+                        // `replace_messages`, which own the messages-revision
+                        // bump the token-estimate cache keys on (#perf-r5).
+                        // Without this bump the first estimate after a
+                        // session restore is computed against whatever
+                        // history revision was current before the sync — a
+                        // stale number can flow into capacity checkpoints.
+                        self.session.bump_messages_revision();
                         self.session.compaction_summary_prompt = compaction_checkpoint;
                         self.session.system_prompt =
                             crate::compaction::strip_compaction_summaries(system_prompt.as_ref());
@@ -2961,37 +2973,55 @@ impl Engine {
                         let route = match self.current_runtime_route() {
                             Ok(route) => route,
                             Err(err) => {
-                                let _ = self
-                                    .tx_event
-                                    .send(Event::error(ErrorEnvelope::fatal_auth(format!(
+                                self.reject_edit_last_turn(ErrorEnvelope::new(
+                                    ErrorCategory::Authentication,
+                                    ErrorSeverity::Critical,
+                                    false,
+                                    "edit_last_turn_invalid_route",
+                                    format!(
                                         "Cannot edit the last turn because its provider route is no longer valid: {err}"
-                                    ))))
-                                    .await;
-                                let outcome = SendMessageOutcome::NotStarted {
-                                    error: Some(format!(
-                                        "provider route is no longer valid: {err}"
-                                    )),
-                                };
-                                self.reconcile_non_completed_goal_turn(&outcome).await;
+                                    ),
+                                ))
+                                .await;
                                 continue;
                             }
                         };
                         // #383: /edit — remove the last user+assistant exchange
                         // from the session, then re-send with the new content.
-                        // Pop messages from the tail until we've removed the
-                        // most recent user message and everything after it.
-                        // First, find the last user message index.
-                        let mut cut = None;
-                        for (idx, msg) in self.session.messages.iter().enumerate().rev() {
-                            if msg.role == "user" {
-                                cut = Some(idx);
-                                break;
+                        // Tool results and runtime-owned internal envelopes are
+                        // also persisted with role "user", so locate the cut
+                        // point by genuine user prompt — a bare role scan would
+                        // land mid-turn on a tool_result and keep the old
+                        // prompt plus its tool round-trips in history.
+                        let idx = match crate::runtime_handoff::edit_last_turn_target(
+                            &self.session.messages,
+                        ) {
+                            crate::runtime_handoff::EditLastTurnTarget::Editable(idx) => idx,
+                            crate::runtime_handoff::EditLastTurnTarget::Unsupported => {
+                                self.reject_edit_last_turn(ErrorEnvelope::new(
+                                    ErrorCategory::InvalidInput,
+                                    ErrorSeverity::Error,
+                                    false,
+                                    "edit_last_turn_unsupported_user_content",
+                                    "Cannot edit the last turn because the latest user message has no editable text content.",
+                                ))
+                                .await;
+                                continue;
                             }
-                        }
-                        if let Some(idx) = cut {
-                            self.session.messages.truncate_to(idx);
-                            self.session.bump_messages_revision();
-                        }
+                            crate::runtime_handoff::EditLastTurnTarget::Missing => {
+                                self.reject_edit_last_turn(ErrorEnvelope::new(
+                                    ErrorCategory::State,
+                                    ErrorSeverity::Error,
+                                    false,
+                                    "edit_last_turn_no_user_prompt",
+                                    "Cannot edit the last turn because the session history has no user message to replace.",
+                                ))
+                                .await;
+                                continue;
+                            }
+                        };
+                        self.session.messages.truncate_to(idx);
+                        self.session.bump_messages_revision();
                         // Now dispatch the new message as a normal send,
                         // reusing the engine's stored mode/model config.
                         let mode = self.current_mode;
@@ -3112,17 +3142,37 @@ impl Engine {
         current_text: &str,
         system_prompt: Option<&SystemPrompt>,
     ) -> usize {
-        let mut messages: Vec<Message> = self.session.messages.clone().into();
-        if !current_text.trim().is_empty() {
-            messages.push(Message {
-                role: Role::User,
-                content: vec![ContentBlock::Text {
-                    text: current_text.to_string(),
-                    cache_control: None,
-                }],
-            });
+        // Estimate the installed history IN PLACE — no full-transcript clone
+        // per `<turn_meta>` build (#perf-r5). `&AppendLog` deref-coerces to
+        // `&[Message]` exactly like the cache call site.
+        let base = estimate_input_tokens_conservative(&self.session.messages, system_prompt);
+        if current_text.trim().is_empty() {
+            return base;
         }
-        estimate_input_tokens_conservative(&messages, system_prompt)
+        // Arithmetic equivalent of pushing one more user message: `own`
+        // un-inflated tokens (Text block rule, `len()/4` — same as the
+        // estimator's per-message byte sum S) plus one framing increment.
+        // The estimator inflates S by ceil(3/2) as a WHOLE, so
+        // ceil((S+own)*3/2) − ceil(S*3/2) = floor(own*3/2) + 1 exactly when
+        // S is even and own is odd; pinned exhaustively (80k pairs) and per
+        // case by `context_pressure_delta_matches_clone_and_push_reference`.
+        let sum: usize = self
+            .session
+            .messages
+            .iter()
+            .map(|m| {
+                crate::compaction::estimate_tokens_for_message(
+                    m,
+                    crate::compaction::message_has_tool_use(m),
+                )
+            })
+            .sum();
+        let own = current_text.len() / 4;
+        let mut inflated_delta = own * 3 / 2;
+        if sum.is_multiple_of(2) && own % 2 == 1 {
+            inflated_delta += 1;
+        }
+        base.saturating_add(inflated_delta).saturating_add(12)
     }
 
     fn append_resource_metadata_lines(
@@ -3718,6 +3768,29 @@ impl Engine {
                 }
             }
         }
+    }
+
+    /// Reject an edit operation before model dispatch while still completing
+    /// the submitted host lifecycle. `Event::Error` is advisory to embedded
+    /// hosts; `TurnComplete(Failed)` is the authoritative terminal signal that
+    /// releases their busy state and closes the admitted operation.
+    async fn reject_edit_last_turn(&mut self, envelope: ErrorEnvelope) {
+        let message = envelope.message.clone();
+        let _ = self.tx_event.send(Event::error(envelope)).await;
+        let _ = self
+            .tx_event
+            .send(Event::TurnComplete {
+                usage: Usage::default(),
+                status: TurnOutcomeStatus::Failed,
+                error: Some(message.clone()),
+                tool_catalog: None,
+                base_url: None,
+            })
+            .await;
+        let outcome = SendMessageOutcome::NotStarted {
+            error: Some(message),
+        };
+        self.reconcile_non_completed_goal_turn(&outcome).await;
     }
 
     /// Reconcile a turn that did not complete with the autonomous goal loop.

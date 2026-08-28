@@ -9,7 +9,7 @@ use std::io::Write;
 use std::pin::Pin;
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::time::timeout as tokio_timeout;
@@ -17,7 +17,8 @@ use tokio::time::timeout as tokio_timeout;
 use crate::config::{
     TOGETHER_INKLING_MODEL, is_exact_direct_moonshot_k3_route, is_exact_kimi_code_k3_route,
     is_exact_xai_grok_4_6_route, is_exact_zai_chat_route, is_exact_zai_tiered_effort_route,
-    minimax_m3_route_uses_max_completion_tokens, wire_model_for_provider_route,
+    is_kimi_code_membership_model, minimax_m3_route_uses_max_completion_tokens,
+    moonshot_base_url_is_exact_kimi_code, wire_model_for_provider_route,
 };
 
 // The bounded response-header wait (`stream_open_timeout`) and its env
@@ -864,6 +865,29 @@ fn apply_direct_moonshot_k3_fixed_sampling(
     }
 }
 
+/// Kimi Code's documented membership models own their sampling behavior.
+/// Strip generic controls only on the exact first-party membership route;
+/// custom gateways and unknown model ids retain their own wire contract.
+/// Source: <https://www.kimi.com/code/docs/en/third-party-tools/codex.html>
+/// (verified 2026-08-26).
+fn apply_kimi_code_fixed_sampling(
+    body: &mut Value,
+    provider: ApiProvider,
+    base_url: &str,
+    model: &str,
+) {
+    if provider != ApiProvider::Moonshot
+        || !moonshot_base_url_is_exact_kimi_code(base_url)
+        || !is_kimi_code_membership_model(model)
+    {
+        return;
+    }
+    if let Some(object) = body.as_object_mut() {
+        object.remove("temperature");
+        object.remove("top_p");
+    }
+}
+
 fn openai_compatible_reasoning_effort(
     effort: &str,
     supports_max: bool,
@@ -918,38 +942,62 @@ fn mirror_minimax_reasoning_details_for_body(body: &mut Value, provider: ApiProv
     mirror_minimax_reasoning_details_for_messages(messages);
 }
 
-fn sanitize_moonshot_chat_tools(chat_tools: &mut [Value]) -> Result<()> {
-    for tool in chat_tools {
+/// Sanitize every Moonshot chat tool in place, dropping only the tools whose
+/// parameters cannot pass MFJS compatibility validation.
+///
+/// Per-tool degradation: a single incompatible tool (e.g. a third-party MCP
+/// server whose schema uses keywords outside the MFJS whitelist) is excluded
+/// from this request with a warning instead of failing the whole request
+/// before transport. The tool name is safe to log — it is already visible in
+/// the UI — while the error's `Display` deliberately carries no schema values.
+///
+/// Returns the names of the dropped tools, in catalog order.
+fn sanitize_moonshot_chat_tools(chat_tools: &mut Vec<Value>) -> Vec<String> {
+    let mut dropped = Vec::new();
+    chat_tools.retain_mut(|tool| {
         let Some(function) = tool
             .as_object_mut()
             .and_then(|tool| tool.get_mut("function"))
             .and_then(Value::as_object_mut)
         else {
-            continue;
+            return true;
         };
         let Some(parameters) = function.get_mut("parameters") else {
-            continue;
+            return true;
         };
-        let note = crate::tools::schema_sanitize::sanitize_for_kimi_parameters(parameters)
-            .map_err(|error| {
-                anyhow::anyhow!(
-                    "Moonshot function parameters failed safe compatibility validation: {error}"
-                )
-            })?;
-        if let Some(note) = note {
-            let description = function
-                .get("description")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            let description = if description.is_empty() {
-                note
-            } else {
-                format!("{description} {note}")
-            };
-            function.insert("description".to_string(), json!(description));
+        match crate::tools::schema_sanitize::sanitize_for_kimi_parameters(parameters) {
+            Ok(note) => {
+                if let Some(note) = note {
+                    let description = function
+                        .get("description")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    let description = if description.is_empty() {
+                        note
+                    } else {
+                        format!("{description} {note}")
+                    };
+                    function.insert("description".to_string(), json!(description));
+                }
+                true
+            }
+            Err(error) => {
+                let name = function
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("<unnamed>")
+                    .to_string();
+                tracing::warn!(
+                    tool = %name,
+                    error = %error,
+                    "dropping Moonshot tool from this request: parameters failed safe compatibility validation"
+                );
+                dropped.push(name);
+                false
+            }
         }
-    }
-    Ok(())
+    });
+    dropped
 }
 
 /// The final Chat Completions wire payload for one request.
@@ -973,6 +1021,10 @@ pub(crate) struct ChatWireBody {
     /// `reasoning_content`. Only computed on the streaming path, which is the
     /// only path that runs the replay sanitizer today.
     pub(crate) replay_input_tokens: Option<u32>,
+    /// Wire-normalized tool names omitted because Moonshot's MFJS validator
+    /// rejected their parameter schemas. Kept outside the wire body so the
+    /// caller can surface one bounded diagnostic without leaking schema data.
+    pub(crate) omitted_tool_names: Vec<String>,
 }
 
 /// Build the Chat Completions wire body for `request`.
@@ -1018,16 +1070,18 @@ pub(crate) fn build_chat_wire_body(
     if let Some(top_p) = request.top_p {
         body["top_p"] = json!(top_p);
     }
+    let mut omitted_tool_names = Vec::new();
     if let Some(tools) = request.tools.as_ref() {
         let mut chat_tools: Vec<_> = tools
             .iter()
             .map(|tool| tool_to_chat_for_base_url(tool, base_url))
             .collect();
         // Moonshot function parameters must end at a plain object root.
-        // Flatten root composition, preserve valid nested anyOf, and fail
-        // closed before transport when an internal root ref is unsafe.
+        // Flatten root composition, preserve valid nested anyOf, and drop
+        // only the tools whose parameters cannot pass MFJS validation so one
+        // incompatible tool never sinks the whole request.
         if matches!(provider, crate::config::ApiProvider::Moonshot) {
-            sanitize_moonshot_chat_tools(&mut chat_tools)?;
+            omitted_tool_names = sanitize_moonshot_chat_tools(&mut chat_tools);
         }
         // xAI rejects a parameters root that is not a plain object schema
         // (e.g. apply_patch's root `oneOf` required-groups) with a 400.
@@ -1055,13 +1109,28 @@ pub(crate) fn build_chat_wire_body(
                 }
             }
         }
-        body["tools"] = json!(chat_tools);
+        // When per-tool degradation (or the caller) left no tools, omit the
+        // key entirely: an empty `tools` array — or a `tool_choice` pointing
+        // at a dropped tool — is itself a fresh 400 on strict providers.
+        if !chat_tools.is_empty() {
+            body["tools"] = json!(chat_tools);
+        }
     }
     if should_send_tool_choice_for_chat(provider, request.reasoning_effort.as_deref())
         && let Some(choice) = request.tool_choice.as_ref()
         && let Some(mapped) = map_tool_choice_for_chat(choice)
     {
-        body["tool_choice"] = mapped;
+        if matches!(provider, crate::config::ApiProvider::Moonshot)
+            && let Some(name) = mapped.pointer("/function/name").and_then(Value::as_str)
+            && omitted_tool_names.iter().any(|omitted| omitted == name)
+        {
+            bail!(
+                "Moonshot cannot force tool '{name}' because its input schema is incompatible with this route"
+            );
+        }
+        if body.get("tools").is_some() {
+            body["tool_choice"] = mapped;
+        }
     }
     apply_route_reasoning_controls(
         &mut body,
@@ -1071,6 +1140,7 @@ pub(crate) fn build_chat_wire_body(
         request.reasoning_effort.as_deref(),
     );
     apply_direct_moonshot_k3_fixed_sampling(&mut body, provider, base_url, &model);
+    apply_kimi_code_fixed_sampling(&mut body, provider, base_url, &model);
 
     // Bulletproof final sanitizer: walk the wire payload and force
     // `reasoning_content` onto any assistant message that has tool_calls
@@ -1097,6 +1167,7 @@ pub(crate) fn build_chat_wire_body(
         body,
         model,
         replay_input_tokens,
+        omitted_tool_names,
     })
 }
 
@@ -4632,12 +4703,12 @@ mod alias_thinking_detection_tests {
     //! <https://api-docs.deepseek.com/guides/thinking_mode>
     use super::{
         ReasoningStreamStyle, apply_direct_moonshot_k3_fixed_sampling,
-        apply_inkling_reasoning_effort, apply_kimi_code_k3_reasoning_effort,
-        apply_openai_reasoning_effort, apply_provider_token_limit, apply_route_reasoning_controls,
-        is_reasoning_model_for_stream, is_reasoning_model_for_stream_on_route,
-        provider_accepts_reasoning_content, reasoning_stream_style_for_route,
-        requires_reasoning_content, should_replay_reasoning_content,
-        should_replay_reasoning_content_for_provider,
+        apply_inkling_reasoning_effort, apply_kimi_code_fixed_sampling,
+        apply_kimi_code_k3_reasoning_effort, apply_openai_reasoning_effort,
+        apply_provider_token_limit, apply_route_reasoning_controls, is_reasoning_model_for_stream,
+        is_reasoning_model_for_stream_on_route, provider_accepts_reasoning_content,
+        reasoning_stream_style_for_route, requires_reasoning_content,
+        should_replay_reasoning_content, should_replay_reasoning_content_for_provider,
         should_replay_reasoning_content_for_provider_on_route,
     };
     use crate::config::ApiProvider;
@@ -5527,6 +5598,62 @@ mod alias_thinking_detection_tests {
     }
 
     #[test]
+    fn kimi_code_k3_256k_uses_k3_reasoning_and_membership_sampling_contracts() {
+        let mut body = json!({
+            "reasoning_effort": "stale",
+            "temperature": 0.3,
+            "top_p": 0.8,
+        });
+        apply_kimi_code_k3_reasoning_effort(
+            &mut body,
+            ApiProvider::Moonshot,
+            crate::config::DEFAULT_KIMI_CODE_BASE_URL,
+            crate::config::KIMI_CODE_K3_256K_MODEL,
+            Some("max"),
+        );
+        apply_kimi_code_fixed_sampling(
+            &mut body,
+            ApiProvider::Moonshot,
+            crate::config::DEFAULT_KIMI_CODE_BASE_URL,
+            crate::config::KIMI_CODE_K3_256K_MODEL,
+        );
+
+        assert_eq!(
+            body["thinking"],
+            json!({ "type": "enabled", "effort": "max" })
+        );
+        assert!(body.get("reasoning_effort").is_none());
+        assert!(body.get("temperature").is_none());
+        assert!(body.get("top_p").is_none());
+    }
+
+    #[test]
+    fn kimi_code_fixed_sampling_does_not_leak_to_neighbor_routes() {
+        for (provider, base_url, model) in [
+            (
+                ApiProvider::Moonshot,
+                crate::config::DEFAULT_MOONSHOT_BASE_URL,
+                crate::config::KIMI_CODE_K3_256K_MODEL,
+            ),
+            (
+                ApiProvider::Openrouter,
+                crate::config::DEFAULT_KIMI_CODE_BASE_URL,
+                crate::config::KIMI_CODE_K3_256K_MODEL,
+            ),
+            (
+                ApiProvider::Moonshot,
+                crate::config::DEFAULT_KIMI_CODE_BASE_URL,
+                "k3-256k-preview",
+            ),
+        ] {
+            let mut body = json!({ "temperature": 0.3, "top_p": 0.8 });
+            apply_kimi_code_fixed_sampling(&mut body, provider, base_url, model);
+            assert_eq!(body["temperature"], json!(0.3));
+            assert_eq!(body["top_p"], json!(0.8));
+        }
+    }
+
+    #[test]
     fn direct_moonshot_k3_uses_top_level_effort_and_never_disables_thinking() {
         for (requested, expected) in [
             ("off", "low"),
@@ -5867,11 +5994,12 @@ mod alias_thinking_detection_tests {
     #[test]
     fn zai_tiered_effort_applies_to_glm_5_2_and_glm_5_3_but_not_5_1() {
         let zai = crate::config::DEFAULT_ZAI_BASE_URL;
-        // GLM-5.3 inherits GLM-5.2's reasoning_options (effort high/max), so it
-        // must take the same tiered wire path — not the generic toggle.
+        // GLM-5.3 and GLM-5.3-Flash inherit GLM-5.2's reasoning_options
+        // (effort high/max), so they must take the same tiered wire path.
         for model in [
             crate::config::ZAI_GLM_5_2_MODEL,
             crate::config::ZAI_GLM_5_3_MODEL,
+            crate::config::ZAI_GLM_5_3_FLASH_MODEL,
         ] {
             let mut body = json!({});
             apply_route_reasoning_controls(&mut body, ApiProvider::Zai, zai, model, Some("max"));

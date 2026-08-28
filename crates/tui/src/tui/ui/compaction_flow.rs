@@ -201,6 +201,15 @@ pub(crate) fn flush_deferred_manual_compaction(
 }
 
 pub(crate) fn apply_compaction_started(app: &mut App, id: String, auto: bool) {
+    if app.sticky_status.as_ref().is_some_and(|status| {
+        matches!(
+            status.kind,
+            crate::tui::app::StatusToastKind::ContextPressure(_)
+        )
+    }) {
+        app.clear_sticky_status();
+    }
+    app.context_pressure_warning_dismissed = None;
     if !auto {
         app.manual_compaction_queued = false;
         if app.manual_compaction_id.as_deref() == Some(id.as_str()) {
@@ -366,6 +375,29 @@ pub(crate) fn maybe_warn_context_pressure_for_config(
     let warning_threshold = CONTEXT_SUGGEST_COMPACT_THRESHOLD_PERCENT.min(configured_threshold);
     let will_auto_compact = config.enabled && used.max(0) as usize >= config.token_threshold;
     if percent < warning_threshold && !will_auto_compact {
+        app.context_pressure_warning_dismissed = None;
+        if app.sticky_status.as_ref().is_some_and(|status| {
+            matches!(
+                status.kind,
+                crate::tui::app::StatusToastKind::ContextPressure(_)
+            )
+        }) {
+            app.clear_sticky_status();
+        }
+        app.context_pressure_warning_dismissed = None;
+        return;
+    }
+    let pressure_level = if percent >= CONTEXT_CRITICAL_THRESHOLD_PERCENT {
+        crate::context_budget::PressureLevel::Critical
+    } else if percent >= CONTEXT_WARNING_THRESHOLD_PERCENT {
+        crate::context_budget::PressureLevel::High
+    } else {
+        crate::context_budget::PressureLevel::Medium
+    };
+    if app
+        .context_pressure_warning_dismissed
+        .is_some_and(|dismissed| pressure_level <= dismissed)
+    {
         return;
     }
 
@@ -386,22 +418,53 @@ pub(crate) fn maybe_warn_context_pressure_for_config(
     };
 
     if percent >= CONTEXT_CRITICAL_THRESHOLD_PERCENT {
-        app.status_message = Some(format!(
-            "Context critical: {percent:.0}% ({used}/{max} tokens{window_note}). {recommendation}"
-        ));
+        set_context_pressure_status(
+            app,
+            format!(
+                "Context critical: {percent:.0}% ({used}/{max} tokens{window_note}). {recommendation}"
+            ),
+            pressure_level,
+        );
         return;
     }
 
-    if app.status_message.is_none() {
-        let status_prefix = if percent >= CONTEXT_WARNING_THRESHOLD_PERCENT {
-            "Context high"
-        } else {
-            "Context building"
-        };
-        app.status_message = Some(format!(
+    let status_prefix = if percent >= CONTEXT_WARNING_THRESHOLD_PERCENT {
+        "Context high"
+    } else {
+        "Context building"
+    };
+    set_context_pressure_status(
+        app,
+        format!(
             "{status_prefix}: {percent:.0}% ({used}/{max} tokens{window_note}). {recommendation}"
-        ));
+        ),
+        pressure_level,
+    );
+}
+
+fn set_context_pressure_status(
+    app: &mut App,
+    text: String,
+    pressure_level: crate::context_budget::PressureLevel,
+) {
+    let can_replace = app.sticky_status.as_ref().is_none_or(|status| {
+        matches!(
+            status.kind,
+            crate::tui::app::StatusToastKind::ContextPressure(_)
+        )
+    });
+    if !can_replace {
+        return;
     }
+    app.status_message = Some(text.clone());
+    app.last_status_message_seen = Some(text.clone());
+    // No TTL: this warning stays visible until compaction or explicit Esc
+    // dismissal instead of being pushed out by later transcript activity.
+    app.sticky_status = Some(crate::tui::app::StatusToast::context_pressure(
+        text,
+        pressure_level,
+    ));
+    app.needs_redraw = true;
 }
 
 #[cfg(test)]

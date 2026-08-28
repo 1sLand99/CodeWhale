@@ -1919,6 +1919,7 @@ async fn compact_lifecycle_outlives_caller_and_preserves_concurrent_thread_updat
             messages_before: Some(4),
             messages_after: Some(2),
             summary_prompt: None,
+            post_input_tokens: None,
         })
         .await?;
     harness
@@ -2871,6 +2872,131 @@ async fn aggregate_usage_keeps_codex_tokens_without_api_dollar_pricing() -> Resu
     Ok(())
 }
 
+/// `aggregate_usage_for_thread` scopes the same recorded-time pricing the
+/// global `/v1/usage` aggregate applies to exactly one thread, in both
+/// published currencies: DeepSeek's first-party rows carry native CNY, so a
+/// deepseek-priced turn must produce a non-zero `cost_cny` there, while a
+/// different thread's spend stays out of the figure. The parent/child split
+/// keeps routed-child (sub-agent) spend out of the parent figure — the split
+/// session persistence writes into `session_cost_*` vs `subagent_cost_*` —
+/// and CNY coverage counts turns under the provider's own CNY row.
+#[tokio::test]
+async fn aggregate_usage_for_thread_scopes_both_currencies_to_one_thread() -> Result<()> {
+    let manager = test_manager(test_runtime_dir())?;
+
+    let billed = sample_thread("thr_thread_usage_billed");
+    manager.store.save_thread(&billed)?;
+    let mut turn = sample_turn(&billed.id, "turn_billed", RuntimeTurnStatus::Completed);
+    turn.usage = Some(Usage {
+        input_tokens: 10_000,
+        output_tokens: 1_000,
+        ..Usage::default()
+    });
+    set_test_turn_route(
+        &mut turn,
+        ApiProvider::Deepseek,
+        ApiProvider::Deepseek.as_str(),
+        "deepseek-v4-flash",
+        Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE),
+        crate::cost_status::RouteBillingMode::Metered,
+    );
+    turn.routed_usage = vec![crate::cost_status::EffectiveRouteUsage {
+        route: crate::cost_status::EffectiveRouteEnvelope {
+            provider: ApiProvider::Deepseek,
+            provider_identity: ApiProvider::Deepseek.as_str().to_string(),
+            model: "deepseek-v4-flash".to_string(),
+            billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE.to_string()),
+            endpoint_fingerprint: None,
+            billing_mode: crate::cost_status::RouteBillingMode::Metered,
+            dispatched_at: turn.created_at,
+        },
+        usage: Usage {
+            input_tokens: 2_000,
+            output_tokens: 200,
+            ..Usage::default()
+        },
+    }];
+    manager.store.save_turn(&turn)?;
+
+    // A second thread with its own priced turn must not leak into the
+    // first thread's figure.
+    let other = sample_thread("thr_thread_usage_other");
+    manager.store.save_thread(&other)?;
+    let mut other_turn = sample_turn(&other.id, "turn_other", RuntimeTurnStatus::Completed);
+    other_turn.usage = Some(Usage {
+        input_tokens: 500_000,
+        output_tokens: 500_000,
+        ..Usage::default()
+    });
+    set_test_turn_route(
+        &mut other_turn,
+        ApiProvider::Deepseek,
+        ApiProvider::Deepseek.as_str(),
+        "deepseek-v4-flash",
+        Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE),
+        crate::cost_status::RouteBillingMode::Metered,
+    );
+    manager.store.save_turn(&other_turn)?;
+
+    let split = manager.aggregate_usage_for_thread(&billed.id).await?;
+    // The split mirrors the persisted session fields: parent spend in
+    // `parent`, routed-child (sub-agent) spend in `routed_children`.
+    assert_eq!(split.parent.input_tokens, 10_000);
+    assert_eq!(split.parent.output_tokens, 1_000);
+    assert_eq!(split.parent.turns, 1);
+    assert!(split.parent.cost_usd > 0.0);
+    assert!(split.parent.cost_cny > 0.0);
+    assert_eq!(split.routed_children.input_tokens, 2_000);
+    assert_eq!(split.routed_children.turns, 1);
+    assert!(split.routed_children.cost_usd > 0.0);
+    assert!(split.routed_children.cost_cny > 0.0);
+
+    // Native CNY row: priced in CNY without any FX projection of the USD
+    // column, and the CNY coverage counters see the same money-metered
+    // turns the USD counters do.
+    assert_eq!(split.parent.priced_turns, 1);
+    assert_eq!(split.parent.unpriced_turns, 0);
+    assert_eq!(split.parent.cny_priced_turns, 1);
+    assert_eq!(split.parent.cny_unpriced_turns, 0);
+    assert!(split.parent.cny_unpriced_reasons.is_empty());
+    assert_eq!(split.routed_children.cny_priced_turns, 1);
+    assert!(split.routed_children.cny_unpriced_reasons.is_empty());
+
+    let totals = split.combined();
+    assert_eq!(totals.input_tokens, 12_000);
+    assert_eq!(totals.turns, 2);
+    assert_eq!(
+        totals.cost_usd,
+        split.parent.cost_usd + split.routed_children.cost_usd
+    );
+    assert!(totals.cost_cny > 0.0);
+    assert_eq!(totals.priced_turns, 2);
+    assert_eq!(totals.unpriced_turns, 0);
+    assert_eq!(totals.cny_priced_turns, 2);
+    assert!(totals.cost_complete);
+
+    // The scoped figure agrees with the thread bucket of the global
+    // aggregate, so the GUI (per-thread endpoint) and `/v1/usage` can never
+    // disagree about the same thread.
+    let global = manager
+        .aggregate_usage(None, None, UsageGroupBy::Thread)
+        .await?;
+    let bucket = global
+        .buckets
+        .iter()
+        .find(|bucket| bucket.key == billed.id)
+        .expect("billed thread bucket");
+    assert_eq!(bucket.cost_usd, totals.cost_usd);
+    assert_eq!(bucket.cost_cny, totals.cost_cny);
+    assert_eq!(bucket.cny_priced_turns, totals.cny_priced_turns);
+
+    let missing = manager
+        .aggregate_usage_for_thread("thr_does_not_exist")
+        .await;
+    assert!(missing.is_err());
+    Ok(())
+}
+
 /// An aggregate in which nothing could be priced is unavailable, not zero.
 ///
 /// `cost_usd` is a `f64` and an all-unknown run leaves it at `0.0`, so the
@@ -2938,6 +3064,11 @@ async fn aggregate_usage_reports_an_all_unknown_run_as_unavailable_not_zero() ->
     assert!(
         !report.totals.unpriced_reasons.is_empty(),
         "an unpriced aggregate must say why"
+    );
+    assert_eq!(report.totals.cny_unpriced_turns, 2);
+    assert!(
+        !report.totals.cny_unpriced_reasons.is_empty(),
+        "CNY coverage must travel with the money (#4318)"
     );
     for bucket in &report.buckets {
         assert_eq!(bucket.priced_turns, 0);
@@ -3266,12 +3397,28 @@ async fn aggregate_usage_marks_bounded_journal_truncation_incomplete() -> Result
         .await?;
     assert_eq!(report.totals.dropped_usage_records, 2);
     assert_eq!(report.totals.unpriced_turns, 2);
+    assert_eq!(report.totals.cny_unpriced_turns, 2);
     assert_eq!(report.totals.turns, 2);
     assert!(!report.totals.cost_complete);
     assert!(
         report
             .totals
             .unpriced_reasons
+            .contains("runtime_usage_journal_truncated")
+    );
+    assert!(
+        report
+            .totals
+            .cny_unpriced_reasons
+            .contains("runtime_usage_journal_truncated")
+    );
+    let bucket = report.buckets.first().expect("thread usage bucket");
+    assert_eq!(bucket.dropped_usage_records, 2);
+    assert_eq!(bucket.unpriced_turns, 2);
+    assert_eq!(bucket.cny_unpriced_turns, 2);
+    assert!(
+        bucket
+            .cny_unpriced_reasons
             .contains("runtime_usage_journal_truncated")
     );
     Ok(())
@@ -3451,7 +3598,7 @@ async fn aggregate_usage_fails_closed_for_legacy_reconstructed_route() -> Result
 #[test]
 fn runtime_usage_accumulators_saturate_tokens_and_currency() {
     let mut total = f64::MAX;
-    saturating_add_usd(&mut total, f64::MAX);
+    saturating_add_cost_amount(&mut total, f64::MAX);
     assert_eq!(total, f64::MAX);
 
     let thread = sample_thread("thr_saturating");
@@ -3686,6 +3833,26 @@ fn runtime_event_sequences_serialize_across_real_processes() -> Result<()> {
 }
 
 #[test]
+fn runtime_process_owner_lock_copy_helps_the_user_recover() {
+    assert!(
+        RUNTIME_PROCESS_OWNER_LOCK_HELD.contains("already active in another process"),
+        "{RUNTIME_PROCESS_OWNER_LOCK_HELD}"
+    );
+    assert!(
+        RUNTIME_PROCESS_OWNER_LOCK_HELD.contains("Close the other Codewhale session"),
+        "{RUNTIME_PROCESS_OWNER_LOCK_HELD}"
+    );
+    assert!(
+        RUNTIME_PROCESS_OWNER_LOCK_HELD.contains("CODEWHALE_RUNTIME_DIR"),
+        "{RUNTIME_PROCESS_OWNER_LOCK_HELD}"
+    );
+    assert!(
+        !RUNTIME_PROCESS_OWNER_LOCK_HELD.contains("thread store"),
+        "{RUNTIME_PROCESS_OWNER_LOCK_HELD}"
+    );
+}
+
+#[test]
 fn runtime_manager_store_has_one_lifetime_process_owner() -> Result<()> {
     let dir = test_runtime_dir();
     let signal = dir.join("manager-owner.ready");
@@ -3702,6 +3869,18 @@ fn runtime_manager_store_has_one_lifetime_process_owner() -> Result<()> {
         message.contains("already active in another process"),
         "unexpected owner-lock error: {error:#}"
     );
+    assert!(
+        message.contains("CODEWHALE_RUNTIME_DIR"),
+        "owner-lock error should name the override for a shared root: {error:#}"
+    );
+    assert!(
+        message.contains("Close the other Codewhale session"),
+        "owner-lock error should name the recovery action: {error:#}"
+    );
+    assert!(
+        !message.contains("thread store"),
+        "owner-lock error should not leak the store implementation: {error:#}"
+    );
 
     let distinct_dir = test_runtime_dir();
     let distinct = test_manager(distinct_dir)?;
@@ -3711,6 +3890,61 @@ fn runtime_manager_store_has_one_lifetime_process_owner() -> Result<()> {
     child.wait_success("Runtime manager owner holder");
     let reopened = test_manager(dir)?;
     drop(reopened);
+    Ok(())
+}
+
+#[test]
+fn session_scoped_runtime_default_lives_under_the_session_directory() {
+    let _lock = crate::test_support::lock_test_env();
+    let temp = tempfile::tempdir().expect("temp home");
+    let home = temp.path().join("cw-home");
+    let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", &home);
+    let _runtime = crate::test_support::EnvVarGuard::remove("CODEWHALE_RUNTIME_DIR");
+    let _legacy = crate::test_support::EnvVarGuard::remove("DEEPSEEK_RUNTIME_DIR");
+
+    let cfg = RuntimeThreadManagerConfig::for_session(home.join("tasks"), "sess-1");
+    assert_eq!(
+        cfg.data_dir,
+        home.join("sessions").join("sess-1").join("runtime")
+    );
+}
+
+#[test]
+fn explicit_runtime_dir_override_beats_session_scope() {
+    let _lock = crate::test_support::lock_test_env();
+    let temp = tempfile::tempdir().expect("temp home");
+    let home = temp.path().join("cw-home");
+    let override_dir = temp.path().join("shared-runtime");
+    let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", &home);
+    let _runtime = crate::test_support::EnvVarGuard::set("CODEWHALE_RUNTIME_DIR", &override_dir);
+    let _legacy = crate::test_support::EnvVarGuard::remove("DEEPSEEK_RUNTIME_DIR");
+
+    let cfg = RuntimeThreadManagerConfig::for_session(home.join("tasks"), "sess-1");
+    assert_eq!(cfg.data_dir, override_dir);
+}
+
+#[test]
+fn session_scoped_runtime_roots_do_not_share_the_process_owner_lock() -> Result<()> {
+    let _lock = crate::test_support::lock_test_env();
+    let temp = tempfile::tempdir()?;
+    let home = temp.path().join("cw-home");
+    let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", &home);
+    let _runtime = crate::test_support::EnvVarGuard::remove("CODEWHALE_RUNTIME_DIR");
+    let _legacy = crate::test_support::EnvVarGuard::remove("DEEPSEEK_RUNTIME_DIR");
+    let tasks = home.join("tasks");
+
+    let first = RuntimeThreadManager::open(
+        Config::default(),
+        PathBuf::from("."),
+        RuntimeThreadManagerConfig::for_session(tasks.clone(), "session-a"),
+    )?;
+    let second = RuntimeThreadManager::open(
+        Config::default(),
+        PathBuf::from("."),
+        RuntimeThreadManagerConfig::for_session(tasks, "session-b"),
+    )?;
+    drop(first);
+    drop(second);
     Ok(())
 }
 
@@ -9982,6 +10216,7 @@ async fn compaction_lifecycle_emits_item_events_with_compaction_counts() -> Resu
                             messages_before: Some(7),
                             messages_after: Some(3),
                             summary_prompt: None,
+                            post_input_tokens: None,
                         })
                         .await;
                     let _ = tx_event
@@ -10018,6 +10253,7 @@ async fn compaction_lifecycle_emits_item_events_with_compaction_counts() -> Resu
                                 "## 📋 Conversation Summary (Auto-Generated)\n\nkey facts."
                                     .to_string(),
                             ),
+                            post_input_tokens: None,
                         })
                         .await;
                     let _ = tx_event

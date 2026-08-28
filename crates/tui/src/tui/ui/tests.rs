@@ -1,6 +1,6 @@
 use super::activity_detail::*;
 use super::compaction_flow::{
-    maybe_warn_context_pressure, should_auto_compact_before_send,
+    apply_compaction_started, maybe_warn_context_pressure, should_auto_compact_before_send,
     should_auto_compact_before_send_with_config,
 };
 use super::observer_hooks::{
@@ -4531,6 +4531,46 @@ fn active_raw_paste_keeps_space_as_payload_over_reasoning_action() {
 }
 
 #[test]
+fn typed_command_burst_keeps_r_and_y_out_of_transcript_actions() {
+    let mut app = create_test_app();
+    app.use_paste_burst_detection = true;
+    app.bracketed_paste_seen = false;
+    app.history = vec![HistoryCell::Assistant {
+        content: "previous command output".to_string(),
+        streaming: false,
+    }];
+    app.resync_history_revisions();
+    let _ = render_underwater_test_app(&mut app, 60, 16);
+    select_original_cell(&mut app, 0);
+    assert!(
+        app.viewport.transcript_selection.is_active(),
+        "precondition: a standing transcript selection must arm block actions"
+    );
+
+    let now = Instant::now();
+    let command = "/plugin trust demo";
+    for (offset, ch) in command.chars().enumerate() {
+        let at = now + Duration::from_millis(offset as u64);
+        let key = KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE);
+        let _ = flush_paste_burst_before_composer(&mut app, at);
+        assert!(
+            handle_plain_key_before_composer(&mut app, &key, at),
+            "paste-burst input should retain {ch:?}"
+        );
+    }
+    assert!(flush_paste_burst_before_composer(
+        &mut app,
+        now + Duration::from_millis(500),
+    ));
+
+    assert_eq!(app.input, command);
+    assert!(
+        app.view_stack.is_empty(),
+        "typed command must not open a pager"
+    );
+}
+
+#[test]
 fn active_streaming_reasoning_keeps_its_visible_owner_across_a_delta() {
     let mut app = create_test_app();
     app.push_history_cell(running_exec_cell());
@@ -7781,50 +7821,72 @@ async fn xai_api_key_confirmation_saves_only_the_selected_xai_slot() {
 /// #5195: the save confirmation must name where the key actually landed —
 /// the durable secret store, not the config path — and the scope it is
 /// visible from (user-global credential, available in all folders).
-#[tokio::test]
-async fn setup_confirm_toast_names_secret_store_and_global_scope() {
-    // ConfigPathEnvGuard holds the shared env lock for the whole test, so the
-    // home/backend overrides must be set after it (and never take the lock
-    // again — it is not reentrant).
-    let _config = ConfigPathEnvGuard::new();
-    let home = TempDir::new().expect("isolated toast home");
-    let _home = crate::test_support::EnvVarGuard::set(
-        "CODEWHALE_HOME",
-        home.path().to_string_lossy().as_ref(),
-    );
-    let _backend = crate::test_support::EnvVarGuard::set("CODEWHALE_SECRET_BACKEND", "file");
-    let mut app = create_test_app();
-    let mut engine = mock_engine_handle();
-    let mut config = Config::default();
-    let identity = picker_provider_identity(&config, ApiProvider::Openrouter, None)
-        .expect("OpenRouter identity");
+/// #5585: this test drives the full guided-setup save path (provider
+/// identity minting, key persistence, model/base-url pinning, and the
+/// settings/TOML round-trips they trigger). Those serde round-trips are deep
+/// enough that the default 2 MiB libtest thread stack overflows; the product
+/// paths run on the 8 MiB main thread or the sheltered 16 MiB parse threads
+/// (see `parse_config_file_str` in `config.rs` and `parse_config_toml_str`
+/// in `codewhale-config`), so this test runs its runtime on an equivalently
+/// sized stack instead of crashing.
+#[test]
+fn setup_confirm_toast_names_secret_store_and_global_scope() {
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("test runtime")
+                .block_on(async {
+                    // ConfigPathEnvGuard holds the shared env lock for the whole test, so the
+                    // home/backend overrides must be set after it (and never take the lock
+                    // again — it is not reentrant).
+                    let _config = ConfigPathEnvGuard::new();
+                    let home = TempDir::new().expect("isolated toast home");
+                    let _home = crate::test_support::EnvVarGuard::set(
+                        "CODEWHALE_HOME",
+                        home.path().to_string_lossy().as_ref(),
+                    );
+                    let _backend =
+                        crate::test_support::EnvVarGuard::set("CODEWHALE_SECRET_BACKEND", "file");
+                    let mut app = create_test_app();
+                    let mut engine = mock_engine_handle();
+                    let mut config = Config::default();
+                    let identity = picker_provider_identity(&config, ApiProvider::Openrouter, None)
+                        .expect("OpenRouter identity");
 
-    let switched = apply_provider_picker_setup_confirmed(
-        &mut app,
-        &mut engine.handle,
-        &mut config,
-        identity,
-        "toast-destination-key".to_string(),
-        "deepseek/deepseek-v4-pro".to_string(),
-        None,
-        None,
-    )
-    .await;
+                    let switched = apply_provider_picker_setup_confirmed(
+                        &mut app,
+                        &mut engine.handle,
+                        &mut config,
+                        identity,
+                        "toast-destination-key".to_string(),
+                        "deepseek/deepseek-v4-pro".to_string(),
+                        None,
+                        None,
+                    )
+                    .await;
 
-    assert!(switched, "setup confirm failed: {:?}", app.status_message);
-    let toast = app.status_message.as_deref().expect("save toast");
-    assert!(
-        toast.contains("secret store"),
-        "toast must name the secret store, got: {toast}"
-    );
-    assert!(
-        toast.contains("available in all folders"),
-        "toast must state the user-global scope, got: {toast}"
-    );
-    assert!(
-        !toast.contains("toast-destination-key"),
-        "toast must never include the key, got: {toast}"
-    );
+                    assert!(switched, "setup confirm failed: {:?}", app.status_message);
+                    let toast = app.status_message.as_deref().expect("save toast");
+                    assert!(
+                        toast.contains("secret store"),
+                        "toast must name the secret store, got: {toast}"
+                    );
+                    assert!(
+                        toast.contains("available in all folders"),
+                        "toast must state the user-global scope, got: {toast}"
+                    );
+                    assert!(
+                        !toast.contains("toast-destination-key"),
+                        "toast must never include the key, got: {toast}"
+                    );
+                })
+        })
+        .expect("spawn test thread")
+        .join()
+        .expect("test thread panicked");
 }
 
 #[tokio::test]
@@ -8392,7 +8454,11 @@ async fn auto_dispatch_keeps_last_and_pending_receipts_aligned() {
         app.pending_turn_route
             .as_ref()
             .map(|(provider, model, auto)| (*provider, model.as_str(), *auto)),
-        Some((ApiProvider::Zai, crate::config::ZAI_GLM_5_TURBO_MODEL, true))
+        Some((
+            ApiProvider::Zai,
+            crate::config::ZAI_GLM_5_3_FLASH_MODEL,
+            true,
+        ))
     );
     assert_eq!(
         app.last_auto_route_receipt, app.pending_auto_route_receipt,
@@ -8406,13 +8472,10 @@ async fn auto_dispatch_keeps_last_and_pending_receipts_aligned() {
     );
     assert_eq!(
         app.last_effective_reasoning_effort,
-        Some(EffectiveReasoningEffort::ThinkingEnabledGranularityUnavailable),
+        Some(EffectiveReasoningEffort::Tier(ReasoningEffort::High)),
         "the post-turn receipt must retain exact route capability constraints"
     );
-    assert_eq!(
-        app.reasoning_effort_display_label(),
-        "low→thinking enabled; granularity unavailable"
-    );
+    assert_eq!(app.reasoning_effort_display_label(), "low→high");
 }
 
 #[tokio::test]
@@ -9561,7 +9624,7 @@ async fn denied_steer_restores_queued_draft_and_keeps_active_turn() {
     assert_eq!(app.queued_draft, Some(message));
     assert_eq!(app.queued_message_count(), 0);
     assert!(app.status_toasts.back().is_some_and(|toast| {
-        toast.level == StatusToastLevel::Warning && toast.text.contains("blocked the steer")
+        toast.level == StatusToastLevel::Warning && toast.text.contains("blocked the follow-up")
     }));
 }
 
@@ -12799,10 +12862,104 @@ fn context_pressure_warning_reflects_auto_compact_threshold_state() {
 
     maybe_warn_context_pressure(&mut app);
 
-    let status = app.status_message.expect("context warning");
+    let status = app.status_message.as_deref().expect("context warning");
     assert!(
         status.contains("Auto-compaction will run before the next send."),
         "unexpected status: {status}"
+    );
+    assert!(
+        app.sticky_status
+            .as_ref()
+            .is_some_and(|toast| toast.text == status),
+        "context pressure must remain visible in sticky status: {status}"
+    );
+}
+
+#[test]
+fn context_pressure_warning_survives_later_status_and_can_be_dismissed() {
+    let mut app = create_test_app();
+    app.api_messages = vec![Message {
+        role: Role::User,
+        content: vec![ContentBlock::Text {
+            text: "context ".repeat(240_000),
+            cache_control: None,
+        }],
+    }];
+    app.auto_compact = true;
+    app.auto_compact_threshold_percent = 100.0;
+    let (used, _, _) = context_usage_snapshot(&app).expect("context snapshot");
+    app.compact_threshold = usize::try_from(used).expect("non-negative context estimate");
+    maybe_warn_context_pressure(&mut app);
+    let warning = app
+        .sticky_status
+        .as_ref()
+        .expect("sticky context warning")
+        .text
+        .clone();
+
+    app.status_message = Some("A later transcript status".to_string());
+    let visible = app
+        .active_status_toast()
+        .expect("a later transient status is visible");
+    assert_eq!(visible.text, "A later transcript status");
+    assert_eq!(
+        app.sticky_status.as_ref().map(|toast| toast.text.as_str()),
+        Some(warning.as_str()),
+        "the persistent pressure warning remains behind the transient status"
+    );
+    assert!(app.dismiss_context_pressure_warning());
+    assert!(app.sticky_status.is_none());
+    app.status_message = None;
+    maybe_warn_context_pressure(&mut app);
+    assert!(
+        app.sticky_status.is_none(),
+        "explicit dismissal must not re-arm on the next pressure check"
+    );
+}
+
+#[test]
+fn context_pressure_warning_clears_when_compaction_starts() {
+    let mut app = create_test_app();
+    app.api_messages = vec![Message {
+        role: Role::User,
+        content: vec![ContentBlock::Text {
+            text: "context ".repeat(240_000),
+            cache_control: None,
+        }],
+    }];
+    app.auto_compact = true;
+    app.auto_compact_threshold_percent = 100.0;
+    let (used, _, _) = context_usage_snapshot(&app).expect("context snapshot");
+    app.compact_threshold = usize::try_from(used).expect("non-negative context estimate");
+    maybe_warn_context_pressure(&mut app);
+    assert!(
+        app.sticky_status
+            .as_ref()
+            .is_some_and(|toast| toast.text.starts_with("Context "))
+    );
+
+    apply_compaction_started(&mut app, "compaction-1".to_string(), false);
+    assert!(
+        app.sticky_status.is_none(),
+        "pressure warning should be cleared"
+    );
+    assert!(
+        app.status_message
+            .as_deref()
+            .is_some_and(|text| text.to_ascii_lowercase().contains("compacting")),
+        "compaction status should replace the pressure warning"
+    );
+}
+
+#[test]
+fn context_pressure_warning_stays_absent_below_threshold() {
+    let mut app = create_test_app();
+    maybe_warn_context_pressure(&mut app);
+
+    assert!(app.sticky_status.is_none());
+    assert!(
+        app.status_message.is_none(),
+        "low-pressure sessions should not create warning chrome"
     );
 }
 
@@ -14389,7 +14546,7 @@ async fn steer_failure_queues_message_and_surfaces_toast() {
     assert_eq!(app.queued_message_count(), 1);
     let toast = app.status_toasts.back().expect("steer failure toast");
     assert_eq!(toast.level, StatusToastLevel::Warning);
-    assert!(toast.text.contains("Steer failed"));
+    assert!(toast.text.contains("Could not send into this turn"));
 }
 
 #[tokio::test]
@@ -14414,7 +14571,7 @@ async fn streaming_enter_queue_pushes_visible_toast() {
     assert_eq!(app.queued_message_count(), 1);
     let toast = app.status_toasts.back().expect("queue toast");
     assert_eq!(toast.level, StatusToastLevel::Info);
-    assert!(toast.text.contains("Queued follow-up"));
+    assert!(toast.text.contains("Queued. Sends after this turn."));
 }
 
 #[test]
@@ -14513,13 +14670,10 @@ async fn operate_streaming_enter_queues_another_parallel_task() {
     .expect("Operate streaming submit queues another task");
 
     assert_eq!(app.queued_message_count(), 1);
-    assert!(app.status_message.as_deref().is_some_and(
-        |status| status.contains("queued task(s)") && status.contains("workers continue")
-    ));
     let toast = app.status_toasts.back().expect("Operate queue toast");
     assert_eq!(toast.level, StatusToastLevel::Info);
-    assert!(toast.text.contains("Queued task"));
-    assert!(toast.text.contains("dispatches next"));
+    assert_eq!(toast.text, "Queued. Sends after this turn.");
+    assert_eq!(app.status_message.as_deref(), Some(toast.text.as_str()));
 }
 
 #[tokio::test]

@@ -1945,6 +1945,19 @@ async fn workspace_and_automation_endpoints_work() -> Result<()> {
     Ok(())
 }
 
+fn test_fleet_route_config() -> crate::config::Config {
+    let mut providers = crate::config::ProvidersConfig::default();
+    providers.deepseek.api_key = Some("test-key".to_string());
+    providers.xai.api_key = Some("test-key".to_string());
+    providers.zai.api_key = Some("test-key".to_string());
+    crate::config::Config {
+        provider: Some("deepseek".to_string()),
+        api_key: Some("test-key".to_string()),
+        providers: Some(providers),
+        ..crate::config::Config::default()
+    }
+}
+
 #[tokio::test]
 async fn fleet_status_runtime_api_exposes_state_and_actions() -> Result<()> {
     let root = std::env::temp_dir().join(format!("codewhale-fleet-api-{}", Uuid::new_v4()));
@@ -1953,7 +1966,8 @@ async fn fleet_status_runtime_api_exposes_state_and_actions() -> Result<()> {
     let sub_agent_manager = runtime_api_sub_agent_manager(&workspace, 2);
     let manager = FleetManager::open(&workspace)?
         .with_sub_agent_manager(sub_agent_manager.clone())
-        .with_session_model(DEFAULT_TEXT_MODEL);
+        .with_session_model(DEFAULT_TEXT_MODEL)
+        .with_route_config(test_fleet_route_config());
     let task = codewhale_protocol::fleet::FleetTaskSpec {
         id: "task-a".to_string(),
         name: "Task A".to_string(),
@@ -5314,6 +5328,377 @@ async fn usage_endpoint_returns_empty_aggregation_for_fresh_store() -> Result<()
         .send()
         .await?;
     assert_eq!(inverted.status(), StatusCode::BAD_REQUEST);
+
+    handle.abort();
+    Ok(())
+}
+
+/// `GET /v1/threads/{id}/usage` reports the thread-scoped token + cost
+/// totals the GUI's session-cost surface consumes. A thread with no turns
+/// yields zeroed totals (both published currencies present in the payload);
+/// a thread that does not exist is a 404, never zeros, so the GUI cannot
+/// mistake a typo'd id for a free conversation.
+#[tokio::test]
+async fn thread_usage_endpoint_scopes_totals_to_one_thread() -> Result<()> {
+    let Some((addr, _runtime_threads, handle)) = spawn_test_server().await? else {
+        return Ok(());
+    };
+    let client = crate::tls::reqwest_client();
+
+    let created: serde_json::Value = client
+        .post(format!("http://{addr}/v1/threads"))
+        .json(&json!({}))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let id = created["id"].as_str().expect("thread id").to_string();
+
+    let usage: serde_json::Value = client
+        .get(format!("http://{addr}/v1/threads/{id}/usage"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(usage["thread_id"], id);
+    assert_eq!(usage["totals"]["input_tokens"], 0);
+    assert_eq!(usage["totals"]["output_tokens"], 0);
+    assert_eq!(usage["totals"]["cost_usd"], 0.0);
+    assert_eq!(usage["totals"]["cost_cny"], 0.0);
+    assert_eq!(usage["totals"]["turns"], 0);
+    assert_eq!(usage["totals"]["priced_turns"], 0);
+    assert_eq!(usage["totals"]["cny_priced_turns"], 0);
+    assert_eq!(usage["totals"]["cny_unpriced_turns"], 0);
+    assert_eq!(usage["totals"]["cny_unpriced_reasons"], json!([]));
+    assert_eq!(usage["totals"]["cost_complete"], true);
+
+    let missing = client
+        .get(format!("http://{addr}/v1/threads/does-not-exist/usage"))
+        .send()
+        .await?;
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+
+    handle.abort();
+    Ok(())
+}
+
+/// `PUT /v1/sessions` persists the thread's audited cost with the same
+/// field semantics the TUI writer uses: parent-turn spend in
+/// `session_cost_*`, routed-child spend in `subagent_cost_*`, so a session
+/// that already carries TUI-written sub-agent spend keeps one display total
+/// instead of counting child spend twice. Coverage rides along (#4318):
+/// `coverage_recorded` is set and the CNY counters describe the provider's
+/// own CNY rows, so a reload reads the totals as known, not legacy-unknown.
+#[tokio::test]
+async fn session_save_merges_thread_cost_split_and_records_coverage() -> Result<()> {
+    let root = std::env::temp_dir().join(format!("deepseek-session-cost-{}", Uuid::new_v4()));
+    let sessions_dir = root.join("sessions");
+    let Some((addr, runtime_threads, handle)) =
+        spawn_test_server_with_root(root.clone(), sessions_dir.clone()).await?
+    else {
+        return Ok(());
+    };
+    let client = crate::tls::reqwest_client();
+
+    let created: serde_json::Value = client
+        .post(format!("http://{addr}/v1/threads"))
+        .json(&json!({
+            "model": "deepseek-v4-flash",
+            "workspace": root.join("workspace")
+        }))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let thread_id = created["id"]
+        .as_str()
+        .context("missing thread id")?
+        .to_string();
+
+    // Seed one completed turn: a DeepSeek first-party parent call plus a
+    // large routed-child (sub-agent) call, both priced.
+    let store = runtime_threads.test_store();
+    let now = Utc::now();
+    let mut turn = TurnRecord {
+        schema_version: 2,
+        id: "turn_cost_merge".to_string(),
+        thread_id: thread_id.clone(),
+        status: RuntimeTurnStatus::Completed,
+        input_summary: "cost merge".to_string(),
+        created_at: now,
+        started_at: Some(now),
+        ended_at: Some(now),
+        duration_ms: Some(0),
+        usage: Some(Usage {
+            input_tokens: 10_000,
+            output_tokens: 1_000,
+            ..Usage::default()
+        }),
+        permission_posture: None,
+        effective_provider: None,
+        effective_provider_id: None,
+        effective_billing_surface: None,
+        effective_endpoint_fingerprint: None,
+        effective_billing_mode: None,
+        effective_dispatched_at: None,
+        effective_model: None,
+        routed_usage: vec![crate::cost_status::EffectiveRouteUsage {
+            route: crate::cost_status::EffectiveRouteEnvelope {
+                provider: ApiProvider::Deepseek,
+                provider_identity: ApiProvider::Deepseek.as_str().to_string(),
+                model: "deepseek-v4-flash".to_string(),
+                billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE.to_string()),
+                endpoint_fingerprint: None,
+                billing_mode: crate::cost_status::RouteBillingMode::Metered,
+                dispatched_at: now,
+            },
+            usage: Usage {
+                input_tokens: 20_000_000,
+                output_tokens: 2_000_000,
+                ..Usage::default()
+            },
+        }],
+        routed_usage_source_ids: Vec::new(),
+        routed_usage_dropped_records: 0,
+        error: None,
+        item_ids: Vec::new(),
+        steer_count: 0,
+        agent_mail_message_id: None,
+    };
+    // Mirror `TurnRecord::persist_effective_route` (private to the runtime
+    // threads module): persist the route envelope onto the turn so the
+    // recorded-time pricer sees a complete dispatch record.
+    turn.effective_provider = Some(ApiProvider::Deepseek.as_str().to_string());
+    turn.effective_provider_id = Some(ApiProvider::Deepseek.as_str().to_string());
+    turn.effective_billing_surface =
+        Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE.to_string());
+    turn.effective_endpoint_fingerprint = None;
+    turn.effective_billing_mode = Some(crate::cost_status::RouteBillingMode::Metered);
+    turn.effective_dispatched_at = Some(now);
+    turn.effective_model = Some("deepseek-v4-flash".to_string());
+    store.save_turn(&turn)?;
+    let mut thread = store.load_thread(&thread_id)?;
+    thread.latest_turn_id = Some(turn.id.clone());
+    store.save_thread(&thread)?;
+
+    let endpoint: serde_json::Value = client
+        .get(format!("http://{addr}/v1/threads/{thread_id}/usage"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let combined_usd = endpoint["totals"]["cost_usd"]
+        .as_f64()
+        .context("combined cost_usd")?;
+    assert!(combined_usd > 0.0);
+
+    // Pre-existing session file carrying TUI-written sub-agent spend — the
+    // shape a GUI save of a resumed TUI session merges into.
+    let session_manager = crate::session_manager::SessionManager::new(sessions_dir.clone())?;
+    let mut prior = crate::session_manager::create_saved_session_with_id_and_mode(
+        "sess_cost_merge".to_string(),
+        &[],
+        "deepseek-v4-flash",
+        &root,
+        0,
+        None,
+        None,
+    );
+    prior.metadata.cost.subagent_cost_usd = 0.5;
+    prior.metadata.cost.subagent_cost_cny = 3.0;
+    session_manager.save_session(&prior)?;
+
+    client
+        .put(format!("http://{addr}/v1/sessions"))
+        .json(&json!({
+            "thread_id": thread_id,
+            "session_id": "sess_cost_merge"
+        }))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    let saved = session_manager.load_session_by_prefix("sess_cost_merge")?;
+    let cost = &saved.metadata.cost;
+    // Parent-turn spend lands in the parent field only, so the display
+    // total keeps exactly one copy of the child spend.
+    assert!(cost.session_cost_usd > 0.0);
+    assert!(cost.session_cost_usd < combined_usd);
+    let child_usd = combined_usd - cost.session_cost_usd;
+    assert!(child_usd > 0.5);
+    assert_eq!(cost.subagent_cost_usd, child_usd);
+    assert_eq!(
+        (cost.session_cost_usd + cost.subagent_cost_usd - combined_usd).abs(),
+        0.0
+    );
+    assert!(cost.subagent_cost_cny > 3.0);
+    assert!(cost.session_cost_cny > 0.0);
+    // Coverage the runtime computed reads back as known, with CNY counted
+    // under the provider's own CNY row.
+    assert!(cost.coverage_recorded);
+    assert!(!cost.coverage_is_legacy_unknown());
+    assert_eq!(cost.priced_turns, 1);
+    assert_eq!(cost.unpriced_turns, 0);
+    assert_eq!(cost.cny_priced_turns, 1);
+    assert_eq!(cost.cny_unpriced_turns, 0);
+    assert!(cost.unpriced_reasons.is_empty());
+    assert!(
+        cost.cny_unpriced_reasons.is_empty(),
+        "DeepSeek first-party parent is CNY-priced; reasons must not invent a gap"
+    );
+
+    // Re-saving is idempotent: max-merge never re-adds the same spend.
+    client
+        .put(format!("http://{addr}/v1/sessions"))
+        .json(&json!({
+            "thread_id": thread_id,
+            "session_id": "sess_cost_merge"
+        }))
+        .send()
+        .await?
+        .error_for_status()?;
+    let resaved = session_manager.load_session_by_prefix("sess_cost_merge")?;
+    assert_eq!(
+        resaved.metadata.cost.session_cost_usd,
+        cost.session_cost_usd
+    );
+    assert_eq!(
+        resaved.metadata.cost.subagent_cost_usd,
+        cost.subagent_cost_usd
+    );
+
+    handle.abort();
+    Ok(())
+}
+
+/// USD-unpriced parent + DeepSeek-priced child: coverage reasons persist
+/// with the parent columns (#4318) while routed spend still lands only in
+/// `subagent_cost_*` (no double-count on reload).
+#[tokio::test]
+async fn session_save_persists_parent_cny_unpriced_reasons_without_double_count() -> Result<()> {
+    let root = std::env::temp_dir().join(format!("deepseek-session-cny-{}", Uuid::new_v4()));
+    let sessions_dir = root.join("sessions");
+    let Some((addr, runtime_threads, handle)) =
+        spawn_test_server_with_root(root.clone(), sessions_dir.clone()).await?
+    else {
+        return Ok(());
+    };
+    let client = crate::tls::reqwest_client();
+
+    let created: serde_json::Value = client
+        .post(format!("http://{addr}/v1/threads"))
+        .json(&json!({
+            "model": "gpt-5.5",
+            "workspace": root.join("workspace")
+        }))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let thread_id = created["id"]
+        .as_str()
+        .context("missing thread id")?
+        .to_string();
+
+    let store = runtime_threads.test_store();
+    let now = Utc::now();
+    let mut turn = TurnRecord {
+        schema_version: 2,
+        id: "turn_cny_reasons".to_string(),
+        thread_id: thread_id.clone(),
+        status: RuntimeTurnStatus::Completed,
+        input_summary: "cny reasons".to_string(),
+        created_at: now,
+        started_at: Some(now),
+        ended_at: Some(now),
+        duration_ms: Some(0),
+        usage: Some(Usage {
+            input_tokens: 10_000,
+            output_tokens: 1_000,
+            ..Usage::default()
+        }),
+        permission_posture: None,
+        effective_provider: None,
+        effective_provider_id: None,
+        effective_billing_surface: None,
+        effective_endpoint_fingerprint: None,
+        effective_billing_mode: None,
+        effective_dispatched_at: None,
+        effective_model: None,
+        routed_usage: vec![crate::cost_status::EffectiveRouteUsage {
+            route: crate::cost_status::EffectiveRouteEnvelope {
+                provider: ApiProvider::Deepseek,
+                provider_identity: ApiProvider::Deepseek.as_str().to_string(),
+                model: "deepseek-v4-flash".to_string(),
+                billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE.to_string()),
+                endpoint_fingerprint: None,
+                billing_mode: crate::cost_status::RouteBillingMode::Metered,
+                dispatched_at: now,
+            },
+            usage: Usage {
+                input_tokens: 20_000,
+                output_tokens: 2_000,
+                ..Usage::default()
+            },
+        }],
+        routed_usage_source_ids: Vec::new(),
+        routed_usage_dropped_records: 0,
+        error: None,
+        item_ids: Vec::new(),
+        steer_count: 0,
+        agent_mail_message_id: None,
+    };
+    turn.effective_provider = Some(ApiProvider::Openai.as_str().to_string());
+    turn.effective_provider_id = Some(ApiProvider::Openai.as_str().to_string());
+    turn.effective_billing_surface = Some(crate::pricing::UNCLASSIFIED_BILLING_SURFACE.to_string());
+    turn.effective_endpoint_fingerprint = None;
+    turn.effective_billing_mode = Some(crate::cost_status::RouteBillingMode::Metered);
+    turn.effective_dispatched_at = Some(now);
+    turn.effective_model = Some("gpt-5.5".to_string());
+    store.save_turn(&turn)?;
+    let mut thread = store.load_thread(&thread_id)?;
+    thread.latest_turn_id = Some(turn.id.clone());
+    store.save_thread(&thread)?;
+
+    client
+        .put(format!("http://{addr}/v1/sessions"))
+        .json(&json!({
+            "thread_id": thread_id,
+            "session_id": "sess_cny_reasons"
+        }))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    let session_manager = crate::session_manager::SessionManager::new(sessions_dir)?;
+    let saved = session_manager.load_session_by_prefix("sess_cny_reasons")?;
+    let cost = &saved.metadata.cost;
+    assert_eq!(
+        cost.session_cost_usd, 0.0,
+        "unpriced parent must not invent USD"
+    );
+    assert!(
+        cost.subagent_cost_usd > 0.0,
+        "routed DeepSeek child is priced"
+    );
+    assert_eq!(
+        cost.priced_turns, 0,
+        "parent coverage columns stay parent-only"
+    );
+    assert_eq!(cost.unpriced_turns, 1);
+    assert_eq!(cost.cny_unpriced_turns, 1);
+    assert!(!cost.unpriced_reasons.is_empty());
+    assert!(
+        !cost.cny_unpriced_reasons.is_empty(),
+        "CNY reasons must persist with the parent coverage counts (#4318)"
+    );
+    assert!(cost.coverage_recorded);
+    assert!(!cost.coverage_is_legacy_unknown());
 
     handle.abort();
     Ok(())
@@ -8939,7 +9324,8 @@ async fn fleet_receipt_api_list_and_get_round_trip() -> Result<()> {
         metadata: std::collections::BTreeMap::new(),
     };
     let manager = crate::fleet::manager::FleetManager::open(&workspace)?
-        .with_session_model(crate::config::DEFAULT_TEXT_MODEL);
+        .with_session_model(crate::config::DEFAULT_TEXT_MODEL)
+        .with_route_config(test_fleet_route_config());
     let report = manager.create_run(
         FleetTaskSpecDocument {
             name: Some("receipt-api-smoke".to_string()),

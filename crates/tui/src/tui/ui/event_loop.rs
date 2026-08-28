@@ -20,6 +20,24 @@ pub(super) fn event_owner_is_active(
     !owner_session_id.is_empty() && current_session_id == Some(owner_session_id)
 }
 
+/// Bind the Runtime thread store to a session before the process-owner lock
+/// is taken, so a second Codewhale on the same machine does not collide on
+/// the default root (#5630). Resume reuses the loaded id; a fresh session
+/// claims one here so first persist keeps it.
+fn ensure_runtime_session_id(app: &mut App) -> String {
+    if let Some(existing) = app
+        .current_session_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    {
+        return existing.to_string();
+    }
+    let session_id = uuid::Uuid::new_v4().to_string();
+    app.current_session_id = Some(session_id.clone());
+    session_id
+}
+
 fn persist_current_session_goal(app: &App) -> Result<(), String> {
     let session_id = app
         .current_session_id
@@ -94,6 +112,23 @@ pub(super) fn handle_plain_key_before_composer(
     crate::tui::paste::handle_paste_burst_key(app, key, now)
 }
 
+/// Handle transcript actions after the paste-burst ambiguity window has
+/// resolved a typed character. The real transcript selection is required;
+/// `detail_target_cell_index` alone falls back to the latest cell and would
+/// arm these shortcuts while the composer is simply being typed into.
+fn handle_focused_transcript_action_char(app: &mut App, ch: char) -> bool {
+    if !app.input.is_empty() || !app.viewport.transcript_selection.is_active() {
+        return false;
+    }
+    match ch {
+        'y' => copy_focused_cell(app),
+        'Y' => copy_focused_cell_metadata(app),
+        'r' => detail_target_cell_index(app)
+            .is_some_and(|index| open_details_pager_for_cell(app, index)),
+        _ => false,
+    }
+}
+
 /// Flush a raw-paste ambiguity window without losing a leading Space.
 ///
 /// `FlushResult::Paste` is always composer payload. A lone typed Space is a
@@ -103,6 +138,11 @@ pub(super) fn flush_paste_burst_before_composer(app: &mut App, now: Instant) -> 
     match app.take_paste_burst_flush_if_enabled(now) {
         crate::tui::paste_burst::FlushResult::Paste(text) => {
             app.insert_str(&text);
+            true
+        }
+        crate::tui::paste_burst::FlushResult::Typed(ch)
+            if handle_focused_transcript_action_char(app, ch) =>
+        {
             true
         }
         crate::tui::paste_burst::FlushResult::Typed(' ')
@@ -409,6 +449,7 @@ pub async fn run_tui(
         }
     }
 
+    let session_id = ensure_runtime_session_id(&mut app);
     let task_manager = TaskManager::start(
         TaskManagerConfig::from_runtime(
             config,
@@ -418,6 +459,7 @@ pub async fn run_tui(
         ),
         config.clone(),
         std::sync::Arc::clone(&app.plugin_registry),
+        &session_id,
     )
     .await?;
     let automations = std::sync::Arc::new(tokio::sync::Mutex::new(
@@ -505,6 +547,12 @@ pub async fn run_tui(
     // Fire session start hook
     {
         let context = app.base_hook_context();
+        // Captured before the hook executor moves `context` into its blocking
+        // task; the outbox emit below needs the same session identity.
+        let outbox_thread_id = context.session_id.clone().unwrap_or_default();
+        let outbox_mode = context.mode.clone();
+        let outbox_model = context.model.clone();
+        let outbox_workspace = context.workspace.clone();
         let hooks = app.hooks.clone();
         if let Err(error) =
             tokio::task::spawn_blocking(move || hooks.execute(HookEvent::SessionStart, &context))
@@ -513,6 +561,23 @@ pub async fn run_tui(
             tracing::error!(target: "hooks", %error, "session_start executor task was lost");
             app.status_message = Some("session_start hook executor did not run".to_string());
         }
+        // Lifecycle outbox (`[lifecycle_outbox]`): fires alongside the
+        // session_start hook, with the same session identity. No-op when
+        // the feature is disabled.
+        app.lifecycle_outbox.emit(codewhale_hooks::LifecycleEvent {
+            event: "session_start".to_string(),
+            kind: "session.started".to_string(),
+            thread_id: outbox_thread_id,
+            turn_id: None,
+            item_id: None,
+            payload: serde_json::json!({
+                "mode": outbox_mode,
+                "model": outbox_model,
+                "workspace": outbox_workspace
+                    .as_ref()
+                    .map(|path| path.display().to_string()),
+            }),
+        });
     }
 
     // Spawn the persistence actor so checkpoint/session-save I/O stays off
@@ -601,6 +666,22 @@ pub async fn run_tui(
     {
         let context = app.base_hook_context();
         let _ = app.execute_hooks(HookEvent::SessionEnd, &context);
+        // Lifecycle outbox (`[lifecycle_outbox]`): fires alongside the
+        // session_end hook, with the same session identity. No-op when
+        // the feature is disabled.
+        app.lifecycle_outbox.emit(codewhale_hooks::LifecycleEvent {
+            event: "session_end".to_string(),
+            kind: "session.ended".to_string(),
+            thread_id: context.session_id.clone().unwrap_or_default(),
+            turn_id: None,
+            item_id: None,
+            payload: serde_json::json!({
+                "workspace": context.workspace
+                    .as_ref()
+                    .map(|path| path.display().to_string()),
+                "total_tokens": context.total_tokens,
+            }),
+        });
     }
 
     // Flush the persistence actor: clear this session's checkpoint, collect
@@ -1485,6 +1566,7 @@ pub(crate) async fn run_event_loop(
                         app.turn_started_at = Some(now);
                         app.turn_last_activity_at = Some(now);
                         app.session.last_output_throughput = None;
+                        app.session.clear_pending_turn_usage();
                         app.streaming_output_token_estimate = 0;
                         app.provider_wait_incident_logged = false;
                         // Discoverability hint for users who don't know how
@@ -1505,6 +1587,23 @@ pub(crate) async fn run_event_loop(
                         app.last_reasoning = None;
                         app.pending_tool_uses.clear();
                         last_status_frame = Instant::now();
+                        // Lifecycle outbox (`[lifecycle_outbox]`): the turn
+                        // boundary the shell-hook system deliberately lacks.
+                        // No-op when the feature is disabled.
+                        app.lifecycle_outbox.emit(codewhale_hooks::LifecycleEvent {
+                            event: "turn_start".to_string(),
+                            kind: "turn.started".to_string(),
+                            thread_id: app.hooks.session_id().to_string(),
+                            turn_id: app.runtime_turn_id.clone(),
+                            item_id: None,
+                            payload: serde_json::json!({
+                                "model": codewhale_hooks::bounded_text(
+                                    &app.model,
+                                    codewhale_hooks::OUTBOX_DETAIL_MAX_CHARS,
+                                ),
+                                "workspace": app.workspace.display().to_string(),
+                            }),
+                        });
                     }
                     EngineEvent::ToolRequestSnapshot { snapshot } => {
                         app.session.last_tool_request_snapshot = Some(snapshot);
@@ -1528,6 +1627,7 @@ pub(crate) async fn run_event_loop(
                         // high-water mark keeps the displayed total monotonic
                         // through the swap (#244).
                         app.clear_pending_turn_cost();
+                        app.session.clear_pending_turn_usage();
                         app.session.last_tool_catalog = tool_catalog;
                         // The endpoint this turn's client actually used. Kept
                         // separately from the mutable session/config surfaces
@@ -2013,6 +2113,41 @@ pub(crate) async fn run_event_loop(
                             surface_observer_hook_submission_failure(app, error);
                         }
 
+                        // Lifecycle outbox (`[lifecycle_outbox]`): one
+                        // `turn_end` event per completed turn, with the kind
+                        // projected from the turn status — `turn.failed` for
+                        // failed turns, `turn.completed` for completed ones,
+                        // `turn.interrupted` for locally cancelled ones.
+                        // No-op when the feature is disabled.
+                        {
+                            let outbox_status =
+                                app.runtime_turn_status.as_deref().unwrap_or("unknown");
+                            let kind = match outbox_status {
+                                "completed" => "turn.completed",
+                                "failed" => "turn.failed",
+                                "interrupted" => "turn.interrupted",
+                                _ => "turn.ended",
+                            };
+                            app.lifecycle_outbox.emit(codewhale_hooks::LifecycleEvent {
+                                event: "turn_end".to_string(),
+                                kind: kind.to_string(),
+                                thread_id: app.hooks.session_id().to_string(),
+                                turn_id: app.runtime_turn_id.clone(),
+                                item_id: None,
+                                payload: serde_json::json!({
+                                    "status": outbox_status,
+                                    "duration_ms": turn_elapsed.as_millis() as u64,
+                                    "workspace": app.workspace.display().to_string(),
+                                    "error": error
+                                        .as_deref()
+                                        .map(|message| codewhale_hooks::bounded_text(
+                                            message,
+                                            codewhale_hooks::OUTBOX_DETAIL_MAX_CHARS,
+                                        )),
+                                }),
+                            });
+                        }
+
                         if queued_to_send.is_none() {
                             queued_to_send = app.pop_queued_message();
                         }
@@ -2067,6 +2202,21 @@ pub(crate) async fn run_event_loop(
                     }
                     EngineEvent::Status { message } => {
                         app.status_message = Some(message);
+                    }
+                    EngineEvent::ToolProjectionWarning {
+                        provider,
+                        omitted_tool_names,
+                        omitted_tool_count,
+                    } => {
+                        let tools = crate::core::events::tool_projection_warning_tool_list(
+                            &omitted_tool_names,
+                            omitted_tool_count,
+                        );
+                        let message = app
+                            .tr(MessageId::ToolProjectionWarning)
+                            .replace("{provider}", &provider)
+                            .replace("{tools}", &tools);
+                        app.push_status_toast(message, StatusToastLevel::Warning, Some(12_000));
                     }
                     EngineEvent::RequestManifestReady { rendered } => {
                         // Typed manifest text, or the explicitly requested
@@ -3000,6 +3150,7 @@ pub(crate) async fn run_event_loop(
                         if let Some(cost) = step_cost {
                             app.accrue_pending_turn_cost_estimate(cost);
                         }
+                        app.session.accrue_pending_turn_usage(&usage);
                     }
                     EngineEvent::AdvisoryNote { note, .. } => {
                         // Advisor background watcher note. Display as a
@@ -4584,6 +4735,14 @@ pub(crate) async fn run_event_loop(
                 KeyCode::Enter
                     if key.modifiers == KeyModifiers::NONE
                         && app.input.is_empty()
+                        && detail_target_cell_index(app).is_some()
+                        && open_focused_cell_pager(app) =>
+                {
+                    continue;
+                }
+                KeyCode::Enter
+                    if key.modifiers == KeyModifiers::NONE
+                        && app.input.is_empty()
                         && detail_target_cell_index(app)
                             .is_some_and(|idx| app.toggle_tool_run_expansion_at(idx)) =>
                 {
@@ -4795,6 +4954,18 @@ pub(crate) async fn run_event_loop(
                     continue;
                 }
                 KeyCode::Esc if app.clear_composer_attachment_selection() => {
+                    continue;
+                }
+                // An idle operator can dismiss the persistent context warning
+                // without affecting vim or attachment handling. While a turn
+                // is active Esc retains its cancellation meaning.
+                KeyCode::Esc
+                    if !app.is_loading
+                        && app.input.is_empty()
+                        && !slash_menu_open
+                        && !mention_menu_open
+                        && app.dismiss_context_pressure_warning() =>
+                {
                     continue;
                 }
                 KeyCode::Esc if mention_menu_open => {

@@ -1,5 +1,6 @@
 use super::*;
 use crate::config::{ApiProvider, Config, ProviderConfig, ProvidersConfig};
+use crate::models::Usage;
 use crate::settings::Settings;
 use crate::test_support::{EnvVarGuard, lock_test_env};
 use crate::tools::plan::{PlanItemArg, StepStatus, UpdatePlanArgs};
@@ -1885,6 +1886,71 @@ fn pending_turn_cost_moves_displayed_total_mid_turn() {
     assert_eq!(
         app.displayed_session_cost_for_currency(CostCurrency::Usd),
         0.1
+    );
+}
+
+#[test]
+fn pending_turn_usage_moves_token_surfaces_without_double_counting() {
+    let mut app = App::new(test_options(false), &Config::default());
+    let usage = Usage {
+        input_tokens: 100,
+        output_tokens: 20,
+        prompt_cache_hit_tokens: Some(60),
+        prompt_cache_miss_tokens: Some(40),
+        prompt_cache_write_tokens: Some(5),
+        ..Usage::default()
+    };
+
+    app.session.accrue_pending_turn_usage(&usage);
+    assert_eq!(app.session.displayed_total_tokens(), 120);
+    assert_eq!(app.session.displayed_total_input_tokens(), 100);
+    assert_eq!(app.session.displayed_total_output_tokens(), 20);
+    assert_eq!(app.session.displayed_total_cache_hit_tokens(), 60);
+    assert_eq!(app.session.displayed_total_cache_miss_tokens(), 35);
+    assert_eq!(app.session.displayed_total_cache_write_tokens(), 5);
+
+    app.session.clear_pending_turn_usage();
+    app.session.total_tokens = 120;
+    app.session.total_input_tokens = 100;
+    app.session.total_output_tokens = 20;
+    app.session.total_cache_hit_tokens = 60;
+    app.session.total_cache_miss_tokens = 35;
+    app.session.total_cache_write_tokens = 5;
+    assert_eq!(app.session.displayed_total_tokens(), 120);
+    assert_eq!(app.session.displayed_total_cache_write_tokens(), 5);
+}
+
+#[test]
+fn context_pressure_toast_kind_is_not_inferred_from_display_text() {
+    let mut app = App::new(test_options(false), &Config::default());
+    app.sticky_status = Some(StatusToast::new(
+        "Context high: 90%",
+        StatusToastLevel::Warning,
+        None,
+    ));
+    assert!(!app.dismiss_context_pressure_warning());
+    assert!(app.sticky_status.is_some());
+
+    app.sticky_status = Some(StatusToast::context_pressure(
+        "localized pressure warning",
+        crate::context_budget::PressureLevel::High,
+    ));
+    assert!(app.dismiss_context_pressure_warning());
+    assert!(app.sticky_status.is_none());
+}
+
+#[test]
+fn critical_context_pressure_remains_visible_over_transient_info_toasts() {
+    let mut app = App::new(test_options(false), &Config::default());
+    app.sticky_status = Some(StatusToast::context_pressure(
+        "Context critical: 95%",
+        crate::context_budget::PressureLevel::Critical,
+    ));
+    app.push_status_toast("Saved", StatusToastLevel::Info, None);
+
+    assert_eq!(
+        app.active_status_toast().map(|toast| toast.text),
+        Some("Context critical: 95%".to_string())
     );
 }
 

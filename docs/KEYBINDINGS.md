@@ -43,7 +43,7 @@ Editing the message you're about to send.
 |-----------------------------|---------------------------------------------------------|
 | `Enter`                     | Send when idle; queue while busy; with an empty composer, send the next queued follow-up now |
 | `Shift-Enter` / `Alt-Enter` / `Ctrl-J` | Insert a newline without sending (idle or busy) |
-| `Ctrl-Enter` / `Cmd-Enter`  | Steer the current turn; send normally when idle (when supported by the terminal) |
+| `Ctrl-Enter` / `Cmd-Enter`  | Send into the current turn; send normally when idle (when the terminal reports it distinctly) |
 | `Ctrl-U`                    | Clear the whole draft (recoverable — see `Ctrl-Z`)      |
 | `Ctrl-Z`                    | Restore the cleared draft (only while the composer is empty) |
 | `Ctrl-W` / `Ctrl-Backspace` / `Alt-Backspace` | Delete previous word        |
@@ -64,7 +64,7 @@ Editing the message you're about to send.
 | `↑` / `↓`                   | Cycle composer history (also selects popup/attachment items) |
 | `Shift-↑` / `Shift-↓`       | Browse conversation history                              |
 | `Ctrl-P` / `Ctrl-N`         | Navigate slash-command menu entries; `Ctrl-P` opens the file picker when the menu is empty |
-| `Ctrl-G` / `Ctrl-S`         | Stash current draft (`/stash pop` restores it); never sends or steers |
+| `Ctrl-G` / `Ctrl-S`         | Stash current draft (`/stash pop` restores it); never sends or queues |
 | `Alt-R`                    | Search prompt history (Alt-R to exit)                  |
 | `Tab`                       | Slash-command / `@`-mention completion (popup-aware)    |
 | `Ctrl-Shift-O` / `F4`       | Open the composer draft in `$VISUAL` / `$EDITOR`; F4 works when the terminal cannot distinguish Ctrl-Shift-O from Ctrl-O |
@@ -154,6 +154,10 @@ When `[memory] enabled = true`, typing `# foo` and pressing `Enter` appends `foo
 | `Alt-[` / `Alt-]`    | Jump between tool output blocks                     |
 | `Esc Esc`            | Backtrack to a previous user message (`←`/`→` steps, `Enter` rewinds) |
 | `Esc`                | Return focus to composer                           |
+| `y`                  | Copy the focused transcript block content          |
+| `Y`                  | Copy the focused transcript block with metadata    |
+| `Enter`              | Open the focused transcript block fullscreen       |
+| `r`                  | Open the focused block's raw markdown/detail view  |
 | Mouse drag           | Select transcript text in Codewhale                |
 | `Ctrl-C`             | Copy an active Codewhale selection                 |
 | `Cmd-click` (macOS) / `Ctrl-click` (Linux/Windows) | Open an OSC 8 link in a supporting terminal (terminal-owned) |

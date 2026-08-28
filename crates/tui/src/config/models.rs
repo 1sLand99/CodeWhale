@@ -32,6 +32,7 @@ pub const OPENROUTER_GEMMA_4_26B_A4B_MODEL: &str = "google/gemma-4-26b-a4b-it";
 pub const OPENROUTER_GLM_5_1_MODEL: &str = "z-ai/glm-5.1";
 pub const OPENROUTER_GLM_5_2_MODEL: &str = "z-ai/glm-5.2";
 pub const OPENROUTER_GLM_5_3_MODEL: &str = "z-ai/glm-5.3";
+pub const OPENROUTER_GLM_5_3_FLASH_MODEL: &str = "z-ai/glm-5.3-flash";
 pub const OPENROUTER_GLM_5_TURBO_MODEL: &str = "z-ai/glm-5-turbo";
 pub const OPENROUTER_KIMI_K2_7_CODE_MODEL: &str = "moonshotai/kimi-k2.7-code";
 pub const OPENROUTER_KIMI_K2_6_MODEL: &str = "moonshotai/kimi-k2.6";
@@ -45,6 +46,7 @@ pub const OPENROUTER_QWEN_3_6_27B_MODEL: &str = "qwen/qwen3.6-27b";
 pub const OPENROUTER_QWEN_3_6_PLUS_MODEL: &str = "qwen/qwen3.6-plus";
 pub const OPENROUTER_QWEN_3_7_PLUS_MODEL: &str = "qwen/qwen3.7-plus";
 pub const OPENROUTER_QWEN_3_7_MAX_MODEL: &str = "qwen/qwen3.7-max";
+pub const OPENROUTER_QWEN_3_8_FLASH_MODEL: &str = "qwen/qwen3.8-flash";
 pub const OPENROUTER_MINIMAX_M2_7_MODEL: &str = "minimax/minimax-m2.7";
 pub const OPENROUTER_NEMOTRON_3_ULTRA_MODEL: &str = "nvidia/nemotron-3-ultra-550b-a55b";
 pub const OPENROUTER_TENCENT_HY3_PREVIEW_MODEL: &str = "tencent/hy3-preview";
@@ -62,6 +64,7 @@ pub const RECENT_OPENROUTER_LARGE_MODELS: &[&str] = &[
     OPENROUTER_QWEN_3_6_PLUS_MODEL,
     OPENROUTER_QWEN_3_7_PLUS_MODEL,
     OPENROUTER_QWEN_3_7_MAX_MODEL,
+    OPENROUTER_QWEN_3_8_FLASH_MODEL,
     OPENROUTER_MINIMAX_M2_7_MODEL,
     OPENROUTER_NEMOTRON_3_ULTRA_MODEL,
     OPENROUTER_KIMI_K2_7_CODE_MODEL,
@@ -69,6 +72,7 @@ pub const RECENT_OPENROUTER_LARGE_MODELS: &[&str] = &[
     OPENROUTER_GLM_5_1_MODEL,
     OPENROUTER_GLM_5_2_MODEL,
     OPENROUTER_GLM_5_3_MODEL,
+    OPENROUTER_GLM_5_3_FLASH_MODEL,
     OPENROUTER_TENCENT_HY3_PREVIEW_MODEL,
     OPENROUTER_GEMMA_4_31B_MODEL,
     OPENROUTER_GEMMA_4_26B_A4B_MODEL,
@@ -114,6 +118,9 @@ pub const KIMI_CODE_MEMBERSHIP_PLAN_CONSOLE_URL: &str =
 /// Official Kimi Code route model id. It is deliberately distinct from
 /// Moonshot's pay-as-you-go `kimi-k3` catalog id.
 pub const KIMI_CODE_K3_MODEL: &str = "k3";
+/// Official fixed-256K Kimi Code K3 wire model id. This is a distinct
+/// membership-route model, not a client-side context alias for `k3`.
+pub const KIMI_CODE_K3_256K_MODEL: &str = "k3-256k";
 /// Kimi Code membership high-speed wire model id. Membership route only, not
 /// a direct Moonshot platform catalog model.
 pub const KIMI_CODE_HIGHSPEED_MODEL: &str = "kimi-for-coding-highspeed";
@@ -191,6 +198,7 @@ pub const DEFAULT_ZAI_MODEL: &str = ZAI_GLM_5_3_MODEL;
 pub const ZAI_GLM_5_1_MODEL: &str = "GLM-5.1";
 pub const ZAI_GLM_5_2_MODEL: &str = "GLM-5.2";
 pub const ZAI_GLM_5_3_MODEL: &str = "GLM-5.3";
+pub const ZAI_GLM_5_3_FLASH_MODEL: &str = "GLM-5.3-Flash";
 pub const ZAI_GLM_5_TURBO_MODEL: &str = "GLM-5-Turbo";
 pub const DEFAULT_ZAI_BASE_URL: &str = "https://api.z.ai/api/coding/paas/v4";
 pub const DEFAULT_STEPFUN_MODEL: &str = "step-3.7-flash";

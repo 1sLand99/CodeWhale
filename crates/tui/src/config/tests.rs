@@ -745,6 +745,36 @@ web_search = true
 }
 
 #[test]
+fn tui_config_parses_lifecycle_outbox_table() {
+    let raw = r#"
+[lifecycle_outbox]
+path = "~/.codewhale/notifications/outbox.jsonl"
+webhook_url = "https://example.com/hooks/codewhale"
+webhook_token = "secret-token"
+"#;
+    let parsed: ConfigFile = toml::from_str(raw).expect("parse lifecycle_outbox config");
+
+    let outbox = parsed
+        .base
+        .lifecycle_outbox
+        .expect("lifecycle_outbox table should parse");
+    assert_eq!(
+        outbox.path,
+        Some(PathBuf::from("~/.codewhale/notifications/outbox.jsonl"))
+    );
+    assert_eq!(
+        outbox.webhook_url.as_deref(),
+        Some("https://example.com/hooks/codewhale")
+    );
+    assert_eq!(outbox.webhook_token.as_deref(), Some("secret-token"));
+
+    // Off by default: a config without the table leaves the feature off.
+    let absent: ConfigFile =
+        toml::from_str("model = \"demo\"").expect("parse config without outbox table");
+    assert!(absent.base.lifecycle_outbox.is_none());
+}
+
+#[test]
 fn tui_config_parses_hotbar_bindings() {
     let raw = r#"
 [[hotbar]]
@@ -6150,6 +6180,29 @@ fn retired_deepseek_aliases_do_not_escape_provider_owned_namespaces() {
 }
 
 #[test]
+fn openrouter_hunyuan_aliases_resolve_to_hy3_preview() {
+    for alias in [
+        "tencent/hy3-preview",
+        "hy3-preview",
+        "hy3",
+        "hunyuan",
+        "tencent-hunyuan",
+        "hunyuan-hy3",
+    ] {
+        assert_eq!(
+            canonical_model_id_for_provider(ApiProvider::Openrouter, alias).as_deref(),
+            Some(OPENROUTER_TENCENT_HY3_PREVIEW_MODEL),
+            "{alias} should select the public Hy3 preview id"
+        );
+    }
+    assert_ne!(
+        canonical_model_id_for_provider(ApiProvider::Openrouter, "hy4").as_deref(),
+        Some(OPENROUTER_TENCENT_HY3_PREVIEW_MODEL),
+        "hy4 is not a released public model id"
+    );
+}
+
+#[test]
 fn deepseek_default_model_canonicalizes_provider_prefixed_ids() {
     let _lock = lock_test_env();
     let temp_root = tempfile::tempdir().unwrap();
@@ -6635,6 +6688,7 @@ fn model_completion_names_for_zai_lists_default_5_1_and_turbo() {
     assert_eq!(models.first().copied(), Some(DEFAULT_ZAI_MODEL));
     assert_eq!(DEFAULT_ZAI_MODEL, ZAI_GLM_5_3_MODEL);
     assert!(models.contains(&ZAI_GLM_5_1_MODEL));
+    assert!(models.contains(&ZAI_GLM_5_3_FLASH_MODEL));
     assert!(models.contains(&ZAI_GLM_5_TURBO_MODEL));
     // GLM-5.2 is still offered alongside the others but no longer takes the
     // default slot; explicit 5.2 routes are untouched.
@@ -6658,6 +6712,9 @@ fn normalize_model_name_for_zai_canonicalizes_current_glm_models() {
         ("glm-5.3", DEFAULT_ZAI_MODEL),
         ("glm-5-3", ZAI_GLM_5_3_MODEL),
         ("zai-glm-5-3", ZAI_GLM_5_3_MODEL),
+        ("glm-5.3-flash", ZAI_GLM_5_3_FLASH_MODEL),
+        ("glm-5-3-flash", ZAI_GLM_5_3_FLASH_MODEL),
+        ("zai-glm-5.3-flash", ZAI_GLM_5_3_FLASH_MODEL),
         ("glm-5-turbo", ZAI_GLM_5_TURBO_MODEL),
         ("zai-glm-5-turbo", ZAI_GLM_5_TURBO_MODEL),
     ] {
@@ -10997,7 +11054,14 @@ fn provider_capability_zai_defaults_to_5_3_and_tracks_5_2_5_1_and_turbo() {
     assert_eq!(v51.max_output, Some(131_072));
     assert!(v51.thinking_supported);
 
-    // GLM-5-Turbo is the faster sub-agent sibling.
+    // GLM-5.3-Flash is the published 1M multimodal sibling.
+    let flash = provider_capability(ApiProvider::Zai, ZAI_GLM_5_3_FLASH_MODEL);
+    assert_eq!(flash.resolved_model, ZAI_GLM_5_3_FLASH_MODEL);
+    assert_eq!(flash.context_window, 1_000_000);
+    assert_eq!(flash.max_output, Some(131_072));
+    assert!(flash.thinking_supported);
+
+    // GLM-5-Turbo is the faster sub-agent sibling of GLM-5.2.
     let turbo = provider_capability(ApiProvider::Zai, ZAI_GLM_5_TURBO_MODEL);
     assert_eq!(turbo.resolved_model, ZAI_GLM_5_TURBO_MODEL);
 }
@@ -12805,6 +12869,16 @@ fn k3_and_kimi_k3_never_cross_products_and_fail_visibly() {
         ApiProvider::Moonshot,
         DEFAULT_KIMI_CODE_BASE_URL,
         KIMI_CODE_K3_MODEL
+    ));
+    assert!(is_exact_kimi_code_k3_route(
+        ApiProvider::Moonshot,
+        DEFAULT_KIMI_CODE_BASE_URL,
+        KIMI_CODE_K3_256K_MODEL
+    ));
+    assert!(!is_exact_kimi_code_bare_k3_route(
+        ApiProvider::Moonshot,
+        DEFAULT_KIMI_CODE_BASE_URL,
+        KIMI_CODE_K3_256K_MODEL
     ));
     assert!(!is_exact_direct_moonshot_k3_route(
         ApiProvider::Moonshot,

@@ -156,9 +156,9 @@ enum CustomProviderField {
 }
 
 /// Which subset of `rows` the list stage shows (#3830). `Configured` is the
-/// normal `/provider` default; first-run onboarding opens `Local` so a user
-/// can start with Ollama, SGLang, or vLLM without walking through cloud-key
-/// setup. `A` still exposes the full catalog and `L` returns to local routes.
+/// normal `/provider` default; first-run onboarding opens `Catalog` so a user
+/// can pick a hosted API or a local runtime immediately. `A` still exposes the
+/// full catalog and `L` filters to local routes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProviderListView {
     Configured,
@@ -2159,7 +2159,7 @@ impl ProviderPickerView {
         let Some(model) = self.selected_model.as_deref() else {
             return false;
         };
-        crate::config::is_exact_kimi_code_k3_route(
+        crate::config::is_exact_kimi_code_bare_k3_route(
             self.selected_provider(),
             &self.rows[self.selected_idx].base_url,
             model,

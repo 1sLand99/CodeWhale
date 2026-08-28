@@ -49,6 +49,10 @@ pub(crate) const OPENROUTER_GLM_5_2_MODEL: &str = "z-ai/glm-5.2";
 // resolves to OpenRouter rather than another vendor. See
 // models_dev.bundled.json `_meta.pending_release_metadata`.
 pub(crate) const OPENROUTER_GLM_5_3_MODEL: &str = "z-ai/glm-5.3";
+// GLM-5.3-Flash (2026-08-26): first natively multimodal GLM-5, 1M context,
+// published USD list $0.15/$0.50 (50% promo until 2026-09-09 UTC+8 is not
+// the durable row). OpenRouter mirror is z-ai/glm-5.3-flash.
+pub(crate) const OPENROUTER_GLM_5_3_FLASH_MODEL: &str = "z-ai/glm-5.3-flash";
 pub(crate) const OPENROUTER_KIMI_K2_7_CODE_MODEL: &str = "moonshotai/kimi-k2.7-code";
 pub(crate) const OPENROUTER_KIMI_K2_6_MODEL: &str = "moonshotai/kimi-k2.6";
 pub(crate) const OPENROUTER_MINIMAX_M3_MODEL: &str = "minimax/minimax-m3";
@@ -62,6 +66,7 @@ pub(crate) const OPENROUTER_QWEN_3_6_27B_MODEL: &str = "qwen/qwen3.6-27b";
 pub(crate) const OPENROUTER_QWEN_3_6_PLUS_MODEL: &str = "qwen/qwen3.6-plus";
 pub(crate) const OPENROUTER_QWEN_3_7_PLUS_MODEL: &str = "qwen/qwen3.7-plus";
 pub(crate) const OPENROUTER_QWEN_3_7_MAX_MODEL: &str = "qwen/qwen3.7-max";
+pub(crate) const OPENROUTER_QWEN_3_8_FLASH_MODEL: &str = "qwen/qwen3.8-flash";
 pub(crate) const OPENROUTER_TENCENT_HY3_PREVIEW_MODEL: &str = "tencent/hy3-preview";
 pub(crate) const OPENROUTER_XIAOMI_MIMO_V2_5_PRO_MODEL: &str = "xiaomi/mimo-v2.5-pro";
 pub(crate) const OPENROUTER_XIAOMI_MIMO_V2_5_MODEL: &str = "xiaomi/mimo-v2.5";
@@ -127,6 +132,7 @@ pub(crate) const DEFAULT_OLLAMA_CLOUD_BASE_URL: &str = "https://ollama.com/v1";
 // own id: only the default moved.
 pub(crate) const DEFAULT_ZAI_MODEL: &str = ZAI_GLM_5_3_MODEL;
 pub(crate) const ZAI_GLM_5_3_MODEL: &str = "GLM-5.3";
+pub(crate) const ZAI_GLM_5_3_FLASH_MODEL: &str = "GLM-5.3-Flash";
 pub(crate) const ZAI_GLM_5_2_MODEL: &str = "GLM-5.2";
 pub(crate) const ZAI_GLM_5_1_MODEL: &str = "GLM-5.1";
 pub(crate) const ZAI_GLM_5_TURBO_MODEL: &str = "GLM-5-Turbo";

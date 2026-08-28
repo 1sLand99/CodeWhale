@@ -648,7 +648,7 @@ fn bundled_asset_parses() {
         "bundled asset must carry provider rows"
     );
     // The helper returns the same parsed catalog.
-    assert_eq!(bundled_models_dev_catalog(), catalog);
+    assert_eq!(*bundled_models_dev_catalog(), catalog);
 }
 
 #[test]
@@ -851,9 +851,11 @@ fn bundled_asset_pricing_is_honest() {
 
     // GLM-5.3 is live on the Coding Plan, but Z.ai has published no USD PAYG
     // rate for it. Coding Plan credit multipliers are not USD, so every
-    // glm-5.3 row stays unpriced rather than inheriting glm-5.2's rates.
+    // glm-5.3 row *except Flash* stays unpriced rather than inheriting
+    // glm-5.2's rates. GLM-5.3-Flash has a published list (2026-08-26).
     for row in &rows {
-        if row.wire_model_id.to_ascii_lowercase().contains("glm-5.3") {
+        let wire = row.wire_model_id.to_ascii_lowercase();
+        if wire.contains("glm-5.3") && !wire.contains("flash") {
             assert!(
                 row.cost.is_none(),
                 "{}/{}: glm-5.3 must stay unpriced until Z.ai publishes rates",
@@ -862,6 +864,48 @@ fn bundled_asset_pricing_is_honest() {
             );
         }
     }
+
+    let glm53_flash = find(&rows, "zai", "GLM-5.3-Flash");
+    let cost = glm53_flash
+        .cost
+        .as_ref()
+        .expect("GLM-5.3-Flash must ship priced at durable list rates");
+    assert_eq!(cost.input, Some(0.15));
+    assert_eq!(cost.output, Some(0.50));
+    assert_eq!(cost.cache_read, Some(0.03));
+    assert_eq!(
+        glm53_flash.limit.as_ref().and_then(|l| l.context),
+        Some(1_000_000)
+    );
+    assert!(
+        !glm53_flash.default_for_provider,
+        "GLM-5.3-Flash is a picker row, not the Z.ai default"
+    );
+
+    // OpenRouter qwen3.8-flash lists durable (non-promo) rates on models.dev
+    // as of 2026-08-26. Unlike GLM-5.3-Flash's explicit 50% promo, this row
+    // must ship priced. It is not a family default.
+    let qwen38_flash = find(&rows, "openrouter", "qwen/qwen3.8-flash");
+    assert!(
+        !qwen38_flash.default_for_provider,
+        "qwen3.8-flash is a suffix variant and must not be the OpenRouter default"
+    );
+    let cost = qwen38_flash
+        .cost
+        .as_ref()
+        .expect("qwen/qwen3.8-flash must ship priced (durable list rates, no promo)");
+    assert_eq!(cost.input, Some(0.16));
+    assert_eq!(cost.output, Some(0.47));
+    assert_eq!(cost.cache_read, Some(0.016));
+    assert_eq!(cost.cache_write, Some(0.20));
+    assert_eq!(
+        qwen38_flash.limit.as_ref().and_then(|l| l.context),
+        Some(1_000_000)
+    );
+    assert_eq!(
+        qwen38_flash.limit.as_ref().and_then(|l| l.output),
+        Some(131_072)
+    );
 
     // M3 has input-length and service tiers that the flat catalog cost shape
     // cannot represent, so the bundled route row stays honestly unpriced.
