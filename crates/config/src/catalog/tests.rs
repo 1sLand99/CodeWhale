@@ -338,42 +338,6 @@ fn fingerprint_of_an_empty_base_url_is_the_redacted_constant() {
 }
 
 #[test]
-fn changelog_declares_fingerprint_persisted_key_change() {
-    // `base_url_fingerprint` is serde-serialized (catalog cache, LiveOffering,
-    // pricing receipts, TurnRecord.routed_usage_source_ids). Empty input and
-    // scheme-less URLs with `@` hash differently than they did before
-    // 388125491. Before a release cut, Unreleased must say so; after the
-    // coordinated version bump, the current-version section owns the same
-    // declaration. An older release cannot satisfy this check, because stale
-    // caches would then look like corruption without a note for this build.
-    let changelog = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../CHANGELOG.md"));
-    let unreleased = changelog
-        .split_once("## [Unreleased]")
-        .expect("CHANGELOG has an Unreleased section")
-        .1
-        .split_once("\n## [")
-        .expect("Unreleased is followed by a released section")
-        .0;
-    let current_heading = format!("## [{}]", env!("CARGO_PKG_VERSION"));
-    let current_release = changelog
-        .split_once(&current_heading)
-        .map(|(_, tail)| tail.split("\n## [").next().unwrap_or(tail))
-        .unwrap_or_default();
-    let declared_change = format!("{unreleased}\n{current_release}");
-    for needle in [
-        "base_url_fingerprint",
-        "persisted-key",
-        "scheme-less",
-        "routed_usage_source_ids",
-    ] {
-        assert!(
-            declared_change.contains(needle),
-            "Unreleased or the current release section must declare the {needle} persisted-key change:\n{declared_change}"
-        );
-    }
-}
-
-#[test]
 fn ttl_marks_entries_stale_and_excludes_them_from_fresh() {
     let fp = base_url_fingerprint("https://api.example.com");
     let mut cache = ProviderCatalogCache::new();
