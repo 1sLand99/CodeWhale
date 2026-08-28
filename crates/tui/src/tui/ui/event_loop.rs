@@ -1005,6 +1005,7 @@ pub(crate) async fn run_event_loop(
                             app.history.get_mut(index)
                     {
                         *content = text.clone();
+                        app.record_completed_assistant_output(index, &text);
                         app.bump_history_cell(index);
                     }
                     if !replace_matching_assistant_text(app, &original_text, text.clone()) {
@@ -1272,6 +1273,9 @@ pub(crate) async fn run_event_loop(
                         let thinking = app.last_reasoning.take();
                         let tool_uses = std::mem::take(&mut app.pending_tool_uses);
                         let history_index = completed_message_index;
+                        if let Some(index) = history_index {
+                            app.record_completed_assistant_output(index, &current_streaming_text);
+                        }
 
                         if app.translation_enabled
                             && !current_streaming_text.is_empty()

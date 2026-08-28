@@ -113,6 +113,12 @@ pub(crate) struct ContextTokenCache {
     pub(crate) message_tokens: Vec<usize>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CompletedAssistantOutputReceipt {
+    history_index: usize,
+    text: String,
+}
+
 impl ContextTokenCache {
     pub(crate) fn clear(&mut self) {
         self.message_tokens.clear();
@@ -1237,6 +1243,10 @@ pub struct App {
     /// Monotonic counter used to issue fresh per-cell revisions.
     pub next_history_revision: u64,
     pub api_messages: Vec<Message>,
+    /// User-visible assistant text that crossed typed completion boundaries.
+    /// Receipts are aligned to transcript cells because provider context can
+    /// be compacted or purged without changing what remains visible.
+    completed_assistant_outputs: Vec<CompletedAssistantOutputReceipt>,
     pub(crate) context_token_cache: RefCell<ContextTokenCache>,
     /// Typed account-owned browser relay for this exact TUI session.
     pub remote_control: crate::remote_control::RemoteControlController,
@@ -3814,6 +3824,18 @@ impl App {
     /// `n` history cells. Every map key >= n is mapped to key - n; keys < n
     /// are dropped.
     fn shift_history_maps_down(&mut self, n: usize) {
+        // A folded-range placeholder is inserted at index 0 immediately
+        // after this shift, so surviving completed-output receipts move down
+        // by `n` and then forward by one.
+        self.completed_assistant_outputs.retain_mut(|receipt| {
+            if receipt.history_index >= n {
+                receipt.history_index = receipt.history_index - n + 1;
+                true
+            } else {
+                false
+            }
+        });
+
         // tool_cells: HashMap<String, usize>
         self.tool_cells.retain(|_, idx| {
             if *idx >= n {
@@ -4174,6 +4196,7 @@ impl App {
     pub fn clear_history(&mut self) {
         self.history.clear();
         self.history_revisions.clear();
+        self.completed_assistant_outputs.clear();
         self.context_references_by_cell.clear();
         self.session_context_references.clear();
         self.session_artifacts.clear();
@@ -4182,11 +4205,63 @@ impl App {
         self.needs_redraw = true;
     }
 
+    /// Record one user-visible assistant message after its typed completion
+    /// boundary. Interrupted salvage never calls this path.
+    pub(crate) fn record_completed_assistant_output(&mut self, history_index: usize, text: &str) {
+        if text.trim().is_empty() {
+            return;
+        }
+        if let Some(receipt) = self
+            .completed_assistant_outputs
+            .iter_mut()
+            .find(|receipt| receipt.history_index == history_index)
+        {
+            receipt.text = text.to_string();
+            return;
+        }
+        self.completed_assistant_outputs
+            .push(CompletedAssistantOutputReceipt {
+                history_index,
+                text: text.to_string(),
+            });
+    }
+
+    /// Rebuild receipts only from the restored typed transcript projection.
+    /// `history_cells_from_message` has already routed repair receipts to
+    /// System cells and omitted interrupted assistant salvage.
+    pub(crate) fn rebuild_completed_assistant_outputs_from_restored_history(&mut self) {
+        self.completed_assistant_outputs = self
+            .history
+            .iter()
+            .enumerate()
+            .filter_map(|(history_index, cell)| match cell {
+                HistoryCell::Assistant {
+                    content,
+                    streaming: false,
+                } if !content.trim().is_empty() => Some(CompletedAssistantOutputReceipt {
+                    history_index,
+                    text: content.clone(),
+                }),
+                _ => None,
+            })
+            .collect();
+    }
+
+    pub(crate) fn completed_assistant_output_receipt(&self) -> Option<&str> {
+        self.completed_assistant_outputs
+            .iter()
+            .rev()
+            .find(|receipt| !receipt.text.trim().is_empty())
+            .map(|receipt| receipt.text.as_str())
+    }
+
     /// Pop the trailing history cell, keeping revisions in sync.
     pub fn pop_history(&mut self) -> Option<HistoryCell> {
         let cell = self.history.pop();
         if cell.is_some() {
             self.history_revisions.pop();
+            self.completed_assistant_outputs
+                .retain(|receipt| receipt.history_index < self.history.len());
             self.context_references_by_cell.remove(&self.history.len());
             self.rebuild_session_context_references();
             self.prune_transcript_index_state(self.history.len());
@@ -4210,6 +4285,8 @@ impl App {
         if self.history_revisions.len() > new_len {
             self.history_revisions.truncate(new_len);
         }
+        self.completed_assistant_outputs
+            .retain(|receipt| receipt.history_index < new_len);
         // Drop any auxiliary maps keyed on history indices that now point
         // past the new tail. We keep the rest intact so unaffected tool
         // cells continue to render correctly.

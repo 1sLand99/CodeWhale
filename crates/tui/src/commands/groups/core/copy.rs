@@ -3,7 +3,6 @@
 use crate::commands::traits::{CommandInfo, RegisterCommand};
 use crate::localization::MessageId;
 use crate::tui::app::App;
-use crate::tui::history::HistoryCell;
 
 use super::CommandResult;
 
@@ -26,30 +25,46 @@ impl RegisterCommand for CopyCmd {
     }
 }
 
-fn last_completed_assistant_output(app: &App) -> Option<&str> {
-    app.history.iter().rev().find_map(|cell| match cell {
-        HistoryCell::Assistant {
-            content,
-            streaming: false,
-        } if !content.trim().is_empty() => Some(content.as_str()),
-        _ => None,
-    })
+fn last_completed_assistant_output(app: &App) -> Option<String> {
+    app.completed_assistant_output_receipt().map(str::to_owned)
 }
 
 fn execute_copy(app: &mut App) -> CommandResult {
-    let Some(content) = last_completed_assistant_output(app).map(str::to_owned) else {
+    let Some(content) = last_completed_assistant_output(app) else {
         return CommandResult::message(app.tr(MessageId::CmdCopyNoOutput).into_owned());
     };
 
+    let terminal_client = app.clipboard.requires_terminal_paste();
+    // Any native-host attempt may fall through to the asynchronous terminal
+    // transport. Preserve /export's durable recovery contract before the
+    // write so every optimistic receipt names (or explicitly lacks) a backup.
+    let recovery = crate::commands::groups::session::write_last_copy(&content);
     match app.clipboard.write_text(&content) {
-        Ok(()) => CommandResult::message(
-            app.tr(MessageId::CmdCopySuccess)
-                .replace("{lines}", &content.lines().count().max(1).to_string()),
-        ),
-        Err(error) => CommandResult::error(
-            app.tr(MessageId::CmdCopyFailed)
-                .replace("{error}", &error.to_string()),
-        ),
+        Ok(()) if terminal_client => match recovery {
+            Some(path) => CommandResult::message(
+                app.tr(MessageId::CmdCopyQueued)
+                    .replace("{path}", &path.display().to_string()),
+            ),
+            None => CommandResult::message(app.tr(MessageId::CmdCopyQueuedNoBackup).into_owned()),
+        },
+        Ok(()) => match recovery {
+            Some(path) => CommandResult::message(
+                app.tr(MessageId::CmdCopySuccess)
+                    .replace("{path}", &path.display().to_string()),
+            ),
+            None => CommandResult::message(app.tr(MessageId::CmdCopySuccessNoBackup).into_owned()),
+        },
+        Err(error) => match recovery {
+            Some(path) => CommandResult::error(
+                app.tr(MessageId::CmdCopyFailed)
+                    .replace("{error}", &error.to_string())
+                    .replace("{path}", &path.display().to_string()),
+            ),
+            None => CommandResult::error(
+                app.tr(MessageId::CmdCopyFailedNoBackup)
+                    .replace("{error}", &error.to_string()),
+            ),
+        },
     }
 }
 
@@ -57,9 +72,12 @@ fn execute_copy(app: &mut App) -> CommandResult {
 mod tests {
     use super::*;
     use crate::config::Config;
+    use crate::models::{ContentBlock, Message, Role};
     use crate::tui::app::TuiOptions;
     use crate::tui::clipboard::ClipboardHandler;
-    use std::path::PathBuf;
+    use crate::tui::history::{HistoryCell, history_cells_from_message};
+    use std::path::{Path, PathBuf};
+    use tempfile::TempDir;
 
     fn test_app() -> App {
         App::new(
@@ -71,61 +89,81 @@ mod tests {
         )
     }
 
+    fn add_completed_assistant(app: &mut App, text: &str) -> usize {
+        let history_index = app.history.len();
+        app.add_message(HistoryCell::Assistant {
+            content: text.to_string(),
+            streaming: false,
+        });
+        app.record_completed_assistant_output(history_index, text);
+        history_index
+    }
+
+    fn isolate_state_home(
+        path: &Path,
+    ) -> (
+        crate::test_support::EnvVarGuard,
+        crate::test_support::EnvVarGuard,
+    ) {
+        (
+            crate::test_support::EnvVarGuard::set("HOME", path),
+            crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", path),
+        )
+    }
+
     #[test]
     fn copies_the_latest_completed_assistant_output_only() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _env_lock = crate::test_support::lock_test_env();
+        let (_home, _codewhale_home) = isolate_state_home(tmp.path());
         let mut app = test_app();
-        app.clipboard = ClipboardHandler::for_test(true, false);
-        app.history = vec![
-            HistoryCell::Assistant {
-                content: "older".to_string(),
-                streaming: false,
-            },
-            HistoryCell::Tool(crate::tui::history::ToolCell::Generic(
-                crate::tui::history::GenericToolCell {
-                    name: "read_file".to_string(),
-                    status: crate::tui::history::ToolStatus::Success,
-                    input_summary: None,
-                    output: Some("tool output".to_string()),
-                    prompts: None,
-                    spillover_path: None,
-                    output_summary: None,
-                    is_diff: false,
-                },
-            )),
-            HistoryCell::Assistant {
-                content: "latest **answer**\nsecond line".to_string(),
-                streaming: false,
-            },
-            HistoryCell::Assistant {
-                content: "partial".to_string(),
-                streaming: true,
-            },
-        ];
+        app.clipboard = ClipboardHandler::for_test(false, false);
+        add_completed_assistant(&mut app, "older");
+        app.add_message(HistoryCell::System {
+            content: "system".to_string(),
+        });
+        app.add_message(HistoryCell::Thinking {
+            content: "hidden reasoning".to_string(),
+            streaming: false,
+            duration_secs: None,
+        });
+        add_completed_assistant(&mut app, "latest **answer**\nsecond line");
+        // Interrupted salvage may be visible, but it never gets a completion
+        // receipt and therefore cannot become `/copy` authority.
+        app.add_message(HistoryCell::Assistant {
+            content: "active partial".to_string(),
+            streaming: false,
+        });
 
         let result = execute_copy(&mut app);
 
-        assert_eq!(
-            result.message.as_deref(),
-            Some("Copied the last completed assistant response to the clipboard (2 lines)")
+        let expected = format!(
+            "Accepted the last completed assistant response for clipboard delivery; a recovery copy is at {}",
+            tmp.path().join("exports/last-copy.md").display()
         );
+        assert_eq!(result.message.as_deref(), Some(expected.as_str()));
         assert_eq!(
             app.clipboard.last_written_text(),
             Some("latest **answer**\nsecond line")
+        );
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join("exports/last-copy.md"))
+                .expect("recovery copy"),
+            "latest **answer**\nsecond line"
         );
     }
 
     #[test]
     fn skips_empty_and_non_assistant_history() {
         let mut app = test_app();
-        app.history = vec![
-            HistoryCell::Assistant {
-                content: "  \n".to_string(),
-                streaming: false,
-            },
-            HistoryCell::System {
-                content: "system".to_string(),
-            },
-        ];
+        add_completed_assistant(&mut app, "  \n");
+        app.add_message(HistoryCell::System {
+            content: "system".to_string(),
+        });
+        app.add_message(HistoryCell::Assistant {
+            content: "partial".to_string(),
+            streaming: false,
+        });
 
         let result = execute_copy(&mut app);
 
@@ -137,12 +175,12 @@ mod tests {
 
     #[test]
     fn active_turn_does_not_change_which_completed_output_is_copied() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _env_lock = crate::test_support::lock_test_env();
+        let (_home, _codewhale_home) = isolate_state_home(tmp.path());
         let mut app = test_app();
-        app.clipboard = ClipboardHandler::for_test(true, false);
-        app.history = vec![HistoryCell::Assistant {
-            content: "completed before the active turn".to_string(),
-            streaming: false,
-        }];
+        app.clipboard = ClipboardHandler::for_test(false, false);
+        add_completed_assistant(&mut app, "completed before the active turn");
         app.is_loading = true;
 
         let result = execute_copy(&mut app);
@@ -153,5 +191,233 @@ mod tests {
             Some("completed before the active turn")
         );
         assert!(app.is_loading);
+    }
+
+    #[test]
+    fn interrupted_assistant_role_never_replaces_the_last_completed_answer() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _env_lock = crate::test_support::lock_test_env();
+        let (_home, _codewhale_home) = isolate_state_home(tmp.path());
+        let mut app = test_app();
+        app.clipboard = ClipboardHandler::for_test(false, false);
+        add_completed_assistant(&mut app, "completed answer");
+        app.add_message(HistoryCell::Assistant {
+            content: "salvaged partial".to_string(),
+            streaming: false,
+        });
+
+        let result = execute_copy(&mut app);
+
+        assert!(!result.is_error);
+        assert_eq!(app.clipboard.last_written_text(), Some("completed answer"));
+    }
+
+    #[test]
+    fn compacted_context_uses_the_typed_completed_output_receipt() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _env_lock = crate::test_support::lock_test_env();
+        let (_home, _codewhale_home) = isolate_state_home(tmp.path());
+        let mut app = test_app();
+        app.clipboard = ClipboardHandler::for_test(false, false);
+        add_completed_assistant(&mut app, "visible answer before compaction");
+        app.api_messages = vec![
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: "compaction checkpoint".to_string(),
+                    cache_control: None,
+                }],
+            },
+            Message {
+                role: Role::InterruptedAssistant,
+                content: vec![ContentBlock::Text {
+                    text: "partial after compaction".to_string(),
+                    cache_control: None,
+                }],
+            },
+        ];
+
+        let result = execute_copy(&mut app);
+
+        assert!(!result.is_error);
+        assert_eq!(
+            app.clipboard.last_written_text(),
+            Some("visible answer before compaction")
+        );
+    }
+
+    #[test]
+    fn completed_receipt_survives_history_folding() {
+        let mut app = test_app();
+        for index in 0..(App::HISTORY_SOFT_CAP - 1) {
+            app.add_message(HistoryCell::System {
+                content: format!("status {index}"),
+            });
+        }
+        add_completed_assistant(&mut app, "completed answer before fold");
+        app.add_message(HistoryCell::System {
+            content: "trigger fold".to_string(),
+        });
+
+        assert_eq!(
+            app.completed_assistant_output_receipt(),
+            Some("completed answer before fold")
+        );
+    }
+
+    #[test]
+    fn popping_the_latest_cell_reveals_the_prior_completed_receipt() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _env_lock = crate::test_support::lock_test_env();
+        let (_home, _codewhale_home) = isolate_state_home(tmp.path());
+        let mut app = test_app();
+        app.clipboard = ClipboardHandler::for_test(false, false);
+        add_completed_assistant(&mut app, "older answer");
+        add_completed_assistant(&mut app, "newer answer");
+        app.api_messages.clear();
+        app.pop_history();
+
+        let result = execute_copy(&mut app);
+
+        assert!(!result.is_error);
+        assert_eq!(app.clipboard.last_written_text(), Some("older answer"));
+    }
+
+    #[test]
+    fn backtrack_truncation_drops_receipts_after_the_selected_boundary() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _env_lock = crate::test_support::lock_test_env();
+        let (_home, _codewhale_home) = isolate_state_home(tmp.path());
+        let mut app = test_app();
+        app.clipboard = ClipboardHandler::for_test(false, false);
+        add_completed_assistant(&mut app, "older answer");
+        app.add_message(HistoryCell::User {
+            content: "next prompt".to_string(),
+        });
+        add_completed_assistant(&mut app, "newer answer");
+        app.api_messages.clear();
+        app.truncate_history_to(2);
+
+        let result = execute_copy(&mut app);
+
+        assert!(!result.is_error);
+        assert_eq!(app.clipboard.last_written_text(), Some("older answer"));
+    }
+
+    #[test]
+    fn restored_repair_receipt_is_never_copyable_assistant_output() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _env_lock = crate::test_support::lock_test_env();
+        let (_home, _codewhale_home) = isolate_state_home(tmp.path());
+        let mut app = test_app();
+        app.clipboard = ClipboardHandler::for_test(false, false);
+        let visible = Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::Text {
+                text: "real assistant answer".to_string(),
+                cache_control: None,
+            }],
+        };
+        let repair = Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::Text {
+                text: "[tool_history_repair] synthetic recovery receipt".to_string(),
+                cache_control: None,
+            }],
+        };
+        app.extend_history(history_cells_from_message(&visible));
+        app.extend_history(history_cells_from_message(&repair));
+        app.rebuild_completed_assistant_outputs_from_restored_history();
+
+        let result = execute_copy(&mut app);
+
+        assert!(!result.is_error);
+        assert_eq!(
+            app.clipboard.last_written_text(),
+            Some("real assistant answer")
+        );
+    }
+
+    #[test]
+    fn successful_delivery_without_recovery_file_is_explicit() {
+        let tmp = TempDir::new().expect("tempdir");
+        let unusable_home = tmp.path().join("home-file");
+        std::fs::write(&unusable_home, "not a directory").expect("home fixture");
+        let _env_lock = crate::test_support::lock_test_env();
+        let (_home, _codewhale_home) = isolate_state_home(&unusable_home);
+        let mut app = test_app();
+        app.clipboard = ClipboardHandler::for_test(false, false);
+        add_completed_assistant(&mut app, "answer");
+
+        let result = execute_copy(&mut app);
+
+        assert!(!result.is_error);
+        let message = result.message.as_deref().unwrap_or_default();
+        assert!(
+            message.contains("no recovery file could be written"),
+            "{message}"
+        );
+        assert!(message.contains("/export file <path>"), "{message}");
+    }
+
+    #[test]
+    fn terminal_client_copy_is_queued_and_names_the_recovery_file() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _env_lock = crate::test_support::lock_test_env();
+        let (_home, _codewhale_home) = isolate_state_home(tmp.path());
+        let mut app = test_app();
+        app.clipboard = ClipboardHandler::for_test(true, true);
+        add_completed_assistant(&mut app, "remote answer");
+
+        let result = execute_copy(&mut app);
+
+        assert!(!result.is_error);
+        let message = result.message.as_deref().unwrap_or_default();
+        assert!(message.contains("Queued"), "{message}");
+        assert!(message.contains("last-copy.md"), "{message}");
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join("exports/last-copy.md"))
+                .expect("recovery copy"),
+            "remote answer"
+        );
+    }
+
+    #[test]
+    fn clipboard_failure_names_the_written_recovery_file() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _env_lock = crate::test_support::lock_test_env();
+        let (_home, _codewhale_home) = isolate_state_home(tmp.path());
+        let mut app = test_app();
+        app.clipboard = ClipboardHandler::unavailable_for_test(false);
+        add_completed_assistant(&mut app, "recoverable answer");
+
+        let result = execute_copy(&mut app);
+
+        assert!(result.is_error);
+        let message = result.message.as_deref().unwrap_or_default();
+        assert!(message.contains("last-copy.md"), "{message}");
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join("exports/last-copy.md"))
+                .expect("recovery copy"),
+            "recoverable answer"
+        );
+    }
+
+    #[test]
+    fn clipboard_and_recovery_failure_explain_the_explicit_export_path() {
+        let tmp = TempDir::new().expect("tempdir");
+        let unusable_home = tmp.path().join("home-file");
+        std::fs::write(&unusable_home, "not a directory").expect("home fixture");
+        let _env_lock = crate::test_support::lock_test_env();
+        let (_home, _codewhale_home) = isolate_state_home(&unusable_home);
+        let mut app = test_app();
+        app.clipboard = ClipboardHandler::unavailable_for_test(false);
+        add_completed_assistant(&mut app, "answer");
+
+        let result = execute_copy(&mut app);
+
+        assert!(result.is_error);
+        let message = result.message.as_deref().unwrap_or_default();
+        assert!(message.contains("/export file <path>"), "{message}");
     }
 }
