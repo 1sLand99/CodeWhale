@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Add provider-native web search for documented Xiaomi MiMo 2.5 Pro and 2.5
+  chat routes while keeping neighboring models and custom gateways fail-closed.
+- Add structured provider-native web search for exact Z.AI global and Zhipu
+  China general API routes, using each site's documented search engine value.
+  Existing `open.bigmodel.cn` configurations now share Z.AI's official model
+  namespace and credential scope; unknown model IDs still pass through.
 - Add provider-native web search for documented Qwen models on ModelStudio
   Token Plan's Responses Harness, without enabling Coding Plan or Anthropic
   routes.

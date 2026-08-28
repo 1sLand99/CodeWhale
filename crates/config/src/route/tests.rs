@@ -1434,6 +1434,94 @@ fn provider_native_web_search_requires_exact_direct_endpoint_offering() {
 }
 
 #[test]
+fn mimo_native_search_is_exact_to_documented_chat_models() {
+    use crate::route::CapabilityState;
+
+    let resolver = RouteResolver::new();
+    for model in ["mimo-v2.5-pro", "mimo-v2.5"] {
+        let direct = resolver
+            .resolve(&req(Some(ProviderKind::XiaomiMimo), Some(model)))
+            .expect("official MiMo chat route resolves");
+        assert_eq!(
+            direct.capabilities().server_side_web_search,
+            CapabilityState::Supported
+        );
+    }
+
+    let neighboring = resolver
+        .resolve(&req(
+            Some(ProviderKind::XiaomiMimo),
+            Some("mimo-v2.5-pro-ultraspeed"),
+        ))
+        .expect("neighboring MiMo model resolves");
+    assert_eq!(
+        neighboring.capabilities().server_side_web_search,
+        CapabilityState::Unknown
+    );
+
+    let custom = resolver
+        .resolve(&RouteRequest {
+            explicit_provider: Some(ProviderKind::XiaomiMimo),
+            model_selector: Some(LogicalModelRef::from("mimo-v2.5-pro")),
+            saved_provider_model: None,
+            base_url_override: Some("https://compatible.example.test/v1".to_string()),
+            limit_overrides: Vec::new(),
+        })
+        .expect("custom MiMo-compatible route resolves");
+    assert_eq!(
+        custom.capabilities().server_side_web_search,
+        CapabilityState::Unknown
+    );
+}
+
+#[test]
+fn zai_native_search_requires_exact_general_api_product() {
+    use crate::route::CapabilityState;
+
+    let resolver = RouteResolver::new();
+    for base_url in [
+        "https://api.z.ai/api/paas/v4",
+        "https://open.bigmodel.cn/api/paas/v4",
+    ] {
+        let direct = resolver
+            .resolve(&RouteRequest {
+                explicit_provider: Some(ProviderKind::Zai),
+                model_selector: Some(LogicalModelRef::from("GLM-5.3")),
+                saved_provider_model: None,
+                base_url_override: Some(base_url.to_string()),
+                limit_overrides: Vec::new(),
+            })
+            .expect("general API route resolves");
+        assert_eq!(
+            direct.capabilities().server_side_web_search,
+            CapabilityState::Supported,
+            "{base_url} should expose structured web search"
+        );
+    }
+
+    for base_url in [
+        "https://api.z.ai/api/coding/paas/v4",
+        "https://open.bigmodel.cn/api/paas/v4/preview",
+        "https://compatible.example.test/v1",
+    ] {
+        let adjacent = resolver
+            .resolve(&RouteRequest {
+                explicit_provider: Some(ProviderKind::Zai),
+                model_selector: Some(LogicalModelRef::from("GLM-5.3")),
+                saved_provider_model: None,
+                base_url_override: Some(base_url.to_string()),
+                limit_overrides: Vec::new(),
+            })
+            .expect("adjacent route resolves");
+        assert_eq!(
+            adjacent.capabilities().server_side_web_search,
+            CapabilityState::Unknown,
+            "{base_url} must remain fail-closed"
+        );
+    }
+}
+
+#[test]
 fn qwen_native_search_is_exact_to_token_plan_responses_routes() {
     use crate::route::CapabilityState;
 
