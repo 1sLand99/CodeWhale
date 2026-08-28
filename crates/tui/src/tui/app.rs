@@ -1798,6 +1798,16 @@ pub struct App {
     pub coordination_detail: Option<crate::tools::subagent::CoordinationDetailProjection>,
     /// Last MCP manager/discovery snapshot shown in the UI.
     pub mcp_snapshot: Option<crate::mcp::McpManagerSnapshot>,
+    /// True while the engine-owned MCP boot connection pass is in flight.
+    /// Configured rows render as connecting until its snapshot lands.
+    pub mcp_initializing: bool,
+    /// Latest engine-owned MCP event generation applied to the UI.
+    pub mcp_snapshot_generation: u64,
+    /// The direct snapshot from a successful `/mcp` action supersedes any
+    /// queued event at `mcp_snapshot_generation`, but not a later generation.
+    pub mcp_snapshot_generation_invalidated: bool,
+    /// Enabled servers that have not settled in the current boot pass.
+    pub mcp_connecting: Vec<String>,
     /// Number of MCP servers declared in the user's config at app boot.
     /// Used by the footer chip (#502) so a count is visible even before
     /// the user runs `/mcp` for the first time. `0` hides the chip.

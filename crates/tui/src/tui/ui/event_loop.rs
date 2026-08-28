@@ -2218,6 +2218,16 @@ pub(crate) async fn run_event_loop(
                             .replace("{tools}", &tools);
                         app.push_status_toast(message, StatusToastLevel::Warning, Some(12_000));
                     }
+                    EngineEvent::McpSessionBoot {
+                        generation,
+                        snapshot,
+                        connecting,
+                        finished,
+                    } => {
+                        apply_mcp_session_boot_event(
+                            app, generation, snapshot, connecting, finished,
+                        );
+                    }
                     EngineEvent::RequestManifestReady { rendered } => {
                         // Typed manifest text, or the explicitly requested
                         // base-prompt-only disclosure. Rendered as a system cell.
@@ -5791,6 +5801,33 @@ pub(crate) async fn run_event_loop(
     }
 }
 
+/// Apply one MCP session-boot event. Failures stay on the snapshot (and
+/// therefore the session page) rather than as toast-only Status copy.
+/// A direct `/mcp` snapshot invalidates only the event generation it
+/// superseded. Older spawn-time updates cannot overwrite it, while a later
+/// engine-authored generation can continue updating the live surface.
+pub(crate) fn apply_mcp_session_boot_event(
+    app: &mut App,
+    generation: u64,
+    snapshot: crate::mcp::McpManagerSnapshot,
+    connecting: Vec<String>,
+    finished: bool,
+) {
+    if generation < app.mcp_snapshot_generation
+        || (generation == app.mcp_snapshot_generation && app.mcp_snapshot_generation_invalidated)
+    {
+        return;
+    }
+    app.mcp_snapshot_generation = generation;
+    app.mcp_snapshot_generation_invalidated = false;
+    app.mcp_configured_count = snapshot.servers.len();
+    app.hotbar_actions.replace_mcp_tools(Some(&snapshot));
+    app.mcp_snapshot = Some(snapshot);
+    app.mcp_connecting = connecting;
+    app.mcp_initializing = !finished;
+    app.needs_redraw = true;
+}
+
 pub(crate) async fn run_cache_warmup(app: &App, config: &Config) -> Result<CacheWarmupOutcome> {
     let route = resolve_cache_replay_route(app, config)?
         .validate()
@@ -5917,4 +5954,128 @@ async fn open_agents_register(app: &mut App, engine_handle: &EngineHandle) {
     }
     let _ = engine_handle.send(Op::ListSubAgents).await;
     app.needs_redraw = true;
+}
+
+#[cfg(test)]
+mod session_boot_event_tests {
+    use super::*;
+    use crate::mcp::{McpManagerSnapshot, McpServerCapabilityMetadata, McpServerSnapshot};
+    use std::path::PathBuf;
+
+    fn server(name: &str, connected: bool) -> McpServerSnapshot {
+        McpServerSnapshot {
+            name: name.to_string(),
+            enabled: true,
+            required: false,
+            transport: "stdio".to_string(),
+            command_or_url: format!("cmd-{name}"),
+            connect_timeout: 5,
+            execute_timeout: 5,
+            read_timeout: 5,
+            connected,
+            error: None,
+            capability_metadata: McpServerCapabilityMetadata::NotObserved,
+            tools: Vec::new(),
+            resources: Vec::new(),
+            prompts: Vec::new(),
+        }
+    }
+
+    fn snapshot(servers: Vec<McpServerSnapshot>) -> McpManagerSnapshot {
+        McpManagerSnapshot {
+            config_path: PathBuf::from("mcp.json"),
+            config_exists: true,
+            reload_required: false,
+            servers,
+        }
+    }
+
+    fn test_app() -> App {
+        crate::test_support::test_app_with_options(crate::test_support::test_tui_options(
+            PathBuf::from("."),
+        ))
+    }
+
+    #[test]
+    fn boot_event_names_every_connecting_server_on_the_app() {
+        let mut app = test_app();
+        apply_mcp_session_boot_event(
+            &mut app,
+            1,
+            snapshot(vec![server("alpha", false), server("beta", false)]),
+            vec!["alpha".into(), "beta".into()],
+            false,
+        );
+        assert!(app.mcp_initializing);
+        assert_eq!(app.mcp_connecting, vec!["alpha", "beta"]);
+        assert_eq!(app.mcp_configured_count, 2);
+        let surface = crate::tui::session_boot::SessionBootSurface::from_app(&app);
+        let chip = surface
+            .activity_chip(crate::localization::Locale::En, 80)
+            .expect("chip");
+        assert!(chip.contains("alpha"), "{chip}");
+        assert!(chip.contains("beta"), "{chip}");
+        assert!(!chip.to_ascii_lowercase().contains("slack"), "{chip}");
+    }
+
+    #[test]
+    fn direct_mcp_snapshot_rejects_an_unseen_older_boot_generation() {
+        let mut app = test_app();
+        assert_eq!(app.mcp_snapshot_generation, 0);
+        app.mcp_snapshot = Some(snapshot(vec![server("direct", true)]));
+        // The direct engine response carries generation 2 even though the UI
+        // has not rendered queued boot generation 1 yet.
+        app.mcp_snapshot_generation = 2;
+        app.mcp_snapshot_generation_invalidated = true;
+        app.mcp_connecting = vec!["alpha".into()];
+        apply_mcp_session_boot_event(
+            &mut app,
+            1,
+            snapshot(vec![server("stale", true)]),
+            vec!["stale".into()],
+            true,
+        );
+        assert_eq!(app.mcp_connecting, vec!["alpha"]);
+        assert_eq!(
+            app.mcp_snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.servers.first())
+                .map(|server| server.name.as_str()),
+            Some("direct")
+        );
+
+        // A queued event emitted by the direct operation itself is the same
+        // generation and cannot replace the already-applied response.
+        apply_mcp_session_boot_event(
+            &mut app,
+            2,
+            snapshot(vec![server("same-pass", true)]),
+            Vec::new(),
+            true,
+        );
+        assert_eq!(
+            app.mcp_snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.servers.first())
+                .map(|server| server.name.as_str()),
+            Some("direct")
+        );
+
+        apply_mcp_session_boot_event(
+            &mut app,
+            3,
+            snapshot(vec![server("fresh", true)]),
+            Vec::new(),
+            true,
+        );
+        assert_eq!(app.mcp_snapshot_generation, 3);
+        assert!(!app.mcp_snapshot_generation_invalidated);
+        assert_eq!(
+            app.mcp_snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.servers.first())
+                .map(|server| server.name.as_str()),
+            Some("fresh")
+        );
+    }
 }
