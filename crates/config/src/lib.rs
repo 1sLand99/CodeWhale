@@ -30,9 +30,13 @@ pub use model_reference::{Modality, ModelReferenceCard, ModelReferenceDatabase};
 pub(crate) use provider_defaults::*;
 pub use provider_kind::ProviderKind;
 pub use provider_templates::{
-    AGNES_TEMPLATE_ID, ProviderSetupApply, ProviderSetupTemplate, SENSENOVA_API_KEY_ENV,
-    SENSENOVA_BASE_URL, SENSENOVA_DEFAULT_MODEL, SENSENOVA_MODELS, SENSENOVA_TEMPLATE_ID,
-    compatible_provider_setup_templates, provider_setup_template, provider_setup_templates,
+    AGNES_TEMPLATE_ID, BASETEN_API_KEY_ENV, BASETEN_BASE_URL, BASETEN_DEFAULT_MODEL,
+    BASETEN_MODELS, BASETEN_TEMPLATE_ID, CEREBRAS_API_KEY_ENV, CEREBRAS_BASE_URL,
+    CEREBRAS_DEFAULT_MODEL, CEREBRAS_MODELS, CEREBRAS_TEMPLATE_ID, GROQ_API_KEY_ENV, GROQ_BASE_URL,
+    GROQ_DEFAULT_MODEL, GROQ_MODELS, GROQ_TEMPLATE_ID, ProviderSetupApply, ProviderSetupTemplate,
+    SENSENOVA_API_KEY_ENV, SENSENOVA_BASE_URL, SENSENOVA_DEFAULT_MODEL, SENSENOVA_MODELS,
+    SENSENOVA_TEMPLATE_ID, compatible_provider_setup_templates, provider_setup_template,
+    provider_setup_templates,
 };
 pub use setup_state::{
     ConstitutionAuthoring, ConstitutionChoice, ConstitutionSource, ConstitutionValidity,
@@ -4360,6 +4364,9 @@ fn canonical_zai_model_id(model: &str) -> Option<&'static str> {
         // moving the default (now GLM-5.3) must not silently re-point an
         // explicit GLM-5.2 route.
         "glm-5.2" | "glm-5-2" | "zai-glm-5.2" | "zai-glm-5-2" => Some(ZAI_GLM_5_2_MODEL),
+        "glm-5.3-flash" | "glm-5-3-flash" | "zai-glm-5.3-flash" | "zai-glm-5-3-flash" => {
+            Some(ZAI_GLM_5_3_FLASH_MODEL)
+        }
         "glm-5.3" | "glm-5-3" | "zai-glm-5.3" | "zai-glm-5-3" => Some(ZAI_GLM_5_3_MODEL),
         "glm-5-turbo" | "glm-5turbo" | "zai-glm-5-turbo" => Some(ZAI_GLM_5_TURBO_MODEL),
         _ => None,
@@ -4387,6 +4394,11 @@ fn canonical_openrouter_recent_model_id(model: &str) -> Option<&'static str> {
         OPENROUTER_GLM_5_2_MODEL | "glm-5.2" | "glm-5-2" | "zai-glm-5.2" | "zai-glm-5-2" => {
             Some(OPENROUTER_GLM_5_2_MODEL)
         }
+        OPENROUTER_GLM_5_3_FLASH_MODEL
+        | "glm-5.3-flash"
+        | "glm-5-3-flash"
+        | "zai-glm-5.3-flash"
+        | "zai-glm-5-3-flash" => Some(OPENROUTER_GLM_5_3_FLASH_MODEL),
         OPENROUTER_GLM_5_3_MODEL | "glm-5.3" | "glm-5-3" | "zai-glm-5.3" | "zai-glm-5-3" => {
             Some(OPENROUTER_GLM_5_3_MODEL)
         }

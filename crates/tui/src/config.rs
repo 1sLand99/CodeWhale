@@ -1022,6 +1022,11 @@ fn canonical_openrouter_recent_model_id(model: &str) -> Option<&'static str> {
         OPENROUTER_GLM_5_2_MODEL | "glm-5.2" | "glm-5-2" | "zai-glm-5.2" | "zai-glm-5-2" => {
             Some(OPENROUTER_GLM_5_2_MODEL)
         }
+        OPENROUTER_GLM_5_3_FLASH_MODEL
+        | "glm-5.3-flash"
+        | "glm-5-3-flash"
+        | "zai-glm-5.3-flash"
+        | "zai-glm-5-3-flash" => Some(OPENROUTER_GLM_5_3_FLASH_MODEL),
         OPENROUTER_GLM_5_3_MODEL | "glm-5.3" | "glm-5-3" | "zai-glm-5.3" | "zai-glm-5-3" => {
             Some(OPENROUTER_GLM_5_3_MODEL)
         }
@@ -1204,6 +1209,9 @@ fn canonical_zai_model_id(model: &str) -> Option<&'static str> {
         // `DEFAULT_ZAI_MODEL`: moving the default (now GLM-5.3) must not
         // silently re-point an explicit GLM-5.2 request.
         "glm-5.2" | "glm-5-2" | "zai-glm-5.2" | "zai-glm-5-2" => Some(ZAI_GLM_5_2_MODEL),
+        "glm-5.3-flash" | "glm-5-3-flash" | "zai-glm-5.3-flash" | "zai-glm-5-3-flash" => {
+            Some(ZAI_GLM_5_3_FLASH_MODEL)
+        }
         "glm-5.3" | "glm-5-3" | "zai-glm-5.3" | "zai-glm-5-3" => Some(ZAI_GLM_5_3_MODEL),
         "glm-5-turbo" | "glm-5turbo" | "zai-glm-5-turbo" => Some(ZAI_GLM_5_TURBO_MODEL),
         _ => None,
@@ -1521,6 +1529,7 @@ pub fn model_completion_names_for_provider(provider: ApiProvider) -> Vec<&'stati
         ApiProvider::Openmodel => vec![DEFAULT_OPENMODEL_MODEL],
         ApiProvider::Zai => vec![
             DEFAULT_ZAI_MODEL,
+            ZAI_GLM_5_3_FLASH_MODEL,
             ZAI_GLM_5_2_MODEL,
             ZAI_GLM_5_1_MODEL,
             ZAI_GLM_5_TURBO_MODEL,
@@ -9600,10 +9609,10 @@ pub(crate) fn is_exact_zai_chat_route(provider: ApiProvider, base_url: &str) -> 
 /// reasoning effort (`reasoning_effort: high | max`) rather than only the
 /// generic thinking toggle.
 ///
-/// GLM-5.2 is the verified member. GLM-5.3 inherits it because its catalog row
-/// inherits GLM-5.2's `reasoning_options` wholesale — see the
-/// `INHERITED FROM glm-5.2` marker in `config/models.rs`. If Z.ai publishes
-/// different reasoning controls for 5.3, this predicate is where they split.
+/// GLM-5.2 is the verified member. GLM-5.3 and GLM-5.3-Flash inherit it
+/// because their catalog rows inherit GLM-5.2's `reasoning_options`
+/// wholesale. If Z.ai publishes different reasoning controls, this
+/// predicate is where they split.
 #[must_use]
 pub(crate) fn is_exact_zai_tiered_effort_route(
     provider: ApiProvider,
@@ -9612,7 +9621,8 @@ pub(crate) fn is_exact_zai_tiered_effort_route(
 ) -> bool {
     is_exact_zai_chat_route(provider, base_url)
         && (model.trim().eq_ignore_ascii_case(ZAI_GLM_5_2_MODEL)
-            || model.trim().eq_ignore_ascii_case(ZAI_GLM_5_3_MODEL))
+            || model.trim().eq_ignore_ascii_case(ZAI_GLM_5_3_MODEL)
+            || model.trim().eq_ignore_ascii_case(ZAI_GLM_5_3_FLASH_MODEL))
 }
 
 /// Whether a route is exactly first-party Z.ai GLM-5-Turbo.
@@ -9627,8 +9637,8 @@ pub(crate) fn is_exact_zai_glm_5_turbo_route(
 }
 
 /// Whether a route is an exact first-party Z.ai model with a verified
-/// reasoning control. GLM-5.2 and GLM-5.3 have tiered effort; GLM-5.1 and
-/// GLM-5-Turbo only expose the generic thinking toggle.
+/// reasoning control. GLM-5.2, GLM-5.3, and GLM-5.3-Flash have tiered
+/// effort; GLM-5.1 and GLM-5-Turbo only expose the generic thinking toggle.
 #[must_use]
 pub(crate) fn is_exact_known_zai_reasoning_route(
     provider: ApiProvider,

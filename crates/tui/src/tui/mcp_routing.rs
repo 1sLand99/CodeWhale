@@ -87,6 +87,10 @@ fn push_server(lines: &mut Vec<String>, server: &McpServerSnapshot, locale: Loca
         crate::mcp::McpRecoveryKind::Reauth => "Re-auth",
         crate::mcp::McpRecoveryKind::Diagnose => "Diagnose",
     };
+    lines.push(format!(
+        "  {}",
+        crate::mcp::mcp_startup_warning(&server.name, recovery, server.error.is_some())
+    ));
     lines.push(format!("  next: {verb} {command}"));
     lines.push(format!(
         "  discovered: {} tools, {} resources, {} prompts",

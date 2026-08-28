@@ -258,7 +258,9 @@ fn known_context_window_for_model(model_lower: &str) -> Option<u32> {
         "z-ai/glm-5-turbo" | "glm-5-turbo" => Some(202_752),
         // GLM-5.3 limits are inherited from GLM-5.2 pending official Z.ai
         // release metadata (see `INHERITED FROM glm-5.2` in config/models.rs).
-        "z-ai/glm-5.2" | "glm-5.2" | "z-ai/glm-5.3" | "glm-5.3" => Some(1_000_000),
+        // GLM-5.3-Flash is the published 1M multimodal sibling (2026-08-26).
+        "z-ai/glm-5.2" | "glm-5.2" | "z-ai/glm-5.3" | "glm-5.3" | "z-ai/glm-5.3-flash"
+        | "glm-5.3-flash" => Some(1_000_000),
         "minimax/minimax-m3" | "minimax-m3" | "qwen/qwen3.8-flash" | "qwen/qwen3.6-flash"
         | "qwen/qwen3.6-plus" => Some(1_000_000),
         // Alibaba Cloud Model Studio (Token Plan console + curated catalog,
@@ -399,8 +401,9 @@ pub fn max_output_tokens_for_model(model: &str) -> Option<u32> {
             Some(131_072)
         }
         "qwen3.7-plus" | "qwen3.7-max" | "qwen3.6-flash" => Some(65_536),
-        "z-ai/glm-5.1" | "z-ai/glm-5.2" | "z-ai/glm-5.3" | "z-ai/glm-5-turbo" | "glm-5.1"
-        | "glm-5.2" | "glm-5.3" | "glm-5-turbo" => Some(131_072),
+        "z-ai/glm-5.1" | "z-ai/glm-5.2" | "z-ai/glm-5.3" | "z-ai/glm-5.3-flash"
+        | "z-ai/glm-5-turbo" | "glm-5.1" | "glm-5.2" | "glm-5.3" | "glm-5.3-flash"
+        | "glm-5-turbo" => Some(131_072),
         "xiaomi/mimo-v2.5-pro"
         | "xiaomi/mimo-v2.5"
         | "mimo-v2.5-pro"
@@ -522,10 +525,12 @@ pub fn model_supports_reasoning(model: &str) -> bool {
             | "z-ai/glm-5.1"
             | "z-ai/glm-5.2"
             | "z-ai/glm-5.3"
+            | "z-ai/glm-5.3-flash"
             | "z-ai/glm-5-turbo"
             | "glm-5.1"
             | "glm-5.2"
             | "glm-5.3"
+            | "glm-5.3-flash"
             | "glm-5-turbo"
             | "grok-4.6"
             | "grok-4.5"
@@ -920,6 +925,7 @@ mod tests {
             ("z-ai/glm-5.1", 202_752),
             ("z-ai/glm-5.2", 1_000_000),
             ("z-ai/glm-5.3", 1_000_000),
+            ("z-ai/glm-5.3-flash", 1_000_000),
         ] {
             assert_eq!(context_window_for_model(model), Some(expected_window));
             assert!(model_supports_reasoning(model));
@@ -1322,6 +1328,7 @@ mod tests {
             ("glm-5.2", 1_000_000),
             // Inherited from glm-5.2 pending official Z.ai release metadata.
             ("glm-5.3", 1_000_000),
+            ("glm-5.3-flash", 1_000_000),
             ("glm-5-turbo", 202_752),
         ] {
             assert_eq!(context_window_for_model(model), Some(expected_window));
@@ -1347,6 +1354,7 @@ mod tests {
         assert_eq!(max_output_tokens_for_model("glm-5.1"), Some(131_072));
         assert_eq!(max_output_tokens_for_model("glm-5.2"), Some(131_072));
         assert_eq!(max_output_tokens_for_model("glm-5.3"), Some(131_072));
+        assert_eq!(max_output_tokens_for_model("glm-5.3-flash"), Some(131_072));
     }
 
     #[test]
