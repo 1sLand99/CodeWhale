@@ -209,10 +209,9 @@ pub fn bundled_offerings() -> Vec<ProviderModelOffering> {
         parallel_tool_calls: CapabilityState::Supported,
         streaming: CapabilityState::Supported,
         prompt_caching: CapabilityState::Supported,
-        // The endpoint supports native web search, but Codewhale does not yet
-        // replay `web_search_call` items on this stateless route. Keep the
-        // executable capability honest until that loop is implemented.
-        server_side_web_search: CapabilityState::Unknown,
+        // Search execution uses a separate bounded Responses request rather
+        // than replaying `web_search_call` items in the main chat.
+        server_side_web_search: CapabilityState::Supported,
         ..RouteCapabilities::default()
     };
     let documented_limits = RouteLimits {

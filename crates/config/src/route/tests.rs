@@ -353,12 +353,20 @@ fn resolver_routes_only_official_deepseek_flash_over_responses() {
         .expect("official Flash route resolves");
     assert_eq!(flash.protocol(), RequestProtocol::Responses);
     assert_eq!(flash.endpoint().endpoint_key, "responses");
+    assert_eq!(
+        flash.capabilities().server_side_web_search,
+        CapabilityState::Supported
+    );
 
     let pro = resolver
         .resolve(&req(Some(ProviderKind::Deepseek), Some("deepseek-v4-pro")))
         .expect("official Pro route resolves");
     assert_eq!(pro.protocol(), RequestProtocol::ChatCompletions);
     assert_eq!(pro.endpoint().endpoint_key, "chat");
+    assert_eq!(
+        pro.capabilities().server_side_web_search,
+        CapabilityState::Supported
+    );
 
     let future = resolver
         .resolve(&req(
@@ -389,6 +397,10 @@ fn resolver_routes_only_official_deepseek_flash_over_responses() {
         .expect("custom compatible Flash route remains pass-through");
     assert_eq!(custom.protocol(), RequestProtocol::ChatCompletions);
     assert_eq!(custom.endpoint().endpoint_key, "chat");
+    assert_eq!(
+        custom.capabilities().server_side_web_search,
+        CapabilityState::Unknown
+    );
 }
 
 #[test]
@@ -1358,7 +1370,7 @@ fn resolver_carries_exact_offering_capabilities_without_protocol_inference() {
     assert_eq!(capabilities.streaming, CapabilityState::Unknown);
     assert_eq!(
         capabilities.server_side_web_search,
-        CapabilityState::Unknown
+        CapabilityState::Supported
     );
 }
 

@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 
 use crate::config::ApiProvider;
 
-use super::{DeepSeekClient, api_url};
+use super::{DeepSeekClient, api_url, responses_api_url};
 
 const MAX_NATIVE_ANSWER_CHARS: usize = 4_000;
 
@@ -49,6 +49,8 @@ impl ProviderNativeSearchClient {
                 | ApiProvider::Anthropic
                 | ApiProvider::Xai
                 | ApiProvider::ModelstudioTokenPlan
+                | ApiProvider::Deepseek
+                | ApiProvider::DeepseekCN
         )
         .then_some(Self { inner })
     }
@@ -61,6 +63,11 @@ impl ProviderNativeSearchClient {
     #[must_use]
     pub(crate) fn model(&self) -> &str {
         &self.inner.default_model
+    }
+
+    #[must_use]
+    pub(crate) fn base_url(&self) -> &str {
+        &self.inner.base_url
     }
 
     #[must_use]
@@ -116,6 +123,11 @@ impl ProviderNativeSearchClient {
                 request,
                 ResponsesSearchDialect::ModelStudio,
             ),
+            ApiProvider::Deepseek | ApiProvider::DeepseekCN => build_responses_search_body(
+                &self.inner.default_model,
+                request,
+                ResponsesSearchDialect::Deepseek,
+            ),
             ApiProvider::Anthropic => {
                 let route_cap = self
                     .inner
@@ -131,6 +143,9 @@ impl ProviderNativeSearchClient {
         let url = match self.inner.api_provider {
             ApiProvider::Openai | ApiProvider::Xai | ApiProvider::ModelstudioTokenPlan => {
                 api_url(&self.inner.base_url, "responses")
+            }
+            ApiProvider::Deepseek | ApiProvider::DeepseekCN => {
+                responses_api_url(&self.inner.base_url, self.inner.api_provider)
             }
             ApiProvider::Anthropic => anthropic_messages_url(&self.inner.base_url),
             _ => unreachable!("provider checked above"),
@@ -153,9 +168,11 @@ impl ProviderNativeSearchClient {
             .await
             .context("provider-native web search returned invalid JSON")?;
         let mut parsed = match self.inner.api_provider {
-            ApiProvider::Openai | ApiProvider::Xai | ApiProvider::ModelstudioTokenPlan => {
-                parse_responses_search(&payload)
-            }
+            ApiProvider::Openai
+            | ApiProvider::Xai
+            | ApiProvider::ModelstudioTokenPlan
+            | ApiProvider::Deepseek
+            | ApiProvider::DeepseekCN => parse_responses_search(&payload),
             ApiProvider::Anthropic => parse_anthropic_search(&payload),
             _ => unreachable!("provider checked above"),
         };
@@ -169,6 +186,7 @@ enum ResponsesSearchDialect {
     Openai,
     Xai,
     ModelStudio,
+    Deepseek,
 }
 
 fn search_prompt(request: &ProviderNativeSearchRequest) -> String {
@@ -197,18 +215,22 @@ fn build_responses_search_body(
         "model": model,
         "input": search_prompt(request),
         "tools": [tool],
-        "tool_choice": "required",
-        "store": false,
     });
-    if matches!(dialect, ResponsesSearchDialect::Openai) {
-        body["include"] = json!(["web_search_call.action.sources"]);
-    } else {
-        // xAI documents the same Responses tool shape but not OpenAI's
-        // source-inclusion extension. Citations are recovered from xAI's
-        // response annotations / citations field instead.
-        body.as_object_mut()
-            .expect("search body is an object")
-            .remove("store");
+    match dialect {
+        ResponsesSearchDialect::Openai => {
+            body["tool_choice"] = json!("required");
+            body["store"] = json!(false);
+            body["include"] = json!(["web_search_call.action.sources"]);
+        }
+        ResponsesSearchDialect::Xai => {
+            body["tool_choice"] = json!("required");
+        }
+        ResponsesSearchDialect::ModelStudio => {
+            body["tool_choice"] = json!("required");
+        }
+        ResponsesSearchDialect::Deepseek => {
+            body["tool_choice"] = json!({ "type": "web_search" });
+        }
     }
     body
 }
@@ -248,14 +270,26 @@ fn parse_responses_search(payload: &Value) -> ProviderNativeSearchResponse {
     let mut citations = Vec::new();
     if let Some(output) = payload.get("output").and_then(Value::as_array) {
         for item in output {
-            if let Some(sources) = item.pointer("/action/sources").and_then(Value::as_array) {
-                for source in sources {
-                    push_citation(&mut citations, citation_from_value(source, None, None));
+            let item_type = item.get("type").and_then(Value::as_str);
+            if item_type == Some("web_search_call")
+                && let Some(action) = item.get("action")
+            {
+                if let Some(sources) = action.get("sources").and_then(Value::as_array) {
+                    for source in sources {
+                        push_citation(&mut citations, citation_from_value(source, None, None));
+                    }
                 }
+                push_citation(&mut citations, citation_from_value(action, None, None));
             }
-            if let Some(content) = item.get("content").and_then(Value::as_array) {
+
+            if item_type == Some("message")
+                && let Some(content) = item.get("content").and_then(Value::as_array)
+            {
                 for block in content {
-                    if let Some(text) = block.get("text").and_then(Value::as_str)
+                    if matches!(
+                        block.get("type").and_then(Value::as_str),
+                        Some("output_text" | "text")
+                    ) && let Some(text) = block.get("text").and_then(Value::as_str)
                         && !text.trim().is_empty()
                     {
                         answer_parts.push(text.trim().to_string());
@@ -277,6 +311,11 @@ fn parse_responses_search(payload: &Value) -> ProviderNativeSearchResponse {
         && !output_text.trim().is_empty()
     {
         answer_parts.push(output_text.trim().to_string());
+    }
+    for answer in &answer_parts {
+        for citation in citations_from_text(answer) {
+            push_citation(&mut citations, Some(citation));
+        }
     }
     if let Some(top_level) = payload.get("citations").and_then(Value::as_array) {
         for citation in top_level {
@@ -403,6 +442,38 @@ fn push_citation(
     citations.push(candidate);
 }
 
+fn citations_from_text(text: &str) -> Vec<ProviderNativeCitation> {
+    let mut citations = Vec::new();
+    let mut offset = 0;
+    while offset < text.len() {
+        let remaining = &text[offset..];
+        let relative_start = match (remaining.find("https://"), remaining.find("http://")) {
+            (Some(https), Some(http)) => Some(https.min(http)),
+            (Some(https), None) => Some(https),
+            (None, Some(http)) => Some(http),
+            (None, None) => None,
+        };
+        let Some(relative_start) = relative_start else {
+            break;
+        };
+        let start = offset + relative_start;
+        let tail = &text[start..];
+        let end = tail
+            .char_indices()
+            .find_map(|(index, ch)| {
+                (index > 0
+                    && (ch.is_whitespace()
+                        || matches!(ch, ')' | ']' | '}' | '>' | '"' | '\'' | '`')))
+                .then_some(index)
+            })
+            .unwrap_or(tail.len());
+        let url = tail[..end].trim_end_matches(['.', ',', ';', ':', '!', '?']);
+        push_citation(&mut citations, citation_from_url(url, None, None, None));
+        offset = start + end.max(1);
+    }
+    citations
+}
+
 fn fallback_title(url: &str) -> String {
     reqwest::Url::parse(url)
         .ok()
@@ -494,6 +565,20 @@ mod tests {
     }
 
     #[test]
+    fn deepseek_payload_uses_its_responses_search_contract() {
+        let body = build_responses_search_body(
+            "deepseek-v4-flash",
+            &request(),
+            ResponsesSearchDialect::Deepseek,
+        );
+        assert_eq!(body["tools"][0]["type"], "web_search");
+        assert!(body["tools"][0].get("filters").is_none());
+        assert_eq!(body["tool_choice"]["type"], "web_search");
+        assert!(body.get("include").is_none());
+        assert!(body.get("store").is_none());
+    }
+
+    #[test]
     fn anthropic_payload_uses_basic_direct_search_contract() {
         let body = build_anthropic_search_body("claude-opus-4-8", &request(), 2_048);
         assert_eq!(body["tools"][0]["type"], "web_search_20250305");
@@ -533,6 +618,48 @@ mod tests {
         assert_eq!(parsed.citations.len(), 2);
         assert_eq!(parsed.citations[0].title, "Source A");
         assert_eq!(parsed.citations[1].url, "https://example.org/b");
+    }
+
+    #[test]
+    fn responses_parser_keeps_final_message_and_opened_pages_only() {
+        let payload = json!({
+            "output": [
+                {
+                    "type": "reasoning",
+                    "content": [{
+                        "type": "reasoning_text",
+                        "text": "private analysis https://reasoning.example/ must stay hidden"
+                    }]
+                },
+                {
+                    "type": "web_search_call",
+                    "action": {
+                        "type": "open_page",
+                        "url": "https://github.com/Hmbown/CodeWhale"
+                    }
+                },
+                {
+                    "type": "message",
+                    "content": [{
+                        "type": "output_text",
+                        "text": "Official repository: https://github.com/Hmbown/CodeWhale",
+                        "annotations": []
+                    }]
+                }
+            ]
+        });
+
+        let parsed = parse_responses_search(&payload);
+
+        assert_eq!(
+            parsed.answer.as_deref(),
+            Some("Official repository: https://github.com/Hmbown/CodeWhale")
+        );
+        assert_eq!(parsed.citations.len(), 1);
+        assert_eq!(
+            parsed.citations[0].url,
+            "https://github.com/Hmbown/CodeWhale"
+        );
     }
 
     #[test]
@@ -577,6 +704,15 @@ mod tests {
     fn non_http_citations_are_rejected() {
         let payload = json!({ "citations": ["javascript:alert(1)"] });
         assert!(parse_responses_search(&payload).citations.is_empty());
+    }
+
+    #[test]
+    fn answer_links_preserve_mixed_scheme_source_order() {
+        let citations =
+            citations_from_text("First http://legacy.example/a, then https://secure.example/b.");
+        assert_eq!(citations.len(), 2);
+        assert_eq!(citations[0].url, "http://legacy.example/a");
+        assert_eq!(citations[1].url, "https://secure.example/b");
     }
 
     #[tokio::test]
@@ -672,6 +808,61 @@ mod tests {
 
         assert_eq!(response.citations.len(), 1);
         assert_eq!(response.citations[0].url, "https://example.com/qwen");
+    }
+    #[tokio::test]
+    async fn deepseek_adapter_uses_authenticated_responses_endpoint() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/responses"))
+            .and(header("authorization", "Bearer deepseek-test-key"))
+            .and(body_partial_json(json!({
+                "model": "deepseek-v4-flash",
+                "tools": [{ "type": "web_search" }],
+                "tool_choice": { "type": "web_search" }
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "output": [
+                    {
+                        "type": "web_search_call",
+                        "action": {
+                            "type": "open_page",
+                            "url": "https://example.com/deepseek"
+                        }
+                    },
+                    {
+                        "type": "message",
+                        "content": [{
+                            "type": "output_text",
+                            "text": "Grounded answer.",
+                            "annotations": []
+                        }]
+                    }
+                ]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let config = Config {
+            provider: Some("deepseek".to_string()),
+            providers: Some(ProvidersConfig {
+                deepseek: ProviderConfig {
+                    api_key: Some("deepseek-test-key".to_string()),
+                    base_url: Some(format!("{}/v1", server.uri())),
+                    model: Some("deepseek-v4-flash".to_string()),
+                    ..ProviderConfig::default()
+                },
+                ..ProvidersConfig::default()
+            }),
+            ..Config::default()
+        };
+        let inner = DeepSeekClient::new(&config).expect("test DeepSeek client");
+        let client = ProviderNativeSearchClient::new(inner).expect("DeepSeek native adapter");
+
+        let response = client.search(&request()).await.expect("native search");
+
+        assert_eq!(response.answer.as_deref(), Some("Grounded answer."));
+        assert_eq!(response.citations.len(), 1);
+        assert_eq!(response.citations[0].url, "https://example.com/deepseek");
     }
 
     #[tokio::test]

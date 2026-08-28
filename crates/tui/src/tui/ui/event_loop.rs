@@ -175,6 +175,9 @@ pub async fn run_tui(
     plugin_registry: std::sync::Arc<crate::plugins::PluginRegistry>,
     pending_telemetry_notice: Option<crate::telemetry_notice::PendingTelemetryNotice>,
 ) -> Result<()> {
+    // Install notification, sound, category, and attention policy before any
+    // producer (including the model-facing notify tool) can emit an event.
+    let _ = crate::tui::notifications::settings(config);
     let use_alt_screen = options.use_alt_screen;
     let use_mouse_capture = options.use_mouse_capture;
     let use_bracketed_paste = options.use_bracketed_paste;
@@ -3707,16 +3710,6 @@ pub(crate) async fn run_event_loop(
 
         if let Some(evt) = maybe_terminal_event {
             app.needs_redraw = true;
-
-            match &evt {
-                Event::FocusGained => {
-                    crate::tui::notifications::set_terminal_focused(true);
-                }
-                Event::FocusLost => {
-                    crate::tui::notifications::set_terminal_focused(false);
-                }
-                _ => {}
-            }
 
             // Handle bracketed paste events
             if let Event::Paste(text) = &evt {

@@ -21583,7 +21583,8 @@ fn notification_settings_tui_always_keeps_configured_method_no_threshold() {
     };
 
     let (method, threshold, include_summary) =
-        crate::tui::notifications::settings(&config).expect("notification should be enabled");
+        crate::tui::notifications::settings_projection(&config)
+            .expect("notification should be enabled");
     assert_eq!(method, crate::tui::notifications::Method::Bel);
     assert_eq!(threshold, Duration::ZERO);
     assert!(include_summary);
@@ -21599,7 +21600,7 @@ fn notification_settings_tui_never_disables_notifications() {
         ..Config::default()
     };
 
-    assert!(crate::tui::notifications::settings(&config).is_none());
+    assert!(crate::tui::notifications::settings_projection(&config).is_none());
 }
 
 #[test]
@@ -21620,7 +21621,8 @@ fn notification_settings_no_tui_override_uses_notifications_block() {
     };
 
     let (method, threshold, include_summary) =
-        crate::tui::notifications::settings(&config).expect("notification should be enabled");
+        crate::tui::notifications::settings_projection(&config)
+            .expect("notification should be enabled");
     assert_eq!(method, crate::tui::notifications::Method::Osc9);
     assert_eq!(threshold, Duration::from_secs(45));
     assert!(!include_summary);
