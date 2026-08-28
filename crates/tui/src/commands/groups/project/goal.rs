@@ -580,4 +580,81 @@ mod tests {
                 .contains("Command capability unavailable: presentation")
         );
     }
+
+    #[test]
+    fn format_elapsed_matches_tui_leaf_helper() {
+        // The portable replica must stay byte-identical to the TUI elapsed
+        // helper (Phase 4 review recommendation).
+        for secs in [0, 1, 59, 60, 61, 125, 3599, 3600, 3601] {
+            assert_eq!(
+                format_elapsed(secs),
+                crate::elapsed::format_elapsed_secs(secs),
+                "format_elapsed({secs}) must equal the TUI helper"
+            );
+        }
+    }
+
+    #[test]
+    fn goal_control_accepted_translates_through_fake_presentation() {
+        // Pending controls route to the translated message, not the raw key.
+        let mut goal = goal_state();
+        goal.objective = Some("Keep the build green".to_string());
+        goal.status = ProjectGoalStatus::Active;
+        goal.pending_controls = true;
+        goal.last_known_objective = Some("Keep the build green".to_string());
+        goal.last_known_status = Some(ProjectGoalStatus::Paused);
+        let result = run(&goal, Some("pause"));
+        assert!(!result.is_error);
+        let msg = result.message.expect("pending-control message");
+        assert!(msg.contains("Goal control saved"));
+        assert!(
+            !msg.contains("goal_control_accepted"),
+            "raw key must not leak"
+        );
+    }
+
+    #[test]
+    fn idle_hint_translates_through_fake_presentation() {
+        // Active goal not being driven: the idle hint is the translated text.
+        let mut goal = goal_state();
+        goal.objective = Some("Ship it".to_string());
+        goal.status = ProjectGoalStatus::Active;
+        goal.is_loading = false;
+        goal.goal_continuation_waiting = false;
+        let result = run(&goal, Some("status"));
+        let line = result.message.unwrap();
+        assert!(
+            line.contains("not running now"),
+            "idle hint must be translated: {line}"
+        );
+        assert!(
+            !line.contains("goal_status_idle_hint"),
+            "raw key must not leak"
+        );
+    }
+
+    #[test]
+    fn goal_token_fallback_uses_session_total() {
+        // tokens_used == 0 falls back to the session conversation-token total.
+        let mut goal = goal_state();
+        goal.objective = Some("Ship it".to_string());
+        goal.token_budget = Some(100);
+        goal.tokens_used = 0;
+        goal.session_total_tokens = 42;
+        let result = run(&goal, Some("status"));
+        let line = result.message.unwrap();
+        assert!(line.contains("tokens 42/100 (42%)"), "line: {line}");
+    }
+
+    #[test]
+    fn goal_token_uses_engine_count_when_nonzero() {
+        let mut goal = goal_state();
+        goal.objective = Some("Ship it".to_string());
+        goal.token_budget = Some(100);
+        goal.tokens_used = 10;
+        goal.session_total_tokens = 42;
+        let result = run(&goal, Some("status"));
+        let line = result.message.unwrap();
+        assert!(line.contains("tokens 10/100 (10%)"), "line: {line}");
+    }
 }

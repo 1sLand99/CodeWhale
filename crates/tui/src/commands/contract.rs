@@ -897,6 +897,47 @@ mod tests {
     }
 
     #[test]
+    fn key_to_project_message_id_resolves_goal_runtime_keys_and_rejects_unknown() {
+        // FEAT-021 D5: only /goal uses runtime translations via the project
+        // key map; unknown keys fail safely.
+        assert_eq!(
+            key_to_project_message_id("goal_control_accepted"),
+            Some(MessageId::GoalControlAccepted)
+        );
+        assert_eq!(
+            key_to_project_message_id("goal_status_idle_hint"),
+            Some(MessageId::GoalStatusIdleHint)
+        );
+        assert_eq!(key_to_project_message_id("goal_bogus_key"), None);
+        assert_eq!(key_to_project_message_id(""), None);
+    }
+
+    #[test]
+    fn presentation_translate_resolves_project_keys_with_locale_and_fallback() {
+        // The presentation facet resolves the project runtime keys through the
+        // current catalog (authoritative English fallback preserved).
+        let mut app = test_app();
+        let mut bundle = app.command_contexts();
+        let mut parts = bundle.parts();
+        let presentation = parts.presentation.as_mut().expect("presentation facet");
+        let accepted = presentation
+            .translate("goal_control_accepted", &[])
+            .expect("goal_control_accepted must resolve");
+        assert!(
+            accepted.contains("Goal control saved"),
+            "English fallback text expected: {accepted}"
+        );
+        let hint = presentation
+            .translate("goal_status_idle_hint", &[])
+            .expect("goal_status_idle_hint must resolve");
+        assert!(hint.contains("not running now"), "hint: {hint}");
+        assert!(
+            presentation.translate("goal_bogus", &[]).is_err(),
+            "unknown key must fail safely"
+        );
+    }
+
+    #[test]
     fn cost_adapter_delegates_totals_high_water_and_route_receipt_to_app() {
         let mut app = test_app();
         app.cost_currency = CostCurrency::Usd;
