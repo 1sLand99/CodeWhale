@@ -702,7 +702,7 @@ pub(crate) fn render(f: &mut Frame, app: &mut App, _config: &Config) -> Option<(
         .set_focus_texture(app.focus_texture, app.ui_theme);
     app.sidebar_hover = crate::tui::app::SidebarHoverState::default();
     app.viewport.last_approval_area = None;
-    app.viewport.header_hitboxes.clear();
+    app.viewport.interaction_targets.clear();
     // Keep the OSC-0 whale title truthful to the current shell phase so
     // alt-tabbed sessions communicate state without a second in-app spinner.
     crate::tui::underwater::sync_title_activity(app);
@@ -961,10 +961,26 @@ pub(crate) fn render(f: &mut Frame, app: &mut App, _config: &Config) -> Option<(
     }
 
     crate::tui::underwater::render_header(header_area, f.buffer_mut(), app);
-    app.viewport.header_hitboxes = crate::tui::underwater::header_hitboxes(header_area, app);
-    for hitbox in &app.viewport.header_hitboxes {
-        let label = match hitbox.target {
-            crate::tui::app::HeaderActionTarget::InspectContext => format!(
+    let context_budget = crate::tui::tideline::ContextBudgetSnapshot::from_app(app);
+    for hitbox in crate::tui::underwater::header_hitboxes(header_area, app) {
+        if let Some(context_budget) = context_budget {
+            app.viewport
+                .interaction_targets
+                .register(crate::tui::tideline::InteractionTarget {
+                    id: crate::tui::tideline::InteractionTargetId::HEADER_CONTEXT,
+                    area: hitbox.area,
+                    focus: crate::tui::tideline::InteractionFocus::Direct,
+                    keyboard_action: Some(hitbox.target),
+                    mouse_action: Some(hitbox.target),
+                    inspect_detail: crate::tui::tideline::InspectDetail::ContextBudget(
+                        context_budget,
+                    ),
+                });
+        }
+    }
+    for target in app.viewport.interaction_targets.iter() {
+        let label = match target.mouse_action {
+            Some(crate::tui::tideline::InteractionAction::InspectContext) => format!(
                 "{} · {}",
                 crate::localization::tr(
                     app.ui_locale,
@@ -975,10 +991,11 @@ pub(crate) fn render(f: &mut Frame, app: &mut App, _config: &Config) -> Option<(
                     crate::localization::MessageId::CtxMenuContextInspectorDesc,
                 ),
             ),
+            None => continue,
         };
         crate::tui::hover_layer::register_rect(
             crate::tui::hover_hit::HoverTargetKind::Link,
-            hitbox.area,
+            target.area,
             label,
             false,
         );

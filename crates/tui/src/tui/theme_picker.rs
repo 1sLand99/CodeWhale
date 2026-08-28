@@ -43,11 +43,11 @@ pub struct ThemePickerView {
     /// reads `COLORFGBG`) on every keystroke.
     system_ui_theme: UiTheme,
     /// Effective session treatment, reported separately from theme so the
-    /// picker never claims an ombre is active under Terminal or Flat.
+    /// picker never claims Deepsea is active under Terminal or Flat.
     ocean_treatment: crate::tui::ocean::OceanTreatment,
     /// User-configured background applied on top of every named-theme preview.
     /// Without carrying this into the picker, a customized Solarized Light
-    /// session would render ombre behind the modal but report Flat inside it.
+    /// session would render Deepsea behind the modal but report Flat inside it.
     background_override: Option<Color>,
     row_hitboxes: RefCell<Vec<(Rect, usize)>>,
     last_mouse_selected: Option<usize>,
@@ -87,7 +87,7 @@ impl ThemePickerView {
     pub fn new(original_name: String) -> Self {
         Self::new_with_treatment(
             original_name,
-            crate::tui::ocean::OceanTreatment::Ombre,
+            crate::tui::ocean::OceanTreatment::Deepsea,
             Locale::En,
         )
     }
@@ -296,13 +296,13 @@ impl ModalView for ThemePickerView {
 
         let mut lines: Vec<Line> = Vec::with_capacity(SELECTABLE_THEMES.len() + 3);
         let treatment = if matches!(self.current(), ThemeId::Terminal) {
-            tr(self.locale, MessageId::ThemeTreatmentOmbreUnavailable)
+            tr(self.locale, MessageId::ThemeTreatmentDeepseaUnavailable)
         } else if self.ocean_treatment.is_flat()
             || crate::tui::ocean::OceanRamp::for_theme(&live).is_none()
         {
             tr(self.locale, MessageId::ThemeTreatmentFlatActive)
         } else {
-            tr(self.locale, MessageId::ThemeTreatmentOmbreActive)
+            tr(self.locale, MessageId::ThemeTreatmentDeepseaActive)
         };
         lines.push(Line::from(Span::styled(
             treatment,
@@ -590,7 +590,7 @@ mod tests {
 
         let terminal = ThemePickerView::new_with_treatment(
             "terminal".to_string(),
-            crate::tui::ocean::OceanTreatment::Ombre,
+            crate::tui::ocean::OceanTreatment::Deepsea,
             Locale::En,
         );
         let mut terminal_buf = ratatui::buffer::Buffer::empty(area);
@@ -600,12 +600,12 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        assert!(terminal_text.contains("Ombre unavailable"));
+        assert!(terminal_text.contains("Deepsea unavailable"));
         assert!(terminal_text.contains("Terminal owns the background"));
 
         let solarized = ThemePickerView::new_with_treatment(
             "solarized-light".to_string(),
-            crate::tui::ocean::OceanTreatment::Ombre,
+            crate::tui::ocean::OceanTreatment::Deepsea,
             Locale::En,
         );
         let mut solarized_buf = ratatui::buffer::Buffer::empty(area);
@@ -616,11 +616,11 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect::<String>();
         assert!(solarized_text.contains("Treatment  Flat — active"));
-        assert!(!solarized_text.contains("Treatment  Ombre — active"));
+        assert!(!solarized_text.contains("Treatment  Deepsea — active"));
 
         let solarized_custom = ThemePickerView::new_with_treatment_and_background(
             "solarized-light".to_string(),
-            crate::tui::ocean::OceanTreatment::Ombre,
+            crate::tui::ocean::OceanTreatment::Deepsea,
             Locale::En,
             Some(Color::Rgb(0x1a, 0x1b, 0x26)),
         );
@@ -631,7 +631,7 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        assert!(solarized_custom_text.contains("Treatment  Ombre — active"));
+        assert!(solarized_custom_text.contains("Treatment  Deepsea — active"));
         assert!(!solarized_custom_text.contains("Treatment  Flat — active"));
     }
 

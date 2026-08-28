@@ -177,7 +177,7 @@ pub(crate) fn underwater_animation_interval_ms(app: &App) -> u64 {
 pub(crate) fn underwater_motion_surface_visible(
     area: Option<Rect>,
     underwater_atmosphere_enabled: bool,
-    ombre_field_breathes: bool,
+    deepsea_field_breathes: bool,
     empty_water_visible: bool,
     obscured: bool,
 ) -> bool {
@@ -187,7 +187,7 @@ pub(crate) fn underwater_motion_surface_visible(
     area.is_some_and(|area| {
         area.width > 0
             && area.height > 0
-            && (ombre_field_breathes
+            && (deepsea_field_breathes
                 || (area.width >= crate::tui::ocean::AMBIENT_MIN_WIDTH
                     && area.height >= crate::tui::ocean::AMBIENT_MIN_HEIGHT)
                 || (empty_water_visible && crate::tui::underwater::empty_state_mark_visible(area)))

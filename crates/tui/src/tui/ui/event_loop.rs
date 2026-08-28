@@ -3360,8 +3360,8 @@ pub(crate) async fn run_event_loop(
         // The ordinary terminal stays quiet. Only the explicit underwater
         // treatment earns ambient redraws; its column can breathe at any
         // usable size and its life needs the collision-safe water budget.
-        let underwater_atmosphere_enabled = app.ocean_treatment.is_ombre();
-        let ombre_field_breathes = underwater_atmosphere_enabled
+        let underwater_atmosphere_enabled = app.ocean_treatment.is_deepsea();
+        let deepsea_field_breathes = underwater_atmosphere_enabled
             && crate::tui::ocean::OceanRamp::for_theme(&app.ui_theme).is_some();
         let browsing_history = !app.viewport.transcript_scroll.is_at_tail();
         let empty_water_visible = app.history.is_empty()
@@ -3376,7 +3376,7 @@ pub(crate) async fn run_event_loop(
         let underwater_motion_visible = underwater_motion_surface_visible(
             app.viewport.last_transcript_area,
             underwater_atmosphere_enabled,
-            ombre_field_breathes,
+            deepsea_field_breathes,
             empty_water_visible,
             underwater_surface_obscured,
         );

@@ -129,9 +129,9 @@ impl ChatWidget {
         let content_area = area;
         let background = app.ui_theme.surface_bg;
         // The ordinary shell inherits its host/theme surface. Underwater life
-        // is earned by the explicit Ombre treatment, never painted over a
+        // is earned by the explicit Deepsea treatment, never painted over a
         // user's terminal simply because the app happens to be active.
-        let underwater_atmosphere = app.ocean_treatment.is_ombre();
+        let underwater_atmosphere = app.ocean_treatment.is_deepsea();
         let ocean_ramp = underwater_atmosphere
             .then(|| crate::tui::ocean::OceanRamp::for_theme(&app.ui_theme))
             .flatten();
@@ -236,7 +236,7 @@ impl ChatWidget {
                 ocean_animated,
                 life_presence_fixed,
                 fish_flee_elapsed_ms,
-                // Reduced-motion users still get a quiet, static Ombre scene;
+                // Reduced-motion users still get a quiet, static Deepsea scene;
                 // Flat remains a normal host-owned terminal either way.
                 ambient_life: underwater_atmosphere
                     && !app.attention_hold_active()
@@ -4362,7 +4362,7 @@ mod tests {
         // scene. Production defaults to Flat/terminal-owned; keep tests that
         // inspect fish and caustics intentional rather than coupled to that
         // startup preference.
-        app.ocean_treatment = crate::tui::ocean::OceanTreatment::Ombre;
+        app.ocean_treatment = crate::tui::ocean::OceanTreatment::Deepsea;
         app
     }
 
@@ -5200,6 +5200,7 @@ mod tests {
         let root = slash_completion_hints("/", 128, &[], Locale::En, None, ApiProvider::Deepseek);
         assert!(root.iter().any(|hint| hint.name == "/model"));
         assert!(!root.iter().any(|hint| hint.name == "/provider"));
+        assert!(!root.iter().any(|hint| hint.name == "/pod"));
         assert!(!root.iter().any(|hint| hint.name == "/fleet"));
         assert!(!root.iter().any(|hint| hint.name == "/config"));
         assert!(!root.iter().any(|hint| hint.name == "/statusline"));
@@ -5404,6 +5405,19 @@ mod tests {
 
         assert_eq!(entry.alias_hint.as_deref(), Some("ship"));
         assert_eq!(entry.description, "Deploy target");
+    }
+
+    #[test]
+    fn slash_completion_migrates_legacy_fleet_to_canonical_pod() {
+        let hints =
+            slash_completion_hints("/fleet", 128, &[], Locale::En, None, ApiProvider::Deepseek);
+        let entry = hints
+            .iter()
+            .find(|hint| hint.name == "/pod")
+            .expect("legacy /fleet should discover canonical /pod");
+
+        assert_eq!(entry.alias_hint.as_deref(), Some("fleet"));
+        assert!(!hints.iter().any(|hint| hint.name == "/fleet"));
     }
 
     #[test]
@@ -6710,7 +6724,7 @@ mod tests {
         // the treatment it is actually asserting instead of inheriting a
         // transient Flat/Terminal choice from the process.
         app.ui_theme = palette::UI_THEME;
-        app.ocean_treatment = crate::tui::ocean::OceanTreatment::Ombre;
+        app.ocean_treatment = crate::tui::ocean::OceanTreatment::Deepsea;
         app.low_motion = false;
         app.fancy_animations = true;
         app.workspace = PathBuf::from("codewhale-test-workspace");
@@ -6781,10 +6795,10 @@ mod tests {
     }
 
     #[test]
-    fn solarized_light_ombre_keeps_canonical_surface_and_ambient_life() {
+    fn solarized_light_deepsea_keeps_canonical_surface_and_ambient_life() {
         let mut app = create_test_app();
         app.ui_theme = crate::palette::SOLARIZED_LIGHT_UI_THEME;
-        app.ocean_treatment = crate::tui::ocean::OceanTreatment::Ombre;
+        app.ocean_treatment = crate::tui::ocean::OceanTreatment::Deepsea;
         app.low_motion = false;
         app.fancy_animations = true;
         // The old cyan-tinted ramp produced the reported #e1e9da at row 16
@@ -6813,11 +6827,11 @@ mod tests {
     }
 
     #[test]
-    fn solarized_light_custom_background_keeps_ombre() {
+    fn solarized_light_custom_background_keeps_deepsea() {
         let mut app = create_test_app();
         let custom = Color::Rgb(0x1a, 0x1b, 0x26);
         app.ui_theme = crate::palette::SOLARIZED_LIGHT_UI_THEME.with_background_color(custom);
-        app.ocean_treatment = crate::tui::ocean::OceanTreatment::Ombre;
+        app.ocean_treatment = crate::tui::ocean::OceanTreatment::Deepsea;
 
         let area = Rect::new(0, 0, 100, 30);
         let mut buf = Buffer::empty(area);
@@ -6827,12 +6841,12 @@ mod tests {
         assert_ne!(
             buf[(0, 0)].bg,
             buf[(0, 29)].bg,
-            "custom Solarized Light backgrounds must retain ombre depth"
+            "custom Solarized Light backgrounds must retain Deepsea depth"
         );
     }
 
     #[test]
-    fn terminal_owned_background_stays_visually_quiet_without_ombre() {
+    fn terminal_owned_background_stays_visually_quiet_without_deepsea() {
         let mut app = create_test_app();
         app.ui_theme = crate::palette::TERMINAL_UI_THEME;
         app.ocean_treatment = crate::tui::ocean::OceanTreatment::Flat;
@@ -6851,7 +6865,7 @@ mod tests {
         let rendered = buffer_text(&buf, area);
         assert!(
             !rendered.contains("><>") && !rendered.contains("<><"),
-            "Terminal must remain a quiet host-owned shell without the selected Ombre scene:\n{rendered}"
+            "Terminal must remain a quiet host-owned shell without the selected Deepsea scene:\n{rendered}"
         );
     }
 
@@ -6918,7 +6932,7 @@ mod tests {
     fn reduced_motion_freezes_the_ocean_without_removing_depth() {
         let mut app = create_test_app();
         app.ui_theme = palette::UI_THEME;
-        app.ocean_treatment = crate::tui::ocean::OceanTreatment::Ombre;
+        app.ocean_treatment = crate::tui::ocean::OceanTreatment::Deepsea;
         app.low_motion = true;
         app.fancy_animations = true;
         let area = Rect::new(0, 0, 100, 20);

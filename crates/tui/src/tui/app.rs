@@ -693,13 +693,9 @@ impl Default for ComposerState {
     }
 }
 
-/// A concrete header action, kept typed so a click never has to re-parse the
-/// text that happened to be painted in the chrome.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HeaderActionTarget {
-    /// Open the existing context inspector for the measured context meter.
-    InspectContext,
-}
+/// Compatibility name retained for the first Tideline header slice. New
+/// surfaces register [`crate::tui::tideline::InteractionAction`] directly.
+pub type HeaderActionTarget = crate::tui::tideline::InteractionAction;
 
 /// A header target painted in the latest frame.
 ///
@@ -723,9 +719,9 @@ pub struct ViewportState {
     pub transcript_scrollbar_dragging: bool,
     pub last_transcript_area: Option<Rect>,
     pub last_composer_area: Option<Rect>,
-    /// Header chrome targets from the latest painted frame. Cleared before
-    /// every render so a resized or hidden meter can never swallow a click.
-    pub header_hitboxes: Vec<HeaderHitbox>,
+    /// Selectable targets from the latest painted frame. Cleared before every
+    /// render so resized or hidden controls can never swallow a click.
+    pub interaction_targets: crate::tui::tideline::InteractionRegistry,
     /// Last left-click trace over the composer, for double/triple-click
     /// word/line selection (crossterm does not decode click counts).
     pub composer_click_trace: Option<crate::tui::mouse_ui::ComposerClickTrace>,
@@ -763,7 +759,7 @@ impl Default for ViewportState {
             transcript_scrollbar_dragging: false,
             last_transcript_area: None,
             last_composer_area: None,
-            header_hitboxes: Vec::new(),
+            interaction_targets: crate::tui::tideline::InteractionRegistry::default(),
             composer_click_trace: None,
             last_approval_area: None,
             last_workflow_panel_area: None,
@@ -2250,8 +2246,8 @@ fn push_enabled_provider_model(
 }
 
 impl App {
-    /// Persist the pending session route as the explicit choice (`/fleet
-    /// save`, `/fleet save-as`, `/model save-default`). Returns the receipt
+    /// Persist the pending session route as the explicit choice (`/pod save`,
+    /// `/pod save-as`, `/model save-default`). Returns the receipt
     /// message naming the exact file written — or an error message when the
     /// write failed. Nothing is ever written without this explicit call.
     pub fn apply_route_save_choice(
@@ -2267,7 +2263,7 @@ impl App {
         match choice {
             RouteSaveChoice::UpdateFleet => {
                 let Some((name, scope)) = pending.fleet.clone() else {
-                    return "Nothing to update — no Fleet is selected. Use /fleet save-as to \
+                    return "Nothing to update — no Fleet is selected. Use /pod save-as to \
                              save this route as a new Fleet."
                         .to_string();
                 };
@@ -2289,7 +2285,7 @@ impl App {
                     }
                     Err(err) => format!(
                         "Fleet update failed: {err} — the saved Fleet may have moved. Use \
-                         /fleet save-as to persist the route."
+                         /pod save-as to persist the route."
                     ),
                 }
             }

@@ -2999,7 +2999,7 @@ async fn run_fleet_command(workspace: &Path, config: &Config, args: FleetArgs) -
     use codewhale_protocol::fleet::{FleetAlertEventClass, FleetArtifactKind, FleetRunId};
 
     // Every label and every row below comes from the shared Fleet control
-    // surface, so `codewhale fleet …` and `/fleet …` cannot drift in how they
+    // surface, so `codewhale fleet …` and `/pod …` cannot drift in how they
     // describe the same durable ledger (#1888, #4022).
     fn print_status(status: &FleetStatusSnapshot) {
         println!("{}", fleet_control::render_fleet_status_snapshot(status));
@@ -3127,7 +3127,7 @@ async fn run_fleet_command(workspace: &Path, config: &Config, args: FleetArgs) -
     // "no_fleet_ledger" while simultaneously creating the file it said was
     // missing — and the next invocation then reported an empty ledger as if a
     // Fleet had existed all along. Refuse the control verbs here, before the
-    // manager exists, so the CLI and `/fleet` agree and neither surface
+    // manager exists, so the CLI and `/pod` agree and neither surface
     // conjures the store it is reporting on (#4022).
     if let Some(operation) = match &args.command {
         FleetCommand::List => Some(ControlOperation::FleetList),
@@ -5976,7 +5976,7 @@ fn print_doctor_setup_report(
         );
     }
     println!(
-        "  · next actions: /constitution (standing law), /setup report (readiness), /setup provider or /provider setup <name> (provider credentials), /model (route), /config (runtime posture), /setup fleet (Operate/Fleet readiness), /fleet setup (explicit profile authoring), /setup hotbar (optional shortcuts), /setup tools (Tools/MCP readiness), /setup remote (remote runtime on-ramp), /setup persistence (path review)"
+        "  · next actions: /constitution (standing law), /setup report (readiness), /setup provider or /provider setup <name> (provider credentials), /model (route), /config (runtime posture), /setup fleet (Operate/Fleet readiness), /pod setup (explicit profile authoring), /setup hotbar (optional shortcuts), /setup tools (Tools/MCP readiness), /setup remote (remote runtime on-ramp), /setup persistence (path review)"
     );
     for step in codewhale_config::SetupStep::ALL {
         let entry = state.steps.get(&step);
@@ -5996,7 +5996,7 @@ fn print_doctor_setup_report(
 
 /// #5098: print every profile id that exists in more than one roster layer
 /// so a personal/config edit that loses to project is visible without
-/// opening `/fleet`.
+/// opening `/pod`.
 fn print_doctor_fleet_roster_layers(config: &Config, workspace: &Path) {
     use colored::Colorize;
 
@@ -6579,7 +6579,7 @@ fn doctor_setup_report_json(config: &Config, workspace: &Path) -> serde_json::Va
             "setup_report": "/setup report",
             "provider_model": "/setup provider, /provider setup <name>, or /model",
             "runtime_posture": "/config",
-            "operate_fleet": "/setup fleet (readiness), /fleet setup (explicit profile authoring)",
+            "operate_fleet": "/setup fleet (readiness), /pod setup (explicit profile authoring)",
             "hotbar": "/setup hotbar",
             "tools_mcp": "/setup tools",
             "remote_runtime": "/setup remote",
@@ -7891,7 +7891,7 @@ fn apply_selected_fleet_operator_for_launch(
     }
     let Some(selected) = crate::fleet::store::resolve_selected_fleet(workspace).map_err(|_| {
         anyhow!(
-            "Selected Fleet is missing or unreadable; inspect /fleet and repair or clear the selection."
+            "Selected Fleet is missing or unreadable; inspect /pod and repair or clear the selection."
         )
     })?
     else {
@@ -7900,7 +7900,7 @@ fn apply_selected_fleet_operator_for_launch(
     let fleet_name = crate::safe_label::SafeLabel::phrase(&selected.name);
     let (fleet, _) = crate::fleet::store::load_fleet_at(&selected.path).map_err(|_| {
         anyhow!(
-            "selected Fleet '{}' ({}) is invalid or unreadable; inspect /fleet and repair or clear the selection.",
+            "selected Fleet '{}' ({}) is invalid or unreadable; inspect /pod and repair or clear the selection.",
             fleet_name,
             selected.scope.label()
         )
@@ -12295,7 +12295,7 @@ mod doctor_setup_state_tests {
         assert_eq!(report["next_actions"]["runtime_posture"], "/config");
         assert_eq!(
             report["next_actions"]["operate_fleet"],
-            "/setup fleet (readiness), /fleet setup (explicit profile authoring)"
+            "/setup fleet (readiness), /pod setup (explicit profile authoring)"
         );
         assert_eq!(report["next_actions"]["hotbar"], "/setup hotbar");
         assert_eq!(report["next_actions"]["tools_mcp"], "/setup tools");

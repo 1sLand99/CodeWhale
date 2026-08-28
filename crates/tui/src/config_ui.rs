@@ -272,7 +272,8 @@ pub enum UiThemeValue {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum OceanTreatmentValue {
-    Ombre,
+    #[serde(alias = "ombre")]
+    Deepsea,
     Flat,
 }
 
@@ -1136,7 +1137,7 @@ impl UiThemeValue {
 impl OceanTreatmentValue {
     fn as_setting(self) -> &'static str {
         match self {
-            Self::Ombre => "ombre",
+            Self::Deepsea => "deepsea",
             Self::Flat => "flat",
         }
     }
@@ -1144,10 +1145,9 @@ impl OceanTreatmentValue {
 
 impl From<&str> for OceanTreatmentValue {
     fn from(value: &str) -> Self {
-        if value.trim().eq_ignore_ascii_case("flat") {
-            Self::Flat
-        } else {
-            Self::Ombre
+        match value.trim().to_ascii_lowercase().as_str() {
+            "deepsea" | "ombre" | "gradient" | "classic" => Self::Deepsea,
+            _ => Self::Flat,
         }
     }
 }

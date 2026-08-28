@@ -2166,7 +2166,7 @@ mod tests {
         }
 
         // Both control domains are bound.
-        for id in ["slash.lane", "slash.fleet"] {
+        for id in ["slash.lane", "slash.pod"] {
             assert!(registry.get(id).is_some(), "{id} must be bindable");
         }
     }

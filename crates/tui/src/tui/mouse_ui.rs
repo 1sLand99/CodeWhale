@@ -103,7 +103,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::localization::MessageId;
 use crate::models::{ContentBlock, Message};
-use crate::tui::app::{App, HeaderActionTarget, SidebarRowAction};
+use crate::tui::app::{App, SidebarRowAction};
 use crate::tui::command_palette::{
     CommandPaletteView, build_entries as build_command_palette_entries,
 };
@@ -111,6 +111,7 @@ use crate::tui::context_menu::{ContextMenuEntry, ContextMenuView};
 use crate::tui::history::HistoryCell;
 use crate::tui::scrolling::{ScrollDirection, TranscriptScroll};
 use crate::tui::selection::{SelectionAutoscroll, TranscriptSelectionPoint};
+use crate::tui::tideline::InteractionAction;
 use crate::tui::ui_text::{
     history_cell_to_text, line_to_plain, slice_text, text_display_width, truncate_line_to_width,
 };
@@ -482,15 +483,14 @@ pub(crate) fn handle_mouse_event(app: &mut App, mouse: MouseEvent) -> Vec<ViewEv
     // typed target recorded by the renderer instead of guessing from a label
     // or rebuilding chrome geometry in input handling.
     if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
-        let target = app
+        let action = app
             .viewport
-            .header_hitboxes
-            .iter()
-            .find(|hitbox| mouse_hits_rect(mouse, Some(hitbox.area)))
-            .map(|hitbox| hitbox.target);
-        if let Some(target) = target {
-            match target {
-                HeaderActionTarget::InspectContext => open_context_inspector(app),
+            .interaction_targets
+            .target_at(mouse.column, mouse.row)
+            .and_then(|target| target.mouse_action);
+        if let Some(action) = action {
+            match action {
+                InteractionAction::InspectContext => open_context_inspector(app),
             }
             app.needs_redraw = true;
             return Vec::new();
@@ -1756,8 +1756,11 @@ mod tests {
     use crate::models::Role;
     use crate::models::{ContentBlock, Message};
     use crate::tui::app::{
-        App, HeaderActionTarget, HeaderHitbox, SidebarHoverRow, SidebarHoverSection,
-        SidebarRowAction, TuiOptions,
+        App, SidebarHoverRow, SidebarHoverSection, SidebarRowAction, TuiOptions,
+    };
+    use crate::tui::tideline::{
+        ContextBudgetSnapshot, InspectDetail, InteractionAction, InteractionFocus,
+        InteractionTarget, InteractionTargetId,
     };
     use crate::tui::views::{ContextMenuAction, ModalKind};
     use crossterm::event::{
@@ -1895,10 +1898,20 @@ mod tests {
     fn context_meter_click_uses_the_same_inspector_as_the_keyboard_shortcut() {
         let mut app = create_test_app();
         app.launch.visible = false;
-        app.viewport.header_hitboxes = vec![HeaderHitbox {
-            area: Rect::new(52, 0, 20, 1),
-            target: HeaderActionTarget::InspectContext,
-        }];
+        app.viewport
+            .interaction_targets
+            .register(InteractionTarget {
+                id: InteractionTargetId::HEADER_CONTEXT,
+                area: Rect::new(52, 0, 20, 1),
+                focus: InteractionFocus::Direct,
+                keyboard_action: Some(InteractionAction::InspectContext),
+                mouse_action: Some(InteractionAction::InspectContext),
+                inspect_detail: InspectDetail::ContextBudget(ContextBudgetSnapshot {
+                    used_tokens: 3_000,
+                    max_tokens: 10_000,
+                    percent_basis_points: 3_000,
+                }),
+            });
 
         handle_mouse_event(&mut app, left_click(60, 0));
 

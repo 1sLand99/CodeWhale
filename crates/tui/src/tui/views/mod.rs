@@ -919,7 +919,7 @@ pub enum ViewEvent {
         reasoning_effort: Option<String>,
         locale: crate::localization::Locale,
     },
-    /// Emitted by the `/fleet` roster view (`s` / Enter) to edit a member.
+    /// Emitted by the `/pod` roster view (`s` / Enter) to edit a member.
     /// The host routes a selected v2 Fleet to its exact editor and uses the
     /// legacy profile wizard only when no named Fleet is selected.
     FleetRosterOpenSetupRequested {
@@ -927,7 +927,7 @@ pub enum ViewEvent {
         /// identify which row the operator selected.
         member_id: String,
     },
-    /// Emitted by the `/fleet` roster `m` shortcut to open the selected
+    /// Emitted by the `/pod` roster `m` shortcut to open the selected
     /// member's exact Fleet editor directly on its model picker.
     FleetRosterOpenModelRequested {
         /// Exact Fleet member id; roles are not unique and therefore cannot
@@ -938,7 +938,7 @@ pub enum ViewEvent {
     FleetRosterOpenWorkersRequested,
 
     /// The roster asks the host to open the secondary named-Fleet switcher
-    /// (`/fleet fleets`). Editing stays on setup; this is pick/select only.
+    /// (`/pod fleets`). Editing stays on setup; this is pick/select only.
     FleetRosterOpenFleetsRequested,
 
     /// The Fleet list view asks the host to open a saved Fleet's detail view.
@@ -2397,7 +2397,7 @@ impl ConfigView {
             "theme" => "Named UI theme. Scope: saved settings.",
             "low_motion" => "Reduce motion: freezes pulses, keeps static highlights.",
             "calm_mode" => "Quieter chrome and denser transcript.",
-            "ocean_treatment" => "Underwater field treatment (ombre / flat / terminal).",
+            "ocean_treatment" => "Underwater field treatment (deepsea / flat / terminal).",
             "locale" => "UI language. Scope: saved settings.",
             "reasoning_effort" => "Default reasoning effort for capable models.",
             "default_mode" => "Startup mode (agent / plan / operate).",
@@ -3185,7 +3185,7 @@ fn config_literal_hint_for_key(key: &str) -> &'static str {
         "calm_mode" => "quietens transcript chrome and tool detail; independent of live motion",
         "low_motion" => "on overrides live-state motion; model output is unchanged",
         "fancy_animations" => "on animates truthful tool, status, and ocean live state",
-        "ocean_treatment" => "ombre | flat (appearance; independent of motion)",
+        "ocean_treatment" => "deepsea | flat (appearance; independent of motion)",
         "show_thinking" => "show or hide model reasoning in chat; task lists stay concise",
         "thinking_default_expanded" => {
             "expand model reasoning by default; Space still toggles each block"
@@ -3222,9 +3222,7 @@ fn config_literal_hint_for_key(key: &str) -> &'static str {
         "fleet.exec.max_spawn_depth" => {
             "0 blocks child agents; 3 default (same axis as sub-agents); capped at 8"
         }
-        "features.subagents" => {
-            "read-only feature flag state; /fleet setup is the user-facing path"
-        }
+        "features.subagents" => "read-only feature flag state; /pod setup is the user-facing path",
         "features.web_search" => "read-only feature flag state for web search tools",
         "features.apply_patch" => "read-only feature flag state for patch editing tools",
         "features.mcp" => "read-only feature flag state for MCP tools",
@@ -3302,7 +3300,7 @@ fn config_choice_values(key: &str, provider: ApiProvider) -> Option<Vec<String>>
         "reasoning_effort" => {
             vec!["default", "auto", "off", "low", "medium", "high", "max"]
         }
-        "ocean_treatment" => vec!["ombre", "flat"],
+        "ocean_treatment" => vec!["deepsea", "flat"],
         "focus_texture" => vec!["off", "scrim", "grain"],
         "work_surface_placement" => vec!["top", "left", "right", "off"],
         "rail_panel" => vec!["tasks", "agents", "context", "pinned"],
@@ -3474,7 +3472,7 @@ fn config_choice_detail(locale: Locale, key: &str, value: &str) -> Cow<'static, 
         ("thinking_highlight", "false") => {
             "Keep the dashed reasoning rail and italic text without a filled background."
         }
-        ("ocean_treatment", "ombre") => "Use one continuous ocean color field.",
+        ("ocean_treatment", "deepsea") => "Use one continuous ocean color field.",
         ("ocean_treatment", "flat") => "Use a single flat background color.",
         _ => "",
     })
@@ -4482,7 +4480,7 @@ impl ModalView for SubAgentsView {
             KeyCode::Char('f') | KeyCode::Char('F') => {
                 ViewAction::Emit(ViewEvent::CommandPaletteSelected {
                     action: CommandPaletteAction::ExecuteCommand {
-                        command: "/fleet".to_string(),
+                        command: "/pod".to_string(),
                     },
                 })
             }
@@ -4568,7 +4566,7 @@ impl ModalView for SubAgentsView {
                 Style::default().fg(palette::TEXT_MUTED),
             )));
             lines.push(Line::from(Span::styled(
-                "Configure roles and launch posture with /fleet.",
+                "Configure roles and launch posture with /pod.",
                 Style::default().fg(palette::TEXT_DIM),
             )));
         } else {
@@ -5532,8 +5530,8 @@ mod tests {
         match action {
             ViewAction::Emit(ViewEvent::CommandPaletteSelected {
                 action: CommandPaletteAction::ExecuteCommand { command },
-            }) => assert_eq!(command, "/fleet"),
-            other => panic!("expected /fleet jump action, got {other:?}"),
+            }) => assert_eq!(command, "/pod"),
+            other => panic!("expected /pod jump action, got {other:?}"),
         }
     }
 

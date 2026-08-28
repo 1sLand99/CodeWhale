@@ -4735,7 +4735,7 @@ context_window = 262144
         assert_eq!(app.ui_theme.surface_bg, explicit_base3);
         assert!(
             crate::tui::ocean::OceanRamp::for_theme(&app.ui_theme).is_some(),
-            "the explicit surface must retain ombre when previewing another theme"
+            "the explicit surface must retain Deepsea when previewing another theme"
         );
     }
 

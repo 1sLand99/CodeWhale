@@ -4115,7 +4115,7 @@ fn wide_underwater_shell_aligns_transcript_and_composer_on_the_shared_canvas() {
 fn wide_underwater_canvas_carries_the_ocean_to_both_terminal_edges() {
     let mut app = create_test_app();
     app.ui_theme = crate::palette::UI_THEME;
-    app.ocean_treatment = crate::tui::ocean::OceanTreatment::Ombre;
+    app.ocean_treatment = crate::tui::ocean::OceanTreatment::Deepsea;
     app.onboarding_workspace_trust_gate = false;
     app.onboarding = OnboardingState::None;
     let surface_bg = app.ui_theme.surface_bg;
@@ -4129,7 +4129,7 @@ fn wide_underwater_canvas_carries_the_ocean_to_both_terminal_edges() {
     let buffer = terminal.backend().buffer();
 
     // Full-width shell (#5322): both terminal edges stay in the water column.
-    // Ombre may tint left and right differently; what must not happen is a flat
+    // Deepsea may tint left and right differently; what must not happen is a flat
     // surface-bg dead margin on either side.
     let mut left_ocean = false;
     let mut right_ocean = false;
@@ -5301,7 +5301,7 @@ async fn cached_denial_explanation_survives_tool_completion_and_done_render() {
     let mut app = create_test_app();
     app.onboarding = OnboardingState::None;
     app.launch.visible = false;
-    app.ocean_treatment = OceanTreatment::Ombre;
+    app.ocean_treatment = OceanTreatment::Deepsea;
     app.is_loading = true;
     app.runtime_turn_status = Some("in_progress".to_string());
 

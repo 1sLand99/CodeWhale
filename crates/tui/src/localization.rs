@@ -1628,9 +1628,9 @@ pub enum MessageId {
     ProviderExternalRevokeFailedToast,
     // Theme picker surface.
     ThemeSurfaceTitle,
-    ThemeTreatmentOmbreUnavailable,
+    ThemeTreatmentDeepseaUnavailable,
     ThemeTreatmentFlatActive,
-    ThemeTreatmentOmbreActive,
+    ThemeTreatmentDeepseaActive,
     // Fleet roster room.
     FleetRosterHeaderLabel,
     FleetRosterTabRoster,
@@ -3387,9 +3387,9 @@ pub const ALL_MESSAGE_IDS: &[MessageId] = &[
     MessageId::ProviderExternalRevokedToast,
     MessageId::ProviderExternalRevokeFailedToast,
     MessageId::ThemeSurfaceTitle,
-    MessageId::ThemeTreatmentOmbreUnavailable,
+    MessageId::ThemeTreatmentDeepseaUnavailable,
     MessageId::ThemeTreatmentFlatActive,
-    MessageId::ThemeTreatmentOmbreActive,
+    MessageId::ThemeTreatmentDeepseaActive,
     MessageId::FleetRosterHeaderLabel,
     MessageId::FleetRosterTabRoster,
     MessageId::FleetRosterTabSetup,

@@ -312,7 +312,7 @@ pub struct Settings {
     /// Enable expressive live-state motion. This affects chrome and state
     /// affordances only; model text always follows upstream stream deltas.
     pub fancy_animations: bool,
-    /// Background treatment: `ombre` paints the terminal-native water column;
+    /// Background treatment: `deepsea` paints the terminal-native water column;
     /// `flat` preserves all state marks on the theme's plain surface.
     pub ocean_treatment: String,
     /// Focus-context texture prototype for modal views (#4823): `off`
@@ -649,10 +649,9 @@ pub const CALM_PRESET_FIELDS: &[(&str, &str)] = &[
 ];
 
 fn normalize_ocean_treatment(value: &str) -> &'static str {
-    if value.trim().eq_ignore_ascii_case("flat") {
-        "flat"
-    } else {
-        "ombre"
+    match value.trim().to_ascii_lowercase().as_str() {
+        "deepsea" | "ombre" | "gradient" | "classic" => "deepsea",
+        _ => "flat",
     }
 }
 
@@ -1261,12 +1260,13 @@ impl Settings {
             }
             "ocean_treatment" | "treatment" | "background_treatment" => {
                 let normalized = value.trim().to_ascii_lowercase();
-                if !matches!(normalized.as_str(), "ombre" | "flat") {
-                    anyhow::bail!(
-                        "Failed to update setting: invalid ocean treatment '{value}'. Expected: ombre or flat."
-                    );
-                }
-                self.ocean_treatment = normalized;
+                self.ocean_treatment = match normalized.as_str() {
+                    "deepsea" | "ombre" | "gradient" | "classic" => "deepsea".to_string(),
+                    "flat" | "terminal" | "none" => "flat".to_string(),
+                    _ => anyhow::bail!(
+                        "Failed to update setting: invalid ocean treatment '{value}'. Expected: deepsea or flat."
+                    ),
+                };
             }
             "focus_texture" | "texture" => {
                 let normalized = value.trim().to_ascii_lowercase();
@@ -1701,7 +1701,7 @@ impl Settings {
             ("fancy_animations", "Expressive live-state motion: on/off"),
             (
                 "ocean_treatment",
-                "Transcript background treatment: ombre/flat (independent of motion)",
+                "Transcript background treatment: deepsea/flat (independent of motion)",
             ),
             (
                 "focus_texture",
@@ -3115,8 +3115,17 @@ mod tests {
         assert_eq!(settings.ocean_treatment, "flat");
         assert!(!settings.low_motion, "appearance must not change motion");
 
+        settings.set("ocean_treatment", "deepsea").unwrap();
+        assert_eq!(settings.ocean_treatment, "deepsea");
+        settings.set("ocean_treatment", "ombre").unwrap();
+        assert_eq!(
+            settings.ocean_treatment, "deepsea",
+            "legacy values migrate one way to the public Deepsea contract"
+        );
+        assert_eq!(normalize_ocean_treatment("kelp"), "flat");
+
         let err = settings.set("ocean_treatment", "kelp").unwrap_err();
-        assert!(err.to_string().contains("ombre or flat"));
+        assert!(err.to_string().contains("deepsea or flat"));
     }
 
     #[test]
