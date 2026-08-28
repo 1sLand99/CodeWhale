@@ -365,6 +365,31 @@ pub fn render_activity(area: Rect, buf: &mut Buffer, app: &mut App) {
         used += span_width(&detail);
         left.extend(detail);
     }
+    // MCP + plugin boot is a session-owned set. Surface it on the activity
+    // strip so a slow optional server cannot look like a hung turn.
+    if let Some(chip) = crate::tui::session_boot::activity_chip(
+        app,
+        available.saturating_sub(used + GROUP_GAP_WIDTH),
+    ) {
+        left.push(Span::raw(GROUP_GAP));
+        used += GROUP_GAP_WIDTH + chip.width();
+        let boot = crate::tui::session_boot::SessionBootSurface::from_app(app);
+        let ink = if boot.servers.iter().any(|row| {
+            matches!(
+                row.state,
+                crate::tui::session_boot::McpServerBootState::Failed
+                    | crate::tui::session_boot::McpServerBootState::NeedsLogin
+            )
+        }) {
+            ChromeInk::Failure
+        } else {
+            ChromeInk::Active
+        };
+        left.push(Span::styled(
+            chip,
+            Style::default().fg(ink.color(&app.ui_theme)),
+        ));
+    }
     if let Some((text, ink)) = notice {
         left.push(Span::raw(GROUP_GAP));
         left.push(Span::styled(
@@ -1341,6 +1366,27 @@ mod tests {
         assert_eq!(
             crate::config::StatusItem::from_key("session_metrics"),
             Some(crate::config::StatusItem::SessionMetrics)
+        );
+    }
+
+    #[test]
+    fn activity_band_names_connecting_mcp_servers() {
+        let mut app = test_app();
+        app.ui_locale = crate::localization::Locale::En;
+        app.mcp_initializing = true;
+        app.mcp_configured_count = 4;
+        app.mcp_connecting = ["alpha", "beta", "gamma", "docs"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        let text = activity_text(&mut app, 120);
+        assert!(text.contains("MCP"), "{text}");
+        assert!(text.contains("4 connecting"), "{text}");
+        assert!(text.contains("alpha"), "{text}");
+        assert!(text.contains("docs"), "{text}");
+        assert!(
+            !text.to_ascii_lowercase().contains("slack"),
+            "Slack is one server, not the chip: {text}"
         );
     }
 }
