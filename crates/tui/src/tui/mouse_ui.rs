@@ -103,7 +103,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::localization::MessageId;
 use crate::models::{ContentBlock, Message};
-use crate::tui::app::{App, SidebarRowAction};
+use crate::tui::app::{App, HeaderActionTarget, SidebarRowAction};
 use crate::tui::command_palette::{
     CommandPaletteView, build_entries as build_command_palette_entries,
 };
@@ -475,6 +475,26 @@ pub(crate) fn handle_mouse_event(app: &mut App, mouse: MouseEvent) -> Vec<ViewEv
         }
         app.needs_redraw = true;
         return Vec::new();
+    }
+
+    // Header facts are inspectable targets, not decorative text. The context
+    // meter shares its destination with the existing Alt+C shortcut; use the
+    // typed target recorded by the renderer instead of guessing from a label
+    // or rebuilding chrome geometry in input handling.
+    if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+        let target = app
+            .viewport
+            .header_hitboxes
+            .iter()
+            .find(|hitbox| mouse_hits_rect(mouse, Some(hitbox.area)))
+            .map(|hitbox| hitbox.target);
+        if let Some(target) = target {
+            match target {
+                HeaderActionTarget::InspectContext => open_context_inspector(app),
+            }
+            app.needs_redraw = true;
+            return Vec::new();
+        }
     }
 
     // Ocean work surface owns its rect, scrolling, focus, and row actions.
@@ -1736,10 +1756,13 @@ mod tests {
     use crate::models::Role;
     use crate::models::{ContentBlock, Message};
     use crate::tui::app::{
-        App, SidebarHoverRow, SidebarHoverSection, SidebarRowAction, TuiOptions,
+        App, HeaderActionTarget, HeaderHitbox, SidebarHoverRow, SidebarHoverSection,
+        SidebarRowAction, TuiOptions,
     };
-    use crate::tui::views::ContextMenuAction;
-    use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+    use crate::tui::views::{ContextMenuAction, ModalKind};
+    use crossterm::event::{
+        KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    };
     use ratatui::layout::Rect;
     use serde_json::json;
     use std::path::PathBuf;
@@ -1865,6 +1888,26 @@ mod tests {
         assert_eq!(
             app.pending_launch_action.take(),
             Some(crate::tui::underwater::LaunchAction::NewSession)
+        );
+    }
+
+    #[test]
+    fn context_meter_click_uses_the_same_inspector_as_the_keyboard_shortcut() {
+        let mut app = create_test_app();
+        app.launch.visible = false;
+        app.viewport.header_hitboxes = vec![HeaderHitbox {
+            area: Rect::new(52, 0, 20, 1),
+            target: HeaderActionTarget::InspectContext,
+        }];
+
+        handle_mouse_event(&mut app, left_click(60, 0));
+
+        assert_eq!(app.view_stack.top_kind(), Some(ModalKind::ContextInspector));
+        assert!(
+            crate::tui::shell_key_routing::is_context_inspector_shortcut(&KeyEvent::new(
+                KeyCode::Char('c'),
+                KeyModifiers::ALT
+            ))
         );
     }
 

@@ -217,23 +217,23 @@ fn every_shipped_theme_has_an_intentional_ocean_treatment() {
 }
 
 #[test]
-fn treatment_parses_saved_values_and_defaults_to_ombre() {
+fn treatment_parses_saved_values_and_migrates_legacy_ombre_values() {
     assert_eq!(OceanTreatment::parse("flat"), OceanTreatment::Flat);
     assert_eq!(OceanTreatment::parse(" FLAT "), OceanTreatment::Flat);
     assert_eq!(OceanTreatment::parse("ombre"), OceanTreatment::Ombre);
     assert_eq!(OceanTreatment::parse("kelp"), OceanTreatment::Ombre);
     assert_eq!(OceanTreatment::parse(""), OceanTreatment::Ombre);
     // Migration shim: settings saved by pre-0.9.4 builds may still carry the
-    // removed classic shell; they load as the default ombre treatment.
+    // removed classic shell; they load as the legacy Ombre treatment.
     assert_eq!(OceanTreatment::parse("classic"), OceanTreatment::Ombre);
 }
 
 #[test]
-fn every_underwater_treatment_keeps_ambient_life() {
-    // The classic shell was the only treatment that stilled ambient life; with
-    // it removed there is no per-treatment ambient-life flag left to test.
-    // What remains worth pinning: both live treatments stay distinct so the
-    // flat/ombre choice keeps its meaning.
+fn ombre_is_the_explicit_underwater_treatment() {
+    // The ordinary terminal must not be turned into an aquarium by default.
+    // Flat and Ombre stay distinct so the user can deliberately opt into the
+    // underwater field.
+    assert_eq!(OceanTreatment::default(), OceanTreatment::Flat);
     assert_ne!(OceanTreatment::Ombre, OceanTreatment::Flat);
     assert!(OceanTreatment::Ombre.is_ombre());
     assert!(OceanTreatment::Flat.is_flat());

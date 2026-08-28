@@ -693,6 +693,25 @@ impl Default for ComposerState {
     }
 }
 
+/// A concrete header action, kept typed so a click never has to re-parse the
+/// text that happened to be painted in the chrome.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeaderActionTarget {
+    /// Open the existing context inspector for the measured context meter.
+    InspectContext,
+}
+
+/// A header target painted in the latest frame.
+///
+/// The visible chrome owns placement; input owns dispatch. Keeping the
+/// rectangular target alongside its typed action gives mouse and keyboard
+/// routes one shared destination without a second navigation system.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HeaderHitbox {
+    pub area: Rect,
+    pub target: HeaderActionTarget,
+}
+
 /// Viewport/scroll state — fields related to transcript scrolling and caching.
 pub struct ViewportState {
     pub transcript_scroll: TranscriptScroll,
@@ -704,6 +723,9 @@ pub struct ViewportState {
     pub transcript_scrollbar_dragging: bool,
     pub last_transcript_area: Option<Rect>,
     pub last_composer_area: Option<Rect>,
+    /// Header chrome targets from the latest painted frame. Cleared before
+    /// every render so a resized or hidden meter can never swallow a click.
+    pub header_hitboxes: Vec<HeaderHitbox>,
     /// Last left-click trace over the composer, for double/triple-click
     /// word/line selection (crossterm does not decode click counts).
     pub composer_click_trace: Option<crate::tui::mouse_ui::ComposerClickTrace>,
@@ -741,6 +763,7 @@ impl Default for ViewportState {
             transcript_scrollbar_dragging: false,
             last_transcript_area: None,
             last_composer_area: None,
+            header_hitboxes: Vec::new(),
             composer_click_trace: None,
             last_approval_area: None,
             last_workflow_panel_area: None,

@@ -170,17 +170,18 @@ pub(crate) fn underwater_animation_interval_ms(app: &App) -> u64 {
 }
 
 /// Whether any underwater motion owner is actually visible in the transcript
-/// host. This keeps the scheduler honest: ombre needs a non-empty viewport,
-/// fish need their collision-safe water budget, and the smaller idle whale may
-/// independently earn its caustic. Obscured surfaces never request frames.
+/// host. This keeps the scheduler honest: only the explicit underwater
+/// treatment earns a viewport budget, and obscured surfaces never request
+/// frames.
 #[must_use]
 pub(crate) fn underwater_motion_surface_visible(
     area: Option<Rect>,
+    underwater_atmosphere_enabled: bool,
     ombre_field_breathes: bool,
     empty_water_visible: bool,
     obscured: bool,
 ) -> bool {
-    if obscured {
+    if obscured || !underwater_atmosphere_enabled {
         return false;
     }
     area.is_some_and(|area| {

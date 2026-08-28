@@ -3357,12 +3357,11 @@ pub(crate) async fn run_event_loop(
         let active_cell_has_live_motion = active_cell_has_live_motion(app);
         let translation_placeholder_has_live_motion = app.translation_enabled
             && (pending_thinking_translations > 0 || app.streaming_thinking_active_entry.is_some());
-        // Idle ambient motion belongs to every underwater treatment: ombre
-        // breathes its water column, while flat and Terminal-owned animate
-        // foreground life only. Schedule redraws only when something can
-        // actually move — the ombre field at any size, or ambient life once
-        // the empty water is large enough to earn it.
-        let ombre_field_breathes = app.ocean_treatment.is_ombre()
+        // The ordinary terminal stays quiet. Only the explicit underwater
+        // treatment earns ambient redraws; its column can breathe at any
+        // usable size and its life needs the collision-safe water budget.
+        let underwater_atmosphere_enabled = app.ocean_treatment.is_ombre();
+        let ombre_field_breathes = underwater_atmosphere_enabled
             && crate::tui::ocean::OceanRamp::for_theme(&app.ui_theme).is_some();
         let browsing_history = !app.viewport.transcript_scroll.is_at_tail();
         let empty_water_visible = app.history.is_empty()
@@ -3376,6 +3375,7 @@ pub(crate) async fn run_event_loop(
         let underwater_surface_obscured = event_broker.is_paused();
         let underwater_motion_visible = underwater_motion_surface_visible(
             app.viewport.last_transcript_area,
+            underwater_atmosphere_enabled,
             ombre_field_breathes,
             empty_water_visible,
             underwater_surface_obscured,
@@ -3411,6 +3411,7 @@ pub(crate) async fn run_event_loop(
             && !ambient_settled
             && (browsing_history || shell_phase_working || empty_water_visible);
         let underwater_completion_motion = shell_motion_enabled
+            && underwater_atmosphere_enabled
             && !underwater_surface_obscured
             && matches!(app.runtime_turn_status.as_deref(), Some("completed"))
             && app.ocean_completion_started_at.is_some_and(|started| {

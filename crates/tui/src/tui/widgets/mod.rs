@@ -62,8 +62,7 @@ pub struct ChatWidget {
     ocean_column: Option<crate::tui::ocean::OceanColumn>,
     /// Live-activity shape of the ambient scene (thinking/tools/subagents).
     ocean_activity: crate::tui::ambient_life::AmbientActivity,
-    /// Ink for idle fish/bubbles. Present for every underwater treatment —
-    /// flat and Terminal-owned keep ambient life without the ombre field.
+    /// Ink for the selected underwater scene's idle fish/bubbles.
     ambient_inks: Option<(Color, Color)>,
     ocean_elapsed_ms: u128,
     ocean_animated: bool,
@@ -129,9 +128,11 @@ impl ChatWidget {
     fn new_with_ocean_elapsed(app: &mut App, area: Rect, ocean_elapsed_ms: u128) -> Self {
         let content_area = area;
         let background = app.ui_theme.surface_bg;
-        let ocean_ramp = app
-            .ocean_treatment
-            .is_ombre()
+        // The ordinary shell inherits its host/theme surface. Underwater life
+        // is earned by the explicit Ombre treatment, never painted over a
+        // user's terminal simply because the app happens to be active.
+        let underwater_atmosphere = app.ocean_treatment.is_ombre();
+        let ocean_ramp = underwater_atmosphere
             .then(|| crate::tui::ocean::OceanRamp::for_theme(&app.ui_theme))
             .flatten();
         // Ink hue carries the live activity (reasoning deep-dim, tools bright,
@@ -139,32 +140,28 @@ impl ChatWidget {
         let ocean_activity = crate::tui::ambient_life::AmbientActivity::from_kind(
             crate::tui::underwater::LiveActivity::from_app(app).kind(),
         );
-        let ambient_inks = Some(crate::tui::ocean::ambient_inks_for_activity(
-            &app.ui_theme,
-            ocean_activity,
-        ));
+        let ambient_inks = underwater_atmosphere
+            .then(|| crate::tui::ocean::ambient_inks_for_activity(&app.ui_theme, ocean_activity));
         // The completion breath is authored decorative motion, so it rides the
         // same motion gate as everything else in the water. Both the column's
         // settle flourish and ambient life's presence read this one clock:
         // presence needs the settle tail past the breath, the column does not.
-        let completion_life_clock = app
-            .motion_policy()
-            .allows_decorative()
-            .then_some(())
-            .and(app.ocean_completion_started_at)
-            .map(|started| started.elapsed().as_millis());
+        let completion_life_clock = (underwater_atmosphere
+            && app.motion_policy().allows_decorative())
+        .then_some(())
+        .and(app.ocean_completion_started_at)
+        .map(|started| started.elapsed().as_millis());
         let completion_elapsed_ms = completion_life_clock
             .filter(|elapsed| *elapsed < crate::tui::ocean::COMPLETION_BREATH_MS);
         let completion_life_active = completion_life_clock
             .is_some_and(|elapsed| elapsed < crate::tui::ocean::COMPLETION_SETTLE_MS);
         let render_empty_state = should_render_empty_state(app);
         let phase = ShellPhase::from_app(app);
-        // Keep the water alive while a turn is doing work, even after the
-        // transcript exists. Previously motion was limited to a pristine
-        // empty composer, so typing or receiving the first message made the
-        // fish appear to die.
+        // Keep the selected underwater scene alive while a turn is doing
+        // work, even after the transcript exists. The ordinary Flat shell
+        // remains entirely still and lets the host terminal lead.
         let underwater_motion_enabled =
-            crate::tui::underwater::decorative_shell_motion_enabled(app);
+            underwater_atmosphere && crate::tui::underwater::decorative_shell_motion_enabled(app);
         let browsing_history = !app.viewport.transcript_scroll.is_at_tail();
         let ocean_animated = underwater_motion_enabled
             && (render_empty_state
@@ -214,7 +211,9 @@ impl ChatWidget {
         render_options.reasoning_preview_viewport_lines = Some(visible_lines);
 
         if render_empty_state {
-            crate::tui::underwater::ensure_idle_welcome_started(app, content_area);
+            if underwater_atmosphere {
+                crate::tui::underwater::ensure_idle_welcome_started(app, content_area);
+            }
             let lines = build_empty_state_lines(app, content_area);
             app.viewport.last_transcript_area = Some(content_area);
             app.viewport.last_transcript_top = 0;
@@ -237,9 +236,10 @@ impl ChatWidget {
                 ocean_animated,
                 life_presence_fixed,
                 fish_flee_elapsed_ms,
-                // Reduced-motion users still get the quiet, static scene;
-                // only movement itself is opt-in.
-                ambient_life: !app.attention_hold_active()
+                // Reduced-motion users still get a quiet, static Ombre scene;
+                // Flat remains a normal host-owned terminal either way.
+                ambient_life: underwater_atmosphere
+                    && !app.attention_hold_active()
                     && matches!(
                         phase,
                         ShellPhase::Idle
@@ -630,10 +630,12 @@ impl ChatWidget {
             ocean_animated,
             life_presence_fixed,
             fish_flee_elapsed_ms,
-            // Fish also accompany intentional transcript browsing. They only
-            // occupy blank cells and are collision-checked, so history stays
-            // legible while the ocean remains playful when scrolling upward.
-            ambient_life: !app.attention_hold_active()
+            // Fish also accompany intentional transcript browsing in the
+            // selected underwater scene. They only occupy blank cells and are
+            // collision-checked, so history stays legible while the ocean
+            // remains playful when scrolling upward.
+            ambient_life: underwater_atmosphere
+                && !app.attention_hold_active()
                 && (browsing_history
                     || matches!(phase, ShellPhase::Working | ShellPhase::Verifying)
                     || completion_life_active),
@@ -939,11 +941,9 @@ impl Renderable for ChatWidget {
 }
 
 impl ChatWidget {
-    /// Paint the underwater field. The water column belongs to ombre;
-    /// ambient life belongs to every underwater treatment. Flat keeps the
-    /// theme surface, Solarized Light keeps canonical Base3, and Terminal
-    /// keeps its inherited background, but none of those means a lifeless
-    /// ocean.
+    /// Paint the explicitly selected underwater field. Flat keeps the theme
+    /// surface, Solarized Light keeps canonical Base3, and Terminal keeps its
+    /// inherited background without inherited aquarium decoration.
     fn render_underwater_field(&self, area: Rect, buf: &mut Buffer) {
         if let Some(column) = self.ocean_column {
             // Cache per-row ocean colors; invalidate only on phase/size/breath.
@@ -4358,6 +4358,11 @@ mod tests {
         let mut app = App::new(options, &Config::default());
         app.ui_locale = Locale::En;
         app.composer.vim_enabled = false;
+        // Most widget fixtures exercise the explicitly selected underwater
+        // scene. Production defaults to Flat/terminal-owned; keep tests that
+        // inspect fish and caustics intentional rather than coupled to that
+        // startup preference.
+        app.ocean_treatment = crate::tui::ocean::OceanTreatment::Ombre;
         app
     }
 
@@ -6754,7 +6759,7 @@ mod tests {
     }
 
     #[test]
-    fn flat_treatment_keeps_theme_surface_and_ambient_life() {
+    fn flat_treatment_keeps_theme_surface_without_ambient_life() {
         let mut app = create_test_app();
         app.ocean_treatment = crate::tui::ocean::OceanTreatment::Flat;
         app.low_motion = false;
@@ -6762,14 +6767,16 @@ mod tests {
         let area = Rect::new(0, 0, 100, 20);
         let base = app.ui_theme.surface_bg;
         let mut buf = Buffer::empty(area);
-        ChatWidget::new(&mut app, area).render(area, &mut buf);
+        let widget = ChatWidget::new(&mut app, area);
+        assert!(!widget.ambient_life);
+        widget.render(area, &mut buf);
 
         assert_eq!(buf[(0, 0)].bg, base);
         assert_eq!(buf[(0, 19)].bg, base, "flat keeps the plain theme surface");
         let rendered = buffer_text(&buf, area);
         assert!(
-            rendered.contains("><>") || rendered.contains("<><"),
-            "flat means a plain surface, not a lifeless ocean — idle fish must survive:\n{rendered}"
+            !rendered.contains("><>") && !rendered.contains("<><"),
+            "flat must preserve a normal host-owned shell without decorative fish:\n{rendered}"
         );
     }
 
@@ -6825,14 +6832,17 @@ mod tests {
     }
 
     #[test]
-    fn terminal_owned_background_still_carries_foreground_life() {
+    fn terminal_owned_background_stays_visually_quiet_without_ombre() {
         let mut app = create_test_app();
         app.ui_theme = crate::palette::TERMINAL_UI_THEME;
+        app.ocean_treatment = crate::tui::ocean::OceanTreatment::Flat;
         app.low_motion = false;
         app.fancy_animations = true;
         let area = Rect::new(0, 0, 100, 20);
         let mut buf = Buffer::empty(area);
-        ChatWidget::new(&mut app, area).render(area, &mut buf);
+        let widget = ChatWidget::new(&mut app, area);
+        assert!(!widget.ambient_life);
+        widget.render(area, &mut buf);
 
         assert!(
             (0..area.height).all(|y| (0..area.width).all(|x| buf[(x, y)].bg == Color::Reset)),
@@ -6840,8 +6850,8 @@ mod tests {
         );
         let rendered = buffer_text(&buf, area);
         assert!(
-            rendered.contains("><>") || rendered.contains("<><"),
-            "Terminal keeps foreground ambient life without owning the background:\n{rendered}"
+            !rendered.contains("><>") && !rendered.contains("<><"),
+            "Terminal must remain a quiet host-owned shell without the selected Ombre scene:\n{rendered}"
         );
     }
 
@@ -6907,6 +6917,8 @@ mod tests {
     #[test]
     fn reduced_motion_freezes_the_ocean_without_removing_depth() {
         let mut app = create_test_app();
+        app.ui_theme = palette::UI_THEME;
+        app.ocean_treatment = crate::tui::ocean::OceanTreatment::Ombre;
         app.low_motion = true;
         app.fancy_animations = true;
         let area = Rect::new(0, 0, 100, 20);

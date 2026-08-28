@@ -68,7 +68,9 @@ fn theme_options(original_name: &str) -> Vec<SettingOption> {
                 .help("Pick a theme with live preview")
                 .values(SettingValues::new(
                     Cow::Owned(current.clone()),
-                    Cow::Borrowed("system"),
+                    // A reset returns to the host-owned terminal surface,
+                    // not a detected palette that can repaint it.
+                    Cow::Borrowed("terminal"),
                     Cow::Borrowed(name),
                 ))
                 .availability(SettingAvailability::Available)

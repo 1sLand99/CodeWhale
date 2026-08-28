@@ -702,6 +702,7 @@ pub(crate) fn render(f: &mut Frame, app: &mut App, _config: &Config) -> Option<(
         .set_focus_texture(app.focus_texture, app.ui_theme);
     app.sidebar_hover = crate::tui::app::SidebarHoverState::default();
     app.viewport.last_approval_area = None;
+    app.viewport.header_hitboxes.clear();
     // Keep the OSC-0 whale title truthful to the current shell phase so
     // alt-tabbed sessions communicate state without a second in-app spinner.
     crate::tui::underwater::sync_title_activity(app);
@@ -960,6 +961,28 @@ pub(crate) fn render(f: &mut Frame, app: &mut App, _config: &Config) -> Option<(
     }
 
     crate::tui::underwater::render_header(header_area, f.buffer_mut(), app);
+    app.viewport.header_hitboxes = crate::tui::underwater::header_hitboxes(header_area, app);
+    for hitbox in &app.viewport.header_hitboxes {
+        let label = match hitbox.target {
+            crate::tui::app::HeaderActionTarget::InspectContext => format!(
+                "{} · {}",
+                crate::localization::tr(
+                    app.ui_locale,
+                    crate::localization::MessageId::CtxMenuContextInspector,
+                ),
+                crate::localization::tr(
+                    app.ui_locale,
+                    crate::localization::MessageId::CtxMenuContextInspectorDesc,
+                ),
+            ),
+        };
+        crate::tui::hover_layer::register_rect(
+            crate::tui::hover_hit::HoverTargetKind::Link,
+            hitbox.area,
+            label,
+            false,
+        );
+    }
 
     // Render the transcript and optional file-tree sidecar. The underwater
     // default deliberately has no legacy right sidebar: Tasks and To-do own

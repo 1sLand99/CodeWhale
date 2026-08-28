@@ -23,7 +23,7 @@ use crate::config::HeaderItem;
 use crate::localization::{Locale, MessageId, tr};
 use crate::palette::{ChromeInk, chrome_style};
 use crate::tui::{
-    app::{App, AppMode, OnboardingState},
+    app::{App, AppMode, HeaderActionTarget, HeaderHitbox, OnboardingState},
     approval::ApprovalMode,
     footer_ui::format_token_count_compact,
     views::ModalKind,
@@ -862,7 +862,7 @@ pub fn render_launch_screen(area: Rect, buf: &mut Buffer, app: &App) {
     );
     let mut header = vec![
         Span::styled(
-            "cw",
+            "Codewhale",
             Style::default()
                 .fg(app.ui_theme.accent_primary)
                 .add_modifier(Modifier::BOLD),
@@ -1036,6 +1036,7 @@ pub fn render_launch_screen(area: Rect, buf: &mut Buffer, app: &App) {
             Style::default().fg(app.ui_theme.border),
         )],
     );
+    let settings_hint = format!("F2: {}", tr(app.ui_locale, MessageId::SettingsTitle));
     let prompt = if let Some(input) = app.launch.worktree_input.as_deref() {
         format!(
             "{}  {}{}",
@@ -1047,12 +1048,15 @@ pub fn render_launch_screen(area: Rect, buf: &mut Buffer, app: &App) {
         status.to_string()
     } else if area.width < 60 {
         format!(
-            "j/k:{} · Enter:{}",
+            "j/k:{} · Enter:{} · {settings_hint}",
             tr(app.ui_locale, MessageId::LaunchHintMove),
             tr(app.ui_locale, MessageId::LaunchHintOpen)
         )
     } else {
-        tr(app.ui_locale, MessageId::LaunchTipFlags).into_owned()
+        format!(
+            "{} · {settings_hint}",
+            tr(app.ui_locale, MessageId::LaunchTipFlags)
+        )
     };
     render_launch_line(
         area,
@@ -1125,6 +1129,60 @@ fn compact_tokens(tokens: i64) -> String {
     } else {
         tokens.to_string()
     }
+}
+
+/// The context meter is one measured fact: an exact percentage for scanning,
+/// a token fraction for auditability when room permits, and a short bar for
+/// peripheral vision. It is deliberately the final header fact so its rect
+/// stays stable and can point at the inspector without parsing rendered text.
+fn header_context_meter(app: &App, tier: ShellTier) -> Option<Span<'static>> {
+    crate::tui::ui::context_usage_snapshot(app).map(|(used, max, percent)| {
+        let filled = ((percent / 100.0) * 5.0).ceil().clamp(0.0, 5.0) as usize;
+        let percentage = format!("{percent:.0}%");
+        let text = match tier {
+            ShellTier::Compact => format!("ctx {percentage}"),
+            ShellTier::Normal | ShellTier::Wide => format!(
+                "context {percentage} {}/{} {}{}",
+                compact_tokens(used),
+                compact_tokens(i64::from(max)),
+                "▰".repeat(filled),
+                "▱".repeat(5usize.saturating_sub(filled)),
+            ),
+        };
+        Span::styled(text, header_fg(app, ChromeInk::Info))
+    })
+}
+
+/// Return concrete, typed header targets for the latest frame.
+///
+/// The context meter is right-aligned and always the final header span, so
+/// its visible geometry does not depend on optional git/token facts. The
+/// keyboard route remains `Alt+C`; this gives that same inspectable fact a
+/// mouse route without inventing another context screen or state owner.
+#[must_use]
+pub(crate) fn header_hitboxes(area: Rect, app: &App) -> Vec<HeaderHitbox> {
+    if area.width == 0 || area.height == 0 {
+        return Vec::new();
+    }
+    let tier = ShellTier::for_chrome_width(area.width);
+    let Some(meter) = header_context_meter(app, tier) else {
+        return Vec::new();
+    };
+    let width = u16::try_from(span_width(&[meter]))
+        .unwrap_or(area.width)
+        .min(area.width);
+    if width == 0 {
+        return Vec::new();
+    }
+    vec![HeaderHitbox {
+        area: Rect {
+            x: area.x.saturating_add(area.width.saturating_sub(width)),
+            y: area.y,
+            width,
+            height: 1,
+        },
+        target: HeaderActionTarget::InspectContext,
+    }]
 }
 
 fn session_token_breakdown(app: &App) -> Option<Span<'static>> {
@@ -1302,28 +1360,7 @@ fn render_header_with_git_status(
         ));
     }
 
-    let context_meter = (tier != ShellTier::Compact)
-        .then(|| crate::tui::ui::context_usage_snapshot(app))
-        .flatten()
-        .map(|(used, max, percent)| {
-            let filled = ((percent / 100.0) * 5.0).ceil().clamp(0.0, 5.0) as usize;
-            // One number, stated twice on purpose and no more: the fraction is
-            // the precise fact, the bar is the glance. The `0%` numeral that
-            // used to close the meter was a third encoding of the same
-            // quantity at a resolution between the other two, and the brackets
-            // fenced a bar that its own filled/hollow glyphs already delimit —
-            // together nine columns of permanent chrome carrying nothing.
-            Span::styled(
-                format!(
-                    "{}/{} {}{}",
-                    compact_tokens(used),
-                    compact_tokens(i64::from(max)),
-                    "▰".repeat(filled),
-                    "▱".repeat(5usize.saturating_sub(filled)),
-                ),
-                header_fg(app, ChromeInk::Info),
-            )
-        });
+    let context_meter = header_context_meter(app, tier);
     let token_breakdown = (tier != ShellTier::Compact)
         .then(|| session_token_breakdown(app))
         .flatten();
@@ -1970,7 +2007,10 @@ mod empty_state_caption_tests {
 
 #[cfg(test)]
 mod header_tests {
-    use super::{FIELD_JOIN, GROUP_GAP, filesystem_scope_notice, render_header_with_git_status};
+    use super::{
+        FIELD_JOIN, GROUP_GAP, filesystem_scope_notice, header_hitboxes,
+        render_header_with_git_status,
+    };
     use crate::palette::ChromeInk;
     use crate::tui::app::{App, AppMode};
     use crate::tui::approval::ApprovalMode;
@@ -2014,7 +2054,7 @@ mod header_tests {
         assert!(filesystem_scope_notice(&app).is_none());
         let line = header_line(&app, 120);
         assert!(!line.contains("files:"), "{line:?}");
-        assert!(line.starts_with("cw"), "{line:?}");
+        assert!(line.starts_with("Codewhale"), "{line:?}");
         assert!(line.contains("work"), "{line:?}");
         assert!(line.contains("ask"), "{line:?}");
     }
@@ -2132,16 +2172,23 @@ mod header_tests {
     }
 
     #[test]
-    fn the_context_meter_states_its_number_twice_not_four_times() {
-        // Fraction (precise) + bar (glance). The `%` numeral was a third
-        // encoding of the same quantity and the brackets fenced a bar its own
-        // glyphs already delimit.
+    fn the_context_meter_states_its_percentage_and_registers_an_inspector_target() {
+        // The percentage is the direct operator question ("how full am I?").
+        // Fraction remains the auditable fact and the bar is the glance.
         let mut app = app();
         app.session.total_input_tokens = 3_000;
         let line = header_line(&app, 120);
         if line.contains('▱') || line.contains('▰') {
             assert!(!line.contains('['), "{line:?}");
-            assert!(!line.contains('%'), "{line:?}");
+            assert!(line.contains("context"), "{line:?}");
+            assert!(line.contains('%'), "{line:?}");
+            let hitboxes = header_hitboxes(Rect::new(0, 0, 120, 1), &app);
+            assert_eq!(hitboxes.len(), 1);
+            assert_eq!(hitboxes[0].area.right(), 120);
+            assert_eq!(
+                hitboxes[0].target,
+                crate::tui::app::HeaderActionTarget::InspectContext
+            );
         }
     }
 }

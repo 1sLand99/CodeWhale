@@ -2,8 +2,8 @@
 //!
 //! The field is atmosphere, never content: ordinary shell cells share its
 //! water column while semantic surfaces such as selections, errors, and code
-//! keep their own backgrounds. Reduced motion freezes the field but does not
-//! remove it, so choosing an underwater treatment always has a visible result.
+//! keep their own backgrounds. It is an explicit treatment, rather than a
+//! layer forced onto every terminal.
 
 use ratatui::{buffer::Buffer, layout::Rect, style::Color};
 
@@ -13,15 +13,17 @@ use crate::tui::underwater::ShellPhase;
 /// Appearance treatment for the underwater shell.
 ///
 /// Parsed once from persisted settings so rendering and scheduling code can
-/// branch on typed state instead of scattered string comparisons. Treatment
-/// is appearance only: ambient life belongs to every underwater treatment,
-/// while motion is governed separately by `low_motion`/`fancy_animations`.
+/// branch on typed state instead of scattered string comparisons. `Ombre` is
+/// the opt-in underwater scene; `Flat` leaves the host/theme surface alone.
+/// Motion inside the selected scene remains governed separately by
+/// `low_motion`/`fancy_animations`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum OceanTreatment {
     /// State-reactive water column painted from the theme's [`OceanRamp`].
-    #[default]
     Ombre,
-    /// Plain theme surface with the same state grammar and ambient life.
+    /// Plain theme surface with no atmospheric treatment. This is the
+    /// terminal-respecting default; the host owns the background.
+    #[default]
     Flat,
 }
 
@@ -49,10 +51,10 @@ impl OceanTreatment {
     }
 }
 
-/// Minimum empty-water size that earns decorative ambient life. Below this,
-/// content and controls own every cell. Shared by the renderer and the idle
-/// animation scheduler so redraws are never scheduled for invisible life.
-/// Lowered in v0.9.1 so smaller windows still retain some life.
+/// Minimum empty-water size that earns decorative ambient life when the
+/// underwater treatment is selected. Below this, content and controls own
+/// every cell. Shared by the renderer and idle animation scheduler so redraws
+/// are never scheduled for invisible life.
 pub const AMBIENT_MIN_WIDTH: u16 = 40;
 pub const AMBIENT_MIN_HEIGHT: u16 = 10;
 

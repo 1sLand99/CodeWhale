@@ -255,6 +255,7 @@ pub enum UiLocale {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum UiThemeValue {
+    Terminal,
     System,
     Dark,
     Light,
@@ -1092,6 +1093,7 @@ impl UiLocale {
 impl UiThemeValue {
     fn as_setting(self) -> &'static str {
         match self {
+            Self::Terminal => "terminal",
             Self::System => "system",
             Self::Dark => "dark",
             Self::Light => "light",
@@ -1114,6 +1116,7 @@ impl UiThemeValue {
             return Ok(Self::Custom);
         }
         match crate::palette::normalize_theme_name(value) {
+            Some("terminal") => Ok(Self::Terminal),
             Some("system") => Ok(Self::System),
             Some("dark") => Ok(Self::Dark),
             Some("light") => Ok(Self::Light),
@@ -1840,6 +1843,7 @@ background_color = "#1A1B26"
         assert_eq!(
             theme,
             &serde_json::json!([
+                "terminal",
                 "system",
                 "dark",
                 "light",
