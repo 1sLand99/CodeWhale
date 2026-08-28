@@ -139,7 +139,7 @@ mod tests {
 
         let expected = format!(
             "Accepted the last completed assistant response for clipboard delivery; a recovery copy is at {}",
-            tmp.path().join("exports/last-copy.md").display()
+            tmp.path().join("exports").join("last-copy.md").display()
         );
         assert_eq!(result.message.as_deref(), Some(expected.as_str()));
         assert_eq!(
@@ -147,7 +147,7 @@ mod tests {
             Some("latest **answer**\nsecond line")
         );
         assert_eq!(
-            std::fs::read_to_string(tmp.path().join("exports/last-copy.md"))
+            std::fs::read_to_string(tmp.path().join("exports").join("last-copy.md"))
                 .expect("recovery copy"),
             "latest **answer**\nsecond line"
         );
@@ -376,7 +376,7 @@ mod tests {
         assert!(message.contains("Queued"), "{message}");
         assert!(message.contains("last-copy.md"), "{message}");
         assert_eq!(
-            std::fs::read_to_string(tmp.path().join("exports/last-copy.md"))
+            std::fs::read_to_string(tmp.path().join("exports").join("last-copy.md"))
                 .expect("recovery copy"),
             "remote answer"
         );
@@ -397,7 +397,7 @@ mod tests {
         let message = result.message.as_deref().unwrap_or_default();
         assert!(message.contains("last-copy.md"), "{message}");
         assert_eq!(
-            std::fs::read_to_string(tmp.path().join("exports/last-copy.md"))
+            std::fs::read_to_string(tmp.path().join("exports").join("last-copy.md"))
                 .expect("recovery copy"),
             "recoverable answer"
         );
