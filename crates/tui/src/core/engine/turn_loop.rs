@@ -4363,14 +4363,16 @@ impl Engine {
                     let user_message =
                         stream_read_error_user_message(&message, any_content_received);
                     stream_error.get_or_insert(user_message.clone());
-                    let _ = self
-                        .tx_event
-                        .send(Event::error(crate::error_taxonomy::envelope_for_llm_error(
-                            e,
-                            user_message,
-                        )))
-                        .await;
-                    if stream_errors >= MAX_STREAM_ERRORS_BEFORE_FAIL {
+                    let envelope = crate::error_taxonomy::envelope_for_llm_error(e, user_message);
+                    // A terminal (non-recoverable) stream failure must stop
+                    // consumption immediately: re-issuing a wrong-model or
+                    // authorization rejection cannot succeed, and continuing
+                    // leaves the door open for stale deltas after the failure
+                    // card. Recoverable classes (rate limit, network) keep
+                    // the bounded retry tail.
+                    let terminal = !envelope.recoverable;
+                    let _ = self.tx_event.send(Event::error(envelope)).await;
+                    if terminal || stream_errors >= MAX_STREAM_ERRORS_BEFORE_FAIL {
                         break;
                     }
                     continue;
@@ -4653,12 +4655,26 @@ impl Engine {
                 }
                 StreamEvent::MessageStop | StreamEvent::Ping => {}
                 StreamEvent::Error { error } => {
-                    // #3014: Anthropic SSE error event. The adapter
-                    // surfaces fatal errors as stream Err items; this
-                    // defensive arm keeps any passed-through error
-                    // visible instead of silently dropped.
-                    crate::logging::warn(format!("Provider stream error event: {error}"));
-                    stream_errors += 1;
+                    // #3014: providers surface mid-stream failures as a
+                    // chunk-level `error` object (chat.rs converts the frame
+                    // to this event and keeps parsing later frames as
+                    // deltas). Historically this arm only warned and kept
+                    // consuming, so every delta after the failure frame —
+                    // including reasoning — still rendered while the real
+                    // error vanished into the retry tail. A mid-stream error
+                    // frame is terminal for this stream: surface it through
+                    // the same typed envelope contract, record it as the
+                    // turn's stream error, and stop consuming. Deltas that
+                    // arrive after the failure frame are never forwarded.
+                    let message = error
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .unwrap_or("provider stream error");
+                    let envelope = ErrorEnvelope::classify(message.to_string(), true);
+                    crate::logging::warn(format!("Provider stream error event: {message}"));
+                    let _ = self.tx_event.send(Event::error(envelope)).await;
+                    stream_error.get_or_insert(message.to_string());
+                    break;
                 }
             }
         }

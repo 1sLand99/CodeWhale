@@ -18907,6 +18907,116 @@ async fn terminal_output_limit_followed_by_stream_error_is_charged_and_not_retri
     run_task.await.expect("engine task");
 }
 
+#[tokio::test]
+async fn midstream_error_frame_stops_the_stream_and_drops_trailing_deltas() {
+    // The reported incident: a provider delivered a chunk-level error
+    // object ("Model not exist.") mid-stream, and the stream kept parsing
+    // later frames as deltas — so reasoning/text rendered *after* the
+    // failure. The `StreamEvent::Error` arm must surface a terminal error
+    // event, stop consuming the stream, and never forward deltas that
+    // arrive after the failure frame.
+    let model = std::sync::Arc::new(crate::llm_client::mock::MockLlmClient::new(vec![vec![
+        crate::llm_client::mock::canned::message_start("midstream-error"),
+        crate::llm_client::mock::canned::text_block_start(0),
+        StreamEvent::Error {
+            error: serde_json::json!({ "message": "Model not exist." }),
+        },
+        // Everything after the error frame must never reach the UI.
+        crate::llm_client::mock::canned::text_delta(0, "TRAILING-DELTA-AFTER-FAILURE"),
+        crate::llm_client::mock::canned::block_stop(0),
+    ]]));
+    let client: crate::core::model_client::SharedModelClient = model.clone();
+    let config = Config::default();
+    let engine_config = EngineConfig {
+        max_steps: 1,
+        snapshots_enabled: false,
+        subagents_enabled: false,
+        terminal_chrome_enabled: false,
+        ..EngineConfig::default()
+    };
+    let (engine, handle) = Engine::new_with_model_client(engine_config, &config, client);
+    let run_task = tokio::spawn(engine.run());
+
+    handle
+        .send(Op::SendMessage {
+            content: "solve the task".to_string(),
+            mode: AppMode::Agent,
+            route: resolved_route_for_test(&config, crate::config::DEFAULT_TEXT_MODEL),
+            compaction: Box::new(CompactionConfig::default()),
+            goal_objective: None,
+            goal_token_budget: None,
+            goal_status: crate::tools::goal::GoalStatus::Active,
+            reasoning_effort: None,
+            reasoning_effort_auto: false,
+            auto_model: false,
+            allow_shell: false,
+            trust_mode: false,
+            auto_approve: false,
+            approval_mode: crate::tui::approval::ApprovalMode::Suggest,
+            translation_enabled: false,
+            allowed_tools: None,
+            dynamic_tools: Vec::new(),
+            hook_executor: None,
+            verbosity: None,
+            provenance: UserInputProvenance::ExternalUser,
+        })
+        .await
+        .expect("send midstream-error turn");
+
+    let mut events = Vec::new();
+    loop {
+        let event = tokio::time::timeout(model_turn_event_timeout(), async {
+            handle.rx_event.write().await.recv().await
+        })
+        .await
+        .expect("midstream-error event timeout")
+        .expect("midstream-error event");
+        let terminal = matches!(event, Event::TurnComplete { .. });
+        events.push(event);
+        if terminal {
+            break;
+        }
+    }
+
+    // The failure is surfaced as a typed error event at Error severity.
+    assert!(events.iter().any(|event| matches!(
+        event,
+        Event::Error { envelope, .. }
+            if envelope.message.contains("Model not exist.")
+                && envelope.category == crate::error_taxonomy::ErrorCategory::InvalidInput
+                && envelope.severity == crate::error_taxonomy::ErrorSeverity::Error
+    )));
+    // Deltas after the failure frame never reach the UI.
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            Event::MessageDelta { content, .. } if content.contains("TRAILING-DELTA")
+        )),
+        "deltas after a mid-stream failure must be dropped: {events:?}"
+    );
+    // The turn fails with the provider's message, not a generic truncation.
+    let (status, error) = events
+        .iter()
+        .find_map(|event| match event {
+            Event::TurnComplete { status, error, .. } => Some((status, error)),
+            _ => None,
+        })
+        .expect("midstream-error TurnComplete");
+    assert_eq!(*status, TurnOutcomeStatus::Failed);
+    assert!(
+        error
+            .as_deref()
+            .is_some_and(|e| e.contains("Model not exist.")),
+        "{error:?}"
+    );
+    // The stream is consumed exactly once — no re-issue of a terminal
+    // rejection.
+    assert_eq!(model.call_count(), 1);
+
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    run_task.await.expect("engine task");
+}
+
 /// Emits a full billed response, then cancels the engine's own token while
 /// yielding the final stream event — modeling Esc arriving right after the
 /// provider finished charging for the response.
