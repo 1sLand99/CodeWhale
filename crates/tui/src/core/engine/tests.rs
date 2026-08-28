@@ -20158,7 +20158,8 @@ async fn reload_mcp_op_recovers_from_invalid_initial_config_in_process() {
     let snapshot = handle
         .reload_mcp(config_path.clone())
         .await
-        .expect("fixed config reloads without restarting the engine");
+        .expect("fixed config reloads without restarting the engine")
+        .snapshot;
     assert!(!snapshot.reload_required);
     assert_eq!(snapshot.servers.len(), 1);
     assert_eq!(snapshot.servers[0].name, "ready");
@@ -20173,13 +20174,116 @@ async fn reload_mcp_op_recovers_from_invalid_initial_config_in_process() {
     let alternate = handle
         .reload_mcp(alternate_path.clone())
         .await
-        .expect("a changed config path replaces the engine pool in process");
+        .expect("a changed config path replaces the engine pool in process")
+        .snapshot;
     assert_eq!(alternate.config_path, alternate_path);
     assert_eq!(alternate.servers.len(), 1);
     assert_eq!(alternate.servers[0].name, "alternate");
 
     handle.send(Op::Shutdown).await.expect("shutdown");
     task.await.expect("engine task");
+}
+
+#[tokio::test]
+async fn mcp_boot_updates_preserve_authority_errors_and_replace_ordinary_errors() {
+    let tmp = tempdir().expect("tempdir");
+    let engine_config = EngineConfig {
+        workspace: tmp.path().to_path_buf(),
+        ..Default::default()
+    };
+    let (mut engine, _handle) = Engine::new(engine_config, &Config::default());
+    engine.mcp_event_generation = 3;
+    engine.mcp_boot_generation = Some(3);
+    engine.mcp_boot_in_flight = true;
+    engine.mcp_connection_errors = HashMap::from([(
+        "stale-transport".to_string(),
+        "obsolete connection failure".to_string(),
+    )]);
+    let authority_errors = Arc::new(HashMap::from([(
+        "revoked-plugin".to_string(),
+        "plugin authority revoked or changed".to_string(),
+    )]));
+
+    engine
+        .apply_mcp_boot_update(McpBootUpdate::Progress {
+            generation: 3,
+            authority_errors: Arc::clone(&authority_errors),
+            connection_errors: HashMap::from([(
+                "current-transport".to_string(),
+                "current connection failure".to_string(),
+            )]),
+            connecting: Vec::new(),
+        })
+        .await;
+    assert_eq!(
+        engine.mcp_connection_errors,
+        HashMap::from([
+            (
+                "revoked-plugin".to_string(),
+                "plugin authority revoked or changed".to_string(),
+            ),
+            (
+                "current-transport".to_string(),
+                "current connection failure".to_string(),
+            ),
+        ])
+    );
+    assert!(!engine.mcp_connection_errors.contains_key("stale-transport"));
+
+    engine.mcp_connection_errors.insert(
+        "stale-between-updates".to_string(),
+        "must not survive finished".to_string(),
+    );
+    engine
+        .apply_mcp_boot_update(McpBootUpdate::Finished {
+            generation: 3,
+            authority_errors,
+            connection_errors: HashMap::from([(
+                "final-transport".to_string(),
+                "final connection failure".to_string(),
+            )]),
+        })
+        .await;
+    assert_eq!(
+        engine.mcp_connection_errors,
+        HashMap::from([
+            (
+                "revoked-plugin".to_string(),
+                "plugin authority revoked or changed".to_string(),
+            ),
+            (
+                "final-transport".to_string(),
+                "final connection failure".to_string(),
+            ),
+        ])
+    );
+}
+
+#[tokio::test]
+async fn stale_boot_finished_does_not_clear_a_newer_receiver() {
+    let tmp = tempdir().expect("tempdir");
+    let engine_config = EngineConfig {
+        workspace: tmp.path().to_path_buf(),
+        ..Default::default()
+    };
+    let (mut engine, _handle) = Engine::new(engine_config, &Config::default());
+    let (_newer_tx, newer_rx) = tokio::sync::mpsc::unbounded_channel();
+    engine.mcp_event_generation = 2;
+    engine.mcp_boot_generation = Some(2);
+    engine.mcp_boot_in_flight = true;
+    engine.mcp_boot_rx = Some(newer_rx);
+
+    engine
+        .apply_mcp_boot_update(McpBootUpdate::Finished {
+            generation: 1,
+            authority_errors: Arc::new(HashMap::new()),
+            connection_errors: HashMap::new(),
+        })
+        .await;
+
+    assert_eq!(engine.mcp_boot_generation, Some(2));
+    assert!(engine.mcp_boot_in_flight);
+    assert!(engine.mcp_boot_rx.is_some());
 }
 
 #[tokio::test]
@@ -20201,10 +20305,12 @@ async fn bootstrap_and_retry_mcp_use_the_engine_owned_pool() {
     let (engine, handle) = Engine::new(engine_config, &Config::default());
     let task = tokio::spawn(async move { engine.run().await });
 
-    let boot = handle
+    let boot_update = handle
         .bootstrap_mcp()
         .await
         .expect("boot snapshots the engine pool");
+    let boot_generation = boot_update.generation;
+    let boot = boot_update.snapshot;
     assert_eq!(boot.config_path, config_path);
     assert_eq!(boot.servers.len(), 3);
     let disabled = boot
@@ -20221,10 +20327,15 @@ async fn bootstrap_and_retry_mcp_use_the_engine_owned_pool() {
         .and_then(|server| server.error.clone())
         .expect("boot preserves the sibling connection diagnosis");
 
-    let retry = handle
+    let retry_update = handle
         .retry_mcp_server("alpha")
         .await
         .expect("a failed per-server retry still returns the live snapshot");
+    assert!(
+        retry_update.generation > boot_generation,
+        "a direct retry needs a newer generation receipt than boot"
+    );
+    let retry = retry_update.snapshot;
     assert_eq!(retry.servers.len(), 3);
     assert!(
         retry

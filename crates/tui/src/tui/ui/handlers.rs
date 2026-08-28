@@ -577,15 +577,21 @@ pub(crate) async fn handle_mcp_ui_action(
     // the retry/compatibility path for externally edited configuration.
     let rebuild_live_pool = is_reload || changed;
     let snapshot_result = if let Some(name) = retry_name.as_deref() {
-        engine_handle.retry_mcp_server(name).await
+        engine_handle
+            .retry_mcp_server(name)
+            .await
+            .map(|update| (update.snapshot, Some(update.generation)))
     } else if snapshot_live_pool {
-        engine_handle.bootstrap_mcp().await
+        engine_handle
+            .bootstrap_mcp()
+            .await
+            .map(|update| (update.snapshot, Some(update.generation)))
     } else if rebuild_live_pool {
         match engine_handle.reload_mcp(path.clone()).await {
-            Ok(snapshot) => {
+            Ok(update) => {
                 app.mcp_reload_required = false;
-                add_mcp_message(app, mcp_reload_summary(&snapshot));
-                Ok(snapshot)
+                add_mcp_message(app, mcp_reload_summary(&update.snapshot));
+                Ok((update.snapshot, Some(update.generation)))
             }
             Err(error) => {
                 app.mcp_reload_required = true;
@@ -604,6 +610,7 @@ pub(crate) async fn handle_mcp_ui_action(
             std::sync::Arc::clone(&app.plugin_registry),
         )
         .await
+        .map(|snapshot| (snapshot, None))
     } else {
         mcp::manager_snapshot_from_config_with_workspace_and_plugins(
             &path,
@@ -611,10 +618,11 @@ pub(crate) async fn handle_mcp_ui_action(
             app.mcp_reload_required,
             app.plugin_registry.as_ref(),
         )
+        .map(|snapshot| (snapshot, None))
     };
 
     match snapshot_result {
-        Ok(snapshot) => {
+        Ok((snapshot, generation)) => {
             if discover {
                 add_mcp_message(
                     app,
@@ -625,7 +633,10 @@ pub(crate) async fn handle_mcp_ui_action(
             // snapshot so footers and panels reflect post-/mcp edits
             // (#502).
             app.mcp_configured_count = snapshot.servers.len();
-            app.mcp_snapshot_generation = app.mcp_snapshot_generation.saturating_add(1);
+            if let Some(generation) = generation {
+                app.mcp_snapshot_generation = generation;
+                app.mcp_snapshot_generation_invalidated = true;
+            }
             app.mcp_snapshot = Some(snapshot.clone());
             app.mcp_initializing = false;
             app.mcp_connecting.clear();

@@ -972,6 +972,7 @@ impl App {
             mcp_initializing: !mcp_connecting.is_empty()
                 && config.features().enabled(crate::features::Feature::Mcp),
             mcp_snapshot_generation: 0,
+            mcp_snapshot_generation_invalidated: false,
             mcp_connecting,
             // Read the MCP config once at boot to know how many servers
             // the user has declared. The footer chip uses this even when

@@ -452,6 +452,9 @@ pub enum Event {
     /// enabled servers that have not settled yet; `finished` is the terminal
     /// receipt for this boot pass.
     McpSessionBoot {
+        /// Monotonic engine-owned event generation. A direct `/mcp` snapshot
+        /// may supersede one generation without suppressing later passes.
+        generation: u64,
         snapshot: crate::mcp::McpManagerSnapshot,
         connecting: Vec<String>,
         finished: bool,

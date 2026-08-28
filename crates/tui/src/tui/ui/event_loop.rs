@@ -2219,11 +2219,14 @@ pub(crate) async fn run_event_loop(
                         app.push_status_toast(message, StatusToastLevel::Warning, Some(12_000));
                     }
                     EngineEvent::McpSessionBoot {
+                        generation,
                         snapshot,
                         connecting,
                         finished,
                     } => {
-                        apply_mcp_session_boot_event(app, snapshot, connecting, finished);
+                        apply_mcp_session_boot_event(
+                            app, generation, snapshot, connecting, finished,
+                        );
                     }
                     EngineEvent::RequestManifestReady { rendered } => {
                         // Typed manifest text, or the explicitly requested
@@ -5800,17 +5803,23 @@ pub(crate) async fn run_event_loop(
 
 /// Apply one MCP session-boot event. Failures stay on the snapshot (and
 /// therefore the session page) rather than as toast-only Status copy.
-/// Explicit `/mcp` mutations bump `mcp_snapshot_generation` so a late
-/// spawn-time boot result cannot overwrite a newer user action.
+/// A direct `/mcp` snapshot invalidates only the event generation it
+/// superseded. Older spawn-time updates cannot overwrite it, while a later
+/// engine-authored generation can continue updating the live surface.
 pub(crate) fn apply_mcp_session_boot_event(
     app: &mut App,
+    generation: u64,
     snapshot: crate::mcp::McpManagerSnapshot,
     connecting: Vec<String>,
     finished: bool,
 ) {
-    if app.mcp_snapshot_generation > 0 {
+    if generation < app.mcp_snapshot_generation
+        || (generation == app.mcp_snapshot_generation && app.mcp_snapshot_generation_invalidated)
+    {
         return;
     }
+    app.mcp_snapshot_generation = generation;
+    app.mcp_snapshot_generation_invalidated = false;
     app.mcp_configured_count = snapshot.servers.len();
     app.hotbar_actions.replace_mcp_tools(Some(&snapshot));
     app.mcp_snapshot = Some(snapshot);
@@ -5992,6 +6001,7 @@ mod session_boot_event_tests {
         let mut app = test_app();
         apply_mcp_session_boot_event(
             &mut app,
+            1,
             snapshot(vec![server("alpha", false), server("beta", false)]),
             vec!["alpha".into(), "beta".into()],
             false,
@@ -6009,17 +6019,63 @@ mod session_boot_event_tests {
     }
 
     #[test]
-    fn later_user_mcp_mutation_wins_over_a_late_boot_event() {
+    fn direct_mcp_snapshot_rejects_an_unseen_older_boot_generation() {
         let mut app = test_app();
-        app.mcp_snapshot_generation = 1;
+        assert_eq!(app.mcp_snapshot_generation, 0);
+        app.mcp_snapshot = Some(snapshot(vec![server("direct", true)]));
+        // The direct engine response carries generation 2 even though the UI
+        // has not rendered queued boot generation 1 yet.
+        app.mcp_snapshot_generation = 2;
+        app.mcp_snapshot_generation_invalidated = true;
         app.mcp_connecting = vec!["alpha".into()];
         apply_mcp_session_boot_event(
             &mut app,
+            1,
             snapshot(vec![server("stale", true)]),
             vec!["stale".into()],
             true,
         );
         assert_eq!(app.mcp_connecting, vec!["alpha"]);
-        assert!(app.mcp_snapshot.is_none());
+        assert_eq!(
+            app.mcp_snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.servers.first())
+                .map(|server| server.name.as_str()),
+            Some("direct")
+        );
+
+        // A queued event emitted by the direct operation itself is the same
+        // generation and cannot replace the already-applied response.
+        apply_mcp_session_boot_event(
+            &mut app,
+            2,
+            snapshot(vec![server("same-pass", true)]),
+            Vec::new(),
+            true,
+        );
+        assert_eq!(
+            app.mcp_snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.servers.first())
+                .map(|server| server.name.as_str()),
+            Some("direct")
+        );
+
+        apply_mcp_session_boot_event(
+            &mut app,
+            3,
+            snapshot(vec![server("fresh", true)]),
+            Vec::new(),
+            true,
+        );
+        assert_eq!(app.mcp_snapshot_generation, 3);
+        assert!(!app.mcp_snapshot_generation_invalidated);
+        assert_eq!(
+            app.mcp_snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.servers.first())
+                .map(|server| server.name.as_str()),
+            Some("fresh")
+        );
     }
 }

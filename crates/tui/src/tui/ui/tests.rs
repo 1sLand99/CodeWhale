@@ -1768,7 +1768,12 @@ async fn mcp_enable_persists_and_applies_the_live_tool_pool_in_one_action() {
             Op::ReloadMcp { config_path, tx } => {
                 assert_eq!(config_path, path);
                 let sender = tx.lock().unwrap().take().expect("reload reply sender");
-                sender.send(Ok(response_snapshot)).expect("reload reply");
+                sender
+                    .send(Ok(crate::core::ops::McpManagerUpdate {
+                        snapshot: response_snapshot,
+                        generation: 7,
+                    }))
+                    .expect("reload reply");
             }
             other => panic!("unexpected op: {other:?}"),
         }
@@ -1794,6 +1799,8 @@ async fn mcp_enable_persists_and_applies_the_live_tool_pool_in_one_action() {
     );
     assert!(!app.mcp_reload_required);
     assert_eq!(app.mcp_snapshot.as_ref(), Some(&snapshot));
+    assert_eq!(app.mcp_snapshot_generation, 7);
+    assert!(app.mcp_snapshot_generation_invalidated);
     assert!(app.history.iter().any(|cell| matches!(
         cell,
         HistoryCell::System { content }

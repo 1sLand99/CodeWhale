@@ -265,7 +265,7 @@ impl EngineHandle {
     /// does not force a config re-read or drop ready transports. Optional
     /// servers are connected in the background at engine spawn; this waits
     /// only if the caller explicitly asked for the settled receipt.
-    pub async fn bootstrap_mcp(&self) -> Result<crate::mcp::McpManagerSnapshot> {
+    pub async fn bootstrap_mcp(&self) -> Result<crate::core::ops::McpManagerUpdate> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         let tx = std::sync::Arc::new(std::sync::Mutex::new(Some(tx)));
         self.send(Op::BootstrapMcp { tx }).await?;
@@ -278,7 +278,7 @@ impl EngineHandle {
     pub async fn retry_mcp_server(
         &self,
         name: impl Into<String>,
-    ) -> Result<crate::mcp::McpManagerSnapshot> {
+    ) -> Result<crate::core::ops::McpManagerUpdate> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         let tx = std::sync::Arc::new(std::sync::Mutex::new(Some(tx)));
         self.send(Op::RetryMcpServer {
@@ -296,7 +296,7 @@ impl EngineHandle {
     pub async fn reload_mcp(
         &self,
         config_path: std::path::PathBuf,
-    ) -> Result<crate::mcp::McpManagerSnapshot> {
+    ) -> Result<crate::core::ops::McpManagerUpdate> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         let tx = std::sync::Arc::new(std::sync::Mutex::new(Some(tx)));
         self.send(Op::ReloadMcp { config_path, tx }).await?;

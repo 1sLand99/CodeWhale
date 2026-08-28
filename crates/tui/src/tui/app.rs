@@ -1801,9 +1801,11 @@ pub struct App {
     /// True while the engine-owned MCP boot connection pass is in flight.
     /// Configured rows render as connecting until its snapshot lands.
     pub mcp_initializing: bool,
-    /// Monotonic UI generation. Explicit MCP actions advance this so a late
-    /// boot result cannot overwrite newer state.
+    /// Latest engine-owned MCP event generation applied to the UI.
     pub mcp_snapshot_generation: u64,
+    /// The direct snapshot from a successful `/mcp` action supersedes any
+    /// queued event at `mcp_snapshot_generation`, but not a later generation.
+    pub mcp_snapshot_generation_invalidated: bool,
     /// Enabled servers that have not settled in the current boot pass.
     pub mcp_connecting: Vec<String>,
     /// Number of MCP servers declared in the user's config at app boot.

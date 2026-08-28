@@ -41,15 +41,24 @@ pub struct ProviderRuntimeStatus {
     pub active_provider_requests: usize,
 }
 
+/// Engine-owned MCP snapshot plus the exact event generation it supersedes.
+/// The TUI uses the receipt to reject already-queued boot events even when it
+/// had not rendered that generation before the direct `/mcp` action.
+#[derive(Debug, Clone)]
+pub struct McpManagerUpdate {
+    pub snapshot: crate::mcp::McpManagerSnapshot,
+    pub generation: u64,
+}
+
 /// Result of rebuilding the engine-owned MCP pool in process.
-pub type McpReloadResult = Result<crate::mcp::McpManagerSnapshot, String>;
+pub type McpReloadResult = Result<McpManagerUpdate, String>;
 
 /// Result of the one-shot boot connection pass for the engine-owned MCP pool.
 ///
 /// This shares the reload result shape while remaining a separate operation:
 /// boot may fill an empty live pool, but it must not force a config reload or
 /// invalidate already-ready connections.
-pub type McpBootstrapResult = Result<crate::mcp::McpManagerSnapshot, String>;
+pub type McpBootstrapResult = Result<McpManagerUpdate, String>;
 
 /// Origin of text being introduced as a user-role turn.
 ///

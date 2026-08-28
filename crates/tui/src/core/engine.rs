@@ -77,7 +77,8 @@ use super::authority::{
 };
 use super::events::{Event, TurnOutcomeStatus, TurnRoute};
 use super::ops::{
-    Op, ProviderRuntimeStatus, SessionSnapshot, USER_SHELL_TOOL_ID_PREFIX, UserInputProvenance,
+    McpManagerUpdate, Op, ProviderRuntimeStatus, SessionSnapshot, USER_SHELL_TOOL_ID_PREFIX,
+    UserInputProvenance,
 };
 use super::session::Session;
 use super::tool_parser;
@@ -692,11 +693,15 @@ impl EngineHandle {
 /// Background MCP boot progress from the spawn-time connect task.
 enum McpBootUpdate {
     Progress {
-        errors: HashMap<String, String>,
+        generation: u64,
+        authority_errors: Arc<HashMap<String, String>>,
+        connection_errors: HashMap<String, String>,
         connecting: Vec<String>,
     },
     Finished {
-        errors: HashMap<String, String>,
+        generation: u64,
+        authority_errors: Arc<HashMap<String, String>>,
+        connection_errors: HashMap<String, String>,
     },
 }
 
@@ -746,6 +751,14 @@ pub struct Engine {
     mcp_boot_in_flight: bool,
     mcp_boot_rx: Option<mpsc::UnboundedReceiver<McpBootUpdate>>,
     mcp_boot_done: Option<tokio::sync::watch::Receiver<bool>>,
+    /// Generation owned by the currently installed boot receiver. Terminal
+    /// cleanup is conditional on this exact value so an older pass can never
+    /// clear a newer receiver.
+    mcp_boot_generation: Option<u64>,
+    /// Monotonic generation for engine-authored MCP session snapshots. Boot
+    /// task updates retain their spawn generation so later passes can reject
+    /// only genuinely stale work.
+    mcp_event_generation: u64,
     /// Workspace-scoped immutable plugin catalogue and authority receipts.
     plugin_registry: Arc<crate::plugins::PluginRegistry>,
     api_provider: ApiProvider,
@@ -1569,6 +1582,8 @@ impl Engine {
             mcp_boot_in_flight: false,
             mcp_boot_rx: None,
             mcp_boot_done: None,
+            mcp_boot_generation: None,
+            mcp_event_generation: 0,
             plugin_registry,
             api_provider,
             api_provider_identity,
@@ -6018,10 +6033,10 @@ impl Engine {
         Ok(pool)
     }
 
-    async fn reload_mcp_pool(
-        &mut self,
-        config_path: PathBuf,
-    ) -> anyhow::Result<crate::mcp::McpManagerSnapshot> {
+    async fn reload_mcp_pool(&mut self, config_path: PathBuf) -> anyhow::Result<McpManagerUpdate> {
+        if self.mcp_boot_in_flight {
+            self.wait_for_mcp_boot().await;
+        }
         let pool = self
             .ensure_mcp_pool()
             .await
@@ -6043,11 +6058,17 @@ impl Engine {
             .collect::<HashMap<_, _>>();
         self.session.mcp_config_path = config_path;
         self.mcp_connection_errors = errors;
-        Ok(pool.manager_snapshot(
+        let snapshot = pool.manager_snapshot(
             &self.session.mcp_config_path,
             false,
             &self.mcp_connection_errors,
-        ))
+        );
+        drop(pool);
+        let generation = self.next_mcp_event_generation();
+        Ok(McpManagerUpdate {
+            snapshot,
+            generation,
+        })
     }
 
     async fn mcp_session_snapshot(&self) -> anyhow::Result<crate::mcp::McpManagerSnapshot> {
@@ -6071,7 +6092,36 @@ impl Engine {
             .collect()
     }
 
-    async fn emit_mcp_session_boot(&self, finished: bool) {
+    fn next_mcp_event_generation(&mut self) -> u64 {
+        self.mcp_event_generation = self.mcp_event_generation.saturating_add(1);
+        self.mcp_event_generation
+    }
+
+    fn replace_mcp_boot_errors(
+        &mut self,
+        authority_errors: &HashMap<String, String>,
+        mut connection_errors: HashMap<String, String>,
+    ) {
+        // Each update owns the ordinary connection diagnoses for this pass,
+        // so replacing the map drops stale transport errors. Reviewed-plugin
+        // authority failures are a separate, non-pending set and must remain
+        // visible throughout the pass; they win if a name ever overlaps.
+        connection_errors.extend(authority_errors.clone());
+        self.mcp_connection_errors = connection_errors;
+    }
+
+    fn finish_mcp_boot_generation(&mut self, generation: u64) -> bool {
+        if self.mcp_boot_generation != Some(generation) {
+            return false;
+        }
+        self.mcp_boot_generation = None;
+        self.mcp_boot_in_flight = false;
+        self.mcp_boot_rx = None;
+        self.mcp_boot_done = None;
+        true
+    }
+
+    async fn emit_mcp_session_boot(&self, generation: u64, finished: bool) {
         let Ok(snapshot) = self.mcp_session_snapshot().await else {
             return;
         };
@@ -6088,6 +6138,7 @@ impl Engine {
             return;
         }
         let _ = self.tx_event.try_send(Event::McpSessionBoot {
+            generation,
             snapshot,
             connecting,
             finished,
@@ -6096,48 +6147,97 @@ impl Engine {
 
     async fn apply_mcp_boot_update(&mut self, update: McpBootUpdate) {
         match update {
-            McpBootUpdate::Progress { errors, connecting } => {
-                self.mcp_connection_errors = errors;
+            McpBootUpdate::Progress {
+                generation,
+                authority_errors,
+                connection_errors,
+                connecting,
+            } => {
+                if self.mcp_boot_generation != Some(generation) {
+                    return;
+                }
+                if generation < self.mcp_event_generation {
+                    return;
+                }
+                self.mcp_event_generation = generation;
+                self.replace_mcp_boot_errors(&authority_errors, connection_errors);
                 if let Ok(snapshot) = self.mcp_session_snapshot().await {
                     let _ = self.tx_event.try_send(Event::McpSessionBoot {
+                        generation,
                         snapshot,
                         connecting,
                         finished: false,
                     });
                 }
             }
-            McpBootUpdate::Finished { errors } => {
-                self.mcp_connection_errors = errors;
-                self.mcp_boot_in_flight = false;
-                self.mcp_boot_rx = None;
+            McpBootUpdate::Finished {
+                generation,
+                authority_errors,
+                connection_errors,
+            } => {
+                if self.mcp_boot_generation != Some(generation) {
+                    return;
+                }
+                if generation < self.mcp_event_generation {
+                    self.finish_mcp_boot_generation(generation);
+                    return;
+                }
+                self.mcp_event_generation = generation;
+                self.replace_mcp_boot_errors(&authority_errors, connection_errors);
+                self.finish_mcp_boot_generation(generation);
                 self.session.pending_prefix_change_reason = Some("mcp-session-boot".to_string());
-                self.emit_mcp_session_boot(true).await;
+                self.emit_mcp_session_boot(generation, true).await;
             }
         }
     }
 
     async fn drain_mcp_boot_updates(&mut self) {
-        if let Some(rx) = self.mcp_boot_rx.as_mut() {
-            while let Ok(update) = rx.try_recv() {
-                // Apply without emitting until the last queued update so the
-                // UI sees one settled receipt rather than a burst.
-                match update {
-                    McpBootUpdate::Progress {
-                        errors,
-                        connecting: _,
-                    } => {
-                        self.mcp_connection_errors = errors;
+        let receiver_generation = self.mcp_boot_generation;
+        let Some(mut rx) = self.mcp_boot_rx.take() else {
+            return;
+        };
+        while let Ok(update) = rx.try_recv() {
+            // Apply without emitting until the last queued update so the UI
+            // sees one settled receipt rather than a burst.
+            match update {
+                McpBootUpdate::Progress {
+                    generation,
+                    authority_errors,
+                    connection_errors,
+                    connecting: _,
+                } => {
+                    if self.mcp_boot_generation != Some(generation) {
+                        continue;
                     }
-                    McpBootUpdate::Finished { errors } => {
-                        self.mcp_connection_errors = errors;
-                        self.mcp_boot_in_flight = false;
-                        self.mcp_boot_rx = None;
-                        self.session.pending_prefix_change_reason =
-                            Some("mcp-session-boot".to_string());
+                    if generation < self.mcp_event_generation {
+                        continue;
+                    }
+                    self.mcp_event_generation = generation;
+                    self.replace_mcp_boot_errors(&authority_errors, connection_errors);
+                }
+                McpBootUpdate::Finished {
+                    generation,
+                    authority_errors,
+                    connection_errors,
+                } => {
+                    if self.mcp_boot_generation != Some(generation) {
+                        continue;
+                    }
+                    if generation < self.mcp_event_generation {
+                        self.finish_mcp_boot_generation(generation);
                         break;
                     }
+                    self.mcp_event_generation = generation;
+                    self.replace_mcp_boot_errors(&authority_errors, connection_errors);
+                    self.finish_mcp_boot_generation(generation);
+                    self.session.pending_prefix_change_reason =
+                        Some("mcp-session-boot".to_string());
+                    break;
                 }
             }
+        }
+        if self.mcp_boot_in_flight && self.mcp_boot_generation == receiver_generation {
+            self.mcp_boot_rx = Some(rx);
         }
     }
 
@@ -6185,24 +6285,29 @@ impl Engine {
             )
         };
 
-        self.mcp_connection_errors = auth_errors
+        let authority_errors = auth_errors
             .into_iter()
             .map(|(name, error)| (name, crate::mcp::format_mcp_error_for_display(&error)))
-            .collect();
+            .collect::<HashMap<_, _>>();
+        self.mcp_connection_errors = authority_errors.clone();
+        let authority_errors = Arc::new(authority_errors);
+        let generation = self.next_mcp_event_generation();
 
         if pending.is_empty() {
             self.mcp_boot_in_flight = false;
-            self.emit_mcp_session_boot(true).await;
+            self.mcp_boot_generation = None;
+            self.emit_mcp_session_boot(generation, true).await;
             return;
         }
 
         self.mcp_boot_in_flight = true;
+        self.mcp_boot_generation = Some(generation);
         let (progress_tx, progress_rx) = mpsc::unbounded_channel();
         let (done_tx, done_rx) = tokio::sync::watch::channel(false);
         self.mcp_boot_rx = Some(progress_rx);
         self.mcp_boot_done = Some(done_rx);
 
-        self.emit_mcp_session_boot(false).await;
+        self.emit_mcp_session_boot(generation, false).await;
 
         let pool_for_task = Arc::clone(&pool);
         spawn_supervised(
@@ -6218,7 +6323,7 @@ impl Engine {
                     catalog_generation,
                 )
                 .await;
-                let mut errors = HashMap::new();
+                let mut connection_errors = HashMap::new();
                 {
                     let mut pool = pool_for_task.lock().await;
                     for (name, result) in results {
@@ -6226,25 +6331,29 @@ impl Engine {
                         match result {
                             Ok(connection) => pool.store_ready_connection(name, connection),
                             Err(error) => {
-                                errors
+                                connection_errors
                                     .insert(name, crate::mcp::format_mcp_error_for_display(&error));
                             }
                         }
                         let _ = progress_tx.send(McpBootUpdate::Progress {
-                            errors: errors.clone(),
+                            generation,
+                            authority_errors: Arc::clone(&authority_errors),
+                            connection_errors: connection_errors.clone(),
                             connecting: remaining.clone(),
                         });
                     }
                     let mut required = Vec::new();
                     pool.push_required_server_errors(&mut required);
                     for (name, error) in required {
-                        errors
+                        connection_errors
                             .entry(name)
                             .or_insert_with(|| crate::mcp::format_mcp_error_for_display(&error));
                     }
                 }
                 let _ = progress_tx.send(McpBootUpdate::Finished {
-                    errors: errors.clone(),
+                    generation,
+                    authority_errors,
+                    connection_errors,
                 });
                 let _ = done_tx.send(true);
             },
@@ -6255,7 +6364,7 @@ impl Engine {
     /// snapshot that exact pool for the boot UI. `connect_all` is bounded and
     /// concurrent; already-ready connections are preserved, and unlike the
     /// explicit reload path no config source is force-reloaded.
-    async fn bootstrap_mcp_pool(&mut self) -> anyhow::Result<crate::mcp::McpManagerSnapshot> {
+    async fn bootstrap_mcp_pool(&mut self) -> anyhow::Result<McpManagerUpdate> {
         if self.mcp_pool.is_none() {
             let _ = self.ensure_mcp_pool().await;
         }
@@ -6266,13 +6375,18 @@ impl Engine {
             // has been scheduled; connect now without blocking later turns.
         }
         self.drain_mcp_boot_updates().await;
-        self.mcp_session_snapshot().await
+        let snapshot = self.mcp_session_snapshot().await?;
+        let generation = self.next_mcp_event_generation();
+        Ok(McpManagerUpdate {
+            snapshot,
+            generation,
+        })
     }
 
-    async fn retry_mcp_server(
-        &mut self,
-        name: &str,
-    ) -> anyhow::Result<crate::mcp::McpManagerSnapshot> {
+    async fn retry_mcp_server(&mut self, name: &str) -> anyhow::Result<McpManagerUpdate> {
+        if self.mcp_boot_in_flight {
+            self.wait_for_mcp_boot().await;
+        }
         let pool = self
             .ensure_mcp_pool()
             .await
@@ -6301,12 +6415,17 @@ impl Engine {
                 .any(|configured| configured.name == *server)
         });
         drop(pool);
+        let generation = self.next_mcp_event_generation();
         let _ = self.tx_event.try_send(Event::McpSessionBoot {
+            generation,
             snapshot: snapshot.clone(),
             connecting: Vec::new(),
             finished: true,
         });
-        Ok(snapshot)
+        Ok(McpManagerUpdate {
+            snapshot,
+            generation,
+        })
     }
 
     async fn mcp_tools(&mut self) -> Vec<Tool> {
@@ -6334,7 +6453,8 @@ impl Engine {
             .collect();
         // Failures stay on the session-boot snapshot, not as Status toasts.
         drop(pool);
-        self.emit_mcp_session_boot(true).await;
+        let generation = self.next_mcp_event_generation();
+        self.emit_mcp_session_boot(generation, true).await;
         self.mcp_pool
             .as_ref()
             .expect("pool exists")
