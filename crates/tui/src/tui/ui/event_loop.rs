@@ -687,12 +687,23 @@ pub async fn run_tui(
         });
     }
 
-    // Flush the persistence actor: clear this session's checkpoint, collect
-    // the durability report (write failures are surfaced, not discarded),
-    // then shut down gracefully.
+    // Flush the persistence actor, collect the durability report (write
+    // failures are surfaced, not discarded), then shut down gracefully.
+    //
+    // The session's crash-recovery checkpoint is cleared only for a settled
+    // session. While a turn is in flight (or a spawned dispatch has not yet
+    // applied), the checkpoint is the only durable record of that work:
+    // clearing it here unconditionally could erase in-flight progress that
+    // never reached a snapshot, so it survives for startup recovery review.
     if let Some((handle, task)) = persistence_runtime {
-        if let Some(session_id) = app.current_session_id.clone() {
+        let turn_in_flight = app.is_loading || app.dispatch_in_flight;
+        if !turn_in_flight && let Some(session_id) = app.current_session_id.clone() {
             handle.try_send(PersistRequest::ClearCheckpoint { session_id });
+        } else if turn_in_flight {
+            tracing::info!(
+                target: "persistence",
+                "shutdown preserves the in-flight checkpoint for recovery review"
+            );
         }
         let (report_tx, report_rx) = tokio::sync::oneshot::channel();
         handle.try_send(PersistRequest::FlushAndReport { reply: report_tx });
@@ -2011,15 +2022,19 @@ pub(crate) async fn run_event_loop(
                         // Auto-save completed turn and clear crash checkpoint.
                         // Offloaded to the persistence actor so the UI
                         // stays responsive.
-                        let mut completed_snapshot_id: Option<String> = None;
                         if let Ok(manager) = SessionManager::default_location()
                             && let Ok(session) = build_session_snapshot(app, &manager)
                         {
                             app.current_session_id = Some(session.metadata.id.clone());
-                            completed_snapshot_id = Some(session.metadata.id.clone());
-                            let queued = persistence_actor::try_persist(
-                                PersistRequest::SessionSnapshot(session),
-                            );
+                            // Compound completion commit: the actor writes the
+                            // completed snapshot and clears this session's
+                            // crash checkpoint only after that write succeeds.
+                            // A failed save now retains the checkpoint as the
+                            // sole recovery record instead of erasing it.
+                            let queued =
+                                persistence_actor::try_persist(PersistRequest::CompletedCommit {
+                                    session,
+                                });
                             if queued {
                                 if let Err(err) = publish_pending_work_projection(app).await {
                                     tracing::warn!(
@@ -2042,11 +2057,11 @@ pub(crate) async fn run_event_loop(
                                 );
                             }
                         }
-                        if let Some(session_id) = completed_snapshot_id {
-                            persistence_actor::persist(PersistRequest::ClearCheckpoint {
-                                session_id,
-                            });
-                        }
+                        // The checkpoint clear is owned by the compound
+                        // `CompletedCommit` above: it applies only after this
+                        // session's snapshot safely landed. When the snapshot
+                        // could not be built or queued, the in-flight
+                        // checkpoint survives for startup recovery review.
 
                         // Refresh DeepSeek account balance after each completed
                         // turn so the footer balance chip stays current without
