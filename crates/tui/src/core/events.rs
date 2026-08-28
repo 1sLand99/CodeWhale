@@ -445,6 +445,21 @@ pub enum Event {
     /// Status message for UI display
     Status { message: String },
 
+    /// Session-owned MCP + plugin boot progress.
+    ///
+    /// Failures stay on this event (and therefore on the session page) until
+    /// retry succeeds. They are not `Status` toasts. `connecting` names the
+    /// enabled servers that have not settled yet; `finished` is the terminal
+    /// receipt for this boot pass.
+    McpSessionBoot {
+        /// Monotonic engine-owned event generation. A direct `/mcp` snapshot
+        /// may supersede one generation without suppressing later passes.
+        generation: u64,
+        snapshot: crate::mcp::McpManagerSnapshot,
+        connecting: Vec<String>,
+        finished: bool,
+    },
+
     /// Rendered `/preview-request` manifest (#1004).
     ///
     /// The engine is the only authority that can rebuild the exact next-turn
