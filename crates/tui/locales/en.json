@@ -1214,6 +1214,8 @@
   "LaunchCreatingWorktree": "Creating worktree…",
   "LaunchWorktreeFailed": "Worktree failed: {error}",
   "LaunchNoSavedSessions": "No saved sessions for this workspace.",
+  "LaunchComposerHint": "Enter send · Shift+Enter new line · Esc back",
+  "LaunchComposerFocusHint": "Tab to type",
   "PhaseIdle": "idle",
   "PhaseDraft": "draft",
   "PhaseWorking": "in the current",

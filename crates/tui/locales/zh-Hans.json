@@ -1214,6 +1214,8 @@
   "LaunchCreatingWorktree": "正在创建工作树…",
   "LaunchWorktreeFailed": "工作树创建失败：{error}",
   "LaunchNoSavedSessions": "此工作区没有已保存的会话。",
+  "LaunchComposerHint": "Enter 发送 · Shift+Enter 换行 · Esc 返回",
+  "LaunchComposerFocusHint": "Tab 输入",
   "PhaseIdle": "空闲",
   "PhaseDraft": "草稿",
   "PhaseWorking": "工作中",

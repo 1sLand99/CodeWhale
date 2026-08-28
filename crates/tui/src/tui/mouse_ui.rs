@@ -442,34 +442,56 @@ pub(crate) fn handle_mouse_event(app: &mut App, mouse: MouseEvent) -> Vec<ViewEv
     // transcript or composer behind the splash.
     if app.launch.visible {
         match mouse.kind {
-            MouseEventKind::ScrollUp => {
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                // Wheeling away from the composer returns focus to the menu.
+                app.launch.composer_focus = false;
+                let key = if matches!(mouse.kind, MouseEventKind::ScrollUp) {
+                    KeyCode::Up
+                } else {
+                    KeyCode::Down
+                };
                 crate::tui::underwater::handle_launch_key(
                     &mut app.launch,
-                    KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
-                    app.ui_locale,
-                );
-            }
-            MouseEventKind::ScrollDown => {
-                crate::tui::underwater::handle_launch_key(
-                    &mut app.launch,
-                    KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+                    KeyEvent::new(key, KeyModifiers::NONE),
                     app.ui_locale,
                 );
             }
             MouseEventKind::Down(MouseButton::Left) => {
-                if let Some((index, _)) = app
+                // Send glyph first: it sits inside the composer row.
+                let send_hit = app
                     .launch
-                    .row_areas
-                    .iter()
-                    .enumerate()
-                    .find(|(_, area)| mouse_hits_rect(mouse, Some(**area)))
-                {
-                    app.launch.selected = index;
-                    app.pending_launch_action = Some(crate::tui::underwater::handle_launch_key(
-                        &mut app.launch,
-                        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
-                        app.ui_locale,
-                    ));
+                    .send_area
+                    .is_some_and(|area| mouse_hits_rect(mouse, Some(area)));
+                let composer_hit = app
+                    .launch
+                    .composer_area
+                    .is_some_and(|area| mouse_hits_rect(mouse, Some(area)));
+                if send_hit && !app.input.trim().is_empty() {
+                    // Same submit path as the composer's Enter key.
+                    app.pending_launch_action =
+                        Some(crate::tui::underwater::LaunchAction::SendComposer);
+                } else if composer_hit || send_hit {
+                    // Clicking the composer — or its send glyph with nothing
+                    // to send — focuses it, exactly like the Tab key.
+                    app.launch.composer_focus = true;
+                } else {
+                    // Clicking anywhere else hands focus back to the menu.
+                    app.launch.composer_focus = false;
+                    if let Some((index, _)) = app
+                        .launch
+                        .row_areas
+                        .iter()
+                        .enumerate()
+                        .find(|(_, area)| mouse_hits_rect(mouse, Some(**area)))
+                    {
+                        app.launch.selected = index;
+                        app.pending_launch_action =
+                            Some(crate::tui::underwater::handle_launch_key(
+                                &mut app.launch,
+                                KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+                                app.ui_locale,
+                            ));
+                    }
                 }
             }
             _ => {}
@@ -1878,7 +1900,7 @@ mod tests {
             let mut app = create_test_app();
             app.launch.visible = true;
             app.launch.worktree_available = true;
-            crate::tui::underwater::record_launch_row_areas(
+            crate::tui::underwater::record_launch_hitboxes(
                 Rect::new(0, 0, 80, 24),
                 &mut app.launch,
             );
@@ -1898,6 +1920,57 @@ mod tests {
             assert_eq!(app.launch.worktree_input, keyboard.worktree_input);
             assert_eq!(app.launch.status, keyboard.status);
         }
+    }
+
+    #[test]
+    fn composer_click_focuses_and_send_click_matches_the_keyboard_submit() {
+        let mut app = create_test_app();
+        app.launch.visible = true;
+        app.launch.worktree_available = true;
+        crate::tui::underwater::record_launch_hitboxes(Rect::new(0, 0, 80, 24), &mut app.launch);
+        let composer = app.launch.composer_area.expect("composer hitbox");
+        let send = app.launch.send_area.expect("send hitbox");
+
+        // Clicking the composer focuses it — the mouse equivalent of Tab.
+        handle_mouse_event(&mut app, left_click(composer.x + 4, composer.y));
+        assert!(app.launch.composer_focus);
+        assert_eq!(app.pending_launch_action, None);
+
+        // Clicking the send glyph produces the same action the event loop
+        // consumes for the composer's Enter key, from the same input state.
+        app.input = "ship it".to_string();
+        handle_mouse_event(&mut app, left_click(send.x, send.y));
+        assert_eq!(
+            app.pending_launch_action.take(),
+            Some(crate::tui::underwater::LaunchAction::SendComposer)
+        );
+        assert_eq!(app.input, "ship it");
+        assert!(app.launch.composer_focus);
+
+        // Nothing to send: the send glyph focuses the composer instead.
+        app.input.clear();
+        handle_mouse_event(&mut app, left_click(send.x, send.y));
+        assert_eq!(app.pending_launch_action, None);
+        assert!(app.launch.composer_focus);
+
+        // Clicking a startup row hands focus back to the menu.
+        let row = app.launch.row_areas[2];
+        handle_mouse_event(&mut app, left_click(row.x, row.y));
+        assert!(!app.launch.composer_focus);
+        assert_eq!(app.launch.selected, 2);
+
+        // Wheeling away from the composer also returns focus to the menu.
+        app.launch.composer_focus = true;
+        handle_mouse_event(
+            &mut app,
+            MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: composer.x + 4,
+                row: composer.y,
+                modifiers: KeyModifiers::NONE,
+            },
+        );
+        assert!(!app.launch.composer_focus);
     }
 
     #[test]

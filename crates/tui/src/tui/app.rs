@@ -547,6 +547,16 @@ pub struct LaunchState {
     pub worktree_available: bool,
     /// Row hitboxes from the most recent launch render.
     pub row_areas: Vec<Rect>,
+    /// Whether launch keys type into the pre-session composer instead of
+    /// driving the menu. The composer itself is the session `App`'s own
+    /// `ComposerState` — this flag only decides where keystrokes go.
+    pub composer_focus: bool,
+    /// Composer input-row hitbox from the most recent launch render. A
+    /// click here focuses the composer, exactly like the Tab key.
+    pub composer_area: Option<Rect>,
+    /// Send-glyph hitbox inside the composer row. A click here submits the
+    /// composed message through the normal dispatch path.
+    pub send_area: Option<Rect>,
 }
 
 impl LaunchState {
@@ -581,6 +591,9 @@ impl LaunchState {
             workspace_session_count,
             worktree_available,
             row_areas: Vec::new(),
+            composer_focus: false,
+            composer_area: None,
+            send_area: None,
         }
     }
 }

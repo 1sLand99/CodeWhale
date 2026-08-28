@@ -1191,6 +1191,8 @@
   "LaunchCreatingWorktree": "worktree बन रहा है…",
   "LaunchWorktreeFailed": "worktree विफल: {error}",
   "LaunchNoSavedSessions": "इस वर्कस्पेस के लिए कोई सहेजा सत्र नहीं।",
+  "LaunchComposerHint": "Enter भेजें · Shift+Enter नई पंक्ति · Esc वापस",
+  "LaunchComposerFocusHint": "टाइप करने के लिए Tab",
   "PhaseIdle": "निष्क्रिय",
   "PhaseDraft": "मसौदा",
   "PhaseWorking": "काम चल रहा",

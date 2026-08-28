@@ -730,7 +730,7 @@ pub(crate) fn render(f: &mut Frame, app: &mut App, _config: &Config) -> Option<(
         // Keep it edge-to-edge so opening Codewhale never recreates black side
         // banks before the responsive session ocean takes over.
         crate::tui::underwater::render_launch_screen(size, f.buffer_mut(), app);
-        crate::tui::underwater::record_launch_row_areas(size, &mut app.launch);
+        crate::tui::underwater::record_launch_hitboxes(size, &mut app.launch);
         if !app.view_stack.is_empty() {
             if app.view_stack.top_kind() == Some(ModalKind::Approval) {
                 app.viewport.last_approval_area = app.view_stack.top_occupied_region(size);

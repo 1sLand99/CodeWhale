@@ -1379,6 +1379,8 @@ pub enum MessageId {
     LaunchCreatingWorktree,
     LaunchWorktreeFailed,
     LaunchNoSavedSessions,
+    LaunchComposerHint,
+    LaunchComposerFocusHint,
     // Underwater shell phase words (footer status band).
     PhaseIdle,
     PhaseDraft,
@@ -3156,6 +3158,8 @@ pub const ALL_MESSAGE_IDS: &[MessageId] = &[
     MessageId::LaunchCreatingWorktree,
     MessageId::LaunchWorktreeFailed,
     MessageId::LaunchNoSavedSessions,
+    MessageId::LaunchComposerHint,
+    MessageId::LaunchComposerFocusHint,
     MessageId::PhaseIdle,
     MessageId::PhaseDraft,
     MessageId::PhaseWorking,

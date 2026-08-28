@@ -1191,6 +1191,8 @@
   "LaunchCreatingWorktree": "Creant el worktree…",
   "LaunchWorktreeFailed": "El worktree ha fallat: {error}",
   "LaunchNoSavedSessions": "No hi ha sessions desades per a aquest espai de treball.",
+  "LaunchComposerHint": "Enter envia · Shift+Enter línia nova · Esc torna",
+  "LaunchComposerFocusHint": "Tab per escriure",
   "PhaseIdle": "inactiu",
   "PhaseDraft": "esborrany",
   "PhaseWorking": "treballant",

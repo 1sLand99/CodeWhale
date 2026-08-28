@@ -1191,6 +1191,8 @@
   "LaunchCreatingWorktree": "Membuat worktree…",
   "LaunchWorktreeFailed": "Worktree gagal: {error}",
   "LaunchNoSavedSessions": "Tidak ada sesi tersimpan untuk workspace ini.",
+  "LaunchComposerHint": "Enter kirim · Shift+Enter baris baru · Esc kembali",
+  "LaunchComposerFocusHint": "Tab untuk mengetik",
   "PhaseIdle": "diam",
   "PhaseDraft": "draf",
   "PhaseWorking": "bekerja",

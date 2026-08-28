@@ -1047,6 +1047,8 @@
   "LaunchMenuSavedCount": "已儲存 {count} 個",
   "LaunchMenuUnavailable": "無法使用",
   "LaunchNoSavedSessions": "此工作區沒有已儲存的工作階段。",
+  "LaunchComposerHint": "Enter 傳送 · Shift+Enter 換行 · Esc 返回",
+  "LaunchComposerFocusHint": "Tab 輸入",
   "LaunchSavedSessionSingular": "已儲存 1 個工作階段",
   "LaunchSavedSessionsPlural": "已儲存 {count} 個工作階段",
   "LaunchTipFlags": "提示：-w <path> 開啟工作區；-r <session-id> 直接還原",

@@ -1214,6 +1214,8 @@
   "LaunchCreatingWorktree": "ワークツリーを作成中…",
   "LaunchWorktreeFailed": "ワークツリーの作成に失敗: {error}",
   "LaunchNoSavedSessions": "このワークスペースには保存済みセッションがありません。",
+  "LaunchComposerHint": "Enter 送信 · Shift+Enter 改行 · Esc 戻る",
+  "LaunchComposerFocusHint": "Tab で入力",
   "PhaseIdle": "待機",
   "PhaseDraft": "下書き",
   "PhaseWorking": "処理中",

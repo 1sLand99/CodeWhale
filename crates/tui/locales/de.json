@@ -1191,6 +1191,8 @@
   "LaunchCreatingWorktree": "Worktree wird erstellt…",
   "LaunchWorktreeFailed": "Worktree fehlgeschlagen: {error}",
   "LaunchNoSavedSessions": "Keine gespeicherten Sitzungen für diesen Workspace.",
+  "LaunchComposerHint": "Enter senden · Shift+Enter neue Zeile · Esc zurück",
+  "LaunchComposerFocusHint": "Tab zum Tippen",
   "PhaseIdle": "ruhend",
   "PhaseDraft": "entwurf",
   "PhaseWorking": "arbeitet",

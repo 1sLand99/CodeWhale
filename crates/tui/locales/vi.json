@@ -1214,6 +1214,8 @@
   "LaunchCreatingWorktree": "Đang tạo worktree…",
   "LaunchWorktreeFailed": "Worktree thất bại: {error}",
   "LaunchNoSavedSessions": "Không có phiên đã lưu cho workspace này.",
+  "LaunchComposerHint": "Enter gửi · Shift+Enter dòng mới · Esc quay lại",
+  "LaunchComposerFocusHint": "Tab để nhập",
   "PhaseIdle": "rảnh",
   "PhaseDraft": "nháp",
   "PhaseWorking": "đang xử lý",

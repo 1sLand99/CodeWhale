@@ -1191,6 +1191,8 @@
   "LaunchCreatingWorktree": "Создание worktree…",
   "LaunchWorktreeFailed": "Ошибка worktree: {error}",
   "LaunchNoSavedSessions": "Нет сохранённых сессий для этой рабочей области.",
+  "LaunchComposerHint": "Enter — отправить · Shift+Enter — новая строка · Esc — назад",
+  "LaunchComposerFocusHint": "Tab — ввести текст",
   "PhaseIdle": "простой",
   "PhaseDraft": "черновик",
   "PhaseWorking": "работа",

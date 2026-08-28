@@ -1214,6 +1214,8 @@
   "LaunchCreatingWorktree": "Criando worktree…",
   "LaunchWorktreeFailed": "Falha no worktree: {error}",
   "LaunchNoSavedSessions": "Nenhuma sessão salva para este workspace.",
+  "LaunchComposerHint": "Enter envia · Shift+Enter nova linha · Esc volta",
+  "LaunchComposerFocusHint": "Tab para digitar",
   "PhaseIdle": "ocioso",
   "PhaseDraft": "rascunho",
   "PhaseWorking": "trabalhando",
