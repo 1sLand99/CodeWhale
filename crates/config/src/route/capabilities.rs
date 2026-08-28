@@ -54,6 +54,8 @@ impl CapabilityState {
 /// - xAI web search tool: <https://docs.x.ai/developers/tools/web-search>
 /// - Z.AI Web Search API: <https://docs.z.ai/api-reference/tools/web-search>
 /// - Zhipu Web Search API: <https://docs.bigmodel.cn/api-reference/工具-api/网络搜索>
+/// - Alibaba Model Studio Token Plan Harness tools: <https://help.aliyun.com/en/model-studio/token-plan-harness-tool>
+/// - DeepSeek Responses web search: <https://api-docs.deepseek.com/api/create-response/>
 #[must_use]
 pub(crate) fn documented_server_side_web_search(
     provider_id: &str,
@@ -81,6 +83,14 @@ pub(crate) fn documented_server_side_web_search(
         "zai" => matches!(
             wire_model_id.as_str(),
             "glm-5.3" | "glm-5.3-flash" | "glm-5.2" | "glm-5.1" | "glm-5-turbo"
+        ),
+        "modelstudio-token-plan" => matches!(
+            wire_model_id.as_str(),
+            "qwen3.8-max" | "qwen3.7-plus" | "qwen3.7-max"
+        ),
+        "deepseek" => matches!(
+            wire_model_id.as_str(),
+            "deepseek-v4-flash" | "deepseek-v4-pro" | "deepseek-v4-flash-vision-exp"
         ),
         _ => false,
     };
@@ -192,6 +202,14 @@ mod tests {
             documented_server_side_web_search("zai", "GLM-5.3"),
             CapabilityState::Supported
         );
+        assert_eq!(
+            documented_server_side_web_search("modelstudio-token-plan", "qwen3.8-max"),
+            CapabilityState::Supported
+        );
+        assert_eq!(
+            documented_server_side_web_search("deepseek", "deepseek-v4-flash"),
+            CapabilityState::Supported
+        );
 
         for (provider, model) in [
             ("openrouter", "openai/gpt-5.6"),
@@ -202,6 +220,9 @@ mod tests {
             ("xai", "grok-4.5-fast"),
             ("anthropic", "claude-haiku-4-5"),
             ("zai", "glm-5.3-preview"),
+            ("modelstudio-coding-plan", "qwen3.8-max"),
+            ("modelstudio-token-plan", "qwen3.8-max-preview"),
+            ("deepseek", "deepseek-v4-flash-preview"),
         ] {
             assert_eq!(
                 documented_server_side_web_search(provider, model),

@@ -1661,6 +1661,8 @@ impl ConfigView {
                 scope: ConfigScope::Saved,
             }
         };
+        let (active_route_provider, _) = app.effective_route_display();
+        let (active_provider_identity, active_route_model) = app.effective_route_identity_display();
         let routing_model = if app.auto_model {
             app.last_effective_model
                 .as_deref()
@@ -1669,7 +1671,7 @@ impl ConfigView {
             app.model.as_str()
         };
         let fast_model =
-            crate::model_routing::provider_router_candidates(app.api_provider, routing_model)
+            crate::model_routing::provider_router_candidates(active_route_provider, routing_model)
                 .cheap
                 .unwrap_or_else(|| {
                     if app.auto_model && app.last_effective_model.is_none() {
@@ -1682,9 +1684,9 @@ impl ConfigView {
             ConfigRow {
                 section: ConfigSection::Provider,
                 key: "provider".to_string(),
-                value: config_provider_row_value(app, &config),
+                value: active_provider_identity.clone(),
                 editable: true,
-                scope: ConfigScope::Saved,
+                scope: ConfigScope::Session,
             },
             ConfigRow {
                 section: ConfigSection::Provider,
@@ -1695,16 +1697,20 @@ impl ConfigView {
             },
             ConfigRow {
                 section: ConfigSection::Provider,
-                key: config_base_url_row_key(app.api_provider).to_string(),
+                key: config_base_url_row_key(active_route_provider).to_string(),
                 value: config_base_url_row_value(app),
-                editable: true,
-                scope: ConfigScope::Saved,
+                // An endpoint is a route receipt, not a loose global knob.
+                // `/provider` owns changing the credential, model, and endpoint
+                // together; this row must not pretend that editing a live
+                // receipt can mutate an already-running client.
+                editable: false,
+                scope: ConfigScope::Session,
             },
             ConfigRow {
                 section: ConfigSection::Provider,
                 key: "context_window".to_string(),
                 value: config
-                    .context_window_for_provider_config(app.api_provider)
+                    .context_window_for_provider_config(active_route_provider)
                     .map_or_else(|| "(not set)".to_string(), |tokens| tokens.to_string()),
                 editable: false,
                 scope: ConfigScope::Saved,
@@ -1727,13 +1733,11 @@ impl ConfigView {
             ConfigRow {
                 section: ConfigSection::Model,
                 key: "model".to_string(),
-                value: format!(
-                    "{} / {}",
-                    app.api_provider.as_str(),
-                    app.model_display_label()
-                ),
+                // `·` keeps the row unambiguous when a provider display name
+                // itself contains `/` (e.g. `Zhipu AI / Z.ai`).
+                value: format!("{active_provider_identity} · {active_route_model}"),
                 editable: true,
-                scope: ConfigScope::Saved,
+                scope: ConfigScope::Session,
             },
             ConfigRow {
                 section: ConfigSection::Model,
@@ -2372,11 +2376,16 @@ impl ConfigView {
 
     fn setting_description(key: &str) -> &'static str {
         match key {
-            "provider" => "Active model provider for this session. Scope: saved route.",
+            "provider" => {
+                "Active model provider for this session. Enter opens the provider picker."
+            }
             "provider_templates" => {
                 "Beginner templates for OpenCode Zen/Go, SenseNova, and unpublished Agnes. Enter opens the list."
             }
-            "model" => "Model id for the active provider. Scope: saved / session route.",
+            "model" => "Model id for the active provider. Enter opens the model picker.",
+            "base_url" | "provider_url" => {
+                "Current route endpoint. Change provider setup through /provider so credential, model, and endpoint stay together."
+            }
             "approval_mode" => {
                 "Session approval posture (ask / auto). Separate from filesystem sandbox."
             }
@@ -2915,30 +2924,8 @@ fn config_base_url_row_key(provider: ApiProvider) -> &'static str {
     }
 }
 
-fn config_provider_row_value(app: &App, config: &Config) -> String {
-    config
-        .provider
-        .as_deref()
-        .filter(|provider| !provider.trim().is_empty())
-        .unwrap_or_else(|| app.provider_identity_for_persistence())
-        .to_string()
-}
-
 fn config_base_url_row_value(app: &App) -> String {
-    Config::load(app.config_path.clone(), app.config_profile.as_deref())
-        .map(|mut config| {
-            // A named custom provider is represented at runtime as `Custom`,
-            // but its table lookup still needs the original provider ID.
-            if config
-                .provider
-                .as_deref()
-                .is_none_or(|provider| provider.trim().is_empty())
-            {
-                config.provider = Some(app.provider_identity_for_persistence().to_string());
-            }
-            config.deepseek_base_url()
-        })
-        .unwrap_or_else(|_| tr(app.ui_locale, MessageId::ConfigUnavailable).to_string())
+    app.active_route_base_url.clone()
 }
 
 fn cost_currency_config_value(app: &App) -> String {
@@ -3127,11 +3114,13 @@ fn config_hint_for_key(locale: Locale, key: &str) -> Cow<'static, str> {
 
 fn config_literal_hint_for_key(key: &str) -> &'static str {
     match key {
-        "model" => "provider-scoped saved route; Enter opens /model",
+        "model" => "live route model for this session; Enter opens /model",
         "fast_model" => {
             "used by Auto routing and agent model_strength=faster when this provider has a known sibling"
         }
-        "provider" => "deepseek | openrouter | xiaomi-mimo | fireworks | siliconflow | ...",
+        "provider" => {
+            "live route provider for this session; Enter opens /provider (credential, model, and endpoint switch together)"
+        }
         "approval_mode" => "this session only: Ask | Auto-Review | Full Access",
         "permission_posture" => "default for new sessions: Ask | Auto-Review | Full Access",
         "approval_policy" => {
@@ -3180,7 +3169,9 @@ fn config_literal_hint_for_key(key: &str) -> &'static str {
         "rail_panel" => "tasks | agents | context | pinned · which panel the rail shows",
         "work_surface_top_height" => "5..=16 rows · also adjustable by dragging the divider",
         "work_surface_side_width" => "26..=80 columns · also adjustable by dragging the divider",
-        "base_url" => "global DeepSeek/root fallback; e.g. https://api.deepseek.com/beta",
+        "base_url" => {
+            "read-only route receipt for the live endpoint · change provider, credential, and endpoint together with /provider"
+        }
         // #5134: the filter matches hint text, so the words a confused user
         // actually types — "context length", "context size", "max context",
         // "1m" — have to appear here or these rows stay unfindable.
@@ -5785,8 +5776,9 @@ mod tests {
         assert!(!keys.contains(&"features.mcp"));
         assert!(!keys.contains(&"features.exec_policy"));
         assert!(!keys.contains(&"whaleflow"));
-        // Diagnostic-only model rows and managed permission rows are not
-        // editable; everything else outside Experimental/Fleet should be.
+        // Diagnostic-only model rows, managed permission rows, and live route
+        // receipts are not editable; everything else outside
+        // Experimental/Fleet should be.
         const DIAGNOSTIC_ONLY: &[&str] = &[
             "fast_model",
             "default_model",
@@ -5795,6 +5787,8 @@ mod tests {
             "effective_auto_compact",
             "external_credentials.openai-codex",
             "external_credentials.xai",
+            "base_url",
+            "provider_url",
         ];
         assert!(
             view.rows
@@ -5827,12 +5821,33 @@ mod tests {
                 })
                 .all(|row| !row.editable)
         );
-        for key in DIAGNOSTIC_ONLY {
+        // Route endpoint rows are provider-specific: DeepSeek routes expose
+        // `base_url`, every other provider exposes `provider_url`. Whichever
+        // exists must be a read-only route receipt.
+        const ROUTE_RECEIPT_KEYS: &[&str] = &["base_url", "provider_url"];
+        for key in DIAGNOSTIC_ONLY
+            .iter()
+            .filter(|key| !ROUTE_RECEIPT_KEYS.contains(key))
+        {
             assert!(
                 view.rows.iter().any(|row| row.key == *key && !row.editable),
                 "{key} must remain diagnostic-only"
             );
         }
+        let receipt_rows: Vec<_> = view
+            .rows
+            .iter()
+            .filter(|row| ROUTE_RECEIPT_KEYS.contains(&row.key.as_str()))
+            .collect();
+        assert_eq!(
+            receipt_rows.len(),
+            1,
+            "exactly one endpoint receipt row must exist for the active route"
+        );
+        assert!(
+            !receipt_rows[0].editable,
+            "endpoint receipt rows must be read-only"
+        );
     }
 
     #[test]
@@ -6027,7 +6042,7 @@ api_key_env = "ACME_API_KEY"
         .expect("custom provider config");
         let mut app = create_test_app();
         app.config_path = Some(config_path);
-        app.api_provider = crate::config::ApiProvider::Custom;
+        app.set_provider_identity(crate::config::ApiProvider::Custom, "acme_ai");
         let mut view = ConfigView::new_for_app(&app);
         view.selected = view
             .rows
@@ -6037,7 +6052,11 @@ api_key_env = "ACME_API_KEY"
 
         let row = &view.rows[view.selected];
         assert_eq!(row.value, "acme_ai");
-        assert_eq!(row.scope, ConfigScope::Saved);
+        assert_eq!(
+            row.scope,
+            ConfigScope::Session,
+            "the provider row shows the live route identity, not saved config"
+        );
         assert!(
             config_choice_values("provider", app.api_provider).is_none(),
             "provider must not be truncated to the generic enum chooser"
@@ -6095,13 +6114,74 @@ api_key_env = "ACME_API_KEY"
             .find(|row| row.key == "fast_model")
             .expect("fast model row");
 
-        assert_eq!(active.value, "zai / GLM-5.2");
+        assert_eq!(active.value, "Zhipu AI / Z.ai · GLM-5.2");
         assert_eq!(fast.value, "GLM-5-Turbo");
         // #4717: DeepSeek-only fallback must not appear on non-DeepSeek providers.
         assert!(
             view.rows.iter().all(|row| row.key != "default_model"),
             "default_model row must be hidden for zai when unset"
         );
+    }
+
+    #[test]
+    fn config_view_live_route_never_shows_stale_saved_provider() {
+        // The reported defect: the saved config still said `provider =
+        // "deepseek"` while the session was actually routed to Z.ai / GLM-5.3,
+        // and Settings presented the stale saved value as the "Active
+        // provider". Route rows must show the live route identity; saved
+        // config is a startup/default fact, never the active receipt.
+        let temp_root = std::env::temp_dir().join(format!(
+            "codewhale-stale-saved-provider-view-test-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&temp_root).unwrap();
+        let config_path = temp_root.join("config.toml");
+        fs::write(
+            &config_path,
+            "provider = \"deepseek\"\nbase_url = \"https://api.deepseek.com/v1\"\n",
+        )
+        .unwrap();
+
+        let mut app = create_test_app();
+        app.config_path = Some(config_path.clone());
+        // Live session route, exactly as a /provider switch would leave it.
+        app.api_provider = crate::config::ApiProvider::Zai;
+        app.model = "GLM-5.3".to_string();
+        app.active_route_base_url = crate::config::DEFAULT_ZAI_BASE_URL.to_string();
+
+        let view = ConfigView::new_for_app(&app);
+
+        let provider_row = view
+            .rows
+            .iter()
+            .find(|row| row.key == "provider")
+            .expect("provider row");
+        assert!(
+            provider_row.value.contains("Z.ai"),
+            "provider row must show the live route identity: {}",
+            provider_row.value
+        );
+        assert!(
+            !provider_row.value.to_lowercase().contains("deepseek"),
+            "stale saved provider must not appear as the active route: {}",
+            provider_row.value
+        );
+        assert_eq!(provider_row.scope, ConfigScope::Session);
+
+        let model_row = view
+            .rows
+            .iter()
+            .find(|row| row.key == "model")
+            .expect("model row");
+        assert_eq!(model_row.value, "Zhipu AI / Z.ai · GLM-5.3");
+
+        let url_row = view
+            .rows
+            .iter()
+            .find(|row| row.key == "provider_url")
+            .expect("endpoint row for the live Z.ai route");
+        assert_eq!(url_row.value, crate::config::DEFAULT_ZAI_BASE_URL);
+        assert!(!view.rows.iter().any(|row| row.key == "base_url"));
     }
 
     #[test]
@@ -6317,21 +6397,9 @@ max_spawn_depth = 2
     }
 
     #[test]
-    fn config_view_base_url_reflects_app_config_path() {
-        let temp_root = std::env::temp_dir().join(format!(
-            "deepseek-tui-base-url-view-test-{}",
-            std::process::id()
-        ));
-        fs::create_dir_all(&temp_root).unwrap();
-        let config_path = temp_root.join("config.toml");
-        fs::write(
-            &config_path,
-            "base_url = \"https://ui-config-view.local/v1\"\n",
-        )
-        .unwrap();
-
+    fn config_view_base_url_reflects_active_route_receipt() {
         let mut app = create_test_app();
-        app.config_path = Some(config_path.clone());
+        app.active_route_base_url = "https://ui-config-view.local/v1".to_string();
         let view = ConfigView::new_for_app(&app);
 
         let row = view
@@ -6343,7 +6411,12 @@ max_spawn_depth = 2
             config_label_for_key(&row.key),
             "Provider API URL (DeepSeek route)"
         );
+        // The endpoint row is a read-only receipt for the live route; it must
+        // not re-read config files, which may describe a different saved
+        // route than the one the session is actually using.
         assert_eq!(row.value, "https://ui-config-view.local/v1");
+        assert!(!row.editable);
+        assert_eq!(row.scope, ConfigScope::Session);
     }
 
     #[test]
@@ -6368,6 +6441,7 @@ base_url = "https://api.xiaomimimo.com/v1"
 
         let mut app = create_test_app();
         app.api_provider = crate::config::ApiProvider::XiaomiMimo;
+        app.active_route_base_url = crate::config::DEFAULT_XIAOMI_MIMO_BASE_URL.to_string();
         app.ui_locale = Locale::Es419;
         app.config_path = Some(config_path.clone());
         let mut view = ConfigView::new_for_app(&app);
@@ -6377,7 +6451,10 @@ base_url = "https://api.xiaomimimo.com/v1"
             .iter()
             .find(|row| row.key == "provider_url")
             .expect("provider_url row missing");
+        // The endpoint row reflects the live route identity (the default when
+        // nothing overrides it), not a config-file re-read, and is a receipt.
         assert_eq!(row.value, crate::config::DEFAULT_XIAOMI_MIMO_BASE_URL);
+        assert!(!row.editable);
         assert!(!view.rows.iter().any(|row| row.key == "base_url"));
 
         view.focus_key("provider_url");
@@ -7342,8 +7419,8 @@ context_window = 262144
         view.selected = view
             .rows
             .iter()
-            .position(|row| row.key == "base_url")
-            .expect("base_url row");
+            .position(|row| row.key == "stream_chunk_timeout_secs")
+            .expect("editable row on the default tab");
 
         let _ = view.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         let edit = view.editing.as_ref().expect("editing should be active");
@@ -7362,8 +7439,8 @@ context_window = 262144
         view.selected = view
             .rows
             .iter()
-            .position(|row| row.key == "base_url")
-            .expect("base_url row");
+            .position(|row| row.key == "stream_chunk_timeout_secs")
+            .expect("editable row on the default tab");
         let _ = view.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(view.editing.is_some());
 
