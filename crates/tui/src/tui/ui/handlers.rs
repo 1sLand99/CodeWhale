@@ -413,6 +413,11 @@ pub(crate) async fn handle_mcp_ui_action(
     let mut changed = false;
     let mut message = None;
     let is_reload = matches!(&action, crate::tui::app::McpUiAction::Reload);
+    let retry_name = match &action {
+        crate::tui::app::McpUiAction::Retry { name } => Some(name.clone()),
+        _ => None,
+    };
+    let snapshot_live_pool = matches!(&action, crate::tui::app::McpUiAction::Show);
     let discover = mcp_ui_action_refreshes_discovery(&action);
 
     let action_result = match action {
@@ -550,6 +555,7 @@ pub(crate) async fn handle_mcp_ui_action(
             }
         }
         crate::tui::app::McpUiAction::Validate | crate::tui::app::McpUiAction::Reload => Ok(()),
+        crate::tui::app::McpUiAction::Retry { .. } => Ok(()),
     };
 
     if let Err(err) = action_result {
@@ -570,12 +576,22 @@ pub(crate) async fn handle_mcp_ui_action(
     // second, easy-to-miss reload step. The standalone reload action remains
     // the retry/compatibility path for externally edited configuration.
     let rebuild_live_pool = is_reload || changed;
-    let snapshot_result = if rebuild_live_pool {
+    let snapshot_result = if let Some(name) = retry_name.as_deref() {
+        engine_handle
+            .retry_mcp_server(name)
+            .await
+            .map(|update| (update.snapshot, Some(update.generation)))
+    } else if snapshot_live_pool {
+        engine_handle
+            .bootstrap_mcp()
+            .await
+            .map(|update| (update.snapshot, Some(update.generation)))
+    } else if rebuild_live_pool {
         match engine_handle.reload_mcp(path.clone()).await {
-            Ok(snapshot) => {
+            Ok(update) => {
                 app.mcp_reload_required = false;
-                add_mcp_message(app, mcp_reload_summary(&snapshot));
-                Ok(snapshot)
+                add_mcp_message(app, mcp_reload_summary(&update.snapshot));
+                Ok((update.snapshot, Some(update.generation)))
             }
             Err(error) => {
                 app.mcp_reload_required = true;
@@ -594,6 +610,7 @@ pub(crate) async fn handle_mcp_ui_action(
             std::sync::Arc::clone(&app.plugin_registry),
         )
         .await
+        .map(|snapshot| (snapshot, None))
     } else {
         mcp::manager_snapshot_from_config_with_workspace_and_plugins(
             &path,
@@ -601,10 +618,11 @@ pub(crate) async fn handle_mcp_ui_action(
             app.mcp_reload_required,
             app.plugin_registry.as_ref(),
         )
+        .map(|snapshot| (snapshot, None))
     };
 
     match snapshot_result {
-        Ok(snapshot) => {
+        Ok((snapshot, generation)) => {
             if discover {
                 add_mcp_message(
                     app,
@@ -615,12 +633,22 @@ pub(crate) async fn handle_mcp_ui_action(
             // snapshot so footers and panels reflect post-/mcp edits
             // (#502).
             app.mcp_configured_count = snapshot.servers.len();
+            if let Some(generation) = generation {
+                app.mcp_snapshot_generation = generation;
+                app.mcp_snapshot_generation_invalidated = true;
+            }
             app.mcp_snapshot = Some(snapshot.clone());
+            app.mcp_initializing = false;
+            app.mcp_connecting.clear();
             // #2068: keep the hotbar's MCP-tool actions in sync with the tools
             // that are actually loaded; the hotbar never connects on its own.
             app.hotbar_actions.replace_mcp_tools(Some(&snapshot));
             open_mcp_manager_pager(app, &snapshot);
         }
+        Err(err) if retry_name.is_some() => add_mcp_message(
+            app,
+            format!("MCP server retry failed; the live tool pool is unchanged: {err}"),
+        ),
         Err(err) if rebuild_live_pool => add_mcp_message(
             app,
             format!("MCP reload failed; the live tool pool is unchanged: {err}"),
