@@ -330,6 +330,7 @@ Common commands for first-time users:
 | `/config` | Edit runtime and provider settings |
 | `/statusline` | Choose which footer status chips are visible |
 | `/compact` | Summarize long context to recover token budget |
+| `/copy` | Copy the last completed assistant response to the clipboard |
 | `/review` | Ask for a structured review workflow |
 | `/memory` | Inspect or manage memory when enabled |
 | `/mcp` | Configure or inspect MCP server integration |
