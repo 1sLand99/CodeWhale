@@ -430,17 +430,18 @@ fn load_cache_file(path: &Path) -> Option<PersistedModelsDevCache> {
     // catalog body. One small parse, zero body copies.
     if bytes.first() == Some(&b'{') && bytes.contains(&b'\n') {
         let split = bytes.iter().position(|b| *b == b'\n')?;
-        if let Ok(header) = serde_json::from_slice::<PersistedModelsDevCacheV2>(&bytes[..split]) {
-            if header.schema_version == CACHE_SCHEMA_VERSION_V2 && !bytes[split + 1..].is_empty() {
-                let body = String::from_utf8(bytes[split + 1..].to_vec()).ok()?;
-                return Some(PersistedModelsDevCache {
-                    schema_version: CACHE_SCHEMA_VERSION,
-                    fetched_at: header.fetched_at,
-                    source_fingerprint: header.source_fingerprint,
-                    source_label: header.source_label,
-                    body,
-                });
-            }
+        if let Ok(header) = serde_json::from_slice::<PersistedModelsDevCacheV2>(&bytes[..split])
+            && header.schema_version == CACHE_SCHEMA_VERSION_V2
+            && !bytes[split + 1..].is_empty()
+        {
+            let body = String::from_utf8(bytes[split + 1..].to_vec()).ok()?;
+            return Some(PersistedModelsDevCache {
+                schema_version: CACHE_SCHEMA_VERSION,
+                fetched_at: header.fetched_at,
+                source_fingerprint: header.source_fingerprint,
+                source_label: header.source_label,
+                body,
+            });
         }
     }
     // v1 fallback: whole-file JSON envelope with the body escaped inside.

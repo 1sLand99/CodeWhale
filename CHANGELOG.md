@@ -18,6 +18,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   variants. `/provider` fills URL, model, and env from one catalog row.
 - MCP manager copy now names the server, the failure, and one recovery
   command (`The X MCP server requires OAuth reauthentication. Run /mcp login X`).
+- Settings Advanced exposes clickable MCP Connect, Reconnect, and Diagnose
+  actions, while Extensions and Problems route recovery through the existing
+  `/mcp login`, `/mcp reload`, `/mcp validate`, and `/plugin validate` commands
+  (#5643, #5655).
 
 - Added `/import-claude` (#5557): reads `~/.claude.json` and
   `~/.claude/settings.json` read-only and renders an explicit, reviewable

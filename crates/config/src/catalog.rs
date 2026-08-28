@@ -220,7 +220,7 @@ pub fn bundled_models_dev_catalog() -> &'static ModelsDevCatalog {
 /// rows override these on `(provider, wire_model_id)` when available.
 #[must_use]
 pub fn bundled_catalog_offerings() -> Vec<CatalogOffering> {
-    bundled_offerings_from_models_dev(&bundled_models_dev_catalog())
+    bundled_offerings_from_models_dev(bundled_models_dev_catalog())
 }
 
 /// Hydrate bundled [`CatalogOffering`] rows from a parsed Models.dev catalog.

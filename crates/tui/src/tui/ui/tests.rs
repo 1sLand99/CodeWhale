@@ -8454,7 +8454,11 @@ async fn auto_dispatch_keeps_last_and_pending_receipts_aligned() {
         app.pending_turn_route
             .as_ref()
             .map(|(provider, model, auto)| (*provider, model.as_str(), *auto)),
-        Some((ApiProvider::Zai, crate::config::ZAI_GLM_5_TURBO_MODEL, true))
+        Some((
+            ApiProvider::Zai,
+            crate::config::ZAI_GLM_5_3_FLASH_MODEL,
+            true,
+        ))
     );
     assert_eq!(
         app.last_auto_route_receipt, app.pending_auto_route_receipt,
@@ -8468,13 +8472,10 @@ async fn auto_dispatch_keeps_last_and_pending_receipts_aligned() {
     );
     assert_eq!(
         app.last_effective_reasoning_effort,
-        Some(EffectiveReasoningEffort::ThinkingEnabledGranularityUnavailable),
+        Some(EffectiveReasoningEffort::Tier(ReasoningEffort::High)),
         "the post-turn receipt must retain exact route capability constraints"
     );
-    assert_eq!(
-        app.reasoning_effort_display_label(),
-        "low→thinking enabled; granularity unavailable"
-    );
+    assert_eq!(app.reasoning_effort_display_label(), "low→high");
 }
 
 #[tokio::test]

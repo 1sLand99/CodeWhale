@@ -1605,7 +1605,7 @@ mod tests {
                 .expect("inventory route should resolve with authenticated active provider");
 
         assert_eq!(route.provider, ApiProvider::Zai);
-        assert_eq!(route.model, crate::config::ZAI_GLM_5_TURBO_MODEL);
+        assert_eq!(route.model, crate::config::ZAI_GLM_5_3_FLASH_MODEL);
         assert_eq!(route.source, AutoRouteSource::Heuristic);
         let receipt = route.receipt.expect("Auto route receipt");
         assert_eq!(receipt.tier, AutoRouteTier::Fast);
@@ -1618,7 +1618,7 @@ mod tests {
         assert_eq!(receipt.pair.strong, crate::config::DEFAULT_ZAI_MODEL);
         assert_eq!(
             receipt.pair.fast.as_deref(),
-            Some(crate::config::ZAI_GLM_5_TURBO_MODEL)
+            Some(crate::config::ZAI_GLM_5_3_FLASH_MODEL)
         );
     }
 
@@ -1753,7 +1753,7 @@ mod tests {
             .await
             .expect("fast-tier route");
         assert_eq!(fast.provider, ApiProvider::Zai);
-        assert_eq!(fast.model, crate::config::ZAI_GLM_5_TURBO_MODEL);
+        assert_eq!(fast.model, crate::config::ZAI_GLM_5_3_FLASH_MODEL);
         assert_eq!(
             fast.receipt.expect("fast receipt").tier,
             AutoRouteTier::Fast
@@ -1939,7 +1939,7 @@ mod tests {
         assert_eq!(cost_saving_route.provider, ApiProvider::Zai);
         assert_eq!(
             cost_saving_route.model,
-            crate::config::ZAI_GLM_5_TURBO_MODEL
+            crate::config::ZAI_GLM_5_3_FLASH_MODEL
         );
         assert_eq!(cost_saving_route.source, AutoRouteSource::Heuristic);
         assert_eq!(

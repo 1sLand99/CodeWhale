@@ -138,10 +138,9 @@ fn apply_provider_model_cutlines(mut snapshot: CatalogSnapshot) -> CatalogSnapsh
         .offerings
         .into_iter()
         .filter_map(|mut offering| {
-            let parsed = resolved
+            let parsed = *resolved
                 .entry(offering.provider.clone())
-                .or_insert_with(|| ApiProvider::parse(&offering.provider))
-                .clone();
+                .or_insert_with(|| ApiProvider::parse(&offering.provider));
             if parsed == Some(ApiProvider::OpencodeGo) {
                 let canonical = opencode_go_chat_model_id(&offering.wire_model_id)?;
                 offering.provider = ApiProvider::OpencodeGo.as_str().to_string();
