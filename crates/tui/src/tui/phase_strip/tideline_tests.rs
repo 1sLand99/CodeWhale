@@ -21,6 +21,10 @@ fn thinking_footer() -> TelineFixture {
         live_detail: Some("1m 15s"),
         cost_label: "$0.42 · 61K tok",
         context_percent: 61,
+        // The old header's posture lockup, carried into the footer per §3.
+        mode_chip: Some(("act", ChromeInk::PolicyAct)),
+        permission_chip: Some(("ask", ChromeInk::PermissionAsk)),
+        notice: None,
     }
 }
 
@@ -30,6 +34,9 @@ struct TelineFixture {
     live_detail: Option<&'static str>,
     cost_label: &'static str,
     context_percent: u8,
+    mode_chip: Option<(&'static str, ChromeInk)>,
+    permission_chip: Option<(&'static str, ChromeInk)>,
+    notice: Option<(&'static str, ChromeInk)>,
 }
 
 impl TelineFixture {
@@ -43,6 +50,9 @@ impl TelineFixture {
             KEYS,
         )
         .live_detail(self.live_detail)
+        .mode_chip(self.mode_chip)
+        .permission_chip(self.permission_chip)
+        .notice(self.notice)
     }
 }
 
@@ -76,8 +86,49 @@ fn footer_merges_phase_cost_left_and_depth_keys_right() {
         band.contains("$0.42 · 61K tok"),
         "cost joins the left: {band}"
     );
+    // The posture chips ride after the cost, whole or not at all.
+    assert!(band.contains("$0.42 · 61K tok · act · ask"), "{band}");
     assert!(band.contains("61%"), "depth percent: {band}");
     assert!(band.ends_with(KEYS), "keys legend right: {band}");
+}
+
+/// §3: the old header's mode/permission chips move into the footer's left
+/// half. A chip that cannot fit whole stands down rather than clipping —
+/// the classic header's own rule for posture words.
+#[test]
+fn footer_posture_chips_fit_whole_or_stand_down() {
+    let mut fixture = thinking_footer();
+    fixture.permission_chip = Some(("full access", ChromeInk::PermissionFullAccess));
+    let text = draw(100, 30, &fixture.widget(&UI_THEME));
+    assert!(
+        text.contains("act · full access"),
+        "both posture chips render: {text}"
+    );
+
+    // Narrow: the chips shed before they would clip.
+    let narrow = draw(40, 12, &fixture.widget(&UI_THEME));
+    for phrase in ["act · full access", "act ·", "· full access"] {
+        assert!(
+            !narrow.contains(phrase),
+            "narrow row clipped a posture word ({phrase}): {narrow}"
+        );
+    }
+}
+
+/// A live notice owns the trailing right slot over the keys legend — the
+/// activity band's toast fact survives the merge (spec §3: nothing the old
+/// bands carried is dropped silently).
+#[test]
+fn footer_notice_owns_the_trailing_slot_over_the_keys() {
+    let mut fixture = thinking_footer();
+    fixture.notice = Some(("Auto-denied exec_shell", ChromeInk::Attention));
+    let text = draw(100, 30, &fixture.widget(&UI_THEME));
+    assert!(text.contains("Auto-denied exec_shell"), "{text}");
+    assert!(
+        !text.contains(KEYS),
+        "the notice outranks the keys legend: {text}"
+    );
+    assert!(text.contains("61%"), "the depth line stays: {text}");
 }
 
 #[test]

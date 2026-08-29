@@ -582,6 +582,8 @@ impl ShellPhase {
     }
 
     #[must_use]
+    #[allow(dead_code)] // classic header/band renderer: superseded by the Tideline shell
+    // (topbar + merged footer, spec §3, 2026-08-29); deletion is its own slice.
     pub fn color(self, app: &App) -> Color {
         phase_ink(self).color(&app.ui_theme)
     }
@@ -624,8 +626,36 @@ fn header_permission_ink(mode: ApprovalMode) -> ChromeInk {
     }
 }
 
+#[allow(dead_code)] // classic header/band renderer: superseded by the Tideline shell
+// (topbar + merged footer, spec §3, 2026-08-29); deletion is its own slice.
 fn header_fg(app: &App, ink: ChromeInk) -> Style {
     chrome_style(&app.ui_theme, ink)
+}
+
+/// One posture word with its ink — the unit the classic header's lockup was
+/// made of, now carried as merged-footer chips.
+pub(crate) type PostureChip = (Cow<'static, str>, ChromeInk);
+
+/// The posture lockup as two standalone chips for the Tideline merged
+/// footer (spec §3: the old header's mode/permission chips move into the
+/// footer activity segment). Same words, same inks, and the same mapping
+/// the classic header used — [`header_mode_ink`] for the mode word,
+/// [`header_permission_ink`] for the permission phrase. The filesystem
+/// scope notice, when it deviates, folds into the permission chip's text
+/// (the header already painted it in the permission ink).
+pub(crate) fn posture_chips(app: &App) -> (Option<PostureChip>, Option<PostureChip>) {
+    let mode = (
+        mode_label(app.ui_locale, app.mode),
+        header_mode_ink(app.mode),
+    );
+    let mut permission = (
+        permission_label(app),
+        header_permission_ink(app.approval_mode),
+    );
+    if let Some(scope) = filesystem_scope_notice(app) {
+        permission.0 = format!("{} · {scope}", permission.0).into();
+    }
+    (Some(mode), Some(permission))
 }
 
 /// Summarize only tools whose lifecycle is actually `Running`. A read label
@@ -1601,6 +1631,8 @@ pub fn record_launch_hitboxes(area: Rect, launch: &mut crate::tui::app::LaunchSt
     }
 }
 
+#[allow(dead_code)] // classic header/band renderer: superseded by the Tideline shell
+// (topbar + merged footer, spec §3, 2026-08-29); deletion is its own slice.
 fn compact_tokens(tokens: i64) -> String {
     if tokens >= 1_000_000 {
         format!("{:.1}M", tokens as f64 / 1_000_000.0)
@@ -1611,6 +1643,9 @@ fn compact_tokens(tokens: i64) -> String {
     }
 }
 
+#[allow(dead_code)]
+// classic header/band renderer: superseded by the Tideline shell
+// (topbar + merged footer, spec §3, 2026-08-29); deletion is its own slice.
 /// The context meter is one measured fact: an exact percentage for scanning,
 /// a token fraction for auditability when room permits, and a short bar for
 /// peripheral vision. It is deliberately the final header fact so its rect
@@ -1639,6 +1674,11 @@ fn header_context_meter(app: &App, tier: ShellTier) -> Option<Span<'static>> {
 /// its visible geometry does not depend on optional git/token facts. The
 /// keyboard route remains `Alt+C`; this gives that same inspectable fact a
 /// mouse route without inventing another context screen or state owner.
+#[allow(dead_code)]
+// classic header/band renderer: superseded by the Tideline shell
+// (topbar + merged footer, spec §3, 2026-08-29); deletion is its own slice.
+// Its posture-floor guard (a hitbox never claims overlapped cells) is the
+// discipline `topbar::context_meter_hitbox` carries forward.
 #[must_use]
 pub(crate) fn header_hitboxes(area: Rect, app: &App) -> Vec<HeaderHitbox> {
     if area.width == 0 || area.height == 0 {
@@ -1719,11 +1759,17 @@ fn session_token_breakdown(app: &App) -> Option<Span<'static>> {
 /// was nothing for the eye to group on. The gap is deliberately wider than the
 /// visual whitespace inside `" · "` — four blank columns against one — because
 /// that ratio is the only thing carrying the grouping.
+#[allow(dead_code)] // classic header/band renderer: superseded by the Tideline shell
+// (topbar + merged footer, spec §3, 2026-08-29); deletion is its own slice.
 const FIELD_JOIN: &str = " · ";
+#[allow(dead_code)] // classic header/band renderer: superseded by the Tideline shell
+// (topbar + merged footer, spec §3, 2026-08-29); deletion is its own slice.
 const GROUP_GAP: &str = "    ";
 
 /// Append one chrome element, inserting the group separator only between
 /// elements so an absent element never leaves trailing padding.
+#[allow(dead_code)] // classic header/band renderer: superseded by the Tideline shell
+// (topbar + merged footer, spec §3, 2026-08-29); deletion is its own slice.
 fn push_chrome(spans: &mut Vec<Span<'static>>, span: Span<'static>) {
     if !spans.is_empty() {
         spans.push(Span::raw(GROUP_GAP));
@@ -1733,11 +1779,15 @@ fn push_chrome(spans: &mut Vec<Span<'static>>, span: Span<'static>) {
 
 /// Render the one-line shell header. Immediate operating posture and workspace
 /// truth live here; quieter route identity lives beside the phase footer.
+#[allow(dead_code)] // classic header/band renderer: superseded by the Tideline shell
+// (topbar + merged footer, spec §3, 2026-08-29); deletion is its own slice.
 pub fn render_header(area: Rect, buf: &mut Buffer, app: &App) {
     let git_status = crate::tui::git_status::cached_status();
     render_header_with_git_status(area, buf, app, &git_status);
 }
 
+#[allow(dead_code)] // classic header/band renderer: superseded by the Tideline shell
+// (topbar + merged footer, spec §3, 2026-08-29); deletion is its own slice.
 fn render_header_with_git_status(
     area: Rect,
     buf: &mut Buffer,
@@ -2011,6 +2061,8 @@ fn render_header_with_git_status(
 /// composer. This row is the canonical home for
 /// `provider · model · thinking level` and never trades places with the
 /// composer or the activity band above it.
+#[allow(dead_code)] // classic header/band renderer: superseded by the Tideline shell
+// (topbar + merged footer, spec §3, 2026-08-29); deletion is its own slice.
 pub fn render_footer(area: Rect, buf: &mut Buffer, app: &mut App) {
     crate::tui::phase_strip::render_identity(area, buf, app);
 }
@@ -3351,6 +3403,16 @@ use ratatui::layout::{Constraint, Layout};
 
 use crate::palette::UiTheme;
 
+/// The three-cell crown glyph for the startup hero's fluke mark (ASCII
+/// `<.>`). Local to this later-slice scaffolding: the topbar's own copies
+/// were deleted by the founder decree (terminal marks must be generated from
+/// the brand master path); the hero keeps the hand-drawn projection until
+/// its slice lands and replaces it with the generated mark.
+#[allow(dead_code)] // translation scaffolding: wired by the landing slice
+const FLUKE: &str = "▚△▞";
+#[allow(dead_code)] // translation scaffolding: wired by the landing slice
+const FLUKE_ASCII: &str = "<.>";
+
 /// Static wave rule between the hero and the quick actions (spec §5b). Dim,
 /// never animated — decoration is opt-in and this is not decoration that
 /// carries state.
@@ -3524,11 +3586,7 @@ impl<'a> TidelineStartup<'a> {
     }
 
     fn fluke(&self) -> &'static str {
-        if self.ascii_safe {
-            crate::tui::topbar::FLUKE_ASCII
-        } else {
-            crate::tui::topbar::FLUKE
-        }
+        if self.ascii_safe { FLUKE_ASCII } else { FLUKE }
     }
 }
 

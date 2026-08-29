@@ -744,6 +744,10 @@ pub struct ViewportState {
     /// WorkflowPanel rect above the composer (#4121), for mouse toggle/cancel.
     pub last_workflow_panel_area: Option<Rect>,
     pub last_workflow_cancel_area: Option<Rect>,
+    /// Topbar segment rects (Tideline shell, spec §6), recorded at render so
+    /// hover and — in a follow-up slice — click routing can hit-test the
+    /// painted cells. Mirrors the workflow-panel cancel-area storage pattern.
+    pub last_topbar_hitboxes: Vec<crate::tui::topbar::TopbarHitbox>,
     /// Live plugin CTA row above the composer, plus review/dismiss hitboxes.
     pub last_plugin_cta_area: Option<Rect>,
     pub last_plugin_cta_review_area: Option<Rect>,
@@ -781,6 +785,7 @@ impl Default for ViewportState {
             last_approval_area: None,
             last_workflow_panel_area: None,
             last_workflow_cancel_area: None,
+            last_topbar_hitboxes: Vec::new(),
             last_plugin_cta_area: None,
             last_plugin_cta_review_area: None,
             last_plugin_cta_dismiss_area: None,
@@ -1838,6 +1843,12 @@ pub struct App {
     pub status_items: Vec<crate::config::StatusItem>,
     /// Optional header items enabled from `tui.header_items` in `config.toml`
     /// at startup. Built-in header content remains independent of this list.
+    /// Unread since the classic header was superseded by the Tideline topbar
+    /// (2026-08-29): the topbar carries the context meter by default and the
+    /// token breakdown lives behind `/cost` (spec §3). The field stays so the
+    /// config surface keeps parsing; its reader returns with the classic
+    /// renderer deletion slice.
+    #[allow(dead_code)]
     pub header_items: Vec<crate::config::HeaderItem>,
     /// Project documentation (AGENTS.md or CLAUDE.md)
     #[allow(dead_code)]

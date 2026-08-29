@@ -45,10 +45,14 @@ pub fn height() -> u16 {
 /// Reserved in every phase — including idle — so the composer's rows never
 /// move when a turn starts, settles, fails, or is cancelled.
 #[must_use]
+#[allow(dead_code)] // classic band renderer: superseded by the merged Tideline footer
+// (spec §3, 2026-08-29); deletion is its own slice.
 pub fn activity_height() -> u16 {
     1
 }
 
+#[allow(dead_code)] // classic band renderer: superseded by the merged Tideline footer
+// (spec §3, 2026-08-29); deletion is its own slice.
 fn span_width(spans: &[Span<'_>]) -> usize {
     spans.iter().map(|span| span.content.width()).sum()
 }
@@ -70,6 +74,8 @@ fn working_detail(app: &App, activity: LiveActivity) -> Option<String> {
     }
 }
 
+#[allow(dead_code)] // classic band renderer: superseded by the merged Tideline footer
+// (spec §3, 2026-08-29); deletion is its own slice.
 fn session_cache_hit_percentage(app: &App) -> Option<u8> {
     let hit = u64::from(app.session.displayed_total_cache_hit_tokens());
     let miss = u64::from(app.session.displayed_total_cache_miss_tokens());
@@ -83,7 +89,8 @@ fn session_cache_hit_percentage(app: &App) -> Option<u8> {
     Some(((hit * 100 + total / 2) / total) as u8)
 }
 
-/// Route identity for the rail, shed field by field until it fits `budget`.
+/// Route identity for a rail or topbar segment, shed field by field until it
+/// fits `budget`.
 ///
 /// The old version composed the full `provider · model · effort` label and
 /// then `truncate_to_width`'d it to a fixed 24/44/64 columns, which happily
@@ -93,7 +100,11 @@ fn session_cache_hit_percentage(app: &App) -> Option<u8> {
 /// instead — provider first, then effort — and if the bare model name still
 /// does not fit, shed the whole group. `/model` and `/status` own the full
 /// route either way.
-fn route_identity_fields(app: &App, tier: ShellTier, budget: usize) -> Option<Vec<String>> {
+pub(crate) fn route_identity_fields(
+    app: &App,
+    tier: ShellTier,
+    budget: usize,
+) -> Option<Vec<String>> {
     let (provider, model) = app.effective_route_identity_display();
     let effort = app.reasoning_effort_display_label();
     if model.is_empty() {
@@ -119,6 +130,8 @@ fn route_identity_fields(app: &App, tier: ShellTier, budget: usize) -> Option<Ve
 /// Paint an identity group: the model name one step brighter than the
 /// qualifiers that narrow it, so the field a mid-session glance is looking
 /// for is the field the eye lands on. Two weights, no new colour.
+#[allow(dead_code)] // classic band renderer: superseded by the merged Tideline footer
+// (spec §3, 2026-08-29); deletion is its own slice.
 fn identity_spans(fields: &[String], model_index: usize, theme: &UiTheme) -> Vec<Span<'static>> {
     let mut spans = Vec::with_capacity(fields.len() * 2);
     for (index, field) in fields.iter().enumerate() {
@@ -241,6 +254,37 @@ fn status_toast_ink(level: crate::tui::app::StatusToastLevel) -> ChromeInk {
     }
 }
 
+/// Pick the notice a band owes its row to right now, if any. Shared by the
+/// classic activity band and the Tideline merged footer so the two can never
+/// disagree about which toast is live. Completion may land in the same event
+/// drain as an approval denial: unresolved Warning/Error receipts stay
+/// visible after `done`, only routine informational copy yields.
+fn selected_notice(
+    status_toast: Option<crate::tui::app::StatusToast>,
+    phase: ShellPhase,
+    phase_label: &str,
+) -> Option<(String, ChromeInk, bool)> {
+    status_toast
+        .filter(|toast| {
+            let survives_completion = matches!(
+                toast.level,
+                crate::tui::app::StatusToastLevel::Warning
+                    | crate::tui::app::StatusToastLevel::Error
+            );
+            (phase != ShellPhase::Done || survives_completion)
+                && !toast.text.trim().is_empty()
+                && toast.text.trim() != phase_label
+        })
+        .map(|toast| {
+            let urgent = matches!(
+                toast.level,
+                crate::tui::app::StatusToastLevel::Warning
+                    | crate::tui::app::StatusToastLevel::Error
+            );
+            (toast.text.clone(), status_toast_ink(toast.level), urgent)
+        })
+}
+
 /// Paint the activity band: the transient row above the composer.
 ///
 /// The band speaks in priority order and sheds from the bottom of that
@@ -258,6 +302,8 @@ fn status_toast_ink(level: crate::tui::app::StatusToastLevel) -> ChromeInk {
 ///
 /// Route identity never appears here: the identity band below the composer
 /// owns it in every phase, without duplication.
+#[allow(dead_code)] // classic band renderer: superseded by the merged Tideline footer
+// (spec §3, 2026-08-29); deletion is its own slice.
 pub fn render_activity(area: Rect, buf: &mut Buffer, app: &mut App) {
     if area.width == 0 || area.height == 0 {
         return;
@@ -318,30 +364,8 @@ pub fn render_activity(area: Rect, buf: &mut Buffer, app: &mut App) {
     let mut show_detail = !detail.is_empty();
 
     let notice = (tier != ShellTier::Compact)
-        .then_some(status_toast)
-        .flatten()
-        .filter(|toast| {
-            // Completion may land in the same event drain as an approval
-            // denial. Keep unresolved attention/error receipts visible after
-            // `done`; only routine informational completion copy yields to
-            // the stable done marker.
-            let survives_completion = matches!(
-                toast.level,
-                crate::tui::app::StatusToastLevel::Warning
-                    | crate::tui::app::StatusToastLevel::Error
-            );
-            (phase != ShellPhase::Done || survives_completion)
-                && !toast.text.trim().is_empty()
-                && toast.text.trim() != phase_label.as_ref()
-        })
-        .map(|toast| {
-            let urgent = matches!(
-                toast.level,
-                crate::tui::app::StatusToastLevel::Warning
-                    | crate::tui::app::StatusToastLevel::Error
-            );
-            (toast.text.clone(), status_toast_ink(toast.level), urgent)
-        });
+        .then(|| selected_notice(status_toast, phase, phase_label.as_ref()))
+        .flatten();
 
     // Urgent notices win the row over detail and the ledger; routine ones
     // stand down instead. Route identity no longer competes — it lives
@@ -408,6 +432,8 @@ pub fn render_activity(area: Rect, buf: &mut Buffer, app: &mut App) {
 /// Cost and session-metrics chips for whatever columns the activity band has
 /// left. The gutter opens the ledger group; the bar is the metrics strip's
 /// own internal divider, so it only shows up once the group is already open.
+#[allow(dead_code)] // classic band renderer: superseded by the merged Tideline footer
+// (spec §3, 2026-08-29); deletion is its own slice.
 fn ledger_spans(app: &App, tier: ShellTier, available: usize) -> Vec<Span<'static>> {
     let mut ledger: Vec<Span<'static>> = Vec::new();
     let mut used = 0usize;
@@ -494,30 +520,13 @@ fn ledger_spans(app: &App, tier: ShellTier, available: usize) -> Vec<Span<'stati
     ledger
 }
 
-/// Paint the identity band: the persistent row below the composer.
-///
-/// Canonical home of `provider · model · thinking level`, before, during,
-/// and after a prompt. Under width pressure the group sheds whole fields —
-/// provider first, then the thinking level — and then stands down entirely
-/// rather than clip a model name (`/model` and `/status` own the full
-/// route). Right-aligned key hints are the only other resident: the chord
-/// chorus while idle or drafting, plus the agent-focus keys whenever the
-/// empty composer still owns them.
-pub fn render_identity(area: Rect, buf: &mut Buffer, app: &mut App) {
-    if area.width == 0 || area.height == 0 {
-        return;
-    }
-    let phase = ShellPhase::from_app(app);
-    let tier = ShellTier::for_chrome_width(area.width);
-    // Quiet chrome background — the identity row never takes phase accent.
-    Block::default()
-        .style(Style::default().bg(app.ui_theme.footer_bg))
-        .render(area, buf);
-
-    // Hints come from shell_key_routing so advertised chords match handlers;
-    // bare letters are never advertised — the composer owns printable keys.
-    // Live phases keep the row quiet; idle and drafting may advertise keys.
-    let mut right_text: Cow<'static, str> = if matches!(
+/// The identity band's right-aligned key legend, and — since the Tideline
+/// footer merge — the merged footer's `keys_legend` source. Live phases keep
+/// the row quiet; idle and drafting advertise the chords the shell owns.
+/// `← for agents · ↓ to manage` joins the chorus whenever the empty composer
+/// still owns those keys.
+fn keys_legend(app: &App, tier: ShellTier, phase: ShellPhase) -> Cow<'static, str> {
+    let right_text: Cow<'static, str> = if matches!(
         phase,
         ShellPhase::Working
             | ShellPhase::Verifying
@@ -555,7 +564,7 @@ pub fn render_identity(area: Rect, buf: &mut Buffer, app: &mut App) {
         // post-completion menu ownership into the same predicate.
         && crate::tui::agent_focus::shell_shortcuts_available(app, false))
     .then(|| crate::tui::agent_focus::footer_agent_hints(app));
-    right_text = match agent_hints {
+    match agent_hints {
         Some(hints) if !right_text.is_empty() => {
             Cow::Owned(format!("{hints}{ITEM_SEPARATOR}{right_text}"))
         }
@@ -563,7 +572,32 @@ pub fn render_identity(area: Rect, buf: &mut Buffer, app: &mut App) {
         // visible on the identity row after `done` even without the chorus.
         Some(hints) if phase == ShellPhase::Done => Cow::Owned(hints),
         _ => right_text,
-    };
+    }
+}
+
+/// Paint the identity band: the persistent row below the composer.
+///
+/// Canonical home of `provider · model · thinking level`, before, during,
+/// and after a prompt. Under width pressure the group sheds whole fields —
+/// provider first, then the thinking level — and then stands down entirely
+/// rather than clip a model name (`/model` and `/status` own the full
+/// route). Right-aligned key hints are the only other resident: the chord
+/// chorus while idle or drafting, plus the agent-focus keys whenever the
+/// empty composer still owns them.
+#[allow(dead_code)] // classic band renderer: superseded by the merged Tideline footer
+// (spec §3, 2026-08-29); deletion is its own slice.
+pub fn render_identity(area: Rect, buf: &mut Buffer, app: &mut App) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let phase = ShellPhase::from_app(app);
+    let tier = ShellTier::for_chrome_width(area.width);
+    // Quiet chrome background — the identity row never takes phase accent.
+    Block::default()
+        .style(Style::default().bg(app.ui_theme.footer_bg))
+        .render(area, buf);
+
+    let right_text = keys_legend(app, tier, phase);
 
     let available = usize::from(area.width);
     let hint_width = right_text.width();
@@ -597,13 +631,21 @@ const ITEM_SEPARATOR_WIDTH: usize = 3;
 /// read as one run-on list of peers. A dot separates peers inside a group; a
 /// gutter separates groups. Same three columns, no extra ink, and the eye
 /// finally has something to skim by.
+#[allow(dead_code)] // classic band renderer: superseded by the merged Tideline footer
+// (spec §3, 2026-08-29); deletion is its own slice.
 const GROUP_GAP: &str = "   ";
+#[allow(dead_code)] // classic band renderer: superseded by the merged Tideline footer
+// (spec §3, 2026-08-29); deletion is its own slice.
 const GROUP_GAP_WIDTH: usize = 3;
 /// Blank columns kept between the left run and the right-aligned key hints.
+#[allow(dead_code)] // classic band renderer: superseded by the merged Tideline footer
+// (spec §3, 2026-08-29); deletion is its own slice.
 const HINT_GAP: usize = 2;
 /// Width of whichever mark opens the session metrics strip — the group
 /// gutter when the ledger starts with it, the ` │ ` bar when chips came
 /// first. Both are three columns.
+#[allow(dead_code)] // classic band renderer: superseded by the merged Tideline footer
+// (spec §3, 2026-08-29); deletion is its own slice.
 const LEDGER_OPENER_WIDTH: usize = 3;
 
 #[cfg(test)]
@@ -1398,11 +1440,9 @@ mod tests {
 // ---------------------------------------------------------------------------
 // Tideline merged footer (spec §3 slots 6+8 merged, §5a "Footer", §5e depth
 // line): one band — phase·cost on the left, depth line·keys on the right.
-// `render_footer` delegates to `render_identity` today; this is the merge
-// target shape, proven standalone. Translation scaffolding in the topbar
-// mold: the caller injects phase word/ink, live detail, cost label, and the
-// context percent (`SessionState`/`context_budget` facts at the landing
-// slice); not wired into `ui/frame.rs` (#5698 gate).
+// Wired into `ui/frame.rs` as the shell's single footer row: the classic
+// activity band (slot 6) and identity band (slot 8) collapsed into it, with
+// the old header's mode/permission chips carried in the left half per §3.
 //
 // Motion contract (spec §5e): the echolocation chip renders its still frame
 // `<·>` — the animated family is the landing slice's job through the 420 ms
@@ -1420,7 +1460,6 @@ const DEPTH_WAVE: &str = "∿";
 const DEPTH_WARN: &str = "surface soon — /compact";
 
 /// What the caller owes the merged footer. All injected, deterministic.
-#[allow(dead_code)] // translation scaffolding: wired by the landing slice
 pub struct TidelineFooter<'a> {
     pub theme: &'a crate::palette::UiTheme,
     /// Phase word, e.g. `thinking` / `surfaced` / `idle`.
@@ -1435,12 +1474,19 @@ pub struct TidelineFooter<'a> {
     pub context_percent: u8,
     /// Key legend, e.g. `Enter send · Ctrl+K clear · ? help`.
     pub keys_legend: &'a str,
+    /// Mode chip (`act` / `plan` / `operate`) in its Policy ink — the old
+    /// header's leftmost posture word, moved into the footer per spec §3.
+    pub mode_chip: Option<(&'a str, crate::palette::ChromeInk)>,
+    /// Permission chip (`ask` / `auto review` / `full access`, plus the
+    /// filesystem scope notice when it deviates) in its Permission ink.
+    pub permission_chip: Option<(&'a str, crate::palette::ChromeInk)>,
+    /// Urgent session notice (status toast / MCP boot chip) that owns the
+    /// right-hand keys slot while it is live.
+    pub notice: Option<(&'a str, crate::palette::ChromeInk)>,
     pub ascii_safe: bool,
 }
 
-#[allow(dead_code)] // translation scaffolding: builder methods feed tests + the landing slice
 impl<'a> TidelineFooter<'a> {
-    #[allow(dead_code)] // translation scaffolding: wired by the landing slice
     #[must_use]
     pub fn new(
         theme: &'a crate::palette::UiTheme,
@@ -1458,6 +1504,9 @@ impl<'a> TidelineFooter<'a> {
             cost_label,
             context_percent,
             keys_legend,
+            mode_chip: None,
+            permission_chip: None,
+            notice: None,
             ascii_safe: false,
         }
     }
@@ -1465,6 +1514,24 @@ impl<'a> TidelineFooter<'a> {
     #[must_use]
     pub fn live_detail(mut self, detail: Option<&'a str>) -> Self {
         self.live_detail = detail;
+        self
+    }
+
+    #[must_use]
+    pub fn mode_chip(mut self, chip: Option<(&'a str, crate::palette::ChromeInk)>) -> Self {
+        self.mode_chip = chip;
+        self
+    }
+
+    #[must_use]
+    pub fn permission_chip(mut self, chip: Option<(&'a str, crate::palette::ChromeInk)>) -> Self {
+        self.permission_chip = chip;
+        self
+    }
+
+    #[must_use]
+    pub fn notice(mut self, notice: Option<(&'a str, crate::palette::ChromeInk)>) -> Self {
+        self.notice = notice;
         self
     }
 
@@ -1535,7 +1602,12 @@ fn tput(buf: &mut Buffer, x: u16, y: u16, text: &str, style: Style) {
 }
 
 /// Paint the merged footer band (spec §5b: `Constraint::Length(1)`).
-#[allow(dead_code)] // translation scaffolding: wired by the landing slice
+///
+/// Left half: still-frame echolocation chip, phase word, live detail, the
+/// cost ledger, then the posture chips (`mode · permission`) the old header
+/// carried. Right half, pinned: the depth line + percent, with the trailing
+/// slot going to the live notice if one is owed, else the ≥80% cap warning,
+/// else the key legend.
 pub fn render_tideline_footer(area: Rect, buf: &mut Buffer, footer: &TidelineFooter<'_>) {
     if area.width < 8 || area.height < 1 {
         return;
@@ -1549,22 +1621,39 @@ pub fn render_tideline_footer(area: Rect, buf: &mut Buffer, footer: &TidelineFoo
     let depth = footer.depth_cells();
     let pct_text = format!("{pct}%");
     let mut right = format!("{depth} {pct_text}");
+    if warn {
+        right = format!("{} {right}", footer.sym("▲"));
+    }
+    let right_base_w = right.width() as u16;
     let warn_text = footer.sym(DEPTH_WARN);
     let keys = footer.sym(footer.keys_legend);
+    let notice_text = footer.notice.map(|(text, ink)| (footer.sym(text), ink));
     let depth_ink = footer.depth_ink();
-    let extra: (&str, crate::palette::ChromeInk) = if warn {
-        right = format!("{} {right}", footer.sym("▲"));
+
+    // Trailing-slot precedence: a live notice outranks the cap warning,
+    // which outranks the posture chips, which outrank the key chorus (the
+    // classic bands' own rule that identity outranks hints). A notice was
+    // clause-fitted at build time, so the whole phrase lands or the band
+    // was too narrow for it anyway.
+    let extra: (&str, crate::palette::ChromeInk) = if let Some((text, ink)) = &notice_text {
+        (text.as_str(), *ink)
+    } else if warn {
         (warn_text.as_str(), crate::palette::ChromeInk::Attention)
-    } else {
+    } else if trailing_extra_width(footer, area.width) > 0 {
         (keys.as_str(), crate::palette::ChromeInk::MetadataHint)
+    } else {
+        // The chorus stands down so the posture chips fit beside the depth
+        // line; if even that is not enough, the chips stand down below.
+        ("", crate::palette::ChromeInk::MetadataHint)
     };
-    let right_width = right.width() as u16 + 1 + extra.0.width() as u16 + 1;
+    let right_width = right_base_w + 1 + extra.0.width() as u16 + 1;
 
     // Left: still-frame echolocation chip + phase word + live detail + cost.
     let chip = footer.sym("<·>");
+    let phase = footer.sym(footer.phase_word);
+    let cost = footer.sym(footer.cost_label);
     tput(buf, area.x, area.y, &chip, tchrome(theme, footer.phase_ink));
     let mut x = area.x + chip.width() as u16 + 1;
-    let phase = footer.sym(footer.phase_word);
     tput(
         buf,
         x,
@@ -1595,8 +1684,7 @@ pub fn render_tideline_footer(area: Rect, buf: &mut Buffer, footer: &TidelineFoo
         );
         x += 2;
     }
-    if x < left_edge_end {
-        let cost = footer.sym(footer.cost_label);
+    if x < left_edge_end && !footer.cost_label.is_empty() {
         let budget = (left_edge_end - x) as usize;
         let cost = truncate_owned(&cost, budget);
         tput(
@@ -1606,6 +1694,33 @@ pub fn render_tideline_footer(area: Rect, buf: &mut Buffer, footer: &TidelineFoo
             &cost,
             tchrome(theme, crate::palette::ChromeInk::MetadataValue),
         );
+        x += cost.width() as u16;
+    }
+    // Posture chips after the cost, each fitting whole or standing down —
+    // a clipped posture word is worse than none (the classic header's rule).
+    for chip in [footer.mode_chip, footer.permission_chip]
+        .into_iter()
+        .flatten()
+    {
+        let text = footer.sym(chip.0);
+        let needs = ITEM_SEPARATOR_WIDTH + text.width();
+        if x + needs as u16 <= left_edge_end {
+            tput(
+                buf,
+                x,
+                area.y,
+                ITEM_SEPARATOR,
+                tchrome(theme, crate::palette::ChromeInk::MetadataDim),
+            );
+            tput(
+                buf,
+                x + ITEM_SEPARATOR_WIDTH as u16,
+                area.y,
+                &text,
+                tchrome(theme, chip.1),
+            );
+            x += needs as u16;
+        }
     }
 
     // Paint the right block pinned to the area edge.
@@ -1638,10 +1753,54 @@ fn truncate_owned(text: &str, width: usize) -> String {
     out
 }
 
+/// The trailing right-slot's width at this row width, shared by the render
+/// and the depth hitbox so the two can never disagree. A live notice or the
+/// cap warning keeps its full width; the key chorus keeps its width only
+/// while the posture chips still fit beside it — otherwise it stands down
+/// and the width is zero.
+fn trailing_extra_width(footer: &TidelineFooter<'_>, area_width: u16) -> usize {
+    let pct = footer.context_percent.clamp(0, 100);
+    let keys_w = footer.sym(footer.keys_legend).width();
+    if let Some((text, _)) = footer.notice {
+        return footer.sym(text).width();
+    }
+    if pct >= 80 {
+        return footer.sym(DEPTH_WARN).width();
+    }
+    let posture_w: usize = [footer.mode_chip, footer.permission_chip]
+        .into_iter()
+        .flatten()
+        .map(|(text, _)| ITEM_SEPARATOR_WIDTH + footer.sym(text).width())
+        .sum();
+    if posture_w == 0 {
+        return keys_w;
+    }
+    // The left half's standing width before the posture chips: chip, phase
+    // word, live detail, divider, cost.
+    let chip = footer.sym("<·>");
+    let phase = footer.sym(footer.phase_word);
+    let detail_w = footer
+        .live_detail
+        .map(|detail| footer.sym(detail).width() + 1)
+        .unwrap_or(0);
+    let cost = footer.sym(footer.cost_label);
+    let prefix_w = chip.width() + 1 + phase.width() + 1 + detail_w + 2 + cost.width();
+    let depth = footer.depth_cells();
+    let right_base_w = format!("{depth} {pct}%").width();
+    let available = usize::from(area_width)
+        .saturating_sub(right_base_w + 1 + keys_w + 1)
+        .saturating_sub(1);
+    if prefix_w + posture_w <= available {
+        keys_w
+    } else {
+        0
+    }
+}
+
 /// Depth-segment hitbox → context inspector (spec §6). Returns the rect
 /// covering the painted depth line + percentage.
 #[must_use]
-#[allow(dead_code)] // translation scaffolding: wired by the landing slice
+#[allow(dead_code)] // depth-segment click routing (spec §6) is a follow-up slice
 pub fn tideline_footer_depth_hitbox(area: Rect, footer: &TidelineFooter<'_>) -> Rect {
     let pct = footer.context_percent.clamp(0, 100);
     let depth = footer.depth_cells();
@@ -1649,20 +1808,164 @@ pub fn tideline_footer_depth_hitbox(area: Rect, footer: &TidelineFooter<'_>) -> 
     if pct >= 80 {
         right = format!("{} {right}", footer.sym("▲"));
     }
-    // Mirror the render's right-block arithmetic: the extra span sits one
-    // space to the right of the depth line.
-    let extra_w = if pct >= 80 {
-        footer.sym(DEPTH_WARN).width() as u16
-    } else {
-        footer.keys_legend.width() as u16
-    };
-    let total = right.width() as u16 + 1 + extra_w + 1;
+    // Mirror the render's right-block arithmetic through the shared
+    // trailing-width rule, so the rect always matches the painted cells.
+    let extra_w = trailing_extra_width(footer, area.width);
+    let total = right.width() as u16 + 1 + extra_w as u16 + 1;
     let x = (area.x + area.width).saturating_sub(total).max(area.x);
     Rect {
         x,
         y: area.y,
         width: right.width() as u16,
         height: 1,
+    }
+}
+
+/// Owned footer facts, built from real `App` state at render time and lent
+/// to [`TidelineFooter`] for painting. Every field names the surface it
+/// replaced when slots 6+8 merged:
+///
+/// - `phase_word`/`phase_ink`/`live_detail` — the activity band's phase verb
+///   and working detail (same phase machinery, same inks).
+/// - `cost_label` — the activity band's cost chip (`cumulative_usage_chip`).
+/// - `keys_legend` — the identity band's key chorus plus agent hints, and
+///   the activity band's `Esc to interrupt` while a turn is live.
+/// - `mode_chip`/`permission_chip` — the old header's posture lockup
+///   (`underwater::posture_chips`, same words, same inks).
+/// - `notice` — the activity band's status toast, or the MCP boot chip when
+///   no toast is live; it owns the trailing right slot while present.
+///
+/// Session metrics (turns/steps/TTFT/cache) move behind `/cost` per spec §3.
+pub(crate) struct TidelineFooterFacts {
+    pub phase_word: String,
+    pub phase_ink: crate::palette::ChromeInk,
+    pub live_detail: Option<String>,
+    pub cost_label: String,
+    pub context_percent: u8,
+    pub keys_legend: String,
+    pub mode_chip: Option<(String, crate::palette::ChromeInk)>,
+    pub permission_chip: Option<(String, crate::palette::ChromeInk)>,
+    pub notice: Option<(String, crate::palette::ChromeInk)>,
+}
+
+impl TidelineFooterFacts {
+    /// Borrow the facts as the deterministic footer widget's input.
+    pub(crate) fn widget<'a>(
+        &'a self,
+        theme: &'a crate::palette::UiTheme,
+        ascii_safe: bool,
+    ) -> TidelineFooter<'a> {
+        TidelineFooter::new(
+            theme,
+            &self.phase_word,
+            self.phase_ink,
+            &self.cost_label,
+            self.context_percent,
+            &self.keys_legend,
+        )
+        .live_detail(self.live_detail.as_deref())
+        .mode_chip(
+            self.mode_chip
+                .as_ref()
+                .map(|(text, ink)| (text.as_str(), *ink)),
+        )
+        .permission_chip(
+            self.permission_chip
+                .as_ref()
+                .map(|(text, ink)| (text.as_str(), *ink)),
+        )
+        .notice(
+            self.notice
+                .as_ref()
+                .map(|(text, ink)| (text.as_str(), *ink)),
+        )
+        .ascii_safe(ascii_safe)
+    }
+}
+
+/// Context window percentage for the depth line — the same snapshot the old
+/// header's meter and the Tideline topbar's meter read.
+pub(crate) fn context_percent_from_app(app: &App) -> u8 {
+    crate::tui::ui::context_usage_snapshot(app)
+        .map(|(_, _, percent)| percent.round().clamp(0.0, 100.0) as u8)
+        .unwrap_or(0)
+}
+
+/// Build the merged footer's facts from live `App` state. `width` is the
+/// footer row's width — notices clause-shed against it, never dangle.
+pub(crate) fn tideline_footer_from_app(app: &mut App, width: u16) -> TidelineFooterFacts {
+    let activity = LiveActivity::from_app(app);
+    let phase = ShellPhase::from_app_with_activity(app, activity);
+    let tier = ShellTier::for_chrome_width(width);
+    let (_, phase_label) = phase_marker_with_activity(app, phase, activity);
+    let phase_word = phase_label.clone().into_owned();
+
+    let live_detail = matches!(phase, ShellPhase::Working | ShellPhase::Verifying)
+        .then(|| working_detail(app, activity))
+        .flatten();
+
+    // Same cost chip the classic activity band spent its ledger on.
+    let usage_chip = app.cumulative_usage_chip();
+    let cost_label = match &usage_chip {
+        crate::route_billing::UsageChip::Money(amount) => Some(amount.clone()),
+        crate::route_billing::UsageChip::PricedSubtotal { .. }
+        | crate::route_billing::UsageChip::Unknown => {
+            crate::route_billing::format_usage_chip(&usage_chip)
+        }
+        _ => None,
+    }
+    .unwrap_or_default();
+
+    // While a turn is live the band carries the interrupt affordance the
+    // activity band used to render beside the verb; idle keeps the chorus.
+    let legend = if tier != ShellTier::Compact
+        && matches!(phase, ShellPhase::Working | ShellPhase::Verifying)
+    {
+        tr(app.ui_locale, MessageId::FooterHintEscInterrupt).into_owned()
+    } else {
+        keys_legend(app, tier, phase).into_owned()
+    };
+
+    let (mode_chip, permission_chip) = crate::tui::underwater::posture_chips(app);
+    let map_chip = |chip: Option<(Cow<'static, str>, crate::palette::ChromeInk)>| {
+        chip.map(|(text, ink)| (text.into_owned(), ink))
+    };
+
+    // The notice: the live status toast if one is owed, else the MCP boot
+    // chip (a slow optional server must not look like a hung turn). Clause-
+    // shed against half the row — the depth line owns the other half.
+    let notice_budget = (usize::from(width) / 2).max(8);
+    let notice = selected_notice(app.active_status_toast(), phase, &phase_word)
+        .map(|(text, ink, _urgent)| (text, ink))
+        .or_else(|| {
+            crate::tui::session_boot::activity_chip(app, notice_budget).map(|chip| {
+                let boot = crate::tui::session_boot::SessionBootSurface::from_app(app);
+                let ink = if boot.servers.iter().any(|row| {
+                    matches!(
+                        row.state,
+                        crate::tui::session_boot::McpServerBootState::Failed
+                            | crate::tui::session_boot::McpServerBootState::NeedsLogin
+                    )
+                }) {
+                    crate::palette::ChromeInk::Failure
+                } else {
+                    crate::palette::ChromeInk::Active
+                };
+                (chip, ink)
+            })
+        })
+        .and_then(|(text, ink)| fit_notice(&text, notice_budget).map(|fitted| (fitted, ink)));
+
+    TidelineFooterFacts {
+        phase_word,
+        phase_ink: crate::tui::underwater::phase_ink(phase),
+        live_detail,
+        cost_label,
+        context_percent: context_percent_from_app(app),
+        keys_legend: legend,
+        mode_chip: map_chip(mode_chip),
+        permission_chip: map_chip(permission_chip),
+        notice,
     }
 }
 

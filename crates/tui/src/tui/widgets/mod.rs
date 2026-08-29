@@ -6891,10 +6891,23 @@ mod tests {
         crate::tui::underwater::render_launch_screen(launch_area, &mut launch, &app, &[], &[]);
         app.launch.visible = false;
 
-        // Header owns the route facts and the block context meter.
-        let header_area = Rect::new(0, 0, 100, 2);
-        let mut header = Buffer::empty(header_area);
-        crate::tui::underwater::render_header(header_area, &mut header, &app);
+        // Topbar (the shell's header surface since the Tideline wiring)
+        // owns the route facts and the block context meter.
+        let topbar_area = Rect::new(0, 0, 100, 1);
+        let mut topbar_buf = Buffer::empty(topbar_area);
+        {
+            let segments = crate::tui::ui::frame::topbar_segments(&app, topbar_area.width);
+            let clock = "27 Aug 2026 14:42:18".to_string();
+            let topbar = crate::tui::topbar::Topbar::new(
+                &app.ui_theme,
+                &clock,
+                crate::tui::ui::frame::topbar_context_percent(&app),
+                &segments,
+            )
+            .ascii_safe(true);
+            use ratatui::widgets::Widget;
+            Widget::render(topbar, topbar_area, &mut topbar_buf);
+        }
 
         // Activity band while working carries the braille state marker;
         // the identity band below the composer carries the route.
@@ -6910,7 +6923,7 @@ mod tests {
         for (surface, buf, rect) in [
             ("idle transcript", &transcript, transcript_area),
             ("launch", &launch, launch_area),
-            ("header", &header, header_area),
+            ("topbar", &topbar_buf, topbar_area),
             ("activity band", &activity, activity_area),
             ("identity band", &identity, identity_area),
         ] {

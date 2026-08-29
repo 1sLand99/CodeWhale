@@ -161,6 +161,9 @@ pub struct MetricsSnapshot {
 impl MetricsSnapshot {
     /// True when there is nothing to say yet (fresh session).
     #[must_use]
+    #[allow(dead_code)] // classic activity-band strip: superseded by the merged Tideline footer
+    // (session metrics live behind /cost per spec §3, 2026-08-29); deletion is
+    // its own slice.
     pub fn is_empty(&self) -> bool {
         self.turns == 0 && self.steps == 0 && self.input_tokens == 0
     }
@@ -176,6 +179,9 @@ pub struct MetricCell {
 }
 
 impl MetricCell {
+    #[allow(dead_code)] // classic activity-band strip: superseded by the merged Tideline footer
+    // (session metrics live behind /cost per spec §3, 2026-08-29); deletion is
+    // its own slice.
     fn width(&self) -> usize {
         use unicode_width::UnicodeWidthStr;
         self.label.width() + 1 + self.value.width()
@@ -194,6 +200,9 @@ pub enum MetricGroup {
     Latency,
 }
 
+#[allow(dead_code)] // classic activity-band strip: superseded by the merged Tideline footer
+// (session metrics live behind /cost per spec §3, 2026-08-29); deletion is
+// its own slice.
 const GROUP_PRIORITY: [MetricGroup; 5] = [
     MetricGroup::Input,
     MetricGroup::Cache,
@@ -458,6 +467,9 @@ impl RenderedStrip {
     }
 }
 
+#[allow(dead_code)] // classic activity-band strip: superseded by the merged Tideline footer
+// (session metrics live behind /cost per spec §3, 2026-08-29); deletion is
+// its own slice.
 fn strip_width(groups: &[MetricGroupCells], separators: Separators) -> usize {
     use unicode_width::UnicodeWidthStr;
     let mut width = 0;
@@ -480,6 +492,9 @@ fn strip_width(groups: &[MetricGroupCells], separators: Separators) -> usize {
 /// groups, and groups go from latency → turns → LLM time → cache → input.
 /// Returns an empty strip when even the input count does not fit.
 #[must_use]
+#[allow(dead_code)] // classic activity-band strip: superseded by the merged Tideline footer
+// (session metrics live behind /cost per spec §3, 2026-08-29); deletion is
+// its own slice.
 pub fn fit_to_width(
     mut groups: Vec<MetricGroupCells>,
     budget: usize,
@@ -534,6 +549,9 @@ pub fn snapshot_from_app(app: &crate::tui::app::App) -> MetricsSnapshot {
 /// Paint a fitted strip as styled spans: labels and separators quiet,
 /// values readable.
 #[must_use]
+#[allow(dead_code)] // classic activity-band strip: superseded by the merged Tideline footer
+// (session metrics live behind /cost per spec §3, 2026-08-29); deletion is
+// its own slice.
 pub fn spans(
     strip: &RenderedStrip,
     theme: &crate::palette::UiTheme,
