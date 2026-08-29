@@ -8630,31 +8630,96 @@ fn run_gh_repo_name() -> Result<String> {
     Ok(name)
 }
 
-/// True when `path` appears as a file touched by the unified diff. Guards the
-/// inline-comment payload: GitHub rejects the whole review with a 422 when a
-/// comment's path is not part of the diff.
-fn diff_touches_path(diff: &str, path: &str) -> bool {
-    diff.contains(&format!("+++ b/{path}")) || diff.contains(&format!("--- a/{path}"))
+/// Longest span a committable suggestion may rewrite. A mechanical fix is
+/// small; a large replacement is a rewrite the model cannot be confident in,
+/// so it degrades to prose.
+const MAX_COMMITTABLE_SUGGESTION_LINES: u32 = 25;
+
+/// Normalize a model-supplied review path to the form GitHub anchors on.
+fn normalize_review_path(path: Option<&str>) -> Option<String> {
+    let path = path?.trim().trim_start_matches("./");
+    if path.is_empty() {
+        return None;
+    }
+    Some(path.to_string())
+}
+
+/// Pick a fence long enough to wrap `replacement` without the replacement's
+/// own backticks closing the block early.
+fn suggestion_fence(replacement: &str) -> String {
+    let mut longest = 0usize;
+    let mut run = 0usize;
+    for ch in replacement.chars() {
+        if ch == '`' {
+            run += 1;
+            longest = longest.max(run);
+        } else {
+            run = 0;
+        }
+    }
+    "`".repeat(longest.saturating_add(1).max(3))
+}
+
+/// GitHub turns any fenced `suggestion` block in a review comment into a
+/// one-click commit. Model prose is not vetted for that, so a fence the model
+/// wrote inside its own explanation is downgraded to a plain code block:
+/// only the `replacement` this function validated against the diff hunks may
+/// ever be committable.
+fn neutralize_model_suggestion_fences(prose: &str) -> String {
+    prose
+        .split('\n')
+        .map(|line| {
+            let trimmed = line.trim_start();
+            let indent = &line[..line.len() - trimmed.len()];
+            let fence_char = match trimmed.chars().next() {
+                Some(ch @ ('`' | '~')) => ch,
+                _ => return line.to_string(),
+            };
+            let ticks = trimmed.chars().take_while(|ch| *ch == fence_char).count();
+            if ticks < 3 {
+                return line.to_string();
+            }
+            let info = trimmed[ticks..].trim();
+            if info.to_ascii_lowercase().starts_with("suggestion") {
+                let fence: String = std::iter::repeat_n(fence_char, ticks).collect();
+                format!("{indent}{fence}text")
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Map structured review issues to GitHub inline-review-comment payloads.
+///
+/// Anchors are checked against the diff's actual hunks, not just its file
+/// list: GitHub 422s the *entire* review when one comment lands outside a
+/// hunk, so a model-estimated line that misses now drops a single comment.
 /// Issues without a locatable position stay in the summary body instead.
-fn inline_review_comments(
+fn inline_issue_comments(
     review: &crate::tools::review::ReviewOutput,
-    diff: &str,
+    hunks: &crate::tools::review_hunks::DiffHunks,
+    plan: &mut InlineReviewPlan,
 ) -> Vec<serde_json::Value> {
     review
         .issues
         .iter()
         .filter_map(|issue| {
-            let path = issue.path.as_deref()?.trim().trim_start_matches("./");
-            if path.is_empty() || !diff_touches_path(diff, path) {
+            let (Some(path), Some(line)) =
+                (normalize_review_path(issue.path.as_deref()), issue.line)
+            else {
+                // No position at all: the summary body is the only home.
+                return None;
+            };
+            if !hunks.contains_line(&path, line) {
+                plan.note_unanchorable(hunks, &path);
                 return None;
             }
-            let line = issue.line?;
             Some(serde_json::json!({
                 "path": path,
                 "line": line,
+                "side": "RIGHT",
                 "body": format!(
                     "**[{}] {}**\n\n{}",
                     issue.severity.to_uppercase(),
@@ -8664,6 +8729,138 @@ fn inline_review_comments(
             }))
         })
         .collect()
+}
+
+/// Render one structured suggestion as an inline review comment.
+///
+/// A committable ```` ```suggestion ```` block is emitted only when **both**
+/// safety conditions hold:
+///
+/// 1. the model supplied literal `replacement` code (not prose), and
+/// 2. every line of the replaced span is a RIGHT-side line inside a diff hunk
+///    (never a deleted LEFT-side line, which GitHub rejects), and the span is
+///    small enough to be a mechanical fix.
+///
+/// Otherwise the comment degrades to prose at the same anchor — a wrong
+/// committable suggestion is worse than prose because it is one click from
+/// being merged. With no valid anchor at all the suggestion stays in the
+/// summary body and `None` is returned.
+fn inline_suggestion_comment(
+    suggestion: &crate::tools::review::ReviewSuggestion,
+    hunks: &crate::tools::review_hunks::DiffHunks,
+    plan: &mut InlineReviewPlan,
+) -> Option<serde_json::Value> {
+    let path = normalize_review_path(suggestion.path.as_deref())?;
+    let end = suggestion.end_line.or(suggestion.line)?;
+    if !hunks.contains_line(&path, end) {
+        plan.note_unanchorable(hunks, &path);
+        return None;
+    }
+    let start = suggestion.start_line.unwrap_or(end);
+    let prose = if suggestion.suggestion.is_empty() {
+        "Suggested change.".to_string()
+    } else {
+        neutralize_model_suggestion_fences(&suggestion.suggestion)
+    };
+
+    // A model that gives neither start_line nor end_line has told us nothing
+    // about how much code it means to replace. GitHub would happily *insert*
+    // a multi-line replacement at a single-line anchor, leaving the lines the
+    // model meant to replace duplicated below it — so that shape is not
+    // committable.
+    let explicit_span = suggestion.start_line.is_some() || suggestion.end_line.is_some();
+    let committable = suggestion.replacement.as_deref().filter(|replacement| {
+        !replacement.trim().is_empty()
+            && start <= end
+            && end.saturating_sub(start).saturating_add(1) <= MAX_COMMITTABLE_SUGGESTION_LINES
+            && (explicit_span || start < end || !replacement.contains('\n'))
+            && hunks.contains_span(&path, start, end)
+    });
+
+    let Some(replacement) = committable else {
+        // Degradation path: keep the finding, drop the one-click apply.
+        plan.degraded_to_prose += 1;
+        return Some(serde_json::json!({
+            "path": path,
+            "line": end,
+            "side": "RIGHT",
+            "body": prose,
+        }));
+    };
+
+    let fence = suggestion_fence(replacement);
+    let body = format!("{prose}\n\n{fence}suggestion\n{replacement}\n{fence}");
+    let mut comment = serde_json::json!({
+        "path": path,
+        "line": end,
+        "side": "RIGHT",
+        "body": body,
+    });
+    if start < end {
+        comment["start_line"] = serde_json::json!(start);
+        comment["start_side"] = serde_json::json!("RIGHT");
+    }
+    Some(comment)
+}
+
+/// The inline-comment payload for one review, plus a truthful count of what
+/// did not survive anchoring. Findings are never silently discarded: the
+/// counts are reported on stderr next to the posted review.
+#[derive(Debug, Default)]
+struct InlineReviewPlan {
+    comments: Vec<serde_json::Value>,
+    /// Findings whose file is in the diff but whose line is not inside any
+    /// hunk — a model-estimated line number that missed.
+    dropped_out_of_hunk: usize,
+    /// Findings pointing at a file this diff does not touch at all.
+    dropped_untouched_file: usize,
+    /// Suggestions posted as prose because committing them was not safe.
+    degraded_to_prose: usize,
+}
+
+impl InlineReviewPlan {
+    fn note_unanchorable(&mut self, hunks: &crate::tools::review_hunks::DiffHunks, path: &str) {
+        if hunks.touches_path(path) {
+            self.dropped_out_of_hunk += 1;
+        } else {
+            self.dropped_untouched_file += 1;
+        }
+    }
+
+    /// One-line receipt, or `None` when every finding landed as intended.
+    fn receipt(&self) -> Option<String> {
+        if self.dropped_out_of_hunk == 0
+            && self.dropped_untouched_file == 0
+            && self.degraded_to_prose == 0
+        {
+            return None;
+        }
+        Some(format!(
+            "note: {} finding(s) had no line inside a diff hunk, {} pointed at a file \
+             outside the diff (both stay in the summary body), and {} suggestion(s) \
+             posted as prose instead of a committable block",
+            self.dropped_out_of_hunk, self.dropped_untouched_file, self.degraded_to_prose
+        ))
+    }
+}
+
+/// Every inline comment for a review: issues first, then suggestions (which
+/// carry the committable ```` ```suggestion ```` blocks).
+fn plan_inline_review_comments(
+    review: &crate::tools::review::ReviewOutput,
+    diff: &str,
+) -> InlineReviewPlan {
+    let hunks = crate::tools::review_hunks::DiffHunks::parse(diff);
+    let mut plan = InlineReviewPlan::default();
+    let mut comments = inline_issue_comments(review, &hunks, &mut plan);
+    comments.extend(
+        review
+            .suggestions
+            .iter()
+            .filter_map(|suggestion| inline_suggestion_comment(suggestion, &hunks, &mut plan)),
+    );
+    plan.comments = comments;
+    plan
 }
 
 /// Render a structured review as the markdown body printed for — and, with
@@ -8732,7 +8929,8 @@ fn render_pr_review_markdown(
         body.push_str(&format!(
             "---\n*Advisory review by Codewhale (`codewhale review --pr {number} --post`, \
              head `{head}`). Line-specific findings are also posted as inline review \
-             comments. CODEOWNERS approval still governs merge.*\n",
+             comments; mechanical fixes arrive as committable suggestions you can \
+             apply from the Files tab. CODEOWNERS approval still governs merge.*\n",
             head = if view.head_sha.is_empty() {
                 "unknown"
             } else {
@@ -8806,16 +9004,27 @@ fn post_pr_review(
         Some(repo) => repo.to_string(),
         None => run_gh_repo_name()?,
     };
-    let inline = inline_review_comments(review, diff);
+    let plan = plan_inline_review_comments(review, diff);
+    if let Some(receipt) = plan.receipt() {
+        eprintln!("{receipt}");
+    }
+    let inline = plan.comments;
     let body = render_pr_review_markdown(number, view, review, true);
     if inline.is_empty() {
         run_gh_post_pr_review(&repo_name, number, &body, &view.head_sha, &[])?;
     } else if let Err(err) =
         run_gh_post_pr_review(&repo_name, number, &body, &view.head_sha, &inline)
     {
-        // One model-estimated line outside the diff hunks makes GitHub reject
-        // the whole review; retry summary-only rather than lose the review.
-        eprintln!("warning: inline review comments rejected ({err}); retrying summary-only");
+        // Anchors are pre-filtered against the parsed diff hunks, so this
+        // path should now be unreachable in the common case. It stays as a
+        // last resort for anchors GitHub rejects for reasons the diff cannot
+        // show (a stale head SHA, a suppressed large file), and it announces
+        // exactly how many inline comments were lost rather than failing
+        // silently.
+        eprintln!(
+            "warning: {} inline review comment(s) rejected ({err}); retrying summary-only",
+            inline.len()
+        );
         run_gh_post_pr_review(&repo_name, number, &body, &view.head_sha, &[])?;
     }
     Ok(())
@@ -14713,38 +14922,337 @@ reasoning = "high"
         assert!(!serialized.contains("local-test-key"));
     }
 
-    #[test]
-    fn inline_review_comments_keep_only_diff_locatable_issues() {
-        let issue = |severity: &str, path: Option<&str>, line: Option<u32>| {
-            crate::tools::review::ReviewIssue {
-                severity: severity.to_string(),
-                title: format!("{severity} finding"),
-                description: "detail".to_string(),
-                path: path.map(str::to_string),
-                line,
-            }
-        };
-        let review = crate::tools::review::ReviewOutput {
+    fn review_issue(
+        severity: &str,
+        path: Option<&str>,
+        line: Option<u32>,
+    ) -> crate::tools::review::ReviewIssue {
+        crate::tools::review::ReviewIssue {
+            severity: severity.to_string(),
+            title: format!("{severity} finding"),
+            description: "detail".to_string(),
+            path: path.map(str::to_string),
+            line,
+        }
+    }
+
+    fn review_suggestion(
+        path: Option<&str>,
+        line: Option<u32>,
+        replacement: Option<&str>,
+    ) -> crate::tools::review::ReviewSuggestion {
+        crate::tools::review::ReviewSuggestion {
+            path: path.map(str::to_string),
+            line,
+            start_line: None,
+            end_line: None,
+            suggestion: "Use the checked variant".to_string(),
+            replacement: replacement.map(str::to_string),
+        }
+    }
+
+    fn review_with(
+        issues: Vec<crate::tools::review::ReviewIssue>,
+        suggestions: Vec<crate::tools::review::ReviewSuggestion>,
+    ) -> crate::tools::review::ReviewOutput {
+        crate::tools::review::ReviewOutput {
             summary: "summary".to_string(),
-            issues: vec![
-                issue("error", Some("./crates/tui/src/lib.rs"), Some(10)),
-                issue("warning", Some("docs/NOT_IN_DIFF.md"), Some(3)),
-                issue("info", Some("crates/tui/src/lib.rs"), None),
-                issue("error", None, Some(7)),
-            ],
-            suggestions: Vec::new(),
+            issues,
+            suggestions,
             overall_assessment: String::new(),
-        };
-        let diff = "diff --git a/crates/tui/src/lib.rs b/crates/tui/src/lib.rs\n\
-                    index 111..222 100644\n\
-                    --- a/crates/tui/src/lib.rs\n\
-                    +++ b/crates/tui/src/lib.rs\n";
-        let comments = inline_review_comments(&review, diff);
+        }
+    }
+
+    /// Two hunks in one file: right lines 10..=12 and 40..=41.
+    ///
+    /// Built from a slice, not one string literal: a `\` continuation strips
+    /// the leading space that marks a context line.
+    fn review_test_diff() -> String {
+        [
+            "diff --git a/crates/tui/src/lib.rs b/crates/tui/src/lib.rs",
+            "index 1111111..2222222 100644",
+            "--- a/crates/tui/src/lib.rs",
+            "+++ b/crates/tui/src/lib.rs",
+            "@@ -10,2 +10,3 @@ fn head() {",
+            " let a = 1;",
+            "+let b = a.unwrap();",
+            " let c = 2;",
+            "@@ -40,2 +40,2 @@ fn tail() {",
+            " let d = 3;",
+            "-let e = d;",
+            "+let e = d + 1;",
+            "",
+        ]
+        .join("\n")
+    }
+
+    #[test]
+    fn inline_review_comments_keep_only_hunk_locatable_issues() {
+        let review = review_with(
+            vec![
+                review_issue("error", Some("./crates/tui/src/lib.rs"), Some(11)),
+                review_issue("warning", Some("docs/NOT_IN_DIFF.md"), Some(3)),
+                review_issue("info", Some("crates/tui/src/lib.rs"), None),
+                review_issue("error", None, Some(7)),
+            ],
+            Vec::new(),
+        );
+        let comments = plan_inline_review_comments(&review, &review_test_diff()).comments;
         // GitHub rejects the entire review (422) when a comment's path is not
         // part of the diff, and inline comments need a line to anchor to.
         assert_eq!(comments.len(), 1);
         assert_eq!(comments[0]["path"], "crates/tui/src/lib.rs");
-        assert_eq!(comments[0]["line"], 10);
+        assert_eq!(comments[0]["line"], 11);
+        assert_eq!(comments[0]["side"], "RIGHT");
+    }
+
+    #[test]
+    fn inline_review_comments_drop_one_out_of_hunk_anchor_not_the_whole_review() {
+        // Line 25 is inside the file but between the two hunks. Before the
+        // hunk filter this single bad anchor 422'd the review and every inline
+        // comment was lost to the summary-only retry.
+        let review = review_with(
+            vec![
+                review_issue("error", Some("crates/tui/src/lib.rs"), Some(11)),
+                review_issue("error", Some("crates/tui/src/lib.rs"), Some(25)),
+                review_issue("warning", Some("crates/tui/src/lib.rs"), Some(41)),
+            ],
+            Vec::new(),
+        );
+        let plan = plan_inline_review_comments(&review, &review_test_diff());
+        let lines: Vec<_> = plan.comments.iter().map(|c| c["line"].clone()).collect();
+        assert_eq!(lines, vec![serde_json::json!(11), serde_json::json!(41)]);
+        // The loss is counted and reported, never silent.
+        assert_eq!(plan.dropped_out_of_hunk, 1);
+        assert_eq!(plan.dropped_untouched_file, 0);
+        assert!(
+            plan.receipt()
+                .expect("receipt")
+                .contains("no line inside a diff hunk")
+        );
+    }
+
+    #[test]
+    fn review_suggestion_with_replacement_posts_a_committable_block() {
+        let review = review_with(
+            Vec::new(),
+            vec![review_suggestion(
+                Some("crates/tui/src/lib.rs"),
+                Some(11),
+                Some("let b = a.unwrap_or_default();"),
+            )],
+        );
+        let comments = plan_inline_review_comments(&review, &review_test_diff()).comments;
+        assert_eq!(comments.len(), 1);
+        let body = comments[0]["body"].as_str().expect("body");
+        assert!(body.starts_with("Use the checked variant"), "{body}");
+        assert!(
+            body.contains("```suggestion\nlet b = a.unwrap_or_default();\n```"),
+            "{body}"
+        );
+        assert_eq!(comments[0]["side"], "RIGHT");
+        // Single-line suggestions must not carry start_line.
+        assert!(comments[0].get("start_line").is_none());
+    }
+
+    #[test]
+    fn multi_line_review_suggestion_spans_start_line_to_line() {
+        let mut suggestion = review_suggestion(
+            Some("crates/tui/src/lib.rs"),
+            Some(12),
+            Some("let b = a.unwrap_or_default();\nlet c = 2;"),
+        );
+        suggestion.start_line = Some(11);
+        suggestion.end_line = Some(12);
+        let review = review_with(Vec::new(), vec![suggestion]);
+        let comments = plan_inline_review_comments(&review, &review_test_diff()).comments;
+        assert_eq!(comments.len(), 1);
+        assert_eq!(comments[0]["start_line"], 11);
+        assert_eq!(comments[0]["start_side"], "RIGHT");
+        assert_eq!(comments[0]["line"], 12);
+        assert_eq!(comments[0]["side"], "RIGHT");
+    }
+
+    #[test]
+    fn review_suggestion_without_replacement_degrades_to_prose() {
+        // SAFETY: a committable suggestion is one click from being merged, so
+        // a suggestion the model did not back with literal code must never
+        // render as an applicable block.
+        let review = review_with(
+            Vec::new(),
+            vec![review_suggestion(
+                Some("crates/tui/src/lib.rs"),
+                Some(11),
+                None,
+            )],
+        );
+        let plan = plan_inline_review_comments(&review, &review_test_diff());
+        assert_eq!(plan.comments.len(), 1);
+        let body = plan.comments[0]["body"].as_str().expect("body");
+        assert_eq!(body, "Use the checked variant");
+        assert!(!body.contains("```suggestion"), "{body}");
+        assert_eq!(plan.degraded_to_prose, 1);
+    }
+
+    #[test]
+    fn review_suggestion_spanning_outside_a_hunk_degrades_to_prose() {
+        // Line 12 is in a hunk but line 13 is not, so the span cannot be
+        // committed. Keep the finding, drop the one-click apply.
+        let mut suggestion = review_suggestion(
+            Some("crates/tui/src/lib.rs"),
+            Some(12),
+            Some("let c = 2;\nlet d = 3;"),
+        );
+        suggestion.start_line = Some(12);
+        suggestion.end_line = Some(13);
+        let review = review_with(Vec::new(), vec![suggestion]);
+        let comments = plan_inline_review_comments(&review, &review_test_diff()).comments;
+        // end_line 13 is outside every hunk, so there is no anchor at all.
+        assert!(comments.is_empty());
+
+        // Same replacement anchored at an in-hunk end line but with a start
+        // line outside the hunk: anchor is valid, span is not -> prose.
+        let mut suggestion = review_suggestion(
+            Some("crates/tui/src/lib.rs"),
+            Some(11),
+            Some("let a = 1;\nlet b = a.unwrap_or_default();"),
+        );
+        suggestion.start_line = Some(9);
+        suggestion.end_line = Some(11);
+        let review = review_with(Vec::new(), vec![suggestion]);
+        let comments = plan_inline_review_comments(&review, &review_test_diff()).comments;
+        assert_eq!(comments.len(), 1);
+        let body = comments[0]["body"].as_str().expect("body");
+        assert!(!body.contains("```suggestion"), "{body}");
+        assert!(comments[0].get("start_line").is_none());
+    }
+
+    #[test]
+    fn review_suggestion_anchored_to_a_deleted_line_is_not_committable() {
+        // Right line 41 is `+let e = d + 1;`; the deleted `-let e = d;` has no
+        // RIGHT-side number, so a model that anchors at the pre-image line 42
+        // gets nothing rather than a suggestion on the wrong line.
+        let review = review_with(
+            Vec::new(),
+            vec![review_suggestion(
+                Some("crates/tui/src/lib.rs"),
+                Some(42),
+                Some("let e = d + 2;"),
+            )],
+        );
+        assert!(
+            plan_inline_review_comments(&review, &review_test_diff())
+                .comments
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn review_suggestion_replacement_containing_backticks_is_fenced_safely() {
+        let review = review_with(
+            Vec::new(),
+            vec![review_suggestion(
+                Some("crates/tui/src/lib.rs"),
+                Some(11),
+                Some("let b = \"```\";"),
+            )],
+        );
+        let comments = plan_inline_review_comments(&review, &review_test_diff()).comments;
+        let body = comments[0]["body"].as_str().expect("body");
+        assert!(body.contains("````suggestion\n"), "{body}");
+        assert!(body.ends_with("\n````"), "{body}");
+    }
+
+    #[test]
+    fn review_suggestion_multi_line_replacement_without_span_degrades_to_prose() {
+        // SAFETY: with no start_line/end_line, GitHub would insert these two
+        // lines at line 11 and leave the original line 11 duplicated below.
+        let review = review_with(
+            Vec::new(),
+            vec![review_suggestion(
+                Some("crates/tui/src/lib.rs"),
+                Some(11),
+                Some("let b = a.unwrap_or_default();\nlet c = 2;"),
+            )],
+        );
+        let plan = plan_inline_review_comments(&review, &review_test_diff());
+        assert_eq!(plan.comments.len(), 1);
+        assert!(
+            !plan.comments[0]["body"]
+                .as_str()
+                .expect("body")
+                .contains("```suggestion")
+        );
+        assert_eq!(plan.degraded_to_prose, 1);
+    }
+
+    #[test]
+    fn review_suggestion_prose_fence_is_never_committable() {
+        // SAFETY: only the replacement this reviewer validated against the
+        // diff may be one click from merging. A fence the model wrote inside
+        // its explanation is downgraded to a plain code block.
+        let mut suggestion = review_suggestion(Some("crates/tui/src/lib.rs"), Some(11), None);
+        suggestion.suggestion =
+            "Try this:\n\n```suggestion\nlet b = a.unwrap_or_default();\n```".to_string();
+        let review = review_with(Vec::new(), vec![suggestion]);
+        let comments = plan_inline_review_comments(&review, &review_test_diff()).comments;
+        let body = comments[0]["body"].as_str().expect("body");
+        assert!(!body.contains("```suggestion"), "{body}");
+        assert!(body.contains("```text"), "{body}");
+        assert!(body.contains("let b = a.unwrap_or_default();"), "{body}");
+    }
+
+    #[test]
+    fn review_suggestion_tilde_prose_fence_is_neutralized() {
+        let mut suggestion = review_suggestion(Some("crates/tui/src/lib.rs"), Some(11), None);
+        suggestion.suggestion = "  ~~~suggestion\n  x\n  ~~~".to_string();
+        let review = review_with(Vec::new(), vec![suggestion]);
+        let comments = plan_inline_review_comments(&review, &review_test_diff()).comments;
+        let body = comments[0]["body"].as_str().expect("body");
+        assert!(body.contains("  ~~~text"), "{body}");
+    }
+
+    #[test]
+    fn oversized_review_suggestion_degrades_to_prose() {
+        // A whole-hunk rewrite is not a mechanical fix, so it must not be
+        // committable even though every line is inside the diff.
+        let span = MAX_COMMITTABLE_SUGGESTION_LINES + 5;
+        let added: String = (1..=span).map(|i| format!("+line {i}\n")).collect();
+        let diff = format!(
+            "diff --git a/big.rs b/big.rs\nnew file mode 100644\n--- /dev/null\n\
+             +++ b/big.rs\n@@ -0,0 +1,{span} @@\n{added}"
+        );
+        let replacement: String = (1..=span)
+            .map(|i| format!("line {i} fixed"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let mut suggestion = review_suggestion(Some("big.rs"), Some(span), Some(&replacement));
+        suggestion.start_line = Some(1);
+        suggestion.end_line = Some(span);
+        let review = review_with(Vec::new(), vec![suggestion]);
+        let comments = plan_inline_review_comments(&review, &diff).comments;
+        assert_eq!(comments.len(), 1);
+        let body = comments[0]["body"].as_str().expect("body");
+        assert!(!body.contains("```suggestion"), "{body}");
+
+        // The same shape, trimmed to the budget, stays committable.
+        let mut suggestion = review_suggestion(
+            Some("big.rs"),
+            Some(MAX_COMMITTABLE_SUGGESTION_LINES),
+            Some("line 1 fixed"),
+        );
+        suggestion.start_line = Some(1);
+        suggestion.end_line = Some(MAX_COMMITTABLE_SUGGESTION_LINES);
+        let review = review_with(Vec::new(), vec![suggestion]);
+        let comments = plan_inline_review_comments(&review, &diff).comments;
+        assert!(
+            comments[0]["body"]
+                .as_str()
+                .expect("body")
+                .contains("```suggestion"),
+            "a span at the budget limit stays committable"
+        );
     }
 
     #[tokio::test]

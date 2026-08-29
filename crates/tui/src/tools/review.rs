@@ -43,12 +43,22 @@ the following schema:\n\
     {\n\
       \"path\": \"relative/file/path or null\",\n\
       \"line\": 123,\n\
-      \"suggestion\": \"actionable improvement\"\n\
+      \"start_line\": 121,\n\
+      \"end_line\": 123,\n\
+      \"suggestion\": \"why this change is needed\",\n\
+      \"replacement\": \"the exact literal lines that replace start_line..end_line\"\n\
     }\n\
   ],\n\
   \"overall_assessment\": \"final assessment\"\n\
 }\n\
-If a field is unknown, use an empty string or null. Prioritize correctness and missing tests.";
+If a field is unknown, use an empty string or null. Prioritize correctness and missing tests.\n\
+\n\
+Rules for \"suggestions\":\n\
+- \"suggestion\" is prose explaining the change.\n\
+- \"replacement\" is NOT a description. It is the literal replacement source code, verbatim, with the exact indentation it must have in the file, and with no diff markers, no line numbers, and no fences. It replaces lines start_line..end_line (inclusive) of the NEW version of the file; when the change is a single line, set start_line == end_line == line.\n\
+- Supply \"replacement\" ONLY for a mechanical, high-confidence fix you are certain compiles and is correct as written (a typo, a wrong comparison operator, a missing await/unwrap guard, a renamed symbol, a wrong constant). Anything requiring judgement, new imports, or edits elsewhere in the file must omit \"replacement\" and stay prose-only.\n\
+- Anchor a suggestion only to lines that appear in the diff you were given, and never to a deleted line. If you are not sure of the exact line numbers, omit \"replacement\".\n\
+- A wrong replacement is worse than no replacement: it is one click from being merged. When in doubt, omit it.";
 
 /// The system prompt shared by every structured review path (`review`
 /// tool and `codewhale review --pr`). Callers parse the reply with
@@ -79,8 +89,22 @@ pub struct ReviewSuggestion {
     pub path: Option<String>,
     #[serde(default)]
     pub line: Option<u32>,
+    /// First line of the replaced span (inclusive). `None` means the
+    /// suggestion covers a single line, `line`.
+    #[serde(default)]
+    pub start_line: Option<u32>,
+    /// Last line of the replaced span (inclusive). Defaults to `line`.
+    #[serde(default)]
+    pub end_line: Option<u32>,
+    /// Prose: why the change is wanted.
     #[serde(default)]
     pub suggestion: String,
+    /// Literal replacement source for `start_line..=end_line`, indentation
+    /// included. `Some` only for mechanical, high-confidence fixes; when it
+    /// is `None` the reviewer posts prose instead of a committable
+    /// GitHub suggestion block.
+    #[serde(default)]
+    pub replacement: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -136,6 +160,14 @@ impl ReviewOutput {
         for suggestion in &mut self.suggestions {
             suggestion.suggestion = suggestion.suggestion.trim().to_string();
             suggestion.path = normalize_optional(suggestion.path.take());
+            // Leading whitespace in `replacement` is load-bearing indentation,
+            // so only trailing newlines and all-whitespace payloads are
+            // normalized away.
+            suggestion.replacement = suggestion
+                .replacement
+                .take()
+                .map(|replacement| replacement.trim_end_matches(['\n', '\r']).to_string())
+                .filter(|replacement| !replacement.trim().is_empty());
         }
         self
     }
@@ -1113,7 +1145,10 @@ mod tests {
             suggestions: vec![ReviewSuggestion {
                 path: Some("src/lib.rs".to_string()),
                 line: Some(12),
+                start_line: None,
+                end_line: None,
                 suggestion: "Add a regression test".to_string(),
+                replacement: None,
             }],
             overall_assessment: "Needs a test".to_string(),
         };
