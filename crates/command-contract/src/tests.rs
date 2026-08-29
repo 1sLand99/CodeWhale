@@ -501,5 +501,3 @@ fn envelope_rejects_duplicate_project_slot_deterministically() {
     }));
     assert!(result.is_err(), "duplicate project slot must assert");
 }
-
-#[test]

@@ -33,9 +33,9 @@ use std::rc::Rc;
 
 use codewhale_command_contract::facets::{
     CommandCostContext, CommandMediaContext, CommandModePolicyContext, CommandModelContext,
-    CommandPresentationContext, CommandProjectContext, CommandSessionContext,
-    CommandSkillsContext, CommandSystemPromptContext, CommandWorkspaceContext,
-    MediaAttachmentReceipt, ProjectGoalState, ProjectGoalStatus, ProjectShareProjection,
+    CommandPresentationContext, CommandProjectContext, CommandSessionContext, CommandSkillsContext,
+    CommandSystemPromptContext, CommandWorkspaceContext, MediaAttachmentReceipt, ProjectGoalState,
+    ProjectGoalStatus, ProjectShareProjection,
 };
 use codewhale_command_contract::handler::CommandContexts;
 #[cfg(test)]
