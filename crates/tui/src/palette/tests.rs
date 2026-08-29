@@ -638,6 +638,31 @@ fn color_depth_detect_is_safe_without_env() {
     let _ = adapt_color(WHALE_BG, ColorDepth::detect());
 }
 
+/// no-color.org contract (spec TIDELINE §5d gap): `NO_COLOR` present and
+/// non-empty forces the mono/ascii-safe path even on a truecolor terminal;
+/// an empty value does not count.
+#[test]
+fn no_color_forces_the_mono_depth_even_on_truecolor() {
+    fn read(pairs: &[(&'static str, &'static str)]) -> impl Fn(&str) -> Option<std::ffi::OsString> {
+        move |key: &str| {
+            pairs
+                .iter()
+                .find(|(k, _)| *k == key)
+                .map(|(_, v)| std::ffi::OsString::from(v))
+        }
+    }
+    let depth = ColorDepth::detect_with(read(&[("NO_COLOR", "1"), ("COLORTERM", "truecolor")]));
+    assert_eq!(depth, ColorDepth::Ansi16, "NO_COLOR wins over COLORTERM");
+    let depth = ColorDepth::detect_with(read(&[("NO_COLOR", ""), ("COLORTERM", "truecolor")]));
+    assert_eq!(
+        depth,
+        ColorDepth::TrueColor,
+        "empty NO_COLOR does not count (no-color.org)"
+    );
+    let depth = ColorDepth::detect_with(read(&[("COLORTERM", "truecolor")]));
+    assert_eq!(depth, ColorDepth::TrueColor, "no NO_COLOR: normal detect");
+}
+
 // === #4833: contrast floor ===
 
 use super::contrast::{

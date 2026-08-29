@@ -3032,3 +3032,432 @@ mod header_tests {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Tideline startup stage — hero, quick actions, option strip (spec §5a
+// components "Hero (startup)", "Quick actions", "Option strip"; §5b startup
+// layout contract; golden `startup_{w}x{h}`).
+//
+// Translation scaffolding in the `topbar` mold: a pure, deterministic widget
+// fed injected facts (`LaunchState`/`workspace_session_count` are projected
+// by the caller), proven against golden buffers, not yet wired into
+// `ui/frame.rs` — that wiring is the landing slice after #5698 settles.
+// Cell rules per spec §2: one glyph per action with declared ASCII
+// fallbacks; the wave rules are static `Span`s; semantic ink only.
+
+use ratatui::layout::{Constraint, Layout};
+
+use crate::palette::UiTheme;
+
+/// Static wave rule between the hero and the quick actions (spec §5b). Dim,
+/// never animated — decoration is opt-in and this is not decoration that
+/// carries state.
+#[allow(dead_code)] // translation scaffolding: wired by the landing slice
+const WAVE_RULE: &str = "⋯ ∼∼∼ ⋯";
+
+/// One QUICK ACTIONS row: icon · label · description · command + `›`.
+///
+/// The `disabled` projection is the caller's (provider state, session
+/// count); the widget only renders it dimmer and never invents availability.
+#[derive(Debug, Clone)]
+#[allow(dead_code)] // translation scaffolding: wired by the landing slice
+pub struct TidelineQuickAction {
+    pub icon: &'static str,
+    pub label: &'static str,
+    pub description: &'static str,
+    pub command: &'static str,
+    pub disabled: bool,
+}
+
+#[allow(dead_code)] // translation scaffolding: wired by the landing slice
+impl TidelineQuickAction {
+    /// The approved startup screen's three rows. `provider_ready` gates the
+    /// chat-only row (no model — spec states the disabled state), and a
+    /// workspace with zero saved sessions gates resume.
+    #[must_use]
+    pub fn approved_set(provider_ready: bool, session_count: usize) -> Vec<Self> {
+        vec![
+            Self {
+                icon: "⌁",
+                label: "New session",
+                description: "start a fresh agent run in this workspace",
+                command: "Enter",
+                disabled: false,
+            },
+            Self {
+                icon: "◌",
+                label: "Chat only",
+                description: "plan and converse without touching the repo",
+                command: "C",
+                disabled: !provider_ready,
+            },
+            Self {
+                icon: "↺",
+                label: "Resume last",
+                description: "pick up a saved session where it ended",
+                command: "Ctrl+R",
+                disabled: session_count == 0,
+            },
+        ]
+    }
+}
+
+/// One option-strip tile: icon + label over its key (spec §5b, 4 columns).
+#[derive(Debug, Clone)]
+#[allow(dead_code)] // translation scaffolding: wired by the landing slice
+pub struct TidelineOption {
+    pub icon: &'static str,
+    pub label: &'static str,
+    pub key: &'static str,
+}
+
+#[allow(dead_code)] // translation scaffolding: wired by the landing slice
+impl TidelineOption {
+    /// The approved four: New worktree / Chat only / Theme / Help.
+    #[must_use]
+    pub fn approved_set() -> Vec<Self> {
+        vec![
+            Self {
+                icon: "⑂",
+                label: "New worktree",
+                key: "Ctrl+N",
+            },
+            Self {
+                icon: "◌",
+                label: "Chat only",
+                key: "C",
+            },
+            Self {
+                icon: "◐",
+                label: "Theme",
+                key: "T",
+            },
+            Self {
+                icon: "?",
+                label: "Help",
+                key: "F1",
+            },
+        ]
+    }
+}
+
+/// What the caller owes the startup stage. Everything injectable so renders
+/// stay deterministic for golden buffers (spec §5a data sources:
+/// `LaunchState`, `workspace_session_count`, provider state).
+#[allow(dead_code)] // translation scaffolding: wired by the landing slice
+pub struct TidelineStartup<'a> {
+    pub theme: &'a UiTheme,
+    /// `workspace_session_count > 0` — the hero subtitle and resume row read
+    /// differently for a returning workspace (spec §5a "first-run vs
+    /// returning").
+    pub session_count: usize,
+    /// Provider configured — gates the chat-only rows.
+    pub provider_ready: bool,
+    /// Focused quick action (keyboard parity with the launch rows).
+    pub selected_action: usize,
+    /// Hovered quick action, if any (value ink brightens + underline).
+    pub hovered_action: Option<usize>,
+    /// Selected option-strip tile.
+    pub selected_option: usize,
+    /// ASCII-safe / NO_COLOR mode: every glyph through `ascii_fallback`.
+    pub ascii_safe: bool,
+}
+
+#[allow(dead_code)] // translation scaffolding: wired by the landing slice
+impl<'a> TidelineStartup<'a> {
+    #[must_use]
+    pub fn new(theme: &'a UiTheme, session_count: usize, provider_ready: bool) -> Self {
+        Self {
+            theme,
+            session_count,
+            provider_ready,
+            selected_action: 0,
+            hovered_action: None,
+            selected_option: 0,
+            ascii_safe: false,
+        }
+    }
+
+    #[must_use]
+    pub fn selected_action(mut self, index: usize) -> Self {
+        self.selected_action = index;
+        self
+    }
+
+    #[must_use]
+    pub fn selected_option(mut self, index: usize) -> Self {
+        self.selected_option = index;
+        self
+    }
+
+    #[must_use]
+    pub fn ascii_safe(mut self, ascii_safe: bool) -> Self {
+        self.ascii_safe = ascii_safe;
+        self
+    }
+
+    fn actions(&self) -> Vec<TidelineQuickAction> {
+        TidelineQuickAction::approved_set(self.provider_ready, self.session_count)
+    }
+
+    fn options(&self) -> Vec<TidelineOption> {
+        TidelineOption::approved_set()
+    }
+
+    fn sym(&self, glyph: &str) -> String {
+        if !self.ascii_safe {
+            return glyph.to_string();
+        }
+        if let Some(fb) = crate::tui::glyphs::ascii_fallback(glyph) {
+            return fb.to_string();
+        }
+        glyph
+            .chars()
+            .map(|c| {
+                crate::tui::glyphs::ascii_fallback(&c.to_string())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| c.to_string())
+            })
+            .collect()
+    }
+
+    fn fluke(&self) -> &'static str {
+        if self.ascii_safe {
+            crate::tui::topbar::FLUKE_ASCII
+        } else {
+            crate::tui::topbar::FLUKE
+        }
+    }
+}
+
+fn chrome(theme: &UiTheme, ink: ChromeInk) -> Style {
+    chrome_style(theme, ink)
+}
+
+fn set_span(buf: &mut Buffer, x: u16, y: u16, span: &Span<'_>) {
+    if let Ok(clamped) = span.content.width().try_into() {
+        buf.set_span(x, y, span, clamped);
+    }
+}
+
+fn centered(buf: &mut Buffer, area: Rect, y: u16, span: &Span<'_>) {
+    let inset = (area.width.saturating_sub(span.content.width() as u16)) / 2;
+    set_span(buf, area.x + inset, area.y + y, span);
+}
+
+/// Paint the startup stage (spec §5b): hero → wave rule → QUICK ACTIONS →
+/// wave rule → option strip → spacer. Deterministic; no clock, no motion.
+#[allow(dead_code)] // translation scaffolding: wired by the landing slice
+pub fn render_tideline_startup(stage: Rect, buf: &mut Buffer, startup: &TidelineStartup<'_>) {
+    if stage.width < 8 || stage.height < 5 {
+        return;
+    }
+    let theme = startup.theme;
+    let [hero, rule_a, quick, rule_b, strip, _spacer] = Layout::vertical([
+        Constraint::Percentage(38),
+        Constraint::Length(1),
+        Constraint::Length(3 + 2),
+        Constraint::Length(1),
+        Constraint::Length(3),
+        Constraint::Min(1),
+    ])
+    .areas(stage);
+
+    // Hero: fluke mark, heading, one dim subtitle (first-run vs returning).
+    let mid_row = hero.height / 2;
+    let fluke = startup.fluke();
+    centered(
+        buf,
+        hero,
+        mid_row.saturating_sub(1),
+        &Span::styled(fluke, chrome(theme, ChromeInk::Attention)),
+    );
+    let heading = "What are we working on?";
+    centered(
+        buf,
+        hero,
+        mid_row,
+        &Span::styled(
+            heading,
+            chrome(theme, ChromeInk::MetadataValue).add_modifier(Modifier::BOLD),
+        ),
+    );
+    let subtitle = if startup.session_count > 0 {
+        format!(
+            "welcome back · {} saved {} in this workspace",
+            startup.session_count,
+            if startup.session_count == 1 {
+                "session"
+            } else {
+                "sessions"
+            },
+        )
+    } else {
+        "type below, or pick a first move".to_string()
+    };
+    centered(
+        buf,
+        hero,
+        mid_row.saturating_add(1),
+        &Span::styled(subtitle, chrome(theme, ChromeInk::MetadataHint)),
+    );
+
+    // Static wave rules.
+    let rule = startup.sym(WAVE_RULE);
+    let rule_span = Span::styled(rule, chrome(theme, ChromeInk::MetadataDim));
+    centered(buf, rule_a, 0, &rule_span);
+    centered(buf, rule_b, 0, &rule_span);
+
+    // QUICK ACTIONS: label row + 3 rows of icon · label · description ·
+    // command + `›`, right-aligned command.
+    set_span(
+        buf,
+        quick.x + 2,
+        quick.y,
+        &Span::styled(
+            "QUICK ACTIONS",
+            chrome(theme, ChromeInk::Metadata).add_modifier(Modifier::BOLD),
+        ),
+    );
+    let actions = startup.actions();
+    let row_right = quick.x + quick.width.saturating_sub(2);
+    for (index, action) in actions.iter().enumerate().take(3) {
+        let y = quick.y + 2 + index as u16;
+        if y >= quick.bottom() {
+            break;
+        }
+        let selected = startup.selected_action == index;
+        let hovered = startup.hovered_action == Some(index);
+        let ink = if action.disabled {
+            ChromeInk::MetadataDim
+        } else if selected {
+            ChromeInk::Identity
+        } else {
+            ChromeInk::MetadataValue
+        };
+        let mut style = chrome(theme, ink);
+        if hovered && !action.disabled {
+            style = style
+                .add_modifier(Modifier::BOLD)
+                .add_modifier(Modifier::UNDERLINED);
+        }
+        if selected && !action.disabled {
+            style = style.add_modifier(Modifier::BOLD);
+        }
+        let marker = if selected { "▸ " } else { "  " };
+        let mut row = format!(
+            "{}{} {} — {}",
+            marker,
+            startup.sym(action.icon),
+            action.label,
+            action.description
+        );
+        if row.width() + 2 + action.command.width() + 2 > quick.width.saturating_sub(4) as usize {
+            // Shed the description before the label: identity first.
+            row = format!("{}{} {}", marker, startup.sym(action.icon), action.label);
+        }
+        let trailer = format!("{} ›", action.command);
+        let trailer_w = trailer.width() as u16;
+        set_span(buf, quick.x + 2, y, &Span::styled(row, chrome(theme, ink)));
+        set_span(
+            buf,
+            row_right.saturating_sub(trailer_w),
+            y,
+            &Span::styled(startup.sym(&trailer), style),
+        );
+    }
+
+    // Option strip: 4 columns × 2 rows (label over key). Tiles shed 4→2
+    // below the 40-column floor so the 80-wide blocker still reads.
+    let options = startup.options();
+    let columns = if strip.width < 40 { 2 } else { 4 };
+    let column_w = strip.width / columns.max(1);
+    for (index, option) in options.iter().enumerate().take(usize::from(columns)) {
+        let x = strip.x + index as u16 * column_w;
+        let selected = startup.selected_option == index;
+        let ink = if selected {
+            ChromeInk::Identity
+        } else {
+            ChromeInk::MetadataValue
+        };
+        let mut label_style = chrome(theme, ink);
+        if selected {
+            label_style = label_style.add_modifier(Modifier::BOLD);
+        }
+        let label = format!("{} {}", startup.sym(option.icon), option.label);
+        let budget = column_w.saturating_sub(1) as usize;
+        let label = truncate_to_width(&label, budget);
+        set_span(buf, x, strip.y + 1, &Span::styled(label, label_style));
+        set_span(
+            buf,
+            x,
+            strip.y + 2,
+            &Span::styled(option.key, chrome(theme, ChromeInk::MetadataHint)),
+        );
+    }
+}
+
+/// Recorded hitboxes for the startup stage (spec §6): the hero fluke (opens
+/// the product menu, the `launch.row_areas` pattern), each quick action row,
+/// and each option-strip tile. Same shapes as the painted cells.
+#[derive(Debug, Clone, Default)]
+#[allow(dead_code)] // translation scaffolding: wired by the landing slice
+pub struct TidelineStartupHitboxes {
+    pub fluke: Rect,
+    pub actions: Vec<Rect>,
+    pub options: Vec<Rect>,
+}
+
+/// Compute the startup hitboxes for one render area. Must be called with the
+/// same inputs as [`render_tideline_startup`] so rects match painted cells.
+#[must_use]
+#[allow(dead_code)] // translation scaffolding: wired by the landing slice
+pub fn tideline_startup_hitboxes(
+    stage: Rect,
+    startup: &TidelineStartup<'_>,
+) -> TidelineStartupHitboxes {
+    let mut out = TidelineStartupHitboxes::default();
+    if stage.width < 8 || stage.height < 5 {
+        return out;
+    }
+    let [hero, _rule_a, quick, _rule_b, strip, _spacer] = Layout::vertical([
+        Constraint::Percentage(38),
+        Constraint::Length(1),
+        Constraint::Length(3 + 2),
+        Constraint::Length(1),
+        Constraint::Length(3),
+        Constraint::Min(1),
+    ])
+    .areas(stage);
+
+    let fluke = startup.fluke();
+    let fluke_w = fluke.width() as u16;
+    out.fluke = Rect {
+        x: hero.x + (hero.width.saturating_sub(fluke_w)) / 2,
+        y: hero.y + (hero.height / 2).saturating_sub(1),
+        width: fluke_w,
+        height: 1,
+    };
+    out.actions = (0..3)
+        .map(|index| Rect {
+            x: quick.x + 2,
+            y: quick.y + 2 + index,
+            width: quick.width.saturating_sub(4),
+            height: 1,
+        })
+        .collect();
+    let columns = if strip.width < 40 { 2 } else { 4 };
+    let column_w = strip.width / columns.max(1);
+    out.options = (0..columns)
+        .map(|index| Rect {
+            x: strip.x + index * column_w,
+            y: strip.y + 1,
+            width: column_w,
+            height: 2,
+        })
+        .collect();
+    out
+}
+
+#[cfg(test)]
+mod tideline_tests;

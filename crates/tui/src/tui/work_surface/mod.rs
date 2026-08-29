@@ -62,8 +62,10 @@
 mod input;
 mod interaction;
 mod model;
-mod panels;
+pub(crate) mod panels;
 mod render;
+#[allow(dead_code)] // Tideline rail rendering (spec §5a); wired by the landing slice
+pub mod tideline;
 
 pub use input::{enter_agents, handle_key, handle_mouse};
 pub(crate) use interaction::{agent_details_closed, release_focus};
