@@ -18,6 +18,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   steps. The internal cloud-agent credential is not user surface: there is
   no `auth set-slot`/`auth clear-slot` command, no hint, and no completion
   entry for it — membership (`codewhale login`) is the only door.
+- Route Contract Phase 1: `RouteResolver` is the runtime path for
+  `resolve_runtime_options`; `codewhale providers export --json` ships the
+  owned descriptor catalog; CLI `--provider` accepts any catalog route id
+  (the closed `ProviderArg` enum is deleted). Catalog layers are
+  bundled → models.dev → provider `/v1/models` → config.toml → user, with
+  policy DENY last and never overridden.
 - Add provider-native web search for documented Xiaomi MiMo 2.5 Pro and 2.5
   chat routes while keeping neighboring models and custom gateways fail-closed.
 - Add structured provider-native web search for exact Z.AI global and Zhipu
