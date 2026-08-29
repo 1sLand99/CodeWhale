@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Add the Tideline component family from the ratatui translation spec
+  (#5698's screens, riding the #5699 work-strip layout): hero startup
+  surface with quick actions and option strip, composer restyle with the
+  fluke cap, notifications inbox, merged footer band, pod ledger, receipt
+  stream, theme list with motion toggles, live preview, settings rail,
+  and the left rail — each a standalone render module pinned by 28 new
+  byte-exact golden buffers. Frame wiring follows the Tideline acceptance
+  gate; `NO_COLOR` is now honored by palette depth detection.
 - Add provider-native web search for documented Xiaomi MiMo 2.5 Pro and 2.5
   chat routes while keeping neighboring models and custom gateways fail-closed.
 - Add structured provider-native web search for exact Z.AI global and Zhipu
