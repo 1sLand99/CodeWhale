@@ -300,10 +300,10 @@ enum Commands {
     },
     /// Create default AGENTS.md in current directory
     Init,
-    /// Save an API key to the shared user config
+    /// Sign in to your Codewhale account (use the `codewhale` CLI).
     Login {
-        /// API key to store (otherwise read from stdin)
-        #[arg(long)]
+        /// Legacy provider-key flag: rejected with a redirect to `auth set`.
+        #[arg(long, hide = true)]
         api_key: Option<String>,
     },
     /// Remove the saved API key
@@ -7999,28 +7999,20 @@ fn apply_saved_reasoning_preference(config: &mut Config, settings: &crate::setti
     config.reasoning_effort_inferred_from_legacy_alias = false;
 }
 
-fn read_api_key_from_stdin() -> Result<String> {
-    let mut stdin = io::stdin();
-    if stdin.is_terminal() {
-        bail!("No API key provided. Pass --api-key or pipe one via stdin.");
-    }
-    let mut buffer = String::new();
-    stdin.read_to_string(&mut buffer)?;
-    let api_key = buffer.trim().to_string();
-    if api_key.is_empty() {
-        bail!("No API key provided via stdin.");
-    }
-    Ok(api_key)
-}
-
 fn run_login(api_key: Option<String>) -> Result<()> {
-    let api_key = match api_key {
-        Some(key) => key,
-        None => read_api_key_from_stdin()?,
-    };
-    let saved = config::save_api_key(&api_key)?;
-    println!("Saved API key to {}", saved.describe());
-    Ok(())
+    if api_key.is_some() {
+        bail!(
+            "`login --api-key` is not account sign-in. \
+             Use `codewhale login` for the Codewhale account, \
+             or `codewhale auth set --provider <id>` for a provider key."
+        );
+    }
+    bail!(
+        "This binary's `login` command does not store provider keys. \
+         Use the `codewhale` CLI: `codewhale login` for the Codewhale account device flow, \
+         `codewhale auth set --provider <id>` for a provider key, \
+         or `codewhale auth set-slot daytona` for a Daytona token."
+    );
 }
 
 fn run_logout() -> Result<()> {

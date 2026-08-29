@@ -611,6 +611,27 @@ mod tests {
     }
 
     #[test]
+    fn login_slash_command_reports_status_and_key_opens_picker() {
+        let mut app = create_test_app();
+        let status = execute("/login", &mut app);
+        assert!(!status.is_error);
+        let message = status.message.expect("login status");
+        assert!(message.contains("Codewhale login"), "{message}");
+        assert!(message.contains("Account:"), "{message}");
+        assert!(message.contains("Daytona:"), "{message}");
+        assert!(message.contains("codewhale login"), "{message}");
+
+        let key = execute("/login key", &mut app);
+        assert!(!key.is_error);
+        assert_eq!(key.action, Some(AppAction::OpenProviderPicker));
+
+        let unknown = execute("/login oauth", &mut app);
+        assert!(unknown.is_error);
+        let err = unknown.message.expect("usage");
+        assert!(err.contains("Usage: /login"), "{err}");
+    }
+
+    #[test]
     fn xai_device_auth_slash_command_starts_login() {
         let mut app = create_test_app();
         let result = execute("/auth xai-device", &mut app);
@@ -921,9 +942,9 @@ mod tests {
                 has_config = true;
                 assert_eq!(
                     commands.len(),
-                    13,
+                    14,
                     "config group (group-local metadata exception) expected \
-                     exactly 13 commands, got {}",
+                     exactly 14 commands, got {}",
                     commands.len()
                 );
             }
