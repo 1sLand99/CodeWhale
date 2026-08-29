@@ -692,6 +692,16 @@ impl ReadFileTool {
         let path_str = required_str(&input, "path")?;
         let offset = contract_line_number(&input, "offset")?;
         let limit = contract_line_number(&input, "limit")?;
+        // S1/F2: check the caller's own spelling BEFORE `resolve_path`
+        // canonicalizes it. A workspace symlink `notes.txt` -> a denied vault
+        // file resolves to the secret's absolute location, and a denial raised
+        // only on the resolved path would name that location in the error —
+        // answering the very question ("where is the secret?") the read was
+        // probing for. `read_guard::check` canonicalizes internally, so the
+        // raw spelling still matches by its target; the resolved check after
+        // `resolve_path` stays as defense in depth for callers whose process
+        // cwd is not the workspace.
+        enforce_read_denylist(Path::new(path_str), "read")?;
         let file_path = context.resolve_path(path_str)?;
         if is_codewhale_credential_path(&file_path) {
             return Err(ToolError::permission_denied(
@@ -839,6 +849,10 @@ impl ToolSpec for ReadFileTool {
         READ_PARAMS.reject_unknown(&input)?;
 
         let path_str = required_str(&input, "path")?;
+        // S1/F2: raw spelling first, resolved path after — see the matching
+        // comment in `execute_contract_read`. Only the raw-spelling denial can
+        // promise an error that never names the symlink target's location.
+        enforce_read_denylist(Path::new(path_str), "read_file")?;
         let file_path = context.resolve_path(path_str)?;
         if is_codewhale_credential_path(&file_path) {
             return Err(ToolError::permission_denied(
@@ -2651,7 +2665,14 @@ impl ToolSpec for ListDirTool {
         LIST_PARAMS.reject_unknown(&input)?;
 
         let path_str = optional_str(&input, "path")?.unwrap_or(".");
+        // S1: enumerating a denied directory is a read of it — `list_dir ~/.ssh`
+        // hands back the key file names. Seatbelt's `deny file-read*` blocks
+        // readdir of denied dirs, so refusing here matches the OS layer. The
+        // raw spelling is checked first (F2) so the refusal names the caller's
+        // path, never a symlink target it might resolve to.
+        enforce_read_denylist(Path::new(path_str), "list_dir")?;
         let dir_path = context.resolve_path(path_str)?;
+        enforce_read_denylist(&dir_path, "list_dir")?;
 
         let entries =
             list_dir_entries_async(dir_path, context.cancel_token.clone(), LIST_DIR_TIMEOUT)

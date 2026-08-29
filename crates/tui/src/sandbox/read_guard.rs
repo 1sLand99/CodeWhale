@@ -50,9 +50,15 @@
 //! - **Symlinks.** Both the literal path and its `canonicalize()`d target are
 //!   tested, so a symlink pointing into `~/.ssh` is denied by its target even
 //!   though its own name is innocuous.
-//! - **`..` and relative paths.** Paths are lexically normalized (`.`/`..`
-//!   folded without touching the disk) and, when the file does not exist, the
-//!   deepest existing ancestor is canonicalized and the remainder re-appended.
+//! - **`..` and relative paths.** Two candidates are tested. The literal one is
+//!   lexically normalized (`.`/`..` folded without touching the disk), which
+//!   catches traversal into a denied tree even when nothing on the path exists
+//!   yet. The resolved one keeps `..` components raw and lets the OS apply
+//!   them *after* resolving each symlink component — the secure order — because
+//!   with `pub/link -> denied/sub`, the path `pub/link/../secret` really reads
+//!   `denied/secret`; folding `..` first would hide that. When the path does
+//!   not exist, the deepest existing ancestor is canonicalized (with the same
+//!   raw order) and the remainder re-appended.
 //! - **Case.** On macOS and Windows — where the default filesystem is
 //!   case-insensitive — comparison is case-folded, so `~/.SSH/ID_RSA` is denied.
 //!   On Linux comparison is exact, matching the filesystem's own semantics.
@@ -166,7 +172,15 @@ impl ReadDenylist {
         let mut deny_env_files = false;
 
         if include_defaults {
-            deny_env_files = !exempt_normalized.iter().any(|p| p.as_os_str() == ".env");
+            // The `.env` rule has no fixed location, so its exemption is
+            // name-shaped: any exempt entry whose FILE NAME is `.env` — bare
+            // `.env`, `~/.env`, `some/project/.env` — disables the whole
+            // filename rule. Comparing the raw string could never match: the
+            // entries above were normalized to absolute paths.
+            deny_env_files = !exempt_normalized.iter().any(|p| {
+                p.file_name()
+                    .is_some_and(|name| name == std::ffi::OsStr::new(".env"))
+            });
             for (raw, label) in default_denied_subtrees() {
                 let path = normalize_lexically(&raw);
                 if exempt_normalized.iter().any(|e| path_is_within(&path, e)) {
@@ -547,15 +561,37 @@ fn absolutize(path: &Path) -> PathBuf {
     normalize_lexically(path)
 }
 
+/// Make a path absolute against the current directory WITHOUT folding `.` or
+/// `..` components.
+///
+/// Folding first is unsound: with `pub/link -> denied/sub`, the path
+/// `pub/link/../secret` lexically becomes `pub/secret`, but the OS resolves the
+/// symlink *before* applying `..` and really reads `denied/secret`. Keeping the
+/// raw `..` components lets `fs::canonicalize` apply the secure order —
+/// resolve each component, then let `..` pop the resolved result.
+fn absolutize_raw(path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("/"))
+            .join(path)
+    }
+}
+
 /// Resolve symlinks as far as the filesystem allows.
 ///
 /// `canonicalize` fails on a path that does not exist, which is exactly the
 /// case for a read of a file that is about to be created — and also the case an
-/// evader would reach for. So on failure we walk up to the deepest ancestor
-/// that *does* exist, canonicalize that (resolving any symlink in the
-/// directory chain), and re-append the remainder.
+/// evader would reach for. So on failure we walk up the RAW ancestor chain
+/// (each surviving `..` included) to the deepest ancestor that *does* exist,
+/// canonicalize that — resolving any symlinks, with the OS applying any `..`
+/// components above it in the secure order — and re-append the remaining
+/// components verbatim. A dropped `..` can only leave the candidate *deeper*
+/// inside an already-resolved ancestor, which subtree matching still denies;
+/// the old lexical-first fold popped symlinks out of existence instead.
 fn canonicalize_best_effort(path: &Path) -> PathBuf {
-    let absolute = normalize_lexically(path);
+    let absolute = absolutize_raw(path);
     if let Ok(resolved) = std::fs::canonicalize(&absolute) {
         return resolved;
     }
@@ -725,6 +761,127 @@ mod tests {
             .expect_err("symlinked parent must not walk around");
     }
 
+    /// F5 regression: `..` must be applied by the OS *after* resolving each
+    /// symlink component, never folded lexically first. With
+    /// `pub/link -> denied/sub`, the path `pub/link/../secret` really reads
+    /// `denied/secret`; the old lexical-first fold produced `pub/secret` and
+    /// the check returned Ok while the read sailed through.
+    #[test]
+    fn dot_dot_through_a_symlink_is_applied_after_symlink_resolution() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let denied = tmp.path().join("denied");
+        std::fs::create_dir_all(denied.join("sub")).expect("mkdir");
+        std::fs::write(denied.join("sub").join("secret"), "TOKEN").expect("write");
+        let pub_dir = tmp.path().join("pub");
+        std::fs::create_dir_all(&pub_dir).expect("mkdir");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(denied.join("sub"), pub_dir.join("link")).expect("symlink");
+        #[cfg(not(unix))]
+        return;
+
+        let list = denylist_for(std::slice::from_ref(&denied));
+        list.check(&pub_dir.join("link").join("..").join("secret"))
+            .expect_err("`..` through a symlink must not walk around the deny-list");
+
+        // Same evasion with a not-yet-existing leaf: the direct canonicalize
+        // fails, so the raw-ancestor walk has to carry the check.
+        list.check(&pub_dir.join("link").join("..").join("not-yet"))
+            .expect_err("the raw-ancestor walk must resolve the symlink before `..`");
+    }
+
+    /// A chain of symlinks (link → link → secret) must be followed to the
+    /// final target, not just one hop. Integrator defeat attempt: indirection
+    /// depth is not a bypass.
+    #[test]
+    fn symlink_chains_resolve_to_the_denied_target() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let denied = tmp.path().join("denied");
+        std::fs::create_dir_all(&denied).expect("mkdir");
+        std::fs::write(denied.join("id_ed25519"), "KEY").expect("write");
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(denied.join("id_ed25519"), tmp.path().join("hop2"))
+                .expect("symlink");
+            std::os::unix::fs::symlink(tmp.path().join("hop2"), tmp.path().join("hop1"))
+                .expect("symlink");
+            let list = denylist_for(std::slice::from_ref(&denied));
+            list.check(&tmp.path().join("hop1"))
+                .expect_err("a symlink chain must resolve to the denied target");
+        }
+        #[cfg(not(unix))]
+        return;
+    }
+
+    /// A relative read issued with the process cwd INSIDE a denied subtree
+    /// must be refused: the absolutization against cwd lands under the rule.
+    /// (Safe under nextest's process-per-test; restores cwd regardless.)
+    #[test]
+    fn relative_read_from_inside_a_denied_tree_is_refused() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let denied = tmp.path().join("denied");
+        std::fs::create_dir_all(&denied).expect("mkdir");
+        std::fs::write(denied.join("id_ed25519"), "KEY").expect("write");
+        let prior = std::env::current_dir().expect("cwd");
+        struct Restore(std::path::PathBuf);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                let _ = std::env::set_current_dir(&self.0);
+            }
+        }
+        let _restore = Restore(prior);
+        std::env::set_current_dir(&denied).expect("chdir into the denied tree");
+
+        let list = denylist_for(std::slice::from_ref(&denied));
+        list.check(Path::new("id_ed25519"))
+            .expect_err("a relative read from inside the denied tree must be refused");
+        list.check(Path::new("./id_ed25519"))
+            .expect_err("the dotted spelling must not differ from the bare one");
+    }
+
+    /// Separator noise must not dodge matching: repeated slashes collapse and a
+    /// trailing slash never changes which subtree a path belongs to.
+    #[test]
+    fn double_slash_and_trailing_slash_variants_are_refused() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let secret_dir = tmp.path().join("secrets");
+        std::fs::create_dir_all(&secret_dir).expect("mkdir");
+        std::fs::write(secret_dir.join("token"), "TOKEN").expect("write");
+
+        let list = denylist_for(std::slice::from_ref(&secret_dir));
+        let root = secret_dir.parent().expect("parent");
+        let double = PathBuf::from(format!("{}/secrets//token", root.display()));
+        list.check(&double)
+            .expect_err("double slashes must not walk around the deny-list");
+        let trailing = PathBuf::from(format!("{}/secrets/", root.display()));
+        list.check(&trailing)
+            .expect_err("a trailing slash must not walk around the deny-list");
+        // And the `.env` filename rule is name-based, so a trailing slash on it
+        // still leaves the file name intact.
+        let list = ReadDenylist::build(true, &[], &[]);
+        let env_dir = tmp.path().join("nested");
+        std::fs::create_dir_all(&env_dir).expect("mkdir");
+        list.check(&env_dir.join(".env"))
+            .unwrap_err_or_panic("`.env` under any directory is denied by name");
+    }
+
+    /// The real attack spelling on macOS: `~/.SSH/ID_RSA` on a case-insensitive
+    /// filesystem is `~/.ssh/id_rsa`. (The tempdir sibling above covers the
+    /// mechanism; this one pins the default rule itself.)
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_case_variation_of_the_default_ssh_rule_is_refused() {
+        let Some(home) = dirs::home_dir() else {
+            return;
+        };
+        if !home.join(".ssh").is_dir() {
+            // Nothing to match against; skip rather than fake a pass.
+            return;
+        }
+        let list = ReadDenylist::build(true, &[], &[]);
+        list.check(&home.join(".SSH").join("ID_RSA"))
+            .expect_err("~/.SSH/ID_RSA is ~/.ssh/id_rsa on a case-insensitive filesystem");
+    }
+
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     #[test]
     fn case_variation_is_refused_on_case_insensitive_filesystems() {
@@ -769,6 +926,39 @@ mod tests {
                 "{allowed} is a committed placeholder and must stay readable"
             );
         }
+    }
+
+    /// F3 regression: exempting `.env` used to compare a *normalized absolute*
+    /// path against the bare string `.env`, which could never match — the
+    /// exemption was dead code. The rule is name-shaped, so any exempt entry
+    /// whose file name is `.env` must disable it.
+    #[test]
+    fn exempting_env_by_name_disables_the_env_file_rule() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let env_file = tmp.path().join(".env");
+        std::fs::write(&env_file, "SECRET=1\n").expect("write");
+
+        // Bare `.env` — the spelling the docs advertise.
+        let list = ReadDenylist::build(true, &[], &[PathBuf::from(".env")]);
+        assert!(
+            list.check(&env_file).is_ok(),
+            "exempting `.env` must disable the env-file rule everywhere"
+        );
+
+        // Any path ending in `/.env` — e.g. `~/.env` or `project/.env`.
+        let home_spelled = dirs::home_dir().map(|h| h.join(".env"));
+        let exempt_path = home_spelled.as_deref().unwrap_or(env_file.as_path());
+        let list = ReadDenylist::build(true, &[], &[exempt_path.to_path_buf()]);
+        assert!(
+            list.check(&env_file).is_ok(),
+            "an exempt entry named `.env` must disable the whole env-file rule"
+        );
+
+        // An exemption for anything else must leave the rule armed.
+        let unrelated = tmp.path().join("notes");
+        let list = ReadDenylist::build(true, &[], std::slice::from_ref(&unrelated));
+        list.check(&env_file)
+            .unwrap_err_or_panic("an unrelated exemption must not reopen `.env` files");
     }
 
     #[test]

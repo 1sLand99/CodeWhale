@@ -1894,11 +1894,29 @@ reasoning contract, and all four membership ids omit generic sampling fields.
     *built-in defaults* when a project genuinely needs it. Deny wins over
     allow: this never reopens anything in `sandbox_denied_read_paths`.
 
+    Exemption granularity is **whole-rule**, not per-file. An exempt path
+    removes a built-in rule only when the rule's own path is at or below it,
+    so exempting `~/.ssh/config` does nothing: the `~/.ssh` rule still denies
+    it, because `~/.ssh` does not lie within `~/.ssh/config`. To reopen that
+    one file you must exempt `~/.ssh` itself — which also reopens the private
+    keys next to it. That is the documented tradeoff: there is no shipped way
+    to narrow a built-in rule to "everything except one file"; copy what you
+    need out of the denied tree instead. The one name-shaped rule, `.env`
+    files, is exempted by *name* rather than by path: any exempt entry whose
+    file name is exactly `.env` — bare `.env`, `~/.env`,
+    `some/project/.env` — disables the entire `.env` filename rule, i.e.
+    every `.env` and `.env.<name>` on disk rather than one project's.
+    (`.env.example` and friends are never denied, so they need no exemption.)
+
   Enforced at two points: sandboxed shell commands (Seatbelt last-match-wins
   `deny file-read*` rules; bubblewrap masks each path) and Codewhale's own
-  `read_file` / `read` / `read_media` tools, which read in-process and are
-  never wrapped by the OS sandbox. A refused read is always an explicit error,
-  never an empty result.
+  in-process tools, which the OS sandbox never wraps — `read_file` / `read` /
+  `read_media` for contents, `list_dir` / `file_search` for *enumeration*
+  (listing a denied directory, or searching one, is refused just as Seatbelt
+  blocks its readdir; a name search rooted above a denied tree skips entries
+  inside it). A refused read is always an explicit error, never an empty
+  result, and the error names the path as the caller spelled it rather than a
+  symlink target's real location.
 
   **This is defense-in-depth, not a security boundary.** It does not stop a
   hardlink to a denied file, a secret already copied into the workspace, an

@@ -2488,3 +2488,84 @@ async fn read_file_refuses_a_workspace_symlink_pointing_at_a_denied_tree() {
         "the refusal must not hand back the secret's resolved location: {message}"
     );
 }
+
+/// F1: `list_dir ~/.ssh` used to hand back the key file names — enumerating a
+/// denied directory is a read of it, exactly what Seatbelt's
+/// `deny file-read*` blocks at the OS layer.
+#[tokio::test]
+async fn list_dir_refuses_to_enumerate_a_denied_directory() {
+    let ctx = ToolContext::new(std::env::temp_dir());
+
+    // Deterministic anchor independent of the machine's home layout: the
+    // `.env` filename rule denies any path whose file name is `.env`, so a
+    // directory by that name is a refused listing too.
+    let holder = tempfile::tempdir().expect("tempdir");
+    let env_dir = holder.path().join("project");
+    std::fs::create_dir_all(env_dir.join(".env")).expect("mkdir");
+    let error = ListDirTool
+        .execute(json!({ "path": env_dir.join(".env") }), &ctx)
+        .await
+        .expect_err("a directory named `.env` is denied by the filename rule");
+    assert!(
+        matches!(error, ToolError::PermissionDenied { .. }),
+        "enumeration of a denied path must be an explicit refusal: {error:?}"
+    );
+
+    let Some(home) = dirs::home_dir() else {
+        return;
+    };
+    let ssh = home.join(".ssh");
+    if !ssh.is_dir() {
+        return;
+    }
+    let error = ListDirTool
+        .execute(json!({ "path": ssh }), &ctx)
+        .await
+        .expect_err("`list_dir ~/.ssh` must not return the key file names");
+    assert!(
+        matches!(error, ToolError::PermissionDenied { .. }),
+        "expected a permission refusal, got: {error:?}"
+    );
+    let message = error.to_string();
+    assert!(message.contains("read deny-list"), "{message}");
+}
+
+/// F2: the refusal must name the path as the caller spelled it. When a
+/// workspace symlink points into a denied tree, `resolve_path` hands the guard
+/// the secret's resolved absolute location first, and a denial raised on that
+/// resolved path answers the probe ("where does this link really go?") in the
+/// error text. The raw-spelling check runs before resolution, so it wins.
+#[cfg(unix)]
+#[tokio::test]
+async fn read_file_refusal_names_the_callers_spelling_not_the_symlink_target() {
+    let Some(home) = dirs::home_dir() else {
+        return;
+    };
+    let ssh = home.join(".ssh");
+    if !ssh.is_dir() {
+        return;
+    }
+
+    let workspace = tempfile::tempdir().expect("tempdir");
+    let link = workspace.path().join("notes.txt");
+    std::os::unix::fs::symlink(&ssh, &link).expect("symlink");
+
+    let ctx = ToolContext::new(workspace.path().to_path_buf());
+    let error = ReadFileTool
+        .execute(json!({ "path": link }), &ctx)
+        .await
+        .expect_err("a symlink into ~/.ssh must be refused");
+    assert!(
+        matches!(error, ToolError::PermissionDenied { .. }),
+        "expected a permission refusal, got: {error:?}"
+    );
+    let message = error.to_string();
+    assert!(
+        message.contains("notes.txt"),
+        "the refusal must name the caller's spelling: {message}"
+    );
+    assert!(
+        !message.contains(&ssh.display().to_string()),
+        "the refusal must not reveal the symlink target's location: {message}"
+    );
+}

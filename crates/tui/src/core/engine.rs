@@ -539,7 +539,13 @@ impl Default for EngineConfig {
             tools_always_load: HashSet::new(),
             prefer_bwrap: false,
             bwrap_extensions: crate::sandbox::BwrapMountExtensions::default(),
-            read_denylist: crate::sandbox::read_guard::ReadDenylist::empty(),
+            // Fail-closed (F7): `Engine::new` unconditionally installs this
+            // list process-wide via `read_guard::set_active`, so a default
+            // here must be the built-in credential-store defaults — an empty
+            // list would override the safe fallback and fail open. Mirrors
+            // `Config::default`, where `sandbox_read_denylist_defaults`
+            // defaults to true.
+            read_denylist: crate::sandbox::read_guard::ReadDenylist::build(true, &[], &[]),
             verbosity: None,
             tools: None,
             workspace_follow_symlinks: false,
