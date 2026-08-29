@@ -589,11 +589,12 @@ impl FleetRosterView {
         let lines = if self.operator_selected() {
             operator_detail_lines(&self.operator)
         } else if let Some(member) = self.selected_member() {
-            // Whale Teams identity first: the portrait (or, in the Compact
-            // tier, only the badge) plus species and job. Rendered without a
-            // state — a roster member is a profile, not a runtime, so this
-            // claims nothing about whether anyone is working.
-            let mut lines = whale_identity_lines(member, self.locale, area.width);
+            // Whale Teams identity first: the species badge plus species and
+            // job. Rendered without a state — a roster member is a profile,
+            // not a runtime, so this claims nothing about whether anyone is
+            // working. (The hand-drawn portrait that used to open this pane
+            // was deleted per the 2026-08-29 founder directive.)
+            let mut lines = whale_identity_lines(member, self.locale);
             // Session model is the operator route so "fast" loadouts resolve
             // to the fast sibling the runtime will actually launch.
             lines.extend(member_detail_lines_with_session(
@@ -637,20 +638,13 @@ fn member_species(member: &AgentProfile) -> whales::WhaleSpecies {
     }
 }
 
-/// Identity block for the detail pane: portrait when the view is at least
-/// the Compact tier width, badge otherwise; then `Name · species · job`. No
-/// state is drawn or claimed — a roster member is a profile, not a runtime.
-fn whale_identity_lines(
-    member: &AgentProfile,
-    locale: Locale,
-    view_width: u16,
-) -> Vec<Line<'static>> {
+/// Identity block for the detail pane: the species badge, then
+/// `Name · species · job`. No state is drawn or claimed — a roster member is
+/// a profile, not a runtime.
+fn whale_identity_lines(member: &AgentProfile, locale: Locale) -> Vec<Line<'static>> {
     let species = member_species(member);
     let theme = &palette::UI_THEME;
     let mut lines: Vec<Line> = Vec::new();
-    if whales::portrait_fits(view_width) {
-        lines.extend(whales::portrait(species, None, 0, theme));
-    }
     let mut caption = whales::badge(species, theme);
     caption.push(Span::styled(
         format!(
