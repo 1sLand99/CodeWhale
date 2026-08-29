@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `/login` reports the Codewhale account session and provider-key next
+  steps. The internal cloud-agent credential is not user surface: there is
+  no `auth set-slot`/`auth clear-slot` command, no hint, and no completion
+  entry for it — membership (`codewhale login`) is the only door.
 - Add provider-native web search for documented Xiaomi MiMo 2.5 Pro and 2.5
   chat routes while keeping neighboring models and custom gateways fail-closed.
 - Add structured provider-native web search for exact Z.AI global and Zhipu
@@ -158,6 +162,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   open, watch, and cancel by the `shell_*` id on the row. `/jobs cancel all`
   cancels running shells; it no longer looks up a task named `all`. The
   composer hourglass crumb no longer stands in for a shell surface.
+- `codewhale logout` and `/logout` now clear the Codewhale account session
+  and the Daytona secret slot, not only provider API keys. The TUI crate's
+  leftover `login --api-key` path no longer claims to save a key.
 - Account sessions no longer read the macOS Keychain. Unsigned or rebuilt
   `codewhale` binaries were a new Keychain ACL principal every time, so
   `codewhale web` and the TUI popped a password dialog on start. Sessions
