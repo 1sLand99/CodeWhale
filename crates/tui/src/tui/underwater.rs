@@ -1046,11 +1046,35 @@ fn launch_cursor_line(text: &str, caret: usize) -> (&str, usize) {
 fn launch_caret_window(line: &str, caret_col: usize, budget: usize) -> (String, String) {
     let chars: Vec<char> = line.chars().collect();
     let caret_col = caret_col.min(chars.len());
+    // The budget is display columns, not characters: CJK and emoji occupy
+    // two cells, and a character-count slice let a wide draft push the caret
+    // past the clip end (review finding 4 — the caret vanished on
+    // CJK/emoji-heavy lines because the downstream truncation cuts from the
+    // end). Accumulate backward from the caret by rendered width so the
+    // caret always lands inside the budget, then fill forward with whatever
+    // width remains.
     let before_budget = budget.saturating_sub(1);
-    let start = caret_col.saturating_sub(before_budget);
-    let before: String = chars[start..caret_col].iter().collect();
-    let after_budget = budget.saturating_sub(before.width() + 1);
-    let after: String = chars[caret_col..].iter().take(after_budget).collect();
+    let mut before = String::new();
+    let mut before_width = 0usize;
+    for &ch in chars[..caret_col].iter().rev() {
+        let ch_width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if before_width.saturating_add(ch_width) > before_budget {
+            break;
+        }
+        before_width += ch_width;
+        before.insert(0, ch);
+    }
+    let after_budget = budget.saturating_sub(before_width + 1);
+    let mut after = String::new();
+    let mut after_width = 0usize;
+    for &ch in chars[caret_col..].iter() {
+        let ch_width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if after_width.saturating_add(ch_width) > after_budget {
+            break;
+        }
+        after_width += ch_width;
+        after.push(ch);
+    }
     (before, after)
 }
 
@@ -1628,6 +1652,31 @@ pub(crate) fn header_hitboxes(area: Rect, app: &App) -> Vec<HeaderHitbox> {
         .unwrap_or(area.width)
         .min(area.width);
     if width == 0 {
+        return Vec::new();
+    }
+    // The posture lockup is the header's guaranteed floor and is never
+    // truncated to make room for the right cluster (see
+    // render_header_with_git_status). At compact widths that floor can run
+    // into the meter's columns, so a hitbox anchored blindly at the right
+    // edge would claim cells the posture actually paints (review finding 5).
+    // Recompute the floor's width with the same spans the renderer composes
+    // and refuse the hitbox when the two would overlap.
+    let mut posture_width = 0usize;
+    if let Some(indicator) = crate::tui::widgets::header_status_indicator_frame(
+        (!app.low_motion && app.fancy_animations)
+            .then_some(app.turn_started_at)
+            .flatten(),
+        &app.status_indicator,
+    ) {
+        posture_width += indicator.width() + GROUP_GAP.len();
+    }
+    posture_width += mode_label(app.ui_locale, app.mode).width();
+    posture_width += FIELD_JOIN.len() + permission_label(app).width();
+    if let Some(scope) = filesystem_scope_notice(app) {
+        posture_width += FIELD_JOIN.len() + scope.width();
+    }
+    let meter_start = usize::from(area.width.saturating_sub(width));
+    if meter_start <= posture_width.saturating_add(usize::from(width > 0)) {
         return Vec::new();
     }
     vec![HeaderHitbox {
@@ -2469,6 +2518,48 @@ mod launch_composer_tests {
         let mut buf = Buffer::empty(area);
         render_launch_screen(area, &mut buf, app, &[], &[]);
         (buf, area)
+    }
+
+    #[test]
+    fn caret_window_budgets_by_display_width_so_wide_drafts_keep_the_caret() {
+        use unicode_width::UnicodeWidthStr;
+        // 12 CJK characters = 24 display cells against a 9-column budget:
+        // a character-count slice kept 8 CHARACTERS (16 cells) and pushed
+        // the caret past the clip end (review finding 4).
+        let line = "你好世界你好世界你好世界";
+        let (before, after) = super::launch_caret_window(line, line.chars().count(), 9);
+        assert!(
+            before.width() <= 8,
+            "before must fit its cell budget: {} cells",
+            before.width()
+        );
+        assert!(before.width() + 1 + after.width() <= 9);
+        assert!(
+            !before.is_empty(),
+            "the window keeps the widest tail that fits"
+        );
+        // ASCII behavior is unchanged: the trailing characters, nothing wider.
+        let (ascii_before, ascii_after) = super::launch_caret_window("hello world", 11, 6);
+        assert_eq!(ascii_before, "world");
+        assert_eq!(ascii_after, "");
+    }
+
+    #[test]
+    fn context_meter_hitbox_yields_to_the_posture_floor() {
+        let mut app = launch_app();
+        app.session.last_prompt_tokens = Some(1_000);
+        // Wide header: the meter owns its right-edge columns.
+        let wide = super::header_hitboxes(Rect::new(0, 0, 120, 1), &app);
+        assert_eq!(wide.len(), 1, "wide header registers the meter hitbox");
+        // Compact header: the posture lockup is the guaranteed floor and is
+        // never truncated, so at narrow widths it can run into the meter's
+        // columns — the hitbox must not claim cells the posture paints
+        // (review finding 5).
+        let narrow = super::header_hitboxes(Rect::new(0, 0, 16, 1), &app);
+        assert!(
+            narrow.is_empty(),
+            "compact header must not claim overlapped cells"
+        );
     }
 
     #[test]
