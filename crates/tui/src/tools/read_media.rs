@@ -271,6 +271,7 @@ pub(crate) async fn execute_read_media(
             "read_media cannot read Codewhale configuration or credential-store files; use `codewhale config list` or `codewhale auth status` for safe inspection",
         ));
     }
+    crate::tools::file::enforce_read_denylist(&file_path, "read_media")?;
 
     // Check cancellation immediately before dispatching blocking I/O and decode work
     if context

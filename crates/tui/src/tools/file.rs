@@ -426,6 +426,31 @@ fn is_config_or_backup(candidate: &Path, config_path: &Path) -> bool {
 /// secret-store directories. Other dotfiles remain readable. Model-bound
 /// redaction is still required because shell tools can read these files and
 /// arbitrary commands can print credentials without reading a file at all.
+/// Refuse a read the sandbox read deny-list blocks (S1).
+///
+/// `read_file`, `read`, and `read_media` all run *in-process*: they call
+/// `std::fs` inside the harness, so `sandbox-exec` and `bwrap` never see them
+/// and the OS-level deny rules do not apply. This is the enforcement point for
+/// those tools, and the refusal is always an explicit error — never an empty
+/// result, which would read as "the file is empty" and invite the model to
+/// probe siblings.
+pub(crate) fn enforce_read_denylist(path: &Path, tool: &str) -> Result<(), ToolError> {
+    match crate::sandbox::read_guard::active().check(path) {
+        Ok(()) => Ok(()),
+        Err(denial) => {
+            let message = denial.message(tool);
+            tracing::warn!(
+                target: "codewhale::sandbox::read_guard",
+                requested = %denial.requested.display(),
+                via_symlink = denial.via_symlink,
+                tool = tool,
+                "sandbox read deny-list refused a read"
+            );
+            Err(ToolError::permission_denied(message))
+        }
+    }
+}
+
 pub(crate) fn is_codewhale_credential_path(path: &Path) -> bool {
     let candidate = canonical_path_for_credential_guard(path);
 
@@ -673,6 +698,7 @@ impl ReadFileTool {
                 "read cannot expose Codewhale configuration or credential-store files; use `codewhale config list` or `codewhale auth status` for safe inspection",
             ));
         }
+        enforce_read_denylist(&file_path, "read")?;
         check_file_operation_cancelled(context)?;
         let bytes = fs::read(&file_path).map_err(|error| {
             ToolError::execution_failed(format!("Failed to read {}: {error}", file_path.display()))
@@ -819,6 +845,7 @@ impl ToolSpec for ReadFileTool {
                 "File `read` cannot expose CodeWhale configuration or credential-store files; use `codewhale config list` or `codewhale auth status` for safe inspection",
             ));
         }
+        enforce_read_denylist(&file_path, "read_file")?;
         let pages = optional_str(&input, "pages")?;
 
         if let Some(result) = read_pdf_if_detected(

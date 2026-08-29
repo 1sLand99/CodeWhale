@@ -435,10 +435,13 @@ pub struct EngineConfig {
     /// User-configured bwrap mount extensions (#5410): extra read-only roots
     /// and writable device nodes such as `/dev/null`.
     pub bwrap_extensions: crate::sandbox::BwrapMountExtensions,
-    /// Opt-in sandbox read deny-list (S1, #5568): subpaths sandboxed shell
-    /// commands must not read even under full-disk-read postures. `~` expands
-    /// at the sandbox boundary. Empty keeps today's behavior.
-    pub denied_read_subpaths: Vec<std::path::PathBuf>,
+    /// Sandbox read deny-list (S1). One source of truth for two enforcement
+    /// points: the OS wrappers get its subtree paths, and the in-process
+    /// file-reading tools consult it directly (they run inside the harness
+    /// process and are never wrapped by `sandbox-exec` or `bwrap`).
+    /// Defense-in-depth, not a security boundary — see
+    /// `crate::sandbox::read_guard` for what it does and does not stop.
+    pub read_denylist: crate::sandbox::read_guard::ReadDenylist,
     /// Tool override and plugin configuration (`[tools]` table in config.toml).
     /// Applied to the per-turn tool registry after built-in tools are registered.
     /// When `None`, no overrides or plugin loading occurs.
@@ -536,7 +539,7 @@ impl Default for EngineConfig {
             tools_always_load: HashSet::new(),
             prefer_bwrap: false,
             bwrap_extensions: crate::sandbox::BwrapMountExtensions::default(),
-            denied_read_subpaths: Vec::new(),
+            read_denylist: crate::sandbox::read_guard::ReadDenylist::empty(),
             verbosity: None,
             tools: None,
             workspace_follow_symlinks: false,
@@ -1499,6 +1502,10 @@ impl Engine {
                 .subagent_default_wall_time_secs()
                 .map(std::time::Duration::from_secs),
         );
+        // The OS wrappers below only cover child processes. Codewhale's own
+        // `read_file`/`read`/`read_media` tools read in-process, so the same
+        // deny-list is installed process-wide for them to consult (S1).
+        crate::sandbox::read_guard::set_active(config.read_denylist.clone());
         let shell_manager = config
             .runtime_services
             .shell_manager
@@ -1508,13 +1515,13 @@ impl Engine {
             Ok(mut manager) => {
                 manager.set_prefer_bwrap(config.prefer_bwrap);
                 manager.set_bwrap_extensions(config.bwrap_extensions.clone());
-                manager.set_denied_read_subpaths(config.denied_read_subpaths.clone());
+                manager.set_denied_read_subpaths(config.read_denylist.subtree_paths());
             }
             Err(poisoned) => {
                 let mut manager = poisoned.into_inner();
                 manager.set_prefer_bwrap(config.prefer_bwrap);
                 manager.set_bwrap_extensions(config.bwrap_extensions.clone());
-                manager.set_denied_read_subpaths(config.denied_read_subpaths.clone());
+                manager.set_denied_read_subpaths(config.read_denylist.subtree_paths());
             }
         }
         let file_read_tracker = new_shared_file_read_tracker();

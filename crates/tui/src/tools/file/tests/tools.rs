@@ -2421,3 +2421,70 @@ async fn expected_hash_is_advertised_on_every_mutating_action() {
         assert!(description.contains("content_hash"), "{description}");
     }
 }
+
+/// S1: the in-process read tools are the *only* enforcement point for
+/// `read_file`/`read`/`read_media` — they call `std::fs` inside the harness
+/// process, so `sandbox-exec` and `bwrap` never see them. This asserts the
+/// refusal is an explicit permission error, not an empty result, and that it
+/// applies to the built-in defaults with no config required.
+#[test]
+fn read_tools_refuse_paths_under_the_default_sandbox_read_denylist() {
+    let Some(home) = dirs::home_dir() else {
+        // No home directory: only machine-wide rules exist and the assertion
+        // below would be vacuous. Skip rather than pretend to have evidence.
+        return;
+    };
+
+    let error = enforce_read_denylist(&home.join(".ssh").join("id_ed25519"), "read_file")
+        .expect_err("~/.ssh must be denied by the built-in defaults");
+    assert!(
+        matches!(error, ToolError::PermissionDenied { .. }),
+        "a denied read must be an explicit refusal, never an empty or missing-file result: {error:?}"
+    );
+    let message = error.to_string();
+    assert!(message.contains("read deny-list"), "{message}");
+    assert!(
+        message.contains("sandbox_read_denylist_exempt"),
+        "{message}"
+    );
+
+    // Ordinary source files stay readable — a coding agent must still be able
+    // to read the user's tree, which is the whole point of the tool.
+    let temporary = tempfile::tempdir().expect("tempdir");
+    let source = temporary.path().join("main.rs");
+    std::fs::write(&source, "fn main() {}\n").expect("fixture");
+    assert!(enforce_read_denylist(&source, "read_file").is_ok());
+}
+
+/// A symlink whose own name is innocuous but whose target is a credential
+/// store must be refused by the target. A deny-list a symlink walks around is
+/// theater, and `resolve_path` deliberately *permits* a workspace symlink that
+/// resolves outside the workspace.
+#[cfg(unix)]
+#[tokio::test]
+async fn read_file_refuses_a_workspace_symlink_pointing_at_a_denied_tree() {
+    let Some(home) = dirs::home_dir() else {
+        return;
+    };
+    let ssh = home.join(".ssh");
+    if !ssh.is_dir() {
+        // Nothing to point at; a fabricated pass here would be worse than a skip.
+        return;
+    }
+
+    let workspace = tempfile::tempdir().expect("tempdir");
+    let link = workspace.path().join("notes.txt");
+    std::os::unix::fs::symlink(&ssh, &link).expect("symlink");
+
+    let error = enforce_read_denylist(&link, "read_file")
+        .expect_err("a symlink into ~/.ssh must be refused by its target");
+    let message = error.to_string();
+    assert!(message.contains("symlink"), "{message}");
+    // The rule's *label* ("SSH keys (~/.ssh)") is named on purpose — the user
+    // needs to know which rule to exempt. What must never appear is the
+    // resolved absolute path, which is the location the caller was fishing for.
+    assert!(
+        !message.contains(&ssh.display().to_string()),
+        "the refusal must not hand back the secret's resolved location: {message}"
+    );
+}
