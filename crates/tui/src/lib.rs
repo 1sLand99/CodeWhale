@@ -15052,20 +15052,30 @@ reasoning = "high"
 
     #[tokio::test]
     async fn review_provider_flag_pins_route_for_multi_route_model() {
+        // A genuinely multi-route model: `shared-review-model` is the
+        // configured model of BOTH named routes below, while the active route
+        // (custom-a) does not offer it. (Two custom providers can never be
+        // ambiguous — the route inventory resolves only the active custom
+        // entry — so the multi-route pair has to be named providers.)
         // Without `--provider`, an explicit `--model` lets cross-provider
         // inventory inference run, and a model offered by more than one
         // configured route hard-errors in `resolve_cli_auto_route`
         // ("available from configured provider route(s): ..."). That error
         // already tells the user to "Pass `--provider <provider>`" — until
         // now `codewhale review` had no such flag to pass.
-        let config = custom_exec_config("custom-a");
+        let mut config = custom_exec_config("custom-a");
+        {
+            let providers = config.providers.as_mut().expect("providers");
+            for entry in [&mut providers.deepseek, &mut providers.openrouter] {
+                *entry = crate::config::ProviderConfig {
+                    model: Some("shared-review-model".to_string()),
+                    api_key: Some("local-test-key".to_string()),
+                    ..Default::default()
+                };
+            }
+        }
 
-        let inferred = review_args(&[
-            "codewhale",
-            "review",
-            "--model",
-            crate::config::ZAI_GLM_5_2_MODEL,
-        ]);
+        let inferred = review_args(&["codewhale", "review", "--model", "shared-review-model"]);
         let (inferred_config, inferred_force) =
             review_execution_route(&config, &inferred).expect("model-only route");
         assert!(
@@ -15074,18 +15084,38 @@ reasoning = "high"
         );
         assert_eq!(inferred_config.provider.as_deref(), Some("custom-a"));
 
+        // Without the flag the multi-route model must refuse to guess.
+        let err = resolve_cli_exec_route(
+            &inferred_config,
+            &resolve_review_model(&inferred_config, inferred.model.as_deref()),
+            "review diff",
+            inferred_force,
+        )
+        .await
+        .expect_err("a model offered by two configured routes must hard-error");
+        let message = err.to_string();
+        assert!(
+            message.contains("available from configured provider route(s)"),
+            "unexpected error: {message}"
+        );
+        assert!(
+            message.contains("deepseek") && message.contains("openrouter"),
+            "both candidate routes must be named: {message}"
+        );
+
+        // With the flag the same model pins to the named route and resolves.
         let pinned = review_args(&[
             "codewhale",
             "review",
             "--provider",
-            "custom-b",
+            "deepseek",
             "--model",
-            crate::config::ZAI_GLM_5_2_MODEL,
+            "shared-review-model",
         ]);
         let (pinned_config, pinned_force) =
             review_execution_route(&config, &pinned).expect("pinned route");
         assert!(pinned_force, "--provider makes the route authoritative");
-        assert_eq!(pinned_config.provider.as_deref(), Some("custom-b"));
+        assert_eq!(pinned_config.provider.as_deref(), Some("deepseek"));
 
         let route = resolve_cli_exec_route(
             &pinned_config,
@@ -15097,12 +15127,44 @@ reasoning = "high"
         .expect("pinned review route");
         let execution = config_for_cli_route(&pinned_config, &route);
 
-        assert_eq!(route.provider, crate::config::ApiProvider::Custom);
-        assert_eq!(route.model, crate::config::ZAI_GLM_5_2_MODEL);
+        assert_eq!(route.provider, crate::config::ApiProvider::Deepseek);
+        assert_eq!(route.model, "shared-review-model");
         assert_eq!(
             execution.provider_identity_for(route.provider),
-            "custom-b",
+            "deepseek",
             "the review runs on the provider the flag named"
+        );
+
+        // Pinning a configured custom provider (the workflow's
+        // CODEWHALE_REVIEW_PROVIDER="my-proxy" case) is equally authoritative
+        // for the same multi-route model.
+        let pinned_custom = review_args(&[
+            "codewhale",
+            "review",
+            "--provider",
+            "custom-b",
+            "--model",
+            "shared-review-model",
+        ]);
+        let (custom_config, custom_force) =
+            review_execution_route(&config, &pinned_custom).expect("pinned custom route");
+        assert!(custom_force);
+        let custom_route = resolve_cli_exec_route(
+            &custom_config,
+            &resolve_review_model(&custom_config, pinned_custom.model.as_deref()),
+            "review diff",
+            custom_force,
+        )
+        .await
+        .expect("pinned custom review route");
+        let custom_execution = config_for_cli_route(&custom_config, &custom_route);
+
+        assert_eq!(custom_route.provider, crate::config::ApiProvider::Custom);
+        assert_eq!(custom_route.model, "shared-review-model");
+        assert_eq!(
+            custom_execution.provider_identity_for(custom_route.provider),
+            "custom-b",
+            "the review runs on the custom provider the flag named"
         );
     }
 

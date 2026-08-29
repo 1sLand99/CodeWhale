@@ -31,9 +31,13 @@ change models.
 Bring-your-own-key still works: set the provider's own variable instead and
 the workflow uses it directly, with no mapping.
 
+If `CODEWHALE_API_KEY` and a provider's own secret are **both** set, the
+canonical account key wins: the workflow maps it onto the chosen provider's
+variable, overwriting the BYOK value.
+
 | Secret                | Role                                                        |
 |-----------------------|-------------------------------------------------------------|
-| `CODEWHALE_API_KEY`   | **canonical** — your Codewhale review key                    |
+| `CODEWHALE_API_KEY`   | **canonical** — your Codewhale review key; wins over any BYOK secret that is also set |
 | `ZAI_API_KEY`         | BYOK fallback (z.ai Coding Plan / GLM)                       |
 | `DEEPSEEK_API_KEY`    | BYOK fallback (DeepSeek). This is the DeepSeek *provider* variable — it is not a generic bot key |
 | `OPENROUTER_API_KEY`  | BYOK fallback (OpenRouter)                                   |

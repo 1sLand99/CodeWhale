@@ -160,7 +160,15 @@ jobs:
             openrouter)           KEY_VAR=OPENROUTER_API_KEY ;;
             anthropic|claude)     KEY_VAR=ANTHROPIC_API_KEY ;;
             *)
-              echo "::error::CODEWHALE_REVIEW_PROVIDER='${PROVIDER}' has no CODEWHALE_API_KEY mapping in this workflow. Set that provider's own key as a repository secret, or add the mapping here."
+              # No mapping for a custom provider. With an account key set that
+              # is a real misconfiguration (hard error below). BYOK-only repos
+              # are fine — the provider's own secret is used directly — so say
+              # so without a red ::error:: annotation on a correct config.
+              if [ -z "${CODEWHALE_API_KEY:-}" ]; then
+                echo "::warning::CODEWHALE_REVIEW_PROVIDER='${PROVIDER}' has no CODEWHALE_API_KEY mapping in this workflow, and none is needed: no account key is set, so the provider's own BYOK secret is used directly."
+              else
+                echo "::error::CODEWHALE_REVIEW_PROVIDER='${PROVIDER}' has no CODEWHALE_API_KEY mapping in this workflow. Set that provider's own key as a repository secret, or add the mapping here."
+              fi
               KEY_VAR=""
               ;;
           esac
