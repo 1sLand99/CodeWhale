@@ -584,24 +584,6 @@ fn install_host(
         )
         .map_err(init_err)?;
 
-    // Structured twin of the per-slot "dropped a failed slot as null"
-    // breadcrumb (R9): a PARTIALLY failed fan-out still resolves and leaves
-    // no task record for the dropped slot, so without this event the ledger
-    // cannot see the loss and records a clean Completed.
-    let fanout_driver = driver.clone();
-    globals
-        .set(
-            "__workflow_slot_dropped",
-            Func::from(move |construct: String, kind: String, slot: u32| {
-                fanout_driver.progress(ProgressEvent::FanoutSlotDropped {
-                    construct,
-                    kind,
-                    slot,
-                });
-            }),
-        )
-        .map_err(init_err)?;
-
     let phase_driver = driver.clone();
     globals
         .set(
@@ -1271,7 +1253,6 @@ const PRELUDE_TEMPLATE: &str = r#""use strict";
   const hostTask = __workflow_task;
   const hostLog = __workflow_log;
   const hostEverySlotFailed = __workflow_every_slot_failed;
-  const hostSlotDropped = __workflow_slot_dropped;
   const hostPhase = __workflow_phase;
   const hostBudgetTotal = __workflow_budget_total;
   const hostBudgetSpent = __workflow_budget_spent;
@@ -1412,7 +1393,6 @@ const PRELUDE_TEMPLATE: &str = r#""use strict";
         "parallel(): dropped a failed slot as null (kind=" + kind + ", slot " + index + "): " +
         message
       );
-      hostSlotDropped("parallel", kind, index);
       return null;
     };
     const slots = thunks.map((thunk, index) => {
@@ -1495,7 +1475,6 @@ const PRELUDE_TEMPLATE: &str = r#""use strict";
           hostLog(
             "pipeline(): dropped item " + index + " as null (kind=" + kind + "): " + message
           );
-          hostSlotDropped("pipeline", kind, index);
           return null;
         }
       }

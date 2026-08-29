@@ -251,18 +251,6 @@ pub enum ProgressEvent {
         /// Total slots the fan-out declared.
         total: u32,
     },
-    /// ONE slot of a settled fan-out dropped to null while other slots
-    /// survived. The structured twin of the per-slot breadcrumb: the ledger
-    /// counts these so a PARTIALLY failed fan-out records Degraded instead
-    /// of a clean Completed with silently lost work.
-    FanoutSlotDropped {
-        /// Which fan-out construct dropped it: `parallel` or `pipeline`.
-        construct: String,
-        /// Typed failure kind (`script`, `task`, `schema`, ...).
-        kind: String,
-        /// Zero-based slot index.
-        slot: u32,
-    },
 }
 
 /// Host-side executor for a Workflow run.

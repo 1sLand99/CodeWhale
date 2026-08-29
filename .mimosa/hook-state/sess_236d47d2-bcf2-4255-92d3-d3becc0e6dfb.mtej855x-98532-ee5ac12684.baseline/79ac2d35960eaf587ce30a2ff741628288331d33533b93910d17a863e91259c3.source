@@ -828,10 +828,6 @@ struct SlotLedger {
     /// task record at all, so only the structured
     /// `ProgressEvent::FanoutAllSlotsFailed` count makes them visible here.
     dead_fanouts: u32,
-    /// Individual slots a settled fan-out dropped to null while other slots
-    /// survived (`ProgressEvent::FanoutSlotDropped`). A partial loss with
-    /// surviving work: Degraded, never a clean Completed.
-    dropped_slots: u32,
     /// Whether any child agent was ever admitted for this run.
     any_child_ran: bool,
     /// First retained dispatch-failure message, for the all-rejected receipt.
@@ -904,11 +900,7 @@ impl SlotLedger {
                 ),
             ));
         }
-        if self.failed_tasks > 0
-            || self.rejected > 0
-            || self.dead_fanouts > 0
-            || self.dropped_slots > 0
-        {
+        if self.failed_tasks > 0 || self.rejected > 0 || self.dead_fanouts > 0 {
             let mut parts = Vec::new();
             if self.failed_tasks > 0 {
                 parts.push(format!(
@@ -920,12 +912,9 @@ impl SlotLedger {
                 parts.push(format!("{} dispatch(es) were rejected", self.rejected));
             }
             if self.dead_fanouts > 0 {
-                parts.push(format!("{} fan-out(s) lost every slot", self.dead_fanouts));
-            }
-            if self.dropped_slots > 0 {
                 parts.push(format!(
-                    "{} fan-out slot(s) dropped while others survived",
-                    self.dropped_slots
+                    "{} fan-out(s) lost every slot",
+                    self.dead_fanouts
                 ));
             }
             return Some((
@@ -1922,7 +1911,6 @@ async fn run_workflow_vm(
                         .count(),
                     rejected: record.dispatch_failure_count,
                     dead_fanouts: driver.dead_fanout_count(),
-                    dropped_slots: driver.dropped_slot_count(),
                     any_child_ran: !record.child_ids.is_empty(),
                     retained_detail: record
                         .dispatch_failures
@@ -3420,7 +3408,6 @@ struct SubAgentWorkflowDriver {
     /// script throws included. Consulted by the terminal slot ledger: those
     /// fan-outs can leave no task record at all.
     dead_fanouts: AtomicU32,
-    dropped_slots: AtomicU32,
     total_budget: Option<u64>,
     last_budget_event: Arc<Mutex<Option<BudgetSnapshot>>>,
     /// Workflow-owned gates installed for this run (#4179).
@@ -3472,7 +3459,6 @@ impl SubAgentWorkflowDriver {
             current_phase: Mutex::new(None),
             task_records: Arc::new(Mutex::new(HashMap::new())),
             dead_fanouts: AtomicU32::new(0),
-            dropped_slots: AtomicU32::new(0),
             total_budget,
             last_budget_event: Arc::new(Mutex::new(None)),
             gate_specs: Arc::new(gate_specs),
@@ -4046,17 +4032,6 @@ impl SubAgentWorkflowDriver {
         self.dead_fanouts.load(Ordering::SeqCst)
     }
 
-    /// Count one slot a settled fan-out dropped while others survived; the
-    /// per-slot breadcrumb already narrates it, this counter makes the loss
-    /// visible to the terminal slot ledger.
-    fn record_dropped_slot(&self) {
-        self.dropped_slots.fetch_add(1, Ordering::SeqCst);
-    }
-
-    fn dropped_slot_count(&self) -> u32 {
-        self.dropped_slots.load(Ordering::SeqCst)
-    }
-
     fn add_waiter_or_complete(&self, agent_id: String, waiter: oneshot::Sender<TaskCompletion>) {
         let mut state = self
             .completion_state
@@ -4327,10 +4302,6 @@ impl WorkflowDriver for SubAgentWorkflowDriver {
             // run where nothing survived as a plain success.
             ProgressEvent::FanoutAllSlotsFailed { .. } => {
                 self.record_dead_fanout();
-                return;
-            }
-            ProgressEvent::FanoutSlotDropped { .. } => {
-                self.record_dropped_slot();
                 return;
             }
             ProgressEvent::Log { message } => (
@@ -5378,7 +5349,6 @@ mod tests {
             failed_tasks: 0,
             rejected: 0,
             dead_fanouts: 0,
-            dropped_slots: 0,
             any_child_ran: true,
             retained_detail: None,
         };
@@ -5398,7 +5368,6 @@ mod tests {
             failed_tasks: 1,
             rejected: 0,
             dead_fanouts: 0,
-            dropped_slots: 0,
             any_child_ran: true,
             retained_detail: None,
         }
@@ -5417,7 +5386,6 @@ mod tests {
             failed_tasks: 4,
             rejected: 0,
             dead_fanouts: 0,
-            dropped_slots: 0,
             any_child_ran: true,
             retained_detail: None,
         }
@@ -5442,7 +5410,6 @@ mod tests {
             failed_tasks: 2,
             rejected: 1,
             dead_fanouts: 0,
-            dropped_slots: 0,
             any_child_ran: true,
             retained_detail: Some("admission cap".to_string()),
         }
@@ -5463,7 +5430,6 @@ mod tests {
             failed_tasks: 0,
             rejected: 2,
             dead_fanouts: 0,
-            dropped_slots: 0,
             any_child_ran: false,
             retained_detail: Some("depth ceiling".to_string()),
         }
@@ -5515,7 +5481,6 @@ mod tests {
             rejected: 0,
             // The fan-out those children died in also reported itself dead.
             dead_fanouts: 1,
-            dropped_slots: 0,
             any_child_ran: true,
             retained_detail: None,
         };
@@ -5546,7 +5511,6 @@ mod tests {
             failed_tasks: 0,
             rejected: 0,
             dead_fanouts: 1,
-            dropped_slots: 0,
             any_child_ran: false,
             retained_detail: None,
         }
@@ -5568,7 +5532,6 @@ mod tests {
             failed_tasks: 0,
             rejected: 0,
             dead_fanouts: 1,
-            dropped_slots: 0,
             any_child_ran: true,
             retained_detail: None,
         }
