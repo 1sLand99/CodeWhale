@@ -545,14 +545,20 @@ pub struct LaunchState {
     pub status: Option<String>,
     pub workspace_session_count: usize,
     pub worktree_available: bool,
-    /// Row hitboxes from the most recent launch render.
+    /// Row hitboxes from the most recent launch render. Index order is
+    /// focus order: the three quick-action rows (`index == launch.selected`
+    /// for 0–2), so the mouse click path and the keyboard share dispatch.
     pub row_areas: Vec<Rect>,
+    /// Option-strip tile hitboxes from the most recent launch render
+    /// (Tideline startup stage), with their dispatch intent.
+    pub option_areas: Vec<(crate::tui::underwater::LaunchOptionAction, Rect)>,
     /// Whether launch keys type into the pre-session composer instead of
     /// driving the menu. The composer itself is the session `App`'s own
     /// `ComposerState` — this flag only decides where keystrokes go.
     pub composer_focus: bool,
-    /// Composer input-row hitbox from the most recent launch render. A
-    /// click here focuses the composer, exactly like the Tab key.
+    /// Composer input-row hitbox from the most recent launch render (the
+    /// docked strip below the option strip). A click here focuses the
+    /// composer, exactly like the Tab key.
     pub composer_area: Option<Rect>,
     /// Send-glyph hitbox inside the composer row. A click here submits the
     /// composed message through the normal dispatch path.
@@ -591,6 +597,7 @@ impl LaunchState {
             workspace_session_count,
             worktree_available,
             row_areas: Vec::new(),
+            option_areas: Vec::new(),
             composer_focus: false,
             composer_area: None,
             send_area: None,
@@ -744,6 +751,10 @@ pub struct ViewportState {
     /// WorkflowPanel rect above the composer (#4121), for mouse toggle/cancel.
     pub last_workflow_panel_area: Option<Rect>,
     pub last_workflow_cancel_area: Option<Rect>,
+    /// Topbar segment rects (Tideline shell, spec §6), recorded at render so
+    /// hover and — in a follow-up slice — click routing can hit-test the
+    /// painted cells. Mirrors the workflow-panel cancel-area storage pattern.
+    pub last_topbar_hitboxes: Vec<crate::tui::topbar::TopbarHitbox>,
     /// Live plugin CTA row above the composer, plus review/dismiss hitboxes.
     pub last_plugin_cta_area: Option<Rect>,
     pub last_plugin_cta_review_area: Option<Rect>,
@@ -781,6 +792,7 @@ impl Default for ViewportState {
             last_approval_area: None,
             last_workflow_panel_area: None,
             last_workflow_cancel_area: None,
+            last_topbar_hitboxes: Vec::new(),
             last_plugin_cta_area: None,
             last_plugin_cta_review_area: None,
             last_plugin_cta_dismiss_area: None,
@@ -1838,6 +1850,12 @@ pub struct App {
     pub status_items: Vec<crate::config::StatusItem>,
     /// Optional header items enabled from `tui.header_items` in `config.toml`
     /// at startup. Built-in header content remains independent of this list.
+    /// Unread since the classic header was superseded by the Tideline topbar
+    /// (2026-08-29): the topbar carries the context meter by default and the
+    /// token breakdown lives behind `/cost` (spec §3). The field stays so the
+    /// config surface keeps parsing; its reader returns with the classic
+    /// renderer deletion slice.
+    #[allow(dead_code)]
     pub header_items: Vec<crate::config::HeaderItem>,
     /// Project documentation (AGENTS.md or CLAUDE.md)
     #[allow(dead_code)]

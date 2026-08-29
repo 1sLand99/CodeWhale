@@ -499,13 +499,33 @@ pub(crate) fn handle_mouse_event(app: &mut App, mouse: MouseEvent) -> Vec<ViewEv
                 } else {
                     // Clicking anywhere else hands focus back to the menu.
                     app.launch.composer_focus = false;
-                    if let Some((index, _)) = app
+                    // Option-strip tiles (below the quick-action rows, never
+                    // overlapping them): every tile dispatches through the
+                    // launch table — the same code its printed key takes
+                    // (spec §6 parity).
+                    if let Some((action, _)) = app
+                        .launch
+                        .option_areas
+                        .iter()
+                        .find(|(_, area)| mouse_hits_rect(mouse, Some(*area)))
+                        .map(|(action, area)| (*action, *area))
+                    {
+                        app.launch.selected = action.launch_row();
+                        app.pending_launch_action =
+                            Some(crate::tui::underwater::handle_launch_key(
+                                &mut app.launch,
+                                KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+                                app.ui_locale,
+                            ));
+                    } else if let Some((index, _)) = app
                         .launch
                         .row_areas
                         .iter()
                         .enumerate()
                         .find(|(_, area)| mouse_hits_rect(mouse, Some(**area)))
                     {
+                        // `row_areas` is the launch table's seven slots, so
+                        // the clicked slot IS the table row.
                         app.launch.selected = index;
                         app.pending_launch_action =
                             Some(crate::tui::underwater::handle_launch_key(
@@ -1921,15 +1941,18 @@ mod tests {
     }
 
     #[test]
-    fn all_seven_launch_mouse_rows_dispatch_the_same_actions_as_keyboard() {
-        for index in 0..7 {
+    fn every_visible_launch_row_dispatches_the_same_action_as_keyboard() {
+        // `row_areas` is the launch table's seven slots; the stage shows the
+        // three quick actions at slots [2, 4, 1] (New session, Chat only,
+        // Resume last). Clicking a row selects its TABLE row, so mouse and
+        // keyboard (select the row, Enter) dispatch identically.
+        for index in [2usize, 4, 1] {
             let mut app = create_test_app();
             app.launch.visible = true;
             app.launch.worktree_available = true;
-            crate::tui::underwater::record_launch_hitboxes(
-                Rect::new(0, 0, 80, 24),
-                &mut app.launch,
-            );
+            let stage = Rect::new(0, 1, 80, 22); // the frame's stage slot at 80x24
+            let hitboxes = crate::tui::underwater::tideline_startup_hitboxes(stage);
+            crate::tui::underwater::apply_launch_hitboxes(&hitboxes, &mut app.launch);
 
             let mut keyboard = app.launch.clone();
             keyboard.selected = index;
@@ -1940,6 +1963,7 @@ mod tests {
             );
 
             let row = app.launch.row_areas[index];
+            assert!(row.width > 0, "slot {index} must own a painted row");
             handle_mouse_event(&mut app, left_click(row.x, row.y));
             assert_eq!(app.launch.selected, index);
             assert_eq!(app.pending_launch_action.take(), Some(keyboard_action));
@@ -1953,7 +1977,14 @@ mod tests {
         let mut app = create_test_app();
         app.launch.visible = true;
         app.launch.worktree_available = true;
-        crate::tui::underwater::record_launch_hitboxes(Rect::new(0, 0, 80, 24), &mut app.launch);
+        let stage = Rect::new(0, 1, 80, 22); // the frame's stage slot at 80x24
+        let hitboxes = crate::tui::underwater::tideline_startup_hitboxes(stage);
+        crate::tui::underwater::apply_launch_hitboxes(&hitboxes, &mut app.launch);
+        assert_eq!(
+            app.launch.row_areas.len(),
+            7,
+            "one slot per launch-table row"
+        );
         let composer = app.launch.composer_area.expect("composer hitbox");
         let send = app.launch.send_area.expect("send hitbox");
 
@@ -2026,6 +2057,93 @@ mod tests {
                 KeyCode::Char('c'),
                 KeyModifiers::ALT
             ))
+        );
+    }
+
+    #[test]
+    fn quick_action_row_clicks_select_their_launch_table_rows() {
+        let mut app = create_test_app();
+        app.launch.visible = true;
+        app.launch.worktree_available = true;
+        let stage = Rect::new(0, 1, 80, 22); // the frame's stage slot at 80x24
+        let hitboxes = crate::tui::underwater::tideline_startup_hitboxes(stage);
+        crate::tui::underwater::apply_launch_hitboxes(&hitboxes, &mut app.launch);
+
+        // The Chat only quick action is launch-table row 4 (its `C` direct
+        // key), not the strip position: clicking it selects row 4 and Enter
+        // dispatches NewChat through the same table.
+        let chat = app.launch.row_areas[4];
+        handle_mouse_event(&mut app, left_click(chat.x + 2, chat.y));
+        assert_eq!(app.launch.selected, 4);
+        assert_eq!(
+            app.pending_launch_action.take(),
+            Some(crate::tui::underwater::LaunchAction::NewChat)
+        );
+
+        // The New session quick action is table row 2 (its `W` direct key).
+        let work = app.launch.row_areas[2];
+        handle_mouse_event(&mut app, left_click(work.x + 2, work.y));
+        assert_eq!(app.launch.selected, 2);
+        assert_eq!(
+            app.pending_launch_action.take(),
+            Some(crate::tui::underwater::LaunchAction::NewSession)
+        );
+    }
+
+    #[test]
+    fn launch_option_tiles_dispatch_the_same_actions_as_their_keys() {
+        let mut app = create_test_app();
+        app.launch.visible = true;
+        app.launch.worktree_available = true;
+        let stage = Rect::new(0, 1, 80, 22);
+        let startup = crate::tui::underwater::tideline_startup_from_app(&app);
+        drop(startup);
+        let hitboxes = crate::tui::underwater::tideline_startup_hitboxes(stage);
+        crate::tui::underwater::apply_launch_hitboxes(&hitboxes, &mut app.launch);
+        assert_eq!(app.launch.option_areas.len(), 4, "four tiles at 80 cols");
+
+        // Worktree tile: same path as Ctrl+N — the name prompt opens.
+        let (worktree, area) = app.launch.option_areas[0];
+        assert_eq!(
+            worktree,
+            crate::tui::underwater::LaunchOptionAction::Worktree
+        );
+        handle_mouse_event(&mut app, left_click(area.x + 1, area.y + 1));
+        assert!(
+            app.launch.worktree_input.is_some(),
+            "worktree tile opens the name prompt"
+        );
+        app.launch.worktree_input = None;
+
+        // Chat tile: same path as C.
+        let (chat, area) = app.launch.option_areas[1];
+        assert_eq!(chat, crate::tui::underwater::LaunchOptionAction::Chat);
+        handle_mouse_event(&mut app, left_click(area.x + 1, area.y + 1));
+        assert_eq!(
+            app.pending_launch_action.take(),
+            Some(crate::tui::underwater::LaunchAction::NewChat)
+        );
+
+        // Theme tile: launch-table row 5 — the same LaunchAction::Theme its
+        // printed `T` key and the event loop's table dispatch take (the
+        // picker itself opens when the pending action is consumed).
+        let (theme, area) = app.launch.option_areas[2];
+        assert_eq!(theme, crate::tui::underwater::LaunchOptionAction::Theme);
+        handle_mouse_event(&mut app, left_click(area.x + 1, area.y + 1));
+        assert_eq!(app.launch.selected, 5);
+        assert_eq!(
+            app.pending_launch_action.take(),
+            Some(crate::tui::underwater::LaunchAction::Theme)
+        );
+
+        // Help tile: launch-table row 6 (`F1`).
+        let (help, area) = app.launch.option_areas[3];
+        assert_eq!(help, crate::tui::underwater::LaunchOptionAction::Help);
+        handle_mouse_event(&mut app, left_click(area.x + 1, area.y + 1));
+        assert_eq!(app.launch.selected, 6);
+        assert_eq!(
+            app.pending_launch_action.take(),
+            Some(crate::tui::underwater::LaunchAction::Help)
         );
     }
 

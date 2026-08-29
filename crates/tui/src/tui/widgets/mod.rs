@@ -6884,35 +6884,38 @@ mod tests {
         let mut transcript = Buffer::empty(transcript_area);
         ChatWidget::new(&mut app, transcript_area).render(transcript_area, &mut transcript);
 
-        // Pre-session launch menu.
+        // Pre-session launch stage (the Tideline startup surface).
         app.launch.visible = true;
         let launch_area = Rect::new(0, 0, 100, 32);
         let mut launch = Buffer::empty(launch_area);
-        crate::tui::underwater::render_launch_screen(launch_area, &mut launch, &app, &[], &[]);
+        {
+            let startup = crate::tui::underwater::tideline_startup_from_app(&app).ascii_safe(true);
+            crate::tui::underwater::render_tideline_startup(launch_area, &mut launch, &startup);
+        }
         app.launch.visible = false;
 
-        // Header owns the route facts and the block context meter.
-        let header_area = Rect::new(0, 0, 100, 2);
-        let mut header = Buffer::empty(header_area);
-        crate::tui::underwater::render_header(header_area, &mut header, &app);
-
-        // Activity band while working carries the braille state marker;
-        // the identity band below the composer carries the route.
-        app.is_loading = true;
-        let activity_area = Rect::new(0, 0, 100, 1);
-        let mut activity = Buffer::empty(activity_area);
-        crate::tui::phase_strip::render_activity(activity_area, &mut activity, &mut app);
-        let identity_area = Rect::new(0, 0, 100, 1);
-        let mut identity = Buffer::empty(identity_area);
-        crate::tui::phase_strip::render_identity(identity_area, &mut identity, &mut app);
-        app.is_loading = false;
+        // Topbar (the shell's header surface since the Tideline wiring)
+        // owns the route facts and the block context meter.
+        let topbar_area = Rect::new(0, 0, 100, 1);
+        let mut topbar_buf = Buffer::empty(topbar_area);
+        {
+            let segments = crate::tui::ui::frame::topbar_segments(&app, topbar_area.width);
+            let clock = "27 Aug 2026 14:42:18".to_string();
+            let topbar = crate::tui::topbar::Topbar::new(
+                &app.ui_theme,
+                &clock,
+                crate::tui::ui::frame::topbar_context_percent(&app),
+                &segments,
+            )
+            .ascii_safe(true);
+            use ratatui::widgets::Widget;
+            Widget::render(topbar, topbar_area, &mut topbar_buf);
+        }
 
         for (surface, buf, rect) in [
             ("idle transcript", &transcript, transcript_area),
             ("launch", &launch, launch_area),
-            ("header", &header, header_area),
-            ("activity band", &activity, activity_area),
-            ("identity band", &identity, identity_area),
+            ("topbar", &topbar_buf, topbar_area),
         ] {
             for y in rect.y..rect.bottom() {
                 for x in rect.x..rect.right() {

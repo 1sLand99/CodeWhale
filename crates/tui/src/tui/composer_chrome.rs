@@ -144,6 +144,14 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::palette::{ChromeInk, UiTheme, chrome_style};
 
+/// The three-cell crown glyph for the composer's fluke cap (ASCII `<.>`).
+/// Local to this later-slice scaffolding: the topbar's own copies were
+/// deleted by the founder decree (terminal marks must be generated from the
+/// brand master path); the composer cap keeps the hand-drawn projection
+/// until its slice lands and replaces it.
+const FLUKE: &str = "▚△▞";
+const FLUKE_ASCII: &str = "<.>";
+
 /// The composer's fixed docked height in the work-screen shell (spec §5b).
 #[allow(dead_code)] // translation scaffolding: wired by the landing slice
 pub const TIDELINE_COMPOSER_HEIGHT: u16 = 4;
@@ -216,11 +224,7 @@ impl<'a> TidelineComposer<'a> {
     }
 
     fn fluke(&self) -> &'static str {
-        if self.ascii_safe {
-            crate::tui::topbar::FLUKE_ASCII
-        } else {
-            crate::tui::topbar::FLUKE
-        }
+        if self.ascii_safe { FLUKE_ASCII } else { FLUKE }
     }
 }
 
