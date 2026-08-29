@@ -159,6 +159,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Background shells are first-class work-strip rows (`▾ Shells N`) you can
+  open, watch, and cancel by the `shell_*` id on the row. `/jobs cancel all`
+  cancels running shells; it no longer looks up a task named `all`. The
+  composer hourglass crumb no longer stands in for a shell surface.
 - Account sessions no longer read the macOS Keychain. Unsigned or rebuilt
   `codewhale` binaries were a new Keychain ACL principal every time, so
   `codewhale web` and the TUI popped a password dialog on start. Sessions
