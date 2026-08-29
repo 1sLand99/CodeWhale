@@ -32,7 +32,6 @@ const CWC_DAYTONA_TOKEN_ENV: &str = "CWC_DAYTONA_TOKEN";
 const CWC_DAYTONA_ENDPOINT_ENV: &str = "CWC_DAYTONA_ENDPOINT";
 const KEYRING_SLOT: &str = "daytona";
 const DEFAULT_DAYTONA_API: &str = "https://app.daytona.io/api";
-const ENABLE_DOCS: &str = "docs/DAYTONA_CLOUD_DISPATCH.md";
 
 /// Explicit PR forge. Never inferred from a generic "origin means GitHub" rule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -412,19 +411,18 @@ pub fn discover_credentials() -> CredentialState {
     }
 }
 
-/// Daytona CLI presence is not a credential. Used for truthful status copy.
-pub fn daytona_cli_version() -> Option<String> {
-    let output = Command::new("daytona").arg("--version").output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let text = String::from_utf8_lossy(&output.stdout);
-    let line = text.lines().next()?.trim();
-    if line.is_empty() || line.len() > 80 {
-        None
-    } else {
-        Some(line.chars().filter(|ch| !ch.is_control()).collect())
-    }
+/// Codewhale membership check. `/dispatch` cloud agents ship with the
+/// account, so the fail-closed gate is sign-in — never a provider key.
+fn membership_signed_in() -> bool {
+    let Ok(secrets) = codewhale_secrets::account::secure_account_session_secrets() else {
+        return false;
+    };
+    let store = codewhale_secrets::account::AccountSessionStore::new(
+        secrets,
+        None,
+        codewhale_secrets::account::DEFAULT_ACCOUNT_API_BASE,
+    );
+    matches!(store.load(), Ok(Some(_)))
 }
 
 /// Auto-decide leftover: Codewhale may propose, but never confirm itself.
@@ -482,7 +480,7 @@ pub fn execute_dispatch(
             job.sandbox_id = Some(receipt.sandbox_id);
             job.status = CloudJobStatus::Running;
             job.pr_url = None;
-            job.note = "Daytona sandbox created. PR open is not claimed: this slice does not fake a forge pull request.".to_string();
+            job.note = "Cloud agent sandbox created. PR open is not claimed: this slice does not fake a forge pull request.".to_string();
             store.save(&job)?;
             Ok(DispatchOutcome::Accepted(job))
         }
@@ -490,7 +488,7 @@ pub fn execute_dispatch(
             job.status = CloudJobStatus::Failed;
             job.refusal = Some(sanitize_error(&error.to_string()));
             job.note = format!(
-                "Daytona launch failed closed. {}",
+                "Cloud agent launch failed closed. {}",
                 job.refusal.as_deref().unwrap_or("unknown error")
             );
             store.save(&job)?;
@@ -536,8 +534,8 @@ pub fn cancel_job(store: &CloudJobStore, id: &str) -> Result<CloudJob> {
         return Ok(job);
     }
     job.status = CloudJobStatus::Canceled;
-    job.note = "Canceled locally. Live Daytona teardown is leftover when a sandbox was created."
-        .to_string();
+    job.note =
+        "Canceled locally. Live sandbox teardown is leftover when one was created.".to_string();
     store.save(&job)?;
     Ok(job)
 }
@@ -545,7 +543,7 @@ pub fn cancel_job(store: &CloudJobStore, id: &str) -> Result<CloudJob> {
 /// Human list used by `/jobs` (cloud kind) and `codewhale dispatch --list`.
 pub fn format_job_list(jobs: &[CloudJob]) -> String {
     if jobs.is_empty() {
-        return "Cloud jobs (0)\nNo Daytona cloud-agent jobs. Use `codewhale dispatch <prompt>` or `/dispatch <prompt>`.".to_string();
+        return "Cloud jobs (0)\nNo cloud-agent jobs yet. Use `codewhale dispatch <prompt>` or `/dispatch <prompt>`.".to_string();
     }
     let mut lines = vec![
         format!("Cloud jobs ({})  kind=cloud", jobs.len()),
@@ -598,29 +596,27 @@ pub fn format_job(job: &CloudJob) -> String {
 
 /// Status card for bare `/dispatch` and `codewhale dispatch --status`.
 pub fn format_status(remotes: &[GitRemote], credentials: &CredentialState) -> String {
-    let mut lines = vec!["Codewhale Daytona cloud dispatch".to_string()];
+    let mut lines = vec!["Codewhale cloud dispatch".to_string()];
     match credentials {
         CredentialState::Missing => {
-            lines.push(format!(
-                "Daytona: not configured (fail-closed). Set {DAYTONA_API_KEY_ENV} or keyring slot `{KEYRING_SLOT}`. See {ENABLE_DOCS}."
-            ));
+            if membership_signed_in() {
+                lines.push(
+                    "Cloud agents are not available for this account yet; cloud dispatch fails closed (no sandbox, no push, no PR)."
+                        .to_string(),
+                );
+            } else {
+                lines.push(
+                    "Cloud agents are included with your Codewhale membership. Sign in with `codewhale login` to enable `/dispatch`; cloud dispatch fails closed until then (no sandbox, no push, no PR)."
+                        .to_string(),
+                );
+            }
         }
-        CredentialState::Present { source } => {
-            let source = match source {
-                CredentialSource::Env => DAYTONA_API_KEY_ENV,
-                CredentialSource::CwcEnv => CWC_DAYTONA_TOKEN_ENV,
-                CredentialSource::Keyring => "keyring:daytona",
-            };
-            lines.push(format!(
-                "Daytona: credentials present ({source}). Confirmation is still required before spend or push."
-            ));
+        CredentialState::Present { .. } => {
+            lines.push(
+                "Cloud agents: ready (account-linked). Confirmation is still required before spend or push."
+                    .to_string(),
+            );
         }
-    }
-    match daytona_cli_version() {
-        Some(version) => lines.push(format!(
-            "Daytona CLI: {version} (installed; not treated as a credential)."
-        )),
-        None => lines.push("Daytona CLI: not installed.".to_string()),
     }
     if remotes.is_empty() {
         lines.push("Remotes: none discovered.".to_string());
@@ -694,10 +690,7 @@ impl DaytonaLauncher for LiveDaytonaLauncher {
         let status = response.status();
         let text = response.text().unwrap_or_default();
         if !status.is_success() {
-            bail!(
-                "Daytona create failed (HTTP {}). Enablement: {ENABLE_DOCS}.",
-                status.as_u16()
-            );
+            bail!("Cloud agent create failed (HTTP {status}).",);
         }
         let parsed: serde_json::Value =
             serde_json::from_str(&text).context("Daytona returned invalid JSON")?;
@@ -717,10 +710,13 @@ impl DaytonaLauncher for LiveDaytonaLauncher {
 }
 
 /// Status / enablement copy shared by CLI and TUI fail-closed paths.
+/// Membership-first: the gate is sign-in, never a provider key.
 pub fn missing_credentials_message() -> String {
-    format!(
-        "Daytona is not configured. Cloud dispatch fails closed (no sandbox, no push, no PR). Set {DAYTONA_API_KEY_ENV} or store the key in the Codewhale secret slot `{KEYRING_SLOT}` — never models.toml. See {ENABLE_DOCS}."
-    )
+    if membership_signed_in() {
+        "Cloud agents are not available for this account yet; cloud dispatch fails closed (no sandbox, no push, no PR).".to_string()
+    } else {
+        "Cloud agents are included with your Codewhale membership. Sign in with `codewhale login` to enable `/dispatch`; cloud dispatch fails closed until then (no sandbox, no push, no PR).".to_string()
+    }
 }
 
 fn prefer_named(remotes: &[GitRemote], forge: Forge) -> Option<SelectedRemote> {
@@ -1044,7 +1040,8 @@ mod tests {
         assert!(job.confirmed);
         assert!(job.sandbox_id.is_none());
         assert!(job.pr_url.is_none());
-        assert!(job.note.contains("DAYTONA_API_KEY"));
+        assert!(job.note.contains("cloud dispatch fails closed"));
+        assert!(!job.note.contains("DAYTONA"));
         assert!(!job.note.contains("sk-"));
     }
 
@@ -1110,8 +1107,8 @@ mod tests {
     #[test]
     fn missing_credentials_copy_never_embeds_a_secret() {
         let message = missing_credentials_message();
-        assert!(message.contains(DAYTONA_API_KEY_ENV));
-        assert!(message.contains(ENABLE_DOCS));
+        assert!(message.contains("cloud dispatch fails closed"));
+        assert!(!message.contains("DAYTONA"));
         assert!(!message.contains("sk-"));
         assert!(!message.contains("Bearer"));
     }

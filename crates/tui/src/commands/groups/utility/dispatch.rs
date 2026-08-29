@@ -1,4 +1,4 @@
-//! `/dispatch` — first-class Daytona cloud-agent offload.
+//! `/dispatch` — first-class Codewhale cloud-agent offload.
 
 use codewhale_command_contract::facets::CommandWorkspaceContext;
 use codewhale_command_contract::handler::{CommandContexts, CommandHandler};
@@ -210,8 +210,8 @@ mod tests {
         let result = dispatch(&mut workspace, None);
         assert!(!result.is_error, "{result:?}");
         let message = result.message.expect("status message");
-        assert!(message.contains("Daytona"));
-        assert!(message.contains("fail-closed") || message.contains("credentials present"));
+        assert!(message.contains("Cloud agents"));
+        assert!(message.contains("fails closed") || message.contains("ready"));
         assert!(result.action.is_none());
     }
 }
