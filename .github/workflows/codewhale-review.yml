@@ -61,6 +61,16 @@ jobs:
         if: env.HAS_PROVIDER_KEY == 'true'
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Install native build deps
+        if: env.HAS_PROVIDER_KEY == 'true'
+        run: |
+          for i in 1 2 3; do
+            sudo apt-get update && break
+            echo "apt-get update failed (attempt $i); retrying in 15s"
+            sleep 15
+          done
+          sudo apt-get install -y libdbus-1-dev pkg-config
+
       - name: Cache cargo build
         if: env.HAS_PROVIDER_KEY == 'true'
         uses: Swatinem/rust-cache@v2
