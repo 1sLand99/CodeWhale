@@ -10,9 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - `/login` reports the Codewhale account session and provider-key next
-  steps. The internal cloud-agent credential is not user surface: `/login`
-  offers `status|account|key` only, status never names the slot, and logout
-  still clears the account session and the internal token fail-closed.
+  steps. The internal cloud-agent credential is not user surface: there is
+  no `auth set-slot`/`auth clear-slot` command, no hint, and no completion
+  entry for it — membership (`codewhale login`) is the only door.
 - Add provider-native web search for documented Xiaomi MiMo 2.5 Pro and 2.5
   chat routes while keeping neighboring models and custom gateways fail-closed.
 - Add structured provider-native web search for exact Z.AI global and Zhipu
