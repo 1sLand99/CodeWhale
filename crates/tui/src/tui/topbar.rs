@@ -10,8 +10,8 @@
 //! marks must be generated from the brand master path, the generated mark is
 //! 12x6+ cells, and every attempt to shrink it into one row was judged
 //! illegible — a one-row topbar cannot carry it. The hand-drawn crown glyph
-//! (`▚△▞` / ASCII `<.>`) was ordered deleted everywhere and is gone from this
-//! module.
+//! (and its ASCII projection) was ordered deleted everywhere and is gone
+//! from this module.
 //!
 //! Segment grammar (left → right): brand lockup, then contextual segments as
 //! `label value` pairs joined by `│`, then the pinned right side — context

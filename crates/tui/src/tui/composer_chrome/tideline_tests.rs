@@ -36,14 +36,18 @@ fn composer_matches_goldens_at_blocker_sizes() {
 }
 
 #[test]
-fn composer_border_is_rounded_with_fluke_cap_and_send_hitbox() {
+fn composer_border_is_rounded_with_send_hitbox_and_no_crown() {
     let composer = TidelineComposer::new(&UI_THEME, "draft").focused(true);
     let text = draw_docked(80, 24, &composer);
     let top = text.lines().nth(20).unwrap_or_default();
     assert!(top.starts_with('╭'), "rounded top-left: {top:?}");
     assert!(
-        top.ends_with("▚△▞"),
-        "fluke cap replaces the corner: {top:?}"
+        top.ends_with('╮'),
+        "plain rounded top-right corner: {top:?}"
+    );
+    assert!(
+        !text.contains("▚△▞"),
+        "the hand-drawn crown fluke was deleted by the founder decree: {text}"
     );
     let bottom = text.lines().nth(23).unwrap_or_default();
     assert!(
@@ -102,9 +106,10 @@ fn composer_ascii_safe_projects_to_ascii() {
     let text = draw_docked(80, 24, &composer);
     let top = text.lines().nth(20).unwrap_or_default();
     assert!(
-        top.starts_with('+') && top.ends_with("<.>"),
-        "ascii border+cap: {top:?}"
+        top.starts_with('+') && top.ends_with('+'),
+        "ascii border corners: {top:?}"
     );
+    assert!(!text.contains("<.>"), "ascii crown is gone too: {text}");
     assert!(text.contains("[^]"), "ascii send: {text}");
     for ch in text.chars() {
         if ch != '\n' {

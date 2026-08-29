@@ -7,7 +7,6 @@
 //! sidebar + dashboard + footer composition with four owners for one fact.
 
 use std::borrow::Cow;
-use std::time::Instant;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
@@ -488,29 +487,11 @@ impl RunningToolFacts {
 const WORKING_BUBBLE_FRAMES: [&str; 8] = ["⠀", "⢀", "⣀", "⣄", "⣤", "⣦", "⣶", "⣿"];
 const COMPLETION_BREATH_MS: u128 = 800;
 const COMPLETION_RELEASE_MS: u128 = 560;
-/// Signal Cut hero mark. The Whale Teams roster (CWC 2026-08-15) reads
-/// head-left, blunt nose, swept dorsal on an arched back, a short tail stock
-/// that stays body mass (`▙▄▄▞`) and rises into the attached crown fluke
-/// `▚△▞`. The fluke's notch `△` sits directly above the rising stock tip
-/// `▞`, so the tail reads as one continuous animal instead of a bar with a
-/// shape floating past it. The belly carries one cyan current cut. The glyph
-/// vocabulary is the one `whales::art` uses for the six-role portraits.
-const IDLE_WHALE_SPOUT_ROW: &str = "    ˚";
-const IDLE_WHALE_ROWS: [&str; 3] = ["  ▗▄▄▟▄▄▄▄▄▖  ▚△▞", " ▐█·████████▙▄▄▞", "  ▝▀▀▀▀▀▀▀▀▘"];
-
-/// Soft variant: same silhouette, one body cell shorter, blush around the eye
-/// and a sparkle beside the spout.
-const UWU_IDLE_WHALE_SPOUT_ROW: &str = "    ˚✦";
-const UWU_IDLE_WHALE_ROWS: [&str; 3] = ["  ▗▄▄▟▄▄▄▄▖  ▚△▞", " ▐█░·░█████▙▄▄▞", "  ▝▀▀▀▀▀▀▀▘"];
-
-/// The belly row is the mark's cyan current cut, not gold body mass; it holds
-/// still while the caustic sweep travels across the gold rows above it.
-const IDLE_WHALE_CURRENT_ROW: usize = 2;
-
-const IDLE_SHIMMER_CYCLE_MS: u128 = 4_000;
-const IDLE_SHIMMER_SWEEP_FRACTION: f32 = 0.32;
-const IDLE_SHIMMER_BAND_HALF_WIDTH: f32 = 0.38;
-const IDLE_SHIMMER_STRENGTH: f32 = 0.33;
+// The idle whale portrait rows (IDLE_WHALE_ROWS / UWU_IDLE_WHALE_ROWS) and
+// their caustic shimmer were deleted per the 2026-08-29 founder directive:
+// hand-drawn whale art is out; the only sanctioned terminal mark is the one
+// generated from the brand master path. The ambient empty-state surface
+// (wordmark, context caption, prompt) below is not whale art and stays.
 
 impl ShellPhase {
     #[must_use]
@@ -1771,142 +1752,6 @@ pub(crate) fn decorative_shell_motion_enabled(app: &App) -> bool {
         && app.view_stack.is_empty()
 }
 
-#[must_use]
-fn idle_mark_animation_enabled(app: &App) -> bool {
-    decorative_shell_motion_enabled(app) && matches!(ShellPhase::from_app(app), ShellPhase::Idle)
-}
-
-/// Start the idle-welcome caustic the first time that mark is actually on
-/// screen. Launch and onboarding sit in front of the empty ocean; starting at
-/// `App` construction lets the first sweep finish behind those surfaces.
-pub(crate) fn ensure_idle_welcome_started(app: &mut App, area: Rect) {
-    if idle_mark_animation_enabled(app)
-        && empty_state_mark_visible(area)
-        && app.ocean_started_at.is_none()
-    {
-        app.ocean_started_at = Some(Instant::now());
-    }
-}
-
-/// Raised-cosine caustic band for the idle whale. The 4s cycle spends roughly
-/// 1.3s crossing the mark and parks off-screen for the remainder, so the brand
-/// has a clear moment of life without becoming looping chrome.
-#[must_use]
-fn idle_mark_shine_opacity(diagonal: f32, elapsed_ms: u128) -> f32 {
-    let cycle_progress = (elapsed_ms % IDLE_SHIMMER_CYCLE_MS) as f32 / IDLE_SHIMMER_CYCLE_MS as f32;
-    let sweep_progress = (cycle_progress / IDLE_SHIMMER_SWEEP_FRACTION).min(1.0);
-    let band_position =
-        -IDLE_SHIMMER_BAND_HALF_WIDTH + sweep_progress * (1.0 + 2.0 * IDLE_SHIMMER_BAND_HALF_WIDTH);
-    let distance = (diagonal - band_position).abs();
-    if distance >= IDLE_SHIMMER_BAND_HALF_WIDTH {
-        return 0.0;
-    }
-    let raised_cosine =
-        0.5 * (1.0 + (std::f32::consts::PI * distance / IDLE_SHIMMER_BAND_HALF_WIDTH).cos());
-    IDLE_SHIMMER_STRENGTH * raised_cosine
-}
-
-#[must_use]
-fn idle_mark_color(base: Color, highlight: Color, opacity: f32) -> Color {
-    if opacity <= 0.0 {
-        return base;
-    }
-    match (base, highlight) {
-        (Color::Rgb(..), Color::Rgb(..)) => crate::palette::blend(highlight, base, opacity),
-        // Named/terminal-owned colors cannot be blended truthfully. Hold the
-        // stable brand color instead of flashing the entire mark at full ink.
-        _ => base,
-    }
-}
-
-fn idle_whale_is_uwu(app: &App) -> bool {
-    app.ui_theme.name == "uwu"
-}
-
-fn idle_whale_spout_row(app: &App) -> &'static str {
-    if idle_whale_is_uwu(app) {
-        UWU_IDLE_WHALE_SPOUT_ROW
-    } else {
-        IDLE_WHALE_SPOUT_ROW
-    }
-}
-
-fn idle_whale_rows(app: &App) -> [&'static str; 3] {
-    if idle_whale_is_uwu(app) {
-        UWU_IDLE_WHALE_ROWS
-    } else {
-        IDLE_WHALE_ROWS
-    }
-}
-
-/// Signal Current cyan owns the spout and the belly cut. It resolves through
-/// the same Whale Teams ink the `/fleet` portraits use, so every theme gets
-/// the brand cyan lifted to the secondary-chrome contrast floor rather than a
-/// per-theme guess.
-fn idle_whale_current_color(app: &App) -> Color {
-    crate::tui::whales::WhaleInk::from_theme(&app.ui_theme).current
-}
-
-fn idle_whale_row_spans(
-    text: &'static str,
-    row: usize,
-    elapsed_ms: u128,
-    animated: bool,
-    base: Color,
-    highlight: Color,
-    eye: Color,
-) -> Vec<Span<'static>> {
-    let rows = IDLE_WHALE_ROWS.len() as f32;
-    let cols = IDLE_WHALE_ROWS
-        .iter()
-        .map(|line| line.chars().count())
-        .max()
-        .unwrap_or(1) as f32;
-    let mut spans = Vec::new();
-    let mut run = String::new();
-    let mut run_color = None;
-
-    for (column, ch) in text.chars().enumerate() {
-        let diagonal = (column as f32 + (rows - 1.0 - row as f32)) / (cols + rows);
-        let color = if matches!(ch, '·' | '░' | '✦' | '△') {
-            // Soft uwu blush/sparkle and the quiet crown-fluke center use the
-            // eye/sakura channel; classic otherwise only has the eye dot.
-            eye
-        } else if animated {
-            idle_mark_color(
-                base,
-                highlight,
-                idle_mark_shine_opacity(diagonal, elapsed_ms),
-            )
-        } else {
-            base
-        };
-        if run_color != Some(color) {
-            if let Some(previous) = run_color {
-                spans.push(Span::styled(
-                    std::mem::take(&mut run),
-                    Style::default().fg(previous),
-                ));
-            }
-            run_color = Some(color);
-        }
-        run.push(ch);
-    }
-    if let Some(previous) = run_color {
-        spans.push(Span::styled(run, Style::default().fg(previous)));
-    }
-    spans
-}
-
-#[must_use]
-fn idle_whale_block_width(spout: &str, rows: &[&str]) -> usize {
-    std::iter::once(spout)
-        .chain(rows.iter().copied())
-        .map(UnicodeWidthStr::width)
-        .max()
-        .unwrap_or(0)
-}
-
 /// Shorten a workspace path to its trailing components, marked with a leading
 /// ellipsis so it reads as "somewhere above here" rather than as a real path.
 fn shorten_workspace(workspace: &str, keep: usize) -> String {
@@ -1982,52 +1827,9 @@ pub fn empty_state_lines(app: &App, area: Rect) -> Vec<Line<'static>> {
     }
     let width = usize::from(area.width);
     let mut lines = vec![Line::from(""); usize::from(area.height / 4)];
-    if empty_state_mark_visible(area) {
-        let animated = idle_mark_animation_enabled(app);
-        let elapsed_ms = app
-            .ocean_started_at
-            .map(|started| started.elapsed().as_millis())
-            .unwrap_or(0);
-        let spout = idle_whale_spout_row(app);
-        let rows = idle_whale_rows(app);
-        let current = idle_whale_current_color(app);
-        let mut mark = vec![vec![Span::styled(spout, Style::default().fg(current))]];
-        // Soft uwu: sakura blush/sparkle glyphs; classic keeps body peach + text eye.
-        let highlight = if idle_whale_is_uwu(app) {
-            app.ui_theme.accent_primary
-        } else {
-            app.ui_theme.text_body
-        };
-        mark.extend(rows.iter().enumerate().map(|(row, text)| {
-            // The belly cut is water, not chrome: it holds the flat brand cyan
-            // while the caustic sweep travels across the gold body above it.
-            let is_current = row == IDLE_WHALE_CURRENT_ROW;
-            idle_whale_row_spans(
-                text,
-                row,
-                elapsed_ms,
-                animated && !is_current,
-                if is_current {
-                    current
-                } else {
-                    app.ui_theme.accent_action
-                },
-                app.ui_theme.text_body,
-                highlight,
-            )
-        }));
-        // The spout, head, belly, peduncle, and flukes are one drawing. Give
-        // every row the same outer inset so the authored offsets survive;
-        // centering each row independently shears the silhouette apart.
-        let block_inset =
-            " ".repeat(width.saturating_sub(idle_whale_block_width(spout, &rows)) / 2);
-        for row in mark {
-            let mut spans = vec![Span::raw(block_inset.clone())];
-            spans.extend(row);
-            lines.push(Line::from(spans));
-        }
-        lines.push(Line::from(""));
-    }
+    // The idle whale portrait that used to open this block was deleted per
+    // the 2026-08-29 founder directive; the ambient empty-state surface
+    // (wordmark, context caption, prompt) is not whale art and stays.
 
     let identity = crate::tui::workspace_context::identity_from_context(
         &app.workspace,
@@ -2786,63 +2588,6 @@ mod launch_composer_tests {
 }
 
 #[cfg(test)]
-mod idle_welcome_shine_tests {
-    use super::{
-        IDLE_SHIMMER_CYCLE_MS, empty_state_mark_visible, ensure_idle_welcome_started,
-        idle_mark_shine_opacity,
-    };
-    use crate::tui::app::OnboardingState;
-    use ratatui::layout::Rect;
-
-    fn idle_app() -> crate::tui::app::App {
-        let mut app = crate::test_support::test_app_with_options(
-            crate::test_support::test_tui_options(std::env::temp_dir()),
-        );
-        app.low_motion = false;
-        app.fancy_animations = true;
-        app.onboarding = OnboardingState::None;
-        app.launch.visible = false;
-        app
-    }
-
-    #[test]
-    fn shine_is_parked_late_in_the_cycle() {
-        // A clock that starts at App construction can sit in this parked
-        // window after the launch menu, so the first visible idle frame
-        // has no caustic at all.
-        assert_eq!(IDLE_SHIMMER_CYCLE_MS, 4_000);
-        let parked = idle_mark_shine_opacity(0.5, 2_500);
-        assert_eq!(parked, 0.0);
-        let crossing = idle_mark_shine_opacity(0.5, 800);
-        assert!(
-            crossing > 0.0,
-            "the first sweep should still be crossing the mark at 800ms, got {crossing}"
-        );
-    }
-
-    #[test]
-    fn welcome_clock_stays_stopped_until_the_mark_can_draw() {
-        let mut app = idle_app();
-        assert!(app.ocean_started_at.is_none());
-
-        let too_small = Rect::new(0, 0, 40, 12);
-        assert!(!empty_state_mark_visible(too_small));
-        ensure_idle_welcome_started(&mut app, too_small);
-        assert!(app.ocean_started_at.is_none());
-
-        app.launch.visible = true;
-        let roomy = Rect::new(0, 0, 80, 24);
-        assert!(empty_state_mark_visible(roomy));
-        ensure_idle_welcome_started(&mut app, roomy);
-        assert!(app.ocean_started_at.is_none());
-
-        app.launch.visible = false;
-        ensure_idle_welcome_started(&mut app, roomy);
-        assert!(app.ocean_started_at.is_some());
-    }
-}
-
-#[cfg(test)]
 mod empty_state_caption_tests {
     use super::{empty_state_caption, shorten_workspace};
     use unicode_width::UnicodeWidthStr;
@@ -3150,8 +2895,8 @@ use crate::palette::UiTheme;
 /// The founder's fluke mark — the generated 12x6 cell rendition from the
 /// brand master path (`designs/brand/20260829-fluke-founder/TUI_GLYPHS.md`,
 /// produced by `build-tui-glyph.py`; never hand-drawn). The hand-projected
-/// crown `▚△▞` was deleted by founder decree; this block is its replacement
-/// everywhere in the startup path. The ASCII-safe projection maps each
+/// three-cell crown was deleted by founder decree; this block is its
+/// replacement everywhere in the startup path. The ASCII-safe projection maps each
 /// quadrant block through its declared `glyphs::ascii_fallback` (`#`, `.`,
 /// `\`) — a legible silhouette, not a smear.
 const FLUKE_BLOCK: [&str; 6] = [

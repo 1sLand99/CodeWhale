@@ -23098,9 +23098,16 @@ mod work_surface {
         app
     }
 
-    /// The whale's belly: a run of upper-block glyphs no other chrome draws.
-    fn has_idle_whale(rendered: &str) -> bool {
-        rendered.contains("▀▀▀▀▀▀▀▀")
+    /// Whether the ambient ocean actually got its floor this frame, measured
+    /// from the empty state's transcript area. The hand-drawn idle whale that
+    /// used to be the on-screen evidence here was deleted per the 2026-08-29
+    /// founder directive; the whale drew exactly when this predicate held, so
+    /// `empty_state_mark_visible` over the recorded transcript area is the
+    /// same visibility, asserted without the deleted art.
+    fn idle_ocean_visible(app: &App) -> bool {
+        app.viewport
+            .last_transcript_area
+            .is_some_and(crate::tui::underwater::empty_state_mark_visible)
     }
 
     /// The strip height for this frame, measured the way the shell measures it:
@@ -23133,7 +23140,7 @@ mod work_surface {
     }
 
     #[test]
-    fn rail_strip_yields_its_rows_so_the_idle_whale_survives_at_24_rows() {
+    fn rail_strip_yields_its_rows_so_the_idle_ocean_survives_at_24_rows() {
         let panel = RailPanel::Agents;
         let natural = natural_strip_rows(panel);
         assert!(
@@ -23145,7 +23152,7 @@ mod work_surface {
         // Below the threshold the rail hands rows back to the water: it renders
         // shorter than it wants, or not at all, and the ocean keeps its floor.
         // 24 rows is the release-evidence size the rail regression took the
-        // whale away from.
+        // ambient ocean away from.
         for rows in [22_u16, 23, 24, 25] {
             let mut app = busy_rail_app(panel);
             let budget = rail_row_budget(&app, 80, rows, true);
@@ -23170,9 +23177,9 @@ mod work_surface {
             );
             let rendered = render_underwater_test_app(&mut app, 80, rows);
             assert!(
-                has_idle_whale(&rendered),
-                "the idle whale must survive at 80x{rows}: decorative water \
-                 outranks a panel nobody is watching\n{rendered}"
+                idle_ocean_visible(&app),
+                "the ambient ocean floor must survive at 80x{rows}: decorative \
+                 water outranks a panel nobody is watching\n{rendered}"
             );
         }
 
@@ -23191,8 +23198,8 @@ mod work_surface {
             );
             let rendered = render_underwater_test_app(&mut app, 80, rows);
             assert!(
-                has_idle_whale(&rendered),
-                "the idle whale must still be earned at 80x{rows}\n{rendered}"
+                idle_ocean_visible(&app),
+                "the ambient ocean floor must still be earned at 80x{rows}\n{rendered}"
             );
             assert!(
                 rendered.contains(AGENT_MARK),
@@ -23214,7 +23221,7 @@ mod work_surface {
         );
         let rendered = render_underwater_test_app(&mut app, 80, 21);
         assert!(
-            has_idle_whale(&rendered),
+            idle_ocean_visible(&app),
             "80x21 is exactly the ocean floor under the Tideline shell:\n{rendered}"
         );
         let mut app = busy_rail_app(panel);
@@ -23225,7 +23232,7 @@ mod work_surface {
         );
         let rendered = render_underwater_test_app(&mut app, 80, 20);
         assert!(
-            !has_idle_whale(&rendered),
+            !idle_ocean_visible(&app),
             "80x20 has no room for the ocean even with no strip at all\n{rendered}"
         );
     }
@@ -23251,11 +23258,13 @@ mod work_surface {
 
         for rows in 18_u16..=40 {
             let mut with_rail = busy_rail_app(RailPanel::Agents);
-            let with = has_idle_whale(&render_underwater_test_app(&mut with_rail, 80, rows));
+            let _ = render_underwater_test_app(&mut with_rail, 80, rows);
+            let with = idle_ocean_visible(&with_rail);
 
             let mut without_rail = busy_rail_app(RailPanel::Agents);
             without_rail.work_surface.placement = WorkSurfacePlacement::Off;
-            let without = has_idle_whale(&render_underwater_test_app(&mut without_rail, 80, rows));
+            let _ = render_underwater_test_app(&mut without_rail, 80, rows);
+            let without = idle_ocean_visible(&without_rail);
 
             assert_eq!(
                 with, without,
@@ -23267,7 +23276,7 @@ mod work_surface {
     }
 
     #[test]
-    fn rail_strip_and_idle_whale_never_thrash_across_a_resize() {
+    fn rail_strip_and_idle_ocean_never_thrash_across_a_resize() {
         // A threshold that is not monotonic in terminal height reads as flicker:
         // drag a terminal edge and the strip blinks in and out. Growing the
         // terminal may only ever *add* chrome, never take it away, and the same
@@ -23311,25 +23320,28 @@ mod work_surface {
             }
         }
 
-        // The whale is monotone too: once the ocean is earned, growing the
-        // terminal never takes it back.
-        let mut seen_whale = false;
+        // The ocean floor is monotone too: once the ocean is earned, growing
+        // the terminal never takes it back.
+        let mut seen_ocean = false;
         for rows in 16_u16..=34 {
             let mut app = busy_rail_app(RailPanel::Agents);
             let rendered = render_underwater_test_app(&mut app, 80, rows);
-            let whale = has_idle_whale(&rendered);
+            let ocean = idle_ocean_visible(&app);
             assert!(
-                whale || !seen_whale,
-                "the idle whale disappeared again at 80x{rows} after being earned at a \
+                ocean || !seen_ocean,
+                "the ambient ocean floor disappeared again at 80x{rows} after being earned at a \
                  smaller size\n{rendered}"
             );
-            seen_whale |= whale;
+            seen_ocean |= ocean;
         }
-        assert!(seen_whale, "the sweep never rendered an idle whale at all");
+        assert!(
+            seen_ocean,
+            "the sweep never earned the ambient ocean at all"
+        );
     }
 
     #[test]
-    fn rail_strip_and_whale_swap_at_the_ambient_width() {
+    fn rail_strip_and_ocean_swap_at_the_ambient_width() {
         // The width gate is a real trade and this test exists so it stays a
         // decision rather than drifting into an accident.
         //
@@ -23361,7 +23373,7 @@ mod work_surface {
         let mut app = busy_rail_app(panel);
         let rendered = render_underwater_test_app(&mut app, width_floor, rows);
         assert!(
-            has_idle_whale(&rendered),
+            idle_ocean_visible(&app),
             "yielding the strip at {width_floor}x{rows} must actually buy the ocean\n{rendered}"
         );
     }
@@ -23481,8 +23493,8 @@ mod work_surface {
         );
         let rendered = render_underwater_test_app(&mut app, 80, 24);
         assert!(
-            has_idle_whale(&rendered),
-            "a yielded strip must leave the whale intact at 80x24\n{rendered}"
+            idle_ocean_visible(&app),
+            "a yielded strip must leave the ambient ocean intact at 80x24\n{rendered}"
         );
         assert!(app.work_surface.last_area.is_none());
         assert!(!app.work_surface.focused);
