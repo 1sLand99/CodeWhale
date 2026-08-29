@@ -732,7 +732,20 @@ pub(crate) fn render(f: &mut Frame, app: &mut App, _config: &Config) -> Option<(
         // Launch is a distinct full-canvas choice state, not a reading column.
         // Keep it edge-to-edge so opening Codewhale never recreates black side
         // banks before the responsive session ocean takes over.
-        crate::tui::underwater::render_launch_screen(size, f.buffer_mut(), app);
+        // Completion entries are computed here — the same way the session
+        // path below computes them for ComposerWidget — so the launch screen
+        // can paint its popup (#5698 review finding 2); the mention walker
+        // needs &mut App, rendering does not.
+        let launch_slash_menu_entries = visible_slash_menu_entries(app, SLASH_MENU_LIMIT);
+        let launch_mention_menu_entries =
+            crate::tui::file_mention::visible_mention_menu_entries(app, app.mention_menu_limit);
+        crate::tui::underwater::render_launch_screen(
+            size,
+            f.buffer_mut(),
+            app,
+            &launch_slash_menu_entries,
+            &launch_mention_menu_entries,
+        );
         crate::tui::underwater::record_launch_hitboxes(size, &mut app.launch);
         if !app.view_stack.is_empty() {
             if app.view_stack.top_kind() == Some(ModalKind::Approval) {

@@ -239,6 +239,10 @@ pub enum LaunchComposerKey {
     BlurToMenu,
     /// Submit the composed message through the normal dispatch path.
     Submit,
+    /// A completion-menu selection was applied (a slash or mention popup was
+    /// open and Enter picked the highlighted entry); the key is consumed
+    /// without submitting — the completed text stays in the composer.
+    MenuSelect,
     /// A chord the startup menu owns (Ctrl+R resume, Ctrl+N worktree,
     /// Ctrl+L changelog, Ctrl+Q quit, F1 help): the same key is then handed
     /// to [`handle_launch_key`]. Startup shortcuts deliberately win over
@@ -275,6 +279,27 @@ pub fn handle_launch_composer_key(app: &mut App, key: KeyEvent) -> LaunchCompose
         KeyCode::Enter
             if crate::tui::composer_ui::composer_submit_chord(key, multiline).is_some() =>
         {
+            // #573 parity with the session composer's Enter arm: when a
+            // completion popup is matching (e.g. `/mo` → `/model`), Enter
+            // applies the highlighted entry instead of sending the literal
+            // prefix. A mention completion amends the composed text and is
+            // consumed; a slash completion completes the command and falls
+            // through to Submit so the launch dispatch path executes it.
+            let mention_entries =
+                crate::tui::file_mention::visible_mention_menu_entries(app, 1);
+            if !mention_entries.is_empty()
+                && crate::tui::file_mention::apply_mention_menu_selection(
+                    app,
+                    &mention_entries,
+                )
+            {
+                return LaunchComposerKey::MenuSelect;
+            }
+            let slash_entries = crate::tui::slash_menu::visible_slash_menu_entries(app, 1);
+            if !slash_entries.is_empty() {
+                crate::tui::slash_menu::apply_slash_menu_selection(app, &slash_entries, false);
+                app.close_slash_menu();
+            }
             if app.input.trim().is_empty() {
                 app.launch.composer_focus = false;
                 LaunchComposerKey::Blur
@@ -1040,6 +1065,113 @@ fn launch_cursor_glyph(low_motion: bool) -> &'static str {
 /// placeholder, and a send glyph — with its hint line beneath. This is the
 /// same composer state the conversation view edits, not a second input
 /// system; only the geometry is a compact launch projection.
+/// Paint the active completion popup for the launch composer (#5698 review
+/// finding 2: the menus existed — the conversation composer match drove
+/// them — but the launch screen returned before `ComposerWidget`, so typing
+/// `/mo` showed nothing). A compact list directly above the input row; the
+/// same entries, the same selected-row convention, and the same mention-
+/// before-slash precedence as the session popup inside `ComposerWidget`.
+fn render_launch_completion_popup(
+    area: Rect,
+    buf: &mut Buffer,
+    app: &App,
+    input_y: u16,
+    slash_menu_entries: &[crate::tui::widgets::SlashMenuEntry],
+    mention_menu_entries: &[String],
+) {
+    if !app.launch.composer_focus {
+        return;
+    }
+    // Rows are (marker, label, description) rendered as one inset line.
+    let rows: Vec<(bool, String, String)> = if !mention_menu_entries.is_empty() {
+        let selected = app
+            .mention_menu_selected
+            .min(mention_menu_entries.len().saturating_sub(1));
+        mention_menu_entries
+            .iter()
+            .enumerate()
+            .map(|(i, entry)| (i == selected, format!("@{entry}"), String::new()))
+            .collect()
+    } else if !slash_menu_entries.is_empty() {
+        let selected = app
+            .slash_menu_selected
+            .min(slash_menu_entries.len().saturating_sub(1));
+        slash_menu_entries
+            .iter()
+            .enumerate()
+            .map(|(i, e)| {
+                let label = if let Some(ref hint) = e.alias_hint {
+                    format!("{} or /{}", e.name, hint)
+                } else {
+                    e.name.clone()
+                };
+                (i == selected, label, e.description.clone())
+            })
+            .collect()
+    } else {
+        return;
+    };
+
+    // Popup rows stack upward from the composer input row; never past the
+    // header rule, and never more than eight.
+    let max_rows = (input_y.saturating_sub(2) as usize).min(8);
+    if max_rows == 0 {
+        return;
+    }
+    // Show the tail around the selection like the session popup scrolls.
+    let total = rows.len();
+    let selected_idx = rows.iter().position(|(sel, _, _)| *sel).unwrap_or(0);
+    let top = if total <= max_rows {
+        0
+    } else {
+        let half = max_rows / 2;
+        if selected_idx <= half {
+            0
+        } else if selected_idx + half >= total {
+            total - max_rows
+        } else {
+            selected_idx - half
+        }
+    };
+    for (offset, (is_selected, label, description)) in rows
+        .iter()
+        .enumerate()
+        .skip(top)
+        .take(max_rows)
+        .map(|(_, row)| row.clone())
+        .enumerate()
+    {
+        let y = input_y - 1 - offset as u16;
+        let style = if is_selected {
+            crate::tui::menu_style::selected_row_bg_style().fg(crate::palette::SELECTION_TEXT)
+        } else {
+            Style::default().fg(app.ui_theme.text_muted)
+        };
+        let marker = crate::tui::glyphs::selection_marker(is_selected);
+        let mut line = format!("{marker} {label}");
+        if !description.is_empty() {
+            let used = line.width();
+            let budget = usize::from(area.width)
+                .saturating_sub(4)
+                .saturating_sub(used + 2);
+            if budget > 1 {
+                line.push_str("  ");
+                line.push_str(&truncate_to_width(description.as_str(), budget));
+            }
+        }
+        render_launch_content_line(
+            area,
+            buf,
+            y,
+            2,
+            vec![Span::styled(
+                truncate_to_width(&line, usize::from(area.width).saturating_sub(4)),
+                style,
+            )],
+        );
+    }
+}
+
 fn render_launch_composer(area: Rect, buf: &mut Buffer, app: &App, input_y: u16, hint_y: u16) {
     let focused = app.launch.composer_focus;
     let content_width = usize::from(area.width).saturating_sub(4);
@@ -1130,7 +1262,17 @@ fn render_launch_composer(area: Rect, buf: &mut Buffer, app: &App, input_y: u16,
 /// seven startup choices plus the session's own composer in a compact
 /// bottom-docked strip; every row dispatches to real session/worktree
 /// machinery before the idle ocean is entered.
-pub fn render_launch_screen(area: Rect, buf: &mut Buffer, app: &App) {
+///
+/// The completion entries are computed by the caller (frame.rs, exactly as
+/// the session path computes them for `ComposerWidget`) because the mention
+/// discovery walker needs `&mut App`; rendering itself stays read-only.
+pub fn render_launch_screen(
+    area: Rect,
+    buf: &mut Buffer,
+    app: &App,
+    slash_menu_entries: &[crate::tui::widgets::SlashMenuEntry],
+    mention_menu_entries: &[String],
+) {
     if area.width == 0 || area.height == 0 {
         return;
     }
@@ -1298,6 +1440,14 @@ pub fn render_launch_screen(area: Rect, buf: &mut Buffer, app: &App) {
     let composer_rows = launch_composer_rows(area);
     if let Some((input_y, hint_y)) = composer_rows {
         render_launch_composer(area, buf, app, input_y, hint_y);
+        render_launch_completion_popup(
+            area,
+            buf,
+            app,
+            input_y,
+            slash_menu_entries,
+            mention_menu_entries,
+        );
     }
     let rule_y = area.height.saturating_sub(3);
     // In the compact layout the composer input replaces the bottom rule row;
@@ -2317,8 +2467,69 @@ mod launch_composer_tests {
     fn render(app: &App, width: u16, height: u16) -> (Buffer, Rect) {
         let area = Rect::new(0, 0, width, height);
         let mut buf = Buffer::empty(area);
-        render_launch_screen(area, &mut buf, app);
+        render_launch_screen(area, &mut buf, app, &[], &[]);
         (buf, area)
+    }
+
+    #[test]
+    fn enter_applies_a_visible_slash_completion_instead_of_sending_the_prefix() {
+        // #5698 review finding 1: the launch composer classified Enter as
+        // Submit without consulting the completion menus, so `/mo` + Enter
+        // sent the literal text instead of running `/model`.
+        let mut app = launch_app();
+        app.launch.composer_focus = true;
+        app.input = "/mo".to_string();
+        app.cursor_position = app.input.chars().count();
+        let entries = crate::tui::slash_menu::visible_slash_menu_entries(&app, 1);
+        assert!(
+            !entries.is_empty(),
+            "precondition: /mo must match at least one command"
+        );
+        let verdict =
+            handle_launch_composer_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(verdict, LaunchComposerKey::Submit);
+        let completed = app.input.clone();
+        assert!(
+            completed.starts_with('/')
+                && completed != "/mo"
+                && entries.iter().any(|e| {
+                    e.name == completed.trim_end() || completed.starts_with(&format!("{}/", e.name))
+                }),
+            "Enter must apply the highlighted completion (matched {:?}), input now: {completed:?}",
+            entries.first().map(|e| e.name.clone())
+        );
+    }
+
+    #[test]
+    fn completion_popup_paints_above_the_launch_composer() {
+        // #5698 review finding 2: the menus were invisible on launch — the
+        // frame returned before the ComposerWidget popup path ran.
+        let app = launch_app();
+        let area = Rect::new(0, 0, 80, 24);
+        let (input_y, _) = launch_composer_rows(area).unwrap();
+        let entries = vec![crate::tui::widgets::SlashMenuEntry {
+            name: "/model".to_string(),
+            description: "Pick the model".to_string(),
+            is_skill: false,
+            alias_hint: None,
+        }];
+        let mut buf = Buffer::empty(area);
+        let mut app = app;
+        app.launch.composer_focus = true;
+        render_launch_screen(area, &mut buf, &app, &entries, &[]);
+        let popup_row = (area.y..input_y)
+            .rev()
+            .map(|y| {
+                (area.x..area.x + area.width)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .find(|line| line.contains("/model"))
+            .expect("the completion menu must be visible above the composer");
+        assert!(
+            popup_row.contains("▸") || popup_row.contains('>') || popup_row.contains('*'),
+            "the selected entry carries a selection marker: {popup_row:?}"
+        );
     }
 
     fn row_text(buf: &Buffer, area: Rect, y: u16) -> String {

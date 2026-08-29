@@ -6888,7 +6888,7 @@ mod tests {
         app.launch.visible = true;
         let launch_area = Rect::new(0, 0, 100, 32);
         let mut launch = Buffer::empty(launch_area);
-        crate::tui::underwater::render_launch_screen(launch_area, &mut launch, &app);
+        crate::tui::underwater::render_launch_screen(launch_area, &mut launch, &app, &[], &[]);
         app.launch.visible = false;
 
         // Header owns the route facts and the block context meter.
