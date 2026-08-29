@@ -2348,7 +2348,7 @@ fn chrome(theme: &UiTheme, ink: ChromeInk) -> Style {
 }
 
 fn set_span(buf: &mut Buffer, x: u16, y: u16, span: &Span<'_>) {
-    if let Some(clamped) = span.content.width().try_into().ok() {
+    if let Ok(clamped) = span.content.width().try_into() {
         buf.set_span(x, y, span, clamped);
     }
 }

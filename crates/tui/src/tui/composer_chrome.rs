@@ -255,7 +255,7 @@ pub fn render_tideline_composer(area: Rect, buf: &mut Buffer, composer: &Tidelin
     let fluke_w = fluke.width() as u16;
     let top_fill = area.width.saturating_sub(1 + fluke_w).max(1);
     let top: String = std::iter::once('╭')
-        .chain(std::iter::repeat('─').take(usize::from(top_fill)))
+        .chain(std::iter::repeat_n('─', usize::from(top_fill)))
         .collect();
     put(buf, area.x, area.y, &composer.sym(&top), border);
     let mut cap_style = chrome(theme, ChromeInk::Attention);
@@ -267,7 +267,7 @@ pub fn render_tideline_composer(area: Rect, buf: &mut Buffer, composer: &Tidelin
     // Bottom row: `╰──…──╯`.
     let bottom_fill = usize::from(area.width.saturating_sub(2));
     let bottom: String = std::iter::once('╰')
-        .chain(std::iter::repeat('─').take(bottom_fill))
+        .chain(std::iter::repeat_n('─', bottom_fill))
         .chain(std::iter::once('╯'))
         .collect();
     put(

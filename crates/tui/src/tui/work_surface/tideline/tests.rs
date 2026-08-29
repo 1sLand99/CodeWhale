@@ -1,8 +1,9 @@
 //! Golden-buffer contract for the Tideline work stage — rail (component 12)
-//! + receipt stream (component 8) — spec §5a/§5b/§5c. Goldens:
-//! `work_{w}x{h}` at the four blocker sizes (the ledger and composer dock
-//! into this stage in the live shell and carry their own suites).
-//! Re-bless with `CODEWHALE_BLESS_GOLDENS=1`.
+//! + receipt stream (component 8) — spec §5a/§5b/§5c.
+//!
+//! Goldens: `work_{w}x{h}` at the four blocker sizes (the ledger and
+//! composer dock into this stage in the live shell and carry their own
+//! suites). Re-bless with `CODEWHALE_BLESS_GOLDENS=1`.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;

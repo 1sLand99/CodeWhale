@@ -183,10 +183,9 @@ pub fn render_tideline_rail(area: Rect, buf: &mut Buffer, rail: &TidelineRail<'_
     }
 
     // Meta rows then the collapse toggle.
-    if let Some(bottom) = (area.y..area.y + area.height.saturating_sub(1))
-        .rev()
-        .next()
-    {
+    if area.height >= 3 {
+        // One row above the collapse toggle.
+        let bottom = area.y + area.height - 2;
         rput(
             buf,
             area.x,

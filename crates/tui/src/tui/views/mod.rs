@@ -7704,8 +7704,8 @@ pub fn render_tideline_settings_rail(
     }
     let theme = rail.theme;
     let categories = tideline_settings_categories();
-    let mut y = area.y;
     for (index, label) in categories.iter().enumerate() {
+        let y = area.y + index as u16;
         if y >= area.y + area.height.saturating_sub(3) {
             break;
         }
@@ -7727,7 +7727,6 @@ pub fn render_tideline_settings_rail(
             );
         }
         srail_put(buf, area.x + 2, y, label, style);
-        y += 1;
     }
     // Meta rows pinned near the bottom (the reference's help/file/feedback).
     let meta_y = area.y + area.height.saturating_sub(3);

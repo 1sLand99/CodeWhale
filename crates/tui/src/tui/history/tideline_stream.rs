@@ -86,7 +86,6 @@ pub enum TidelineStreamEvent {
 
 /// What the caller owes the stream render.
 #[allow(dead_code)] // translation scaffolding: wired by the landing slice
-#[allow(dead_code)] // translation scaffolding: wired by the landing slice
 pub struct TidelineStream<'a> {
     pub theme: &'a UiTheme,
     pub events: &'a [TidelineStreamEvent],
@@ -164,7 +163,6 @@ fn struncate(text: &str, width: usize) -> String {
 /// the marks in place (§7). The pod-formation tree draws all edges as one
 /// still frame — the ≤600 ms top-down reveal is a landing-slice motion.
 #[allow(dead_code)] // translation scaffolding: wired by the landing slice
-#[allow(dead_code)] // translation scaffolding: wired by the landing slice
 pub fn render_tideline_stream(area: Rect, buf: &mut Buffer, stream: &TidelineStream<'_>) {
     if area.width < 10 || area.height < 1 {
         return;
@@ -176,8 +174,7 @@ pub fn render_tideline_stream(area: Rect, buf: &mut Buffer, stream: &TidelineStr
 
     let mut y = area.y;
     let bottom = area.y + body_height;
-    let mut row_index: usize = 0;
-    for event in stream.events {
+    for (row_index, event) in stream.events.iter().enumerate() {
         if y >= bottom {
             break;
         }
@@ -277,7 +274,6 @@ pub fn render_tideline_stream(area: Rect, buf: &mut Buffer, stream: &TidelineStr
             }
         }
         y += advance;
-        row_index += 1;
     }
 
     // Legend row — the marks taught in place.
@@ -297,7 +293,6 @@ pub fn render_tideline_stream(area: Rect, buf: &mut Buffer, stream: &TidelineStr
 /// Row hitboxes for the stream (transcript click path, spec §6): one rect
 /// per event, pod trees spanning their edges.
 #[must_use]
-#[allow(dead_code)] // translation scaffolding: wired by the landing slice
 #[allow(dead_code)] // translation scaffolding: wired by the landing slice
 pub fn tideline_stream_hitboxes(area: Rect, stream: &TidelineStream<'_>) -> Vec<Rect> {
     let mut out = Vec::new();
