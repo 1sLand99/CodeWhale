@@ -687,12 +687,23 @@ pub async fn run_tui(
         });
     }
 
-    // Flush the persistence actor: clear this session's checkpoint, collect
-    // the durability report (write failures are surfaced, not discarded),
-    // then shut down gracefully.
+    // Flush the persistence actor, collect the durability report (write
+    // failures are surfaced, not discarded), then shut down gracefully.
+    //
+    // The session's crash-recovery checkpoint is cleared only for a settled
+    // session. While a turn is in flight (or a spawned dispatch has not yet
+    // applied), the checkpoint is the only durable record of that work:
+    // clearing it here unconditionally could erase in-flight progress that
+    // never reached a snapshot, so it survives for startup recovery review.
     if let Some((handle, task)) = persistence_runtime {
-        if let Some(session_id) = app.current_session_id.clone() {
+        let turn_in_flight = app.is_loading || app.dispatch_in_flight;
+        if !turn_in_flight && let Some(session_id) = app.current_session_id.clone() {
             handle.try_send(PersistRequest::ClearCheckpoint { session_id });
+        } else if turn_in_flight {
+            tracing::info!(
+                target: "persistence",
+                "shutdown preserves the in-flight checkpoint for recovery review"
+            );
         }
         let (report_tx, report_rx) = tokio::sync::oneshot::channel();
         handle.try_send(PersistRequest::FlushAndReport { reply: report_tx });
@@ -1205,6 +1216,8 @@ pub(crate) async fn run_event_loop(
         // #1830/#2317: service any already-arrived terminal keys before a
         // potentially long engine batch so composer/modal input stays live.
         collect_pending_terminal_events(&terminal_input, &mut pending_terminal_events)?;
+        app.maybe_poll_plugin_catalog_idle();
+        app.maybe_poll_plugin_cta();
 
         if drain_remote_control_events(app, config, &engine_handle).await? {
             app.needs_redraw = true;
@@ -1557,6 +1570,22 @@ pub(crate) async fn run_event_loop(
                                 .retain(|(tool_id, _, _)| tool_id != &id);
                         }
                         handle_tool_call_complete(app, &id, &name, &result);
+                        if name
+                            == crate::tools::request_plugin_install::REQUEST_PLUGIN_INSTALL_TOOL_NAME
+                            && let Ok(output) = &result
+                            && output.success
+                            && let Some(meta) = output.metadata.as_ref()
+                        {
+                            let plugin = meta
+                                .get("plugin")
+                                .and_then(serde_json::Value::as_str)
+                                .unwrap_or("");
+                            let command = meta
+                                .get("command")
+                                .and_then(serde_json::Value::as_str)
+                                .unwrap_or("");
+                            app.surface_plugin_review_request(plugin, command);
+                        }
                         if flush_gate_receipts_for(app, Some(&id)) {
                             transcript_batch_updated = true;
                         }
@@ -2091,15 +2120,19 @@ pub(crate) async fn run_event_loop(
                         // Auto-save completed turn and clear crash checkpoint.
                         // Offloaded to the persistence actor so the UI
                         // stays responsive.
-                        let mut completed_snapshot_id: Option<String> = None;
                         if let Ok(manager) = SessionManager::default_location()
                             && let Ok(session) = build_session_snapshot(app, &manager)
                         {
                             app.current_session_id = Some(session.metadata.id.clone());
-                            completed_snapshot_id = Some(session.metadata.id.clone());
-                            let queued = persistence_actor::try_persist(
-                                PersistRequest::SessionSnapshot(session),
-                            );
+                            // Compound completion commit: the actor writes the
+                            // completed snapshot and clears this session's
+                            // crash checkpoint only after that write succeeds.
+                            // A failed save now retains the checkpoint as the
+                            // sole recovery record instead of erasing it.
+                            let queued =
+                                persistence_actor::try_persist(PersistRequest::CompletedCommit {
+                                    session,
+                                });
                             if queued {
                                 if let Err(err) = publish_pending_work_projection(app).await {
                                     tracing::warn!(
@@ -2122,11 +2155,11 @@ pub(crate) async fn run_event_loop(
                                 );
                             }
                         }
-                        if let Some(session_id) = completed_snapshot_id {
-                            persistence_actor::persist(PersistRequest::ClearCheckpoint {
-                                session_id,
-                            });
-                        }
+                        // The checkpoint clear is owned by the compound
+                        // `CompletedCommit` above: it applies only after this
+                        // session's snapshot safely landed. When the snapshot
+                        // could not be built or queued, the in-flight
+                        // checkpoint survives for startup recovery review.
 
                         // Refresh DeepSeek account balance after each completed
                         // turn so the footer balance chip stays current without
@@ -5206,6 +5239,10 @@ pub(crate) async fn run_event_loop(
                                 app.status_message =
                                     Some("Queued edit canceled; follow-up restored".to_string());
                             }
+                        }
+                        EscapeAction::DismissPluginCta => {
+                            app.backtrack.reset();
+                            let _ = app.dismiss_plugin_cta();
                         }
                         EscapeAction::ClearInput => {
                             app.backtrack.reset();

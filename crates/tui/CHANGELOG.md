@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Add `codewhale dispatch` / `/dispatch` so a local session can propose a
+  Codewhale cloud agent against an explicit `github`, `cnb`, or `gitee` remote.
+  Confirmation is required; missing credentials fail closed; cloud jobs share
+  the existing `/jobs` surface as `kind=cloud`. See
+  [DAYTONA_CLOUD_DISPATCH.md](docs/DAYTONA_CLOUD_DISPATCH.md).
+- `/login` reports the Codewhale account session and provider-key next
+  steps. The internal cloud-agent credential is not user surface: there is
+  no `auth set-slot`/`auth clear-slot` command, no hint, and no completion
+  entry for it — membership (`codewhale login`) is the only door.
+- Route Contract Phase 1: `RouteResolver` is the runtime path for
+  `resolve_runtime_options`; `codewhale providers export --json` ships the
+  owned descriptor catalog; CLI `--provider` accepts any catalog route id
+  (the closed `ProviderArg` enum is deleted). Catalog layers are
+  bundled → models.dev → provider `/v1/models` → config.toml → user, with
+  policy DENY last and never overridden.
 - Add provider-native web search for documented Xiaomi MiMo 2.5 Pro and 2.5
   chat routes while keeping neighboring models and custom gateways fail-closed.
 - Add structured provider-native web search for exact Z.AI global and Zhipu
@@ -37,6 +52,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   actions, while Extensions and Problems route recovery through the existing
   `/mcp login`, `/mcp reload`, `/mcp validate`, and `/plugin validate` commands
   (#5643, #5655).
+- Plugin prompt matching (#5579): sending a task can toast the next review
+  step when the prompt strongly matches an installed-but-idle plugin or a
+  marketplace catalog you added (for example a Supabase prompt suggesting
+  `/plugin trust supabase`). A live composer CTA offers the same review
+  command while you type, matching turns append a bounded
+  `<recommended_plugins>` user block, and `request_plugin_install` surfaces
+  review without installing. `/plugin suggest` now ranks manifest keywords and
+  catalog candidates, never auto-installs, and on-disk plugin changes also
+  nudge `/plugin reload` between turns.
+
 
 - Added `/import-claude` (#5557): reads `~/.claude.json` and
   `~/.claude/settings.json` read-only and renders an explicit, reviewable
@@ -154,6 +179,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Background shells are first-class work-strip rows (`▾ Shells N`) you can
+  open, watch, and cancel by the `shell_*` id on the row. `/jobs cancel all`
+  cancels running shells; it no longer looks up a task named `all`. The
+  composer hourglass crumb no longer stands in for a shell surface.
+- `codewhale logout` and `/logout` now clear the Codewhale account session
+  and the Daytona secret slot, not only provider API keys. The TUI crate's
+  leftover `login --api-key` path no longer claims to save a key.
 - Account sessions no longer read the macOS Keychain. Unsigned or rebuilt
   `codewhale` binaries were a new Keychain ACL principal every time, so
   `codewhale web` and the TUI popped a password dialog on start. Sessions
