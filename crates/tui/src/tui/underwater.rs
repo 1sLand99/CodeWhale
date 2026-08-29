@@ -1314,8 +1314,13 @@ pub fn render_launch_screen(area: Rect, buf: &mut Buffer, app: &App) {
         );
     }
     let settings_hint = format!("F2: {}", tr(app.ui_locale, MessageId::SettingsTitle));
-    let composer_hint =
-        composer_rows.is_some_and(|(input_y, _)| input_y == rule_y) && app.launch.composer_focus;
+    // In the compact layout the composer input row replaces the bottom rule
+    // row, and there is no dedicated hint row under it — the shared prompt row
+    // is the only surface that can carry the composer's affordances. A blurred
+    // composer holding a draft must still say how to get back to typing, or
+    // Esc strands the draft behind an undocumented Tab.
+    let compact_composer = composer_rows.is_some_and(|(input_y, _)| input_y == rule_y);
+    let composer_hint = compact_composer && app.launch.composer_focus;
     let prompt = if let Some(input) = app.launch.worktree_input.as_deref() {
         format!(
             "{}  {}{}",
@@ -1327,6 +1332,8 @@ pub fn render_launch_screen(area: Rect, buf: &mut Buffer, app: &App) {
         status.to_string()
     } else if composer_hint {
         tr(app.ui_locale, MessageId::LaunchComposerHint).into_owned()
+    } else if compact_composer {
+        tr(app.ui_locale, MessageId::LaunchComposerFocusHint).into_owned()
     } else if area.width < 60 {
         format!(
             "j/k:{} · Enter:{} · {settings_hint}",
@@ -2642,14 +2649,41 @@ mod launch_composer_tests {
         // The full hint sheds its tail at the 40-column floor, exactly like
         // the other launch copy; the submit segment stays readable.
         assert!(
-            prompt_row.starts_with(&format!(
-                "{}",
-                tr(Locale::En, MessageId::LaunchComposerHint)
+            prompt_row.starts_with(
+                &tr(Locale::En, MessageId::LaunchComposerHint)
                     .chars()
                     .take(20)
                     .collect::<String>()
-            )),
+            ),
             "focused 40x12 prompt row must carry the composer hint: {prompt_row:?}"
+        );
+    }
+
+    #[test]
+    fn compact_floor_blurred_composer_still_advertises_how_to_refocus() {
+        // Esc keeps the draft but hands focus back; at the compact floor there
+        // is no dedicated hint row, so the shared prompt row is the only place
+        // that can say how to start typing again.
+        let mut app = launch_app();
+        app.launch.composer_focus = true;
+        type_char(&mut app, 'd');
+        type_char(&mut app, 'r');
+        assert_eq!(
+            handle_launch_composer_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            LaunchComposerKey::Blur
+        );
+        assert!(!app.launch.composer_focus);
+        let (buf, area) = render(&app, 40, 12);
+        let (input_y, hint_y) = launch_composer_rows(area).unwrap();
+        let input_row = row_text(&buf, area, input_y);
+        assert!(
+            input_row.contains("dr"),
+            "the blurred composer must keep the draft: {input_row:?}"
+        );
+        let prompt_row = row_text(&buf, area, hint_y);
+        assert!(
+            prompt_row.contains(&tr(Locale::En, MessageId::LaunchComposerFocusHint).into_owned()),
+            "blurred 40x12 prompt row must still say how to refocus: {prompt_row:?}"
         );
     }
 }
