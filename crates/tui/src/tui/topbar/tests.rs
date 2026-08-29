@@ -124,7 +124,11 @@ fn bless(name: &str, text: &str) {
 }
 
 fn golden_text(name: &str) -> Option<String> {
-    std::fs::read_to_string(golden_path(name)).ok()
+    // Normalize to LF; a Windows checkout can hand us CRLF while `render_row`
+    // always terminates with LF. Cell symbols never contain CR.
+    std::fs::read_to_string(golden_path(name))
+        .ok()
+        .map(|text| text.replace("\r\n", "\n"))
 }
 
 #[test]

@@ -52,8 +52,12 @@ pub(crate) fn render_golden_text(
 pub(crate) fn assert_matches_golden(name: &str, rendered: &str) {
     let path = golden_path(name);
     match std::fs::read_to_string(&path) {
+        // Compare against LF: a Windows checkout can hand us CRLF, and the
+        // dump side always joins rows with LF. Cell symbols never contain CR,
+        // so this can only ever cancel a line-ending difference.
         Ok(expected) => assert_eq!(
-            rendered, expected,
+            rendered,
+            expected.replace("\r\n", "\n"),
             "golden drift at {name}; re-bless only with an approved design change"
         ),
         Err(_) => {
