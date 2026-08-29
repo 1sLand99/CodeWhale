@@ -15297,16 +15297,29 @@ reasoning = "high"
         assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
     }
 
+    /// R1: omitting `--max-turns` used to resolve to `u32::MAX`, i.e. a
+    /// headless run with no bound at all. It now resolves to the finite
+    /// default, and an explicit value still wins.
     #[test]
-    fn exec_omits_the_headless_turn_cap_by_default() {
+    fn exec_defaults_to_a_finite_headless_turn_cap() {
         let cli = parse_cli(&["codewhale", "exec", "--auto", "benchmark this"]);
         let Some(Commands::Exec(args)) = cli.command else {
             panic!("expected exec command");
         };
 
         assert_eq!(args.max_turns, None);
-        assert_eq!(exec_max_steps(args.max_turns), u32::MAX);
+        let defaulted = exec_max_steps(args.max_turns);
+        assert_eq!(
+            defaulted,
+            crate::core::engine::turn_budget::DEFAULT_EXEC_MAX_TURNS
+        );
+        assert!(defaulted < u32::MAX, "the headless default must be finite");
         assert_eq!(exec_max_steps(Some(7)), 7);
+        assert_eq!(
+            exec_max_steps(Some(u32::MAX)),
+            crate::core::engine::turn_budget::MAX_MAX_MODEL_STEPS,
+            "even the largest override stays finite"
+        );
     }
 
     #[test]
@@ -16104,6 +16117,10 @@ reasoning = "high"
                 mouse_capture: None,
                 terminal_probe_timeout_ms: None,
                 stream_chunk_timeout_secs: None,
+                max_model_steps: None,
+                turn_wall_clock_secs: None,
+                stream_max_content_mb: None,
+                stream_max_duration_secs: None,
                 status_items: None,
                 osc8_links: None,
                 composer_arrows_scroll: None,
@@ -16199,6 +16216,10 @@ reasoning = "high"
                 mouse_capture: Some(false),
                 terminal_probe_timeout_ms: None,
                 stream_chunk_timeout_secs: None,
+                max_model_steps: None,
+                turn_wall_clock_secs: None,
+                stream_max_content_mb: None,
+                stream_max_duration_secs: None,
                 status_items: None,
                 osc8_links: None,
                 composer_arrows_scroll: None,
@@ -16232,6 +16253,10 @@ reasoning = "high"
                 mouse_capture: Some(true),
                 terminal_probe_timeout_ms: None,
                 stream_chunk_timeout_secs: None,
+                max_model_steps: None,
+                turn_wall_clock_secs: None,
+                stream_max_content_mb: None,
+                stream_max_duration_secs: None,
                 status_items: None,
                 osc8_links: None,
                 composer_arrows_scroll: None,
@@ -16319,6 +16344,10 @@ reasoning = "high"
                 mouse_capture: Some(true),
                 terminal_probe_timeout_ms: None,
                 stream_chunk_timeout_secs: None,
+                max_model_steps: None,
+                turn_wall_clock_secs: None,
+                stream_max_content_mb: None,
+                stream_max_duration_secs: None,
                 status_items: None,
                 osc8_links: None,
                 composer_arrows_scroll: None,
