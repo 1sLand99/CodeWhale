@@ -213,13 +213,13 @@ pub(crate) fn build_engine_config(app: &App, config: &Config) -> EngineConfig {
         project_context_pack_enabled: config.project_context_pack_enabled(),
         translation_enabled: app.translation_enabled,
         verbosity: app.verbosity.clone(),
-        // Effectively unlimited: the previous cap of 100 hit the ceiling on
-        // long multi-step plans (wide refactors, sub-agent orchestration) and
-        // presented as the agent "giving up mid-task". `u32::MAX` is the type
-        // ceiling; users can still interrupt with Ctrl+C / Esc, and a turn
-        // naturally ends when the model stops emitting tool calls. A real
-        // runaway is rare and human-noticeable; we trust the operator.
-        max_steps: u32::MAX,
+        // R1: finite, not `u32::MAX`. The old comment argued a runaway is
+        // "human-noticeable", but an interactive session left running is
+        // exactly where an unbounded loop spends real money unattended.
+        // The default (200) is far above what a long multi-step plan needs;
+        // operators who want more raise `[tui].max_model_steps`, and the
+        // clamp keeps even the maximum finite.
+        max_steps: config.max_model_steps(),
         max_subagents,
         max_admitted_subagents: config
             .max_admitted_subagents_for_provider(provider)
@@ -267,6 +267,9 @@ pub(crate) fn build_engine_config(app: &App, config: &Config) -> EngineConfig {
             config.subagent_api_timeout_secs_for_provider(provider),
         ),
         stream_chunk_timeout: Duration::from_secs(app.stream_chunk_timeout_secs),
+        turn_wall_clock: config.turn_wall_clock(),
+        stream_max_content_bytes: config.stream_max_content_bytes(),
+        stream_max_duration: config.stream_max_duration(),
         subagent_heartbeat_timeout: Duration::from_secs(
             config.subagent_heartbeat_timeout_secs_for_provider(provider),
         ),
