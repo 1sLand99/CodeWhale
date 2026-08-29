@@ -805,6 +805,87 @@ enum WorkflowRunStatus {
     Cancelled,
 }
 
+/// The per-slot outcome ledger a finished run is classified against.
+///
+/// A workflow script can return a perfectly good-looking value while every
+/// task it fanned out died — `parallel()`'s settled default resolves a failed
+/// slot to `null`, so the script never sees a throw. Terminal status is
+/// therefore decided from what actually ran, not from the script's return.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct SlotLedger {
+    /// Task records the driver holds for this run (children that were admitted).
+    tasks: usize,
+    /// How many of those records ended in a failed terminal state.
+    failed_tasks: usize,
+    /// Requested slots refused before a child existed — driver admission
+    /// refusals plus `ProgressEvent::TaskRejected`.
+    rejected: u64,
+    /// Whether any child agent was ever admitted for this run.
+    any_child_ran: bool,
+    /// First retained dispatch-failure message, for the all-rejected receipt.
+    retained_detail: Option<String>,
+}
+
+impl SlotLedger {
+    /// The terminal status a `Completed` script run should actually record,
+    /// with the receipt line, or `None` when every slot came back clean.
+    fn classify(&self) -> Option<(WorkflowRunStatus, String)> {
+        if !self.any_child_ran && self.rejected > 0 {
+            // #5035: every dispatch was rejected before a child ran.
+            let retained = self
+                .retained_detail
+                .as_ref()
+                .map(|message| format!("; retained detail: {message}"))
+                .unwrap_or_default();
+            return Some((
+                WorkflowRunStatus::Failed,
+                format!(
+                    "no child agents ran: all {} task dispatch(es) were rejected{retained}",
+                    self.rejected
+                ),
+            ));
+        }
+        // R9: a run whose every task failed produced nothing. Reporting that
+        // as a partial success let a workflow that lost all its work read as
+        // "completed with caveats"; it is a failure with a preserved output.
+        if self.tasks > 0 && self.failed_tasks == self.tasks {
+            let rejected = if self.rejected > 0 {
+                format!(" and {} dispatch(es) were rejected", self.rejected)
+            } else {
+                String::new()
+            };
+            return Some((
+                WorkflowRunStatus::Failed,
+                format!(
+                    "no task produced a result: all {} task(s) failed{rejected}; \
+                     the recorded result reflects no completed work",
+                    self.tasks
+                ),
+            ));
+        }
+        if self.failed_tasks > 0 || self.rejected > 0 {
+            let mut parts = Vec::new();
+            if self.failed_tasks > 0 {
+                parts.push(format!(
+                    "{} of {} task(s) failed",
+                    self.failed_tasks, self.tasks
+                ));
+            }
+            if self.rejected > 0 {
+                parts.push(format!("{} dispatch(es) were rejected", self.rejected));
+            }
+            return Some((
+                WorkflowRunStatus::Degraded,
+                format!(
+                    "completed with dropped slots: {}; the recorded result may be partial",
+                    parts.join(" and ")
+                ),
+            ));
+        }
+        None
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WorkflowAction {
     Start,
@@ -1777,38 +1858,22 @@ async fn run_workflow_vm(
             // rejections that previously vanished into null slots).
             if status == WorkflowRunStatus::Completed {
                 let task_records = driver.task_records_snapshot();
-                let failed_children = task_records
-                    .iter()
-                    .filter(|task| task.status == IrWorkflowRunStatus::Failed)
-                    .count();
-                let rejected = record.dispatch_failure_count;
-                if record.child_ids.is_empty() && rejected > 0 {
-                    // #5035: every dispatch was rejected before a child ran.
-                    status = WorkflowRunStatus::Failed;
-                    let retained_detail = record
+                let ledger = SlotLedger {
+                    tasks: task_records.len(),
+                    failed_tasks: task_records
+                        .iter()
+                        .filter(|task| task.status == IrWorkflowRunStatus::Failed)
+                        .count(),
+                    rejected: record.dispatch_failure_count,
+                    any_child_ran: !record.child_ids.is_empty(),
+                    retained_detail: record
                         .dispatch_failures
                         .first()
-                        .map(|failure| format!("; retained detail: {}", failure.message))
-                        .unwrap_or_default();
-                    error = Some(format!(
-                        "no child agents ran: all {rejected} task dispatch(es) were rejected{retained_detail}"
-                    ));
-                } else if failed_children > 0 || rejected > 0 {
-                    status = WorkflowRunStatus::Degraded;
-                    let mut parts = Vec::new();
-                    if failed_children > 0 {
-                        parts.push(format!(
-                            "{failed_children} of {} task(s) failed",
-                            task_records.len()
-                        ));
-                    }
-                    if rejected > 0 {
-                        parts.push(format!("{rejected} dispatch(es) were rejected"));
-                    }
-                    error = Some(format!(
-                        "completed with dropped slots: {}; the recorded result may be partial",
-                        parts.join(" and ")
-                    ));
+                        .map(|failure| failure.message.clone()),
+                };
+                if let Some((slot_status, slot_error)) = ledger.classify() {
+                    status = slot_status;
+                    error = Some(slot_error);
                 }
             }
             record.status = status;
@@ -5186,6 +5251,101 @@ mod tests {
     use axum::{Json, Router, routing::post};
     use codewhale_workflow::{IsolationMode, leaf_is_write_capable};
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn a_clean_slot_ledger_leaves_the_run_completed() {
+        let ledger = SlotLedger {
+            tasks: 3,
+            failed_tasks: 0,
+            rejected: 0,
+            any_child_ran: true,
+            retained_detail: None,
+        };
+        assert_eq!(ledger.classify(), None);
+    }
+
+    #[test]
+    fn a_run_with_no_tasks_at_all_stays_completed() {
+        // A script that orchestrates nothing is not a dropped-slot failure.
+        assert_eq!(SlotLedger::default().classify(), None);
+    }
+
+    #[test]
+    fn some_failed_slots_degrade_the_run_without_failing_it() {
+        let (status, message) = SlotLedger {
+            tasks: 3,
+            failed_tasks: 1,
+            rejected: 0,
+            any_child_ran: true,
+            retained_detail: None,
+        }
+        .classify()
+        .expect("a dropped slot must be classified");
+        assert_eq!(status, WorkflowRunStatus::Degraded);
+        assert!(message.contains("1 of 3 task(s) failed"), "{message}");
+    }
+
+    #[test]
+    fn a_run_whose_every_task_failed_cannot_report_success() {
+        // R9: `parallel()`'s settled default resolves each dead slot to
+        // `null`, so the script returns cleanly. The run must not.
+        let (status, message) = SlotLedger {
+            tasks: 4,
+            failed_tasks: 4,
+            rejected: 0,
+            any_child_ran: true,
+            retained_detail: None,
+        }
+        .classify()
+        .expect("a fully-failed fan-out must be classified");
+        assert_eq!(status, WorkflowRunStatus::Failed);
+        assert!(
+            message.contains("no task produced a result: all 4 task(s) failed"),
+            "{message}"
+        );
+        assert_ne!(
+            owner_state_for_run_status(status),
+            OwnerState::Completed,
+            "a run that lost every task must never project as completed"
+        );
+    }
+
+    #[test]
+    fn a_fully_failed_fan_out_also_names_its_rejected_dispatches() {
+        let (status, message) = SlotLedger {
+            tasks: 2,
+            failed_tasks: 2,
+            rejected: 1,
+            any_child_ran: true,
+            retained_detail: Some("admission cap".to_string()),
+        }
+        .classify()
+        .expect("a fully-failed fan-out must be classified");
+        assert_eq!(status, WorkflowRunStatus::Failed);
+        assert!(
+            message.contains("all 2 task(s) failed")
+                && message.contains("1 dispatch(es) were rejected"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn every_dispatch_rejected_still_fails_before_any_child_ran() {
+        let (status, message) = SlotLedger {
+            tasks: 0,
+            failed_tasks: 0,
+            rejected: 2,
+            any_child_ran: false,
+            retained_detail: Some("depth ceiling".to_string()),
+        }
+        .classify()
+        .expect("an all-rejected run must be classified");
+        assert_eq!(status, WorkflowRunStatus::Failed);
+        assert!(
+            message.contains("no child agents ran") && message.contains("depth ceiling"),
+            "{message}"
+        );
+    }
 
     #[test]
     fn settled_runs_leave_a_report_artifact_under_codewhale_reports() {
