@@ -56,6 +56,14 @@ pub fn ascii_fallback(symbol: &str) -> Option<&'static str> {
             Some("#")
         }
         "▁" | "▂" | "▃" => Some("_"),
+        // Tideline action glyphs (spec §2): one cell each, no wide glyphs.
+        "⌁" => Some("+"),
+        "↺" => Some("<"),
+        "▤" => Some("="),
+        "◐" => Some("*"),
+        "⑂" => Some("y"),
+        "∼" | "∿" => Some("~"),
+        "⋯" => Some("."),
         "▖" | "▗" | "▘" | "▝" => Some("."),
         "▚" => Some("\\"),
         "▞" => Some("/"),
@@ -113,6 +121,14 @@ mod tests {
             ("≈≈>", "~>"),
             ("≈", "~"),
             ("～", "~"),
+            ("⌁", "+"),
+            ("↺", "<"),
+            ("▤", "="),
+            ("◐", "*"),
+            ("⑂", "y"),
+            ("∼", "~"),
+            ("∿", "~"),
+            ("⋯", "."),
         ] {
             assert_eq!(ascii_fallback(rich), Some(safe));
         }
