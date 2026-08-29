@@ -3326,7 +3326,7 @@ fn auth_diagnostic_lines(store: &ConfigStore, provider: Option<ProviderKind>) ->
 }
 
 fn run_auth_diagnostic(store: &ConfigStore, provider: Option<ProviderKind>) -> Result<()> {
-    for line in auth_diagnostic_lines(store, provider.map(ProviderKind::from)) {
+    for line in auth_diagnostic_lines(store, provider) {
         println!("{line}");
     }
     Ok(())
@@ -3763,7 +3763,6 @@ fn run_auth_command_with_secrets_and_runtime(
             path,
             yes,
         } => {
-            let provider: ProviderKind = provider.into();
             let (source, path) = external_credential_target(provider, path)?;
             let preview = external_consent_preview_lines(provider, source, &path);
             for line in &preview {
@@ -3832,7 +3831,6 @@ fn run_auth_command_with_secrets_and_runtime(
             Ok(())
         }
         AuthCommand::ExternalRevoke { provider } => {
-            let provider: ProviderKind = provider.into();
             let provider_key = provider.provider().provider_config_key();
             codewhale_config::mutate_config_document(store.path(), |document| {
                 codewhale_config::unset_config_document_value(
@@ -3858,8 +3856,7 @@ fn run_auth_command_with_secrets_and_runtime(
                 return run_auth_diagnostic(store, provider);
             }
             match provider {
-                Some(p) => {
-                    let provider: ProviderKind = p.into();
+                Some(provider) => {
                     for line in auth_status_lines_for_provider_with_runtime(
                         store,
                         secrets,
@@ -3884,7 +3881,6 @@ fn run_auth_command_with_secrets_and_runtime(
             api_key,
             api_key_stdin,
         } => {
-            let provider: ProviderKind = provider.into();
             let slot = provider_slot(provider);
             if provider == ProviderKind::Ollama && api_key.is_none() && !api_key_stdin {
                 let provider_cfg = store.config.providers.for_provider_mut(provider);
@@ -3918,7 +3914,6 @@ fn run_auth_command_with_secrets_and_runtime(
             Ok(())
         }
         AuthCommand::Get { provider } => {
-            let provider: ProviderKind = provider.into();
             println!(
                 "{}",
                 auth_get_line_with_runtime(store, secrets, provider, runtime_overrides)
@@ -3926,14 +3921,12 @@ fn run_auth_command_with_secrets_and_runtime(
             Ok(())
         }
         AuthCommand::PrintApiKey { provider } => {
-            let provider: ProviderKind = provider.into();
             let mut stdout = io::stdout().lock();
             credential_handoff::handoff_secret_line(&mut stdout, io::stdout().is_terminal(), || {
                 credential_handoff::resolve_api_key(store, secrets, provider, runtime_overrides)
             })
         }
         AuthCommand::Clear { provider } => {
-            let provider: ProviderKind = provider.into();
             if provider == ProviderKind::Xai {
                 codewhale_config::with_xai_oauth_revocation_transaction(|| {
                     clear_auth_provider(store, secrets, provider)
@@ -4252,7 +4245,7 @@ fn run_model_command(
             // kimi-k3 model resolve` re-derive a registry default and report
             // `kimi-k2.7-code` while the runtime used `kimi-k3` (v0.9.1 kimi-k3 dogfood report). The
             // top-level `--model` was not consulted at all on that path.
-            let subcommand_provider = provider.map(ProviderKind::from);
+            let subcommand_provider = provider;
             let queried = model.as_deref().map(str::trim).filter(|m| !m.is_empty());
 
             // With no explicit query, this reports the route the runtime would
@@ -4812,12 +4805,10 @@ fn apply_tui_env(cli: &Cli, resolved_runtime: &ResolvedRuntimeOptions, passthrou
     let keyring_bridge_api_key = resolved_runtime.api_key.as_ref();
     let keyring_bridge_source = resolved_runtime.api_key_source;
     if let Some(provider) = cli.provider.as_deref() {
-        let provider = builtin_provider_arg(provider)
-            .map(ProviderKind::from)
-            .map_or_else(
-                || provider.to_string(),
-                |provider| provider.as_str().to_string(),
-            );
+        let provider = builtin_provider_arg(provider).map_or_else(
+            || provider.to_string(),
+            |provider| provider.as_str().to_string(),
+        );
         unsafe {
             std::env::set_var("CODEWHALE_PROVIDER", &provider);
             std::env::set_var("DEEPSEEK_PROVIDER", provider);
