@@ -587,13 +587,24 @@ fn citations_from_text(text: &str) -> Vec<ProviderNativeCitation> {
         };
         let start = offset + relative_start;
         let tail = &text[start..];
+        // Balanced parentheses belong to the URL (Wikipedia titles such as
+        // `Foo_(bar)` keep their closing paren); an unmatched closer ends it.
+        let mut open_parens = 0_usize;
         let end = tail
             .char_indices()
-            .find_map(|(index, ch)| {
-                (index > 0
+            .find_map(|(index, ch)| match ch {
+                '(' => {
+                    open_parens += 1;
+                    None
+                }
+                ')' if open_parens > 0 => {
+                    open_parens -= 1;
+                    None
+                }
+                _ => (index > 0
                     && (ch.is_whitespace()
                         || matches!(ch, ')' | ']' | '}' | '>' | '"' | '\'' | '`')))
-                .then_some(index)
+                .then_some(index),
             })
             .unwrap_or(tail.len());
         let url = tail[..end].trim_end_matches(['.', ',', ';', ':', '!', '?']);
@@ -874,6 +885,28 @@ mod tests {
         assert_eq!(citations.len(), 2);
         assert_eq!(citations[0].url, "http://legacy.example/a");
         assert_eq!(citations[1].url, "https://secure.example/b");
+    }
+
+    #[test]
+    fn answer_links_keep_balanced_parenthesis_segments() {
+        let citations = citations_from_text(
+            "See https://en.wikipedia.org/wiki/Foo_(bar) and https://en.wikipedia.org/wiki/Baz_(qux_(nested)) for details.",
+        );
+        assert_eq!(citations.len(), 2);
+        assert_eq!(
+            citations[0].url, "https://en.wikipedia.org/wiki/Foo_(bar)",
+            "a balanced closing paren is part of the URL"
+        );
+        assert_eq!(
+            citations[1].url, "https://en.wikipedia.org/wiki/Baz_(qux_(nested))",
+            "nested balanced parens stay intact"
+        );
+
+        let unbalanced = citations_from_text("Broken https://en.wikipedia.org/wiki/Foo_(bar here.");
+        assert_eq!(
+            unbalanced[0].url, "https://en.wikipedia.org/wiki/Foo_(bar",
+            "an unclosed paren cannot extend past the next whitespace"
+        );
     }
 
     #[tokio::test]
