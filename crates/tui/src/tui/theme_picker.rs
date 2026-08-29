@@ -242,6 +242,29 @@ impl ThemePickerView {
     }
 
     fn commit_event(&self) -> ViewAction {
+        // A commit that never moved the cursor must not rewrite settings.
+        //
+        // `ocean_treatment` is independent of `theme` — `normalize_ocean_treatment`
+        // (settings.rs) accepts `deepsea` beside ANY theme name — but this picker's
+        // option list can only express `(theme, Flat)` per theme plus the single
+        // `(Whale, Deepsea)` row. So a persisted pair like `theme = "system"` +
+        // `ocean_treatment = "deepsea"` opens on the plain `system` row, whose
+        // option maps to Flat, and pressing Enter without navigating silently
+        // discarded the user's Deepsea. Treating an unmoved cursor as "nothing
+        // changed" keeps the unrepresentable pair intact; any real navigation
+        // still commits the selected option exactly as before.
+        let opened_on = initial_option_id(&self.original_theme_name, self.original_ocean_treatment);
+        if self.controller.selected_id() == Some(opened_on.as_str()) {
+            let ocean_treatment = match self.original_ocean_treatment {
+                OceanTreatment::Deepsea => "deepsea",
+                OceanTreatment::Flat => "flat",
+            };
+            return ViewAction::EmitAndClose(ViewEvent::ThemeSelectionUpdated {
+                theme: self.original_theme_name.clone(),
+                ocean_treatment: ocean_treatment.to_string(),
+                persist: true,
+            });
+        }
         let selection = self.current();
         ViewAction::EmitAndClose(ViewEvent::ThemeSelectionUpdated {
             theme: selection.theme.name().to_string(),
@@ -629,6 +652,49 @@ mod tests {
             }
             other => panic!("expected commit, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn enter_without_navigating_preserves_a_non_whale_deepsea_pair() {
+        // `ocean_treatment` is independent of `theme` (settings.rs
+        // normalize_ocean_treatment accepts deepsea beside any theme), and
+        // esc_reverts_to_exact_original_theme_and_treatment_pair already pins
+        // that Esc keeps such a pair. Enter used to destroy it: the picker can
+        // only express Deepsea paired with Whale, so (dracula, deepsea) opened
+        // on the plain `dracula` row and committing without navigating wrote
+        // flat, silently discarding a persisted preference. #5698 review
+        // finding 3.
+        let mut v = ThemePickerView::new_with_treatment(
+            "dracula".to_string(),
+            OceanTreatment::Deepsea,
+            Locale::En,
+        );
+        let action = v.handle_key(key(KeyCode::Enter));
+        assert_eq!(
+            selected_values(&action),
+            Some(("dracula", "deepsea", true)),
+            "committing without moving the cursor must not downgrade the treatment"
+        );
+    }
+
+    #[test]
+    fn enter_after_navigating_away_still_commits_the_chosen_option() {
+        // The preservation above must not freeze the picker: a real move still
+        // commits the selected option's own pair.
+        let mut v = ThemePickerView::new_with_treatment(
+            "dracula".to_string(),
+            OceanTreatment::Deepsea,
+            Locale::En,
+        );
+        v.handle_key(key(KeyCode::Down));
+        let action = v.handle_key(key(KeyCode::Enter));
+        let (theme, treatment, persist) = selected_values(&action).expect("expected a commit");
+        assert_ne!(
+            theme, "dracula",
+            "navigation should have moved off the opening row"
+        );
+        assert_eq!(treatment, "flat");
+        assert!(persist);
     }
 
     #[test]

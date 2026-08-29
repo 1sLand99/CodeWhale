@@ -120,18 +120,19 @@ pub(crate) fn rail_row_budget(
     let composer_floor = MIN_COMPOSER_HEIGHT.saturating_add(u16::from(app.composer_border));
     terminal_height
         .saturating_sub(header_height_for(terminal_height))
-        // Both standing bands bracket the composer now: the identity row
-        // below it and the activity row above it.
+        // The merged Tideline footer is one row (spec §3: slots 6+8
+        // collapsed into it) — the shell no longer brackets the composer
+        // with two standing bands.
         .saturating_sub(crate::tui::phase_strip::height())
-        .saturating_sub(crate::tui::phase_strip::activity_height())
         .saturating_sub(composer_floor)
         .saturating_sub(chat_floor)
 }
 
-/// The header collapses to a single row on short terminals. Shared so the
-/// rail budget charges the same chrome the layout actually reserves.
-pub(crate) fn header_height_for(terminal_height: u16) -> u16 {
-    if terminal_height < 16 { 1 } else { 2 }
+/// The header is the one-row Tideline topbar (spec §5b:
+/// `Constraint::Length(1)`), at every terminal height. Shared so the rail
+/// budget charges the same chrome the layout actually reserves.
+pub(crate) fn header_height_for(_terminal_height: u16) -> u16 {
+    1
 }
 
 /// Column-axis twin of [`rail_row_budget`]: the columns a side rail must

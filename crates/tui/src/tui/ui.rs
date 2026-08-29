@@ -895,7 +895,9 @@ pub(crate) use motion::*;
 pub(crate) use release_check::*;
 pub(crate) use terminal::*;
 
-mod frame;
+// `frame` is `pub(crate)` so sibling modules (e.g. the widgets ASCII-safety
+// test) can reach the topbar builders that project `App` state.
+pub(crate) mod frame;
 mod overlays;
 mod provider_routes;
 mod session_state;

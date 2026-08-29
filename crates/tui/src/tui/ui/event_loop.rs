@@ -4454,6 +4454,12 @@ pub(crate) async fn run_event_loop(
                             // composer match below owns this key.
                             composer_authority = true;
                         }
+                        crate::tui::underwater::LaunchComposerKey::MenuSelect => {
+                            // A completion popup entry was applied; the key is
+                            // consumed without submitting.
+                            app.needs_redraw = true;
+                            continue;
+                        }
                         crate::tui::underwater::LaunchComposerKey::Submit => {
                             let chord = composer_submit_chord(key, app.composer_multiline_mode)
                                 .unwrap_or(ComposerSubmitChord::Enter);

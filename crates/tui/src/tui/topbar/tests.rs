@@ -10,8 +10,9 @@
 //! CODEWHALE_BLESS_GOLDENS=1 ./scripts/dev-test.sh tui topbar
 //! ```
 
-use ratatui::{Terminal, backend::TestBackend};
-use unicode_width::UnicodeWidthChar;
+use ratatui::Terminal;
+use ratatui::backend::{Backend, TestBackend};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::{Topbar, TopbarSegment, TopbarSegmentId};
 use crate::palette::{ChromeInk, UI_THEME, UiTheme};
@@ -224,18 +225,40 @@ fn topbar_hitboxes_match_painted_cells() {
             "hitboxes must not overlap"
         );
     }
-    // The painted segment text sits inside its recorded hitbox.
-    let row = render_row(&UI_THEME, 160, &segments, 0);
+    // The painted segment text sits inside its recorded hitbox. Slice by
+    // cell, not by byte: the row contains multi-byte glyphs (`│`, meter).
+    let cells = render_cells(&UI_THEME, 160, &segments, 0);
     for hb in &hitboxes {
-        let cells: String = row[hb.area.x as usize..(hb.area.x + hb.area.width) as usize]
-            .chars()
+        let text: String = (hb.area.x..hb.area.x + hb.area.width)
+            .filter_map(|x| cells.get(usize::from(x)))
+            .cloned()
             .collect();
         assert!(
-            !cells.trim().is_empty(),
+            !text.trim().is_empty(),
             "hitbox {:?} covers empty cells",
             hb.id
         );
     }
+}
+
+/// Per-cell symbols of one rendered row (the golden dump, before joining).
+fn render_cells(theme: &UiTheme, width: u16, segments: &[TopbarSegment], pct: u8) -> Vec<String> {
+    let backend = TestBackend::new(width, 1);
+    let mut terminal = Terminal::new(backend).expect("terminal");
+    terminal
+        .draw(|frame| {
+            let topbar = Topbar::new(theme, CLOCK, pct, segments);
+            use ratatui::widgets::Widget;
+            Widget::render(topbar, frame.area(), frame.buffer_mut());
+        })
+        .expect("draw");
+    terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol().to_string())
+        .collect()
 }
 
 #[test]
@@ -259,7 +282,9 @@ fn topbar_ascii_safe_has_no_wide_or_unsupported_glyphs() {
             .map(|cell| cell.symbol())
             .collect::<String>()
     };
-    assert!(row.contains("<.>"), "fluke projects to <.>");
+    // The brand lockup is the wordmark alone (founder decree deleted the
+    // crown glyph); it is pure ASCII, so ascii-safe mode changes nothing.
+    assert!(row.starts_with("CODEWHALE"), "wordmark is the brand: {row}");
     assert!(row.contains('#'), "meter projects to #");
     assert!(!row.contains('▰'), "no block glyphs survive ascii-safe");
     for ch in row.chars() {
@@ -310,4 +335,70 @@ fn topbar_hover_and_narrow_do_not_panic() {
         let _ = render_row(&UI_THEME, w, &segments, 61);
     }
     assert!(!plain.is_empty());
+}
+
+#[test]
+fn context_meter_hitbox_covers_exactly_the_painted_meter_span() {
+    // The meter's mouse route must land on the cells the meter painted —
+    // the posture-floor discipline (a hitbox never claims cells another
+    // element paints), proven against the buffer itself at three row
+    // widths: roomy (no shed), tight (segments shed, clock prefix shed),
+    // and too narrow (no hitbox rather than an overlapping one).
+    use ratatui::widgets::Widget;
+    let segments = work_segments();
+    for width in [160u16, 80, 60, 44, 30, 20] {
+        let topbar = Topbar::new(&UI_THEME, CLOCK, 61, &segments);
+        let backend = TestBackend::new(width, 1);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| {
+                Widget::render(
+                    Topbar::new(&UI_THEME, CLOCK, 61, &segments),
+                    frame.area(),
+                    frame.buffer_mut(),
+                );
+            })
+            .expect("draw");
+        let row: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        match super::context_meter_hitbox(&topbar, terminal.backend().size().expect("size").into())
+        {
+            Some(area) => {
+                let start = usize::from(area.x);
+                let end = start + usize::from(area.width);
+                let covered = row
+                    .chars()
+                    .skip(start)
+                    .take(end - start)
+                    .collect::<String>();
+                assert!(
+                    covered.starts_with("context "),
+                    "{width} wide: hitbox must start at the meter's first cell: {covered:?}"
+                );
+                assert!(
+                    covered.contains('%') && (covered.contains('▰') || covered.contains('▱')),
+                    "{width} wide: hitbox must cover percentage and bar: {covered:?}"
+                );
+                assert!(
+                    !covered.trim_end().contains(':'),
+                    "{width} wide: hitbox must not reach the clock: {covered:?}"
+                );
+            }
+            None => {
+                // Refused only when even the shed floor cannot fit: brand +
+                // gap + the meter + two spaces + the time-only clock.
+                let meter_w = "context 61% ".width() + 5;
+                let floor = super::brand_width() + super::BRAND_GAP.width() + 1 + meter_w + 2 + 8;
+                assert!(
+                    usize::from(width) < floor,
+                    "{width} wide: a fittable meter (floor {floor}) must return a hitbox"
+                );
+            }
+        }
+    }
 }

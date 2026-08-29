@@ -10,11 +10,17 @@ use std::time::Instant;
 /// `deepseek_squiggle` (v0.3.5 → v0.8.x) used 420 ms; the dot replacement
 /// used the same cadence. Keep both at 420 ms so the visual rhythm matches
 /// what long-time users remember.
+#[allow(dead_code)] // the echolocation animation family (spec §5e, 420 ms cadence) reuses
+// this picker when its landing slice animates the merged-footer chip;
+// the shell renders the still frame until then (2026-08-29).
 const STATUS_INDICATOR_FRAME_MS: u128 = 420;
 
 /// Geometric replacement frames shipped between v0.8.x and v0.8.29.
 /// Every frame is one cell wide so the provider/model label never shifts
 /// while the animation advances.
+#[allow(dead_code)] // the echolocation animation family (spec §5e, 420 ms cadence) reuses
+// this picker when its landing slice animates the merged-footer chip;
+// the shell renders the still frame until then (2026-08-29).
 const STATUS_INDICATOR_DOT_FRAMES: &[&str] = &["◍", "◉", "◌", "◌", "◉", "◍"];
 
 /// Resolve the current status-indicator frame to render in the header
@@ -31,6 +37,9 @@ const STATUS_INDICATOR_DOT_FRAMES: &[&str] = &["◍", "◉", "◌", "◌", "◉"
 /// wordmark; unknown values do too. `"off"` returns `None` so the caller can
 /// hide the chip outright.
 #[must_use]
+#[allow(dead_code)] // the echolocation animation family (spec §5e, 420 ms cadence) reuses
+// this picker when its landing slice animates the merged-footer chip;
+// the shell renders the still frame until then (2026-08-29).
 pub fn header_status_indicator_frame(
     turn_started_at: Option<Instant>,
     mode: &str,
