@@ -4,7 +4,7 @@
 //! role a species-led whale and every whale one of six runtime states. This
 //! module carries that identity into the TUI as species badges and state
 //! words. The hand-drawn portrait art that used to live here (the three-row
-//! glyph renditions and the `▚△▞` crown fluke) was deleted per the
+//! glyph renditions and the hand-drawn crown fluke) was deleted per the
 //! 2026-08-29 founder directive; the only sanctioned terminal mark is the one
 //! generated from the brand master path. Colors are Codewhale palette tokens
 //! resolved through the live [`UiTheme`], so the whales follow Blue Stage

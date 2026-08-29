@@ -23,7 +23,7 @@
                                                                 WHALE     │ASSIGNMENT │STATE        
                                                               ▶ whale-1   │restyle th…│● working    
                                                                 whale-2   │golden buf…│✓ done       
-                                                              ╭──────────────────────────────────▚△▞
+                                                              ╭────────────────────────────────────╮
                                                               │ the preview is the product▌        │
 ? help                                                        │                                [↑] │
 / file issue                                                  ╰────────────────────────────────────╯

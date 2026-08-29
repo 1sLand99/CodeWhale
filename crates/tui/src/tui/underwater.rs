@@ -2895,8 +2895,8 @@ use crate::palette::UiTheme;
 /// The founder's fluke mark — the generated 12x6 cell rendition from the
 /// brand master path (`designs/brand/20260829-fluke-founder/TUI_GLYPHS.md`,
 /// produced by `build-tui-glyph.py`; never hand-drawn). The hand-projected
-/// crown `▚△▞` was deleted by founder decree; this block is its replacement
-/// everywhere in the startup path. The ASCII-safe projection maps each
+/// three-cell crown was deleted by founder decree; this block is its
+/// replacement everywhere in the startup path. The ASCII-safe projection maps each
 /// quadrant block through its declared `glyphs::ascii_fallback` (`#`, `.`,
 /// `\`) — a legible silhouette, not a smear.
 const FLUKE_BLOCK: [&str; 6] = [

@@ -124,16 +124,18 @@ mod tests {
 
 // ---------------------------------------------------------------------------
 // Tideline composer restyle (spec §2 composer decision, §5a "Composer"):
-// rounded border + fluke cap + `[↑]` send hitbox. Translation scaffolding in
+// rounded border + `[↑]` send hitbox. Translation scaffolding in
 // the topbar mold — a pure, deterministic widget over injected state; the
 // composer authority logic (composer_ui.rs) is untouched, and wiring into
 // `ui/frame.rs` is the landing slice after #5698 settles.
 //
 // Cell rules (spec §2): no bezier strokes — `╭─╮│╰╯` border dim at rest and
-// Info on focus; the three-cell fluke (`▚△▞`, ASCII `<.>`) is set into the
-// top-right corner as the cap and carries the whale identity; the send `↑`
-// is a 3-cell `[↑]` hitbox right-aligned inside the border. The hull taper
-// silhouette is deliberately dropped (sub-cell vector work).
+// Info on focus; the send `↑` is a 3-cell `[↑]` hitbox right-aligned inside
+// the border. The hand-drawn three-cell crown fluke this cap used to carry
+// was deleted by the 2026-08-29 founder decree (terminal marks must be
+// generated from the brand master path, never hand-drawn); the corner is a
+// plain `╮` again. The hull taper silhouette is deliberately dropped
+// (sub-cell vector work).
 
 use ratatui::{
     buffer::Buffer,
@@ -143,14 +145,6 @@ use ratatui::{
 use unicode_width::UnicodeWidthStr;
 
 use crate::palette::{ChromeInk, UiTheme, chrome_style};
-
-/// The three-cell crown glyph for the composer's fluke cap (ASCII `<.>`).
-/// Local to this later-slice scaffolding: the topbar's own copies were
-/// deleted by the founder decree (terminal marks must be generated from the
-/// brand master path); the composer cap keeps the hand-drawn projection
-/// until its slice lands and replaces it.
-const FLUKE: &str = "▚△▞";
-const FLUKE_ASCII: &str = "<.>";
 
 /// The composer's fixed docked height in the work-screen shell (spec §5b).
 #[allow(dead_code)] // translation scaffolding: wired by the landing slice
@@ -222,10 +216,6 @@ impl<'a> TidelineComposer<'a> {
             })
             .collect()
     }
-
-    fn fluke(&self) -> &'static str {
-        if self.ascii_safe { FLUKE_ASCII } else { FLUKE }
-    }
 }
 
 fn chrome(theme: &UiTheme, ink: ChromeInk) -> Style {
@@ -253,20 +243,15 @@ pub fn render_tideline_composer(area: Rect, buf: &mut Buffer, composer: &Tidelin
     };
     let border = chrome(theme, border_ink);
 
-    // Rounded border. Top row: `╭──…──▚△▞` — the fluke cap replaces the
-    // top-right corner (spec §2). The cap wakes with focus (bold).
-    let fluke = composer.fluke();
-    let fluke_w = fluke.width() as u16;
-    let top_fill = area.width.saturating_sub(1 + fluke_w).max(1);
+    // Rounded border. Top row: `╭──…──╮` — the hand-drawn crown fluke that
+    // used to replace the top-right corner was deleted by the founder
+    // decree; the corner is a plain `╮` again, waking with the border only.
+    let top_fill = usize::from(area.width.saturating_sub(2).max(1));
     let top: String = std::iter::once('╭')
-        .chain(std::iter::repeat_n('─', usize::from(top_fill)))
+        .chain(std::iter::repeat_n('─', top_fill))
+        .chain(std::iter::once('╮'))
         .collect();
     put(buf, area.x, area.y, &composer.sym(&top), border);
-    let mut cap_style = chrome(theme, ChromeInk::Attention);
-    if composer.focused {
-        cap_style = cap_style.add_modifier(Modifier::BOLD);
-    }
-    put(buf, area.x + area.width - fluke_w, area.y, fluke, cap_style);
 
     // Bottom row: `╰──…──╯`.
     let bottom_fill = usize::from(area.width.saturating_sub(2));
