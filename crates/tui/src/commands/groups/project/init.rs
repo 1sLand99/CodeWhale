@@ -821,20 +821,18 @@ impl codewhale_command_contract::metadata::RegisterCommand<crate::commands::Comm
 
     fn handler()
     -> codewhale_command_contract::handler::CommandHandler<crate::commands::CommandResult> {
-        codewhale_command_contract::handler::CommandHandler::Contextual {
-            capabilities: codewhale_command_contract::handler::CommandCapabilities::PROJECT
-                .union(codewhale_command_contract::handler::CommandCapabilities::WORKSPACE),
-            handler: init_contextual,
-        }
+        codewhale_command_contract::handler::CommandHandler::Contextual(init_contextual)
     }
 }
 
 /// Contextual `/init` dispatch (FEAT-021 Phase 4).
 ///
-/// Destructures the declared `PROJECT | WORKSPACE` facets with a safe
-/// missing-facet error. The workspace path is consumed via the `WORKSPACE`
-/// facet (D2); the `PROJECT` capability is declared per D4 even though init
-/// consumes no project-facet method.
+/// Destructures the declared `WORKSPACE` facet with a safe missing-facet
+/// error. The workspace path is consumed via the `WORKSPACE` facet (D2);
+/// `/init` consumes no project-facet method, so it destructures exactly
+/// `WORKSPACE` (D4, least-capability — the initial PROJECT|WORKSPACE
+/// declaration was amended after the critical audit; main's model expresses
+/// the declaration as exact facet destructuring rather than a bitmask).
 fn init_contextual(contexts: CommandContexts<'_>, _arg: Option<&str>) -> CommandResult {
     let parts = contexts.into_parts();
     let Some(workspace) = parts.workspace.as_deref() else {

@@ -12,7 +12,7 @@
 use codewhale_command_contract::facets::{
     CommandPresentationContext, ProjectGoalState, ProjectGoalStatus,
 };
-use codewhale_command_contract::handler::{CommandCapabilities, CommandContexts, CommandHandler};
+use codewhale_command_contract::handler::{CommandContexts, CommandHandler};
 use codewhale_command_contract::metadata::{CommandInfo, RegisterCommand};
 
 use crate::tui::app::AppAction;
@@ -289,10 +289,7 @@ impl RegisterCommand<CommandResult> for GoalCmd {
     }
 
     fn handler() -> CommandHandler<CommandResult> {
-        CommandHandler::Contextual {
-            capabilities: CommandCapabilities::PROJECT.union(CommandCapabilities::PRESENTATION),
-            handler: goal_contextual,
-        }
+        CommandHandler::Contextual(goal_contextual)
     }
 }
 

@@ -5,7 +5,7 @@
 //! status/set delegates; the TUI adapter owns all host-side LSP behavior.
 
 use codewhale_command_contract::facets::CommandProjectContext;
-use codewhale_command_contract::handler::{CommandCapabilities, CommandContexts, CommandHandler};
+use codewhale_command_contract::handler::{CommandContexts, CommandHandler};
 use codewhale_command_contract::metadata::{CommandInfo, RegisterCommand};
 
 use crate::commands::CommandResult;
@@ -25,10 +25,7 @@ impl RegisterCommand<CommandResult> for LspCmd {
     }
 
     fn handler() -> CommandHandler<CommandResult> {
-        CommandHandler::Contextual {
-            capabilities: CommandCapabilities::PROJECT,
-            handler: lsp_contextual,
-        }
+        CommandHandler::Contextual(lsp_contextual)
     }
 }
 

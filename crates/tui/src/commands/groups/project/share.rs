@@ -12,7 +12,7 @@ use std::io::Write;
 use std::path::Path;
 
 use codewhale_command_contract::facets::CommandProjectContext;
-use codewhale_command_contract::handler::{CommandCapabilities, CommandContexts, CommandHandler};
+use codewhale_command_contract::handler::{CommandContexts, CommandHandler};
 use codewhale_command_contract::metadata::{CommandInfo, RegisterCommand};
 
 use crate::commands::CommandResult;
@@ -205,10 +205,7 @@ impl RegisterCommand<CommandResult> for ShareCmd {
     }
 
     fn handler() -> CommandHandler<CommandResult> {
-        CommandHandler::Contextual {
-            capabilities: CommandCapabilities::PROJECT,
-            handler: share_contextual,
-        }
+        CommandHandler::Contextual(share_contextual)
     }
 }
 
