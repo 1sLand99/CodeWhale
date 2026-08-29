@@ -19,6 +19,7 @@ use codewhale_agent::ModelRegistry;
 use codewhale_app_server::{
     AppServerOptions, run as run_app_server, run_stdio as run_app_server_stdio,
 };
+use codewhale_config::route::{ProvidersExport, parse_route_kind};
 use codewhale_config::{
     CliRuntimeOverrides, ConfigApiKeyValueKind, ConfigStore, ConfigToml, ProviderKind,
     ProviderSource, ResolvedRuntimeOptions, RuntimeApiKeySource, SetupState,
@@ -33,141 +34,17 @@ use codewhale_telemetry::{
     TelemetryDecision, TurnWall,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-enum ProviderArg {
-    Deepseek,
-    NvidiaNim,
-    Openai,
-    Atlascloud,
-    WanjieArk,
-    Volcengine,
-    Openrouter,
-    Orcarouter,
-    XiaomiMimo,
-    Novita,
-    Fireworks,
-    Siliconflow,
-    #[value(
-        alias = "silicon-flow-cn",
-        alias = "siliconflow-CN",
-        alias = "silicon_flow_cn",
-        alias = "siliconflow_cn",
-        alias = "siliconflow-china",
-        alias = "siliconflow_china"
-    )]
-    SiliconflowCn,
-    Arcee,
-    Moonshot,
-    Sglang,
-    Vllm,
-    Ollama,
-    #[value(alias = "ollama_cloud")]
-    OllamaCloud,
-    Huggingface,
-    Together,
-    OpenaiCodex,
-    Anthropic,
-    #[value(alias = "open-model", alias = "open_model")]
-    Openmodel,
-    Zai,
-    Stepfun,
-    Minimax,
-    #[value(
-        alias = "minimax_anthropic",
-        alias = "mini-max-anthropic",
-        alias = "mini_max_anthropic"
-    )]
-    MinimaxAnthropic,
-    #[value(alias = "deep-infra", alias = "deep_infra")]
-    Deepinfra,
-    #[value(alias = "fugu", alias = "sakana-ai", alias = "sakana_ai")]
-    Sakana,
-    #[value(alias = "long-cat", alias = "meituan-longcat", alias = "meituan")]
-    LongCat,
-    #[value(alias = "opencode_go", alias = "opencodego")]
-    OpencodeGo,
-    #[value(
-        alias = "opencode_zen",
-        alias = "opencodezen",
-        alias = "zen",
-        alias = "opencode"
-    )]
-    OpencodeZen,
-    #[value(
-        alias = "meta-ai",
-        alias = "meta_ai",
-        alias = "meta-model-api",
-        alias = "muse",
-        alias = "muse-spark"
-    )]
-    Meta,
-    #[value(alias = "x-ai", alias = "x_ai", alias = "grok")]
-    Xai,
-    #[value(
-        alias = "mistral-ai",
-        alias = "mistral_ai",
-        alias = "mistralai",
-        alias = "la-plateforme",
-        alias = "la_plateforme"
-    )]
-    Mistral,
-    /// Google Gemini (official OpenAI-compatible endpoint).
-    Google,
-    /// Google Antigravity (`agy`) — consent-gated OAuth import.
-    #[value(alias = "agy")]
-    Antigravity,
-    #[value(alias = "eden-ai", alias = "eden_ai")]
-    Edenai,
+/// Catalog-backed `--provider` parser. Replaces the closed 47-arm `ProviderArg` enum.
+fn parse_catalog_route(value: &str) -> std::result::Result<ProviderKind, String> {
+    parse_route_kind(value).ok_or_else(|| {
+        format!(
+            "unknown route '{value}'; expected a catalog route id (see `codewhale providers export --json`)"
+        )
+    })
 }
 
-impl From<ProviderArg> for ProviderKind {
-    fn from(value: ProviderArg) -> Self {
-        match value {
-            ProviderArg::Deepseek => ProviderKind::Deepseek,
-            ProviderArg::NvidiaNim => ProviderKind::NvidiaNim,
-            ProviderArg::Openai => ProviderKind::Openai,
-            ProviderArg::Atlascloud => ProviderKind::Atlascloud,
-            ProviderArg::WanjieArk => ProviderKind::WanjieArk,
-            ProviderArg::Volcengine => ProviderKind::Volcengine,
-            ProviderArg::Openrouter => ProviderKind::Openrouter,
-            ProviderArg::Orcarouter => ProviderKind::Orcarouter,
-            ProviderArg::XiaomiMimo => ProviderKind::XiaomiMimo,
-            ProviderArg::Novita => ProviderKind::Novita,
-            ProviderArg::Fireworks => ProviderKind::Fireworks,
-            ProviderArg::Siliconflow => ProviderKind::Siliconflow,
-            ProviderArg::SiliconflowCn => ProviderKind::SiliconflowCN,
-            ProviderArg::Arcee => ProviderKind::Arcee,
-            ProviderArg::Moonshot => ProviderKind::Moonshot,
-            ProviderArg::Sglang => ProviderKind::Sglang,
-            ProviderArg::Vllm => ProviderKind::Vllm,
-            ProviderArg::Ollama => ProviderKind::Ollama,
-            ProviderArg::OllamaCloud => ProviderKind::OllamaCloud,
-            ProviderArg::Huggingface => ProviderKind::Huggingface,
-            ProviderArg::Together => ProviderKind::Together,
-            ProviderArg::OpenaiCodex => ProviderKind::OpenaiCodex,
-            ProviderArg::Anthropic => ProviderKind::Anthropic,
-            ProviderArg::Openmodel => ProviderKind::Openmodel,
-            ProviderArg::Zai => ProviderKind::Zai,
-            ProviderArg::Stepfun => ProviderKind::Stepfun,
-            ProviderArg::Minimax => ProviderKind::Minimax,
-            ProviderArg::MinimaxAnthropic => ProviderKind::MinimaxAnthropic,
-            ProviderArg::Deepinfra => ProviderKind::Deepinfra,
-            ProviderArg::Sakana => ProviderKind::Sakana,
-            ProviderArg::LongCat => ProviderKind::LongCat,
-            ProviderArg::OpencodeGo => ProviderKind::OpencodeGo,
-            ProviderArg::OpencodeZen => ProviderKind::OpencodeZen,
-            ProviderArg::Meta => ProviderKind::Meta,
-            ProviderArg::Xai => ProviderKind::Xai,
-            ProviderArg::Mistral => ProviderKind::Mistral,
-            ProviderArg::Google => ProviderKind::Google,
-            ProviderArg::Antigravity => ProviderKind::Antigravity,
-            ProviderArg::Edenai => ProviderKind::Edenai,
-        }
-    }
-}
-
-fn builtin_provider_arg(value: &str) -> Option<ProviderArg> {
-    ProviderArg::from_str(value, false).ok()
+fn builtin_provider_arg(value: &str) -> Option<ProviderKind> {
+    parse_route_kind(value)
 }
 
 fn parse_provider_identifier(value: &str) -> std::result::Result<String, String> {
@@ -464,6 +341,24 @@ The command prints the completion script to stdout; redirect it to a path your s
     Metrics(MetricsArgs),
     /// Check for and apply updates to the `codewhale` binary.
     Update(UpdateArgs),
+    /// Export the route catalog (`providers export --json`).
+    Providers(ProvidersArgs),
+}
+
+#[derive(Debug, Args)]
+struct ProvidersArgs {
+    #[command(subcommand)]
+    command: ProvidersCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum ProvidersCommand {
+    /// Write the owned route catalog as JSON (cwc contract).
+    Export {
+        /// Required. The export is the generated cwc catalog source of truth.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// The name of this crate's `[[bin]]` target, and the command users actually
@@ -553,18 +448,13 @@ fn top_level_provider_override(
         return Ok(None);
     };
     if let Some(provider) = builtin_provider_arg(provider) {
-        return Ok(Some(provider.into()));
+        return Ok(Some(provider));
     }
     if command_accepts_raw_provider(command) {
         return Ok(None);
     }
 
-    let expected = ProviderArg::value_variants()
-        .iter()
-        .filter_map(ValueEnum::to_possible_value)
-        .map(|value| value.get_name().to_string())
-        .collect::<Vec<_>>()
-        .join(", ");
+    let expected = ProviderKind::names_hint();
     bail!(
         "invalid value '{provider}' for '--provider <PROVIDER>': expected one of {expected}; configured custom providers are accepted only by exec and fleet"
     )
@@ -1532,8 +1422,8 @@ struct LoginArgs {
     #[arg(long, hide = true)]
     api_key: Option<String>,
     /// Legacy provider flag: rejected with a redirect to `auth set`.
-    #[arg(long, value_enum, hide = true)]
-    provider: Option<ProviderArg>,
+    #[arg(long, value_parser = parse_catalog_route, hide = true)]
+    provider: Option<ProviderKind>,
 }
 
 #[derive(Debug, Args)]
@@ -1551,8 +1441,8 @@ enum AuthCommand {
     /// another CLI. Managed mutation is currently unsupported and fails closed.
     #[command(name = "external-consent")]
     ExternalConsent {
-        #[arg(long, value_enum)]
-        provider: ProviderArg,
+        #[arg(long, value_parser = parse_catalog_route)]
+        provider: ProviderKind,
         #[arg(long, value_enum)]
         mode: ExternalCredentialModeArg,
         /// Exact credential file path. Defaults to the selected CLI's resolved
@@ -1567,16 +1457,16 @@ enum AuthCommand {
     /// Revoke access to another CLI's credential file for one provider.
     #[command(name = "external-revoke")]
     ExternalRevoke {
-        #[arg(long, value_enum)]
-        provider: ProviderArg,
+        #[arg(long, value_parser = parse_catalog_route)]
+        provider: ProviderKind,
     },
     /// Show current provider and runtime-effective credential route state.
     /// Without `--provider`, shows all known providers.
     /// With `--provider`, shows detailed status for that provider.
     Status {
         /// Show status for a specific provider only.
-        #[arg(long, value_enum)]
-        provider: Option<ProviderArg>,
+        #[arg(long, value_parser = parse_catalog_route)]
+        provider: Option<ProviderKind>,
         /// Report resolved home/config/settings/backend paths and structural
         /// credential-source presence without printing credential values or
         /// probing provider credential stores.
@@ -1587,8 +1477,8 @@ enum AuthCommand {
     /// `--api-key`, `--api-key-stdin`, or prompts on stdin when
     /// neither is given. Does not echo the key.
     Set {
-        #[arg(long, value_enum)]
-        provider: ProviderArg,
+        #[arg(long, value_parser = parse_catalog_route)]
+        provider: ProviderKind,
         /// Inline value (discouraged — appears in shell history).
         #[arg(long)]
         api_key: Option<String>,
@@ -1599,18 +1489,18 @@ enum AuthCommand {
     /// Report the effective credential route for a provider. Never prints a
     /// credential; reports the source layer or structural OAuth/repair state.
     Get {
-        #[arg(long, value_enum)]
-        provider: ProviderArg,
+        #[arg(long, value_parser = parse_catalog_route)]
+        provider: ProviderKind,
     },
     /// Pipe the runtime-effective API key to a local client; refuses terminals.
     PrintApiKey {
-        #[arg(long, value_enum)]
-        provider: ProviderArg,
+        #[arg(long, value_parser = parse_catalog_route)]
+        provider: ProviderKind,
     },
     /// Delete a provider's key from config and secret-store storage.
     Clear {
-        #[arg(long, value_enum)]
-        provider: ProviderArg,
+        #[arg(long, value_parser = parse_catalog_route)]
+        provider: ProviderKind,
     },
     /// List all known providers with their runtime-effective auth state,
     /// without revealing credentials.
@@ -1665,13 +1555,13 @@ struct ModelArgs {
 #[derive(Debug, Subcommand)]
 enum ModelCommand {
     List {
-        #[arg(long, value_enum)]
-        provider: Option<ProviderArg>,
+        #[arg(long, value_parser = parse_catalog_route)]
+        provider: Option<ProviderKind>,
     },
     Resolve {
         model: Option<String>,
-        #[arg(long, value_enum)]
-        provider: Option<ProviderArg>,
+        #[arg(long, value_parser = parse_catalog_route)]
+        provider: Option<ProviderKind>,
     },
     /// Set the default model (e.g. "pro", "flash", "deepseek-v4-pro").
     Set { model: String },
@@ -2167,6 +2057,7 @@ fn run() -> Result<()> {
             finish_cli_telemetry(session, &outcome);
             outcome
         }
+        Some(Commands::Providers(args)) => run_providers_command(args),
         None => {
             let resolved_runtime = resolve_runtime_for_dispatch(&mut store, &runtime_overrides);
             let forwarded = root_tui_passthrough(&cli)?;
@@ -3434,7 +3325,7 @@ fn auth_diagnostic_lines(store: &ConfigStore, provider: Option<ProviderKind>) ->
     lines
 }
 
-fn run_auth_diagnostic(store: &ConfigStore, provider: Option<ProviderArg>) -> Result<()> {
+fn run_auth_diagnostic(store: &ConfigStore, provider: Option<ProviderKind>) -> Result<()> {
     for line in auth_diagnostic_lines(store, provider.map(ProviderKind::from)) {
         println!("{line}");
     }
@@ -4311,12 +4202,10 @@ fn clear_recorded_telemetry_opt_out_if_reenabled(key: &str, value: &str) -> Resu
 }
 
 fn model_command_provider_hint(
-    command_provider: Option<ProviderArg>,
+    command_provider: Option<ProviderKind>,
     top_level_provider: Option<ProviderKind>,
 ) -> Option<ProviderKind> {
-    command_provider
-        .map(ProviderKind::from)
-        .or(top_level_provider)
+    command_provider.or(top_level_provider)
 }
 
 fn provider_source_label(source: ProviderSource) -> String {
@@ -5040,6 +4929,21 @@ fn apply_tui_env(cli: &Cli, resolved_runtime: &ResolvedRuntimeOptions, passthrou
 // delegation is now in-process, and
 // `only_one_function_may_locate_and_spawn_the_tui` pins that.
 
+fn run_providers_command(args: ProvidersArgs) -> Result<()> {
+    match args.command {
+        ProvidersCommand::Export { json } => {
+            if !json {
+                bail!("`codewhale providers export` requires `--json`");
+            }
+            let export = ProvidersExport::from_registry(env!("CODEWHALE_BUILD_VERSION"));
+            serde_json::to_writer_pretty(io::stdout(), &export)
+                .context("failed to write providers export")?;
+            println!();
+            Ok(())
+        }
+    }
+}
+
 fn run_metrics_command(args: MetricsArgs) -> Result<()> {
     let since = match args.since.as_deref() {
         Some(s) => {
@@ -5220,6 +5124,7 @@ mod tests {
             yolo: None,
             verbosity: None,
             http_headers: std::collections::BTreeMap::new(),
+            route: None,
         }
     }
 
@@ -5687,7 +5592,7 @@ verbosity = "project-imported"
             cli.command,
             Some(Commands::Model(ModelArgs {
                 command: ModelCommand::List {
-                    provider: Some(ProviderArg::Openai)
+                    provider: Some(ProviderKind::Openai)
                 }
             }))
         ));
@@ -5716,7 +5621,7 @@ verbosity = "project-imported"
             Some(Commands::Model(ModelArgs {
                 command: ModelCommand::Resolve {
                     model: Some(ref model),
-                    provider: Some(ProviderArg::Deepseek)
+                    provider: Some(ProviderKind::Deepseek)
                 }
             })) if model == "deepseek-v4-pro"
         ));
@@ -5737,7 +5642,7 @@ verbosity = "project-imported"
             Some(ProviderKind::Zai)
         );
         assert_eq!(
-            model_command_provider_hint(Some(ProviderArg::Minimax), Some(ProviderKind::Zai)),
+            model_command_provider_hint(Some(ProviderKind::Minimax), Some(ProviderKind::Zai)),
             Some(ProviderKind::Minimax)
         );
         assert_eq!(model_command_provider_hint(None, None), None);
@@ -6280,8 +6185,18 @@ verbosity = "project-imported"
             Some(ProviderKind::Openrouter)
         );
 
+        assert_eq!(
+            top_level_provider_override(
+                Some("qianfan"),
+                Some(&Commands::Exec(TuiPassthroughArgs {
+                    args: vec!["Reply OK".into()]
+                }))
+            )
+            .expect("qianfan is a catalog route"),
+            Some(ProviderKind::Qianfan)
+        );
+
         for (provider, command) in [
-            ("qianfan", vec!["exec", "Reply OK"]),
             ("lm-studio", vec!["exec", "Reply OK"]),
             ("lm-studio", vec!["fleet", "status"]),
         ] {
@@ -6303,21 +6218,21 @@ verbosity = "project-imported"
     #[test]
     fn opencode_go_provider_aliases_parse_as_builtin() {
         for alias in ["opencode-go", "opencode_go", "opencodego"] {
-            assert_eq!(builtin_provider_arg(alias), Some(ProviderArg::OpencodeGo));
+            assert_eq!(builtin_provider_arg(alias), Some(ProviderKind::OpencodeGo));
         }
     }
 
     #[test]
     fn ollama_cloud_provider_aliases_parse_as_builtin() {
         for alias in ["ollama-cloud", "ollama_cloud"] {
-            assert_eq!(builtin_provider_arg(alias), Some(ProviderArg::OllamaCloud));
+            assert_eq!(builtin_provider_arg(alias), Some(ProviderKind::OllamaCloud));
         }
     }
 
     #[test]
     fn antigravity_provider_aliases_parse_as_builtin() {
         for alias in ["antigravity", "agy"] {
-            assert_eq!(builtin_provider_arg(alias), Some(ProviderArg::Antigravity));
+            assert_eq!(builtin_provider_arg(alias), Some(ProviderKind::Antigravity));
         }
     }
 
@@ -6334,7 +6249,7 @@ verbosity = "project-imported"
         ] {
             assert_eq!(
                 builtin_provider_arg(alias),
-                Some(ProviderArg::MinimaxAnthropic),
+                Some(ProviderKind::MinimaxAnthropic),
                 "{alias}"
             );
         }
@@ -6361,7 +6276,7 @@ verbosity = "project-imported"
             "zen",
             "opencode",
         ] {
-            assert_eq!(builtin_provider_arg(alias), Some(ProviderArg::OpencodeZen));
+            assert_eq!(builtin_provider_arg(alias), Some(ProviderKind::OpencodeZen));
         }
     }
 
@@ -6377,7 +6292,7 @@ verbosity = "project-imported"
 
         let err = Cli::try_parse_from(["codewhale", "auth", "set", "--provider", "lm-studio"])
             .expect_err("auth keeps enum-only provider validation");
-        assert_eq!(err.kind(), ErrorKind::InvalidValue);
+        assert_eq!(err.kind(), ErrorKind::ValueValidation);
 
         let err = Cli::try_parse_from([
             "codewhale",
@@ -6740,7 +6655,7 @@ verbosity = "project-imported"
         run_auth_command_with_secrets(
             &mut store,
             AuthCommand::Set {
-                provider: ProviderArg::Deepseek,
+                provider: ProviderKind::Deepseek,
                 api_key: Some("sk-test".to_string()),
                 api_key_stdin: false,
             },
@@ -6810,7 +6725,7 @@ verbosity = "project-imported"
             no_open: false,
             timeout_seconds: 600,
             api_key: None,
-            provider: Some(ProviderArg::Deepseek),
+            provider: Some(ProviderKind::Deepseek),
         })
         .expect_err("legacy --provider must be rejected");
         assert!(
@@ -6866,7 +6781,7 @@ verbosity = "project-imported"
         run_auth_command_with_secrets(
             &mut store,
             AuthCommand::Set {
-                provider: ProviderArg::Openrouter,
+                provider: ProviderKind::Openrouter,
                 api_key: Some("sk-or-repo-scoped".to_string()),
                 api_key_stdin: false,
             },
@@ -6922,7 +6837,7 @@ verbosity = "project-imported"
             cli.command,
             Some(Commands::Auth(AuthArgs {
                 command: AuthCommand::ExternalConsent {
-                    provider: ProviderArg::OpenaiCodex,
+                    provider: ProviderKind::OpenaiCodex,
                     mode: ExternalCredentialModeArg::ReadOnly,
                     path: Some(_),
                     yes: true,
@@ -6935,7 +6850,7 @@ verbosity = "project-imported"
             cli.command,
             Some(Commands::Auth(AuthArgs {
                 command: AuthCommand::ExternalRevoke {
-                    provider: ProviderArg::Xai,
+                    provider: ProviderKind::Xai,
                 }
             }))
         ));
@@ -6945,7 +6860,7 @@ verbosity = "project-imported"
             cli.command,
             Some(Commands::Auth(AuthArgs {
                 command: AuthCommand::Set {
-                    provider: ProviderArg::Deepseek,
+                    provider: ProviderKind::Deepseek,
                     api_key: None,
                     api_key_stdin: false,
                 }
@@ -6964,7 +6879,7 @@ verbosity = "project-imported"
             cli.command,
             Some(Commands::Auth(AuthArgs {
                 command: AuthCommand::Set {
-                    provider: ProviderArg::Openrouter,
+                    provider: ProviderKind::Openrouter,
                     api_key: None,
                     api_key_stdin: true,
                 }
@@ -6976,7 +6891,7 @@ verbosity = "project-imported"
             cli.command,
             Some(Commands::Auth(AuthArgs {
                 command: AuthCommand::Get {
-                    provider: ProviderArg::Novita
+                    provider: ProviderKind::Novita
                 }
             }))
         ));
@@ -6986,7 +6901,7 @@ verbosity = "project-imported"
             cli.command,
             Some(Commands::Auth(AuthArgs {
                 command: AuthCommand::Clear {
-                    provider: ProviderArg::NvidiaNim
+                    provider: ProviderKind::NvidiaNim
                 }
             }))
         ));
@@ -6996,7 +6911,7 @@ verbosity = "project-imported"
             cli.command,
             Some(Commands::Auth(AuthArgs {
                 command: AuthCommand::Set {
-                    provider: ProviderArg::Fireworks,
+                    provider: ProviderKind::Fireworks,
                     api_key: None,
                     api_key_stdin: false,
                 }
@@ -7008,7 +6923,7 @@ verbosity = "project-imported"
             cli.command,
             Some(Commands::Auth(AuthArgs {
                 command: AuthCommand::Set {
-                    provider: ProviderArg::Siliconflow,
+                    provider: ProviderKind::Siliconflow,
                     api_key: None,
                     api_key_stdin: false,
                 }
@@ -7020,7 +6935,7 @@ verbosity = "project-imported"
             cli.command,
             Some(Commands::Auth(AuthArgs {
                 command: AuthCommand::Set {
-                    provider: ProviderArg::Arcee,
+                    provider: ProviderKind::Arcee,
                     api_key: None,
                     api_key_stdin: false,
                 }
@@ -7032,7 +6947,7 @@ verbosity = "project-imported"
             cli.command,
             Some(Commands::Auth(AuthArgs {
                 command: AuthCommand::Set {
-                    provider: ProviderArg::Moonshot,
+                    provider: ProviderKind::Moonshot,
                     api_key: None,
                     api_key_stdin: false,
                 }
@@ -7044,7 +6959,7 @@ verbosity = "project-imported"
             cli.command,
             Some(Commands::Auth(AuthArgs {
                 command: AuthCommand::Set {
-                    provider: ProviderArg::WanjieArk,
+                    provider: ProviderKind::WanjieArk,
                     api_key: None,
                     api_key_stdin: false,
                 }
@@ -7056,7 +6971,7 @@ verbosity = "project-imported"
             cli.command,
             Some(Commands::Auth(AuthArgs {
                 command: AuthCommand::Get {
-                    provider: ProviderArg::Sglang
+                    provider: ProviderKind::Sglang
                 }
             }))
         ));
@@ -7066,7 +6981,7 @@ verbosity = "project-imported"
             cli.command,
             Some(Commands::Auth(AuthArgs {
                 command: AuthCommand::Get {
-                    provider: ProviderArg::Vllm
+                    provider: ProviderKind::Vllm
                 }
             }))
         ));
@@ -7076,7 +6991,7 @@ verbosity = "project-imported"
             cli.command,
             Some(Commands::Auth(AuthArgs {
                 command: AuthCommand::Set {
-                    provider: ProviderArg::Ollama,
+                    provider: ProviderKind::Ollama,
                     api_key: None,
                     api_key_stdin: false,
                 }
@@ -7088,7 +7003,7 @@ verbosity = "project-imported"
             cli.command,
             Some(Commands::Auth(AuthArgs {
                 command: AuthCommand::Status {
-                    provider: Some(ProviderArg::OpenaiCodex),
+                    provider: Some(ProviderKind::OpenaiCodex),
                     diagnostic: false,
                 }
             }))
@@ -7106,26 +7021,26 @@ verbosity = "project-imported"
             cli.command,
             Some(Commands::Auth(AuthArgs {
                 command: AuthCommand::Status {
-                    provider: Some(ProviderArg::Deepseek),
+                    provider: Some(ProviderKind::Deepseek),
                     diagnostic: true,
                 }
             }))
         ));
 
         for (provider, expected) in [
-            ("anthropic", ProviderArg::Anthropic),
-            ("openmodel", ProviderArg::Openmodel),
-            ("open-model", ProviderArg::Openmodel),
-            ("zai", ProviderArg::Zai),
-            ("stepfun", ProviderArg::Stepfun),
-            ("minimax", ProviderArg::Minimax),
-            ("minimax-anthropic", ProviderArg::MinimaxAnthropic),
-            ("minimax_anthropic", ProviderArg::MinimaxAnthropic),
-            ("deepinfra", ProviderArg::Deepinfra),
-            ("deep-infra", ProviderArg::Deepinfra),
-            ("siliconflow-cn", ProviderArg::SiliconflowCn),
-            ("siliconflow-CN", ProviderArg::SiliconflowCn),
-            ("siliconflow_china", ProviderArg::SiliconflowCn),
+            ("anthropic", ProviderKind::Anthropic),
+            ("openmodel", ProviderKind::Openmodel),
+            ("open-model", ProviderKind::Openmodel),
+            ("zai", ProviderKind::Zai),
+            ("stepfun", ProviderKind::Stepfun),
+            ("minimax", ProviderKind::Minimax),
+            ("minimax-anthropic", ProviderKind::MinimaxAnthropic),
+            ("minimax_anthropic", ProviderKind::MinimaxAnthropic),
+            ("deepinfra", ProviderKind::Deepinfra),
+            ("deep-infra", ProviderKind::Deepinfra),
+            ("siliconflow-cn", ProviderKind::SiliconflowCN),
+            ("siliconflow-CN", ProviderKind::SiliconflowCN),
+            ("siliconflow_china", ProviderKind::SiliconflowCN),
         ] {
             let cli = parse_ok(&[
                 "deepseek",
@@ -7205,7 +7120,7 @@ verbosity = "project-imported"
         run_auth_command_with_secrets(
             &mut store,
             AuthCommand::Set {
-                provider: ProviderArg::Deepseek,
+                provider: ProviderKind::Deepseek,
                 api_key: Some("sk-keyring".to_string()),
                 api_key_stdin: false,
             },
@@ -7263,7 +7178,7 @@ verbosity = "project-imported"
         let error = run_auth_command_with_secrets(
             &mut store,
             AuthCommand::Set {
-                provider: ProviderArg::Openrouter,
+                provider: ProviderKind::Openrouter,
                 api_key: Some("fallback-test-credential".to_string()),
                 api_key_stdin: false,
             },
@@ -7296,7 +7211,7 @@ verbosity = "project-imported"
         run_auth_command_with_secrets(
             &mut store,
             AuthCommand::Set {
-                provider: ProviderArg::Arcee,
+                provider: ProviderKind::Arcee,
                 api_key: Some("arcee-key".to_string()),
                 api_key_stdin: false,
             },
@@ -7336,7 +7251,7 @@ verbosity = "project-imported"
         run_auth_command_with_secrets(
             &mut store,
             AuthCommand::Set {
-                provider: ProviderArg::Ollama,
+                provider: ProviderKind::Ollama,
                 api_key: None,
                 api_key_stdin: false,
             },
@@ -7376,7 +7291,7 @@ verbosity = "project-imported"
         run_auth_command_with_secrets(
             &mut store,
             AuthCommand::Clear {
-                provider: ProviderArg::Deepseek,
+                provider: ProviderKind::Deepseek,
             },
             &secrets,
         )
@@ -7431,7 +7346,7 @@ verbosity = "project-imported"
         run_auth_command_with_secrets(
             &mut store,
             AuthCommand::Status {
-                provider: Some(ProviderArg::Deepseek),
+                provider: Some(ProviderKind::Deepseek),
                 diagnostic: false,
             },
             &secrets,
@@ -8282,7 +8197,7 @@ verbosity = "project-imported"
         let unconfirmed = run_auth_command_with_secrets(
             &mut store,
             AuthCommand::ExternalConsent {
-                provider: ProviderArg::Xai,
+                provider: ProviderKind::Xai,
                 mode: ExternalCredentialModeArg::ReadOnly,
                 path: Some(external_path.clone()),
                 yes: false,
@@ -8300,7 +8215,7 @@ verbosity = "project-imported"
         run_auth_command_with_secrets(
             &mut store,
             AuthCommand::ExternalConsent {
-                provider: ProviderArg::Xai,
+                provider: ProviderKind::Xai,
                 mode: ExternalCredentialModeArg::ReadOnly,
                 path: Some(external_path.clone()),
                 yes: true,
@@ -8361,7 +8276,7 @@ verbosity = "project-imported"
         run_auth_command_with_secrets(
             &mut store,
             AuthCommand::Set {
-                provider: ProviderArg::Xai,
+                provider: ProviderKind::Xai,
                 api_key: Some("xai-codewhale-owned-key".to_string()),
                 api_key_stdin: false,
             },
@@ -8377,7 +8292,7 @@ verbosity = "project-imported"
         run_auth_command_with_secrets(
             &mut store,
             AuthCommand::ExternalConsent {
-                provider: ProviderArg::Xai,
+                provider: ProviderKind::Xai,
                 mode: ExternalCredentialModeArg::ReadOnly,
                 path: Some(external_path.clone()),
                 yes: true,
@@ -8388,7 +8303,7 @@ verbosity = "project-imported"
         run_auth_command_with_secrets(
             &mut store,
             AuthCommand::ExternalRevoke {
-                provider: ProviderArg::Xai,
+                provider: ProviderKind::Xai,
             },
             &secrets,
         )
@@ -8412,7 +8327,7 @@ verbosity = "project-imported"
         let managed = run_auth_command_with_secrets(
             &mut store,
             AuthCommand::ExternalConsent {
-                provider: ProviderArg::OpenaiCodex,
+                provider: ProviderKind::OpenaiCodex,
                 mode: ExternalCredentialModeArg::Managed,
                 path: Some(external_path.clone()),
                 yes: true,
@@ -8429,7 +8344,7 @@ verbosity = "project-imported"
         let kimi = run_auth_command_with_secrets(
             &mut store,
             AuthCommand::ExternalConsent {
-                provider: ProviderArg::Moonshot,
+                provider: ProviderKind::Moonshot,
                 mode: ExternalCredentialModeArg::ReadOnly,
                 path: Some(external_path.clone()),
                 yes: true,
@@ -8497,7 +8412,7 @@ verbosity = "project-imported"
             let error = run_auth_command_with_secrets(
                 &mut store,
                 AuthCommand::Set {
-                    provider: ProviderArg::Xai,
+                    provider: ProviderKind::Xai,
                     api_key: Some("new-xai-key".to_string()),
                     api_key_stdin: false,
                 },
@@ -9087,6 +9002,7 @@ verbosity = "project-imported"
             "mcp-server",
             "config",
             "model",
+            "providers",
             "thread",
             "sandbox",
             "app-server",

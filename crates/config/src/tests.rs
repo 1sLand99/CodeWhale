@@ -8776,6 +8776,17 @@ fn telemetry_consent_names_its_source() {
     assert_eq!(source, TelemetrySource::Env);
 }
 
+#[test]
+fn resolved_runtime_options_mints_a_route_candidate() {
+    let resolved = ConfigToml::default().resolve_runtime_options(&CliRuntimeOverrides::default());
+    let route = resolved
+        .route
+        .as_ref()
+        .expect("RouteResolver is the runtime path");
+    assert_eq!(route.provider_kind(), resolved.provider);
+    assert_eq!(route.endpoint().base_url, resolved.base_url);
+}
+
 /// #5441: the runtime receipt carries the same source the surfaces print.
 #[test]
 fn resolved_runtime_options_reports_telemetry_source() {
