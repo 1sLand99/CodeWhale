@@ -3004,6 +3004,20 @@ pub struct Config {
     /// Example: `sandbox_denied_read_paths = ["~/.ssh", "~/.aws"]`.
     #[serde(default, alias = "sandboxDeniedReadPaths")]
     pub sandbox_denied_read_paths: Vec<std::path::PathBuf>,
+    /// Apply the built-in credential-store read deny-list (S1). Defaults to
+    /// `true`: `~/.ssh`, cloud credential dirs, keychains, browser profiles,
+    /// `.env` files, and Codewhale's own secret stores are unreadable by the
+    /// file-reading tools and by sandboxed shell commands. Set to `false` to
+    /// restore the pre-S1 full-disk-read behavior. See
+    /// `sandbox::read_guard` for the exact list and its honest limits — it is
+    /// defense-in-depth, not a security boundary.
+    #[serde(default, alias = "sandboxReadDenylistDefaults")]
+    pub sandbox_read_denylist_defaults: Option<bool>,
+    /// Subtract paths from the *built-in* deny-list defaults when a project
+    /// genuinely needs one of them. Has no effect on
+    /// `sandbox_denied_read_paths`: an explicit deny always wins.
+    #[serde(default, alias = "sandboxReadDenylistExempt")]
+    pub sandbox_read_denylist_exempt: Vec<std::path::PathBuf>,
     #[serde(alias = "managedConfigPath")]
     pub managed_config_path: Option<String>,
     #[serde(alias = "requirementsPath")]
@@ -4135,6 +4149,29 @@ pub(crate) fn approval_policy_baseline_from_permission_posture(
 // === Config Loading ===
 
 impl Config {
+    /// The read deny-list in force for this config (S1).
+    ///
+    /// Unions the built-in credential-store defaults (unless
+    /// `sandbox_read_denylist_defaults = false`) with
+    /// `sandbox_denied_read_paths`, minus `sandbox_read_denylist_exempt`.
+    /// Feeds both the in-process file-reading tools and the OS sandbox
+    /// wrappers, so a shell `cat` and a `read_file` call refuse the same paths.
+    #[must_use]
+    pub fn read_denylist(&self) -> crate::sandbox::read_guard::ReadDenylist {
+        crate::sandbox::read_guard::ReadDenylist::build(
+            self.sandbox_read_denylist_defaults.unwrap_or(true),
+            &self.sandbox_denied_read_paths,
+            &self.sandbox_read_denylist_exempt,
+        )
+    }
+
+    /// Every path the OS sandbox wrappers should deny reads under — the
+    /// deny-list's subtree rules, home-expanded and normalized.
+    #[must_use]
+    pub fn effective_sandbox_denied_read_paths(&self) -> Vec<std::path::PathBuf> {
+        self.read_denylist().subtree_paths()
+    }
+
     #[must_use]
     pub fn stop_words(&self) -> Vec<String> {
         self.stop_words.clone().unwrap_or_else(default_stop_words)
@@ -10274,6 +10311,14 @@ fn merge_config(base: Config, override_cfg: Config) -> Config {
             base.sandbox_denied_read_paths
         } else {
             override_cfg.sandbox_denied_read_paths
+        },
+        sandbox_read_denylist_defaults: override_cfg
+            .sandbox_read_denylist_defaults
+            .or(base.sandbox_read_denylist_defaults),
+        sandbox_read_denylist_exempt: if override_cfg.sandbox_read_denylist_exempt.is_empty() {
+            base.sandbox_read_denylist_exempt
+        } else {
+            override_cfg.sandbox_read_denylist_exempt
         },
         managed_config_path: override_cfg
             .managed_config_path

@@ -281,7 +281,7 @@ pub(crate) async fn run_exec_agent(
             read_only_roots: execution_config.bwrap_ro_roots.clone(),
             device_roots: execution_config.bwrap_dev_roots.clone(),
         },
-        denied_read_subpaths: execution_config.sandbox_denied_read_paths.clone(),
+        read_denylist: execution_config.read_denylist(),
         memory_enabled: execution_config.memory_enabled(),
         memory_path: execution_config.memory_path(),
         speech_output_dir: execution_config.speech_output_dir(),
