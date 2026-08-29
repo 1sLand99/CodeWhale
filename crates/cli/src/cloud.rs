@@ -606,10 +606,6 @@ fn run_with<T: CloudTransport, W: Write>(
                 client.poll_device(&device, Duration::from_secs(login.timeout_seconds), sleeper)?;
             let user = client.me()?;
             write_account(out, "Signed in to Codewhale.", profile, api_base, &user)?;
-            writeln!(
-                out,
-                "Optional: store a Daytona token with `codewhale auth set-slot daytona`."
-            )?;
             Ok(())
         }
         CloudCommand::Status => match client.load_auth()? {

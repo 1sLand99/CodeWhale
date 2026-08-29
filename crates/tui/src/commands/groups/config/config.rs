@@ -3011,6 +3011,8 @@ pub fn lsp_command(app: &mut App, arg: Option<&str>) -> CommandResult {
 
 /// Unified login status. Account device flow stays on the CLI so this
 /// command never freezes the TUI and never invents a second OAuth broker.
+/// The internal cloud-agent credential is not user surface: membership
+/// (`codewhale login`) is the only door, never a provider key.
 pub fn login(app: &mut App, arg: Option<&str>) -> CommandResult {
     let raw = arg.map(str::trim).unwrap_or("");
     let token = raw.split_whitespace().next().unwrap_or("");
@@ -3026,12 +3028,8 @@ pub fn login(app: &mut App, arg: Option<&str>) -> CommandResult {
              Then `/login` to confirm the session landed."
                 .to_string(),
         ),
-        "daytona" => CommandResult::error(
-            "Store a Daytona token with `codewhale auth set-slot daytona` (hidden prompt or --api-key-stdin). \
-             Dispatch looks up DAYTONA_API_KEY, CWC_DAYTONA_TOKEN, then keyring slot `daytona`.",
-        ),
         other => CommandResult::error(format!(
-            "Usage: /login [status|account|key|daytona]\nUnknown argument: {other}"
+            "Usage: /login [status|account|key]\nUnknown argument: {other}"
         )),
     }
 }
@@ -3066,22 +3064,14 @@ fn login_status_text(app: &App) -> String {
         }
         Err(error) => format!("unavailable ({error})"),
     };
-    let daytona = match codewhale_secrets::daytona_credential_source(
-        &codewhale_secrets::Secrets::auto_detect(),
-    ) {
-        Some(source) => format!("set (source: {source})"),
-        None => "not set".to_string(),
-    };
     let provider = app.provider_identity_for_persistence();
     format!(
         "Codewhale login\n\
          Account: {account}\n\
-         Daytona: {daytona}\n\
          Active provider: {provider}\n\
          \n\
          Sign in: `codewhale login`\n\
          Provider key: `codewhale auth set --provider <id>` or `/login key`\n\
-         Daytona token: `codewhale auth set-slot daytona`\n\
          Sign out: `/logout` or `codewhale logout`"
     )
 }
@@ -3136,14 +3126,16 @@ pub fn logout(app: &mut App) -> CommandResult {
                 Err(error) => cleared.push(format!("account session not cleared ({error})")),
             }
             match clear_daytona_slot() {
-                Ok(true) => cleared.push("Daytona token".to_string()),
+                Ok(true) => cleared.push("internal cloud-agent token".to_string()),
                 Ok(false) => {}
-                Err(error) => cleared.push(format!("Daytona token not cleared ({error})")),
+                Err(error) => {
+                    cleared.push(format!("internal cloud-agent token not cleared ({error})"))
+                }
             }
             CommandResult::with_message_and_action(
                 format!(
                     "Cleared {}. \
-                     Use `codewhale login` to sign in again, or `codewhale auth set --provider <id>` / `codewhale auth set-slot daytona` to store credentials.",
+                     Use `codewhale login` to sign in again, or `codewhale auth set --provider <id>` to store a provider key.",
                     cleared.join(", ")
                 ),
                 AppAction::OpenProviderPicker,

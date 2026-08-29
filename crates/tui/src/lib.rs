@@ -8010,8 +8010,7 @@ fn run_login(api_key: Option<String>) -> Result<()> {
     bail!(
         "This binary's `login` command does not store provider keys. \
          Use the `codewhale` CLI: `codewhale login` for the Codewhale account device flow, \
-         `codewhale auth set --provider <id>` for a provider key, \
-         or `codewhale auth set-slot daytona` for a Daytona token."
+         or `codewhale auth set --provider <id>` for a provider key."
     );
 }
 

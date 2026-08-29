@@ -1612,20 +1612,6 @@ enum AuthCommand {
         #[arg(long, value_enum)]
         provider: ProviderArg,
     },
-    /// Save a non-provider credential (Daytona token) to the secret store.
-    #[command(name = "set-slot")]
-    SetSlot {
-        slot: CredentialSlotArg,
-        /// Inline value (discouraged — appears in shell history).
-        #[arg(long)]
-        api_key: Option<String>,
-        /// Read the token from stdin instead of prompting.
-        #[arg(long = "api-key-stdin", default_value_t = false)]
-        api_key_stdin: bool,
-    },
-    /// Delete a non-provider credential slot from the secret store.
-    #[command(name = "clear-slot")]
-    ClearSlot { slot: CredentialSlotArg },
     /// List all known providers with their runtime-effective auth state,
     /// without revealing credentials.
     List,
@@ -1642,20 +1628,6 @@ enum AuthCommand {
 enum ExternalCredentialModeArg {
     ReadOnly,
     Managed,
-}
-
-/// Non-provider secret-store slots that login writes and other surfaces look up.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-enum CredentialSlotArg {
-    Daytona,
-}
-
-impl CredentialSlotArg {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Daytona => codewhale_secrets::DAYTONA_TOKEN_SLOT,
-        }
-    }
 }
 
 #[derive(Debug, Args)]
@@ -3256,7 +3228,6 @@ fn auth_status_all_providers_with_runtime(
     let active_provider = store.config.provider;
     let mut lines = Vec::new();
     lines.push(account_status_line());
-    lines.push(daytona_status_line(secrets));
     lines.push(String::new());
     lines.push(format!(
         "active provider: {} (set via config or CODEWHALE_PROVIDER)",
@@ -3344,10 +3315,7 @@ fn auth_status_all_providers_with_runtime(
     lines.push(String::new());
     lines.push("* = active provider (from config or CODEWHALE_PROVIDER)".to_string());
     lines.push("Run `codewhale auth status --provider <id>` for detailed info.".to_string());
-    lines.push(
-        "Account sign-in is `codewhale login`. Daytona token: `codewhale auth set-slot daytona`."
-            .to_string(),
-    );
+    lines.push("Account sign-in is `codewhale login`.".to_string());
     lines
 }
 
@@ -3380,13 +3348,6 @@ fn account_status_line() -> String {
             }
         }
         Err(error) => format!("account: unavailable ({error})"),
-    }
-}
-
-fn daytona_status_line(secrets: &Secrets) -> String {
-    match codewhale_secrets::daytona_credential_source(secrets) {
-        Some(source) => format!("daytona: set (source: {source})"),
-        None => "daytona: not set".to_string(),
     }
 }
 
@@ -4164,34 +4125,6 @@ fn run_auth_command_with_secrets_and_runtime(
             } else {
                 clear_auth_provider(store, secrets, provider)
             }
-        }
-        AuthCommand::SetSlot {
-            slot,
-            api_key,
-            api_key_stdin,
-        } => {
-            let slot = slot.as_str();
-            let value = match (api_key, api_key_stdin) {
-                (Some(value), _) => value,
-                (None, true) => read_api_key_from_stdin()?,
-                (None, false) => prompt_api_key(slot)?,
-            };
-            let value = value.trim();
-            if value.is_empty() {
-                bail!("refusing to store an empty {slot} token");
-            }
-            secrets.set(slot, value)?;
-            println!(
-                "saved {slot} token to {} (never written to config.toml)",
-                secrets.backend_name()
-            );
-            Ok(())
-        }
-        AuthCommand::ClearSlot { slot } => {
-            let slot = slot.as_str();
-            secrets.delete(slot)?;
-            println!("cleared {slot} token from {}", secrets.backend_name());
-            Ok(())
         }
         AuthCommand::List => {
             for line in auth_list_lines_with_runtime(store, secrets, runtime_overrides) {
@@ -6985,33 +6918,26 @@ verbosity = "project-imported"
     }
 
     #[test]
-    fn auth_parses_daytona_slot_commands() {
-        let cli = parse_ok(&[
-            "codewhale",
-            "auth",
-            "set-slot",
-            "daytona",
-            "--api-key-stdin",
-        ]);
-        assert!(matches!(
-            cli.command,
-            Some(Commands::Auth(AuthArgs {
-                command: AuthCommand::SetSlot {
-                    slot: CredentialSlotArg::Daytona,
-                    api_key_stdin: true,
-                    ..
-                }
-            }))
-        ));
-        let cli = parse_ok(&["codewhale", "auth", "clear-slot", "daytona"]);
-        assert!(matches!(
-            cli.command,
-            Some(Commands::Auth(AuthArgs {
-                command: AuthCommand::ClearSlot {
-                    slot: CredentialSlotArg::Daytona
-                }
-            }))
-        ));
+    fn auth_parses_daytona_slot_commands_as_unknown() {
+        // The internal cloud-agent slot must not be a user command: parsing
+        // rejects it and `auth --help` never teaches it.
+        for argv in [
+            vec![
+                "codewhale",
+                "auth",
+                "set-slot",
+                "daytona",
+                "--api-key-stdin",
+            ],
+            vec!["codewhale", "auth", "clear-slot", "daytona"],
+        ] {
+            let error = Cli::try_parse_from(argv).expect_err("slot commands must not parse");
+            assert_eq!(error.kind(), ErrorKind::InvalidSubcommand, "{error}");
+        }
+        let help = help_for(&["codewhale", "auth", "--help"]);
+        assert!(!help.contains("set-slot"), "{help}");
+        assert!(!help.contains("clear-slot"), "{help}");
+        assert!(!help.to_lowercase().contains("daytona"), "{help}");
     }
 
     /// #5198: `auth set` shares the login resolver — provider auth markers go
@@ -7782,11 +7708,11 @@ verbosity = "project-imported"
         let output = auth_status_all_providers(&store, &secrets).join("\n");
 
         assert!(output.contains("account:"), "{output}");
-        assert!(output.contains("daytona: not set"), "{output}");
-        assert!(
-            output.contains("codewhale login") && output.contains("set-slot daytona"),
-            "{output}"
-        );
+        assert!(output.contains("codewhale login"), "{output}");
+        // No-brand invariant: the internal cloud-agent slot is not user
+        // surface, so status never names it or teaches a set-slot command.
+        assert!(!output.to_lowercase().contains("daytona"), "{output}");
+        assert!(!output.contains("set-slot"), "{output}");
 
         // Should list all known providers
         assert!(output.contains("deepseek"));
@@ -8937,56 +8863,38 @@ verbosity = "project-imported"
     }
 
     #[test]
-    fn auth_set_slot_writes_daytona_without_config_plaintext() {
+    fn auth_set_slot_daytona_has_no_user_surface() {
+        // The internal cloud-agent credential is managed by Codewhale, not
+        // users: no CLI command may write or clear it, and no help text may
+        // teach it. Membership (`codewhale login`) is the only door.
         use codewhale_secrets::InMemoryKeyringStore;
         use std::sync::Arc;
 
-        let nanos = chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default();
-        let path = std::env::temp_dir().join(format!(
-            "deepseek-cli-auth-set-slot-test-{}-{nanos}.toml",
-            std::process::id()
-        ));
-        let mut store = ConfigStore::load(Some(path.clone())).expect("store should load");
+        for argv in [
+            vec![
+                "codewhale",
+                "auth",
+                "set-slot",
+                "daytona",
+                "--api-key",
+                "dtn_saved",
+            ],
+            vec!["codewhale", "auth", "clear-slot", "daytona"],
+        ] {
+            assert!(
+                Cli::try_parse_from(argv).is_err(),
+                "slot commands must not parse"
+            );
+        }
+
         let inner = Arc::new(InMemoryKeyringStore::new());
-        let secrets = Secrets::new(inner.clone());
-
-        run_auth_command_with_secrets(
-            &mut store,
-            AuthCommand::SetSlot {
-                slot: CredentialSlotArg::Daytona,
-                api_key: Some("dtn_saved".to_string()),
-                api_key_stdin: false,
-            },
-            &secrets,
-        )
-        .expect("set-slot should succeed");
-
-        assert_eq!(
-            secrets
-                .get(codewhale_secrets::DAYTONA_TOKEN_SLOT)
-                .expect("read slot")
-                .as_deref(),
-            Some("dtn_saved")
-        );
-        let saved = std::fs::read_to_string(&path).unwrap_or_default();
-        assert!(!saved.contains("dtn_saved"), "{saved}");
-
-        run_auth_command_with_secrets(
-            &mut store,
-            AuthCommand::ClearSlot {
-                slot: CredentialSlotArg::Daytona,
-            },
-            &secrets,
-        )
-        .expect("clear-slot should succeed");
+        let secrets = Secrets::new(inner);
         assert!(
             secrets
                 .get(codewhale_secrets::DAYTONA_TOKEN_SLOT)
                 .expect("read slot")
                 .is_none()
         );
-
-        let _ = std::fs::remove_file(path);
     }
 
     #[test]

@@ -60,7 +60,7 @@ static PERMISSIONS_INFO: CommandInfo = CommandInfo {
 static LOGIN_INFO: CommandInfo = CommandInfo {
     name: "login",
     aliases: &[],
-    usage: "/login [status|account|key|daytona]",
+    usage: "/login [status|account|key]",
     description_id: MessageId::CmdLoginDescription,
 };
 static AUTH_INFO: CommandInfo = CommandInfo {

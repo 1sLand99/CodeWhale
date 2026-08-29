@@ -618,12 +618,20 @@ mod tests {
         let message = status.message.expect("login status");
         assert!(message.contains("Codewhale login"), "{message}");
         assert!(message.contains("Account:"), "{message}");
-        assert!(message.contains("Daytona:"), "{message}");
         assert!(message.contains("codewhale login"), "{message}");
+        // No-brand invariant: the internal cloud-agent slot is not user
+        // surface, so status never names it or teaches a set-slot command.
+        assert!(!message.contains("Daytona"), "{message}");
+        assert!(!message.contains("set-slot"), "{message}");
 
         let key = execute("/login key", &mut app);
         assert!(!key.is_error);
         assert_eq!(key.action, Some(AppAction::OpenProviderPicker));
+
+        let daytona = execute("/login daytona", &mut app);
+        assert!(daytona.is_error);
+        let err = daytona.message.expect("usage");
+        assert!(err.contains("Usage: /login [status|account|key]"), "{err}");
 
         let unknown = execute("/login oauth", &mut app);
         assert!(unknown.is_error);
