@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Add `codewhale dispatch` / `/dispatch` so a local session can propose a
+  Daytona cloud agent against an explicit `github`, `cnb`, or `gitee` remote.
+  Confirmation is required; missing credentials fail closed; cloud jobs share
+  the existing `/jobs` surface as `kind=cloud`. See
+  [DAYTONA_CLOUD_DISPATCH.md](docs/DAYTONA_CLOUD_DISPATCH.md).
 - Add provider-native web search for documented Xiaomi MiMo 2.5 Pro and 2.5
   chat routes while keeping neighboring models and custom gateways fail-closed.
 - Add structured provider-native web search for exact Z.AI global and Zhipu
