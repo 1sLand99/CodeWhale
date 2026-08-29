@@ -11,7 +11,7 @@ use super::{
 };
 use crate::{
     client::api_url,
-    config::{DEFAULT_KIMI_CODE_BASE_URL, MOONSHOT_KIMI_K3_MODEL},
+    config::{MOONSHOT_KIMI_K3_MODEL, moonshot_base_url_is_exact_kimi_code},
 };
 
 const MAX_NATIVE_SEARCH_ROUNDS: usize = 4;
@@ -24,7 +24,10 @@ pub(super) async fn search(
     client: &ProviderNativeSearchClient,
     request: &ProviderNativeSearchRequest,
 ) -> Result<ProviderNativeSearchResponse> {
-    if is_kimi_code_route(&client.inner.base_url) {
+    if moonshot_base_url_is_exact_kimi_code(&client.inner.base_url) {
+        // Exact Kimi Code membership endpoint only: the structured `/search`
+        // service is a first-party contract, so differently-cased or adjacent
+        // Kimi-hosted paths must not inherit it.
         search_kimi_code(client, request).await
     } else if client
         .inner
@@ -36,13 +39,6 @@ pub(super) async fn search(
     } else {
         search_builtin(client, request).await
     }
-}
-
-fn is_kimi_code_route(base_url: &str) -> bool {
-    base_url
-        .trim()
-        .trim_end_matches('/')
-        .eq_ignore_ascii_case(DEFAULT_KIMI_CODE_BASE_URL)
 }
 
 async fn search_kimi_code(
@@ -378,6 +374,33 @@ mod tests {
         reserve_native_search_tool_calls(&mut executed, 4).expect("final allowed round");
         assert_eq!(executed, MAX_NATIVE_SEARCH_TOOL_CALLS);
         assert!(reserve_native_search_tool_calls(&mut executed, 1).is_err());
+    }
+
+    #[test]
+    fn kimi_code_dispatch_reuses_the_exact_route_matcher() {
+        for route in [
+            "https://api.kimi.com/coding/v1",
+            "https://api.kimi.com/coding/v1/",
+            "HTTPS://API.KIMI.COM/coding/v1",
+        ] {
+            assert!(
+                moonshot_base_url_is_exact_kimi_code(route),
+                "{route} is the membership endpoint"
+            );
+        }
+        for neighboring_route in [
+            // A case-variant path is a different route, not the official one.
+            "https://API.KIMI.COM/CODING/V1",
+            "https://api.kimi.com/coding/v2",
+            "https://api.kimi.com/coding",
+            "http://api.kimi.com/coding/v1",
+            "https://api.moonshot.ai/v1",
+        ] {
+            assert!(
+                !moonshot_base_url_is_exact_kimi_code(neighboring_route),
+                "{neighboring_route} must not reach the Kimi Code /search service"
+            );
+        }
     }
 
     #[tokio::test]

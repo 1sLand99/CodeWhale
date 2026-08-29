@@ -7,7 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{DEFAULT_KIMI_CODE_BASE_URL, ProviderKind};
+use crate::ProviderKind;
 
 /// Whether a resolved provider/model offering supports one capability.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -138,9 +138,8 @@ pub(crate) fn documented_moonshot_web_search_for_route(
     if provider != ProviderKind::Moonshot {
         return CapabilityState::Unknown;
     }
-    let normalized = base_url.trim().trim_end_matches('/').to_ascii_lowercase();
     let model = wire_model_id.trim().to_ascii_lowercase();
-    if normalized == DEFAULT_KIMI_CODE_BASE_URL
+    if crate::provider::is_exact_kimi_code_route(provider, base_url)
         && matches!(
             model.as_str(),
             "k3" | "k3-256k" | "kimi-for-coding" | "kimi-for-coding-highspeed"
@@ -185,6 +184,7 @@ pub struct RouteCapabilities {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::DEFAULT_KIMI_CODE_BASE_URL;
 
     #[test]
     fn optional_boolean_preserves_unknown_and_false() {
