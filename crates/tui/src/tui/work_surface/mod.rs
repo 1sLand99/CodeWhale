@@ -64,7 +64,7 @@
 mod input;
 mod interaction;
 mod model;
-mod panels;
+pub(crate) mod panels;
 mod render;
 #[allow(dead_code)] // Tideline rail rendering (spec §5a); wired by the landing slice
 pub mod tideline;

@@ -7652,3 +7652,159 @@ context_window = 262144
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Tideline settings rail + settings stage (spec §5a "Settings rail",
+// "Live preview"; §5b 3-pane settings layout). Translation scaffolding in
+// the topbar mold: pure, deterministic widgets; `ConfigView`'s own nav is
+// untouched and takes over these categories at the landing slice (#5698
+// gate).
+
+#[allow(dead_code)] // Tideline settings rail + preview (spec §5a)
+pub mod tideline_preview;
+
+/// The eight settings categories in rail order (Appearance → Advanced).
+#[must_use]
+#[allow(dead_code)] // translation scaffolding: wired by the landing slice
+pub fn tideline_settings_categories() -> [&'static str; 8] {
+    [
+        "Appearance",
+        "Motion",
+        "Composer",
+        "Notifications",
+        "Provider",
+        "Keybindings",
+        "Privacy",
+        "Advanced",
+    ]
+}
+
+/// What the caller owes the settings rail.
+#[allow(dead_code)] // translation scaffolding: wired by the landing slice
+pub struct TidelineSettingsRail<'a> {
+    pub theme: &'a crate::palette::UiTheme,
+    pub selected: usize,
+    pub ascii_safe: bool,
+}
+
+fn srail_put(buf: &mut Buffer, x: u16, y: u16, text: &str, style: Style) {
+    buf.set_stringn(x, y, text, text.width(), style);
+}
+
+/// Paint the settings rail: 8 categories with the selected `▸`, then the
+/// meta rows (help / file issue / feedback).
+#[allow(dead_code)] // translation scaffolding: wired by the landing slice
+pub fn render_tideline_settings_rail(
+    area: Rect,
+    buf: &mut Buffer,
+    rail: &TidelineSettingsRail<'_>,
+) {
+    if area.width < 4 || area.height < 4 {
+        return;
+    }
+    let theme = rail.theme;
+    let categories = tideline_settings_categories();
+    let mut y = area.y;
+    for (index, label) in categories.iter().enumerate() {
+        if y >= area.y + area.height.saturating_sub(3) {
+            break;
+        }
+        let selected = rail.selected == index;
+        let ink = if selected {
+            crate::palette::ChromeInk::Identity
+        } else {
+            crate::palette::ChromeInk::MetadataValue
+        };
+        let mut style = crate::palette::chrome_style(theme, ink);
+        if selected {
+            style = style.add_modifier(Modifier::BOLD);
+            srail_put(
+                buf,
+                area.x,
+                y,
+                "▸",
+                crate::palette::chrome_style(theme, crate::palette::ChromeInk::Identity),
+            );
+        }
+        srail_put(buf, area.x + 2, y, label, style);
+        y += 1;
+    }
+    // Meta rows pinned near the bottom (the reference's help/file/feedback).
+    let meta_y = area.y + area.height.saturating_sub(3);
+    for (offset, meta) in ["? help", "/ file issue", "f feedback"].iter().enumerate() {
+        let row_y = meta_y + offset as u16;
+        if row_y < area.y + area.height {
+            srail_put(
+                buf,
+                area.x,
+                row_y,
+                meta,
+                crate::palette::chrome_style(theme, crate::palette::ChromeInk::MetadataHint),
+            );
+        }
+    }
+}
+
+/// Category rects for the rail (spec §6: keyboard + mouse parity).
+#[must_use]
+#[allow(dead_code)] // translation scaffolding: wired by the landing slice
+pub fn tideline_settings_rail_hitboxes(area: Rect, _rail: &TidelineSettingsRail<'_>) -> Vec<Rect> {
+    let mut out = Vec::new();
+    if area.width < 4 || area.height < 4 {
+        return out;
+    }
+    for index in 0..tideline_settings_categories().len() {
+        let y = area.y + index as u16;
+        if y >= area.y + area.height.saturating_sub(3) {
+            break;
+        }
+        out.push(Rect {
+            x: area.x,
+            y,
+            width: area.width,
+            height: 1,
+        });
+    }
+    out
+}
+
+use ratatui::layout::{Constraint, Layout};
+
+/// The settings stage composite (spec §5b): `nav │ form │ preview` at
+/// ≥100 columns; the preview pane sheds below 100.
+pub struct TidelineSettingsStage<'a> {
+    pub rail: TidelineSettingsRail<'a>,
+    pub theme_list: crate::tui::theme_picker::TidelineThemeList<'a>,
+    pub preview: tideline_preview::TidelineSettingsPreview<'a>,
+}
+
+/// Paint the settings stage.
+#[allow(dead_code)] // translation scaffolding: wired by the landing slice
+pub fn render_tideline_settings_stage(
+    area: Rect,
+    buf: &mut Buffer,
+    stage: &TidelineSettingsStage<'_>,
+) {
+    if area.width < 30 || area.height < 4 {
+        return;
+    }
+    if area.width >= 100 {
+        let [nav, form, preview] = Layout::horizontal([
+            Constraint::Length(18),
+            Constraint::Min(30),
+            Constraint::Percentage(38),
+        ])
+        .areas(area);
+        render_tideline_settings_rail(nav, buf, &stage.rail);
+        crate::tui::theme_picker::render_tideline_theme_list(form, buf, &stage.theme_list);
+        tideline_preview::render_tideline_settings_preview(preview, buf, &stage.preview);
+    } else {
+        let [nav, form] =
+            Layout::horizontal([Constraint::Length(16), Constraint::Min(20)]).areas(area);
+        render_tideline_settings_rail(nav, buf, &stage.rail);
+        crate::tui::theme_picker::render_tideline_theme_list(form, buf, &stage.theme_list);
+    }
+}
+
+#[cfg(test)]
+mod tideline_tests;

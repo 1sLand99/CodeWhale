@@ -747,3 +747,188 @@ mod tests {
         assert_eq!(v.controller.visible().len(), SELECTABLE_THEMES.len());
     }
 }
+
+use unicode_width::UnicodeWidthStr as _TidelineWidth;
+
+// ---------------------------------------------------------------------------
+// Tideline theme list (spec §5a "Theme list"): the 13 selectable themes
+// (4 mode rows + 9 presets), the selected row boxed with ✓, and the MOTION
+// (OPTIONAL) toggles. Translation scaffolding in the topbar mold: pure,
+// deterministic, injected selection — Up/Down preview and Enter apply stay
+// the shared settings-picker controller's job at the landing slice; not
+// wired into `ui/frame.rs` (#5698 gate).
+
+/// The 13 themes in display order: 4 mode rows then 9 presets.
+#[allow(dead_code)] // translation scaffolding: wired by the landing slice
+pub fn tideline_theme_rows() -> Vec<crate::palette::ThemeId> {
+    crate::palette::SELECTABLE_THEMES.to_vec()
+}
+
+/// What the caller owes the theme-list render.
+#[allow(dead_code)] // translation scaffolding: wired by the landing slice
+pub struct TidelineThemeList<'a> {
+    pub theme: &'a UiTheme,
+    /// Selected row index into the 13-theme display order.
+    pub selected: usize,
+    /// `low_motion` setting (MOTION OPTIONAL toggle 1).
+    pub low_motion: bool,
+    /// `fancy_animations` setting (MOTION OPTIONAL toggle 2).
+    pub fancy_animations: bool,
+    pub ascii_safe: bool,
+}
+
+#[allow(dead_code)] // translation scaffolding: builder methods feed tests + the landing slice
+impl<'a> TidelineThemeList<'a> {
+    #[allow(dead_code)] // translation scaffolding: wired by the landing slice
+    #[must_use]
+    pub fn new(theme: &'a UiTheme, selected: usize) -> Self {
+        Self {
+            theme,
+            selected,
+            low_motion: false,
+            fancy_animations: true,
+            ascii_safe: false,
+        }
+    }
+
+    #[must_use]
+    pub fn motion(mut self, low_motion: bool, fancy_animations: bool) -> Self {
+        self.low_motion = low_motion;
+        self.fancy_animations = fancy_animations;
+        self
+    }
+
+    #[must_use]
+    pub fn ascii_safe(mut self, ascii_safe: bool) -> Self {
+        self.ascii_safe = ascii_safe;
+        self
+    }
+
+    fn sym(&self, glyph: &str) -> String {
+        if !self.ascii_safe {
+            return glyph.to_string();
+        }
+        if let Some(fb) = crate::tui::glyphs::ascii_fallback(glyph) {
+            return fb.to_string();
+        }
+        glyph
+            .chars()
+            .map(|c| {
+                crate::tui::glyphs::ascii_fallback(&c.to_string())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| c.to_string())
+            })
+            .collect()
+    }
+}
+
+fn tput(buf: &mut Buffer, x: u16, y: u16, text: &str, style: Style) {
+    buf.set_stringn(x, y, text, _TidelineWidth::width(text), style);
+}
+
+fn tchrome(theme: &UiTheme, ink: crate::palette::ChromeInk) -> Style {
+    crate::palette::chrome_style(theme, ink)
+}
+
+/// Paint the theme list: 13 rows (4 modes + 9 presets) with the selected
+/// row boxed `[ ✓ Name ]`, then the MOTION (OPTIONAL) toggle rows.
+#[allow(dead_code)] // translation scaffolding: wired by the landing slice
+pub fn render_tideline_theme_list(area: Rect, buf: &mut Buffer, list: &TidelineThemeList<'_>) {
+    if area.width < 8 || area.height < 3 {
+        return;
+    }
+    let theme = list.theme;
+    let rows = tideline_theme_rows();
+    let mut y = area.y;
+    for (index, id) in rows.iter().enumerate() {
+        if y >= area.y + area.height {
+            return;
+        }
+        let selected = list.selected == index;
+        let label = id.display_name();
+        let row = if selected {
+            format!("[ {} {} ]", list.sym("✓"), label)
+        } else {
+            format!("  {label}  ")
+        };
+        let ink = if selected {
+            crate::palette::ChromeInk::Identity
+        } else {
+            crate::palette::ChromeInk::MetadataValue
+        };
+        let mut style = tchrome(theme, ink);
+        if selected {
+            style = style.add_modifier(Modifier::BOLD);
+        }
+        tput(buf, area.x, y, &row, style);
+        y += 1;
+    }
+    // MOTION (OPTIONAL)
+    if y < area.y + area.height {
+        tput(
+            buf,
+            area.x,
+            y,
+            "MOTION (OPTIONAL)",
+            tchrome(theme, crate::palette::ChromeInk::MetadataDim).add_modifier(Modifier::BOLD),
+        );
+        y += 1;
+    }
+    for (label, on) in [
+        ("low motion", list.low_motion),
+        ("ambient life", list.fancy_animations),
+    ] {
+        if y >= area.y + area.height {
+            return;
+        }
+        let mark = if on { "◉" } else { "○" };
+        let row = format!("{} {}", list.sym(mark), label);
+        let ink = if on {
+            crate::palette::ChromeInk::Active
+        } else {
+            crate::palette::ChromeInk::MetadataDim
+        };
+        tput(buf, area.x + 1, y, &row, tchrome(theme, ink));
+        y += 1;
+    }
+}
+
+/// Row hitboxes for the theme list (spec §6): 13 theme rects + 2 toggles.
+#[must_use]
+#[allow(dead_code)] // translation scaffolding: wired by the landing slice
+pub fn tideline_theme_list_hitboxes(area: Rect, _list: &TidelineThemeList<'_>) -> Vec<Rect> {
+    let mut out = Vec::new();
+    if area.width < 8 || area.height < 3 {
+        return out;
+    }
+    let rows = tideline_theme_rows().len();
+    for index in 0..rows {
+        let y = area.y + index as u16;
+        if y >= area.y + area.height {
+            return out;
+        }
+        out.push(Rect {
+            x: area.x,
+            y,
+            width: area.width,
+            height: 1,
+        });
+    }
+    // Toggle rows follow the MOTION (OPTIONAL) header.
+    let toggle_y = area.y + rows as u16 + 1;
+    for offset in 0..2 {
+        let y = toggle_y + offset;
+        if y < area.y + area.height {
+            out.push(Rect {
+                x: area.x,
+                y,
+                width: area.width,
+                height: 1,
+            });
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tideline_tests;
