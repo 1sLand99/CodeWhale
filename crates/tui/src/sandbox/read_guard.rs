@@ -56,6 +56,12 @@
 //!   spelling that `canonicalize` and `current_dir` hand back. Without that,
 //!   the resolved candidate never matched a literal rule, which is exactly the
 //!   shape hosted macOS CI runs in (`$TMPDIR` under `/var/folders`).
+//!   Exemptions are matched the same way, so exempting `/private/etc/sudoers`
+//!   — the spelling a denial message may name — reopens the `/etc/sudoers`
+//!   rule it resolves from. Rules are resolved when the list is built
+//!   (startup and config reload); a symlink retargeted afterwards is seen
+//!   through the literal candidate only until the list is rebuilt, which is
+//!   within the defense-in-depth posture above.
 //! - **`..` and relative paths.** Two candidates are tested. The literal one is
 //!   lexically normalized (`.`/`..` folded without touching the disk), which
 //!   catches traversal into a denied tree even when nothing on the path exists
@@ -149,6 +155,20 @@ impl DenyRule {
         }
     }
 
+    /// True when this rule, under either spelling, lies at or below one of
+    /// `roots`. Exemptions subtract whole rules, so both spellings count.
+    fn is_within_any(&self, roots: &[PathBuf]) -> bool {
+        let DenyRule::Subtree { path, resolved, .. } = self else {
+            return false;
+        };
+        roots.iter().any(|root| {
+            path_is_within(path, root)
+                || resolved
+                    .as_deref()
+                    .is_some_and(|real| path_is_within(real, root))
+        })
+    }
+
     #[must_use]
     fn describe(&self) -> String {
         match self {
@@ -182,11 +202,19 @@ impl ReadDenylist {
     ///   from the built-in defaults only.
     #[must_use]
     pub fn build(include_defaults: bool, extra: &[PathBuf], exempt: &[PathBuf]) -> Self {
+        // Each exemption is kept in both spellings too, so exempting the path a
+        // denial named (`/private/etc/sudoers` on macOS) reopens the rule it
+        // resolved from (`/etc/sudoers`), and vice versa.
         let exempt_normalized: Vec<PathBuf> = exempt
             .iter()
             .cloned()
             .map(expand_home_prefix)
             .map(|p| normalize_lexically(&p))
+            .flat_map(|p| {
+                let resolved = canonicalize_best_effort(&p);
+                let real = (resolved != p).then_some(resolved);
+                std::iter::once(p).chain(real)
+            })
             .collect();
 
         let mut subtrees = Vec::new();
@@ -203,11 +231,11 @@ impl ReadDenylist {
                     .is_some_and(|name| name == std::ffi::OsStr::new(".env"))
             });
             for (raw, label) in default_denied_subtrees() {
-                let path = normalize_lexically(&raw);
-                if exempt_normalized.iter().any(|e| path_is_within(&path, e)) {
+                let rule = DenyRule::subtree(normalize_lexically(&raw), label);
+                if rule.is_within_any(&exempt_normalized) {
                     continue;
                 }
-                subtrees.push(DenyRule::subtree(path, label));
+                subtrees.push(rule);
             }
         }
 
@@ -694,6 +722,17 @@ mod tests {
         ReadDenylist::build(false, paths, &[])
     }
 
+    // Two tests below move the process-wide cwd. libtest runs tests as
+    // parallel threads of one process, so they take this lock; nextest runs
+    // each test in its own process and never contends for it.
+    static CWD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn lock_cwd() -> std::sync::MutexGuard<'static, ()> {
+        CWD_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     #[test]
     fn empty_denylist_denies_nothing_and_reports_full_disk_read() {
         let list = ReadDenylist::empty();
@@ -834,9 +873,10 @@ mod tests {
 
     /// A relative read issued with the process cwd INSIDE a denied subtree
     /// must be refused: the absolutization against cwd lands under the rule.
-    /// (Safe under nextest's process-per-test; restores cwd regardless.)
+    /// (Serialized with the other cwd-moving test; restores cwd regardless.)
     #[test]
     fn relative_read_from_inside_a_denied_tree_is_refused() {
+        let _cwd = lock_cwd();
         let tmp = tempfile::tempdir().expect("tempdir");
         let denied = tmp.path().join("denied");
         std::fs::create_dir_all(&denied).expect("mkdir");
@@ -1112,6 +1152,7 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn rule_spelled_through_a_symlinked_root_matches_the_resolved_spelling() {
+        let _cwd = lock_cwd();
         let tmp = tempfile::tempdir().expect("tempdir");
         let real_root = tmp.path().join("real");
         let denied = real_root.join("secrets");
@@ -1147,6 +1188,28 @@ mod tests {
         let sibling = real_root.join("notes.md");
         std::fs::write(&sibling, "notes").expect("write");
         assert!(list.check(&sibling).is_ok(), "sibling must stay readable");
+    }
+
+    /// A denial names the path as requested, so on macOS it may say
+    /// `/private/etc/sudoers`; exempting that spelling must reopen the
+    /// `/etc/sudoers` rule it resolves from, and the literal spelling must
+    /// keep working too. Unrelated defaults stay armed either way.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn exempting_either_spelling_of_a_symlinked_default_rule_reopens_it() {
+        for exempt in ["/private/etc/sudoers", "/etc/sudoers"] {
+            let list = ReadDenylist::build(true, &[], &[PathBuf::from(exempt)]);
+            assert!(
+                list.check(Path::new("/etc/sudoers")).is_ok(),
+                "exempting {exempt} must reopen the literal spelling"
+            );
+            assert!(
+                list.check(Path::new("/private/etc/sudoers")).is_ok(),
+                "exempting {exempt} must reopen the resolved spelling"
+            );
+            list.check(Path::new("/private/etc/ssh/ssh_host_ed25519_key"))
+                .unwrap_err_or_panic("an unrelated default rule stays armed");
+        }
     }
 
     /// On macOS `/etc` is a symlink to `/private/etc`, so the machine-wide
