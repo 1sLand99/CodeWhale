@@ -1216,6 +1216,13 @@ struct ReviewArgs {
     /// Override model for this review
     #[arg(long)]
     model: Option<String>,
+    /// Override the provider route for this review (e.g. `zai`, `openrouter`,
+    /// `deepseek`). Non-secret identifier only — credentials still resolve
+    /// from the environment/config. Use it to disambiguate a `--model` that
+    /// more than one configured route offers (which otherwise hard-errors
+    /// with "available from configured provider route(s): ...").
+    #[arg(long)]
+    provider: Option<String>,
     /// Maximum diff characters to include
     #[arg(long, default_value_t = 200_000)]
     max_chars: usize,
@@ -8170,6 +8177,11 @@ fn pick_session_id() -> Result<String> {
 async fn run_review(config: &Config, args: ReviewArgs) -> Result<()> {
     use crate::client::DeepSeekClient;
 
+    // Resolved before anything is fetched or billed so an unknown
+    // `--provider` fails fast with the provider vocabulary hint.
+    let (config, force_configured_route) = review_execution_route(config, &args)?;
+    let config = &config;
+
     if args.pr.is_some() && !is_command_available("gh") {
         bail!(
             "`gh` CLI not found on PATH. Install GitHub CLI \
@@ -8193,7 +8205,7 @@ async fn run_review(config: &Config, args: ReviewArgs) -> Result<()> {
     }
 
     let model = resolve_review_model(config, args.model.as_deref());
-    let route = resolve_cli_exec_route(config, &model, &diff, args.model.is_none()).await?;
+    let route = resolve_cli_exec_route(config, &model, &diff, force_configured_route).await?;
     let execution_config = config_for_cli_route(config, &route);
     let route_provider = execution_config.provider_identity_for(route.provider);
     let model = route.model.clone();
@@ -8338,6 +8350,29 @@ Provide findings ordered by severity with file references, then open questions, 
         }
     }
     Ok(())
+}
+
+/// Apply `codewhale review --provider <name>` and decide whether the route is
+/// authoritative (no cross-provider inventory inference).
+///
+/// This mirrors `codewhale exec --provider` (#4093): the flag sets ONLY the
+/// non-secret provider identity, and pinning the route is what lets a model
+/// offered by more than one configured route resolve instead of hard-erroring
+/// in `resolve_cli_auto_route`.
+fn review_execution_route(config: &Config, args: &ReviewArgs) -> Result<(Config, bool)> {
+    let explicit_provider = non_empty_flag(args.provider.as_deref());
+    let explicit_model = non_empty_flag(args.model.as_deref());
+    let mut resolved = config.clone();
+    if let Some(provider_arg) = explicit_provider {
+        apply_exec_provider_override(&mut resolved, provider_arg)?;
+    }
+    let force_configured_route =
+        should_force_configured_exec_route(false, explicit_provider, explicit_model);
+    Ok((resolved, force_configured_route))
+}
+
+fn non_empty_flag(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|value| !value.is_empty())
 }
 
 fn resolve_review_model(config: &Config, explicit_model: Option<&str>) -> String {
@@ -14981,6 +15016,182 @@ reasoning = "high"
         let serialized = serde_json::to_string(&receipt).expect("review receipt");
         assert!(!serialized.contains("127.0.0.1"));
         assert!(!serialized.contains("local-test-key"));
+    }
+
+    fn review_args(argv: &[&str]) -> ReviewArgs {
+        let cli = parse_cli(argv);
+        let Some(Commands::Review(args)) = cli.command else {
+            panic!("expected review command");
+        };
+        args
+    }
+
+    #[test]
+    fn review_parses_provider_flag_alongside_model() {
+        let args = review_args(&[
+            "codewhale",
+            "review",
+            "--pr",
+            "5709",
+            "--provider",
+            "zai",
+            "--model",
+            "GLM-5.3",
+        ]);
+
+        assert_eq!(args.provider.as_deref(), Some("zai"));
+        assert_eq!(args.model.as_deref(), Some("GLM-5.3"));
+        assert_eq!(args.pr, Some(5709));
+        // The threaded id round-trips through the provider vocabulary the
+        // override validates against — never a model-id sniff.
+        assert_eq!(
+            crate::config::ApiProvider::parse(args.provider.as_deref().unwrap()),
+            Some(crate::config::ApiProvider::Zai)
+        );
+    }
+
+    #[tokio::test]
+    async fn review_provider_flag_pins_route_for_multi_route_model() {
+        // A genuinely multi-route model: `shared-review-model` is the
+        // configured model of BOTH named routes below, while the active route
+        // (custom-a) does not offer it. (Two custom providers can never be
+        // ambiguous — the route inventory resolves only the active custom
+        // entry — so the multi-route pair has to be named providers.)
+        // Without `--provider`, an explicit `--model` lets cross-provider
+        // inventory inference run, and a model offered by more than one
+        // configured route hard-errors in `resolve_cli_auto_route`
+        // ("available from configured provider route(s): ..."). That error
+        // already tells the user to "Pass `--provider <provider>`" — until
+        // now `codewhale review` had no such flag to pass.
+        let mut config = custom_exec_config("custom-a");
+        {
+            let providers = config.providers.as_mut().expect("providers");
+            for entry in [&mut providers.deepseek, &mut providers.openrouter] {
+                *entry = crate::config::ProviderConfig {
+                    model: Some("shared-review-model".to_string()),
+                    api_key: Some("local-test-key".to_string()),
+                    ..Default::default()
+                };
+            }
+        }
+
+        let inferred = review_args(&["codewhale", "review", "--model", "shared-review-model"]);
+        let (inferred_config, inferred_force) =
+            review_execution_route(&config, &inferred).expect("model-only route");
+        assert!(
+            !inferred_force,
+            "an explicit model with no provider stays open to inventory inference"
+        );
+        assert_eq!(inferred_config.provider.as_deref(), Some("custom-a"));
+
+        // Without the flag the multi-route model must refuse to guess.
+        let err = resolve_cli_exec_route(
+            &inferred_config,
+            &resolve_review_model(&inferred_config, inferred.model.as_deref()),
+            "review diff",
+            inferred_force,
+        )
+        .await
+        .expect_err("a model offered by two configured routes must hard-error");
+        let message = err.to_string();
+        assert!(
+            message.contains("available from configured provider route(s)"),
+            "unexpected error: {message}"
+        );
+        assert!(
+            message.contains("deepseek") && message.contains("openrouter"),
+            "both candidate routes must be named: {message}"
+        );
+
+        // With the flag the same model pins to the named route and resolves.
+        let pinned = review_args(&[
+            "codewhale",
+            "review",
+            "--provider",
+            "deepseek",
+            "--model",
+            "shared-review-model",
+        ]);
+        let (pinned_config, pinned_force) =
+            review_execution_route(&config, &pinned).expect("pinned route");
+        assert!(pinned_force, "--provider makes the route authoritative");
+        assert_eq!(pinned_config.provider.as_deref(), Some("deepseek"));
+
+        let route = resolve_cli_exec_route(
+            &pinned_config,
+            &resolve_review_model(&pinned_config, pinned.model.as_deref()),
+            "review diff",
+            pinned_force,
+        )
+        .await
+        .expect("pinned review route");
+        let execution = config_for_cli_route(&pinned_config, &route);
+
+        assert_eq!(route.provider, crate::config::ApiProvider::Deepseek);
+        assert_eq!(route.model, "shared-review-model");
+        assert_eq!(
+            execution.provider_identity_for(route.provider),
+            "deepseek",
+            "the review runs on the provider the flag named"
+        );
+
+        // Pinning a configured custom provider (the workflow's
+        // CODEWHALE_REVIEW_PROVIDER="my-proxy" case) is equally authoritative
+        // for the same multi-route model.
+        let pinned_custom = review_args(&[
+            "codewhale",
+            "review",
+            "--provider",
+            "custom-b",
+            "--model",
+            "shared-review-model",
+        ]);
+        let (custom_config, custom_force) =
+            review_execution_route(&config, &pinned_custom).expect("pinned custom route");
+        assert!(custom_force);
+        let custom_route = resolve_cli_exec_route(
+            &custom_config,
+            &resolve_review_model(&custom_config, pinned_custom.model.as_deref()),
+            "review diff",
+            custom_force,
+        )
+        .await
+        .expect("pinned custom review route");
+        let custom_execution = config_for_cli_route(&custom_config, &custom_route);
+
+        assert_eq!(custom_route.provider, crate::config::ApiProvider::Custom);
+        assert_eq!(custom_route.model, "shared-review-model");
+        assert_eq!(
+            custom_execution.provider_identity_for(custom_route.provider),
+            "custom-b",
+            "the review runs on the custom provider the flag named"
+        );
+    }
+
+    #[test]
+    fn review_provider_flag_rejects_unknown_provider() {
+        let config = custom_exec_config("custom-a");
+        let args = review_args(&["codewhale", "review", "--provider", "not-a-provider"]);
+
+        let err = review_execution_route(&config, &args)
+            .expect_err("unknown provider must fail before any diff is fetched");
+        assert!(
+            err.to_string().contains("Unrecognized --provider"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn review_without_provider_flag_keeps_configured_route_authoritative() {
+        let config = custom_exec_config("custom-a");
+        let args = review_args(&["codewhale", "review"]);
+
+        let (resolved, force) = review_execution_route(&config, &args).expect("default route");
+        assert!(
+            force,
+            "the configured/default review route is authoritative"
+        );
+        assert_eq!(resolved.provider.as_deref(), Some("custom-a"));
     }
 
     fn review_issue(
