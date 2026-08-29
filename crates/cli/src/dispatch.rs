@@ -196,7 +196,8 @@ mod tests {
         )
         .unwrap();
         let text = String::from_utf8(output).unwrap();
-        assert!(text.contains("Daytona"));
+        assert!(text.contains("Codewhale cloud dispatch"));
+        assert!(!text.contains("Daytona"));
         assert!(!text.contains("sk-"));
         assert!(!text.contains("Bearer"));
     }
