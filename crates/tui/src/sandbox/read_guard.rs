@@ -49,7 +49,13 @@
 //!   exempted back open.
 //! - **Symlinks.** Both the literal path and its `canonicalize()`d target are
 //!   tested, so a symlink pointing into `~/.ssh` is denied by its target even
-//!   though its own name is innocuous.
+//!   though its own name is innocuous. The *rules* are resolved the same way
+//!   when they are built: a rule spelled `/etc/ssh` also denies
+//!   `/private/etc/ssh` on macOS, where `/etc` is itself a symlink, and a rule
+//!   written against a `/var/...` directory fires for the `/private/var/...`
+//!   spelling that `canonicalize` and `current_dir` hand back. Without that,
+//!   the resolved candidate never matched a literal rule, which is exactly the
+//!   shape hosted macOS CI runs in (`$TMPDIR` under `/var/folders`).
 //! - **`..` and relative paths.** Two candidates are tested. The literal one is
 //!   lexically normalized (`.`/`..` folded without touching the disk), which
 //!   catches traversal into a denied tree even when nothing on the path exists
@@ -114,8 +120,13 @@ impl ReadDenial {
 pub enum DenyRule {
     /// Everything at or below a directory (or a single file at that path).
     Subtree {
-        /// Normalized absolute path.
+        /// Normalized absolute path, as configured.
         path: PathBuf,
+        /// `path` with symlinks resolved, kept only when it differs. A read is
+        /// matched against both spellings: the literal one catches
+        /// `/etc/sudoers` as written, this one catches `/private/etc/sudoers`
+        /// — the same file, reached by the name the OS actually uses.
+        resolved: Option<PathBuf>,
         /// Human label, e.g. "SSH keys (~/.ssh)".
         label: &'static str,
     },
@@ -128,6 +139,16 @@ pub enum DenyRule {
 }
 
 impl DenyRule {
+    /// A subtree rule that also remembers where its path really leads.
+    fn subtree(path: PathBuf, label: &'static str) -> Self {
+        let resolved = canonicalize_best_effort(&path);
+        DenyRule::Subtree {
+            resolved: (resolved != path).then_some(resolved),
+            path,
+            label,
+        }
+    }
+
     #[must_use]
     fn describe(&self) -> String {
         match self {
@@ -186,7 +207,7 @@ impl ReadDenylist {
                 if exempt_normalized.iter().any(|e| path_is_within(&path, e)) {
                     continue;
                 }
-                subtrees.push(DenyRule::Subtree { path, label });
+                subtrees.push(DenyRule::subtree(path, label));
             }
         }
 
@@ -197,10 +218,10 @@ impl ReadDenylist {
             if path.as_os_str().is_empty() {
                 continue;
             }
-            subtrees.push(DenyRule::Subtree {
+            subtrees.push(DenyRule::subtree(
                 path,
-                label: "a path in `sandbox_denied_read_paths`",
-            });
+                "a path in `sandbox_denied_read_paths`",
+            ));
         }
 
         Self {
@@ -257,10 +278,19 @@ impl ReadDenylist {
                 });
             }
             for rule in &self.subtrees {
-                let DenyRule::Subtree { path, .. } = rule else {
+                let DenyRule::Subtree {
+                    path,
+                    resolved: rule_resolved,
+                    ..
+                } = rule
+                else {
                     continue;
                 };
-                if path_is_within(candidate, path) {
+                let hit = path_is_within(candidate, path)
+                    || rule_resolved
+                        .as_deref()
+                        .is_some_and(|real| path_is_within(candidate, real));
+                if hit {
                     return Err(ReadDenial {
                         requested: requested.to_path_buf(),
                         rule: rule.clone(),
@@ -1055,9 +1085,83 @@ mod tests {
 
     #[test]
     fn root_parent_traversal_does_not_escape_above_root() {
-        assert_eq!(
-            normalize_lexically(Path::new("/../../etc")),
-            PathBuf::from("/etc")
+        // Spell the traversal from the current drive/root so the assertion
+        // holds on Windows too: there `/../../etc` resolves against the cwd's
+        // drive and normalizes to `D:\etc`, not a bare `/etc`.
+        let cwd = std::env::current_dir().expect("cwd");
+        let root: PathBuf = cwd
+            .components()
+            .take_while(|c| matches!(c, Component::Prefix(_) | Component::RootDir))
+            .collect();
+        let traversal = root.join("..").join("..").join("etc");
+        assert_eq!(normalize_lexically(&traversal), root.join("etc"));
+        if cfg!(unix) {
+            assert_eq!(
+                normalize_lexically(Path::new("/../../etc")),
+                PathBuf::from("/etc")
+            );
+        }
+    }
+
+    /// Hosted macOS CI hands `tempfile` a `/var/folders/...` directory that is
+    /// really `/private/var/folders/...`; `canonicalize` and `current_dir`
+    /// return the resolved spelling while the rule was written against the
+    /// literal one, and no symlink test above fired. Build that shape
+    /// explicitly so the regression is caught on every host, not only where
+    /// `$TMPDIR` happens to be a symlink.
+    #[test]
+    #[cfg(unix)]
+    fn rule_spelled_through_a_symlinked_root_matches_the_resolved_spelling() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let real_root = tmp.path().join("real");
+        let denied = real_root.join("secrets");
+        std::fs::create_dir_all(&denied).expect("mkdir");
+        std::fs::write(denied.join("id_rsa"), "KEY").expect("write");
+        let alias_root = tmp.path().join("alias");
+        std::os::unix::fs::symlink(&real_root, &alias_root).expect("symlink");
+
+        // The rule names the alias, the way a `/var/...` tempdir rule does.
+        let list = denylist_for(&[alias_root.join("secrets")]);
+
+        // A read spelled through the real directory is the same file.
+        list.check(&denied.join("id_rsa"))
+            .expect_err("the resolved spelling of a denied tree must be refused");
+        // An innocuous symlink resolves to the real spelling, never the alias.
+        let link = tmp.path().join("notes.txt");
+        std::os::unix::fs::symlink(denied.join("id_rsa"), &link).expect("symlink");
+        list.check(&link)
+            .expect_err("a symlink into the denied tree must be refused by its target");
+        // A relative read from inside it absolutizes against the real cwd.
+        let prior = std::env::current_dir().expect("cwd");
+        struct Restore(std::path::PathBuf);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                let _ = std::env::set_current_dir(&self.0);
+            }
+        }
+        let _restore = Restore(prior);
+        std::env::set_current_dir(&denied).expect("chdir into the denied tree");
+        list.check(Path::new("id_rsa"))
+            .expect_err("a relative read from inside the denied tree must be refused");
+        // And the innocent sibling of the real directory stays readable.
+        let sibling = real_root.join("notes.md");
+        std::fs::write(&sibling, "notes").expect("write");
+        assert!(list.check(&sibling).is_ok(), "sibling must stay readable");
+    }
+
+    /// On macOS `/etc` is a symlink to `/private/etc`, so the machine-wide
+    /// default rules were readable under their real names.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_private_spelling_of_a_machine_wide_rule_is_refused() {
+        let list = ReadDenylist::build(true, &[], &[]);
+        list.check(Path::new("/private/etc/sudoers"))
+            .unwrap_err_or_panic("/private/etc/sudoers is /etc/sudoers");
+        list.check(Path::new("/private/etc/ssh/ssh_host_ed25519_key"))
+            .unwrap_err_or_panic("/private/etc/ssh is /etc/ssh");
+        assert!(
+            list.check(Path::new("/private/etc/hosts")).is_ok(),
+            "/etc/hosts is not a credential store"
         );
     }
 
