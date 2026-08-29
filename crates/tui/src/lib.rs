@@ -8630,20 +8630,6 @@ fn run_gh_repo_name() -> Result<String> {
     Ok(name)
 }
 
-/// Longest span a committable suggestion may rewrite. A mechanical fix is
-/// small; a large replacement is a rewrite the model cannot be confident in,
-/// so it degrades to prose.
-const MAX_COMMITTABLE_SUGGESTION_LINES: u32 = 25;
-
-/// Normalize a model-supplied review path to the form GitHub anchors on.
-fn normalize_review_path(path: Option<&str>) -> Option<String> {
-    let path = path?.trim().trim_start_matches("./");
-    if path.is_empty() {
-        return None;
-    }
-    Some(path.to_string())
-}
-
 /// Pick a fence long enough to wrap `replacement` without the replacement's
 /// own backticks closing the block early.
 fn suggestion_fence(replacement: &str) -> String {
@@ -8668,35 +8654,91 @@ fn suggestion_fence(replacement: &str) -> String {
 fn neutralize_model_suggestion_fences(prose: &str) -> String {
     prose
         .split('\n')
-        .map(|line| {
-            let trimmed = line.trim_start();
-            let indent = &line[..line.len() - trimmed.len()];
-            let fence_char = match trimmed.chars().next() {
-                Some(ch @ ('`' | '~')) => ch,
-                _ => return line.to_string(),
-            };
-            let ticks = trimmed.chars().take_while(|ch| *ch == fence_char).count();
-            if ticks < 3 {
-                return line.to_string();
-            }
-            let info = trimmed[ticks..].trim();
-            if info.to_ascii_lowercase().starts_with("suggestion") {
-                let fence: String = std::iter::repeat_n(fence_char, ticks).collect();
-                format!("{indent}{fence}text")
-            } else {
-                line.to_string()
-            }
-        })
+        .map(neutralize_suggestion_fence_line)
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Neutralize one line's fence if it opens a `suggestion` block.
+///
+/// The fence may sit behind leading whitespace or behind a blockquote cue or
+/// list marker (`- ```suggestion`, `> ```suggestion`, `1. ```suggestion`).
+/// Whether GitHub renders those container-nested blocks applicable is
+/// unverified, so all of those shapes are treated as live and rewritten.
+fn neutralize_suggestion_fence_line(line: &str) -> String {
+    let trimmed = line.trim_start();
+    let indent = &line[..line.len() - trimmed.len()];
+    let (prefix, fence) = split_container_prefix(trimmed);
+    let fence_char = match fence.chars().next() {
+        Some(ch @ ('`' | '~')) => ch,
+        _ => return line.to_string(),
+    };
+    let ticks = fence.chars().take_while(|ch| *ch == fence_char).count();
+    if ticks < 3 {
+        return line.to_string();
+    }
+    let info = fence[ticks..].trim();
+    if info.to_ascii_lowercase().starts_with("suggestion") {
+        let fence: String = std::iter::repeat_n(fence_char, ticks).collect();
+        format!("{indent}{prefix}{fence}text")
+    } else {
+        line.to_string()
+    }
+}
+
+/// Split the blockquote cues and list markers off the front of a line,
+/// returning `(prefix_to_preserve, rest)`. Nesting is followed (`> - `),
+/// but a line of ordinary prose is left untouched — the prefix only matters
+/// when what follows it is a fence.
+fn split_container_prefix(trimmed: &str) -> (&str, &str) {
+    let mut rest = trimmed;
+    while let Some(after) = strip_container_token(rest) {
+        rest = after;
+    }
+    let split = trimmed.len() - rest.len();
+    trimmed.split_at(split)
+}
+
+/// Strip one container token (`> ` blockquote cue, `-`/`*`/`+` bullet, or an
+/// ordered-list marker) plus its trailing whitespace, or `None` when the
+/// line does not start with one.
+fn strip_container_token(rest: &str) -> Option<&str> {
+    if let Some(after) = rest.strip_prefix('>') {
+        return Some(after.trim_start_matches([' ', '\t']));
+    }
+    if let Some(after) = rest
+        .strip_prefix(['-', '*', '+'])
+        .filter(|after| after.starts_with([' ', '\t']))
+    {
+        return Some(after.trim_start_matches([' ', '\t']));
+    }
+    let digits = rest.chars().take_while(char::is_ascii_digit).count();
+    if digits > 0 {
+        let after_marker = &rest[digits..];
+        if let Some(after) = after_marker
+            .strip_prefix(['.', ')'])
+            .filter(|after| after.starts_with([' ', '\t']))
+        {
+            return Some(after.trim_start_matches([' ', '\t']));
+        }
+    }
+    None
 }
 
 /// Map structured review issues to GitHub inline-review-comment payloads.
 ///
 /// Anchors are checked against the diff's actual hunks, not just its file
-/// list: GitHub 422s the *entire* review when one comment lands outside a
+/// lists: GitHub 422s the *entire* review when one comment lands outside a
 /// hunk, so a model-estimated line that misses now drops a single comment.
 /// Issues without a locatable position stay in the summary body instead.
+///
+/// SAFETY: `title` and `description` are raw model text interpolated into a
+/// comment body. A model-written ```suggestion fence there would become a
+/// one-click-mergeable block that bypasses every span and size check, so
+/// both fields pass through `neutralize_model_suggestion_fences` — only a
+/// replacement validated against the diff hunks may ever be committable.
+/// (`severity` is safe unneutralized: it is normalized to a fixed
+/// error/warning/info vocabulary before it reaches here.)
 fn inline_issue_comments(
     review: &crate::tools::review::ReviewOutput,
     hunks: &crate::tools::review_hunks::DiffHunks,
@@ -8706,9 +8748,10 @@ fn inline_issue_comments(
         .issues
         .iter()
         .filter_map(|issue| {
-            let (Some(path), Some(line)) =
-                (normalize_review_path(issue.path.as_deref()), issue.line)
-            else {
+            let (Some(path), Some(line)) = (
+                crate::tools::review::normalize_review_path(issue.path.as_deref()),
+                issue.line,
+            ) else {
                 // No position at all: the summary body is the only home.
                 return None;
             };
@@ -8723,8 +8766,8 @@ fn inline_issue_comments(
                 "body": format!(
                     "**[{}] {}**\n\n{}",
                     issue.severity.to_uppercase(),
-                    issue.title,
-                    issue.description
+                    neutralize_model_suggestion_fences(&issue.title),
+                    neutralize_model_suggestion_fences(&issue.description)
                 ),
             }))
         })
@@ -8750,34 +8793,29 @@ fn inline_suggestion_comment(
     hunks: &crate::tools::review_hunks::DiffHunks,
     plan: &mut InlineReviewPlan,
 ) -> Option<serde_json::Value> {
-    let path = normalize_review_path(suggestion.path.as_deref())?;
-    let end = suggestion.end_line.or(suggestion.line)?;
-    if !hunks.contains_line(&path, end) {
-        plan.note_unanchorable(hunks, &path);
-        return None;
-    }
-    let start = suggestion.start_line.unwrap_or(end);
+    // The committable decision lives in `resolve_suggestion_anchor` so the
+    // review receipt records exactly what this path emits for the same diff.
+    let (path, start, end, committable) =
+        match crate::tools::review::resolve_suggestion_anchor(suggestion, hunks) {
+            crate::tools::review::SuggestionAnchor::Anchored {
+                path,
+                start,
+                end,
+                committable,
+            } => (path, start, end, committable),
+            crate::tools::review::SuggestionAnchor::Unanchorable { path } => {
+                plan.note_unanchorable(hunks, &path);
+                return None;
+            }
+            crate::tools::review::SuggestionAnchor::NoPosition => return None,
+        };
     let prose = if suggestion.suggestion.is_empty() {
         "Suggested change.".to_string()
     } else {
         neutralize_model_suggestion_fences(&suggestion.suggestion)
     };
 
-    // A model that gives neither start_line nor end_line has told us nothing
-    // about how much code it means to replace. GitHub would happily *insert*
-    // a multi-line replacement at a single-line anchor, leaving the lines the
-    // model meant to replace duplicated below it — so that shape is not
-    // committable.
-    let explicit_span = suggestion.start_line.is_some() || suggestion.end_line.is_some();
-    let committable = suggestion.replacement.as_deref().filter(|replacement| {
-        !replacement.trim().is_empty()
-            && start <= end
-            && end.saturating_sub(start).saturating_add(1) <= MAX_COMMITTABLE_SUGGESTION_LINES
-            && (explicit_span || start < end || !replacement.contains('\n'))
-            && hunks.contains_span(&path, start, end)
-    });
-
-    let Some(replacement) = committable else {
+    let Some(replacement) = suggestion.replacement.as_deref().filter(|_| committable) else {
         // Degradation path: keep the finding, drop the one-click apply.
         plan.degraded_to_prose += 1;
         return Some(serde_json::json!({
@@ -8916,6 +8954,29 @@ fn render_pr_review_markdown(
                 body.push_str(&format!("- {}\n", suggestion.suggestion));
             } else {
                 body.push_str(&format!("- {location} — {}\n", suggestion.suggestion));
+            }
+            // The replacement is the computed fix itself; rendering only the
+            // prose used to compute and validate it, then throw it away.
+            // Show it as a fenced block indented into the list item. In the
+            // local report the fence is live — the user asked for the fix and
+            // this block is the artifact to apply. In a *posted* PR body it
+            // degrades to a plain code block: GitHub must only ever be handed
+            // a one-click suggestion block this pipeline validated against
+            // the diff hunks (the inline suggestion comments), never one the
+            // summary duplicated from a suggestion that failed anchoring or
+            // the span gates.
+            if let Some(replacement) = suggestion
+                .replacement
+                .as_deref()
+                .filter(|replacement| !replacement.trim().is_empty())
+            {
+                let fence = suggestion_fence(replacement);
+                let info = if posted { "text" } else { "suggestion" };
+                body.push_str(&format!("\n  {fence}{info}\n"));
+                for line in replacement.split('\n') {
+                    body.push_str(&format!("  {line}\n"));
+                }
+                body.push_str(&format!("  {fence}\n"));
             }
         }
         body.push('\n');
@@ -15213,7 +15274,108 @@ reasoning = "high"
     }
 
     #[test]
+    fn suggestion_fence_behind_list_marker_or_blockquote_is_neutralized() {
+        // Whether GitHub renders a fence nested behind a list marker,
+        // blockquote cue, or ordered-list marker applicable is unverified,
+        // so those shapes are treated as live and downgraded too. Ordinary
+        // prose lines that merely start with a marker stay untouched.
+        let neutralized = neutralize_model_suggestion_fences(
+            "```suggestion\n- ```suggestion\n  rm -rf /\n> ```suggestion\n1. ```suggestion\n> - ~~~suggestion\n- fix the `foo` call",
+        );
+        assert_eq!(
+            neutralized,
+            "```text\n- ```text\n  rm -rf /\n> ```text\n1. ```text\n> - ~~~text\n- fix the `foo` call"
+        );
+    }
+
+    #[test]
+    fn inline_issue_comment_neutralizes_model_suggestion_fences_in_issue_text() {
+        // SAFETY: regression for a proven hole — the issue title and
+        // description are raw model text, and a ```suggestion fence in
+        // either used to reach the inline comment body verbatim: a
+        // one-click mergeable block that bypassed every span and size
+        // check. Only a replacement validated against the diff hunks may
+        // ever be committable.
+        let mut fenced_description = review_issue("error", Some("crates/tui/src/lib.rs"), Some(11));
+        fenced_description.title = "Cleanup script".to_string();
+        fenced_description.description = "Run this:\n\n```suggestion\nrm -rf /\n```\n".to_string();
+        let mut fenced_title = review_issue("warning", Some("crates/tui/src/lib.rs"), Some(12));
+        fenced_title.title = "Fix all\n```suggestion\nrm -rf ~\n```".to_string();
+        fenced_title.description = "detail".to_string();
+        let review = review_with(vec![fenced_description, fenced_title], Vec::new());
+
+        let comments = plan_inline_review_comments(&review, &review_test_diff()).comments;
+        assert_eq!(comments.len(), 2);
+        for comment in &comments {
+            let body = comment["body"].as_str().expect("body");
+            assert!(!body.contains("```suggestion"), "{body}");
+        }
+        let description_body = comments[0]["body"].as_str().expect("body");
+        assert!(
+            description_body.contains("```text\nrm -rf /"),
+            "{description_body}"
+        );
+        let title_body = comments[1]["body"].as_str().expect("body");
+        assert!(title_body.contains("```text\nrm -rf ~"), "{title_body}");
+    }
+
+    #[test]
+    fn pr_review_markdown_shows_the_computed_replacement() {
+        // A plain `codewhale review --pr` (no --post) computes and validates
+        // the literal fix; the local report must show it, not just the prose.
+        let view = GhPullRequest {
+            title: "T".to_string(),
+            body: String::new(),
+            base: "main".to_string(),
+            head: "feature".to_string(),
+            url: "https://example.invalid/pr/1".to_string(),
+            head_sha: "abc123".to_string(),
+        };
+        let mut single = review_suggestion(
+            Some("crates/tui/src/lib.rs"),
+            Some(11),
+            Some("let b = a.unwrap_or_default();"),
+        );
+        single.suggestion = "Use the checked variant".to_string();
+        let mut multi = review_suggestion(
+            Some("crates/tui/src/lib.rs"),
+            Some(11),
+            Some("let b = a.unwrap_or_default();\nlet c = 2;"),
+        );
+        multi.suggestion = "Replace both lines".to_string();
+        multi.start_line = Some(11);
+        multi.end_line = Some(12);
+        let review = review_with(Vec::new(), vec![single, multi]);
+
+        let local = render_pr_review_markdown(1, &view, &review, false);
+        assert!(local.contains("### Suggestions"), "{local}");
+        assert!(
+            local.contains("\n  ```suggestion\n  let b = a.unwrap_or_default();\n  ```\n"),
+            "{local}"
+        );
+        assert!(
+            local.contains(
+                "\n  ```suggestion\n  let b = a.unwrap_or_default();\n  let c = 2;\n  ```\n"
+            ),
+            "{local}"
+        );
+
+        // The posted body keeps the fix visible but never as a live
+        // one-click block: only diff-validated inline suggestion comments
+        // may carry those to GitHub.
+        let posted = render_pr_review_markdown(1, &view, &review, true);
+        assert!(
+            posted.contains("let b = a.unwrap_or_default();"),
+            "{posted}"
+        );
+        assert!(!posted.contains("```suggestion"), "{posted}");
+        assert!(posted.contains("```text"), "{posted}");
+    }
+
+    #[test]
     fn oversized_review_suggestion_degrades_to_prose() {
+        use crate::tools::review::MAX_COMMITTABLE_SUGGESTION_LINES;
+
         // A whole-hunk rewrite is not a mechanical fix, so it must not be
         // committable even though every line is inside the diff.
         let span = MAX_COMMITTABLE_SUGGESTION_LINES + 5;
