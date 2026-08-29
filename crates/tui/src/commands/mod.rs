@@ -1864,11 +1864,13 @@ mod tests {
         // FEAT-015 shipped no production contextual command, so the assertion
         // below used to exclude nothing. FEAT-018 migrates the utility group;
         // the remaining non-fixture commands must still use the legacy
-        // concrete-App path. The seven utility entries are asserted separately
-        // by the FEAT-018 public-dispatch and inventory tests (Phase 6).
+        // concrete-App path. The migrated utility entries (the FEAT-018 seven
+        // plus `/dispatch`, which joins the same portable path) are asserted
+        // separately by the FEAT-018 public-dispatch and inventory tests.
         const FEAT_018_UTILITY: &[&str] = &[
             "attach",
             "automation",
+            "dispatch",
             "jobs",
             "mcp",
             "network",
