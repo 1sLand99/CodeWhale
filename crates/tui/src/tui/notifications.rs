@@ -2440,6 +2440,7 @@ pub struct TidelineInbox<'a> {
     pub ascii_safe: bool,
 }
 
+#[allow(dead_code)] // translation scaffolding: builder methods feed tests + the landing slice
 impl<'a> TidelineInbox<'a> {
     #[allow(dead_code)] // translation scaffolding: wired by the landing slice
     #[must_use]
