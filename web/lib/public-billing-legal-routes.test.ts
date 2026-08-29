@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { footerLegalLinks } from "./i18n/links";
+import { getChrome } from "./i18n/dictionaries";
 import { LEGAL_UPDATED, PRIVACY_SECTIONS, TERMS_SECTIONS } from "./legal-copy";
 
 const webRoot = new URL("../", import.meta.url);
@@ -19,7 +20,7 @@ describe("marketing pricing and legal routes", () => {
   });
 
   it("aliases /privacy and /terms onto the legal paths instead of inventing a second policy", () => {
-    expect(footerLegalLinks("en").map((l) => l.href)).toEqual([
+    expect(footerLegalLinks("en", getChrome("en")).map((l) => l.href)).toEqual([
       "/en/pricing",
       "/en/legal/terms",
       "/en/legal/privacy",

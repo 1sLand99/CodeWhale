@@ -206,10 +206,18 @@ describe("navigation parity and accessibility", () => {
         `/${locale}/contribute`,
         "https://github.com/Hmbown/CodeWhale/blob/main/LICENSE",
       ]);
-      expect(footerLegalLinks(locale).map((l) => l.href), `${locale} footer legal`).toEqual([
+      const legal = footerLegalLinks(locale, getChrome(locale));
+      expect(legal.map((l) => l.href), `${locale} footer legal`).toEqual([
         `/${locale}/pricing`,
         `/${locale}/legal/terms`,
         `/${locale}/legal/privacy`,
+      ]);
+      // Labels come from the dictionary, not hardcoded English, so every
+      // routed locale renders the footer legal links in its own language.
+      expect(legal.map((l) => l.label), `${locale} footer legal labels`).toEqual([
+        getChrome(locale).footerPricing,
+        getChrome(locale).footerTerms,
+        getChrome(locale).footerPrivacy,
       ]);
     }
   });
@@ -293,9 +301,15 @@ describe("navigation parity and accessibility", () => {
       label: "MIT license",
       href: "https://github.com/Hmbown/CodeWhale/blob/main/LICENSE",
     });
+    // zh gets the footer legal labels from its dictionary, not English.
+    expect(footerLegalLinks("zh", getChrome("zh")).map((l) => l.label)).toEqual([
+      "价格",
+      "服务条款",
+      "隐私政策",
+    ]);
     expect(footer).toContain("footerProductLinks(locale, chrome)");
     expect(footer).toContain("footerProjectLinks(locale, chrome)");
-    expect(footer).toContain("footerLegalLinks(locale)");
+    expect(footer).toContain("footerLegalLinks(locale, chrome)");
   });
 });
 

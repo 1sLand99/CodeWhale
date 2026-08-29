@@ -21,7 +21,7 @@ export function Footer({ locale = "en" }: { locale?: Locale }) {
   const homeHref = `/${locale}`;
   const product = footerProductLinks(locale, chrome);
   const project = footerProjectLinks(locale, chrome);
-  const legal = footerLegalLinks(locale);
+  const legal = footerLegalLinks(locale, chrome);
 
   return (
     <footer className="site-footer">
