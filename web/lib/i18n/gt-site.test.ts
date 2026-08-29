@@ -7,7 +7,7 @@ import { getChrome, getDocsGuide, getHome } from "./dictionaries";
 
 const webRoot = fileURLToPath(new URL("../..", import.meta.url));
 
-function runGtSite(command: string, extraEnv: NodeJS.ProcessEnv = {}) {
+function runGtSite(command: string, extraEnv: Record<string, string> = {}) {
   return spawnSync(process.execPath, [join(webRoot, "scripts", "gt-site.mjs"), command], {
     cwd: webRoot,
     encoding: "utf8",
