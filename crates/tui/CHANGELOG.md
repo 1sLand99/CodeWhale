@@ -41,6 +41,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   actions, while Extensions and Problems route recovery through the existing
   `/mcp login`, `/mcp reload`, `/mcp validate`, and `/plugin validate` commands
   (#5643, #5655).
+- Plugin prompt matching (#5579): sending a task can toast the next review
+  step when the prompt strongly matches an installed-but-idle plugin or a
+  marketplace catalog you added (for example a Supabase prompt suggesting
+  `/plugin trust supabase`). A live composer CTA offers the same review
+  command while you type, matching turns append a bounded
+  `<recommended_plugins>` user block, and `request_plugin_install` surfaces
+  review without installing. `/plugin suggest` now ranks manifest keywords and
+  catalog candidates, never auto-installs, and on-disk plugin changes also
+  nudge `/plugin reload` between turns.
+
 
 - Added `/import-claude` (#5557): reads `~/.claude.json` and
   `~/.claude/settings.json` read-only and renders an explicit, reviewable
