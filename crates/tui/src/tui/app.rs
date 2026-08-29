@@ -547,6 +547,16 @@ pub struct LaunchState {
     pub worktree_available: bool,
     /// Row hitboxes from the most recent launch render.
     pub row_areas: Vec<Rect>,
+    /// Whether launch keys type into the pre-session composer instead of
+    /// driving the menu. The composer itself is the session `App`'s own
+    /// `ComposerState` — this flag only decides where keystrokes go.
+    pub composer_focus: bool,
+    /// Composer input-row hitbox from the most recent launch render. A
+    /// click here focuses the composer, exactly like the Tab key.
+    pub composer_area: Option<Rect>,
+    /// Send-glyph hitbox inside the composer row. A click here submits the
+    /// composed message through the normal dispatch path.
+    pub send_area: Option<Rect>,
 }
 
 impl LaunchState {
@@ -581,6 +591,9 @@ impl LaunchState {
             workspace_session_count,
             worktree_available,
             row_areas: Vec::new(),
+            composer_focus: false,
+            composer_area: None,
+            send_area: None,
         }
     }
 }
@@ -693,6 +706,21 @@ impl Default for ComposerState {
     }
 }
 
+/// Compatibility name retained for the first Tideline header slice. New
+/// surfaces register [`crate::tui::tideline::InteractionAction`] directly.
+pub type HeaderActionTarget = crate::tui::tideline::InteractionAction;
+
+/// A header target painted in the latest frame.
+///
+/// The visible chrome owns placement; input owns dispatch. Keeping the
+/// rectangular target alongside its typed action gives mouse and keyboard
+/// routes one shared destination without a second navigation system.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HeaderHitbox {
+    pub area: Rect,
+    pub target: HeaderActionTarget,
+}
+
 /// Viewport/scroll state — fields related to transcript scrolling and caching.
 pub struct ViewportState {
     pub transcript_scroll: TranscriptScroll,
@@ -704,6 +732,9 @@ pub struct ViewportState {
     pub transcript_scrollbar_dragging: bool,
     pub last_transcript_area: Option<Rect>,
     pub last_composer_area: Option<Rect>,
+    /// Selectable targets from the latest painted frame. Cleared before every
+    /// render so resized or hidden controls can never swallow a click.
+    pub interaction_targets: crate::tui::tideline::InteractionRegistry,
     /// Last left-click trace over the composer, for double/triple-click
     /// word/line selection (crossterm does not decode click counts).
     pub composer_click_trace: Option<crate::tui::mouse_ui::ComposerClickTrace>,
@@ -745,6 +776,7 @@ impl Default for ViewportState {
             transcript_scrollbar_dragging: false,
             last_transcript_area: None,
             last_composer_area: None,
+            interaction_targets: crate::tui::tideline::InteractionRegistry::default(),
             composer_click_trace: None,
             last_approval_area: None,
             last_workflow_panel_area: None,
@@ -2241,8 +2273,8 @@ fn push_enabled_provider_model(
 }
 
 impl App {
-    /// Persist the pending session route as the explicit choice (`/fleet
-    /// save`, `/fleet save-as`, `/model save-default`). Returns the receipt
+    /// Persist the pending session route as the explicit choice (`/pod save`,
+    /// `/pod save-as`, `/model save-default`). Returns the receipt
     /// message naming the exact file written — or an error message when the
     /// write failed. Nothing is ever written without this explicit call.
     pub fn apply_route_save_choice(
@@ -2258,7 +2290,7 @@ impl App {
         match choice {
             RouteSaveChoice::UpdateFleet => {
                 let Some((name, scope)) = pending.fleet.clone() else {
-                    return "Nothing to update — no Fleet is selected. Use /fleet save-as to \
+                    return "Nothing to update — no Fleet is selected. Use /pod save-as to \
                              save this route as a new Fleet."
                         .to_string();
                 };
@@ -2280,7 +2312,7 @@ impl App {
                     }
                     Err(err) => format!(
                         "Fleet update failed: {err} — the saved Fleet may have moved. Use \
-                         /fleet save-as to persist the route."
+                         /pod save-as to persist the route."
                     ),
                 }
             }
