@@ -127,6 +127,52 @@ pub(crate) fn topbar_segments(app: &App, width: u16) -> Vec<TopbarSegment> {
     segments
 }
 
+/// Render the Tideline topbar into one header row and record its segment
+/// hitboxes (spec §5b `Constraint::Length(1)`). The ONE header on every
+/// screen: the session shell and the launch screen both call this, so the
+/// brand lockup, contextual segments, and the pinned meter + clock never
+/// change identity between pre- and post-session states. Segment rects are
+/// recorded for hover (this frame's highlight resolves against the previous
+/// frame's rects, the standard one-frame-lag registry pattern) and for click
+/// routing in a follow-up slice.
+/// Render the Tideline topbar row and record its segment hitboxes. Returns
+/// the pinned context meter's hitbox — the chrome row's one always-present
+/// inspector target (`Alt+C`'s mouse route) — or `None` when the meter could
+/// not paint whole and clear of the brand at this width.
+pub(crate) fn render_topbar_row(f: &mut Frame, app: &mut App, area: Rect) -> Option<Rect> {
+    if area.height == 0 {
+        app.viewport.last_topbar_hitboxes.clear();
+        return None;
+    }
+    let segments = topbar_segments(app, area.width);
+    let clock = topbar_clock();
+    let hovered = app.last_mouse_pos.and_then(|(mx, my)| {
+        app.viewport
+            .last_topbar_hitboxes
+            .iter()
+            .find(|hb| hb.area.x <= mx && mx < hb.area.right() && hb.area.y == my)
+            .map(|hb| hb.id)
+    });
+    let topbar = Topbar::new(
+        &app.ui_theme,
+        &clock,
+        topbar_context_percent(app),
+        &segments,
+    )
+    .ascii_safe(crate::tui::color_compat::ascii_safe_enabled())
+    .hovered(hovered);
+    let hitboxes = topbar_hitboxes(&topbar, area);
+    let context_hitbox = crate::tui::topbar::context_meter_hitbox(&topbar, area);
+    // Keep the header row's quiet background under the widget itself.
+    let buf = f.buffer_mut();
+    Block::default()
+        .style(Style::default().bg(app.ui_theme.header_bg))
+        .render(area, buf);
+    ratatui::widgets::Widget::render(topbar, area, buf);
+    app.viewport.last_topbar_hitboxes = hitboxes;
+    context_hitbox
+}
+
 /// Map the host terminal rect onto the session shell canvas.
 ///
 /// Wide terminals use the full available width (v0.8.65 behavior; #5322). A
@@ -850,24 +896,61 @@ pub(crate) fn render(f: &mut Frame, app: &mut App, _config: &Config) -> Option<(
     }
 
     if app.launch.visible {
-        // Launch is a distinct full-canvas choice state, not a reading column.
-        // Keep it edge-to-edge so opening Codewhale never recreates black side
-        // banks before the responsive session ocean takes over.
-        // Completion entries are computed here — the same way the session
-        // path below computes them for ComposerWidget — so the launch screen
-        // can paint its popup (#5698 review finding 2); the mention walker
-        // needs &mut App, rendering does not.
+        // The launch screen lives inside the session shell frame (spec
+        // §5b): the ONE topbar header, the Tideline startup stage as the
+        // body, and the merged footer — the same chrome every post-session
+        // screen wears, so opening Codewhale and working in it are one
+        // design. The pre-session composer docks in the stage's bottom
+        // rows; completion entries are computed here — the same way the
+        // session path below computes them for ComposerWidget — so the
+        // stage can paint its popup (#5698 review finding 2); the mention
+        // walker needs &mut App, rendering does not.
         let launch_slash_menu_entries = visible_slash_menu_entries(app, SLASH_MENU_LIMIT);
         let launch_mention_menu_entries =
             crate::tui::file_mention::visible_mention_menu_entries(app, app.mention_menu_limit);
-        crate::tui::underwater::render_launch_screen(
-            size,
-            f.buffer_mut(),
-            app,
-            &launch_slash_menu_entries,
-            &launch_mention_menu_entries,
-        );
-        crate::tui::underwater::record_launch_hitboxes(size, &mut app.launch);
+        let [topbar_area, stage_area, footer_area] = Layout::default()
+            .direction(Direction::Vertical)
+            .flex(ratatui::layout::Flex::Start)
+            .constraints([
+                Constraint::Length(1), // topbar: the one header
+                Constraint::Min(1),    // stage: Tideline startup
+                Constraint::Length(1), // merged footer (slots 6+8)
+            ])
+            .areas(size);
+        render_topbar_row(f, app, topbar_area);
+        let startup = crate::tui::underwater::tideline_startup_from_app(app);
+        let hitboxes = crate::tui::underwater::tideline_startup_hitboxes(stage_area);
+        crate::tui::underwater::render_tideline_startup(stage_area, f.buffer_mut(), &startup);
+        // The completion popup paints above the docked composer's input row,
+        // over the stage rows it needs — the same caller-computed entries
+        // the session popup rides.
+        if let Some(input_row) = hitboxes
+            .composer
+            .map(|area| area.y.saturating_sub(stage_area.y))
+        {
+            crate::tui::underwater::render_launch_completion_popup(
+                stage_area,
+                f.buffer_mut(),
+                app,
+                input_row,
+                &launch_slash_menu_entries,
+                &launch_mention_menu_entries,
+            );
+        }
+        crate::tui::underwater::apply_launch_hitboxes(&hitboxes, &mut app.launch);
+        // The merged footer is the screen's last row on every screen.
+        if footer_area.height > 0 {
+            let facts = crate::tui::phase_strip::tideline_footer_from_app(app, footer_area.width);
+            let footer = facts.widget(
+                &app.ui_theme,
+                crate::tui::color_compat::ascii_safe_enabled(),
+            );
+            let buf = f.buffer_mut();
+            Block::default()
+                .style(Style::default().bg(app.ui_theme.footer_bg))
+                .render(footer_area, buf);
+            crate::tui::phase_strip::render_tideline_footer(footer_area, buf, &footer);
+        }
         if !app.view_stack.is_empty() {
             if app.view_stack.top_kind() == Some(ModalKind::Approval) {
                 app.viewport.last_approval_area = app.view_stack.top_occupied_region(size);
@@ -1082,44 +1165,12 @@ pub(crate) fn render(f: &mut Frame, app: &mut App, _config: &Config) -> Option<(
 
     // The Tideline topbar owns the header slot (spec §3: it replaces
     // `underwater::render_header`). One row: brand wordmark, contextual
-    // segments, then the pinned context meter + clock. Segment rects are
-    // recorded for hover (this frame's highlight resolves against the
-    // previous frame's rects, the standard one-frame-lag registry pattern)
-    // and for click routing in a follow-up slice. The route identity the
-    // old identity band carried below the composer now lives here as the
-    // Model segment — its new permanent home.
+    // segments, then the pinned context meter + clock. The route identity
+    // the old identity band carried below the composer now lives here as
+    // the Model segment — its new permanent home.
     let mut topbar_context_hitbox = None;
     if header_height > 0 {
-        let segments = topbar_segments(app, header_area.width);
-        let clock = topbar_clock();
-        let hovered = app.last_mouse_pos.and_then(|(mx, my)| {
-            app.viewport
-                .last_topbar_hitboxes
-                .iter()
-                .find(|hb| hb.area.x <= mx && mx < hb.area.right() && hb.area.y == my)
-                .map(|hb| hb.id)
-        });
-        let topbar = Topbar::new(
-            &app.ui_theme,
-            &clock,
-            topbar_context_percent(app),
-            &segments,
-        )
-        .ascii_safe(crate::tui::color_compat::ascii_safe_enabled())
-        .hovered(hovered);
-        let hitboxes = topbar_hitboxes(&topbar, header_area);
-        // The context meter stays an inspector target in the new chrome: the
-        // registration the classic header's right edge carried, anchored to
-        // the topbar's own painted meter rect — same refuse-to-overlap
-        // discipline, no hitbox when the meter truncated into other cells.
-        topbar_context_hitbox = crate::tui::topbar::context_meter_hitbox(&topbar, header_area);
-        // Keep the header row's quiet background under the widget itself.
-        let buf = f.buffer_mut();
-        Block::default()
-            .style(Style::default().bg(app.ui_theme.header_bg))
-            .render(header_area, buf);
-        ratatui::widgets::Widget::render(topbar, header_area, buf);
-        app.viewport.last_topbar_hitboxes = hitboxes;
+        topbar_context_hitbox = render_topbar_row(f, app, header_area);
     } else {
         app.viewport.last_topbar_hitboxes.clear();
     }
