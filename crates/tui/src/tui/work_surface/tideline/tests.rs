@@ -144,7 +144,13 @@ fn stream_renders_turns_tree_receipts_conclusion_and_legend() {
     assert!(text.contains("×12"), "receipt count: {text}");
     assert!(text.contains("working whale-1 editing"), "{text}");
     assert!(text.contains("failed whale-3"), "{text}");
-    assert!(text.contains("▸"), "selected row marker: {text}");
+    // Selection never erases a state mark: at the stream's left edge the
+    // ✓ stays and the focus rides on bold (the work-stage golden shows the
+    // ▸ marker in its own column when the rail provides one).
+    assert!(
+        text.contains("✓ done whale-2"),
+        "state mark survives selection: {text}"
+    );
     assert!(text.trim_end().contains("done"), "conclusion: {text}");
     // The legend teaches every mark in place.
     assert!(text.contains("● working"), "{text}");

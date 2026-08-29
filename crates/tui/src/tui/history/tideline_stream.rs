@@ -250,13 +250,18 @@ pub fn render_tideline_stream(area: Rect, buf: &mut Buffer, stream: &TidelineStr
                 let mut style = schrome(theme, state.ink());
                 if selected {
                     style = style.add_modifier(Modifier::BOLD);
-                    sput(
-                        buf,
-                        area.x.saturating_sub(1),
-                        y,
-                        "▸",
-                        schrome(theme, ChromeInk::Identity),
-                    );
+                    // The marker needs its own column left of the mark; at
+                    // the stream's left edge the state mark wins (a marker
+                    // must never erase state) and bold carries the focus.
+                    if area.x > 0 {
+                        sput(
+                            buf,
+                            area.x - 1,
+                            y,
+                            &stream.sym("▸"),
+                            schrome(theme, ChromeInk::Identity),
+                        );
+                    }
                 }
                 sput(buf, area.x + 2, y, &line, style);
             }

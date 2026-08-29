@@ -3,7 +3,7 @@
  ├── whale-2 · golden buffers                                                   
  └── whale-3 · preview render                                                   
 ● working whale-1 editing crates/tui · 14:41:02 ×12                             
-▸ done whale-2 wrote 4 goldens · 14:39:02 ×34                                   
+✓ done whale-2 wrote 4 goldens · 14:39:02 ×34                                   
 ✗ failed whale-3 preview render · 14:20:55 ×3                                   
 ▏ two whales surfaced; the third failed — retrying                              
    done: footer merged, 4 goldens blessed                                       
