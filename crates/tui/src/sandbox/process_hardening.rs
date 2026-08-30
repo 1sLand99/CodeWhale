@@ -402,13 +402,12 @@ mod linux_flag_tests {
         }
         let mode = std::env::var(CHILD_MODE_ENV).ok();
         apply_process_hardening(mode.as_deref());
-        let status = std::fs::read_to_string("/proc/self/status").expect("read /proc/self/status");
-        let flag = status
-            .lines()
-            .find_map(|line| line.strip_prefix("NoNewPrivs:"))
-            .expect("NoNewPrivs line in /proc/self/status")
-            .trim();
-        println!("NNP={flag}");
+        // Read the flag back through PR_GET_NO_NEW_PRIVS, not
+        // /proc/self/status: no_new_privs is per-task and /proc/self/status
+        // shows the *main* thread's flag, while libtest runs this test on a
+        // spawned thread — the /proc read always reports 0 here.
+        let flag = no_new_privs_active().expect("PR_GET_NO_NEW_PRIVS reads the flag on Linux");
+        println!("NNP={}", if flag { "1" } else { "0" });
     }
 
     fn run_child(mode: Option<&str>, env_override: Option<&str>) -> String {
