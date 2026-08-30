@@ -9,6 +9,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Website: the public site moves to the Tideline deep-ocean design language
+  (dark by default with an opt-in light documentation sheet, palette grounded
+  in the TUI's WHALE_* tokens) and the new whale brand mark across the favicon,
+  app icons, web manifest, nav wordmark, and social card (#5573).
+
+- Add `codewhale dispatch` / `/dispatch` so a local session can propose a
+  Codewhale cloud agent against an explicit `github`, `cnb`, or `gitee` remote.
+  Confirmation is required; missing credentials fail closed; cloud jobs share
+  the existing `/jobs` surface as `kind=cloud`. See
+  [DAYTONA_CLOUD_DISPATCH.md](docs/DAYTONA_CLOUD_DISPATCH.md).
+- `/login` reports the Codewhale account session and provider-key next
+  steps. The internal cloud-agent credential is not user surface: there is
+  no `auth set-slot`/`auth clear-slot` command, no hint, and no completion
+  entry for it — membership (`codewhale login`) is the only door.
+- Add the Tideline component family from the ratatui translation spec
+  (#5698's screens, riding the #5699 work-strip layout): hero startup
+  surface with quick actions and option strip, composer restyle with the
+  fluke cap, notifications inbox, merged footer band, pod ledger, receipt
+  stream, theme list with motion toggles, live preview, settings rail,
+  and the left rail — each a standalone render module pinned by 28 new
+  byte-exact golden buffers. Frame wiring follows the Tideline acceptance
+  gate; `NO_COLOR` is now honored by palette depth detection.
+- Route Contract Phase 1: `RouteResolver` is the runtime path for
+  `resolve_runtime_options`; `codewhale providers export --json` ships the
+  owned descriptor catalog; CLI `--provider` accepts any catalog route id
+  (the closed `ProviderArg` enum is deleted). Catalog layers are
+  bundled → models.dev → provider `/v1/models` → config.toml → user, with
+  policy DENY last and never overridden.
 - Add provider-native web search for documented Xiaomi MiMo 2.5 Pro and 2.5
   chat routes while keeping neighboring models and custom gateways fail-closed.
 - Add structured provider-native web search for exact Z.AI global and Zhipu
@@ -24,6 +52,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add provider-native web search for documented DeepSeek V4 routes through the
   Responses API, with fail-closed capability gating for compatible custom
   endpoints.
+- Add provider-native search for exact Moonshot K3 Formula, legacy K2.6
+  built-in search, and Kimi Code membership `/search` routes. Treat the exact
+  Moonshot China endpoint as a first-party direct route.
 - Z.ai `GLM-5.3-Flash` and OpenRouter `z-ai/glm-5.3-flash` are first-class
   picker rows (`/model GLM-5.3-Flash`). Flash is the faster/explore sibling
   of `GLM-5.3`; the Z.ai default stays `GLM-5.3`. List price is $0.15/$0.50
@@ -37,6 +68,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   actions, while Extensions and Problems route recovery through the existing
   `/mcp login`, `/mcp reload`, `/mcp validate`, and `/plugin validate` commands
   (#5643, #5655).
+- Plugin prompt matching (#5579): sending a task can toast the next review
+  step when the prompt strongly matches an installed-but-idle plugin or a
+  marketplace catalog you added (for example a Supabase prompt suggesting
+  `/plugin trust supabase`). A live composer CTA offers the same review
+  command while you type, matching turns append a bounded
+  `<recommended_plugins>` user block, and `request_plugin_install` surfaces
+  review without installing. `/plugin suggest` now ranks manifest keywords and
+  catalog candidates, never auto-installs, and on-disk plugin changes also
+  nudge `/plugin reload` between turns.
+
 
 - Added `/import-claude` (#5557): reads `~/.claude.json` and
   `~/.claude/settings.json` read-only and renders an explicit, reviewable
@@ -154,10 +195,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The sandbox read deny-list matches a rule's resolved path as well as its
+  literal spelling. On macOS `/etc` and `/var` are symlinks into `/private`,
+  so a read of `/private/etc/sudoers` walked around the `/etc/sudoers` rule,
+  and a rule written against a symlinked directory never fired for the real
+  path that `canonicalize` and the process cwd hand back.
 - Background shells are first-class work-strip rows (`▾ Shells N`) you can
   open, watch, and cancel by the `shell_*` id on the row. `/jobs cancel all`
   cancels running shells; it no longer looks up a task named `all`. The
   composer hourglass crumb no longer stands in for a shell surface.
+- `codewhale logout` and `/logout` now clear the Codewhale account session
+  and the Daytona secret slot, not only provider API keys. The TUI crate's
+  leftover `login --api-key` path no longer claims to save a key.
 - Account sessions no longer read the macOS Keychain. Unsigned or rebuilt
   `codewhale` binaries were a new Keychain ACL principal every time, so
   `codewhale web` and the TUI popped a password dialog on start. Sessions
