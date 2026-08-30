@@ -832,8 +832,15 @@ fn colorfulness_sigma(image: &DynamicImage) -> f64 {
         return 0.0;
     }
     let (mut sum_rg, mut sum_yb, mut sum_rg2, mut sum_yb2) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
-    for px in rgb.as_raw().chunks_exact(3) {
-        let (r, g, b) = (f64::from(px[0]), f64::from(px[1]), f64::from(px[2]));
+    // An `Rgb<u8>` buffer is exactly 3 bytes per pixel, so the remainder is
+    // always empty; `as_chunks` makes the pixel stride a compile-time fact.
+    let (pixels, remainder) = rgb.as_raw().as_chunks::<3>();
+    debug_assert!(
+        remainder.is_empty(),
+        "RGB8 buffer length must be a multiple of 3"
+    );
+    for &[r, g, b] in pixels {
+        let (r, g, b) = (f64::from(r), f64::from(g), f64::from(b));
         let rg = r - g;
         let yb = (r + g) / 2.0 - b;
         sum_rg += rg;
