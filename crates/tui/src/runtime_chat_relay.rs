@@ -255,8 +255,8 @@ impl RuntimeChatRelayHost {
             fs::set_permissions(&private_dir, fs::Permissions::from_mode(0o700))
                 .map_err(|_| "Runtime Chat could not protect private local state.".to_string())?;
         }
-        let scope_lock = RelayScopeLock::acquire(&private_dir.join(SCOPE_LOCK_FILE))
-            .map_err(|error| {
+        let scope_lock =
+            RelayScopeLock::acquire(&private_dir.join(SCOPE_LOCK_FILE)).map_err(|error| {
                 // Only WouldBlock is genuine contention. Any other lock
                 // failure is a local IO fault, and misreporting it as
                 // ownership hides the cause (#5735's flake evidence).
