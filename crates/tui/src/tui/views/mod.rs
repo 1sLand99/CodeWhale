@@ -1347,12 +1347,43 @@ enum SnapshotLane {
     Model,
 }
 
+/// Which durable store a saved row persists to — independent of which
+/// authority currently wins the *effective* decision. An environment or
+/// terminal override (NO_ANIMATIONS, a legacy console host, …) relabels the
+/// row's authority without repairing or breaking its store, so store-error
+/// marking must key on this field, never on `authority`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SettingStore {
+    /// `settings.toml` (user settings).
+    UserSettings,
+    /// `config.toml` (workspace configuration).
+    WorkspaceConfig,
+    /// Session-owned, diagnostic, or otherwise not persisted from this surface.
+    None,
+}
+
+impl SettingStore {
+    /// The store an authority implies when a row is *built* under it. Only
+    /// meaningful at construction: an override authority applied later must
+    /// keep the row's original store.
+    fn for_authority(authority: SettingAuthority) -> Self {
+        match authority {
+            SettingAuthority::UserSettings => SettingStore::UserSettings,
+            SettingAuthority::WorkspaceConfiguration => SettingStore::WorkspaceConfig,
+            _ => SettingStore::None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ConfigRowFacts {
     kind: ConfigRowKind,
     /// Rail category when the section alone would misfile the row.
     category: Option<ConfigCategory>,
     authority: SettingAuthority,
+    /// The store this row's saved/startup lanes come from (#5730 Windows CI:
+    /// an override-authority row still has a store that can fail to load).
+    store: SettingStore,
     apply: SettingApplySemantics,
     /// Value observed in force from an explicit `App` field. `None` means
     /// unobserved; it is never inferred from the persisted value.
@@ -1376,6 +1407,7 @@ impl ConfigRowFacts {
             kind: ConfigRowKind::Setting,
             category: None,
             authority: SettingAuthority::UserSettings,
+            store: SettingStore::UserSettings,
             apply: SettingApplySemantics::Immediate,
             effective: None,
             snapshot: None,
@@ -1411,6 +1443,7 @@ impl ConfigRowFacts {
     fn session_setting() -> Self {
         Self {
             authority: SettingAuthority::Session,
+            store: SettingStore::None,
             apply: SettingApplySemantics::EffectiveNow,
             ..Self::saved_setting()
         }
@@ -1419,6 +1452,7 @@ impl ConfigRowFacts {
     /// A persisted setting shown but not editable from this surface.
     fn read_only_setting(authority: SettingAuthority) -> Self {
         Self {
+            store: SettingStore::for_authority(authority),
             authority,
             apply: SettingApplySemantics::ReadOnly,
             ..Self::saved_setting()
@@ -1429,6 +1463,7 @@ impl ConfigRowFacts {
     fn diagnostic(authority: SettingAuthority) -> Self {
         Self {
             kind: ConfigRowKind::Diagnostic,
+            store: SettingStore::None,
             authority,
             apply: SettingApplySemantics::ReadOnly,
             ..Self::saved_setting()
@@ -1440,6 +1475,7 @@ impl ConfigRowFacts {
         Self {
             kind: ConfigRowKind::Action,
             authority: SettingAuthority::Session,
+            store: SettingStore::None,
             apply: SettingApplySemantics::EffectiveNow,
             command: Some((command, verb)),
             ..Self::saved_setting()
@@ -1454,7 +1490,16 @@ impl ConfigRowFacts {
     }
 
     fn authority(self, authority: SettingAuthority) -> Self {
-        Self { authority, ..self }
+        // Callers that relabel a row's authority through this builder are
+        // describing the row's store (e.g. a config.toml row), so the store
+        // follows. An *override* never goes through this builder — it wins
+        // the effective decision while the store stays what it was.
+        let store = SettingStore::for_authority(authority);
+        Self {
+            authority,
+            store,
+            ..self
+        }
     }
 
     fn apply(self, apply: SettingApplySemantics) -> Self {
@@ -2562,13 +2607,17 @@ impl ConfigView {
         // A row whose store failed to load carries the error instead of a
         // default: its value reads unavailable, it is not editable (writing
         // through an unreadable store could clobber it), and its saved and
-        // startup lanes are reported as unavailable.
+        // startup lanes are reported as unavailable. Keyed on the row's
+        // *store*, not its authority: an environment/terminal override wins
+        // the effective decision without making the store any less broken
+        // (caught by Windows CI, where the legacy-console probe relabels the
+        // motion rows' authority and a broken store then went unreported).
         let unavailable = tr(app.ui_locale, MessageId::ConfigUnavailable).into_owned();
         for row in &mut rows {
-            let error = match row.facts.authority {
-                SettingAuthority::UserSettings => settings_error.as_deref(),
-                SettingAuthority::WorkspaceConfiguration => config_error.as_deref(),
-                _ => None,
+            let error = match row.facts.store {
+                SettingStore::UserSettings => settings_error.as_deref(),
+                SettingStore::WorkspaceConfig => config_error.as_deref(),
+                SettingStore::None => None,
             };
             if let Some(error) = error
                 && row.facts.kind == ConfigRowKind::Setting
@@ -8627,6 +8676,12 @@ context_window = 262144
             .expect("low_motion row");
         view.rows[low_motion].value = "false".to_string();
         view.rows[low_motion].facts.effective = Some("true".to_string());
+        // Pin the authority: the host motion-override probe (a legacy console
+        // host, NO_ANIMATIONS, an SSH session, …) would otherwise relabel this
+        // row and make the test host-dependent. The subject here is the
+        // saved/effective synthesis contract, not override detection.
+        view.rows[low_motion].facts.authority = super::SettingAuthority::UserSettings;
+        view.rows[low_motion].facts.authority_detail = None;
         view.category = ConfigCategory::Motion;
         view.selected = low_motion;
 
@@ -9109,6 +9164,43 @@ context_window = 262144
         // Session rows are untouched by store failures.
         let provider = view.rows.iter().find(|row| row.key == "provider").unwrap();
         assert!(provider.editable && provider.facts.store_error.is_none());
+    }
+
+    /// An environment/terminal override wins the effective decision but does
+    /// not repair a broken store: the overridden motion row must still report
+    /// the settings.toml load failure instead of synthesizing a saved lane.
+    /// (Windows CI caught this through the legacy-console probe; store truth
+    /// is keyed on the row's store, not its current authority.)
+    #[test]
+    fn overridden_motion_row_still_reports_a_broken_settings_store() {
+        let _lock = crate::test_support::lock_test_env();
+        let tmp = TempDir::new().expect("tempdir");
+        let config_dir = tmp.path().join(".deepseek");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(config_dir.join("settings.toml"), "theme = [broken\n").unwrap();
+        let config_path = config_dir.join("config.toml");
+        std::fs::write(&config_path, "approval_policy = [broken\n").unwrap();
+        let _guard = crate::test_support::EnvVarGuard::set("DEEPSEEK_CONFIG_PATH", &config_path);
+        let _override = crate::test_support::EnvVarGuard::set("NO_ANIMATIONS", "1");
+        let app = create_test_app();
+        let view = ConfigView::new_for_app(&app);
+
+        let row = view
+            .rows
+            .iter()
+            .find(|row| row.key == "low_motion")
+            .expect("low_motion row");
+        assert_eq!(row.facts.authority, super::SettingAuthority::Environment);
+        assert!(
+            row.facts.store_error.is_some(),
+            "the override wins the effective decision; the broken store is still reported"
+        );
+        let fact = view.setting_fact(row).expect("setting fact");
+        assert!(fact.saved.is_none() && fact.startup.is_none(), "{fact:?}");
+        assert!(
+            fact.effective.is_some(),
+            "App still supplies the live value"
+        );
     }
 
     /// P1.2: when a runtime overlay forces low motion, the row's source is
