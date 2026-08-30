@@ -190,9 +190,9 @@ pub struct ProjectGoalState {
 /// Exposes the typed, exact-minimum operations the live project handlers
 /// consume: `/lsp` status/set state, `/share` session payload data, and
 /// `/goal` goal state including the session-derived effective values.
-/// `/init` host data flows through the existing `WORKSPACE` facet (D2), so it
-/// declares `PROJECT | WORKSPACE` (D4) without consuming a project-facet
-/// method. All results are contract-owned portable values; implementation
+/// `/init` host data flows through the existing `WORKSPACE` facet (D2), so
+/// `/init` destructures exactly `WORKSPACE` (D4) and consumes no
+/// project-facet method. All results are contract-owned portable values; implementation
 /// errors cross as safe text. The TUI adapter is the only place that touches
 /// `App`, `config::config`, the goal service, or the session manager.
 pub trait CommandProjectContext {
