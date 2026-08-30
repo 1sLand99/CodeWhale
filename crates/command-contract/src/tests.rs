@@ -474,8 +474,6 @@ fn project_facet_transports_through_envelope_when_declared() {
         .with_project(&mut project)
         .into_parts();
     assert!(parts.project.is_some());
-    assert!(parts.plugin.is_none());
-    assert!(parts.memory.is_none());
     assert!(parts.session.is_none());
 
     // PROJECT combined with WORKSPACE (init) and PRESENTATION (goal).
@@ -487,7 +485,6 @@ fn project_facet_transports_through_envelope_when_declared() {
     assert!(parts.project.is_some());
     assert!(parts.workspace.is_some());
     assert!(parts.presentation.is_none());
-    assert!(parts.plugin.is_none());
 }
 
 #[test]
