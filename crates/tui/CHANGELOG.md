@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Website: the public site moves to the Tideline deep-ocean design language
+  (dark by default with an opt-in light documentation sheet, palette grounded
+  in the TUI's WHALE_* tokens) and the new whale brand mark across the favicon,
+  app icons, web manifest, nav wordmark, and social card (#5573).
+
 - Add `codewhale dispatch` / `/dispatch` so a local session can propose a
   Codewhale cloud agent against an explicit `github`, `cnb`, or `gitee` remote.
   Confirmation is required; missing credentials fail closed; cloud jobs share
