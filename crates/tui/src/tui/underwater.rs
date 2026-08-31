@@ -3011,55 +3011,6 @@ use ratatui::layout::{Constraint, Layout};
 
 use crate::palette::UiTheme;
 
-/// The current Codewhale diving-whale mark — the generated 10x6 cell
-/// rendition from `designs/brand/20260829-codewhale-mark/TUI_GLYPHS.md`,
-/// produced by `build-tui-glyph.py`; never hand-drawn. Its wave is the `>`
-/// shell-prompt motif. The retired fluke-ring proposal is deliberately absent
-/// from this startup path. The ASCII-safe projection maps each quadrant block
-/// through its declared `glyphs::ascii_fallback` — a legible silhouette, not a
-/// smear.
-const CURRENT_MARK_BLOCK: [&str; 6] = [
-    "▄▄▄▄██▌",
-    "▜████▀▘",
-    "   ▟██▄▄",
-    "   ▟█████▖",
-    " ▐█▟▀█████",
-    " ▐█▜██████",
-];
-/// The generated glyph has a seven-cell first row, but all rows share this
-/// ten-cell canvas. Use the canvas for centering and hitboxes so later rows do
-/// not shift or escape their recorded area.
-const CURRENT_MARK_WIDTH: u16 = 10;
-
-/// Rows of current-mark ink, one `String` per terminal row. `ascii_safe`
-/// projects each cell through the declared fallbacks (spec §2: every
-/// authored glyph has one).
-fn current_mark_rows(ascii_safe: bool) -> Vec<String> {
-    CURRENT_MARK_BLOCK
-        .iter()
-        .map(|row| current_mark_row(row, ascii_safe))
-        .collect()
-}
-
-/// Single-row projection: the unicode row verbatim, or each block through
-/// its declared ASCII fallback.
-fn current_mark_row(row: &str, ascii_safe: bool) -> String {
-    if !ascii_safe {
-        return row.to_string();
-    }
-    row.chars()
-        .map(|ch| {
-            if ch == ' ' {
-                ch.to_string()
-            } else {
-                crate::tui::glyphs::ascii_fallback(&ch.to_string())
-                    .map(str::to_string)
-                    .unwrap_or_else(|| ch.to_string())
-            }
-        })
-        .collect()
-}
-
 /// Static wave rule between the hero and the quick actions (spec §5b). Dim,
 /// never animated — decoration is opt-in and this is not decoration that
 /// carries state.
@@ -3244,10 +3195,6 @@ impl<'a> TidelineStartup<'a> {
             })
             .collect()
     }
-
-    fn current_mark(&self) -> Vec<String> {
-        current_mark_rows(self.ascii_safe)
-    }
 }
 
 fn chrome(theme: &UiTheme, ink: ChromeInk) -> Style {
@@ -3288,24 +3235,28 @@ struct StartupLayout {
     quick_rows_start: u16,
     /// Row within `hero` where the centered hero block starts.
     hero_top: u16,
-    /// Whether the 10x6 current mark fits (the fixed canvas, heading, and
-    /// subtitle).
-    current_mark_shown: bool,
-    /// Option-strip column count: 4 tiles need ~14 cells each to name
-    /// themselves whole, so below 56 stage columns the strip sheds to 2
-    /// (§5b shed ⑩) rather than truncate every label mid-word.
+    /// Row within `strip` where labels start. Medium-height stages reclaim the
+    /// purely decorative top padding so the compact composer can keep its hint.
+    strip_content_start: u16,
+    /// The four launch routes stay discoverable at every supported width;
+    /// narrow stages shorten their labels instead of dropping actions.
     strip_columns: u16,
 }
 
 fn startup_layout(stage: Rect) -> StartupLayout {
     let quick_len: u16 = if stage.height >= 15 { 3 + 2 } else { 3 };
     let rule_len: u16 = if stage.height >= 11 { 1 } else { 0 };
+    let strip_len: u16 = if (11..18).contains(&stage.height) {
+        2
+    } else {
+        3
+    };
     let [hero, rule_a, quick, rule_b, strip, tail] = Layout::vertical([
         Constraint::Percentage(38),
         Constraint::Length(rule_len),
         Constraint::Length(quick_len),
         Constraint::Length(rule_len),
-        Constraint::Length(3),
+        Constraint::Length(strip_len),
         Constraint::Min(1),
     ])
     .areas(stage);
@@ -3319,14 +3270,7 @@ fn startup_layout(stage: Rect) -> StartupLayout {
         height: dock_h,
         ..tail
     };
-    let current_mark_h = CURRENT_MARK_BLOCK.len() as u16;
-    let current_mark_shown =
-        hero.width >= CURRENT_MARK_WIDTH && hero.height >= current_mark_h.saturating_add(2);
-    let block_h = if current_mark_shown {
-        current_mark_h + 2
-    } else {
-        u16::min(hero.height, 2)
-    };
+    let block_h = u16::min(hero.height, 2);
     StartupLayout {
         hero,
         rule_a,
@@ -3336,8 +3280,8 @@ fn startup_layout(stage: Rect) -> StartupLayout {
         dock,
         quick_rows_start: quick.height.saturating_sub(3),
         hero_top: hero.height.saturating_sub(block_h) / 2,
-        current_mark_shown,
-        strip_columns: if strip.width < 56 { 2 } else { 4 },
+        strip_content_start: u16::from(strip_len > 2),
+        strip_columns: 4,
     }
 }
 
@@ -3350,23 +3294,11 @@ pub fn render_tideline_startup(stage: Rect, buf: &mut Buffer, startup: &Tideline
     let theme = startup.theme;
     let layout = startup_layout(stage);
 
-    // Hero: the generated current mark (when the cell budget admits it), the
-    // heading, and one dim subtitle (first-run vs returning) as one vertically
-    // centered block. Each mark row is left-aligned on the same fixed-width
-    // canvas, rather than individually centered by its visible ink width.
-    let mut hero_row = layout.hero_top;
-    if layout.current_mark_shown {
-        let mark_x = layout.hero.x + layout.hero.width.saturating_sub(CURRENT_MARK_WIDTH) / 2;
-        for row in startup.current_mark() {
-            set_span(
-                buf,
-                mark_x,
-                layout.hero.y + hero_row,
-                &Span::styled(row, chrome(theme, ChromeInk::Attention)),
-            );
-            hero_row = hero_row.saturating_add(1);
-        }
-    }
+    // Hero: one direct heading and one dim subtitle (first-run vs returning)
+    // as a vertically centered block. The terminal does not approximate the
+    // canonical raster mark; surfaces capable of rendering that exact asset
+    // own the brand image.
+    let hero_row = layout.hero_top;
     let heading = "What are we working on?";
     centered(
         buf,
@@ -3394,7 +3326,10 @@ pub fn render_tideline_startup(stage: Rect, buf: &mut Buffer, startup: &Tideline
         buf,
         layout.hero,
         hero_row.saturating_add(1),
-        &Span::styled(subtitle, chrome(theme, ChromeInk::MetadataHint)),
+        &Span::styled(
+            truncate_to_width(&subtitle, usize::from(layout.hero.width)),
+            chrome(theme, ChromeInk::MetadataHint),
+        ),
     );
 
     // Static wave rules.
@@ -3474,8 +3409,9 @@ pub fn render_tideline_startup(stage: Rect, buf: &mut Buffer, startup: &Tideline
         );
     }
 
-    // Option strip: 4 columns × 2 rows (label over key). Tiles shed 4→2
-    // below the 40-column floor so the 80-wide blocker still reads.
+    // Option strip: 4 columns × 2 rows (label over key). At narrow widths the
+    // labels compact to one word; actions never disappear merely because the
+    // terminal is small.
     let options = startup.options();
     let columns = layout.strip_columns;
     let column_w = layout.strip.width / columns.max(1);
@@ -3491,19 +3427,32 @@ pub fn render_tideline_startup(stage: Rect, buf: &mut Buffer, startup: &Tideline
         if selected {
             label_style = label_style.add_modifier(Modifier::BOLD);
         }
-        let label = format!("{} {}", startup.sym(option.icon), option.label);
-        let budget = column_w.saturating_sub(1) as usize;
+        let option_label = if layout.strip.width < 56 {
+            match index {
+                0 => "worktree",
+                1 => "chat",
+                _ => option.label,
+            }
+        } else {
+            option.label
+        };
+        let label = format!("{} {option_label}", startup.sym(option.icon));
+        let budget = if layout.strip.width < 56 {
+            usize::from(column_w)
+        } else {
+            usize::from(column_w.saturating_sub(1))
+        };
         let label = truncate_to_width(&label, budget);
         set_span(
             buf,
             x,
-            layout.strip.y + 1,
+            layout.strip.y + layout.strip_content_start,
             &Span::styled(label, label_style),
         );
         set_span(
             buf,
             x,
-            layout.strip.y + 2,
+            layout.strip.y + layout.strip_content_start + 1,
             &Span::styled(option.key, chrome(theme, ChromeInk::MetadataHint)),
         );
     }
@@ -3559,8 +3508,7 @@ pub fn render_tideline_startup(stage: Rect, buf: &mut Buffer, startup: &Tideline
 
 /// Recorded interactive hitboxes for the startup stage (spec §6): each quick
 /// action row and option-strip tile, plus the docked composer's focus and send
-/// targets. The hero brand mark is deliberately decorative; it has no action
-/// or hitbox until the product defines one with keyboard parity.
+/// targets. The hero copy is deliberately non-interactive and has no hitbox.
 #[derive(Debug, Clone, Default)]
 pub struct TidelineStartupHitboxes {
     pub actions: Vec<Rect>,
@@ -3607,7 +3555,7 @@ pub fn tideline_startup_hitboxes_with_composer(
     out.options = (0..columns)
         .map(|index| Rect {
             x: layout.strip.x + index * column_w,
-            y: layout.strip.y + 1,
+            y: layout.strip.y + layout.strip_content_start,
             width: column_w,
             height: 2,
         })

@@ -6,6 +6,8 @@
 //! tool_lifecycle` etc. filtering via the module path while cutting six link
 //! jobs to one. See `crates/tui/tests/README.md`.
 
+#[cfg(all(unix, feature = "long-running-tests"))]
+mod active_composer_pointer_pty;
 mod core_session_command_extraction;
 mod directory_listing_acceptance;
 mod epic_acceptance_harness;

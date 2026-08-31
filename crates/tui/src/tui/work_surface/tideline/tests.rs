@@ -10,11 +10,10 @@ use ratatui::layout::Rect;
 use unicode_width::UnicodeWidthChar;
 
 use super::{
-    TidelineRail, TidelineWorkStage, active_session_tideline_rail_groups, render_tideline_rail,
-    render_tideline_work_stage, tideline_rail_groups, tideline_rail_hitboxes, tideline_rail_width,
+    TidelineRail, TidelineWorkStage, render_tideline_rail, render_tideline_work_stage,
+    tideline_rail_groups, tideline_rail_hitboxes, tideline_rail_width,
 };
 use crate::palette::UI_THEME;
-use crate::tui::app::{TaskPanelEntry, TaskPanelEntryKind};
 use crate::tui::golden_harness::{BLOCKER_SIZES, assert_matches_golden, render_golden_text};
 use crate::tui::history::tideline_exports::{
     TidelineReceiptState, TidelineStream, TidelineStreamEvent, render_tideline_stream,
@@ -71,171 +70,6 @@ fn groups() -> Vec<super::TidelineRailGroup> {
     )
 }
 
-fn active_rail_app() -> crate::tui::app::App {
-    let options = crate::test_support::test_tui_options(std::path::PathBuf::from("."));
-    let mut app = crate::test_support::test_app_with_options(options);
-    app.launch.visible = false;
-    app.current_session_id = Some("tideline-live-rail-facts".to_string());
-    app.ui_locale = crate::localization::Locale::En;
-    app
-}
-
-fn pending_task(id: &str, status: &str) -> TaskPanelEntry {
-    TaskPanelEntry {
-        id: id.to_string(),
-        status: status.to_string(),
-        prompt_summary: "durable work".to_string(),
-        duration_ms: None,
-        kind: TaskPanelEntryKind::Background,
-        stale: false,
-        elapsed_since_output_ms: None,
-        owner_agent_id: None,
-        owner_agent_name: None,
-        current_tool: None,
-        role: None,
-        files_touched: 0,
-    }
-}
-
-fn rail_fact<'a>(groups: &'a [super::TidelineRailGroup], label: &str) -> &'a str {
-    groups
-        .iter()
-        .find(|group| group.label == label)
-        .and_then(|group| group.lines.first())
-        .map(|(line, _)| line.as_str())
-        .unwrap_or_else(|| panic!("missing {label} fact"))
-}
-
-fn subagent(
-    id: &str,
-    status: crate::tools::subagent::SubAgentStatus,
-) -> crate::tools::subagent::SubAgentResult {
-    crate::tools::subagent::SubAgentResult {
-        name: id.to_string(),
-        agent_id: id.to_string(),
-        context_mode: "fresh".to_string(),
-        fork_context: false,
-        workspace: None,
-        git_branch: None,
-        agent_type: crate::tools::subagent::FleetRole::Worker,
-        assignment: crate::tools::subagent::SubAgentAssignment {
-            objective: format!("objective-{id}"),
-            role: Some("worker".to_string()),
-        },
-        model: "deepseek-v4-flash".to_string(),
-        nickname: None,
-        status,
-        worker_status: None,
-        runtime_permissions: None,
-        parent_run_id: None,
-        spawn_depth: 0,
-        child_route: None,
-        result: None,
-        steps_taken: 0,
-        checkpoint: None,
-        needs_input: None,
-        duration_ms: 0,
-        started_at: None,
-        from_prior_session: false,
-    }
-}
-
-#[test]
-fn live_rail_reports_pending_durable_tasks_as_a_run() {
-    let mut app = active_rail_app();
-    app.task_panel.push(pending_task("durable-1", "queued"));
-
-    let groups = active_session_tideline_rail_groups(&app);
-    assert_eq!(rail_fact(&groups, "RUNS"), "1 queued");
-    assert_eq!(rail_fact(&groups, "WORK"), "1 queued");
-}
-
-#[test]
-fn live_rail_keeps_pending_work_visible_alongside_a_completed_checklist() {
-    let mut app = active_rail_app();
-    app.todos.try_lock().expect("todos lock").add(
-        "already done".to_string(),
-        crate::tools::todo::TodoStatus::Completed,
-    );
-    app.task_panel.push(pending_task("durable-1", "running"));
-
-    let groups = active_session_tideline_rail_groups(&app);
-    assert_eq!(rail_fact(&groups, "RUNS"), "1 running");
-    assert_eq!(rail_fact(&groups, "WORK"), "1 running · 0/1");
-}
-
-#[test]
-fn live_rail_dedupes_cached_and_progress_only_pod_members() {
-    let mut app = active_rail_app();
-    app.subagent_cache = vec![
-        subagent(
-            "agent-running",
-            crate::tools::subagent::SubAgentStatus::Running,
-        ),
-        subagent(
-            "agent-completed",
-            crate::tools::subagent::SubAgentStatus::Completed,
-        ),
-    ];
-    app.agent_progress
-        .insert("agent-running".to_string(), "working".to_string());
-    app.agent_progress
-        .insert("agent-progress-only".to_string(), "planning".to_string());
-
-    let groups = active_session_tideline_rail_groups(&app);
-    assert_eq!(rail_fact(&groups, "RUNS"), "2 running");
-    assert_eq!(rail_fact(&groups, "POD"), "2/3");
-    assert_eq!(
-        rail_fact(&groups, "WHALES"),
-        format!("2/{}", app.max_subagents.max(1))
-    );
-}
-
-#[test]
-fn live_rail_keeps_runs_and_work_consistent_for_a_foreground_turn() {
-    let mut app = active_rail_app();
-    app.is_loading = true;
-
-    let groups = active_session_tideline_rail_groups(&app);
-    assert_eq!(rail_fact(&groups, "RUNS"), "running");
-    assert_eq!(rail_fact(&groups, "WORK"), "running");
-}
-
-#[test]
-fn live_rail_counts_a_running_shell_without_calling_it_idle() {
-    let mut app = active_rail_app();
-    app.task_panel.push(TaskPanelEntry {
-        id: "shell_a1b2c3d4".to_string(),
-        status: "running".to_string(),
-        prompt_summary: "shell: cargo test -p codewhale-tui".to_string(),
-        duration_ms: Some(42_000),
-        kind: TaskPanelEntryKind::Background,
-        stale: false,
-        elapsed_since_output_ms: None,
-        owner_agent_id: None,
-        owner_agent_name: None,
-        current_tool: None,
-        role: None,
-        files_touched: 0,
-    });
-
-    let groups = active_session_tideline_rail_groups(&app);
-    assert_eq!(rail_fact(&groups, "RUNS"), "1 running");
-    assert_eq!(rail_fact(&groups, "WORK"), "1 running");
-}
-
-#[test]
-fn live_rail_uses_the_selected_locale_for_its_group_labels() {
-    let mut app = active_rail_app();
-    app.ui_locale = crate::localization::Locale::Ja;
-
-    let labels = active_session_tideline_rail_groups(&app)
-        .into_iter()
-        .map(|group| group.label.into_owned())
-        .collect::<Vec<_>>();
-    assert_eq!(labels, ["実行", "クジラ", "POD", "作業", "コンテキスト"]);
-}
-
 /// Render the stage directly (the fixture borrows cannot outlive the fn).
 fn draw_stage(width: u16, height: u16) -> String {
     render_golden_text(width, height, |buf| {
@@ -285,26 +119,6 @@ fn rail_shows_five_groups_help_and_collapse() {
     assert!(text.contains("▰▰▰▱▱ 61%"), "context meter: {text}");
     assert!(text.contains("? help"), "{text}");
     assert!(text.contains("« collapse"), "{text}");
-}
-
-#[test]
-fn passive_summary_shows_five_groups_without_inert_controls_or_hitboxes() {
-    let groups = groups();
-    let rail = TidelineRail::new(&UI_THEME, &groups).summary();
-    let area = Rect::new(0, 0, 16, 10);
-    let text = render_golden_text(area.width, area.height, |buf| {
-        render_tideline_rail(area, buf, &rail);
-    });
-
-    for label in ["RUNS", "WHALES", "POD", "WORK", "CONTEXT"] {
-        assert!(text.contains(label), "missing {label}: {text}");
-    }
-    assert!(!text.contains("? help"), "{text}");
-    assert!(!text.contains("« collapse"), "{text}");
-    assert!(
-        tideline_rail_hitboxes(area, &rail).is_empty(),
-        "passive visual state must not advertise a clickable target"
-    );
 }
 
 #[test]

@@ -3,9 +3,8 @@
 > **Status — retired reference, not current brand authority.** This record
 > preserves the removed hand-drawn portrait/crown treatment for historical
 > comparison. Do not use its `▚△▞` treatment as a Codewhale mark or infer that
-> `underwater.rs` renders it. The current approved terminal mark is the
-> generated diving whale from `designs/brand/20260829-codewhale-mark/`, whose
-> wave forms a `>` prompt.
+> `underwater.rs` renders it. The canonical mark is a raster asset and has no
+> approved ASCII or block-glyph substitute.
 
 How the former Signal Cut mascots became terminal glyph art. The remaining
 live runtime contract (role → species, state → evidence, inks) is
@@ -34,8 +33,8 @@ Read off the matrix and the working keyframes:
 ## (a) Historical empty-state portrait
 
 Former `crates/tui/src/tui/underwater.rs` idle-art constants. The current
-startup hero no longer uses this artwork; it renders the approved generated
-diving-whale mark instead.
+startup hero no longer uses this artwork and does not approximate the canonical
+raster mark.
 
 ```
     ˚

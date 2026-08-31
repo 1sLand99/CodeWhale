@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- TUI: startup no longer presents an approximate ASCII or block-glyph whale as
+  the product mark. It keeps the direct Tideline prompt while exact-raster
+  surfaces remain responsible for the canonical asset.
+
 - TUI: the active-session composer paints the same three-cell `[↑]` send
   target as Startup and clicks it through the existing Enter submit
   dispatcher (#5771). Compact/quiet composers still omit the control.

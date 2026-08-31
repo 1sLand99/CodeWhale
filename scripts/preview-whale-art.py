@@ -2,9 +2,8 @@
 """Preview archived Codewhale empty-state portrait art: before vs after.
 
 This script is historical comparison evidence only. It is not a preview of the
-current Codewhale mark: that mark is the generated diving whale from
-`designs/brand/20260829-codewhale-mark/`, whose wave forms a `>` prompt.
-The historical rows are held below as a fixed record because the live
+current Codewhale mark: the canonical mark is a raster asset with no approved
+ASCII or block-glyph substitute. The historical rows are held below as a fixed record because the live
 `underwater.rs` constants were intentionally deleted with the old artwork.
 
     python3 scripts/preview-whale-art.py            # ANSI true colour

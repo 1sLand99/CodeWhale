@@ -117,6 +117,7 @@ impl PendingWork {
     }
 
     #[must_use]
+    #[cfg(test)]
     pub fn count_state(&self, state: PendingItemState) -> usize {
         self.items.iter().filter(|item| item.state == state).count()
     }
@@ -179,6 +180,7 @@ pub fn pending_work_from_app(app: &App) -> PendingWork {
 /// Build the complete live-work projection for an active-session status
 /// surface. Unlike [`pending_work_from_app`], this includes live shell jobs.
 #[must_use]
+#[cfg(test)]
 pub(crate) fn live_work_from_app(app: &App) -> PendingWork {
     collect_pending_work(app, true)
 }

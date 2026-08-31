@@ -8,8 +8,8 @@ use ratatui::layout::Rect;
 use unicode_width::UnicodeWidthChar;
 
 use super::{
-    CURRENT_MARK_BLOCK, CURRENT_MARK_WIDTH, LaunchAction, TidelineStartup, handle_launch_key,
-    render_tideline_startup, tideline_startup_hitboxes,
+    LaunchAction, TidelineStartup, handle_launch_key, render_tideline_startup,
+    tideline_startup_hitboxes,
 };
 use crate::palette::UI_THEME;
 use crate::tui::golden_harness::{BLOCKER_SIZES, assert_matches_golden, render_golden_text};
@@ -86,23 +86,25 @@ fn startup_matches_goldens_at_blocker_sizes() {
 fn startup_matches_golden_at_the_40x12_terminal_floor() {
     // §5b shed order proven at the floor. A 40x12 terminal leaves the stage
     // 10 rows after the topbar and merged footer: the QUICK ACTIONS label
-    // row and the wave rules collapse, the hero keeps heading + subtitle
-    // (the 10x6 current mark needs its 8-row budget), and the strip sheds to 2
-    // columns so tile labels stay whole.
+    // row and the wave rules collapse, the hero keeps heading + subtitle, and
+    // all four routes keep compact labels.
     let fixture = returning();
     let startup = fixture.widget(&UI_THEME);
     let text = draw(40, 10, &startup);
     assert_matches_golden("startup_40x10", &text);
     assert!(text.contains("What are we working on?"), "{text}");
     assert!(
-        text.contains("New worktree"),
-        "2-column strip keeps tile 1: {text}"
+        text.lines()
+            .any(|line| line.contains("welcome back") && line.contains('…')),
+        "compact subtitle must end deliberately: {text}"
     );
     assert!(
-        text.contains("Chat only"),
-        "2-column strip keeps tile 2: {text}"
+        text.contains("worktree"),
+        "compact strip keeps worktree: {text}"
     );
-    assert!(!text.contains("Theme"), "tiles 3/4 shed: {text}");
+    assert!(text.contains("chat"), "compact strip keeps chat: {text}");
+    assert!(text.contains("Theme"), "compact strip keeps theme: {text}");
+    assert!(text.contains("Help"), "compact strip keeps help: {text}");
 }
 
 #[test]
@@ -123,30 +125,13 @@ fn startup_hero_states_first_run_vs_returning() {
 }
 
 #[test]
-fn startup_hero_paints_the_generated_current_mark_on_its_fixed_canvas_and_sheds_it_at_short_stages()
-{
-    // The generated 10x6 current mark: each row starts on the same ten-cell
-    // canvas, above the heading. It sheds below its 8-row budget instead of
-    // being clipped mid-mark.
-    let startup = TidelineStartup::new(&UI_THEME, 4, true);
-    let wide = draw(80, 24, &startup);
-    for row in CURRENT_MARK_BLOCK {
-        let expected = format!(
-            "{}{row}",
-            " ".repeat((80 - usize::from(CURRENT_MARK_WIDTH)) / 2)
-        );
-        assert!(
-            wide.lines().any(|line| line.starts_with(&expected)),
-            "current mark row {row:?} must paint on its fixed canvas at 80x24:\n{wide}"
-        );
-    }
-    // 60x16: stage 14 rows -> hero 5 < 8, mark sheds, heading stays.
-    let short = draw(60, 16, &startup);
-    assert!(short.contains("What are we working on?"), "{short}");
-    assert!(
-        !short.contains(CURRENT_MARK_BLOCK[0]),
-        "the current mark must not clip mid-mark at short stages:\n{short}"
-    );
+fn medium_startup_keeps_the_compact_composer_hint() {
+    // A 60x16 terminal gives the startup stage 14 rows after the one-row
+    // topbar and footer. The option strip yields only decorative padding so
+    // the compact composer can preserve both its input and focus hint.
+    let fixture = returning();
+    let text = draw(60, 14, &fixture.widget(&UI_THEME));
+    assert!(text.contains("Tab to type"), "{text}");
 }
 
 #[test]
@@ -271,43 +256,23 @@ fn startup_disabled_rows_render_dimmer_set_not_hidden() {
 }
 
 #[test]
-fn startup_option_strip_sheds_to_two_columns_when_narrow() {
+fn startup_option_strip_keeps_all_four_routes_when_narrow() {
     let mut startup = TidelineStartup::new(&UI_THEME, 4, true);
     startup.selected_option = Some(1);
     let wide = draw(80, 24, &startup);
     for tile in ["New worktree", "Chat only", "Theme", "Help"] {
         assert!(wide.contains(tile), "80 cols shows all four tiles: {wide}");
     }
-    let narrow = draw(30, 20, &startup);
-    assert!(narrow.contains("New worktree"), "narrow keeps tile 1");
-    assert!(narrow.contains("Chat only"), "narrow keeps tile 2");
-    assert!(!narrow.contains("Theme\n"), "narrow sheds tiles 3/4");
+    let narrow = draw(40, 20, &startup);
+    for tile in ["worktree", "chat", "Theme", "Help"] {
+        assert!(narrow.contains(tile), "narrow keeps {tile}: {narrow}");
+    }
 }
 
 #[test]
 fn startup_ascii_safe_has_no_wide_or_unsupported_glyphs() {
     let startup = TidelineStartup::new(&UI_THEME, 4, true).ascii_safe(true);
     let text = draw(100, 30, &startup);
-    // The generated current mark projects through the declared quadrant-block
-    // fallbacks — a legible silhouette, not a hand-made ASCII substitute.
-    for row in CURRENT_MARK_BLOCK {
-        let projected: String = row
-            .chars()
-            .map(|ch| {
-                if ch == ' ' {
-                    ch.to_string()
-                } else {
-                    crate::tui::glyphs::ascii_fallback(&ch.to_string())
-                        .map(str::to_string)
-                        .unwrap_or_else(|| ch.to_string())
-                }
-            })
-            .collect();
-        assert!(
-            text.lines().any(|line| line.contains(projected.trim_end())),
-            "ascii current-mark row {projected:?} must paint:\n{text}"
-        );
-    }
     assert!(text.contains(". ~~~ ."), "wave rule projects to ASCII");
     assert!(text.contains("Enter >"), "chevron projects to >");
     for ch in text.chars() {
