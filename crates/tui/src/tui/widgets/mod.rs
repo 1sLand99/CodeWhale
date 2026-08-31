@@ -1121,6 +1121,16 @@ pub(crate) fn composer_enclosure_enabled(app: &App) -> bool {
     app.composer_border
 }
 
+/// Shared `[↑]` submit rect for the live composer, or `None` when the
+/// enclosure cannot host the three-cell affordance.
+#[must_use]
+pub(crate) fn active_composer_submit_rect(app: &App, area: Rect) -> Option<Rect> {
+    if !composer_enclosure_enabled(app) || area.width < 6 || area.height < 3 {
+        return None;
+    }
+    Some(crate::tui::composer_chrome::tideline_composer_geometry(area).submit)
+}
+
 /// Restore the rounded corners after the semantic top/bottom passes.
 ///
 /// Ratatui renders a `TOP`-only (or `BOTTOM`-only) block through the corner
@@ -1809,6 +1819,18 @@ impl Renderable for ComposerWidget<'_> {
             buf[(prompt_x, cursor_y)]
                 .set_symbol("❯")
                 .set_style(Style::default().fg(self.app.ui_theme.accent_primary));
+        }
+
+        // Restore the shared `[↑]` after caller-owned input so a long draft
+        // cannot erase the one cell target the mouse handler also uses.
+        if has_panel {
+            crate::tui::composer_chrome::render_tideline_composer_submit(
+                area,
+                buf,
+                &self.app.ui_theme,
+                true,
+                crate::tui::color_compat::ascii_safe_enabled(),
+            );
         }
     }
 
@@ -4380,15 +4402,16 @@ mod tests {
     use super::{
         ACTIVE_REVISION_DOMAIN, ApprovalMode, ApprovalWidget, COMPOSER_PANEL_HEIGHT,
         COMPOSER_PLACEHOLDER, COMPOSER_PROMPT_GUTTER_WIDTH, ChatWidget, ComposerWidget, Renderable,
-        SlashMenuEntry, active_entry_revision, apply_detail_target_highlight,
-        apply_selection_to_line, apply_send_flash, approval_palette, approval_truncation_hint,
-        build_empty_state_lines, composer_content_geometry, composer_empty_hint_text,
-        composer_height, composer_max_height, composer_submit_hint, composer_top_padding,
-        cursor_row_col, empty_composer_visual_rows, enclosed_composer_panel_fits, fish_flee_offset,
-        fish_heading, fish_mark, history_entry_revision, layout_input, layout_input_with_scroll,
-        placeholder_visual_lines, push_command_entry, receipt_is_settling, revision_in_domain,
-        should_render_empty_state, slash_completion_hints, tool_run_summary_revision,
-        wrap_input_lines, wrap_input_lines_for_mouse, wrap_text,
+        SlashMenuEntry, active_composer_submit_rect, active_entry_revision,
+        apply_detail_target_highlight, apply_selection_to_line, apply_send_flash, approval_palette,
+        approval_truncation_hint, build_empty_state_lines, composer_content_geometry,
+        composer_empty_hint_text, composer_height, composer_max_height, composer_submit_hint,
+        composer_top_padding, cursor_row_col, empty_composer_visual_rows,
+        enclosed_composer_panel_fits, fish_flee_offset, fish_heading, fish_mark,
+        history_entry_revision, layout_input, layout_input_with_scroll, placeholder_visual_lines,
+        push_command_entry, receipt_is_settling, revision_in_domain, should_render_empty_state,
+        slash_completion_hints, tool_run_summary_revision, wrap_input_lines,
+        wrap_input_lines_for_mouse, wrap_text,
     };
     use crate::config::{ApiProvider, Config};
     use crate::localization::Locale;
@@ -6484,6 +6507,57 @@ mod tests {
         assert!(
             buffer_text(&search_buf, area)
                 .contains(&*search_app.tr(crate::localization::MessageId::HistorySearchTitle))
+        );
+    }
+
+    #[test]
+    fn enclosed_composer_paints_the_shared_send_hitbox() {
+        let mut app = create_test_app();
+        app.composer_border = true;
+        app.input = "ship it".to_string();
+        app.cursor_position = app.input.chars().count();
+        for (width, height) in [(40_u16, 12), (60, 16), (80, 24), (100, 32), (120, 32)] {
+            let rendered = render_composer(&app, width, height);
+            assert!(
+                rendered.contains("[↑]"),
+                "missing send affordance at {width}x{height}:\n{rendered}"
+            );
+            assert!(
+                !rendered.contains("▚△▞"),
+                "retired crown must stay gone at {width}x{height}:\n{rendered}"
+            );
+        }
+    }
+
+    #[test]
+    fn enclosed_composer_send_hitbox_matches_painted_cells() {
+        let mut app = create_test_app();
+        app.composer_border = true;
+        app.input = "x".repeat(240);
+        app.cursor_position = app.input.chars().count();
+        let slash_menu_entries = Vec::<SlashMenuEntry>::new();
+        let mention_menu_entries = Vec::<String>::new();
+        let widget = ComposerWidget::new(&app, 8, &slash_menu_entries, &mention_menu_entries);
+        let area = Rect::new(0, 0, 80, 8);
+        let mut buf = Buffer::empty(area);
+        widget.render(area, &mut buf);
+        let submit = active_composer_submit_rect(&app, area).expect("enclosed composer submit");
+        let painted: String = (submit.x..submit.x + submit.width)
+            .map(|x| buf[(x, submit.y)].symbol().to_string())
+            .collect();
+        assert_eq!(painted, "[↑]", "geometry must cover the painted send cells");
+    }
+
+    #[test]
+    fn quiet_composer_does_not_paint_a_fake_send_control() {
+        let mut app = create_test_app();
+        app.composer_border = false;
+        app.input = "ship it".to_string();
+        app.cursor_position = app.input.chars().count();
+        let rendered = render_composer(&app, 80, 4);
+        assert!(
+            !rendered.contains("[↑]"),
+            "compact composer must shed the send chrome:\n{rendered}"
         );
     }
 

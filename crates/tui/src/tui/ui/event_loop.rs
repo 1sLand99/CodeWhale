@@ -867,6 +867,89 @@ async fn dispatch_launch_composer_submit(
     Ok(false)
 }
 
+/// Submit the live-session composer through the same branches Enter uses.
+///
+/// Mouse `[↑]` sets `pending_composer_submit`; this consumes that chord without
+/// duplicating draft consumption or opening transcript-only Enter shortcuts.
+#[allow(clippy::too_many_arguments)]
+async fn dispatch_session_composer_submit(
+    terminal: &mut AppTerminal,
+    app: &mut App,
+    engine_handle: &mut EngineHandle,
+    task_manager: &SharedTaskManager,
+    config: &mut Config,
+    web_config_session: &mut Option<WebConfigSession>,
+    chord: ComposerSubmitChord,
+) -> Result<bool> {
+    let action = app.decide_composer_submit(chord);
+    if matches!(action, ComposerSubmitAction::SendQueuedNow) {
+        let _ = send_next_queued_message_now(app, config, engine_handle).await?;
+        return Ok(false);
+    }
+    if !app.composer_enter_would_submit() {
+        return Ok(false);
+    }
+
+    let slash_menu_entries = visible_slash_menu_entries(app, SLASH_MENU_LIMIT);
+    let slash_menu_open = !slash_menu_entries.is_empty();
+    let selecting_inline_skill = slash_menu_open
+        && partial_inline_skill_mention_at_cursor(&app.input, app.cursor_position).is_some();
+    if slash_menu_open
+        && !slash_menu_entries.is_empty()
+        && apply_slash_menu_selection(app, &slash_menu_entries, false)
+    {
+        app.close_slash_menu();
+        if selecting_inline_skill {
+            return Ok(false);
+        }
+    }
+
+    let Some(input) = app.handle_composer_enter() else {
+        return Ok(false);
+    };
+    if should_intercept_memory_quick_add(config, &input) {
+        handle_memory_quick_add(app, &input, config);
+        return Ok(false);
+    }
+    if handle_bang_shell_input(app, engine_handle, &input).await? {
+        return Ok(false);
+    }
+    if looks_like_slash_command_input(&input) {
+        if execute_command_input(
+            terminal,
+            app,
+            engine_handle,
+            task_manager,
+            config,
+            web_config_session,
+            &input,
+        )
+        .await?
+        {
+            return Ok(true);
+        }
+    } else {
+        if app.edit_in_progress {
+            crate::commands::execute("/undo", app);
+            app.edit_in_progress = false;
+            let _ = engine_handle
+                .send(Op::SyncSession {
+                    session_id: app.current_session_id.clone(),
+                    messages: app.api_messages.clone(),
+                    system_prompt: app.system_prompt.clone(),
+                    system_prompt_override: false,
+                    model: app.model.clone(),
+                    workspace: app.workspace.clone(),
+                    mode: app.mode,
+                })
+                .await;
+        }
+        let (queued, recovery) = message_from_submitted_input(app, input);
+        dispatch_composer_message(app, config, engine_handle, queued, recovery, action).await?;
+    }
+    Ok(false)
+}
+
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 pub(crate) async fn run_event_loop(
     terminal: &mut AppTerminal,
@@ -4083,6 +4166,22 @@ pub(crate) async fn run_event_loop(
                                 return Ok(());
                             }
                         }
+                    }
+                    app.needs_redraw = true;
+                }
+                if let Some(chord) = app.pending_composer_submit.take() {
+                    if dispatch_session_composer_submit(
+                        terminal,
+                        app,
+                        &mut engine_handle,
+                        &task_manager,
+                        config,
+                        &mut web_config_session,
+                        chord,
+                    )
+                    .await?
+                    {
+                        return Ok(());
                     }
                     app.needs_redraw = true;
                 }

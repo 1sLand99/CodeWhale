@@ -374,6 +374,22 @@ pub(crate) fn handle_composer_mouse(app: &mut App, mouse: MouseEvent) -> bool {
             COMPOSER_MOUSE_SCROLL_LINES as isize,
         ),
         MouseEventKind::Down(MouseButton::Left) => {
+            if let Some(submit) = crate::tui::widgets::active_composer_submit_rect(app, area)
+                && mouse_hits_rect(mouse, Some(submit))
+            {
+                // Same chord the keyboard Enter path uses. Empty / paste-burst
+                // clicks are consumed so they cannot also move the caret.
+                let action =
+                    app.decide_composer_submit(crate::tui::app::ComposerSubmitChord::Enter);
+                if !matches!(action, crate::tui::app::ComposerSubmitAction::Noop)
+                    && (app.composer_enter_would_submit()
+                        || matches!(action, crate::tui::app::ComposerSubmitAction::SendQueuedNow))
+                {
+                    app.pending_composer_submit = Some(crate::tui::app::ComposerSubmitChord::Enter);
+                }
+                app.needs_redraw = true;
+                return true;
+            }
             if let Some(pos) = mouse_pos_to_char_index(app, mouse.column, mouse.row, text_area) {
                 match classify_composer_click(
                     &mut app.viewport.composer_click_trace,
@@ -2032,6 +2048,38 @@ mod tests {
             },
         );
         assert!(!app.launch.composer_focus);
+    }
+
+    #[test]
+    fn active_composer_send_click_queues_the_keyboard_submit_chord() {
+        let mut app = create_test_app();
+        app.launch.visible = false;
+        app.composer_border = true;
+        app.input = "ship it".to_string();
+        app.cursor_position = app.input.chars().count();
+        let area = Rect::new(0, 20, 80, 4);
+        app.viewport.last_composer_area = Some(area);
+        app.viewport.last_composer_content = Some(Rect::new(1, 21, 78, 2));
+        let submit = crate::tui::widgets::active_composer_submit_rect(&app, area)
+            .expect("enclosed composer submit");
+
+        handle_mouse_event(&mut app, left_click(submit.x, submit.y));
+        assert_eq!(
+            app.pending_composer_submit,
+            Some(crate::tui::app::ComposerSubmitChord::Enter)
+        );
+        assert_eq!(app.input, "ship it");
+        assert_eq!(app.cursor_position, app.input.chars().count());
+
+        app.pending_composer_submit = None;
+        handle_mouse_event(&mut app, left_click(area.x + 4, area.y + 1));
+        assert_eq!(app.pending_composer_submit, None);
+
+        app.input.clear();
+        app.cursor_position = 0;
+        handle_mouse_event(&mut app, left_click(submit.x, submit.y));
+        assert_eq!(app.pending_composer_submit, None);
+        assert!(app.input.is_empty());
     }
 
     #[test]

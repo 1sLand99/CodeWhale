@@ -852,6 +852,7 @@ impl App {
             focus_texture,
             launch,
             pending_launch_action: None,
+            pending_composer_submit: None,
             pending_hotbar_slot: None,
             synchronized_output_enabled,
             status_indicator,
