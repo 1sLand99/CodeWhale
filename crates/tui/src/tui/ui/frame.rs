@@ -1001,13 +1001,17 @@ pub(crate) fn render(f: &mut Frame, app: &mut App, _config: &Config) -> Option<(
         let topbar_interactions = render_topbar_row(f, app, topbar_area);
         register_topbar_interaction_targets(app, topbar_interactions);
         let startup = crate::tui::underwater::tideline_startup_from_app(app);
-        let hitboxes = crate::tui::underwater::tideline_startup_hitboxes(stage_area);
+        let hitboxes = if startup.composer.enclosed {
+            crate::tui::underwater::tideline_startup_hitboxes(stage_area)
+        } else {
+            crate::tui::underwater::tideline_startup_hitboxes_with_composer(stage_area, false)
+        };
         crate::tui::underwater::render_tideline_startup(stage_area, f.buffer_mut(), &startup);
         // The completion popup paints above the docked composer's input row,
         // over the stage rows it needs — the same caller-computed entries
         // the session popup rides.
         if let Some(input_row) = hitboxes
-            .composer
+            .input
             .map(|area| area.y.saturating_sub(stage_area.y))
         {
             crate::tui::underwater::render_launch_completion_popup(

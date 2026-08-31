@@ -59,6 +59,21 @@ fn composer_border_is_rounded_with_send_hitbox_and_no_crown() {
 }
 
 #[test]
+fn composer_send_hitbox_survives_a_long_draft() {
+    let draft = "x".repeat(240);
+    let text = draw_docked(
+        80,
+        24,
+        &TidelineComposer::new(&UI_THEME, &draft).focused(true),
+    );
+    let send_row = text.lines().nth(22).unwrap_or_default();
+    assert!(
+        send_row.contains("[↑]"),
+        "caller-owned text must not overwrite the submit target: {send_row:?}"
+    );
+}
+
+#[test]
 fn composer_focus_states_change_ink_not_cells() {
     let draft = "same draft";
     let rest = draw_docked(80, 24, &TidelineComposer::new(&UI_THEME, draft));

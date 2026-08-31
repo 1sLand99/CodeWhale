@@ -941,21 +941,6 @@ fn truncate_to_width(text: &str, width: usize) -> String {
     result
 }
 
-fn render_launch_line(area: Rect, buf: &mut Buffer, y: u16, spans: Vec<Span<'static>>) {
-    if y >= area.height {
-        return;
-    }
-    Paragraph::new(Line::from(spans)).render(
-        Rect {
-            x: area.x,
-            y: area.y.saturating_add(y),
-            width: area.width,
-            height: 1,
-        },
-        buf,
-    );
-}
-
 fn render_launch_content_line(
     area: Rect,
     buf: &mut Buffer,
@@ -982,11 +967,22 @@ fn render_launch_content_line(
 ///
 /// The dock owns the stage spacer's bottom rows (spec §5b: composer
 /// `Length(4)` incl. border, below the option strip and above the merged
-/// footer): `[input, hint, rule, prompt]` at four rows, shedding the rule
-/// first, then the hint shares the prompt row — the tiers the classic
-/// screen's strip authored, re-derived against `startup_layout`. Rows are
-/// stage-relative; `None` when the stage cannot fit even the input row.
+/// footer). At its full size, the shared rounded shell uses the two interior
+/// rows for input and localized submit guidance. Compact terminals retain the
+/// one-line projection rather than claiming borders they cannot render.
+/// Rows are stage-relative; `None` when the stage cannot fit even the input
+/// row.
 fn launch_composer_rows(stage: Rect) -> Option<(u16, u16)> {
+    let dock = startup_layout(stage).dock;
+    let input_y = if dock.height >= crate::tui::composer_chrome::TIDELINE_COMPOSER_HEIGHT {
+        dock.y.saturating_sub(stage.y).saturating_add(1)
+    } else {
+        dock.y.saturating_sub(stage.y)
+    };
+    (dock.height >= 1).then_some((input_y, input_y.saturating_add(1)))
+}
+
+fn launch_compact_composer_rows(stage: Rect) -> Option<(u16, u16)> {
     let dock = startup_layout(stage).dock;
     let input_y = dock.y.saturating_sub(stage.y);
     (dock.height >= 1).then_some((input_y, input_y.saturating_add(1)))
@@ -1164,7 +1160,7 @@ pub fn render_launch_completion_popup(
 /// [`LaunchComposerDisplay::from_app`]; the row painting itself is
 /// `render_launch_composer` — #5698's docked strip, reused line-for-line
 /// and re-docked below the option strip.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct LaunchComposerDisplay<'a> {
     /// Whether the composer holds keyboard focus (`launch.composer_focus`).
     pub focused: bool,
@@ -1180,6 +1176,25 @@ pub struct LaunchComposerDisplay<'a> {
     pub hint_focused: std::borrow::Cow<'a, str>,
     /// The blurred composer's hint line.
     pub hint_blurred: std::borrow::Cow<'a, str>,
+    /// Mirrors the shared composer preference. The default Tideline startup
+    /// surface uses the rounded enclosure; an explicit compact opt-out keeps
+    /// the legacy one-line projection only where the setting asks for it.
+    pub enclosed: bool,
+}
+
+impl Default for LaunchComposerDisplay<'_> {
+    fn default() -> Self {
+        Self {
+            focused: false,
+            input: "",
+            caret: 0,
+            low_motion: false,
+            placeholder: Cow::Borrowed(""),
+            hint_focused: Cow::Borrowed(""),
+            hint_blurred: Cow::Borrowed(""),
+            enclosed: true,
+        }
+    }
 }
 
 impl<'a> LaunchComposerDisplay<'a> {
@@ -1195,6 +1210,7 @@ impl<'a> LaunchComposerDisplay<'a> {
             placeholder: tr(app.ui_locale, MessageId::ComposerPlaceholder),
             hint_focused: tr(app.ui_locale, MessageId::LaunchComposerHint),
             hint_blurred: tr(app.ui_locale, MessageId::LaunchComposerFocusHint),
+            enclosed: app.composer_border,
         }
     }
 }
@@ -1212,8 +1228,104 @@ fn render_launch_composer(
     display: &LaunchComposerDisplay<'_>,
     input_y: u16,
     hint_y: u16,
+    panel_area: Option<Rect>,
+    status_line: Option<&str>,
+    ascii_safe: bool,
 ) {
     let focused = display.focused;
+    if let Some(panel_area) = panel_area {
+        crate::tui::composer_chrome::render_tideline_composer_shell(
+            panel_area, buf, theme, focused, ascii_safe,
+        );
+        let geometry = crate::tui::composer_chrome::tideline_composer_geometry(panel_area);
+        let content_width = usize::from(
+            geometry
+                .submit
+                .x
+                .saturating_sub(geometry.content.x)
+                .saturating_sub(1),
+        );
+        if content_width == 0 {
+            return;
+        }
+        let text_budget = content_width.saturating_sub(2);
+        let prompt_style = if focused {
+            theme.accent_primary
+        } else {
+            theme.text_hint
+        };
+        let input = display.input;
+        let caret = launch_cursor_glyph(display.low_motion);
+        let body = if input.is_empty() {
+            if focused {
+                caret.to_string()
+            } else {
+                display.placeholder.to_string()
+            }
+        } else if focused {
+            let (line, col) = launch_cursor_line(input, display.caret);
+            let (before, after) = launch_caret_window(line, col, text_budget);
+            format!("{before}{caret}{after}")
+        } else {
+            let (line, _) = launch_cursor_line(input, display.caret);
+            line.to_string()
+        };
+        let body_style = if focused {
+            theme.text_body
+        } else if input.is_empty() {
+            theme.text_hint
+        } else {
+            theme.text_muted
+        };
+        Paragraph::new(Line::from(vec![
+            Span::styled("❯", Style::default().fg(prompt_style)),
+            Span::raw(" "),
+            Span::styled(
+                truncate_to_width(&body, text_budget),
+                Style::default().fg(body_style),
+            ),
+        ]))
+        .render(
+            Rect {
+                x: geometry.content.x,
+                y: geometry.content.y,
+                width: content_width as u16,
+                height: 1,
+            },
+            buf,
+        );
+
+        let hint = status_line.map(Cow::Borrowed).unwrap_or_else(|| {
+            if focused {
+                display.hint_focused.clone()
+            } else {
+                display.hint_blurred.clone()
+            }
+        });
+        if geometry.content.height >= 2 {
+            Paragraph::new(Line::from(Span::styled(
+                truncate_to_width(hint.as_ref(), content_width),
+                Style::default().fg(if status_line.is_some() {
+                    theme.text_body
+                } else if focused {
+                    theme.text_hint
+                } else {
+                    theme.text_dim
+                }),
+            )))
+            .render(
+                Rect {
+                    x: geometry.content.x,
+                    y: geometry.content.y.saturating_add(1),
+                    width: content_width as u16,
+                    height: 1,
+                },
+                buf,
+            );
+        }
+        return;
+    }
+
     let content_width = usize::from(area.width).saturating_sub(4);
     if content_width == 0 {
         return;
@@ -2223,8 +2335,8 @@ mod launch_composer_tests {
             let (buf, area) = render(&app, width, height);
             let input_row = row_text(&buf, area, input_y);
             assert!(
-                input_row.contains('❯') && input_row.contains('↑'),
-                "{width}x{height}: composer row lacks its prompt/send anchors: {input_row:?}"
+                input_row.contains('❯'),
+                "{width}x{height}: composer row lacks its prompt anchor: {input_row:?}"
             );
             assert!(
                 input_row.contains(&tr(Locale::En, MessageId::ComposerPlaceholder).into_owned()),
@@ -2245,12 +2357,19 @@ mod launch_composer_tests {
             // Hitboxes mirror the rendered row, and send sits at its end.
             let composer = app.launch.composer_area.expect("composer hitbox");
             let send = app.launch.send_area.expect("send hitbox");
-            assert_eq!(composer.y, area.y + input_y);
-            assert_eq!(send.y, composer.y);
-            assert_eq!(send.right(), composer.right());
+            assert!(
+                composer.y <= area.y + input_y && area.y + input_y < composer.bottom(),
+                "{width}x{height}: input row must live inside the focus surface"
+            );
+            assert!(
+                composer.y <= send.y && send.y < composer.bottom(),
+                "{width}x{height}: send target must live inside the focus surface"
+            );
+            assert!(send.right() <= composer.right());
+            let expected_send = if send.width == 3 { "[↑]" } else { " ↑" };
             assert_eq!(
                 row_cells(&buf, area, send.y - area.y, send.x, send.right()),
-                " ↑",
+                expected_send,
                 "{width}x{height}: send hitbox must cover the rendered send glyph"
             );
             assert!(
@@ -3389,45 +3508,53 @@ pub fn render_tideline_startup(stage: Rect, buf: &mut Buffer, startup: &Tideline
         );
     }
 
-    // The docked pre-session composer (§5b: composer Length(4) incl.
-    // border): #5698's strip re-docked below the option strip, in the
-    // spacer's bottom rows. Paint order is precedence — the strip first,
-    // then the stage's one transient line (the worktree-name prompt or a
-    // launch status message) over the dock's last row, so a modal prompt
-    // outranks the hint exactly as the classic screen's prompt row did.
-    if let Some((input_row, hint_row)) = launch_composer_rows(stage) {
-        render_launch_composer(stage, buf, theme, &startup.composer, input_row, hint_row);
-        if layout.dock.height == 4 {
-            // The dock's border row between hint and prompt.
-            render_launch_line(
-                stage,
-                buf,
-                input_row + 2,
-                vec![Span::styled(
-                    "─".repeat(usize::from(stage.width)),
-                    chrome(theme, ChromeInk::MetadataDim),
-                )],
-            );
-        }
-        if let Some(line) = startup.status_line.as_deref() {
-            let y = if layout.dock.height == 1 {
-                input_row
-            } else {
-                layout
-                    .dock
-                    .bottom()
-                    .saturating_sub(1)
-                    .saturating_sub(stage.y)
-            };
-            set_span(
-                buf,
-                stage.x + 2,
-                stage.y + y,
-                &Span::styled(
-                    truncate_to_width(line, usize::from(stage.width.saturating_sub(4))),
-                    chrome(theme, ChromeInk::Metadata),
-                ),
-            );
+    // The docked pre-session composer (§5b) is the same rounded Tideline
+    // shell used by the work surface whenever the full four-row dock fits.
+    // Its shell owns both the visible `[↑]` affordance and the matching
+    // geometry; the launch renderer owns only localized input/hint content.
+    // Tiny terminals retain the compact strip rather than drawing fake
+    // corners with no interior cells.
+    let enclosed = startup.composer.enclosed
+        && layout.dock.height >= crate::tui::composer_chrome::TIDELINE_COMPOSER_HEIGHT
+        && layout.dock.width >= 6;
+    let composer_rows = if enclosed {
+        launch_composer_rows(stage)
+    } else {
+        launch_compact_composer_rows(stage)
+    };
+    if let Some((input_row, hint_row)) = composer_rows {
+        render_launch_composer(
+            stage,
+            buf,
+            theme,
+            &startup.composer,
+            input_row,
+            hint_row,
+            enclosed.then_some(layout.dock),
+            startup.status_line.as_deref(),
+            startup.ascii_safe,
+        );
+        if !enclosed {
+            if let Some(line) = startup.status_line.as_deref() {
+                let y = if layout.dock.height == 1 {
+                    input_row
+                } else {
+                    layout
+                        .dock
+                        .bottom()
+                        .saturating_sub(1)
+                        .saturating_sub(stage.y)
+                };
+                set_span(
+                    buf,
+                    stage.x + 2,
+                    stage.y + y,
+                    &Span::styled(
+                        truncate_to_width(line, usize::from(stage.width.saturating_sub(4))),
+                        chrome(theme, ChromeInk::Metadata),
+                    ),
+                );
+            }
         }
     }
 }
@@ -3440,8 +3567,10 @@ pub fn render_tideline_startup(stage: Rect, buf: &mut Buffer, startup: &Tideline
 pub struct TidelineStartupHitboxes {
     pub actions: Vec<Rect>,
     pub options: Vec<Rect>,
-    /// The docked composer's input row (click focuses, exactly like Tab).
+    /// The docked composer focus surface (click focuses, exactly like Tab).
     pub composer: Option<Rect>,
+    /// The actual text-input row; completion menus anchor directly above it.
+    pub input: Option<Rect>,
     /// The send glyph inside the composer row (click submits).
     pub send: Option<Rect>,
 }
@@ -3451,6 +3580,16 @@ pub struct TidelineStartupHitboxes {
 /// cells wherever both run on the same stage.
 #[must_use]
 pub fn tideline_startup_hitboxes(stage: Rect) -> TidelineStartupHitboxes {
+    tideline_startup_hitboxes_with_composer(stage, true)
+}
+
+/// Same geometry as [`tideline_startup_hitboxes`], respecting the explicit
+/// compact-composer preference used by the current `App` projection.
+#[must_use]
+pub fn tideline_startup_hitboxes_with_composer(
+    stage: Rect,
+    enclosed: bool,
+) -> TidelineStartupHitboxes {
     let mut out = TidelineStartupHitboxes::default();
     if stage.width < 8 || stage.height < 5 {
         return out;
@@ -3475,22 +3614,40 @@ pub fn tideline_startup_hitboxes(stage: Rect) -> TidelineStartupHitboxes {
             height: 2,
         })
         .collect();
-    // The docked composer's hitboxes: the input row, and the trailing
-    // " ↑" send affordance at its end — #5698's shapes, re-anchored to the
-    // dock's geometry through the same `startup_layout` arithmetic.
+    // The four-row dock reuses the exact rounded shell geometry, including
+    // the visible three-cell `[↑]` submit rect. Compact terminals preserve
+    // the older one-line target because they cannot host an enclosed shell.
     if layout.dock.height >= 1 {
-        out.composer = Some(Rect {
-            x: stage.x.saturating_add(2),
-            y: layout.dock.y,
-            width: stage.width.saturating_sub(4),
-            height: 1,
-        });
-        out.send = Some(Rect {
-            x: stage.x.saturating_add(stage.width.saturating_sub(4)),
-            y: layout.dock.y,
-            width: 2.min(stage.width),
-            height: 1,
-        });
+        let use_enclosed = enclosed
+            && layout.dock.height >= crate::tui::composer_chrome::TIDELINE_COMPOSER_HEIGHT
+            && layout.dock.width >= 6;
+        if use_enclosed {
+            let geometry = crate::tui::composer_chrome::tideline_composer_geometry(layout.dock);
+            let hitboxes = crate::tui::composer_chrome::tideline_composer_hitboxes(layout.dock);
+            out.composer = Some(hitboxes.border);
+            out.input = Some(Rect {
+                x: geometry.content.x,
+                y: geometry.content.y,
+                width: geometry.content.width,
+                height: 1,
+            });
+            out.send = Some(hitboxes.submit);
+        } else {
+            let input = Rect {
+                x: stage.x.saturating_add(2),
+                y: layout.dock.y,
+                width: stage.width.saturating_sub(4),
+                height: 1,
+            };
+            out.composer = Some(input);
+            out.input = Some(input);
+            out.send = Some(Rect {
+                x: stage.x.saturating_add(stage.width.saturating_sub(4)),
+                y: layout.dock.y,
+                width: 2.min(stage.width),
+                height: 1,
+            });
+        }
     }
     out
 }
