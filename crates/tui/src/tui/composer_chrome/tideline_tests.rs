@@ -141,6 +141,10 @@ fn composer_hitboxes_match_painted_cells() {
         let mut buf = Buffer::empty(Rect::new(0, 0, w, h));
         render_tideline_composer(area, &mut buf, &composer);
         let hitboxes = tideline_composer_hitboxes(area);
+        assert_eq!(
+            hitboxes.border, area,
+            "focus hitbox must cover the full rounded shell at {w}x{h}"
+        );
         let submit: String = (hitboxes.submit.x..hitboxes.submit.x + hitboxes.submit.width)
             .map(|x| buf[(x, hitboxes.submit.y)].symbol().to_string())
             .collect();

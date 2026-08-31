@@ -296,6 +296,7 @@ fn cjk_composer_cursor_and_mouse_geometry_agree_in_compact_and_wide_frames() {
         let mut app = create_test_app();
         app.onboarding = OnboardingState::None;
         app.launch.visible = false;
+        app.composer_border = true;
         app.input = "ab中文".to_string();
         app.cursor_position = app.input.chars().count();
         let config = Config::default();
@@ -317,6 +318,17 @@ fn cjk_composer_cursor_and_mouse_geometry_agree_in_compact_and_wide_frames() {
             .last_composer_content
             .expect("render records composer content geometry");
         let text_area = crate::tui::widgets::composer_content_geometry(inner, false).text_area;
+        let composer = app
+            .viewport
+            .last_composer_area
+            .expect("render records composer area");
+        let submit = crate::tui::widgets::active_composer_submit_rect(&app, composer)
+            .expect("enclosed composer exposes submit geometry");
+        assert_eq!(
+            text_area.right(),
+            submit.x.saturating_sub(1),
+            "{width}x{height}: frame must retain one blank cell before submit"
+        );
         assert_eq!(
             first_cursor.0,
             text_area.x + 6,
@@ -326,6 +338,12 @@ fn cjk_composer_cursor_and_mouse_geometry_agree_in_compact_and_wide_frames() {
             first_cursor.1 >= text_area.y
                 && first_cursor.1 < text_area.y.saturating_add(text_area.height),
             "{width}x{height}: cursor must remain inside composer content: {first_cursor:?}"
+        );
+        assert!(
+            first_cursor.0 < submit.x
+                || first_cursor.0 >= submit.right()
+                || first_cursor.1 != submit.y,
+            "{width}x{height}: cursor must stay outside submit: {first_cursor:?} vs {submit:?}"
         );
 
         frame::finish_frame_cursor(&mut terminal, Some(first_cursor)).unwrap();

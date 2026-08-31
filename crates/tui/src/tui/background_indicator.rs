@@ -170,22 +170,13 @@ fn truncate_label(label: &str) -> String {
 /// strip and `/jobs` surface render. Read-only; no locks, no registries.
 ///
 /// Live shells deliberately remain only on the detailed Work strip, rather
-/// than being repeated in the composer crumb. Use [`live_work_from_app`] for
-/// a whole-session status surface that must account for them.
+/// than being repeated in the composer crumb.
 #[must_use]
 pub fn pending_work_from_app(app: &App) -> PendingWork {
-    collect_pending_work(app, false)
+    collect_pending_work(app)
 }
 
-/// Build the complete live-work projection for an active-session status
-/// surface. Unlike [`pending_work_from_app`], this includes live shell jobs.
-#[must_use]
-#[cfg(test)]
-pub(crate) fn live_work_from_app(app: &App) -> PendingWork {
-    collect_pending_work(app, true)
-}
-
-fn collect_pending_work(app: &App, include_shells: bool) -> PendingWork {
+fn collect_pending_work(app: &App) -> PendingWork {
     let mut items: Vec<PendingItem> = Vec::new();
 
     // Background shells and durable tasks: the merged task_panel snapshot
@@ -199,25 +190,13 @@ fn collect_pending_work(app: &App, include_shells: bool) -> PendingWork {
         // Live shells belong on the work strip (`▾ Shells N`), not this
         // composer crumb. A dual surface hid the PTY behind hourglasses.
         let is_shell = is_live_shell_entry(entry);
-        if is_shell && !include_shells {
+        if is_shell {
             continue;
         }
-        let (kind, raw_label) = if is_shell {
-            (
-                PendingItemKind::Shell,
-                entry
-                    .prompt_summary
-                    .strip_prefix("shell: ")
-                    .filter(|command| !command.trim().is_empty())
-                    .unwrap_or(entry.id.as_str()),
-            )
-        } else {
-            (PendingItemKind::Task, entry.id.as_str())
-        };
         items.push(PendingItem {
-            kind,
+            kind: PendingItemKind::Task,
             state,
-            label: truncate_label(raw_label),
+            label: truncate_label(entry.id.as_str()),
         });
     }
 
@@ -515,15 +494,15 @@ mod tests {
     }
 
     #[test]
-    fn live_work_projection_keeps_shells_and_typed_task_states() {
+    fn durable_work_projection_keeps_queued_and_running_states() {
         use crate::tui::app::TaskPanelEntry;
         let options = crate::test_support::test_tui_options(std::path::PathBuf::from("."));
         let mut app = crate::test_support::test_app_with_options(options);
         app.task_panel.extend([
             TaskPanelEntry {
-                id: "shell_a1b2c3d4".to_string(),
+                id: "durable-running".to_string(),
                 status: "running".to_string(),
-                prompt_summary: "shell: cargo test -p codewhale-tui".to_string(),
+                prompt_summary: "durable work".to_string(),
                 duration_ms: Some(42_000),
                 kind: TaskPanelEntryKind::Background,
                 stale: false,
@@ -550,16 +529,22 @@ mod tests {
             },
         ]);
 
-        let live = live_work_from_app(&app);
-        assert_eq!(live.count(PendingItemKind::Shell), 1);
-        assert_eq!(live.count_state(PendingItemState::Queued), 1);
-        assert_eq!(live.count_state(PendingItemState::Running), 1);
+        let work = pending_work_from_app(&app);
+        assert_eq!(work.count(PendingItemKind::Task), 2);
+        assert_eq!(work.count_state(PendingItemState::Queued), 1);
+        assert_eq!(work.count_state(PendingItemState::Running), 1);
         assert!(
-            live.items
+            work.items
                 .iter()
-                .any(|item| item.kind == PendingItemKind::Shell
+                .any(|item| item.label == "durable-running"
                     && item.state == PendingItemState::Running),
-            "live shell must retain its running state: {live:?}"
+            "durable running task must retain its typed state: {work:?}"
+        );
+        assert!(
+            work.items.iter().any(
+                |item| item.label == "durable-queued" && item.state == PendingItemState::Queued
+            ),
+            "durable queued task must retain its typed state: {work:?}"
         );
     }
 

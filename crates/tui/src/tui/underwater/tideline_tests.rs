@@ -257,7 +257,8 @@ fn startup_disabled_rows_render_dimmer_set_not_hidden() {
 
 #[test]
 fn startup_option_strip_keeps_all_four_routes_when_narrow() {
-    let mut startup = TidelineStartup::new(&UI_THEME, 4, true);
+    let mut startup =
+        TidelineStartup::new(&UI_THEME, 4, true).locale(crate::localization::Locale::En);
     startup.selected_option = Some(1);
     let wide = draw(80, 24, &startup);
     for tile in ["New worktree", "Chat only", "Theme", "Help"] {
@@ -267,6 +268,24 @@ fn startup_option_strip_keeps_all_four_routes_when_narrow() {
     for tile in ["worktree", "chat", "Theme", "Help"] {
         assert!(narrow.contains(tile), "narrow keeps {tile}: {narrow}");
     }
+}
+
+#[test]
+fn startup_option_strip_uses_localized_compact_labels_when_narrow() {
+    let mut startup =
+        TidelineStartup::new(&UI_THEME, 4, true).locale(crate::localization::Locale::ZhHans);
+    startup.selected_option = Some(1);
+    let narrow = draw(40, 20, &startup);
+    let compact_cells = narrow.replace(' ', "");
+    assert!(
+        compact_cells.contains("工作树"),
+        "localized worktree: {narrow}"
+    );
+    assert!(compact_cells.contains("聊天"), "localized chat: {narrow}");
+    assert!(
+        !narrow.contains("worktree") && !narrow.contains("chat"),
+        "narrow locale must not fall back to hardcoded English: {narrow}"
+    );
 }
 
 #[test]

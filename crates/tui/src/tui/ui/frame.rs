@@ -1385,14 +1385,16 @@ pub(crate) fn render(f: &mut Frame, app: &mut App, _config: &Config) -> Option<(
             &slash_menu_entries,
             &mention_menu_entries,
         );
-        let inner = composer_widget.inner_area(area);
-        app.viewport.last_composer_content = Some(inner);
+        let input_plane = composer_widget.inner_area(area);
+        app.viewport.last_composer_content = Some(input_plane);
 
         // Compute scroll offset and top padding for mouse coordinate mapping.
         let input_text = app.composer_display_input();
         let input_cursor = app.composer_display_cursor();
-        let content_geometry =
-            crate::tui::widgets::composer_content_geometry(inner, app.is_history_search_active());
+        let content_geometry = crate::tui::widgets::composer_content_geometry(
+            input_plane,
+            app.is_history_search_active(),
+        );
         let content_width = content_geometry.text_width();
         let menu_lines = ComposerWidget::new(
             app,
@@ -1401,7 +1403,8 @@ pub(crate) fn render(f: &mut Frame, app: &mut App, _config: &Config) -> Option<(
             &mention_menu_entries,
         )
         .active_menu_reserved_rows();
-        let budget = crate::tui::widgets::composer_input_rows_budget(inner.height, menu_lines);
+        let budget =
+            crate::tui::widgets::composer_input_rows_budget(input_plane.height, menu_lines);
         let (_, _, _, scroll_offset) = crate::tui::widgets::layout_input_with_scroll(
             input_text,
             input_cursor,

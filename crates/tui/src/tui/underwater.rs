@@ -1238,13 +1238,7 @@ fn render_launch_composer(
             panel_area, buf, theme, focused, ascii_safe,
         );
         let geometry = crate::tui::composer_chrome::tideline_composer_geometry(panel_area);
-        let content_width = usize::from(
-            geometry
-                .submit
-                .x
-                .saturating_sub(geometry.content.x)
-                .saturating_sub(1),
-        );
+        let content_width = usize::from(geometry.content.width);
         if content_width == 0 {
             return;
         }
@@ -3113,6 +3107,8 @@ impl TidelineOption {
 /// `LaunchState`, `workspace_session_count`, provider state).
 pub struct TidelineStartup<'a> {
     pub theme: &'a UiTheme,
+    /// Locale used by compact option labels as well as injected composer copy.
+    pub locale: Locale,
     /// `workspace_session_count > 0` — the hero subtitle and resume row read
     /// differently for a returning workspace (spec §5a "first-run vs
     /// returning").
@@ -3142,6 +3138,7 @@ impl<'a> TidelineStartup<'a> {
     pub fn new(theme: &'a UiTheme, session_count: usize, provider_ready: bool) -> Self {
         Self {
             theme,
+            locale: Locale::En,
             session_count,
             provider_ready,
             selected_action: Some(0),
@@ -3156,6 +3153,12 @@ impl<'a> TidelineStartup<'a> {
     #[must_use]
     pub fn status_line(mut self, line: Option<String>) -> Self {
         self.status_line = line;
+        self
+    }
+
+    #[must_use]
+    pub fn locale(mut self, locale: Locale) -> Self {
+        self.locale = locale;
         self
     }
 
@@ -3429,12 +3432,12 @@ pub fn render_tideline_startup(stage: Rect, buf: &mut Buffer, startup: &Tideline
         }
         let option_label = if layout.strip.width < 56 {
             match index {
-                0 => "worktree",
-                1 => "chat",
-                _ => option.label,
+                0 => tr(startup.locale, MessageId::LaunchMenuWorktreeCompact),
+                1 => tr(startup.locale, MessageId::LaunchMenuChatCompact),
+                _ => Cow::Borrowed(option.label),
             }
         } else {
-            option.label
+            Cow::Borrowed(option.label)
         };
         let label = format!("{} {option_label}", startup.sym(option.icon));
         let budget = if layout.strip.width < 56 {
@@ -3662,6 +3665,7 @@ pub fn tideline_startup_from_app(app: &App) -> TidelineStartup<'_> {
         app.launch.workspace_session_count,
         !app.onboarding_needs_api_key,
     )
+    .locale(app.ui_locale)
     .ascii_safe(ascii_safe)
     .composer(LaunchComposerDisplay::from_app(app))
     .status_line(launch_status_line(app, ascii_safe));

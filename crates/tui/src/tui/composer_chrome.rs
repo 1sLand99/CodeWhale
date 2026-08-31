@@ -149,6 +149,12 @@ use crate::palette::{ChromeInk, UiTheme, chrome_style};
 /// The composer's fixed docked height in the work-screen shell (spec §5b).
 pub const TIDELINE_COMPOSER_HEIGHT: u16 = 4;
 
+/// Fixed width of the painted `[↑]` submit control.
+pub const TIDELINE_COMPOSER_SUBMIT_WIDTH: u16 = 3;
+
+/// Blank cell between input content and the painted submit control.
+pub const TIDELINE_COMPOSER_SUBMIT_BREATHING_WIDTH: u16 = 1;
+
 /// What the caller owes the composer chrome. Draft, queued-crumb, and
 /// approval state are injected so renders stay deterministic for goldens.
 #[allow(dead_code)] // translation scaffolding: wired by the landing slice
@@ -250,8 +256,8 @@ fn symbol(glyph: &str, ascii_safe: bool) -> String {
 /// `[↑]` can drift away from the mouse target at a terminal width boundary.
 #[derive(Debug, Clone, Copy)]
 pub struct TidelineComposerGeometry {
-    /// Interior rows, excluding the one-cell rails and the breathing space
-    /// immediately inside each rail.
+    /// Interior input rows, excluding the one-cell rails, the submit control,
+    /// and its one-cell breathing space.
     pub content: Rect,
     /// The visible three-cell `[↑]` submit affordance.
     pub submit: Rect,
@@ -264,20 +270,24 @@ pub struct TidelineComposerGeometry {
 #[must_use]
 pub fn tideline_composer_geometry(area: Rect) -> TidelineComposerGeometry {
     let rail_width = 1;
-    let send_width = 3;
-    let content = Rect {
-        x: area.x.saturating_add(2),
-        y: area.y.saturating_add(1),
-        width: area.width.saturating_sub(2 + rail_width * 2),
-        height: area.height.saturating_sub(2),
-    };
+    let interior_breathing_width = 1;
     let submit = Rect {
-        x: area
-            .x
-            .saturating_add(area.width.saturating_sub(rail_width + 1 + send_width)),
+        x: area.x.saturating_add(area.width.saturating_sub(
+            rail_width + interior_breathing_width + TIDELINE_COMPOSER_SUBMIT_WIDTH,
+        )),
         y: area.y.saturating_add(area.height.saturating_sub(2)),
-        width: send_width.min(area.width),
+        width: TIDELINE_COMPOSER_SUBMIT_WIDTH.min(area.width),
         height: 1.min(area.height),
+    };
+    let content_x = area.x.saturating_add(rail_width + interior_breathing_width);
+    let content_right = submit
+        .x
+        .saturating_sub(TIDELINE_COMPOSER_SUBMIT_BREATHING_WIDTH);
+    let content = Rect {
+        x: content_x,
+        y: area.y.saturating_add(1),
+        width: content_right.saturating_sub(content_x),
+        height: area.height.saturating_sub(2),
     };
     TidelineComposerGeometry {
         content,
@@ -454,7 +464,7 @@ fn truncate_cells(text: &str, width: usize) -> String {
 }
 
 /// Recorded hitboxes for one rendered composer (spec §6): the `[↑]` submit
-/// rect and the top-border ring (click = focus the composer).
+/// rect and the full rounded shell (click = focus the composer).
 #[derive(Debug, Clone, Copy)]
 pub struct TidelineComposerHitboxes {
     pub submit: Rect,

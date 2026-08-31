@@ -1172,6 +1172,35 @@ fn enclosed_composer_panel_fits(show_panel: bool, area_width: u16, area_height: 
     show_panel && area_height >= 3 && area_width >= COMPOSER_PANEL_MIN_WIDTH
 }
 
+/// Border-aware input plane for the active composer.
+///
+/// The shared shell's `[↑]` control occupies three cells on the inner row.
+/// Keep the text plane to its left, with one blank cell in between, so input
+/// wrapping, cursor placement, and pointer mapping cannot claim painted send
+/// cells. The outer block still owns the trailing breathing cell before its
+/// right rail.
+fn composer_inner_area(area: Rect, has_panel: bool) -> Rect {
+    let inner = if has_panel {
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .inner(area)
+    } else if area.height >= 2 {
+        Block::default().borders(Borders::TOP).inner(area)
+    } else {
+        area
+    };
+    if !has_panel {
+        return inner;
+    }
+
+    let shell = crate::tui::composer_chrome::tideline_composer_geometry(area);
+    Rect {
+        width: shell.content.right().saturating_sub(inner.x),
+        ..inner
+    }
+}
+
 /// Canonical horizontal geometry for composer input text.
 ///
 /// The prompt glyph occupies the first gutter column and the second column is
@@ -1300,19 +1329,10 @@ impl<'a> ComposerWidget<'a> {
         enclosed_composer_panel_fits(self.wants_enclosed_panel(), area.width, area.height)
     }
 
-    /// The border-aware content rectangle shared by rendering, cursor mapping,
-    /// and the frame's persistent mouse geometry.
+    /// The border- and submit-aware input rectangle shared by rendering,
+    /// cursor mapping, and the frame's persistent mouse geometry.
     pub(crate) fn inner_area(&self, area: Rect) -> Rect {
-        if self.has_panel(area) {
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .inner(area)
-        } else if area.height >= 2 {
-            Block::default().borders(Borders::TOP).inner(area)
-        } else {
-            area
-        }
+        composer_inner_area(area, self.has_panel(area))
     }
 
     fn mode_color(&self) -> Color {
@@ -3513,16 +3533,13 @@ fn composer_height(
     show_panel: bool,
 ) -> u16 {
     let has_panel = enclosed_composer_panel_fits(show_panel, area_width, available_height);
-    // A full enclosure spends one column on each side before the prompt
-    // gutter. Use the same width as `inner_area` + `composer_content_geometry`
-    // so measured height and rendered wrapping agree at every boundary.
-    let panel_side_inset = u16::from(has_panel).saturating_mul(2);
-    let content_width = usize::from(
-        area_width
-            .saturating_sub(panel_side_inset)
-            .saturating_sub(COMPOSER_PROMPT_GUTTER_WIDTH)
-            .max(1),
-    );
+    // Measure through the same border- and submit-aware plane that rendering,
+    // cursor placement, the frame viewport, and mouse mapping use. A draft
+    // that wraps here therefore cannot consume the painted `[↑]` cells later.
+    let measurement_area = Rect::new(0, 0, area_width, if has_panel { 3 } else { 1 });
+    let content_width =
+        composer_content_geometry(composer_inner_area(measurement_area, has_panel), false)
+            .text_width();
     let mut line_count = wrap_input_lines(input, content_width).len();
     if line_count == 0 {
         line_count = 1;
@@ -4406,11 +4423,11 @@ fn line_spans_with_selection<'a>(
 mod tests {
     use super::{
         ACTIVE_REVISION_DOMAIN, ApprovalMode, ApprovalWidget, COMPOSER_PANEL_HEIGHT,
-        COMPOSER_PLACEHOLDER, COMPOSER_PROMPT_GUTTER_WIDTH, ChatWidget, ComposerWidget, Renderable,
-        SlashMenuEntry, active_composer_submit_rect, active_entry_revision,
-        apply_detail_target_highlight, apply_selection_to_line, apply_send_flash, approval_palette,
-        approval_truncation_hint, build_empty_state_lines, composer_content_geometry,
-        composer_empty_hint_text, composer_height, composer_max_height, composer_submit_hint,
+        COMPOSER_PLACEHOLDER, ChatWidget, ComposerWidget, Renderable, SlashMenuEntry,
+        active_composer_submit_rect, active_entry_revision, apply_detail_target_highlight,
+        apply_selection_to_line, apply_send_flash, approval_palette, approval_truncation_hint,
+        build_empty_state_lines, composer_content_geometry, composer_empty_hint_text,
+        composer_height, composer_inner_area, composer_max_height, composer_submit_hint,
         composer_top_padding, cursor_row_col, empty_composer_visual_rows,
         enclosed_composer_panel_fits, fish_flee_offset, fish_heading, fish_mark,
         history_entry_revision, layout_input, layout_input_with_scroll, placeholder_visual_lines,
@@ -5899,13 +5916,10 @@ mod tests {
         } else {
             1
         };
-        let horizontal_enclosure = u16::from(has_panel).saturating_mul(2);
-        let content_width = usize::from(
-            width
-                .saturating_sub(horizontal_enclosure)
-                .saturating_sub(COMPOSER_PROMPT_GUTTER_WIDTH)
-                .max(1),
-        );
+        let measurement_area = Rect::new(0, 0, width, if has_panel { 3 } else { 1 });
+        let content_width =
+            composer_content_geometry(composer_inner_area(measurement_area, has_panel), false)
+                .text_width();
         let input_height_budget = usize::from(height)
             .saturating_sub(menu_lines)
             .saturating_sub(chrome_height)
@@ -5962,10 +5976,11 @@ mod tests {
                 "width={width} bottom border disagrees with height policy"
             );
             if expected_panel {
+                let shell = crate::tui::composer_chrome::tideline_composer_geometry(area);
                 assert_eq!(
                     widget.inner_area(area),
-                    Rect::new(1, 1, width.saturating_sub(2), 1),
-                    "width={width} panel inner area must reserve both side rails"
+                    Rect::new(1, 1, shell.content.right().saturating_sub(1), 1,),
+                    "width={width} panel input area must reserve the send control and breathing cell"
                 );
                 assert_eq!(buf[(area.left(), area.top())].symbol(), "\u{256d}");
                 assert_eq!(
@@ -6005,9 +6020,10 @@ mod tests {
 
     #[test]
     fn composer_height_wraps_to_the_rounded_panel_content_width() {
-        // At the minimum viable panel width, the two side rails and prompt
-        // gutter leave eight text columns. Measuring against the old ten
-        // columns would render a second line without allocating its row.
+        // At the minimum viable panel width, the side rails, prompt gutter,
+        // shared `[↑]` control, and its breathing cell leave three text
+        // columns. Measuring against the old width would render extra lines
+        // without allocating their rows.
         let height = composer_height(
             "123456789",
             super::COMPOSER_PANEL_MIN_WIDTH,
@@ -6016,7 +6032,7 @@ mod tests {
             ComposerDensity::Comfortable,
             true,
         );
-        assert_eq!(height, 4);
+        assert_eq!(height, 6);
     }
 
     #[test]
@@ -6562,6 +6578,53 @@ mod tests {
             .map(|x| buf[(x, submit.y)].symbol().to_string())
             .collect();
         assert_eq!(painted, "[↑]", "geometry must cover the painted send cells");
+    }
+
+    #[test]
+    fn enclosed_composer_reserves_submit_cells_for_a_74_character_draft() {
+        let mut app = create_test_app();
+        app.composer_border = true;
+        let draft = "x".repeat(74);
+        app.input = draft.clone();
+        app.cursor_position = app.input.chars().count();
+        let slash_menu_entries = Vec::<SlashMenuEntry>::new();
+        let mention_menu_entries = Vec::<String>::new();
+        let widget = ComposerWidget::new(&app, 8, &slash_menu_entries, &mention_menu_entries);
+        let area = Rect::new(0, 0, 80, 8);
+        let mut buf = Buffer::empty(area);
+        widget.render(area, &mut buf);
+
+        let submit = active_composer_submit_rect(&app, area).expect("enclosed composer submit");
+        let input_plane = widget.inner_area(area);
+        let text_area = composer_content_geometry(input_plane, false).text_area;
+        assert_eq!(
+            text_area.right(),
+            submit.x.saturating_sub(1),
+            "one blank cell must remain between draft text and submit"
+        );
+
+        let (cursor_x, cursor_y) = widget.cursor_pos(area).expect("draft cursor");
+        assert!(
+            cursor_x < submit.x || cursor_x >= submit.right() || cursor_y != submit.y,
+            "cursor {cursor_x},{cursor_y} must not land in submit {submit:?}"
+        );
+        assert_eq!(app.input, draft, "rendering must retain the full draft");
+
+        let first_line: String = (text_area.x..text_area.right())
+            .map(|x| buf[(x, cursor_y.saturating_sub(1))].symbol().to_string())
+            .collect();
+        let continuation: String = (text_area.x..text_area.x.saturating_add(3))
+            .map(|x| buf[(x, cursor_y)].symbol().to_string())
+            .collect();
+        assert_eq!(first_line, "x".repeat(71), "first wrapped draft row");
+        assert_eq!(
+            continuation, "xxx",
+            "draft continuation must remain visible"
+        );
+        let painted: String = (submit.x..submit.right())
+            .map(|x| buf[(x, submit.y)].symbol().to_string())
+            .collect();
+        assert_eq!(painted, "[↑]", "submit stays intact beside the draft");
     }
 
     #[test]
