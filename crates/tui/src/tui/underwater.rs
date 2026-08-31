@@ -3534,9 +3534,7 @@ pub fn render_tideline_startup(stage: Rect, buf: &mut Buffer, startup: &Tideline
             startup.status_line.as_deref(),
             startup.ascii_safe,
         );
-        if !enclosed
-            && let Some(line) = startup.status_line.as_deref()
-        {
+        if !enclosed && let Some(line) = startup.status_line.as_deref() {
             let y = if layout.dock.height == 1 {
                 input_row
             } else {
