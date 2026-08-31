@@ -1123,9 +1123,14 @@ pub(crate) fn composer_enclosure_enabled(app: &App) -> bool {
 
 /// Shared `[↑]` submit rect for the live composer, or `None` when the
 /// enclosure cannot host the three-cell affordance.
+///
+/// The gate is the same `enclosed_composer_panel_fits` predicate the painter
+/// uses: a hitbox without the painted panel would be an invisible click
+/// target (widths 6–11 rendered a borderless rule while still accepting
+/// clicks).
 #[must_use]
 pub(crate) fn active_composer_submit_rect(app: &App, area: Rect) -> Option<Rect> {
-    if !composer_enclosure_enabled(app) || area.width < 6 || area.height < 3 {
+    if !enclosed_composer_panel_fits(composer_enclosure_enabled(app), area.width, area.height) {
         return None;
     }
     Some(crate::tui::composer_chrome::tideline_composer_geometry(area).submit)
@@ -6250,11 +6255,22 @@ mod tests {
         );
         let inner = widget.inner_area(area);
         let quiet_row = cursor_y.saturating_add(1);
+        // The quiet row hosts exactly one thing: the shared `[↑]` affordance
+        // on its recorded hitbox cells. Every other cell stays blank.
+        let submit = active_composer_submit_rect(&app, area).expect("enclosed composer submit");
         assert!(
             quiet_row < inner.bottom()
-                && (inner.x..inner.right()).all(|x| buf[(x, quiet_row)].symbol() == " "),
-            "comfortable composer should keep a quiet content row before the footer: {rendered}"
+                && (inner.x..inner.right()).all(|x| {
+                    let on_submit =
+                        submit.y == quiet_row && x >= submit.x && x < submit.x + submit.width;
+                    on_submit || buf[(x, quiet_row)].symbol() == " "
+                }),
+            "comfortable composer should keep a quiet content row before the footer, hosting only the shared [↑]: {rendered}"
         );
+        let painted: String = (submit.x..submit.x + submit.width)
+            .map(|x| buf[(x, submit.y)].symbol().to_string())
+            .collect();
+        assert_eq!(painted, "[↑]", "the quiet row hosts the shared send cells");
     }
 
     #[test]
@@ -6546,6 +6562,30 @@ mod tests {
             .map(|x| buf[(x, submit.y)].symbol().to_string())
             .collect();
         assert_eq!(painted, "[↑]", "geometry must cover the painted send cells");
+    }
+
+    #[test]
+    fn composer_send_hitbox_only_exists_where_the_panel_paints() {
+        let mut app = create_test_app();
+        app.composer_border = true;
+        // Widths 6–11 fail COMPOSER_PANEL_MIN_WIDTH: the painter sheds the
+        // enclosure there, so no invisible hit target may remain.
+        for width in 6..12_u16 {
+            let area = Rect::new(0, 0, width, 4);
+            assert!(
+                active_composer_submit_rect(&app, area).is_none(),
+                "no hitbox without the painted panel at width {width}"
+            );
+        }
+        let area = Rect::new(0, 0, 12, 4);
+        assert!(
+            active_composer_submit_rect(&app, area).is_some(),
+            "the minimum panel width hosts the hitbox"
+        );
+        // Short composer rows and the quiet opt-out shed the hitbox too.
+        assert!(active_composer_submit_rect(&app, Rect::new(0, 0, 80, 2)).is_none());
+        app.composer_border = false;
+        assert!(active_composer_submit_rect(&app, Rect::new(0, 0, 80, 4)).is_none());
     }
 
     #[test]
