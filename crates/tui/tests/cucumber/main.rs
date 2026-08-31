@@ -7,6 +7,10 @@
 //! jobs to one. See `crates/tui/tests/README.md`.
 
 #[cfg(all(unix, feature = "long-running-tests"))]
+#[path = "../support/qa_harness/mod.rs"]
+mod qa_harness;
+
+#[cfg(all(unix, feature = "long-running-tests"))]
 mod active_composer_pointer_pty;
 mod core_session_command_extraction;
 mod directory_listing_acceptance;

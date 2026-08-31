@@ -12,11 +12,9 @@
 
 #![cfg(all(unix, feature = "long-running-tests"))]
 
-#[path = "../support/qa_harness/mod.rs"]
-mod qa_harness;
-
 use std::time::{Duration, Instant};
 
+use super::qa_harness;
 use qa_harness::Frame;
 use qa_harness::harness::{Harness, make_sealed_workspace};
 use qa_harness::keys;

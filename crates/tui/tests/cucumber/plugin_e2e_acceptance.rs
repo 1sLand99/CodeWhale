@@ -16,8 +16,7 @@ use cucumber::{World as _, given, then, when, writer::Stats as _};
 use tempfile::TempDir;
 
 #[cfg(all(unix, feature = "long-running-tests"))]
-#[path = "../support/qa_harness/mod.rs"]
-mod qa_harness;
+use super::qa_harness;
 
 #[cfg(all(unix, feature = "long-running-tests"))]
 use qa_harness::harness::{Harness, make_sealed_workspace};
