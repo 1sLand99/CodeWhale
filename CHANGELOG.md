@@ -26,13 +26,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Computer meter receipts record only provider-accepted active seconds. v3
-  Computer admission (profile, 1x/2x/4x multiplier, account, quote, expiry) is
-  bound before dispatch, and receipts are minted immutably at per-second
-  granularity. Wall-clock-if-idle, queued/stopped/teardown time, and any
-  allocation that does not exactly match standard-8/16/32 are rejected. Tests
-  use hermetic Daytona-shaped fixtures: no live provider call, no charge, and
-  no deploy (#5781).
+- Computer session records now count only time a provider actually accepted the
+  session as active, at per-second granularity. Idle, queued, stopped, and
+  teardown time are excluded, and a session whose allocation does not match a
+  standard profile is refused rather than recorded approximately. Covered by
+  hermetic fixtures; no live provider call and no deploy (#5781).
 
 - Website: the public site moves to the Tideline deep-ocean design language
   (dark by default with an opt-in light documentation sheet, palette grounded
