@@ -3534,27 +3534,27 @@ pub fn render_tideline_startup(stage: Rect, buf: &mut Buffer, startup: &Tideline
             startup.status_line.as_deref(),
             startup.ascii_safe,
         );
-        if !enclosed {
-            if let Some(line) = startup.status_line.as_deref() {
-                let y = if layout.dock.height == 1 {
-                    input_row
-                } else {
-                    layout
-                        .dock
-                        .bottom()
-                        .saturating_sub(1)
-                        .saturating_sub(stage.y)
-                };
-                set_span(
-                    buf,
-                    stage.x + 2,
-                    stage.y + y,
-                    &Span::styled(
-                        truncate_to_width(line, usize::from(stage.width.saturating_sub(4))),
-                        chrome(theme, ChromeInk::Metadata),
-                    ),
-                );
-            }
+        if !enclosed
+            && let Some(line) = startup.status_line.as_deref()
+        {
+            let y = if layout.dock.height == 1 {
+                input_row
+            } else {
+                layout
+                    .dock
+                    .bottom()
+                    .saturating_sub(1)
+                    .saturating_sub(stage.y)
+            };
+            set_span(
+                buf,
+                stage.x + 2,
+                stage.y + y,
+                &Span::styled(
+                    truncate_to_width(line, usize::from(stage.width.saturating_sub(4))),
+                    chrome(theme, ChromeInk::Metadata),
+                ),
+            );
         }
     }
 }
