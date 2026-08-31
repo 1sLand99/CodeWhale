@@ -48,7 +48,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `/login` reports the Codewhale account session and provider-key next
   steps. The internal cloud-agent credential is not user surface: there is
   no `auth set-slot`/`auth clear-slot` command, no hint, and no completion
-  entry for it — membership (`codewhale login`) is the only door.
+  entry for it — signing in with `codewhale login` is the only door.
 - Add the Tideline component family from the ratatui translation spec
   (#5698's screens, riding the #5699 work-strip layout): hero startup
   surface with quick actions and option strip, notifications inbox, merged
