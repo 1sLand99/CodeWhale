@@ -4875,9 +4875,13 @@ impl App {
     pub fn arm_quit(&mut self) {
         self.quit_armed_until = Some(Instant::now() + Self::QUIT_CONFIRMATION_WINDOW);
         // The armed state must be spoken, not silent: surface the localized
-        // press-again hint so the user learns a second Ctrl+C exits.
-        self.status_message = Some(self.tr(MessageId::FooterPressCtrlCAgain).into_owned());
-        self.needs_redraw = true;
+        // press-again hint as a typed toast with the same lifetime as the
+        // confirmation window, so the user learns a second Ctrl+C exits.
+        self.push_status_toast(
+            self.tr(MessageId::FooterPressCtrlCAgain),
+            StatusToastLevel::Info,
+            Some(Self::QUIT_CONFIRMATION_WINDOW.as_millis() as u64),
+        );
     }
 
     /// Whether the quit timer is currently armed (i.e. a prior Ctrl+C set it

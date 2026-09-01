@@ -13660,14 +13660,22 @@ fn ctrl_c_disposition_launch_screen_arms_exit_prompt() {
 #[test]
 fn arm_quit_shows_press_again_hint() {
     // The armed state must be visible: the first Ctrl+C surfaces the
-    // localized "Press Ctrl+C again to quit" hint, not a silent redraw.
+    // localized "Press Ctrl+C again to quit" hint as a typed toast (not the
+    // legacy status_message sink, not a silent redraw), living exactly as
+    // long as the confirmation window.
     let mut app = create_test_app();
     app.arm_quit();
     let hint = app.tr(MessageId::FooterPressCtrlCAgain).into_owned();
-    assert_eq!(
-        app.status_message.as_deref(),
-        Some(hint.as_str()),
-        "arming the quit prompt must show the press-again hint"
+    assert!(
+        app.status_toasts
+            .iter()
+            .any(|toast| toast.text == hint && toast.level == StatusToastLevel::Info),
+        "arming the quit prompt must toast the press-again hint: {:?}",
+        app.status_toasts
+    );
+    assert!(
+        app.status_message.is_none(),
+        "the quit hint must not write the legacy status sink"
     );
 }
 
