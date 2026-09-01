@@ -31,9 +31,12 @@ run_suite() {
 
 if [ "$(id -u)" = "0" ] && [ "$(uname -s)" = "Linux" ]; then
   id -u builder >/dev/null 2>&1 || useradd -m -s /bin/bash builder
+  # cargo writes into CARGO_HOME (registry, git checkouts) and ./target, so
+  # both must belong to the user that will actually run the suite.
   chown -R builder:builder . "$CARGO_HOME" "$RUSTUP_HOME" 2>/dev/null || true
   echo "--- re-exec as unprivileged user (root ignores permission bits)"
   exec runuser -u builder -- env \
+    HOME=/home/builder \
     PATH="$PATH" CARGO_HOME="$CARGO_HOME" RUSTUP_HOME="$RUSTUP_HOME" \
     CARGO_TERM_COLOR="${CARGO_TERM_COLOR:-always}" \
     CARGO_INCREMENTAL="${CARGO_INCREMENTAL:-0}" \
