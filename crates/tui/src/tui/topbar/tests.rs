@@ -46,15 +46,18 @@ fn startup_segments() -> Vec<TopbarSegment> {
     ]
 }
 
-/// Approved work screen: folder, branch, effective model.
+/// Approved work screen: repository, branch, effective model. The repository
+/// segment states the forge slug and keeps the folder basename as its shorter
+/// form.
 fn work_segments() -> Vec<TopbarSegment> {
     vec![
         TopbarSegment::new(
             TopbarSegmentId::Workspace,
             "",
-            "mcp-gateway",
+            "Hmbown/CodeWhale",
             ChromeInk::Metadata,
-        ),
+        )
+        .short("codewhale"),
         TopbarSegment::new(TopbarSegmentId::Branch, "⑂", "main", ChromeInk::Metadata),
         TopbarSegment::new(
             TopbarSegmentId::Model,
@@ -94,6 +97,15 @@ fn settings_segments() -> Vec<TopbarSegment> {
 /// declared order has to hold with the whole ladder present.
 fn crowded_segments() -> Vec<TopbarSegment> {
     let mut segments = work_segments();
+    // A slug whose two forms share no substring, so the shed sweep can tell
+    // "slug" from "basename" from "segment gone".
+    segments[0] = TopbarSegment::new(
+        TopbarSegmentId::Workspace,
+        "",
+        "acme/mcp-gateway",
+        ChromeInk::Metadata,
+    )
+    .short("mcp-gateway");
     segments.insert(
         2,
         TopbarSegment::new(
@@ -219,11 +231,12 @@ fn topbar_states_no_clock() {
     }
 }
 
-/// Declared shed order (spec §5b): the bar glyphs, then the help hint, then
-/// folder, then branch. `codewhale`, the route identity, and the
-/// `context NN%` text are the floor at every width.
+/// Declared shed order (spec §5b): the bar glyphs, then the repository slug
+/// down to the folder basename, then the help hint, then folder, then
+/// branch. `codewhale`, the route identity, and the `context NN%` text are
+/// the floor at every width.
 #[test]
-fn topbar_sheds_bar_then_help_then_folder_then_branch() {
+fn topbar_sheds_bar_then_slug_then_help_then_folder_then_branch() {
     let segments = crowded_segments();
     // The narrowest row that still shows a thing. A thing that sheds earlier
     // needs a wider row to survive, so these strictly decrease down the
@@ -235,24 +248,34 @@ fn topbar_sheds_bar_then_help_then_folder_then_branch() {
             .unwrap_or_else(|| panic!("{needle} never painted at any width"))
     };
     let bar = narrowest_showing("▱");
+    let slug = narrowest_showing("acme/");
     let help = narrowest_showing("help");
     let folder = narrowest_showing("mcp-gateway");
-    let branch = narrowest_showing("main");
+    let branch = narrowest_showing("⑂ main");
     assert!(
-        bar > help && help > folder && folder > branch,
-        "shed order drifted: bar {bar}, help {help}, folder {folder}, branch {branch}"
+        bar > slug && slug > help && help > folder && folder > branch,
+        "shed order drifted: bar {bar}, slug {slug}, help {help}, \
+         folder {folder}, branch {branch}"
     );
-    // The bar is the first thing to go, so the whole working line — folder,
-    // branch, an untruncated model name, and the help hint — fits at 80.
+    // The slug degrades to the basename rather than costing the row a whole
+    // segment: the repository is still named at every width the folder
+    // survives.
+    for width in folder..=180u16 {
+        let row = render_row(&UI_THEME, width, &segments, 61);
+        assert!(
+            row.contains("mcp-gateway"),
+            "{width}: the repository stays named: {row:?}"
+        );
+    }
+    // The bar is the first thing to go, so the whole working line — the
+    // repository, branch, an untruncated model name, and the help hint — is
+    // what 80 columns spend their cells on.
     let row80 = render_row(&UI_THEME, 80, &work_segments(), 61);
     assert!(
-        row80.contains("mcp-gateway") && row80.contains("⑂ main"),
-        "80: folder and branch outrank the gauge: {row80:?}"
+        row80.contains("⑂ main") && row80.contains("model deepseek-v4"),
+        "80: branch and model outrank the gauge: {row80:?}"
     );
-    assert!(
-        row80.contains("model deepseek-v4") && row80.contains("help"),
-        "80: the model name and the help hint outrank the gauge: {row80:?}"
-    );
+    assert!(row80.contains("help"), "80: the hint survives: {row80:?}");
     assert!(
         !row80.contains('▱'),
         "80: the bar is what yields: {row80:?}"
@@ -321,6 +344,32 @@ fn topbar_context_takes_the_error_token_at_eighty() {
     assert_eq!(super::meter_ink_for(79), ChromeInk::Info);
     assert_eq!(super::context_label_ink_for(83), ChromeInk::Failure);
     assert_eq!(super::context_label_ink_for(79), ChromeInk::Metadata);
+}
+
+/// The repository segment states `owner/name` while the row can afford it,
+/// and falls back to the folder basename — never to nothing — when it
+/// cannot. A shorter form is taken before the help hint or any segment goes.
+#[test]
+fn topbar_repository_slug_falls_back_to_the_folder_basename() {
+    let segments = work_segments();
+    let wide = render_row(&UI_THEME, 120, &segments, 61);
+    assert!(
+        wide.contains("Hmbown/CodeWhale"),
+        "the slug is the repository's name when it fits: {wide:?}"
+    );
+    let tight = render_row(&UI_THEME, 80, &segments, 61);
+    assert!(
+        !tight.contains("Hmbown/CodeWhale"),
+        "80 cannot afford the slug: {tight:?}"
+    );
+    assert!(
+        tight.matches("codewhale").count() == 2,
+        "the basename keeps the slot beside the wordmark: {tight:?}"
+    );
+    // A "shorter" form that is not shorter is not adopted.
+    let no_short = TopbarSegment::new(TopbarSegmentId::Workspace, "", "cw", ChromeInk::Metadata)
+        .short("a-much-longer-name");
+    assert!(no_short.short.is_none());
 }
 
 /// The hint must name a chord that actually opens help in this shell. `F1`

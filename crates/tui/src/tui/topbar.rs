@@ -26,8 +26,10 @@
 //! time from the same snapshot.
 //!
 //! Shed order as width drops (spec §5b): the meter's bar glyphs first, then
-//! the help hint, then contextual segments by
-//! [`TopbarSegmentId::shed_priority`] (folder, branch, then the work facts).
+//! any segment that carries a shorter form takes it (the repository segment's
+//! `owner/name` becomes the folder basename), then the help hint, then
+//! contextual segments by [`TopbarSegmentId::shed_priority`] (folder, branch,
+//! then the work facts).
 //! The brand, the route identity, and the `context NN%` text are the floor
 //! and never shed — and the route identity is never truncated to keep a
 //! decorative gauge, because the bar only re-states the number beside it.
@@ -72,7 +74,8 @@ const WORDMARK: &str = "codewhale";
 pub enum TopbarSegmentId {
     /// The brand lockup — status-only until a product menu exists.
     Brand,
-    /// Workspace folder name.
+    /// The repository the session is in: the `owner/name` forge slug when
+    /// one is known, else the workspace folder name.
     Workspace,
     /// Checked-out git branch (`⑂ main`), from the cached status probe.
     Branch,
@@ -121,6 +124,10 @@ pub struct TopbarSegment {
     pub id: TopbarSegmentId,
     pub label: String,
     pub value: String,
+    /// A shorter, still-true form of [`Self::value`]. The shed pass takes it
+    /// before it drops anything, so a long value costs the row nothing it
+    /// cannot get back. `None` means this segment has only one form.
+    pub short: Option<String>,
     pub ink: ChromeInk,
 }
 
@@ -131,20 +138,40 @@ impl TopbarSegment {
             id,
             label: label.to_string(),
             value: value.into(),
+            short: None,
             ink,
         }
     }
 
-    fn rendered_width(&self) -> usize {
-        segment_text(self).width()
+    /// Give the segment a shorter alternative form (ignored when it is not
+    /// actually shorter — a "short" form that costs cells is not one).
+    #[must_use]
+    pub fn short(mut self, short: impl Into<String>) -> Self {
+        let short = short.into();
+        if short.width() < self.value.width() {
+            self.short = Some(short);
+        }
+        self
+    }
+
+    fn value_at(&self, short: bool) -> &str {
+        match (short, self.short.as_deref()) {
+            (true, Some(short)) => short,
+            _ => &self.value,
+        }
+    }
+
+    fn rendered_width(&self, short: bool) -> usize {
+        segment_text(self, short).width()
     }
 }
 
-fn segment_text(segment: &TopbarSegment) -> String {
+fn segment_text(segment: &TopbarSegment, short: bool) -> String {
+    let value = segment.value_at(short);
     if segment.label.is_empty() {
-        segment.value.clone()
+        value.to_string()
     } else {
-        format!("{} {}", segment.label, segment.value)
+        format!("{} {}", segment.label, value)
     }
 }
 
@@ -270,6 +297,8 @@ fn right_text(pct: u8, meter: &str, help: &str, show_bar: bool, show_help: bool)
 /// `startup_layout` follows.
 struct ShedRow<'t> {
     kept: Vec<&'t TopbarSegment>,
+    /// Segments with a shorter form are painting it.
+    use_short: bool,
     show_bar: bool,
     show_help: bool,
     right_width: usize,
@@ -293,10 +322,10 @@ fn shed_pass<'t>(topbar: &'t Topbar<'_>, area: Rect) -> ShedRow<'t> {
     let brand_w = brand_width();
     let join_w = SEGMENT_JOIN.width();
     let mut kept: Vec<&TopbarSegment> = topbar.segments.iter().collect();
-    let total_needed = |segs: &[&TopbarSegment], right: usize| -> usize {
+    let total_needed = |segs: &[&TopbarSegment], short: bool, right: usize| -> usize {
         brand_w
             + if segs.is_empty() { 0 } else { join_w }
-            + segs.iter().map(|s| s.rendered_width()).sum::<usize>()
+            + segs.iter().map(|s| s.rendered_width(short)).sum::<usize>()
             + if segs.is_empty() {
                 0
             } else {
@@ -314,10 +343,15 @@ fn shed_pass<'t>(topbar: &'t Topbar<'_>, area: Rect) -> ShedRow<'t> {
     // or model name should be cut to keep ten decorative cells.
     let mut show_help = !help.is_empty();
     let mut show_bar = true;
+    let mut use_short = false;
     let mut right_width = right_text(pct, &meter, &help, show_bar, show_help).width();
-    while total_needed(&kept, right_width) > area.width as usize {
+    while total_needed(&kept, use_short, right_width) > area.width as usize {
         if show_bar {
             show_bar = false;
+        } else if !use_short && kept.iter().any(|segment| segment.short.is_some()) {
+            // A long `owner/name` must not cost the row the help hint or a
+            // whole segment while a shorter true form is available.
+            use_short = true;
         } else if show_help {
             show_help = false;
         } else if let Some(pos) = kept
@@ -336,6 +370,7 @@ fn shed_pass<'t>(topbar: &'t Topbar<'_>, area: Rect) -> ShedRow<'t> {
 
     ShedRow {
         kept,
+        use_short,
         show_bar,
         show_help,
         right_width,
@@ -382,6 +417,7 @@ impl Widget for Topbar<'_> {
         let label_ink = context_label_ink_for(pct);
         let ShedRow {
             kept,
+            use_short,
             show_bar,
             show_help,
             right_width,
@@ -428,9 +464,10 @@ impl Widget for Topbar<'_> {
                     .add_modifier(Modifier::UNDERLINED);
             }
             // label dim, value in the segment's ink (two spans, one hitbox)
+            let value = segment.value_at(use_short);
             if segment.label.is_empty() {
-                set(buf, x, &Span::styled(&segment.value, style));
-                x += segment.value.width();
+                set(buf, x, &Span::styled(value, style));
+                x += value.width();
             } else {
                 // The label may be a glyph (`⑂`); ascii-safe projects it, and
                 // every projection is single-width so the shed arithmetic
@@ -442,8 +479,8 @@ impl Widget for Topbar<'_> {
                     &Span::styled(label.clone(), chrome(theme, ChromeInk::Metadata)),
                 );
                 x += label.width() + 1;
-                set(buf, x, &Span::styled(&segment.value, style));
-                x += segment.value.width();
+                set(buf, x, &Span::styled(value, style));
+                x += value.width();
             }
         }
 
@@ -511,7 +548,7 @@ pub fn topbar_hitboxes(topbar: &Topbar<'_>, area: Rect) -> Vec<TopbarHitbox> {
     let right_start = usize::from(area.x + area.width).saturating_sub(shed.right_width);
     for segment in shed.kept.iter() {
         x += join_w;
-        let w = segment.rendered_width();
+        let w = segment.rendered_width(shed.use_short);
         if x + w <= right_start && x + w <= usize::from(area.x + area.width) {
             out.push(TopbarHitbox {
                 id: segment.id,

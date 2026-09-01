@@ -13,6 +13,24 @@ pub(crate) fn topbar_context_percent(app: &App) -> u8 {
     crate::tui::phase_strip::context_percent_from_app(app)
 }
 
+/// What the workspace segment says, and what it falls back to when the row
+/// is tight: the forge slug `owner/name` when `origin` resolves to one, else
+/// the workspace folder name, which is what the user calls the project when
+/// there is no remote to name it.
+///
+/// `file_name()` is `None` for `.`, `..`, and `/`; a segment reading `.`
+/// names nothing, so an empty first element means the segment stands down.
+fn workspace_segment_forms(slug: Option<&str>, workspace: &std::path::Path) -> (String, String) {
+    let basename = workspace
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    match slug {
+        Some(slug) if !slug.is_empty() => (slug.to_string(), basename),
+        _ => (basename, String::new()),
+    }
+}
+
 /// Build the topbar's contextual segments from live `App` state (spec §5a
 /// "Topbar" data sources). Shedding is the widget's job; this only states
 /// the facts, in reference order: folder, branch, run, pod, whales,
@@ -26,38 +44,39 @@ pub(crate) fn topbar_segments(app: &App, width: u16) -> Vec<TopbarSegment> {
     let mut segments = Vec::new();
     let tier = crate::tui::underwater::ShellTier::for_chrome_width(width);
 
-    // Workspace folder: the basename of the workspace root, which is what
-    // the user calls the project. The git status probe supplies the branch
-    // beside it; both are read from cache only — the render path never
-    // probes, background refresh belongs to the event loop.
-    // `file_name()` is None for `.`, `..`, and `/`; a topbar segment reading
-    // `.` names nothing, so those stand down rather than fill the slot.
-    let folder = app
-        .workspace
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_default();
+    // Repository, then branch. Both come from the one cached `git_status`
+    // snapshot — the render path never probes; the background refresh owns
+    // that, and the forge slug rides the same probe.
+    let git = crate::tui::git_status::cached_status();
     let folder_budget = match tier {
         crate::tui::underwater::ShellTier::Compact => 16,
         crate::tui::underwater::ShellTier::Normal => 24,
         crate::tui::underwater::ShellTier::Wide => 36,
     };
-    if !folder.is_empty() {
-        segments.push(TopbarSegment::new(
+    let (repo, basename) = workspace_segment_forms(git.remote_slug.as_deref(), &app.workspace);
+    if !repo.is_empty() {
+        let mut segment = TopbarSegment::new(
             TopbarSegmentId::Workspace,
             "",
-            crate::localization::truncate_to_width(&folder, folder_budget),
+            crate::localization::truncate_to_width(&repo, folder_budget),
             ChromeInk::Metadata,
-        ));
+        );
+        if !basename.is_empty() {
+            segment = segment.short(crate::localization::truncate_to_width(
+                &basename,
+                folder_budget,
+            ));
+        }
+        segments.push(segment);
     }
 
     // Branch, when git knows one. Unknown stays absent: the header must not
     // invent a ref to fill the slot (`git_status::chrome_label`'s own rule).
-    if let Some(branch) = crate::tui::git_status::cached_status().branch {
+    if let Some(branch) = git.branch.as_deref() {
         segments.push(TopbarSegment::new(
             TopbarSegmentId::Branch,
             "⑂",
-            crate::localization::truncate_to_width(&branch, folder_budget),
+            crate::localization::truncate_to_width(branch, folder_budget),
             ChromeInk::Metadata,
         ));
     }
@@ -1797,7 +1816,7 @@ pub(crate) fn workflow_tool_is_running(app: &App) -> bool {
 mod tests {
     use super::{
         register_topbar_interaction_targets, render_topbar_row, short_title_truncate,
-        topbar_segments,
+        topbar_segments, workspace_segment_forms,
     };
     use ratatui::{Terminal, backend::TestBackend};
 
@@ -1877,6 +1896,38 @@ mod tests {
         assert_eq!(
             target.inspect_detail,
             crate::tui::tideline::InspectDetail::Route
+        );
+    }
+
+    /// "Where did the github info go?" — the workspace segment names the
+    /// repository when `origin` resolves to a forge slug, and only falls back
+    /// to the folder basename when it does not. The basename rides along as
+    /// the segment's shorter form so a long slug never costs the row a whole
+    /// fact.
+    #[test]
+    fn workspace_segment_prefers_the_forge_slug_over_the_folder_name() {
+        let workspace = std::path::Path::new("/Volumes/VIXinSSD/CW/codewhale");
+        assert_eq!(
+            workspace_segment_forms(Some("Hmbown/CodeWhale"), workspace),
+            ("Hmbown/CodeWhale".to_string(), "codewhale".to_string()),
+            "a known slug names the repository, with the basename in reserve"
+        );
+        // No remote, an unrecognised host, or a path-shaped remote: the
+        // normalizer returns None and the basename is the whole answer.
+        assert_eq!(
+            workspace_segment_forms(None, workspace),
+            ("codewhale".to_string(), String::new())
+        );
+        // `.` and `/` name nothing; an empty first form stands the segment
+        // down rather than painting a dot.
+        assert_eq!(
+            workspace_segment_forms(None, std::path::Path::new(".")),
+            (String::new(), String::new())
+        );
+        // The slug still wins when the workspace itself is unnameable.
+        assert_eq!(
+            workspace_segment_forms(Some("Hmbown/CodeWhale"), std::path::Path::new(".")),
+            ("Hmbown/CodeWhale".to_string(), String::new())
         );
     }
 

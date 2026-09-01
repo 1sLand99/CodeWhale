@@ -1,1 +1,1 @@
-codewhale │ mcp-gateway │ ⑂ main │ model deepseek-v4                                                                         context 61% ▰▰▰▰▰▰▱▱▱▱  Ctrl+/ help
+codewhale │ Hmbown/CodeWhale │ ⑂ main │ model deepseek-v4                                                                    context 61% ▰▰▰▰▰▰▱▱▱▱  Ctrl+/ help
