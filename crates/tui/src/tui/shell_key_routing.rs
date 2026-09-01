@@ -68,6 +68,24 @@ pub const SHELL_BINDINGS: &[ShellBinding] = &[
     },
 ];
 
+/// The chord the topbar advertises for help.
+///
+/// Not `F1`: tmux, screen, and several terminal emulators claim it before the
+/// shell ever sees the key, so a topbar that printed `F1 help` would be
+/// advertising a key that does nothing for many users. Not `?` either — bare
+/// `?` is composer text in every focus state, and help only answers to
+/// `Alt+?`, which stays unadvertised until it is proven in real terminals
+/// (TUI-DOG-003). `Ctrl+/` is the chord [`is_help_shortcut`] accepts
+/// unconditionally, together with its legacy `Ctrl+7` / `Ctrl+_` encodings,
+/// so it is the one hint chrome can print honestly.
+pub const HELP_CHROME_CHORD: &str = "Ctrl+/";
+
+/// The topbar's single right-hand key hint, e.g. `Ctrl+/ help`.
+#[must_use]
+pub fn topbar_help_hint() -> String {
+    format!("{HELP_CHROME_CHORD} help")
+}
+
 #[must_use]
 pub fn binding(id: ShellBindingId) -> &'static ShellBinding {
     SHELL_BINDINGS

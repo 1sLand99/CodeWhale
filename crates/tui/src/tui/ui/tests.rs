@@ -227,7 +227,7 @@ fn composer_rows_stay_pinned_across_turn_state_transitions() {
             "{width}x{height} topbar lost the route {model:?}: {topbar_row:?}"
         );
         assert!(
-            topbar_row.contains("CODEWHALE"),
+            topbar_row.contains("codewhale"),
             "{width}x{height} topbar lost the brand: {topbar_row:?}"
         );
         let footer_row = idle_rows.last().expect("merged footer row");

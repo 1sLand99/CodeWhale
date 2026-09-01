@@ -2,19 +2,37 @@
 //!
 //! This is the translation seam between the approved Tideline reference
 //! screens and the live shell. It is a pure, deterministic widget: no `App`,
-//! no wall-clock read (the clock string is injected), no ambient motion. The
-//! caller owns facts; this module owns cells.
+//! no wall-clock read, no ambient motion. The caller owns facts; this module
+//! owns cells.
 //!
-//! The brand lockup is the `CODEWHALE` wordmark alone, in the sanctioned
+//! The brand lockup is the `codewhale` wordmark alone, in the sanctioned
 //! whale-mark gold. There is no glyph before it by founder decree: the
 //! canonical mark is a raster asset with no approved ASCII or block-glyph
 //! substitute, and a one-row topbar cannot carry it faithfully. The retired
 //! hand-drawn crown glyph is absent from this module.
 //!
 //! Segment grammar (left → right): brand lockup, then contextual segments as
-//! `label value` pairs joined by `│`, then the pinned right side — context
-//! meter and clock. Segments shed in a declared order as width drops; brand,
-//! context meter, and clock are the guaranteed floor (spec §5b shed order).
+//! `label value` pairs joined by `│`, then the pinned right side — the
+//! context reading and one help hint:
+//!
+//! ```text
+//! codewhale │ mcp-gateway │ ⑂ main │ model deepseek-v4   context 61% ▰▰▰▰▰▰▱▱▱▱  Ctrl+/ help
+//! ```
+//!
+//! There is no clock. A date stamp is not a fact anyone runs an agent to
+//! read, and it outranked `model not connected` in the row it shared (the
+//! accepted mockups carry none). The context reading is painted here and
+//! only here — the merged footer used to print the same percentage a second
+//! time from the same snapshot.
+//!
+//! Shed order as width drops (spec §5b): the meter's bar glyphs first, then
+//! the help hint, then contextual segments by
+//! [`TopbarSegmentId::shed_priority`] (folder, branch, then the work facts).
+//! The brand, the route identity, and the `context NN%` text are the floor
+//! and never shed — and the route identity is never truncated to keep a
+//! decorative gauge, because the bar only re-states the number beside it.
+//! The full working line is 83 cells, so at 80 columns the bar is what
+//! yields; it reappears from roughly 90 columns up.
 //!
 //! Interaction: segment geometry is recorded for parity tests, but only the
 //! effective model/route segment and the pinned context meter advertise an
@@ -37,15 +55,16 @@ use unicode_width::UnicodeWidthStr;
 use crate::palette::{ChromeInk, UiTheme};
 use crate::tui::glyphs;
 
-/// Separator between segments — one cell, dim.
+/// Separator between segments — one cell, dim. Also joins the brand lockup
+/// to the first segment.
 const SEGMENT_JOIN: &str = " │ ";
-/// Gap between the brand lockup and the first segment.
-const BRAND_GAP: &str = "   ";
+/// Gap between the context meter and the help hint.
+const HELP_GAP: &str = "  ";
 /// Width of the context meter bar (cells of ▰/▱).
-const METER_CELLS: usize = 5;
+const METER_CELLS: usize = 10;
 /// The brand lockup: wordmark only, no glyph (founder decree — see the
 /// module docs). Pure ASCII, so it never widens under ascii-safe mode.
-const WORDMARK: &str = "CODEWHALE";
+const WORDMARK: &str = "codewhale";
 
 /// Identity of a topbar segment. Most variants are status facts; the live
 /// shell currently registers an action only for [`Self::Model`].
@@ -53,8 +72,10 @@ const WORDMARK: &str = "CODEWHALE";
 pub enum TopbarSegmentId {
     /// The brand lockup — status-only until a product menu exists.
     Brand,
-    /// Workspace path (startup).
+    /// Workspace folder name.
     Workspace,
+    /// Checked-out git branch (`⑂ main`), from the cached status probe.
+    Branch,
     /// Current run (work screen).
     Run,
     /// Active pod (work screen).
@@ -67,8 +88,6 @@ pub enum TopbarSegmentId {
     Automation,
     /// Effective model / route — click opens the provider inspector.
     Model,
-    /// Theme name (startup).
-    Theme,
     /// Settings breadcrumb (settings screen) — click walks up one category.
     /// Not constructed by the main shell yet: the settings screen is a
     /// later Tideline slice (spec §5a).
@@ -78,14 +97,16 @@ pub enum TopbarSegmentId {
 
 impl TopbarSegmentId {
     /// Shed priority: higher sheds first as width drops. `0` never sheds.
-    /// The floor is brand + context meter + clock; among segments, Model and
-    /// the settings breadcrumb are the last to go because route identity is
-    /// the one fact the user must always be able to read (spec §5b).
+    /// Segments only start shedding after the meter bar and the help hint
+    /// have already gone. The floor is brand + route identity + the
+    /// `context NN%` text; among segments the declared order is folder,
+    /// then branch, then the work facts, because route identity is the one
+    /// fact the user must always be able to read (spec §5b).
     #[must_use]
     pub fn shed_priority(self) -> u8 {
         match self {
-            Self::Theme => 5,
-            Self::Workspace => 4,
+            Self::Workspace => 5,
+            Self::Branch => 4,
             Self::Whales | Self::Automation => 3,
             Self::Pod => 2,
             Self::Run | Self::SettingsPath => 1,
@@ -132,9 +153,9 @@ fn segment_text(segment: &TopbarSegment) -> String {
 /// frame-count keyed (spec §5e).
 pub struct Topbar<'a> {
     pub theme: &'a UiTheme,
-    /// Full clock string, e.g. `27 Aug 2026 14:42:18`. At narrow widths it
-    /// sheds to the time-of-day suffix before any segment sheds.
-    pub clock: &'a str,
+    /// The single right-hand key hint, e.g. `Ctrl+/ help`. Empty means the
+    /// caller has no hint to advertise. It is the first thing to shed.
+    pub help_hint: &'a str,
     /// Context window percentage, 0–100.
     pub context_percent: u8,
     /// Contextual segments in display order.
@@ -151,13 +172,13 @@ impl<'a> Topbar<'a> {
     #[must_use]
     pub fn new(
         theme: &'a UiTheme,
-        clock: &'a str,
+        help_hint: &'a str,
         context_percent: u8,
         segments: &'a [TopbarSegment],
     ) -> Self {
         Self {
             theme,
-            clock,
+            help_hint,
             context_percent,
             segments,
             hovered: None,
@@ -204,32 +225,62 @@ fn brand_width() -> usize {
     WORDMARK.width()
 }
 
+/// Ink for the meter bar and the percentage. At the 80% cap the whole
+/// context reading turns to the error token — it is the one topbar fact
+/// that becomes a problem rather than a status.
 fn meter_ink_for(pct: u8) -> ChromeInk {
     if pct >= 80 {
-        ChromeInk::Attention
+        ChromeInk::Failure
     } else {
         ChromeInk::Info
     }
 }
 
-/// The shed pass's answer: which segments survive at this row width, the
-/// effective right-block width (after any clock-prefix shed), and the
-/// context meter's own span. Shared by the render and the hitbox
+/// Ink for the `context ` label. Follows the value into the error token at
+/// the cap so the reading reads as one warning, not a gray word beside a
+/// red number.
+fn context_label_ink_for(pct: u8) -> ChromeInk {
+    if pct >= 80 {
+        ChromeInk::Failure
+    } else {
+        ChromeInk::Metadata
+    }
+}
+
+/// The right block's text at one shed state, used for width arithmetic and
+/// mirrored span-for-span by the render.
+fn right_text(pct: u8, meter: &str, help: &str, show_bar: bool, show_help: bool) -> String {
+    let mut text = format!("context {pct}%");
+    if show_bar {
+        text.push(' ');
+        text.push_str(meter);
+    }
+    if show_help && !help.is_empty() {
+        text.push_str(HELP_GAP);
+        text.push_str(help);
+    }
+    text
+}
+
+/// The shed pass's answer: which segments survive at this row width, whether
+/// the help hint and meter bar survived, the effective right-block width, and
+/// the context reading's own span. Shared by the render and the hitbox
 /// computation so the two can never disagree about where the meter
 /// painted — the same single-arithmetic discipline the startup stage's
 /// `startup_layout` follows.
 struct ShedRow<'t> {
     kept: Vec<&'t TopbarSegment>,
-    dropped_clock_prefix: bool,
+    show_bar: bool,
+    show_help: bool,
     right_width: usize,
-    /// Width of the `context NN% ▰▰▱▱▱` span alone.
+    /// Width of the `context NN% ▰▰▱▱▱` span alone (no help hint).
     context_width: usize,
     meter: String,
 }
 
 fn shed_pass<'t>(topbar: &'t Topbar<'_>, area: Rect) -> ShedRow<'t> {
     let ascii = topbar.ascii_safe;
-    // Right-side pinned block: `context NN% ▰▰▱▱▱  27 Aug 2026 14:42:18`.
+    // Right-side pinned block: `context NN% ▰▰▰▰▰▰▱▱▱▱  Ctrl+/ help`.
     let pct = topbar.context_percent.clamp(0, 100);
     let meter: String = (0..METER_CELLS)
         .map(|i| {
@@ -237,20 +288,14 @@ fn shed_pass<'t>(topbar: &'t Topbar<'_>, area: Rect) -> ShedRow<'t> {
             sym(if filled { "▰" } else { "▱" }, ascii)
         })
         .collect();
-    let clock_text = topbar.clock;
-    let right_text = format!("context {}% {}  {}", pct, meter, clock_text);
-    let mut right_width = right_text.width();
+    let help = sym(topbar.help_hint, ascii);
 
-    // Shed pass: drop segments (highest shed_priority first) and finally
-    // shorten the clock until the row fits. Brand + context + clock are
-    // the floor; if even the floor cannot fit, the clock sheds to time
-    // only, then the right block wins by truncation from the left.
     let brand_w = brand_width();
     let join_w = SEGMENT_JOIN.width();
     let mut kept: Vec<&TopbarSegment> = topbar.segments.iter().collect();
     let total_needed = |segs: &[&TopbarSegment], right: usize| -> usize {
         brand_w
-            + BRAND_GAP.width()
+            + if segs.is_empty() { 0 } else { join_w }
             + segs.iter().map(|s| s.rendered_width()).sum::<usize>()
             + if segs.is_empty() {
                 0
@@ -260,10 +305,22 @@ fn shed_pass<'t>(topbar: &'t Topbar<'_>, area: Rect) -> ShedRow<'t> {
             + 2
             + right
     };
-    let mut dropped_clock_prefix = false;
+
+    // Shed pass, in the declared order: the meter's bar glyphs, then the help
+    // hint, then segments by priority. `context NN%`, the brand, and the
+    // route identity are the floor; below that the render truncates. The bar
+    // goes first on purpose — it encodes the same number printed beside it,
+    // so it is the cheapest thing on the row to lose, and no folder, branch,
+    // or model name should be cut to keep ten decorative cells.
+    let mut show_help = !help.is_empty();
+    let mut show_bar = true;
+    let mut right_width = right_text(pct, &meter, &help, show_bar, show_help).width();
     while total_needed(&kept, right_width) > area.width as usize {
-        // 1. shed the highest-priority segment
-        if let Some(pos) = kept
+        if show_bar {
+            show_bar = false;
+        } else if show_help {
+            show_help = false;
+        } else if let Some(pos) = kept
             .iter()
             .enumerate()
             .filter(|(_, s)| s.id.shed_priority() > 0)
@@ -271,24 +328,18 @@ fn shed_pass<'t>(topbar: &'t Topbar<'_>, area: Rect) -> ShedRow<'t> {
             .map(|(i, _)| i)
         {
             kept.remove(pos);
-            continue;
+        } else {
+            break;
         }
-        // 2. shed the clock date prefix (keep `HH:MM:SS`)
-        if !dropped_clock_prefix && clock_text.len() > 8 {
-            let short = &clock_text[clock_text.len() - 8..];
-            right_width = format!("context {}% {}  {}", pct, meter, short).width();
-            dropped_clock_prefix = true;
-            continue;
-        }
-        // 3. nothing left to shed — the render truncates from the right
-        //    (clock goes first, then meter); the brand never truncates.
-        break;
+        right_width = right_text(pct, &meter, &help, show_bar, show_help).width();
     }
+
     ShedRow {
         kept,
-        dropped_clock_prefix,
+        show_bar,
+        show_help,
         right_width,
-        context_width: format!("context {}% {}", pct, meter).width(),
+        context_width: right_text(pct, &meter, &help, show_bar, false).width(),
         meter,
     }
 }
@@ -306,7 +357,9 @@ pub fn context_meter_hitbox(topbar: &Topbar<'_>, area: Rect) -> Option<Rect> {
     }
     let shed = shed_pass(topbar, area);
     let start = usize::from(area.width).saturating_sub(shed.right_width);
-    if start <= brand_width() + BRAND_GAP.width() || shed.context_width >= usize::from(area.width) {
+    if start <= brand_width() + SEGMENT_JOIN.width()
+        || shed.context_width >= usize::from(area.width)
+    {
         return None;
     }
     Some(Rect {
@@ -318,26 +371,23 @@ pub fn context_meter_hitbox(topbar: &Topbar<'_>, area: Rect) -> Option<Rect> {
 }
 
 impl Widget for Topbar<'_> {
-    #[allow(clippy::too_many_lines)]
     fn render(self, area: Rect, buf: &mut Buffer) {
         if area.height < 1 || area.width < 1 {
             return;
         }
         let theme = self.theme;
+        let ascii = self.ascii_safe;
         let pct = self.context_percent.clamp(0, 100);
         let meter_ink = meter_ink_for(pct);
+        let label_ink = context_label_ink_for(pct);
         let ShedRow {
             kept,
-            dropped_clock_prefix,
+            show_bar,
+            show_help,
             right_width,
             meter,
             ..
         } = shed_pass(&self, area);
-        let shown_clock = if dropped_clock_prefix {
-            &self.clock[self.clock.len() - 8..]
-        } else {
-            self.clock
-        };
 
         let mut x = area.x as usize;
         let y = area.y;
@@ -359,18 +409,16 @@ impl Widget for Topbar<'_> {
             ),
         );
         x += WORDMARK.width();
-        x += BRAND_GAP.width();
 
-        // Contextual segments with recorded hitboxes.
-        for (index, segment) in kept.iter().enumerate() {
-            if index > 0 {
-                set(
-                    buf,
-                    x,
-                    &Span::styled(SEGMENT_JOIN, chrome(theme, ChromeInk::MetadataDim)),
-                );
-                x += SEGMENT_JOIN.width();
-            }
+        // Contextual segments with recorded hitboxes, joined to the brand by
+        // the same separator they use between themselves.
+        for segment in kept.iter() {
+            set(
+                buf,
+                x,
+                &Span::styled(SEGMENT_JOIN, chrome(theme, ChromeInk::MetadataDim)),
+            );
+            x += SEGMENT_JOIN.width();
             let hovered = segment.id == TopbarSegmentId::Model
                 && self.hovered == Some(TopbarSegmentId::Model);
             let mut style = chrome(theme, segment.ink);
@@ -384,12 +432,16 @@ impl Widget for Topbar<'_> {
                 set(buf, x, &Span::styled(&segment.value, style));
                 x += segment.value.width();
             } else {
+                // The label may be a glyph (`⑂`); ascii-safe projects it, and
+                // every projection is single-width so the shed arithmetic
+                // above stays exact.
+                let label = sym(&segment.label, ascii);
                 set(
                     buf,
                     x,
-                    &Span::styled(&segment.label, chrome(theme, ChromeInk::Metadata)),
+                    &Span::styled(label.clone(), chrome(theme, ChromeInk::Metadata)),
                 );
-                x += segment.label.width() + 1;
+                x += label.width() + 1;
                 set(buf, x, &Span::styled(&segment.value, style));
                 x += segment.value.width();
             }
@@ -398,18 +450,19 @@ impl Widget for Topbar<'_> {
         // Right pinned block, right-aligned to the area edge.
         let mut sx = (area.x as usize + area.width as usize).saturating_sub(right_width);
         let mut spans: Vec<Span> = Vec::with_capacity(6);
-        spans.push(Span::styled("context ", chrome(theme, ChromeInk::Metadata)));
-        spans.push(Span::styled(
-            format!("{}%", pct),
-            chrome(theme, ChromeInk::Info),
-        ));
-        spans.push(Span::raw(" "));
-        spans.push(Span::styled(meter.clone(), chrome(theme, meter_ink)));
-        spans.push(Span::raw("  "));
-        spans.push(Span::styled(
-            shown_clock,
-            chrome(theme, ChromeInk::MetadataHint),
-        ));
+        spans.push(Span::styled("context ", chrome(theme, label_ink)));
+        spans.push(Span::styled(format!("{pct}%"), chrome(theme, meter_ink)));
+        if show_bar {
+            spans.push(Span::raw(" "));
+            spans.push(Span::styled(meter.clone(), chrome(theme, meter_ink)));
+        }
+        if show_help {
+            spans.push(Span::raw(HELP_GAP));
+            spans.push(Span::styled(
+                sym(self.help_hint, ascii),
+                chrome(theme, ChromeInk::MetadataHint),
+            ));
+        }
         for span in &spans {
             set(buf, sx, span);
             sx += span.content.width();
@@ -452,14 +505,12 @@ pub fn topbar_hitboxes(topbar: &Topbar<'_>, area: Rect) -> Vec<TopbarHitbox> {
             },
         });
     }
-    let mut x = area.x as usize + brand_w + BRAND_GAP.width();
+    let mut x = area.x as usize + brand_w;
     let join_w = SEGMENT_JOIN.width();
     let shed = shed_pass(topbar, area);
     let right_start = usize::from(area.x + area.width).saturating_sub(shed.right_width);
-    for (index, segment) in shed.kept.iter().enumerate() {
-        if index > 0 {
-            x += join_w;
-        }
+    for segment in shed.kept.iter() {
+        x += join_w;
         let w = segment.rendered_width();
         if x + w <= right_start && x + w <= usize::from(area.x + area.width) {
             out.push(TopbarHitbox {

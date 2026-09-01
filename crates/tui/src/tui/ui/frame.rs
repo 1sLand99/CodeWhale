@@ -7,13 +7,6 @@ use super::*;
 use crate::models::Role;
 use crate::tui::topbar::{Topbar, TopbarSegment, TopbarSegmentId, topbar_hitboxes};
 
-/// The topbar's clock string, read from the wall clock exactly once per
-/// render (spec §5e cadence law). `27 Aug 2026 14:42:18` — the widget sheds
-/// the date prefix itself at narrow widths, so this is always the full form.
-pub(crate) fn topbar_clock() -> String {
-    chrono::Local::now().format("%d %b %Y %H:%M:%S").to_string()
-}
-
 /// Context window percentage for the topbar meter — the same snapshot the
 /// merged footer's depth line reads, so the two can never disagree.
 pub(crate) fn topbar_context_percent(app: &App) -> u8 {
@@ -22,10 +15,52 @@ pub(crate) fn topbar_context_percent(app: &App) -> u8 {
 
 /// Build the topbar's contextual segments from live `App` state (spec §5a
 /// "Topbar" data sources). Shedding is the widget's job; this only states
-/// the facts, in reference order: run, pod, whales, model, theme, folder.
+/// the facts, in reference order: folder, branch, run, pod, whales,
+/// automation, model.
+///
+/// The theme name is no longer among them. It was a first-run nicety that
+/// outlived first run, and the accepted screens spend that space on the
+/// workspace the session is actually editing.
 pub(crate) fn topbar_segments(app: &App, width: u16) -> Vec<TopbarSegment> {
     use crate::palette::ChromeInk;
     let mut segments = Vec::new();
+    let tier = crate::tui::underwater::ShellTier::for_chrome_width(width);
+
+    // Workspace folder: the basename of the workspace root, which is what
+    // the user calls the project. The git status probe supplies the branch
+    // beside it; both are read from cache only — the render path never
+    // probes, background refresh belongs to the event loop.
+    // `file_name()` is None for `.`, `..`, and `/`; a topbar segment reading
+    // `.` names nothing, so those stand down rather than fill the slot.
+    let folder = app
+        .workspace
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let folder_budget = match tier {
+        crate::tui::underwater::ShellTier::Compact => 16,
+        crate::tui::underwater::ShellTier::Normal => 24,
+        crate::tui::underwater::ShellTier::Wide => 36,
+    };
+    if !folder.is_empty() {
+        segments.push(TopbarSegment::new(
+            TopbarSegmentId::Workspace,
+            "",
+            crate::localization::truncate_to_width(&folder, folder_budget),
+            ChromeInk::Metadata,
+        ));
+    }
+
+    // Branch, when git knows one. Unknown stays absent: the header must not
+    // invent a ref to fill the slot (`git_status::chrome_label`'s own rule).
+    if let Some(branch) = crate::tui::git_status::cached_status().branch {
+        segments.push(TopbarSegment::new(
+            TopbarSegmentId::Branch,
+            "⑂",
+            crate::localization::truncate_to_width(&branch, folder_budget),
+            ChromeInk::Metadata,
+        ));
+    }
 
     // Run/breadcrumb while a workflow run is active — the collapsed
     // workflow chip's new home (the classic header's `top_bar_chip`, with
@@ -70,7 +105,6 @@ pub(crate) fn topbar_segments(app: &App, width: u16) -> Vec<TopbarSegment> {
     // projection (`AutomationPanelState`) stays the single owner; the
     // topbar reads it. Compact keeps the abbreviated live count — chrome
     // sheds before content.
-    let tier = crate::tui::underwater::ShellTier::for_chrome_width(width);
     let automation_value = if tier == crate::tui::underwater::ShellTier::Compact {
         app.automation_panel.activity_slot_compact()
     } else {
@@ -97,9 +131,9 @@ pub(crate) fn topbar_segments(app: &App, width: u16) -> Vec<TopbarSegment> {
             ChromeInk::Waiting,
         ));
     } else {
-        let tier = crate::tui::underwater::ShellTier::for_chrome_width(width);
-        // The brand lockup, gap, and the pinned meter + clock floor claim
-        // the rest of the row; the route sheds its own qualifiers first.
+        // The brand lockup, the folder/branch pair, and the pinned context
+        // reading claim the rest of the row; the route sheds its own
+        // qualifiers first.
         let budget = (usize::from(width)).saturating_sub(60).max(24);
         let fields = crate::tui::phase_strip::route_identity_fields(app, tier, budget)
             .unwrap_or_else(|| vec![model]);
@@ -110,39 +144,6 @@ pub(crate) fn topbar_segments(app: &App, width: u16) -> Vec<TopbarSegment> {
             ChromeInk::Identity,
         ));
     }
-
-    // Theme name from the active theme id.
-    segments.push(TopbarSegment::new(
-        TopbarSegmentId::Theme,
-        "theme",
-        app.theme_id.display_name(),
-        ChromeInk::Info,
-    ));
-
-    // Workspace truth: the cached git status label (it already leads with
-    // the repo name) or the workspace folder name. Cached only — the render
-    // path never probes; background refresh belongs to the event loop.
-    let tier = crate::tui::underwater::ShellTier::for_chrome_width(width);
-    let max_git_width = match tier {
-        crate::tui::underwater::ShellTier::Compact => 24,
-        crate::tui::underwater::ShellTier::Normal => 36,
-        crate::tui::underwater::ShellTier::Wide => 52,
-    };
-    let workspace_label =
-        crate::tui::git_status::chrome_label(&crate::tui::git_status::cached_status())
-            .map(|label| crate::localization::truncate_to_width(&label, max_git_width));
-    let workspace_label = workspace_label.unwrap_or_else(|| {
-        app.workspace
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| app.workspace.to_string_lossy().into_owned())
-    });
-    segments.push(TopbarSegment::new(
-        TopbarSegmentId::Workspace,
-        "folder",
-        workspace_label,
-        ChromeInk::Metadata,
-    ));
 
     segments
 }
@@ -172,7 +173,6 @@ fn render_topbar_row(f: &mut Frame, app: &mut App, area: Rect) -> TopbarInteract
         return TopbarInteractionHitboxes::default();
     }
     let segments = topbar_segments(app, area.width);
-    let clock = topbar_clock();
     let hovered = app.last_mouse_pos.and_then(|(mx, my)| {
         app.viewport
             .last_topbar_hitboxes
@@ -185,9 +185,10 @@ fn render_topbar_row(f: &mut Frame, app: &mut App, area: Rect) -> TopbarInteract
             })
             .map(|hb| hb.id)
     });
+    let help_hint = crate::tui::shell_key_routing::topbar_help_hint();
     let topbar = Topbar::new(
         &app.ui_theme,
-        &clock,
+        &help_hint,
         topbar_context_percent(app),
         &segments,
     )

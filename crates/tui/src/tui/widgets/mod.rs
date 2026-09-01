@@ -7152,10 +7152,10 @@ mod tests {
         let mut topbar_buf = Buffer::empty(topbar_area);
         {
             let segments = crate::tui::ui::frame::topbar_segments(&app, topbar_area.width);
-            let clock = "27 Aug 2026 14:42:18".to_string();
+            let help_hint = crate::tui::shell_key_routing::topbar_help_hint();
             let topbar = crate::tui::topbar::Topbar::new(
                 &app.ui_theme,
-                &clock,
+                &help_hint,
                 crate::tui::ui::frame::topbar_context_percent(&app),
                 &segments,
             )
