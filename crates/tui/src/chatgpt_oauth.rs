@@ -302,10 +302,15 @@ pub fn build_authorize_url(
     redirect_uri: &str,
     state: &str,
     pkce: &PkceChallenge,
-) -> String {
-    let mut url = reqwest::Url::parse(&authorize_endpoint(issuer)).unwrap_or_else(|_| {
-        reqwest::Url::parse("https://auth.openai.com/oauth/authorize").expect("static issuer")
-    });
+) -> Result<String> {
+    // A malformed configured issuer must fail loudly. Silently redirecting
+    // the browser to the production authorize endpoint would hand OpenAI a
+    // sign-in the user aimed somewhere else.
+    let mut url = reqwest::Url::parse(&authorize_endpoint(issuer)).with_context(|| {
+        format!(
+            "ChatGPT OAuth issuer is not a valid URL ({issuer:?}) — check CODEWHALE_CHATGPT_OAUTH_ISSUER"
+        )
+    })?;
     url.query_pairs_mut()
         .append_pair("response_type", "code")
         .append_pair("client_id", client_id)
@@ -316,7 +321,7 @@ pub fn build_authorize_url(
         .append_pair("state", state)
         .append_pair("id_token_add_organizations", "true")
         .append_pair("originator", CHATGPT_OAUTH_ORIGINATOR);
-    url.to_string()
+    Ok(url.to_string())
 }
 
 pub fn parse_callback_query(query: &str) -> Result<CallbackOutcome> {
@@ -417,7 +422,7 @@ pub fn start_auth_request_on(
     let redirect_uri = redirect_uri_for_port(port);
     let pkce = generate_pkce();
     let state = generate_state();
-    let authorize_url = build_authorize_url(issuer, client_id, &redirect_uri, &state, &pkce);
+    let authorize_url = build_authorize_url(issuer, client_id, &redirect_uri, &state, &pkce)?;
     Ok(AuthRequest {
         state,
         pkce,
@@ -1357,6 +1362,23 @@ mod tests {
     }
 
     #[test]
+    fn malformed_issuer_fails_loudly_not_to_production() {
+        let pkce = PkceChallenge {
+            verifier: "verifier".into(),
+            challenge: "challenge".into(),
+        };
+        let err = build_authorize_url(
+            "not a url \\ ",
+            CHATGPT_OAUTH_CLIENT_ID,
+            "http://localhost:1455/auth/callback",
+            "state-1",
+            &pkce,
+        )
+        .expect_err("malformed issuer must not produce an authorize URL");
+        assert!(format!("{err:#}").contains("CODEWHALE_CHATGPT_OAUTH_ISSUER"));
+    }
+
+    #[test]
     fn authorize_url_is_honest_originator_and_pkce() {
         let pkce = PkceChallenge {
             verifier: "verifier".into(),
@@ -1369,6 +1391,7 @@ mod tests {
             "state-1",
             &pkce,
         );
+        let url = url.expect("static issuer parses");
         assert!(url.starts_with("https://auth.openai.com/oauth/authorize?"));
         assert!(url.contains("code_challenge=challenge"));
         assert!(url.contains("code_challenge_method=S256"));
