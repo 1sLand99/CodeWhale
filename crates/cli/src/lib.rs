@@ -129,6 +129,21 @@ struct Cli {
     /// Continue the most recent interactive session for this workspace.
     #[arg(short = 'c', long = "continue")]
     continue_session: bool,
+    /// Resume a saved interactive session by id or unique id prefix.
+    #[arg(
+        short = 'r',
+        long = "resume",
+        value_name = "SESSION_ID",
+        conflicts_with_all = ["continue_session", "session_id"]
+    )]
+    resume: Option<String>,
+    /// Alias of `--resume` matching `codewhale exec --session-id`.
+    #[arg(
+        long = "session-id",
+        value_name = "SESSION_ID",
+        conflicts_with_all = ["continue_session", "resume"]
+    )]
+    session_id: Option<String>,
     #[arg(short = 'p', long = "prompt", value_name = "PROMPT")]
     prompt_flag: Option<String>,
     #[arg(
@@ -1850,6 +1865,20 @@ fn run() -> Result<()> {
             error
         }
     })?;
+    // Root session flags only reach the TUI through the `None` branch below;
+    // no subcommand handler reads them. Accepting them silently resumes
+    // nothing -- `codewhale --resume abc exec "..."` would start a fresh
+    // session while looking like it continued one.
+    if command.is_some()
+        && (cli.continue_session || cli.resume.is_some() || cli.session_id.is_some())
+    {
+        anyhow::bail!(
+            "--continue/--resume/--session-id apply to the interactive session and \
+             cannot be combined with a subcommand. Run them without a subcommand, or \
+             use the subcommand's own flag (for example `codewhale exec --session-id <id>`)."
+        );
+    }
+
     match command {
         Some(Commands::Run(args)) => {
             let resolved_runtime = resolve_runtime_for_dispatch(&mut store, &runtime_overrides);
@@ -2118,6 +2147,26 @@ fn root_tui_passthrough(cli: &Cli) -> Result<Vec<String>> {
     if cli.continue_session {
         forwarded.push("--continue".to_string());
     }
+    let resume_session_id = cli
+        .resume
+        .as_deref()
+        .or(cli.session_id.as_deref())
+        .map(str::trim);
+    if resume_session_id.is_some_and(str::is_empty) {
+        // A shell expanding an unset variable -- `codewhale --resume
+        // "$SESSION_ID"` -- must not quietly become a fresh session. The user
+        // asked to resume; starting new loses the session they meant, and the
+        // mistake is invisible until the history is gone.
+        bail!(
+            "--resume/--session-id needs a session id, but got an empty value \
+             (an unset shell variable?). Use `codewhale --continue` to resume \
+             the most recent session."
+        );
+    }
+    if let Some(session_id) = resume_session_id {
+        forwarded.push("--resume".to_string());
+        forwarded.push(session_id.to_string());
+    }
 
     let prompt =
         cli.prompt_flag
@@ -2134,6 +2183,11 @@ fn root_tui_passthrough(cli: &Cli) -> Result<Vec<String>> {
         if cli.continue_session {
             bail!(
                 "`codewhale --continue` resumes the interactive TUI. Use `codewhale exec --continue <PROMPT>` to continue a session non-interactively."
+            );
+        }
+        if let Some(session_id) = resume_session_id {
+            bail!(
+                "`codewhale --resume {session_id}` resumes the interactive TUI. Use `codewhale exec --resume {session_id} <PROMPT>` to continue a session non-interactively."
             );
         }
         forwarded.push("--prompt".to_string());
@@ -9288,6 +9342,69 @@ verbosity = "project-imported"
         assert!(cli.prompt_flag.is_none());
         assert!(cli.prompt.is_empty());
         assert_eq!(root_tui_passthrough(&cli).unwrap(), vec!["--continue"]);
+    }
+
+    #[test]
+    fn parses_top_level_resume_flags_for_interactive_resume() {
+        // The operations runbook advertises `codewhale --resume <id>`. Before
+        // the root flag existed, the trailing prompt positional swallowed it
+        // and forwarded `--prompt "--resume <id>"` to the TUI (exit 2).
+        for argv in [
+            &["codewhale", "--resume", "800596e6"][..],
+            &["codewhale", "--resume=800596e6"][..],
+            &["codewhale", "-r", "800596e6"][..],
+            &["codewhale", "--session-id", "800596e6"][..],
+            &["codewhale", "--session-id=800596e6"][..],
+        ] {
+            let cli = parse_ok(argv);
+            assert!(
+                cli.prompt.is_empty(),
+                "{argv:?} must not be swallowed as a prompt: {:?}",
+                cli.prompt
+            );
+            assert!(cli.prompt_flag.is_none(), "{argv:?}");
+            assert!(cli.command.is_none(), "{argv:?}");
+            assert_eq!(
+                root_tui_passthrough(&cli).unwrap(),
+                vec!["--resume".to_string(), "800596e6".to_string()],
+                "{argv:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn empty_resume_identifier_is_rejected_rather_than_starting_fresh() {
+        // `codewhale --resume "$SESSION_ID"` with the variable unset used to
+        // trim to empty, filter to None, and start a brand-new session while
+        // looking like it resumed one. Losing the session the user asked for
+        // must be loud.
+        for argv in [
+            &["codewhale", "--resume", ""][..],
+            &["codewhale", "--session-id", "   "][..],
+        ] {
+            let cli = parse_ok(argv);
+            let err = root_tui_passthrough(&cli)
+                .expect_err("an empty resume id must not silently start a fresh session");
+            assert!(
+                err.to_string().contains("needs a session id"),
+                "{argv:?}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn top_level_resume_rejects_startup_prompt_and_conflicting_flags() {
+        let cli = parse_ok(&["codewhale", "--resume", "800596e6", "-p", "follow up"]);
+        let err = root_tui_passthrough(&cli).expect_err("prompted resume should be rejected");
+        assert!(
+            err.to_string()
+                .contains("codewhale exec --resume 800596e6 <PROMPT>"),
+            "{err}"
+        );
+
+        assert!(Cli::try_parse_from(["codewhale", "--resume", "800596e6", "--continue"]).is_err());
+        assert!(Cli::try_parse_from(["codewhale", "--resume", "a", "--session-id", "b"]).is_err());
+        assert!(Cli::try_parse_from(["codewhale", "--session-id", "b", "-c"]).is_err());
     }
 
     #[test]
