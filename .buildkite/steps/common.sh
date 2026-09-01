@@ -25,5 +25,11 @@ fi
 # shellcheck disable=SC1091
 [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
 
+# Export toolchain homes explicitly so the unprivileged re-exec in test.sh can
+# inherit them; rustup's default HOME-relative paths do not survive a user swap.
+export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
+export RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
+export PATH="$CARGO_HOME/bin:$PATH"
+
 cargo --version
 rustc --version
