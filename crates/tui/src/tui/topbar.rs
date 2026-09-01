@@ -26,10 +26,12 @@
 //! time from the same snapshot.
 //!
 //! Shed order as width drops (spec §5b): the meter's bar glyphs first, then
-//! any segment that carries a shorter form takes it (the repository segment's
-//! `owner/name` becomes the folder basename), then the help hint, then
+//! the help hint, then any segment that carries a shorter form takes it (the
+//! repository segment's `owner/name` becomes the folder basename), then
 //! contextual segments by [`TopbarSegmentId::shed_priority`] (folder, branch,
-//! then the work facts).
+//! then the work facts). The repository outranks the hint on purpose: which
+//! repository you are in is the fact people scan the bar for, and the hint
+//! comes back as soon as the row can afford both.
 //! The brand, the route identity, and the `context NN%` text are the floor
 //! and never shed — and the route identity is never truncated to keep a
 //! decorative gauge, because the bar only re-states the number beside it.
@@ -336,11 +338,12 @@ fn shed_pass<'t>(topbar: &'t Topbar<'_>, area: Rect) -> ShedRow<'t> {
     };
 
     // Shed pass, in the declared order: the meter's bar glyphs, then the help
-    // hint, then segments by priority. `context NN%`, the brand, and the
-    // route identity are the floor; below that the render truncates. The bar
-    // goes first on purpose — it encodes the same number printed beside it,
-    // so it is the cheapest thing on the row to lose, and no folder, branch,
-    // or model name should be cut to keep ten decorative cells.
+    // hint, then any shorter segment form, then segments by priority.
+    // `context NN%`, the brand, and the route identity are the floor; below
+    // that the render truncates. The bar goes first on purpose — it encodes
+    // the same number printed beside it, so it is the cheapest thing on the
+    // row to lose, and no repository, branch, or model name should be cut to
+    // keep ten decorative cells.
     let mut show_help = !help.is_empty();
     let mut show_bar = true;
     let mut use_short = false;
@@ -348,12 +351,14 @@ fn shed_pass<'t>(topbar: &'t Topbar<'_>, area: Rect) -> ShedRow<'t> {
     while total_needed(&kept, use_short, right_width) > area.width as usize {
         if show_bar {
             show_bar = false;
-        } else if !use_short && kept.iter().any(|segment| segment.short.is_some()) {
-            // A long `owner/name` must not cost the row the help hint or a
-            // whole segment while a shorter true form is available.
-            use_short = true;
         } else if show_help {
             show_help = false;
+        } else if !use_short && kept.iter().any(|segment| segment.short.is_some()) {
+            // A long `owner/name` degrades to the folder basename rather than
+            // costing the row a whole segment — but only after the hint has
+            // gone, because "which repository am I in" is what the bar is
+            // read for.
+            use_short = true;
         } else if let Some(pos) = kept
             .iter()
             .enumerate()

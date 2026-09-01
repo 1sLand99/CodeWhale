@@ -231,12 +231,12 @@ fn topbar_states_no_clock() {
     }
 }
 
-/// Declared shed order (spec §5b): the bar glyphs, then the repository slug
-/// down to the folder basename, then the help hint, then folder, then
+/// Declared shed order (spec §5b): the bar glyphs, then the help hint, then
+/// the repository slug down to the folder basename, then folder, then
 /// branch. `codewhale`, the route identity, and the `context NN%` text are
 /// the floor at every width.
 #[test]
-fn topbar_sheds_bar_then_slug_then_help_then_folder_then_branch() {
+fn topbar_sheds_bar_then_help_then_slug_then_folder_then_branch() {
     let segments = crowded_segments();
     // The narrowest row that still shows a thing. A thing that sheds earlier
     // needs a wider row to survive, so these strictly decrease down the
@@ -248,13 +248,13 @@ fn topbar_sheds_bar_then_slug_then_help_then_folder_then_branch() {
             .unwrap_or_else(|| panic!("{needle} never painted at any width"))
     };
     let bar = narrowest_showing("▱");
-    let slug = narrowest_showing("acme/");
     let help = narrowest_showing("help");
+    let slug = narrowest_showing("acme/");
     let folder = narrowest_showing("mcp-gateway");
     let branch = narrowest_showing("⑂ main");
     assert!(
-        bar > slug && slug > help && help > folder && folder > branch,
-        "shed order drifted: bar {bar}, slug {slug}, help {help}, \
+        bar > help && help > slug && slug > folder && folder > branch,
+        "shed order drifted: bar {bar}, help {help}, slug {slug}, \
          folder {folder}, branch {branch}"
     );
     // The slug degrades to the basename rather than costing the row a whole
@@ -267,18 +267,24 @@ fn topbar_sheds_bar_then_slug_then_help_then_folder_then_branch() {
             "{width}: the repository stays named: {row:?}"
         );
     }
-    // The bar is the first thing to go, so the whole working line — the
-    // repository, branch, an untruncated model name, and the help hint — is
-    // what 80 columns spend their cells on.
+    // What 80 columns spend their cells on: the repository under its real
+    // name, the branch, and an untruncated model name. The gauge yields
+    // first and the hint second — "where did the github info go?" is the
+    // question this row exists to answer, and a key hint is not worth the
+    // answer.
     let row80 = render_row(&UI_THEME, 80, &work_segments(), 61);
     assert!(
-        row80.contains("⑂ main") && row80.contains("model deepseek-v4"),
-        "80: branch and model outrank the gauge: {row80:?}"
+        row80.contains("Hmbown/CodeWhale"),
+        "80: the repository slug outranks the help hint: {row80:?}"
     );
-    assert!(row80.contains("help"), "80: the hint survives: {row80:?}");
     assert!(
-        !row80.contains('▱'),
-        "80: the bar is what yields: {row80:?}"
+        row80.contains("⑂ main") && row80.contains("model deepseek-v4"),
+        "80: branch and model stay whole: {row80:?}"
+    );
+    assert!(!row80.contains('▱'), "80: the bar yields first: {row80:?}");
+    assert!(
+        !row80.contains("help"),
+        "80: the hint yields next: {row80:?}"
     );
 
     for width in 24..=180u16 {
@@ -357,10 +363,15 @@ fn topbar_repository_slug_falls_back_to_the_folder_basename() {
         wide.contains("Hmbown/CodeWhale"),
         "the slug is the repository's name when it fits: {wide:?}"
     );
-    let tight = render_row(&UI_THEME, 80, &segments, 61);
+    let still_wide_enough = render_row(&UI_THEME, 80, &segments, 61);
+    assert!(
+        still_wide_enough.contains("Hmbown/CodeWhale"),
+        "80 keeps the slug by shedding the gauge and the hint: {still_wide_enough:?}"
+    );
+    let tight = render_row(&UI_THEME, 66, &segments, 61);
     assert!(
         !tight.contains("Hmbown/CodeWhale"),
-        "80 cannot afford the slug: {tight:?}"
+        "66 cannot afford the slug: {tight:?}"
     );
     assert!(
         tight.matches("codewhale").count() == 2,
