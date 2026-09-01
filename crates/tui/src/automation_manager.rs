@@ -1221,6 +1221,9 @@ impl AutomationManager {
         {
             let entry = entry?;
             let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+                continue;
+            }
             let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
                 continue;
             };
@@ -2961,6 +2964,34 @@ mod tests {
         assert_eq!(found.len(), 1, "the run is found wherever it sits");
         assert_eq!(found[0].id, long_running.id);
         assert_eq!(found[0].status, AutomationRunStatus::Running);
+    }
+
+    #[test]
+    fn get_runs_by_ids_ignores_non_json_noise() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let manager = AutomationManager::open(tempdir.path().to_path_buf()).expect("manager");
+        let automation = automation_record_with_settings(None, None, None, None);
+        let run = queued_run_for(&automation);
+        manager.save_run(&run).expect("save json run");
+
+        let dir = manager.runs_dir_for(&automation.id).expect("runs dir");
+        let json = dir
+            .read_dir()
+            .expect("list")
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .find(|path| path.extension().and_then(|ext| ext.to_str()) == Some("json"))
+            .expect("json run file");
+        let stem = json.file_stem().and_then(|stem| stem.to_str()).expect("stem");
+        fs::write(dir.join(format!("{stem}.tmp")), "not-json").expect("write tmp noise");
+        fs::write(dir.join(format!("{stem}.json.bak")), "not-json").expect("write bak noise");
+
+        let wanted: std::collections::BTreeSet<String> = [run.id.clone()].into_iter().collect();
+        let found = manager
+            .get_runs_by_ids(&automation.id, &wanted)
+            .expect("noise must not poison the re-read");
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].id, run.id);
     }
 
     #[test]

@@ -815,8 +815,8 @@ pub fn render_tideline_footer(area: Rect, buf: &mut Buffer, footer: &TidelineFoo
     let extra = trailing_extra(footer, area.width, usize::from(right_base_w));
     let right_width = right_base_w + 1 + extra.width(footer) as u16 + 1;
 
-    // Left: still-frame echolocation chip + phase word + live detail +
-    // automation slot + cost.
+    // Left: still-frame echolocation chip + phase word + live detail + cost.
+    // Scheduled automation work lives on the top strip, not this footer.
     let chip = footer.sym("<·>");
     let phase = footer.sym(footer.phase_word);
     let cost = footer.sym(footer.cost_label);

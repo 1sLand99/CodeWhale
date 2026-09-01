@@ -3,8 +3,8 @@
 //!
 //! One owner per fact: this projection is the single reader of "how much
 //! scheduled work is live" — Active automations (`N`), runs currently
-//! Queued|Running (`M`), and failed runs not yet acknowledged. The merged
-//! footer reads it; `background_indicator.rs` keeps owning
+//! Queued|Running (`M`), and failed runs not yet acknowledged. The top
+//! strip reads it; `background_indicator.rs` keeps owning
 //! shells/tasks/agents and never learns about automations.
 //!
 //! The disk scan lives in `tui/ui/task_projection.rs`
