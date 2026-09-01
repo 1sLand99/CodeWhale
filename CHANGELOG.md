@@ -15,6 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Public roster language is Pod. `/pod` is the customer surface; fleet remains
   the internal wire, storage, and migration name (#5776).
 
+- Compaction replacement history keeps a bounded last user round (assistant +
+  tool results) instead of dropping them behind a summary. `/context` names
+  the compaction path and `/anchor` survival. Failed compact still does not
+  replace live history (#4394).
 - Provider catalogs: compatible hosts (Baseten, Groq, Cerebras, SenseNova,
   Command Code) no longer compile a frozen model roster. Descriptors name the
   wire, URL, and env; live `GET /v1/models` and a Codewhale-owned catalog
@@ -39,6 +43,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Compaction publishes a structured survival contract for session-tree
+  journal entry types (`crates/tui/src/compaction/SURVIVAL_CONTRACT.md`) and
+  fails closed when the last user round, tool results, `/anchor` text, or
+  checkpoint receipt would vanish (#4394).
 - Internal: `codewhale-config` gains `RouteAuthoritySnapshot`, one immutable
   authority that owns a compiled provider catalog together with the route
   resolver projected from it, so a picker, a readiness view, and an execution
