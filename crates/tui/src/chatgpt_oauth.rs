@@ -295,7 +295,6 @@ pub fn redirect_uri_for_port(port: u16) -> String {
     format!("http://localhost:{port}{CHATGPT_OAUTH_CALLBACK_PATH}")
 }
 
-#[must_use]
 pub fn build_authorize_url(
     issuer: &str,
     client_id: &str,
