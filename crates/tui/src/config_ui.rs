@@ -262,7 +262,9 @@ pub enum UiThemeValue {
     TokyoNight,
     Dracula,
     GruvboxDark,
+    Claude,
     Matrix,
+    SolarizedLight,
     Uwu,
     /// User theme carried as its full `custom:<name>` selector — the same
     /// single string `/theme` and the persisted `theme` setting use.
@@ -327,8 +329,10 @@ pub enum InlineDiffValue {
 #[serde(rename_all = "snake_case")]
 pub enum WorkSurfacePlacementValue {
     Top,
+    Bottom,
     Left,
     Right,
+    Off,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -1086,7 +1090,9 @@ impl UiThemeValue {
             Self::TokyoNight => "tokyo-night".into(),
             Self::Dracula => "dracula".into(),
             Self::GruvboxDark => "gruvbox-dark".into(),
+            Self::Claude => "claude".into(),
             Self::Matrix => "matrix".into(),
+            Self::SolarizedLight => "solarized-light".into(),
             Self::Uwu => "uwu".into(),
             Self::Custom(selector) => std::borrow::Cow::Owned(selector.clone()),
         }
@@ -1108,7 +1114,9 @@ impl UiThemeValue {
             Some("tokyo-night") => Ok(Self::TokyoNight),
             Some("dracula") => Ok(Self::Dracula),
             Some("gruvbox-dark") => Ok(Self::GruvboxDark),
+            Some("claude") => Ok(Self::Claude),
             Some("matrix") => Ok(Self::Matrix),
+            Some("solarized-light") => Ok(Self::SolarizedLight),
             Some("uwu") => Ok(Self::Uwu),
             Some(other) => bail!("unsupported theme '{other}'"),
             None => bail!("invalid theme '{value}'"),
@@ -1234,8 +1242,10 @@ impl WorkSurfacePlacementValue {
     fn as_setting(self) -> &'static str {
         match self {
             Self::Top => "top",
+            Self::Bottom => "bottom",
             Self::Left => "left",
             Self::Right => "right",
+            Self::Off => "off",
         }
     }
 }
@@ -1243,9 +1253,14 @@ impl WorkSurfacePlacementValue {
 impl From<&str> for WorkSurfacePlacementValue {
     fn from(value: &str) -> Self {
         match value.trim().to_ascii_lowercase().as_str() {
+            "top" => Self::Top,
+            "bottom" => Self::Bottom,
             "left" => Self::Left,
             "right" => Self::Right,
-            _ => Self::Top,
+            "off" => Self::Off,
+            // Mirror `normalize_work_surface_placement`: the bar's home is
+            // under the composer.
+            _ => Self::Bottom,
         }
     }
 }
@@ -1854,7 +1869,9 @@ background_color = "#1A1B26"
                 "tokyo-night",
                 "dracula",
                 "gruvbox-dark",
+                "claude",
                 "matrix",
+                "solarized-light",
                 "uwu"
             ])
         );
@@ -1863,6 +1880,81 @@ background_color = "#1A1B26"
             serde_json::json!({"type": "string"}),
             "custom theme selector must ride inside the theme value"
         );
+    }
+
+    #[test]
+    fn ui_theme_value_covers_every_selectable_theme() {
+        // The typed /config document must round-trip every theme the /theme
+        // picker can persist, so the typed value space tracks
+        // `SELECTABLE_THEMES`. Drift here silently rewrote a saved theme on
+        // save (claude and solarized-light used to fall out).
+        for theme in crate::palette::SELECTABLE_THEMES {
+            let name = theme.name();
+            let value = UiThemeValue::from_setting(name)
+                .unwrap_or_else(|err| panic!("UiThemeValue must accept theme {name}: {err}"));
+            assert_eq!(
+                value.as_setting(),
+                name,
+                "UiThemeValue must round-trip theme {name}"
+            );
+            let serialized = serde_json::to_value(&value)
+                .unwrap_or_else(|err| panic!("serialize theme {name}: {err}"));
+            assert_eq!(serialized, serde_json::json!(name));
+        }
+    }
+
+    #[test]
+    fn work_surface_placement_round_trips_bottom_and_off_through_typed_document() {
+        // A persisted `bottom` used to deserialize as `Top` — saving the
+        // typed document silently moved the work surface. Every placement
+        // `Settings::set` accepts must survive the typed document.
+        assert_eq!(
+            WorkSurfacePlacementValue::from("bottom"),
+            WorkSurfacePlacementValue::Bottom
+        );
+        assert_eq!(
+            WorkSurfacePlacementValue::from("off"),
+            WorkSurfacePlacementValue::Off
+        );
+        for placement in ["bottom", "top", "left", "right", "off"] {
+            let value = WorkSurfacePlacementValue::from(placement);
+            assert_eq!(value.as_setting(), placement);
+            let serialized = serde_json::to_value(&value)
+                .unwrap_or_else(|err| panic!("serialize placement {placement}: {err}"));
+            assert_eq!(
+                serde_json::from_value::<WorkSurfacePlacementValue>(serialized)
+                    .unwrap_or_else(|err| panic!("deserialize placement {placement}: {err}")),
+                value
+            );
+        }
+
+        let _lock = lock_test_env();
+        let temp_root = tempfile::tempdir().expect("isolated Codewhale home");
+        let codewhale_home = temp_root.path().join(".codewhale");
+        fs::create_dir_all(&codewhale_home).expect("settings dir");
+        let settings_path = codewhale_home.join("settings.toml");
+        fs::write(&settings_path, "work_surface_placement = \"bottom\"\n").expect("settings");
+        let _home = EnvVarGuard::set("CODEWHALE_HOME", &codewhale_home);
+        let _codewhale_config = EnvVarGuard::remove("CODEWHALE_CONFIG_PATH");
+        let _deepseek_config = EnvVarGuard::remove("DEEPSEEK_CONFIG_PATH");
+
+        let mut app = app();
+        let mut config = Config::default();
+        let doc = build_document(&app, &config).expect("document");
+        assert_eq!(
+            doc.settings.work_surface_placement,
+            WorkSurfacePlacementValue::Bottom,
+            "the live bottom default must not degrade to top in the typed document"
+        );
+        let doc = parse_document(serde_json::to_value(&doc).expect("serialize document"))
+            .expect("parse document");
+        assert_eq!(
+            doc.settings.work_surface_placement,
+            WorkSurfacePlacementValue::Bottom
+        );
+        // Applying session-only must validate: `Settings::set` accepts
+        // bottom, so the typed document never corrupts it.
+        apply_document(doc, &mut app, &mut config, false).expect("apply placement");
     }
 
     #[test]

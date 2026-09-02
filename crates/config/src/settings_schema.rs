@@ -239,8 +239,9 @@ const INLINE_DIFFS: &[SettingOption] = &[
 ];
 
 const STATUS_INDICATOR: &[SettingOption] = &[
+    // `whale` is retired: load migrates whale | 🐳 | 🐋 to the typographic
+    // mark, so the editor no longer offers it.
     SettingOption::new("cw", "ConfigChoiceStatusCw", ""),
-    SettingOption::new("whale", "ConfigChoiceStatusWhale", ""),
     SettingOption::new("dots", "ConfigChoiceStatusDots", ""),
     SettingOption::new("off", "ConfigValueOff", ""),
 ];
@@ -285,6 +286,11 @@ const WORK_SURFACE_PLACEMENT: &[SettingOption] = &[
         "ConfigChoiceDetailPlacementTop",
     ),
     SettingOption::new(
+        "bottom",
+        "ConfigChoicePlacementBottom",
+        "ConfigChoiceDetailPlacementBottom",
+    ),
+    SettingOption::new(
         "left",
         "ConfigChoicePlacementLeft",
         "ConfigChoiceDetailPlacementLeft",
@@ -298,6 +304,8 @@ const WORK_SURFACE_PLACEMENT: &[SettingOption] = &[
 ];
 
 const RAIL_PANEL: &[SettingOption] = &[
+    // The dock's own grammar is lowercase nouns, so the panels the classic
+    // sidebar never named ride on their raw value (`RailPanel::title`).
     SettingOption::new(
         "tasks",
         "ConfigChoiceRailTasks",
@@ -308,16 +316,16 @@ const RAIL_PANEL: &[SettingOption] = &[
         "ConfigChoiceRailAgents",
         "ConfigChoiceDetailRailAgents",
     ),
+    SettingOption::new("background", "", ""),
+    SettingOption::new("files", "", ""),
+    SettingOption::new("notepad", "", ""),
     SettingOption::new(
         "context",
         "ConfigChoiceRailContext",
         "ConfigChoiceDetailRailContext",
     ),
-    SettingOption::new(
-        "pinned",
-        "ConfigChoiceRailPinned",
-        "ConfigChoiceDetailRailPinned",
-    ),
+    SettingOption::new("git", "", ""),
+    SettingOption::new("price", "", ""),
 ];
 
 /// Rail tab ids.
@@ -681,7 +689,7 @@ pub const SETTINGS_SCHEMA: &[SettingDef] = &[
     def(
         "work_surface_placement",
         SettingKind::Enum(WORK_SURFACE_PLACEMENT),
-        "left",
+        "bottom",
         ui(
             TAB_WORK,
             "sidebar",

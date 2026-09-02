@@ -1369,15 +1369,25 @@ impl Settings {
             }
             "rail_panel" | "rail" => {
                 let normalized = value.trim().to_ascii_lowercase();
+                // `pinned` stays accepted as a setting word; it folds into
+                // the tasks view exactly like the load-time migration.
                 if !matches!(
                     normalized.as_str(),
-                    "tasks" | "agents" | "context" | "pinned"
+                    "tasks"
+                        | "agents"
+                        | "background"
+                        | "files"
+                        | "notepad"
+                        | "context"
+                        | "git"
+                        | "price"
+                        | "pinned"
                 ) {
                     anyhow::bail!(
-                        "Failed to update setting: invalid rail panel '{value}'. Expected: tasks, agents, context, or pinned."
+                        "Failed to update setting: invalid rail panel '{value}'. Expected: tasks, agents, background, files, notepad, context, git, or price."
                     );
                 }
-                self.rail_panel = normalized;
+                self.rail_panel = normalize_rail_panel(&normalized).to_string();
                 self.rail_panel_explicit = true;
             }
             "work_surface_top_height" | "work_top_height" => {
@@ -3205,11 +3215,22 @@ mod tests {
     }
 
     #[test]
-    fn rail_panel_persists_tasks_agents_context_and_pinned() {
+    fn rail_panel_persists_every_dock_panel_and_folds_pinned_into_tasks() {
         let mut settings = Settings::default();
         assert_eq!(settings.rail_panel, "tasks");
 
-        for panel in ["agents", "context", "pinned", "tasks"] {
+        // Every panel the dock cycles through must survive `set` and a
+        // settings.toml round trip — the dock persists all eight.
+        for panel in [
+            "tasks",
+            "agents",
+            "background",
+            "files",
+            "notepad",
+            "context",
+            "git",
+            "price",
+        ] {
             settings.set("rail_panel", panel).expect("valid panel");
             assert_eq!(settings.rail_panel, panel);
             let body = toml::to_string(&settings).expect("serialize settings");
@@ -3217,12 +3238,18 @@ mod tests {
             assert_eq!(restored.rail_panel, panel);
         }
 
+        // `pinned` stays accepted as a setting word but persists as the
+        // canonical tasks view, matching the load-time migration.
+        settings.set("rail_panel", "agents").expect("reset panel");
+        settings.set("rail_panel", "pinned").expect("pinned alias");
+        assert_eq!(settings.rail_panel, "tasks");
+
         let err = settings
             .set("rail_panel", "auto")
             .expect_err("auto-collapse was dropped with the legacy sidebar");
         assert!(
             err.to_string()
-                .contains("tasks, agents, context, or pinned")
+                .contains("tasks, agents, background, files, notepad, context, git, or price")
         );
         assert_eq!(settings.rail_panel, "tasks");
     }
