@@ -916,6 +916,9 @@ pub enum AppAction {
     OpenProviderTemplateList,
     /// Run the xAI/Grok device-code flow with the TUI temporarily suspended.
     StartXaiDeviceLogin,
+    /// Run native ChatGPT PKCE sign-in with the TUI temporarily suspended.
+    StartChatgptPkceLogin,
+    StartChatgptRevoke,
     /// Open the `/mode` picker modal for Act / Plan / Operate.
     OpenModePicker,
     /// Refresh the engine prompt after the UI operating mode changes.

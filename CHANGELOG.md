@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The footer always shows the permission posture; when only one chip
+  fits, the permission chip outranks the mode word (#5796).
+- Local Ollama: the header names a model only when the local catalog can
+  serve it, and says `unknown` until it knows. The startup mark, web and
+  app icon carry the new side-view prompt-eye whale (#5795).
+- One focus owner: Tab and Shift+Tab work regardless of what is in the
+  composer; Alt shortcuts survive mid-draft; Ctrl+Tab no longer cycles the
+  mode by accident (#5798).
+- Tool cells carry their own state: a running, failed or warned tool
+  reads as such in the transcript itself, with per-entry rail dots and
+  family-coloured glyphs (#5799).
+- Web: docs hub with task search, shared empty/loading/error states, an
+  offline-to-back-online banner, `/changelog` in every locale, and real
+  404s with correct metadata (#5743).
+- Web: the app's colours come from one file generated from the TUI whale
+  palette; re-typing a colour by hand fails web CI (#5797).
+- Web: a one-way ceiling on `isZh` branching outside the i18n spine —
+  the count may only go down (#5805).
+- An internal agent handoff doc was removed from the public tree and
+  `.playwright-mcp/` is now ignored (#5800).
 - First run paints the composer immediately: the Welcome/language/provider/
   trust gates no longer precede the first keystroke. Missing-key and
   workspace-trust recovery stay for returning users; language and provider
@@ -53,6 +73,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Native ChatGPT sign-in for the `openai-codex` route: `codewhale auth
+  chatgpt` opens a browser PKCE flow and stores refreshable tokens in
+  Codewhale-owned credentials — no Codex CLI install required.
+  `/auth chatgpt-revoke` clears them off the event loop (#5784).
 - MCP servers and plugins can be connected self-serve from the session: a
   unified auth flow with rotation-safe token handling, a spoken authorization
   URL, and catalog refresh when stored credentials stop working (#5747).

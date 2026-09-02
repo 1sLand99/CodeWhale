@@ -1476,6 +1476,12 @@ enum AuthCommand {
     /// Sign in to xAI/Grok with an SSH-friendly device code.
     #[command(name = "xai-device")]
     XaiDevice,
+    /// Sign in with ChatGPT for Codex subscription access (PKCE loopback).
+    #[command(name = "chatgpt")]
+    Chatgpt,
+    /// Revoke Codewhale-owned ChatGPT tokens. Codex CLI consent is unchanged.
+    #[command(name = "chatgpt-revoke")]
+    ChatgptRevoke,
     /// Explicitly allow read-only access to one credential file owned by
     /// another CLI. Managed mutation is currently unsupported and fails closed.
     #[command(name = "external-consent")]
@@ -2032,6 +2038,22 @@ fn run() -> Result<()> {
                     vec!["auth".to_string(), "xai-device".to_string()],
                 )
             }
+            AuthCommand::Chatgpt => {
+                let resolved_runtime = resolve_runtime_for_dispatch(&mut store, &runtime_overrides);
+                run_tui_in_process(
+                    &cli,
+                    &resolved_runtime,
+                    vec!["auth".to_string(), "chatgpt".to_string()],
+                )
+            }
+            AuthCommand::ChatgptRevoke => {
+                let resolved_runtime = resolve_runtime_for_dispatch(&mut store, &runtime_overrides);
+                run_tui_in_process(
+                    &cli,
+                    &resolved_runtime,
+                    vec!["auth".to_string(), "chatgpt-revoke".to_string()],
+                )
+            }
             command @ AuthCommand::Status {
                 diagnostic: true, ..
             } => {
@@ -2402,12 +2424,31 @@ fn run_logout_command_with_secrets_unlocked(
     let xai = store.config.providers.for_provider_mut(ProviderKind::Xai);
     xai.oauth_credential_generation = None;
     xai.auth_mode = None;
+    let openai_codex = store
+        .config
+        .providers
+        .for_provider_mut(ProviderKind::OpenaiCodex);
+    if openai_codex
+        .oauth_credential_generation
+        .as_deref()
+        .is_some_and(codewhale_config::is_valid_chatgpt_oauth_generation)
+    {
+        openai_codex.oauth_credential_generation = None;
+        if openai_codex.auth_mode.as_deref() == Some("oauth") {
+            openai_codex.auth_mode = None;
+        }
+    }
     store.config.auth_mode = None;
     if let Err(error) = store.save() {
         store.config = original_config;
         return Err(error);
     }
     let mut keyring_failures = clear_all_provider_api_keys_from_keyring(secrets);
+    // Already inside with_xai_oauth_revocation_transaction: the locked
+    // variant must not re-enter the non-reentrant lifecycle mutex.
+    if let Err(error) = codewhale_config::clear_all_chatgpt_oauth_credentials_locked() {
+        keyring_failures.push(format!("chatgpt oauth: {error}"));
+    }
     if let Err(error) = clear_daytona_slot(secrets) {
         keyring_failures.push(format!(
             "{}: {error}",
@@ -3626,6 +3667,15 @@ fn auth_status_lines_for_provider_with_runtime(
         let active_source = if provider == ProviderKind::OpenaiCodex {
             if env_key.is_some() {
                 "env"
+            } else if store
+                .config
+                .providers
+                .openai_codex
+                .oauth_credential_generation
+                .as_deref()
+                .is_some_and(codewhale_config::is_valid_chatgpt_oauth_generation)
+            {
+                "codewhale-owned ChatGPT sign-in (availability not probed)"
             } else if external_selected {
                 "external read-only consent (availability not probed)"
             } else {
@@ -3672,7 +3722,8 @@ fn auth_status_lines_for_provider_with_runtime(
     let model = provider_cfg.model.as_deref().unwrap_or("(default)");
 
     let lookup_order = if provider == ProviderKind::OpenaiCodex {
-        "lookup order: env -> consent-gated exact Codex CLI file".to_string()
+        "lookup order: env -> Codewhale-owned ChatGPT sign-in -> consent-gated exact Codex CLI file"
+            .to_string()
     } else {
         "lookup order: config -> secret store -> env".to_string()
     };
@@ -3947,6 +3998,32 @@ fn run_auth_command_with_secrets_and_runtime(
                 "codewhale".to_string(),
                 "auth".to_string(),
                 "xai-device".to_string(),
+            ];
+            let code = codewhale_tui::run(argv);
+            std::process::exit(if code == std::process::ExitCode::SUCCESS {
+                0
+            } else {
+                1
+            })
+        }
+        AuthCommand::Chatgpt => {
+            let argv = vec![
+                "codewhale".to_string(),
+                "auth".to_string(),
+                "chatgpt".to_string(),
+            ];
+            let code = codewhale_tui::run(argv);
+            std::process::exit(if code == std::process::ExitCode::SUCCESS {
+                0
+            } else {
+                1
+            })
+        }
+        AuthCommand::ChatgptRevoke => {
+            let argv = vec![
+                "codewhale".to_string(),
+                "auth".to_string(),
+                "chatgpt-revoke".to_string(),
             ];
             let code = codewhale_tui::run(argv);
             std::process::exit(if code == std::process::ExitCode::SUCCESS {
@@ -7157,6 +7234,22 @@ verbosity = "project-imported"
             }))
         ));
 
+        let cli = parse_ok(&["deepseek", "auth", "chatgpt"]);
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Auth(AuthArgs {
+                command: AuthCommand::Chatgpt
+            }))
+        ));
+
+        let cli = parse_ok(&["deepseek", "auth", "chatgpt-revoke"]);
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Auth(AuthArgs {
+                command: AuthCommand::ChatgptRevoke
+            }))
+        ));
+
         let cli = parse_ok(&[
             "deepseek",
             "auth",
@@ -7914,7 +8007,9 @@ verbosity = "project-imported"
         assert!(output.contains("provider: openai-codex"));
         assert!(output.contains("auth mode: codex_oauth"));
         assert!(output.contains("active source: missing"));
-        assert!(output.contains("lookup order: env -> consent-gated exact Codex CLI file"));
+        assert!(output.contains(
+            "lookup order: env -> Codewhale-owned ChatGPT sign-in -> consent-gated exact Codex CLI file"
+        ));
         assert!(output.contains("external credentials: disabled"));
         assert!(output.contains("scope_valid=false"));
         assert!(output.contains("disabled; no external-credential probing, reading"));
