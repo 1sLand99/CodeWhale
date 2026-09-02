@@ -30,7 +30,8 @@
 //! then the work facts). The repository outranks the hint on purpose: which
 //! repository you are in is the fact people scan this row for, and the hint
 //! comes back as soon as the row can afford both. The route identity and the
-//! `context NN%` text are the floor and never shed.
+//! `context NN%` text are the floor and never shed; below the floor the
+//! reading pins to the right edge whole and the route's tail is covered.
 //!
 //! Interaction: segment geometry is recorded for parity tests, but only the
 //! effective model/route segment and the context meter advertise an action in
@@ -397,8 +398,9 @@ impl Widget for InfoLine<'_> {
             use_short,
             show_bar,
             show_help,
+            left_width,
+            context_width,
             meter,
-            ..
         } = shed_pass(&self, area);
 
         let mut x = area.x as usize;
@@ -450,8 +452,16 @@ impl Widget for InfoLine<'_> {
             }
         }
 
-        // The context reading closes the left run.
-        if !kept.is_empty() {
+        // The context reading closes the left run. Below the floor — a row
+        // too narrow for even the route identity and the reading — the join
+        // is skipped and the reading pins to the right edge instead, so the
+        // number is whole and the route's tail is what gets covered: the
+        // reading is the one fact that must always be readable, and a route
+        // name cut short is still recognisable.
+        let below_floor = left_width > usize::from(area.width);
+        if below_floor {
+            x = (area.x as usize + area.width as usize).saturating_sub(context_width);
+        } else if !kept.is_empty() {
             join(buf, x);
             x += ITEM_JOIN.width();
         }

@@ -280,6 +280,17 @@ fn infoline_sheds_bar_then_help_then_slug_then_folder_then_branch() {
         "80: the hint survives too: {row80:?}"
     );
 
+    // Below the floor (route identity + join + reading = 25 cells for this
+    // fixture) the reading pins right, whole, and the route is what yields.
+    let row24 = render_row(&UI_THEME, 24, &segments, 61);
+    assert!(
+        row24.trim_end().ends_with("context 61%"),
+        "24: below the floor the reading pins right: {row24:?}"
+    );
+    assert!(
+        row24.starts_with("deepseek"),
+        "24: the route keeps the left edge: {row24:?}"
+    );
     for width in 24..=180u16 {
         let row = render_row(&UI_THEME, width, &segments, 61);
         assert!(

@@ -130,7 +130,7 @@ pub(crate) fn rail_row_budget(
         .saturating_sub(chat_floor)
 }
 
-/// The header is the one-row Tideline topbar (spec §5b:
+/// The info line is one row under the posture row (spec §5b:
 /// `Constraint::Length(1)`), at every terminal height. Shared so the rail
 /// budget charges the same chrome the layout actually reserves.
 pub(crate) fn info_row_height_for(_terminal_height: u16) -> u16 {

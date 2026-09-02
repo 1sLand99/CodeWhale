@@ -221,7 +221,7 @@ fn render_info_row(f: &mut Frame, app: &mut App, area: Rect) -> InfoLineInteract
             .find(|hitbox| hitbox.id == InfoSegmentId::Model)
             .map(|hitbox| hitbox.area),
     };
-    // Keep the header row's quiet background under the widget itself.
+    // Keep the row's quiet background under the widget itself.
     let buf = f.buffer_mut();
     Block::default()
         .style(Style::default().bg(app.ui_theme.header_bg))
@@ -1070,11 +1070,16 @@ pub(crate) fn render(f: &mut Frame, app: &mut App, _config: &Config) -> Option<(
                 .render(footer_area, buf);
             crate::tui::phase_strip::render_tideline_footer(footer_area, buf, &footer);
         }
-        // The info line is the screen's last row, under the posture row.
+        // The info line is the screen's last row, under the posture row. At
+        // a height with no row for it, the stale rects must go too, or a
+        // model/context click could route against cells nothing paints.
+        let mut info_interactions = InfoLineInteractionHitboxes::default();
         if info_area.height > 0 {
-            let info_interactions = render_info_row(f, app, info_area);
-            register_info_interaction_targets(app, info_interactions);
+            info_interactions = render_info_row(f, app, info_area);
+        } else {
+            app.viewport.last_infoline_hitboxes.clear();
         }
+        register_info_interaction_targets(app, info_interactions);
         if !app.view_stack.is_empty() {
             if app.view_stack.top_kind() == Some(ModalKind::Approval) {
                 app.viewport.last_approval_area = app.view_stack.top_occupied_region(size);
@@ -1810,7 +1815,7 @@ mod tests {
     /// abbreviated `⏱ N·M` at Compact (chrome sheds before content), never
     /// at zero.
     #[test]
-    fn topbar_automation_segment_reads_the_projection() {
+    fn infoline_automation_segment_reads_the_projection() {
         let mut app =
             crate::test_support::test_app_with_options(crate::test_support::test_tui_options("."));
         app.ui_locale = crate::localization::Locale::En;
@@ -1843,11 +1848,11 @@ mod tests {
     }
 
     #[test]
-    fn topbar_route_segment_registers_interaction_target() {
+    fn infoline_route_segment_registers_interaction_target() {
         let mut app =
             crate::test_support::test_app_with_options(crate::test_support::test_tui_options("."));
         let mut terminal =
-            Terminal::new(TestBackend::new(160, 1)).expect("topbar test terminal should build");
+            Terminal::new(TestBackend::new(160, 1)).expect("info-line test terminal should build");
 
         terminal
             .draw(|frame| {
@@ -1855,14 +1860,14 @@ mod tests {
                 let hitboxes = render_info_row(frame, &mut app, area);
                 register_info_interaction_targets(&mut app, hitboxes);
             })
-            .expect("topbar should render");
+            .expect("info line should render");
 
         let segment = app
             .viewport
             .last_infoline_hitboxes
             .iter()
             .find(|hitbox| hitbox.id == crate::tui::infoline::InfoSegmentId::Model)
-            .expect("wide topbar should paint its model segment");
+            .expect("a wide info line should paint its model segment");
         let target = app
             .viewport
             .interaction_targets

@@ -74,8 +74,8 @@ fn footer_matches_goldens_at_blocker_sizes() {
     }
 }
 
-// The scheduled-work slot moved to the topbar (TUI band contract: work in
-// the top strip; the merged footer owns phase/cost/detail). Its topbar
+// The scheduled-work slot moved to the info line (TUI band contract: work in
+// the top strip; the merged footer owns phase/cost/detail). Its info-line
 // rendering is pinned by `ui/frame.rs` tests reading the same
 // `AutomationPanelState` projection.
 
@@ -154,7 +154,7 @@ fn nonurgent_notice_keeps_compact_help_when_the_floor_fits() {
     assert!(text.contains("? help"), "{text}");
 }
 
-/// The context reading is the topbar's, and only the topbar's. This band used
+/// The context reading is the info line's, and only the info line's. This band used
 /// to print the same percentage from the same snapshot, beside a nine-cell
 /// sparkline encoding the number printed next to it.
 #[test]
@@ -165,7 +165,7 @@ fn footer_states_no_context_reading() {
         let text = draw(120, 32, &footer);
         assert!(
             !text.contains(&format!("{pct}%")),
-            "{pct}: the footer must not repeat the topbar's reading: {text}"
+            "{pct}: the footer must not repeat the info line's reading: {text}"
         );
         assert!(!text.contains('∿'), "{pct}: the sparkline is gone: {text}");
         assert!(!text.contains('▆'), "{pct}: the sparkline is gone: {text}");
@@ -187,7 +187,7 @@ fn footer_warns_at_eighty_percent_cap() {
     );
     assert!(
         !text.contains("83%"),
-        "the reading itself stays in the topbar: {text}"
+        "the reading itself stays in the info line: {text}"
     );
 }
 

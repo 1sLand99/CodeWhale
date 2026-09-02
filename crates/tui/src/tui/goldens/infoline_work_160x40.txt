@@ -1,1 +1,1 @@
-codewhale │ Hmbown/CodeWhale │ ⑂ main │ model deepseek-v4                                                                    context 61% ▰▰▰▰▰▰▱▱▱▱  Ctrl+/ help
+Hmbown/CodeWhale · ⑂ main · deepseek-v4 · context 61% ▰▰▰▰▰▰▱▱▱▱                                                                                     Ctrl+/ help

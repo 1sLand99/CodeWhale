@@ -194,10 +194,10 @@ pub const SHELL_BINDINGS: &[ShellBinding] = &[
     },
 ];
 
-/// The chord the topbar advertises for help.
+/// The chord the info line advertises for help.
 ///
 /// Not `F1`: tmux, screen, and several terminal emulators claim it before the
-/// shell ever sees the key, so a topbar that printed `F1 help` would be
+/// shell ever sees the key, so an info line that printed `F1 help` would be
 /// advertising a key that does nothing for many users. Not `?` either — bare
 /// `?` is composer text in every focus state, and help only answers to
 /// `Alt+?`, which stays unadvertised until it is proven in real terminals
@@ -531,7 +531,7 @@ mod tests {
     }
 
     #[test]
-    fn topbar_route_f3_requires_a_plain_function_key() {
+    fn infoline_route_f3_requires_a_plain_function_key() {
         assert!(is_provider_route_shortcut(&KeyEvent::new(
             KeyCode::F(3),
             KeyModifiers::NONE

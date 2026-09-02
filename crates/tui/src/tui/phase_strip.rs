@@ -56,7 +56,7 @@ fn working_detail(app: &App, activity: LiveActivity) -> Option<String> {
     }
 }
 
-/// Route identity for a rail or topbar segment, shed field by field until it
+/// Route identity for a rail or info line segment, shed field by field until it
 /// fits `budget`.
 ///
 /// The old version composed the full `provider · model · effort` label and
@@ -446,8 +446,8 @@ mod tests {
 
     /// The merged footer owns phase/cost/detail only: scheduled automation
     /// work is the TOP strip's fact (TUI band contract), so the footer facts
-    /// must never carry an automation slot. The topbar-side rendering is
-    /// pinned by `ui/frame.rs` tests (`topbar_segments` reads the same
+    /// must never carry an automation slot. The info line-side rendering is
+    /// pinned by `ui/frame.rs` tests (`info_segments` reads the same
     /// `AutomationPanelState` projection).
     #[test]
     fn the_footer_does_not_carry_automation_work() {
@@ -501,11 +501,11 @@ mod tests {
         );
     }
 
-    /// The route identity (the topbar Model segment's value) sheds whole
+    /// The route identity (the info line Model segment's value) sheds whole
     /// fields — provider first, then the effort label — and stands down
     /// entirely rather than clip a model name. Ported from the identity
     /// band to `route_identity_fields`, the live shedding authority the
-    /// topbar calls with the same budget rule.
+    /// info line calls with the same budget rule.
     #[test]
     fn route_identity_sheds_qualifiers_before_it_would_clip_a_model_name() {
         let model = "deepseek-v4-flash-preview-2026-05-01";
@@ -518,15 +518,11 @@ mod tests {
         );
         app.ui_locale = crate::localization::Locale::En;
 
-        // The topbar's own budget rule (ui/frame.rs): width minus the brand
+        // The info line's own budget rule (ui/frame.rs): width minus the brand
         // lockup, meter, and clock floor, never below 24.
-        let topbar_budget = |width: u16| (usize::from(width)).saturating_sub(60).max(24);
+        let info_budget = |width: u16| (usize::from(width)).saturating_sub(60).max(24);
         let fields = |width: u16| {
-            route_identity_fields(
-                &app,
-                ShellTier::for_chrome_width(width),
-                topbar_budget(width),
-            )
+            route_identity_fields(&app, ShellTier::for_chrome_width(width), info_budget(width))
         };
 
         let wide = fields(140).expect("wide budget keeps the route");
@@ -569,14 +565,11 @@ mod tests {
         );
         app.model = model.to_string();
 
-        let topbar_budget = |width: u16| (usize::from(width)).saturating_sub(60).max(24);
+        let info_budget = |width: u16| (usize::from(width)).saturating_sub(60).max(24);
         for width in [30u16, 40, 50, 60, 70, 80, 160] {
-            let shed = route_identity_fields(
-                &app,
-                ShellTier::for_chrome_width(width),
-                topbar_budget(width),
-            )
-            .unwrap_or_default();
+            let shed =
+                route_identity_fields(&app, ShellTier::for_chrome_width(width), info_budget(width))
+                    .unwrap_or_default();
             for field in &shed {
                 assert!(
                     !field.contains('…'),
@@ -609,13 +602,13 @@ mod tests {
 // `<·>` — the animated family is the landing slice's job through the 420 ms
 // heartbeat.
 //
-// The depth sparkline and its percentage are gone: the topbar's context
+// The depth sparkline and its percentage are gone: the info line's context
 // meter is the one reading, and this band was printing the same number from
 // the same snapshot a second time on every screen. A nine-cell sparkline
 // encoding a number printed beside it is decoration, not a fact.
 
 /// The context cap warning at ≥80% (spec §5a/§5e). The reading itself lives
-/// in the topbar; this band still says what to do about it.
+/// in the info line; this band still says what to do about it.
 const DEPTH_WARN: &str = "surface soon — /compact";
 
 /// What the caller owes the merged footer. All injected, deterministic.
@@ -629,7 +622,7 @@ pub struct TidelineFooter<'a> {
     pub live_detail: Option<&'a str>,
     /// Cost ledger label, e.g. `$0.42 · 61K tok`.
     pub cost_label: &'a str,
-    /// Context window percentage 0–100. The topbar paints the reading; this
+    /// Context window percentage 0–100. The info line paints the reading; this
     /// band only uses it to decide whether the ≥80% cap warning is owed.
     pub context_percent: u8,
     /// Key legend, e.g. `Enter send · Ctrl+K clear · ? help`.
@@ -752,7 +745,7 @@ impl TrailingExtra {
 /// cost ledger, then the posture chips (`mode · permission`) the old header
 /// carried. Right half, pinned: the live notice if one is owed, else the
 /// ≥80% cap warning, else the key legend. The context reading itself is the
-/// topbar's, painted once per screen.
+/// info line's, painted once per screen.
 pub fn render_tideline_footer(area: Rect, buf: &mut Buffer, footer: &TidelineFooter<'_>) {
     if area.width < 8 || area.height < 1 {
         return;
@@ -969,7 +962,7 @@ fn trailing_extra(footer: &TidelineFooter<'_>, area_width: u16) -> TrailingExtra
     }
     if footer.context_percent.clamp(0, 100) >= 80 {
         // The cap mark stays with the microcopy now that the percentage it
-        // used to precede lives in the topbar.
+        // used to precede lives in the info line.
         return TrailingExtra {
             text: format!("{} {}", footer.sym("▲"), footer.sym(DEPTH_WARN)),
             ink: ChromeInk::Attention,
@@ -1046,7 +1039,7 @@ impl TidelineFooterFacts {
     }
 }
 
-/// Context window percentage — the snapshot the Tideline topbar's context
+/// Context window percentage — the snapshot the info line's context
 /// meter reads, and the footer's ≥80% cap-warning trigger.
 pub(crate) fn context_percent_from_app(app: &App) -> u8 {
     crate::tui::ui::context_usage_snapshot(app)
@@ -1095,7 +1088,7 @@ pub(crate) fn tideline_footer_from_app(app: &mut App, width: u16) -> TidelineFoo
     };
 
     // Scheduled automation work is NOT a footer fact: the TUI band contract
-    // puts work in the top strip, so `topbar_segments` reads the
+    // puts work in the top strip, so `info_segments` reads the
     // `AutomationPanelState` projection directly.
 
     // The notice: the live status toast if one is owed, else the compact MCP
