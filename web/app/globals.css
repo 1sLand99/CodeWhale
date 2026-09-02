@@ -1,3 +1,5 @@
+@import "./tokens.css";
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
@@ -7,73 +9,74 @@
  * The site is the deep-ocean stage the Tideline TUI redesign paints: one dark
  * field everywhere, with the whale palette's semantic inks on top. The token
  * NAMES below keep their historical shape (`--paper`, `--ink`, `--indigo`) so
- * component rules and the docs light theme stay diffable, but the values are
- * the WHALE_* dark tokens from crates/tui/src/palette/tokens.rs — the same
- * field, chrome, and ink the product renders.
+ * component rules and the docs light theme stay diffable, but the values now
+ * resolve through ./tokens.css, generated from crates/tui/src/palette/tokens.rs
+ * by scripts/export-design-tokens.py — the same field, chrome, and ink the
+ * product renders, with no hand-copied hexes.
  */
 :root {
   /* RGB channel triples backing the Tailwind surface/ink tokens (see
      tailwind.config.ts). The docs light theme overrides them for its
      opt-in light sheet. */
-  --c-paper: 3 7 13;          /* WHALE_BG — deep field */
-  --c-paper-deep: 14 23 41;   /* WHALE_PANEL */
-  --c-paper-edge: 38 62 92;   /* WHALE_BORDER — blue at 25% on stage */
-  --c-ink: 246 242 232;       /* WHALE_TEXT_BODY — whale ivory */
-  --c-ink-soft: 182 192 212;  /* WHALE_TEXT_SOFT */
-  --c-ink-mute: 147 160 184;  /* WHALE_TEXT_MUTED */
-  --c-indigo: 106 174 242;    /* WHALE_ACTION — interaction blue */
+  --c-paper: var(--whale-bg-rgb);
+  --c-paper-deep: var(--whale-panel-rgb);
+  --c-paper-edge: var(--whale-border-rgb);
+  --c-ink: var(--whale-text-body-rgb);
+  --c-ink-soft: var(--whale-text-soft-rgb);
+  --c-ink-mute: var(--whale-text-muted-rgb);
+  --c-indigo: var(--whale-action-rgb);
   --c-indigo-deep: 143 196 248; /* lifted action blue — hover on dark */
-  --c-stage-soft: 182 192 212;
+  --c-stage-soft: var(--whale-text-soft-rgb);
 
-  --paper: #03070d;
-  --paper-deep: #0e1729;
-  --paper-edge: #263e5c;
+  --paper: var(--whale-bg);
+  --paper-deep: var(--whale-panel);
+  --paper-edge: var(--whale-border);
   /* Cards are the TUI's panel plate resting on the deep field. */
   --paper-card: #101d33;
-  --paper-line: #263e5c;
-  --paper-line-soft: #263e5c;
-  --ink: #f6f2e8;
-  --ink-soft: #b6c0d4;
-  --ink-mute: #93a0b8;
-  --indigo: #6aaef2;
+  --paper-line: var(--whale-border);
+  --paper-line-soft: var(--whale-border);
+  --ink: var(--whale-text-body);
+  --ink-soft: var(--whale-text-soft);
+  --ink-mute: var(--whale-text-muted);
+  --indigo: var(--whale-action);
   --indigo-deep: #8fc4f8;
-  --indigo-pale: rgba(106, 174, 242, 0.16);
-  --action-on-dark: #6aaef2;
+  --indigo-pale: rgb(var(--whale-action-rgb) / 0.16);
+  --action-on-dark: var(--whale-action);
   /* Semantic state inks, straight from the status-bar grammar: green is
      outcome, coral is cognition/attention, gold is the human mark. */
-  --ochre: #f6c453;
-  --jade: #9bd66f;
-  --seafoam: #4fd1c5;
-  --cobalt: #6aaef2;
-  --cyan: #48d7ff; /* bounded accents only — eyebrow chrome, composer prompt */
+  --ochre: var(--whale-human);
+  --jade: var(--whale-working-green);
+  --seafoam: var(--whale-accent-secondary);
+  --cobalt: var(--whale-action);
+  --cyan: var(--whale-cyan); /* bounded accents only — eyebrow chrome, composer prompt */
   --settings-state-active: var(--indigo);
   --settings-state-ready: var(--jade);
   --settings-state-muted: var(--ink-mute);
-  --ocean-deep: #03070d;
-  --ocean-mid: #0e1729;
-  --ocean-current: #d1ebf4;
-  --ocean-mist: #b6c0d4;
-  --ocean-coral: #ff7a59;
-  --signal-gold: #f6c453;
+  --ocean-deep: var(--whale-bg);
+  --ocean-mid: var(--whale-panel);
+  --ocean-current: var(--whale-ice);
+  --ocean-mist: var(--whale-text-soft);
+  --ocean-coral: var(--whale-warning);
+  --signal-gold: var(--whale-human);
   /* The whale mark is white ink on the deep-blue tile; off the tile it is a
      white silhouette on the field. Gold stays reserved for human moments. */
   --mark-ink: #ffffff;
-  --stage-text: #f6f2e8;
-  --stage-soft: #b6c0d4;
-  --stage-muted: #93a0b8;
+  --stage-text: var(--whale-text-body);
+  --stage-soft: var(--whale-text-soft);
+  --stage-muted: var(--whale-text-muted);
 
   /* Blue Stage field, verbatim from crates/tui/src/palette/tokens.rs — the
      same gradient the TUI samples down its water column. */
-  --stage-field-top: #0e1729; /* WHALE_PANEL — surface */
-  --stage-field-mid: #08111c; /* WHALE_CHROME — the authored 42% break */
-  --stage-field-deep: #03070d; /* WHALE_BG — deep field, and the footer seabed */
+  --stage-field-top: var(--whale-panel); /* surface */
+  --stage-field-mid: var(--whale-chrome); /* the authored 42% break */
+  --stage-field-deep: var(--whale-bg); /* deep field, and the footer seabed */
   --stage-ambient: #264866;
-  --stage-composer: #162238; /* WHALE_COMPOSER — the raised input plate */
-  --stage-elevated: #182742; /* WHALE_ELEVATED */
-  --stage-line: #263e5c; /* WHALE_BORDER — blue at 25% on stage */
+  --stage-composer: var(--whale-composer); /* the raised input plate */
+  --stage-elevated: var(--whale-elevated);
+  --stage-line: var(--whale-border); /* blue at 25% on stage */
   --stage-hint: #8491aa;
-  --stage-dim: #697791;
-  --violet: #ad88ff; /* WHALE_MODE_OPERATE — 1px rules only, never text */
+  --stage-dim: var(--whale-text-dim);
+  --violet: var(--whale-mode-operate); /* 1px rules only, never text */
 
   /* Type stacks. Display and body are one instrument voice — Tideline sets
      its headings in the same sans as its copy, separated by weight and
@@ -85,9 +88,9 @@
 
   /* Hairline + code surfaces routed through vars so the docs light theme can
      re-ink them without touching every rule. */
-  --hairline: rgba(106, 174, 242, 0.2);
-  --code-bg: #08111c;
-  --code-fg: #f6f2e8;
+  --hairline: rgb(var(--whale-action-rgb) / 0.2);
+  --code-bg: var(--whale-chrome);
+  --code-fg: var(--whale-text-body);
 
   /* One site container and one vertical rhythm. Every page gutter aligns
      with the nav; every hero and section shares a single padding token. */
@@ -3310,7 +3313,15 @@ html[lang="ko"] .ocean-column h2 {
       "sidebar";
   }
 
-  .docs-sidebar nav { display: none; }
+  /* The one docs nav stays reachable below the article: the groups reflow
+     into columns so 23 topics read as an index, not a scroll of links. */
+  .docs-sidebar nav {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(13rem, 1fr));
+    column-gap: 2rem;
+  }
+
+  .docs-sidebar-group:last-child { border-bottom: 0; }
 }
 
 @media (max-width: 640px) {
@@ -3403,10 +3414,10 @@ html[lang="ko"] .ocean-column h2 {
 /* ------------------------------------------------------------------ */
 
 .docs-theme {
-  --docs-accent: #6aaef2;
-  --docs-button-bg: #0e1729;
-  --docs-button-border: #263e5c;
-  --docs-button-text: #f6f2e8;
+  --docs-accent: var(--whale-action);
+  --docs-button-bg: var(--whale-panel);
+  --docs-button-border: var(--whale-border);
+  --docs-button-text: var(--whale-text-body);
   background: var(--paper);
   color: var(--ink);
 }
@@ -3450,20 +3461,510 @@ html[data-theme="light"] .docs-theme {
   --ink: #14213a;
   --ink-soft: #455168;
   --ink-mute: #5b6780;
-  --indigo: #315fd8;
+  --indigo: var(--whale-cobalt);
   --indigo-deep: #2448a6;
   --indigo-pale: #e8eef8;
   --ochre: #7a5500;
   --jade: #08766d;
-  --cobalt: #315fd8;
-  --cyan: #0f7f9f;
+  --cobalt: var(--whale-cobalt);
+  /* 5.3:1 on --paper and 4.9:1 on --paper-deep, so the 0.62rem release-truth
+     label clears body-text contrast on the light sheet too. */
+  --cyan: #0b6f8c;
   /* The whale silhouette re-inks to the light sheet's body navy. */
   --mark-ink: #14213a;
   --hairline: rgba(20, 35, 70, 0.14);
-  --code-bg: #03070d;
-  --code-fg: #f6f2e8;
-  --docs-accent: #315fd8;
+  --code-bg: var(--whale-bg);
+  --code-fg: var(--whale-text-body);
+  --docs-accent: var(--whale-cobalt);
   --docs-button-bg: #fff;
   --docs-button-border: #aeb8c6;
   --docs-button-text: #1b2230;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Shared surface states — empty / loading / error (surface-state.tsx) */
+/* ------------------------------------------------------------------ */
+/*
+ * One plate for every data-bearing page's non-data moments. The mark on the
+ * left carries the state in colour AND the copy carries it in words, so no
+ * state is conveyed by colour alone: mute for empty, action blue for loading,
+ * coral for error — the status-bar grammar the product already speaks.
+ */
+.state-block {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 1rem;
+  align-items: start;
+  padding: clamp(1.5rem, 4vw, 2.25rem) clamp(1.25rem, 3vw, 1.75rem);
+  border: 1px solid var(--stage-line);
+  border-radius: 6px;
+  background: var(--paper-card);
+  color: var(--ink);
+}
+
+.state-block-compact {
+  padding: 1rem 1.15rem;
+  gap: 0.8rem;
+}
+
+.state-mark {
+  width: 0.6rem;
+  height: 0.6rem;
+  margin-top: 0.42rem;
+  border-radius: 999px;
+  background: var(--ink-mute);
+  flex: none;
+}
+
+.state-block-loading .state-mark { background: var(--indigo); }
+.state-block-error .state-mark { background: var(--ocean-coral); }
+.state-block-error { border-color: color-mix(in srgb, var(--ocean-coral) 45%, var(--stage-line)); }
+
+.state-copy { min-width: 0; }
+
+.state-title {
+  color: var(--ink);
+  font-size: 0.98rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.state-body {
+  max-width: 44rem;
+  margin-top: 0.4rem;
+  color: var(--ink-soft);
+  font-size: 0.86rem;
+  line-height: 1.65;
+}
+
+.state-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  margin-top: 1rem;
+}
+
+.state-retry[aria-busy="true"] { opacity: 0.7; cursor: progress; }
+
+/* Skeleton lines: neutral bars, never fake words. The shimmer is opt-in
+   under no-preference; reduced motion sees still bars. */
+.state-skeleton {
+  display: grid;
+  gap: 0.55rem;
+  margin-top: 0.85rem;
+}
+
+.state-skeleton > span {
+  display: block;
+  height: 0.7rem;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--ink-mute) 22%, transparent);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .state-skeleton > span {
+    background: linear-gradient(
+      90deg,
+      color-mix(in srgb, var(--ink-mute) 18%, transparent) 0%,
+      color-mix(in srgb, var(--ink-mute) 34%, transparent) 50%,
+      color-mix(in srgb, var(--ink-mute) 18%, transparent) 100%
+    );
+    background-size: 200% 100%;
+    animation: state-shimmer 1.6s ease-in-out infinite;
+  }
+}
+
+@keyframes state-shimmer {
+  from { background-position: 200% 0; }
+  to { background-position: -200% 0; }
+}
+
+/* Route-level boundaries (loading.tsx / error.tsx / not-found.tsx) sit in
+   the site container with the page rhythm so a boundary never looks like a
+   different site. */
+.route-state {
+  width: var(--container);
+  margin-inline: auto;
+  padding-block: clamp(3rem, 6vw, 4.75rem);
+  max-width: 52rem;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Connection banner — offline / reconnecting / degraded / restored    */
+/* ------------------------------------------------------------------ */
+.connection-banner {
+  position: sticky;
+  top: 0;
+  z-index: 35;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 0.9rem;
+  align-items: center;
+  width: var(--container);
+  margin: 0.75rem auto 0;
+  padding: 0.7rem 1rem;
+  border: 1px solid var(--stage-line);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--paper-card) 92%, transparent);
+  backdrop-filter: blur(8px);
+  color: var(--ink);
+}
+
+.connection-mark {
+  width: 0.6rem;
+  height: 0.6rem;
+  border-radius: 999px;
+  background: var(--ink-mute);
+}
+
+.connection-banner-offline { border-color: color-mix(in srgb, var(--ocean-coral) 50%, var(--stage-line)); }
+.connection-banner-offline .connection-mark { background: var(--ocean-coral); }
+.connection-banner-reconnecting .connection-mark { background: var(--indigo); }
+.connection-banner-degraded .connection-mark { background: var(--ochre); }
+.connection-banner-restored { border-color: color-mix(in srgb, var(--jade) 50%, var(--stage-line)); }
+.connection-banner-restored .connection-mark { background: var(--jade); }
+
+@media (prefers-reduced-motion: no-preference) {
+  .connection-banner-reconnecting .connection-mark {
+    animation: connection-pulse 1.2s ease-in-out infinite;
+  }
+  .connection-banner {
+    animation: mm-in 200ms cubic-bezier(0.25, 0.46, 0.45, 0.94) both;
+  }
+}
+
+@keyframes connection-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
+.connection-copy { min-width: 0; }
+.connection-title { font-size: 0.86rem; font-weight: 600; }
+.connection-body { margin-top: 0.15rem; color: var(--ink-soft); font-size: 0.78rem; line-height: 1.5; }
+.connection-checked { color: var(--ink-mute); font-family: var(--font-mono), "JetBrains Mono", monospace; font-size: 0.68rem; }
+
+.connection-actions { display: flex; gap: 0.5rem; }
+
+.connection-button {
+  display: inline-flex;
+  min-height: 2.25rem;
+  align-items: center;
+  padding: 0.35rem 0.75rem;
+  border: 1px solid var(--stage-line);
+  border-radius: 5px;
+  color: var(--ink);
+  font-family: var(--font-mono), "JetBrains Mono", monospace;
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  transition: border-color 150ms ease, background-color 150ms ease, color 150ms ease;
+}
+
+.connection-button:hover { border-color: var(--indigo); color: var(--indigo); }
+.connection-button-primary { border-color: var(--indigo); background: var(--indigo); color: var(--paper); }
+.connection-button-primary:hover { background: var(--indigo-deep); border-color: var(--indigo-deep); color: var(--paper); }
+.connection-button:disabled { opacity: 0.55; cursor: not-allowed; }
+.connection-button[aria-busy="true"] { cursor: progress; }
+
+@media (max-width: 560px) {
+  .connection-banner {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+  .connection-actions {
+    grid-column: 2;
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/*  Docs: release truth, task index, contextual help                   */
+/* ------------------------------------------------------------------ */
+.release-truth {
+  margin-top: 1.4rem;
+  color: var(--ink-mute);
+}
+
+.release-truth-label {
+  color: var(--cyan);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  font-size: 0.62rem;
+}
+
+.release-truth a {
+  color: var(--indigo);
+}
+
+.release-truth a:hover {
+  color: var(--indigo-deep);
+  text-decoration: underline;
+  text-underline-offset: 0.2rem;
+}
+
+.release-truth[data-release-state="published"] > span:not(.release-truth-label) {
+  color: var(--jade);
+}
+
+.docs-result-lead {
+  margin: -0.2rem 0 0.9rem;
+  color: var(--ink-soft);
+  font-size: 0.82rem;
+}
+
+.docs-result-heading h3 {
+  font-size: 1.05rem;
+  letter-spacing: -0.01em;
+}
+
+.docs-result-heading-topics {
+  margin-bottom: 0;
+  padding-bottom: 0.75rem;
+}
+
+.docs-result-topics {
+  display: grid;
+  gap: 2rem;
+}
+
+.docs-task-group .docs-topic-list {
+  border-top: 1px solid var(--stage-line);
+}
+
+.docs-task-row .docs-topic-source {
+  font-size: 0.66rem;
+}
+
+.docs-help {
+  display: grid;
+  grid-template-columns: minmax(0, 1.3fr) minmax(12rem, 0.7fr);
+  gap: clamp(1.5rem, 4vw, 3rem);
+  margin-top: 3rem;
+  padding: clamp(1.4rem, 3vw, 2rem);
+  border: 1px solid var(--stage-line);
+  border-radius: 6px;
+  background: var(--paper-card);
+}
+
+.docs-help-copy h2 {
+  font-size: 1.15rem;
+  letter-spacing: -0.015em;
+}
+
+.docs-help-copy p {
+  margin-top: 0.55rem;
+  color: var(--ink-soft);
+  font-size: 0.84rem;
+  line-height: 1.65;
+}
+
+.docs-help-source {
+  font-family: var(--font-mono), "JetBrains Mono", monospace;
+  font-size: 0.7rem !important;
+  color: var(--ink-mute) !important;
+}
+
+.docs-help-source a {
+  color: var(--indigo);
+}
+
+.docs-help-source a:hover { text-decoration: underline; text-underline-offset: 0.2rem; }
+
+.docs-help-links {
+  display: grid;
+  gap: 0.35rem;
+  align-content: start;
+  border-top: 1px solid var(--stage-line);
+  padding-top: 0.6rem;
+}
+
+.docs-help-links a {
+  display: inline-flex;
+  min-height: 2.5rem;
+  align-items: center;
+  color: var(--indigo);
+  font-family: var(--font-mono), "JetBrains Mono", monospace;
+  font-size: 0.74rem;
+}
+
+.docs-help-links a:hover { color: var(--indigo-deep); text-decoration: underline; text-underline-offset: 0.2rem; }
+
+@media (max-width: 760px) {
+  .docs-help { grid-template-columns: 1fr; }
+}
+
+/* ---------- reference tables on docs pages ---------- */
+.docs-ref-rows {
+  display: grid;
+  border-top: 1px solid var(--hairline);
+}
+
+.docs-ref-rows > div {
+  display: grid;
+  grid-template-columns: minmax(10rem, 0.42fr) minmax(0, 1fr);
+  gap: 1.25rem;
+  padding: 0.9rem 0;
+  border-bottom: 1px solid var(--hairline);
+}
+
+.docs-ref-rows dt {
+  color: var(--ink);
+  font-size: 0.88rem;
+  font-weight: 600;
+}
+
+.docs-ref-rows dd {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--ink-soft);
+  font-size: 0.86rem;
+  line-height: 1.6;
+}
+
+.docs-ref-rows code.inline { white-space: nowrap; }
+
+@media (max-width: 560px) {
+  .docs-ref-rows > div { grid-template-columns: 1fr; gap: 0.3rem; }
+}
+
+/* ------------------------------------------------------------------ */
+/*  Changelog                                                          */
+/* ------------------------------------------------------------------ */
+.changelog-facts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem;
+  margin-top: 1.75rem;
+}
+
+.changelog-facts > div {
+  padding: 1.1rem 1.25rem;
+  border: 1px solid var(--stage-line);
+  border-radius: 6px;
+  background: var(--paper-card);
+}
+
+.changelog-facts span {
+  display: block;
+  color: var(--ink-mute);
+  font-family: var(--font-mono), "JetBrains Mono", monospace;
+  font-size: 0.62rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.changelog-facts > div { min-width: 0; }
+
+.changelog-facts strong {
+  display: block;
+  overflow-wrap: anywhere;
+  margin-top: 0.45rem;
+  color: var(--ink);
+  font-size: 1.05rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.changelog-facts a {
+  display: inline-block;
+  margin-top: 0.55rem;
+  color: var(--indigo);
+  font-size: 0.76rem;
+}
+
+.changelog-facts a:hover { text-decoration: underline; text-underline-offset: 0.2rem; }
+
+.changelog-facts [data-published="true"] strong { color: var(--jade); }
+.changelog-facts [data-candidate="unreleased"] strong { color: var(--ochre); }
+
+.changelog-release {
+  padding-block: 2.25rem;
+  border-top: 1px solid var(--hairline);
+}
+
+.changelog-release-head {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.75rem 1.5rem;
+}
+
+.changelog-release-head h2 {
+  font-size: clamp(1.4rem, 2.6vw, 1.9rem);
+  font-variant-numeric: tabular-nums;
+}
+
+.changelog-release-head .dotline {
+  color: var(--ink-mute);
+}
+
+.changelog-release-head .dotline a { color: var(--indigo); }
+.changelog-release-head .dotline a:hover { text-decoration: underline; text-underline-offset: 0.2rem; }
+
+.changelog-unreleased-note {
+  max-width: 44rem;
+  margin-top: 0.6rem;
+  color: var(--ink-soft);
+  font-size: 0.86rem;
+  line-height: 1.6;
+}
+
+.changelog-sections {
+  display: grid;
+  gap: 1.35rem;
+  margin-top: 1.4rem;
+}
+
+.changelog-sections h3 {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--cyan);
+}
+
+.changelog-sections h3 a {
+  color: var(--ink-mute);
+  font-family: var(--font-mono), "JetBrains Mono", monospace;
+  font-size: 0.64rem;
+  letter-spacing: 0.04em;
+  text-transform: none;
+}
+
+.changelog-sections h3 a:hover {
+  color: var(--indigo);
+  text-decoration: underline;
+  text-underline-offset: 0.2rem;
+}
+
+.changelog-sections ul {
+  margin-top: 0.55rem;
+  border-top: 1px solid var(--hairline);
+}
+
+.changelog-sections li {
+  min-width: 0;
+  padding: 0.6rem 0;
+  border-bottom: 1px solid var(--hairline);
+  color: var(--ink-soft);
+  font-size: 0.86rem;
+  line-height: 1.6;
+  /* Release notes quote commands, env names, and URLs verbatim; a long
+     unbroken token must wrap inside the column, never widen the page. */
+  overflow-wrap: anywhere;
+}
+
+.changelog-sections li::before {
+  content: "·";
+  margin-right: 0.6rem;
+  color: var(--stage-dim);
+}
+
+@media (max-width: 640px) {
+  .changelog-facts { grid-template-columns: 1fr; }
 }

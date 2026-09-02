@@ -1,8 +1,11 @@
 import Link from "next/link";
 import { Seal } from "@/components/seal";
 import { FeedCard } from "@/components/feed-card";
-import { fetchFeed } from "@/lib/github";
+import { FeedRetry } from "@/components/feed-retry";
+import { EmptyState, ErrorState, UnavailableState } from "@/components/surface-state";
+import { loadFeed, type FeedLoadStatus } from "@/lib/github";
 import { getEnv } from "@/lib/kv";
+import { getStates } from "@/lib/i18n/dictionaries";
 import { buildPageMetadata } from "@/lib/page-meta";
 import type { FeedItem } from "@/lib/types";
 
@@ -27,16 +30,40 @@ export default async function FeedPage({ params }: { params: Promise<{ locale: s
 
   const env = await getEnv();
   let feed: FeedItem[] = [];
+  // Four honest answers for an empty column: GitHub answered and had nothing
+  // (`ok` → empty), GitHub was not asked or refused (`skipped` / `unavailable`
+  // → not loaded, retry), or the fetch itself threw (`failed` → error, retry).
+  // Each column answers for itself: one refused endpoint must not tell the
+  // other column that its source did not answer.
+  let issuesStatus: FeedLoadStatus | "failed" = "ok";
+  let pullsStatus: FeedLoadStatus | "failed" = "ok";
   try {
-    feed = await fetchFeed(env.GITHUB_TOKEN, 50);
+    const load = await loadFeed(env.GITHUB_TOKEN, 50);
+    feed = load.items;
+    issuesStatus = load.issuesStatus;
+    pullsStatus = load.pullsStatus;
   } catch (e) {
+    issuesStatus = "failed";
+    pullsStatus = "failed";
     console.error("feed fetch failed", e);
   }
 
   const issues = feed.filter((f) => f.kind === "issue");
   const pulls = feed.filter((f) => f.kind === "pull");
   const eyebrow = isZh ? "动态" : "Activity";
-  const emptyLabel = isZh ? "暂无数据 · 动态加载失败" : "No data · feed not loaded";
+  const states = getStates(locale);
+  // FeedRetry first busts this route's ISR entry, because a bare server
+  // re-render would serve the same cached `skipped`/`unavailable` record for
+  // up to ten minutes.
+  const retry = <FeedRetry label={states.retry} />;
+  const columnState = (status: FeedLoadStatus | "failed") =>
+    status === "failed" ? (
+      <ErrorState locale={locale} compact action={retry} />
+    ) : status === "ok" ? (
+      <EmptyState locale={locale} compact />
+    ) : (
+      <UnavailableState locale={locale} compact action={retry} />
+    );
 
   return (
     <>
@@ -68,7 +95,7 @@ export default async function FeedPage({ params }: { params: Promise<{ locale: s
                   {pulls.length > 0 ? (
                     pulls.map((p) => <FeedCard key={p.url} item={p} />)
                   ) : (
-                    <div className="py-10 text-center text-sm font-mono text-ink-mute">{emptyLabel}</div>
+                    <div className="py-4">{columnState(pullsStatus)}</div>
                   )}
                 </div>
               </div>
@@ -84,7 +111,7 @@ export default async function FeedPage({ params }: { params: Promise<{ locale: s
                   {issues.length > 0 ? (
                     issues.map((i) => <FeedCard key={i.url} item={i} />)
                   ) : (
-                    <div className="py-10 text-center text-sm font-mono text-ink-mute">{emptyLabel}</div>
+                    <div className="py-4">{columnState(issuesStatus)}</div>
                   )}
                 </div>
               </div>
@@ -136,7 +163,7 @@ export default async function FeedPage({ params }: { params: Promise<{ locale: s
                   {pulls.length > 0 ? (
                     pulls.map((p) => <FeedCard key={p.url} item={p} />)
                   ) : (
-                    <div className="py-10 text-center text-sm font-mono text-ink-mute">{emptyLabel}</div>
+                    <div className="py-4">{columnState(pullsStatus)}</div>
                   )}
                 </div>
               </div>
@@ -152,7 +179,7 @@ export default async function FeedPage({ params }: { params: Promise<{ locale: s
                   {issues.length > 0 ? (
                     issues.map((i) => <FeedCard key={i.url} item={i} />)
                   ) : (
-                    <div className="py-10 text-center text-sm font-mono text-ink-mute">{emptyLabel}</div>
+                    <div className="py-4">{columnState(issuesStatus)}</div>
                   )}
                 </div>
               </div>

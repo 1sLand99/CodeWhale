@@ -8,6 +8,7 @@ import {
   REPO_RELEASES_URL,
   REPO_URL,
 } from "@/lib/i18n/links";
+import { SITE_CONTACT_EMAIL, SITE_SECURITY_EMAIL } from "@/lib/page-meta";
 import { Whale } from "./whale";
 
 /**
@@ -58,7 +59,8 @@ export function Footer({ locale = "en" }: { locale?: Locale }) {
           {GITEE_ENABLED && <a href="https://gitee.com/Hmbown/CodeWhale">Gitee</a>}
           <a href="https://cnb.cool/codewhale.net/codewhale">CNB</a>
           <a href="https://npmmirror.com/package/codewhale">npmmirror</a>
-          <a href="mailto:hmbown@gmail.com">{chrome.footerSecurity}</a>
+          <a href={`mailto:${SITE_CONTACT_EMAIL}`}>{SITE_CONTACT_EMAIL}</a>
+          <a href={`mailto:${SITE_SECURITY_EMAIL}`}>{chrome.footerSecurity}</a>
         </div>
         <span>© {new Date().getFullYear()} Codewhale</span>
       </div>

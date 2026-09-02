@@ -78,6 +78,9 @@ enum Stage {
     /// Explicit xAI acquisition choice. xAI supports both an API key and the
     /// Codewhale-owned device OAuth flow; neither path may impersonate the other.
     XaiAuthChoice,
+    /// Explicit ChatGPT/Codex acquisition choice. Native PKCE subscription
+    /// sign-in is first-class; Codex CLI import remains an alternative.
+    ChatgptAuthChoice,
     KeyEntry,
     /// Explicit disabled/read-only/managed external-credential policy choice.
     ExternalConsentChoice,
@@ -111,6 +114,12 @@ enum ExternalConsentChoice {
 enum XaiAuthChoice {
     ApiKey,
     DeviceOAuth,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChatgptAuthChoice {
+    SignInWithChatgpt,
+    ImportCodexCli,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -186,6 +195,7 @@ pub struct ProviderPickerView {
     key_entry_error: Option<String>,
     locale: Locale,
     xai_auth_choice: XaiAuthChoice,
+    chatgpt_auth_choice: ChatgptAuthChoice,
     external_consent_choice: ExternalConsentChoice,
     /// Where Esc returns from the revoke confirmation. Revocation is reachable
     /// both from the list (`x`) and from the policy choice, and "back" has to
@@ -1607,6 +1617,7 @@ impl ProviderPickerView {
             key_entry_error: None,
             locale: Locale::En,
             xai_auth_choice: XaiAuthChoice::ApiKey,
+            chatgpt_auth_choice: ChatgptAuthChoice::SignInWithChatgpt,
             external_consent_choice: ExternalConsentChoice::Disabled,
             external_revoke_return: Stage::List,
             pending_api_key: None,
@@ -1942,11 +1953,28 @@ impl ProviderPickerView {
     fn begin_setup(&mut self) {
         if self.selected_provider() == ApiProvider::Xai {
             self.enter_xai_auth_choice();
+        } else if self.selected_provider() == ApiProvider::OpenaiCodex {
+            self.enter_chatgpt_auth_choice();
         } else if self.stepfun_billing_route_applies() {
             self.enter_stepfun_billing_route();
         } else {
             self.enter_key_entry();
         }
+    }
+
+    fn enter_chatgpt_auth_choice(&mut self) {
+        self.chatgpt_auth_choice = ChatgptAuthChoice::SignInWithChatgpt;
+        self.stage = Stage::ChatgptAuthChoice;
+        self.api_key_input.clear();
+        self.key_entry_error = None;
+        self.pending_api_key = None;
+    }
+
+    fn move_chatgpt_auth_choice(&mut self) {
+        self.chatgpt_auth_choice = match self.chatgpt_auth_choice {
+            ChatgptAuthChoice::SignInWithChatgpt => ChatgptAuthChoice::ImportCodexCli,
+            ChatgptAuthChoice::ImportCodexCli => ChatgptAuthChoice::SignInWithChatgpt,
+        };
     }
 
     fn enter_xai_auth_choice(&mut self) {
@@ -2868,6 +2896,49 @@ impl ProviderPickerView {
                 "{} 2. {}",
                 marker(XaiAuthChoice::DeviceOAuth),
                 self.tr(MessageId::XaiAuthChoiceDeviceOAuthOption),
+            )),
+        ])
+        .wrap(Wrap { trim: false })
+        .render(content, buf);
+    }
+
+    fn render_chatgpt_auth_choice(&self, area: Rect, buf: &mut Buffer) {
+        let outer = Block::default()
+            .title(Line::from(Span::styled(
+                self.tr(MessageId::ChatgptAuthChoiceTitle),
+                Style::default()
+                    .fg(palette::WHALE_INFO)
+                    .add_modifier(Modifier::BOLD),
+            )))
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(palette::BORDER_COLOR))
+            .style(Style::default().bg(palette::WHALE_BG));
+        let inner = outer.inner(area);
+        outer.render(area, buf);
+        let content = render_modal_footer(
+            inner,
+            buf,
+            &[
+                ActionHint::new("↑↓/1-2", self.tr(MessageId::ProviderExternalActionChoose)),
+                ActionHint::new("Enter", self.tr(MessageId::SetupActionContinue)),
+                ActionHint::new("E", self.tr(MessageId::ProviderExternalActionReuseCodex)),
+                ActionHint::new("Esc", self.tr(MessageId::SetupActionBack)),
+            ],
+        );
+        let marker =
+            |choice| crate::tui::glyphs::selection_marker(self.chatgpt_auth_choice == choice);
+        Paragraph::new(vec![
+            Line::from(self.tr(MessageId::ChatgptAuthChoiceIntro)),
+            Line::from(""),
+            Line::from(format!(
+                "{} 1. {}",
+                marker(ChatgptAuthChoice::SignInWithChatgpt),
+                self.tr(MessageId::ChatgptAuthChoicePkceOption),
+            )),
+            Line::from(format!(
+                "{} 2. {}",
+                marker(ChatgptAuthChoice::ImportCodexCli),
+                self.tr(MessageId::ChatgptAuthChoiceImportOption),
             )),
         ])
         .wrap(Wrap { trim: false })
@@ -3820,6 +3891,7 @@ impl ModalView for ProviderPickerView {
             }
             Stage::List
             | Stage::XaiAuthChoice
+            | Stage::ChatgptAuthChoice
             | Stage::ExternalConsentChoice
             | Stage::ExternalConsentConfirm
             | Stage::ExternalConsentRevokeConfirm
@@ -4058,12 +4130,46 @@ impl ModalView for ProviderPickerView {
                 },
                 _ => ViewAction::None,
             },
+            Stage::ChatgptAuthChoice => match key.code {
+                KeyCode::Esc => {
+                    self.stage = Stage::List;
+                    ViewAction::None
+                }
+                KeyCode::Up | KeyCode::Down => {
+                    self.move_chatgpt_auth_choice();
+                    ViewAction::None
+                }
+                KeyCode::Char('1') => {
+                    self.chatgpt_auth_choice = ChatgptAuthChoice::SignInWithChatgpt;
+                    ViewAction::None
+                }
+                KeyCode::Char('2') => {
+                    self.chatgpt_auth_choice = ChatgptAuthChoice::ImportCodexCli;
+                    ViewAction::None
+                }
+                KeyCode::Char(c) if key.modifiers.is_empty() && c.eq_ignore_ascii_case(&'e') => {
+                    self.enter_external_consent_choice();
+                    ViewAction::None
+                }
+                KeyCode::Enter => match self.chatgpt_auth_choice {
+                    ChatgptAuthChoice::SignInWithChatgpt => {
+                        ViewAction::EmitAndClose(ViewEvent::ProviderPickerChatgptOAuthRequested)
+                    }
+                    ChatgptAuthChoice::ImportCodexCli => {
+                        self.enter_external_consent_choice();
+                        ViewAction::None
+                    }
+                },
+                _ => ViewAction::None,
+            },
             Stage::KeyEntry => match key.code {
                 KeyCode::Esc => {
                     // Back to the route choice when one was made, so Esc undoes
                     // one wizard step instead of discarding the whole flow.
                     self.stage = if self.selected_provider() == ApiProvider::Xai {
                         Stage::XaiAuthChoice
+                    } else if self.selected_provider() == ApiProvider::OpenaiCodex {
+                        Stage::ChatgptAuthChoice
                     } else if self.pending_base_url.is_some() {
                         Stage::StepfunBillingRoute
                     } else {
@@ -4134,6 +4240,8 @@ impl ModalView for ProviderPickerView {
                 KeyCode::Esc => {
                     self.stage = if self.selected_provider() == ApiProvider::Xai {
                         Stage::XaiAuthChoice
+                    } else if self.selected_provider() == ApiProvider::OpenaiCodex {
+                        Stage::ChatgptAuthChoice
                     } else {
                         Stage::KeyEntry
                     };
@@ -4389,6 +4497,7 @@ impl ModalView for ProviderPickerView {
             Stage::PlanTier
             | Stage::StepfunBillingRoute
             | Stage::XaiAuthChoice
+            | Stage::ChatgptAuthChoice
             | Stage::KeyEntry
             | Stage::ExternalConsentChoice
             | Stage::ExternalConsentConfirm
@@ -4403,6 +4512,7 @@ impl ModalView for ProviderPickerView {
         let preferred_height = match self.stage {
             Stage::List => (self.rows.len() as u16).saturating_add(2),
             Stage::XaiAuthChoice => 12,
+            Stage::ChatgptAuthChoice => 13,
             // Key/OAuth help is intentionally multi-line and wraps at narrow
             // widths. One shared height keeps every provider's final guidance
             // visible instead of special-casing whichever route clipped last.
@@ -4428,6 +4538,7 @@ impl ModalView for ProviderPickerView {
         match self.stage {
             Stage::List => self.render_list(popup_area, buf),
             Stage::XaiAuthChoice => self.render_xai_auth_choice(popup_area, buf),
+            Stage::ChatgptAuthChoice => self.render_chatgpt_auth_choice(popup_area, buf),
             Stage::KeyEntry => self.render_key_entry(popup_area, buf),
             Stage::ExternalConsentChoice => self.render_external_consent_choice(popup_area, buf),
             Stage::ExternalConsentConfirm => self.render_external_consent_confirm(popup_area, buf),
@@ -5066,16 +5177,14 @@ mod tests {
             &config,
             None,
         );
-        assert_eq!(codex.stage, Stage::KeyEntry);
+        assert_eq!(codex.stage, Stage::ChatgptAuthChoice);
         assert_eq!(codex.selected_provider(), ApiProvider::OpenaiCodex);
         let codex_text = render_text(&codex, 120, 20);
-        assert!(codex_text.contains("OAuth login"), "{codex_text}");
-        assert!(
-            codex_text.contains("OPENAI_CODEX_ACCESS_TOKEN"),
-            "{codex_text}"
-        );
-        assert!(codex_text.contains("external-consent"), "{codex_text}");
-        assert!(!codex_text.contains("Credentials:"), "{codex_text}");
+        assert!(codex_text.contains("Sign in with ChatGPT"), "{codex_text}");
+        assert!(codex_text.contains("subscription"), "{codex_text}");
+        assert!(codex_text.contains("openai"), "{codex_text}");
+        assert!(codex_text.contains("API-key"), "{codex_text}");
+        assert!(codex_text.contains("Import Codex CLI"), "{codex_text}");
         assert!(!codex_text.contains("(paste key here)"), "{codex_text}");
 
         let local = ProviderPickerView::new_for_setup(
@@ -7158,12 +7267,27 @@ mod tests {
                 )),
                 CredentialAcquisition::OAuth => {
                     assert!(matches!(action, ViewAction::None), "{provider:?}");
-                    assert_eq!(picker.stage, Stage::KeyEntry, "{provider:?}");
-                    assert!(picker.handle_paste("fixture-oauth-paste"));
-                    assert!(
-                        picker.api_key_input.is_empty(),
-                        "{provider:?} must reject key paste"
-                    );
+                    if provider == ApiProvider::OpenaiCodex {
+                        assert_eq!(picker.stage, Stage::ChatgptAuthChoice, "{provider:?}");
+                        assert!(!picker.handle_paste("fixture-oauth-paste"));
+                        assert!(
+                            picker.api_key_input.is_empty(),
+                            "{provider:?} must reject key paste"
+                        );
+                        assert!(matches!(
+                            picker.handle_key(key(KeyCode::Enter)),
+                            ViewAction::EmitAndClose(
+                                ViewEvent::ProviderPickerChatgptOAuthRequested
+                            )
+                        ));
+                    } else {
+                        assert_eq!(picker.stage, Stage::KeyEntry, "{provider:?}");
+                        assert!(picker.handle_paste("fixture-oauth-paste"));
+                        assert!(
+                            picker.api_key_input.is_empty(),
+                            "{provider:?} must reject key paste"
+                        );
+                    }
                 }
                 CredentialAcquisition::Configuration => {
                     assert_eq!(provider, ApiProvider::Custom);
@@ -7895,20 +8019,32 @@ mod tests {
             None,
         )
         .expect("OpenAI Codex has a picker row");
-        assert_eq!(picker.stage, Stage::KeyEntry);
+        assert_eq!(picker.stage, Stage::ChatgptAuthChoice);
 
         let rendered = render_text(&picker, 96, 20);
-        assert!(rendered.contains("OAuth login"), "{rendered}");
-        assert!(rendered.contains("no token is stored here"), "{rendered}");
+        assert!(rendered.contains("Sign in with ChatGPT"), "{rendered}");
+        assert!(rendered.contains("subscription"), "{rendered}");
+        assert!(rendered.contains("billing"), "{rendered}");
+        assert!(rendered.contains("Import Codex CLI"), "{rendered}");
         assert!(!rendered.contains("save & switch"));
         assert!(!rendered.contains("(paste key here)"));
         assert!(!rendered.contains("Credentials:"));
 
-        assert!(picker.handle_paste("codex-token"));
-        for c in "codex-token".chars() {
-            picker.handle_key(key(KeyCode::Char(c)));
-        }
+        assert!(!picker.handle_paste("codex-token"));
         assert!(picker.api_key_input.is_empty());
+        assert!(matches!(
+            picker.handle_key(key(KeyCode::Enter)),
+            ViewAction::EmitAndClose(ViewEvent::ProviderPickerChatgptOAuthRequested)
+        ));
+
+        let mut picker = ProviderPickerView::new_for_missing_auth(
+            ApiProvider::Deepseek,
+            ApiProvider::OpenaiCodex,
+            &config,
+            None,
+        )
+        .expect("OpenAI Codex has a picker row");
+        picker.handle_key(key(KeyCode::Char('2')));
         assert!(matches!(
             picker.handle_key(key(KeyCode::Enter)),
             ViewAction::None
@@ -7973,6 +8109,7 @@ mod tests {
         .expect("OpenAI Codex has a picker row")
         .with_locale(crate::localization::Locale::ZhHans);
 
+        picker.handle_key(key(KeyCode::Char('2')));
         picker.handle_key(key(KeyCode::Enter));
         let choices = render_text(&picker, 100, 20);
         let compact = choices
@@ -8332,19 +8469,26 @@ mod tests {
         );
 
         // Plain Enter begins ordinary setup; it must not read the external
-        // file, mint a grant, or emit the consent-confirmed event.
+        // file, mint a grant, or emit the consent-confirmed event. #5778 puts
+        // openai-codex behind the ChatGPT auth choice first; entering that
+        // stage stays inside the no-I/O boundary.
         assert!(matches!(
             picker.handle_key(key(KeyCode::Enter)),
             ViewAction::None
         ));
-        assert_eq!(picker.stage, Stage::KeyEntry);
+        assert_eq!(picker.stage, Stage::ChatgptAuthChoice);
         assert_eq!(
             crate::external_credentials::complete_side_effect_trap_counts(),
             (0, 0, 0, 0, 0),
             "ordinary selection must not touch external credential state"
         );
 
-        // The explicit reuse flow: choice stage still hides the path…
+        // The explicit reuse flow: choose "Import from Codex CLI", then Enter;
+        // the choice stage still hides the path and performs no I/O.
+        assert!(matches!(
+            picker.handle_key(key(KeyCode::Char('2'))),
+            ViewAction::None
+        ));
         assert!(matches!(
             picker.handle_key(key(KeyCode::Enter)),
             ViewAction::None
