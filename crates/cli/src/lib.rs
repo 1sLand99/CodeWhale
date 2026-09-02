@@ -5170,7 +5170,6 @@ fn apply_tui_env(cli: &Cli, resolved_runtime: &ResolvedRuntimeOptions, passthrou
     if cli.yolo {
         unsafe {
             std::env::set_var("CODEWHALE_YOLO", "true");
-            std::env::set_var("DEEPSEEK_YOLO", "true");
         }
     }
     if let Some(api_key) = cli.api_key.as_ref() {
@@ -5516,6 +5515,32 @@ mod tests {
             );
             assert!(std::env::var(codewhale_config::LEGACY_CLI_API_KEY_SOURCE_ENV).is_err());
         }
+    }
+
+    #[test]
+    fn yolo_flag_writes_only_the_codewhale_env_var() {
+        let _lock = env_lock();
+        let _guards = [
+            ScopedEnvVar::remove("CODEWHALE_TELEMETRY"),
+            ScopedEnvVar::remove("DEEPSEEK_TELEMETRY"),
+            ScopedEnvVar::remove(codewhale_config::TELEMETRY_FLOOR_ENV),
+            ScopedEnvVar::remove("CODEWHALE_YOLO"),
+            ScopedEnvVar::remove("DEEPSEEK_YOLO"),
+        ];
+
+        let cli = parse_ok(&["codewhale", "--yolo"]);
+        let runtime = resolved_runtime_for_test(ProviderKind::NvidiaNim, ProviderSource::Cli);
+        apply_tui_env(&cli, &runtime, &[]);
+
+        assert_eq!(
+            std::env::var("CODEWHALE_YOLO").as_deref(),
+            Ok("true"),
+            "--yolo must still enable the posture via CODEWHALE_YOLO"
+        );
+        assert!(
+            std::env::var("DEEPSEEK_YOLO").is_err(),
+            "--yolo must not write the retired DEEPSEEK_YOLO alias (#5443)"
+        );
     }
 
     #[test]

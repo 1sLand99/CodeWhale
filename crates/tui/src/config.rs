@@ -9281,6 +9281,9 @@ fn apply_env_overrides_unlocked(config: &mut Config, policy: ConfigEnvironmentPo
             .map(str::to_string)
             .collect();
     }
+    // `DEEPSEEK_YOLO` is a read-only deprecated alias of `CODEWHALE_YOLO`
+    // (removable in 0.10 per issue #5443); `CODEWHALE_YOLO` wins when both
+    // are set.
     if let Ok(value) = std::env::var("CODEWHALE_YOLO").or_else(|_| std::env::var("DEEPSEEK_YOLO")) {
         config.yolo = Some(value == "1" || value.eq_ignore_ascii_case("true"));
     }

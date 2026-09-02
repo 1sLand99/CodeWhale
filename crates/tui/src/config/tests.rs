@@ -1431,6 +1431,52 @@ fn apply_env_overrides_sets_search_api_key() {
 }
 
 #[test]
+fn apply_env_overrides_yolo_prefers_codewhale_and_keeps_deepseek_alias() {
+    let _guard = lock_test_env();
+    let codewhale_prev = env::var_os("CODEWHALE_YOLO");
+    let deepseek_prev = env::var_os("DEEPSEEK_YOLO");
+    let mut config = Config::default();
+
+    // Only the canonical name is set.
+    unsafe {
+        env::set_var("CODEWHALE_YOLO", "true");
+        env::remove_var("DEEPSEEK_YOLO");
+    }
+    apply_env_overrides(&mut config, ConfigEnvironmentPolicy::Runtime);
+    assert_eq!(
+        config.yolo,
+        Some(true),
+        "CODEWHALE_YOLO=true must enable the yolo posture"
+    );
+
+    // Only the deprecated alias is set: it must keep working through 0.9.x.
+    unsafe {
+        env::remove_var("CODEWHALE_YOLO");
+        env::set_var("DEEPSEEK_YOLO", "true");
+    }
+    apply_env_overrides(&mut config, ConfigEnvironmentPolicy::Runtime);
+    assert_eq!(
+        config.yolo,
+        Some(true),
+        "DEEPSEEK_YOLO remains a read-only deprecated alias until 0.10 (#5443)"
+    );
+
+    // Both set: the canonical name wins.
+    unsafe { env::set_var("CODEWHALE_YOLO", "false") };
+    apply_env_overrides(&mut config, ConfigEnvironmentPolicy::Runtime);
+    assert_eq!(
+        config.yolo,
+        Some(false),
+        "CODEWHALE_YOLO must win over the deprecated DEEPSEEK_YOLO alias"
+    );
+
+    unsafe {
+        EnvGuard::restore_var("CODEWHALE_YOLO", codewhale_prev);
+        EnvGuard::restore_var("DEEPSEEK_YOLO", deepseek_prev);
+    }
+}
+
+#[test]
 fn structural_config_load_keeps_safe_environment_overrides_but_omits_secret_values() {
     let _guard = lock_test_env();
     let temp = tempfile::tempdir().expect("tempdir");

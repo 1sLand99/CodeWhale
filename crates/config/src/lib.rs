@@ -7048,13 +7048,17 @@ impl EnvRuntimeOverrides {
             sandbox_mode: std::env::var("CODEWHALE_SANDBOX_MODE")
                 .or_else(|_| std::env::var("DEEPSEEK_SANDBOX_MODE"))
                 .ok(),
+            // `DEEPSEEK_YOLO` is a read-only deprecated alias of
+            // `CODEWHALE_YOLO` so existing scripts keep working; when both are
+            // set `CODEWHALE_YOLO` wins. The alias is removed in 0.10 per
+            // issue #5443 — do not write it anywhere.
             yolo: std::env::var("CODEWHALE_YOLO")
                 .or_else(|_| std::env::var("DEEPSEEK_YOLO"))
                 .ok()
                 .and_then(|v| match parse_bool(&v) {
                     Ok(b) => Some(b),
                     Err(_) => {
-                        tracing::warn!("Invalid CODEWHALE_YOLO/DEEPSEEK_YOLO value '{v}', expected true/false");
+                        tracing::warn!("Invalid CODEWHALE_YOLO value '{v}', expected true/false");
                         None
                     }
                 }),

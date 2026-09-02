@@ -2020,6 +2020,53 @@ fn http_headers_env_overrides_config() {
 }
 
 #[test]
+fn yolo_env_var_prefers_codewhale_and_keeps_deepseek_alias() {
+    let _lock = env_lock();
+    let _env = EnvGuard::without_deepseek_runtime_overrides();
+    let codewhale_prev = env::var_os("CODEWHALE_YOLO");
+    let deepseek_prev = env::var_os("DEEPSEEK_YOLO");
+    let config = ConfigToml::default();
+
+    // Only the canonical name is set.
+    unsafe {
+        env::set_var("CODEWHALE_YOLO", "true");
+        env::remove_var("DEEPSEEK_YOLO");
+    }
+    let resolved = config.resolve_runtime_options(&CliRuntimeOverrides::default());
+    assert_eq!(
+        resolved.yolo,
+        Some(true),
+        "CODEWHALE_YOLO=true must enable the yolo posture"
+    );
+
+    // Only the deprecated alias is set: it must keep working through 0.9.x.
+    unsafe {
+        env::remove_var("CODEWHALE_YOLO");
+        env::set_var("DEEPSEEK_YOLO", "true");
+    }
+    let resolved = config.resolve_runtime_options(&CliRuntimeOverrides::default());
+    assert_eq!(
+        resolved.yolo,
+        Some(true),
+        "DEEPSEEK_YOLO remains a read-only deprecated alias until 0.10 (#5443)"
+    );
+
+    // Both set: the canonical name wins.
+    unsafe { env::set_var("CODEWHALE_YOLO", "false") };
+    let resolved = config.resolve_runtime_options(&CliRuntimeOverrides::default());
+    assert_eq!(
+        resolved.yolo,
+        Some(false),
+        "CODEWHALE_YOLO must win over the deprecated DEEPSEEK_YOLO alias"
+    );
+
+    unsafe {
+        EnvGuard::restore_var("CODEWHALE_YOLO", codewhale_prev);
+        EnvGuard::restore_var("DEEPSEEK_YOLO", deepseek_prev);
+    }
+}
+
+#[test]
 fn nvidia_nim_provider_defaults_to_catalog_endpoint_and_model() {
     let _lock = env_lock();
     let _env = EnvGuard::without_deepseek_runtime_overrides();
