@@ -66,7 +66,7 @@ pub(crate) use status::StatusToastKind;
 pub use status::{StatusToast, StatusToastLevel};
 pub use types::{
     AppAction, AppMode, AppModeUi, AutomationAction, ComposerDensity, ComposerSubmitAction,
-    ComposerSubmitChord, InitialInput, McpUiAction, QueuedMessage, ReasoningEffort,
+    ComposerSubmitChord, InitialInput, McpUiAction, QueuedMessage, ReasoningEffort, ScreenMode,
     SettingSelection, ShellJobAction, SubmitDisposition, TaskPanelEntry, TaskPanelEntryKind,
     ToolCollapseMode, ToolDetailRecord, TranscriptSpacing, TuiOptions, VimMode,
 };
@@ -1496,14 +1496,23 @@ pub struct App {
     /// the `/memory` slash command, and tool registration for
     /// `remember`.
     pub use_memory: bool,
-    pub use_alt_screen: bool,
+    /// Screen the TUI is painting on right now. `/fullscreen` and `/inline`
+    /// move it at runtime; `use_alt_screen()` is derived from it so no second
+    /// flag can drift out of step with the live terminal.
+    pub screen_mode: ScreenMode,
+    /// Mouse capture as programmed on the live terminal. Re-derived from
+    /// `mouse_capture_preference` and `screen_mode` on every screen switch.
     pub use_mouse_capture: bool,
+    /// See [`TuiOptions::mouse_capture_preference`].
+    pub mouse_capture_preference: bool,
     /// When true, plain Up/Down on an empty composer scroll the transcript
     /// instead of navigating input history.  Defaults to `true` when mouse
     /// capture is off: terminals that convert mouse-wheel events to arrow-key
     /// sequences (e.g. Windows CMD without `WT_SESSION`) get page-scrolling
     /// without any explicit config (#1443).
     pub composer_arrows_scroll: bool,
+    /// Whether `composer_arrows_scroll` came from explicit configuration.
+    pub composer_arrows_scroll_explicit: bool,
     /// Data-side cap for the `@`-mention popup. The renderer still limits the
     /// visible rows to available terminal height.
     pub mention_menu_limit: usize,
@@ -2276,7 +2285,7 @@ impl std::ops::DerefMut for App {
 
 // === App State ===
 
-fn default_composer_arrows_scroll(use_mouse_capture: bool) -> bool {
+pub(crate) fn default_composer_arrows_scroll(use_mouse_capture: bool) -> bool {
     default_composer_arrows_scroll_for_platform(use_mouse_capture, cfg!(windows))
 }
 
@@ -2330,6 +2339,16 @@ impl App {
             return Focus::Panel;
         }
         Focus::Composer
+    }
+
+    /// Whether the live terminal is on the alternate screen buffer.
+    ///
+    /// Derived from [`App::screen_mode`] rather than stored, so every
+    /// pause/resume/teardown site reads the mode the terminal is actually in
+    /// after a `/fullscreen` or `/inline` switch.
+    #[must_use]
+    pub const fn use_alt_screen(&self) -> bool {
+        self.screen_mode.uses_alt_screen()
     }
 
     /// Persist the pending session route as the explicit choice (`/pod save`,
