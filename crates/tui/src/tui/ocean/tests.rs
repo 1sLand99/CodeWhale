@@ -202,7 +202,7 @@ fn terminal_native_themes_keep_reset_shells_while_underwater_paints_the_column()
             buf[(x, y)].set_bg(theme.surface_bg);
         }
     }
-    let column = OceanColumn::new(ramp, area, 0, None, ShellPhase::Idle, false, 0);
+    let column = OceanColumn::new(ramp, area, 0, None, ShellPhase::Idle, false, 0, 0);
     column.paint_matching(area, &mut buf, theme.surface_bg);
     assert_ne!(buf[(0, 0)].bg, Color::Reset);
     assert_ne!(buf[(0, area.height - 1)].bg, Color::Reset);
@@ -259,17 +259,28 @@ fn attention_phases_tint_the_water_even_when_life_has_settled() {
     // presence 0 + animated false is the fully settled, reduced-motion case —
     // exactly where the old treatment went neutral and a blocked session was
     // indistinguishable from an idle one across the room.
-    let waiting = OceanColumn::new(ramp, viewport, 0, None, ShellPhase::Approval, false, 0);
-    let failed = OceanColumn::new(ramp, viewport, 0, None, ShellPhase::Failed, false, 0);
-    let idle = OceanColumn::new(ramp, viewport, 0, None, ShellPhase::Idle, false, 0);
+    let waiting = OceanColumn::new(ramp, viewport, 0, None, ShellPhase::Approval, false, 0, 0);
+    let failed = OceanColumn::new(ramp, viewport, 0, None, ShellPhase::Failed, false, 0, 0);
+    let idle = OceanColumn::new(ramp, viewport, 0, None, ShellPhase::Idle, false, 0, 0);
 
     assert_ne!(waiting.color_at_y(0), idle.color_at_y(0));
     assert_ne!(failed.color_at_y(0), idle.color_at_y(0));
     assert_ne!(waiting.color_at_y(0), failed.color_at_y(0));
 
     // The tint is steady across time and motion settings alike.
-    let later = OceanColumn::new(ramp, viewport, 700, None, ShellPhase::Approval, true, 0);
+    let later = OceanColumn::new(ramp, viewport, 700, None, ShellPhase::Approval, true, 0, 0);
     assert_eq!(waiting.color_at_y(0), later.color_at_y(0));
+}
+
+/// A full context window reads as the trench: row 0 at 100% matches the
+/// bottom row at 0%, so the abyss visibly rises as context fills.
+#[test]
+fn context_fill_drags_the_water_column_toward_the_deep() {
+    let ramp = OceanRamp::for_theme(&crate::palette::UNDERWATER_UI_THEME).expect("underwater ramp");
+    let surface_row = ramp.color_at_context(0, 24, 0);
+    let abyss_row = ramp.color_at_context(0, 24, 100);
+    assert_ne!(surface_row, abyss_row);
+    assert_eq!(abyss_row, ramp.color_at_context(23, 24, 0));
 }
 
 #[test]
@@ -369,6 +380,7 @@ fn cache_fingerprint_changes_when_only_ramp_colors_change() {
         ShellPhase::Working,
         true,
         1000,
+        0,
     );
     let second = OceanColumn::new(
         second_ramp,
@@ -378,6 +390,7 @@ fn cache_fingerprint_changes_when_only_ramp_colors_change() {
         ShellPhase::Working,
         true,
         1000,
+        0,
     );
 
     assert_ne!(first.color_at_y(viewport.y), second.color_at_y(viewport.y));
@@ -407,6 +420,7 @@ fn each_ramp_color_participates_in_the_typed_cache_identity() {
         ShellPhase::Working,
         true,
         1000,
+        0,
     );
     let alternatives = [
         OceanRamp {
@@ -444,6 +458,7 @@ fn each_ramp_color_participates_in_the_typed_cache_identity() {
             ShellPhase::Working,
             true,
             1000,
+            0,
         );
         assert_ne!(
             baseline.ramp_cache_identity(),
@@ -465,6 +480,7 @@ fn identical_semantic_cache_inputs_have_identical_identity() {
         ShellPhase::Working,
         true,
         1000,
+        0,
     );
     let second = OceanColumn::new(
         ramp,
@@ -474,6 +490,7 @@ fn identical_semantic_cache_inputs_have_identical_identity() {
         ShellPhase::Working,
         true,
         1000,
+        0,
     );
 
     assert_eq!(first.ramp_cache_identity(), second.ramp_cache_identity());
@@ -500,7 +517,7 @@ fn split_shell_surfaces_share_one_absolute_row_column() {
     }
     buf[(4, 10)].set_bg(theme.selection_bg);
 
-    let column = OceanColumn::new(ramp, viewport, 0, None, ShellPhase::Idle, false, 0);
+    let column = OceanColumn::new(ramp, viewport, 0, None, ShellPhase::Idle, false, 0, 0);
     column.paint_matching(header, &mut buf, theme.header_bg);
     column.paint_matching(composer, &mut buf, theme.composer_bg);
 
@@ -527,7 +544,7 @@ fn full_viewport_water_column_reaches_both_terminal_edges() {
     }
     buf[(60, 16)].set_bg(theme.selection_bg);
 
-    let column = OceanColumn::new(ramp, viewport, 0, None, ShellPhase::Idle, false, 0);
+    let column = OceanColumn::new(ramp, viewport, 0, None, ShellPhase::Idle, false, 0, 0);
     column.paint_matching(viewport, &mut buf, theme.surface_bg);
 
     for y in viewport.top()..viewport.bottom() {

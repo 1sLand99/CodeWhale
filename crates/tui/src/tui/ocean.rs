@@ -238,17 +238,6 @@ impl OceanColumn {
     }
 
     #[must_use]
-    pub fn context_percent(self) -> u8 {
-        self.context_percent
-    }
-
-    #[must_use]
-    pub fn with_context_percent(mut self, percent: u8) -> Self {
-        self.context_percent = percent.min(100);
-        self
-    }
-
-    #[must_use]
     pub fn color_at_y(self, y: u16) -> Color {
         let row = y.saturating_sub(self.top).min(self.height - 1);
         if let Some(elapsed) = self.completion_elapsed_ms {
@@ -459,11 +448,6 @@ impl OceanRamp {
     }
 
     /// Water tint for the states that need to read from across the room.
-    #[must_use]
-    pub fn color_at_attention(self, row: u16, height: u16, phase: ShellPhase) -> Color {
-        self.color_at_attention_context(row, height, phase, 0)
-    }
-
     #[must_use]
     pub fn color_at_attention_context(
         self,
