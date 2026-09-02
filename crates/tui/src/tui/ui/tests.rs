@@ -5886,28 +5886,6 @@ fn full_access_auto_approves_requests_while_auto_review_holds_without_a_modal() 
     );
 
     app.approval_mode = ApprovalMode::Suggest;
-    app.mode = AppMode::Yolo;
-    assert_eq!(
-        resolve_ui_approval_disposition(
-            &app,
-            "exec_shell",
-            "shell:exec_shell:cargo test",
-            "key",
-            false,
-        ),
-        ApprovalRequestDisposition::AutoApprove
-    );
-    assert_eq!(
-        resolve_ui_approval_disposition(
-            &app,
-            "exec_shell",
-            "shell:exec_shell:cargo test",
-            "key",
-            true,
-        ),
-        ApprovalRequestDisposition::AutoDenyFullAccessPolicyHold
-    );
-
     app.mode = AppMode::Agent;
     app.approval_session_approved
         .insert("shell:exec_shell:cargo test".to_string());
@@ -5935,7 +5913,7 @@ fn full_access_auto_approves_requests_while_auto_review_holds_without_a_modal() 
 }
 
 #[test]
-fn app_auto_approval_helper_covers_yolo_and_bypass_only() {
+fn app_auto_approval_helper_covers_bypass_only() {
     let mut app = create_test_app();
     app.mode = AppMode::Agent;
     app.approval_mode = ApprovalMode::Suggest;
@@ -5945,10 +5923,6 @@ fn app_auto_approval_helper_covers_yolo_and_bypass_only() {
     assert!(!app_auto_approve_enabled(&app));
 
     app.approval_mode = ApprovalMode::Bypass;
-    assert!(app_auto_approve_enabled(&app));
-
-    app.approval_mode = ApprovalMode::Suggest;
-    app.mode = AppMode::Yolo;
     assert!(app_auto_approve_enabled(&app));
 }
 
@@ -5969,10 +5943,9 @@ fn auto_review_suppresses_stale_question_prompts_while_other_postures_allow_them
         );
     }
 
-    // Compatibility shape: legacy Yolo hosts can carry a stale Auto enum,
-    // but their effective posture is Full Access, where questions are valid.
-    app.mode = AppMode::Yolo;
-    app.approval_mode = ApprovalMode::Auto;
+    // Full Access keeps questions valid, same as Auto-Review suppresses
+    // them only for its own stale-prompt cleanup.
+    app.approval_mode = ApprovalMode::Bypass;
     assert!(!should_suppress_user_input_prompt(&app));
 }
 
@@ -7768,13 +7741,7 @@ async fn mode_change_update_notifies_engine() {
     let mut engine = crate::core::engine::mock_engine_handle();
 
     assert!(
-        apply_mode_update(
-            &mut app,
-            &engine.handle,
-            &crate::config::Config::default(),
-            crate::tui::app::AppMode::Yolo
-        )
-        .await
+        apply_yolo_compat_update(&mut app, &engine.handle, &crate::config::Config::default()).await
     );
 
     match engine.rx_op.recv().await.expect("change mode op") {
@@ -14117,7 +14084,6 @@ fn test_esc_priority_order_matches_cancel_stack() {
     let mut app = create_test_app();
     app.is_loading = true;
     app.input = "draft".to_string();
-    app.mode = AppMode::Yolo;
     assert_eq!(next_escape_action(&app, false), EscapeAction::CancelRequest);
 
     app.input.clear();

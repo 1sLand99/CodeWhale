@@ -684,15 +684,10 @@ pub fn home_dashboard(app: &mut App) -> CommandResult {
     let _ = writeln!(stats, "\n{}", tr(locale, MessageId::HomeModeTips));
     let _ = writeln!(stats, "--------------------------------------------");
     match app.mode {
-        AppMode::Agent | AppMode::Auto => {
+        AppMode::Agent => {
             let _ = writeln!(stats, "{}", tr(locale, MessageId::HomeAgentModeTip));
             let _ = writeln!(stats, "{}", tr(locale, MessageId::HomeAgentModeReviewTip));
             let _ = writeln!(stats, "{}", tr(locale, MessageId::HomeAgentModeYoloTip));
-        }
-        AppMode::Yolo => {
-            // Compatibility residual: YOLO is invisible Act + Full Access.
-            let _ = writeln!(stats, "{}", tr(locale, MessageId::HomeYoloModeTip));
-            let _ = writeln!(stats, "{}", tr(locale, MessageId::HomeYoloModeCaution));
         }
         AppMode::Operate => {
             let _ = writeln!(stats, "{}", tr(locale, MessageId::HomeOperateModeTip));
@@ -1727,13 +1722,7 @@ mod tests {
 
     #[test]
     fn test_home_dashboard_mode_tips_for_each_mode() {
-        let modes = [
-            AppMode::Agent,
-            AppMode::Auto,
-            AppMode::Yolo,
-            AppMode::Plan,
-            AppMode::Operate,
-        ];
+        let modes = [AppMode::Agent, AppMode::Plan, AppMode::Operate];
         for mode in modes {
             let mut app = create_test_app();
             app.mode = mode;

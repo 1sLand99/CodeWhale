@@ -11063,8 +11063,9 @@ fn parse_mode_opt_resolves_explicit_tokens_and_aliases() {
     assert_eq!(parse_mode_opt("auto"), Some(AppMode::Agent));
     assert_eq!(parse_mode_opt("operate"), Some(AppMode::Operate));
     assert_eq!(parse_mode_opt("3"), Some(AppMode::Operate));
-    assert_eq!(parse_mode_opt("yolo"), Some(AppMode::Yolo));
-    assert_eq!(parse_mode_opt("4"), Some(AppMode::Yolo));
+    // Legacy YOLO spellings resolve to Act; the posture travels separately.
+    assert_eq!(parse_mode_opt("yolo"), Some(AppMode::Agent));
+    assert_eq!(parse_mode_opt("4"), Some(AppMode::Agent));
     assert_eq!(parse_mode_opt(" PLAN "), Some(AppMode::Plan));
 }
 
@@ -11088,7 +11089,7 @@ fn parse_mode_wrapper_defaults_and_resolves_numeric_aliases() {
     assert_eq!(parse_mode("1"), AppMode::Agent);
     assert_eq!(parse_mode("2"), AppMode::Plan);
     assert_eq!(parse_mode("3"), AppMode::Operate);
-    assert_eq!(parse_mode("4"), AppMode::Yolo);
+    assert_eq!(parse_mode("4"), AppMode::Agent);
 }
 
 fn rebind_event(event: &str, agent_id: &str, seq: u64) -> RuntimeEventRecord {

@@ -289,7 +289,7 @@ impl Engine {
             &hypothetical_content,
             inputs.allow_shell,
             inputs.trust_mode,
-            inputs.mode == AppMode::Yolo || inputs.auto_approve,
+            inputs.auto_approve,
             inputs.approval_mode,
         );
         let prompt_context = NextTurnPromptContext {
@@ -647,7 +647,7 @@ impl Engine {
             "",
             inputs.allow_shell,
             inputs.trust_mode,
-            inputs.mode == AppMode::Yolo || inputs.auto_approve,
+            inputs.auto_approve,
             inputs.approval_mode,
         );
         SessionFacts {

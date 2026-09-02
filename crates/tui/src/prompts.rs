@@ -1691,9 +1691,10 @@ mod tests {
     }
 
     #[test]
-    fn yolo_mode_uses_the_shared_completion_contract() {
-        // `codewhale exec --auto` runs AppMode::Yolo; the verify-then-stop
-        // contract must survive composition into the prompt that mode ships.
+    fn full_access_posture_uses_the_shared_completion_contract() {
+        // `codewhale exec --auto` runs Act with the Full Access posture; the
+        // verify-then-stop contract must survive composition into the prompt
+        // that posture ships.
         let tmp = tempdir().expect("tempdir");
         let text = system_prompt_flat_text(
             &system_prompt_for_mode_with_context_skills_session_and_approval(
@@ -1712,7 +1713,7 @@ mod tests {
                     verbosity: None,
                     skills_scan_codewhale_only: false,
                     plugin_registry: None,
-                    mode: crate::tui::app::AppMode::Yolo,
+                    mode: crate::tui::app::AppMode::Agent,
                 },
             ),
         );

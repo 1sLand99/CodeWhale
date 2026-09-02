@@ -4521,17 +4521,10 @@ impl Engine {
         // which is not necessarily the installed one under auto routing.
         let capability = route.capability_profile();
         let always_load = self.config.tools_always_load.clone();
-        let bypass = input_policy.auto_approve
-            || input_policy.approval_mode == crate::tui::approval::ApprovalMode::Bypass;
-        let catalog_mode = if bypass {
-            AppMode::Yolo
-        } else {
-            input_policy.mode
-        };
         let mut catalog = build_model_tool_catalog_with_surface(
             tool_registry.to_api_tools_with_cache(true),
             mcp_tools,
-            catalog_mode,
+            input_policy.mode,
             &always_load,
             capability.tool_surface_budget,
         );
@@ -4747,7 +4740,7 @@ impl Engine {
             &content,
             allow_shell,
             trust_mode,
-            mode == AppMode::Yolo || auto_approve,
+            auto_approve,
             approval_mode,
         );
         let prompt_context = NextTurnPromptContext::for_planned_turn(
@@ -5847,7 +5840,7 @@ impl Engine {
             mode,
             self.session.allow_shell,
             self.session.trust_mode,
-            mode == AppMode::Yolo || auto_approve,
+            auto_approve,
             self.session.approval_mode,
         );
         let route = TurnRouteContext {

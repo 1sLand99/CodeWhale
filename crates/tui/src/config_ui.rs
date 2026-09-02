@@ -1401,7 +1401,7 @@ impl From<&str> for DefaultModeValue {
             other => match AppMode::from_setting(other) {
                 AppMode::Plan => Self::Plan,
                 AppMode::Operate => Self::Operate,
-                AppMode::Agent | AppMode::Yolo | AppMode::Auto => Self::Agent,
+                AppMode::Agent => Self::Agent,
             },
         }
     }

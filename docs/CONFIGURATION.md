@@ -945,35 +945,6 @@ Select a profile with:
 
 If a profile is selected but missing, codewhale exits with an error listing available profiles.
 
-## Harness Profiles
-
-v0.9 adds a config data model for model-specific harness posture. This is a
-preview schema: it can be parsed and tested, but runtime provider/model
-selection and prompt/tool behavior are wired in later v0.9 slices.
-When no configured profile matches, the resolver falls back to built-in seed
-profiles for the model families listed in the cutline doc. Configured profiles
-always take precedence over those seeds.
-
-```toml
-[[harness_profiles]]
-provider_route = "deepseek"
-model_pattern = "deepseek-v4.*"
-
-[harness_profiles.posture]
-kind = "cache-heavy"          # standard | cache-heavy | lean | custom
-max_subagents = 10            # 0 means runtime default
-prefer_codebase_search = false
-compaction_strategy = "prefix-cache" # default | prefix-cache | aggressive
-tool_surface = "full"              # full | read-only | auto
-safety_posture = "standard"        # standard | strict | permissive
-```
-
-Unknown posture names or unknown keys inside a harness profile fail config
-deserialization instead of silently becoming `custom`. That is intentional:
-once runtime wiring consumes these profiles, a typo should be visible.
-The v0.9 implementation order and automatic-creator boundary are documented in
-[`HARNESS_PROFILE_CUTLINE.md`](rfcs/HARNESS_PROFILE_CUTLINE.md).
-
 ## Environment Variables
 
 Most runtime environment variables override config values. API-key variables are
@@ -2169,10 +2140,6 @@ reasoning contract, and all four membership ids omit generic sampling fields.
 - `[verifier].enabled` (bool, default `false`): enables automatic
   claim-of-done verifier preview once that runtime trigger is active. The
   manual `run_verifiers` tool is still available when this is false.
-- `[verifier].verdict_policy` (string, default `"hunt"`): maps verifier
-  `pass` / `partial` / `fail` into the goal verdict vocabulary
-  `hunted` / `wounded` / `escaped`. `"hunt"` is the only shipped policy today;
-  unknown values are rejected so future policies can be added deliberately.
 - `mcp_config_path` (string, optional): defaults to `~/.codewhale/mcp.json`, with
   legacy `~/.deepseek/mcp.json` fallback when the Codewhale path is absent.
   Custom paths must be absolute; a relative value falls back to the user-global

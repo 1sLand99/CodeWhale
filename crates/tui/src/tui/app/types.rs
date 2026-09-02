@@ -63,7 +63,7 @@ impl AppModeUi for AppMode {
         tr(
             locale,
             match self {
-                AppMode::Agent | AppMode::Auto | AppMode::Yolo => MessageId::AppModeAgent,
+                AppMode::Agent => MessageId::AppModeAgent,
                 AppMode::Plan => MessageId::AppModePlan,
                 AppMode::Operate => MessageId::AppModeOperate,
             },
@@ -75,7 +75,7 @@ impl AppModeUi for AppMode {
         tr(
             locale,
             match self {
-                AppMode::Agent | AppMode::Auto | AppMode::Yolo => MessageId::AppModeAgentHint,
+                AppMode::Agent => MessageId::AppModeAgentHint,
                 AppMode::Plan => MessageId::AppModePlanHint,
                 AppMode::Operate => MessageId::AppModeOperateHint,
             },
