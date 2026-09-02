@@ -332,6 +332,34 @@ pub(crate) fn switch_screen_mode(
     outcome
 }
 
+/// Give an inline session a viewport the size of the terminal it is now in.
+///
+/// Stock ratatui keeps `Viewport::Inline(rows)` at the rows it was built with,
+/// so after the window grows a "full-height" inline viewport would stop at the
+/// old height and leave the new rows blank. Rebuild it over the same
+/// negotiated backend facts, sized to the event-reported `size` (the
+/// `terminal::size()` query can lag a resize — see the `#582` note in the
+/// event loop).
+///
+/// The cursor is parked on row 0 first. A full-height viewport is anchored
+/// there, and from row 0 the full height is exactly the room ratatui asks
+/// for, so it appends no lines and the host scrollback gains nothing. In
+/// inline mode the visible screen is the session's own frame, so nothing of
+/// the user's is painted over.
+pub(crate) fn refit_inline_viewport(terminal: &mut AppTerminal, size: Size) -> io::Result<()> {
+    let _ = terminal.backend_mut().flush();
+    let mut backend = terminal.backend().respawn(io::stdout());
+    backend.force_size(size);
+    backend.set_terminal_size(size);
+    ratatui::backend::Backend::set_cursor_position(
+        &mut backend,
+        ratatui::layout::Position::ORIGIN,
+    )?;
+    *terminal = build_app_terminal(backend, ScreenMode::Inline)?;
+    terminal.backend_mut().clear_forced_size();
+    Ok(())
+}
+
 /// The fallible half of [`switch_screen_mode`], with the terminal escapes and
 /// the rebuild injected so the rollback can be exercised against a fake
 /// backend.

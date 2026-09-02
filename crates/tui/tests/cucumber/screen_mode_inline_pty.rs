@@ -97,7 +97,39 @@ fn inline_start_never_takes_the_alternate_screen_and_screen_commands_switch_it()
     wait_for_alt_screen(&mut tui, false, "/inline");
     wait_or_panic(&mut tui, LIVE_SHELL_WORDMARK, SETTLE_WAIT, "inline repaint");
 
+    // Claim 3: the inline viewport follows the terminal size. Stock ratatui
+    // keeps an inline viewport at the rows it was built with, so without the
+    // refit a taller window would leave the new bottom rows blank.
+    tui.resize(ROWS + 8, COLS).expect("grow the terminal");
+    wait_for_bottom_rows_painted(&mut tui, "grow to 32 rows");
+    tui.resize(ROWS, COLS).expect("shrink the terminal back");
+    wait_for_bottom_rows_painted(&mut tui, "shrink back to 24 rows");
+    assert_ne!(
+        tui.terminal_modes().state(mode::ALT_SCREEN),
+        Some(true),
+        "resizing inline must not take the alternate screen\n{}",
+        tui.diagnostics()
+    );
+
     tui.shutdown();
+}
+
+/// The live shell paints its composer at the bottom of the viewport, so a
+/// viewport that fits the terminal has text within its last rows.
+fn wait_for_bottom_rows_painted(tui: &mut Harness, label: &str) {
+    let painted = tui.wait_for(
+        |frame| {
+            let rows = frame.rows();
+            (rows.saturating_sub(4)..rows).any(|y| !frame.row(y).trim().is_empty())
+        },
+        SETTLE_WAIT,
+    );
+    if painted.is_err() {
+        panic!(
+            "{label}: nothing painted in the bottom rows after resize\n{}",
+            tui.diagnostics()
+        );
+    }
 }
 
 /// Walk the real onboarding into deterministic offline-explore mode: no

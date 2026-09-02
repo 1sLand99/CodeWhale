@@ -4161,7 +4161,16 @@ pub(crate) async fn run_event_loop(
                 // unrecoverable black screen reported by @imakid.
                 // The `Event::Resize` payload itself carries the
                 // authoritative new size, so we forward it.
-                if let Err(err) = terminal.resize(Rect::new(0, 0, final_w, final_h)) {
+                //
+                // Inline mode cannot use `resize`: ratatui keeps an inline
+                // viewport at the rows it was built with, so the viewport is
+                // rebuilt at the new height instead.
+                let refit = if app.screen_mode == ScreenMode::Inline {
+                    refit_inline_viewport(terminal, Size::new(final_w, final_h))
+                } else {
+                    terminal.resize(Rect::new(0, 0, final_w, final_h))
+                };
+                if let Err(err) = refit {
                     tracing::warn!(
                         ?err,
                         final_w,
