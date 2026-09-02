@@ -78,15 +78,15 @@ pub(crate) fn info_segments(app: &App, width: u16) -> Vec<InfoSegment> {
 
     // Branch, when git knows one. Unknown stays absent: the header must not
     // invent a ref to fill the slot (`git_status::chrome_label`'s own rule).
-    if git_matches_workspace {
-        if let Some(branch) = git.branch.as_deref() {
-            segments.push(InfoSegment::new(
-                InfoSegmentId::Branch,
-                "⑂",
-                crate::localization::truncate_to_width(branch, folder_budget),
-                ChromeInk::Metadata,
-            ));
-        }
+    if git_matches_workspace
+        && let Some(branch) = git.branch.as_deref()
+    {
+        segments.push(InfoSegment::new(
+            InfoSegmentId::Branch,
+            "⑂",
+            crate::localization::truncate_to_width(branch, folder_budget),
+            ChromeInk::Metadata,
+        ));
     }
 
     // Run/breadcrumb while a workflow run is active — the collapsed
