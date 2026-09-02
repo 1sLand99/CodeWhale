@@ -3413,6 +3413,21 @@ fn config_choice_values(key: &str) -> Option<Vec<String>> {
             );
             return Some(values);
         }
+        "reasoning_effort" => {
+            // Settings-canonical vocabulary; the live settings screen uses
+            // `reasoning_effort_choices()` which narrows this by route/provider.
+            return Some(vec![
+                "default".to_string(),
+                "off".to_string(),
+                "low".to_string(),
+                "medium".to_string(),
+                "high".to_string(),
+                "xhigh".to_string(),
+                "auto".to_string(),
+                "ultra".to_string(),
+                "max".to_string(),
+            ]);
+        }
         _ => {}
     }
     codewhale_config::setting(key)
@@ -3427,7 +3442,13 @@ fn canonical_config_choice(key: &str, value: &str) -> String {
             "true" | "on" | "yes" | "1" | "enabled" => "true".to_string(),
             _ => "false".to_string(),
         },
-        "approval_mode" | "permission_posture" | "approval_policy" => match normalized.as_str() {
+        "approval_mode" | "permission_posture" => match normalized.as_str() {
+            "ask" | "suggest" | "on-request" | "untrusted" => "ask".to_string(),
+            "auto" | "auto-review" => "auto-review".to_string(),
+            "full" | "full-access" | "bypass" | "yolo" => "full-access".to_string(),
+            _ => normalized,
+        },
+        "approval_policy" => match normalized.as_str() {
             "ask" | "suggest" | "on-request" | "untrusted" => "ask".to_string(),
             "auto" | "auto-review" => "auto-review".to_string(),
             "full" | "full-access" | "bypass" | "yolo" => "full-access".to_string(),
@@ -3464,6 +3485,11 @@ fn canonical_config_choice(key: &str, value: &str) -> String {
 /// The schema declares per-value labels; a boolean with none uses the shared
 /// on/off pair, and any other undeclared value shows itself.
 fn config_choice_label(locale: Locale, key: &str, value: &str) -> String {
+    // The runtime "default" choice for reasoning_effort is the unset sentinel;
+    // keep its localized placeholder label instead of showing the raw word.
+    if key == "reasoning_effort" && value == "default" {
+        return tr(locale, MessageId::ConfigDefaultReasoning).into_owned();
+    }
     let declared = codewhale_config::setting(key);
     let message = declared
         .and_then(|def| def.option(value))
@@ -6052,7 +6078,7 @@ mod tests {
         truncate_view_text,
     };
     use crate::config::Config;
-    use crate::localization::{Locale, MessageId, tr};
+    use crate::localization::{Locale, MessageId, tr, tr_key};
     use crate::palette;
     use crate::settings::Settings;
     use crate::tools::subagent::{FleetRole, SubAgentAssignment, SubAgentResult, SubAgentStatus};
@@ -7807,6 +7833,17 @@ base_url = "https://api.xiaomimimo.com/v1"
         let built: std::collections::HashSet<&str> =
             view.rows.iter().map(|row| row.key.as_str()).collect();
 
+        // Every schema row must appear in the view; `ui: None` settings stay
+        // declared but off-screen, and anything the schema says is visible must
+        // have a row here.
+        for def in codewhale_config::schema_rows() {
+            assert!(
+                built.contains(def.key),
+                "{} is declared in schema_rows but has no ConfigRow",
+                def.key
+            );
+        }
+
         assert_eq!(
             codewhale_config::schema_tabs(),
             ConfigCategory::ALL
@@ -7895,16 +7932,25 @@ base_url = "https://api.xiaomimimo.com/v1"
         ];
 
         for def in codewhale_config::schema_rows() {
-            let samples: Vec<String> = match def.values() {
-                Some(values) => values.into_iter().map(str::to_string).collect(),
-                None if def.default.is_empty() => vec![],
-                None => vec![def.default.to_string()],
+            // At least one value per row that is not the default, so a row
+            // whose store silently drops writes cannot pass by looking like
+            // an untouched `Settings`: bools and enums try every value, an
+            // int tries the default plus one, free text tries a sentinel.
+            // `config_choice_values` also covers the two registry-backed
+            // strings (theme, locale), whose value set is the shipped list.
+            let samples: Vec<String> = match config_choice_values(def.key) {
+                Some(values) => values,
+                None if def.is_int() => {
+                    let default: i64 = def.default.parse().unwrap_or(0);
+                    vec![(default + 1).to_string()]
+                }
+                None => vec!["roundtrip-probe".to_string()],
             };
-            if samples.is_empty() {
-                // Free text with no declared default (a colour, a path): the
-                // value set is the user's, so there is nothing to round-trip.
-                continue;
-            }
+            assert!(
+                !samples.is_empty(),
+                "{} yields no sample to round-trip",
+                def.key
+            );
             let mut settings = Settings::default();
             let accepted = samples
                 .first()
@@ -7946,6 +7992,48 @@ base_url = "https://api.xiaomimimo.com/v1"
                 codewhale_config::setting(key).is_some(),
                 "`/set {key}` is accepted but undeclared in SETTINGS_SCHEMA"
             );
+        }
+    }
+
+    /// Every message key declared by the schema must resolve to a localized
+    /// string in every shipped locale. `tr_key` returns the key itself when a
+    /// pack is missing the entry, so this fails fast on a stale binding.
+    #[test]
+    fn settings_schema_message_keys_are_localized() {
+        let mut keys: Vec<&'static str> = Vec::new();
+        for def in codewhale_config::SETTINGS_SCHEMA {
+            if let Some(ui) = def.ui {
+                if !ui.label.is_empty() {
+                    keys.push(ui.label);
+                }
+                if !ui.description.is_empty() {
+                    keys.push(ui.description);
+                }
+            }
+            let options = match def.kind {
+                codewhale_config::SettingKind::Bool(options) => options,
+                codewhale_config::SettingKind::Enum(options) => options,
+                codewhale_config::SettingKind::Int | codewhale_config::SettingKind::String => &[],
+            };
+            for option in options {
+                if !option.label.is_empty() {
+                    keys.push(option.label);
+                }
+                if !option.description.is_empty() {
+                    keys.push(option.description);
+                }
+            }
+        }
+
+        for locale in Locale::shipped() {
+            for key in &keys {
+                let resolved = tr_key(locale, key);
+                assert_ne!(
+                    resolved.as_ref(),
+                    *key,
+                    "{key} is not localized for {locale:?}"
+                );
+            }
         }
     }
 

@@ -203,6 +203,7 @@ const APPROVAL_POLICY: &[SettingOption] = &[
         "ConfigChoiceFullAccess",
         "ConfigChoiceDetailFullAccess",
     ),
+    SettingOption::new("never", "ConfigChoiceNever", "ConfigChoiceDetailNever"),
 ];
 
 const DEFAULT_MODE: &[SettingOption] = &[
@@ -637,12 +638,15 @@ pub const SETTINGS_SCHEMA: &[SettingDef] = &[
             "ConfigHintComposerMultilineMode",
         ),
     ),
+    // Settable via `/set`, surfaced through the composer keymap rather than a
+    // settings row.
     def(
         "composer_vim_mode",
         SettingKind::Enum(VIM_MODE),
         "normal",
         None,
     ),
+    // Terminal protocol toggle; available through `/set` but not given a row.
     def("bracketed_paste", SettingKind::Bool(ON_OFF), "true", None),
     def(
         "paste_burst_detection",
@@ -655,6 +659,7 @@ pub const SETTINGS_SCHEMA: &[SettingDef] = &[
             "ConfigHintBooleanValues",
         ),
     ),
+    // Mention-completion tuning knobs; exposed via `/set`, not the settings row.
     def("mention_menu_limit", SettingKind::Int, "128", None),
     def(
         "mention_menu_behavior",
@@ -663,6 +668,7 @@ pub const SETTINGS_SCHEMA: &[SettingDef] = &[
         None,
     ),
     def("mention_walk_depth", SettingKind::Int, "10", None),
+    // Workspace discovery option for symlinked layouts; advanced, `/set`-only.
     def(
         "workspace_follow_symlinks",
         SettingKind::Bool(ON_OFF),
@@ -708,6 +714,7 @@ pub const SETTINGS_SCHEMA: &[SettingDef] = &[
         "tasks",
         ui(TAB_WORK, "sidebar", "", "ConfigHintRailPanel"),
     ),
+    // Sidebar panel toggles; driven by view actions and startup flags, not rows.
     def("context_panel", SettingKind::Bool(ON_OFF), "false", None),
     def("sessions_rail", SettingKind::Bool(ON_OFF), "false", None),
     def(
@@ -738,7 +745,7 @@ pub const SETTINGS_SCHEMA: &[SettingDef] = &[
             "ConfigHintAutoCompactThreshold",
         ),
     ),
-    // A receipt with no sentence of its own: the two rows above explain it.
+    // A computed receipt from auto_compact + threshold; no user-facing row.
     def("effective_auto_compact", SettingKind::String, "", None),
     def(
         "max_history",
@@ -1011,7 +1018,7 @@ pub const SETTINGS_SCHEMA: &[SettingDef] = &[
             "ConfigHintFastModel",
         ),
     ),
-    // A transport knob with no sentence: it stays settable, not browsable.
+    // A transport timeout; advanced networking, available through `/set` only.
     def("stream_chunk_timeout_secs", SettingKind::Int, "900", None),
     def(
         "default_model",
