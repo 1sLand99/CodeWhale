@@ -301,7 +301,7 @@ fn assert_startup_contract(frame: &Frame, rows: u16, cols: u16, size: &str) {
     // real chords, and the focused composer. The posture bar and metrics
     // line appear only once a session exists, so `context` is NOT asserted
     // here any more (SHELL-DESIGN-20260901 Round 5).
-    for needle in ["Codewhale", "❯"] {
+    for needle in ["codewhale", "❯"] {
         assert!(
             text.contains(needle),
             "{size}: startup misses {needle:?}\n{}",
@@ -340,7 +340,7 @@ fn assert_startup_contract(frame: &Frame, rows: u16, cols: u16, size: &str) {
 fn assert_live_shell_contract(frame: &Frame, cols: u16, size: &str) {
     let text = frame.text();
     assert!(
-        text.contains("ctx "),
+        text.contains("no git"),
         "{size}: live shell misses the info line\n{}",
         frame.debug_dump()
     );
