@@ -1780,4 +1780,56 @@ mod tests {
         let update = UpdateGoalTool::new(new_shared_goal_state());
         assert!(update.description().contains("requires user input"));
     }
+
+    #[test]
+    fn from_persisted_keeps_counters_that_sync_from_host_status_resets() {
+        // Rehydration treats the durable record as history: the counters
+        // survive, evidence starts empty, and only a terminal status carries
+        // a finish time.
+        let restored = GoalState::from_persisted(
+            "ship the goal loop",
+            Some(50_000),
+            GoalStatus::Active,
+            None,
+            1_234,
+            56,
+            3,
+        );
+        assert_eq!(restored.objective.as_deref(), Some("ship the goal loop"));
+        assert_eq!(restored.token_budget, Some(50_000));
+        assert_eq!(restored.status, Some(GoalStatus::Active));
+        assert_eq!(restored.tokens_used, 1_234);
+        assert_eq!(restored.time_used_seconds, 56);
+        assert_eq!(restored.continuation_count, 3);
+        assert!(restored.started_at.is_some());
+        assert!(restored.finished_at.is_none());
+        assert!(restored.evidence.is_none());
+        assert!(restored.blocker.is_none());
+        assert!(restored.advisories.is_empty());
+
+        let blocked = GoalState::from_persisted(
+            "ship the goal loop",
+            None,
+            GoalStatus::Blocked,
+            None,
+            0,
+            0,
+            0,
+        );
+        assert!(blocked.finished_at.is_some());
+
+        // The same objective through the host-status path keeps the counters
+        // (it is not a re-declaration)…
+        let mut state = restored;
+        state.sync_from_host_status(Some("ship the goal loop"), Some(50_000), GoalStatus::Active);
+        assert_eq!(state.tokens_used, 1_234);
+        assert_eq!(state.continuation_count, 3);
+
+        // …while a changed objective resets them — the contrast that makes
+        // `from_persisted` necessary for rehydration.
+        state.sync_from_host_status(Some("a different objective"), None, GoalStatus::Active);
+        assert_eq!(state.tokens_used, 0);
+        assert_eq!(state.time_used_seconds, 0);
+        assert_eq!(state.continuation_count, 0);
+    }
 }

@@ -6871,6 +6871,98 @@ async fn host_goal_loop_skips_rearm_without_update_goal_and_after_failed_pass() 
 }
 
 #[tokio::test]
+async fn host_goal_loop_mirrors_terminal_snapshot_and_does_not_rearm() -> Result<()> {
+    // A completed pass whose engine snapshot says `complete` (or `blocked`)
+    // is mirrored into the durable record and arms nothing more: a restarted
+    // host must not resume a goal the verifier already closed.
+    let manager = test_manager(test_runtime_dir())?;
+    for (goal_id, engine_status, expected) in [
+        (
+            "goal_complete",
+            "complete",
+            codewhale_protocol::ThreadGoalStatus::Complete,
+        ),
+        (
+            "goal_blocked",
+            "blocked",
+            codewhale_protocol::ThreadGoalStatus::Blocked,
+        ),
+    ] {
+        let thread = manager
+            .create_thread(CreateThreadRequest::default())
+            .await?;
+        manager
+            .store
+            .save_goal(&active_test_goal(&thread.id, goal_id))?;
+        let harness = install_mock_engine(&manager, &thread.id).await;
+        let mut rx_op = harness.rx_op;
+        let tx_event = harness.tx_event;
+        let passes = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0));
+        let counter = passes.clone();
+        let status = engine_status.to_string();
+        tokio::spawn(async move {
+            while let Some(op) = rx_op.recv().await {
+                if !matches!(op, Op::SendMessage { .. }) {
+                    continue;
+                }
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let snapshot = crate::tools::goal::GoalSnapshot {
+                    objective: Some("ship the goal loop".to_string()),
+                    status: status.clone(),
+                    continuation_count: 1,
+                    ..Default::default()
+                };
+                let _ = tx_event.send(EngineEvent::GoalUpdated { snapshot }).await;
+                let _ = tx_event
+                    .send(EngineEvent::TurnStarted {
+                        turn_id: format!("engine_{status}"),
+                        created_at: chrono::Utc::now(),
+                        route: None,
+                    })
+                    .await;
+                let _ = tx_event
+                    .send(EngineEvent::TurnComplete {
+                        usage: Usage {
+                            input_tokens: 7,
+                            output_tokens: 3,
+                            ..Usage::default()
+                        },
+                        status: TurnOutcomeStatus::Completed,
+                        error: None,
+                        tool_catalog: Some(vec![catalog_tool("update_goal")]),
+                        base_url: None,
+                    })
+                    .await;
+            }
+        });
+        manager.activate_thread_goal(&thread.id).await?;
+        let goal = wait_for_goal_status(
+            &manager,
+            &thread.id,
+            expected,
+            TURN_SETTLEMENT_DEADLOCK_TIMEOUT,
+        )
+        .await?;
+        // Usage and the engine's continuation counter landed on the record.
+        assert_eq!(goal.tokens_used, 10);
+        assert_eq!(goal.continuation_count, 1);
+        sleep(Duration::from_millis(400)).await;
+        assert_eq!(
+            passes.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "a terminal snapshot must not arm another pass ({engine_status})"
+        );
+        let turns = manager.store.list_turns_for_thread(&thread.id)?;
+        assert_eq!(
+            turns.len(),
+            1,
+            "exactly the kickoff turn ran ({engine_status})"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn get_thread_detail_batches_items_by_turn_without_losing_order() -> Result<()> {
     let manager = test_manager(test_runtime_dir())?;
     let thread = manager
