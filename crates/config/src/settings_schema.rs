@@ -976,6 +976,30 @@ pub const SETTINGS_SCHEMA: &[SettingDef] = &[
             "ConfigHintEffectiveContextWindow",
         ),
     ),
+    // Trust receipts: which external credential file a provider may read, and
+    // under what access. Read-only here; `/provider` owns changing them.
+    def(
+        "external_credentials.openai-codex",
+        SettingKind::String,
+        "",
+        ui(
+            TAB_ADVANCED,
+            "provider",
+            "",
+            "ConfigHintExternalCredentials",
+        ),
+    ),
+    def(
+        "external_credentials.xai",
+        SettingKind::String,
+        "",
+        ui(
+            TAB_ADVANCED,
+            "provider",
+            "",
+            "ConfigHintExternalCredentials",
+        ),
+    ),
     def(
         "fast_model",
         SettingKind::String,
@@ -1002,8 +1026,8 @@ pub const SETTINGS_SCHEMA: &[SettingDef] = &[
     ),
     def(
         "features.vision_model",
-        SettingKind::Bool(ON_OFF),
-        "false",
+        SettingKind::String,
+        "",
         ui(
             TAB_ADVANCED,
             "experimental",
@@ -1013,8 +1037,8 @@ pub const SETTINGS_SCHEMA: &[SettingDef] = &[
     ),
     def(
         "features.subagents",
-        SettingKind::Bool(ON_OFF),
-        "true",
+        SettingKind::String,
+        "",
         ui(
             TAB_ADVANCED,
             "experimental",
@@ -1024,8 +1048,8 @@ pub const SETTINGS_SCHEMA: &[SettingDef] = &[
     ),
     def(
         "features.web_search",
-        SettingKind::Bool(ON_OFF),
-        "true",
+        SettingKind::String,
+        "",
         ui(
             TAB_ADVANCED,
             "experimental",
@@ -1035,8 +1059,8 @@ pub const SETTINGS_SCHEMA: &[SettingDef] = &[
     ),
     def(
         "features.apply_patch",
-        SettingKind::Bool(ON_OFF),
-        "true",
+        SettingKind::String,
+        "",
         ui(
             TAB_ADVANCED,
             "experimental",
@@ -1046,14 +1070,14 @@ pub const SETTINGS_SCHEMA: &[SettingDef] = &[
     ),
     def(
         "features.mcp",
-        SettingKind::Bool(ON_OFF),
-        "true",
+        SettingKind::String,
+        "",
         ui(TAB_ADVANCED, "experimental", "", "ConfigHintFeatureMcp"),
     ),
     def(
         "features.exec_policy",
-        SettingKind::Bool(ON_OFF),
-        "true",
+        SettingKind::String,
+        "",
         ui(
             TAB_ADVANCED,
             "experimental",
