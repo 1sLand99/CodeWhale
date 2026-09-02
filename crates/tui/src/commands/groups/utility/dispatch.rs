@@ -36,7 +36,9 @@ impl RegisterCommand<CommandResult> for DispatchCmd {
 
 fn dispatch_contextual(contexts: CommandContexts<'_>, arg: Option<&str>) -> CommandResult {
     let mut parts = contexts.into_parts();
-    let workspace = parts.workspace.as_deref_mut().expect("workspace facet");
+    let Some(workspace) = parts.workspace.as_deref_mut() else {
+        return CommandResult::error("Command capability unavailable: workspace");
+    };
     dispatch(workspace, arg)
 }
 
@@ -227,6 +229,17 @@ mod tests {
             &["cloud-agent", "cloud-dispatch"]
         );
         assert!(DispatchCmd::info().usage.starts_with("/dispatch"));
+    }
+
+    #[test]
+    fn missing_workspace_facet_fails_safely() {
+        let result = dispatch_contextual(CommandContexts::empty(), None);
+        assert!(result.is_error, "{result:?}");
+        assert_eq!(
+            result.message.as_deref(),
+            Some("Error: Command capability unavailable: workspace")
+        );
+        assert!(result.action.is_none());
     }
 
     #[test]

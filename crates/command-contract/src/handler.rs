@@ -7,7 +7,8 @@
 use crate::facets::{
     CommandCostContext, CommandMediaContext, CommandMemoryContext, CommandModePolicyContext,
     CommandModelContext, CommandPresentationContext, CommandProjectContext, CommandSessionContext,
-    CommandSkillsContext, CommandSystemPromptContext, CommandWorkspaceContext,
+    CommandSkillGroupContext, CommandSkillsContext, CommandSystemPromptContext,
+    CommandWorkspaceContext,
 };
 
 /// Exact host capabilities exposed to one contextual command handler.
@@ -33,13 +34,15 @@ impl CommandCapabilities {
     pub const MEMORY: Self = Self(1 << 9);
     /// Project-group host data (FEAT-021 D1).
     pub const PROJECT: Self = Self(1 << 10);
+    /// Skills-group host data (FEAT-022 D1).
+    pub const SKILL_GROUP: Self = Self(1 << 11);
 
     pub const fn union(self, other: Self) -> Self {
         Self(self.0 | other.0)
     }
 
     pub const fn contains(self, capability: Self) -> bool {
-        self.0 & capability.0 == capability.0
+        !capability.is_empty() && self.0 & capability.0 == capability.0
     }
 
     pub const fn is_empty(self) -> bool {
@@ -78,6 +81,7 @@ pub struct CommandContexts<'a> {
     media: Option<&'a mut dyn CommandMediaContext>,
     memory: Option<&'a mut dyn CommandMemoryContext>,
     project: Option<&'a mut dyn CommandProjectContext>,
+    skill_group: Option<&'a mut dyn CommandSkillGroupContext>,
 }
 
 /// Consumed envelope used when one handler needs several independent facets.
@@ -93,6 +97,7 @@ pub struct ContextParts<'a> {
     pub media: Option<&'a mut dyn CommandMediaContext>,
     pub memory: Option<&'a mut dyn CommandMemoryContext>,
     pub project: Option<&'a mut dyn CommandProjectContext>,
+    pub skill_group: Option<&'a mut dyn CommandSkillGroupContext>,
 }
 
 impl<'a> CommandContexts<'a> {
@@ -109,6 +114,7 @@ impl<'a> CommandContexts<'a> {
             media: None,
             memory: None,
             project: None,
+            skill_group: None,
         }
     }
 
@@ -125,6 +131,7 @@ impl<'a> CommandContexts<'a> {
             media: self.media,
             memory: self.memory,
             project: self.project,
+            skill_group: self.skill_group,
         }
     }
 
@@ -209,6 +216,14 @@ impl<'a> CommandContexts<'a> {
         assert!(
             self.project.replace(value).is_none(),
             "project facet already set"
+        );
+        self
+    }
+
+    pub fn with_skill_group(mut self, value: &'a mut dyn CommandSkillGroupContext) -> Self {
+        assert!(
+            self.skill_group.replace(value).is_none(),
+            "skill-group facet already set"
         );
         self
     }
