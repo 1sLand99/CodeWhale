@@ -39,7 +39,7 @@ impl CommandCapabilities {
     }
 
     pub const fn contains(self, capability: Self) -> bool {
-        self.0 & capability.0 == capability.0
+        !capability.is_empty() && self.0 & capability.0 == capability.0
     }
 
     pub const fn is_empty(self) -> bool {

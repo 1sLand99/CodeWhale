@@ -152,9 +152,18 @@ fn feat015_contextual(
 ) -> CommandResult {
     use codewhale_command_contract::handler::ContextParts;
     let parts: ContextParts<'_> = contexts.into_parts();
-    let workspace = parts.workspace.expect("workspace facet").workspace();
-    let mode = parts.mode_policy.expect("mode-policy facet").mode();
-    let currency = parts.cost.expect("cost facet").display_currency();
+    let Some(workspace) = parts.workspace else {
+        return CommandResult::error("Command capability unavailable: workspace");
+    };
+    let Some(mode_policy) = parts.mode_policy else {
+        return CommandResult::error("Command capability unavailable: mode-policy");
+    };
+    let Some(cost) = parts.cost else {
+        return CommandResult::error("Command capability unavailable: cost");
+    };
+    let workspace = workspace.workspace();
+    let mode = mode_policy.mode();
+    let currency = cost.display_currency();
     let normalized = arg.unwrap_or("");
     CommandResult::message(format!(
         "feat015ctx workspace={} mode={:?} currency={:?} arg={}",
@@ -1925,6 +1934,20 @@ mod tests {
     }
 
     #[test]
+    fn feat015_contextual_command_fails_safely_without_declared_facets() {
+        let result = feat015_contextual(
+            codewhale_command_contract::handler::CommandContexts::empty(),
+            None,
+        );
+        assert!(result.is_error, "{result:?}");
+        assert_eq!(
+            result.message.as_deref(),
+            Some("Error: Command capability unavailable: workspace")
+        );
+        assert!(result.action.is_none());
+    }
+
+    #[test]
     fn feat015_contextual_command_is_registered_only_in_test_builds() {
         // The fixture entry is present in the test-build registry with a
         // capability-scoped handler; production builds never see it.
@@ -2077,12 +2100,17 @@ mod tests {
 
     #[test]
     fn feat021_project_entries_register_through_portable_bridge() {
-        // main's model carries no capability bitmask: each project command
-        // must register through the portable bridge as a contextual handler
-        // and dispatch safely through the public seam. Exact facet
-        // destructuring (D4) is proven by the handler tests and the adapter
-        // exposure test.
-        for name in ["init", "lsp", "share", "goal"] {
+        use codewhale_command_contract::handler::{CommandCapabilities, CommandHandler};
+
+        for (name, expected) in [
+            ("init", CommandCapabilities::WORKSPACE),
+            ("lsp", CommandCapabilities::PROJECT),
+            ("share", CommandCapabilities::PROJECT),
+            (
+                "goal",
+                CommandCapabilities::PROJECT.union(CommandCapabilities::PRESENTATION),
+            ),
+        ] {
             assert!(
                 registry().has_contextual_handler(name),
                 "/{name} must register through the portable bridge"
@@ -2092,13 +2120,10 @@ mod tests {
                 .expect("entry")
                 .contextual_handler()
                 .expect("contextual handler");
-            assert!(
-                matches!(
-                    handler,
-                    codewhale_command_contract::handler::CommandHandler::Contextual { .. }
-                ),
-                "/{name} must be contextual"
-            );
+            let CommandHandler::Contextual { capabilities, .. } = handler else {
+                panic!("/{name} must be contextual");
+            };
+            assert_eq!(capabilities, expected, "/{name} exact capability set");
         }
     }
 

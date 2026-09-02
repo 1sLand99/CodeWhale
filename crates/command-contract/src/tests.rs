@@ -853,6 +853,8 @@ fn capabilities_declare_exact_memory_authority() {
     assert!(!workspace.contains(CommandCapabilities::MEMORY));
     assert!(!memory.contains(CommandCapabilities::WORKSPACE));
     assert!(CommandCapabilities::NONE.is_empty());
+    assert!(!workspace_memory.contains(CommandCapabilities::NONE));
+    assert!(!CommandCapabilities::NONE.contains(CommandCapabilities::NONE));
     // No presentation or media authority is declared for the memory group.
     assert!(!workspace_memory.contains(CommandCapabilities::PRESENTATION));
     assert!(!workspace_memory.contains(CommandCapabilities::MEDIA));
