@@ -1235,6 +1235,10 @@ mod launch_worktree_tests {
         let repo = root.path().join("proj");
         std::fs::create_dir_all(&repo).unwrap();
         git(&repo, &["init", "-q", "-b", "main"]);
+        // Windows CI checks out with a global core.autocrlf=true; the
+        // byte-fidelity assertion below needs the worktree checkout to be
+        // verbatim.
+        git(&repo, &["config", "core.autocrlf", "false"]);
         git(
             &repo,
             &[
