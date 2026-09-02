@@ -13,6 +13,10 @@ const LINE_NUMBER_WIDTH: usize = 4;
 /// edited, and emphasising the changed words would light up the whole row.
 const INTRALINE_MIN_RATIO: f32 = 0.5;
 
+/// Pairing stops here so a huge hunk cannot buffer word segments for every
+/// replaced line; longer runs render line by line.
+const INTRALINE_MAX_RUN: usize = 64;
+
 /// A run of text inside a changed line and whether it is part of the change.
 type Segment = (String, bool);
 
@@ -57,8 +61,11 @@ pub fn render_diff_bounded(diff: &str, width: u16, max_body_rows: usize) -> Boun
 /// this form so the bounded preview budget is spent on the actual red/green
 /// evidence instead of a second, generic summary.
 /// Render at most `max_rows` body rows while counting every omitted wrapped
-/// row. Allocation is bounded by the retained preview plus one source line's
-/// wrapped representation, rather than by the size of the complete diff.
+/// row. Allocation is bounded by the retained preview, one source line's
+/// wrapped representation, and the current `-`/`+` run: its line slices
+/// (borrowed, pointer-sized) plus word segments for at most
+/// `INTRALINE_MAX_RUN` replaced pairs — never by the size of the complete
+/// diff.
 #[must_use]
 pub fn render_diff_body_bounded(diff: &str, width: u16, max_rows: usize) -> BoundedDiffRender {
     let mut collector = BoundedLineCollector::new(max_rows);
@@ -107,23 +114,35 @@ pub fn render_diff_body_bounded(diff: &str, width: u16, max_rows: usize) -> Boun
             // A deleted run followed by an added run of the same length is a
             // set of replaced lines: emphasise the words that changed within
             // each pair. Any other shape renders line by line as before.
+            // `\ No newline at end of file` markers are lifted out of the run
+            // (and painted after it) so files without a trailing newline
+            // still pair.
             let mut removed = vec![raw.trim_start_matches('-')];
-            while let Some(next) = lines.next_if(|next| is_deleted(next)) {
-                removed.push(next.trim_start_matches('-'));
+            let mut added: Vec<&str> = Vec::new();
+            let mut markers: Vec<&str> = Vec::new();
+            loop {
+                if let Some(marker) = lines.next_if(|next| is_no_newline_marker(next)) {
+                    markers.push(marker);
+                } else if added.is_empty()
+                    && let Some(next) = lines.next_if(|next| is_deleted(next))
+                {
+                    removed.push(next.trim_start_matches('-'));
+                } else if let Some(next) = lines.next_if(|next| is_added(next)) {
+                    added.push(next.trim_start_matches('+'));
+                } else {
+                    break;
+                }
             }
-            let mut added = Vec::new();
-            while let Some(next) = lines.next_if(|next| is_added(next)) {
-                added.push(next.trim_start_matches('+'));
-            }
-            let pairs: Vec<Option<(Vec<Segment>, Vec<Segment>)>> = if removed.len() == added.len() {
-                removed
-                    .iter()
-                    .zip(&added)
-                    .map(|(old, new)| intraline_segments(old, new))
-                    .collect()
-            } else {
-                Vec::new()
-            };
+            let pairs: Vec<Option<(Vec<Segment>, Vec<Segment>)>> =
+                if removed.len() == added.len() && removed.len() <= INTRALINE_MAX_RUN {
+                    removed
+                        .iter()
+                        .zip(&added)
+                        .map(|(old, new)| intraline_segments(old, new))
+                        .collect()
+                } else {
+                    Vec::new()
+                };
 
             for (idx, content) in removed.iter().enumerate() {
                 let emphasis = pairs
@@ -158,6 +177,9 @@ pub fn render_diff_body_bounded(diff: &str, width: u16, max_rows: usize) -> Boun
                 if let Some(line) = new_line.as_mut() {
                     *line = line.saturating_add(1);
                 }
+            }
+            for marker in markers {
+                collector.extend(render_header_line(marker, width));
             }
             continue;
         }
@@ -396,6 +418,10 @@ fn is_deleted(raw: &str) -> bool {
     raw.starts_with('-') && !raw.starts_with("---")
 }
 
+fn is_no_newline_marker(raw: &str) -> bool {
+    raw.starts_with("\\ No newline")
+}
+
 fn added_style() -> Style {
     Style::default()
         .fg(palette::DIFF_ADDED)
@@ -411,34 +437,45 @@ fn deleted_style() -> Style {
 /// Split a replaced line pair into word runs (unicode word boundaries, so
 /// punctuation stays out of the emphasis), flagging the runs that differ.
 ///
-/// Returns `None` when the pair shares too little to read as an edit, so the
-/// caller paints the whole line the way it always has.
+/// Returns `None` when the pair shares too few *words* to read as an edit —
+/// whitespace and punctuation tokens do not count, so two lines that agree
+/// only on syntax are painted whole, the way they always were.
 fn intraline_segments(old: &str, new: &str) -> Option<(Vec<Segment>, Vec<Segment>)> {
     let diff = TextDiff::from_unicode_words(old, new);
-    if diff.ratio() < INTRALINE_MIN_RATIO {
-        return None;
-    }
     let mut old_segments: Vec<Segment> = Vec::new();
     let mut new_segments: Vec<Segment> = Vec::new();
     let mut changed = false;
+    let mut shared_words = 0usize;
+    let mut total_words = 0usize;
     for change in diff.iter_all_changes() {
         let text = change.value();
+        let is_word = text.chars().any(char::is_alphanumeric);
         match change.tag() {
             ChangeTag::Equal => {
+                if is_word {
+                    shared_words += 2;
+                    total_words += 2;
+                }
                 push_segment(&mut old_segments, text, false);
                 push_segment(&mut new_segments, text, false);
             }
             ChangeTag::Delete => {
                 changed = true;
+                total_words += usize::from(is_word);
                 push_segment(&mut old_segments, text, true);
             }
             ChangeTag::Insert => {
                 changed = true;
+                total_words += usize::from(is_word);
                 push_segment(&mut new_segments, text, true);
             }
         }
     }
-    changed.then_some((old_segments, new_segments))
+    if !changed || total_words == 0 {
+        return None;
+    }
+    let ratio = shared_words as f32 / total_words as f32;
+    (ratio >= INTRALINE_MIN_RATIO).then_some((old_segments, new_segments))
 }
 
 fn push_segment(segments: &mut Vec<Segment>, text: &str, emphasised: bool) {
@@ -448,40 +485,69 @@ fn push_segment(segments: &mut Vec<Segment>, text: &str, emphasised: bool) {
     }
 }
 
-/// Paint one wrapped chunk of a changed line, carrying the emphasis flags
-/// across the wrap. `wrap_text` only drops or collapses whitespace, so every
-/// chunk character is matched forward against the source characters.
-fn emphasised_spans(
-    chunk: &str,
+/// Paint the wrapped chunks of a changed line, mapping every non-whitespace
+/// character back to its source flag by position. `wrap_text` only drops,
+/// collapses, or re-inserts whitespace (the indent lead comes back on every
+/// continuation chunk), so the non-whitespace sequence is the invariant.
+/// Whitespace joins an emphasised run only when both its neighbours are in
+/// it. Returns `None` if the invariant ever fails, and the caller paints the
+/// whole line plainly rather than emphasising the wrong word.
+fn emphasised_chunks(
+    chunks: &[String],
     style: Style,
-    source: &[(char, bool)],
-    cursor: &mut usize,
-) -> Vec<Span<'static>> {
+    segments: &[Segment],
+) -> Option<Vec<Vec<Span<'static>>>> {
+    let source: Vec<(char, bool)> = segments
+        .iter()
+        .flat_map(|(run, flag)| {
+            run.chars()
+                .filter(|ch| !ch.is_whitespace())
+                .map(move |ch| (ch, *flag))
+        })
+        .collect();
     let emphasis = style.add_modifier(Modifier::BOLD | Modifier::REVERSED);
-    let mut spans = Vec::new();
-    let mut run = String::new();
-    let mut run_flag = false;
-    for ch in chunk.chars() {
-        while *cursor < source.len()
-            && !(source[*cursor].0 == ch
-                || (source[*cursor].0.is_whitespace() && ch.is_whitespace()))
-        {
-            *cursor += 1;
+    let mut cursor = 0usize;
+    let mut out = Vec::with_capacity(chunks.len());
+    for chunk in chunks {
+        let mut spans = Vec::new();
+        let mut run = String::new();
+        let mut run_flag = false;
+        let mut prev_flag = false;
+        for ch in chunk.chars() {
+            let flag = if ch.is_whitespace() {
+                prev_flag && source.get(cursor).is_some_and(|(_, next)| *next)
+            } else {
+                let (expected, flag) = *source.get(cursor)?;
+                debug_assert_eq!(
+                    expected, ch,
+                    "wrapped chunk diverged from its source line at {cursor}"
+                );
+                if expected != ch {
+                    return None;
+                }
+                cursor += 1;
+                prev_flag = flag;
+                flag
+            };
+            if flag != run_flag && !run.is_empty() {
+                let painted = if run_flag { emphasis } else { style };
+                spans.push(Span::styled(std::mem::take(&mut run), painted));
+            }
+            run_flag = flag;
+            run.push(ch);
         }
-        let flag = source.get(*cursor).map(|(_, flag)| *flag).unwrap_or(false);
-        *cursor = cursor.saturating_add(1).min(source.len());
-        if flag != run_flag && !run.is_empty() {
+        if !run.is_empty() {
             let painted = if run_flag { emphasis } else { style };
-            spans.push(Span::styled(std::mem::take(&mut run), painted));
+            spans.push(Span::styled(run, painted));
         }
-        run_flag = flag;
-        run.push(ch);
+        out.push(spans);
     }
-    if !run.is_empty() {
-        let painted = if run_flag { emphasis } else { style };
-        spans.push(Span::styled(run, painted));
-    }
-    spans
+    debug_assert_eq!(
+        cursor,
+        source.len(),
+        "wrapped chunks did not consume the whole source line"
+    );
+    (cursor == source.len()).then_some(out)
 }
 
 fn render_diff_line(
@@ -497,15 +563,7 @@ fn render_diff_line(
     let prefix_width = prefix.width();
     let available = width.saturating_sub(prefix_width as u16).max(1) as usize;
     let wrapped = wrap_text(content, available);
-    let source: Vec<(char, bool)> = emphasis
-        .map(|segments| {
-            segments
-                .iter()
-                .flat_map(|(run, flag)| run.chars().map(move |ch| (ch, *flag)))
-                .collect()
-        })
-        .unwrap_or_default();
-    let mut cursor = 0usize;
+    let mut painted = emphasis.and_then(|segments| emphasised_chunks(&wrapped, style, segments));
 
     let mut out = Vec::new();
     for (idx, chunk) in wrapped.into_iter().enumerate() {
@@ -515,10 +573,9 @@ fn render_diff_line(
             Span::raw(" ".repeat(prefix_width))
         };
         let mut spans = vec![gutter];
-        if emphasis.is_some() {
-            spans.extend(emphasised_spans(&chunk, style, &source, &mut cursor));
-        } else {
-            spans.push(Span::styled(chunk, style));
+        match painted.as_mut() {
+            Some(rows) => spans.append(&mut rows[idx]),
+            None => spans.push(Span::styled(chunk, style)),
         }
         out.push(Line::from(spans));
     }
@@ -666,6 +723,25 @@ mod tests {
         render_diff_body_bounded(diff, width, usize::MAX).lines
     }
 
+    /// Text between the gutter and the first emphasised span, so a test can
+    /// pin where on the row the emphasis starts.
+    fn text_before_emphasis(line: &Line<'static>) -> String {
+        line.spans
+            .iter()
+            .skip(1)
+            .take_while(|span| !span.style.add_modifier.contains(Modifier::REVERSED))
+            .map(|span| span.content.as_ref())
+            .collect()
+    }
+
+    fn emphasis_per_row(diff: &str, width: u16) -> Vec<String> {
+        rendered_body(diff, width)
+            .iter()
+            .skip(1) // hunk header
+            .map(emphasised_text)
+            .collect()
+    }
+
     #[test]
     fn replaced_line_pair_emphasises_only_the_changed_words() {
         let diff = "\
@@ -674,15 +750,7 @@ mod tests {
 +    let total = price * count;
 ";
         let rendered = rendered_body(diff, 80);
-        let emphasised = rendered
-            .iter()
-            .map(emphasised_text)
-            .filter(|text| !text.is_empty())
-            .collect::<Vec<_>>();
-        assert_eq!(
-            emphasised,
-            vec!["quantity".to_string(), "count".to_string()]
-        );
+        assert_eq!(emphasis_per_row(diff, 80), vec!["quantity", "count"]);
         let content = rendered
             .iter()
             .filter_map(diff_content_text)
@@ -698,30 +766,107 @@ mod tests {
     }
 
     #[test]
-    fn unequal_runs_and_rewrites_render_without_emphasis() {
+    fn every_pair_in_a_replaced_run_is_emphasised_in_order() {
+        let diff = "\
+@@ -1,2 +1,2 @@
+-let alpha = 1;
+-let beta = 2;
++let alpha = 10;
++let beta = 20;
+";
+        assert_eq!(emphasis_per_row(diff, 80), vec!["1", "2", "10", "20"]);
+    }
+
+    #[test]
+    fn a_rewrite_inside_a_replaced_run_stays_plain_while_its_neighbour_is_emphasised() {
+        let diff = "\
+@@ -1,2 +1,2 @@
+-let x = 1;
+-fn old_name() {}
++let x = 2;
++return None;
+";
+        assert_eq!(emphasis_per_row(diff, 80), vec!["1", "", "2", ""]);
+    }
+
+    #[test]
+    fn lines_sharing_only_syntax_are_not_emphasised() {
+        // Whitespace, `=` and `;` agree; every word differs but `let`.
+        let diff = "\
+@@ -1,1 +1,1 @@
+-let alpha = beta;
++let gamma = delta;
+";
+        assert_eq!(emphasis_per_row(diff, 80), vec!["", ""]);
+    }
+
+    #[test]
+    fn unequal_runs_render_without_emphasis() {
         let unequal = "\
 @@ -1,2 +1,1 @@
 -let a = 1;
 -let b = 2;
 +let a = 1; let b = 2;
 ";
-        assert!(
-            rendered_body(unequal, 80)
-                .iter()
-                .all(|line| emphasised_text(line).is_empty()),
-            "two deletions against one insertion are not a replaced pair"
-        );
+        assert_eq!(emphasis_per_row(unequal, 80), vec!["", "", ""]);
+    }
 
-        let rewrite = "\
+    #[test]
+    fn emphasis_follows_unicode_word_boundaries() {
+        let diff = "\
 @@ -1,1 +1,1 @@
--fn render(width: u16) -> Vec<Line>
-+return None;
+-café au lait, naïve
++café au thé, naïve
 ";
-        assert!(
-            rendered_body(rewrite, 80)
-                .iter()
-                .all(|line| emphasised_text(line).is_empty()),
-            "a line sharing almost nothing with its replacement is painted whole"
+        assert_eq!(emphasis_per_row(diff, 80), vec!["lait", "thé"]);
+    }
+
+    #[test]
+    fn no_newline_marker_does_not_break_pairing() {
+        let diff = "\
+@@ -1,1 +1,1 @@
+-old line
+\\ No newline at end of file
++new line
+\\ No newline at end of file
+";
+        let rendered = rendered_body(diff, 80);
+        let rows: Vec<String> = rendered.iter().map(emphasised_text).collect();
+        assert_eq!(rows, vec!["", "old", "new", "", ""]);
+        let text: Vec<String> = rendered.iter().map(line_text).collect();
+        assert_eq!(
+            text.iter()
+                .filter(|row| row.contains("No newline at end of file"))
+                .count(),
+            2,
+            "markers are still shown: {text:?}"
+        );
+    }
+
+    #[test]
+    fn emphasis_lands_on_the_right_chunk_of_a_wrapped_indented_line() {
+        // Gutter is 12 columns; width 40 leaves 28 for text. With the 8-space
+        // indent re-inserted on every continuation chunk, the line wraps as
+        // "        let total =" / "        compute(alpha, beta," /
+        // "        gamma, quantity);" — the change sits on the third chunk.
+        let diff = "\
+@@ -1,1 +1,1 @@
+-        let total = compute(alpha, beta, gamma, quantity);
++        let total = compute(alpha, beta, gamma, count);
+";
+        let rendered = rendered_body(diff, 40);
+        let rows: Vec<String> = rendered.iter().map(emphasised_text).collect();
+        assert_eq!(rows, vec!["", "", "", "quantity", "", "", "count"]);
+        assert_eq!(
+            diff_content_text(&rendered[3]).as_deref(),
+            Some("        gamma, quantity);")
+        );
+        assert_eq!(text_before_emphasis(&rendered[3]), "        gamma, ");
+        assert_eq!(text_before_emphasis(&rendered[6]), "        gamma, ");
+        // Row text is untouched by the emphasis.
+        assert_eq!(
+            diff_content_text(&rendered[6]).as_deref(),
+            Some("        gamma, count);")
         );
     }
 
@@ -733,9 +878,12 @@ mod tests {
 +alpha beta gamma delta epsilon zeta eta THETA iota kappa
 ";
         let rendered = rendered_body(diff, 30);
-        assert!(rendered.len() > 2, "narrow width should wrap: {rendered:?}");
-        let joined: String = rendered.iter().map(emphasised_text).collect();
-        assert_eq!(joined, "thetaTHETA");
+        let rows: Vec<String> = rendered.iter().map(emphasised_text).collect();
+        // 18 text columns: "alpha beta gamma" / "delta epsilon zeta" /
+        // "eta theta iota" / "kappa" — the change sits on the third chunk.
+        assert_eq!(rows, vec!["", "", "", "theta", "", "", "", "THETA", ""]);
+        assert_eq!(text_before_emphasis(&rendered[3]), "eta ");
+        assert_eq!(text_before_emphasis(&rendered[7]), "eta ");
         // Wrapping drops the space at each break; everything else survives.
         let body: String = rendered
             .iter()
