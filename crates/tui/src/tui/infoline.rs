@@ -1,47 +1,41 @@
-//! Tideline topbar — the one-row status surface from the approved screens.
+//! The shell's info line — one row of session facts, painted under the
+//! composer's posture row at the bottom of the screen.
 //!
-//! This is the translation seam between the approved Tideline reference
-//! screens and the live shell. It is a pure, deterministic widget: no `App`,
-//! no wall-clock read, no ambient motion. The caller owns facts; this module
-//! owns cells.
+//! It used to be a top bar. The founder's call (SHELL-DESIGN-20260901 §2.0):
+//! *"Putting the info at the bottom is a better idea, because then you scroll
+//! up and it feels intentional. Move the top/side bar to the bottom."* The
+//! segments, the shed pass, and the repository probe are the same code; only
+//! the placement changed, and nothing paints above the transcript any more.
 //!
-//! The brand lockup is the `codewhale` wordmark alone, in the sanctioned
-//! whale-mark gold. There is no glyph before it by founder decree: the
-//! canonical mark is a raster asset with no approved ASCII or block-glyph
-//! substitute, and a one-row topbar cannot carry it faithfully. The retired
-//! hand-drawn crown glyph is absent from this module.
-//!
-//! Segment grammar (left → right): brand lockup, then contextual segments as
-//! `label value` pairs joined by `│`, then the pinned right side — the
-//! context reading and one help hint:
+//! The row, left to right, joined by ` · `:
 //!
 //! ```text
-//! codewhale │ mcp-gateway │ ⑂ main │ model deepseek-v4   context 61% ▰▰▰▰▰▰▱▱▱▱  Ctrl+/ help
+//! Hmbown/CodeWhale · ⑂ main · deepseek-v4 · context 61% ▰▰▰▰▰▰▱▱▱▱  Ctrl+/ help
 //! ```
 //!
-//! There is no clock. A date stamp is not a fact anyone runs an agent to
-//! read, and it outranked `model not connected` in the row it shared (the
-//! accepted mockups carry none). The context reading is painted here and
-//! only here — the merged footer used to print the same percentage a second
-//! time from the same snapshot.
+//! The `codewhale` wordmark is gone from here: the mark belongs to the launch
+//! header and nowhere else in the default look (§2.0 decision 4). So is the
+//! `model` label — a bare model name in this row is self-describing. There is
+//! no clock; a date stamp is not a fact anyone runs an agent to read, and it
+//! used to outrank `model not connected` on the row it shared.
+//!
+//! The context reading is painted here and only here — the merged footer
+//! above used to print the same percentage a second time from the same
+//! snapshot.
 //!
 //! Shed order as width drops (spec §5b): the meter's bar glyphs first, then
 //! the help hint, then any segment that carries a shorter form takes it (the
 //! repository segment's `owner/name` becomes the folder basename), then
-//! contextual segments by [`TopbarSegmentId::shed_priority`] (folder, branch,
+//! contextual segments by [`InfoSegmentId::shed_priority`] (folder, branch,
 //! then the work facts). The repository outranks the hint on purpose: which
-//! repository you are in is the fact people scan the bar for, and the hint
-//! comes back as soon as the row can afford both.
-//! The brand, the route identity, and the `context NN%` text are the floor
-//! and never shed — and the route identity is never truncated to keep a
-//! decorative gauge, because the bar only re-states the number beside it.
-//! The full working line is 83 cells, so at 80 columns the bar is what
-//! yields; it reappears from roughly 90 columns up.
+//! repository you are in is the fact people scan this row for, and the hint
+//! comes back as soon as the row can afford both. The route identity and the
+//! `context NN%` text are the floor and never shed.
 //!
 //! Interaction: segment geometry is recorded for parity tests, but only the
-//! effective model/route segment and the pinned context meter advertise an
-//! action in the live shell. Status-only facts do not brighten on hover or
-//! pretend to be controls.
+//! effective model/route segment and the context meter advertise an action in
+//! the live shell. Status-only facts do not brighten on hover or pretend to
+//! be controls.
 //!
 //! Color: semantic ink only ([`ChromeInk`]); no hex, per the status-bar color
 //! grammar. ASCII-safe mode substitutes every glyph through
@@ -59,23 +53,17 @@ use unicode_width::UnicodeWidthStr;
 use crate::palette::{ChromeInk, UiTheme};
 use crate::tui::glyphs;
 
-/// Separator between segments — one cell, dim. Also joins the brand lockup
-/// to the first segment.
-const SEGMENT_JOIN: &str = " │ ";
-/// Gap between the context meter and the help hint.
-const HELP_GAP: &str = "  ";
+/// Separator between items — the row's one piece of punctuation.
+const ITEM_JOIN: &str = " · ";
+/// Minimum gap between the last left item and the pinned help hint.
+const HELP_GAP: usize = 2;
 /// Width of the context meter bar (cells of ▰/▱).
 const METER_CELLS: usize = 10;
-/// The brand lockup: wordmark only, no glyph (founder decree — see the
-/// module docs). Pure ASCII, so it never widens under ascii-safe mode.
-const WORDMARK: &str = "codewhale";
 
-/// Identity of a topbar segment. Most variants are status facts; the live
+/// Identity of an info-line segment. Most variants are status facts; the live
 /// shell currently registers an action only for [`Self::Model`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TopbarSegmentId {
-    /// The brand lockup — status-only until a product menu exists.
-    Brand,
+pub enum InfoSegmentId {
     /// The repository the session is in: the `owner/name` forge slug when
     /// one is known, else the workspace folder name.
     Workspace,
@@ -87,9 +75,8 @@ pub enum TopbarSegmentId {
     Pod,
     /// Whale capacity `n/m` (work screen).
     Whales,
-    /// Scheduled automation work `⏱ N scheduled · M running` — the top
-    /// strip's work fact. The `AutomationPanelState` projection owns the
-    /// count; the topbar only reads it.
+    /// Scheduled automation work `⏱ N scheduled · M running` — the
+    /// `AutomationPanelState` projection owns the count; this row reads it.
     Automation,
     /// Effective model / route — click opens the provider inspector.
     Model,
@@ -100,13 +87,14 @@ pub enum TopbarSegmentId {
     SettingsPath,
 }
 
-impl TopbarSegmentId {
+impl InfoSegmentId {
     /// Shed priority: higher sheds first as width drops. `0` never sheds.
-    /// Segments only start shedding after the meter bar and the help hint
-    /// have already gone. The floor is brand + route identity + the
-    /// `context NN%` text; among segments the declared order is folder,
-    /// then branch, then the work facts, because route identity is the one
-    /// fact the user must always be able to read (spec §5b).
+    /// Segments only start shedding after the meter bar, the help hint, and
+    /// every available shorter form have already gone. The floor is the
+    /// route identity plus the `context NN%` text; among segments the
+    /// declared order is folder, then branch, then the work facts, because
+    /// route identity is the one fact the user must always be able to read
+    /// (spec §5b).
     #[must_use]
     pub fn shed_priority(self) -> u8 {
         match self {
@@ -115,15 +103,15 @@ impl TopbarSegmentId {
             Self::Whales | Self::Automation => 3,
             Self::Pod => 2,
             Self::Run | Self::SettingsPath => 1,
-            Self::Model | Self::Brand => 0,
+            Self::Model => 0,
         }
     }
 }
 
-/// One contextual topbar segment.
+/// One contextual info-line segment.
 #[derive(Debug, Clone)]
-pub struct TopbarSegment {
-    pub id: TopbarSegmentId,
+pub struct InfoSegment {
+    pub id: InfoSegmentId,
     pub label: String,
     pub value: String,
     /// A shorter, still-true form of [`Self::value`]. The shed pass takes it
@@ -133,9 +121,9 @@ pub struct TopbarSegment {
     pub ink: ChromeInk,
 }
 
-impl TopbarSegment {
+impl InfoSegment {
     #[must_use]
-    pub fn new(id: TopbarSegmentId, label: &str, value: impl Into<String>, ink: ChromeInk) -> Self {
+    pub fn new(id: InfoSegmentId, label: &str, value: impl Into<String>, ink: ChromeInk) -> Self {
         Self {
             id,
             label: label.to_string(),
@@ -168,7 +156,7 @@ impl TopbarSegment {
     }
 }
 
-fn segment_text(segment: &TopbarSegment, short: bool) -> String {
+fn segment_text(segment: &InfoSegment, short: bool) -> String {
     let value = segment.value_at(short);
     if segment.label.is_empty() {
         value.to_string()
@@ -177,33 +165,33 @@ fn segment_text(segment: &TopbarSegment, short: bool) -> String {
     }
 }
 
-/// What the caller owes the topbar. Everything is injected so renders are
+/// What the caller owes the info line. Everything is injected so renders are
 /// deterministic (golden buffers) and wall-clock keyed by the owner, never
 /// frame-count keyed (spec §5e).
-pub struct Topbar<'a> {
+pub struct InfoLine<'a> {
     pub theme: &'a UiTheme,
     /// The single right-hand key hint, e.g. `Ctrl+/ help`. Empty means the
-    /// caller has no hint to advertise. It is the first thing to shed.
+    /// caller has no hint to advertise. It sheds right after the meter bar.
     pub help_hint: &'a str,
     /// Context window percentage, 0–100.
     pub context_percent: u8,
     /// Contextual segments in display order.
-    pub segments: &'a [TopbarSegment],
-    /// Actionable segment under the mouse. Only [`TopbarSegmentId::Model`]
+    pub segments: &'a [InfoSegment],
+    /// Actionable segment under the mouse. Only [`InfoSegmentId::Model`]
     /// currently advertises hover feedback in the live shell.
-    pub hovered: Option<TopbarSegmentId>,
+    pub hovered: Option<InfoSegmentId>,
     /// ASCII-safe / NO_COLOR mode: every glyph goes through
     /// [`glyphs::ascii_fallback`].
     pub ascii_safe: bool,
 }
 
-impl<'a> Topbar<'a> {
+impl<'a> InfoLine<'a> {
     #[must_use]
     pub fn new(
         theme: &'a UiTheme,
         help_hint: &'a str,
         context_percent: u8,
-        segments: &'a [TopbarSegment],
+        segments: &'a [InfoSegment],
     ) -> Self {
         Self {
             theme,
@@ -222,7 +210,7 @@ impl<'a> Topbar<'a> {
     }
 
     #[must_use]
-    pub fn hovered(mut self, hovered: Option<TopbarSegmentId>) -> Self {
+    pub fn hovered(mut self, hovered: Option<InfoSegmentId>) -> Self {
         self.hovered = hovered;
         self
     }
@@ -250,12 +238,8 @@ fn sym(glyph: &str, ascii_safe: bool) -> String {
     }
 }
 
-fn brand_width() -> usize {
-    WORDMARK.width()
-}
-
 /// Ink for the meter bar and the percentage. At the 80% cap the whole
-/// context reading turns to the error token — it is the one topbar fact
+/// context reading turns to the error token — it is the one fact on this row
 /// that becomes a problem rather than a status.
 fn meter_ink_for(pct: u8) -> ChromeInk {
     if pct >= 80 {
@@ -276,79 +260,70 @@ fn context_label_ink_for(pct: u8) -> ChromeInk {
     }
 }
 
-/// The right block's text at one shed state, used for width arithmetic and
-/// mirrored span-for-span by the render.
-fn right_text(pct: u8, meter: &str, help: &str, show_bar: bool, show_help: bool) -> String {
-    let mut text = format!("context {pct}%");
+/// The context reading's text at one shed state — the row's last left item,
+/// used for width arithmetic and mirrored span-for-span by the render.
+fn context_text(pct: u8, meter: &str, show_bar: bool) -> String {
     if show_bar {
-        text.push(' ');
-        text.push_str(meter);
+        format!("context {pct}% {meter}")
+    } else {
+        format!("context {pct}%")
     }
-    if show_help && !help.is_empty() {
-        text.push_str(HELP_GAP);
-        text.push_str(help);
-    }
-    text
 }
 
 /// The shed pass's answer: which segments survive at this row width, whether
-/// the help hint and meter bar survived, the effective right-block width, and
-/// the context reading's own span. Shared by the render and the hitbox
-/// computation so the two can never disagree about where the meter
-/// painted — the same single-arithmetic discipline the startup stage's
-/// `startup_layout` follows.
+/// the help hint and meter bar survived, and where the context reading sits.
+/// Shared by the render and the hitbox computation so the two can never
+/// disagree about the cells the meter painted — the same single-arithmetic
+/// discipline the startup stage's `startup_layout` follows.
 struct ShedRow<'t> {
-    kept: Vec<&'t TopbarSegment>,
+    kept: Vec<&'t InfoSegment>,
     /// Segments with a shorter form are painting it.
     use_short: bool,
     show_bar: bool,
     show_help: bool,
-    right_width: usize,
-    /// Width of the `context NN% ▰▰▱▱▱` span alone (no help hint).
+    /// Width of the left run: segments, joins, and the context reading.
+    left_width: usize,
+    /// Width of the `context NN% ▰▰▱▱▱` item alone.
     context_width: usize,
     meter: String,
 }
 
-fn shed_pass<'t>(topbar: &'t Topbar<'_>, area: Rect) -> ShedRow<'t> {
-    let ascii = topbar.ascii_safe;
-    // Right-side pinned block: `context NN% ▰▰▰▰▰▰▱▱▱▱  Ctrl+/ help`.
-    let pct = topbar.context_percent.clamp(0, 100);
+fn shed_pass<'t>(info: &'t InfoLine<'_>, area: Rect) -> ShedRow<'t> {
+    let ascii = info.ascii_safe;
+    let pct = info.context_percent.clamp(0, 100);
     let meter: String = (0..METER_CELLS)
         .map(|i| {
             let filled = (i + 1) * 100 / METER_CELLS <= usize::from(pct);
             sym(if filled { "▰" } else { "▱" }, ascii)
         })
         .collect();
-    let help = sym(topbar.help_hint, ascii);
+    let help = sym(info.help_hint, ascii);
 
-    let brand_w = brand_width();
-    let join_w = SEGMENT_JOIN.width();
-    let mut kept: Vec<&TopbarSegment> = topbar.segments.iter().collect();
-    let total_needed = |segs: &[&TopbarSegment], short: bool, right: usize| -> usize {
-        brand_w
-            + if segs.is_empty() { 0 } else { join_w }
-            + segs.iter().map(|s| s.rendered_width(short)).sum::<usize>()
-            + if segs.is_empty() {
-                0
-            } else {
-                join_w * (segs.len() - 1)
-            }
-            + 2
-            + right
+    let join_w = ITEM_JOIN.width();
+    let mut kept: Vec<&InfoSegment> = info.segments.iter().collect();
+    // The left run is the kept segments plus the context reading, all joined.
+    let left_width = |segs: &[&InfoSegment], short: bool, show_bar: bool| -> usize {
+        segs.iter().map(|s| s.rendered_width(short)).sum::<usize>()
+            + join_w * segs.len()
+            + context_text(pct, &meter, show_bar).width()
+    };
+    let total_needed = |left: usize, show_help: bool| -> usize {
+        left + if show_help && !help.is_empty() {
+            HELP_GAP + help.width()
+        } else {
+            0
+        }
     };
 
     // Shed pass, in the declared order: the meter's bar glyphs, then the help
-    // hint, then any shorter segment form, then segments by priority.
-    // `context NN%`, the brand, and the route identity are the floor; below
-    // that the render truncates. The bar goes first on purpose — it encodes
-    // the same number printed beside it, so it is the cheapest thing on the
-    // row to lose, and no repository, branch, or model name should be cut to
-    // keep ten decorative cells.
+    // hint, then any shorter segment form, then segments by priority. The bar
+    // goes first on purpose — it encodes the same number printed beside it,
+    // so it is the cheapest thing on the row to lose, and no repository,
+    // branch, or model name should be cut to keep ten decorative cells.
     let mut show_help = !help.is_empty();
     let mut show_bar = true;
     let mut use_short = false;
-    let mut right_width = right_text(pct, &meter, &help, show_bar, show_help).width();
-    while total_needed(&kept, use_short, right_width) > area.width as usize {
+    while total_needed(left_width(&kept, use_short, show_bar), show_help) > area.width as usize {
         if show_bar {
             show_bar = false;
         } else if show_help {
@@ -356,7 +331,7 @@ fn shed_pass<'t>(topbar: &'t Topbar<'_>, area: Rect) -> ShedRow<'t> {
         } else if !use_short && kept.iter().any(|segment| segment.short.is_some()) {
             // A long `owner/name` degrades to the folder basename rather than
             // costing the row a whole segment — but only after the hint has
-            // gone, because "which repository am I in" is what the bar is
+            // gone, because "which repository am I in" is what this row is
             // read for.
             use_short = true;
         } else if let Some(pos) = kept
@@ -370,38 +345,35 @@ fn shed_pass<'t>(topbar: &'t Topbar<'_>, area: Rect) -> ShedRow<'t> {
         } else {
             break;
         }
-        right_width = right_text(pct, &meter, &help, show_bar, show_help).width();
     }
 
     ShedRow {
+        left_width: left_width(&kept, use_short, show_bar),
+        context_width: context_text(pct, &meter, show_bar).width(),
         kept,
         use_short,
         show_bar,
         show_help,
-        right_width,
-        context_width: right_text(pct, &meter, &help, show_bar, false).width(),
         meter,
     }
 }
 
-/// The pinned context meter's hitbox (spec §6: the meter is the chrome
-/// row's one always-present inspector target — `Alt+C`'s mouse route).
-/// Covers exactly the painted `context NN% ▰▰▱▱▱` span. `None` when the
-/// row is too narrow for that span to have painted whole and clear of the
-/// brand lockup: a hitbox never claims cells another element paints (the
-/// posture-floor discipline the classic header's meter hitbox carried).
+/// The context meter's hitbox (spec §6: the meter is the chrome row's one
+/// always-present inspector target — `Alt+C`'s mouse route). Covers exactly
+/// the painted `context NN% ▰▰▱▱▱` cells. `None` when the row is too narrow
+/// for that item to have painted whole: a hitbox never claims cells another
+/// element paints (the posture-floor discipline the classic header's meter
+/// hitbox carried).
 #[must_use]
-pub fn context_meter_hitbox(topbar: &Topbar<'_>, area: Rect) -> Option<Rect> {
+pub fn context_meter_hitbox(info: &InfoLine<'_>, area: Rect) -> Option<Rect> {
     if area.width < 1 || area.height < 1 {
         return None;
     }
-    let shed = shed_pass(topbar, area);
-    let start = usize::from(area.width).saturating_sub(shed.right_width);
-    if start <= brand_width() + SEGMENT_JOIN.width()
-        || shed.context_width >= usize::from(area.width)
-    {
+    let shed = shed_pass(info, area);
+    if shed.left_width > usize::from(area.width) {
         return None;
     }
+    let start = shed.left_width - shed.context_width;
     Some(Rect {
         x: area.x + u16::try_from(start).unwrap_or(u16::MAX),
         y: area.y,
@@ -410,7 +382,7 @@ pub fn context_meter_hitbox(topbar: &Topbar<'_>, area: Rect) -> Option<Rect> {
     })
 }
 
-impl Widget for Topbar<'_> {
+impl Widget for InfoLine<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         if area.height < 1 || area.width < 1 {
             return;
@@ -425,7 +397,6 @@ impl Widget for Topbar<'_> {
             use_short,
             show_bar,
             show_help,
-            right_width,
             meter,
             ..
         } = shed_pass(&self, area);
@@ -437,31 +408,21 @@ impl Widget for Topbar<'_> {
         let set = |buf: &mut Buffer, cx: usize, span: &Span<'_>| {
             buf.set_span(cx as u16, y, span, span.content.width() as u16);
         };
-
-        // Brand lockup: the wordmark alone in Attention gold, bold (the
-        // whale-mark gold is the one gold that is not chrome, per the token
-        // table). No glyph precedes it — founder decree, see module docs.
-        set(
-            buf,
-            x,
-            &Span::styled(
-                WORDMARK,
-                chrome(theme, ChromeInk::Attention).add_modifier(Modifier::BOLD),
-            ),
-        );
-        x += WORDMARK.width();
-
-        // Contextual segments with recorded hitboxes, joined to the brand by
-        // the same separator they use between themselves.
-        for segment in kept.iter() {
+        let join = |buf: &mut Buffer, cx: usize| {
             set(
                 buf,
-                x,
-                &Span::styled(SEGMENT_JOIN, chrome(theme, ChromeInk::MetadataDim)),
+                cx,
+                &Span::styled(ITEM_JOIN, chrome(theme, ChromeInk::MetadataDim)),
             );
-            x += SEGMENT_JOIN.width();
-            let hovered = segment.id == TopbarSegmentId::Model
-                && self.hovered == Some(TopbarSegmentId::Model);
+        };
+
+        for (index, segment) in kept.iter().enumerate() {
+            if index > 0 {
+                join(buf, x);
+                x += ITEM_JOIN.width();
+            }
+            let hovered =
+                segment.id == InfoSegmentId::Model && self.hovered == Some(InfoSegmentId::Model);
             let mut style = chrome(theme, segment.ink);
             if hovered {
                 style = style
@@ -489,25 +450,30 @@ impl Widget for Topbar<'_> {
             }
         }
 
-        // Right pinned block, right-aligned to the area edge.
-        let mut sx = (area.x as usize + area.width as usize).saturating_sub(right_width);
-        let mut spans: Vec<Span> = Vec::with_capacity(6);
-        spans.push(Span::styled("context ", chrome(theme, label_ink)));
-        spans.push(Span::styled(format!("{pct}%"), chrome(theme, meter_ink)));
+        // The context reading closes the left run.
+        if !kept.is_empty() {
+            join(buf, x);
+            x += ITEM_JOIN.width();
+        }
+        set(buf, x, &Span::styled("context ", chrome(theme, label_ink)));
+        x += "context ".width();
+        let pct_text = format!("{pct}%");
+        set(buf, x, &Span::styled(&pct_text, chrome(theme, meter_ink)));
+        x += pct_text.width();
         if show_bar {
-            spans.push(Span::raw(" "));
-            spans.push(Span::styled(meter.clone(), chrome(theme, meter_ink)));
+            set(buf, x, &Span::raw(" "));
+            set(buf, x + 1, &Span::styled(&meter, chrome(theme, meter_ink)));
         }
+
+        // The help hint is pinned to the row's right edge.
         if show_help {
-            spans.push(Span::raw(HELP_GAP));
-            spans.push(Span::styled(
-                sym(self.help_hint, ascii),
-                chrome(theme, ChromeInk::MetadataHint),
-            ));
-        }
-        for span in &spans {
-            set(buf, sx, span);
-            sx += span.content.width();
+            let hint = sym(self.help_hint, ascii);
+            let sx = (area.x as usize + area.width as usize).saturating_sub(hint.width());
+            set(
+                buf,
+                sx,
+                &Span::styled(hint, chrome(theme, ChromeInk::MetadataHint)),
+            );
         }
     }
 }
@@ -516,46 +482,33 @@ fn chrome(theme: &UiTheme, ink: ChromeInk) -> Style {
     crate::palette::grammar::chrome_style(theme, ink)
 }
 
-/// Recorded hitboxes for one rendered topbar row. Mirrors the
+/// Recorded hitboxes for one rendered info row. Mirrors the
 /// `viewport.last_workflow_cancel_area` storage pattern: render computes the
 /// rects, the caller stores them, `mouse_ui` hit-tests against them.
 #[derive(Debug, Clone)]
-pub struct TopbarHitbox {
-    pub id: TopbarSegmentId,
+pub struct InfoLineHitbox {
+    pub id: InfoSegmentId,
     pub area: Rect,
 }
 
 /// Compute the hitbox `Rect` for each kept segment. Must be called with the
 /// same inputs as the render so the rects match the painted cells exactly.
-/// The brand lockup is included as recorded geometry, though it is status-only
-/// in the live shell. The context meter has its own exact hitbox helper.
+/// The context meter has its own exact hitbox helper.
 #[must_use]
-pub fn topbar_hitboxes(topbar: &Topbar<'_>, area: Rect) -> Vec<TopbarHitbox> {
+pub fn infoline_hitboxes(info: &InfoLine<'_>, area: Rect) -> Vec<InfoLineHitbox> {
     let mut out = Vec::new();
     if area.height < 1 || area.width < 1 {
         return out;
     }
-    let brand_w = brand_width();
-    if brand_w <= usize::from(area.width) {
-        out.push(TopbarHitbox {
-            id: TopbarSegmentId::Brand,
-            area: Rect {
-                x: area.x,
-                y: area.y,
-                width: brand_w as u16,
-                height: 1,
-            },
-        });
-    }
-    let mut x = area.x as usize + brand_w;
-    let join_w = SEGMENT_JOIN.width();
-    let shed = shed_pass(topbar, area);
-    let right_start = usize::from(area.x + area.width).saturating_sub(shed.right_width);
-    for segment in shed.kept.iter() {
-        x += join_w;
+    let shed = shed_pass(info, area);
+    let mut x = area.x as usize;
+    for (index, segment) in shed.kept.iter().enumerate() {
+        if index > 0 {
+            x += ITEM_JOIN.width();
+        }
         let w = segment.rendered_width(shed.use_short);
-        if x + w <= right_start && x + w <= usize::from(area.x + area.width) {
-            out.push(TopbarHitbox {
+        if x + w <= usize::from(area.x + area.width) {
+            out.push(InfoLineHitbox {
                 id: segment.id,
                 area: Rect {
                     x: x as u16,

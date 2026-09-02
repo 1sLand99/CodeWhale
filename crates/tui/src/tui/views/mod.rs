@@ -3560,6 +3560,7 @@ fn config_integer_key(key: &str) -> bool {
             | "thinking_preview_lines"
             | "auto_compact_threshold_percent"
             | "max_history"
+            | "fleet.exec.max_spawn_depth"
     )
 }
 

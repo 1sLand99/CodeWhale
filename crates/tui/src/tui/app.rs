@@ -753,7 +753,7 @@ pub struct ViewportState {
     /// Topbar segment rects (Tideline shell, spec §6), recorded at render so
     /// hover and — in a follow-up slice — click routing can hit-test the
     /// painted cells. Mirrors the workflow-panel cancel-area storage pattern.
-    pub last_topbar_hitboxes: Vec<crate::tui::topbar::TopbarHitbox>,
+    pub last_infoline_hitboxes: Vec<crate::tui::infoline::InfoLineHitbox>,
     /// Live plugin CTA row above the composer, plus review/dismiss hitboxes.
     pub last_plugin_cta_area: Option<Rect>,
     pub last_plugin_cta_review_area: Option<Rect>,
@@ -791,7 +791,7 @@ impl Default for ViewportState {
             last_approval_area: None,
             last_workflow_panel_area: None,
             last_workflow_cancel_area: None,
-            last_topbar_hitboxes: Vec::new(),
+            last_infoline_hitboxes: Vec::new(),
             last_plugin_cta_area: None,
             last_plugin_cta_review_area: None,
             last_plugin_cta_dismiss_area: None,

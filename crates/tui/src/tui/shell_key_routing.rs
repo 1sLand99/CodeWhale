@@ -206,9 +206,9 @@ pub const SHELL_BINDINGS: &[ShellBinding] = &[
 /// so it is the one hint chrome can print honestly.
 pub const HELP_CHROME_CHORD: &str = "Ctrl+/";
 
-/// The topbar's single right-hand key hint, e.g. `Ctrl+/ help`.
+/// The info line's single right-hand key hint, e.g. `Ctrl+/ help`.
 #[must_use]
-pub fn topbar_help_hint() -> String {
+pub fn info_help_hint() -> String {
     format!("{HELP_CHROME_CHORD} help")
 }
 
