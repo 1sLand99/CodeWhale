@@ -2342,8 +2342,8 @@ async fn run_async_main_dispatch(
                     explicit_provider,
                     explicit_model,
                 );
-                // The `deepseek` launcher forwards `--yolo` to this binary via
-                // the DEEPSEEK_YOLO env var (which the config loader folds into
+                // A launcher can forward `--yolo` to this binary via the
+                // CODEWHALE_YOLO env var (which the config loader folds into
                 // `config.yolo`), not as a CLI flag. Honour either source.
                 let yolo = cli.yolo || config.yolo.unwrap_or(false);
                 let env_tool_surface = exec_tool_surface_from_env();
@@ -10974,8 +10974,8 @@ async fn run_interactive_with_notice(
         }
     });
 
-    // The `deepseek` launcher forwards `--yolo` to this binary via the
-    // DEEPSEEK_YOLO env var (config.yolo), not as a CLI flag. Honour either.
+    // A launcher can forward `--yolo` to this binary via the CODEWHALE_YOLO
+    // env var (config.yolo), not as a CLI flag. Honour either.
     let yolo = cli.yolo || config.yolo.unwrap_or(false);
 
     tui::run_tui(
