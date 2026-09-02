@@ -189,6 +189,8 @@
   "HotbarActionTrustToggleName": "Commutar la confiança",
   "HotbarActionTrustToggleDescription": "Activa o desactiva el mode de confiança de l'espai de treball.",
   "ConfigTitle": "Config",
+  "ConfigPreviewLabel": "Vista prèvia: ",
+  "ConfigHintExternalCredentials": "Quin fitxer de credencials pot llegir aquest proveïdor, amb quin accés i com revocar-lo.",
   "ConfigModalTitle": " Config ",
   "ConfigSearchPlaceholder": "escriu per filtrar",
   "ConfigNoSettings": "  No hi ha configuració disponible.",
