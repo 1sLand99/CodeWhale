@@ -200,6 +200,8 @@ pub enum MessageId {
     CommandPaletteTitle,
     CommandPaletteSubtitle,
     ConfigTitle,
+    ConfigPreviewLabel,
+    ConfigHintExternalCredentials,
     ConfigSubtitle,
     ConfigModalTitle,
     ConfigSearchPlaceholder,
@@ -2269,6 +2271,8 @@ pub const ALL_MESSAGE_IDS: &[MessageId] = &[
     MessageId::CommandPaletteTitle,
     MessageId::CommandPaletteSubtitle,
     MessageId::ConfigTitle,
+    MessageId::ConfigPreviewLabel,
+    MessageId::ConfigHintExternalCredentials,
     MessageId::ConfigSubtitle,
     MessageId::ConfigModalTitle,
     MessageId::ConfigSearchPlaceholder,
@@ -4175,6 +4179,16 @@ pub const ALL_MESSAGE_IDS: &[MessageId] = &[
 
 pub fn tr(locale: Locale, id: MessageId) -> Cow<'static, str> {
     rust_i18n::t!(format!("{id:?}"), locale = locale.tag())
+}
+
+/// Resolve a message by its registry key — the `MessageId` variant name.
+///
+/// The settings schema (`codewhale_config::SETTINGS_SCHEMA`) names the string
+/// a setting shows rather than carrying its prose, so it needs to resolve a
+/// key it holds as a `&str`. An unknown key returns the key itself, which the
+/// schema binding test in `crate::tui::views` fails on.
+pub fn tr_key(locale: Locale, key: &'static str) -> Cow<'static, str> {
+    rust_i18n::t!(key, locale = locale.tag())
 }
 
 pub fn thinking_translation_placeholder(locale: Locale) -> &'static str {

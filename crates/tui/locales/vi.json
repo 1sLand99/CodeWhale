@@ -189,6 +189,8 @@
   "HotbarActionTrustToggleName": "Bật/tắt tin cậy",
   "HotbarActionTrustToggleDescription": "Bật hoặc tắt chế độ tin cậy của workspace.",
   "ConfigTitle": "Cấu hình",
+  "ConfigPreviewLabel": "Xem trước: ",
+  "ConfigHintExternalCredentials": "Tệp thông tin xác thực mà nhà cung cấp này được đọc, ở mức truy cập nào và cách thu hồi.",
   "ConfigModalTitle": " Cấu hình ",
   "ConfigSearchPlaceholder": "Nhập để lọc kết quả",
   "ConfigNoSettings": "  Không có cài đặt nào khả dụng.",

@@ -189,6 +189,8 @@
   "HotbarActionTrustToggleName": "信頼モード切替",
   "HotbarActionTrustToggleDescription": "ワークスペース信頼モードを有効または無効にします。",
   "ConfigTitle": "設定",
+  "ConfigPreviewLabel": "プレビュー: ",
+  "ConfigHintExternalCredentials": "このプロバイダーが読み取れる認証情報ファイル、その権限、取り消し方法。",
   "ConfigModalTitle": " 設定 ",
   "ConfigSearchPlaceholder": "入力して絞り込み",
   "ConfigNoSettings": "  設定がありません。",

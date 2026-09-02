@@ -189,6 +189,8 @@
   "HotbarActionTrustToggleName": "Alternar confianza",
   "HotbarActionTrustToggleDescription": "Activar o desactivar el modo de confianza del espacio de trabajo.",
   "ConfigTitle": "Config",
+  "ConfigPreviewLabel": "Vista previa: ",
+  "ConfigHintExternalCredentials": "Qué archivo de credenciales puede leer este proveedor, con qué acceso y cómo revocarlo.",
   "ConfigModalTitle": " Config ",
   "ConfigSearchPlaceholder": "escribe para filtrar",
   "ConfigNoSettings": "  No hay configuraciones disponibles.",

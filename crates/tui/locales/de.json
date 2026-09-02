@@ -189,6 +189,8 @@
   "HotbarActionTrustToggleName": "Vertrauen umschalten",
   "HotbarActionTrustToggleDescription": "Workspace-Vertrauensmodus aktivieren oder deaktivieren.",
   "ConfigTitle": "Konfig",
+  "ConfigPreviewLabel": "Vorschau: ",
+  "ConfigHintExternalCredentials": "Welche Anmeldedatei dieser Anbieter lesen darf, mit welchem Zugriff und wie man sie widerruft.",
   "ConfigModalTitle": " Konfig ",
   "ConfigSearchPlaceholder": "zum Filtern tippen",
   "ConfigNoSettings": "  Keine Einstellungen verfügbar.",
