@@ -1900,7 +1900,7 @@ mod tests {
         TITLE_ANIMATION_RUNNING.store(false, Ordering::SeqCst);
         COMPLETION_MARKER_SHOWN.store(false, Ordering::SeqCst);
         set_title_prefix(Some("Alpha"));
-        assert_eq!(decorate_title(resting_title_body()), "[Alpha] Codewhale");
+        assert_eq!(decorate_title(resting_title_body()), "[Alpha] codewhale");
         COMPLETION_MARKER_SHOWN.store(true, Ordering::SeqCst);
         assert_eq!(decorate_title(resting_title_body()), "[Alpha] ✓ done");
         COMPLETION_MARKER_SHOWN.store(false, Ordering::SeqCst);

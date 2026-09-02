@@ -5,7 +5,7 @@
                                                                                 
                                                                                 
         ╭──────────────────────────────────────────────────────────────╮        
-        │         Codewhale v0.9.12                                    │        
+        │         codewhale v0.9.12                                    │        
         │ ⣠⡾⠛⠷⠄   ⚠ no model connected · run /provider                 │        
         │ ⣿⣄⣠⣤⣶⠶⡆   New worktree                                ctrl+n │        
         │ ⠙⠿⣯⣿⡡⠞    Resume session                              ctrl+r │        
