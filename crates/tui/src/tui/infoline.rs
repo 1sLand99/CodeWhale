@@ -72,6 +72,8 @@ pub enum InfoSegmentId {
     Ttft,
     /// Output rate (`38 tok/s`).
     Rate,
+    /// Prompt cache hit percent (`cache 85%`).
+    Cache,
 }
 
 impl InfoSegmentId {
@@ -83,6 +85,7 @@ impl InfoSegmentId {
     pub fn shed_priority(self) -> u8 {
         match self {
             Self::Rate => 9,
+            Self::Cache => 8,
             Self::Ttft => 8,
             Self::OutputTokens => 7,
             Self::Cost => 6,

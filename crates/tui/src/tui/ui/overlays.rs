@@ -58,14 +58,12 @@ pub(crate) fn open_theme_picker(app: &mut App) {
         return;
     }
     let original = app.theme_id.name().to_string();
-    app.view_stack.push_boxed(
-        crate::tui::theme_picker::ThemePickerView::boxed_with_treatment(
+    app.view_stack
+        .push_boxed(crate::tui::theme_picker::ThemePickerView::boxed(
             original,
-            app.ocean_treatment,
             app.ui_locale,
             app.background_color_override,
-        ),
-    );
+        ));
     app.needs_redraw = true;
 }
 

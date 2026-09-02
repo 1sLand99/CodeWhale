@@ -126,12 +126,12 @@ fn settings_strip_windows_to_the_selected_category_with_painted_hitboxes() {
 }
 
 #[test]
-fn theme_list_shows_thirteen_themes_boxed_selection_and_motion_toggles() {
+fn theme_list_shows_fourteen_themes_boxed_selection_and_motion_toggles() {
     let list = TidelineThemeList::new(&UI_THEME, 3).motion(false, true);
     let text = render_golden_text(30, 24, |buf| {
         render_tideline_theme_list(Rect::new(0, 0, 30, 24), buf, &list);
     });
-    assert_eq!(SELECTABLE_THEMES.len(), 13, "4 mode rows + 9 presets");
+    assert_eq!(SELECTABLE_THEMES.len(), 14, "4 mode rows + 10 presets");
     for name in [
         "System",
         "Terminal",
@@ -141,9 +141,10 @@ fn theme_list_shows_thirteen_themes_boxed_selection_and_motion_toggles() {
     ] {
         assert!(text.contains(name), "missing {name}: {text}");
     }
-    // Index 3 is the fourth mode row (Blue Stage Light).
+    // Index 3 is Blue Stage; Underwater sits between Terminal and Blue Stage.
+    assert!(text.contains("Underwater"), "{text}");
     assert!(
-        text.contains("[ ✓ Blue Stage Light ]"),
+        text.contains("[ ✓ Blue Stage ]"),
         "selected row boxed with check: {text}"
     );
     assert!(text.contains("MOTION (OPTIONAL)"), "{text}");
@@ -234,7 +235,7 @@ fn settings_rail_and_theme_list_hitboxes_match_painted_rows() {
     let mut buf = Buffer::empty(Rect::new(0, 0, w, h));
     render_tideline_theme_list(form, &mut buf, &list);
     let boxes = tideline_theme_list_hitboxes(form, &list);
-    assert_eq!(boxes.len(), 15, "13 theme rows + 2 motion toggles");
+    assert_eq!(boxes.len(), 16, "14 theme rows + 2 motion toggles");
     for rect in &boxes {
         let cells: String = (rect.x..rect.x + rect.width)
             .map(|x| buf[(x, rect.y)].symbol().to_string())

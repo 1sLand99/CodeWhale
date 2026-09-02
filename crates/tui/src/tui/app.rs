@@ -1623,7 +1623,6 @@ pub struct App {
     pub fancy_animations: bool,
     /// Typed appearance treatment; appearance is independent from motion
     /// settings, and every underwater treatment keeps ambient life.
-    pub ocean_treatment: crate::tui::ocean::OceanTreatment,
     /// Focus-context texture prototype mode (#4823), parsed once from the
     /// `focus_texture` setting. `Off` by default; while off the modal render
     /// path is byte-identical to the pre-prototype path.

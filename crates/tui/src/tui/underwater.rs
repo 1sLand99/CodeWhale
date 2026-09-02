@@ -1903,7 +1903,7 @@ pub fn empty_state_lines(app: &App, area: Rect) -> Vec<Line<'static>> {
         app.mcp_configured_count,
         width,
     );
-    let brand = "Codewhale";
+    let brand = "codewhale";
     let brand_inset = " ".repeat(width.saturating_sub(brand.width()) / 2);
     lines.push(Line::from(Span::styled(
         format!("{brand_inset}{brand}"),
@@ -2700,7 +2700,7 @@ mod header_tests {
         assert!(filesystem_scope_notice(&app).is_none());
         let line = header_line(&app, 120);
         assert!(!line.contains("files:"), "{line:?}");
-        assert!(line.starts_with("Codewhale"), "{line:?}");
+        assert!(line.starts_with("codewhale"), "{line:?}");
         assert!(line.contains("work"), "{line:?}");
         assert!(line.contains("ask"), "{line:?}");
     }
@@ -3426,7 +3426,7 @@ fn render_launch_card(
         text_x,
         row,
         &Span::styled(
-            fit("Codewhale"),
+            fit("codewhale"),
             faded(
                 Style::default()
                     .fg(theme.accent_action)
@@ -3437,7 +3437,7 @@ fn render_launch_card(
         ),
     );
     let version = format!("v{}", startup.version);
-    let version_x = text_x + "Codewhale".width() as u16 + 1;
+    let version_x = text_x + "codewhale".width() as u16 + 1;
     if usize::from(version_x) + version.width() <= interior_w {
         set_span(
             buf,

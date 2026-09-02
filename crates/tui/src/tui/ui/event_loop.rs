@@ -3762,10 +3762,10 @@ pub(crate) async fn run_event_loop(
         let active_cell_has_live_motion = active_cell_has_live_motion(app);
         let translation_placeholder_has_live_motion = app.translation_enabled
             && (pending_thinking_translations > 0 || app.streaming_thinking_active_entry.is_some());
-        // The ordinary terminal stays quiet. Only the explicit underwater
-        // treatment earns ambient redraws; its column can breathe at any
-        // usable size and its life needs the collision-safe water budget.
-        let underwater_atmosphere_enabled = app.ocean_treatment.is_deepsea();
+        // The ordinary terminal stays quiet. Only the underwater theme earns
+        // ambient redraws; its column can breathe at any usable size and its
+        // life needs the collision-safe water budget.
+        let underwater_atmosphere_enabled = app.theme_id == crate::palette::ThemeId::Underwater;
         let deepsea_field_breathes = underwater_atmosphere_enabled
             && crate::tui::ocean::OceanRamp::for_theme(&app.ui_theme).is_some();
         let browsing_history = !app.viewport.transcript_scroll.is_at_tail();

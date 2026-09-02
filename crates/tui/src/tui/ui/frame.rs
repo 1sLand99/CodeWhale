@@ -93,20 +93,23 @@ pub(crate) fn info_segments(app: &App, width: u16) -> Vec<InfoSegment> {
         ));
     }
 
-    // The context reading: painted here and nowhere else. At the 80% cap
-    // the whole reading turns to the error token — it is the one fact on
+    // The context reading: painted here and nowhere else. Only displayed
+    // when context fullness >= 50%; below 50% it remains silent. At the 80%
+    // cap the whole reading turns to the error token — it is the one fact on
     // this row that becomes a problem rather than a status.
     let pct = info_context_percent(app);
-    segments.push(InfoSegment::new(
-        InfoSegmentId::Context,
-        app.tr(MessageId::InfoLineContext).as_ref(),
-        format!("{pct}%"),
-        if pct >= 80 {
-            ChromeInk::Failure
-        } else {
-            ChromeInk::Info
-        },
-    ));
+    if pct >= 50 {
+        segments.push(InfoSegment::new(
+            InfoSegmentId::Context,
+            app.tr(MessageId::InfoLineContext).as_ref(),
+            format!("{pct}%"),
+            if pct >= 80 {
+                ChromeInk::Failure
+            } else {
+                ChromeInk::Info
+            },
+        ));
+    }
 
     let cost = session_cost_label(app);
     if !cost.is_empty() {
@@ -142,12 +145,37 @@ pub(crate) fn info_segments(app: &App, width: u16) -> Vec<InfoSegment> {
                 ChromeInk::MetadataValue,
             ));
         }
+        let hit = u64::from(app.session.displayed_total_cache_hit_tokens());
+        let miss = u64::from(app.session.displayed_total_cache_miss_tokens());
+        if hit + miss > 0 {
+            let cache_pct =
+                u8::try_from((hit * 100 + (hit + miss) / 2) / (hit + miss)).unwrap_or(100);
+            segments.push(InfoSegment::new(
+                InfoSegmentId::Cache,
+                "cache",
+                format!("{cache_pct}%"),
+                ChromeInk::MetadataValue,
+            ));
+        }
         segments.push(InfoSegment::new(
             InfoSegmentId::OutputTokens,
             "↓",
             crate::tui::session_metrics::format_tokens(tokens),
             ChromeInk::MetadataValue,
         ));
+    } else {
+        let hit = u64::from(app.session.displayed_total_cache_hit_tokens());
+        let miss = u64::from(app.session.displayed_total_cache_miss_tokens());
+        if hit + miss > 0 {
+            let cache_pct =
+                u8::try_from((hit * 100 + (hit + miss) / 2) / (hit + miss)).unwrap_or(100);
+            segments.push(InfoSegment::new(
+                InfoSegmentId::Cache,
+                "cache",
+                format!("{cache_pct}%"),
+                ChromeInk::MetadataValue,
+            ));
+        }
     }
 
     segments

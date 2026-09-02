@@ -2019,14 +2019,12 @@ pub(crate) async fn apply_command_result(
                     // Avoids re-reading settings.toml from disk on every
                     // `/theme` invocation.
                     let original = app.theme_id.name().to_string();
-                    app.view_stack.push_boxed(
-                        crate::tui::theme_picker::ThemePickerView::boxed_with_treatment(
+                    app.view_stack
+                        .push_boxed(crate::tui::theme_picker::ThemePickerView::boxed(
                             original,
-                            app.ocean_treatment,
                             app.ui_locale,
                             app.background_color_override,
-                        ),
-                    );
+                        ));
                 }
             }
             AppAction::OpenSkillsManager => {
