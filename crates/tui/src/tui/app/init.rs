@@ -698,6 +698,11 @@ impl App {
         // #2069: expose the already-discovered skills as bindable hotbar
         // actions. Reuses the startup skill cache, so no extra filesystem I/O.
         hotbar_actions.register_skills(&cached_skills);
+        let composer_arrows_scroll_explicit = config
+            .tui
+            .as_ref()
+            .and_then(|tui| tui.composer_arrows_scroll)
+            .is_some();
         let mut app = Self {
             mode: initial_mode,
             hotbar_actions,
@@ -1095,6 +1100,7 @@ impl App {
                 .as_ref()
                 .and_then(|tui| tui.composer_arrows_scroll)
                 .unwrap_or_else(|| default_composer_arrows_scroll(use_mouse_capture)),
+            composer_arrows_scroll_explicit,
             mention_menu_limit: settings.mention_menu_limit,
             mention_walk_depth: settings.mention_walk_depth,
             mention_menu_behavior: settings.mention_menu_behavior.clone(),

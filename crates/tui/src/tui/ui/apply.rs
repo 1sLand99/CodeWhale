@@ -1896,27 +1896,30 @@ pub(crate) async fn apply_command_result(
                     Ok(()) => {
                         let screen = match mode {
                             crate::tui::app::ScreenMode::Fullscreen => {
-                                "Screen: fullscreen (alternate screen)."
+                                app.tr(MessageId::ScreenModeFullscreenNotice)
                             }
                             crate::tui::app::ScreenMode::Inline => {
-                                "Screen: inline — the terminal keeps its own scrollback. The transcript stays in the viewport; nothing is written into scrollback yet."
+                                app.tr(MessageId::ScreenModeInlineNotice)
                             }
                         };
                         let capture = if app.use_mouse_capture {
-                            "Mouse capture on."
+                            app.tr(MessageId::ScreenModeMouseCaptureOn)
                         } else {
-                            "Mouse capture off; the terminal owns selection."
+                            app.tr(MessageId::ScreenModeMouseCaptureOff)
                         };
                         app.add_message(HistoryCell::System {
                             content: format!("{screen} {capture}"),
                         });
                     }
                     Err(reason) => {
+                        let unchanged = app
+                            .tr(MessageId::ScreenModeUnchanged)
+                            .replace("{reason}", &reason);
                         app.add_message(HistoryCell::System {
-                            content: format!("Screen unchanged: {reason}."),
+                            content: unchanged.clone(),
                         });
                         app.push_status_toast(
-                            format!("Screen unchanged: {reason}"),
+                            unchanged.trim_end_matches('.').to_string(),
                             StatusToastLevel::Warning,
                             Some(8_000),
                         );

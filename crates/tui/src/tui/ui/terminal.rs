@@ -279,6 +279,13 @@ pub(crate) fn apply_mouse_capture_for_screen<W: Write>(
     Ok(true)
 }
 
+fn refresh_composer_arrows_scroll(app: &mut App) {
+    if !app.composer_arrows_scroll_explicit {
+        app.composer_arrows_scroll =
+            crate::tui::app::default_composer_arrows_scroll(app.use_mouse_capture);
+    }
+}
+
 /// Rows a full-height inline viewport should request.
 ///
 /// `Viewport::Inline` clamps to the terminal height anyway; asking for the
@@ -350,10 +357,15 @@ pub(crate) fn switch_screen_mode(
         &mut |on_alt_screen| {
             let mut stdout = io::stdout();
             if on_alt_screen {
-                enter_alt_screen(&mut stdout)
+                enter_alt_screen(&mut stdout)?;
+                #[cfg(windows)]
+                crate::logging::set_verbose(false);
             } else {
-                leave_alt_screen(&mut stdout)
+                leave_alt_screen(&mut stdout)?;
+                #[cfg(windows)]
+                crate::logging::restore_verbose_state();
             }
+            Ok(())
         },
         move || build_app_terminal(carried, target),
     );
@@ -367,6 +379,7 @@ pub(crate) fn switch_screen_mode(
         if let Err(err) = apply_mouse_capture_for_screen(app, terminal.backend_mut()) {
             tracing::warn!(?err, "mouse capture could not follow the screen switch");
         }
+        refresh_composer_arrows_scroll(app);
         let _ = reset_terminal_viewport(terminal, app.synchronized_output_enabled);
     }
     outcome
@@ -947,6 +960,43 @@ mod screen_mode_tests {
             "an unchanged answer writes nothing"
         );
         assert!(wire.is_empty());
+    }
+
+    #[test]
+    fn switching_screens_recomputes_derived_composer_arrows_only() {
+        let mut app = crate::test_support::test_app_with_options(
+            crate::test_support::test_tui_options(std::path::PathBuf::from(".")),
+        );
+        app.composer_arrows_scroll_explicit = false;
+
+        app.use_mouse_capture = false;
+        refresh_composer_arrows_scroll(&mut app);
+        assert!(
+            app.composer_arrows_scroll,
+            "inline/no-capture uses arrows to scroll"
+        );
+
+        app.use_mouse_capture = true;
+        refresh_composer_arrows_scroll(&mut app);
+        assert!(
+            !app.composer_arrows_scroll,
+            "fullscreen/capture uses prompt history"
+        );
+
+        app.composer_arrows_scroll_explicit = true;
+        app.composer_arrows_scroll = true;
+        app.use_mouse_capture = true;
+        refresh_composer_arrows_scroll(&mut app);
+        assert!(
+            app.composer_arrows_scroll,
+            "explicit true survives a switch"
+        );
+        app.use_mouse_capture = false;
+        refresh_composer_arrows_scroll(&mut app);
+        assert!(
+            app.composer_arrows_scroll,
+            "explicit true survives the reverse switch"
+        );
     }
 
     #[test]

@@ -1511,6 +1511,8 @@ pub struct App {
     /// sequences (e.g. Windows CMD without `WT_SESSION`) get page-scrolling
     /// without any explicit config (#1443).
     pub composer_arrows_scroll: bool,
+    /// Whether `composer_arrows_scroll` came from explicit configuration.
+    pub composer_arrows_scroll_explicit: bool,
     /// Data-side cap for the `@`-mention popup. The renderer still limits the
     /// visible rows to available terminal height.
     pub mention_menu_limit: usize,
@@ -2283,7 +2285,7 @@ impl std::ops::DerefMut for App {
 
 // === App State ===
 
-fn default_composer_arrows_scroll(use_mouse_capture: bool) -> bool {
+pub(crate) fn default_composer_arrows_scroll(use_mouse_capture: bool) -> bool {
     default_composer_arrows_scroll_for_platform(use_mouse_capture, cfg!(windows))
 }
 
