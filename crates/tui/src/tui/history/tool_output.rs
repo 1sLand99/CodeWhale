@@ -10,8 +10,8 @@ use crate::palette;
 use super::constants::{TOOL_OUTPUT_HEAD_LINES, TOOL_OUTPUT_TAIL_LINES, TOOL_TEXT_LIMIT};
 use super::{
     RenderMode, details_affordance_line, looks_like_file_path, render_card_detail_line,
-    render_card_detail_line_single, render_card_detail_line_styled, tool_value_style,
-    truncate_text,
+    render_card_detail_line_single, render_card_detail_line_single_styled,
+    render_card_detail_line_styled, tool_value_style, truncate_text,
 };
 
 pub(super) fn render_tool_output_mode(
@@ -444,7 +444,7 @@ fn output_rows(output: &str, width: u16) -> Vec<OutputRow> {
             });
         } else {
             let parts = wrap_text(&sanitized, wrap_width);
-            let mut styled_parts = styled.map(|segments| split_segments(segments, &parts));
+            let mut styled_parts = styled.map(|segments| split_segments(&segments, &parts));
             for (idx, wrapped) in parts.into_iter().enumerate() {
                 rows.push(OutputRow {
                     text: wrapped,
@@ -527,7 +527,7 @@ fn tool_style(style: Style) -> Style {
 /// wrapped part keeps the colours of the characters it holds. `parts` must
 /// concatenate to the segments' text (which is how `wrap_text` splits).
 pub(super) fn split_segments(
-    segments: Vec<StyledSegment>,
+    segments: &[StyledSegment],
     parts: &[String],
 ) -> Vec<Vec<StyledSegment>> {
     let mut chars = segments
@@ -691,12 +691,21 @@ fn render_output_row(
     let file_style = file_line_style(&row.text);
     let value_style = diff_style.or(file_style).unwrap_or_else(tool_value_style);
     if let Some(segments) = &row.styled {
-        lines.extend(render_card_detail_line_styled(
-            label,
-            segments,
-            value_style,
-            width,
-        ));
+        if row.intact {
+            lines.push(render_card_detail_line_single_styled(
+                label,
+                segments,
+                value_style,
+            ));
+        } else {
+            lines.extend(render_card_detail_line_styled(
+                label,
+                &row.text,
+                segments,
+                value_style,
+                width,
+            ));
+        }
     } else if row.intact {
         lines.push(render_card_detail_line_single(
             label,
@@ -848,6 +857,44 @@ mod ansi_colour_tests {
         assert_eq!(spans[4].style, tool_value_style());
         let plain: String = spans[3..].iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(plain, "error: boom");
+    }
+
+    #[test]
+    fn coloured_intact_path_stays_on_one_line_with_the_plain_hitbox() {
+        let path = "crates/tui/src/tui/history/tool_output.rs:812";
+        let coloured = format!("\x1b[35m{path}\x1b[0m");
+        let plain_rows = output_rows(path, 20);
+        let styled_rows = output_rows(&coloured, 20);
+        assert_eq!(plain_rows.len(), 1);
+        assert_eq!(styled_rows.len(), 1);
+        assert!(plain_rows[0].intact && styled_rows[0].intact);
+        assert!(styled_rows[0].styled.is_some());
+
+        let mut plain = Vec::new();
+        render_output_row(&mut plain, Some("output"), &plain_rows[0], 20);
+        let mut styled = Vec::new();
+        render_output_row(&mut styled, Some("output"), &styled_rows[0], 20);
+        assert_eq!(plain.len(), 1, "plain intact row is one line");
+        assert_eq!(styled.len(), 1, "coloured intact row is one line too");
+        let text = |line: &Line<'static>| {
+            line.spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect::<String>()
+        };
+        assert_eq!(text(&styled[0]), text(&plain[0]));
+        // Same prefix (rail + label + gap), so the click region is identical.
+        assert_eq!(
+            styled[0].spans[..3]
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect::<Vec<_>>(),
+            plain[0].spans[..3]
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(styled[0].spans[3].style.fg, Some(Color::Magenta));
     }
 
     #[test]
