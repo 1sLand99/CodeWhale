@@ -226,6 +226,148 @@ pub(crate) fn terminal_input_recovery_relevant(app: &App, has_running_agents: bo
         || active_turn_has_running_tool(app)
 }
 
+/// Which screen the live terminal is on, for teardown paths that cannot see
+/// `App` (the `TerminalCleanupGuard` drop, the panic hook).
+///
+/// A runtime `/inline` or `/fullscreen` switch moves the terminal after the
+/// guard was built, so the guard must read the current screen rather than the
+/// one startup chose — otherwise a rolled-back or switched session emits a
+/// `LeaveAlternateScreen` for a screen it is not on (or skips the one it is).
+static LIVE_ALT_SCREEN: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn set_live_alt_screen(on_alt_screen: bool) {
+    LIVE_ALT_SCREEN.store(on_alt_screen, Ordering::Release);
+}
+
+pub(crate) fn live_alt_screen() -> bool {
+    LIVE_ALT_SCREEN.load(Ordering::Acquire)
+}
+
+/// Rows a full-height inline viewport should request.
+///
+/// `Viewport::Inline` clamps to the terminal height anyway; asking for the
+/// full height is what makes inline mode a drop-in replacement for the alt
+/// screen rather than a shrunken strip.
+fn inline_viewport_rows(backend: &ColorCompatBackend<Stdout>) -> u16 {
+    ratatui::backend::Backend::size(backend)
+        .map_or(24, |size| size.height)
+        .max(1)
+}
+
+/// Build the ratatui terminal for `mode`.
+///
+/// Inline is the fallible one: `Terminal::with_options` measures the terminal
+/// and appends lines to make room for the viewport, so it is the probe. It is
+/// deliberately given the *full* terminal height, which makes the anchoring
+/// independent of where the cursor happens to be — the newlines it prints
+/// scroll whatever was on screen into the host's real scrollback instead of
+/// being painted over.
+pub(crate) fn build_app_terminal(
+    backend: ColorCompatBackend<Stdout>,
+    mode: ScreenMode,
+) -> io::Result<AppTerminal> {
+    match mode {
+        ScreenMode::Fullscreen => Terminal::new(backend),
+        ScreenMode::Inline => {
+            let rows = inline_viewport_rows(&backend);
+            Terminal::with_options(
+                backend,
+                ratatui::TerminalOptions {
+                    viewport: ratatui::Viewport::Inline(rows),
+                },
+            )
+        }
+    }
+}
+
+/// Move the live terminal to `target` in place, rolling back on failure.
+///
+/// Stock ratatui cannot change an existing terminal's viewport, so the switch
+/// rebuilds one over a fresh backend and only adopts it once the rebuild
+/// succeeded. That ordering *is* the rollback: on failure the caller's
+/// terminal was never touched, so undoing the alternate-screen escape restores
+/// the previous mode exactly.
+///
+/// Nothing is committed to the host scrollback here. Inline mode paints a
+/// full-height viewport, so no transcript row ever leaves the live region and
+/// `Terminal::insert_before` has nothing to commit — see
+/// `docs/CONFIGURATION.md`.
+pub(crate) fn switch_screen_mode(
+    terminal: &mut AppTerminal,
+    app: &mut App,
+    target: ScreenMode,
+) -> std::result::Result<(), String> {
+    let from = app.screen_mode;
+    if from == target {
+        return Ok(());
+    }
+
+    // Everything the previous mode staged must reach the terminal before the
+    // escapes below move the cursor out from under it.
+    let _ = terminal.backend_mut().flush();
+
+    let carried = terminal.backend().respawn(io::stdout());
+    let outcome = transition_screen(
+        terminal,
+        from,
+        target,
+        &mut |on_alt_screen| {
+            let mut stdout = io::stdout();
+            let _ = if on_alt_screen {
+                execute!(stdout, EnterAlternateScreen)
+            } else {
+                execute!(stdout, LeaveAlternateScreen)
+            };
+            set_live_alt_screen(on_alt_screen);
+        },
+        move || build_app_terminal(carried, target),
+    );
+
+    // Either way the screen changed underneath the app: repaint.
+    app.needs_redraw = true;
+    if outcome.is_ok() {
+        app.screen_mode = target;
+        let _ = reset_terminal_viewport(terminal, app.synchronized_output_enabled);
+    }
+    outcome
+}
+
+/// The fallible half of [`switch_screen_mode`], with the terminal escapes and
+/// the rebuild injected so the rollback can be exercised against a fake
+/// backend.
+///
+/// `alt_screen` programs the alternate screen (best effort, like every other
+/// teardown escape in this module); `build` is the probe. A failed probe never
+/// touched `terminal`, so rollback is exactly one call to `alt_screen` with the
+/// previous mode's answer.
+fn transition_screen<B, F>(
+    terminal: &mut Terminal<B>,
+    from: ScreenMode,
+    target: ScreenMode,
+    alt_screen: &mut dyn FnMut(bool),
+    build: F,
+) -> std::result::Result<(), String>
+where
+    B: ratatui::backend::Backend,
+    F: FnOnce() -> io::Result<Terminal<B>>,
+{
+    alt_screen(target.uses_alt_screen());
+    match build() {
+        Ok(rebuilt) => {
+            *terminal = rebuilt;
+            Ok(())
+        }
+        Err(err) => {
+            alt_screen(from.uses_alt_screen());
+            Err(format!(
+                "{} viewport probe failed: {err}; staying in {}",
+                target.as_str(),
+                from.as_str()
+            ))
+        }
+    }
+}
+
 pub(crate) fn pause_terminal(
     terminal: &mut AppTerminal,
     use_alt_screen: bool,
@@ -534,4 +676,93 @@ pub(crate) fn active_poll_ms(app: &App) -> u64 {
 
 pub(crate) fn idle_poll_ms(app: &App) -> u64 {
     if app.low_motion { 120 } else { UI_IDLE_POLL_MS }
+}
+
+#[cfg(test)]
+mod screen_mode_tests {
+    use super::*;
+    use ratatui::backend::TestBackend;
+
+    fn probe_failure() -> io::Error {
+        io::Error::other("terminal refused the inline viewport")
+    }
+
+    #[test]
+    fn failed_probe_rolls_the_screen_back_and_says_why() {
+        let mut terminal =
+            Terminal::new(TestBackend::new(20, 6)).expect("fullscreen test terminal");
+        let mut alt_screen_writes: Vec<bool> = Vec::new();
+
+        let error = transition_screen(
+            &mut terminal,
+            ScreenMode::Fullscreen,
+            ScreenMode::Inline,
+            &mut |on_alt_screen| alt_screen_writes.push(on_alt_screen),
+            || Err(probe_failure()),
+        )
+        .expect_err("a failing probe must not report a switch");
+
+        assert!(
+            error.contains("inline viewport probe failed"),
+            "message must name the probe that failed: {error}"
+        );
+        assert!(
+            error.contains("terminal refused the inline viewport"),
+            "message must carry the terminal's own reason: {error}"
+        );
+        assert!(
+            error.contains("staying in fullscreen"),
+            "message must name the mode the user is left in: {error}"
+        );
+        // Left the alt screen for the probe, then went straight back to it.
+        assert_eq!(alt_screen_writes, vec![false, true]);
+        // The caller's terminal is the one it started with.
+        assert_eq!(terminal.get_frame().area(), Rect::new(0, 0, 20, 6));
+    }
+
+    #[test]
+    fn successful_probe_adopts_the_rebuilt_terminal() {
+        let mut terminal =
+            Terminal::new(TestBackend::new(20, 6)).expect("fullscreen test terminal");
+        let mut alt_screen_writes: Vec<bool> = Vec::new();
+
+        transition_screen(
+            &mut terminal,
+            ScreenMode::Fullscreen,
+            ScreenMode::Inline,
+            &mut |on_alt_screen| alt_screen_writes.push(on_alt_screen),
+            || {
+                Terminal::with_options(
+                    TestBackend::new(20, 6),
+                    ratatui::TerminalOptions {
+                        viewport: ratatui::Viewport::Inline(3),
+                    },
+                )
+                .map_err(|err| io::Error::other(err.to_string()))
+            },
+        )
+        .expect("a successful probe must switch");
+
+        assert_eq!(alt_screen_writes, vec![false], "no rollback write");
+        assert_eq!(
+            terminal.get_frame().area().height,
+            3,
+            "inline viewport adopted"
+        );
+    }
+
+    #[test]
+    fn inline_viewport_asks_for_the_full_terminal_height() {
+        // Inline is a drop-in for the alt screen, not a strip: the viewport is
+        // the whole terminal, which is also what makes its anchoring
+        // independent of where the cursor happened to be.
+        let backend = crate::tui::color_compat::ColorCompatBackend::new(
+            io::stdout(),
+            crate::palette::ColorDepth::TrueColor,
+            crate::palette::PaletteMode::Dark,
+        );
+        let mut backend = backend;
+        backend.set_terminal_size(Size::new(80, 24));
+        assert_eq!(inline_viewport_rows(&backend), 24);
+    }
 }

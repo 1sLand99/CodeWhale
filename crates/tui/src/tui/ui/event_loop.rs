@@ -265,7 +265,8 @@ pub async fn run_tui(
     // Install notification, sound, category, and attention policy before any
     // producer (including the model-facing notify tool) can emit an event.
     let _ = crate::tui::notifications::settings(config);
-    let use_alt_screen = options.use_alt_screen;
+    let startup_screen_mode = options.screen_mode;
+    let use_alt_screen = startup_screen_mode.uses_alt_screen();
     let use_mouse_capture = options.use_mouse_capture;
     let use_bracketed_paste = options.use_bracketed_paste;
 
@@ -396,8 +397,10 @@ pub async fn run_tui(
     // sequence is received. Terminals that do not understand it silently
     // ignore it.
     recover_terminal_modes(&mut stdout, use_mouse_capture, use_bracketed_paste);
+    // The guard reads the *live* screen rather than this one, so a runtime
+    // `/inline` switch cannot leave it emitting the wrong teardown escape.
+    set_live_alt_screen(use_alt_screen);
     let mut cleanup_guard = TerminalCleanupGuard {
-        use_alt_screen,
         use_mouse_capture,
         use_bracketed_paste,
         defused: false,
@@ -418,7 +421,7 @@ pub async fn run_tui(
     );
     let mut backend = ColorCompatBackend::new(stdout, color_depth, palette_mode);
     backend.set_detected_background(background.color());
-    let mut terminal = Terminal::new(backend)?;
+    let mut terminal = build_app_terminal(backend, startup_screen_mode)?;
     // At this point Settings hasn't loaded yet, so we can't read the
     // user's `synchronized_output` knob. Use the same env-based terminal
     // quirk detection that `Settings::apply_env_overrides` uses, so the
@@ -815,7 +818,9 @@ pub async fn run_tui(
     disable_alternate_scroll_mode(terminal.backend_mut());
     execute!(terminal.backend_mut(), DisableFocusChange)?;
     disable_raw_mode()?;
-    if use_alt_screen {
+    // `/inline` and `/fullscreen` can have moved the screen since startup; the
+    // teardown must match the screen the terminal is actually on.
+    if app.use_alt_screen() {
         execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
         #[cfg(windows)]
         crate::logging::restore_verbose_state();
@@ -2823,7 +2828,7 @@ pub(crate) async fn run_event_loop(
                             }
                             if let Err(err) = pause_terminal(
                                 terminal,
-                                app.use_alt_screen,
+                                app.use_alt_screen(),
                                 app.use_mouse_capture,
                                 app.use_bracketed_paste,
                             ) {
@@ -2834,7 +2839,7 @@ pub(crate) async fn run_event_loop(
                                 );
                                 resume_terminal(
                                     terminal,
-                                    app.use_alt_screen,
+                                    app.use_alt_screen(),
                                     app.use_mouse_capture,
                                     app.use_bracketed_paste,
                                     app.synchronized_output_enabled,
@@ -2866,7 +2871,7 @@ pub(crate) async fn run_event_loop(
                         if event_broker.is_paused() {
                             resume_terminal(
                                 terminal,
-                                app.use_alt_screen,
+                                app.use_alt_screen(),
                                 app.use_mouse_capture,
                                 app.use_bracketed_paste,
                                 app.synchronized_output_enabled,
@@ -3029,7 +3034,7 @@ pub(crate) async fn run_event_loop(
                             );
                         }
                         let should_recapture_terminal =
-                            !has_other_running_subagents && app.use_alt_screen;
+                            !has_other_running_subagents && app.use_alt_screen();
                         let subagent_notification_mode =
                             config.notifications_config().subagent_completion;
                         let workflow_tool_running = workflow_tool_is_running(app);
@@ -3060,7 +3065,7 @@ pub(crate) async fn run_event_loop(
                         if should_recapture_terminal && event_broker.is_paused() {
                             resume_terminal(
                                 terminal,
-                                app.use_alt_screen,
+                                app.use_alt_screen(),
                                 app.use_mouse_capture,
                                 app.use_bracketed_paste,
                                 app.synchronized_output_enabled,
@@ -3835,7 +3840,7 @@ pub(crate) async fn run_event_loop(
             }
             resume_terminal(
                 terminal,
-                app.use_alt_screen,
+                app.use_alt_screen(),
                 app.use_mouse_capture,
                 app.use_bracketed_paste,
                 app.synchronized_output_enabled,
@@ -4106,7 +4111,7 @@ pub(crate) async fn run_event_loop(
                 tracing::debug!(
                     width,
                     height,
-                    use_alt_screen = app.use_alt_screen,
+                    use_alt_screen = app.use_alt_screen(),
                     "Event::Resize received; clearing terminal"
                 );
                 // Drain any further Resize events queued in this poll cycle so we
@@ -6001,7 +6006,7 @@ pub(crate) async fn run_event_loop(
                             if ready {
                                 crate::tui::external_editor::spawn_editor_for_input(
                                     terminal,
-                                    app.use_alt_screen,
+                                    app.use_alt_screen(),
                                     app.use_mouse_capture,
                                     app.use_bracketed_paste,
                                     &seed,
@@ -6305,14 +6310,14 @@ pub(crate) async fn run_xai_device_login_from_tui(
 ) -> Result<bool> {
     pause_terminal(
         terminal,
-        app.use_alt_screen,
+        app.use_alt_screen(),
         app.use_mouse_capture,
         app.use_bracketed_paste,
     )?;
     let login_result = crate::xai_oauth::device_code_login().await;
     resume_terminal(
         terminal,
-        app.use_alt_screen,
+        app.use_alt_screen(),
         app.use_mouse_capture,
         app.use_bracketed_paste,
         app.synchronized_output_enabled,
@@ -6350,14 +6355,14 @@ pub(crate) async fn run_chatgpt_pkce_login_from_tui(
 ) -> Result<bool> {
     pause_terminal(
         terminal,
-        app.use_alt_screen,
+        app.use_alt_screen(),
         app.use_mouse_capture,
         app.use_bracketed_paste,
     )?;
     let login_result = crate::chatgpt_oauth::pkce_login().await;
     resume_terminal(
         terminal,
-        app.use_alt_screen,
+        app.use_alt_screen(),
         app.use_mouse_capture,
         app.use_bracketed_paste,
         app.synchronized_output_enabled,

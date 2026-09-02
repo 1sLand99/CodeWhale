@@ -1708,7 +1708,7 @@ pub(crate) async fn apply_command_result(
                 ConfigUiMode::Tui => {
                     pause_terminal(
                         terminal,
-                        app.use_alt_screen,
+                        app.use_alt_screen(),
                         app.use_mouse_capture,
                         app.use_bracketed_paste,
                     )?;
@@ -1716,7 +1716,7 @@ pub(crate) async fn apply_command_result(
                         .and_then(|doc| config_ui::apply_document(doc, app, config, true));
                     resume_terminal(
                         terminal,
-                        app.use_alt_screen,
+                        app.use_alt_screen(),
                         app.use_mouse_capture,
                         app.use_bracketed_paste,
                         app.synchronized_output_enabled,
@@ -1888,6 +1888,35 @@ pub(crate) async fn apply_command_result(
             }
             AppAction::StartChatgptRevoke => {
                 run_chatgpt_revoke_from_tui(app, config).await;
+            }
+            AppAction::SetScreenMode(mode) => {
+                // The terminal transition is the only fallible part; a failed
+                // probe leaves the previous screen live and says why.
+                match switch_screen_mode(terminal, app, mode) {
+                    Ok(()) => {
+                        let notice = match mode {
+                            crate::tui::app::ScreenMode::Fullscreen => {
+                                "Screen: fullscreen (alternate screen)."
+                            }
+                            crate::tui::app::ScreenMode::Inline => {
+                                "Screen: inline — the terminal keeps its own scrollback. The transcript stays in the viewport; nothing is written into scrollback yet."
+                            }
+                        };
+                        app.add_message(HistoryCell::System {
+                            content: notice.to_string(),
+                        });
+                    }
+                    Err(reason) => {
+                        app.add_message(HistoryCell::System {
+                            content: format!("Screen unchanged: {reason}."),
+                        });
+                        app.push_status_toast(
+                            format!("Screen unchanged: {reason}"),
+                            StatusToastLevel::Warning,
+                            Some(8_000),
+                        );
+                    }
+                }
             }
             AppAction::OpenModePicker => {
                 if app.view_stack.top_kind() != Some(ModalKind::ModePicker) {

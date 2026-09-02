@@ -415,6 +415,8 @@
   "CmdReviewDescription": "對檔案、diff 或 PR 進行結構化程式碼審查",
   "CmdRlmDescription": "工具箱：開啟持久 RLM 上下文",
   "CmdSaveDescription": "將工作階段儲存到檔案",
+  "CmdFullscreenDescription": "在替代螢幕上繪製（TUI 佔用整個終端機）",
+  "CmdInlineDescription": "以終端機完整高度內嵌繪製，保留終端機自身的回捲緩衝",
   "CmdSessionsDescription": "開啟工作階段歷史選擇器",
   "CmdSettingsDescription": "開啟類型化設定編輯器",
   "CmdSetupDescription": "開啟以憲章為核心的設定",

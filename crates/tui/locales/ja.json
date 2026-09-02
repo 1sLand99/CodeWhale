@@ -515,6 +515,8 @@
   "CmdReviewDescription": "ファイル・diff・PR に対して構造化コードレビューを実行",
   "CmdRlmDescription": "ファイルまたはテキスト用の永続 RLM コンテキストを開く",
   "CmdSaveDescription": "セッションをファイルに保存",
+  "CmdFullscreenDescription": "代替画面に描画する (TUI が端末全体を占有)",
+  "CmdInlineDescription": "端末の全高でインライン描画し、端末のスクロールバックを保持",
   "CmdForkDescription": "現在の会話を兄弟セッションに fork",
   "CmdTreeDescription": "セッション履歴をツリー表示（末端がアクティブなブランチ）",
   "CmdBranchDescription": "履歴を書き換えず、アクティブなブランチを既存のセッション項目へ移動",

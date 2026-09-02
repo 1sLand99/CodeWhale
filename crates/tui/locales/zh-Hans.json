@@ -515,6 +515,8 @@
   "CmdReviewDescription": "对文件、diff 或 PR 进行结构化代码审查",
   "CmdRlmDescription": "工具箱：打开持久 RLM 上下文",
   "CmdSaveDescription": "将会话保存到文件",
+  "CmdFullscreenDescription": "在备用屏幕上绘制（TUI 占用整个终端）",
+  "CmdInlineDescription": "以终端完整高度内联绘制，保留终端自身的回滚缓冲",
   "CmdForkDescription": "将当前对话分叉为兄弟会话",
   "CmdTreeDescription": "以树形结构显示会话历史（叶节点为当前分支）",
   "CmdBranchDescription": "将当前分支移至现有会话条目，不重写历史记录",

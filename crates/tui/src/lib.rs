@@ -178,6 +178,7 @@ use crate::mcp::{
 use crate::models::Role;
 use crate::models::{ContentBlock, Message, MessageRequest, SystemPrompt};
 use crate::session_manager::{SessionManager, create_saved_session, truncate_id};
+use crate::tui::app::ScreenMode;
 use crate::tui::history::{summarize_tool_args, summarize_tool_output};
 
 #[cfg(windows)]
@@ -10106,8 +10107,19 @@ fn parse_sandbox_policy(
     }
 }
 
-fn should_use_alt_screen(_cli: &Cli, _config: &Config) -> bool {
-    true
+/// Screen the interactive TUI starts on.
+///
+/// `tui.alternate_screen` is the existing knob and keeps its existing
+/// vocabulary: `auto`/`always` stay on the alternate screen (the default),
+/// while `never` now selects the full-height inline viewport instead of being
+/// parsed and ignored. `/inline` and `/fullscreen` move it at runtime.
+fn startup_screen_mode(_cli: &Cli, config: &Config) -> ScreenMode {
+    config
+        .tui
+        .as_ref()
+        .and_then(|tui| tui.alternate_screen.as_deref())
+        .and_then(ScreenMode::parse)
+        .unwrap_or_default()
 }
 
 fn should_use_mouse_capture(cli: &Cli, config: &Config, use_alt_screen: bool) -> bool {
@@ -10832,8 +10844,8 @@ async fn run_interactive_with_notice(
         || config.max_subagents_for_provider(provider),
         |value| value.clamp(1, MAX_SUBAGENTS),
     );
-    let use_alt_screen = should_use_alt_screen(cli, config);
-    let use_mouse_capture = should_use_mouse_capture(cli, config, use_alt_screen);
+    let screen_mode = startup_screen_mode(cli, config);
+    let use_mouse_capture = should_use_mouse_capture(cli, config, screen_mode.uses_alt_screen());
     let use_bracketed_paste = crate::settings::Settings::load()
         .map(|s| s.effective_bracketed_paste())
         .unwrap_or_else(|_| !crate::settings::detected_legacy_windows_console_host());
@@ -10928,7 +10940,7 @@ async fn run_interactive_with_notice(
             config_path: cli.config.clone(),
             config_profile: effective_config_profile(cli),
             allow_shell: interactive_tui_allow_shell(yolo, config),
-            use_alt_screen,
+            screen_mode,
             use_mouse_capture,
             use_bracketed_paste,
             skills_dir,
@@ -17282,7 +17294,22 @@ api_key = "test-only-key"
         let cli = parse_cli(&["codewhale"]);
         let config = Config::default();
 
-        assert!(should_use_alt_screen(&cli, &config));
+        assert_eq!(startup_screen_mode(&cli, &config), ScreenMode::Fullscreen);
+    }
+
+    #[test]
+    fn screen_mode_round_trips_through_its_own_vocabulary() {
+        for mode in [ScreenMode::Fullscreen, ScreenMode::Inline] {
+            assert_eq!(ScreenMode::parse(mode.as_str()), Some(mode));
+        }
+        // The `tui.alternate_screen` words the config file already documents.
+        assert_eq!(ScreenMode::parse("auto"), Some(ScreenMode::Fullscreen));
+        assert_eq!(ScreenMode::parse("always"), Some(ScreenMode::Fullscreen));
+        assert_eq!(ScreenMode::parse("never"), Some(ScreenMode::Inline));
+        assert_eq!(ScreenMode::parse("  INLINE "), Some(ScreenMode::Inline));
+        assert_eq!(ScreenMode::parse("sideways"), None);
+        assert!(ScreenMode::Fullscreen.uses_alt_screen());
+        assert!(!ScreenMode::Inline.uses_alt_screen());
     }
 
     #[test]
@@ -17299,7 +17326,7 @@ api_key = "test-only-key"
     }
 
     #[test]
-    fn config_never_is_accepted_but_keeps_alternate_screen() {
+    fn config_never_selects_the_inline_screen() {
         let cli = parse_cli(&["codewhale"]);
         let config = Config {
             tui: Some(crate::config::TuiConfig {
@@ -17320,7 +17347,7 @@ api_key = "test-only-key"
             ..Config::default()
         };
 
-        assert!(should_use_alt_screen(&cli, &config));
+        assert_eq!(startup_screen_mode(&cli, &config), ScreenMode::Inline);
     }
 
     #[test]

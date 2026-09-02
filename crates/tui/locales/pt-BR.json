@@ -515,6 +515,8 @@
   "CmdReviewDescription": "Executar uma revisão de código estruturada em um arquivo, diff ou PR",
   "CmdRlmDescription": "Abrir um contexto RLM persistente para um arquivo ou texto",
   "CmdSaveDescription": "Salvar a sessão em arquivo",
+  "CmdFullscreenDescription": "Desenhar na tela alternativa (a TUI ocupa todo o terminal)",
+  "CmdInlineDescription": "Desenhar inline na altura total do terminal, mantendo o histórico do terminal",
   "CmdForkDescription": "Bifurcar a conversa ativa para uma sessão irmã",
   "CmdTreeDescription": "Mostrar o histórico da sessão em árvore (a folha é o ramo ativo)",
   "CmdBranchDescription": "Mover o ramo ativo para uma entrada existente da sessão sem reescrever o histórico",

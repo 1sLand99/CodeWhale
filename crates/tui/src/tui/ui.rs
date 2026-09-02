@@ -138,7 +138,7 @@ use super::app::{
     ActiveCompaction, ActiveTurnMetadata, AgentCurrentActivity, AgentCurrentActivityStatus, App,
     AppAction, AppMode, ComposerSubmitAction, ComposerSubmitChord, EffectiveReasoningEffort,
     GoalControlIntent, OnboardingState, PendingGoalControl, PendingProviderSwitch, QueuedMessage,
-    ReasoningEffort, StatusToast, StatusToastLevel, SubmitDisposition, TaskPanelEntry,
+    ReasoningEffort, ScreenMode, StatusToast, StatusToastLevel, SubmitDisposition, TaskPanelEntry,
     TaskPanelEntryKind, ToolEvidence, TuiOptions, bound_agent_activity_text, is_stop_word,
     looks_like_slash_command_input, shell_command_from_bang_input,
 };
@@ -370,7 +370,6 @@ fn resume_hint_text() -> &'static str {
 }
 
 struct TerminalCleanupGuard {
-    use_alt_screen: bool,
     use_mouse_capture: bool,
     use_bracketed_paste: bool,
     defused: bool,
@@ -387,7 +386,8 @@ impl Drop for TerminalCleanupGuard {
         disable_alternate_scroll_mode(&mut stdout);
         let _ = execute!(stdout, DisableFocusChange);
         let _ = disable_raw_mode();
-        if self.use_alt_screen {
+        // The live screen, not the one startup chose: `/inline` moves it.
+        if live_alt_screen() {
             let _ = execute!(stdout, LeaveAlternateScreen);
         }
         if self.use_mouse_capture {

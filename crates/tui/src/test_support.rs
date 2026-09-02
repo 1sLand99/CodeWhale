@@ -298,7 +298,7 @@ pub(crate) fn test_tui_options(workspace: impl AsRef<Path>) -> crate::tui::app::
         config_path: None,
         config_profile: None,
         allow_shell: false,
-        use_alt_screen: true,
+        screen_mode: crate::tui::app::ScreenMode::Fullscreen,
         use_mouse_capture: false,
         use_bracketed_paste: true,
         max_subagents: 1,

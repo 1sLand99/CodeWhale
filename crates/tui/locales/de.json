@@ -512,6 +512,8 @@
   "CmdReviewDescription": "Strukturiertes Code-Review für eine Datei, einen Diff oder PR ausführen",
   "CmdRlmDescription": "Persistenten RLM-Kontext für eine Datei oder Text öffnen",
   "CmdSaveDescription": "Sitzung in Datei speichern",
+  "CmdFullscreenDescription": "Auf dem Alternativbildschirm zeichnen (die TUI besitzt das ganze Terminal)",
+  "CmdInlineDescription": "Inline in voller Terminalhöhe zeichnen und den Terminal-Verlauf behalten",
   "CmdForkDescription": "Aktives Gespräch in eine Schwester-Sitzung forken",
   "CmdTreeDescription": "Sitzungsverlauf als Baum anzeigen (das Blatt ist der aktive Zweig)",
   "CmdBranchDescription": "Aktiven Zweig zu einem vorhandenen Sitzungseintrag verschieben, ohne den Verlauf neu zu schreiben",

@@ -515,6 +515,8 @@
   "CmdReviewDescription": "Chạy một quy trình xem xét mã nguồn có cấu trúc trên tệp, diff hoặc PR",
   "CmdRlmDescription": "Mở ngữ cảnh RLM liên tục cho một tệp hoặc văn bản",
   "CmdSaveDescription": "Lưu phiên làm việc vào tệp",
+  "CmdFullscreenDescription": "Vẽ trên màn hình thay thế (TUI chiếm toàn bộ terminal)",
+  "CmdInlineDescription": "Vẽ nội tuyến với chiều cao đầy đủ, giữ lịch sử cuộn của terminal",
   "CmdForkDescription": "Rẽ nhánh (fork) cuộc hội thoại hiện tại thành một phiên song song",
   "CmdTreeDescription": "Hiển thị lịch sử phiên dưới dạng cây (nút lá là nhánh đang hoạt động)",
   "CmdBranchDescription": "Di chuyển nhánh đang hoạt động đến một mục phiên hiện có mà không ghi lại lịch sử",

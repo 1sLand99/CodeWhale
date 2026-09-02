@@ -515,6 +515,8 @@
   "CmdReviewDescription": "Run a structured code review on a file, diff, or PR",
   "CmdRlmDescription": "Open a persistent RLM context for a file or text",
   "CmdSaveDescription": "Save session to file",
+  "CmdFullscreenDescription": "Paint on the alternate screen (the TUI owns the whole terminal)",
+  "CmdInlineDescription": "Paint inline at full terminal height, keeping the terminal's own scrollback",
   "CmdForkDescription": "Fork the active conversation into a sibling session",
   "CmdTreeDescription": "Show the session history as a tree (the leaf is the active branch)",
   "CmdBranchDescription": "Move the active branch to an existing session entry without rewriting history",
