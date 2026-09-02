@@ -73,7 +73,7 @@ pub fn render_diff_body_bounded(diff: &str, width: u16, max_rows: usize) -> Boun
     let mut new_line: Option<usize> = None;
 
     let mut lines = diff.lines().peekable();
-    while let Some(raw) = lines.next() {
+    'line: while let Some(raw) = lines.next() {
         if raw.starts_with("diff --git") || raw.starts_with("index ") {
             collector.extend(render_header_line(raw, width));
             continue;
@@ -123,7 +123,6 @@ pub fn render_diff_body_bounded(diff: &str, width: u16, max_rows: usize) -> Boun
             let mut added: Vec<&str> = Vec::new();
             let mut removed_markers: Vec<(usize, &str)> = Vec::new();
             let mut added_markers: Vec<(usize, &str)> = Vec::new();
-            let mut oversized = false;
             loop {
                 if let Some(marker) = lines.next_if(|next| is_no_newline_marker(next)) {
                     if added.is_empty() {
@@ -137,21 +136,15 @@ pub fn render_diff_body_bounded(diff: &str, width: u16, max_rows: usize) -> Boun
                     if removed.len() < INTRALINE_MAX_RUN {
                         removed.push(next.trim_start_matches('-'));
                     } else {
-                        for (idx, content) in removed.drain(..).enumerate() {
-                            render_plain_diff_line(
-                                &mut collector,
-                                content,
-                                width,
-                                &mut old_line,
-                                &mut new_line,
-                                '-',
-                            );
-                            for &(marker_idx, marker) in &removed_markers {
-                                if marker_idx == idx {
-                                    collector.extend(render_header_line(marker, width));
-                                }
-                            }
-                        }
+                        flush_plain_run(
+                            &mut collector,
+                            &removed,
+                            &removed_markers,
+                            '-',
+                            width,
+                            &mut old_line,
+                            &mut new_line,
+                        );
                         render_plain_diff_line(
                             &mut collector,
                             next.trim_start_matches('-'),
@@ -160,43 +153,30 @@ pub fn render_diff_body_bounded(diff: &str, width: u16, max_rows: usize) -> Boun
                             &mut new_line,
                             '-',
                         );
-                        oversized = true;
-                        break;
+                        continue 'line;
                     }
                 } else if let Some(next) = lines.next_if(|next| is_added(next)) {
                     if added.len() < INTRALINE_MAX_RUN {
                         added.push(next.trim_start_matches('+'));
                     } else {
-                        for (idx, content) in removed.drain(..).enumerate() {
-                            render_plain_diff_line(
-                                &mut collector,
-                                content,
-                                width,
-                                &mut old_line,
-                                &mut new_line,
-                                '-',
-                            );
-                            for &(marker_idx, marker) in &removed_markers {
-                                if marker_idx == idx {
-                                    collector.extend(render_header_line(marker, width));
-                                }
-                            }
-                        }
-                        for (idx, content) in added.drain(..).enumerate() {
-                            render_plain_diff_line(
-                                &mut collector,
-                                content,
-                                width,
-                                &mut old_line,
-                                &mut new_line,
-                                '+',
-                            );
-                            for &(marker_idx, marker) in &added_markers {
-                                if marker_idx == idx {
-                                    collector.extend(render_header_line(marker, width));
-                                }
-                            }
-                        }
+                        flush_plain_run(
+                            &mut collector,
+                            &removed,
+                            &removed_markers,
+                            '-',
+                            width,
+                            &mut old_line,
+                            &mut new_line,
+                        );
+                        flush_plain_run(
+                            &mut collector,
+                            &added,
+                            &added_markers,
+                            '+',
+                            width,
+                            &mut old_line,
+                            &mut new_line,
+                        );
                         render_plain_diff_line(
                             &mut collector,
                             next.trim_start_matches('+'),
@@ -205,33 +185,11 @@ pub fn render_diff_body_bounded(diff: &str, width: u16, max_rows: usize) -> Boun
                             &mut new_line,
                             '+',
                         );
-                        oversized = true;
-                        break;
+                        continue 'line;
                     }
                 } else {
                     break;
                 }
-            }
-
-            if oversized {
-                while let Some(next) = lines.next_if(|next| {
-                    is_no_newline_marker(next) || is_deleted(next) || is_added(next)
-                }) {
-                    if is_no_newline_marker(next) {
-                        collector.extend(render_header_line(next, width));
-                        continue;
-                    }
-                    let marker = if is_deleted(next) { '-' } else { '+' };
-                    render_plain_diff_line(
-                        &mut collector,
-                        next.trim_start_matches(marker),
-                        width,
-                        &mut old_line,
-                        &mut new_line,
-                        marker,
-                    );
-                }
-                continue;
             }
 
             let pairs: Vec<Option<(Vec<Segment>, Vec<Segment>)>> =
@@ -686,6 +644,25 @@ fn render_plain_diff_line(
             }
         }
         _ => {}
+    }
+}
+
+fn flush_plain_run(
+    collector: &mut BoundedLineCollector,
+    lines: &[&str],
+    markers: &[(usize, &str)],
+    sign: char,
+    width: u16,
+    old_line: &mut Option<usize>,
+    new_line: &mut Option<usize>,
+) {
+    for (idx, content) in lines.iter().enumerate() {
+        render_plain_diff_line(collector, content, width, old_line, new_line, sign);
+        for &(marker_idx, marker) in markers {
+            if marker_idx == idx {
+                collector.extend(render_header_line(marker, width));
+            }
+        }
     }
 }
 
