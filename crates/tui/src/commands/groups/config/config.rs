@@ -1939,72 +1939,6 @@ fn live_route_setting_subject(key: &str) -> Option<MessageId> {
     }
 }
 
-/// Apply the canonical theme picker's compound theme + ocean-treatment state.
-///
-/// Preview and rollback update both live fields through the same per-setting
-/// owner used by `/config`. A save validates the pair before any live mutation,
-/// then persists both fields inside one [`Settings::transact`] critical section
-/// so Deepsea cannot survive on disk with only half of its selection.
-pub fn set_theme_selection(
-    app: &mut App,
-    theme: &str,
-    ocean_treatment: &str,
-    persist: bool,
-) -> CommandResult {
-    let mut candidate = match Settings::load_persisted() {
-        Ok(settings) => settings,
-        Err(error) if !persist => {
-            app.status_message = Some(format!(
-                "Settings unavailable; applying session-only theme override ({error})"
-            ));
-            Settings::default()
-        }
-        Err(error) => return CommandResult::error(format!("Failed to load settings: {error}")),
-    };
-    if let Err(error) = candidate.set("theme", theme) {
-        return CommandResult::error(error.to_string());
-    }
-    if let Err(error) = candidate.set("ocean_treatment", ocean_treatment) {
-        return CommandResult::error(error.to_string());
-    }
-    let normalized_theme = candidate.theme.clone();
-    let normalized_treatment = candidate.ocean_treatment.clone();
-
-    // Resolve/apply the theme first: custom themes can fail resolution even
-    // after their selector syntax validates, and treatment must not change in
-    // that case. The treatment value has already passed Settings validation.
-    let theme_result = set_config_value(app, "theme", &normalized_theme, false);
-    if theme_result.is_error {
-        return theme_result;
-    }
-    let treatment_result = set_config_value(app, "ocean_treatment", &normalized_treatment, false);
-    if treatment_result.is_error {
-        return treatment_result;
-    }
-
-    if persist
-        && let Err(error) = Settings::transact(|settings| {
-            settings.set("theme", &normalized_theme)?;
-            settings.set("ocean_treatment", &normalized_treatment)
-        })
-    {
-        return CommandResult::error(format!("Failed to save: {error}"));
-    }
-
-    CommandResult {
-        message: Some(format!(
-            "theme = {normalized_theme}, ocean_treatment = {normalized_treatment} ({})",
-            if persist {
-                "saved"
-            } else {
-                "session only, add --save to persist"
-            }
-        )),
-        action: theme_result.action.or(treatment_result.action),
-        is_error: false,
-    }
-}
-
 /// Modify a setting at runtime
 pub fn set_config_value(app: &mut App, key: &str, value: &str, persist: bool) -> CommandResult {
     let key = key.to_lowercase();
@@ -2553,11 +2487,6 @@ pub fn set_config_value(app: &mut App, key: &str, value: &str, persist: bool) ->
             app.fancy_animations = effective_settings.fancy_animations;
             app.needs_redraw = true;
         }
-        "ocean_treatment" | "treatment" | "background_treatment" => {
-            app.ocean_treatment =
-                crate::tui::ocean::OceanTreatment::parse(&settings.ocean_treatment);
-            app.needs_redraw = true;
-        }
         "focus_texture" | "texture" => {
             app.focus_texture =
                 crate::tui::focus_texture::FocusTextureMode::parse(&settings.focus_texture)
@@ -2966,27 +2895,11 @@ pub fn theme(app: &mut App, arg: Option<&str>) -> CommandResult {
             )),
             Err(error) => CommandResult::error(error),
         },
-        // `underwater` (= deepsea) is a compound choice: the Dark palette
-        // plus the painted ocean treatment. It is spelled like a theme
-        // because that is how people ask for it (`/theme underwater`), but
-        // `ocean_treatment` is its owner — the theme picker's Underwater row
-        // and this command write the same pair.
-        Some(name) if is_underwater_theme_alias(name) => {
-            set_theme_selection(app, "dark", "deepsea", true)
-        }
+        // `underwater` is an ordinary theme (aliases `deepsea`/`deep-sea`/
+        // `ombre` fold through the same normalizer); the painted ocean field
+        // is the theme itself, not a treatment beside it.
         Some(name) => set_config_value(app, "theme", name, true),
     }
-}
-
-/// The spellings of the underwater treatment accepted where a theme name is
-/// expected. Narrower than [`crate::tui::ocean::OceanTreatment::parse`] on
-/// purpose: `gradient`/`classic` are persisted-setting aliases, not names a
-/// user types after `/theme`.
-fn is_underwater_theme_alias(name: &str) -> bool {
-    matches!(
-        name.trim().to_ascii_lowercase().as_str(),
-        "underwater" | "deepsea" | "deep-sea" | "ombre"
-    )
 }
 
 /// Manage workspace-level trust and the per-path allowlist.
@@ -4975,7 +4888,7 @@ context_window = 262144
     }
 
     #[test]
-    fn theme_command_underwater_alias_applies_the_deepsea_pair() {
+    fn theme_command_underwater_alias_selects_the_underwater_theme() {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -4989,23 +4902,27 @@ context_window = 262144
         let _guard = EnvGuard::new(&temp_root);
 
         let mut app = create_test_app();
-        for alias in ["underwater", "Deepsea", "ombre"] {
+        for alias in ["underwater", "Deepsea", "deep-sea", "ombre"] {
             let result = theme(&mut app, Some(alias));
             assert!(!result.is_error, "{alias}: {:?}", result.message);
             assert_eq!(
                 result.message.as_deref(),
-                Some("theme = dark, ocean_treatment = deepsea (saved)"),
+                Some("theme = underwater (saved)"),
                 "{alias}"
             );
-            assert_eq!(app.theme_id, crate::palette::ThemeId::Whale);
-            assert!(app.ocean_treatment.is_deepsea(), "{alias}");
+            assert_eq!(app.theme_id, crate::palette::ThemeId::Underwater, "{alias}");
+            assert_eq!(app.ui_theme.name, "underwater", "{alias}");
+            assert!(
+                crate::tui::ocean::OceanRamp::for_theme(&app.ui_theme).is_some(),
+                "{alias}: the underwater theme owns the painted field"
+            );
         }
     }
 
     #[test]
-    fn compound_theme_selection_updates_live_state_and_persists_one_pair_transaction() {
+    fn underwater_theme_selection_updates_live_state_and_persists_one_field() {
         let temp_root = env::temp_dir().join(format!(
-            "codewhale-tui-deepsea-selection-test-{}-{}",
+            "codewhale-tui-underwater-selection-test-{}-{}",
             std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -5016,32 +4933,27 @@ context_window = 262144
         let _guard = EnvGuard::new(&temp_root);
         fs::write(
             temp_root.join(".deepseek").join("settings.toml"),
-            "theme = \"light\"\nocean_treatment = \"flat\"\nmax_input_history = 77\n",
+            "theme = \"light\"\nmax_input_history = 77\n",
         )
         .expect("seed settings");
 
         let mut app = create_test_app();
-        let result = set_theme_selection(&mut app, "dark", "deepsea", true);
+        let result = set_config_value(&mut app, "theme", "underwater", true);
 
         assert!(!result.is_error, "{:?}", result.message);
-        assert_eq!(app.theme_id, crate::palette::ThemeId::Whale);
-        assert_eq!(
-            app.ocean_treatment,
-            crate::tui::ocean::OceanTreatment::Deepsea
-        );
-        let persisted = Settings::load_persisted().expect("persisted compound selection");
-        assert_eq!(persisted.theme, "dark");
-        assert_eq!(persisted.ocean_treatment, "deepsea");
+        assert_eq!(app.theme_id, crate::palette::ThemeId::Underwater);
+        let persisted = Settings::load_persisted().expect("persisted selection");
+        assert_eq!(persisted.theme, "underwater");
         assert_eq!(
             persisted.max_input_history, 77,
-            "the compound transaction must not overwrite unrelated settings"
+            "the theme save must not overwrite unrelated settings"
         );
     }
 
     #[test]
-    fn compound_theme_selection_preflights_both_fields_before_live_mutation() {
+    fn invalid_theme_name_changes_nothing() {
         let temp_root = env::temp_dir().join(format!(
-            "codewhale-tui-deepsea-preflight-test-{}-{}",
+            "codewhale-tui-theme-preflight-test-{}-{}",
             std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -5052,21 +4964,18 @@ context_window = 262144
         let _guard = EnvGuard::new(&temp_root);
         fs::write(
             temp_root.join(".deepseek").join("settings.toml"),
-            "theme = \"light\"\nocean_treatment = \"flat\"\n",
+            "theme = \"light\"\n",
         )
         .expect("seed settings");
 
         let mut app = create_test_app();
         let original_theme = app.theme_id;
-        let original_treatment = app.ocean_treatment;
-        let result = set_theme_selection(&mut app, "dark", "kelp", true);
+        let result = set_config_value(&mut app, "theme", "kelp", true);
 
         assert!(result.is_error);
         assert_eq!(app.theme_id, original_theme);
-        assert_eq!(app.ocean_treatment, original_treatment);
         let persisted = Settings::load_persisted().expect("unchanged persisted settings");
         assert_eq!(persisted.theme, "light");
-        assert_eq!(persisted.ocean_treatment, "flat");
     }
 
     #[test]
@@ -5098,8 +5007,37 @@ context_window = 262144
         assert_eq!(app.background_color_override, Some(explicit_base3));
         assert_eq!(app.ui_theme.surface_bg, explicit_base3);
         assert!(
+            crate::tui::ocean::OceanRamp::for_theme(&app.ui_theme).is_none(),
+            "only the underwater theme owns a painted field"
+        );
+    }
+
+    #[test]
+    fn underwater_theme_keeps_its_field_under_a_background_override() {
+        let temp_root = env::temp_dir().join(format!(
+            "codewhale-tui-underwater-override-test-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        fs::create_dir_all(temp_root.join(".deepseek")).expect("settings dir");
+        let _guard = EnvGuard::new(&temp_root);
+
+        let mut app = create_test_app();
+        let custom = ratatui::style::Color::Rgb(0x1a, 0x1b, 0x26);
+        let background = set_config_value(&mut app, "background_color", "#1a1b26", false);
+        assert!(!background.is_error, "{:?}", background.message);
+
+        let preview = set_config_value(&mut app, "theme", "underwater", false);
+        assert!(!preview.is_error, "{:?}", preview.message);
+        assert_eq!(app.theme_id, crate::palette::ThemeId::Underwater);
+        assert_eq!(app.background_color_override, Some(custom));
+        assert_eq!(app.ui_theme.surface_bg, custom);
+        assert!(
             crate::tui::ocean::OceanRamp::for_theme(&app.ui_theme).is_some(),
-            "the explicit surface must retain Deepsea when previewing another theme"
+            "the underwater theme's field survives a background override"
         );
     }
 
@@ -5140,7 +5078,7 @@ context_window = 262144
         );
         assert_eq!(app.background_color_override, Some(custom));
         assert_eq!(app.ui_theme.surface_bg, custom);
-        assert!(crate::tui::ocean::OceanRamp::for_theme(&app.ui_theme).is_some());
+        assert!(crate::tui::ocean::OceanRamp::for_theme(&app.ui_theme).is_none());
 
         let saved_theme = set_config_value(&mut app, "theme", "dark", true);
         assert!(!saved_theme.is_error, "{:?}", saved_theme.message);

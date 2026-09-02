@@ -62,7 +62,6 @@ pub struct SettingsSection {
     pub calm_mode: bool,
     pub low_motion: bool,
     pub fancy_animations: bool,
-    pub ocean_treatment: OceanTreatmentValue,
     pub focus_texture: FocusTextureValue,
     pub work_surface_placement: WorkSurfacePlacementValue,
     #[schemars(range(min = 2, max = 16))]
@@ -271,14 +270,6 @@ pub enum UiThemeValue {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum OceanTreatmentValue {
-    #[serde(alias = "ombre", alias = "underwater")]
-    Deepsea,
-    Flat,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
 pub enum FocusTextureValue {
     Off,
     Scrim,
@@ -437,7 +428,6 @@ pub fn build_document(app: &App, config: &Config) -> Result<ConfigUiDocument> {
             calm_mode: settings.calm_mode,
             low_motion: settings.low_motion,
             fancy_animations: settings.fancy_animations,
-            ocean_treatment: settings.ocean_treatment.as_str().into(),
             focus_texture: settings.focus_texture.as_str().into(),
             work_surface_placement: settings.work_surface_placement.as_str().into(),
             work_surface_top_height: settings.work_surface_top_height,
@@ -630,7 +620,6 @@ pub fn apply_document(
         ("calm_mode", bool_str(doc.settings.calm_mode)),
         ("low_motion", bool_str(doc.settings.low_motion)),
         ("fancy_animations", bool_str(doc.settings.fancy_animations)),
-        ("ocean_treatment", doc.settings.ocean_treatment.as_setting()),
         ("focus_texture", doc.settings.focus_texture.as_setting()),
         (
             "work_surface_placement",
@@ -1130,24 +1119,6 @@ impl UiThemeValue {
             Some("uwu") => Ok(Self::Uwu),
             Some(other) => bail!("unsupported theme '{other}'"),
             None => bail!("invalid theme '{value}'"),
-        }
-    }
-}
-
-impl OceanTreatmentValue {
-    fn as_setting(self) -> &'static str {
-        match self {
-            Self::Deepsea => "deepsea",
-            Self::Flat => "flat",
-        }
-    }
-}
-
-impl From<&str> for OceanTreatmentValue {
-    fn from(value: &str) -> Self {
-        match value.trim().to_ascii_lowercase().as_str() {
-            "deepsea" | "ombre" | "gradient" | "classic" => Self::Deepsea,
-            _ => Self::Flat,
         }
     }
 }
