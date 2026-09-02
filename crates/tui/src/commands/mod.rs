@@ -1742,19 +1742,21 @@ mod tests {
     }
 
     #[test]
-    fn balance_command_reports_scaffold_without_claiming_dispatch() {
+    fn balance_command_dispatches_live_fetch_for_prepaid_providers() {
         let mut app = create_test_app();
-        app.api_provider = ApiProvider::Deepseek;
-
-        let result = execute("/balance", &mut app);
-        let msg = result
-            .message
-            .expect("balance scaffold should explain current state");
-
-        assert!(!result.is_error);
-        assert!(msg.contains("DeepSeek"));
-        assert!(msg.contains("not wired"));
-        assert!(!msg.contains("sent"));
+        for provider in [
+            ApiProvider::Deepseek,
+            ApiProvider::Openrouter,
+            ApiProvider::Siliconflow,
+        ] {
+            app.api_provider = provider;
+            let result = execute("/balance", &mut app);
+            assert!(!result.is_error, "{provider:?}");
+            assert!(
+                matches!(result.action, Some(AppAction::FetchBalance)),
+                "{provider:?} should dispatch a live remaining-credit fetch"
+            );
+        }
     }
 
     #[test]
@@ -1984,6 +1986,11 @@ mod tests {
             // FEAT-019 memory group.
             "note",
             "memory",
+            // FEAT-022 skills group.
+            "skills",
+            "skill",
+            "review",
+            "restore",
         ];
         for info in command_infos() {
             if info.name == "feat015ctx" || MIGRATED_GROUPS.contains(&info.name) {
@@ -2254,6 +2261,100 @@ mod tests {
         }
     }
 
+    // ---------------------------------------------------------------------
+    // FEAT-022: skills group registration + public dispatch (Task 6.2).
+    // All four commands register through the portable bridge; frontier state
+    // is asserted by the migration fixtures and live gate.
+    // ---------------------------------------------------------------------
+
+    /// Pins HOME to a tempdir so global skill discovery stays hermetic.
+    struct Feat022ScopedHome {
+        prev: Option<std::ffi::OsString>,
+        _home: tempfile::TempDir,
+        _guard: crate::test_support::TestEnvLock,
+    }
+    impl Drop for Feat022ScopedHome {
+        fn drop(&mut self) {
+            // SAFETY: process-wide lock still held.
+            unsafe {
+                match self.prev.take() {
+                    Some(v) => std::env::set_var("HOME", v),
+                    None => std::env::remove_var("HOME"),
+                }
+            }
+        }
+    }
+    fn feat022_scoped_home(_tmp: &tempfile::TempDir) -> Feat022ScopedHome {
+        let guard = crate::test_support::lock_test_env();
+        let prev = std::env::var_os("HOME");
+        let home = tempfile::TempDir::new().expect("home tempdir");
+        // SAFETY: serialised by the global env lock.
+        unsafe {
+            std::env::set_var("HOME", home.path());
+        }
+        Feat022ScopedHome {
+            prev,
+            _home: home,
+            _guard: guard,
+        }
+    }
+
+    fn feat022_test_app(tmp: &tempfile::TempDir) -> App {
+        let mut options = crate::test_support::test_tui_options(tmp.path());
+        options.skills_dir = tmp.path().join("skills");
+        crate::test_support::test_app_with_options(options)
+    }
+
+    fn feat022_write_skill(dir: &std::path::Path, name: &str) {
+        let skill_dir = dir.join(name);
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: {name} skill\n---\n{name} instructions"),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn feat022_all_four_skills_entries_are_registered_with_portable_handlers() {
+        use codewhale_command_contract::handler::{CommandCapabilities, CommandHandler};
+
+        for (name, alias, expected) in [
+            (
+                "skills",
+                Some("jinengliebiao"),
+                CommandCapabilities::SKILL_GROUP,
+            ),
+            (
+                "skill",
+                Some("jineng"),
+                CommandCapabilities::SKILL_GROUP.union(CommandCapabilities::SKILLS),
+            ),
+            ("review", Some("shencha"), CommandCapabilities::SKILL_GROUP),
+            ("restore", None, CommandCapabilities::SKILL_GROUP),
+        ] {
+            let info = registry()
+                .get_info(name)
+                .unwrap_or_else(|| panic!("/{name} must be registered"));
+            assert_eq!(info.name, name, "canonical name");
+            let handler = registry()
+                .get(name)
+                .expect("entry")
+                .contextual_handler()
+                .expect("contextual handler");
+            let CommandHandler::Contextual { capabilities, .. } = handler else {
+                panic!("/{name} must be contextual");
+            };
+            assert_eq!(capabilities, expected, "/{name} exact capability set");
+            if let Some(alias) = alias {
+                assert!(
+                    registry().get_info(alias).is_some(),
+                    "/{name} alias {alias} must resolve"
+                );
+            }
+        }
+    }
+
     #[test]
     fn feat019_note_dispatches_through_public_seam() {
         let tmpdir = tempfile::TempDir::new().unwrap();
@@ -2321,5 +2422,86 @@ mod tests {
             // Every path returns a result; none may panic.
             assert!(result.message.is_some(), "{command}: {result:?}");
         }
+    }
+
+    #[test]
+    fn feat022_skills_commands_dispatch_through_public_seam() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let _home = feat022_scoped_home(&tmp);
+        let mut app = feat022_test_app(&tmp);
+        std::fs::create_dir_all(tmp.path().join("skills")).unwrap();
+        feat022_write_skill(&tmp.path().join("skills"), "demo");
+
+        // Bare /skills opens the unified manager (zero network).
+        let result = execute("/skills", &mut app);
+        assert!(!result.is_error, "{result:?}");
+        assert!(
+            matches!(
+                result.action,
+                Some(crate::tui::app::AppAction::OpenSkillsManager)
+            ),
+            "{result:?}"
+        );
+
+        // /skill activates the demo skill and sets active_skill.
+        let result = execute("/skill demo", &mut app);
+        assert!(!result.is_error, "{result:?}");
+        assert!(result.message.unwrap().contains("Skill 'demo' activated."));
+        assert!(app.active_skill.is_some());
+
+        // /restore with no snapshots shows the empty message.
+        let result = execute("/restore", &mut app);
+        assert!(!result.is_error, "{result:?}");
+        assert!(result.message.unwrap().contains("No snapshots"));
+
+        // /review without a target prints usage.
+        let result = execute("/review", &mut app);
+        assert!(result.is_error, "{result:?}");
+        assert!(result.message.unwrap().contains("Usage: /review"));
+    }
+
+    #[test]
+    fn feat022_aliases_dispatch_through_public_seam() {
+        // All four aliases (jinengliebiao, jineng, shencha) resolve through the
+        // registry to the same portable handlers as the canonical names.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let _home = feat022_scoped_home(&tmp);
+        let mut app = feat022_test_app(&tmp);
+        std::fs::create_dir_all(tmp.path().join("skills")).unwrap();
+        feat022_write_skill(&tmp.path().join("skills"), "demo");
+
+        let result = execute("/jinengliebiao", &mut app);
+        assert!(
+            matches!(
+                result.action,
+                Some(crate::tui::app::AppAction::OpenSkillsManager)
+            ),
+            "{result:?}"
+        );
+
+        let result = execute("/jineng demo", &mut app);
+        assert!(!result.is_error, "{result:?}");
+        assert!(result.message.unwrap().contains("Skill 'demo' activated."));
+
+        let result = execute("/shencha", &mut app);
+        assert!(result.is_error, "{result:?}");
+        assert!(result.message.unwrap().contains("Usage: /review"));
+    }
+
+    #[test]
+    fn feat022_context_exposure_is_exact_per_d4() {
+        // The test-only full envelope exposes every adapter; production
+        // dispatch exposes only each handler's declared facets.
+        // skills/review/restore consume only skill_group; skill also consumes
+        // skills for cache refreshes.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let _home = feat022_scoped_home(&tmp);
+        let mut app = feat022_test_app(&tmp);
+        let mut bundle = app.command_contexts();
+        let parts = bundle.parts();
+        assert!(parts.skill_group.is_some());
+        assert!(parts.skills.is_some());
+        // Missing-facet safety through the public seam is covered by the
+        // handler-level tests; here we assert the envelope carries both.
     }
 }

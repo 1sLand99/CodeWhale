@@ -283,7 +283,6 @@
     "core",
     "debug",
     "plugins",
-    "session",
-    "skills"
+    "session"
   ]
 }

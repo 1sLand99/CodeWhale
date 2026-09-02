@@ -775,6 +775,38 @@ webhook_token = "secret-token"
 }
 
 #[test]
+fn tui_config_parses_control_socket_table() {
+    let raw = r#"
+[control_socket]
+enabled = true
+"#;
+    let parsed: ConfigFile = toml::from_str(raw).expect("parse control_socket config");
+
+    let socket = parsed
+        .base
+        .control_socket
+        .expect("control_socket table should parse");
+    assert!(socket.enabled);
+
+    // Off by default: a config without the table leaves the feature off.
+    let absent: ConfigFile =
+        toml::from_str("model = \"demo\"").expect("parse config without control_socket table");
+    assert!(absent.base.control_socket.is_none());
+
+    // An empty table stays off.
+    let empty: ConfigFile =
+        toml::from_str("[control_socket]").expect("parse empty control_socket table");
+    assert!(
+        !empty
+            .base
+            .control_socket
+            .expect("table should parse")
+            .enabled,
+        "empty table must leave the socket off"
+    );
+}
+
+#[test]
 fn tui_config_parses_hotbar_bindings() {
     let raw = r#"
 [[hotbar]]
@@ -11226,12 +11258,13 @@ fn provider_capability_roundtrip_serialization() {
 }
 
 #[test]
-fn status_item_balance_available_only_for_deepseek_providers() {
-    // Balance item should only be offered for DeepSeek / DeepSeekCN.
+fn status_item_balance_available_for_prepaid_providers() {
     assert!(StatusItem::Balance.is_available_for(ApiProvider::Deepseek));
     assert!(StatusItem::Balance.is_available_for(ApiProvider::DeepseekCN));
-    // Sanity: all other known providers should hide the Balance toggle.
-    assert!(!StatusItem::Balance.is_available_for(ApiProvider::Openrouter));
+    assert!(StatusItem::Balance.is_available_for(ApiProvider::Openrouter));
+    assert!(StatusItem::Balance.is_available_for(ApiProvider::Siliconflow));
+    assert!(StatusItem::Balance.is_available_for(ApiProvider::SiliconflowCn));
+    // Invoice-only, local, and unimplemented prepaid vendors stay hidden.
     assert!(!StatusItem::Balance.is_available_for(ApiProvider::Novita));
     assert!(!StatusItem::Balance.is_available_for(ApiProvider::NvidiaNim));
     assert!(!StatusItem::Balance.is_available_for(ApiProvider::Fireworks));
