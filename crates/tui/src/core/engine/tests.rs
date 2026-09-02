@@ -10631,12 +10631,12 @@ fn deferred_apply_patch_first_use_hydrates_schema_without_execution() {
 }
 
 #[test]
-fn model_tool_catalog_defers_non_core_native_tools_in_yolo_mode() {
+fn model_tool_catalog_defers_non_core_native_tools_in_act_mode() {
     let always_load = HashSet::new();
     let catalog = build_model_tool_catalog(
         vec![api_tool("read"), api_tool("project_map")],
         vec![api_tool("mcp_server_write")],
-        AppMode::Yolo,
+        AppMode::Agent,
         &always_load,
     );
 
@@ -10713,10 +10713,10 @@ fn auto_review_hides_question_tool_while_other_postures_keep_it() {
 }
 
 #[test]
-fn legacy_yolo_auto_shape_keeps_question_tool_as_effective_full_access() {
+fn legacy_full_access_bit_keeps_question_tool_as_effective_full_access() {
     let authority = crate::core::authority::effective_input_policy(
         UserInputProvenance::ExternalUser,
-        AppMode::Yolo,
+        AppMode::Agent,
         "continue",
         true,
         true,
@@ -10756,7 +10756,7 @@ fn model_tool_catalog_sorts_each_partition_for_prefix_cache_stability() {
             api_tool("exec_shell"),
         ],
         vec![api_tool("mcp_zoo_b"), api_tool("mcp_aardvark_a")],
-        AppMode::Yolo,
+        AppMode::Agent,
         &always_load,
     );
 
@@ -11086,7 +11086,7 @@ async fn run_shell_command_op_skips_approval_when_auto_approved() {
     engine
         .handle_run_shell_command(
             "echo bang-yolo".to_string(),
-            AppMode::Yolo,
+            AppMode::Agent,
             true,
             true,
             true,
@@ -11197,10 +11197,10 @@ async fn run_shell_command_op_allows_readonly_shell_in_auto_mode() {
 #[tokio::test]
 async fn yolo_mode_does_not_prompt_for_typed_ask_rule() {
     // #3386: a command matching a typed ask-rule (permissions.toml) must not
-    // surface an approval modal in YOLO mode, even though Yolo resolves to
-    // ApprovalMode::Auto which the execpolicy maps to OnFailure (honors
+    // surface an approval modal in the Full Access posture, even though the
+    // stale ApprovalMode::Auto maps to OnFailure in the execpolicy (honors
     // ask-rules). The auto_review safety floor and typed deny rules still
-    // apply; only the ask-rule Prompt is suppressed in YOLO.
+    // apply; only the ask-rule Prompt is suppressed under Full Access.
     let (mut engine, handle) = Engine::new(
         EngineConfig {
             exec_policy_engine: ask_rule_engine("echo"),
@@ -11212,7 +11212,7 @@ async fn yolo_mode_does_not_prompt_for_typed_ask_rule() {
     engine
         .handle_run_shell_command(
             "echo yolo-ask-rule".to_string(),
-            AppMode::Yolo,
+            AppMode::Agent,
             true,
             true,
             true,
@@ -12454,7 +12454,7 @@ async fn yolo_mode_does_not_prompt_for_background_shell() {
     handle
         .send(Op::SendMessage {
             content: "please run a background shell".to_string(),
-            mode: AppMode::Yolo,
+            mode: AppMode::Agent,
             route: resolved_route_for_test(&api_config, crate::config::DEFAULT_TEXT_MODEL),
             compaction: Box::new(CompactionConfig::default()),
             goal_objective: None,
@@ -12590,7 +12590,7 @@ async fn yolo_mode_executes_publish_like_shell_without_prompt() {
     handle
         .send(Op::SendMessage {
             content: "please publish this crate".to_string(),
-            mode: AppMode::Yolo,
+            mode: AppMode::Agent,
             route: resolved_route_for_test(&api_config, crate::config::DEFAULT_TEXT_MODEL),
             compaction: Box::new(CompactionConfig::default()),
             goal_objective: None,
@@ -12730,7 +12730,7 @@ async fn yolo_mode_does_not_prompt_for_mcp_action() {
     handle
         .send(Op::SendMessage {
             content: "please open the PR".to_string(),
-            mode: AppMode::Yolo,
+            mode: AppMode::Agent,
             route: resolved_route_for_test(&api_config, crate::config::DEFAULT_TEXT_MODEL),
             compaction: Box::new(CompactionConfig::default()),
             goal_objective: None,
@@ -13037,12 +13037,7 @@ fn plan_mode_toggle_preserves_catalog_byte_stability() {
 fn parent_turn_registry_includes_goal_tools_for_all_modes() {
     let (engine, _handle) = Engine::new(EngineConfig::default(), &Config::default());
 
-    for mode in [
-        AppMode::Plan,
-        AppMode::Agent,
-        AppMode::Operate,
-        AppMode::Yolo,
-    ] {
+    for mode in [AppMode::Plan, AppMode::Agent, AppMode::Operate] {
         let registry = engine
             .build_turn_tool_registry_builder(
                 mode,
@@ -13166,18 +13161,6 @@ fn mode_invariant_matrix_covers_context_catalog_subagents_and_prompt_metadata() 
             trust_mode: false,
             auto_approve: false,
             approval_mode: ApprovalMode::Suggest,
-            plan_hint: false,
-        },
-        ModeCase {
-            // YOLO remains an elevated-permission alias, but prompt/setting
-            // surfaces now speak Act (invisible one-way permission shorthand).
-            name: "yolo",
-            mode: AppMode::Yolo,
-            shell_policy: ShellPolicy::Full,
-            sandbox: ExpectedSandbox::DangerFullAccess,
-            trust_mode: true,
-            auto_approve: true,
-            approval_mode: ApprovalMode::Bypass,
             plan_hint: false,
         },
     ];
@@ -13384,7 +13367,7 @@ fn mode_invariant_matrix_covers_provenance_authority_narrowing() {
         ProvenanceCase {
             name: "external user",
             provenance: UserInputProvenance::ExternalUser,
-            expected_mode: AppMode::Yolo,
+            expected_mode: AppMode::Agent,
             expected_trust: true,
             expected_auto: true,
             expected_approval: ApprovalMode::Bypass,
@@ -13393,7 +13376,7 @@ fn mode_invariant_matrix_covers_provenance_authority_narrowing() {
         ProvenanceCase {
             name: "runtime continuation",
             provenance: UserInputProvenance::Runtime,
-            expected_mode: AppMode::Yolo,
+            expected_mode: AppMode::Agent,
             expected_trust: true,
             expected_auto: true,
             expected_approval: ApprovalMode::Bypass,
@@ -13402,7 +13385,7 @@ fn mode_invariant_matrix_covers_provenance_authority_narrowing() {
         ProvenanceCase {
             name: "sub-agent handoff",
             provenance: UserInputProvenance::SubAgentHandoff,
-            expected_mode: AppMode::Yolo,
+            expected_mode: AppMode::Agent,
             expected_trust: true,
             expected_auto: true,
             expected_approval: ApprovalMode::Bypass,
@@ -13440,7 +13423,7 @@ fn mode_invariant_matrix_covers_provenance_authority_narrowing() {
     for case in cases {
         let policy = effective_input_policy(
             case.provenance,
-            AppMode::Yolo,
+            AppMode::Agent,
             "continue",
             true,
             true,
@@ -13475,7 +13458,6 @@ fn agent_mode_can_build_auto_approved_tool_context() {
             .auto_approve
     );
     assert!(engine.build_tool_context(AppMode::Agent, true).auto_approve);
-    assert!(engine.build_tool_context(AppMode::Yolo, false).auto_approve);
 }
 
 #[test]
@@ -13530,10 +13512,6 @@ fn build_tool_context_uses_typed_shell_policy_per_mode() {
             .shell_policy,
         crate::worker_profile::ShellPolicy::Full
     );
-    assert_eq!(
-        engine.build_tool_context(AppMode::Yolo, false).shell_policy,
-        crate::worker_profile::ShellPolicy::Full
-    );
 
     config.allow_shell = false;
     let (engine, _handle) = Engine::new(config, &Config::default());
@@ -13553,7 +13531,7 @@ fn turn_tool_context_uses_planned_authority_and_route_not_installed_session() {
     engine.session.model = "installed-old-model".to_string();
 
     let authority = crate::core::authority::TurnAuthority::from_effective_fields(
-        AppMode::Yolo,
+        AppMode::Agent,
         true,
         true,
         true,
@@ -13627,21 +13605,24 @@ fn agent_mode_elevates_writes_without_granting_network() {
         "Agent mode must still elevate workspace writes; got {agent_policy:?}",
     );
 
-    let yolo_ctx = engine.build_tool_context(AppMode::Yolo, false);
-    let yolo_policy = yolo_ctx
+    let full_access_ctx = engine.build_tool_context(AppMode::Agent, true);
+    let full_access_policy = full_access_ctx
         .elevated_sandbox_policy
         .as_ref()
-        .expect("Yolo mode should elevate the sandbox policy");
-    assert!(yolo_policy.has_network_access());
-    // v0.8.11: YOLO drops to DangerFullAccess (no sandbox) so the user
-    // is not bounced through approval round-trips for legitimate
+        .expect("Full Access should elevate the sandbox policy");
+    assert!(full_access_policy.has_network_access());
+    // v0.8.11: Full Access drops to DangerFullAccess (no sandbox) so the
+    // user is not bounced through approval round-trips for legitimate
     // outside-workspace writes (package installs, sub-agent
-    // workspaces, ~/.cache mutations, etc.). YOLO is opt-in and
+    // workspaces, ~/.cache mutations, etc.). Full Access is opt-in and
     // already enables trust mode + auto-approve; the sandbox was the
     // last guardrail and contradicts the contract.
     assert!(
-        matches!(yolo_policy, crate::sandbox::SandboxPolicy::DangerFullAccess),
-        "Yolo mode must use DangerFullAccess (no sandbox); got {yolo_policy:?}",
+        matches!(
+            full_access_policy,
+            crate::sandbox::SandboxPolicy::DangerFullAccess
+        ),
+        "Full Access must use DangerFullAccess (no sandbox); got {full_access_policy:?}",
     );
 
     // Plan mode (#1077): the sandbox must actually deny workspace writes.
@@ -13735,11 +13716,11 @@ fn sandbox_policy_for_turn_returns_correct_default_policy_per_mode() {
         other => panic!("Agent mode should be WorkspaceWrite; got {other:?}"),
     }
 
-    // YOLO: DangerFullAccess.
+    // Bypass posture: DangerFullAccess.
     assert!(matches!(
         sandbox_policy_for_turn(
-            AppMode::Yolo,
-            ApprovalMode::Suggest,
+            AppMode::Agent,
+            ApprovalMode::Bypass,
             None,
             &workspace,
             SandboxNetworkAccess::Restricted,
@@ -13851,7 +13832,7 @@ async fn change_mode_refreshes_session_prompt_and_updates_session() {
     let run = tokio::spawn(engine.run());
     handle
         .send(Op::ChangeMode {
-            mode: AppMode::Yolo,
+            mode: AppMode::Agent,
             allow_shell: true,
             trust_mode: true,
             auto_approve: true,
@@ -14496,7 +14477,7 @@ async fn change_mode_op_updates_current_mode_and_emits_status() {
     let run = tokio::spawn(engine.run());
     handle
         .send(Op::ChangeMode {
-            mode: AppMode::Yolo,
+            mode: AppMode::Agent,
             allow_shell: true,
             trust_mode: true,
             auto_approve: true,
@@ -14570,16 +14551,16 @@ fn runtime_mode_policy_updates_engine_session_mirrors() {
         crate::tui::approval::ApprovalMode::Never
     );
 
-    let yolo_authority = crate::core::authority::TurnAuthority::from_effective_fields(
-        AppMode::Yolo,
+    let full_access_authority = crate::core::authority::TurnAuthority::from_effective_fields(
+        AppMode::Agent,
         true,
         true,
         true,
         crate::tui::approval::ApprovalMode::Bypass,
     );
-    engine.apply_runtime_mode_policy(&yolo_authority);
+    engine.apply_runtime_mode_policy(&full_access_authority);
 
-    assert_eq!(engine.current_mode, AppMode::Yolo);
+    assert_eq!(engine.current_mode, AppMode::Agent);
     assert!(engine.session.allow_shell);
     assert!(engine.session.trust_mode);
     assert!(engine.config.trust_mode);
@@ -16904,7 +16885,7 @@ fn provenance_gate_preserves_standing_yolo_for_runtime_and_subagent_continuation
     for provenance in all_provenances {
         let policy = effective_input_policy(
             provenance,
-            AppMode::Yolo,
+            AppMode::Agent,
             "continue",
             true,
             true,
@@ -16913,7 +16894,7 @@ fn provenance_gate_preserves_standing_yolo_for_runtime_and_subagent_continuation
         );
 
         if inheriting_provenances.contains(&provenance) {
-            assert_eq!(policy.mode, AppMode::Yolo, "{provenance:?}");
+            assert_eq!(policy.mode, AppMode::Agent, "{provenance:?}");
             assert!(policy.allow_shell, "{provenance:?}");
             assert!(policy.trust_mode, "{provenance:?}");
             assert!(policy.auto_approve, "{provenance:?}");
@@ -17011,7 +16992,7 @@ fn self_generated_fake_approvals_cannot_authorize_work() {
         for content in ["改吧", "嗯"] {
             let policy = effective_input_policy(
                 provenance,
-                AppMode::Yolo,
+                AppMode::Agent,
                 content,
                 true,
                 true,
@@ -17049,7 +17030,7 @@ fn external_prompt_wording_never_changes_effective_mode_or_authority() {
             "你在帮我看看 外卖部分还哪里没有使用多语言",
         ),
         (
-            AppMode::Yolo,
+            AppMode::Agent,
             crate::tui::approval::ApprovalMode::Bypass,
             true,
             true,
@@ -17089,14 +17070,14 @@ fn external_prompt_wording_never_changes_effective_mode_or_authority() {
 fn external_user_wording_does_not_downgrade_standing_authority() {
     let review_wording = effective_input_policy(
         UserInputProvenance::ExternalUser,
-        AppMode::Yolo,
+        AppMode::Agent,
         "你在帮我看看 外卖部分还哪里没有使用多语言 我看看要不要加",
         true,
         true,
         true,
         crate::tui::approval::ApprovalMode::Bypass,
     );
-    assert_eq!(review_wording.mode, AppMode::Yolo);
+    assert_eq!(review_wording.mode, AppMode::Agent);
     assert!(review_wording.allow_shell);
     assert!(review_wording.trust_mode);
     assert!(review_wording.auto_approve);
@@ -17111,14 +17092,14 @@ fn external_user_wording_does_not_downgrade_standing_authority() {
 
     let later_user_instruction = effective_input_policy(
         UserInputProvenance::ExternalUser,
-        AppMode::Yolo,
+        AppMode::Agent,
         "需要修复下",
         true,
         true,
         true,
         crate::tui::approval::ApprovalMode::Bypass,
     );
-    assert_eq!(later_user_instruction.mode, AppMode::Yolo);
+    assert_eq!(later_user_instruction.mode, AppMode::Agent);
     assert!(later_user_instruction.allow_shell);
     assert!(later_user_instruction.trust_mode);
     assert!(later_user_instruction.auto_approve);
@@ -17285,8 +17266,8 @@ fn current_mode_field_assignment_takes_effect_synchronously() {
     let (mut engine, _handle) = Engine::new(config, &Config::default());
     assert_eq!(engine.current_mode, AppMode::Agent);
 
-    engine.current_mode = AppMode::Yolo;
-    assert_eq!(engine.current_mode, AppMode::Yolo);
+    engine.current_mode = AppMode::Operate;
+    assert_eq!(engine.current_mode, AppMode::Operate);
 }
 
 #[test]
@@ -20888,7 +20869,7 @@ fn every_effective_mode_change_carries_a_structured_narrowing_event() {
     for provenance in narrowing_provenances {
         let policy = effective_input_policy(
             provenance,
-            AppMode::Yolo,
+            AppMode::Agent,
             "continue",
             true,
             true,
@@ -20913,10 +20894,8 @@ fn every_effective_mode_change_carries_a_structured_narrowing_event() {
             "{provenance:?}"
         );
         assert_eq!(event.reason().as_str(), "non_authoritative_provenance");
-        // The transition names both ends, so a reader can see what was lost.
-        // Mode deliberately reads as the permission vocabulary (`AppMode::
-        // as_setting` writes "agent" for the legacy Yolo label), so the
-        // posture is what carries the change here.
+        // The transition names both ends, so a reader can see what was
+        // lost; the posture is what carries the change here.
         let transition = event.transition();
         assert_eq!(
             transition, "agent (Full Access) -> agent (Ask)",
@@ -20927,7 +20906,7 @@ fn every_effective_mode_change_carries_a_structured_narrowing_event() {
     // An authoritative turn narrows nothing and therefore reports nothing.
     let unchanged = effective_input_policy(
         UserInputProvenance::ExternalUser,
-        AppMode::Yolo,
+        AppMode::Agent,
         "continue",
         true,
         true,
@@ -20945,7 +20924,7 @@ fn every_effective_mode_change_carries_a_structured_narrowing_event() {
 fn ui_status_and_model_metadata_render_the_same_narrowing_sentence() {
     let policy = effective_input_policy(
         UserInputProvenance::AssistantGenerated,
-        AppMode::Yolo,
+        AppMode::Agent,
         "continue",
         true,
         true,
@@ -21014,7 +20993,7 @@ fn turn_metadata_carries_the_narrowing_only_on_a_narrowed_turn() {
 
     let policy = effective_input_policy(
         UserInputProvenance::AssistantGenerated,
-        AppMode::Yolo,
+        AppMode::Agent,
         "continue",
         true,
         true,

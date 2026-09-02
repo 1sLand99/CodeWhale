@@ -3376,8 +3376,12 @@ fn app_mode_helpers_centralize_parse_labels_and_cycle_order() {
     assert_eq!(AppMode::parse("auto"), Some(AppMode::Agent));
     assert_eq!(AppMode::parse("3"), Some(AppMode::Operate));
     assert_eq!(AppMode::parse("operate"), Some(AppMode::Operate));
-    assert_eq!(AppMode::parse("YOLO"), Some(AppMode::Yolo));
-    assert_eq!(AppMode::parse("4"), Some(AppMode::Yolo));
+    // Legacy YOLO spellings resolve to Act; the bypass posture they imply
+    // travels on the permission surface, not on a mode.
+    assert_eq!(AppMode::parse("YOLO"), Some(AppMode::Agent));
+    assert_eq!(AppMode::parse("4"), Some(AppMode::Agent));
+    assert_eq!(AppMode::parse("bypass"), Some(AppMode::Agent));
+    assert_eq!(AppMode::parse("bypass-permissions"), Some(AppMode::Agent));
     assert_eq!(AppMode::parse("multitask"), None);
     assert_eq!(AppMode::parse("5"), None);
     assert_eq!(AppMode::parse("fast"), None);
@@ -3385,12 +3389,8 @@ fn app_mode_helpers_centralize_parse_labels_and_cycle_order() {
     assert_eq!(AppMode::from_setting("5"), AppMode::Operate);
 
     assert_eq!(AppMode::Agent.as_setting(), "agent");
-    assert_eq!(AppMode::Yolo.as_setting(), "agent");
     assert_eq!(AppMode::Plan.display_name(), "Plan");
-    assert_eq!(AppMode::Yolo.label(), "ACT");
-    assert_eq!(AppMode::Yolo.display_name(), "Act");
     assert_eq!(AppMode::Agent.number(), '1');
-    assert_eq!(AppMode::Yolo.number(), '1');
     assert_eq!(AppMode::Operate.number(), '3');
     assert_eq!(
         AppMode::CYCLE,
@@ -3400,11 +3400,9 @@ fn app_mode_helpers_centralize_parse_labels_and_cycle_order() {
     assert_eq!(AppMode::Plan.next(), AppMode::Agent);
     assert_eq!(AppMode::Agent.next(), AppMode::Operate);
     assert_eq!(AppMode::Operate.next(), AppMode::Plan);
-    assert_eq!(AppMode::Yolo.next(), AppMode::Agent);
     assert_eq!(AppMode::Plan.previous(), AppMode::Operate);
     assert_eq!(AppMode::Agent.previous(), AppMode::Plan);
     assert_eq!(AppMode::Operate.previous(), AppMode::Agent);
-    assert_eq!(AppMode::Yolo.previous(), AppMode::Agent);
 }
 
 #[test]
@@ -3476,7 +3474,7 @@ fn test_mode_switch_toasts_do_not_disrupt_non_mode_toasts() {
 
     app.set_mode(AppMode::Agent);
     app.sync_status_message_to_toasts();
-    app.set_mode(AppMode::Yolo);
+    app.set_mode_yolo_compat();
     app.sync_status_message_to_toasts();
 
     assert_eq!(app.status_toasts.len(), 1);
@@ -3537,9 +3535,8 @@ fn test_set_mode_updates_state() {
     let mut app = App::new(test_options(false), &Config::default());
     app.yolo_compat_notified = true;
     app.set_mode(AppMode::Plan);
-    assert_eq!(app.mode, AppMode::Plan);
-    // The deprecated YOLO alias remaps to Agent (M6 back-compat shim).
-    app.set_mode(AppMode::Yolo);
+    // The deprecated YOLO alias lands in Act (M6 back-compat shim).
+    app.set_mode_yolo_compat();
     assert_eq!(app.mode, AppMode::Agent);
     assert!(app.yolo);
     // YOLO compat shim should enable trust, shell, and bypass approvals.
@@ -3568,7 +3565,7 @@ fn set_mode_yolo_restores_previous_policies_on_exit() {
     app.approval_mode = ApprovalMode::Never;
     app.yolo_compat_notified = true;
 
-    app.set_mode(AppMode::Yolo);
+    app.set_mode_yolo_compat();
     assert!(app.allow_shell);
     assert!(app.trust_mode);
     assert_eq!(app.approval_mode, ApprovalMode::Bypass);
@@ -3613,7 +3610,7 @@ fn set_mode_plan_to_yolo_keeps_yolo_permissions_and_restores_agent_baseline() {
     app.set_mode(AppMode::Plan);
     app.approval_mode = ApprovalMode::Suggest;
 
-    app.set_mode(AppMode::Yolo);
+    app.set_mode_yolo_compat();
     assert_eq!(app.mode, AppMode::Agent);
     assert!(app.allow_shell);
     assert!(app.trust_mode);
@@ -3657,13 +3654,8 @@ fn base_policy_for_mode_projects_the_mode_permission_table() {
     assert_eq!(operate.trust_mode, agent.trust_mode);
     assert_eq!(operate.approval_mode, ApprovalMode::Never);
 
-    // YOLO: full authority is represented by Bypass, not a separate
-    // auto-approve field (#3736).
-    let yolo = base_policy_for_mode(AppMode::Yolo, &prefs);
-    assert_eq!(yolo.mode, AppMode::Yolo);
-    assert!(yolo.allow_shell);
-    assert!(yolo.trust_mode);
-    assert_eq!(yolo.approval_mode, ApprovalMode::Bypass);
+    // Full Access is represented by the Bypass posture, not a mode row or a
+    // separate auto-approve field (#3736).
 
     // A minimal Agent baseline projects through Agent unchanged.
     let minimal = ModeSessionPrefs {
@@ -3999,7 +3991,7 @@ fn yolo_entry_points_honor_a_locked_approval_policy() {
     assert!(!app.trust_mode);
     assert!(!app.yolo);
 
-    assert_eq!(app.select_mode(AppMode::Yolo), SettingSelection::Refused);
+    assert_eq!(app.select_yolo_compat(), SettingSelection::Refused);
     assert_eq!(app.approval_mode, ApprovalMode::Suggest);
     assert!(!app.allow_shell);
     assert!(!app.yolo);
@@ -4009,7 +4001,7 @@ fn yolo_entry_points_honor_a_locked_approval_policy() {
             .any(|toast| toast.text.contains("controlled"))
     );
 
-    assert!(!app.set_mode(AppMode::Yolo));
+    assert!(!app.set_mode_yolo_compat());
     assert_eq!(app.approval_mode, ApprovalMode::Suggest);
     assert!(!app.allow_shell);
     assert!(!app.yolo);
@@ -4029,7 +4021,8 @@ fn set_mode_agent_to_yolo_to_agent_restores_baseline_without_yolo_leak() {
     app.approval_mode = ApprovalMode::Suggest;
     app.yolo_compat_notified = true;
 
-    app.set_mode(AppMode::Yolo);
+    app.set_mode_yolo_compat();
+    assert_eq!(app.mode, AppMode::Agent);
     assert!(app.allow_shell);
     assert!(app.trust_mode);
     assert_eq!(app.approval_mode, ApprovalMode::Bypass);
@@ -4069,7 +4062,7 @@ fn set_mode_plan_to_yolo_to_agent_does_not_bleed_yolo_into_agent() {
     assert!(!app.trust_mode);
     assert_eq!(app.approval_mode, ApprovalMode::Suggest);
 
-    app.set_mode(AppMode::Yolo);
+    app.set_mode_yolo_compat();
     assert!(app.allow_shell);
     assert!(app.trust_mode);
     assert_eq!(app.approval_mode, ApprovalMode::Bypass);
@@ -6309,7 +6302,7 @@ fn explicit_mode_selection_and_hotbar_share_the_persistence_owner() {
 
     // The legacy YOLO entry point installs Act, so that is what must persist —
     // "yolo" is a permission alias, never a startup mode.
-    assert_eq!(app.select_mode(AppMode::Yolo), SettingSelection::Changed);
+    assert_eq!(app.select_yolo_compat(), SettingSelection::Changed);
     assert_eq!(Settings::load().expect("reload").default_mode, "agent");
 }
 

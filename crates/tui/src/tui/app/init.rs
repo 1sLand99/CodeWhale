@@ -504,7 +504,10 @@ impl App {
 
         // Resolve the saved mode separately from the permission posture.
         let preferred_mode = AppMode::from_setting(&settings.default_mode);
-        let yolo_requested = yolo || (preferred_mode == AppMode::Yolo && !start_in_agent_mode);
+        // Legacy `default_mode = "yolo"` was split into Act plus the
+        // full-access posture at the settings edge, so only the CLI flag
+        // requests the compat elevation here.
+        let yolo_requested = yolo;
         let initial_mode = if yolo_requested || start_in_agent_mode {
             AppMode::Agent
         } else {
@@ -587,7 +590,7 @@ impl App {
             .unwrap_or_default();
         let configured_trust_mode = configured_approval_mode == ApprovalMode::Bypass;
         let mode_prefs = ModeSessionPrefs {
-            agent_allow_shell: if yolo_compat || matches!(initial_mode, AppMode::Yolo) {
+            agent_allow_shell: if yolo_compat {
                 config.interactive_allow_shell()
             } else {
                 allow_shell

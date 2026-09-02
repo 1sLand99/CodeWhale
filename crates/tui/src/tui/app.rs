@@ -2779,17 +2779,8 @@ impl App {
     }
 
     pub fn set_mode(&mut self, mode: AppMode) -> bool {
-        let requested_mode = mode;
-        let mode = match mode {
-            AppMode::Yolo => AppMode::Agent,
-            other => other,
-        };
-        // YOLO is a permission change (Full Access + trust + shell), not a
-        // mode change. A locked approval policy owns that surface — every
-        // other posture route already honors the lock.
-        let yolo_compat = requested_mode == AppMode::Yolo && !self.approval_policy_locked();
         let previous_mode = self.mode;
-        if previous_mode == mode && !yolo_compat && !self.yolo {
+        if previous_mode == mode && !self.yolo {
             return false;
         }
 
@@ -2812,38 +2803,95 @@ impl App {
             };
         }
 
-        if yolo_compat {
-            // Transient full-access mirrors for legacy YOLO entry points; do not
-            // persist trust/shell elevation into the durable Agent baseline.
-            if self.shell_access_editable {
-                self.allow_shell = true;
-            }
-            self.trust_mode = true;
-            self.approval_mode = ApprovalMode::Bypass;
-            self.yolo = true;
-            self.notify_yolo_compat_once();
-        } else {
-            let policy = base_policy_for_mode(mode, &self.mode_prefs);
-            self.allow_shell = policy.allow_shell;
-            self.trust_mode = policy.trust_mode;
-            self.approval_mode = policy.approval_mode;
-            self.yolo = matches!(policy.approval_mode, ApprovalMode::Bypass);
-        }
+        let policy = base_policy_for_mode(mode, &self.mode_prefs);
+        self.allow_shell = policy.allow_shell;
+        self.trust_mode = policy.trust_mode;
+        self.approval_mode = policy.approval_mode;
+        self.yolo = matches!(policy.approval_mode, ApprovalMode::Bypass);
 
-        // Execute mode change hooks. Built from `base_hook_context` so this
-        // event carries the same session id, workspace, model, and token total
-        // as every other event — it used to omit `DEEPSEEK_SESSION_ID`
-        // entirely, which made mode transitions uncorrelatable with the
-        // session they belonged to.
+        self.finish_mode_change(previous_mode);
+        true
+    }
+
+    /// Legacy YOLO entry points (`--yolo` launch, Alt+Y, the `/mode` yolo
+    /// alias, `/zidong`). YOLO is a permission change (Full Access + trust + shell),
+    /// not a mode change: the installed mode stays Act and the elevated
+    /// authority lives in transient full-access mirrors, never in the durable
+    /// Agent baseline (#3386/#3279).
+    pub fn set_mode_yolo_compat(&mut self) -> bool {
+        // YOLO is a permission change. A locked approval policy must not be
+        // sidestepped by --yolo, default_mode=yolo, /zidong, or Alt+Y.
+        if self.approval_policy_locked() {
+            return false;
+        }
+        let previous_mode = self.mode;
+        // Same baseline-refresh rule as a mode hop: the elevation must not
+        // bleed into the restored Agent surface.
+        if previous_mode.uses_agent_baseline() && !self.yolo {
+            self.mode_prefs = ModeSessionPrefs {
+                agent_allow_shell: self.allow_shell,
+                agent_trust_mode: self.trust_mode,
+                agent_approval_mode: self.approval_mode,
+            };
+        }
+        // The legacy alias always lands in Act, never in Plan or Operate.
+        self.mode = AppMode::Agent;
+        // Transient full-access mirrors; do not persist trust/shell elevation
+        // into the durable Agent baseline.
+        if self.shell_access_editable {
+            self.allow_shell = true;
+        }
+        self.trust_mode = true;
+        self.approval_mode = ApprovalMode::Bypass;
+        self.yolo = true;
+        self.notify_yolo_compat_once();
+        self.finish_mode_change(previous_mode);
+        true
+    }
+
+    /// Apply the legacy YOLO selection from a user-facing entry point
+    /// (Alt+Y, the `/mode` yolo alias, `/zidong`). A locked approval policy owns the
+    /// permission surface and refuses here; otherwise this behaves like
+    /// [`Self::select_mode`] and persists the mode actually installed (Act).
+    pub fn select_yolo_compat(&mut self) -> SettingSelection {
+        if self.reject_setting_change_while_busy(MessageId::SettingSubjectMode) {
+            return SettingSelection::Refused;
+        }
+        if self.approval_policy_locked() {
+            self.push_status_toast(
+                "Permissions are controlled by config or managed requirements".to_string(),
+                StatusToastLevel::Warning,
+                Some(6_000),
+            );
+            self.needs_redraw = true;
+            return SettingSelection::Refused;
+        }
+        let changed = self.set_mode_yolo_compat();
+        self.startup_defaults
+            .spawn(crate::tui::startup_defaults::StartupDefaults::mode(
+                self.mode,
+            ));
+        if changed {
+            SettingSelection::Changed
+        } else {
+            SettingSelection::PersistedSame
+        }
+    }
+
+    /// Shared tail of every mode transition: ModeChange hooks plus redraw.
+    /// Built from `base_hook_context` so this event carries the same session
+    /// id, workspace, model, and token total as every other event — it used
+    /// to omit `DEEPSEEK_SESSION_ID` entirely, which made mode transitions
+    /// uncorrelatable with the session they belonged to.
+    fn finish_mode_change(&mut self, previous_mode: AppMode) {
         let context = self
             .base_hook_context()
-            .with_mode(mode.label())
+            .with_mode(self.mode.label())
             .with_previous_mode(previous_mode.label());
         if let Err(error) = self.submit_hooks(HookEvent::ModeChange, context) {
             self.surface_observer_hook_submission_failure(error);
         }
         self.needs_redraw = true;
-        true
     }
 
     /// Apply a *user-facing* mode selection: change the live session mode and
@@ -2854,9 +2902,10 @@ impl App {
     /// application use it because they are re-installing a mode the user
     /// already chose elsewhere, and re-persisting there would let a restored
     /// session silently rewrite the startup default. Every interactive
-    /// selector (Tab/Shift+Tab cycling, the Alt+A/P/Y shortcuts, the hotbar
+    /// selector (Tab/Shift+Tab cycling, the Alt+A/P shortcuts, the hotbar
     /// mode actions) goes through here instead, so "I switched to Operate"
-    /// survives a restart (reported by Hunter against v0.9.1).
+    /// survives a restart (reported by Hunter against v0.9.1). The legacy
+    /// YOLO entry points go through [`Self::select_yolo_compat`] instead.
     ///
     /// The write is queued, not performed here: it is ordered behind every
     /// earlier selection by [`StartupDefaultsWriter`], and a failure surfaces
@@ -2864,10 +2913,7 @@ impl App {
     /// dropped.
     ///
     /// What is persisted is `self.mode` — the mode `set_mode` actually
-    /// installed — not the requested enum. The legacy `Yolo` entry point installs
-    /// Act, so persisting the request would write a startup mode the user never
-    /// lands in. `AppMode::as_setting` collapses that alias too, but reading the
-    /// installed value keeps the two from having to agree.
+    /// installed — not the requested enum.
     ///
     /// The outcome is typed, not a bool, because three things can happen and
     /// only one of them means "nothing was saved":
@@ -2889,15 +2935,6 @@ impl App {
     /// [`StartupDefaultsWriter`]: crate::tui::startup_defaults::StartupDefaultsWriter
     pub fn select_mode(&mut self, mode: AppMode) -> SettingSelection {
         if self.reject_setting_change_while_busy(MessageId::SettingSubjectMode) {
-            return SettingSelection::Refused;
-        }
-        if matches!(mode, AppMode::Yolo) && self.approval_policy_locked() {
-            self.push_status_toast(
-                "Permissions are controlled by config or managed requirements".to_string(),
-                StatusToastLevel::Warning,
-                Some(6_000),
-            );
-            self.needs_redraw = true;
             return SettingSelection::Refused;
         }
         let changed = self.set_mode(mode);

@@ -6156,7 +6156,7 @@ pub(crate) async fn run_event_loop(
                     continue;
                 }
                 KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::ALT) => {
-                    apply_mode_update(app, &engine_handle, config, AppMode::Yolo).await;
+                    apply_yolo_compat_update(app, &engine_handle, config).await;
                     continue;
                 }
                 KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::ALT) => {
@@ -6168,7 +6168,7 @@ pub(crate) async fn run_event_loop(
                     continue;
                 }
                 KeyCode::Char('Y') if key.modifiers.contains(KeyModifiers::ALT) => {
-                    apply_mode_update(app, &engine_handle, config, AppMode::Yolo).await;
+                    apply_yolo_compat_update(app, &engine_handle, config).await;
                     continue;
                 }
                 KeyCode::Char('P') if key.modifiers.contains(KeyModifiers::ALT) => {

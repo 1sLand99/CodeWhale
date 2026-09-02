@@ -507,11 +507,7 @@ fn header_mode_ink(mode: AppMode) -> ChromeInk {
     match mode {
         AppMode::Plan => ChromeInk::PolicyPlan,
         AppMode::Operate => ChromeInk::PolicyOperate,
-        // YOLO stays Policy, not Failure — the header must not spend red
-        // on a selected mode. It wears the act badge because `mode_label`
-        // resolves it to act; the posture it implies is the permission
-        // chip's Cognition ink, not this one.
-        AppMode::Agent | AppMode::Yolo => ChromeInk::PolicyAct,
+        AppMode::Agent => ChromeInk::PolicyAct,
     }
 }
 
@@ -731,7 +727,7 @@ pub(crate) fn phase_marker_with_activity(
 
 fn mode_label(locale: Locale, mode: AppMode) -> Cow<'static, str> {
     match mode {
-        AppMode::Agent | AppMode::Yolo => tr(locale, MessageId::ChipModeAct),
+        AppMode::Agent => tr(locale, MessageId::ChipModeAct),
         AppMode::Plan => tr(locale, MessageId::ChipModePlan),
         AppMode::Operate => tr(locale, MessageId::ChipModeOperate),
     }

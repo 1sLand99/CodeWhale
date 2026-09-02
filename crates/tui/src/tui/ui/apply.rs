@@ -616,6 +616,24 @@ pub(crate) async fn apply_mode_update(
     }
 }
 
+/// Apply the legacy YOLO shortcut (Alt+Y): a permission change, not a mode
+/// change. Same persist/report/sync contract as [`apply_mode_update`]; the
+/// startup default written is the mode actually installed (Act).
+pub(crate) async fn apply_yolo_compat_update(
+    app: &mut App,
+    engine_handle: &EngineHandle,
+    _config: &Config,
+) -> bool {
+    let outcome = app.select_yolo_compat();
+    app.report_mode_selection(AppMode::Agent, outcome);
+    if outcome.changed_live_state() {
+        sync_mode_update(app, engine_handle).await;
+        true
+    } else {
+        false
+    }
+}
+
 /// Entering Operate attaches to the recorded operation (a fresh one only
 /// when none exists or the last was cancelled), shows the localized lead
 /// plan, and keeps always-on mode durable by reinstalling the hourly lead

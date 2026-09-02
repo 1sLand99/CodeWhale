@@ -81,7 +81,6 @@ pub(crate) const PENDING_GROUPS: &[&str] =
 pub(crate) fn to_command_mode(mode: AppMode) -> CommandMode {
     match mode {
         AppMode::Agent => CommandMode::Agent,
-        AppMode::Yolo => CommandMode::Yolo,
         AppMode::Plan => CommandMode::Plan,
         AppMode::Operate => CommandMode::Operate,
     }
@@ -90,7 +89,6 @@ pub(crate) fn to_command_mode(mode: AppMode) -> CommandMode {
 fn from_command_mode(mode: CommandMode) -> AppMode {
     match mode {
         CommandMode::Agent => AppMode::Agent,
-        CommandMode::Yolo => AppMode::Yolo,
         CommandMode::Plan => AppMode::Plan,
         CommandMode::Operate => AppMode::Operate,
     }
@@ -1473,12 +1471,7 @@ mod tests {
 
     #[test]
     fn boundary_mappings_cover_every_variant() {
-        for mode in [
-            AppMode::Agent,
-            AppMode::Yolo,
-            AppMode::Plan,
-            AppMode::Operate,
-        ] {
+        for mode in [AppMode::Agent, AppMode::Plan, AppMode::Operate] {
             let command = to_command_mode(mode);
             assert_eq!(from_command_mode(command), mode);
         }
@@ -1610,17 +1603,16 @@ mod tests {
             let mut bundle = app.command_contexts();
             let mut parts = bundle.parts();
             let policy = parts.mode_policy.as_mut().expect("mode facet");
+            policy.set_mode(CommandMode::Operate);
             policy.set_shell_access(true);
-            policy.set_mode(CommandMode::Yolo);
             assert!(policy.allow_shell());
-            assert_eq!(policy.approval_mode(), CommandApprovalMode::Bypass);
+            assert_eq!(policy.mode(), CommandMode::Operate);
         }
         assert_eq!(
             app.mode,
-            AppMode::Agent,
-            "YOLO is an Agent compatibility mode"
+            AppMode::Operate,
+            "adapter delegates to App authority"
         );
-        assert!(app.yolo);
         assert!(app.allow_shell);
     }
 

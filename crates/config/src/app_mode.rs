@@ -7,8 +7,6 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppMode {
     Agent,
-    /// Legacy compatibility alias; resolves to [`Self::Agent`] + bypass approvals.
-    Yolo,
     Plan,
     Operate,
 }
@@ -16,7 +14,6 @@ pub enum AppMode {
 impl AppMode {
     /// Productive keyboard cycle: Plan -> Act -> Operate -> Plan.
     ///
-    /// `Yolo` is kept for parse/back-compat only and is not in the Tab cycle.
     /// Operate joins the visible cycle as the always-on pod operation:
     /// a lead plans slices, then workers execute against an optional burn rate.
     pub const CYCLE: [Self; 3] = [Self::Plan, Self::Agent, Self::Operate];
@@ -27,9 +24,12 @@ impl AppMode {
             "agent" | "act" | "work" | "auto" | "1" => Some(Self::Agent),
             "plan" | "2" => Some(Self::Plan),
             "operate" | "operation" | "ops" | "3" => Some(Self::Operate),
-            // Invisible one-way permission shorthand only — never a visible mode.
+            // Invisible one-way permission shorthand only — never a visible
+            // mode. These spellings resolve to Act; the bypass posture they
+            // imply is carried by the permission surface (settings load,
+            // CLI/runtime wire), not by a mode.
             "yolo" | "4" | "bypass" | "bypass-permissions" | "bypasspermissions" => {
-                Some(Self::Yolo)
+                Some(Self::Agent)
             }
             _ => None,
         }
@@ -48,8 +48,6 @@ impl AppMode {
     pub fn as_setting(self) -> &'static str {
         match self {
             Self::Agent => "agent",
-            // Write current permission vocabulary, not the legacy YOLO label.
-            Self::Yolo => "agent",
             Self::Plan => "plan",
             Self::Operate => "operate",
         }
@@ -59,7 +57,6 @@ impl AppMode {
     pub fn label(self) -> &'static str {
         match self {
             AppMode::Agent => "ACT",
-            AppMode::Yolo => "ACT",
             AppMode::Plan => "PLAN",
             AppMode::Operate => "OPERATE",
         }
@@ -69,7 +66,6 @@ impl AppMode {
     pub fn display_name(self) -> &'static str {
         match self {
             AppMode::Agent => "Act",
-            AppMode::Yolo => "Act",
             AppMode::Plan => "Plan",
             AppMode::Operate => "Operate",
         }
@@ -78,7 +74,7 @@ impl AppMode {
     #[must_use]
     pub fn number(self) -> char {
         match self {
-            AppMode::Agent | AppMode::Yolo => '1',
+            AppMode::Agent => '1',
             AppMode::Plan => '2',
             AppMode::Operate => '3',
         }
@@ -103,7 +99,6 @@ impl AppMode {
     pub fn description(self) -> &'static str {
         match self {
             AppMode::Agent => "Act mode - direct work in the current session with tools",
-            AppMode::Yolo => "Act mode with Full Access (legacy compatibility setting)",
             AppMode::Plan => "Plan mode - research and design before implementing",
             AppMode::Operate => {
                 "Operate mode - always-on pod operation: lead plans, optional $/time burn rate, workers follow the plan"

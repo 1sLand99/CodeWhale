@@ -11920,11 +11920,7 @@ async fn build_direct_workflow_tool(
     }
 
     let yolo = config.yolo.unwrap_or(false);
-    let mode = if yolo {
-        AppMode::Yolo
-    } else {
-        AppMode::Operate
-    };
+    let mode = AppMode::Operate;
     let allow_shell = yolo || config.allow_shell();
     let shell_policy = shell_policy_for_mode(mode, allow_shell);
     let trusted = crate::workspace_trust::WorkspaceTrust::load_for(workspace);

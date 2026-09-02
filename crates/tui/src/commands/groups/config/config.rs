@@ -2915,6 +2915,26 @@ pub fn mode(app: &mut App, arg: Option<&str>) -> CommandResult {
     let Some(arg) = arg.filter(|value| !value.trim().is_empty()) else {
         return CommandResult::action(AppAction::OpenModePicker);
     };
+    // The legacy YOLO spellings are a one-way permission shorthand, not a
+    // mode: route them to the full-access compat path before parse folds
+    // them to Act.
+    if matches!(
+        arg.trim().to_ascii_lowercase().as_str(),
+        "yolo" | "4" | "bypass" | "bypass-permissions" | "bypasspermissions"
+    ) {
+        let (message, changed) = switch_yolo_compat_with_status(app);
+        if changed {
+            CommandResult::with_message_and_action(message, AppAction::ModeChanged(app.mode))
+        } else {
+            CommandResult::message(message)
+        }
+    } else {
+        mode_selection(app, arg)
+    }
+}
+
+/// `/mode <mode>` for the real modes (Plan/Act/Operate).
+fn mode_selection(app: &mut App, arg: &str) -> CommandResult {
     match AppMode::parse(arg) {
         Some(mode) => {
             let (message, changed) = switch_mode_with_status(app, mode);
@@ -2944,6 +2964,24 @@ fn switch_mode_with_status(app: &mut App, mode: AppMode) -> (String, bool) {
     match app.select_mode(mode) {
         SettingSelection::Changed => (format!("Switched to {} mode.", mode.display_name()), true),
         SettingSelection::PersistedSame => (app.mode_startup_default_receipt(mode), false),
+        SettingSelection::Refused => (
+            app.setting_locked_message(MessageId::SettingSubjectMode),
+            false,
+        ),
+    }
+}
+
+/// Status for the legacy YOLO alias: user-facing copy says Act, because the
+/// alias is invisible Act + Full Access.
+fn switch_yolo_compat_with_status(app: &mut App) -> (String, bool) {
+    match app.select_yolo_compat() {
+        SettingSelection::Changed => (
+            format!("Switched to {} mode.", AppMode::Agent.display_name()),
+            true,
+        ),
+        SettingSelection::PersistedSame => {
+            (app.mode_startup_default_receipt(AppMode::Agent), false)
+        }
         SettingSelection::Refused => (
             app.setting_locked_message(MessageId::SettingSubjectMode),
             false,
@@ -3668,7 +3706,7 @@ mod tests {
         let result = mode(&mut app, Some("yolo"));
         // YOLO is invisible Act+Bypass shorthand — user-facing copy says Act.
         assert!(result.message.unwrap().contains("Switched to Act mode"));
-        assert_eq!(result.action, Some(AppAction::ModeChanged(AppMode::Yolo)));
+        assert_eq!(result.action, Some(AppAction::ModeChanged(AppMode::Agent)));
         assert!(app.allow_shell);
         assert!(app.trust_mode);
         assert!(app.yolo);
@@ -3703,9 +3741,9 @@ mod tests {
         assert!(result.is_error);
         assert_eq!(app.mode, AppMode::Operate);
         let result = mode(&mut app, Some("4"));
-        assert_eq!(result.action, Some(AppAction::ModeChanged(AppMode::Yolo)));
-        // "4" still parses as the deprecated YOLO alias, which lands in Agent
+        // "4" still routes to the deprecated YOLO alias, which lands in Agent
         // mode with bypass approvals (M6 compat shim).
+        assert_eq!(result.action, Some(AppAction::ModeChanged(AppMode::Agent)));
         assert_eq!(app.mode, AppMode::Agent);
         assert!(app.yolo);
     }
