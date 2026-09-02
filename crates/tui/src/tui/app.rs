@@ -1500,7 +1500,11 @@ pub struct App {
     /// move it at runtime; `use_alt_screen()` is derived from it so no second
     /// flag can drift out of step with the live terminal.
     pub screen_mode: ScreenMode,
+    /// Mouse capture as programmed on the live terminal. Re-derived from
+    /// `mouse_capture_preference` and `screen_mode` on every screen switch.
     pub use_mouse_capture: bool,
+    /// See [`TuiOptions::mouse_capture_preference`].
+    pub mouse_capture_preference: bool,
     /// When true, plain Up/Down on an empty composer scroll the transcript
     /// instead of navigating input history.  Defaults to `true` when mouse
     /// capture is off: terminals that convert mouse-wheel events to arrow-key

@@ -1894,7 +1894,7 @@ pub(crate) async fn apply_command_result(
                 // probe leaves the previous screen live and says why.
                 match switch_screen_mode(terminal, app, mode) {
                     Ok(()) => {
-                        let notice = match mode {
+                        let screen = match mode {
                             crate::tui::app::ScreenMode::Fullscreen => {
                                 "Screen: fullscreen (alternate screen)."
                             }
@@ -1902,8 +1902,13 @@ pub(crate) async fn apply_command_result(
                                 "Screen: inline — the terminal keeps its own scrollback. The transcript stays in the viewport; nothing is written into scrollback yet."
                             }
                         };
+                        let capture = if app.use_mouse_capture {
+                            "Mouse capture on."
+                        } else {
+                            "Mouse capture off; the terminal owns selection."
+                        };
                         app.add_message(HistoryCell::System {
-                            content: notice.to_string(),
+                            content: format!("{screen} {capture}"),
                         });
                     }
                     Err(reason) => {

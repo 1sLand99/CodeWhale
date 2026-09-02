@@ -657,8 +657,14 @@ pub struct TuiOptions {
     /// Screen the TUI starts on (alternate screen, or a full-height inline
     /// viewport that leaves the host scrollback intact).
     pub screen_mode: ScreenMode,
-    /// Capture mouse input for internal scrolling/selection.
+    /// Capture mouse input for internal scrolling/selection, on the screen
+    /// the session starts on.
     pub use_mouse_capture: bool,
+    /// The user's mouse-capture answer with the screen factored out (CLI
+    /// flag, `tui.mouse_capture`, or the host default). `/fullscreen` and
+    /// `/inline` re-derive `use_mouse_capture` from it, so the documented
+    /// default keeps applying after a runtime switch.
+    pub mouse_capture_preference: bool,
     /// Enable terminal bracketed-paste mode (OSC `?2004h` / `?2004l`). Defaults
     /// on; settable via `bracketed_paste = false` in `settings.toml` for the
     /// rare terminal that mishandles it.
@@ -900,6 +906,15 @@ impl ScreenMode {
     #[must_use]
     pub const fn uses_alt_screen(self) -> bool {
         matches!(self, Self::Fullscreen)
+    }
+
+    /// Whether mouse capture is on for this screen, given the user's
+    /// preference. This is the one rule: startup and the `/fullscreen` ·
+    /// `/inline` switch both ask it. Capture needs the alternate screen —
+    /// inline mode exists so the terminal owns selection and scrollback.
+    #[must_use]
+    pub const fn mouse_capture(self, preferred: bool) -> bool {
+        self.uses_alt_screen() && preferred
     }
 
     /// Canonical name, as `/screen` prints it and `parse` accepts it.

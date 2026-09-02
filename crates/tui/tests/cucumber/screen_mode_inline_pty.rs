@@ -24,9 +24,10 @@ const ROWS: u16 = 24;
 const COLS: u16 = 80;
 const STARTUP_WAIT: Duration = Duration::from_secs(15);
 const SETTLE_WAIT: Duration = Duration::from_secs(5);
-/// Stable proof the live shell repainted after a screen change: the top bar's
-/// wordmark, which every live-shell frame paints regardless of composer state.
-const LIVE_SHELL_WORDMARK: &str = "CODEWHALE";
+/// Stable proof the live shell repainted after a screen change: the context
+/// meter's label on the info line, which every live-shell frame paints
+/// regardless of composer state (and survives the wordmark's removal).
+const LIVE_SHELL_SENTINEL: &str = "context ";
 
 #[test]
 fn inline_start_never_takes_the_alternate_screen_and_screen_commands_switch_it() {
@@ -73,8 +74,8 @@ fn inline_start_never_takes_the_alternate_screen_and_screen_commands_switch_it()
         tui.diagnostics()
     );
     assert!(
-        tui.frame().contains(LIVE_SHELL_WORDMARK),
-        "inline shell painted no top bar\n{}",
+        tui.frame().contains(LIVE_SHELL_SENTINEL),
+        "inline shell painted no info line\n{}",
         tui.diagnostics()
     );
 
@@ -86,7 +87,7 @@ fn inline_start_never_takes_the_alternate_screen_and_screen_commands_switch_it()
     wait_for_alt_screen(&mut tui, true, "/fullscreen");
     wait_or_panic(
         &mut tui,
-        LIVE_SHELL_WORDMARK,
+        LIVE_SHELL_SENTINEL,
         SETTLE_WAIT,
         "fullscreen repaint",
     );
@@ -95,7 +96,7 @@ fn inline_start_never_takes_the_alternate_screen_and_screen_commands_switch_it()
     tui.send(keys::key::text("/inline")).expect("type /inline");
     tui.send(keys::key::enter()).expect("submit /inline");
     wait_for_alt_screen(&mut tui, false, "/inline");
-    wait_or_panic(&mut tui, LIVE_SHELL_WORDMARK, SETTLE_WAIT, "inline repaint");
+    wait_or_panic(&mut tui, LIVE_SHELL_SENTINEL, SETTLE_WAIT, "inline repaint");
 
     // Claim 3: the inline viewport follows the terminal size. Stock ratatui
     // keeps an inline viewport at the rows it was built with, so without the

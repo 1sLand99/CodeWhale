@@ -10122,29 +10122,31 @@ fn startup_screen_mode(_cli: &Cli, config: &Config) -> ScreenMode {
         .unwrap_or_default()
 }
 
-fn should_use_mouse_capture(cli: &Cli, config: &Config, use_alt_screen: bool) -> bool {
+/// The user's mouse-capture preference with the screen factored out: the
+/// CLI flags, then `tui.mouse_capture`, then the host default. Which screen
+/// the session is on decides whether it applies — see
+/// [`ScreenMode::mouse_capture`], which startup and the runtime switch share.
+fn mouse_capture_preference(cli: &Cli, config: &Config) -> bool {
     let terminal_emulator = std::env::var("TERMINAL_EMULATOR").ok();
     let wt_session = std::env::var("WT_SESSION").ok().filter(|s| !s.is_empty());
     let conemu_pid = std::env::var("ConEmuPID").ok().filter(|s| !s.is_empty());
-    should_use_mouse_capture_with(
+    mouse_capture_preference_with(
         cli,
         config,
-        use_alt_screen,
         terminal_emulator.as_deref(),
         wt_session.as_deref(),
         conemu_pid.as_deref(),
     )
 }
 
-fn should_use_mouse_capture_with(
+fn mouse_capture_preference_with(
     cli: &Cli,
     config: &Config,
-    use_alt_screen: bool,
     terminal_emulator: Option<&str>,
     wt_session: Option<&str>,
     conemu_pid: Option<&str>,
 ) -> bool {
-    if !use_alt_screen || cli.no_mouse_capture {
+    if cli.no_mouse_capture {
         return false;
     }
     if cli.mouse_capture {
@@ -10155,6 +10157,29 @@ fn should_use_mouse_capture_with(
         .as_ref()
         .and_then(|tui| tui.mouse_capture)
         .unwrap_or_else(|| default_mouse_capture_enabled(terminal_emulator, wt_session, conemu_pid))
+}
+
+#[cfg(test)]
+fn should_use_mouse_capture_with(
+    cli: &Cli,
+    config: &Config,
+    use_alt_screen: bool,
+    terminal_emulator: Option<&str>,
+    wt_session: Option<&str>,
+    conemu_pid: Option<&str>,
+) -> bool {
+    let mode = if use_alt_screen {
+        ScreenMode::Fullscreen
+    } else {
+        ScreenMode::Inline
+    };
+    mode.mouse_capture(mouse_capture_preference_with(
+        cli,
+        config,
+        terminal_emulator,
+        wt_session,
+        conemu_pid,
+    ))
 }
 
 /// Whether to enable terminal mouse capture by default for this platform/host.
@@ -10845,7 +10870,8 @@ async fn run_interactive_with_notice(
         |value| value.clamp(1, MAX_SUBAGENTS),
     );
     let screen_mode = startup_screen_mode(cli, config);
-    let use_mouse_capture = should_use_mouse_capture(cli, config, screen_mode.uses_alt_screen());
+    let mouse_capture_preference = mouse_capture_preference(cli, config);
+    let use_mouse_capture = screen_mode.mouse_capture(mouse_capture_preference);
     let use_bracketed_paste = crate::settings::Settings::load()
         .map(|s| s.effective_bracketed_paste())
         .unwrap_or_else(|_| !crate::settings::detected_legacy_windows_console_host());
@@ -10942,6 +10968,7 @@ async fn run_interactive_with_notice(
             allow_shell: interactive_tui_allow_shell(yolo, config),
             screen_mode,
             use_mouse_capture,
+            mouse_capture_preference,
             use_bracketed_paste,
             skills_dir,
             memory_path: config.memory_path(),

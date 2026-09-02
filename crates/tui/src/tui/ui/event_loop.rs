@@ -362,7 +362,7 @@ pub async fn run_tui(
         }
     };
     if use_alt_screen {
-        execute!(stdout, EnterAlternateScreen)?;
+        enter_alt_screen(&mut stdout)?;
         // Windows also suppresses Codewhale's own verbose CLI logger while
         // the alt-screen is active. The stderr redirect above catches raw
         // writes; this prevents the known verbose source at the origin.
@@ -397,11 +397,10 @@ pub async fn run_tui(
     // sequence is received. Terminals that do not understand it silently
     // ignore it.
     recover_terminal_modes(&mut stdout, use_mouse_capture, use_bracketed_paste);
-    // The guard reads the *live* screen rather than this one, so a runtime
-    // `/inline` switch cannot leave it emitting the wrong teardown escape.
-    set_live_alt_screen(use_alt_screen);
+    // The guard reads the *live* screen and disables capture unconditionally,
+    // so a runtime `/inline` or `/fullscreen` switch cannot leave it emitting
+    // the wrong teardown escape.
     let mut cleanup_guard = TerminalCleanupGuard {
-        use_mouse_capture,
         use_bracketed_paste,
         defused: false,
     };
@@ -821,11 +820,11 @@ pub async fn run_tui(
     // `/inline` and `/fullscreen` can have moved the screen since startup; the
     // teardown must match the screen the terminal is actually on.
     if app.use_alt_screen() {
-        execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+        leave_alt_screen(terminal.backend_mut())?;
         #[cfg(windows)]
         crate::logging::restore_verbose_state();
     }
-    if use_mouse_capture {
+    if app.use_mouse_capture {
         execute!(terminal.backend_mut(), DisableMouseCapture)?;
     }
     if use_bracketed_paste {

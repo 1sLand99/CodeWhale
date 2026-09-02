@@ -300,6 +300,7 @@ pub(crate) fn test_tui_options(workspace: impl AsRef<Path>) -> crate::tui::app::
         allow_shell: false,
         screen_mode: crate::tui::app::ScreenMode::Fullscreen,
         use_mouse_capture: false,
+        mouse_capture_preference: false,
         use_bracketed_paste: true,
         max_subagents: 1,
         skills_dir: PathBuf::from("."),

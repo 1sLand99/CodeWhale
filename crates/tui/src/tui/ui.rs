@@ -370,7 +370,6 @@ fn resume_hint_text() -> &'static str {
 }
 
 struct TerminalCleanupGuard {
-    use_mouse_capture: bool,
     use_bracketed_paste: bool,
     defused: bool,
 }
@@ -388,11 +387,11 @@ impl Drop for TerminalCleanupGuard {
         let _ = disable_raw_mode();
         // The live screen, not the one startup chose: `/inline` moves it.
         if live_alt_screen() {
-            let _ = execute!(stdout, LeaveAlternateScreen);
+            let _ = leave_alt_screen(&mut stdout);
         }
-        if self.use_mouse_capture {
-            let _ = execute!(stdout, DisableMouseCapture);
-        }
+        // Capture follows the screen at runtime too; disabling it when it was
+        // never on is harmless (the emergency path already does).
+        let _ = execute!(stdout, DisableMouseCapture);
         if self.use_bracketed_paste {
             disable_bracketed_paste_mode(&mut stdout);
         }
