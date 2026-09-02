@@ -216,7 +216,7 @@ mod tests {
     fn handler_is_contextual_and_argument_aware() {
         assert!(matches!(
             DispatchCmd::handler(),
-            CommandHandler::Contextual(_)
+            CommandHandler::Contextual { .. }
         ));
         assert_eq!(
             DispatchCmd::info().description_key,
