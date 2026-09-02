@@ -189,6 +189,8 @@
   "HotbarActionTrustToggleName": "ट्रस्ट टॉगल करें",
   "HotbarActionTrustToggleDescription": "वर्कस्पेस ट्रस्ट मोड सक्षम या अक्षम करें।",
   "ConfigTitle": "कॉन्फ़िग",
+  "ConfigPreviewLabel": "पूर्वावलोकन: ",
+  "ConfigHintExternalCredentials": "यह प्रदाता कौन-सी क्रेडेंशियल फ़ाइल पढ़ सकता है, किस पहुँच के साथ, और उसे कैसे रद्द करें।",
   "ConfigModalTitle": " कॉन्फ़िग ",
   "ConfigSearchPlaceholder": "फ़िल्टर करने के लिए टाइप करें",
   "ConfigNoSettings": "  कोई सेटिंग उपलब्ध नहीं।",

@@ -189,6 +189,8 @@
   "HotbarActionTrustToggleName": "Basculer la confiance",
   "HotbarActionTrustToggleDescription": "Activer ou désactiver le mode de confiance du workspace.",
   "ConfigTitle": "Config",
+  "ConfigPreviewLabel": "Aperçu : ",
+  "ConfigHintExternalCredentials": "Quel fichier d'identifiants ce fournisseur peut lire, avec quel accès et comment le révoquer.",
   "ConfigModalTitle": " Config ",
   "ConfigSearchPlaceholder": "taper pour filtrer",
   "ConfigNoSettings": "  Aucun paramètre disponible.",

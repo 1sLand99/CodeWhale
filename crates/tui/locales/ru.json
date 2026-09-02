@@ -189,6 +189,8 @@
   "HotbarActionTrustToggleName": "Доверие",
   "HotbarActionTrustToggleDescription": "Включает или выключает режим доверия рабочей области.",
   "ConfigTitle": "Настройки",
+  "ConfigPreviewLabel": "Предпросмотр: ",
+  "ConfigHintExternalCredentials": "Какой файл учётных данных может читать этот провайдер, с каким доступом и как его отозвать.",
   "ConfigModalTitle": " Настройки ",
   "ConfigSearchPlaceholder": "введите для фильтра",
   "ConfigNoSettings": "  Настройки недоступны.",

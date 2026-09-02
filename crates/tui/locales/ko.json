@@ -189,6 +189,8 @@
   "HotbarActionTrustToggleName": "신뢰 전환",
   "HotbarActionTrustToggleDescription": "작업 공간 신뢰 모드를 켜거나 끕니다.",
   "ConfigTitle": "설정",
+  "ConfigPreviewLabel": "미리보기: ",
+  "ConfigHintExternalCredentials": "이 제공자가 읽을 수 있는 자격 증명 파일, 접근 수준, 해제 방법.",
   "ConfigModalTitle": " 설정 ",
   "ConfigSearchPlaceholder": "입력하여 필터링",
   "ConfigNoSettings": "  사용 가능한 설정이 없습니다.",
