@@ -289,7 +289,12 @@ impl RegisterCommand<CommandResult> for GoalCmd {
     }
 
     fn handler() -> CommandHandler<CommandResult> {
-        CommandHandler::Contextual(goal_contextual)
+        CommandHandler::Contextual {
+            capabilities: codewhale_command_contract::handler::CommandCapabilities::PROJECT
+                .union(codewhale_command_contract::handler::CommandCapabilities::PRESENTATION)
+                .union(codewhale_command_contract::handler::CommandCapabilities::WORKSPACE),
+            handler: goal_contextual,
+        }
     }
 }
 

@@ -112,7 +112,7 @@ pub trait CommandMediaContext {
     fn attach_media(&mut self, resolved_path: &Path) -> Result<MediaAttachmentReceipt, String>;
 }
 
-<<<<<<< HEAD
+// ---------------------------------------------------------------------------
 // Project (FEAT-021 D1/D2/D3/D4)
 // ---------------------------------------------------------------------------
 

@@ -32,18 +32,12 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use codewhale_command_contract::facets::{
-<<<<<<< HEAD
-    CommandCostContext, CommandMediaContext, CommandModePolicyContext, CommandModelContext,
-    CommandPresentationContext, CommandProjectContext, CommandSessionContext, CommandSkillsContext,
-    CommandSystemPromptContext, CommandWorkspaceContext, MediaAttachmentReceipt, ProjectGoalState,
-    ProjectGoalStatus, ProjectShareProjection,
-=======
     CommandCostContext, CommandMediaContext, CommandMemoryContext, CommandModePolicyContext,
-    CommandModelContext, CommandPresentationContext, CommandSessionContext, CommandSkillsContext,
-    CommandSystemPromptContext, CommandWorkspaceContext, MediaAttachmentReceipt, MemoryDelete,
-    MemoryDeleteScope, MemoryExport, MemoryGetOutcome, MemoryHit, MemoryImportOutcome,
-    MemoryReindex, MemoryRememberTarget, MemoryRemembered, MemoryStatus,
->>>>>>> 09c6d86ff (feat(FEAT-019): add TUI memory adapter, capability-driven envelope, and utility capability declarations)
+    CommandModelContext, CommandPresentationContext, CommandProjectContext, CommandSessionContext,
+    CommandSkillsContext, CommandSystemPromptContext, CommandWorkspaceContext,
+    MediaAttachmentReceipt, MemoryDelete, MemoryDeleteScope, MemoryExport, MemoryGetOutcome,
+    MemoryHit, MemoryImportOutcome, MemoryReindex, MemoryRememberTarget, MemoryRemembered,
+    MemoryStatus, ProjectGoalState, ProjectGoalStatus, ProjectShareProjection,
 };
 #[cfg(test)]
 use codewhale_command_contract::handler::ContextParts;
@@ -72,9 +66,8 @@ use crate::tui::app::{App, ReasoningEffort};
 /// (`scripts/check-command-migration-manifest.py`) reads this exact
 /// declaration by source regex and the Rust frontier tests assert it.
 #[allow(dead_code)]
-pub(crate) const PENDING_GROUPS: &[&str] = &[
-    "config", "core", "debug", "plugins", "session", "skills",
-];
+pub(crate) const PENDING_GROUPS: &[&str] =
+    &["config", "core", "debug", "plugins", "session", "skills"];
 
 // ---------------------------------------------------------------------------
 // Boundary-value mappings (D8)
@@ -943,24 +936,7 @@ pub(crate) struct CommandContextBundle<'a> {
     workspace: WorkspaceAdapter<'a>,
     presentation: PresentationAdapter<'a>,
     media: MediaAdapter<'a>,
-<<<<<<< HEAD
     project: ProjectAdapter<'a>,
-}
-
-impl<'a> CommandContextBundle<'a> {
-    pub(crate) fn contexts(&mut self) -> CommandContexts<'_> {
-        CommandContexts::empty()
-            .with_session(&mut self.session)
-            .with_model(&mut self.model)
-            .with_cost(&mut self.cost)
-            .with_mode_policy(&mut self.mode_policy)
-            .with_system_prompt(&mut self.system_prompt)
-            .with_skills(&mut self.skills)
-            .with_workspace(&mut self.workspace)
-            .with_presentation(&mut self.presentation)
-            .with_media(&mut self.media)
-            .with_project(&mut self.project)
-=======
     memory: MemoryAdapter<'a>,
 }
 
@@ -998,8 +974,10 @@ impl<'a> CommandContextBundle<'a> {
         if capabilities.contains(CommandCapabilities::MEMORY) {
             contexts = contexts.with_memory(&mut self.memory);
         }
+        if capabilities.contains(CommandCapabilities::PROJECT) {
+            contexts = contexts.with_project(&mut self.project);
+        }
         contexts
->>>>>>> 09c6d86ff (feat(FEAT-019): add TUI memory adapter, capability-driven envelope, and utility capability declarations)
     }
 
     /// Test-only: consume the bundle into independent facet parts.
@@ -1014,7 +992,8 @@ impl<'a> CommandContextBundle<'a> {
             .union(CommandCapabilities::WORKSPACE)
             .union(CommandCapabilities::PRESENTATION)
             .union(CommandCapabilities::MEDIA)
-            .union(CommandCapabilities::MEMORY);
+            .union(CommandCapabilities::MEMORY)
+            .union(CommandCapabilities::PROJECT);
         self.contexts(all_test_capabilities).into_parts()
     }
 }
@@ -1035,13 +1014,9 @@ impl App {
             skills: SkillsAdapter { host: host.clone() },
             workspace: WorkspaceAdapter { host: host.clone() },
             presentation: PresentationAdapter { host: host.clone() },
-<<<<<<< HEAD
-            project: ProjectAdapter { host: host.clone() },
-            media: MediaAdapter { host },
-=======
             media: MediaAdapter { host: host.clone() },
+            project: ProjectAdapter { host: host.clone() },
             memory: MemoryAdapter { host },
->>>>>>> 09c6d86ff (feat(FEAT-019): add TUI memory adapter, capability-driven envelope, and utility capability declarations)
         }
     }
 }
@@ -1511,12 +1486,10 @@ mod tests {
             let _ = parts.media.is_some();
             let _ = parts.presentation.is_some();
             let _ = parts.memory.is_some();
+            let _ = parts.project.is_some();
         }
         assert_eq!(app.input, input_before, "no eager composer mutation");
     }
-
-<<<<<<< HEAD
-    // ---------------------------------------------------------------------
     // FEAT-021 project adapter tests
     // ---------------------------------------------------------------------
 
@@ -1558,7 +1531,9 @@ mod tests {
         assert!(
             presentation.translate("goal_bogus", &[]).is_err(),
             "unknown key must fail safely"
-=======
+        );
+    }
+
     // -----------------------------------------------------------------------
     // FEAT-019: memory adapter mappings (D6/D9)
     // -----------------------------------------------------------------------
@@ -1650,12 +1625,10 @@ mod tests {
         assert_eq!(
             err,
             "workspace memory requires a git repository with an origin"
->>>>>>> 09c6d86ff (feat(FEAT-019): add TUI memory adapter, capability-driven envelope, and utility capability declarations)
         );
     }
 
     #[test]
-<<<<<<< HEAD
     fn project_adapter_maps_lsp_state() {
         let mut app = test_app();
         app.lsp_enabled = false;
@@ -1996,6 +1969,5 @@ mod tests {
         let parts = bundle.contexts(CommandCapabilities::SESSION).into_parts();
         assert!(parts.session.is_some());
         assert!(parts.memory.is_none());
-    }
     }
 }
