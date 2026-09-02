@@ -6,7 +6,6 @@ mod config_document;
 pub mod descriptors;
 pub mod device_code;
 pub mod external_credentials;
-mod harness;
 pub mod model_reference;
 pub mod models_dev;
 pub mod persistence;
@@ -23,10 +22,6 @@ mod xai_credentials;
 pub use config_document::{
     create_config_document, mutate_config_document, replace_config_document_if_unchanged,
     set_config_document_value, unset_config_document_value,
-};
-pub use harness::{
-    HarnessCompactionStrategy, HarnessPosture, HarnessPostureKind, HarnessProfile,
-    HarnessSafetyPosture, HarnessToolSurface, built_in_harness_profiles,
 };
 pub use model_reference::{Modality, ModelReferenceCard, ModelReferenceDatabase};
 pub(crate) use provider_defaults::*;
@@ -866,10 +861,6 @@ pub struct ConfigToml {
     /// applies the defaults documented in [`LspConfigToml`].
     #[serde(default)]
     pub lsp: Option<LspConfigToml>,
-    /// Per-model harness profiles (#2693). Runtime wiring lands in follow-up
-    /// v0.9 slices; this is the durable config data model.
-    #[serde(default)]
-    pub harness_profiles: Vec<HarnessProfile>,
     /// Optional 1-8 hotbar slot bindings (#2064). When absent, the TUI falls
     /// back to the built-in default slots.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1223,23 +1214,6 @@ fn insert_provider_config_values(
 }
 
 impl ConfigToml {
-    /// Resolve the first configured harness profile for a provider/model route.
-    ///
-    /// This helper is deliberately dormant for v0.9: callers may display or
-    /// test the resolved profile, but runtime provider/model routing and prompt
-    /// shaping remain unchanged until a later, explicit integration slice.
-    #[must_use]
-    pub fn resolve_harness_profile(
-        &self,
-        provider_route: &str,
-        model: &str,
-    ) -> Option<&HarnessProfile> {
-        self.harness_profiles
-            .iter()
-            .chain(built_in_harness_profiles().iter())
-            .find(|profile| profile.matches_route(provider_route, model))
-    }
-
     /// Resolve durable hotbar config into normalized 1-8 slot bindings.
     ///
     /// `known_action_ids` is supplied by the TUI action registry in later
@@ -2486,38 +2460,14 @@ pub fn built_in_role_presets() -> BTreeMap<String, FleetRolePreset> {
     .into()
 }
 
-/// Verdict policy for the verifier-preview surface (#2093).
-///
-/// Only the hunt vocabulary is shipped today. Keeping this typed lets future
-/// policy additions reject misspellings instead of silently accepting unknown
-/// strings.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum VerifierVerdictPolicy {
-    #[default]
-    Hunt,
-}
-
 /// On-disk schema for `[verifier]`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct VerifierConfigToml {
     /// Enable automatic verifier preview when the runtime wires a
     /// claim-of-done trigger. Manual `run_verifiers` remains available
     /// regardless.
     #[serde(default)]
     pub enabled: bool,
-    /// How verifier verdicts map into the goal/hunt system.
-    #[serde(default)]
-    pub verdict_policy: VerifierVerdictPolicy,
-}
-
-impl Default for VerifierConfigToml {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            verdict_policy: VerifierVerdictPolicy::Hunt,
-        }
-    }
 }
 
 /// On-disk schema for `[advisor]` (#3982).
