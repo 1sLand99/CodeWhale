@@ -681,13 +681,10 @@ pub enum ViewEvent {
         value: String,
         persist: bool,
     },
-    /// The canonical `/theme` picker owns theme and underwater treatment as
-    /// one selection. Keeping the pair in one event lets its command owner
-    /// preview, roll back, and persist both fields without an observable
-    /// half-selected Deepsea state.
+    /// The canonical `/theme` picker's selection. Preview, rollback, and
+    /// persist travel in one event so the theme never changes by half.
     ThemeSelectionUpdated {
         theme: String,
-        ocean_treatment: String,
         persist: bool,
     },
     SubAgentsRefresh,
@@ -2154,13 +2151,6 @@ impl ConfigView {
                 value: settings.background_color.clone().unwrap_or_else(|| {
                     tr(app.ui_locale, MessageId::ConfigDefaultValue).to_string()
                 }),
-                editable: true,
-                scope: ConfigScope::Saved,
-                facts: ConfigRowFacts::saved_setting(),
-            },
-            ConfigRow {
-                key: "ocean_treatment".to_string(),
-                value: settings.ocean_treatment.clone(),
                 editable: true,
                 scope: ConfigScope::Saved,
                 facts: ConfigRowFacts::saved_setting(),

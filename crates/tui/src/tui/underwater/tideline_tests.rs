@@ -109,7 +109,7 @@ fn startup_matches_golden_at_the_40x12_terminal_floor() {
     // four-row dock all still fit.
     let text = draw(40, 10, &connected(&UI_THEME));
     assert_matches_golden("startup_40x10", &text);
-    assert!(text.contains("Codewhale"), "{text}");
+    assert!(text.contains("codewhale"), "{text}");
     assert!(text.contains("New worktree"), "{text}");
     assert!(text.contains("❯"), "the floor keeps the composer: {text}");
 }
@@ -128,14 +128,14 @@ fn startup_surfacing_midpoint_matches_its_golden() {
         "the midpoint frame differs from the still frame"
     );
     // The header copy is already in place; only the mark is mid-surface.
-    assert!(text.contains("Codewhale v0.9.12"), "{text}");
+    assert!(text.contains("codewhale v0.9.12"), "{text}");
 }
 
 #[test]
 fn the_card_states_the_workspace_menu_and_mcp_news() {
     let text = draw(100, 30, &connected(&UI_THEME));
     for fact in [
-        "Codewhale v0.9.12",
+        "codewhale v0.9.12",
         // The top line owns the workspace truth now.
         "Hmbown/CodeWhale · main",
         // The card's announcement: only when true.
@@ -159,7 +159,7 @@ fn the_card_states_the_workspace_menu_and_mcp_news() {
         "top line opens with the branch glyph: {first:?}"
     );
     assert!(
-        !first.contains("Codewhale"),
+        !first.contains("codewhale"),
         "the wordmark left row 0: {first:?}"
     );
     // Nothing from the old stage survives.
@@ -202,7 +202,7 @@ fn startup_ascii_safe_drops_the_mark_and_every_wide_glyph() {
         "the branch glyph falls back to ASCII on row 0: {first:?}"
     );
     assert!(
-        text.contains("Codewhale"),
+        text.contains("codewhale"),
         "the card keeps the wordmark: {text}"
     );
     assert!(

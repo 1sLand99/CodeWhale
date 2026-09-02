@@ -4497,8 +4497,8 @@ fn bottom_placement_keeps_the_stage_and_queued_preview_at_twelve_rows() {
 #[test]
 fn wide_underwater_canvas_carries_the_ocean_to_both_terminal_edges() {
     let mut app = create_test_app();
-    app.ui_theme = crate::palette::UI_THEME;
-    app.ocean_treatment = crate::tui::ocean::OceanTreatment::Deepsea;
+    app.theme_id = crate::palette::ThemeId::Underwater;
+    app.ui_theme = crate::palette::UNDERWATER_UI_THEME;
     app.onboarding_workspace_trust_gate = false;
     app.onboarding = OnboardingState::None;
     let surface_bg = app.ui_theme.surface_bg;
@@ -5678,13 +5678,13 @@ fn session_denied_notice_explains_cached_decision_and_recovery() {
 async fn cached_denial_explanation_survives_tool_completion_and_done_render() {
     use crate::core::engine::MockApprovalEvent;
     use crate::tools::spec::ToolError;
-    use crate::tui::ocean::OceanTreatment;
     use ratatui::{Terminal, backend::TestBackend};
 
     let mut app = create_test_app();
     app.onboarding = OnboardingState::None;
     app.launch.visible = false;
-    app.ocean_treatment = OceanTreatment::Deepsea;
+    app.theme_id = crate::palette::ThemeId::Underwater;
+    app.ui_theme = crate::palette::UNDERWATER_UI_THEME;
     app.is_loading = true;
     app.runtime_turn_status = Some("in_progress".to_string());
 

@@ -958,15 +958,14 @@ async fn handle_theme_selection_updated(
     engine_handle: &mut EngineHandle,
     web_config_session: &mut Option<WebConfigSession>,
     theme: String,
-    ocean_treatment: String,
     persist: bool,
 ) -> Result<bool> {
     let result = prepare_config_update_result(
-        commands::set_theme_selection(app, &theme, &ocean_treatment, persist),
+        commands::set_config_value(app, "theme", &theme, persist),
         persist,
     );
-    // Both halves affect shell paint and must bypass ratatui's incremental
-    // cell diff, including a Deepsea -> Flat preview or Esc rollback.
+    // The theme owns the shell paint and must bypass ratatui's incremental
+    // cell diff, including an Esc rollback.
     app.force_next_full_repaint = true;
     if apply_command_result(
         terminal,
@@ -1301,11 +1300,7 @@ pub(crate) async fn handle_view_events(
                     return Ok(true);
                 }
             }
-            ViewEvent::ThemeSelectionUpdated {
-                theme,
-                ocean_treatment,
-                persist,
-            } => {
+            ViewEvent::ThemeSelectionUpdated { theme, persist } => {
                 if handle_theme_selection_updated(
                     terminal,
                     app,
@@ -1314,7 +1309,6 @@ pub(crate) async fn handle_view_events(
                     engine_handle,
                     web_config_session,
                     theme,
-                    ocean_treatment,
                     persist,
                 )
                 .await?
@@ -2287,11 +2281,7 @@ pub(crate) fn handle_view_events_boxed<'a>(
                         return Ok(true);
                     }
                 }
-                ViewEvent::ThemeSelectionUpdated {
-                    theme,
-                    ocean_treatment,
-                    persist,
-                } => {
+                ViewEvent::ThemeSelectionUpdated { theme, persist } => {
                     if handle_theme_selection_updated(
                         terminal,
                         app,
@@ -2300,7 +2290,6 @@ pub(crate) fn handle_view_events_boxed<'a>(
                         engine_handle,
                         web_config_session,
                         theme,
-                        ocean_treatment,
                         persist,
                     )
                     .await?

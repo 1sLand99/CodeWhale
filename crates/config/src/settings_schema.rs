@@ -221,11 +221,6 @@ const DEFAULT_MODE: &[SettingOption] = &[
     ),
 ];
 
-const OCEAN_TREATMENT: &[SettingOption] = &[
-    SettingOption::new("deepsea", "", "ConfigChoiceDetailOceanDeepsea"),
-    SettingOption::new("flat", "", "ConfigChoiceDetailOceanFlat"),
-];
-
 const FOCUS_TEXTURE: &[SettingOption] = &[
     SettingOption::new("off", "ConfigValueOff", ""),
     SettingOption::new("scrim", "", ""),
@@ -394,17 +389,6 @@ pub const SETTINGS_SCHEMA: &[SettingDef] = &[
             "display",
             "ConfigLabelBackground",
             "ConfigHintBackgroundColor",
-        ),
-    ),
-    def(
-        "ocean_treatment",
-        SettingKind::Enum(OCEAN_TREATMENT),
-        "flat",
-        ui(
-            TAB_APPEARANCE,
-            "display",
-            "ConfigLabelOceanTreatment",
-            "ConfigHintOceanTreatment",
         ),
     ),
     // No sentence anywhere justifies this prototype toggle, so it keeps its
