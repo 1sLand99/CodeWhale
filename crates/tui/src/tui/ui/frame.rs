@@ -147,9 +147,12 @@ pub(crate) fn info_segments(app: &App, width: u16) -> Vec<InfoSegment> {
         }
         let hit = u64::from(app.session.displayed_total_cache_hit_tokens());
         let miss = u64::from(app.session.displayed_total_cache_miss_tokens());
-        if hit + miss > 0 {
-            let cache_pct =
-                u8::try_from((hit * 100 + (hit + miss) / 2) / (hit + miss)).unwrap_or(100);
+        let cache_total = hit + miss;
+        if cache_total > 0 {
+            let cache_pct = (hit * 100 + cache_total / 2)
+                .checked_div(cache_total)
+                .and_then(|pct| u8::try_from(pct).ok())
+                .unwrap_or(100);
             segments.push(InfoSegment::new(
                 InfoSegmentId::Cache,
                 "cache",
@@ -166,9 +169,12 @@ pub(crate) fn info_segments(app: &App, width: u16) -> Vec<InfoSegment> {
     } else {
         let hit = u64::from(app.session.displayed_total_cache_hit_tokens());
         let miss = u64::from(app.session.displayed_total_cache_miss_tokens());
-        if hit + miss > 0 {
-            let cache_pct =
-                u8::try_from((hit * 100 + (hit + miss) / 2) / (hit + miss)).unwrap_or(100);
+        let cache_total = hit + miss;
+        if cache_total > 0 {
+            let cache_pct = (hit * 100 + cache_total / 2)
+                .checked_div(cache_total)
+                .and_then(|pct| u8::try_from(pct).ok())
+                .unwrap_or(100);
             segments.push(InfoSegment::new(
                 InfoSegmentId::Cache,
                 "cache",

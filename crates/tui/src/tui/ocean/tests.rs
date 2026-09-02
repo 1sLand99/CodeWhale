@@ -40,17 +40,20 @@ fn whale_ramp_is_perceptibly_deep_not_merely_non_equal() {
         distance(ramp.surface, ramp.deep) >= 32,
         "the selected underwater treatment must read at a glance"
     );
-    assert_ne!(ramp.color_at(0, 20), ramp.color_at(19, 20));
+    assert_ne!(
+        ramp.color_at_context(0, 20, 0),
+        ramp.color_at_context(19, 20, 0)
+    );
 }
 
 #[test]
 fn whale_column_stays_blue_and_gently_banded_at_full_screen_depth() {
     let theme = crate::palette::UNDERWATER_UI_THEME;
     let ramp = OceanRamp::for_theme(&theme).expect("underwater ramp");
-    let mut previous = ramp.color_at(0, 80);
+    let mut previous = ramp.color_at_context(0, 80, 0);
 
     for row in 0..80 {
-        let current = ramp.color_at(row, 80);
+        let current = ramp.color_at_context(row, 80, 0);
         let (red, green, blue) = rgb(current).expect("RGB ocean color");
         assert!(
             blue > green && green > red,
@@ -67,8 +70,8 @@ fn whale_column_stays_blue_and_gently_banded_at_full_screen_depth() {
         previous = current;
     }
 
-    assert_eq!(ramp.color_at(0, 80), ramp.surface);
-    assert_eq!(ramp.color_at(79, 80), ramp.deep);
+    assert_eq!(ramp.color_at_context(0, 80, 0), ramp.surface);
+    assert_eq!(ramp.color_at_context(79, 80, 0), ramp.deep);
 }
 
 #[test]
@@ -286,10 +289,10 @@ fn context_fill_drags_the_water_column_toward_the_deep() {
 #[test]
 fn shimmer_is_subtle_and_concentrated_near_the_surface() {
     let ramp = OceanRamp::for_theme(&crate::palette::UNDERWATER_UI_THEME).expect("underwater ramp");
-    let surface_a = ramp.color_at_phase(0, 20, 0, ShellPhase::Idle);
-    let surface_b = ramp.color_at_phase(0, 20, 22_500, ShellPhase::Idle);
-    let deep_a = ramp.color_at_phase(19, 20, 0, ShellPhase::Idle);
-    let deep_b = ramp.color_at_phase(19, 20, 22_500, ShellPhase::Idle);
+    let surface_a = ramp.color_at_phase_context(0, 20, 0, ShellPhase::Idle, 0);
+    let surface_b = ramp.color_at_phase_context(0, 20, 22_500, ShellPhase::Idle, 0);
+    let deep_a = ramp.color_at_phase_context(19, 20, 0, ShellPhase::Idle, 0);
+    let deep_b = ramp.color_at_phase_context(19, 20, 22_500, ShellPhase::Idle, 0);
 
     let surface_shift = distance(surface_a, surface_b);
     assert!(
@@ -314,14 +317,17 @@ fn attention_phases_carry_their_own_water_and_work_phases_have_distinct_depth_bi
         ShellPhase::Failed,
     ] {
         assert_eq!(
-            ramp.color_at_phase(4, 20, 0, phase),
-            ramp.color_at_phase(4, 20, 45_000, phase)
+            ramp.color_at_phase_context(4, 20, 0, phase, 0),
+            ramp.color_at_phase_context(4, 20, 45_000, phase, 0)
         );
-        assert_ne!(ramp.color_at_phase(4, 20, 0, phase), ramp.color_at(4, 20));
+        assert_ne!(
+            ramp.color_at_phase_context(4, 20, 0, phase, 0),
+            ramp.color_at_context(4, 20, 0)
+        );
     }
     assert_ne!(
-        ramp.color_at_phase(10, 20, 22_500, ShellPhase::Working),
-        ramp.color_at_phase(10, 20, 22_500, ShellPhase::Verifying)
+        ramp.color_at_phase_context(10, 20, 22_500, ShellPhase::Working, 0),
+        ramp.color_at_phase_context(10, 20, 22_500, ShellPhase::Verifying, 0)
     );
 }
 
@@ -333,24 +339,24 @@ fn tall_columns_darken_continuously_without_an_anchor_shelf() {
     let ramp = OceanRamp::for_theme(&crate::palette::UNDERWATER_UI_THEME).expect("underwater ramp");
     let height = 120;
     let anchor = 50; // ~0.42 of 120
-    let above = ramp.color_at(anchor - 6, height);
-    let at = ramp.color_at(anchor, height);
-    let below = ramp.color_at(anchor + 6, height);
+    let above = ramp.color_at_context(anchor - 6, height, 0);
+    let at = ramp.color_at_context(anchor, height, 0);
+    let below = ramp.color_at_context(anchor + 6, height, 0);
     assert_ne!(above, at, "water must still darken entering the old anchor");
     assert_ne!(at, below, "water must still darken leaving the old anchor");
-    assert_eq!(ramp.color_at(0, height), ramp.surface);
-    assert_eq!(ramp.color_at(height - 1, height), ramp.deep);
+    assert_eq!(ramp.color_at_context(0, height, 0), ramp.surface);
+    assert_eq!(ramp.color_at_context(height - 1, height, 0), ramp.deep);
 }
 
 #[test]
 fn completion_breath_peaks_once_then_settles() {
     let ramp = OceanRamp::for_theme(&crate::palette::UNDERWATER_UI_THEME).expect("underwater ramp");
-    let start = ramp.color_at_completion(0, 20, 0);
-    let peak = ramp.color_at_completion(0, 20, 320);
-    let settled = ramp.color_at_completion(0, 20, 800);
+    let start = ramp.color_at_completion_context(0, 20, 0, 0);
+    let peak = ramp.color_at_completion_context(0, 20, 320, 0);
+    let settled = ramp.color_at_completion_context(0, 20, 800, 0);
     assert_ne!(start, peak);
     assert_ne!(peak, settled);
-    assert_eq!(settled, ramp.color_at(0, 20));
+    assert_eq!(settled, ramp.color_at_context(0, 20, 0));
 }
 
 #[test]
@@ -521,8 +527,8 @@ fn split_shell_surfaces_share_one_absolute_row_column() {
     column.paint_matching(header, &mut buf, theme.header_bg);
     column.paint_matching(composer, &mut buf, theme.composer_bg);
 
-    assert_eq!(buf[(0, 0)].bg, ramp.color_at(0, 12));
-    assert_eq!(buf[(0, 11)].bg, ramp.color_at(11, 12));
+    assert_eq!(buf[(0, 0)].bg, ramp.color_at_context(0, 12, 0));
+    assert_eq!(buf[(0, 11)].bg, ramp.color_at_context(11, 12, 0));
     assert_ne!(buf[(0, 1)].bg, buf[(0, 10)].bg);
     assert_eq!(
         buf[(4, 10)].bg,
@@ -548,7 +554,7 @@ fn full_viewport_water_column_reaches_both_terminal_edges() {
     column.paint_matching(viewport, &mut buf, theme.surface_bg);
 
     for y in viewport.top()..viewport.bottom() {
-        let expected = ramp.color_at(y, viewport.height);
+        let expected = ramp.color_at_context(y, viewport.height, 0);
         assert_eq!(buf[(viewport.left(), y)].bg, expected);
         assert_eq!(buf[(viewport.right() - 1, y)].bg, expected);
     }

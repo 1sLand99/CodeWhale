@@ -376,11 +376,6 @@ impl OceanRamp {
         })
     }
 
-    #[must_use]
-    pub fn color_at(self, row: u16, height: u16) -> Color {
-        self.color_at_context(row, height, 0)
-    }
-
     /// Abyss Depth effect: wires context fullness (0..=100) into the water
     /// column gradient calculation so that as context fills up, the dark
     /// abyssal deep rises up to consume the sunlit surface gradient.
@@ -398,17 +393,6 @@ impl OceanRamp {
         let toward_middle = mix_colors(self.surface, self.middle, position);
         let toward_deep = mix_colors(self.middle, self.deep, position);
         mix_colors(toward_middle, toward_deep, position)
-    }
-
-    #[must_use]
-    pub fn color_at_phase(
-        self,
-        row: u16,
-        height: u16,
-        elapsed_ms: u128,
-        phase: ShellPhase,
-    ) -> Color {
-        self.color_at_phase_context(row, height, elapsed_ms, phase, 0)
     }
 
     #[must_use]
@@ -471,11 +455,6 @@ impl OceanRamp {
             ShellPhase::Failed => mix_colors(base, self.failure, 0.09),
             _ => base,
         }
-    }
-
-    #[must_use]
-    pub fn color_at_completion(self, row: u16, height: u16, elapsed_ms: u128) -> Color {
-        self.color_at_completion_context(row, height, elapsed_ms, 0)
     }
 
     #[must_use]
