@@ -1919,7 +1919,7 @@ background_color = "#1A1B26"
         for placement in ["bottom", "top", "left", "right", "off"] {
             let value = WorkSurfacePlacementValue::from(placement);
             assert_eq!(value.as_setting(), placement);
-            let serialized = serde_json::to_value(&value)
+            let serialized = serde_json::to_value(value)
                 .unwrap_or_else(|err| panic!("serialize placement {placement}: {err}"));
             assert_eq!(
                 serde_json::from_value::<WorkSurfacePlacementValue>(serialized)
