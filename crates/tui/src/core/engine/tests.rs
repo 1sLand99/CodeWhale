@@ -11151,7 +11151,7 @@ async fn run_shell_command_op_allows_readonly_shell_in_auto_mode() {
         engine
             .handle_run_shell_command(
                 "pwd".to_string(),
-                AppMode::Auto,
+                AppMode::Agent,
                 true,
                 false,
                 false,
@@ -13156,16 +13156,6 @@ fn mode_invariant_matrix_covers_context_catalog_subagents_and_prompt_metadata() 
             trust_mode: true,
             auto_approve: true,
             approval_mode: ApprovalMode::Bypass,
-            plan_hint: false,
-        },
-        ModeCase {
-            name: "auto-compat",
-            mode: AppMode::Auto,
-            shell_policy: ShellPolicy::Full,
-            sandbox: ExpectedSandbox::WorkspaceWrite,
-            trust_mode: false,
-            auto_approve: false,
-            approval_mode: ApprovalMode::Suggest,
             plan_hint: false,
         },
         ModeCase {

@@ -64,13 +64,12 @@ fn count(value: usize) -> u64 {
     u64::try_from(value).unwrap_or(u64::MAX)
 }
 
-/// Lossless mode label. Unlike `AppMode::as_setting`, `auto` and `yolo` keep
-/// their identity so a client can round-trip through `AppMode::parse`.
+/// Lossless mode label. Unlike `AppMode::as_setting`, `yolo` keeps its
+/// identity so a client can round-trip through `AppMode::parse`.
 #[must_use]
 pub fn app_mode_str(mode: AppMode) -> &'static str {
     match mode {
         AppMode::Agent => "agent",
-        AppMode::Auto => "auto",
         AppMode::Yolo => "yolo",
         AppMode::Plan => "plan",
         AppMode::Operate => "operate",
@@ -1393,19 +1392,11 @@ mod tests {
     fn mode_labels_round_trip_through_app_mode_parse() {
         for mode in [
             AppMode::Agent,
-            AppMode::Auto,
             AppMode::Yolo,
             AppMode::Plan,
             AppMode::Operate,
         ] {
-            let parsed = AppMode::parse(app_mode_str(mode));
-            // `auto` parses back to the visible Agent mode by design.
-            let expected = if mode == AppMode::Auto {
-                AppMode::Agent
-            } else {
-                mode
-            };
-            assert_eq!(parsed, Some(expected), "{mode:?}");
+            assert_eq!(AppMode::parse(app_mode_str(mode)), Some(mode), "{mode:?}");
         }
         for mode in [
             ApprovalMode::Auto,

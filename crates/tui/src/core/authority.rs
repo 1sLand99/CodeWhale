@@ -43,7 +43,6 @@ pub(crate) struct EffectiveModePolicy {
 /// This is the single source of truth for the mode/permission table:
 /// - `Plan`   -> read-only: no shell, no trust, `Suggest` approvals.
 /// - `Agent`  -> the user's durable baseline (`prefs`).
-/// - `Auto`   -> compatibility alias for Agent; not a separate behavior.
 /// - `Operate` -> Agent baseline plus orchestration capabilities in the runtime.
 /// - `Yolo`   -> legacy compat; full authority: shell + trust + `Bypass` approvals.
 #[must_use]
@@ -55,7 +54,7 @@ pub(crate) fn base_policy_for_mode(mode: AppMode, prefs: &ModeSessionPrefs) -> E
             trust_mode: false,
             approval_mode: ApprovalMode::Suggest,
         },
-        AppMode::Agent | AppMode::Auto | AppMode::Operate => EffectiveModePolicy {
+        AppMode::Agent | AppMode::Operate => EffectiveModePolicy {
             mode,
             allow_shell: prefs.agent_allow_shell,
             trust_mode: prefs.agent_trust_mode,
@@ -418,7 +417,7 @@ pub(crate) fn shell_policy_for_mode(mode: AppMode, allow_shell: bool) -> ShellPo
     }
     match mode {
         AppMode::Plan => ShellPolicy::None,
-        AppMode::Agent | AppMode::Auto | AppMode::Operate | AppMode::Yolo => ShellPolicy::Full,
+        AppMode::Agent | AppMode::Operate | AppMode::Yolo => ShellPolicy::Full,
     }
 }
 
@@ -503,7 +502,7 @@ pub(crate) fn write_carve_out_posture(
     auto_approve: bool,
 ) -> bool {
     !auto_approve
-        && matches!(mode, AppMode::Agent | AppMode::Auto | AppMode::Operate)
+        && matches!(mode, AppMode::Agent | AppMode::Operate)
         && approval_mode == ApprovalMode::Suggest
 }
 

@@ -512,10 +512,8 @@ impl App {
         };
 
         // Durable Agent-era permission baseline (#3386). Plan/YOLO derive from
-        // and restore to this. Legacy Auto inputs parse to Agent; if an older
-        // caller still constructs `AppMode::Auto` directly, it projects through
-        // the Agent baseline instead of enabling a fourth runtime posture. When
-        // the user starts in YOLO the live shell flag is force-enabled below, so
+        // and restore to this. When the user starts in YOLO the live shell
+        // flag is force-enabled below, so
         // the baseline shell value is taken from the interactive default (the
         // pre-mode Agent surface) rather than the YOLO-forced live mirror;
         // otherwise it mirrors the resolved `allow_shell` option, which already

@@ -3385,15 +3385,11 @@ fn app_mode_helpers_centralize_parse_labels_and_cycle_order() {
     assert_eq!(AppMode::from_setting("5"), AppMode::Operate);
 
     assert_eq!(AppMode::Agent.as_setting(), "agent");
-    assert_eq!(AppMode::Auto.as_setting(), "agent");
     assert_eq!(AppMode::Yolo.as_setting(), "agent");
     assert_eq!(AppMode::Plan.display_name(), "Plan");
-    assert_eq!(AppMode::Auto.display_name(), "Act");
-    assert_eq!(AppMode::Auto.label(), "ACT");
     assert_eq!(AppMode::Yolo.label(), "ACT");
     assert_eq!(AppMode::Yolo.display_name(), "Act");
     assert_eq!(AppMode::Agent.number(), '1');
-    assert_eq!(AppMode::Auto.number(), '1');
     assert_eq!(AppMode::Yolo.number(), '1');
     assert_eq!(AppMode::Operate.number(), '3');
     assert_eq!(
@@ -3404,12 +3400,10 @@ fn app_mode_helpers_centralize_parse_labels_and_cycle_order() {
     assert_eq!(AppMode::Plan.next(), AppMode::Agent);
     assert_eq!(AppMode::Agent.next(), AppMode::Operate);
     assert_eq!(AppMode::Operate.next(), AppMode::Plan);
-    assert_eq!(AppMode::Auto.next(), AppMode::Agent);
     assert_eq!(AppMode::Yolo.next(), AppMode::Agent);
     assert_eq!(AppMode::Plan.previous(), AppMode::Operate);
     assert_eq!(AppMode::Agent.previous(), AppMode::Plan);
     assert_eq!(AppMode::Operate.previous(), AppMode::Agent);
-    assert_eq!(AppMode::Auto.previous(), AppMode::Agent);
     assert_eq!(AppMode::Yolo.previous(), AppMode::Agent);
 }
 
@@ -3456,10 +3450,6 @@ fn test_cycle_mode_reverse_transitions() {
     app.mode = AppMode::Agent;
     app.cycle_mode_reverse();
     assert_eq!(app.mode, AppMode::Plan);
-
-    app.mode = AppMode::Auto;
-    app.cycle_mode_reverse();
-    assert_eq!(app.mode, AppMode::Agent);
 }
 
 #[test]
@@ -3659,13 +3649,6 @@ fn base_policy_for_mode_projects_the_mode_permission_table() {
     assert!(agent.allow_shell);
     assert!(agent.trust_mode);
     assert_eq!(agent.approval_mode, ApprovalMode::Never);
-
-    // Auto: compatibility alias for the durable Agent baseline.
-    let auto = base_policy_for_mode(AppMode::Auto, &prefs);
-    assert_eq!(auto.mode, AppMode::Auto);
-    assert!(auto.allow_shell);
-    assert!(auto.trust_mode);
-    assert_eq!(auto.approval_mode, ApprovalMode::Never);
 
     // Operate uses the Agent baseline.
     let operate = base_policy_for_mode(AppMode::Operate, &prefs);

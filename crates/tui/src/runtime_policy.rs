@@ -104,7 +104,7 @@ pub(crate) fn parse_runtime_mode(value: &str) -> Option<AppMode> {
 #[must_use]
 fn visible_mode(mode: AppMode) -> AppMode {
     match mode {
-        AppMode::Auto | AppMode::Yolo => AppMode::Agent,
+        AppMode::Yolo => AppMode::Agent,
         other => other,
     }
 }

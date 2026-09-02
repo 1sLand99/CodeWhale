@@ -81,7 +81,6 @@ pub(crate) const PENDING_GROUPS: &[&str] =
 pub(crate) fn to_command_mode(mode: AppMode) -> CommandMode {
     match mode {
         AppMode::Agent => CommandMode::Agent,
-        AppMode::Auto => CommandMode::Auto,
         AppMode::Yolo => CommandMode::Yolo,
         AppMode::Plan => CommandMode::Plan,
         AppMode::Operate => CommandMode::Operate,
@@ -91,7 +90,6 @@ pub(crate) fn to_command_mode(mode: AppMode) -> CommandMode {
 fn from_command_mode(mode: CommandMode) -> AppMode {
     match mode {
         CommandMode::Agent => AppMode::Agent,
-        CommandMode::Auto => AppMode::Auto,
         CommandMode::Yolo => AppMode::Yolo,
         CommandMode::Plan => AppMode::Plan,
         CommandMode::Operate => AppMode::Operate,
@@ -1477,7 +1475,6 @@ mod tests {
     fn boundary_mappings_cover_every_variant() {
         for mode in [
             AppMode::Agent,
-            AppMode::Auto,
             AppMode::Yolo,
             AppMode::Plan,
             AppMode::Operate,

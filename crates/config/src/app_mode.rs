@@ -7,7 +7,6 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppMode {
     Agent,
-    Auto,
     /// Legacy compatibility alias; resolves to [`Self::Agent`] + bypass approvals.
     Yolo,
     Plan,
@@ -17,8 +16,6 @@ pub enum AppMode {
 impl AppMode {
     /// Productive keyboard cycle: Plan -> Act -> Operate -> Plan.
     ///
-    /// `Auto` remains an internal variant while the real implementation is
-    /// redesigned; do not expose it through user-facing mode selection (#3733).
     /// `Yolo` is kept for parse/back-compat only and is not in the Tab cycle.
     /// Operate joins the visible cycle as the always-on pod operation:
     /// a lead plans slices, then workers execute against an optional burn rate.
@@ -51,7 +48,6 @@ impl AppMode {
     pub fn as_setting(self) -> &'static str {
         match self {
             Self::Agent => "agent",
-            Self::Auto => "agent",
             // Write current permission vocabulary, not the legacy YOLO label.
             Self::Yolo => "agent",
             Self::Plan => "plan",
@@ -63,7 +59,6 @@ impl AppMode {
     pub fn label(self) -> &'static str {
         match self {
             AppMode::Agent => "ACT",
-            AppMode::Auto => "ACT",
             AppMode::Yolo => "ACT",
             AppMode::Plan => "PLAN",
             AppMode::Operate => "OPERATE",
@@ -74,7 +69,6 @@ impl AppMode {
     pub fn display_name(self) -> &'static str {
         match self {
             AppMode::Agent => "Act",
-            AppMode::Auto => "Act",
             AppMode::Yolo => "Act",
             AppMode::Plan => "Plan",
             AppMode::Operate => "Operate",
@@ -84,7 +78,7 @@ impl AppMode {
     #[must_use]
     pub fn number(self) -> char {
         match self {
-            AppMode::Agent | AppMode::Auto | AppMode::Yolo => '1',
+            AppMode::Agent | AppMode::Yolo => '1',
             AppMode::Plan => '2',
             AppMode::Operate => '3',
         }
@@ -92,7 +86,7 @@ impl AppMode {
 
     #[must_use]
     pub fn uses_agent_baseline(self) -> bool {
-        matches!(self, Self::Agent | Self::Auto | Self::Operate)
+        matches!(self, Self::Agent | Self::Operate)
     }
 
     /// Operate gets a higher parallel launch floor so background fan-out is
@@ -108,9 +102,7 @@ impl AppMode {
     /// Description shown in help or onboarding text.
     pub fn description(self) -> &'static str {
         match self {
-            AppMode::Agent | AppMode::Auto => {
-                "Act mode - direct work in the current session with tools"
-            }
+            AppMode::Agent => "Act mode - direct work in the current session with tools",
             AppMode::Yolo => "Act mode with Full Access (legacy compatibility setting)",
             AppMode::Plan => "Plan mode - research and design before implementing",
             AppMode::Operate => {

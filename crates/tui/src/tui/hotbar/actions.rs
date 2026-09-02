@@ -914,9 +914,6 @@ impl AppHotbarAction {
             AppHotbarKind::Mode(AppMode::Agent) => MessageId::HotbarActionModeAgentName,
             AppHotbarKind::Mode(AppMode::Yolo) => MessageId::HotbarActionModeYoloName,
             AppHotbarKind::Mode(AppMode::Operate) => MessageId::HotbarActionModeOperateName,
-            AppHotbarKind::Mode(AppMode::Auto) => {
-                return None;
-            }
             AppHotbarKind::ReasoningCycle => MessageId::HotbarActionReasoningCycleName,
             AppHotbarKind::SidebarToggle => MessageId::HotbarActionSidebarToggleName,
             AppHotbarKind::FileTreeToggle => MessageId::HotbarActionFileTreeToggleName,
@@ -933,9 +930,6 @@ impl AppHotbarAction {
             AppHotbarKind::Mode(AppMode::Agent) => MessageId::HotbarActionModeAgentDescription,
             AppHotbarKind::Mode(AppMode::Yolo) => MessageId::HotbarActionModeYoloDescription,
             AppHotbarKind::Mode(AppMode::Operate) => MessageId::HotbarActionModeOperateDescription,
-            AppHotbarKind::Mode(AppMode::Auto) => {
-                return None;
-            }
             AppHotbarKind::ReasoningCycle => MessageId::HotbarActionReasoningCycleDescription,
             AppHotbarKind::SidebarToggle => MessageId::HotbarActionSidebarToggleDescription,
             AppHotbarKind::FileTreeToggle => MessageId::HotbarActionFileTreeToggleDescription,
