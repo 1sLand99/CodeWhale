@@ -208,8 +208,11 @@ pub const HELP_CHROME_CHORD: &str = "Ctrl+/";
 
 /// The info line's single right-hand key hint, e.g. `Ctrl+/ help`.
 #[must_use]
-pub fn info_help_hint() -> String {
-    format!("{HELP_CHROME_CHORD} help")
+pub fn info_help_hint(locale: crate::localization::Locale) -> String {
+    format!(
+        "{HELP_CHROME_CHORD} {}",
+        crate::localization::tr(locale, crate::localization::MessageId::InfoLineHelp)
+    )
 }
 
 #[must_use]

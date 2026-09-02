@@ -174,6 +174,7 @@ pub struct InfoLine<'a> {
     /// The single right-hand key hint, e.g. `Ctrl+/ help`. Empty means the
     /// caller has no hint to advertise. It sheds right after the meter bar.
     pub help_hint: &'a str,
+    pub context_label: &'a str,
     /// Context window percentage, 0–100.
     pub context_percent: u8,
     /// Contextual segments in display order.
@@ -191,12 +192,14 @@ impl<'a> InfoLine<'a> {
     pub fn new(
         theme: &'a UiTheme,
         help_hint: &'a str,
+        context_label: &'a str,
         context_percent: u8,
         segments: &'a [InfoSegment],
     ) -> Self {
         Self {
             theme,
             help_hint,
+            context_label,
             context_percent,
             segments,
             hovered: None,
@@ -263,11 +266,11 @@ fn context_label_ink_for(pct: u8) -> ChromeInk {
 
 /// The context reading's text at one shed state — the row's last left item,
 /// used for width arithmetic and mirrored span-for-span by the render.
-fn context_text(pct: u8, meter: &str, show_bar: bool) -> String {
+fn context_text(label: &str, pct: u8, meter: &str, show_bar: bool) -> String {
     if show_bar {
-        format!("context {pct}% {meter}")
+        format!("{label} {pct}% {meter}")
     } else {
-        format!("context {pct}%")
+        format!("{label} {pct}%")
     }
 }
 
@@ -300,13 +303,13 @@ fn shed_pass<'t>(info: &'t InfoLine<'_>, area: Rect) -> ShedRow<'t> {
         .collect();
     let help = sym(info.help_hint, ascii);
 
-    let join_w = ITEM_JOIN.width();
+    let join_w = sym(ITEM_JOIN, ascii).width();
     let mut kept: Vec<&InfoSegment> = info.segments.iter().collect();
     // The left run is the kept segments plus the context reading, all joined.
     let left_width = |segs: &[&InfoSegment], short: bool, show_bar: bool| -> usize {
         segs.iter().map(|s| s.rendered_width(short)).sum::<usize>()
             + join_w * segs.len()
-            + context_text(pct, &meter, show_bar).width()
+            + context_text(info.context_label, pct, &meter, show_bar).width()
     };
     let total_needed = |left: usize, show_help: bool| -> usize {
         left + if show_help && !help.is_empty() {
@@ -350,7 +353,7 @@ fn shed_pass<'t>(info: &'t InfoLine<'_>, area: Rect) -> ShedRow<'t> {
 
     ShedRow {
         left_width: left_width(&kept, use_short, show_bar),
-        context_width: context_text(pct, &meter, show_bar).width(),
+        context_width: context_text(info.context_label, pct, &meter, show_bar).width(),
         kept,
         use_short,
         show_bar,
@@ -360,25 +363,30 @@ fn shed_pass<'t>(info: &'t InfoLine<'_>, area: Rect) -> ShedRow<'t> {
 }
 
 /// The context meter's hitbox (spec §6: the meter is the chrome row's one
-/// always-present inspector target — `Alt+C`'s mouse route). Covers exactly
-/// the painted `context NN% ▰▰▱▱▱` cells. `None` when the row is too narrow
-/// for that item to have painted whole: a hitbox never claims cells another
-/// element paints (the posture-floor discipline the classic header's meter
-/// hitbox carried).
+/// always-present inspector target — `Alt+C`'s mouse route). Covers the
+/// painted context reading, pinned to the right when the row is below its
+/// width floor.
 #[must_use]
 pub fn context_meter_hitbox(info: &InfoLine<'_>, area: Rect) -> Option<Rect> {
     if area.width < 1 || area.height < 1 {
         return None;
     }
     let shed = shed_pass(info, area);
-    if shed.left_width > usize::from(area.width) {
+    let area_left = usize::from(area.x);
+    let area_right = area_left + usize::from(area.width);
+    let start = if shed.left_width > usize::from(area.width) {
+        area_right.saturating_sub(shed.context_width)
+    } else {
+        area_left + shed.left_width - shed.context_width
+    };
+    let end = (start + shed.context_width).min(area_right);
+    if start >= end {
         return None;
     }
-    let start = shed.left_width - shed.context_width;
     Some(Rect {
-        x: area.x + u16::try_from(start).unwrap_or(u16::MAX),
+        x: u16::try_from(start).unwrap_or(u16::MAX),
         y: area.y,
-        width: u16::try_from(shed.context_width).unwrap_or(area.width),
+        width: u16::try_from(end - start).unwrap_or(area.width),
         height: 1,
     })
 }
@@ -405,23 +413,24 @@ impl Widget for InfoLine<'_> {
 
         let mut x = area.x as usize;
         let y = area.y;
+        let join = sym(ITEM_JOIN, ascii);
         // All positions below are usize and cast at the `set_span` boundary;
         // every write is clamped inside `area` by construction.
         let set = |buf: &mut Buffer, cx: usize, span: &Span<'_>| {
             buf.set_span(cx as u16, y, span, span.content.width() as u16);
         };
-        let join = |buf: &mut Buffer, cx: usize| {
+        let paint_join = |buf: &mut Buffer, cx: usize| {
             set(
                 buf,
                 cx,
-                &Span::styled(ITEM_JOIN, chrome(theme, ChromeInk::MetadataDim)),
+                &Span::styled(&join, chrome(theme, ChromeInk::MetadataDim)),
             );
         };
 
         for (index, segment) in kept.iter().enumerate() {
             if index > 0 {
-                join(buf, x);
-                x += ITEM_JOIN.width();
+                paint_join(buf, x);
+                x += join.width();
             }
             let hovered =
                 segment.id == InfoSegmentId::Model && self.hovered == Some(InfoSegmentId::Model);
@@ -462,11 +471,16 @@ impl Widget for InfoLine<'_> {
         if below_floor {
             x = (area.x as usize + area.width as usize).saturating_sub(context_width);
         } else if !kept.is_empty() {
-            join(buf, x);
-            x += ITEM_JOIN.width();
+            paint_join(buf, x);
+            x += join.width();
         }
-        set(buf, x, &Span::styled("context ", chrome(theme, label_ink)));
-        x += "context ".width();
+        let context_prefix = format!("{} ", self.context_label);
+        set(
+            buf,
+            x,
+            &Span::styled(&context_prefix, chrome(theme, label_ink)),
+        );
+        x += context_prefix.width();
         let pct_text = format!("{pct}%");
         set(buf, x, &Span::styled(&pct_text, chrome(theme, meter_ink)));
         x += pct_text.width();
@@ -511,19 +525,27 @@ pub fn infoline_hitboxes(info: &InfoLine<'_>, area: Rect) -> Vec<InfoLineHitbox>
         return out;
     }
     let shed = shed_pass(info, area);
+    let area_right = usize::from(area.x) + usize::from(area.width);
+    let clip_right = if shed.left_width > usize::from(area.width) {
+        area_right.saturating_sub(shed.context_width)
+    } else {
+        area_right
+    };
+    let join_width = sym(ITEM_JOIN, info.ascii_safe).width();
     let mut x = area.x as usize;
     for (index, segment) in shed.kept.iter().enumerate() {
         if index > 0 {
-            x += ITEM_JOIN.width();
+            x += join_width;
         }
         let w = segment.rendered_width(shed.use_short);
-        if x + w <= usize::from(area.x + area.width) {
+        let end = (x + w).min(clip_right);
+        if x < end {
             out.push(InfoLineHitbox {
                 id: segment.id,
                 area: Rect {
                     x: x as u16,
                     y: area.y,
-                    width: w as u16,
+                    width: (end - x) as u16,
                     height: 1,
                 },
             });

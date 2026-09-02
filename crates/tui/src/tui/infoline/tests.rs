@@ -22,7 +22,15 @@ use crate::palette::{ChromeInk, UI_THEME, UiTheme};
 /// The hint the live shell advertises, from the one binding module that owns
 /// it — a fixture string here would let chrome and routing drift apart.
 fn help_hint() -> String {
-    crate::tui::shell_key_routing::info_help_hint()
+    crate::tui::shell_key_routing::info_help_hint(crate::localization::Locale::En)
+}
+
+fn context_label() -> String {
+    crate::localization::tr(
+        crate::localization::Locale::En,
+        crate::localization::MessageId::FooterHintContext,
+    )
+    .into_owned()
 }
 
 const BLOCKER_SIZES: [(u16, u16); 4] = [(80, 24), (100, 30), (120, 32), (160, 40)];
@@ -135,7 +143,8 @@ fn render_buffer(
     let hint = help_hint();
     terminal
         .draw(|frame| {
-            let info = InfoLine::new(theme, &hint, pct, segments);
+            let context = context_label();
+            let info = InfoLine::new(theme, &hint, &context, pct, segments);
             use ratatui::widgets::Widget;
             Widget::render(info, frame.area(), frame.buffer_mut());
         })
@@ -397,7 +406,7 @@ fn infoline_help_hint_names_a_chord_that_opens_help() {
         !is_help_shortcut(&KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE)),
         "bare ? types text, so it must never be the printed hint"
     );
-    let hint = info_help_hint();
+    let hint = info_help_hint(crate::localization::Locale::En);
     assert!(!hint.contains("F1"), "terminals eat F1: {hint}");
     let row = render_row(&UI_THEME, 160, &work_segments(), 61);
     assert!(row.ends_with(&hint), "the hint is pinned right: {row:?}");
@@ -408,7 +417,8 @@ fn infoline_hitboxes_match_painted_cells() {
     use super::infoline_hitboxes;
     let segments = startup_segments();
     let hint = help_hint();
-    let info = InfoLine::new(&UI_THEME, &hint, 0, &segments);
+    let context = context_label();
+    let info = InfoLine::new(&UI_THEME, &hint, &context, 0, &segments);
     let area = ratatui::layout::Rect::new(0, 0, 160, 1);
     let hitboxes = infoline_hitboxes(&info, area);
     assert_eq!(hitboxes.len(), 2, "one hitbox per painted segment");
@@ -449,7 +459,8 @@ fn infoline_hitboxes_follow_the_same_shed_pass_as_paint() {
     let segments = crowded_segments();
     let hint = help_hint();
     for width in [120u16, 80, 60, 44, 30, 20] {
-        let info = InfoLine::new(&UI_THEME, &hint, 61, &segments);
+        let context = context_label();
+        let info = InfoLine::new(&UI_THEME, &hint, &context, 61, &segments);
         let hitboxes = super::infoline_hitboxes(&info, ratatui::layout::Rect::new(0, 0, width, 1));
         let cells = render_cells(&UI_THEME, width, &segments, 61);
         for hitbox in hitboxes {
@@ -470,6 +481,23 @@ fn infoline_hitboxes_follow_the_same_shed_pass_as_paint() {
             );
         }
     }
+
+    let context = context_label();
+    let segments = work_segments();
+    for width in 20..=24 {
+        let info = InfoLine::new(&UI_THEME, &hint, &context, 61, &segments);
+        let area = ratatui::layout::Rect::new(0, 0, width, 1);
+        let model = super::infoline_hitboxes(&info, area)
+            .into_iter()
+            .find(|hitbox| hitbox.id == InfoSegmentId::Model);
+        let context = super::context_meter_hitbox(&info, area).expect("context hitbox");
+        assert!(
+            model.is_none_or(|model| {
+                model.area.right() <= context.x || context.right() <= model.area.x
+            }),
+            "{width}: model and context hitboxes overlap"
+        );
+    }
 }
 
 #[test]
@@ -481,7 +509,9 @@ fn infoline_ascii_safe_has_no_wide_or_unsupported_glyphs() {
         let mut terminal = Terminal::new(backend).expect("terminal");
         terminal
             .draw(|frame| {
-                let info = InfoLine::new(&UI_THEME, &hint, 61, &segments).ascii_safe(true);
+                let context = context_label();
+                let info =
+                    InfoLine::new(&UI_THEME, &hint, &context, 61, &segments).ascii_safe(true);
                 use ratatui::widgets::Widget;
                 Widget::render(info, frame.area(), frame.buffer_mut());
             })
@@ -513,7 +543,8 @@ fn infoline_hover_and_narrow_do_not_panic() {
         let mut terminal = Terminal::new(backend).expect("terminal");
         terminal
             .draw(|frame| {
-                let info = InfoLine::new(&UI_THEME, &hint, 61, &segments)
+                let context = context_label();
+                let info = InfoLine::new(&UI_THEME, &hint, &context, 61, &segments)
                     .hovered(Some(InfoSegmentId::Model));
                 use ratatui::widgets::Widget;
                 Widget::render(info, frame.area(), frame.buffer_mut());
@@ -545,7 +576,8 @@ fn context_meter_hitbox_covers_exactly_the_painted_meter_span() {
     let segments = crowded_segments();
     let hint = help_hint();
     for width in [160u16, 80, 60, 44, 30, 20] {
-        let info = InfoLine::new(&UI_THEME, &hint, 61, &segments);
+        let context = context_label();
+        let info = InfoLine::new(&UI_THEME, &hint, &context, 61, &segments);
         let row = render_row(&UI_THEME, width, &segments, 61);
         let area = ratatui::layout::Rect::new(0, 0, width, 1);
         match super::context_meter_hitbox(&info, area) {

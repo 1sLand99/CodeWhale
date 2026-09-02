@@ -8,7 +8,7 @@ use crate::models::Role;
 use crate::tui::infoline::{InfoLine, InfoSegment, InfoSegmentId, infoline_hitboxes};
 
 /// Context window percentage for the info line's meter — the same snapshot the
-/// merged footer's depth line reads, so the two can never disagree.
+/// merged footer's context reading, so the two can never disagree.
 pub(crate) fn info_context_percent(app: &App) -> u8 {
     crate::tui::phase_strip::context_percent_from_app(app)
 }
@@ -48,12 +48,18 @@ pub(crate) fn info_segments(app: &App, width: u16) -> Vec<InfoSegment> {
     // snapshot — the render path never probes; the background refresh owns
     // that, and the forge slug rides the same probe.
     let git = crate::tui::git_status::cached_status();
+    let git_matches_workspace = git.probed_workspace.as_deref() == Some(app.workspace.as_path());
     let folder_budget = match tier {
         crate::tui::underwater::ShellTier::Compact => 16,
         crate::tui::underwater::ShellTier::Normal => 24,
         crate::tui::underwater::ShellTier::Wide => 36,
     };
-    let (repo, basename) = workspace_segment_forms(git.remote_slug.as_deref(), &app.workspace);
+    let (repo, basename) = workspace_segment_forms(
+        git_matches_workspace
+            .then_some(git.remote_slug.as_deref())
+            .flatten(),
+        &app.workspace,
+    );
     if !repo.is_empty() {
         let mut segment = InfoSegment::new(
             InfoSegmentId::Workspace,
@@ -72,13 +78,15 @@ pub(crate) fn info_segments(app: &App, width: u16) -> Vec<InfoSegment> {
 
     // Branch, when git knows one. Unknown stays absent: the header must not
     // invent a ref to fill the slot (`git_status::chrome_label`'s own rule).
-    if let Some(branch) = git.branch.as_deref() {
-        segments.push(InfoSegment::new(
-            InfoSegmentId::Branch,
-            "⑂",
-            crate::localization::truncate_to_width(branch, folder_budget),
-            ChromeInk::Metadata,
-        ));
+    if git_matches_workspace {
+        if let Some(branch) = git.branch.as_deref() {
+            segments.push(InfoSegment::new(
+                InfoSegmentId::Branch,
+                "⑂",
+                crate::localization::truncate_to_width(branch, folder_budget),
+                ChromeInk::Metadata,
+            ));
+        }
     }
 
     // Run/breadcrumb while a workflow run is active — the collapsed
@@ -95,7 +103,13 @@ pub(crate) fn info_segments(app: &App, width: u16) -> Vec<InfoSegment> {
         };
         let chip = panel.top_bar_chip();
         let value = chip.strip_prefix("wf ").unwrap_or(&chip).to_string();
-        segments.push(InfoSegment::new(InfoSegmentId::Run, "run", value, ink));
+        segments.push(InfoSegment::new(
+            InfoSegmentId::Run,
+            app.tr(crate::localization::MessageId::ToolFamilyRun)
+                .as_ref(),
+            value,
+            ink,
+        ));
     }
 
     // Pod membership and whale capacity from the sub-agent state: `pod n/m`
@@ -105,14 +119,16 @@ pub(crate) fn info_segments(app: &App, width: u16) -> Vec<InfoSegment> {
     if pod_total > 0 {
         segments.push(InfoSegment::new(
             InfoSegmentId::Pod,
-            "pod",
+            app.tr(crate::localization::MessageId::FleetRosterHeaderLabel)
+                .as_ref(),
             format!("{running}/{pod_total}"),
             ChromeInk::Active,
         ));
         if running > 0 {
             segments.push(InfoSegment::new(
                 InfoSegmentId::Whales,
-                "whales",
+                app.tr(crate::localization::MessageId::InfoLineWhales)
+                    .as_ref(),
                 format!("{}/{}", running, app.max_subagents.max(1)),
                 ChromeInk::Info,
             ));
@@ -132,7 +148,8 @@ pub(crate) fn info_segments(app: &App, width: u16) -> Vec<InfoSegment> {
     if let Some(value) = automation_value {
         segments.push(InfoSegment::new(
             InfoSegmentId::Automation,
-            "automation",
+            app.tr(crate::localization::MessageId::InfoLineAutomation)
+                .as_ref(),
             value,
             app.automation_panel.activity_ink(),
         ));
@@ -145,8 +162,10 @@ pub(crate) fn info_segments(app: &App, width: u16) -> Vec<InfoSegment> {
     if model.is_empty() {
         segments.push(InfoSegment::new(
             InfoSegmentId::Model,
-            "model",
-            "not connected",
+            app.tr(crate::localization::MessageId::StartupDefaultSubjectModel)
+                .as_ref(),
+            app.tr(crate::localization::MessageId::InfoLineNotConnected)
+                .as_ref(),
             ChromeInk::Waiting,
         ));
     } else {
@@ -204,10 +223,12 @@ fn render_info_row(f: &mut Frame, app: &mut App, area: Rect) -> InfoLineInteract
             })
             .map(|hb| hb.id)
     });
-    let help_hint = crate::tui::shell_key_routing::info_help_hint();
+    let help_hint = crate::tui::shell_key_routing::info_help_hint(app.ui_locale);
+    let context_label = app.tr(crate::localization::MessageId::FooterHintContext);
     let info = InfoLine::new(
         &app.ui_theme,
         &help_hint,
+        context_label.as_ref(),
         info_context_percent(app),
         &segments,
     )
@@ -1239,7 +1260,7 @@ pub(crate) fn render(f: &mut Frame, app: &mut App, _config: &Config) -> Option<(
 
     // One pinned footer row brackets the composer from below (spec §3: the
     // activity band and identity band merged into it): phase · live detail ·
-    // cost · posture chips on the left, depth line · keys — or a live
+    // cost · posture chips on the left, context reading · keys — or a live
     // notice — on the right. The row is reserved in every phase, so a turn
     // moving between idle, thinking, tool use, approval, completion,
     // failure, and cancellation rewrites text inside a fixed row — the
@@ -1473,7 +1494,7 @@ pub(crate) fn render(f: &mut Frame, app: &mut App, _config: &Config) -> Option<(
     }
     // The merged Tideline footer is the screen's last row: phase verb,
     // live detail, cost, and the posture chips the old header carried, with
-    // the depth line and key legend (or a live notice) pinned right. Every
+    // the context reading and key legend (or a live notice) pinned right. Every
     // fact the two classic bands stated survives here except the session
     // metrics strip, which spec §3 moves behind `/cost`.
     if footer_height > 0 {
