@@ -189,6 +189,8 @@
   "HotbarActionTrustToggleName": "Toggle trust",
   "HotbarActionTrustToggleDescription": "Enable or disable workspace trust mode.",
   "ConfigTitle": "Config",
+  "ConfigPreviewLabel": "Preview: ",
+  "ConfigHintExternalCredentials": "Which credential file this provider may read, at what access, and how to revoke it.",
   "ConfigModalTitle": " Config ",
   "ConfigSearchPlaceholder": "type to filter",
   "ConfigNoSettings": "  No settings available.",

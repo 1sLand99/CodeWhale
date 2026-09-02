@@ -189,6 +189,8 @@
   "HotbarActionTrustToggleName": "Alihkan kepercayaan",
   "HotbarActionTrustToggleDescription": "Aktifkan atau nonaktifkan mode kepercayaan workspace.",
   "ConfigTitle": "Konfigurasi",
+  "ConfigPreviewLabel": "Pratinjau: ",
+  "ConfigHintExternalCredentials": "Berkas kredensial yang boleh dibaca penyedia ini, tingkat aksesnya, dan cara mencabutnya.",
   "ConfigModalTitle": " Konfigurasi ",
   "ConfigSearchPlaceholder": "ketik untuk menyaring",
   "ConfigNoSettings": "  Tidak ada pengaturan tersedia.",

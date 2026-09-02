@@ -189,6 +189,8 @@
   "HotbarActionTrustToggleName": "Перемкнути довіру",
   "HotbarActionTrustToggleDescription": "Увімкнути або вимкнути режим довіри робочої області.",
   "ConfigTitle": "Конфігурація",
+  "ConfigPreviewLabel": "Попередній перегляд: ",
+  "ConfigHintExternalCredentials": "Який файл облікових даних може читати цей провайдер, з яким доступом і як його відкликати.",
   "ConfigModalTitle": " Конфігурація ",
   "ConfigSearchPlaceholder": "вводьте для фільтра",
   "ConfigNoSettings": "  Немає доступних налаштувань.",

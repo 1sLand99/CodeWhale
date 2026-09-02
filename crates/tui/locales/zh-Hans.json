@@ -189,6 +189,8 @@
   "HotbarActionTrustToggleName": "切换信任",
   "HotbarActionTrustToggleDescription": "启用或停用工作区信任模式。",
   "ConfigTitle": "配置",
+  "ConfigPreviewLabel": "预览: ",
+  "ConfigHintExternalCredentials": "该提供商可读取的凭据文件、访问级别，以及如何撤销。",
   "ConfigModalTitle": " 配置 ",
   "ConfigSearchPlaceholder": "输入以筛选",
   "ConfigNoSettings": "  没有可用设置。",

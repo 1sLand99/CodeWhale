@@ -628,6 +628,8 @@
   "ConfigShowing": "  顯示",
   "ConfigSubtitle": "設定優先；原始鍵在高級詳情",
   "ConfigTitle": "設定",
+  "ConfigPreviewLabel": "預覽: ",
+  "ConfigHintExternalCredentials": "該提供者可讀取的憑證檔案、存取層級，以及如何撤銷。",
   "ConfigUnavailable": "(無法使用)",
   "CoordinationActiveClaims": "{count} 個活躍聲明",
   "CoordinationActiveHotPathsHeading": "活動熱點路徑",
