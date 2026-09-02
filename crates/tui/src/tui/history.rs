@@ -2662,6 +2662,54 @@ fn render_card_detail_line(
     lines
 }
 
+/// `render_card_detail_line` for a row whose text carries its own SGR
+/// colours: every segment's style is patched over `value_style`, so the
+/// tool's colour wins where it set one and the cell's own ink (dim, state,
+/// file:line emphasis) shows through where it did not. Wraps to `width`
+/// along the same boundaries as the plain path.
+fn render_card_detail_line_styled(
+    label: Option<&str>,
+    segments: &[tool_output::StyledSegment],
+    value_style: Style,
+    width: u16,
+) -> Vec<Line<'static>> {
+    let label_text = label.map(|text| format!("{text}:"));
+    let prefix_width = UnicodeWidthStr::width(TRANSCRIPT_RAIL)
+        + label_text.as_deref().map_or(0, UnicodeWidthStr::width)
+        + usize::from(label.is_some());
+    let content_width = usize::from(width).saturating_sub(prefix_width).max(1);
+
+    let full: String = segments.iter().map(|(text, _)| text.as_str()).collect();
+    let parts = wrap_text(&full, content_width);
+    let split = tool_output::split_segments(segments.to_vec(), &parts);
+
+    let mut lines = Vec::new();
+    for (idx, part) in split.into_iter().enumerate() {
+        let mut spans = vec![Span::styled(
+            TRANSCRIPT_RAIL.to_string(),
+            Style::default().fg(palette::TEXT_DIM),
+        )];
+        if idx == 0 {
+            if let Some(label_text) = label_text.as_deref() {
+                spans.push(Span::styled(
+                    label_text.to_string(),
+                    tool_detail_label_style(),
+                ));
+                spans.push(Span::raw(" "));
+            }
+        } else if let Some(label_text) = label_text.as_deref() {
+            spans.push(Span::raw(
+                " ".repeat(UnicodeWidthStr::width(label_text) + 1),
+            ));
+        }
+        for (text, style) in part {
+            spans.push(Span::styled(text, value_style.patch(style)));
+        }
+        lines.push(Line::from(spans));
+    }
+    lines
+}
+
 fn render_card_detail_line_single(
     label: Option<&str>,
     value: &str,
