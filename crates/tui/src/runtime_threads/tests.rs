@@ -11808,3 +11808,281 @@ fn mail_event_count(manager: &RuntimeThreadManager, thread_id: &str, event_name:
         .filter(|event| event.event == event_name)
         .count()
 }
+
+/// Regression for #5823: after a Runtime restart, history is rebuilt from the
+/// persisted turn-item snapshots. The live engine path stores the tool-call
+/// identity in item metadata and overwrites `detail` with the tool output at
+/// completion, so the rebuild must restore a paired, non-empty
+/// tool_call/tool_result from metadata instead of an empty shell.
+#[test]
+fn restart_rebuild_restores_tool_call_identity_from_persisted_items() -> Result<()> {
+    let dir = test_runtime_dir();
+    let manager = test_manager(dir.clone())?;
+    let thread = sample_thread("thr_rebuild_5823");
+    manager.store.save_thread(&thread)?;
+
+    let now = Utc::now();
+    let user_item = TurnItemRecord {
+        schema_version: CURRENT_RUNTIME_SCHEMA_VERSION,
+        id: "item_u5823".to_string(),
+        turn_id: "turn_5823".to_string(),
+        kind: TurnItemKind::UserMessage,
+        status: TurnItemLifecycleStatus::Completed,
+        summary: "read the readme".to_string(),
+        detail: Some("read the readme".to_string()),
+        metadata: None,
+        artifact_refs: Vec::new(),
+        started_at: Some(now),
+        ended_at: Some(now),
+    };
+    // Completed live tool call: identity captured at `ToolCallStarted`, result
+    // markers merged at `ToolCallComplete`, `detail` holding the tool output.
+    let call_item = TurnItemRecord {
+        schema_version: CURRENT_RUNTIME_SCHEMA_VERSION,
+        id: "item_t5823".to_string(),
+        turn_id: "turn_5823".to_string(),
+        kind: TurnItemKind::ToolCall,
+        status: TurnItemLifecycleStatus::Completed,
+        summary: "read: readme body".to_string(),
+        detail: Some("# README body".to_string()),
+        metadata: Some(json!({
+            "tool_use_id": "call_00_abc",
+            "tool_name": "read",
+            "tool_input": r#"{"path":"README.md"}"#,
+            "tool_result_for": "call_00_abc",
+            "is_error": false,
+        })),
+        artifact_refs: Vec::new(),
+        started_at: Some(now),
+        ended_at: Some(now),
+    };
+    manager.store.save_item(&user_item)?;
+    manager.store.save_item(&call_item)?;
+    manager.store.save_turn(&TurnRecord {
+        schema_version: CURRENT_RUNTIME_SCHEMA_VERSION,
+        id: "turn_5823".to_string(),
+        thread_id: thread.id.clone(),
+        status: RuntimeTurnStatus::Completed,
+        input_summary: "read the readme".to_string(),
+        created_at: now,
+        started_at: Some(now),
+        ended_at: Some(now),
+        duration_ms: None,
+        usage: None,
+        permission_posture: None,
+        effective_provider: None,
+        effective_provider_id: None,
+        effective_billing_surface: None,
+        effective_endpoint_fingerprint: None,
+        effective_billing_mode: None,
+        effective_dispatched_at: None,
+        effective_model: None,
+        routed_usage: Vec::new(),
+        routed_usage_source_ids: Vec::new(),
+        routed_usage_dropped_records: 0,
+        error: None,
+        item_ids: vec![user_item.id.clone(), call_item.id.clone()],
+        steer_count: 0,
+        agent_mail_message_id: None,
+    })?;
+
+    let turns = manager.store.list_turns_for_thread(&thread.id)?;
+    let messages = manager.reconstruct_messages_from_turns(&turns)?;
+    let roles: Vec<&str> = messages.iter().map(|m| m.role.as_str()).collect();
+    assert_eq!(roles, vec!["user", "assistant", "user"]);
+
+    match &messages[1].content[0] {
+        ContentBlock::ToolUse {
+            id, name, input, ..
+        } => {
+            assert_eq!(id, "call_00_abc");
+            assert_eq!(name, "read");
+            // This exact string is the provider `tool_calls[].function.arguments`
+            // value; the old bug replayed "null" with empty id/name.
+            assert_eq!(
+                serde_json::to_string(input).unwrap(),
+                r#"{"path":"README.md"}"#
+            );
+        }
+        other => panic!("expected restored tool call, got {other:?}"),
+    }
+    match &messages[2].content[0] {
+        ContentBlock::ToolResult {
+            tool_use_id,
+            content,
+            ..
+        } => {
+            assert_eq!(tool_use_id, "call_00_abc");
+            assert_eq!(content, "# README body");
+        }
+        other => panic!("expected restored tool result, got {other:?}"),
+    }
+
+    let _ = std::fs::remove_dir_all(dir);
+    Ok(())
+}
+
+/// A tool call snapshot persisted at `ToolCallStarted` but never completed
+/// (restart mid-tool) still carries its identity and must rebuild the call
+/// with non-empty id/name/arguments instead of an empty shell.
+#[test]
+fn restart_rebuild_keeps_in_flight_tool_call_identity() -> Result<()> {
+    let dir = test_runtime_dir();
+    let manager = test_manager(dir.clone())?;
+    let thread = sample_thread("thr_rebuild_5823_inflight");
+    manager.store.save_thread(&thread)?;
+
+    let now = Utc::now();
+    let call_item = TurnItemRecord {
+        schema_version: CURRENT_RUNTIME_SCHEMA_VERSION,
+        id: "item_inflight5823".to_string(),
+        turn_id: "turn_5823_inflight".to_string(),
+        kind: TurnItemKind::ToolCall,
+        status: TurnItemLifecycleStatus::InProgress,
+        summary: "read started".to_string(),
+        detail: Some(r#"{"path":"README.md"}"#.to_string()),
+        metadata: Some(json!({
+            "tool_use_id": "call_00_def",
+            "tool_name": "read",
+            "tool_input": r#"{"path":"README.md"}"#,
+        })),
+        artifact_refs: Vec::new(),
+        started_at: Some(now),
+        ended_at: None,
+    };
+    manager.store.save_item(&call_item)?;
+    manager.store.save_turn(&TurnRecord {
+        schema_version: CURRENT_RUNTIME_SCHEMA_VERSION,
+        id: "turn_5823_inflight".to_string(),
+        thread_id: thread.id.clone(),
+        status: RuntimeTurnStatus::Failed,
+        input_summary: "read the readme".to_string(),
+        created_at: now,
+        started_at: Some(now),
+        ended_at: Some(now),
+        duration_ms: None,
+        usage: None,
+        permission_posture: None,
+        effective_provider: None,
+        effective_provider_id: None,
+        effective_billing_surface: None,
+        effective_endpoint_fingerprint: None,
+        effective_billing_mode: None,
+        effective_dispatched_at: None,
+        effective_model: None,
+        routed_usage: Vec::new(),
+        routed_usage_source_ids: Vec::new(),
+        routed_usage_dropped_records: 0,
+        error: None,
+        item_ids: vec![call_item.id.clone()],
+        steer_count: 0,
+        agent_mail_message_id: None,
+    })?;
+
+    let turns = manager.store.list_turns_for_thread(&thread.id)?;
+    let messages = manager.reconstruct_messages_from_turns(&turns)?;
+    match &messages[0].content[0] {
+        ContentBlock::ToolUse {
+            id, name, input, ..
+        } => {
+            assert_eq!(id, "call_00_def");
+            assert_eq!(name, "read");
+            assert_eq!(
+                serde_json::to_string(input).unwrap(),
+                r#"{"path":"README.md"}"#
+            );
+        }
+        other => panic!("expected in-flight tool call identity, got {other:?}"),
+    }
+
+    let _ = std::fs::remove_dir_all(dir);
+    Ok(())
+}
+
+/// Snapshots persisted before tool identity was durable (metadata absent)
+/// must contribute nothing to rebuilt history: an empty id/name tool_call
+/// with `arguments: "null"` is rejected by strict OpenAI-compatible
+/// endpoints, so degrading silently is safer than replaying the shell.
+#[test]
+fn restart_rebuild_skips_legacy_tool_items_without_identity() -> Result<()> {
+    let dir = test_runtime_dir();
+    let manager = test_manager(dir.clone())?;
+    let thread = sample_thread("thr_rebuild_5823_legacy");
+    manager.store.save_thread(&thread)?;
+
+    let now = Utc::now();
+    let user_item = TurnItemRecord {
+        schema_version: CURRENT_RUNTIME_SCHEMA_VERSION,
+        id: "item_legacy_u".to_string(),
+        turn_id: "turn_5823_legacy".to_string(),
+        kind: TurnItemKind::UserMessage,
+        status: TurnItemLifecycleStatus::Completed,
+        summary: "hello".to_string(),
+        detail: Some("hello".to_string()),
+        metadata: None,
+        artifact_refs: Vec::new(),
+        started_at: Some(now),
+        ended_at: Some(now),
+    };
+    let legacy_tool_item = TurnItemRecord {
+        schema_version: CURRENT_RUNTIME_SCHEMA_VERSION,
+        id: "item_legacy_t".to_string(),
+        turn_id: "turn_5823_legacy".to_string(),
+        kind: TurnItemKind::ToolCall,
+        status: TurnItemLifecycleStatus::Completed,
+        summary: "read: old output".to_string(),
+        detail: Some("old output".to_string()),
+        metadata: None,
+        artifact_refs: Vec::new(),
+        started_at: Some(now),
+        ended_at: Some(now),
+    };
+    manager.store.save_item(&user_item)?;
+    manager.store.save_item(&legacy_tool_item)?;
+    manager.store.save_turn(&TurnRecord {
+        schema_version: CURRENT_RUNTIME_SCHEMA_VERSION,
+        id: "turn_5823_legacy".to_string(),
+        thread_id: thread.id.clone(),
+        status: RuntimeTurnStatus::Completed,
+        input_summary: "hello".to_string(),
+        created_at: now,
+        started_at: Some(now),
+        ended_at: Some(now),
+        duration_ms: None,
+        usage: None,
+        permission_posture: None,
+        effective_provider: None,
+        effective_provider_id: None,
+        effective_billing_surface: None,
+        effective_endpoint_fingerprint: None,
+        effective_billing_mode: None,
+        effective_dispatched_at: None,
+        effective_model: None,
+        routed_usage: Vec::new(),
+        routed_usage_source_ids: Vec::new(),
+        routed_usage_dropped_records: 0,
+        error: None,
+        item_ids: vec![user_item.id.clone(), legacy_tool_item.id.clone()],
+        steer_count: 0,
+        agent_mail_message_id: None,
+    })?;
+
+    let turns = manager.store.list_turns_for_thread(&thread.id)?;
+    let messages = manager.reconstruct_messages_from_turns(&turns)?;
+    let roles: Vec<&str> = messages.iter().map(|m| m.role.as_str()).collect();
+    assert_eq!(roles, vec!["user"]);
+    for message in &messages {
+        for block in &message.content {
+            assert!(
+                !matches!(
+                    block,
+                    ContentBlock::ToolUse { .. } | ContentBlock::ToolResult { .. }
+                ),
+                "legacy snapshot must not rebuild a tool block, got {block:?}"
+            );
+        }
+    }
+
+    let _ = std::fs::remove_dir_all(dir);
+    Ok(())
+}
