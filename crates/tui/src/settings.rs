@@ -314,9 +314,6 @@ pub struct Settings {
     /// Enable expressive live-state motion. This affects chrome and state
     /// affordances only; model text always follows upstream stream deltas.
     pub fancy_animations: bool,
-    /// Background treatment: `deepsea` paints the terminal-native water column;
-    /// `flat` preserves all state marks on the theme's plain surface.
-    pub ocean_treatment: String,
     /// Focus-context texture prototype for modal views (#4823): `off`
     /// (default), `scrim` dims the area outside the focused modal, `grain`
     /// sprinkles deterministic dots over blank cells there. Static texture,
@@ -562,11 +559,8 @@ impl Default for Settings {
             low_motion: false,
             load_error: None,
             fancy_animations: true,
-            // A fresh terminal follows the host surface. Deep/ocean treatment
-            // remains an explicit appearance choice rather than a backdrop
-            // painted over every terminal the user brings.
-            ocean_treatment: "flat".to_string(),
             focus_texture: "off".to_string(),
+
             // Round 3 (2026-09-01): the bar's information lives under the
             // composer. Side rails are opt-in and fall back to the top strip
             // on narrow terminals.
@@ -646,13 +640,6 @@ pub const CALM_PRESET_FIELDS: &[(&str, &str)] = &[
     ("fancy_animations", "false"),
     ("show_tool_details", "false"),
 ];
-
-fn normalize_ocean_treatment(value: &str) -> &'static str {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "deepsea" | "underwater" | "ombre" | "gradient" | "classic" => "deepsea",
-        _ => "flat",
-    }
-}
 
 fn normalize_work_surface_placement(value: &str) -> &'static str {
     match value.trim().to_ascii_lowercase().as_str() {
@@ -916,6 +903,27 @@ impl Settings {
             }) {
                 s.auto_compact = true;
             }
+
+            // Compat boundary (2026-09-02): `ocean_treatment` was a modifier
+            // on `theme`; the painted field is now the `underwater` theme
+            // itself. Fold any persisted deepsea treatment into
+            // `theme = "underwater"`, then drop the retired key on the next
+            // ordinary save (the struct simply has no such field).
+            if let Some(_treatment) = parsed_document
+                .as_ref()
+                .and_then(toml::Value::as_table)
+                .and_then(|table| table.get("ocean_treatment"))
+                .and_then(toml::Value::as_str)
+                .filter(|treatment| {
+                    matches!(
+                        treatment.trim().to_ascii_lowercase().as_str(),
+                        "deepsea" | "underwater" | "ombre" | "gradient" | "classic"
+                    )
+                })
+            {
+                s.theme = "underwater".to_string();
+            }
+
             // "yolo" used to bundle two independent choices: Agent mode and
             // unrestricted approvals.  Keep that behavior on upgrade, but
             // store/show the two choices explicitly so Settings does not claim
@@ -935,7 +943,6 @@ impl Settings {
             // gone, so its settings carry forward instead of stranding.
             migrate_sidebar_settings_to_rail(&mut s);
             s.status_indicator = normalize_status_indicator(&s.status_indicator).to_string();
-            s.ocean_treatment = normalize_ocean_treatment(&s.ocean_treatment).to_string();
             s.work_surface_placement =
                 normalize_work_surface_placement(&s.work_surface_placement).to_string();
             s.rail_panel = normalize_rail_panel(&s.rail_panel).to_string();
@@ -1334,18 +1341,6 @@ impl Settings {
             "fancy_animations" | "fancy" | "animations" => {
                 self.fancy_animations = parse_bool(value)?;
             }
-            "ocean_treatment" | "treatment" | "background_treatment" => {
-                let normalized = value.trim().to_ascii_lowercase();
-                self.ocean_treatment = match normalized.as_str() {
-                    "deepsea" | "underwater" | "ombre" | "gradient" | "classic" => {
-                        "deepsea".to_string()
-                    }
-                    "flat" | "terminal" | "none" => "flat".to_string(),
-                    _ => anyhow::bail!(
-                        "Failed to update setting: invalid ocean treatment '{value}'. Expected: deepsea or flat."
-                    ),
-                };
-            }
             "focus_texture" | "texture" => {
                 let normalized = value.trim().to_ascii_lowercase();
                 if !matches!(normalized.as_str(), "off" | "scrim" | "grain") {
@@ -1635,7 +1630,6 @@ impl Settings {
         lines.push(format!("  tool_collapse:      {}", self.tool_collapse_mode));
         lines.push(format!("  low_motion:         {}", self.low_motion));
         lines.push(format!("  fancy_animations:   {}", self.fancy_animations));
-        lines.push(format!("  ocean_treatment:    {}", self.ocean_treatment));
         lines.push(format!("  focus_texture:      {}", self.focus_texture));
         lines.push(format!(
             "  work_surface:       {}",
@@ -1775,10 +1769,6 @@ impl Settings {
                 "Reduce decorative motion without changing model text delivery: on/off",
             ),
             ("fancy_animations", "Expressive live-state motion: on/off"),
-            (
-                "ocean_treatment",
-                "Transcript background treatment: deepsea/flat (independent of motion)",
-            ),
             (
                 "focus_texture",
                 "Modal focus-context texture prototype: off/scrim/grain (default off)",
@@ -3155,29 +3145,50 @@ mod tests {
     }
 
     #[test]
-    fn ocean_treatment_is_appearance_not_motion() {
-        let mut settings = Settings::default();
-        assert_eq!(settings.ocean_treatment, "flat");
-        assert!(!settings.low_motion);
+    fn retired_ocean_treatment_folds_into_the_underwater_theme() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("settings.toml");
+        std::fs::write(&path, "theme = \"light\"\nocean_treatment = \"deepsea\"\n")
+            .expect("legacy settings");
 
-        settings.set("ocean_treatment", "flat").unwrap();
-        assert_eq!(settings.ocean_treatment, "flat");
-        assert!(!settings.low_motion, "appearance must not change motion");
-
-        settings.set("ocean_treatment", "deepsea").unwrap();
-        assert_eq!(settings.ocean_treatment, "deepsea");
-        settings.set("ocean_treatment", "ombre").unwrap();
+        let settings = Settings::load_persisted_from_candidates(Some(path.clone()), None, None)
+            .expect("legacy setting must remain readable");
         assert_eq!(
-            settings.ocean_treatment, "deepsea",
-            "legacy values migrate one way to the public Deepsea contract"
+            settings.theme, "underwater",
+            "the persisted painted field is the user-visible fact; it becomes the theme"
         );
-        settings.set("ocean_treatment", "underwater").unwrap();
-        assert_eq!(settings.ocean_treatment, "deepsea");
-        assert_eq!(normalize_ocean_treatment("Underwater"), "deepsea");
-        assert_eq!(normalize_ocean_treatment("kelp"), "flat");
 
-        let err = settings.set("ocean_treatment", "kelp").unwrap_err();
-        assert!(err.to_string().contains("deepsea or flat"));
+        settings
+            .save_to_path(&path)
+            .expect("save normalized settings");
+        let saved = std::fs::read_to_string(&path).expect("read normalized settings");
+        assert!(
+            !saved.contains("ocean_treatment"),
+            "the retired key must not be written back: {saved}"
+        );
+        assert!(saved.contains("theme = \"underwater\""), "{saved}");
+    }
+
+    #[test]
+    fn flat_ocean_treatment_leaves_the_theme_alone_and_is_dropped() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("settings.toml");
+        std::fs::write(&path, "theme = \"light\"\nocean_treatment = \"flat\"\n")
+            .expect("legacy settings");
+
+        let settings = Settings::load_persisted_from_candidates(Some(path.clone()), None, None)
+            .expect("legacy setting must remain readable");
+        assert_eq!(
+            settings.theme, "light",
+            "flat never opted into a painted field"
+        );
+
+        settings
+            .save_to_path(&path)
+            .expect("save normalized settings");
+        let saved = std::fs::read_to_string(&path).expect("read normalized settings");
+        assert!(!saved.contains("ocean_treatment"), "{saved}");
+        assert!(saved.contains("theme = \"light\""), "{saved}");
     }
 
     #[test]
