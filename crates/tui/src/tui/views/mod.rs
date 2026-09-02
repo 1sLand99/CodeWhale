@@ -8027,7 +8027,7 @@ base_url = "https://api.xiaomimimo.com/v1"
 
         for locale in Locale::shipped() {
             for key in &keys {
-                let resolved = tr_key(locale, key);
+                let resolved = tr_key(*locale, key);
                 assert_ne!(
                     resolved.as_ref(),
                     *key,
