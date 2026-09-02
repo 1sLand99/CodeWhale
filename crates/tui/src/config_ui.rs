@@ -84,13 +84,11 @@ pub struct SettingsSection {
         description = "Locale used by the TUI. Every shipped locale pack holds full English parity; nothing falls back."
     )]
     pub locale: UiLocale,
-    pub theme: UiThemeValue,
     #[schemars(
-        title = "Custom theme name",
-        description = "Theme slug from the fixed Codewhale themes directory; used only when theme is custom."
+        title = "Theme",
+        description = "Compiled theme name, or custom:<name> for a theme from the Codewhale themes directory."
     )]
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub custom_theme_name: Option<String>,
+    pub theme: UiThemeValue,
     #[schemars(
         title = "Background color",
         description = "Optional Blue Stage background override as #RRGGBB. Leave empty to keep the named theme."
@@ -252,7 +250,7 @@ pub enum UiLocale {
     Uk,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum UiThemeValue {
     Terminal,
@@ -266,7 +264,9 @@ pub enum UiThemeValue {
     GruvboxDark,
     Matrix,
     Uwu,
-    Custom,
+    /// User theme carried as its full `custom:<name>` selector — the same
+    /// single string `/theme` and the persisted `theme` setting use.
+    Custom(String),
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -453,13 +453,6 @@ pub fn build_document(app: &App, config: &Config) -> Result<ConfigUiDocument> {
             inline_diffs: settings.inline_diffs.as_str().into(),
             locale: UiLocale::from_setting(&settings.locale)?,
             theme: UiThemeValue::from_setting(&settings.theme)?,
-            custom_theme_name: crate::palette::normalize_user_theme_selector(&settings.theme)
-                .map_err(anyhow::Error::msg)?
-                .map(|selector| {
-                    selector
-                        .trim_start_matches(crate::palette::USER_THEME_PREFIX)
-                        .to_string()
-                }),
             background_color: settings.background_color.clone(),
             bracketed_paste: settings.bracketed_paste,
             composer_density: settings.composer_density.as_str().into(),
@@ -860,19 +853,7 @@ fn validate_document(doc: &ConfigUiDocument, app: &App, config: &Config) -> Resu
 }
 
 fn theme_setting_for_document(doc: &ConfigUiDocument) -> Result<String> {
-    let setting = if doc.settings.theme == UiThemeValue::Custom {
-        let name = doc
-            .settings
-            .custom_theme_name
-            .as_deref()
-            .map(str::trim)
-            .filter(|name| !name.is_empty())
-            .ok_or_else(|| anyhow::anyhow!("custom theme requires custom_theme_name"))?;
-        format!("{}{}", crate::palette::USER_THEME_PREFIX, name)
-    } else {
-        doc.settings.theme.as_setting().to_string()
-    };
-    crate::palette::resolve_theme_setting(&setting, None)
+    crate::palette::resolve_theme_setting(&doc.settings.theme.as_setting(), None)
         .map(|(normalized, _, _)| normalized)
         .map_err(anyhow::Error::msg)
 }
@@ -1092,29 +1073,30 @@ impl UiLocale {
 }
 
 impl UiThemeValue {
-    fn as_setting(self) -> &'static str {
+    /// Canonical settings string. `Custom` carries its own full
+    /// `custom:<name>` selector, so it round-trips without a sibling field.
+    fn as_setting(&self) -> std::borrow::Cow<'static, str> {
         match self {
-            Self::Terminal => "terminal",
-            Self::System => "system",
-            Self::Dark => "dark",
-            Self::Light => "light",
-            Self::Grayscale => "grayscale",
-            Self::CatppuccinMocha => "catppuccin-mocha",
-            Self::TokyoNight => "tokyo-night",
-            Self::Dracula => "dracula",
-            Self::GruvboxDark => "gruvbox-dark",
-            Self::Matrix => "matrix",
-            Self::Uwu => "uwu",
-            Self::Custom => "custom",
+            Self::Terminal => "terminal".into(),
+            Self::System => "system".into(),
+            Self::Dark => "dark".into(),
+            Self::Light => "light".into(),
+            Self::Grayscale => "grayscale".into(),
+            Self::CatppuccinMocha => "catppuccin-mocha".into(),
+            Self::TokyoNight => "tokyo-night".into(),
+            Self::Dracula => "dracula".into(),
+            Self::GruvboxDark => "gruvbox-dark".into(),
+            Self::Matrix => "matrix".into(),
+            Self::Uwu => "uwu".into(),
+            Self::Custom(selector) => std::borrow::Cow::Owned(selector.clone()),
         }
     }
 
     fn from_setting(value: &str) -> Result<Self> {
-        if crate::palette::normalize_user_theme_selector(value)
-            .map_err(anyhow::Error::msg)?
-            .is_some()
+        if let Some(selector) =
+            crate::palette::normalize_user_theme_selector(value).map_err(anyhow::Error::msg)?
         {
-            return Ok(Self::Custom);
+            return Ok(Self::Custom(selector));
         }
         match crate::palette::normalize_theme_name(value) {
             Some("terminal") => Ok(Self::Terminal),
@@ -1760,8 +1742,20 @@ background_color = "#1A1B26"
         let mut app = app();
         let mut config = Config::default();
         let doc = build_document(&app, &config).expect("document");
-        assert_eq!(doc.settings.theme, UiThemeValue::Custom);
-        assert_eq!(doc.settings.custom_theme_name.as_deref(), Some("ocean"));
+        assert_eq!(
+            doc.settings.theme,
+            UiThemeValue::Custom("custom:ocean".to_string())
+        );
+
+        // The typed document must survive its wire form untouched: the custom
+        // selector lives inside `theme` itself, with no sibling field and no
+        // disk migration.
+        let doc = parse_document(serde_json::to_value(&doc).expect("serialize document"))
+            .expect("parse document");
+        assert_eq!(
+            doc.settings.theme,
+            UiThemeValue::Custom("custom:ocean".to_string())
+        );
 
         apply_document(doc, &mut app, &mut config, false).expect("apply custom theme");
         assert_eq!(
@@ -1839,9 +1833,17 @@ background_color = "#1A1B26"
             &serde_json::json!(expected_locales),
             "UiLocale schema must match Locale::shipped()"
         );
-        let theme = &schema["$defs"]["UiThemeValue"]["enum"];
+        let theme = &schema["$defs"]["UiThemeValue"];
+        // `Custom` carries its `custom:<name>` selector inline, so schemars
+        // renders oneOf: the named themes stay a string enum and the custom
+        // variant becomes a single-key object.
+        let theme_variants = theme
+            .get("oneOf")
+            .and_then(|ones| ones.as_array())
+            .expect("UiThemeValue oneOf");
+        let named = &theme_variants[0]["enum"];
         assert_eq!(
-            theme,
+            named,
             &serde_json::json!([
                 "terminal",
                 "system",
@@ -1853,9 +1855,13 @@ background_color = "#1A1B26"
                 "dracula",
                 "gruvbox-dark",
                 "matrix",
-                "uwu",
-                "custom"
+                "uwu"
             ])
+        );
+        assert_eq!(
+            theme_variants[1]["properties"]["custom"],
+            serde_json::json!({"type": "string"}),
+            "custom theme selector must ride inside the theme value"
         );
     }
 
