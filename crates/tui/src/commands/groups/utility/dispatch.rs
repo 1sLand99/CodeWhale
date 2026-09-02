@@ -28,7 +28,7 @@ impl RegisterCommand<CommandResult> for DispatchCmd {
 
     fn handler() -> CommandHandler<CommandResult> {
         CommandHandler::Contextual {
-            capabilities: codewhale_command_contract::handler::CommandCapabilities::NONE,
+            capabilities: codewhale_command_contract::handler::CommandCapabilities::WORKSPACE,
             handler: dispatch_contextual,
         }
     }
