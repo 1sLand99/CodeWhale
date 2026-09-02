@@ -203,7 +203,8 @@ const APPROVAL_POLICY: &[SettingOption] = &[
         "ConfigChoiceFullAccess",
         "ConfigChoiceDetailFullAccess",
     ),
-    SettingOption::new("never", "ConfigChoiceNever", "ConfigChoiceDetailNever"),
+    // `never` is a managed-policy value only: it is accepted from config.toml and
+    // shown read-only, never offered by the editor.
 ];
 
 const DEFAULT_MODE: &[SettingOption] = &[
@@ -368,7 +369,8 @@ pub const SETTINGS_SCHEMA: &[SettingDef] = &[
             TAB_APPEARANCE,
             "display",
             "ConfigLabelTheme",
-            "ConfigHintTheme",
+            // Described by its shipped value list, not prose (`config_hint_for_key`).
+            "",
         ),
     ),
     def(
@@ -379,7 +381,8 @@ pub const SETTINGS_SCHEMA: &[SettingDef] = &[
             TAB_APPEARANCE,
             "display",
             "ConfigLabelLocale",
-            "ConfigHintLocale",
+            // Described by its shipped value list, not prose (`config_hint_for_key`).
+            "",
         ),
     ),
     def(
@@ -1155,6 +1158,11 @@ mod tests {
             let ui = def.ui.as_ref().expect("schema_rows filters on ui");
             assert!(!ui.tab.is_empty(), "{} has an empty tab", def.key);
             assert!(!ui.group.is_empty(), "{} has an empty group", def.key);
+            // theme and locale are described by their shipped value lists,
+            // which the TUI composes at render time; no prose key exists.
+            if matches!(def.key, "theme" | "locale") {
+                continue;
+            }
             assert!(
                 !ui.description.is_empty(),
                 "{} has a row but no sentence justifying it",

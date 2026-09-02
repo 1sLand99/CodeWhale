@@ -7832,15 +7832,41 @@ base_url = "https://api.xiaomimimo.com/v1"
         let mut view = create_config_view(Locale::En);
         let built: std::collections::HashSet<&str> =
             view.rows.iter().map(|row| row.key.as_str()).collect();
+        let schema_keys: std::collections::HashSet<&str> =
+            codewhale_config::schema_rows().map(|def| def.key).collect();
 
         // Every schema row must appear in the view; `ui: None` settings stay
         // declared but off-screen, and anything the schema says is visible must
-        // have a row here.
+        // have a row here. A few rows are mutually exclusive: exactly one member
+        // of each set is shown, chosen by which store controls the fact.
+        let conditional_pairs: &[&[&str]] = &[
+            &[
+                "permission_posture",
+                "approval_policy",
+                "managed_approval_policy",
+            ],
+            &["allow_shell", "managed_allow_shell"],
+            &["base_url", "provider_url"],
+        ];
         for def in codewhale_config::schema_rows() {
+            let present_in_pair = conditional_pairs
+                .iter()
+                .any(|pair| pair.contains(&def.key) && pair.iter().any(|key| built.contains(key)));
+            // Experimental feature rows exist only when the flag is configured
+            // or non-default (`experimental_feature_rows`).
+            let configured_only = def.key.starts_with("features.");
             assert!(
-                built.contains(def.key),
+                def.ui.is_none() || built.contains(def.key) || present_in_pair || configured_only,
                 "{} is declared in schema_rows but has no ConfigRow",
                 def.key
+            );
+        }
+
+        // No row should exist that is not declared in the schema.
+        for key in &built {
+            assert!(
+                schema_keys.contains(key),
+                "{key} has a ConfigRow but is not declared in schema_rows"
             );
         }
 
@@ -7929,6 +7955,11 @@ base_url = "https://api.xiaomimimo.com/v1"
             "features.apply_patch",
             "features.mcp",
             "features.exec_policy",
+            "base_url",
+            "provider_url",
+            "effective_context_window",
+            "external_credentials.openai-codex",
+            "external_credentials.xai",
         ];
 
         for def in codewhale_config::schema_rows() {
@@ -7940,6 +7971,9 @@ base_url = "https://api.xiaomimimo.com/v1"
             // strings (theme, locale), whose value set is the shipped list.
             let samples: Vec<String> = match config_choice_values(def.key) {
                 Some(values) => values,
+                // Validated free text: a value the store's own parser accepts.
+                None if def.key == "background_color" => vec!["#1a1b26".to_string()],
+                None if def.key == "default_model" => vec!["deepseek-v4-pro".to_string()],
                 None if def.is_int() => {
                     let default: i64 = def.default.parse().unwrap_or(0);
                     vec![(default + 1).to_string()]
