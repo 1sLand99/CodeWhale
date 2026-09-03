@@ -4449,6 +4449,7 @@ impl Engine {
                 .with_parent_completion_tx(self.tx_subagent_completion.clone())
                 .with_runtime_cost_owner(self.config.compaction.runtime_cost_owner.as_deref())
                 .with_parent_mode(input_policy.mode)
+                .with_approval_receipt_store(self.approval_receipt_store.clone())
                 .with_permission_posture(
                     self.session.approval_mode,
                     Arc::clone(&self.shared_auto_review_policy),
@@ -5893,6 +5894,7 @@ impl Engine {
         .with_parent_completion_tx(self.tx_subagent_completion.clone())
         .with_runtime_cost_owner(self.config.compaction.runtime_cost_owner.as_deref())
         .with_parent_mode(mode)
+        .with_approval_receipt_store(self.approval_receipt_store.clone())
         .with_permission_posture(
             self.session.approval_mode,
             Arc::clone(&self.shared_auto_review_policy),
