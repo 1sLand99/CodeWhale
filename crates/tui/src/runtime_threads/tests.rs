@@ -2611,27 +2611,51 @@ async fn create_thread_uses_requested_named_custom_provider_default_model() -> R
 }
 
 #[tokio::test]
-async fn create_thread_uses_requested_non_current_builtin_default_model() -> Result<()> {
-    let config = Config {
-        provider: Some("openrouter".to_string()),
-        default_text_model: Some(DEFAULT_TEXT_MODEL.to_string()),
-        ..Default::default()
-    };
-    let manager = RuntimeThreadManager::open(
-        config,
-        PathBuf::from("."),
-        test_manager_config(test_runtime_dir()),
-    )?;
-
-    let thread = manager
-        .create_thread(CreateThreadRequest {
-            model_provider: Some("zai".to_string()),
+async fn create_thread_scenario() -> Result<()> {
+    // Scenario consolidation of: create_thread_uses_requested_non_current_builtin_default_model, create_thread_defaults_auto_approve_to_false
+    // from create_thread_uses_requested_non_current_builtin_default_model
+    {
+        let config = Config {
+            provider: Some("openrouter".to_string()),
+            default_text_model: Some(DEFAULT_TEXT_MODEL.to_string()),
             ..Default::default()
-        })
-        .await?;
+        };
+        let manager = RuntimeThreadManager::open(
+            config,
+            PathBuf::from("."),
+            test_manager_config(test_runtime_dir()),
+        )?;
 
-    assert_eq!(thread.model_provider.as_deref(), Some("zai"));
-    assert_eq!(thread.model, crate::config::DEFAULT_ZAI_MODEL);
+        let thread = manager
+            .create_thread(CreateThreadRequest {
+                model_provider: Some("zai".to_string()),
+                ..Default::default()
+            })
+            .await?;
+
+        assert_eq!(thread.model_provider.as_deref(), Some("zai"));
+        assert_eq!(thread.model, crate::config::DEFAULT_ZAI_MODEL);
+    }
+    // from create_thread_defaults_auto_approve_to_false
+    {
+        let manager = test_manager(test_runtime_dir())?;
+        let thread = manager
+            .create_thread(CreateThreadRequest {
+                model: None,
+                workspace: None,
+                mode: None,
+                allow_shell: None,
+                trust_mode: None,
+                auto_approve: None,
+                archived: false,
+                system_prompt: None,
+                task_id: None,
+                ..Default::default()
+            })
+            .await?;
+
+        assert!(!thread.auto_approve);
+    }
     Ok(())
 }
 
@@ -3719,29 +3743,79 @@ async fn wait_for_terminal_turn(
 }
 
 #[test]
-fn store_load_thread_rejects_newer_schema_version() {
-    let dir = test_runtime_dir();
-    let store = RuntimeThreadStore::open(dir.clone()).expect("open store");
+fn store_load_scenario() {
+    // Scenario consolidation of: store_load_thread_rejects_newer_schema_version, store_load_turn_rejects_newer_schema_version, store_load_item_rejects_newer_schema_version
+    // from store_load_thread_rejects_newer_schema_version
+    {
+        let dir = test_runtime_dir();
+        let store = RuntimeThreadStore::open(dir.clone()).expect("open store");
 
-    // Construct a thread record persisted with a future schema version.
-    let mut thread = sample_thread("thr_future");
-    thread.schema_version = CURRENT_RUNTIME_SCHEMA_VERSION + 1;
+        // Construct a thread record persisted with a future schema version.
+        let mut thread = sample_thread("thr_future");
+        thread.schema_version = CURRENT_RUNTIME_SCHEMA_VERSION + 1;
 
-    // Bypass save_thread (which would respect our local schema_version)
-    // by writing the JSON directly so we can simulate a future writer.
-    let path = store.threads_dir.join(format!("{}.json", thread.id));
-    std::fs::create_dir_all(path.parent().unwrap()).expect("mkdirs");
-    let payload = serde_json::to_string(&thread).expect("serialize thread");
-    std::fs::write(&path, payload).expect("write thread");
+        // Bypass save_thread (which would respect our local schema_version)
+        // by writing the JSON directly so we can simulate a future writer.
+        let path = store.threads_dir.join(format!("{}.json", thread.id));
+        std::fs::create_dir_all(path.parent().unwrap()).expect("mkdirs");
+        let payload = serde_json::to_string(&thread).expect("serialize thread");
+        std::fs::write(&path, payload).expect("write thread");
 
-    let err = store
-        .load_thread(&thread.id)
-        .expect_err("load_thread must reject newer schema");
-    let msg = format!("{err:#}");
-    assert!(msg.contains("newer than supported"), "got: {msg}");
+        let err = store
+            .load_thread(&thread.id)
+            .expect_err("load_thread must reject newer schema");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("newer than supported"), "got: {msg}");
 
-    // Cleanup so we don't leak across tests.
-    let _ = std::fs::remove_dir_all(dir);
+        // Cleanup so we don't leak across tests.
+        let _ = std::fs::remove_dir_all(dir);
+    }
+    // from store_load_turn_rejects_newer_schema_version
+    {
+        let dir = test_runtime_dir();
+        let store = RuntimeThreadStore::open(dir.clone()).expect("open store");
+
+        let mut turn = sample_turn("thr_t", "trn_future", RuntimeTurnStatus::InProgress);
+        turn.schema_version = CURRENT_RUNTIME_SCHEMA_VERSION + 1;
+
+        let path = store.turns_dir.join(format!("{}.json", turn.id));
+        std::fs::create_dir_all(path.parent().unwrap()).expect("mkdirs");
+        std::fs::write(&path, serde_json::to_string(&turn).expect("serialize turn"))
+            .expect("write turn");
+
+        let err = store
+            .load_turn(&turn.id)
+            .expect_err("load_turn must reject newer schema");
+        assert!(
+            format!("{err:#}").contains("newer than supported"),
+            "got: {err:#}"
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+    // from store_load_item_rejects_newer_schema_version
+    {
+        let dir = test_runtime_dir();
+        let store = RuntimeThreadStore::open(dir.clone()).expect("open store");
+
+        let mut item = sample_item("trn_t", "itm_future", TurnItemLifecycleStatus::InProgress);
+        item.schema_version = CURRENT_RUNTIME_SCHEMA_VERSION + 1;
+
+        let path = store.items_dir.join(format!("{}.json", item.id));
+        std::fs::create_dir_all(path.parent().unwrap()).expect("mkdirs");
+        std::fs::write(&path, serde_json::to_string(&item).expect("serialize item"))
+            .expect("write item");
+
+        let err = store
+            .load_item(&item.id)
+            .expect_err("load_item must reject newer schema");
+        assert!(
+            format!("{err:#}").contains("newer than supported"),
+            "got: {err:#}"
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }
 
 #[test]
@@ -3894,19 +3968,47 @@ fn runtime_manager_store_has_one_lifetime_process_owner() -> Result<()> {
 }
 
 #[test]
-fn session_scoped_runtime_default_lives_under_the_session_directory() {
-    let _lock = crate::test_support::lock_test_env();
-    let temp = tempfile::tempdir().expect("temp home");
-    let home = temp.path().join("cw-home");
-    let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", &home);
-    let _runtime = crate::test_support::EnvVarGuard::remove("CODEWHALE_RUNTIME_DIR");
-    let _legacy = crate::test_support::EnvVarGuard::remove("DEEPSEEK_RUNTIME_DIR");
+fn session_scoped_scenario() -> Result<()> {
+    // Scenario consolidation of: session_scoped_runtime_default_lives_under_the_session_directory, session_scoped_runtime_roots_do_not_share_the_process_owner_lock
+    // from session_scoped_runtime_default_lives_under_the_session_directory
+    {
+        let _lock = crate::test_support::lock_test_env();
+        let temp = tempfile::tempdir().expect("temp home");
+        let home = temp.path().join("cw-home");
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", &home);
+        let _runtime = crate::test_support::EnvVarGuard::remove("CODEWHALE_RUNTIME_DIR");
+        let _legacy = crate::test_support::EnvVarGuard::remove("DEEPSEEK_RUNTIME_DIR");
 
-    let cfg = RuntimeThreadManagerConfig::for_session(home.join("tasks"), "sess-1");
-    assert_eq!(
-        cfg.data_dir,
-        home.join("sessions").join("sess-1").join("runtime")
-    );
+        let cfg = RuntimeThreadManagerConfig::for_session(home.join("tasks"), "sess-1");
+        assert_eq!(
+            cfg.data_dir,
+            home.join("sessions").join("sess-1").join("runtime")
+        );
+    }
+    // from session_scoped_runtime_roots_do_not_share_the_process_owner_lock
+    {
+        let _lock = crate::test_support::lock_test_env();
+        let temp = tempfile::tempdir()?;
+        let home = temp.path().join("cw-home");
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", &home);
+        let _runtime = crate::test_support::EnvVarGuard::remove("CODEWHALE_RUNTIME_DIR");
+        let _legacy = crate::test_support::EnvVarGuard::remove("DEEPSEEK_RUNTIME_DIR");
+        let tasks = home.join("tasks");
+
+        let first = RuntimeThreadManager::open(
+            Config::default(),
+            PathBuf::from("."),
+            RuntimeThreadManagerConfig::for_session(tasks.clone(), "session-a"),
+        )?;
+        let second = RuntimeThreadManager::open(
+            Config::default(),
+            PathBuf::from("."),
+            RuntimeThreadManagerConfig::for_session(tasks, "session-b"),
+        )?;
+        drop(first);
+        drop(second);
+    }
+    Ok(())
 }
 
 #[test]
@@ -3921,31 +4023,6 @@ fn explicit_runtime_dir_override_beats_session_scope() {
 
     let cfg = RuntimeThreadManagerConfig::for_session(home.join("tasks"), "sess-1");
     assert_eq!(cfg.data_dir, override_dir);
-}
-
-#[test]
-fn session_scoped_runtime_roots_do_not_share_the_process_owner_lock() -> Result<()> {
-    let _lock = crate::test_support::lock_test_env();
-    let temp = tempfile::tempdir()?;
-    let home = temp.path().join("cw-home");
-    let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", &home);
-    let _runtime = crate::test_support::EnvVarGuard::remove("CODEWHALE_RUNTIME_DIR");
-    let _legacy = crate::test_support::EnvVarGuard::remove("DEEPSEEK_RUNTIME_DIR");
-    let tasks = home.join("tasks");
-
-    let first = RuntimeThreadManager::open(
-        Config::default(),
-        PathBuf::from("."),
-        RuntimeThreadManagerConfig::for_session(tasks.clone(), "session-a"),
-    )?;
-    let second = RuntimeThreadManager::open(
-        Config::default(),
-        PathBuf::from("."),
-        RuntimeThreadManagerConfig::for_session(tasks, "session-b"),
-    )?;
-    drop(first);
-    drop(second);
-    Ok(())
 }
 
 #[test]
@@ -4859,54 +4936,6 @@ fn store_rejects_path_like_record_ids() {
 }
 
 #[test]
-fn store_load_turn_rejects_newer_schema_version() {
-    let dir = test_runtime_dir();
-    let store = RuntimeThreadStore::open(dir.clone()).expect("open store");
-
-    let mut turn = sample_turn("thr_t", "trn_future", RuntimeTurnStatus::InProgress);
-    turn.schema_version = CURRENT_RUNTIME_SCHEMA_VERSION + 1;
-
-    let path = store.turns_dir.join(format!("{}.json", turn.id));
-    std::fs::create_dir_all(path.parent().unwrap()).expect("mkdirs");
-    std::fs::write(&path, serde_json::to_string(&turn).expect("serialize turn"))
-        .expect("write turn");
-
-    let err = store
-        .load_turn(&turn.id)
-        .expect_err("load_turn must reject newer schema");
-    assert!(
-        format!("{err:#}").contains("newer than supported"),
-        "got: {err:#}"
-    );
-
-    let _ = std::fs::remove_dir_all(dir);
-}
-
-#[test]
-fn store_load_item_rejects_newer_schema_version() {
-    let dir = test_runtime_dir();
-    let store = RuntimeThreadStore::open(dir.clone()).expect("open store");
-
-    let mut item = sample_item("trn_t", "itm_future", TurnItemLifecycleStatus::InProgress);
-    item.schema_version = CURRENT_RUNTIME_SCHEMA_VERSION + 1;
-
-    let path = store.items_dir.join(format!("{}.json", item.id));
-    std::fs::create_dir_all(path.parent().unwrap()).expect("mkdirs");
-    std::fs::write(&path, serde_json::to_string(&item).expect("serialize item"))
-        .expect("write item");
-
-    let err = store
-        .load_item(&item.id)
-        .expect_err("load_item must reject newer schema");
-    assert!(
-        format!("{err:#}").contains("newer than supported"),
-        "got: {err:#}"
-    );
-
-    let _ = std::fs::remove_dir_all(dir);
-}
-
-#[test]
 fn enforce_lru_capacity_does_not_loop_when_all_threads_are_active() {
     let mut active = ActiveThreads::default();
     let harness_a = mock_engine_handle();
@@ -4960,27 +4989,54 @@ fn enforce_lru_capacity_does_not_loop_when_all_threads_are_active() {
 }
 
 #[test]
-fn approval_decision_keeps_trust_mode_out_of_tool_approval() {
-    assert!(matches!(
-        RuntimeThreadManager::approval_decision(false, false, false),
-        RuntimeApprovalDecision::DenyTool
-    ));
-    assert!(matches!(
-        RuntimeThreadManager::approval_decision(false, true, false),
-        RuntimeApprovalDecision::DenyTool
-    ));
-    assert!(matches!(
-        RuntimeThreadManager::approval_decision(true, false, false),
-        RuntimeApprovalDecision::ApproveTool
-    ));
-    assert!(matches!(
-        RuntimeThreadManager::approval_decision(true, false, true),
-        RuntimeApprovalDecision::DenyTool
-    ));
-    assert!(matches!(
-        RuntimeThreadManager::approval_decision(true, true, true),
-        RuntimeApprovalDecision::RetryWithFullAccess
-    ));
+fn approval_decision_scenario() {
+    // Scenario consolidation of: approval_decision_keeps_trust_mode_out_of_tool_approval, approval_decision_requires_auto_approve_and_trust_for_full_access
+    // from approval_decision_keeps_trust_mode_out_of_tool_approval
+    {
+        assert!(matches!(
+            RuntimeThreadManager::approval_decision(false, false, false),
+            RuntimeApprovalDecision::DenyTool
+        ));
+        assert!(matches!(
+            RuntimeThreadManager::approval_decision(false, true, false),
+            RuntimeApprovalDecision::DenyTool
+        ));
+        assert!(matches!(
+            RuntimeThreadManager::approval_decision(true, false, false),
+            RuntimeApprovalDecision::ApproveTool
+        ));
+        assert!(matches!(
+            RuntimeThreadManager::approval_decision(true, false, true),
+            RuntimeApprovalDecision::DenyTool
+        ));
+        assert!(matches!(
+            RuntimeThreadManager::approval_decision(true, true, true),
+            RuntimeApprovalDecision::RetryWithFullAccess
+        ));
+    }
+    // from approval_decision_requires_auto_approve_and_trust_for_full_access
+    {
+        assert_eq!(
+            RuntimeThreadManager::approval_decision(false, false, false),
+            RuntimeApprovalDecision::DenyTool
+        );
+        assert_eq!(
+            RuntimeThreadManager::approval_decision(false, true, false),
+            RuntimeApprovalDecision::DenyTool
+        );
+        assert_eq!(
+            RuntimeThreadManager::approval_decision(true, false, false),
+            RuntimeApprovalDecision::ApproveTool
+        );
+        assert_eq!(
+            RuntimeThreadManager::approval_decision(true, false, true),
+            RuntimeApprovalDecision::DenyTool
+        );
+        assert_eq!(
+            RuntimeThreadManager::approval_decision(true, true, true),
+            RuntimeApprovalDecision::RetryWithFullAccess
+        );
+    }
 }
 
 #[test]
@@ -5666,28 +5722,6 @@ async fn engine_error_remains_failed_after_nominal_turn_complete() -> Result<()>
     let terminal = wait_for_terminal_turn(&manager, &turn.id, Duration::from_secs(2)).await?;
     assert_eq!(terminal.status, RuntimeTurnStatus::Failed);
     assert_eq!(terminal.error.as_deref(), Some("provider exploded"));
-    Ok(())
-}
-
-#[tokio::test]
-async fn create_thread_defaults_auto_approve_to_false() -> Result<()> {
-    let manager = test_manager(test_runtime_dir())?;
-    let thread = manager
-        .create_thread(CreateThreadRequest {
-            model: None,
-            workspace: None,
-            mode: None,
-            allow_shell: None,
-            trust_mode: None,
-            auto_approve: None,
-            archived: false,
-            system_prompt: None,
-            task_id: None,
-            ..Default::default()
-        })
-        .await?;
-
-    assert!(!thread.auto_approve);
     Ok(())
 }
 
@@ -10827,30 +10861,6 @@ fn summarize_text_truncates() {
 }
 
 #[test]
-fn approval_decision_requires_auto_approve_and_trust_for_full_access() {
-    assert_eq!(
-        RuntimeThreadManager::approval_decision(false, false, false),
-        RuntimeApprovalDecision::DenyTool
-    );
-    assert_eq!(
-        RuntimeThreadManager::approval_decision(false, true, false),
-        RuntimeApprovalDecision::DenyTool
-    );
-    assert_eq!(
-        RuntimeThreadManager::approval_decision(true, false, false),
-        RuntimeApprovalDecision::ApproveTool
-    );
-    assert_eq!(
-        RuntimeThreadManager::approval_decision(true, false, true),
-        RuntimeApprovalDecision::DenyTool
-    );
-    assert_eq!(
-        RuntimeThreadManager::approval_decision(true, true, true),
-        RuntimeApprovalDecision::RetryWithFullAccess
-    );
-}
-
-#[test]
 fn opening_manager_recovers_stale_queued_and_in_progress_work() -> Result<()> {
     let data_dir = test_runtime_dir();
     let manager = test_manager(data_dir.clone())?;
@@ -11034,9 +11044,48 @@ fn opening_manager_recovers_stale_queued_and_in_progress_work() -> Result<()> {
 }
 
 #[test]
-fn parse_mode_defaults_to_agent() {
-    assert_eq!(parse_mode("unknown"), AppMode::Agent);
-    assert_eq!(parse_mode("plan"), AppMode::Plan);
+fn parse_mode_scenario() {
+    // Scenario consolidation of: parse_mode_defaults_to_agent, parse_mode_opt_resolves_explicit_tokens_and_aliases, parse_mode_opt_rejects_prompt_fragments, parse_mode_wrapper_defaults_and_resolves_numeric_aliases
+    // from parse_mode_defaults_to_agent
+    {
+        assert_eq!(parse_mode("unknown"), AppMode::Agent);
+        assert_eq!(parse_mode("plan"), AppMode::Plan);
+    }
+    // from parse_mode_opt_resolves_explicit_tokens_and_aliases
+    {
+        assert_eq!(parse_mode_opt("agent"), Some(AppMode::Agent));
+        assert_eq!(parse_mode_opt("1"), Some(AppMode::Agent));
+        assert_eq!(parse_mode_opt("plan"), Some(AppMode::Plan));
+        assert_eq!(parse_mode_opt("2"), Some(AppMode::Plan));
+        assert_eq!(parse_mode_opt("auto"), Some(AppMode::Agent));
+        assert_eq!(parse_mode_opt("operate"), Some(AppMode::Operate));
+        assert_eq!(parse_mode_opt("3"), Some(AppMode::Operate));
+        // Legacy YOLO spellings resolve to Act; the posture travels separately.
+        assert_eq!(parse_mode_opt("yolo"), Some(AppMode::Agent));
+        assert_eq!(parse_mode_opt("4"), Some(AppMode::Agent));
+        assert_eq!(parse_mode_opt(" PLAN "), Some(AppMode::Plan));
+    }
+    // from parse_mode_opt_rejects_prompt_fragments
+    {
+        for input in [
+            "plan a trip to Tokyo",
+            "switch the agent on",
+            "enter yolo mode",
+            "agent of chaos",
+            "mode",
+        ] {
+            assert_eq!(parse_mode_opt(input), None);
+        }
+    }
+    // from parse_mode_wrapper_defaults_and_resolves_numeric_aliases
+    {
+        assert_eq!(parse_mode("plan a trip to Tokyo"), AppMode::Agent);
+        assert_eq!(parse_mode("auto"), AppMode::Agent);
+        assert_eq!(parse_mode("1"), AppMode::Agent);
+        assert_eq!(parse_mode("2"), AppMode::Plan);
+        assert_eq!(parse_mode("3"), AppMode::Operate);
+        assert_eq!(parse_mode("4"), AppMode::Agent);
+    }
 }
 
 #[test]
@@ -11052,44 +11101,6 @@ fn mode_only_override_preserves_legacy_full_access_posture() -> Result<()> {
     let ask = runtime_policy_with_overrides(&thread, Some("act"), None, Some(false))?;
     assert_eq!(ask.permission_wire(), "ask");
     Ok(())
-}
-
-#[test]
-fn parse_mode_opt_resolves_explicit_tokens_and_aliases() {
-    assert_eq!(parse_mode_opt("agent"), Some(AppMode::Agent));
-    assert_eq!(parse_mode_opt("1"), Some(AppMode::Agent));
-    assert_eq!(parse_mode_opt("plan"), Some(AppMode::Plan));
-    assert_eq!(parse_mode_opt("2"), Some(AppMode::Plan));
-    assert_eq!(parse_mode_opt("auto"), Some(AppMode::Agent));
-    assert_eq!(parse_mode_opt("operate"), Some(AppMode::Operate));
-    assert_eq!(parse_mode_opt("3"), Some(AppMode::Operate));
-    // Legacy YOLO spellings resolve to Act; the posture travels separately.
-    assert_eq!(parse_mode_opt("yolo"), Some(AppMode::Agent));
-    assert_eq!(parse_mode_opt("4"), Some(AppMode::Agent));
-    assert_eq!(parse_mode_opt(" PLAN "), Some(AppMode::Plan));
-}
-
-#[test]
-fn parse_mode_opt_rejects_prompt_fragments() {
-    for input in [
-        "plan a trip to Tokyo",
-        "switch the agent on",
-        "enter yolo mode",
-        "agent of chaos",
-        "mode",
-    ] {
-        assert_eq!(parse_mode_opt(input), None);
-    }
-}
-
-#[test]
-fn parse_mode_wrapper_defaults_and_resolves_numeric_aliases() {
-    assert_eq!(parse_mode("plan a trip to Tokyo"), AppMode::Agent);
-    assert_eq!(parse_mode("auto"), AppMode::Agent);
-    assert_eq!(parse_mode("1"), AppMode::Agent);
-    assert_eq!(parse_mode("2"), AppMode::Plan);
-    assert_eq!(parse_mode("3"), AppMode::Operate);
-    assert_eq!(parse_mode("4"), AppMode::Agent);
 }
 
 fn rebind_event(event: &str, agent_id: &str, seq: u64) -> RuntimeEventRecord {
@@ -11396,63 +11407,68 @@ async fn fork_at_user_message_does_not_mutate_source() -> Result<()> {
 // ── compaction summary persistence (merge_summary_into_prompt) ──
 
 #[test]
-fn summary_merge_appends_section_to_base_prompt() {
-    let merged = merge_summary_into_prompt(
-        Some("You are a helpful agent."),
-        "## 📋 Conversation Summary (Auto-Generated)\n\nUser prefers lists.",
-    );
-    assert!(merged.starts_with("You are a helpful agent."));
-    assert!(merged.contains(COMPACTION_SUMMARY_BEGIN));
-    assert!(merged.contains("User prefers lists."));
-    assert!(merged.ends_with(COMPACTION_SUMMARY_END));
-    // Reload restore keys on the marker: SyncSession migrates this carrier
-    // into one ordinary history checkpoint before provider dispatch.
-    assert!(merged.contains("Conversation Summary (Auto-Generated)"));
+fn summary_merge_scenario() {
+    // Scenario consolidation of: summary_merge_appends_section_to_base_prompt, summary_merge_replaces_existing_section_idempotently, summary_merge_handles_missing_base
+    // from summary_merge_appends_section_to_base_prompt
+    {
+        let merged = merge_summary_into_prompt(
+            Some("You are a helpful agent."),
+            "## 📋 Conversation Summary (Auto-Generated)\n\nUser prefers lists.",
+        );
+        assert!(merged.starts_with("You are a helpful agent."));
+        assert!(merged.contains(COMPACTION_SUMMARY_BEGIN));
+        assert!(merged.contains("User prefers lists."));
+        assert!(merged.ends_with(COMPACTION_SUMMARY_END));
+        // Reload restore keys on the marker: SyncSession migrates this carrier
+        // into one ordinary history checkpoint before provider dispatch.
+        assert!(merged.contains("Conversation Summary (Auto-Generated)"));
+    }
+    // from summary_merge_replaces_existing_section_idempotently
+    {
+        let first = merge_summary_into_prompt(Some("Base prompt."), "summary v1");
+        let second = merge_summary_into_prompt(Some(&first), "summary v2");
+        assert!(second.contains("summary v2"));
+        assert!(!second.contains("summary v1"));
+        assert_eq!(
+            second.matches(COMPACTION_SUMMARY_BEGIN).count(),
+            1,
+            "repeated compactions must swap the section, not stack duplicates"
+        );
+        assert!(second.starts_with("Base prompt."));
+    }
+    // from summary_merge_handles_missing_base
+    {
+        let merged = merge_summary_into_prompt(None, "only summary");
+        assert!(merged.starts_with(COMPACTION_SUMMARY_BEGIN));
+        assert!(merged.contains("only summary"));
+        let empty_base = merge_summary_into_prompt(Some(""), "only summary");
+        assert!(empty_base.starts_with(COMPACTION_SUMMARY_BEGIN));
+    }
 }
 
 #[test]
-fn summary_merge_replaces_existing_section_idempotently() {
-    let first = merge_summary_into_prompt(Some("Base prompt."), "summary v1");
-    let second = merge_summary_into_prompt(Some(&first), "summary v2");
-    assert!(second.contains("summary v2"));
-    assert!(!second.contains("summary v1"));
-    assert_eq!(
-        second.matches(COMPACTION_SUMMARY_BEGIN).count(),
-        1,
-        "repeated compactions must swap the section, not stack duplicates"
-    );
-    assert!(second.starts_with("Base prompt."));
-}
-
-#[test]
-fn summary_merge_handles_missing_base() {
-    let merged = merge_summary_into_prompt(None, "only summary");
-    assert!(merged.starts_with(COMPACTION_SUMMARY_BEGIN));
-    assert!(merged.contains("only summary"));
-    let empty_base = merge_summary_into_prompt(Some(""), "only summary");
-    assert!(empty_base.starts_with(COMPACTION_SUMMARY_BEGIN));
-}
-
-#[test]
-fn summary_strip_preserves_text_after_section() {
-    let with_tail = format!(
-        "Base.\n\n{COMPACTION_SUMMARY_BEGIN}\nold summary\n{COMPACTION_SUMMARY_END}\n\nTrailing rules."
-    );
-    let stripped = strip_summary_section(&with_tail);
-    assert!(stripped.contains("Base."));
-    assert!(stripped.contains("Trailing rules."));
-    assert!(!stripped.contains("old summary"));
-    // Re-merge keeps the tail intact.
-    let merged = merge_summary_into_prompt(Some(&with_tail), "new summary");
-    assert!(merged.contains("Trailing rules."));
-    assert!(merged.contains("new summary"));
-}
-
-#[test]
-fn summary_strip_handles_missing_end_sentinel() {
-    let broken = format!("Base.\n\n{COMPACTION_SUMMARY_BEGIN}\ntruncated…");
-    let stripped = strip_summary_section(&broken);
-    assert_eq!(stripped, "Base.");
+fn summary_strip_scenario() {
+    // Scenario consolidation of: summary_strip_preserves_text_after_section, summary_strip_handles_missing_end_sentinel
+    // from summary_strip_preserves_text_after_section
+    {
+        let with_tail = format!(
+            "Base.\n\n{COMPACTION_SUMMARY_BEGIN}\nold summary\n{COMPACTION_SUMMARY_END}\n\nTrailing rules."
+        );
+        let stripped = strip_summary_section(&with_tail);
+        assert!(stripped.contains("Base."));
+        assert!(stripped.contains("Trailing rules."));
+        assert!(!stripped.contains("old summary"));
+        // Re-merge keeps the tail intact.
+        let merged = merge_summary_into_prompt(Some(&with_tail), "new summary");
+        assert!(merged.contains("Trailing rules."));
+        assert!(merged.contains("new summary"));
+    }
+    // from summary_strip_handles_missing_end_sentinel
+    {
+        let broken = format!("Base.\n\n{COMPACTION_SUMMARY_BEGIN}\ntruncated…");
+        let stripped = strip_summary_section(&broken);
+        assert_eq!(stripped, "Base.");
+    }
 }
 
 /// Release acceptance: the full two-task Agent Mail matrix in one run, with
