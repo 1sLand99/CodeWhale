@@ -78,7 +78,7 @@ pub(crate) fn resolve_fleet_setup_edit_target(
         }),
         Ok(None) => Ok(FleetSetupEditTarget::LegacyProfiles),
         Err(_) => Err(
-            "Selected Fleet is missing or unreadable; open /fleet fleets to repair or clear the selection. Legacy profiles were not opened."
+            "Selected Fleet is missing or unreadable; open /fleet teams to repair or clear the selection. Legacy profiles were not opened."
                 .to_string(),
         ),
     }

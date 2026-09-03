@@ -774,8 +774,8 @@ pub enum ViewEvent {
         model: String,
         delta: isize,
     },
-    /// `⇧F` in the picker: add the row's exact route to the fleet (the
-    /// selected Fleet), or remove it when it is already there (design §10 F1).
+    /// `⇧F` in the picker: add the row's exact route to the team (the
+    /// selected saved team), or remove it when it is already there (design §10 F1).
     ModelPickerToggleFleet {
         provider: crate::config::ApiProvider,
         /// Exact named route for `Custom`; built-in providers leave this unset.

@@ -1,4 +1,4 @@
-//! Fleet detail — open a saved named Fleet and edit it.
+//! Fleet detail — open a saved named team and edit it.
 //!
 //! Row 0 is the Coordinator's own model; below it one row per member.
 //! Editing a Fleet edits that Fleet's file — never the live session route and
@@ -96,7 +96,7 @@ impl FleetDetailView {
         Self::open_for_member(app, config, name, scope, None)
     }
 
-    /// Open the exact named Fleet and, when the request came from a roster
+    /// Open the exact named team and, when the request came from a roster
     /// member, focus that member in the v2 editor.
     pub(crate) fn open_for_member(
         app: &App,
@@ -225,7 +225,7 @@ impl FleetDetailView {
         match save_fleet(&self.fleet, self.scope, &self.workspace) {
             Ok(path) => Some(ViewAction::EmitAndClose(ViewEvent::FleetStoreChanged {
                 message: format!(
-                    "Renamed Fleet `{old_name}` → `{new_name}` ({}) — wrote {}",
+                    "Renamed Team `{old_name}` → `{new_name}` ({}) — wrote {}",
                     self.scope.label(),
                     path.display()
                 ),
@@ -415,7 +415,7 @@ impl FleetDetailView {
         match save_fleet(&self.fleet, self.scope, &self.workspace) {
             Ok(path) => Some(ViewAction::EmitAndClose(ViewEvent::FleetStoreChanged {
                 message: format!(
-                    "Saved Fleet `{}` ({}) — wrote {}",
+                    "Saved Team `{}` ({}) — wrote {}",
                     self.fleet.name,
                     self.scope.long_label(),
                     path.display()
@@ -435,7 +435,7 @@ impl FleetDetailView {
         match save_fleet(&self.fleet, target, &self.workspace) {
             Ok(path) => Some(ViewAction::EmitAndClose(ViewEvent::FleetStoreChanged {
                 message: format!(
-                    "Copied Fleet `{}` to {} scope — wrote {}",
+                    "Copied Team `{}` to {} scope — wrote {}",
                     self.fleet.name,
                     target.label(),
                     path.display()
@@ -452,7 +452,7 @@ impl FleetDetailView {
         match set_selected(&self.fleet.name, scope, &self.workspace) {
             Ok(path) => Some(ViewAction::EmitAndClose(ViewEvent::FleetStoreChanged {
                 message: format!(
-                    "Selected Fleet `{}` as {} default — wrote {}",
+                    "Selected Team `{}` as {} default — wrote {}",
                     self.fleet.name,
                     scope.label(),
                     path.display()
@@ -631,7 +631,7 @@ impl ModalView for FleetDetailView {
             format!("Renaming: {}▏", self.rename_input)
         } else {
             format!(
-                "Fleet `{}` · {} scope · {}",
+                "Team `{}` · {} scope · {}",
                 self.fleet.name,
                 self.scope.label(),
                 self.source.display()
@@ -639,10 +639,7 @@ impl ModalView for FleetDetailView {
         };
         let mut header = vec![
             Line::from(vec![
-                Span::styled(
-                    "─ Fleet ",
-                    Style::default().fg(palette::WHALE_ACTION).bold(),
-                ),
+                Span::styled("─ Team ", Style::default().fg(palette::WHALE_ACTION).bold()),
                 Span::styled(title, Style::default().fg(palette::TEXT_SECONDARY)),
             ]),
             Line::from(""),
@@ -994,7 +991,7 @@ mod tests {
             panic!("expected FleetStoreChanged, got {action:?}");
         };
         assert!(
-            message.contains("Renamed Fleet `Old Name` → `New Name`"),
+            message.contains("Renamed Team `Old Name` → `New Name`"),
             "{message}"
         );
         // The on-disk file now carries the new name.
@@ -1098,7 +1095,7 @@ mod tests {
         let ViewAction::EmitAndClose(ViewEvent::FleetStoreChanged { message }) = action else {
             panic!("expected FleetStoreChanged, got {action:?}");
         };
-        assert!(message.contains("Saved Fleet `Fleet C`"), "{message}");
+        assert!(message.contains("Saved Team `Fleet C`"), "{message}");
         // The receipt names the path as this platform writes it, so build the
         // expected tail the same way instead of hard-coding `/` — on Windows
         // `Path::display` renders the separators as `\`.

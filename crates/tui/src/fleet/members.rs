@@ -638,7 +638,7 @@ mod tests {
         );
         let receipt = change_receipt(Locale::En, "openrouter", "z-ai/glm-5.3-flash", &change);
         assert!(
-            receipt.contains("new personal fleet, now selected"),
+            receipt.contains("new personal team, now selected"),
             "{receipt}"
         );
         let models = fleet_models(&workspace).expect("fleet");
@@ -671,7 +671,7 @@ mod tests {
             "{err:?}"
         );
         assert!(
-            err.message(Locale::En).contains("is not in the fleet"),
+            err.message(Locale::En).contains("is not on the team"),
             "{err}"
         );
     }
@@ -846,7 +846,7 @@ mod tests {
             }
         );
         let receipt = change_receipt(Locale::En, "openrouter", "z-ai/glm-5.3", &change);
-        assert!(receipt.contains("stays in the fleet"), "{receipt}");
+        assert!(receipt.contains("stays on the team"), "{receipt}");
         assert!(receipt.contains("current model"), "{receipt}");
         // A role-less /fleet add of the same route is the same no-op.
         let change = add_fleet_model(&workspace, "openrouter", "z-ai/glm-5.3", &[]).expect("add");

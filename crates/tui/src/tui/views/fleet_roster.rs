@@ -269,14 +269,14 @@ impl FleetRosterView {
 
     fn footer_hints(&self) -> Vec<ActionHint> {
         let edit_label = if self.selected_fleet.is_some() {
-            "edit Fleet"
+            "edit team"
         } else {
             "setup profile"
         };
         let mut hints = vec![
             ActionHint::new("↑/↓", "move"),
             ActionHint::new("s/Enter", edit_label),
-            ActionHint::new("f", "saved Fleets"),
+            ActionHint::new("f", "saved teams"),
             ActionHint::new("w", tr(self.locale, MessageId::FleetRosterWorkers)),
             ActionHint::new("PgUp/PgDn", "scroll detail"),
             ActionHint::new("Esc", "close"),
@@ -456,11 +456,11 @@ impl FleetRosterView {
     /// Scope-explicit selected Fleet line. Paths stay out — receipts name them.
     fn selected_fleet_line(&self) -> String {
         if let Some(error) = &self.load_error {
-            return format!("Fleet selection error — {error}");
+            return format!("Team selection error — {error}");
         }
         match &self.selected_fleet {
-            Some(sel) => format!("Fleet `{}` · {}", sel.name, sel.scope.long_label()),
-            None => "No Fleet selected — built-in team".to_string(),
+            Some(sel) => format!("Team `{}` · {}", sel.name, sel.scope.long_label()),
+            None => "No team selected — built-in team".to_string(),
         }
     }
 

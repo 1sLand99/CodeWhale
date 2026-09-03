@@ -1377,7 +1377,7 @@ pub(crate) async fn handle_view_events(
                     } else {
                         app.set_sticky_status(
                             format!(
-                                "Could not open Fleet `{name}` ({}) — the file may have moved or become unreadable.",
+                                "Could not open team `{name}` ({}) — the file may have moved or become unreadable.",
                                 scope.label()
                             ),
                             crate::tui::app::StatusToastLevel::Error,
@@ -1417,7 +1417,7 @@ pub(crate) async fn handle_view_events(
                 // mutated.
                 let Some(provider) = ApiProvider::parse(&provider_id) else {
                     app.set_sticky_status(
-                        format!("Fleet route activation failed: unknown provider `{provider_id}`"),
+                        format!("Team route activation failed: unknown provider `{provider_id}`"),
                         crate::tui::app::StatusToastLevel::Error,
                         None,
                     );
@@ -1436,7 +1436,7 @@ pub(crate) async fn handle_view_events(
                             .record_success(&scoped, provider, &validated.model);
                         app.push_status_toast(
                             format!(
-                                "{provider_label} route activated for Fleet: {}",
+                                "{provider_label} route activated for team: {}",
                                 validated.model
                             ),
                             crate::tui::app::StatusToastLevel::Success,
@@ -1504,7 +1504,7 @@ pub(crate) async fn handle_view_events(
                         Ok(dir) => dir,
                         Err(err) => {
                             app.set_sticky_status(
-                                format!("Fleet {} scope is unavailable: {err:#}", scope.label()),
+                                format!("Team {} scope is unavailable: {err:#}", scope.label()),
                                 StatusToastLevel::Error,
                                 None,
                             );
@@ -1582,26 +1582,26 @@ pub(crate) async fn handle_view_events(
                         let zh = app.ui_locale == crate::localization::Locale::ZhHans;
                         app.add_message(HistoryCell::System {
                             content: if zh {
-                                format!("已保存 Fleet 配置：{}", target.display())
+                                format!("已保存团队配置：{}", target.display())
                             } else {
                                 format!(
-                                    "Fleet {} profile saved: {}",
+                                    "Team {} profile saved: {}",
                                     scope.label(),
                                     target.display()
                                 )
                             },
                         });
                         app.status_message = Some(if zh {
-                            format!("已保存 Fleet 配置：{}", draft.file_name())
+                            format!("已保存团队配置：{}", draft.file_name())
                         } else if roster_refresh_failed {
                             format!(
-                                "Fleet {} profile saved, but the live roster could not refresh; restart before dispatching {}",
+                                "Team {} profile saved, but the live roster could not refresh; restart before dispatching {}",
                                 scope.label(),
                                 draft.id
                             )
                         } else {
                             format!(
-                                "Fleet {} profile saved: {}",
+                                "Team {} profile saved: {}",
                                 scope.label(),
                                 draft.file_name()
                             )
@@ -1610,9 +1610,9 @@ pub(crate) async fn handle_view_events(
                     Err(err) => {
                         app.status_message =
                             Some(if app.ui_locale == crate::localization::Locale::ZhHans {
-                                format!("无法保存 Fleet 配置：{err:#}")
+                                format!("无法保存团队配置：{err:#}")
                             } else {
-                                format!("Fleet profile could not be saved: {err:#}")
+                                format!("Team profile could not be saved: {err:#}")
                             });
                     }
                 }

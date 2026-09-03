@@ -774,7 +774,7 @@ fn open_fleet_setup_target(app: &mut App, config: &Config, member_id: Option<&st
                 app, config, &name, scope, member_id,
             ) else {
                 app.set_sticky_status(
-                    "Selected Fleet is invalid or unreadable; open /fleet fleets to repair or clear the selection. Legacy profiles were not opened."
+                    "Selected team is invalid or unreadable; open /fleet teams to repair or clear the selection. Legacy profiles were not opened."
                         .to_string(),
                     StatusToastLevel::Error,
                     None,
@@ -784,7 +784,7 @@ fn open_fleet_setup_target(app: &mut App, config: &Config, member_id: Option<&st
             let fleet_name = crate::safe_label::SafeLabel::phrase(&name);
             app.view_stack.push(view);
             app.status_message = Some(format!(
-                "Editing selected Fleet `{fleet_name}` ({}) — legacy profiles will not be changed.",
+                "Editing selected team `{fleet_name}` ({}) — legacy profiles will not be changed.",
                 scope.label()
             ));
         }
@@ -823,7 +823,7 @@ fn open_fleet_model_target(app: &mut App, config: &Config, member_id: &str) {
                 Some(member_id),
             ) else {
                 app.set_sticky_status(
-                    "Selected Fleet is invalid or unreadable; open /fleet fleets to repair or clear the selection."
+                    "Selected team is invalid or unreadable; open /fleet teams to repair or clear the selection."
                         .to_string(),
                     StatusToastLevel::Error,
                     None,

@@ -2503,8 +2503,8 @@ impl App {
         match choice {
             RouteSaveChoice::UpdateFleet => {
                 let Some((name, scope)) = pending.fleet.clone() else {
-                    return "Nothing to update — no Fleet is selected. Use /fleet save-as to \
-                             save this route as a new Fleet."
+                    return "Nothing to update — no team is selected. Use /fleet save-as to \
+                             save this route as a new team."
                         .to_string();
                 };
                 match crate::fleet::store::load_fleet_in_scope(&name, scope, &self.workspace) {
@@ -2516,15 +2516,15 @@ impl App {
                         });
                         match save_fleet(&fleet, scope, &self.workspace) {
                             Ok(path) => format!(
-                                "Fleet `{}` now runs on {route} — wrote {}",
+                                "Team `{}` now runs on {route} — wrote {}",
                                 fleet.name,
                                 path.display()
                             ),
-                            Err(err) => format!("Fleet update failed: {err}"),
+                            Err(err) => format!("Team update failed: {err}"),
                         }
                     }
                     Err(err) => format!(
-                        "Fleet update failed: {err} — the saved Fleet may have moved. Use \
+                        "Team update failed: {err} — the saved team may have moved. Use \
                          /fleet save-as to persist the route."
                     ),
                 }
@@ -2541,7 +2541,7 @@ impl App {
                     display.clone(),
                     Some("Saved from a session route choice.".to_string()),
                 ) else {
-                    return "Could not create the Fleet.".to_string();
+                    return "Could not create the team.".to_string();
                 };
                 fleet.operator = Some(FleetOperator {
                     provider: pending.provider_identity.clone(),
@@ -2566,7 +2566,7 @@ impl App {
                             Err(err) => format!(" — selection failed: {err}"),
                         };
                         format!(
-                            "Saved route {route} as new Fleet `{}` — wrote {}{selected_note}",
+                            "Saved route {route} as new team `{}` — wrote {}{selected_note}",
                             display,
                             path.display()
                         )

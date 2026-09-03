@@ -382,9 +382,9 @@ fn selected_named_fleet_member_shows_edit_affordance() {
         text.contains("m model"),
         "footer should advertise the model shortcut: {text}"
     );
-    assert!(text.contains("Fleet `Default`"), "{text}");
-    assert!(text.contains("edit Fleet"), "{text}");
-    assert!(text.contains("saved Fleets"), "{text}");
+    assert!(text.contains("Team `Default`"), "{text}");
+    assert!(text.contains("edit team"), "{text}");
+    assert!(text.contains("saved teams"), "{text}");
 }
 
 #[test]
@@ -603,9 +603,9 @@ fn fleet_roster_is_usable_and_opaque_at_blocker_sizes() {
             );
             // Some action label is always visible.
             assert!(text.contains("close"), "{label} {w}x{h}: missing footer");
-            // The first impression names the fleet as the worker/orchestration surface.
+            // The first impression names the team as the worker/orchestration surface.
             assert!(
-                text.contains("fleet") && text.contains("workers"),
+                text.contains("team") && text.contains("workers"),
                 "{label} {w}x{h}: missing framing"
             );
             // The selected row's detail is on screen.

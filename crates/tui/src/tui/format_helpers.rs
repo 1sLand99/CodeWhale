@@ -101,7 +101,7 @@ mod tests {
         assert!(msg.contains("* deepseek-v4-pro (current)"), "got: {msg}");
         assert!(msg.contains("  deepseek-v4-flash"), "got: {msg}");
         assert!(
-            msg.starts_with("Your fleet is the session model only"),
+            msg.starts_with("Your team is the session model only"),
             "got: {msg}"
         );
         assert!(msg.contains("Available models (2)"), "got: {msg}");
@@ -122,7 +122,9 @@ mod tests {
             &broken,
         );
         assert!(
-            msg.starts_with("Your selected fleet could not be loaded: fleet file not found: selected fleet `Ops`"),
+            msg.starts_with(
+                "Your selected team could not be loaded: fleet file not found: selected fleet `Ops`"
+            ),
             "got: {msg}"
         );
         assert!(!msg.contains("session model only"), "got: {msg}");
