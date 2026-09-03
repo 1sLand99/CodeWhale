@@ -2,8 +2,8 @@
 
 use crate::localization::{Locale, MessageId, tr};
 use crate::mcp::{
-    McpManagerSnapshot, McpServerCapabilityMetadata, McpServerSnapshot, format_mcp_tool_description,
-    mcp_display_target,
+    McpManagerSnapshot, McpServerCapabilityMetadata, McpServerSnapshot,
+    format_mcp_tool_description, mcp_display_target,
 };
 use crate::tui::app::App;
 use crate::tui::history::HistoryCell;

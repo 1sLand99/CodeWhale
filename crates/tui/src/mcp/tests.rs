@@ -6898,14 +6898,8 @@ fn mcp_display_target_shows_command_names_only() {
         mcp_display_target("stdio", "./mcp/custom-server --port 8080"),
         "custom-server"
     );
-    assert_eq!(
-        mcp_display_target("stdio", "node server.js"),
-        "node"
-    );
-    assert_eq!(
-        mcp_display_target("stdio", "/usr/local/bin/foo -x"),
-        "foo"
-    );
+    assert_eq!(mcp_display_target("stdio", "node server.js"), "node");
+    assert_eq!(mcp_display_target("stdio", "/usr/local/bin/foo -x"), "foo");
     assert_eq!(
         mcp_display_target("stdio", "C:\\tools\\mcp.exe --stdio"),
         "mcp.exe"

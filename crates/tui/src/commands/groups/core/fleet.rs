@@ -271,9 +271,7 @@ impl RegisterCommand for FleetCmd {
             "setup" | "edit" | "new" => CommandResult::action(AppAction::OpenFleetSetup),
             // Named saved fleets — secondary surface for multi-fleet pick/switch.
             // Deliberately not "list": that verb is the durable ledger (#4022).
-            "fleets" | "saved" | "manage" => {
-                CommandResult::action(AppAction::OpenFleetList)
-            }
+            "fleets" | "saved" | "manage" => CommandResult::action(AppAction::OpenFleetList),
             // The current-session sub-agent projection, named for what it is.
             "workers" | "worker" | "agents" | "subagents" => super::core::subagents(app),
             "help" | "?" => CommandResult::message(help_text()),
@@ -455,7 +453,10 @@ mod tests {
     fn retired_pod_invocations_are_rejected() {
         let mut app = test_app();
         let rejected = crate::commands::execute("/pod", &mut app);
-        assert!(rejected.is_error, "/pod must not dispatch, got: {rejected:?}");
+        assert!(
+            rejected.is_error,
+            "/pod must not dispatch, got: {rejected:?}"
+        );
         assert!(
             rejected
                 .message

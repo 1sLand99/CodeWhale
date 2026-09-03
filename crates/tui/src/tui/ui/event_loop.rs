@@ -4828,12 +4828,10 @@ pub(crate) async fn run_event_loop(
                             // up runs the highlighted row below, through the
                             // same arms clicks use.
                             let rows = crate::tui::underwater::launch_rows_for_app(app);
-                            menu_run_action = Some(
-                                crate::tui::underwater::run_launch_card_row(
-                                    &rows,
-                                    app.launch.menu_selected,
-                                ),
-                            );
+                            menu_run_action = Some(crate::tui::underwater::run_launch_card_row(
+                                &rows,
+                                app.launch.menu_selected,
+                            ));
                         }
                         crate::tui::underwater::LaunchComposerKey::Submit => {
                             let chord = composer_submit_chord(key, app.composer_multiline_mode)

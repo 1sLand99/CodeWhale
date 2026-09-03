@@ -551,10 +551,7 @@ pub(crate) fn restore_message_submit_denial(
 /// the normal `LoadSession` path; a session that vanished behind the card
 /// leaves the card up with a status saying why instead of stranding the
 /// user on an empty stage.
-pub(crate) fn resume_launch_session(
-    app: &mut App,
-    session_id: &str,
-) -> commands::CommandResult {
+pub(crate) fn resume_launch_session(app: &mut App, session_id: &str) -> commands::CommandResult {
     let failed = |app: &mut App, err: &str| {
         app.launch.status = Some(
             app.tr(MessageId::LaunchResumeFailed)
@@ -1197,10 +1194,7 @@ mod launch_resume_tests {
             "a fresh session id was minted"
         );
         assert!(
-            matches!(
-                result.action,
-                Some(AppAction::SyncSession { .. })
-            ),
+            matches!(result.action, Some(AppAction::SyncSession { .. })),
             "the engine syncs the fresh session"
         );
     }

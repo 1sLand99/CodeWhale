@@ -4463,7 +4463,9 @@ pub(crate) fn render_settings_category_strip(
     let mut x = area.x;
     if start > 0 {
         let prev_style = if hovered_nav == Some(NavStep::Previous) {
-            style.marker.patch(crate::tui::menu_style::hovered_row_style())
+            style
+                .marker
+                .patch(crate::tui::menu_style::hovered_row_style())
         } else {
             style.marker
         };
@@ -4513,7 +4515,9 @@ pub(crate) fn render_settings_category_strip(
     if end < labels.len() {
         let marker_x = right.saturating_sub(2);
         let next_style = if hovered_nav == Some(NavStep::Next) {
-            style.marker.patch(crate::tui::menu_style::hovered_row_style())
+            style
+                .marker
+                .patch(crate::tui::menu_style::hovered_row_style())
         } else {
             style.marker
         };
@@ -5689,7 +5693,10 @@ impl ModalView for SubAgentsView {
 
         if self.agents.is_empty() {
             lines.push(Line::from(Span::styled(
-                tr(self.locale, MessageId::SubagentsNoCurrentSessionFleetWorkers),
+                tr(
+                    self.locale,
+                    MessageId::SubagentsNoCurrentSessionFleetWorkers,
+                ),
                 Style::default().fg(palette::TEXT_MUTED),
             )));
             lines.push(Line::from(Span::styled(
@@ -7636,9 +7643,9 @@ api_key_env = "ACME_API_KEY"
             "saved legacy fallback must not surface a row"
         );
         let mut settings = Settings::default();
-        settings.set("default_model", "deepseek-v4-pro").expect(
-            "default_model stays settable through `/set` after the row is gone",
-        );
+        settings
+            .set("default_model", "deepseek-v4-pro")
+            .expect("default_model stays settable through `/set` after the row is gone");
     }
 
     /// Retired rows leave no section behind: sub-agent depth moved into the
@@ -10957,9 +10964,9 @@ pub fn render_tideline_settings_strip(
         None,
     )
     .chips
-        .into_iter()
-        .map(|(rect, _)| rect)
-        .collect()
+    .into_iter()
+    .map(|(rect, _)| rect)
+    .collect()
 }
 
 use ratatui::layout::{Constraint, Layout};

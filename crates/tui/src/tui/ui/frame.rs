@@ -1087,8 +1087,7 @@ pub(crate) fn render(f: &mut Frame, app: &mut App, _config: &Config) -> Option<(
         };
         // The card's clickable rows share the painter's plan geometry, so
         // hover and click rects match painted cells.
-        hitboxes.rows =
-            crate::tui::underwater::tideline_startup_row_hitboxes(stage_area, &startup);
+        hitboxes.rows = crate::tui::underwater::tideline_startup_row_hitboxes(stage_area, &startup);
         let sixel_area =
             crate::tui::underwater::render_tideline_startup(stage_area, f.buffer_mut(), &startup);
         app.launch.sixel_mark_area = if sixel_area.width > 0 {

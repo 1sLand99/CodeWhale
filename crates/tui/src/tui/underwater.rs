@@ -145,8 +145,10 @@ fn launch_recent_entries(app: &App) -> (Vec<LaunchRecentEntry>, bool) {
             } else {
                 raw.to_string()
             };
-            let age =
-                crate::tui::session_picker::format_relative_time(&session.updated_at, app.ui_locale);
+            let age = crate::tui::session_picker::format_relative_time(
+                &session.updated_at,
+                app.ui_locale,
+            );
             let count = tr(app.ui_locale, MessageId::SessionsMessageCountCompact)
                 .replace("{count}", &session.message_count.to_string());
             LaunchRecentEntry {
@@ -184,10 +186,7 @@ pub fn launch_row_click_action(id: &crate::tui::app::LaunchRowId) -> LaunchActio
 
 /// Run the card's highlighted row. Enter on the card is the list's runner;
 /// an untouched list runs nothing.
-pub fn run_launch_card_row(
-    rows: &[LaunchCardRow],
-    menu_selected: Option<usize>,
-) -> LaunchAction {
+pub fn run_launch_card_row(rows: &[LaunchCardRow], menu_selected: Option<usize>) -> LaunchAction {
     let Some(selected) = menu_selected else {
         return LaunchAction::None;
     };
@@ -2028,10 +2027,7 @@ mod launch_contract_tests {
             handle_launch_key(&mut launch, key(KeyCode::F(1), none), Locale::En),
             LaunchAction::Help
         );
-        assert!(
-            launch.composer_focus,
-            "F1 leaves the composer focused"
-        );
+        assert!(launch.composer_focus, "F1 leaves the composer focused");
         for code in [
             KeyCode::Char('n'),
             KeyCode::Char('r'),
@@ -2378,10 +2374,7 @@ mod launch_composer_tests {
             let painted: String = (rect.x..rect.x + rect.width)
                 .map(|x| buf[(x, rect.y)].symbol().to_string())
                 .collect();
-            assert!(
-                !painted.trim().is_empty(),
-                "row hitbox covers empty cells"
-            );
+            assert!(!painted.trim().is_empty(), "row hitbox covers empty cells");
         }
         // Hover paints the shared selection band on exactly the hovered
         // row — the visible response every clickable element owes.
@@ -2393,10 +2386,7 @@ mod launch_composer_tests {
                 .filter(|x| buf[(*x, rect.y)].bg == crate::palette::SELECTION_BG)
                 .count();
             if index == 1 {
-                assert!(
-                    banded > 0,
-                    "the hovered row carries the selection band"
-                );
+                assert!(banded > 0, "the hovered row carries the selection band");
             } else {
                 assert_eq!(banded, 0, "only the hovered row highlights");
             }
@@ -2548,10 +2538,7 @@ mod launch_composer_tests {
 
         // …while F1 help stays launch-owned.
         assert_eq!(
-            handle_launch_composer_key(
-                &mut app,
-                KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE)
-            ),
+            handle_launch_composer_key(&mut app, KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE)),
             LaunchComposerKey::MenuChord
         );
         assert!(app.launch.composer_focus);
@@ -2572,10 +2559,7 @@ mod launch_composer_tests {
             KeyCode::Char('q'),
         ] {
             assert_eq!(
-                handle_launch_composer_key(
-                    &mut app,
-                    KeyEvent::new(code, KeyModifiers::CONTROL)
-                ),
+                handle_launch_composer_key(&mut app, KeyEvent::new(code, KeyModifiers::CONTROL)),
                 LaunchComposerKey::ComposerAuthority,
                 "{code:?} belongs to the composer now"
             );
@@ -3873,7 +3857,12 @@ fn render_launch_card(
                     let detail_x = right_edge.saturating_sub(entry.detail.width() as u16);
                     let label_end = text_x + marker_w + 1 + entry.label.width() as u16 + 1;
                     if detail_x > label_end {
-                        set_span(buf, detail_x, *y, &Span::styled(entry.detail.clone(), row_style));
+                        set_span(
+                            buf,
+                            detail_x,
+                            *y,
+                            &Span::styled(entry.detail.clone(), row_style),
+                        );
                     }
                 }
             }
@@ -4040,8 +4029,7 @@ pub fn tideline_startup_row_hitboxes(
     ) else {
         return Vec::new();
     };
-    plan
-        .rows
+    plan.rows
         .iter()
         .filter_map(|(y, kind)| match kind {
             LaunchCardPlanRow::Interactive(index) => rows.get(*index).map(|row| {
@@ -4252,7 +4240,10 @@ pub fn apply_launch_hitboxes(
     launch.row_hitboxes = hitboxes.rows.clone();
     // Hover must match a painted cell, so a shed row clears it; the
     // keyboard selection is intentionally kept (Enter still runs it).
-    if launch.hovered_row.is_some_and(|hovered| hovered >= launch.row_hitboxes.len()) {
+    if launch
+        .hovered_row
+        .is_some_and(|hovered| hovered >= launch.row_hitboxes.len())
+    {
         launch.hovered_row = None;
     }
 }
