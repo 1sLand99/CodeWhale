@@ -29,7 +29,7 @@ fn draw_stage(width: u16, height: u16) -> String {
             ascii_safe: false,
             locale: Locale::En,
         };
-        let theme_list = TidelineThemeList::new(&UI_THEME, 3).motion(false, true);
+        let theme_list = TidelineThemeList::new(&UI_THEME, 4).motion(false, true);
         let preview = TidelineSettingsPreview {
             active_theme: &UI_THEME,
             candidate: &UI_THEME,

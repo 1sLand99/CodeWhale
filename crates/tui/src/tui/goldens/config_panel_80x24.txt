@@ -14,7 +14,7 @@
    Reasoning background highlight     On                        [x]  SAVED   │  
    Help Expand Groups                 Off                       [ ]  SAVED   │  
    Pin Last Prompt                    On                        [x]  SAVED   │  
-  system | terminal | underwater | dark | light | grayscale |…                  
+  system | terminal | underwater | underwater-retro | dark | light |…           
   Enter or click again: Enter opens choices · Theme: current terminal · saved   
   terminal · applies on save                                                    
   Preview: ▶▶ ask · agent                                                       

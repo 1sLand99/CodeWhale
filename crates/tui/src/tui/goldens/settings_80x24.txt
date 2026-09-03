@@ -2,6 +2,7 @@
   System
   Terminal
   Underwater
+  Underwater Retro
 [ ✓ Blue Stage ]
   Blue Stage Light
   Grayscale

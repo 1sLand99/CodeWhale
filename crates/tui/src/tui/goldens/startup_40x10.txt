@@ -1,7 +1,7 @@
 ⑂ Hmbown/CodeWhale · main               
     ╭──────────────────────────────╮    
     │ ⢠⡞⠛⢂⣀ codewhale              │    
-    │ ⠘⢿⣻⣟⠝ ● 2 MCP servers connec…│    
+    │ ⠘⠿⣿⠍⠉ ● 2 MCP servers connec…│    
     │         New session          │    
     ╰──────────────────────────────╯    
 ╭──────────────────────────────────────╮

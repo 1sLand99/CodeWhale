@@ -15,16 +15,16 @@
                     │ Help Expand Groups                 Off            [ ]   │kind      choice                         
                     │ Pin Last Prompt                    On             [x]   │available not observed this session      
                     │ Tool detail level                  Off            [ ]   │                                         
-                    │ Inline file changes                Full diff      ‹ ›   │system | terminal | underwater | dark |  
-                    │ Output pacing                      auto           ‹ ›   │light | grayscale | catppuccin-mocha |   
-                    │ Cost currency                      usd            ‹ ›   │tokyo-night | dracula | gruvbox-dark |   
-                    │ Transcript spacing                 comfortable    ‹ ›   │claude | matrix | solarized-light | uwu  
-                    │ Tool cards                         compact        ‹ ›   │Enter or click again: Enter opens        
+                    │ Inline file changes                Full diff      ‹ ›   │system | terminal | underwater |         
+                    │ Output pacing                      auto           ‹ ›   │underwater-retro | dark | light |        
+                    │ Cost currency                      usd            ‹ ›   │grayscale | catppuccin-mocha |           
+                    │ Transcript spacing                 comfortable    ‹ ›   │tokyo-night | dracula | gruvbox-dark |   
+                    │ Tool cards                         compact        ‹ ›   │claude | matrix | solarized-light | uwu  
+                    │                                                         │Enter or click again: Enter opens        
                     │                                                         │choices                                  
                     │                                                         │                                         
                     │                                                         │                                         
-                    │                                                         │                                         
-  system | terminal | underwater | dark | light | grayscale | catppuccin-mocha | tokyo-night | dracula |…               
+  system | terminal | underwater | underwater-retro | dark | light | grayscale | catppuccin-mocha | tokyo-night |…      
   Preview: ▶▶ ask · agent                                                                                               
   type=filter, Up/Down=select, Enter/e=edit, Esc/q=close                                                                
                                                                                                                         

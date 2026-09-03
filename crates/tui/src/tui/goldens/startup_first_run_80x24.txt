@@ -6,9 +6,9 @@
                                                                                 
                                                                                 
         ╭──────────────────────────────────────────────────────────────╮        
-        │ ⣠⡾⠛⠷⠄   codewhale v0.9.12                                    │        
-        │ ⣿⣄⣠⣤⣶⠶⡆ ⚠ no model connected · run /provider                 │        
-        │ ⠙⠿⣯⣿⡡⠞    New session                                        │        
+        │ ⢠⡶⠛⠧⠄   codewhale v0.9.12                                    │        
+        │ ⣿⣄⣠⣤⣶⠶⠆ ⚠ no model connected · run /provider                 │        
+        │ ⠘⠻⣿⣗⠡⠊    New session                                        │        
         │         No recent sessions yet — type below to start.        │        
         ╰──────────────────────────────────────────────────────────────╯        
                                                                                 
