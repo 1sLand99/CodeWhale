@@ -1716,7 +1716,7 @@ fn degraded_workflow_receipt_is_terminal_warning_not_running_or_success() {
         .expect("terminal warning status span");
     assert_eq!(
         warning.style.fg,
-        Some(crate::deepseek_theme::active_theme().tool_warning_accent),
+        Some(super::tool_rail_color(ToolStatus::Warning)),
         "degraded receipt must use the terminal warning accent"
     );
     assert!(
@@ -2534,5 +2534,71 @@ fn exploring_cell_status_keeps_the_loudest_terminal_state() {
     assert_eq!(
         ToolCell::Exploring(cell(&[ToolStatus::Success, ToolStatus::Failed])).status(),
         Some(ToolStatus::Failed)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Tool-card ink: rail vs glyph
+// ---------------------------------------------------------------------------
+
+/// The rail is the card border and follows OMP's rule: every status draws a
+/// distinct border. Two statuses sharing a rail is the failure this mapping
+/// exists to prevent — it is how `Hydrated` once sat on the running accent and
+/// read as live work.
+#[test]
+fn tool_rail_is_distinct_for_every_status() {
+    let statuses = [
+        ToolStatus::Running,
+        ToolStatus::Success,
+        ToolStatus::Hydrated,
+        ToolStatus::Warning,
+        ToolStatus::Failed,
+    ];
+    for (i, status) in statuses.iter().enumerate() {
+        for other in &statuses[i + 1..] {
+            assert_ne!(
+                super::tool_rail_color(*status),
+                super::tool_rail_color(*other),
+                "{status:?} and {other:?} draw the same rail"
+            );
+        }
+    }
+}
+
+/// The rail reports lifecycle, the glyph reports identity, and each half of
+/// that split is load-bearing: a settled card must dim its border while
+/// keeping an identifying glyph, a passed verify must not share a glyph with a
+/// finished read, and the two must never disagree about trouble.
+#[test]
+fn rail_and_glyph_split_only_where_the_card_has_settled() {
+    use crate::tui::widgets::tool_card::ToolFamily;
+    for family in [ToolFamily::Read, ToolFamily::Verify] {
+        for status in [ToolStatus::Running, ToolStatus::Warning, ToolStatus::Failed] {
+            assert_eq!(
+                super::tool_rail_color(status),
+                super::tool_glyph_color(status, family),
+                "{status:?} must read the same on the rail and the glyph"
+            );
+        }
+        assert_ne!(
+            super::tool_rail_color(ToolStatus::Success),
+            super::tool_glyph_color(ToolStatus::Success, family),
+            "a settled {family:?} card must dim its border without dimming its glyph"
+        );
+        assert_eq!(
+            super::tool_glyph_color(ToolStatus::Hydrated, family),
+            super::tool_rail_color(ToolStatus::Hydrated),
+            "a hydrated {family:?} card has not succeeded at anything and must not borrow an accent"
+        );
+    }
+    assert_ne!(
+        super::tool_glyph_color(ToolStatus::Success, ToolFamily::Verify),
+        super::tool_glyph_color(ToolStatus::Success, ToolFamily::Read),
+        "a passed verify and a finished read must not share a glyph colour"
+    );
+    assert_eq!(
+        super::tool_glyph_color(ToolStatus::Success, ToolFamily::Read),
+        super::tool_glyph_color(ToolStatus::Running, ToolFamily::Read),
+        "a finished read keeps the accent it wore while running"
     );
 }

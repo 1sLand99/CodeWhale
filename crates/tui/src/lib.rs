@@ -46,7 +46,6 @@ mod continual_harness;
 mod core;
 mod cost_status;
 mod credentials;
-mod deepseek_theme;
 mod dependencies;
 pub mod dispatch_runner;
 mod doctor;
