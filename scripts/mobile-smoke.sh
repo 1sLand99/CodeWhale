@@ -169,7 +169,7 @@ stop_server
 
 PORT=$(pick_port)
 
-log "=== Test Group 3: Binding warnings (0.0.0.0 default) ==="
+log "=== Test Group 3: Binding warnings (loopback default) ==="
 STDOUT_FILE=$(mktemp)
 "$BINARY" serve --port "$PORT" --mobile --insecure > "$STDOUT_FILE" 2>&1 &
 SERVER_PID=$!
@@ -190,10 +190,10 @@ fi
 STDOUT=$(cat "$STDOUT_FILE")
 rm -f "$STDOUT_FILE"
 
-if echo "$STDOUT" | grep -q "0.0.0.0"; then
-    pass "stdout/stderr contains 0.0.0.0 binding warning"
+if echo "$STDOUT" | grep -qi "loopback"; then
+    pass "stdout/stderr contains loopback binding warning"
 else
-    fail "stdout/stderr missing 0.0.0.0 binding warning"
+    fail "stdout/stderr missing loopback binding warning"
 fi
 
 if echo "$STDOUT" | grep -qi "mobile"; then

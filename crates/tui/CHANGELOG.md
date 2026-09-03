@@ -24,6 +24,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `DASHSCOPE_API_KEY` credential, live `/v1/models` discovery. Qwen 3.8
   Flash and Qwen 3.8 Max arrive through the catalog authority — never a
   hard-coded id.
+- Concentrate: first-class opt-in BYOK Responses gateway with live models
+  discovery and typed SSE streaming (#5725).
+- Cloud dispatch: remote runner offloads coding agent tasks to isolated
+  cloud sandboxes with machine token auth and structured job tracking
+  (#5701, #5712).
+- Per-session control socket: config-gated `[control_socket]` table binds
+  `<sessions-dir>/<session-id>/control.sock` per running session, exposing
+  message, interrupt, relaunch, and status JSON-RPC verbs (#5533, #5831).
 
 ### Changed
 
@@ -34,7 +42,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   session / Changelog / Quit with their real chords right-aligned. Enter
   runs the highlighted entry, Up/Down move it, and typing goes straight to
   the composer. The card dissolves on the first keystroke or command
-  (≤240 ms, instant under reduced motion).
+  (≤240 ms, instant under reduced motion) (#5826, #5801, #5815, #5286).
+- The work surface sits under the composer by default, keeping history
+  readable and leaving the stage unencumbered (#5809).
+- Skills command shapes: FEAT-022 command shapes and retained-host
+  validation (#5825, #5829).
 - After the card dissolves, the working screen shows `⑂ branch  path` with
   `⋮ MCP n/m` on the right, the transcript starts with the
   `◆ session_start` receipt (naming the configured session-start hooks),
@@ -116,7 +128,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Native ChatGPT sign-in for the `openai-codex` route: `codewhale auth
   chatgpt` opens a browser PKCE flow and stores refreshable tokens in
   Codewhale-owned credentials — no Codex CLI install required.
-  `/auth chatgpt-revoke` clears them off the event loop (#5784).
+  `/auth chatgpt-revoke` clears them off the event loop (#5784, #5778).
 - MCP servers and plugins can be connected self-serve from the session: a
   unified auth flow with rotation-safe token handling, a spoken authorization
   URL, and catalog refresh when stored credentials stop working (#5747).
@@ -146,7 +158,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Compaction publishes a structured survival contract for session-tree
   journal entry types (`crates/tui/src/compaction/SURVIVAL_CONTRACT.md`) and
   fails closed when the last user round, tool results, `/anchor` text, or
-  checkpoint receipt would vanish (#4394).
+  checkpoint receipt would vanish (#4394, #5782).
 - Internal: `codewhale-config` gains `RouteAuthoritySnapshot`, one immutable
   authority that owns a compiled provider catalog together with the route
   resolver projected from it, so a picker, a readiness view, and an execution

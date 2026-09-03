@@ -693,19 +693,27 @@ fn review_confirmation_in_text(text: &str) -> Option<String> {
     // The confirmation is `/plugin trust demo <64-hex>.<64-hex>` (129 chars).
     // Transcript cards wrap well before that, so a single rendered line no
     // longer holds the token. Join trimmed lines and recover the two digests.
+    // The screen may also contain the typed `/plugin trust demo ` command, so
+    // check all occurrences of marker, not just the first.
     let joined: String = text.lines().map(str::trim).collect();
     let marker = "/plugin trust demo ";
-    let start = joined.find(marker)?;
-    let token: String = joined[start + marker.len()..]
-        .chars()
-        .take_while(|ch| ch.is_ascii_hexdigit() || *ch == '.')
-        .collect();
-    let (content, capability) = token.split_once('.')?;
-    (content.len() == 64
-        && capability.len() == 64
-        && content.chars().all(|ch| ch.is_ascii_hexdigit())
-        && capability.chars().all(|ch| ch.is_ascii_hexdigit()))
-    .then(|| format!("{marker}{content}.{capability}"))
+    for (start, _) in joined.match_indices(marker) {
+        let token: String = joined[start + marker.len()..]
+            .chars()
+            .take_while(|ch| ch.is_ascii_hexdigit() || *ch == '.')
+            .collect();
+        let Some((content, capability)) = token.split_once('.') else {
+            continue;
+        };
+        if content.len() == 64
+            && capability.len() == 64
+            && content.chars().all(|ch| ch.is_ascii_hexdigit())
+            && capability.chars().all(|ch| ch.is_ascii_hexdigit())
+        {
+            return Some(format!("{marker}{content}.{capability}"));
+        }
+    }
+    None
 }
 
 #[cfg(all(unix, feature = "long-running-tests"))]
