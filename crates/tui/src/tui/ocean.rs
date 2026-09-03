@@ -213,6 +213,9 @@ fn color_cache_code(value: Color) -> u32 {
 }
 
 impl OceanColumn {
+    // Eight args mirroring the eight column fields; a params struct would
+    // only rename the call sites without removing a single decision.
+    #[allow(clippy::too_many_arguments)]
     #[must_use]
     pub fn new(
         ramp: OceanRamp,

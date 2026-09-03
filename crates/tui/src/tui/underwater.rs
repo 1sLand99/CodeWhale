@@ -3474,12 +3474,13 @@ fn launch_card_plan(
     let mut show_announcement = announcement;
     let mut content_rows = 1 + u16::from(show_announcement) + plan_rows.len() as u16;
     while available < content_rows + 2 {
-        if let Some(last) = plan_rows.last() {
-            if *last != LaunchCardPlanRow::Interactive(0) {
-                plan_rows.pop();
-                content_rows -= 1;
-                continue;
-            }
+        if plan_rows
+            .last()
+            .is_some_and(|last| *last != LaunchCardPlanRow::Interactive(0))
+        {
+            plan_rows.pop();
+            content_rows -= 1;
+            continue;
         }
         if show_announcement {
             show_announcement = false;
@@ -3794,7 +3795,7 @@ fn render_launch_card(
                     text_x,
                     *y,
                     &Span::styled(
-                        fit(&tr(startup.locale, MessageId::LaunchRecentHeading).into_owned()),
+                        fit(&tr(startup.locale, MessageId::LaunchRecentHeading)),
                         faded(chrome(theme, ChromeInk::MetadataDim), theme, fade),
                     ),
                 );
@@ -3805,7 +3806,7 @@ fn render_launch_card(
                     text_x,
                     *y,
                     &Span::styled(
-                        fit(&tr(startup.locale, MessageId::LaunchNoRecentSessions).into_owned()),
+                        fit(&tr(startup.locale, MessageId::LaunchNoRecentSessions)),
                         faded(chrome(theme, ChromeInk::Metadata), theme, fade),
                     ),
                 );
