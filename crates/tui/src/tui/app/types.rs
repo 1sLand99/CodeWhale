@@ -1017,9 +1017,9 @@ pub enum AppAction {
     OpenExtensions {
         tab: crate::tui::views::extensions::ExtensionsTab,
     },
-    /// Open `/pod` — the saved named-Fleet list (the primary Pod surface).
+    /// Open `/fleet` — the saved named-Fleet list (the primary Fleet surface).
     OpenFleetList,
-    /// Open the `/pod` roster — the saved-party view of the agent team.
+    /// Open the `/fleet` roster — the saved-party view of the agent team.
     OpenFleetRoster,
     /// Open the selected v2 Fleet editor, or legacy profile setup when no
     /// named Fleet is selected.

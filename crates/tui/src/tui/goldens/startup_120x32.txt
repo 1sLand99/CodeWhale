@@ -10,9 +10,9 @@
                                                                                                                         
             ╭──────────────────────────────────────────────────────────────────────────────────────────────╮            
             │         codewhale v0.9.12                                                                    │            
-            │ ⣠⡾⠛⠷⠄   ● 2 MCP servers connected · 1 needs sign-in · run /mcp                               │            
-            │ ⣿⣄⣠⣤⣶⠶⡆   New worktree                                                                ctrl+n │            
-            │ ⠙⠿⣯⣿⡡⠞    Resume session                                                              ctrl+r │            
+            │ ⢠⡶⠛⠧⠄   ● 2 MCP servers connected · 1 needs sign-in · run /mcp                               │            
+            │ ⣿⣄⣠⣤⣶⠶⠆   New worktree                                                                ctrl+n │            
+            │ ⠘⠻⣿⣗⠡⠊    Resume session                                                              ctrl+r │            
             │           Changelog                                                                   ctrl+l │            
             │           Quit                                                                        ctrl+q │            
             ╰──────────────────────────────────────────────────────────────────────────────────────────────╯            

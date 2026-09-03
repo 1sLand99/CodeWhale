@@ -568,6 +568,21 @@ pub struct LaunchState {
     /// Claude Code config was detected on this host (probed once at
     /// construction); drives the launch card's migration notice line.
     pub claude_code_detected: bool,
+    /// Sixel-tier plumbing (`MarkTier::Sixel`), all `None` until used:
+    /// - `sixel_cell_px`: the terminal's cell size in pixels, measured once
+    ///   at startup so the raster encodes to the block's exact pixels.
+    /// - `sixel_terminal_bg`: the probed terminal background, for
+    ///   transparent (`Reset`) theme stages whose ground the terminal owns.
+    /// - `sixel_mark_area`: the block the last launch render reserved, in
+    ///   stage coordinates; reset every frame by the frame renderer.
+    /// - `sixel_emitted`: the live image's block, in the same stage
+    ///   coordinates (identical to screen cells in fullscreen), or `None`
+    ///   when nothing is drawn. Compared against the reservation so the
+    ///   event loop re-emits only on moves and clears on tier exit.
+    pub sixel_cell_px: Option<(u16, u16)>,
+    pub sixel_terminal_bg: Option<Color>,
+    pub sixel_mark_area: Option<Rect>,
+    pub sixel_emitted: Option<Rect>,
 }
 
 /// The launch card's dissolve motion budget. One bounded motion; reduced
@@ -622,6 +637,10 @@ impl LaunchState {
             menu_selected: None,
             dissolve_started_ms: None,
             claude_code_detected,
+            sixel_cell_px: None,
+            sixel_terminal_bg: None,
+            sixel_mark_area: None,
+            sixel_emitted: None,
         }
     }
 
@@ -1255,7 +1274,7 @@ pub type DispatchApplyFn = Box<
 #[allow(clippy::struct_excessive_bools)]
 /// A route change made in-session that the user has not yet decided how to
 /// save. Route changes are temporary by default; persisting them requires an
-/// explicit choice (Update this Pod / Save as a new Pod / Remember as my
+/// explicit choice (Update this Fleet / Save as a new Fleet / Remember as my
 /// default / Keep for this session only).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingRouteSave {
@@ -2399,8 +2418,8 @@ impl App {
         self.screen_mode.uses_alt_screen()
     }
 
-    /// Persist the pending session route as the explicit choice (`/pod save`,
-    /// `/pod save-as`, `/model save-default`). Returns the receipt
+    /// Persist the pending session route as the explicit choice (`/fleet save`,
+    /// `/fleet save-as`, `/model save-default`). Returns the receipt
     /// message naming the exact file written — or an error message when the
     /// write failed. Nothing is ever written without this explicit call.
     pub fn apply_route_save_choice(
@@ -2416,8 +2435,8 @@ impl App {
         match choice {
             RouteSaveChoice::UpdateFleet => {
                 let Some((name, scope)) = pending.fleet.clone() else {
-                    return "Nothing to update — no Pod is selected. Use /pod save-as to \
-                             save this route as a new Pod."
+                    return "Nothing to update — no Fleet is selected. Use /fleet save-as to \
+                             save this route as a new Fleet."
                         .to_string();
                 };
                 match crate::fleet::store::load_fleet_in_scope(&name, scope, &self.workspace) {
@@ -2429,16 +2448,16 @@ impl App {
                         });
                         match save_fleet(&fleet, scope, &self.workspace) {
                             Ok(path) => format!(
-                                "Pod `{}` now runs on {route} — wrote {}",
+                                "Fleet `{}` now runs on {route} — wrote {}",
                                 fleet.name,
                                 path.display()
                             ),
-                            Err(err) => format!("Pod update failed: {err}"),
+                            Err(err) => format!("Fleet update failed: {err}"),
                         }
                     }
                     Err(err) => format!(
-                        "Pod update failed: {err} — the saved Pod may have moved. Use \
-                         /pod save-as to persist the route."
+                        "Fleet update failed: {err} — the saved Fleet may have moved. Use \
+                         /fleet save-as to persist the route."
                     ),
                 }
             }
@@ -2454,7 +2473,7 @@ impl App {
                     display.clone(),
                     Some("Saved from a session route choice.".to_string()),
                 ) else {
-                    return "Could not create the Pod.".to_string();
+                    return "Could not create the Fleet.".to_string();
                 };
                 fleet.operator = Some(FleetOperator {
                     provider: pending.provider_identity.clone(),
@@ -2479,7 +2498,7 @@ impl App {
                             Err(err) => format!(" — selection failed: {err}"),
                         };
                         format!(
-                            "Saved route {route} as new Pod `{}` — wrote {}{selected_note}",
+                            "Saved route {route} as new Fleet `{}` — wrote {}{selected_note}",
                             display,
                             path.display()
                         )
