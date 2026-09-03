@@ -10382,7 +10382,7 @@ fn xai_invalid_owned_generation_blocks_external_and_uses_api_key_fallback() -> R
 
     crate::external_credentials::reset_side_effect_trap();
     assert!(
-        !crate::xai_oauth::credentials_present(&config),
+        !crate::oauth::credentials_present(crate::oauth::OAuthProvider::Xai, &config),
         "an invalid owned generation pointer must not resolve external OAuth"
     );
     assert_eq!(config.deepseek_api_key()?, "fake-xai-cfg-key");

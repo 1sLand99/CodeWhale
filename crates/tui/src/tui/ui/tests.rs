@@ -8140,8 +8140,11 @@ async fn successful_native_xai_oauth_activation_completes_onboarding() {
     app.trust_mode = true;
     let mut engine = mock_engine_handle();
     let mut config = Config::default();
-    let pending =
-        crate::xai_oauth::pending_device_login_for_test("fixture-access", "fixture-refresh");
+    let pending = crate::oauth::pending_login_for_test(
+        crate::oauth::OAuthProvider::Xai,
+        "fixture-access",
+        "fixture-refresh",
+    );
 
     let switched = apply_codewhale_owned_xai_login(
         &mut app,
@@ -8189,7 +8192,11 @@ async fn failed_native_xai_oauth_activation_stays_in_onboarding_recovery() {
     app.onboarding_needs_api_key = true;
     let mut engine = mock_engine_handle();
     let mut config = Config::default();
-    let pending = crate::xai_oauth::pending_device_login_for_test("", "fixture-refresh");
+    let pending = crate::oauth::pending_login_for_test(
+        crate::oauth::OAuthProvider::Xai,
+        "",
+        "fixture-refresh",
+    );
 
     let switched = apply_codewhale_owned_xai_login(
         &mut app,

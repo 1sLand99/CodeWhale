@@ -3073,18 +3073,16 @@ pub(crate) async fn apply_provider_picker_setup_confirmed(
     switched
 }
 
-pub(crate) async fn apply_codewhale_owned_xai_login(
+async fn apply_codewhale_owned_login(
     app: &mut App,
     engine_handle: &mut EngineHandle,
     config: &mut Config,
-    pending: crate::xai_oauth::PendingXaiDeviceLogin,
+    provider: ApiProvider,
+    pending: crate::oauth::PendingOAuthLogin,
     status_prefix: &str,
+    login_kind: &str,
 ) -> bool {
-    match crate::xai_oauth::activate_device_login(
-        pending,
-        app.config_path.as_deref(),
-        Some(&mut *config),
-    ) {
+    match crate::oauth::activate_login(pending, app.config_path.as_deref(), Some(&mut *config)) {
         Ok(activation) => {
             app.status_message = Some(format!(
                 "{status_prefix}; activated {} via {}",
@@ -3096,49 +3094,53 @@ pub(crate) async fn apply_codewhale_owned_xai_login(
         Err(err) => {
             app.add_message(HistoryCell::System {
                 content: format!(
-                    "Failed to finalize {} device login: {err:#}\nProvider unchanged.",
-                    ApiProvider::Xai.as_str()
+                    "Failed to finalize {} {login_kind}: {err:#}\nProvider unchanged.",
+                    provider.as_str()
                 ),
             });
             return false;
         }
     }
 
-    switch_provider(app, engine_handle, config, ApiProvider::Xai, None).await
+    switch_provider(app, engine_handle, config, provider, None).await
+}
+
+pub(crate) async fn apply_codewhale_owned_xai_login(
+    app: &mut App,
+    engine_handle: &mut EngineHandle,
+    config: &mut Config,
+    pending: crate::oauth::PendingOAuthLogin,
+    status_prefix: &str,
+) -> bool {
+    apply_codewhale_owned_login(
+        app,
+        engine_handle,
+        config,
+        ApiProvider::Xai,
+        pending,
+        status_prefix,
+        "device login",
+    )
+    .await
 }
 
 pub(crate) async fn apply_codewhale_owned_chatgpt_login(
     app: &mut App,
     engine_handle: &mut EngineHandle,
     config: &mut Config,
-    pending: crate::chatgpt_oauth::PendingChatgptPkceLogin,
+    pending: crate::oauth::PendingOAuthLogin,
     status_prefix: &str,
 ) -> bool {
-    match crate::chatgpt_oauth::activate_pkce_login(
+    apply_codewhale_owned_login(
+        app,
+        engine_handle,
+        config,
+        ApiProvider::OpenaiCodex,
         pending,
-        app.config_path.as_deref(),
-        Some(&mut *config),
-    ) {
-        Ok(activation) => {
-            app.status_message = Some(format!(
-                "{status_prefix}; activated {} via {}",
-                codewhale_config::quote_os_path(&activation.auth_path),
-                codewhale_config::quote_os_path(&activation.config_path)
-            ));
-            app.api_key_env_only = false;
-        }
-        Err(err) => {
-            app.add_message(HistoryCell::System {
-                content: format!(
-                    "Failed to finalize {} ChatGPT sign-in: {err:#}\nProvider unchanged.",
-                    ApiProvider::OpenaiCodex.as_str()
-                ),
-            });
-            return false;
-        }
-    }
-
-    switch_provider(app, engine_handle, config, ApiProvider::OpenaiCodex, None).await
+        status_prefix,
+        "ChatGPT sign-in",
+    )
+    .await
 }
 
 /// `/auth chatgpt-revoke`. The remote revoke is one blocking HTTP round trip
@@ -3148,7 +3150,11 @@ pub(crate) async fn apply_codewhale_owned_chatgpt_login(
 pub(crate) async fn run_chatgpt_revoke_from_tui(app: &mut App, config: &mut Config) {
     let config_path = app.config_path.clone();
     let outcome = tokio::task::spawn_blocking(move || {
-        crate::chatgpt_oauth::revoke_owned_login(config_path.as_deref(), None)
+        crate::oauth::revoke_owned_login(
+            crate::oauth::OAuthProvider::Chatgpt,
+            config_path.as_deref(),
+            None,
+        )
     })
     .await
     .map_err(|err| anyhow::anyhow!("ChatGPT revoke task was lost: {err}"))

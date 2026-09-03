@@ -27,7 +27,6 @@ mod artifacts;
 mod audit;
 mod auto_reasoning;
 mod automation_manager;
-mod chatgpt_oauth;
 mod child_env;
 mod client;
 pub mod cloud_dispatch;
@@ -163,7 +162,6 @@ mod worker_profile;
 mod working_set;
 mod workspace_discovery;
 mod workspace_trust;
-mod xai_oauth;
 
 use crate::config::{Config, DEFAULT_TEXT_MODEL, MAX_SUBAGENTS, effective_home_dir};
 use crate::eval::{EvalHarness, EvalHarnessConfig, ScenarioStepKind};
@@ -3966,7 +3964,7 @@ fn resolve_credential_diagnostic(config: &Config) -> CredentialDiagnostic {
         && provider == crate::config::ApiProvider::Xai
         && auth_mode
             .as_deref()
-            .is_some_and(crate::xai_oauth::auth_mode_uses_xai_oauth)
+            .is_some_and(crate::oauth::auth_mode_uses_xai_oauth)
     {
         return config
             .external_credential_consent_status(provider)
@@ -4339,7 +4337,7 @@ fn doctor_should_probe_auth(config: &Config) -> bool {
     if provider == crate::config::ApiProvider::Xai
         && auth_mode
             .as_deref()
-            .is_some_and(crate::xai_oauth::auth_mode_uses_xai_oauth)
+            .is_some_and(crate::oauth::auth_mode_uses_xai_oauth)
     {
         return false;
     }
@@ -8141,11 +8139,7 @@ fn run_logout() -> Result<()> {
 
 async fn run_xai_device_auth(config_path: Option<&Path>) -> Result<()> {
     let pending = crate::oauth::login(crate::oauth::OAuthProvider::Xai).await?;
-    let activation = xai_oauth::activate_device_login(
-        xai_oauth::pending_from_unified(pending),
-        config_path,
-        None,
-    )?;
+    let activation = crate::oauth::activate_login(pending, config_path, None)?;
     println!(
         "xAI OAuth is ready; activated {} via {}",
         codewhale_config::quote_os_path(&activation.auth_path),
@@ -8155,10 +8149,8 @@ async fn run_xai_device_auth(config_path: Option<&Path>) -> Result<()> {
 }
 
 async fn run_chatgpt_pkce_auth(config_path: Option<&Path>) -> Result<()> {
-    let pending = crate::oauth::login(crate::oauth::OAuthProvider::Chatgpt)
-        .await
-        .map(chatgpt_oauth::pending_from_unified)?;
-    let activation = chatgpt_oauth::activate_pkce_login(pending, config_path, None)?;
+    let pending = crate::oauth::login(crate::oauth::OAuthProvider::Chatgpt).await?;
+    let activation = crate::oauth::activate_login(pending, config_path, None)?;
     println!(
         "ChatGPT OAuth is ready; activated {} via {}",
         codewhale_config::quote_os_path(&activation.auth_path),
@@ -8168,7 +8160,7 @@ async fn run_chatgpt_pkce_auth(config_path: Option<&Path>) -> Result<()> {
 }
 
 fn run_chatgpt_pkce_revoke(config_path: Option<&Path>) -> Result<()> {
-    chatgpt_oauth::revoke_owned_login(config_path, None)?;
+    crate::oauth::revoke_owned_login(crate::oauth::OAuthProvider::Chatgpt, config_path, None)?;
     println!("Revoked Codewhale-owned ChatGPT tokens. Codex CLI consent is unchanged.");
     Ok(())
 }

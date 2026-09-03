@@ -264,7 +264,7 @@ pub fn capture_product(config: &Config, provider: ApiProvider) -> RouteProduct {
         }
         ApiProvider::Xai => {
             if provider_config.is_some_and(uses_xai_oauth)
-                && crate::xai_oauth::credentials_valid(config)
+                && crate::oauth::credentials_valid(crate::oauth::OAuthProvider::Xai, config)
             {
                 RouteProduct::Subscription("Grok OAuth quota")
             } else {
@@ -826,7 +826,7 @@ fn auth_mode(config: &ProviderConfig) -> Option<String> {
 }
 
 fn uses_xai_oauth(config: &ProviderConfig) -> bool {
-    auth_mode(config).is_some_and(|mode| crate::xai_oauth::auth_mode_uses_xai_oauth(&mode))
+    auth_mode(config).is_some_and(|mode| crate::oauth::auth_mode_uses_xai_oauth(&mode))
 }
 
 fn uses_anthropic_oauth(config: &ProviderConfig) -> bool {
@@ -1891,8 +1891,8 @@ mod tests {
         .expect("secure owned credential directory");
         let scope = format!(
             "{}::{}",
-            crate::xai_oauth::XAI_OIDC_ISSUER,
-            crate::xai_oauth::GROK_OIDC_CLIENT_ID
+            crate::oauth::XAI_OIDC_ISSUER,
+            crate::oauth::GROK_OIDC_CLIENT_ID
         );
         std::fs::write(
             &owned_path,

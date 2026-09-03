@@ -137,7 +137,7 @@ pub(crate) fn resolve_credential_source_with(
         return CredentialResolution::missing(probed);
     }
     if provider == ApiProvider::OpenaiCodex && !config.provider_uses_custom_endpoint(provider) {
-        if crate::chatgpt_oauth::credentials_present(config) {
+        if crate::oauth::credentials_present(crate::oauth::OAuthProvider::Chatgpt, config) {
             return CredentialResolution::found(CredentialSource::OAuth {
                 flow: "ChatGPT".to_string(),
             });
@@ -165,7 +165,7 @@ pub(crate) fn resolve_credential_source_with(
     }
     if provider == ApiProvider::Xai
         && !config.provider_uses_custom_endpoint(provider)
-        && crate::xai_oauth::credentials_present(config)
+        && crate::oauth::credentials_present(crate::oauth::OAuthProvider::Xai, config)
     {
         // xAI supports both API keys and OAuth. A Grok-compatible token file is
         // sufficient, but its absence must fall through to the ordinary API-key

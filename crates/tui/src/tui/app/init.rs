@@ -189,12 +189,20 @@ impl App {
             && effective_auth_config
                 .provider_config_for(ApiProvider::Xai)
                 .and_then(|entry| entry.auth_mode.as_deref())
-                .is_some_and(crate::xai_oauth::auth_mode_uses_xai_oauth)
-            && !crate::xai_oauth::credentials_present(&effective_auth_config);
+                .is_some_and(crate::oauth::auth_mode_uses_xai_oauth)
+            && !crate::oauth::credentials_present(
+                crate::oauth::OAuthProvider::Xai,
+                &effective_auth_config,
+            );
         let xai_dangling_repair_message = if xai_oauth_needs_reauth {
-            if crate::xai_oauth::owned_generation_is_dangling(&effective_auth_config) {
-                match crate::xai_oauth::clear_dangling_xai_oauth_generation(config_path.as_deref())
-                {
+            if crate::oauth::owned_generation_is_dangling(
+                crate::oauth::OAuthProvider::Xai,
+                &effective_auth_config,
+            ) {
+                match crate::oauth::clear_dangling_generation(
+                    crate::oauth::OAuthProvider::Xai,
+                    config_path.as_deref(),
+                ) {
                     Ok(()) => {
                         // Keep the in-memory route consistent with the repaired
                         // persisted file so the running app never reaches for

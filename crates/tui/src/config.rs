@@ -4276,7 +4276,7 @@ impl Config {
             ApiProvider::Xai => (
                 codewhale_config::ProviderKind::Xai,
                 codewhale_config::ExternalCredentialSource::GrokCli,
-                crate::xai_oauth::auth_file_path(),
+                crate::oauth::grok_auth_file_path(),
             ),
             ApiProvider::Deepseek => (
                 codewhale_config::ProviderKind::Deepseek,
@@ -6736,9 +6736,9 @@ impl Config {
             && self
                 .provider_config_for(provider)
                 .is_some_and(provider_config_uses_xai_oauth)
-            && crate::xai_oauth::credentials_present(self)
+            && crate::oauth::credentials_present(crate::oauth::OAuthProvider::Xai, self)
         {
-            return crate::xai_oauth::get_access_token(self);
+            return crate::oauth::get_xai_access_token(self);
         }
 
         // OpenAI Codex (ChatGPT) can read an existing Codex CLI OAuth login
@@ -6983,16 +6983,22 @@ impl Config {
             ApiProvider::OpencodeZen => {
                 anyhow::bail!("{}", missing_provider_api_key_message(provider)?)
             }
-            ApiProvider::OpenaiCodex => anyhow::bail!("{}", crate::oauth::missing_auth_message()),
+            ApiProvider::OpenaiCodex => anyhow::bail!(
+                "{}",
+                crate::oauth::missing_auth_message(crate::oauth::OAuthProvider::Chatgpt)
+            ),
             ApiProvider::Xai => {
                 // Prefer OAuth guidance when auth_mode requests it or Grok CLI
                 // tokens already exist; otherwise show both API-key and OAuth.
                 if self
                     .provider_config_for(provider)
                     .is_some_and(provider_config_uses_xai_oauth)
-                    || crate::xai_oauth::credentials_present(self)
+                    || crate::oauth::credentials_present(crate::oauth::OAuthProvider::Xai, self)
                 {
-                    anyhow::bail!("{}", crate::xai_oauth::missing_auth_message());
+                    anyhow::bail!(
+                        "{}",
+                        crate::oauth::missing_auth_message(crate::oauth::OAuthProvider::Xai)
+                    );
                 }
                 anyhow::bail!(
                     "xAI API key not found. Get a key: https://console.x.ai/\n\
@@ -10269,7 +10275,7 @@ fn provider_config_uses_xai_oauth(config: &ProviderConfig) -> bool {
     config
         .auth_mode
         .as_deref()
-        .is_some_and(crate::xai_oauth::auth_mode_uses_xai_oauth)
+        .is_some_and(crate::oauth::auth_mode_uses_xai_oauth)
 }
 
 /// Whether a base URL points at a loopback/unspecified host, i.e. a local
@@ -11376,7 +11382,7 @@ pub fn active_provider_has_config_api_key(config: &Config) -> bool {
         // A native ChatGPT PKCE login is a Codewhale-owned credential and
         // stands on its own, before any external Codex CLI consent is
         // considered.
-        if crate::chatgpt_oauth::credentials_valid(config) {
+        if crate::oauth::credentials_valid(crate::oauth::OAuthProvider::Chatgpt, config) {
             return true;
         }
         // The persistent Codex login is the OAuth credential file, analogous to
@@ -11535,8 +11541,9 @@ impl Config {
                 && !self.provider_uses_custom_endpoint(ApiProvider::OpenaiCodex),
             "Codex OAuth credentials are only available on the official OpenAI Codex route"
         );
-        if crate::chatgpt_oauth::credentials_valid(self) {
-            let owned = crate::chatgpt_oauth::get_owned_credentials(self)?;
+        if crate::oauth::credentials_valid(crate::oauth::OAuthProvider::Chatgpt, self) {
+            let owned =
+                crate::oauth::get_owned_credentials(crate::oauth::OAuthProvider::Chatgpt, self)?;
             return Ok(crate::oauth::CodexCredentials {
                 access_token: owned.access_token,
                 account_id: owned.account_id,
@@ -12027,7 +12034,7 @@ fn validate_external_credential_before_consent(
             crate::oauth::get_credentials(&grant).map(|_| ())
         }
         codewhale_config::ExternalCredentialSource::GrokCli => {
-            crate::xai_oauth::validate_external_credentials(&grant)
+            crate::oauth::validate_grok_external_credentials(&grant)
         }
         codewhale_config::ExternalCredentialSource::DshCli => {
             crate::dsh_credentials::deepseek_api_key_from_grant(&grant)?

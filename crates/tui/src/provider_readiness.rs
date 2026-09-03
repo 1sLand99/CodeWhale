@@ -124,7 +124,7 @@ pub(crate) fn auth_class_for_provider(
         && official_endpoint
         && auth_mode
             .as_deref()
-            .is_some_and(crate::xai_oauth::auth_mode_uses_xai_oauth)
+            .is_some_and(crate::oauth::auth_mode_uses_xai_oauth)
     {
         return ProviderAuthClass::OAuth;
     }
@@ -272,12 +272,12 @@ pub(crate) fn credential_state_for_provider(
         && official_endpoint
         && auth_mode
             .as_deref()
-            .is_some_and(crate::xai_oauth::auth_mode_uses_xai_oauth);
+            .is_some_and(crate::oauth::auth_mode_uses_xai_oauth);
     if xai_oauth_selected {
         // #5772: `Saved` means a credential was actually found. A surviving
         // consent record whose file is gone or expired resolves below as
         // `ExternalConsent` (dormant) or `MissingLogin`, never as `Saved`.
-        return if crate::xai_oauth::credentials_valid(config)
+        return if crate::oauth::credentials_valid(crate::oauth::OAuthProvider::Xai, config)
             || explicit_provider_credential_present(config, provider)
         {
             CredentialState::Saved

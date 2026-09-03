@@ -587,7 +587,7 @@ impl ProviderDashboardRow {
         let auth_base_url = config.base_url_for_route(provider);
         let xai_oauth_ready = provider == ApiProvider::Xai
             && official_endpoint
-            && crate::xai_oauth::credentials_valid(config);
+            && crate::oauth::credentials_valid(crate::oauth::OAuthProvider::Xai, config);
         let auth_status = if credential_state == CredentialState::ExternalConsent {
             ProviderAuthStatus::OAuthConsented
         } else {
@@ -1312,7 +1312,7 @@ fn xai_oauth_status(
 ) -> Option<ProviderAuthStatus> {
     let oauth_selected = configured
         .and_then(|entry| entry.auth_mode.as_deref())
-        .is_some_and(crate::xai_oauth::auth_mode_uses_xai_oauth);
+        .is_some_and(crate::oauth::auth_mode_uses_xai_oauth);
     if !oauth_selected {
         return None;
     }
@@ -1560,7 +1560,7 @@ pub(crate) fn external_consent_target_for_provider(
         ApiProvider::Xai => (
             codewhale_config::ProviderKind::Xai,
             codewhale_config::ExternalCredentialSource::GrokCli,
-            crate::xai_oauth::auth_file_path(),
+            crate::oauth::grok_auth_file_path(),
         ),
         _ => return None,
     };
