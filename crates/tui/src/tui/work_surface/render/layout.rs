@@ -4,7 +4,9 @@
 use ratatui::layout::Rect;
 
 use crate::tui::app::App;
-use crate::tui::work_surface::model::{self, WorkSurfacePlacement, visible_rows_for_panel};
+use crate::tui::work_surface::model::{
+    self, RailPanel, WorkSurfacePlacement, visible_rows_for_panel,
+};
 
 use super::{progress_shares_goal_row, top_goal_title, top_todo_progress};
 
@@ -62,7 +64,19 @@ pub fn height(app: &mut App, width: u16, terminal_height: u16, rail_budget: u16)
         }
     }
 
-    let rows = visible_rows_for_panel(app);
+    // The strip is something to SHOW, not a fixture: without an explicit
+    // pick it opens only for work — live agents, the to-do list, background
+    // jobs. The persisted `rail_panel` preference (files, context, git,
+    // price…) always has rows to paint, and letting it auto-open made the
+    // dock a permanent band under the composer. It still opens on demand
+    // (cycle, tab click, `/workbar <view>`) and then sticks until Esc.
+    let auto_open =
+        app.work_surface.explicit_view || RailPanel::AUTO_ORDER.contains(&app.work_surface.panel);
+    let rows = if auto_open {
+        visible_rows_for_panel(app)
+    } else {
+        Vec::new()
+    };
     let strip = app.work_surface.effective_placement.is_strip();
     let goal_rows = u16::from(strip && top_goal_title(app).is_some());
     let explicit = app.work_surface.explicit_view;
