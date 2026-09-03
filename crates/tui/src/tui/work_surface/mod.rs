@@ -2743,13 +2743,13 @@ mod tests {
             .next()
             .expect("dock tab row");
 
-        assert!(first_row.contains("tasks"), "{first_row:?}");
-        assert!(first_row.contains("agents"), "{first_row:?}");
-        assert!(!first_row.contains("tasks 3"), "{first_row:?}");
-        assert!(!first_row.contains("agents 1"), "{first_row:?}");
-        assert!(first_row.contains("context"), "{first_row:?}");
+        assert!(first_row.contains("TODO"), "{first_row:?}");
+        assert!(first_row.contains("AGENTS"), "{first_row:?}");
+        assert!(!first_row.contains("TODO 3"), "{first_row:?}");
+        assert!(!first_row.contains("AGENTS 1"), "{first_row:?}");
+        assert!(first_row.contains("CONTEXT"), "{first_row:?}");
         // Shed from the right: price goes before any work view.
-        assert!(!first_row.contains("price"), "{first_row:?}");
+        assert!(!first_row.contains("PRICE"), "{first_row:?}");
     }
 
     #[test]

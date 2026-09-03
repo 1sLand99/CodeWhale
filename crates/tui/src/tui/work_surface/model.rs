@@ -123,6 +123,7 @@ impl RailPanel {
     pub fn parse(value: &str) -> Self {
         match value.trim().to_ascii_lowercase().as_str() {
             "agents" | "subagents" | "sub-agents" => Self::Agents,
+            "tasks" | "todo" | "todos" => Self::Tasks,
             "background" | "shells" | "jobs" => Self::Background,
             "files" | "changes" => Self::Files,
             "notepad" | "notes" => Self::Notepad,
@@ -147,11 +148,24 @@ impl RailPanel {
         }
     }
 
-    /// Tab label. Lowercase on purpose: the dock's grammar is lowercase
-    /// nouns, like the tool rows' lowercase verbs (design §2.11).
+    /// Tab label. CAPS on purpose (founder ruling 2026-09-03): the tabs are
+    /// the dock's primary navigation and lowercase nouns read as status
+    /// text beside them. The plan-step list reads TODO, not TASKS — the
+    /// Background panel already holds running tasks, so TASKS collides
+    /// with it. `as_setting()` stays lowercase — it is the persisted
+    /// value, never a label.
     #[must_use]
     pub const fn title(self) -> &'static str {
-        self.as_setting()
+        match self {
+            Self::Agents => "AGENTS",
+            Self::Tasks => "TODO",
+            Self::Background => "BACKGROUND",
+            Self::Files => "FILES",
+            Self::Notepad => "NOTEPAD",
+            Self::Context => "CONTEXT",
+            Self::Git => "GIT",
+            Self::Price => "PRICE",
+        }
     }
 }
 

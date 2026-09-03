@@ -1,4 +1,4 @@
- agents 1    tasks 3    context    git    price                                ×
+ AGENTS 1    TODO 3    CONTEXT    GIT    PRICE                                 ×
  ▾ Subagents 1                                                                  
  ▸ scout  running  objective for dock-golden-agent                           0s 
                                                                                 
