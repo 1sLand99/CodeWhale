@@ -2,6 +2,7 @@
 
 pub mod activation;
 pub mod agent_plugin;
+pub mod builtin;
 pub mod context;
 pub mod discovery;
 pub mod export;

@@ -1743,7 +1743,7 @@ pub(crate) fn capability_hash_with_policy(
     hash_inventory_with_policy(inventory, policy)
 }
 
-fn hex_digest(bytes: impl AsRef<[u8]>) -> String {
+pub(super) fn hex_digest(bytes: impl AsRef<[u8]>) -> String {
     let bytes = bytes.as_ref();
     let mut output = String::with_capacity(bytes.len() * 2);
     for byte in bytes {

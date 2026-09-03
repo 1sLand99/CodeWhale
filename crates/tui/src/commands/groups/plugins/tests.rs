@@ -113,6 +113,9 @@ fn list_show_validate_are_read_only_and_label_legacy_tools() {
     let _lock = crate::test_support::lock_test_env();
     let root = TempDir::new().unwrap();
     let codewhale_home = root.path().join("home");
+    // A configured user has a home; that is the state in which the built-in
+    // bundle is materialized and listed.
+    fs::create_dir_all(&codewhale_home).unwrap();
     let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", &codewhale_home);
     write_bundle(root.path());
     let (mut app, _temp) = create_test_app(root.path());
@@ -137,7 +140,12 @@ fn list_show_validate_are_read_only_and_label_legacy_tools() {
         assert!(!state_path.exists(), "read-only command wrote plugin state");
     }
     let list = plugins(&mut app, Some("list")).message.unwrap();
-    assert!(list.contains("Plugin bundles (1)"));
+    // The workspace bundle plus the built-in computer-use bundle, which every
+    // binary now carries and which lists disabled until it is reviewed.
+    assert!(list.contains("Plugin bundles (2)"), "{list}");
+    // The renderer escapes markdown, so the hyphen arrives backslashed.
+    assert!(list.contains(r"computer\-use"), "{list}");
+    assert!(list.contains("builtin · not-reviewed"), "{list}");
     assert!(list.contains("disabled"));
     assert!(list.contains("Legacy executable plugin tools (1)"));
 }

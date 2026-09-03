@@ -710,7 +710,17 @@ mod tests {
 
         let discovery = crate::plugins::PluginDiscoveryContext::capture_pre_dotenv();
         let registry = discovery.registry_for_workspace(&workspace);
-        assert!(registry.is_empty());
+        assert!(registry.get("ambient-plugin").is_none());
+        assert!(registry.get("cursor-plugin").is_none());
+        // Only what Codewhale itself ships is present: no ambient root loaded.
+        assert_eq!(
+            registry
+                .list()
+                .iter()
+                .filter(|plugin| plugin.scope != PluginScope::Builtin)
+                .count(),
+            0
+        );
         assert!(!home.join("plugins/state.json").exists());
     }
 }
