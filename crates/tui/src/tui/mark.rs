@@ -1146,7 +1146,7 @@ mod tests {
 
     #[test]
     fn the_positioned_stream_saves_jumps_draws_and_restores() {
-        let sixel = sixel_encode(6, 6, &vec![(1u8, 2u8, 3u8); 36]).expect("encodes");
+        let sixel = sixel_encode(6, 6, &[(1u8, 2u8, 3u8); 36]).expect("encodes");
         let bytes = sixel_positioned_sequence(Rect::new(4, 2, 6, 3), &sixel);
         let text = String::from_utf8(bytes).expect("ASCII stream");
         assert!(text.starts_with("\x1b7\x1b[3;5H\x1bPq"), "{text:?}");
