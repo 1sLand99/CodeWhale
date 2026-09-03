@@ -74,7 +74,7 @@ impl InlineDiffMode {
 /// # Example `~/.codewhale/tui.toml`
 ///
 /// ```toml
-/// theme    = "terminal"    # host-owned background; "dark" | "light" | "grayscale" | ... remain available
+/// theme    = "underwater"    # painted ocean field; "terminal" | "dark" | "light" | "grayscale" | ... remain available
 /// font_size = 14
 ///
 /// [keybinds]
@@ -86,8 +86,9 @@ impl InlineDiffMode {
 #[serde(default)]
 pub struct TuiPrefs {
     /// UI colour theme.
-    /// Default `"terminal"`, which leaves foreground and background to the
-    /// host terminal while retaining ANSI-safe semantic accents.
+    /// Default `"underwater"`, the painted ocean field. `"terminal"` leaves
+    /// foreground and background to the host terminal while retaining
+    /// ANSI-safe semantic accents.
     pub theme: String,
     /// Terminal font size hint forwarded to supporting front-ends (e.g. the
     /// Tauri shell). `0` means "use terminal default". Default `0`.
@@ -100,7 +101,7 @@ pub struct TuiPrefs {
 impl Default for TuiPrefs {
     fn default() -> Self {
         Self {
-            theme: "terminal".to_string(),
+            theme: "underwater".to_string(),
             font_size: 0,
             keybinds: KeybindPrefs::default(),
         }
@@ -392,12 +393,13 @@ pub struct Settings {
     /// ca, de, fr, id, hi, ru, uk.
     /// Every shipped pack holds full `en.json` parity; nothing falls back.
     pub locale: String,
-    /// Named UI theme. `"terminal"` is the fresh-install default and fully
-    /// inherits the host terminal's foreground/background. `"system"`,
-    /// `"dark"`, `"light"`, `"grayscale"`, and the community
-    /// presets: `"catppuccin-mocha"`, `"tokyo-night"`, `"dracula"`,
-    /// `"gruvbox-dark"`. The `background_color` setting still overrides the
-    /// surface color on top of the resolved theme.
+    /// Named UI theme. `"underwater"` is the fresh-install default and paints
+    /// the ocean field. `"terminal"` fully inherits the host terminal's
+    /// foreground/background. `"system"`, `"dark"`, `"light"`,
+    /// `"grayscale"`, and the community presets: `"catppuccin-mocha"`,
+    /// `"tokyo-night"`, `"dracula"`, `"gruvbox-dark"`. The
+    /// `background_color` setting still overrides the surface color on top
+    /// of the resolved theme.
     pub theme: String,
     /// Optional main TUI background color as a 6-digit hex RGB value.
     pub background_color: Option<String>,
@@ -589,7 +591,7 @@ impl Default for Settings {
             show_tool_details: false,
             inline_diffs: "full".to_string(),
             locale: "auto".to_string(),
-            theme: "terminal".to_string(),
+            theme: "underwater".to_string(),
             background_color: None,
             composer_density: "comfortable".to_string(),
             composer_border: true,
@@ -2736,9 +2738,9 @@ fn normalize_synchronized_output(value: &str) -> &str {
 
 fn normalize_settings_theme(value: &str) -> String {
     // A malformed persisted selector must not turn into a painted application
-    // background. Falling back to Terminal preserves the host surface and
-    // ANSI semantics until the user picks an explicit palette.
-    normalize_theme_setting(value).unwrap_or_else(|_| "terminal".to_string())
+    // background. Falling back to the underwater default keeps a single
+    // compiled first-party theme until the user picks an explicit palette.
+    normalize_theme_setting(value).unwrap_or_else(|_| "underwater".to_string())
 }
 
 /// Returns `true` when the active terminal is Ptyxis (the new default
@@ -3803,9 +3805,22 @@ mod tests {
     }
 
     #[test]
+    fn default_settings_resolve_to_the_underwater_theme() {
+        // Slice C: the fresh-install default is the underwater theme, end to
+        // end from `Settings::default()` through theme resolution.
+        let settings = Settings::default();
+        assert_eq!(settings.theme, "underwater");
+        let (name, id, theme) =
+            crate::palette::resolve_theme_setting(&settings.theme, None).expect("default resolves");
+        assert_eq!(id, crate::palette::ThemeId::Underwater);
+        assert_eq!(name, "underwater");
+        assert_eq!(theme.name, "underwater");
+    }
+
+    #[test]
     fn theme_normalizes_supported_values_and_rejects_unknowns() {
         let mut settings = Settings::default();
-        assert_eq!(settings.theme, "terminal");
+        assert_eq!(settings.theme, "underwater");
 
         settings.set("theme", "grayscale").expect("set grayscale");
         assert_eq!(settings.theme, "grayscale");
@@ -5118,7 +5133,7 @@ mod tests {
         let loaded = Settings::load().expect("load settings");
 
         assert_eq!(
-            loaded.theme, "terminal",
+            loaded.theme, "underwater",
             "explicit CODEWHALE_HOME must not inherit ambient legacy settings"
         );
         assert_eq!(
@@ -5233,7 +5248,7 @@ mod tests {
     #[test]
     fn tui_prefs_defaults_inherit_the_terminal_zero_font() {
         let prefs = TuiPrefs::default();
-        assert_eq!(prefs.theme, "terminal");
+        assert_eq!(prefs.theme, "underwater");
         assert_eq!(prefs.font_size, 0);
         assert!(prefs.keybinds.submit.is_none());
         assert!(prefs.keybinds.new_line.is_none());
@@ -5329,7 +5344,10 @@ mod tests {
         std::fs::create_dir_all(&tmp).unwrap();
         let _config_override = EnvVarRestore::set("DEEPSEEK_CONFIG_PATH", tmp.join("config.toml"));
         let prefs = TuiPrefs::load().expect("load should not fail when file absent");
-        assert_eq!(prefs.theme, "terminal", "should fall back to default theme");
+        assert_eq!(
+            prefs.theme, "underwater",
+            "should fall back to default theme"
+        );
         let _ = std::fs::remove_dir_all(&tmp);
     }
 

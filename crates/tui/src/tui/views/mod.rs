@@ -2922,12 +2922,84 @@ impl ConfigView {
         self.hovered_choice = None;
     }
 
-    /// Leave the editor without applying (Esc or the Cancel control).
-    fn cancel_edit(&mut self) {
+    /// Live-preview the edited choice when the edited key is the theme:
+    /// highlighting a theme row applies it session-only (`persist:false`)
+    /// so the surface behind the editor repaints immediately, while only
+    /// Enter/Apply persists. Other keys preview nothing.
+    fn preview_edited_choice(&self) -> ViewAction {
+        let Some(edit) = self.editing.as_ref() else {
+            return ViewAction::None;
+        };
+        if edit.key != "theme" {
+            return ViewAction::None;
+        }
+        let Some(value) = edit
+            .choices
+            .as_ref()
+            .and_then(|choices| choices.get(edit.selected_choice).cloned())
+        else {
+            return ViewAction::None;
+        };
+        ViewAction::Emit(ViewEvent::ConfigUpdated {
+            key: edit.key.clone(),
+            value,
+            persist: false,
+        })
+    }
+
+    /// Leave the editor without applying (Esc or the Cancel control). When
+    /// the theme highlight moved, the live surface already previews the
+    /// highlighted theme, so Esc reverts it to the exact value the editor
+    /// opened with (session-only, mirroring the `/theme` picker rollback).
+    fn cancel_edit(&mut self) -> ViewAction {
+        let revert = self
+            .editing
+            .as_ref()
+            .filter(|edit| edit.key == "theme")
+            .and_then(|edit| {
+                let highlighted = edit.choices.as_ref()?.get(edit.selected_choice)?;
+                (canonical_config_choice(&edit.key, highlighted)
+                    != canonical_config_choice(&edit.key, &edit.original_value))
+                .then(|| ViewEvent::ConfigUpdated {
+                    key: edit.key.clone(),
+                    value: edit.original_value.clone(),
+                    persist: false,
+                })
+            });
         self.editing = None;
         self.status = Some(self.tr(MessageId::ConfigEditCancelled).to_string());
         self.last_mouse_selected = None;
         self.clear_hover();
+        revert.map_or(ViewAction::None, ViewAction::Emit)
+    }
+
+    /// Hover-follow for the editor's choice rows (the global hover rule):
+    /// the pointer highlights the hovered row, painted with the shared
+    /// selected-row style. On the theme editor it also live-previews,
+    /// exactly like ↑/↓.
+    fn hover_edited_choice(&mut self, mouse: MouseEvent) -> ViewAction {
+        let position = Position::new(mouse.column, mouse.row);
+        let hovered = self
+            .last_choice_hitboxes
+            .borrow()
+            .iter()
+            .find_map(|(rect, choice)| rect.contains(position).then_some(*choice));
+        let Some(hovered) = hovered else {
+            return ViewAction::None;
+        };
+        let changed = match self.editing.as_mut() {
+            Some(edit) if edit.selected_choice != hovered => {
+                edit.selected_choice = hovered;
+                true
+            }
+            _ => false,
+        };
+        if changed {
+            self.preview_edited_choice()
+        } else {
+            ViewAction::None
+        }
+>>>>>>> fix/0912-theme-20260902
     }
 
     /// Apply the editor's value (Enter or the Apply control): the selected
@@ -2954,32 +3026,29 @@ impl ConfigView {
 
     fn handle_choice_key(&mut self, key: KeyEvent) -> ViewAction {
         match key.code {
-            KeyCode::Esc => {
-                self.cancel_edit();
-                ViewAction::None
-            }
+            KeyCode::Esc => self.cancel_edit(),
             KeyCode::Enter => self.commit_edit(),
             KeyCode::Up | KeyCode::Left | KeyCode::Char('k') => {
                 self.move_choice(-1);
-                ViewAction::None
+                self.preview_edited_choice()
             }
             KeyCode::Down | KeyCode::Right | KeyCode::Char('j') => {
                 self.move_choice(1);
-                ViewAction::None
+                self.preview_edited_choice()
             }
             KeyCode::PageUp => {
                 self.move_choice(-5);
-                ViewAction::None
+                self.preview_edited_choice()
             }
             KeyCode::PageDown => {
                 self.move_choice(5);
-                ViewAction::None
+                self.preview_edited_choice()
             }
             KeyCode::Home => {
                 if let Some(edit) = self.editing.as_mut() {
                     edit.selected_choice = 0;
                 }
-                ViewAction::None
+                self.preview_edited_choice()
             }
             KeyCode::End => {
                 if let Some(edit) = self.editing.as_mut()
@@ -2987,7 +3056,7 @@ impl ConfigView {
                 {
                     edit.selected_choice = choices.len().saturating_sub(1);
                 }
-                ViewAction::None
+                self.preview_edited_choice()
             }
             KeyCode::Char(digit @ '1'..='9') => {
                 if let Some(edit) = self.editing.as_mut()
@@ -2998,11 +3067,11 @@ impl ConfigView {
                         edit.selected_choice = index;
                     }
                 }
-                ViewAction::None
+                self.preview_edited_choice()
             }
             KeyCode::Char(' ') => {
                 self.move_choice(1);
-                ViewAction::None
+                self.preview_edited_choice()
             }
             _ => ViewAction::None,
         }
@@ -3017,10 +3086,7 @@ impl ConfigView {
             return self.handle_choice_key(key);
         }
         match key.code {
-            KeyCode::Esc => {
-                self.cancel_edit();
-                ViewAction::None
-            }
+            KeyCode::Esc => self.cancel_edit(),
             KeyCode::Enter => self.commit_edit(),
             KeyCode::Backspace => {
                 if let Some(edit) = self.editing.as_mut() {
@@ -3742,8 +3808,15 @@ impl ModalView for ConfigView {
                 .as_ref()
                 .is_some_and(|edit| edit.choices.is_some());
             match mouse.kind {
-                MouseEventKind::ScrollUp if has_choices => self.move_choice(-1),
-                MouseEventKind::ScrollDown if has_choices => self.move_choice(1),
+                MouseEventKind::Moved if has_choices => return self.hover_edited_choice(mouse),
+                MouseEventKind::ScrollUp if has_choices => {
+                    self.move_choice(-1);
+                    return self.preview_edited_choice();
+                }
+                MouseEventKind::ScrollDown if has_choices => {
+                    self.move_choice(1);
+                    return self.preview_edited_choice();
+                }
                 MouseEventKind::Down(MouseButton::Left) => {
                     let position = Position::new(mouse.column, mouse.row);
                     let control = self
@@ -3753,10 +3826,7 @@ impl ModalView for ConfigView {
                         .find_map(|(rect, control)| rect.contains(position).then_some(*control));
                     match control {
                         Some(EditorControl::Apply) => return self.commit_edit(),
-                        Some(EditorControl::Cancel) => {
-                            self.cancel_edit();
-                            return ViewAction::None;
-                        }
+                        Some(EditorControl::Cancel) => return self.cancel_edit(),
                         None => {}
                     }
                     let choice = self
@@ -3764,10 +3834,15 @@ impl ModalView for ConfigView {
                         .borrow()
                         .iter()
                         .find_map(|(rect, choice)| rect.contains(position).then_some(*choice));
-                    if let Some(choice) = choice
-                        && let Some(edit) = self.editing.as_mut()
-                    {
-                        edit.selected_choice = choice;
+                    let picked = match (choice, self.editing.as_mut()) {
+                        (Some(choice), Some(edit)) => {
+                            edit.selected_choice = choice;
+                            true
+                        }
+                        _ => false,
+                    };
+                    if picked {
+                        return self.preview_edited_choice();
                     }
                 }
                 _ => {}
@@ -7892,6 +7967,48 @@ base_url = "https://api.xiaomimimo.com/v1"
         }
     }
 
+    /// Slice C: cell-exact goldens for Edit Theme with the underwater
+    /// default open — title, scope/current lanes, the 14 theme rows, and
+    /// the Apply/Cancel controls. Empty settings mean the editor opens on
+    /// the default theme, so these goldens pin the default end to end.
+    /// Re-bless with `CODEWHALE_BLESS_GOLDENS=1`.
+    #[test]
+    fn edit_theme_matches_goldens_at_blocker_sizes() {
+        let _guard = ConfigSettingsEnvGuard::new("");
+        let app = create_test_app();
+        let mut view = ConfigView::new_for_app(&app);
+        view.focus_key("theme");
+        view.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(
+            view.editing
+                .as_ref()
+                .is_some_and(|edit| edit.key == "theme"),
+            "Enter must open the theme editor"
+        );
+        for (width, height) in [(80u16, 24u16), (120u16, 32u16)] {
+            let rendered = crate::tui::golden_harness::render_golden_text(width, height, |buf| {
+                view.render(Rect::new(0, 0, width, height), buf);
+            });
+            crate::tui::golden_harness::assert_matches_golden(
+                &format!("edit_theme_{width}x{height}"),
+                &trim_golden_rows(&rendered),
+            );
+        }
+    }
+
+    /// Goldens are stored without cell padding: every row is right-trimmed
+    /// and trailing empty rows are dropped, so `git diff --check` stays
+    /// clean.
+    fn trim_golden_rows(text: &str) -> String {
+        let mut rows: Vec<&str> = text.lines().map(str::trim_end).collect();
+        while rows.last().is_some_and(|row| row.is_empty()) {
+            rows.pop();
+        }
+        let mut out = rows.join("\n");
+        out.push('\n');
+        out
+    }
+
     /// The settings screen is a projection of the schema: its rail tabs, the
     /// group headings inside them, and the row order are the schema's
     /// declaration order, not a second table's. This is the one table test
@@ -9821,6 +9938,181 @@ context_window = 262144
         let dump = render_dump(&view, 120, 32);
         let head: String = expected.chars().take(20).collect();
         assert!(dump.contains(&head), "source names the override:\n{dump}");
+    }
+
+    /// Slice C: Edit Theme live preview — highlighting a theme row emits a
+    /// session-only `ConfigUpdated` (the surface repaints immediately) while
+    /// only Enter/Apply persists; Esc reverts to the opening value.
+    #[test]
+    fn edit_theme_highlight_previews_without_persisting_and_esc_reverts() {
+        let _guard = ConfigSettingsEnvGuard::new("theme = \"terminal\"\n");
+        let app = create_test_app();
+        let mut view = ConfigView::new_for_app(&app);
+        view.focus_key("theme");
+        let key = |view: &mut ConfigView, code: KeyCode| {
+            view.handle_key(KeyEvent::new(code, KeyModifiers::NONE))
+        };
+        assert!(matches!(key(&mut view, KeyCode::Enter), ViewAction::None));
+        assert!(
+            view.editing
+                .as_ref()
+                .is_some_and(|edit| edit.key == "theme"),
+            "Enter must open the theme editor"
+        );
+
+        // ↓ highlights underwater: preview (persist:false), editor stays open.
+        match key(&mut view, KeyCode::Down) {
+            ViewAction::Emit(ViewEvent::ConfigUpdated {
+                key,
+                value,
+                persist,
+            }) => {
+                assert_eq!(key, "theme");
+                assert_eq!(value, "underwater");
+                assert!(!persist, "highlighting must not persist");
+            }
+            other => panic!("highlight must preview, got {other:?}"),
+        }
+        assert!(view.editing.is_some(), "preview keeps the editor open");
+
+        // Esc reverts the live surface to the opening value, session-only.
+        match key(&mut view, KeyCode::Esc) {
+            ViewAction::Emit(ViewEvent::ConfigUpdated {
+                key,
+                value,
+                persist,
+            }) => {
+                assert_eq!(key, "theme");
+                assert_eq!(value, "terminal");
+                assert!(!persist, "revert must not persist");
+            }
+            other => panic!("esc must revert the preview, got {other:?}"),
+        }
+        assert!(view.editing.is_none());
+    }
+
+    /// Slice C: Enter/Apply in Edit Theme persists the highlighted theme.
+    #[test]
+    fn edit_theme_enter_persists_the_highlighted_theme() {
+        let _guard = ConfigSettingsEnvGuard::new("theme = \"terminal\"\n");
+        let app = create_test_app();
+        let mut view = ConfigView::new_for_app(&app);
+        view.focus_key("theme");
+        let key = |view: &mut ConfigView, code: KeyCode| {
+            view.handle_key(KeyEvent::new(code, KeyModifiers::NONE))
+        };
+        assert!(matches!(key(&mut view, KeyCode::Enter), ViewAction::None));
+        let _ = key(&mut view, KeyCode::Down);
+        match key(&mut view, KeyCode::Enter) {
+            ViewAction::Emit(ViewEvent::ConfigUpdated {
+                key,
+                value,
+                persist,
+            }) => {
+                assert_eq!(key, "theme");
+                assert_eq!(value, "underwater");
+                assert!(persist, "Apply must persist");
+            }
+            other => panic!("enter must persist the highlight, got {other:?}"),
+        }
+        assert!(view.editing.is_none());
+    }
+
+    /// Slice C: Esc without moving the highlight previews nothing and
+    /// reverts nothing.
+    #[test]
+    fn edit_theme_esc_without_preview_is_silent() {
+        let _guard = ConfigSettingsEnvGuard::new("theme = \"terminal\"\n");
+        let app = create_test_app();
+        let mut view = ConfigView::new_for_app(&app);
+        view.focus_key("theme");
+        let key = |view: &mut ConfigView, code: KeyCode| {
+            view.handle_key(KeyEvent::new(code, KeyModifiers::NONE))
+        };
+        assert!(matches!(key(&mut view, KeyCode::Enter), ViewAction::None));
+        assert!(
+            matches!(key(&mut view, KeyCode::Esc), ViewAction::None),
+            "no preview happened, so there is nothing to revert"
+        );
+    }
+
+    /// Slice C: live preview is theme-only — other choice editors keep
+    /// their silent highlight behavior.
+    #[test]
+    fn edit_choice_highlight_previews_only_the_theme_key() {
+        let _guard = ConfigSettingsEnvGuard::new("");
+        let app = create_test_app();
+        let mut view = ConfigView::new_for_app(&app);
+        view.focus_key("default_mode");
+        let key = |view: &mut ConfigView, code: KeyCode| {
+            view.handle_key(KeyEvent::new(code, KeyModifiers::NONE))
+        };
+        assert!(matches!(key(&mut view, KeyCode::Enter), ViewAction::None));
+        assert!(
+            view.editing
+                .as_ref()
+                .is_some_and(|edit| edit.key == "default_mode"),
+            "Enter must open the default_mode editor"
+        );
+        assert!(
+            matches!(key(&mut view, KeyCode::Down), ViewAction::None),
+            "non-theme highlight must stay silent"
+        );
+        assert!(
+            matches!(key(&mut view, KeyCode::Esc), ViewAction::None),
+            "no preview means no revert"
+        );
+    }
+
+    /// Slice C (global hover rule): hovering an Edit Theme choice row
+    /// highlights it and live-previews; hovering the same row again is
+    /// silent.
+    #[test]
+    fn edit_theme_hover_highlights_and_previews() {
+        let _guard = ConfigSettingsEnvGuard::new("theme = \"terminal\"\n");
+        let app = create_test_app();
+        let mut view = ConfigView::new_for_app(&app);
+        view.focus_key("theme");
+        view.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let area = Rect::new(0, 0, 120, 32);
+        let mut buf = Buffer::empty(area);
+        view.render(area, &mut buf);
+        let hover = |view: &mut ConfigView, column: u16, row: u16| {
+            view.handle_mouse(MouseEvent {
+                kind: MouseEventKind::Moved,
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            })
+        };
+        // Choice index 2 is underwater (system, terminal, underwater, …).
+        let (rect, _) = view
+            .last_choice_hitboxes
+            .borrow()
+            .iter()
+            .copied()
+            .find(|(_, idx)| *idx == 2)
+            .expect("rendered underwater hitbox");
+        match hover(&mut view, rect.x, rect.y) {
+            ViewAction::Emit(ViewEvent::ConfigUpdated {
+                key,
+                value,
+                persist,
+            }) => {
+                assert_eq!(key, "theme");
+                assert_eq!(value, "underwater");
+                assert!(!persist, "hover preview must not persist");
+            }
+            other => panic!("hover must preview, got {other:?}"),
+        }
+        assert!(
+            matches!(hover(&mut view, rect.x, rect.y), ViewAction::None),
+            "hovering the highlighted row is silent"
+        );
+        assert!(
+            matches!(hover(&mut view, 0, 0), ViewAction::None),
+            "hovering outside every row is silent"
+        );
     }
 
     /// P1.3: at 40 columns every category is reachable with the pointer alone

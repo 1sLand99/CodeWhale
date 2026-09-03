@@ -309,8 +309,8 @@ impl App {
         // the fallback's switch, honored only when bracketed paste is off.
         let use_paste_burst_detection = settings.paste_burst_detection && !use_bracketed_paste;
         // Resolve the named theme from settings; unknown values were already
-        // normalised to "system" in Settings::load. The background_color
-        // setting still overlays on top.
+        // normalised to the underwater default in Settings::load. The
+        // background_color setting still overlays on top.
         let background_color_override = settings
             .background_color
             .as_deref()

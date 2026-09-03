@@ -192,9 +192,9 @@ fn theme_options(current_name: &str) -> Vec<SettingOption> {
                 .help("Pick a theme with live preview")
                 .values(SettingValues::new(
                     Cow::Owned(current.clone()),
-                    // A reset returns to the host-owned terminal surface,
-                    // not a detected palette that can repaint it.
-                    Cow::Borrowed("terminal"),
+                    // A reset returns to the underwater default, not a
+                    // detected palette that can repaint it.
+                    Cow::Borrowed("underwater"),
                     Cow::Borrowed(name),
                 ))
                 .availability(SettingAvailability::Available)
@@ -216,6 +216,24 @@ impl ModalView for ThemePickerView {
 
     fn handle_mouse(&mut self, mouse: MouseEvent) -> ViewAction {
         match mouse.kind {
+            MouseEventKind::Moved => {
+                // Hover-follow with live preview: the pointer highlights a
+                // row exactly like ↑/↓ does, so the surface behind the modal
+                // repaints on hover and a later Enter persists the hovered
+                // theme. Returning the preview event (not None) is what makes
+                // the highlight repaint immediately.
+                let hovered = self.row_hitboxes.borrow().iter().find_map(|(rect, idx)| {
+                    rect.contains(ratatui::layout::Position::new(mouse.column, mouse.row))
+                        .then_some(*idx)
+                });
+                match hovered {
+                    Some(idx) if self.controller.selected_source_index() != Some(idx) => {
+                        let nav = self.controller.select_source_index(idx);
+                        self.action_from_nav(nav)
+                    }
+                    _ => ViewAction::None,
+                }
+            }
             MouseEventKind::ScrollUp => {
                 self.last_mouse_selected = None;
                 self.move_up()
@@ -477,6 +495,49 @@ mod tests {
     }
 
     #[test]
+    fn hover_moves_highlight_and_previews_without_persisting() {
+        let mut v = ThemePickerView::new("system".to_string());
+        let area = Rect::new(0, 0, 100, 30);
+        let mut buf = Buffer::empty(area);
+        v.render(area, &mut buf);
+        let underwater_source = v
+            .controller
+            .options()
+            .iter()
+            .position(|option| option.id.as_ref() == ThemeId::Underwater.name())
+            .expect("Underwater row");
+        let (rect, idx) = v
+            .row_hitboxes
+            .borrow()
+            .iter()
+            .copied()
+            .find(|(_, source)| *source == underwater_source)
+            .expect("rendered Underwater hitbox");
+        let hover = MouseEvent {
+            kind: MouseEventKind::Moved,
+            column: rect.x,
+            row: rect.y,
+            modifiers: KeyModifiers::NONE,
+        };
+        // Hovering a new row highlights it and previews (persist:false),
+        // exactly like keyboard navigation.
+        let action = v.handle_mouse(hover);
+        assert!(matches!(action, ViewAction::Emit(_)));
+        assert_eq!(selected_values(&action), Some(("underwater", false)));
+        assert_eq!(v.selected(), idx);
+        // Hovering the already-highlighted row is a no-op.
+        assert!(matches!(v.handle_mouse(hover), ViewAction::None));
+        // Hovering outside every row is a no-op.
+        let outside = MouseEvent {
+            kind: MouseEventKind::Moved,
+            column: 99,
+            row: 29,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert!(matches!(v.handle_mouse(outside), ViewAction::None));
+    }
+
+    #[test]
     fn arrow_navigation_wraps_at_picker_edges() {
         let mut v = ThemePickerView::new("system".to_string());
         let last = SELECTABLE_THEMES.last().unwrap();
@@ -703,6 +764,37 @@ mod tests {
         assert_eq!(v.controller.selected_id(), Some("dracula"));
         // One row per selectable theme: no modifier rows beside them.
         assert_eq!(v.controller.visible().len(), SELECTABLE_THEMES.len());
+    }
+
+    /// Goldens are stored without cell padding: every row is right-trimmed
+    /// and trailing empty rows are dropped, so `git diff --check` stays
+    /// clean.
+    fn trim_golden_rows(text: &str) -> String {
+        let mut rows: Vec<&str> = text.lines().map(str::trim_end).collect();
+        while rows.last().is_some_and(|row| row.is_empty()) {
+            rows.pop();
+        }
+        let mut out = rows.join("\n");
+        out.push('\n');
+        out
+    }
+
+    /// Slice C: cell-exact goldens for the picker surface with the default
+    /// theme selected — 14 rows plus the preview footer. A visual change
+    /// that cannot show as a golden diff did not happen. Re-bless with
+    /// `CODEWHALE_BLESS_GOLDENS=1`.
+    #[test]
+    fn theme_picker_matches_goldens_at_blocker_sizes() {
+        use crate::tui::golden_harness::{assert_matches_golden, render_golden_text};
+        for (w, h) in [(80u16, 24u16), (120u16, 32u16)] {
+            let rendered = render_golden_text(w, h, |buf| {
+                ThemePickerView::new("underwater".to_string()).render(Rect::new(0, 0, w, h), buf);
+            });
+            assert_matches_golden(
+                &format!("theme_picker_{w}x{h}"),
+                &trim_golden_rows(&rendered),
+            );
+        }
     }
 }
 
