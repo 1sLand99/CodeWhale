@@ -1155,9 +1155,6 @@ pub(crate) async fn apply_command_result(
     engine_handle: &mut EngineHandle,
     task_manager: &SharedTaskManager,
     config: &mut Config,
-    #[cfg_attr(not(feature = "web"), allow(unused_variables))] web_config_session: &mut Option<
-        WebConfigSession,
-    >,
     result: commands::CommandResult,
 ) -> Result<bool> {
     // These two actions await participant inference inline on the UI event
@@ -1778,73 +1775,6 @@ pub(crate) async fn apply_command_result(
             AppAction::SetAdvisorEnabled { enabled } => {
                 let _ = engine_handle.send(Op::SetAdvisorEnabled { enabled }).await;
             }
-            AppAction::OpenConfigEditor(mode) => match mode {
-                ConfigUiMode::Native => {
-                    if app.view_stack.top_kind() != Some(ModalKind::Config) {
-                        app.view_stack.push(ConfigView::new_for_app(app));
-                    }
-                }
-                ConfigUiMode::Tui => {
-                    pause_terminal(
-                        terminal,
-                        app.use_alt_screen(),
-                        app.use_mouse_capture,
-                        app.use_bracketed_paste,
-                    )?;
-                    let editor_result = config_ui::run_tui_editor(app, config)
-                        .and_then(|doc| config_ui::apply_document(doc, app, config, true));
-                    resume_terminal(
-                        terminal,
-                        app.use_alt_screen(),
-                        app.use_mouse_capture,
-                        app.use_bracketed_paste,
-                        app.synchronized_output_enabled,
-                    )?;
-                    match editor_result {
-                        Ok(outcome) => {
-                            if outcome.requires_engine_sync {
-                                apply_model_and_compaction_update(
-                                    engine_handle,
-                                    app.compaction_config(),
-                                    app.mode,
-                                    app.active_route_limits,
-                                )
-                                .await;
-                            }
-                            app.add_message(HistoryCell::System {
-                                content: outcome.final_message.clone(),
-                            });
-                            app.status_message = Some(outcome.final_message);
-                        }
-                        Err(err) => {
-                            app.add_message(HistoryCell::System {
-                                content: format!("Config UI failed: {err}"),
-                            });
-                        }
-                    }
-                }
-                ConfigUiMode::Web => {
-                    #[cfg(feature = "web")]
-                    {
-                        let session = config_ui::start_web_editor(app, config).await?;
-                        let url = format!("http://{}", session.addr);
-                        let open_err = config_ui::open_browser(&url).err();
-                        if let Some(err) = open_err {
-                            app.add_message(HistoryCell::System {
-                                content: format!("Failed to open browser automatically: {err}"),
-                            });
-                        }
-                        app.status_message = Some(format!("web ui listen on: {url}"));
-                        *web_config_session = Some(session);
-                    }
-                    #[cfg(not(feature = "web"))]
-                    {
-                        app.add_message(HistoryCell::System {
-                            content: "This build does not include the web config UI.".to_string(),
-                        });
-                    }
-                }
-            },
             AppAction::OpenConfigView => {
                 if app.view_stack.top_kind() != Some(ModalKind::Config) {
                     app.view_stack.push(ConfigView::new_for_app(app));

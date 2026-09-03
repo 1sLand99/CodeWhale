@@ -8235,30 +8235,34 @@ base_url = "https://api.xiaomimimo.com/v1"
     fn every_persisted_settings_field_is_declared_in_the_schema() {
         use crate::settings::PinnedModel;
 
-        let mut settings = Settings::default();
         // Options serialize as absent when None; force them present so the
         // table below names every key settings.toml can hold.
-        settings.background_color = Some("#1a1b26".to_string());
-        settings.default_provider = Some("deepseek".to_string());
-        settings.default_model = Some("deepseek-v4-pro".to_string());
-        settings.reasoning_effort = Some("medium".to_string());
-        settings.permission_posture = Some("ask".to_string());
-        settings.sandbox_mode = Some("read-only".to_string());
-        settings.provider_models = Some(std::collections::HashMap::from([(
-            "deepseek".to_string(),
-            "deepseek-v4-pro".to_string(),
-        )]));
-        settings.enabled_models = Some(std::collections::HashMap::from([(
-            "deepseek".to_string(),
-            vec!["deepseek-v4-pro".to_string()],
-        )]));
-        settings.pinned_models = vec![PinnedModel {
-            provider: "deepseek".to_string(),
-            model: "deepseek-v4-pro".to_string(),
-            label: None,
-        }];
-        settings.behavioral_tip_impressions =
-            std::collections::BTreeMap::from([("probe".to_string(), 1u8)]);
+        let settings = Settings {
+            background_color: Some("#1a1b26".to_string()),
+            default_provider: Some("deepseek".to_string()),
+            default_model: Some("deepseek-v4-pro".to_string()),
+            reasoning_effort: Some("medium".to_string()),
+            permission_posture: Some("ask".to_string()),
+            sandbox_mode: Some("read-only".to_string()),
+            provider_models: Some(std::collections::HashMap::from([(
+                "deepseek".to_string(),
+                "deepseek-v4-pro".to_string(),
+            )])),
+            enabled_models: Some(std::collections::HashMap::from([(
+                "deepseek".to_string(),
+                vec!["deepseek-v4-pro".to_string()],
+            )])),
+            pinned_models: vec![PinnedModel {
+                provider: "deepseek".to_string(),
+                model: "deepseek-v4-pro".to_string(),
+                label: None,
+            }],
+            behavioral_tip_impressions: std::collections::BTreeMap::from([(
+                "probe".to_string(),
+                1u8,
+            )]),
+            ..Settings::default()
+        };
         let table = toml::Value::try_from(&settings)
             .expect("settings serialize")
             .as_table()

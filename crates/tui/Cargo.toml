@@ -12,11 +12,7 @@ default-run = "codewhale-tui"
 workspace = true
 
 [features]
-default = ["tui", "json", "toml"]
-tui = ["dep:schemaui", "schemaui/tui", "json", "toml"]
-web = ["dep:schemaui", "schemaui/web", "json", "toml"]
-json = ["schemaui/json"]
-toml = ["schemaui/toml"]
+default = []
 long-running-tests = []
 
 [lib]
@@ -44,7 +40,6 @@ codewhale-telemetry = { path = "../telemetry", version = "0.9.11" }
 codewhale-tools = { path = "../tools", version = "0.9.11" }
 codewhale-workflow = { path = "../workflow", version = "0.9.11" }
 codewhale-workflow-js = { path = "../workflow-js", version = "0.9.11" }
-schemaui = { version = "0.12.0", default-features = false, optional = true }
 async-stream = "0.3.6"
 async-trait.workspace = true
 base64 = "0.22.1"

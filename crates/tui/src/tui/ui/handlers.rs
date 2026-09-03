@@ -883,7 +883,6 @@ pub(crate) async fn handle_config_updated(
     config: &mut Config,
     task_manager: &SharedTaskManager,
     engine_handle: &mut EngineHandle,
-    web_config_session: &mut Option<WebConfigSession>,
     key: String,
     value: String,
     persist: bool,
@@ -920,17 +919,7 @@ pub(crate) async fn handle_config_updated(
     ) {
         app.force_next_full_repaint = true;
     }
-    if apply_command_result(
-        terminal,
-        app,
-        engine_handle,
-        task_manager,
-        config,
-        web_config_session,
-        result,
-    )
-    .await?
-    {
+    if apply_command_result(terminal, app, engine_handle, task_manager, config, result).await? {
         return Ok(true);
     }
 
@@ -956,7 +945,6 @@ async fn handle_theme_selection_updated(
     config: &mut Config,
     task_manager: &SharedTaskManager,
     engine_handle: &mut EngineHandle,
-    web_config_session: &mut Option<WebConfigSession>,
     theme: String,
     persist: bool,
 ) -> Result<bool> {
@@ -967,17 +955,7 @@ async fn handle_theme_selection_updated(
     // The theme owns the shell paint and must bypass ratatui's incremental
     // cell diff, including an Esc rollback.
     app.force_next_full_repaint = true;
-    if apply_command_result(
-        terminal,
-        app,
-        engine_handle,
-        task_manager,
-        config,
-        web_config_session,
-        result,
-    )
-    .await?
-    {
+    if apply_command_result(terminal, app, engine_handle, task_manager, config, result).await? {
         return Ok(true);
     }
     refresh_config_view_if_open(app, "theme");
@@ -991,7 +969,6 @@ pub(crate) async fn handle_view_events(
     config: &mut Config,
     task_manager: &SharedTaskManager,
     engine_handle: &mut EngineHandle,
-    web_config_session: &mut Option<WebConfigSession>,
     events: Vec<ViewEvent>,
 ) -> Result<bool> {
     for event in events {
@@ -1004,7 +981,6 @@ pub(crate) async fn handle_view_events(
                         engine_handle,
                         task_manager,
                         config,
-                        &mut *web_config_session,
                         &command,
                     )
                     .await?
@@ -1290,7 +1266,6 @@ pub(crate) async fn handle_view_events(
                     config,
                     task_manager,
                     engine_handle,
-                    web_config_session,
                     key,
                     value,
                     persist,
@@ -1307,7 +1282,6 @@ pub(crate) async fn handle_view_events(
                     config,
                     task_manager,
                     engine_handle,
-                    web_config_session,
                     theme,
                     persist,
                 )
@@ -2220,7 +2194,6 @@ pub(crate) async fn handle_view_events(
                     engine_handle,
                     task_manager,
                     config,
-                    &mut *web_config_session,
                     &command,
                 )
                 .await?
@@ -2262,7 +2235,6 @@ pub(crate) fn handle_view_events_boxed<'a>(
     config: &'a mut Config,
     task_manager: &'a SharedTaskManager,
     engine_handle: &'a mut EngineHandle,
-    web_config_session: &'a mut Option<WebConfigSession>,
     events: Vec<ViewEvent>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<bool>> + 'a>> {
     Box::pin(async move {
@@ -2279,7 +2251,6 @@ pub(crate) fn handle_view_events_boxed<'a>(
                         config,
                         task_manager,
                         engine_handle,
-                        web_config_session,
                         key,
                         value,
                         persist,
@@ -2296,7 +2267,6 @@ pub(crate) fn handle_view_events_boxed<'a>(
                         config,
                         task_manager,
                         engine_handle,
-                        web_config_session,
                         theme,
                         persist,
                     )
@@ -2312,7 +2282,6 @@ pub(crate) fn handle_view_events_boxed<'a>(
                         config,
                         task_manager,
                         engine_handle,
-                        web_config_session,
                         vec![other],
                     ))
                     .await?

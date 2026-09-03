@@ -17,7 +17,6 @@ use crate::config::{
     ApiProvider, Config, DEFAULT_OPENROUTER_MODEL, DEFAULT_TEXT_MODEL, DEFAULT_ZAI_MODEL,
     ProviderConfig, ProvidersConfig,
 };
-use crate::config_ui::{self, WebConfigSession, WebConfigSessionEvent};
 use crate::core::engine::mock_engine_handle;
 use crate::tui::active_cell::ActiveCell;
 use crate::tui::app::{ReasoningEffort, ToolDetailRecord};
@@ -37,6 +36,7 @@ use crate::tui::shell_key_routing::{
     Focus, SHELL_BINDINGS, ShellBindingId, is_permission_cycle_shortcut,
 };
 use crate::tui::ui_text::truncate_line_to_width;
+use crate::tui::views::ConfigView;
 use crate::tui::views::{HelpView, ModalView, ViewAction};
 use crate::working_set::Workspace;
 use crossterm::event::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
@@ -7119,38 +7119,19 @@ fn apply_loaded_session_updates_current_workspace_display() {
     assert!(result.action.is_none());
 }
 
-#[tokio::test]
-async fn drain_web_config_events_applies_draft_without_closing_session() {
-    let mut app = create_test_app();
-    let mut config = Config::default();
-    let engine = mock_engine_handle();
-    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-    let doc = config_ui::build_document(&app, &config).expect("document");
-    tx.send(WebConfigSessionEvent::Draft(doc))
-        .expect("send draft");
-    let mut session = Some(WebConfigSession::for_test(rx));
-
-    let keep = drain_web_config_events(&mut session, &mut app, &mut config, &engine.handle).await;
-
-    assert!(keep);
-    assert!(session.is_some());
-}
-
-#[tokio::test]
-async fn drain_web_config_events_closes_session_after_commit() {
-    let _config_env = ConfigPathEnvGuard::new();
-    let mut app = create_test_app();
-    let mut config = Config::default();
-    let engine = mock_engine_handle();
-    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-    let doc = config_ui::build_document(&app, &config).expect("document");
-    tx.send(WebConfigSessionEvent::Committed(doc))
-        .expect("send commit");
-    let mut session = Some(WebConfigSession::for_test(rx));
-
-    let keep = drain_web_config_events(&mut session, &mut app, &mut config, &engine.handle).await;
-
-    assert!(!keep);
+#[test]
+fn config_view_is_the_only_settings_surface() {
+    // The schemaui TUI/web editors are gone: the canonical ConfigView owns
+    // settings edits. It opens, takes a filter keystroke, and keeps it.
+    let app = create_test_app();
+    let mut view = ConfigView::new_for_app(&app);
+    for ch in "theme".chars() {
+        let _ = view.handle_key(KeyEvent::new(
+            crossterm::event::KeyCode::Char(ch),
+            crossterm::event::KeyModifiers::NONE,
+        ));
+    }
+    assert_eq!(view.filter_query(), "theme");
 }
 
 #[test]

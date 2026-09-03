@@ -957,7 +957,6 @@ pub enum AppAction {
         workspace: PathBuf,
         mode: AppMode,
     },
-    OpenConfigEditor(ConfigUiMode),
     OpenConfigView,
     /// Open the native git worktree manager.
     OpenWorktreeManager,

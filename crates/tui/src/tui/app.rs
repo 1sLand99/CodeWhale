@@ -19,7 +19,6 @@ use crate::compaction::CompactionConfig;
 use crate::config::{
     ApiProvider, ApprovalPolicyControl, Config, DEFAULT_TEXT_MODEL, has_api_key, has_api_key_for,
 };
-use crate::config_ui::ConfigUiMode;
 use crate::core::authority::{ModeSessionPrefs, base_policy_for_mode};
 use crate::core::events::TurnRoute;
 use crate::hooks::{HookContext, HookEvent, HookExecutor, HookResult};

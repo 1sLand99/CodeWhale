@@ -57,7 +57,6 @@ use crate::config::{
     UpdateConfig, persist_external_credential_consent_for_at,
     revoke_external_credential_consent_for_at,
 };
-use crate::config_ui::{self, ConfigUiMode, WebConfigSession, WebConfigSessionEvent};
 use crate::core::engine::{EngineConfig, EngineHandle, spawn_engine};
 use crate::core::events::Event as EngineEvent;
 use crate::core::ops::{Op, ProviderRuntimeStatus, USER_SHELL_TOOL_ID_PREFIX, UserInputProvenance};
@@ -191,7 +190,6 @@ const CONTEXT_SUGGEST_COMPACT_THRESHOLD_PERCENT: f64 = 60.0;
 const UI_IDLE_POLL_MS: u64 = 48;
 const UI_ACTIVE_POLL_MS: u64 = 24;
 const SUBAGENT_HOOK_PREVIEW_LIMIT: usize = 2_048;
-const WEB_CONFIG_POLL_MS: u64 = 16;
 const DISPATCH_WATCHDOG_TIMEOUT: Duration = Duration::from_secs(30);
 /// Minimum wall-clock time a turn may stay in `"in_progress"` before the UI
 /// assumes the engine stalled (e.g. sub-agent hang, lost completion event,
@@ -923,7 +921,6 @@ async fn execute_command_input(
     engine_handle: &mut EngineHandle,
     task_manager: &SharedTaskManager,
     config: &mut Config,
-    web_config_session: &mut Option<WebConfigSession>,
     input: &str,
 ) -> Result<bool> {
     let _ = app.note_manual_command_for_tip(input);
@@ -953,16 +950,7 @@ async fn execute_command_input(
         clear_active_provider_api_key_from_memory(app, config);
         app.api_key_env_only = crate::config::active_provider_uses_env_only_api_key(config);
     }
-    apply_command_result(
-        terminal,
-        app,
-        engine_handle,
-        task_manager,
-        config,
-        web_config_session,
-        result,
-    )
-    .await
+    apply_command_result(terminal, app, engine_handle, task_manager, config, result).await
 }
 
 #[derive(Debug, Clone)]

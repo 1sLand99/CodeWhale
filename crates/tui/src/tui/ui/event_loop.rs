@@ -971,7 +971,6 @@ async fn dispatch_launch_composer_submit(
     engine_handle: &mut EngineHandle,
     task_manager: &SharedTaskManager,
     config: &mut Config,
-    web_config_session: &mut Option<WebConfigSession>,
     chord: ComposerSubmitChord,
 ) -> Result<bool> {
     let action = app.decide_composer_submit(chord);
@@ -983,17 +982,7 @@ async fn dispatch_launch_composer_submit(
         return Ok(false);
     }
     let result = begin_launch_session(app, None);
-    if apply_command_result(
-        terminal,
-        app,
-        engine_handle,
-        task_manager,
-        config,
-        web_config_session,
-        result,
-    )
-    .await?
-    {
+    if apply_command_result(terminal, app, engine_handle, task_manager, config, result).await? {
         return Ok(true);
     }
     // The transition is applied; only now consume the draft it carries.
@@ -1012,16 +1001,7 @@ async fn dispatch_launch_composer_submit(
         app.add_message(HistoryCell::User {
             content: input.clone(),
         });
-        if execute_command_input(
-            terminal,
-            app,
-            engine_handle,
-            task_manager,
-            config,
-            web_config_session,
-            &input,
-        )
-        .await?
+        if execute_command_input(terminal, app, engine_handle, task_manager, config, &input).await?
         {
             return Ok(true);
         }
@@ -1046,7 +1026,6 @@ async fn dispatch_session_composer_submit(
     engine_handle: &mut EngineHandle,
     task_manager: &SharedTaskManager,
     config: &mut Config,
-    web_config_session: &mut Option<WebConfigSession>,
     chord: ComposerSubmitChord,
 ) -> Result<bool> {
     let action = app.decide_composer_submit(chord);
@@ -1057,16 +1036,7 @@ async fn dispatch_session_composer_submit(
     if !app.composer_enter_would_submit() {
         return Ok(false);
     }
-    submit_decided_composer_input(
-        terminal,
-        app,
-        engine_handle,
-        task_manager,
-        config,
-        web_config_session,
-        action,
-    )
-    .await
+    submit_decided_composer_input(terminal, app, engine_handle, task_manager, config, action).await
 }
 
 /// Shared tail of a decided composer submit: slash-menu selection, draft
@@ -1084,7 +1054,6 @@ async fn submit_decided_composer_input(
     engine_handle: &mut EngineHandle,
     task_manager: &SharedTaskManager,
     config: &mut Config,
-    web_config_session: &mut Option<WebConfigSession>,
     action: ComposerSubmitAction,
 ) -> Result<bool> {
     // #573: when the user typed a slash-command prefix that the popup is
@@ -1125,16 +1094,7 @@ async fn submit_decided_composer_input(
         app.add_message(HistoryCell::User {
             content: input.clone(),
         });
-        if execute_command_input(
-            terminal,
-            app,
-            engine_handle,
-            task_manager,
-            config,
-            web_config_session,
-            &input,
-        )
-        .await?
+        if execute_command_input(terminal, app, engine_handle, task_manager, config, &input).await?
         {
             return Ok(true);
         }
@@ -1216,7 +1176,6 @@ pub(crate) async fn run_event_loop(
             .as_ref()
             .is_some_and(|socket| socket.enabled),
     );
-    let mut web_config_session: Option<WebConfigSession> = None;
     let mut prev_input_snapshot = String::new();
     let mut terminal_paused_at: Option<Instant> = None;
     let mut force_terminal_repaint = false;
@@ -1364,10 +1323,6 @@ pub(crate) async fn run_event_loop(
             app.add_message(HistoryCell::System {
                 content: notice.notice_block(install),
             });
-        }
-
-        if !drain_web_config_events(&mut web_config_session, app, config, &engine_handle).await {
-            web_config_session = None;
         }
 
         // Non-blocking startup-default writes (mode / thinking) report their
@@ -3788,7 +3743,6 @@ pub(crate) async fn run_event_loop(
                     config,
                     &task_manager,
                     &mut engine_handle,
-                    &mut web_config_session,
                     events,
                 )
                 .await?
@@ -4087,9 +4041,6 @@ pub(crate) async fn run_event_loop(
         if let Some(until_anim) = frame_requester.due_in(now) {
             poll_timeout = poll_timeout.min(until_anim);
         }
-        if web_config_session.is_some() {
-            poll_timeout = poll_timeout.min(Duration::from_millis(WEB_CONFIG_POLL_MS));
-        }
         // While the quit-confirmation prompt is armed, ensure we wake up to
         // expire it on time even if no input event arrives.
         if let Some(deadline) = app.quit_armed_until {
@@ -4307,7 +4258,6 @@ pub(crate) async fn run_event_loop(
                     config,
                     &task_manager,
                     &mut engine_handle,
-                    &mut web_config_session,
                     events,
                 )
                 .await?
@@ -4328,7 +4278,6 @@ pub(crate) async fn run_event_loop(
                                 &mut engine_handle,
                                 &task_manager,
                                 config,
-                                &mut web_config_session,
                                 result,
                             )
                             .await?
@@ -4344,7 +4293,6 @@ pub(crate) async fn run_event_loop(
                                 &mut engine_handle,
                                 &task_manager,
                                 config,
-                                &mut web_config_session,
                                 result,
                             )
                             .await?
@@ -4370,7 +4318,6 @@ pub(crate) async fn run_event_loop(
                                 &mut engine_handle,
                                 &task_manager,
                                 config,
-                                &mut web_config_session,
                                 ComposerSubmitChord::Enter,
                             )
                             .await?
@@ -4388,7 +4335,6 @@ pub(crate) async fn run_event_loop(
                         &mut engine_handle,
                         &task_manager,
                         config,
-                        &mut web_config_session,
                         chord,
                     )
                     .await?
@@ -4409,7 +4355,6 @@ pub(crate) async fn run_event_loop(
                                 &mut engine_handle,
                                 &task_manager,
                                 config,
-                                &mut web_config_session,
                                 commands::CommandResult::action(action),
                             )
                             .await?
@@ -4496,7 +4441,6 @@ pub(crate) async fn run_event_loop(
                                 &mut engine_handle,
                                 &task_manager,
                                 config,
-                                &mut web_config_session,
                                 &command,
                             )
                             .await?
@@ -4602,7 +4546,6 @@ pub(crate) async fn run_event_loop(
                         config,
                         &task_manager,
                         &mut engine_handle,
-                        &mut web_config_session,
                         events,
                     )
                     .await?
@@ -4747,7 +4690,6 @@ pub(crate) async fn run_event_loop(
                     config,
                     &task_manager,
                     &mut engine_handle,
-                    &mut web_config_session,
                     vec![ViewEvent::TopbarRoutePickerRequested],
                 )
                 .await?
@@ -4771,7 +4713,6 @@ pub(crate) async fn run_event_loop(
                         config,
                         &task_manager,
                         &mut engine_handle,
-                        &mut web_config_session,
                         events,
                     )
                     .await?
@@ -4852,7 +4793,6 @@ pub(crate) async fn run_event_loop(
                                 &mut engine_handle,
                                 &task_manager,
                                 config,
-                                &mut web_config_session,
                                 chord,
                             )
                             .await?
@@ -4905,7 +4845,6 @@ pub(crate) async fn run_event_loop(
                                 &mut engine_handle,
                                 &task_manager,
                                 config,
-                                &mut web_config_session,
                                 result,
                             )
                             .await?
@@ -4921,7 +4860,6 @@ pub(crate) async fn run_event_loop(
                                 &mut engine_handle,
                                 &task_manager,
                                 config,
-                                &mut web_config_session,
                                 result,
                             )
                             .await?
@@ -5091,7 +5029,6 @@ pub(crate) async fn run_event_loop(
                     config,
                     &task_manager,
                     &mut engine_handle,
-                    &mut web_config_session,
                     events,
                 )
                 .await?
@@ -5114,7 +5051,6 @@ pub(crate) async fn run_event_loop(
                                 &mut engine_handle,
                                 &task_manager,
                                 config,
-                                &mut web_config_session,
                                 commands::CommandResult::action(action),
                             )
                             .await?
@@ -5802,7 +5738,6 @@ pub(crate) async fn run_event_loop(
                                 &mut engine_handle,
                                 &task_manager,
                                 config,
-                                &mut web_config_session,
                                 &input,
                             )
                             .await?
@@ -5837,7 +5772,6 @@ pub(crate) async fn run_event_loop(
                         &mut engine_handle,
                         &task_manager,
                         config,
-                        &mut web_config_session,
                         action,
                     )
                     .await?
@@ -6093,7 +6027,6 @@ pub(crate) async fn run_event_loop(
                         &mut engine_handle,
                         &task_manager,
                         config,
-                        &mut web_config_session,
                         "/update install",
                     )
                     .await?
