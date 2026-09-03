@@ -1697,7 +1697,7 @@ impl ConfigCategory {
         Self::ALL.into_iter().find(|category| category.id() == id)
     }
 
-    const ALL: [ConfigCategory; 6] = [
+    const ALL: [ConfigCategory; 7] = [
         ConfigCategory::Appearance,
         ConfigCategory::ModelsProviders,
         ConfigCategory::Work,

@@ -21,19 +21,6 @@ pub enum HoverTargetKind {
     Link,
     /// A compact row that omitted part of its full source label.
     TruncatedText,
-    /// A clickable button (`[ Apply ]`, approval options, dialog controls).
-    Button,
-    /// A clickable list/picker row (file/model/theme/session/provider rows,
-    /// choice options, work-surface rows).
-    Row,
-    /// A clickable tab (settings category strip, shell tabs).
-    Tab,
-    /// A clickable chip (key-hint chips, filter chips, header chips).
-    Chip,
-    /// A clickable hotbar slot.
-    HotbarSlot,
-    /// A clickable toggle (switches, check rows, on/off settings).
-    Toggle,
 }
 
 /// Result of a hover hit-test.

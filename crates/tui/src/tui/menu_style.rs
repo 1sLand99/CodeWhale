@@ -41,30 +41,6 @@ pub fn hovered_row_style() -> Style {
         .add_modifier(Modifier::UNDERLINED | Modifier::BOLD)
 }
 
-/// Hovered-but-not-selected row with a caller-chosen foreground, mirroring
-/// [`selected_row_style_with_fg`] for tinted rows. Same underline + bold
-/// treatment, still no background fill.
-#[must_use]
-pub fn hovered_row_style_with_fg(fg: Color) -> Style {
-    Style::default()
-        .fg(fg)
-        .add_modifier(Modifier::UNDERLINED | Modifier::BOLD)
-}
-
-/// Generic clickable-control hover (Slice G shared primitive for buttons,
-/// chips, tabs, toggles, and hotbar slots). Resolves `hovered` onto any
-/// base control style by adding underline + bold; the base keeps its own
-/// fg/bg so primary, danger, and ghost treatments stay recognizable under
-/// the pointer. Non-color redundant: the underline reads without color.
-#[must_use]
-pub fn hover_style(base: Style, hovered: bool) -> Style {
-    if hovered {
-        base.add_modifier(Modifier::UNDERLINED | Modifier::BOLD)
-    } else {
-        base
-    }
-}
-
 /// Selected row with a caller-chosen foreground (the provider picker tints
 /// per-field ink while keeping the shared selection background).
 #[must_use]
@@ -91,16 +67,6 @@ pub fn disabled_selected_row_style() -> Style {
         .fg(palette::TEXT_MUTED)
         .bg(palette::SURFACE_ELEVATED)
         .add_modifier(Modifier::DIM)
-}
-
-/// Hovered-but-not-selected row: every clickable row paints this while the
-/// pointer is over it, so hover always answers visibly without stealing the
-/// keyboard selection. The elevated-surface band reads on every theme and
-/// never copies the selection trio (ink + background + bold), so hover and
-/// selection stay distinguishable when they meet on adjacent rows.
-#[must_use]
-pub fn hovered_row_style() -> Style {
-    Style::default().bg(palette::SURFACE_ELEVATED)
 }
 
 /// Theme-preview variant: the theme picker shows each candidate theme's *own*
@@ -234,38 +200,6 @@ mod tests {
         // Never masquerades as keyboard selection: no background band.
         assert_eq!(hovered.bg, None);
         assert_ne!(hovered, selected_row_style());
-    }
-
-    #[test]
-    fn hovered_row_with_fg_keeps_caller_ink_and_no_fill() {
-        let hovered = hovered_row_style_with_fg(palette::WHALE_ACTION);
-        assert_eq!(hovered.fg, Some(palette::WHALE_ACTION));
-        assert_eq!(hovered.bg, None);
-        assert!(hovered.add_modifier.contains(Modifier::UNDERLINED));
-        assert_ne!(
-            hovered,
-            selected_row_style_with_fg(palette::WHALE_ACTION),
-            "hover must stay distinct from selection for the same ink"
-        );
-    }
-
-    #[test]
-    fn hover_style_is_a_noop_unhovered_and_marks_primary_and_ghost_buttons() {
-        let primary = Style::default()
-            .fg(palette::SELECTION_TEXT)
-            .bg(palette::WHALE_ACTION)
-            .add_modifier(Modifier::BOLD);
-        assert_eq!(hover_style(primary, false), primary);
-        let hovered = hover_style(primary, true);
-        assert_eq!(hovered.fg, primary.fg);
-        assert_eq!(hovered.bg, primary.bg);
-        assert!(hovered.add_modifier.contains(Modifier::UNDERLINED));
-
-        let ghost = Style::default().fg(palette::TEXT_PRIMARY);
-        let hovered_ghost = hover_style(ghost, true);
-        assert_eq!(hovered_ghost.fg, ghost.fg);
-        assert_eq!(hovered_ghost.bg, None);
-        assert_ne!(hovered_ghost, ghost);
     }
 
     #[test]

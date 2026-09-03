@@ -131,26 +131,6 @@ pub fn paint_link_glow(
     }
 }
 
-/// Modifier-only hover mark for clickable controls and rows (Slice G:
-/// buttons, rows, tabs, chips, hotbar slots, toggles). Adds underline +
-/// bold to every cell in `area` while preserving each cell's fg/bg, so the
-/// hovered control keeps its own treatment (primary, danger, tinted row)
-/// and never masquerades as keyboard selection. Bounds-checked against
-/// `buf` like [`paint_link_glow`].
-pub fn paint_control_hover(buf: &mut Buffer, area: Rect) {
-    for y in area.y..area.y.saturating_add(area.height) {
-        for x in area.x..area.x.saturating_add(area.width) {
-            if x >= buf.area.x.saturating_add(buf.area.width)
-                || y >= buf.area.y.saturating_add(buf.area.height)
-            {
-                continue;
-            }
-            let cell = &mut buf[(x, y)];
-            cell.modifier.insert(Modifier::UNDERLINED | Modifier::BOLD);
-        }
-    }
-}
-
 /// Apply all hover effects for the resolved target onto `buf`.
 pub fn apply_resolved_effects(buf: &mut Buffer, reduced_motion: bool, theme: &palette::UiTheme) {
     resolve_hover();
@@ -186,14 +166,6 @@ pub fn apply_resolved_effects(buf: &mut Buffer, reduced_motion: bool, theme: &pa
         HoverTargetKind::TruncatedText => {
             paint_link_glow(buf, hit.area, theme.accent_primary, true);
             paint_full_text_popover(buf, &hit, theme);
-        }
-        HoverTargetKind::Button
-        | HoverTargetKind::Row
-        | HoverTargetKind::Tab
-        | HoverTargetKind::Chip
-        | HoverTargetKind::HotbarSlot
-        | HoverTargetKind::Toggle => {
-            paint_control_hover(buf, hit.area);
         }
     }
 }
@@ -270,57 +242,6 @@ mod tests {
         assert_eq!(hit.kind, HoverTargetKind::Link);
         assert!(hit.copyable);
         clear_pointer();
-    }
-
-    #[test]
-    fn control_kinds_mark_hovered_cells_and_keep_unhovered_clean() {
-        use ratatui::style::{Color, Modifier};
-        let _guard = HOVER_TEST_LOCK.lock().unwrap();
-        for kind in [
-            HoverTargetKind::Button,
-            HoverTargetKind::Row,
-            HoverTargetKind::Tab,
-            HoverTargetKind::Chip,
-            HoverTargetKind::HotbarSlot,
-            HoverTargetKind::Toggle,
-        ] {
-            let area = Rect::new(2, 1, 10, 1);
-            let mut plain = Buffer::empty(Rect::new(0, 0, 20, 4));
-            for x in 2..12 {
-                plain[(x, 1)].set_fg(Color::Yellow);
-            }
-            let mut hovered = plain.clone();
-            clear_pointer();
-            begin_frame();
-            set_pointer(5, 1);
-            register_rect(kind, area, "control", false);
-            apply_resolved_effects(&mut hovered, true, &palette::UI_THEME);
-            for x in 2..12 {
-                assert!(
-                    hovered[(x, 1)].modifier.contains(Modifier::UNDERLINED),
-                    "{kind:?} cell {x} needs underline feedback"
-                );
-                assert!(
-                    hovered[(x, 1)].modifier.contains(Modifier::BOLD),
-                    "{kind:?} cell {x} needs bold feedback"
-                );
-                assert_eq!(
-                    hovered[(x, 1)].fg,
-                    plain[(x, 1)].fg,
-                    "{kind:?} must preserve the control's own ink"
-                );
-                assert_eq!(
-                    plain[(x, 1)].modifier & (Modifier::UNDERLINED | Modifier::BOLD),
-                    Modifier::empty(),
-                    "{kind:?} unhovered baseline must stay clean"
-                );
-            }
-            // Cells outside the target stay untouched.
-            assert_eq!(hovered[(0, 0)].symbol(), plain[(0, 0)].symbol());
-            assert_eq!(hovered[(0, 0)].modifier, plain[(0, 0)].modifier);
-            assert_eq!(hovered[(0, 0)].fg, plain[(0, 0)].fg);
-            clear_pointer();
-        }
     }
 
     #[test]
