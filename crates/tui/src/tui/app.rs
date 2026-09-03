@@ -2248,6 +2248,11 @@ pub struct App {
         Option<tokio::task::JoinHandle<crate::tui::automation_panel::AutomationScan>>,
     /// Session-local quieting and command detectors for event-driven tips.
     pub behavioral_tips: crate::tui::behavioral_tips::BehavioralTipState,
+    /// Footer-hint use counts, hydrated from `Settings` at startup and
+    /// bumped by `App::note_footer_hint_used`. The posture bar reads this
+    /// every frame, so the counts live here rather than behind a
+    /// settings-file read.
+    pub footer_hint_uses: std::collections::BTreeMap<String, u8>,
     /// Unified Workflow activity surface (#4121). Lives above the composer so
     /// phase/row progress does not flood the chat transcript. Preserved after
     /// completion until the next `RunStarted` replaces it.

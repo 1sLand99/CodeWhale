@@ -8261,6 +8261,7 @@ base_url = "https://api.xiaomimimo.com/v1"
                 "probe".to_string(),
                 1u8,
             )]),
+            footer_hint_uses: std::collections::BTreeMap::from([("probe".to_string(), 1u8)]),
             ..Settings::default()
         };
         let table = toml::Value::try_from(&settings)
@@ -8282,6 +8283,7 @@ base_url = "https://api.xiaomimimo.com/v1"
             "feature_intro_shown",
             "yolo_deprecation_shown",
             "behavioral_tip_impressions",
+            "footer_hint_uses",
         ] {
             assert!(
                 table.contains_key(key),

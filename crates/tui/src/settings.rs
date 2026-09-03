@@ -485,6 +485,12 @@ pub struct Settings {
     /// behavioral-tip engine and omitted entirely before the first sighting.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub behavioral_tip_impressions: std::collections::BTreeMap<String, u8>,
+    /// Persisted use counts for the Tideline footer key hints. Keys are the
+    /// stable hint identifiers in `crate::tui::footer_hints`; a hint retires
+    /// to its bare state once its binding has been used enough times.
+    /// Omitted entirely before the first recorded use.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub footer_hint_uses: std::collections::BTreeMap<String, u8>,
     /// True only for the current load when `default_mode = "yolo"` was read
     /// from an older settings file. App startup uses this provenance to migrate
     /// the old bundled Full Access choice without weakening project or managed
@@ -575,6 +581,7 @@ impl Default for Settings {
             feature_intro_shown: false,
             yolo_deprecation_shown: false,
             behavioral_tip_impressions: std::collections::BTreeMap::new(),
+            footer_hint_uses: std::collections::BTreeMap::new(),
             legacy_yolo_default: false,
             tui_prefs_migration: None,
         }
@@ -3439,6 +3446,23 @@ mod tests {
                 .get("planning_mode")
                 .copied(),
             Some(1)
+        );
+    }
+
+    #[test]
+    fn footer_hint_uses_are_backward_compatible_and_persist_when_recorded() {
+        let default_body = toml::to_string_pretty(&Settings::default()).expect("serialize");
+        assert!(!default_body.contains("footer_hint_uses"));
+
+        let mut settings = Settings::default();
+        settings
+            .footer_hint_uses
+            .insert("permission_cycle".to_string(), 2);
+        let body = toml::to_string_pretty(&settings).expect("serialize");
+        let restored: Settings = toml::from_str(&body).expect("restore settings");
+        assert_eq!(
+            restored.footer_hint_uses.get("permission_cycle").copied(),
+            Some(2)
         );
     }
 

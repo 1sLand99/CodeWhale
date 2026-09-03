@@ -1102,6 +1102,9 @@ pub const SETTINGS_SCHEMA: &[SettingDef] = &[
         None,
     ),
     def("behavioral_tip_impressions", SettingKind::String, "", None),
+    // Footer key-hint use counts: a hint retires to its bare state once its
+    // binding has been used enough times. Written by the footer, never edited.
+    def("footer_hint_uses", SettingKind::String, "", None),
 ];
 
 /// The declaration for `key`, if the shell knows it.

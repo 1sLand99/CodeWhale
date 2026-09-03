@@ -922,27 +922,35 @@ pub(crate) fn tideline_footer_from_app(app: &mut App, width: u16) -> TidelineFoo
 
     // The one hint that applies now: the double-tap send-now window while a
     // turn is running, else the interrupt affordance, else the arrow keys
-    // the empty composer lends to the agent roster.
+    // the empty composer lends to the agent roster. Each hint retires once
+    // its binding has been used enough times (`footer_hints::retired`): a
+    // taught binding renders the bare state, never more chrome.
     let hint = if app.double_tap_window_open() {
         Some((
             tr(app.ui_locale, MessageId::PostureHintEnterAgain)
                 .replace("{enter}", "Enter")
                 .replace("{steer}", "Ctrl+Enter"),
             ChromeInk::MetadataHint,
+            crate::tui::footer_hints::ENTER_AGAIN,
         ))
     } else if matches!(phase, ShellPhase::Working | ShellPhase::Verifying) {
         Some((
             tr(app.ui_locale, MessageId::FooterHintEscInterrupt).into_owned(),
             ChromeInk::MetadataHint,
+            crate::tui::footer_hints::ESC_INTERRUPT,
         ))
     } else if crate::tui::agent_focus::shell_shortcuts_available(app, false) {
         Some((
             crate::tui::agent_focus::footer_agent_hints(app),
             ChromeInk::MetadataHint,
+            crate::tui::footer_hints::AGENT_ARROWS,
         ))
     } else {
         None
     };
+    let hint = hint
+        .filter(|(_, _, key)| !crate::tui::footer_hints::retired(&app.footer_hint_uses, key))
+        .map(|(text, ink, _)| (text, ink));
 
     // The right slot: the live status toast if one is owed, else the compact
     // MCP or plugin boot chip, else the remote-control state when it is on.
@@ -965,9 +973,19 @@ pub(crate) fn tideline_footer_from_app(app: &mut App, width: u16) -> TidelineFoo
 
     TidelineFooterFacts {
         permission_chip,
-        permission_key: live_chord(ShellBindingId::PermissionCycle),
+        permission_key: live_chord(ShellBindingId::PermissionCycle).filter(|_| {
+            !crate::tui::footer_hints::retired(
+                &app.footer_hint_uses,
+                crate::tui::footer_hints::PERMISSION_CYCLE,
+            )
+        }),
         mode_chip,
-        mode_key: live_chord(ShellBindingId::ModeCycle),
+        mode_key: live_chord(ShellBindingId::ModeCycle).filter(|_| {
+            !crate::tui::footer_hints::retired(
+                &app.footer_hint_uses,
+                crate::tui::footer_hints::MODE_CYCLE,
+            )
+        }),
         counts: live_counts(app, tier),
         hint,
         context_percent: context_percent_from_app(app),

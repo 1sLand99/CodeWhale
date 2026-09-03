@@ -244,6 +244,7 @@ pub(crate) fn dispatch_tab_key(
     let prior_model = app.model.clone();
     let prior_mode = app.mode;
     app.cycle_mode();
+    app.note_footer_hint_used(crate::tui::footer_hints::MODE_CYCLE);
     TabDispatch::ModeCycled {
         prior_mode,
         prior_model,
@@ -4490,6 +4491,7 @@ pub(crate) async fn run_event_loop(
                 }
                 Some(ShellBindingId::PermissionCycle) => {
                     cycle_permission_posture(app, config, &engine_handle).await;
+                    app.note_footer_hint_used(crate::tui::footer_hints::PERMISSION_CYCLE);
                     continue;
                 }
                 Some(ShellBindingId::ViewCycle) => {
@@ -5198,6 +5200,7 @@ pub(crate) async fn run_event_loop(
                     },
                 )
                 .await;
+                app.note_footer_hint_used(crate::tui::footer_hints::ENTER_AGAIN);
                 continue;
             }
             if matches!(portable_submit_chord, Some(ComposerSubmitChord::Enter))
@@ -5215,6 +5218,7 @@ pub(crate) async fn run_event_loop(
                 &key,
                 slash_menu_open || mention_menu_open,
             ) {
+                app.note_footer_hint_used(crate::tui::footer_hints::AGENT_ARROWS);
                 match shortcut {
                     crate::tui::agent_focus::AgentShellShortcut::FocusAgents => {
                         if !crate::tui::work_surface::enter_agents(app) {
@@ -5491,6 +5495,7 @@ pub(crate) async fn run_event_loop(
                         }
                         EscapeAction::CancelRequest => {
                             app.backtrack.reset();
+                            app.note_footer_hint_used(crate::tui::footer_hints::ESC_INTERRUPT);
                             if escape_cancel_request(
                                 app,
                                 &engine_handle,

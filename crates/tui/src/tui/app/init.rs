@@ -1056,6 +1056,7 @@ impl App {
             automation_panel: crate::tui::automation_panel::AutomationPanelState::default(),
             automation_scan: None,
             behavioral_tips: crate::tui::behavioral_tips::BehavioralTipState::default(),
+            footer_hint_uses: settings.footer_hint_uses.clone(),
             workflow_panel: None,
             session_started_at: chrono::Utc::now(),
             needs_redraw: true,
