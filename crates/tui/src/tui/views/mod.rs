@@ -8227,6 +8227,71 @@ base_url = "https://api.xiaomimimo.com/v1"
         }
     }
 
+    /// Every field `Settings` persists to settings.toml is declared in
+    /// SETTINGS_SCHEMA — a row for editable values, a hidden def for picker
+    /// memory and one-way flags. A persisted field without a declaration has
+    /// no kind, no provenance layer, and no resolver home.
+    #[test]
+    fn every_persisted_settings_field_is_declared_in_the_schema() {
+        use crate::settings::PinnedModel;
+
+        let mut settings = Settings::default();
+        // Options serialize as absent when None; force them present so the
+        // table below names every key settings.toml can hold.
+        settings.background_color = Some("#1a1b26".to_string());
+        settings.default_provider = Some("deepseek".to_string());
+        settings.default_model = Some("deepseek-v4-pro".to_string());
+        settings.reasoning_effort = Some("medium".to_string());
+        settings.permission_posture = Some("ask".to_string());
+        settings.sandbox_mode = Some("read-only".to_string());
+        settings.provider_models = Some(std::collections::HashMap::from([(
+            "deepseek".to_string(),
+            "deepseek-v4-pro".to_string(),
+        )]));
+        settings.enabled_models = Some(std::collections::HashMap::from([(
+            "deepseek".to_string(),
+            vec!["deepseek-v4-pro".to_string()],
+        )]));
+        settings.pinned_models = vec![PinnedModel {
+            provider: "deepseek".to_string(),
+            model: "deepseek-v4-pro".to_string(),
+            label: None,
+        }];
+        settings.behavioral_tip_impressions =
+            std::collections::BTreeMap::from([("probe".to_string(), 1u8)]);
+        let table = toml::Value::try_from(&settings)
+            .expect("settings serialize")
+            .as_table()
+            .expect("settings are a table")
+            .clone();
+        // The probe is only trustworthy if it actually names the keys whose
+        // only declaration is hidden; a future `skip_serializing` would
+        // silently drop a key from this table instead of failing below.
+        for key in [
+            "tool_collapse_mode",
+            "max_input_history",
+            "default_provider",
+            "sandbox_mode",
+            "provider_models",
+            "enabled_models",
+            "pinned_models",
+            "feature_intro_shown",
+            "yolo_deprecation_shown",
+            "behavioral_tip_impressions",
+        ] {
+            assert!(
+                table.contains_key(key),
+                "probe settings undercovers settings.toml: `{key}` did not serialize"
+            );
+        }
+        for key in table.keys() {
+            assert!(
+                codewhale_config::setting(key).is_some(),
+                "settings.toml persists `{key}` with no SETTINGS_SCHEMA declaration"
+            );
+        }
+    }
+
     /// Every message key declared by the schema must resolve to a localized
     /// string in every shipped locale. `tr_key` returns the key itself when a
     /// pack is missing the entry, so this fails fast on a stale binding.
