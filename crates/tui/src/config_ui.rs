@@ -254,6 +254,7 @@ pub enum UiLocale {
 pub enum UiThemeValue {
     Terminal,
     System,
+    Underwater,
     Dark,
     Light,
     Grayscale,
@@ -1072,6 +1073,7 @@ impl UiThemeValue {
         match self {
             Self::Terminal => "terminal".into(),
             Self::System => "system".into(),
+            Self::Underwater => "underwater".into(),
             Self::Dark => "dark".into(),
             Self::Light => "light".into(),
             Self::Grayscale => "grayscale".into(),
@@ -1096,6 +1098,7 @@ impl UiThemeValue {
         match crate::palette::normalize_theme_name(value) {
             Some("terminal") => Ok(Self::Terminal),
             Some("system") => Ok(Self::System),
+            Some("underwater") => Ok(Self::Underwater),
             Some("dark") => Ok(Self::Dark),
             Some("light") => Ok(Self::Light),
             Some("grayscale") => Ok(Self::Grayscale),

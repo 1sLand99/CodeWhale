@@ -46,6 +46,18 @@ pub fn selected_row_bg_style() -> Style {
     Style::default().bg(palette::SELECTION_BG)
 }
 
+/// Hovered-but-not-selected row (Slice D global hover rule). Pointer feedback
+/// must never reuse the selection background — hover is advisory, selection
+/// is authoritative — so hover is an underlined action-ink foreground with no
+/// background fill. It reads on monochrome terminals (underline) and never
+/// collides with [`selected_row_style`].
+#[must_use]
+pub fn hovered_row_style() -> Style {
+    Style::default()
+        .fg(palette::WHALE_ACTION)
+        .add_modifier(Modifier::UNDERLINED)
+}
+
 /// Selected-but-disabled row (e.g. a locked model): the cursor position is
 /// still visible, but muted ink on the elevated surface plus a dim modifier
 /// says the row cannot be chosen.
@@ -177,6 +189,20 @@ mod tests {
                 .bg(palette::SELECTION_BG)
                 .add_modifier(Modifier::BOLD)
         );
+    }
+
+    #[test]
+    fn hovered_row_is_underlined_action_ink_without_selection_fill() {
+        // Hover must stay visually distinct from selection: no selection
+        // background, so a hovered row can never read as the chosen one.
+        let style = hovered_row_style();
+        assert_eq!(
+            style,
+            Style::default()
+                .fg(palette::WHALE_ACTION)
+                .add_modifier(Modifier::UNDERLINED)
+        );
+        assert_ne!(style.bg, selected_row_style().bg);
     }
 
     #[test]
