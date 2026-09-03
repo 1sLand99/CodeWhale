@@ -490,26 +490,6 @@ pub async fn run_tui(
     );
     crate::startup_trace::mark("app_constructed");
     sync_config_provider_from_app(config, &app);
-    if !app.auto_model {
-        let saved_provider_model = config
-            .provider_config_for(app.api_provider)
-            .and_then(|provider| provider.model.as_deref());
-        if let Ok(resolution) = crate::route_runtime::resolve_route_candidate_with_context_metadata(
-            app.api_provider,
-            Some(&app.model),
-            saved_provider_model,
-            Some(config.deepseek_base_url()),
-            app.active_context_window_override,
-            None,
-        ) {
-            let resolved_model = resolution.candidate.wire_model_id().as_str().to_string();
-            app.fleet_roster_stale |= crate::fleet::members::auto_enroll_fleet_model(
-                &app.workspace,
-                app.provider_identity_for_persistence(),
-                &resolved_model,
-            );
-        }
-    }
     surface_prompt_override_notices(&mut app);
 
     if options.resume_session_id.is_none() && !app.launch.visible {
@@ -3823,6 +3803,15 @@ pub(crate) async fn run_event_loop(
                 started.elapsed()
                     < Duration::from_millis(crate::tui::ocean::COMPLETION_SETTLE_MS as u64)
             });
+        // The launch screen has no transcript widget to drive the ambient
+        // clock, so it asks for frames itself: while the mark surfaces or
+        // the card dissolves, and while the underwater field is alive
+        // (settling on the same idle grace as the transcript's empty water).
+        let launch_motion = crate::tui::underwater::launch_motion_active(
+            app,
+            underwater_surface_obscured,
+            ambient_settled,
+        );
         let status_motion = should_tick_status_animation(
             app,
             has_running_agents,
@@ -3833,10 +3822,13 @@ pub(crate) async fn run_event_loop(
         let animation_interval_ms = animation_interval_ms(
             app,
             status_motion,
-            underwater_ambient_motion || underwater_completion_motion,
+            underwater_ambient_motion || underwater_completion_motion || launch_motion,
         );
         let motion_policy = app.motion_policy();
-        if (status_motion || underwater_ambient_motion || underwater_completion_motion)
+        if (status_motion
+            || underwater_ambient_motion
+            || underwater_completion_motion
+            || launch_motion)
             && last_status_frame.elapsed() >= Duration::from_millis(animation_interval_ms)
         {
             let translation_animated = streaming_thinking::animate_pending_translation(

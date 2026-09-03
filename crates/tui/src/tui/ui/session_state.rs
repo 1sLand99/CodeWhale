@@ -949,16 +949,10 @@ pub(crate) fn resolve_loaded_session_route(app: &mut App, config: &Config) {
         None,
     ) {
         Ok(resolution) => {
-            let resolved_model = resolution.candidate.wire_model_id().as_str().to_string();
             app.set_active_route_resolution(
                 resolution.candidate.endpoint().base_url.clone(),
                 resolution.candidate.limits(),
                 resolution.context_window.source,
-            );
-            app.fleet_roster_stale |= crate::fleet::members::auto_enroll_fleet_model(
-                &app.workspace,
-                app.provider_identity_for_persistence(),
-                &resolved_model,
             );
         }
         Err(_) => {

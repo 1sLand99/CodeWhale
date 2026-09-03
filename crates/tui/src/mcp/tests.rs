@@ -5762,14 +5762,6 @@ fn mcp_recovery_kind_names_real_login_and_reload_commands() {
         "/mcp login github"
     );
     assert_eq!(
-        crate::mcp::mcp_startup_warning("cloudflare-api", McpRecoveryKind::Reauth, true),
-        "The cloudflare-api MCP server requires OAuth reauthentication. Run `/mcp login cloudflare-api`."
-    );
-    assert_eq!(
-        crate::mcp::mcp_startup_warning("cloudflare-api", McpRecoveryKind::Diagnose, true),
-        "MCP startup incomplete (failed: cloudflare-api). Run `/mcp validate`."
-    );
-    assert_eq!(
         McpRecoveryKind::Connect.slash_command("github"),
         "/mcp reload"
     );

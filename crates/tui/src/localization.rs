@@ -1773,6 +1773,7 @@ pub enum MessageId {
     FleetModelReasonOperatorRoute,
     FleetModelReasonAlreadyPresent,
     FleetModelErrorNeedsRoute,
+    FleetModelErrorNeedsRole,
     FleetModelErrorNoSelection,
     FleetModelErrorOperatorRoute,
     FleetModelErrorNotInFleet,
@@ -1925,6 +1926,7 @@ pub enum MessageId {
     AutomationActionFailed,
     AutomationEmpty,
     AutomationListHeading,
+    AutomationScopeNote,
     AutomationNoun,
     AutomationStatusLabel,
     AutomationStatusActive,
@@ -1939,6 +1941,7 @@ pub enum MessageId {
     AutomationActionResume,
     AutomationActionDelete,
     AutomationActionRun,
+    AutomationActionCancel,
     AutomationActionPaused,
     AutomationActionResumed,
     AutomationNextLabel,
@@ -3815,6 +3818,7 @@ pub const ALL_MESSAGE_IDS: &[MessageId] = &[
     MessageId::FleetModelReasonOperatorRoute,
     MessageId::FleetModelReasonAlreadyPresent,
     MessageId::FleetModelErrorNeedsRoute,
+    MessageId::FleetModelErrorNeedsRole,
     MessageId::FleetModelErrorNoSelection,
     MessageId::FleetModelErrorOperatorRoute,
     MessageId::FleetModelErrorNotInFleet,
@@ -3958,6 +3962,7 @@ pub const ALL_MESSAGE_IDS: &[MessageId] = &[
     MessageId::AutomationActionFailed,
     MessageId::AutomationEmpty,
     MessageId::AutomationListHeading,
+    MessageId::AutomationScopeNote,
     MessageId::AutomationNoun,
     MessageId::AutomationStatusLabel,
     MessageId::AutomationStatusActive,
@@ -3972,6 +3977,7 @@ pub const ALL_MESSAGE_IDS: &[MessageId] = &[
     MessageId::AutomationActionResume,
     MessageId::AutomationActionDelete,
     MessageId::AutomationActionRun,
+    MessageId::AutomationActionCancel,
     MessageId::AutomationActionPaused,
     MessageId::AutomationActionResumed,
     MessageId::AutomationNextLabel,
@@ -4740,8 +4746,9 @@ mod tests {
             .filter(|key| key.starts_with("Automation"))
             .collect::<Vec<_>>();
         // AUTOMATION-VISIBILITY §2: the band slot and typed receipt cards
-        // added 10 keys and retired 3 bare-prose receipts (42 → 49).
-        assert_eq!(automation_keys.len(), 49);
+        // added 10 keys and retired 3 bare-prose receipts (42 → 49); the
+        // automations room added its cancel hint and scope note (→ 51).
+        assert_eq!(automation_keys.len(), 51);
 
         for locale in Locale::shipped_complete() {
             let pack = raw_locale_messages(*locale);

@@ -168,6 +168,8 @@ impl InteractionTargetId {
     /// id only: the provider picker remains the owner of route catalog and
     /// readiness facts.
     pub const HEADER_ROUTE: Self = Self("header.route");
+    /// A live count in the posture bar; opens the dock view it counts.
+    pub const FOOTER_COUNT: Self = Self("footer.count");
     pub const DOCK_TAB_AGENTS: Self = Self("dock.tab.agents");
     pub const DOCK_TAB_TASKS: Self = Self("dock.tab.tasks");
     pub const DOCK_TAB_BACKGROUND: Self = Self("dock.tab.background");

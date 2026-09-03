@@ -321,6 +321,33 @@ fn register_info_interaction_targets(app: &mut App, hitboxes: InfoLineInteractio
     }
 }
 
+/// The posture bar's live counts are the bottom-of-screen way into the
+/// dock: each one opens the view it counts (agents → AGENTS, shells / tasks
+/// / automations → BACKGROUND, the idle `todo` word → TODO). Same
+/// `ShowDockPanel` action the strip's own tabs use.
+fn register_footer_count_targets(
+    app: &mut App,
+    facts: &crate::tui::phase_strip::TidelineFooterFacts,
+    count_rects: &[(usize, Rect)],
+) {
+    for (index, area) in count_rects {
+        let Some(panel) = facts.count_panels.get(*index).copied() else {
+            continue;
+        };
+        let action = crate::tui::tideline::InteractionAction::ShowDockPanel(panel);
+        app.viewport
+            .interaction_targets
+            .register(crate::tui::tideline::InteractionTarget {
+                id: crate::tui::tideline::InteractionTargetId::FOOTER_COUNT,
+                area: *area,
+                focus: crate::tui::tideline::InteractionFocus::Direct,
+                keyboard_action: Some(action),
+                mouse_action: Some(action),
+                inspect_detail: crate::tui::tideline::InspectDetail::Route,
+            });
+    }
+}
+
 /// Map the host terminal rect onto the session shell canvas.
 ///
 /// Wide terminals use the full available width (v0.8.65 behavior; #5322). A
@@ -1079,7 +1106,14 @@ pub(crate) fn render(f: &mut Frame, app: &mut App, _config: &Config) -> Option<(
         let stage_area = areas[0];
         let footer_area = areas.get(1).copied().unwrap_or_default();
         let info_area = areas.get(2).copied().unwrap_or_default();
-        let startup = crate::tui::underwater::tideline_startup_from_app(app);
+        // Advance the ambient clock here: the transcript widget that
+        // normally samples it is not built while the launch screen is up,
+        // and the mark's surfacing, the card's dissolve and the water all
+        // read this one clock.
+        app.sample_ambient_clock_ms();
+        let startup = crate::tui::underwater::tideline_startup_from_app(app).ocean(
+            crate::tui::underwater::launch_ocean_from_app(app, stage_area),
+        );
         let mut hitboxes = if startup.composer.enclosed {
             crate::tui::underwater::tideline_startup_hitboxes(stage_area)
         } else {
@@ -1514,7 +1548,8 @@ pub(crate) fn render(f: &mut Frame, app: &mut App, _config: &Config) -> Option<(
         Block::default()
             .style(Style::default().bg(app.ui_theme.footer_bg))
             .render(area, buf);
-        crate::tui::phase_strip::render_tideline_footer(area, buf, &footer);
+        let count_rects = crate::tui::phase_strip::render_tideline_footer(area, buf, &footer);
+        register_footer_count_targets(app, &facts, &count_rects);
     }
 
     // The metrics line sits directly under the posture bar: model · ctx ·

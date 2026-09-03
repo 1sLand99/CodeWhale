@@ -4428,27 +4428,6 @@ pub fn mcp_recovery_kind(
     McpRecoveryKind::Reconnect
 }
 
-/// Session-start / manager line: name the server, name the failure, one command.
-/// Matches the Codex shape (`The X MCP server requires OAuth reauthentication. Run …`
-/// / `MCP startup incomplete (failed: X)`).
-#[must_use]
-pub fn mcp_startup_warning(name: &str, kind: McpRecoveryKind, failed: bool) -> String {
-    let command = kind.slash_command(name);
-    match kind {
-        McpRecoveryKind::Reauth => {
-            format!("The {name} MCP server requires OAuth reauthentication. Run `{command}`.")
-        }
-        McpRecoveryKind::Enable => {
-            format!("The {name} MCP server is disabled. Run `{command}`.")
-        }
-        _ if failed => format!("MCP startup incomplete (failed: {name}). Run `{command}`."),
-        McpRecoveryKind::Connect => {
-            format!("The {name} MCP server is not connected yet. Run `{command}`.")
-        }
-        _ => format!("The {name} MCP server needs attention. Run `{command}`."),
-    }
-}
-
 pub fn load_config(path: &Path) -> Result<McpConfig> {
     validate_mcp_config_path(path)?;
     let Some(contents) = read_mcp_config_file(path)? else {

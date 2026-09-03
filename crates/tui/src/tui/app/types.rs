@@ -1201,6 +1201,10 @@ pub enum AppAction {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AutomationAction {
+    /// Open the automations room, optionally focused on one id.
+    Open {
+        focus: Option<String>,
+    },
     List,
     Show(String),
     Pause(String),

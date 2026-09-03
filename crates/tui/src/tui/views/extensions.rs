@@ -1045,24 +1045,6 @@ enum ExtensionsFocus {
     List,
 }
 
-impl ExtensionsFocus {
-    const fn next(self) -> Self {
-        match self {
-            Self::Tabs => Self::Search,
-            Self::Search => Self::List,
-            Self::List => Self::Tabs,
-        }
-    }
-
-    const fn previous(self) -> Self {
-        match self {
-            Self::Tabs => Self::List,
-            Self::Search => Self::Tabs,
-            Self::List => Self::Search,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum VisibleEntry<'a> {
     Group(&'a ExtensionGroup),
@@ -1245,12 +1227,18 @@ impl ModalView for ExtensionsView {
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> ViewAction {
+        // One navigation grammar (grokbuild, the stated authority): Tab and
+        // Shift+Tab / BackTab move across the tab bar, always — even during
+        // a search, which keeps its query on the new tab. `/` searches, Esc
+        // backs out, ↑↓ move, Enter acts. Tab never cycles focus.
+        if key.code == KeyCode::BackTab
+            || (key.code == KeyCode::Tab && key.modifiers.contains(KeyModifiers::SHIFT))
+        {
+            self.set_tab(self.active_tab.previous());
+            return ViewAction::None;
+        }
         if key.code == KeyCode::Tab {
-            self.focus = if key.modifiers.contains(KeyModifiers::SHIFT) {
-                self.focus.previous()
-            } else {
-                self.focus.next()
-            };
+            self.set_tab(self.active_tab.next());
             return ViewAction::None;
         }
         if self.focus == ExtensionsFocus::Search {
@@ -1286,19 +1274,13 @@ impl ModalView for ExtensionsView {
                 self.focus = ExtensionsFocus::Search;
                 ViewAction::None
             }
-            KeyCode::Left if self.focus == ExtensionsFocus::Tabs => {
+            // Left/Right and `[`/`]` are the same move for hands that reach
+            // for them; the advertised chord is Tab.
+            KeyCode::Left | KeyCode::Char('[') | KeyCode::Char('h') => {
                 self.set_tab(self.active_tab.previous());
                 ViewAction::None
             }
-            KeyCode::Right if self.focus == ExtensionsFocus::Tabs => {
-                self.set_tab(self.active_tab.next());
-                ViewAction::None
-            }
-            KeyCode::Char('[') => {
-                self.set_tab(self.active_tab.previous());
-                ViewAction::None
-            }
-            KeyCode::Char(']') => {
+            KeyCode::Right | KeyCode::Char(']') | KeyCode::Char('l') => {
                 self.set_tab(self.active_tab.next());
                 ViewAction::None
             }
@@ -1525,7 +1507,7 @@ impl ModalView for ExtensionsView {
         )))
         .render(rows[3], buf);
         let compact_hints = [
-            super::ActionHint::new("Tab", tr(self.locale, MessageId::ExtensionsActionFocus)),
+            super::ActionHint::new("Tab", tr(self.locale, MessageId::ExtensionsActionTabs)),
             super::ActionHint::new("/", tr(self.locale, MessageId::SessionsActionSearch)),
             super::ActionHint::new("Esc", tr(self.locale, MessageId::SessionsActionClose)),
         ];
@@ -1540,8 +1522,7 @@ impl ModalView for ExtensionsView {
             _ => tr(self.locale, MessageId::ExtensionsActionFold).into_owned(),
         };
         let full_hints = [
-            super::ActionHint::new("Tab", tr(self.locale, MessageId::ExtensionsActionFocus)),
-            super::ActionHint::new("[ ]", tr(self.locale, MessageId::ExtensionsActionTabs)),
+            super::ActionHint::new("Tab", tr(self.locale, MessageId::ExtensionsActionTabs)),
             super::ActionHint::new("↑↓", tr(self.locale, MessageId::LaunchHintMove)),
             super::ActionHint::new("Enter", enter_label),
             super::ActionHint::new("/", tr(self.locale, MessageId::SessionsActionSearch)),
@@ -1584,5 +1565,35 @@ mod tests {
         assert_eq!(recovery, McpRecoveryKind::Reconnect);
         assert_eq!(recovery.slash_command("playwright"), "/mcp reload");
         assert_eq!(tr(Locale::En, recovery.label_key()).as_ref(), "reconnect");
+    }
+
+    /// The grokbuild grammar: Tab / Shift+Tab move across the tab bar, even
+    /// mid-search, and the query rides along to the new tab.
+    #[test]
+    fn tab_switches_tabs_and_keeps_the_search_query() {
+        use crate::tui::views::ModalView;
+        let mut view = ExtensionsView::from_snapshot_with_locale(
+            ExtensionsSnapshot::default(),
+            ExtensionsTab::Plugins,
+            Locale::En,
+        );
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        view.handle_key(key(KeyCode::Char('/')));
+        view.handle_key(key(KeyCode::Char('g')));
+        assert_eq!(view.focus, ExtensionsFocus::Search);
+
+        view.handle_key(key(KeyCode::Tab));
+        assert_eq!(view.active_tab, ExtensionsTab::Marketplace);
+        assert_eq!(view.query, "g", "the query carries over to the new tab");
+
+        view.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT));
+        assert_eq!(view.active_tab, ExtensionsTab::Plugins);
+        view.handle_key(key(KeyCode::BackTab));
+        assert_eq!(view.active_tab, ExtensionsTab::Hooks);
+
+        // Wraps: the last tab's next is the first.
+        view.set_tab(ExtensionsTab::Mcp);
+        view.handle_key(key(KeyCode::Tab));
+        assert_eq!(view.active_tab, ExtensionsTab::Hooks);
     }
 }

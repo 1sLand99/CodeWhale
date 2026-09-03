@@ -27,7 +27,7 @@ pub(crate) fn dismiss_dock(app: &mut App) {
     // closed: the dock re-opens when *that* view grows.
     super::model::resolve_view(app);
     app.work_surface.dismissed_view = app.work_surface.panel;
-    app.work_surface.dismissed_at_rows = super::model::visible_rows_for_panel(app).len();
+    app.work_surface.dismissed_at_rows = super::model::auto_work_rows(app);
     app.work_surface.focused = false;
     app.work_surface.selected = None;
     app.needs_redraw = true;

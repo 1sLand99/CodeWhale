@@ -564,6 +564,19 @@ pub(crate) fn handle_mouse_event(app: &mut App, mouse: MouseEvent) -> Vec<ViewEv
     if work_surface.consumed {
         return Vec::new();
     }
+    // The posture bar's live counts open the dock view they count. The
+    // strip's own tabs were consumed above; anything left carrying a dock
+    // action is a footer chip.
+    if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+        && let Some(InteractionAction::ShowDockPanel(panel)) = app
+            .viewport
+            .interaction_targets
+            .target_at(mouse.column, mouse.row)
+            .and_then(|target| target.mouse_action)
+    {
+        crate::tui::work_surface::select_dock_panel(app, panel);
+        return Vec::new();
+    }
 
     // WorkflowPanel toggle / cancel (#4121) before composer so the strip
     // above the input remains clickable.

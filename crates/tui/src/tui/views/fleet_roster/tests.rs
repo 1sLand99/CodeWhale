@@ -195,26 +195,23 @@ fn selection_change_resets_detail_scroll() {
 }
 
 #[test]
-fn enter_and_s_open_the_setup_wizard_for_members_only() {
-    for code in [KeyCode::Enter, KeyCode::Char('s')] {
-        // Operator row: display-only, no wizard hand-off.
-        let mut view = built_in_view();
-        assert!(view.operator_selected());
-        assert!(
-            matches!(view.handle_key(key(code)), ViewAction::None),
-            "{code:?} must be inert on the operator row"
-        );
+fn enter_opens_the_setup_wizard_for_members_only() {
+    // Operator row: display-only, no wizard hand-off.
+    let mut view = built_in_view();
+    assert!(view.operator_selected());
+    assert!(
+        matches!(view.handle_key(key(KeyCode::Enter)), ViewAction::None),
+        "Enter must be inert on the operator row"
+    );
 
-        // Member row: hands off to the setup wizard.
-        view.handle_key(key(KeyCode::Down));
-        let action = view.handle_key(key(code));
-        let ViewAction::EmitAndClose(ViewEvent::FleetRosterOpenSetupRequested { member_id }) =
-            action
-        else {
-            panic!("{code:?} should hand off to the setup wizard");
-        };
-        assert_eq!(member_id, "manager");
-    }
+    // Member row: hands off to the setup wizard.
+    view.handle_key(key(KeyCode::Down));
+    let action = view.handle_key(key(KeyCode::Enter));
+    let ViewAction::EmitAndClose(ViewEvent::FleetRosterOpenSetupRequested { member_id }) = action
+    else {
+        panic!("Enter should hand off to the setup wizard");
+    };
+    assert_eq!(member_id, "manager");
 }
 
 #[test]
@@ -244,7 +241,7 @@ fn mouse_selection_reveals_details_then_activates_the_same_member_as_enter() {
         .flat_map(|y| (0..area.width).map(move |x| (x, y)))
         .map(|(x, y)| selected_buf[(x, y)].symbol())
         .collect::<String>();
-    assert!(selected_text.contains("Member"), "{selected_text}");
+    assert!(selected_text.contains("Role"), "{selected_text}");
     assert!(selected_text.contains("manager"), "{selected_text}");
 
     let mouse_member = setup_member_id(view.handle_mouse(click)).expect("second click activates");
@@ -341,28 +338,6 @@ fn match_terminal_roster_surface_uses_reset_background() {
 }
 
 #[test]
-fn m_opens_the_selected_member_model_picker_only_for_a_named_fleet() {
-    let mut view = built_in_view();
-    view.handle_key(key(KeyCode::Down));
-    assert!(matches!(
-        view.handle_key(key(KeyCode::Char('m'))),
-        ViewAction::None
-    ));
-
-    let mut view = selected_fleet_view();
-    assert!(matches!(
-        view.handle_key(key(KeyCode::Char('m'))),
-        ViewAction::None
-    ));
-    view.handle_key(key(KeyCode::Down));
-    assert!(matches!(
-        view.handle_key(key(KeyCode::Char('m'))),
-        ViewAction::EmitAndClose(ViewEvent::FleetRosterOpenModelRequested { ref member_id })
-            if member_id == "manager"
-    ));
-}
-
-#[test]
 fn selected_named_fleet_member_shows_edit_affordance() {
     let rows = render_through_stack(
         || {
@@ -378,22 +353,27 @@ fn selected_named_fleet_member_shows_edit_affordance() {
         text.contains("[edit]"),
         "focused member should advertise editing: {text}"
     );
-    assert!(
-        text.contains("m model"),
-        "footer should advertise the model shortcut: {text}"
-    );
     assert!(text.contains("Team `Default`"), "{text}");
-    assert!(text.contains("edit team"), "{text}");
+    assert!(text.contains("Enter edit"), "{text}");
+    assert!(text.contains("Tab workers"), "{text}");
     assert!(text.contains("saved teams"), "{text}");
+    // The letter-key wall is gone: one grammar, no `s`, `m`, `w`, PgUp hints.
+    assert!(!text.contains("m model"), "{text}");
+    assert!(!text.contains("PgUp"), "{text}");
 }
 
 #[test]
-fn w_opens_the_live_workers_tab() {
-    let mut view = built_in_view();
-    assert!(matches!(
-        view.handle_key(key(KeyCode::Char('w'))),
-        ViewAction::EmitAndClose(ViewEvent::FleetRosterOpenWorkersRequested)
-    ));
+fn tab_and_w_open_the_live_workers_tab() {
+    for code in [KeyCode::Tab, KeyCode::BackTab, KeyCode::Char('w')] {
+        let mut view = built_in_view();
+        assert!(
+            matches!(
+                view.handle_key(key(code)),
+                ViewAction::EmitAndClose(ViewEvent::FleetRosterOpenWorkersRequested)
+            ),
+            "{code:?}"
+        );
+    }
 }
 
 #[test]

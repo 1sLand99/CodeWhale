@@ -481,6 +481,13 @@ pub struct Settings {
     /// One-time YOLO deprecation toast has been shown. Suppresses the repeat
     /// toast after the first sighting per install (persisted across sessions).
     pub yolo_deprecation_shown: bool,
+    /// Round 3 (2026-09-01) moved the work bar under the composer. Every
+    /// settings.toml saved before that carries `work_surface_placement =
+    /// "top"` — the old default, persisted verbatim by ordinary saves, not a
+    /// choice anyone made. This flag records that the one-time `top` →
+    /// `bottom` migration ran, so a user who picks `top` afterwards keeps it.
+    #[serde(default)]
+    pub work_surface_bottom_migrated: bool,
     /// Persisted impression counts for action-triggered, ephemeral product
     /// guidance. Keys are stable tip identifiers; values are bounded by the
     /// behavioral-tip engine and omitted entirely before the first sighting.
@@ -588,6 +595,7 @@ impl Default for Settings {
             workspace_follow_symlinks: false,
             feature_intro_shown: false,
             yolo_deprecation_shown: false,
+            work_surface_bottom_migrated: false,
             behavioral_tip_impressions: std::collections::BTreeMap::new(),
             footer_hint_uses: std::collections::BTreeMap::new(),
             legacy_yolo_default: false,
@@ -922,6 +930,15 @@ impl Settings {
             s.status_indicator = normalize_status_indicator(&s.status_indicator).to_string();
             s.work_surface_placement =
                 normalize_work_surface_placement(&s.work_surface_placement).to_string();
+            // Round 3 placement migration: a persisted `top` from before the
+            // default moved is the old default, not a preference. Move it
+            // once and remember; the next ordinary save persists both.
+            if !s.work_surface_bottom_migrated {
+                if s.work_surface_placement == "top" {
+                    s.work_surface_placement = "bottom".to_string();
+                }
+                s.work_surface_bottom_migrated = true;
+            }
             s.rail_panel = normalize_rail_panel(&s.rail_panel).to_string();
             // Migrate the unreadable 2..=4 legacy range in memory. The next
             // ordinary settings transaction persists the normalized value;
@@ -3392,6 +3409,23 @@ mod tests {
     }
 
     #[test]
+    fn settings_load_keeps_top_placement_chosen_after_the_bottom_migration() {
+        let _g = config_path_test_guard();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let settings_path = tmp.path().join("settings.toml");
+        std::fs::write(
+            &settings_path,
+            "work_surface_placement = \"top\"\nwork_surface_bottom_migrated = true\n",
+        )
+        .expect("settings");
+        let _config_override =
+            EnvVarRestore::set("DEEPSEEK_CONFIG_PATH", tmp.path().join("config.toml"));
+
+        let loaded = Settings::load().expect("load settings");
+        assert_eq!(loaded.work_surface_placement, "top");
+    }
+
+    #[test]
     fn settings_load_migrates_unreadable_top_work_surface_height() {
         let _g = config_path_test_guard();
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -3404,7 +3438,10 @@ mod tests {
         let loaded = Settings::load().expect("load settings");
 
         assert_eq!(loaded.work_surface_top_height, WORK_SURFACE_TOP_HEIGHT_MIN);
-        assert_eq!(loaded.work_surface_placement, "top");
+        // Round 3: a persisted `top` from before the default moved is the
+        // old default, migrated once to `bottom` (0.9.12 defect #9).
+        assert_eq!(loaded.work_surface_placement, "bottom");
+        assert!(loaded.work_surface_bottom_migrated);
         // `pinned` folded into the tasks view (2026-09-02 dock views).
         assert_eq!(loaded.rail_panel, "tasks");
         assert_eq!(

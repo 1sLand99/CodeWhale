@@ -30,6 +30,7 @@ use crate::tui::menu_style;
 use crate::tui::tideline::{SettingApplySemantics, SettingAuthority, SettingFact, UiSnapshot};
 use crate::tui::widgets::agent_card::AgentLifecycle;
 
+pub mod automations;
 pub mod extensions;
 pub mod fleet_detail;
 pub mod fleet_list;
@@ -77,6 +78,9 @@ pub enum ModalKind {
     /// Live workflow **run** dashboard (`/workflows`): active and retained
     /// runs from the journal, with host-side cancel.
     WorkflowsManager,
+    /// The scheduled-automation room (`/automation`): every automation the
+    /// person owns, with pause / resume / run / cancel / delete.
+    Automations,
 }
 
 /// Clear and paint a modal popup with an opaque surface.
@@ -944,13 +948,6 @@ pub enum ViewEvent {
     /// The host routes a selected v2 Fleet to its exact editor and uses the
     /// legacy profile wizard only when no named Fleet is selected.
     FleetRosterOpenSetupRequested {
-        /// Exact Fleet member id; roles are not unique and therefore cannot
-        /// identify which row the operator selected.
-        member_id: String,
-    },
-    /// Emitted by the `/fleet` roster `m` shortcut to open the selected
-    /// member's exact Fleet editor directly on its model picker.
-    FleetRosterOpenModelRequested {
         /// Exact Fleet member id; roles are not unique and therefore cannot
         /// identify which row the operator selected.
         member_id: String,
@@ -8282,6 +8279,7 @@ base_url = "https://api.xiaomimimo.com/v1"
             "pinned_models",
             "feature_intro_shown",
             "yolo_deprecation_shown",
+            "work_surface_bottom_migrated",
             "behavioral_tip_impressions",
             "footer_hint_uses",
         ] {

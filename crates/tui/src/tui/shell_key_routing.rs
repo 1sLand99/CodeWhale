@@ -186,11 +186,12 @@ pub const SHELL_BINDINGS: &[ShellBinding] = &[
         id: ShellBindingId::ModeCycle,
         catalog_chord: "Tab",
         footer_chord: "Tab",
-        // Tab is the session's mode cycle. The composer's own completions
-        // get the key first, but *having typed* never disables it. The
-        // launch screen is excluded: there Tab moves focus between the
-        // startup menu and the pre-session composer.
-        focus: FocusScope::SessionShell,
+        // Tab is the shell's mode cycle. The composer's own completions
+        // get the key first, but *having typed* never disables it. Live on
+        // the launch screen too: the card's rows are arrowed, the composer
+        // is always focused, so Tab had no focus left to move and read as
+        // dead (0.9.12 defect #5).
+        focus: FocusScope::AnyShell,
     },
     ShellBinding {
         id: ShellBindingId::PermissionCycle,
@@ -652,8 +653,8 @@ mod tests {
             route(Focus::Composer, &shift_tab),
             Some(ShellBindingId::PermissionCycle)
         );
-        // Tab moves focus on the launch stage; the posture control still works.
-        assert_eq!(route(Focus::Launch, &tab), None);
+        // Both shell controls are live on the launch stage as well.
+        assert_eq!(route(Focus::Launch, &tab), Some(ShellBindingId::ModeCycle));
         assert_eq!(
             route(Focus::Launch, &shift_tab),
             Some(ShellBindingId::PermissionCycle)

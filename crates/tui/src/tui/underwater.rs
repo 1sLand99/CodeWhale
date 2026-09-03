@@ -3187,6 +3187,169 @@ pub struct TidelineStartup<'a> {
     /// Session-start hooks configured, for the working screen's receipt
     /// row. Zero paints the receipt without a hooks count.
     pub session_hooks: usize,
+    /// The underwater field beneath the stage: the same ocean ramp and
+    /// ambient life the transcript paints, so opening Codewhale and working
+    /// in it are one water. `None` under every other theme.
+    pub ocean: Option<LaunchOcean>,
+}
+
+/// The launch stage's share of the underwater atmosphere: one ocean column
+/// plus the ink pair and clocks ambient life needs. Built by
+/// [`launch_ocean_from_app`] from the same inputs `ChatWidget` uses, so the
+/// card's water and the transcript's water agree frame for frame.
+#[derive(Debug, Clone, Copy)]
+pub struct LaunchOcean {
+    pub column: crate::tui::ocean::OceanColumn,
+    pub inks: (Color, Color),
+    pub elapsed_ms: u128,
+    /// Life presence in `[0,1]`; fades the creatures in and out.
+    pub presence: f32,
+    pub animated: bool,
+    pub activity: crate::tui::ambient_life::AmbientActivity,
+}
+
+/// Whether the launch screen wants animation frames right now: the mark is
+/// still surfacing, the card is dissolving, or the underwater field is
+/// alive and not yet settled. Nothing here paints; the event loop reads it
+/// to schedule redraws, and each redraw advances the ambient clock.
+#[must_use]
+pub fn launch_motion_active(app: &App, obscured: bool, ambient_settled: bool) -> bool {
+    if !app.launch.visible
+        || obscured
+        || app.onboarding != OnboardingState::None
+        || !app.view_stack.is_empty()
+        || !app.motion_policy().allows_decorative()
+    {
+        return false;
+    }
+    let now = app.ambient_clock_ms;
+    let surfacing = crate::tui::mark::surface_progress(now, MARK_SURFACE_MS) < 1.0;
+    let dissolve = app.launch.card_dissolve_progress(now, true);
+    let dissolving = dissolve > 0.0 && dissolve < 1.0;
+    let water_alive = app.theme_id == crate::palette::ThemeId::Underwater && !ambient_settled;
+    surfacing || dissolving || water_alive
+}
+
+/// Build the launch stage's ocean for the underwater theme. Mirrors the
+/// transcript's `ChatWidget::new` wiring for an empty, idle stage: the
+/// column breathes on the ambient clock and life is present whenever motion
+/// is allowed (reduced motion keeps a still scene, never an empty one).
+#[must_use]
+pub fn launch_ocean_from_app(app: &App, stage: Rect) -> Option<LaunchOcean> {
+    if app.theme_id != crate::palette::ThemeId::Underwater {
+        return None;
+    }
+    let ramp = crate::tui::ocean::OceanRamp::for_theme(&app.ui_theme)?;
+    let activity =
+        crate::tui::ambient_life::AmbientActivity::from_kind(LiveActivity::from_app(app).kind());
+    let inks = crate::tui::ocean::ambient_inks_for_activity(&app.ui_theme, activity);
+    let animated = app.motion_policy().allows_decorative()
+        && !app.attention_hold_active()
+        && app.view_stack.is_empty();
+    let elapsed_ms = app.ambient_clock_ms;
+    // The launch stage is the empty state: full presence while animated,
+    // the static settled reading otherwise.
+    let presence = crate::tui::ocean::life_presence(None, None, animated, false, true);
+    let presence_fixed = (presence * 1000.0).round().clamp(0.0, 1000.0) as u16;
+    let column = crate::tui::ocean::OceanColumn::new(
+        ramp,
+        stage,
+        elapsed_ms,
+        None,
+        ShellPhase::Idle,
+        animated,
+        presence_fixed,
+        crate::tui::phase_strip::context_percent_from_app(app),
+    );
+    Some(LaunchOcean {
+        column,
+        inks,
+        elapsed_ms,
+        presence,
+        animated,
+        activity,
+    })
+}
+
+/// Paint the ocean ramp under every stage cell that still wears the theme
+/// surface. Runs before the card so fg-only chrome inherits the water.
+fn render_launch_ocean_field(stage: Rect, buf: &mut Buffer, theme: &UiTheme, ocean: &LaunchOcean) {
+    let column = ocean.column;
+    let ramp = crate::tui::ambient_life::frame_ocean_ramp(
+        &column,
+        stage.height,
+        stage.y,
+        ocean.elapsed_ms,
+        column.phase_tag(),
+        column.ramp_fingerprint(),
+    );
+    for local_y in 0..stage.height {
+        let row_bg = ramp
+            .get(usize::from(local_y))
+            .copied()
+            .unwrap_or_else(|| column.color_at_y(stage.y.saturating_add(local_y)));
+        for local_x in 0..stage.width {
+            if let Some(cell) = buf.cell_mut((stage.x + local_x, stage.y + local_y))
+                && (cell.bg == theme.surface_bg || cell.bg == Color::Reset)
+            {
+                cell.set_bg(row_bg);
+            }
+        }
+    }
+}
+
+/// Snapshot the painted stage as transcript-shaped lines so ambient life
+/// keeps its collision rules (creatures swim only in open water, never
+/// through the card or the composer).
+fn launch_stage_lines(stage: Rect, buf: &Buffer) -> Vec<Line<'static>> {
+    (0..stage.height)
+        .map(|local_y| {
+            let mut text = String::with_capacity(usize::from(stage.width));
+            for local_x in 0..stage.width {
+                let symbol = buf
+                    .cell((stage.x + local_x, stage.y + local_y))
+                    .map_or(" ", ratatui::buffer::Cell::symbol);
+                text.push_str(if symbol.is_empty() { " " } else { symbol });
+            }
+            Line::from(text)
+        })
+        .collect()
+}
+
+/// Paint ambient life and caustic shimmer over the finished stage.
+fn render_launch_ocean_life(stage: Rect, buf: &mut Buffer, ocean: &LaunchOcean) {
+    let lines = launch_stage_lines(stage, buf);
+    let cursor = crate::tui::ambient_life::AmbientCursor {
+        column: stage.x.saturating_add(stage.width / 2),
+        row: stage
+            .y
+            .saturating_add(crate::tui::ambient_life::school_band_row(stage)),
+        flee_elapsed_ms: None,
+    };
+    let whale = crate::tui::ambient_life::WhaleCameo {
+        elapsed_ms: None,
+        anchor_x: stage.x.saturating_add(stage.width / 2),
+        anchor_y: stage.y.saturating_add(stage.height.saturating_mul(2) / 3),
+    };
+    let _ = crate::tui::ambient_life::render_ambient_life(
+        stage,
+        buf,
+        ocean.inks,
+        &lines,
+        ocean.elapsed_ms,
+        ocean.presence,
+        cursor,
+        whale,
+        ocean.activity,
+    );
+    crate::tui::ambient_life::apply_caustic_shimmer(
+        stage,
+        buf,
+        &ocean.column,
+        ocean.elapsed_ms,
+        ocean.animated,
+        &lines,
+    );
 }
 
 impl<'a> TidelineStartup<'a> {
@@ -3213,7 +3376,15 @@ impl<'a> TidelineStartup<'a> {
             composer_rule: None,
             branch: None,
             session_hooks: 0,
+            ocean: None,
         }
+    }
+
+    /// Set the underwater field beneath the stage.
+    #[must_use]
+    pub fn ocean(mut self, ocean: Option<LaunchOcean>) -> Self {
+        self.ocean = ocean;
+        self
     }
 
     /// Set the configured session-start hook count for the receipt row.
@@ -3977,6 +4148,13 @@ pub fn render_tideline_startup(
     let theme = startup.theme;
     let layout = startup_layout(stage);
 
+    // The water first: the same ocean ramp the transcript paints, so the
+    // launch card and the working screen are one field. Chrome is fg-only
+    // and inherits it.
+    if let Some(ocean) = startup.ocean.as_ref() {
+        render_launch_ocean_field(stage, buf, theme, ocean);
+    }
+
     // The top line: ⑂ branch  path, one dim row the terminal owns above the
     // stage. The working screen (card gone) gains the `⋮ MCP n/m` chip right.
     let card_gone = startup.card_dissolve >= 1.0;
@@ -4077,6 +4255,13 @@ pub fn render_tideline_startup(
                 ),
             );
         }
+    }
+    // Life last, over the finished stage, in open water only. The school's
+    // floor band sits at the bottom of its field, so the field ends where
+    // the composer dock begins — otherwise the fish would try to swim
+    // through the input row and never appear at all.
+    if let Some(ocean) = startup.ocean.as_ref() {
+        render_launch_ocean_life(layout.header, buf, ocean);
     }
     sixel_reserve
 }
@@ -4239,7 +4424,14 @@ pub fn tideline_startup_from_app(app: &App) -> TidelineStartup<'_> {
     // billing boundary; the provider identity in the route line is the
     // billing owner, the permission + scope is the trust boundary).
     let (_, model) = app.effective_route_identity_display();
-    let permission = permission_label(app);
+    // The mode sits between the route and the permission so Tab's cycle is
+    // legible here and the rule reads the same as the working screen's
+    // posture bar (`mode · permission`), not a different answer (#7).
+    let (mode_chip, _) = posture_chips(app);
+    let permission = match mode_chip {
+        Some((mode, _)) => format!("{mode} · {}", permission_label(app)),
+        None => permission_label(app).into_owned(),
+    };
     let scope = filesystem_scope_notice(app).map(|scope| scope.into_owned());
     let mut rule = if model.is_empty() {
         format!(

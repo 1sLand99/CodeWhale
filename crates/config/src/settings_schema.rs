@@ -1101,6 +1101,13 @@ pub const SETTINGS_SCHEMA: &[SettingDef] = &[
         "false",
         None,
     ),
+    // Round 3 work-bar placement migration ran once (`top` → `bottom`).
+    def(
+        "work_surface_bottom_migrated",
+        SettingKind::Bool(ON_OFF),
+        "false",
+        None,
+    ),
     def("behavioral_tip_impressions", SettingKind::String, "", None),
     // Footer key-hint use counts: a hint retires to its bare state once its
     // binding has been used enough times. Written by the footer, never edited.

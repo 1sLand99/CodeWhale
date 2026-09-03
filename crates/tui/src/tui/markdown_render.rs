@@ -1704,6 +1704,19 @@ fn parse_inline_spans(line: &str, base_style: Style, link_style: Style) -> Vec<I
     let mut rest = line;
 
     while !rest.is_empty() {
+        // Backslash escape (CommonMark §2.4): `\` before ASCII punctuation
+        // yields the literal character. Producers escape untrusted text
+        // (plugin names, paths) this way so it cannot open markup; without
+        // this arm the backslash itself reached the terminal
+        // (`computer\-use`, `0\.1\.0` — 0.9.12 defect #21).
+        if let Some(escaped) = rest.strip_prefix('\\')
+            && let Some(ch) = escaped.chars().next()
+            && ch.is_ascii_punctuation()
+        {
+            out.push(InlineToken::new(ch.to_string(), base_style, None));
+            rest = &escaped[ch.len_utf8()..];
+            continue;
+        }
         // **bold**
         if let Some(end) = rest.strip_prefix("**").and_then(|s| s.find("**")) {
             let inner = &rest[2..2 + end];
@@ -1905,7 +1918,8 @@ fn find_next_marker(s: &str) -> usize {
     while i < bytes.len() {
         let ch_len = s[i..].chars().next().map_or(1, |c| c.len_utf8());
         let slice = &s[i..];
-        if slice.starts_with("**")
+        if slice.starts_with('\\')
+            || slice.starts_with("**")
             || slice.starts_with("__")
             || slice.starts_with("~~")
             || slice.starts_with('`')
@@ -2314,6 +2328,19 @@ mod tests {
                     .collect()
             })
             .collect()
+    }
+
+    #[test]
+    fn backslash_escapes_yield_the_literal_punctuation() {
+        let lines = render_markdown(
+            "ID: computer\\-use 0\\.1\\.0 \\*not italic\\* trailing\\",
+            80,
+            Style::default(),
+        );
+        assert_eq!(
+            visible_lines(&lines),
+            vec!["ID: computer-use 0.1.0 *not italic* trailing\\"]
+        );
     }
 
     fn rendered_fingerprint(lines: &[RenderedMarkdownLine]) -> Vec<String> {

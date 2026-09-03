@@ -43,16 +43,25 @@ pub fn enter_agents(app: &mut App) -> bool {
         return false;
     }
     let rows = visible_rows_for_panel(app);
+    // A live strip is proven by the hitboxes it painted this frame. When the
+    // agents view itself was on screen the worker row must be among them;
+    // when another view was up (the dock opens on TODO), any painted row
+    // proves the strip is live and the switch paints the workers next frame.
+    let strip_is_live = !app.work_surface.hitboxes.is_empty();
+    let agents_were_painted = previous_panel == RailPanel::Agents;
     let first_agent = rows
         .iter()
         .find(|row| {
             row.selectable
                 && row.id.0.starts_with("worker:")
-                && app
-                    .work_surface
-                    .hitboxes
-                    .iter()
-                    .any(|hitbox| hitbox.id == row.id)
+                && if agents_were_painted {
+                    app.work_surface
+                        .hitboxes
+                        .iter()
+                        .any(|hitbox| hitbox.id == row.id)
+                } else {
+                    strip_is_live
+                }
         })
         .map(|row| row.id.clone());
     let Some(first_agent) = first_agent else {

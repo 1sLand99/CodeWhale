@@ -53,7 +53,10 @@ pub fn height(app: &mut App, width: u16, terminal_height: u16, rail_budget: u16)
     }
     model::resolve_view(app);
     if app.work_surface.dismissed {
-        let current_rows = visible_rows_for_panel(app).len();
+        // New work anywhere in the auto views re-opens the dock — a worker
+        // spawning while the to-do list is on top counts, even though the
+        // resolved view stays TODO.
+        let current_rows = model::auto_work_rows(app);
         let new_work = app.work_surface.panel != app.work_surface.dismissed_view
             || current_rows > app.work_surface.dismissed_at_rows;
         if new_work {

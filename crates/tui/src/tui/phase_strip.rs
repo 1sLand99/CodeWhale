@@ -641,6 +641,8 @@ struct PostureItem {
     bold: bool,
     /// Painted after `, ` rather than ` · `: the counts are one group.
     joined: bool,
+    /// Which of `footer.counts` this item is, when it is one.
+    count_index: Option<usize>,
 }
 
 /// Shed ladder for the left run, most expendable first: the hint, the
@@ -662,6 +664,7 @@ fn posture_items(footer: &TidelineFooter<'_>, shed: u8) -> Vec<PostureItem> {
         ink: footer.permission_chip.1,
         bold: true,
         joined: false,
+        count_index: None,
     }];
     if let Some((mode, ink)) = footer.mode_chip.filter(|_| shed < 4) {
         items.push(PostureItem {
@@ -669,6 +672,7 @@ fn posture_items(footer: &TidelineFooter<'_>, shed: u8) -> Vec<PostureItem> {
             ink,
             bold: true,
             joined: false,
+            count_index: None,
         });
     }
     if shed < 2 {
@@ -678,6 +682,7 @@ fn posture_items(footer: &TidelineFooter<'_>, shed: u8) -> Vec<PostureItem> {
                 ink: *ink,
                 bold: false,
                 joined: index > 0,
+                count_index: Some(index),
             });
         }
     }
@@ -689,6 +694,7 @@ fn posture_items(footer: &TidelineFooter<'_>, shed: u8) -> Vec<PostureItem> {
             ink,
             bold: false,
             joined: false,
+            count_index: None,
         });
     }
     items
@@ -721,9 +727,17 @@ fn left_run_width(mark: &str, items: &[PostureItem]) -> usize {
 /// shed from the right until the run fits beside the pinned right slot.
 /// Right: the notice or remote-control state, clause-shed by the caller and
 /// truncated here as the last resort; it never covers the permission chip.
-pub fn render_tideline_footer(area: Rect, buf: &mut Buffer, footer: &TidelineFooter<'_>) {
+/// Paint the posture bar. Returns the painted rect of each live count, by
+/// its index into `footer.counts`, so the caller can make the counts the
+/// bottom-of-screen affordance that opens the matching dock view.
+pub fn render_tideline_footer(
+    area: Rect,
+    buf: &mut Buffer,
+    footer: &TidelineFooter<'_>,
+) -> Vec<(usize, Rect)> {
+    let mut count_rects = Vec::new();
     if area.width < 8 || area.height < 1 {
-        return;
+        return count_rects;
     }
     let theme = footer.theme;
     let width = usize::from(area.width);
@@ -775,7 +789,16 @@ pub fn render_tideline_footer(area: Rect, buf: &mut Buffer, footer: &TidelineFoo
         if item.bold {
             style = style.add_modifier(Modifier::BOLD);
         }
-        tput(buf, x as u16, area.y, &clip(x, &item.text), style);
+        let text = clip(x, &item.text);
+        tput(buf, x as u16, area.y, &text, style);
+        if let Some(count_index) = item.count_index
+            && !text.is_empty()
+        {
+            count_rects.push((
+                count_index,
+                Rect::new(x as u16, area.y, text.width() as u16, 1),
+            ));
+        }
         x += item.text.width();
     }
 
@@ -785,6 +808,7 @@ pub fn render_tideline_footer(area: Rect, buf: &mut Buffer, footer: &TidelineFoo
         let sx = (usize::from(area.x) + width).saturating_sub(text.width());
         tput(buf, sx as u16, area.y, &text, tchrome(theme, ink));
     }
+    count_rects
 }
 
 fn truncate_owned(text: &str, width: usize) -> String {
@@ -809,6 +833,9 @@ pub(crate) struct TidelineFooterFacts {
     pub mode_chip: Option<(String, crate::palette::ChromeInk)>,
     pub mode_key: Option<&'static str>,
     pub counts: Vec<(String, ChromeInk)>,
+    /// The dock view each entry of `counts` opens when clicked — same
+    /// length, same order.
+    pub count_panels: Vec<crate::tui::work_surface::RailPanel>,
     pub hint: Option<(String, crate::palette::ChromeInk)>,
     pub context_percent: u8,
     pub right: Option<(String, crate::palette::ChromeInk)>,
@@ -850,20 +877,34 @@ pub(crate) fn context_percent_from_app(app: &App) -> u8 {
 /// The live counts: running sub-agents, live shells, background tasks, and
 /// scheduled automation. Each count is zero-suppressed — the bar never
 /// grows furniture for work that is not happening.
-fn live_counts(app: &App, tier: ShellTier) -> Vec<(String, ChromeInk)> {
+fn live_counts(
+    app: &App,
+    tier: ShellTier,
+) -> (
+    Vec<(String, ChromeInk)>,
+    Vec<crate::tui::work_surface::RailPanel>,
+) {
     use crate::tui::background_indicator::{PendingItemKind, pending_work_from_app};
+    use crate::tui::work_surface::RailPanel;
     let mut counts = Vec::new();
+    let mut panels = Vec::new();
     let agents = crate::tui::subagent_routing::running_agent_count(app);
     match agents {
         0 => {}
-        1 => counts.push((
-            tr(app.ui_locale, MessageId::FooterAgentSingular).into_owned(),
-            ChromeInk::Active,
-        )),
-        n => counts.push((
-            tr(app.ui_locale, MessageId::FooterAgentsPlural).replace("{count}", &n.to_string()),
-            ChromeInk::Active,
-        )),
+        1 => {
+            counts.push((
+                tr(app.ui_locale, MessageId::FooterAgentSingular).into_owned(),
+                ChromeInk::Active,
+            ));
+            panels.push(RailPanel::Agents);
+        }
+        n => {
+            counts.push((
+                tr(app.ui_locale, MessageId::FooterAgentsPlural).replace("{count}", &n.to_string()),
+                ChromeInk::Active,
+            ));
+            panels.push(RailPanel::Agents);
+        }
     }
     let shells = app
         .task_panel
@@ -875,6 +916,7 @@ fn live_counts(app: &App, tier: ShellTier) -> Vec<(String, ChromeInk)> {
             format!("{shells} {}", PendingItemKind::Shell.plural_noun(shells)),
             ChromeInk::Active,
         ));
+        panels.push(RailPanel::Background);
     }
     let tasks = pending_work_from_app(app).count(PendingItemKind::Task);
     if tasks > 0 {
@@ -882,6 +924,7 @@ fn live_counts(app: &App, tier: ShellTier) -> Vec<(String, ChromeInk)> {
             format!("{tasks} {}", PendingItemKind::Task.plural_noun(tasks)),
             ChromeInk::Active,
         ));
+        panels.push(RailPanel::Background);
     }
     // Scheduled automation: the `AutomationPanelState` projection stays the
     // single owner; Compact keeps the abbreviated count (chrome sheds
@@ -893,8 +936,20 @@ fn live_counts(app: &App, tier: ShellTier) -> Vec<(String, ChromeInk)> {
     };
     if let Some(automation) = automation {
         counts.push((automation, app.automation_panel.activity_ink()));
+        panels.push(RailPanel::Background);
     }
-    counts
+    // With nothing live there is still one bottom affordance that opens the
+    // dock (founder, 2026-09-03: the bar opens when used, or when you click
+    // something at the bottom to ask for it). The word is the dock's own
+    // TODO view title; it disappears while the dock is up.
+    if counts.is_empty() && app.work_surface.last_area.is_none() {
+        counts.push((
+            RailPanel::Tasks.title().to_ascii_lowercase(),
+            ChromeInk::MetadataDim,
+        ));
+        panels.push(RailPanel::Tasks);
+    }
+    (counts, panels)
 }
 
 /// Build the posture bar's facts from live `App` state. `width` is the
@@ -913,8 +968,7 @@ pub(crate) fn tideline_footer_from_app(app: &mut App, width: u16) -> TidelineFoo
         .unwrap_or_else(|| (String::new(), ChromeInk::PermissionAsk));
     let mode_chip = mode_chip.map(|(text, ink)| (text.into_owned(), ink));
     // Cycle keys come from the binding table and only when that binding is
-    // live for the current focus — the launch stage's Tab moves focus, so
-    // the mode chip there carries no key.
+    // live for the current focus.
     let live_chord = |id: ShellBindingId| -> Option<&'static str> {
         let binding = binding(id);
         binding.focus.admits(focus).then_some(binding.footer_chord)
@@ -971,6 +1025,7 @@ pub(crate) fn tideline_footer_from_app(app: &mut App, width: u16) -> TidelineFoo
                 .map(|word| (format!("/rc {word}"), ChromeInk::Info))
         });
 
+    let (counts, count_panels) = live_counts(app, tier);
     TidelineFooterFacts {
         permission_chip,
         permission_key: live_chord(ShellBindingId::PermissionCycle).filter(|_| {
@@ -986,7 +1041,8 @@ pub(crate) fn tideline_footer_from_app(app: &mut App, width: u16) -> TidelineFoo
                 crate::tui::footer_hints::MODE_CYCLE,
             )
         }),
-        counts: live_counts(app, tier),
+        counts,
+        count_panels,
         hint,
         context_percent: context_percent_from_app(app),
         right,

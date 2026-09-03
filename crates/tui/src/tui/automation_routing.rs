@@ -33,6 +33,20 @@ pub(super) async fn handle_action(
     };
 
     let cell = match action {
+        AutomationAction::Open { focus } => {
+            // The room, not a receipt: the one place to see, pause, run,
+            // cancel, and delete automations (0.9.12 defect #14).
+            if app.view_stack.top_kind() == Some(crate::tui::views::ModalKind::Automations) {
+                app.view_stack.pop();
+            }
+            app.view_stack
+                .push(crate::tui::views::automations::AutomationsView::new(
+                    app,
+                    focus.as_deref(),
+                ));
+            app.needs_redraw = true;
+            return;
+        }
         AutomationAction::List => HistoryCell::System {
             content: list(locale, &automations).await,
         },

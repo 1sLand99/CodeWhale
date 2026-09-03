@@ -677,7 +677,7 @@ pub(crate) async fn handle_mcp_ui_action(
             // #2068: keep the hotbar's MCP-tool actions in sync with the tools
             // that are actually loaded; the hotbar never connects on its own.
             app.hotbar_actions.replace_mcp_tools(Some(&snapshot));
-            open_mcp_manager_pager(app, &snapshot);
+            open_mcp_extensions(app);
         }
         Err(err) if retry_name.is_some() => add_mcp_message(
             app,
@@ -1364,9 +1364,6 @@ pub(crate) async fn handle_view_events(
                 // (focused on this member) or the legacy wizard when no named
                 // Fleet is selected.
                 open_fleet_setup_target(app, config, Some(&member_id));
-            }
-            ViewEvent::FleetRosterOpenModelRequested { member_id } => {
-                open_fleet_model_target(app, config, &member_id);
             }
             ViewEvent::FleetListOpenDetailRequested { name, scope } => {
                 if app.view_stack.top_kind() != Some(ModalKind::FleetDetail) {

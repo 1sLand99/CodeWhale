@@ -779,11 +779,6 @@ pub(crate) async fn apply_model_picker_choice(
         }
         if !model_is_auto {
             apply_picker_effort_choice(app, engine_handle, effort, previous_effort).await;
-            app.fleet_roster_stale |= crate::fleet::members::auto_enroll_fleet_model(
-                &app.workspace,
-                app.provider_identity_for_persistence(),
-                &app.model,
-            );
             if save_as_startup_default {
                 app.status_message = Some(app.save_live_route_as_startup_default());
             }
@@ -879,13 +874,6 @@ pub(crate) async fn apply_model_picker_choice(
     // writes a startup default.
     let route_provider = app.provider_identity_for_persistence().to_string();
     app.note_session_route_change(&route_provider, &resolved_model);
-    if !model_is_auto {
-        app.fleet_roster_stale |= crate::fleet::members::auto_enroll_fleet_model(
-            &app.workspace,
-            &route_provider,
-            &resolved_model,
-        );
-    }
 
     if model_changed {
         apply_model_and_compaction_update(
@@ -1251,6 +1239,12 @@ pub(crate) async fn apply_command_result(
                     content: success_message.clone(),
                 });
                 app.status_message = Some(success_message);
+                // A loaded session is the working screen. The launch card's
+                // recent rows reach here through `/resume`-shaped dispatch;
+                // leaving the launch stage visible over the restored
+                // transcript is what made those rows read as dead (#4).
+                app.launch.visible = false;
+                app.launch.status = None;
             }
             AppAction::SyncSession {
                 session_id,
