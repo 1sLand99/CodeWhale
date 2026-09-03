@@ -661,7 +661,7 @@ pub(crate) fn title_activity_verb(app: &App) -> &'static str {
             LiveActivityKind::Reasoning => "reasoning…",
             LiveActivityKind::Reading => "reading…",
             LiveActivityKind::UsingTool => "using tool…",
-            LiveActivityKind::UsingSubagents => "pod underway…",
+            LiveActivityKind::UsingSubagents => "fleet underway…",
             LiveActivityKind::Verifying => "verifying…",
             LiveActivityKind::Working => "in the current…",
         },

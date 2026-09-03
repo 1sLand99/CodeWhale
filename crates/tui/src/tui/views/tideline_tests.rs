@@ -172,7 +172,7 @@ fn live_preview_is_a_real_projection_of_the_real_renderers() {
     assert!(text.contains("PREVIEW · Blue Stage"), "{text}");
     assert!(text.contains("└── whale-2"), "real pod tree: {text}");
     assert!(text.contains("● working"), "real receipt marks: {text}");
-    assert!(text.contains("POD LEDGER"), "real ledger: {text}");
+    assert!(text.contains("FLEET LEDGER"), "real ledger: {text}");
     assert!(text.contains("╭"), "real composer chrome: {text}");
     assert!(text.contains("╮"), "real composer corner: {text}");
     assert!(

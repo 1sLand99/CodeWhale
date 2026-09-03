@@ -26,10 +26,10 @@ pub(super) fn event_owner_is_active(
     !owner_session_id.is_empty() && current_session_id == Some(owner_session_id)
 }
 
-fn current_session_pod_workers_status(locale: crate::localization::Locale, count: usize) -> String {
+fn current_session_fleet_workers_status(locale: crate::localization::Locale, count: usize) -> String {
     crate::localization::tr(
         locale,
-        crate::localization::MessageId::SubagentsCurrentSessionPodWorkersStatus,
+        crate::localization::MessageId::SubagentsCurrentSessionFleetWorkersStatus,
     )
     .replace("{count}", &count.to_string())
 }
@@ -3155,7 +3155,7 @@ pub(crate) async fn run_event_loop(
                         reconcile_subagent_activity_state(app);
                         let view_agents = subagent_view_agents(app, &app.subagent_cache);
                         if app.view_stack.update_subagents(&view_agents) {
-                            app.status_message = Some(current_session_pod_workers_status(
+                            app.status_message = Some(current_session_fleet_workers_status(
                                 app.ui_locale,
                                 view_agents.len(),
                             ));
@@ -4430,7 +4430,7 @@ pub(crate) async fn run_event_loop(
             // A route change made in-session is temporary and stays that way
             // until the user EXPLICITLY persists it with a command
             // (/fleet save updates the selected Fleet, /fleet save-as saves a
-            // new Pod, /model save-default remembers the startup default).
+            // new Fleet, /model save-default remembers the startup default).
             // Nothing here intercepts keys: a scripted or automated terminal
             // types exactly what it types, and plain typing can never trigger
             // a fleet write by accident.
@@ -6552,14 +6552,14 @@ mod session_boot_event_tests {
 }
 
 #[cfg(test)]
-mod pod_workers_status_tests {
-    use super::current_session_pod_workers_status;
+mod fleet_workers_status_tests {
+    use super::current_session_fleet_workers_status;
     use crate::localization::Locale;
 
     #[test]
-    fn current_session_pod_worker_status_keeps_the_english_session_boundary() {
+    fn current_session_fleet_worker_status_keeps_the_english_session_boundary() {
         assert_eq!(
-            current_session_pod_workers_status(Locale::En, 3),
+            current_session_fleet_workers_status(Locale::En, 3),
             "Current-session fleet workers: 3 total"
         );
     }
