@@ -3798,6 +3798,13 @@ impl ModalView for ConfigView {
 
     fn handle_mouse(&mut self, mouse: MouseEvent) -> ViewAction {
         if matches!(mouse.kind, MouseEventKind::Moved) {
+            let has_choices = self
+                .editing
+                .as_ref()
+                .is_some_and(|edit| edit.choices.is_some());
+            if has_choices {
+                return self.hover_edited_choice(mouse);
+            }
             self.track_hover(mouse);
             return ViewAction::None;
         }
@@ -3807,7 +3814,6 @@ impl ModalView for ConfigView {
                 .as_ref()
                 .is_some_and(|edit| edit.choices.is_some());
             match mouse.kind {
-                MouseEventKind::Moved if has_choices => return self.hover_edited_choice(mouse),
                 MouseEventKind::ScrollUp if has_choices => {
                     self.move_choice(-1);
                     return self.preview_edited_choice();
