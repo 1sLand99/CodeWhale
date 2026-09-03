@@ -214,6 +214,81 @@ pub const UNDERWATER_UI_THEME: UiTheme = UiTheme {
     tool_failed: WHALE_ERROR,
 };
 
+/// The underwater-retro theme: the flat phosphor-teal look of the legacy
+/// deepsea era (the old `deepseek_theme` token days) as a selectable theme.
+/// Same ink and accent roles as underwater so text contrast is identical;
+/// the ground is flat near-black blue with no ombre paint, so the ocean ramp
+/// leaves it alone.
+pub const UNDERWATER_RETRO_UI_THEME: UiTheme = UiTheme {
+    name: "underwater-retro",
+    mode: PaletteMode::Dark,
+    surface_bg: Color::Rgb(0x05, 0x10, 0x19),
+    panel_bg: Color::Rgb(0x07, 0x15, 0x22),
+    elevated_bg: Color::Rgb(0x0a, 0x1c, 0x2c),
+    composer_bg: Color::Rgb(0x07, 0x15, 0x22),
+    selection_bg: SELECTION_BG,
+    header_bg: Color::Rgb(0x03, 0x0c, 0x13),
+    footer_bg: Color::Rgb(0x03, 0x0c, 0x13),
+    text_dim: TEXT_DIM,
+    text_hint: TEXT_HINT,
+    text_muted: TEXT_MUTED,
+    text_body: TEXT_BODY,
+    text_soft: TEXT_SOFT,
+    border: Color::Rgb(0x14, 0x50, 0x5e),
+    accent_primary: WHALE_ACTION,
+    accent_secondary: WHALE_LIVE,
+    accent_action: WHALE_HUMAN,
+    error_fg: WHALE_ERROR,
+    error_hover: Color::Rgb(
+        WHALE_ERROR_HOVER_RGB.0,
+        WHALE_ERROR_HOVER_RGB.1,
+        WHALE_ERROR_HOVER_RGB.2,
+    ),
+    error_surface: Color::Rgb(
+        WHALE_ERROR_SURFACE_RGB.0,
+        WHALE_ERROR_SURFACE_RGB.1,
+        WHALE_ERROR_SURFACE_RGB.2,
+    ),
+    error_border: Color::Rgb(
+        WHALE_ERROR_BORDER_RGB.0,
+        WHALE_ERROR_BORDER_RGB.1,
+        WHALE_ERROR_BORDER_RGB.2,
+    ),
+    error_text: Color::Rgb(
+        WHALE_ERROR_TEXT_RGB.0,
+        WHALE_ERROR_TEXT_RGB.1,
+        WHALE_ERROR_TEXT_RGB.2,
+    ),
+    warning: STATUS_WARNING,
+    success: Color::Rgb(
+        WHALE_SUCCESS_RGB.0,
+        WHALE_SUCCESS_RGB.1,
+        WHALE_SUCCESS_RGB.2,
+    ),
+    info: WHALE_ACTION,
+    mode_agent: MODE_AGENT,
+    mode_yolo: MODE_YOLO,
+    mode_plan: MODE_PLAN,
+    mode_operate: MODE_OPERATE,
+    permission_ask: TEXT_REASONING,
+    permission_auto_review: WHALE_HUMAN,
+    permission_full_access: STATUS_WARNING,
+    status_ready: TEXT_MUTED,
+    status_working: WHALE_LIVE,
+    status_warning: STATUS_WARNING,
+    diff_added_fg: DIFF_ADDED,
+    diff_deleted_fg: WHALE_ERROR,
+    diff_added_bg: DIFF_ADDED_BG,
+    diff_deleted_bg: DIFF_DELETED_BG,
+    tool_running: WHALE_LIVE,
+    tool_success: Color::Rgb(
+        WHALE_WORKING_GREEN_RGB.0,
+        WHALE_WORKING_GREEN_RGB.1,
+        WHALE_WORKING_GREEN_RGB.2,
+    ),
+    tool_failed: WHALE_ERROR,
+};
+
 pub const LIGHT_UI_THEME: UiTheme = UiTheme {
     name: "whale-light",
     mode: PaletteMode::Light,
@@ -814,6 +889,7 @@ pub enum ThemeId {
     System,
     Terminal,
     Underwater,
+    UnderwaterRetro,
     Whale,
     WhaleLight,
     Grayscale,
@@ -837,6 +913,7 @@ impl ThemeId {
             "system" => Some(Self::System),
             "terminal" => Some(Self::Terminal),
             "underwater" | "deepsea" => Some(Self::Underwater),
+            "underwater-retro" | "retro" => Some(Self::UnderwaterRetro),
             "dark" => Some(Self::Whale),
             "light" => Some(Self::WhaleLight),
             "grayscale" => Some(Self::Grayscale),
@@ -860,6 +937,7 @@ impl ThemeId {
             Self::System => "system",
             Self::Terminal => "terminal",
             Self::Underwater => "underwater",
+            Self::UnderwaterRetro => "underwater-retro",
             Self::Whale => "dark",
             Self::WhaleLight => "light",
             Self::Grayscale => "grayscale",
@@ -881,6 +959,7 @@ impl ThemeId {
             Self::System => "System",
             Self::Terminal => "Terminal",
             Self::Underwater => "Underwater",
+            Self::UnderwaterRetro => "Underwater Retro",
             Self::Whale => "Blue Stage",
             Self::WhaleLight => "Blue Stage Light",
             Self::Grayscale => "Grayscale",
@@ -902,6 +981,7 @@ impl ThemeId {
             Self::System => "Follow terminal background (COLORFGBG / macOS appearance)",
             Self::Terminal => "Inherit terminal colors fully (transparent surfaces, ANSI accents)",
             Self::Underwater => "The painted ocean field: ombre water, ambient life, the whale",
+            Self::UnderwaterRetro => "Flat phosphor-teal ocean: the legacy deepsea look, no ombre",
             Self::Whale => "Stage black, action blue, and one Signal Gold human beacon",
             Self::WhaleLight => "Paper, cobalt action, and one Signal Gold human beacon",
             Self::Grayscale => "Color-minimal high contrast",
@@ -928,6 +1008,7 @@ impl ThemeId {
             Self::System => UiTheme::detect(),
             Self::Terminal => TERMINAL_UI_THEME,
             Self::Underwater => UNDERWATER_UI_THEME,
+            Self::UnderwaterRetro => UNDERWATER_RETRO_UI_THEME,
             Self::Whale => UI_THEME,
             Self::WhaleLight => LIGHT_UI_THEME,
             Self::Grayscale => GRAYSCALE_UI_THEME,
@@ -948,6 +1029,7 @@ pub const SELECTABLE_THEMES: &[ThemeId] = &[
     ThemeId::System,
     ThemeId::Terminal,
     ThemeId::Underwater,
+    ThemeId::UnderwaterRetro,
     ThemeId::Whale,
     ThemeId::WhaleLight,
     ThemeId::Grayscale,
@@ -1007,6 +1089,7 @@ pub fn normalize_theme_name(value: &str) -> Option<&'static str> {
         "" | "auto" | "system" | "default" => Some("system"),
         "terminal" | "term" | "transparent" | "follow-terminal" | "inherit" => Some("terminal"),
         "underwater" | "deepsea" | "deep-sea" | "ocean" | "ombre" => Some("underwater"),
+        "underwater-retro" | "retro" | "uw-retro" => Some("underwater-retro"),
         "dark" | "whale" | "whale-dark" => Some("dark"),
         "light" | "whale-light" => Some("light"),
         "grayscale" | "greyscale" | "gray" | "grey" | "mono" | "monochrome" | "black-white"
@@ -1083,6 +1166,7 @@ mod tests {
                 "system",
                 "terminal",
                 "underwater",
+                "underwater-retro",
                 "dark",
                 "light",
                 "grayscale",
@@ -1104,6 +1188,12 @@ mod tests {
         assert_eq!(normalize_theme_name("ombre"), Some("underwater"));
         assert_eq!(normalize_theme_name("owo"), Some("uwu"));
         assert_eq!(normalize_theme_name("kawaii"), Some("uwu"));
+        assert_eq!(normalize_theme_name("retro"), Some("underwater-retro"));
+        assert_eq!(
+            ThemeId::from_name("underwater-retro"),
+            Some(ThemeId::UnderwaterRetro)
+        );
+        assert_eq!(ThemeId::UnderwaterRetro.name(), "underwater-retro");
     }
 
     #[test]

@@ -1554,9 +1554,10 @@ You can inspect or update these from the TUI with `/settings` and `/config`
 
 Common settings keys:
 
-- `theme` (`system`, `terminal`, `dark`, `light`, `grayscale`,
-  `catppuccin-mocha`, `tokyo-night`, `dracula`, `gruvbox-dark`, `claude`,
-  `matrix`, `solarized-light`; default `system`): `system` follows terminal
+- `theme` (`system`, `terminal`, `underwater`, `underwater-retro`,
+  `dark`, `light`, `grayscale`, `catppuccin-mocha`, `tokyo-night`,
+  `dracula`, `gruvbox-dark`, `claude`, `matrix`, `solarized-light`, `uwu`;
+  default `system`): `system` follows terminal
   background detection, `dark`/`light` use the Codewhale Whale pair,
   `terminal` inherits the host terminal, `grayscale` is the low-opinion
   black/white theme, and the named community presets apply across the TUI.
