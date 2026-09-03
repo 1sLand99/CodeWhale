@@ -65,7 +65,7 @@ fn settings_stage_matches_goldens_at_blocker_sizes() {
 }
 
 #[test]
-fn settings_rail_lists_eight_categories_and_meta_rows() {
+fn settings_rail_lists_seven_categories_and_meta_rows() {
     let rail = TidelineSettingsRail {
         theme: &UI_THEME,
         selected: 0,
@@ -76,7 +76,7 @@ fn settings_rail_lists_eight_categories_and_meta_rows() {
         render_tideline_settings_rail(Rect::new(0, 0, 20, 30), buf, &rail);
     });
     let categories = tideline_settings_categories(Locale::En);
-    assert_eq!(categories.len(), 8);
+    assert_eq!(categories.len(), 7);
     // One taxonomy: the stage rail lists exactly ConfigView's categories.
     for (label, category) in categories.iter().zip(ConfigCategory::ALL) {
         assert_eq!(label.as_ref(), category.label(Locale::En).as_ref());
@@ -93,7 +93,7 @@ fn settings_rail_lists_eight_categories_and_meta_rows() {
 
 #[test]
 fn settings_strip_windows_to_the_selected_category_with_painted_hitboxes() {
-    for (width, selected) in [(38u16, 7usize), (44, 7), (60, 4), (76, 0), (96, 7)] {
+    for (width, selected) in [(38u16, 6usize), (44, 6), (60, 4), (76, 0), (96, 6)] {
         let rail = TidelineSettingsRail {
             theme: &UI_THEME,
             selected,

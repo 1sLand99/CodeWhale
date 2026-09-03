@@ -18,7 +18,7 @@
 //! now (#3167 reworks Fleet UI localization); the command entry
 //! (`CmdFleetDescription`) is already localized.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 
 use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::{
@@ -143,6 +143,9 @@ pub struct FleetRosterView {
     /// A first click selects/reveals details; a consecutive click on the same
     /// row activates the exact same handoff as Enter.
     last_mouse_selected: Option<usize>,
+    /// Row under the pointer, tinted with the shared hover style. Hover
+    /// never moves the keyboard selection; only painted rows answer.
+    hovered_row: Cell<Option<usize>>,
     /// Canonical active-theme surface captured from `App`; Terminal owns
     /// `Color::Reset`, while explicit themes retain their resolved surface.
     surface_bg: Color,
@@ -198,6 +201,7 @@ impl FleetRosterView {
             detail_scroll: 0,
             row_hitboxes: RefCell::new(Vec::new()),
             last_mouse_selected: None,
+            hovered_row: Cell::new(None),
             surface_bg: palette::UI_THEME.surface_bg,
             locale: Locale::En,
         }
@@ -223,12 +227,14 @@ impl FleetRosterView {
         self.selected = crate::tui::list_nav::wrap_index(self.selected, self.row_count(), -1);
         self.detail_scroll = 0;
         self.last_mouse_selected = None;
+        self.hovered_row.set(None);
     }
 
     fn move_down(&mut self) {
         self.selected = crate::tui::list_nav::wrap_index(self.selected, self.row_count(), 1);
         self.detail_scroll = 0;
         self.last_mouse_selected = None;
+        self.hovered_row.set(None);
     }
 
     fn select_row(&mut self, row: usize) {
@@ -338,6 +344,18 @@ impl ModalView for FleetRosterView {
 
     fn handle_mouse(&mut self, mouse: MouseEvent) -> ViewAction {
         match mouse.kind {
+            MouseEventKind::Moved => {
+                let hovered = self
+                    .row_hitboxes
+                    .borrow()
+                    .iter()
+                    .find_map(|(rect, action)| {
+                        rect.contains(ratatui::layout::Position::new(mouse.column, mouse.row))
+                            .then_some(action.row())
+                    });
+                self.hovered_row.set(hovered);
+                ViewAction::None
+            }
             MouseEventKind::ScrollUp => {
                 self.move_up();
                 ViewAction::None
@@ -502,6 +520,9 @@ impl FleetRosterView {
                 FleetRosterRowAction::SelectOrActivate { row: idx },
             ));
             let is_selected = idx == self.selected;
+            // Hover tints but never steals the keyboard selection.
+            let hovered = !is_selected && self.hovered_row.get() == Some(idx);
+            let hover_tint = || menu_style::hovered_row_style();
             let pointer = format!("{} ", crate::tui::glyphs::selection_marker(is_selected));
             let (text, base_style) = if idx == 0 {
                 (
@@ -548,6 +569,10 @@ impl FleetRosterView {
                 let text = truncate_view_text(&text, list_width.saturating_sub(badge_cells));
                 let base_style = if is_selected {
                     menu_style::selected_row_style()
+                } else if hovered {
+                    Style::default()
+                        .fg(palette::TEXT_PRIMARY)
+                        .patch(hover_tint())
                 } else {
                     Style::default().fg(palette::TEXT_PRIMARY)
                 };
@@ -566,6 +591,8 @@ impl FleetRosterView {
                                 .bg(palette::SELECTION_BG)
                                 .add_modifier(Modifier::BOLD),
                         )
+                    } else if hovered {
+                        Span::styled(span.content, span.style.patch(hover_tint()))
                     } else {
                         span
                     });
@@ -576,6 +603,8 @@ impl FleetRosterView {
             };
             let style = if is_selected {
                 menu_style::selected_row_style()
+            } else if hovered {
+                base_style.patch(hover_tint())
             } else {
                 base_style
             };

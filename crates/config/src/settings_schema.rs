@@ -326,7 +326,7 @@ const RAIL_PANEL: &[SettingOption] = &[
 /// Rail tab ids.
 pub const TAB_APPEARANCE: &str = "appearance";
 pub const TAB_MODELS: &str = "models";
-pub const TAB_FLEET: &str = "fleet";
+
 pub const TAB_WORK: &str = "work";
 pub const TAB_TOOLS: &str = "tools";
 pub const TAB_TRUST: &str = "trust";
@@ -587,14 +587,16 @@ pub const SETTINGS_SCHEMA: &[SettingDef] = &[
             "ConfigHintReasoningEffort",
         ),
     ),
-    // ── fleet ────────────────────────────────────────────────────────
+    // Sub-agent fan-out depth, next to the model rows that drive it. Fleet
+    // membership itself lives in the /fleet menu, so a one-row Fleet tab
+    // would only restate this table.
     def(
         "fleet.exec.max_spawn_depth",
         SettingKind::Int,
         "3",
         ui(
-            TAB_FLEET,
-            "fleet",
+            TAB_MODELS,
+            "model",
             "ConfigLabelFleetSpawnDepth",
             "ConfigHintFleetMaxSpawnDepth",
         ),
@@ -1002,41 +1004,18 @@ pub const SETTINGS_SCHEMA: &[SettingDef] = &[
             "ConfigHintExternalCredentials",
         ),
     ),
-    def(
-        "fast_model",
-        SettingKind::String,
-        "",
-        ui(
-            TAB_ADVANCED,
-            "model",
-            "ConfigLabelFastModel",
-            "ConfigHintFastModel",
-        ),
-    ),
+    // Derived fast-sibling receipt, retired from the table: the /model picker
+    // already names the fast sibling where a choice actually happens, and no
+    // backend reads `fast_model` as a persisted key.
+    def("fast_model", SettingKind::String, "", None),
     // A transport timeout; advanced networking, available through `/set` only.
     def("stream_chunk_timeout_secs", SettingKind::Int, "900", None),
-    def(
-        "default_model",
-        SettingKind::String,
-        "",
-        ui(
-            TAB_ADVANCED,
-            "legacy",
-            "ConfigLabelDefaultModel",
-            "ConfigHintDefaultModel",
-        ),
-    ),
-    def(
-        "features.vision_model",
-        SettingKind::String,
-        "",
-        ui(
-            TAB_ADVANCED,
-            "experimental",
-            "",
-            "ConfigHintFeatureVisionModel",
-        ),
-    ),
+    // DeepSeek-only legacy fallback: the runtime still reads it, but it is
+    // not a live choice, so it stays settable through `/set` without a row.
+    def("default_model", SettingKind::String, "", None),
+    // Beta vision flag: the feature backend stays live, but the row goes —
+    // feature state is diagnosed where vision runs, not in Advanced.
+    def("features.vision_model", SettingKind::String, "", None),
     def(
         "features.subagents",
         SettingKind::String,
