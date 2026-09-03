@@ -1255,7 +1255,7 @@ pub type DispatchApplyFn = Box<
 #[allow(clippy::struct_excessive_bools)]
 /// A route change made in-session that the user has not yet decided how to
 /// save. Route changes are temporary by default; persisting them requires an
-/// explicit choice (Update this Pod / Save as a new Pod / Remember as my
+/// explicit choice (Update this Fleet / Save as a new Fleet / Remember as my
 /// default / Keep for this session only).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingRouteSave {
@@ -2399,8 +2399,8 @@ impl App {
         self.screen_mode.uses_alt_screen()
     }
 
-    /// Persist the pending session route as the explicit choice (`/pod save`,
-    /// `/pod save-as`, `/model save-default`). Returns the receipt
+    /// Persist the pending session route as the explicit choice (`/fleet save`,
+    /// `/fleet save-as`, `/model save-default`). Returns the receipt
     /// message naming the exact file written — or an error message when the
     /// write failed. Nothing is ever written without this explicit call.
     pub fn apply_route_save_choice(
@@ -2416,8 +2416,8 @@ impl App {
         match choice {
             RouteSaveChoice::UpdateFleet => {
                 let Some((name, scope)) = pending.fleet.clone() else {
-                    return "Nothing to update — no Pod is selected. Use /pod save-as to \
-                             save this route as a new Pod."
+                    return "Nothing to update — no Fleet is selected. Use /fleet save-as to \
+                             save this route as a new Fleet."
                         .to_string();
                 };
                 match crate::fleet::store::load_fleet_in_scope(&name, scope, &self.workspace) {
@@ -2429,16 +2429,16 @@ impl App {
                         });
                         match save_fleet(&fleet, scope, &self.workspace) {
                             Ok(path) => format!(
-                                "Pod `{}` now runs on {route} — wrote {}",
+                                "Fleet `{}` now runs on {route} — wrote {}",
                                 fleet.name,
                                 path.display()
                             ),
-                            Err(err) => format!("Pod update failed: {err}"),
+                            Err(err) => format!("Fleet update failed: {err}"),
                         }
                     }
                     Err(err) => format!(
-                        "Pod update failed: {err} — the saved Pod may have moved. Use \
-                         /pod save-as to persist the route."
+                        "Fleet update failed: {err} — the saved Fleet may have moved. Use \
+                         /fleet save-as to persist the route."
                     ),
                 }
             }
@@ -2454,7 +2454,7 @@ impl App {
                     display.clone(),
                     Some("Saved from a session route choice.".to_string()),
                 ) else {
-                    return "Could not create the Pod.".to_string();
+                    return "Could not create the Fleet.".to_string();
                 };
                 fleet.operator = Some(FleetOperator {
                     provider: pending.provider_identity.clone(),
@@ -2479,7 +2479,7 @@ impl App {
                             Err(err) => format!(" — selection failed: {err}"),
                         };
                         format!(
-                            "Saved route {route} as new Pod `{}` — wrote {}{selected_note}",
+                            "Saved route {route} as new Fleet `{}` — wrote {}{selected_note}",
                             display,
                             path.display()
                         )
@@ -4193,7 +4193,7 @@ impl App {
                 let role = agent.agent_type.as_str().trim();
                 (!role.is_empty()).then(|| role.to_string())
             })
-            .map(|role| crate::tools::subagent::public_role_label(&role))
+            .map(|role| crate::fleet::role::public_role_label(&role))
     }
 
     /// `true` for the `Agent N` counter placeholder assigned before a child's

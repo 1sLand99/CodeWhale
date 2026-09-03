@@ -1,6 +1,6 @@
-//! `/pod` roster — the barracks view of the saved agent party.
+//! `/fleet` roster — the barracks view of the saved agent party.
 //!
-//! The roster view is the primary `/pod` face. The first row is the
+//! The roster view is the primary `/fleet` face. The first row is the
 //! **operator** — the Fleet leader (your live session model). When a user
 //! picks a session model they are picking the operator, and every member
 //! below is that leader's team. The header names the selected saved Fleet and
@@ -12,7 +12,7 @@
 //! never writes anything; `s` / Enter on a selected-v2 member opens that
 //! Fleet's exact editor, while the legacy profile wizard is used only when no
 //! named Fleet is selected (the operator row is display-only). Switch named
-//! saved Fleets with `/pod pods` (`/pod fleets` remains compatible).
+//! saved Fleets with `/fleet fleets` (`/fleet fleets` remains compatible).
 //!
 //! NOTE: like `fleet_setup.rs`, the copy below is intentionally English for
 //! now (#3167 reworks Fleet UI localization); the command entry
@@ -31,11 +31,11 @@ use ratatui::{
 
 use crate::config::Config;
 use crate::fleet::profile::AgentProfile;
+use crate::fleet::role::public_role_label;
 use crate::fleet::roster::{FleetRoster, ProfileLayer, ProfileOrigin, layers_from_parts};
 use crate::fleet::worker_runtime::roster_member_agent_type;
 use crate::localization::{Locale, MessageId, tr};
 use crate::palette;
-use crate::tools::subagent::public_role_label;
 use crate::tui::app::App;
 use crate::tui::menu_style;
 use crate::tui::views::{
@@ -721,7 +721,7 @@ fn operator_detail_lines(operator: &OperatorInfo) -> Vec<Line<'static>> {
         "Description",
         "The Coordinator is this Fleet's leader — your main session model. Every \
          member below works for it. Change the model with /model or /provider; \
-         persist with /pod save."
+         persist with /fleet save."
             .to_string(),
     );
     lines

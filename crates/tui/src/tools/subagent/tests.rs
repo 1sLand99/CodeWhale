@@ -2796,7 +2796,7 @@ fn agent_description_explains_background_child_and_transcript_handle() {
     assert!(description.contains("multiple starts"));
     assert!(description.contains("action=wait"));
     assert!(description.contains("action=claim"));
-    assert!(description.contains("Fleet profile"));
+    assert!(description.contains("Fleet role"));
     assert!(
         estimate_tool_description_tokens_conservative(description) <= 1024,
         "agent description exceeds the conservative 1024-token budget"
@@ -3117,13 +3117,12 @@ fn prompt_only_general_children_default_read_only_instead_of_claiming_the_repo()
         assert_eq!(request.write_roots, vec![".".to_string()]);
     }
 
-    // Fleet roles are classified only after the live roster resolves them.
-    // A manager profile defaults to the parent workspace when it has no scope.
-    let roster = FleetRoster::built_ins_only();
+    // Fleet roles are classified only after role resolution. A builder role
+    // defaults to the parent workspace when it has no scope.
     let mut fleet_role =
-        parse_spawn_request(&json!({"prompt": "fleet role", "role": "release_lead"}))
-            .expect("unresolved fleet role should parse");
-    apply_spawn_profile(&mut fleet_role, &roster).expect("release lead should resolve");
+        parse_spawn_request(&json!({"prompt": "fleet role", "profile": "implement"}))
+            .expect("role profile should parse");
+    resolve_spawn_role(&mut fleet_role).expect("implement should resolve");
     validate_spawn_write_contract(&mut fleet_role, false)
         .expect("resolved write-capable fleet role defaults write scope to parent workspace");
     assert_eq!(fleet_role.write_roots, vec![".".to_string()]);
@@ -3729,49 +3728,6 @@ fn test_parse_spawn_request_rejects_out_of_range_max_depth() {
     );
 }
 
-fn fleet_roster_with(id: &str, profile: codewhale_config::FleetProfile) -> FleetRoster {
-    let tmp = tempdir().expect("tempdir");
-    let config = codewhale_config::FleetConfigToml {
-        profiles: std::collections::BTreeMap::from([(id.to_string(), profile)]),
-        ..Default::default()
-    };
-    FleetRoster::load(&config, tmp.path())
-}
-
-/// A roster with a single explicit member and no personal/workspace profiles.
-/// Used for tests that resolve by role name (e.g. `type: "builder"`) and must
-/// not be shadowed by the operator's personal `~/.codewhale/agents/*.toml`.
-fn isolated_fleet_roster_with(
-    id: &str,
-    mut profile: codewhale_config::FleetProfile,
-) -> FleetRoster {
-    if profile.role.name.trim().is_empty() {
-        profile.role.name = id.to_string();
-    }
-    FleetRoster::from_members(vec![crate::fleet::profile::AgentProfile {
-        id: id.to_string(),
-        display_name: Some(id.to_string()),
-        description: None,
-        requires: Vec::new(),
-        profile,
-        source: std::path::PathBuf::from("test"),
-        origin: crate::fleet::roster::ProfileOrigin::Config,
-        plugin_authority: None,
-    }])
-}
-
-fn custom_fleet_profile(role: &str) -> codewhale_config::FleetProfile {
-    codewhale_config::FleetProfile {
-        slot: codewhale_config::FleetSlot::from_name(role),
-        role: codewhale_config::FleetRole {
-            name: role.to_string(),
-            description: None,
-            instructions: None,
-        },
-        ..Default::default()
-    }
-}
-
 #[test]
 fn test_parse_spawn_request_accepts_profile_and_preserves_safe_selector() {
     let input = json!({
@@ -3817,141 +3773,82 @@ fn test_parse_spawn_request_rejects_invalid_profile_token() {
 }
 
 #[tokio::test]
-async fn agent_roster_action_and_spawn_resolve_the_same_member() {
+async fn agent_roster_action_and_spawn_resolve_the_same_roles() {
     let tmp = tempdir().expect("tempdir");
     let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 1);
-    let mut profile = custom_fleet_profile("scout");
-    profile.provider = Some("deepseek".to_string());
-    profile.model = Some("deepseek-v4-flash".to_string());
-    let roster = std::sync::Arc::new(isolated_fleet_roster_with("flash-scout", profile));
-    let mut runtime = stub_runtime();
-    // No Config snapshot: action=roster and spawn both consume this exact
-    // installed roster rather than independently reloading test disk state.
-    runtime.api_config = None;
-    runtime.fleet_roster = roster.clone();
+    let runtime = stub_runtime();
     let tool = AgentTool::new(manager, runtime);
     let result = tool
         .execute(json!({"action": "roster"}), &ToolContext::new(tmp.path()))
         .await
         .expect("roster action");
     let payload: Value = serde_json::from_str(&result.content).expect("roster JSON");
-    assert_eq!(payload["count"], json!(1));
-    assert_eq!(payload["total_count"], json!(1));
+    assert_eq!(payload["count"], json!(8));
+    assert_eq!(payload["total_count"], json!(8));
     assert_eq!(payload["truncated"], json!(false));
-    assert_eq!(payload["members"][0]["member_id"], "flash-scout");
-    assert_eq!(payload["members"][0]["model_name"], "DeepSeek V4 Flash");
+    let ids: Vec<&str> = payload["members"]
+        .as_array()
+        .expect("members array")
+        .iter()
+        .map(|member| member["member_id"].as_str().expect("member id"))
+        .collect();
+    for role in [
+        "general",
+        "explore",
+        "planner",
+        "reviewer",
+        "implement",
+        "test",
+        "advisor",
+        "custom",
+    ] {
+        assert!(ids.contains(&role), "missing role {role}: {ids:?}");
+    }
 
+    // Spawn resolves the same role vocabulary: no saved member is bound.
     let mut request = parse_spawn_request(&json!({
         "prompt": "inspect",
-        "profile": "DeepSeek V4 Flash"
+        "profile": "explore"
     }))
-    .expect("human selector parses");
-    let resolved = apply_spawn_profile(&mut request, &roster)
-        .expect("same roster resolves")
-        .expect("member");
-    assert_eq!(resolved.id, "flash-scout");
-    assert_eq!(request.profile.as_deref(), Some("flash-scout"));
-}
-
-#[tokio::test]
-async fn agent_roster_action_redacts_selected_fleet_load_details() {
-    let tmp = tempdir().expect("tempdir");
-    let fleets = tmp.path().join(".codewhale/fleets");
-    std::fs::create_dir_all(&fleets).expect("fleet dir");
-    std::fs::write(fleets.join("selected"), "Broken\n").expect("selection");
-    let secret_marker = "sk-live-abcdef0123456789abcdef";
-    std::fs::write(
-        fleets.join("broken.toml"),
-        format!("not valid TOML /Users/operator/private {secret_marker}\n"),
-    )
-    .expect("broken Fleet");
-
-    let roster = crate::fleet::identity::load_effective_roster(
-        &codewhale_config::FleetConfigToml::default(),
-        tmp.path(),
-        None,
-    );
-    let mut runtime = stub_runtime();
-    runtime.api_config = None;
-    runtime.fleet_roster = std::sync::Arc::new(roster);
-    let tool = AgentTool::new(
-        new_shared_subagent_manager(tmp.path().to_path_buf(), 1),
-        runtime,
-    );
-    let message = tool
-        .execute(json!({"action": "roster"}), &ToolContext::new(tmp.path()))
-        .await
-        .expect_err("invalid selected Fleet must fail visibly")
-        .to_string();
-
-    assert!(
-        message.contains("Selected folder Fleet `Broken`"),
-        "{message}"
-    );
-    assert!(!message.contains(&tmp.path().display().to_string()));
-    assert!(!message.contains("/Users/operator"));
-    assert!(!message.contains(secret_marker));
-    assert!(!message.contains("not valid TOML"));
-    assert!(message.chars().count() <= 300, "{message}");
+    .expect("role selector parses");
+    resolve_spawn_role(&mut request).expect("same roles resolve");
+    assert_eq!(request.agent_type, FleetRole::Scout);
+    assert_eq!(request.profile.as_deref(), Some("explore"));
 }
 
 #[test]
-fn test_apply_spawn_profile_unknown_lists_available_members() {
-    let roster = FleetRoster::built_ins_only();
+fn test_resolve_spawn_role_unknown_lists_roles() {
     let mut request =
         parse_spawn_request(&json!({"prompt": "x", "profile": "warlock"})).expect("parse");
-    let err = apply_spawn_profile(&mut request, &roster).expect_err("unknown profile should fail");
+    let err = resolve_spawn_role(&mut request).expect_err("unknown profile should fail");
     let message = err.to_string();
     assert!(
         message.contains("Unknown Fleet role/profile 'warlock'"),
         "{message}"
     );
-    for member in [
-        "manager",
-        "scout",
-        "builder",
-        "reviewer",
-        "verifier",
-        "consultant",
-        "synthesizer",
+    for role in [
         "general",
+        "explore",
+        "planner",
+        "reviewer",
+        "implement",
+        "test",
+        "advisor",
+        "custom",
     ] {
-        assert!(message.contains(member), "missing {member}: {message}");
+        assert!(message.contains(role), "missing {role}: {message}");
     }
 }
 
 #[test]
-fn test_apply_spawn_profile_unknown_bounds_available_members() {
-    let members = (0..(crate::fleet::identity::MAX_ROSTER_DISCOVERY_MEMBERS + 6))
-        .map(|index| {
-            let mut member = member_pinning_provider("deepseek", "deepseek-v4-flash");
-            member.id = format!("member-{index}-{}", "x".repeat(220));
-            member
-        })
-        .collect();
-    let roster = FleetRoster::from_members(members);
-    let mut request =
-        parse_spawn_request(&json!({"prompt": "x", "profile": "missing"})).expect("parse");
-    let message = apply_spawn_profile(&mut request, &roster)
-        .expect_err("unknown profile should fail")
-        .to_string();
-
-    assert!(message.contains("Showing the first 64 of 70"), "{message}");
-    assert!(message.contains("member-63-"), "{message}");
-    assert!(!message.contains("member-64-"), "{message}");
-    assert!(message.chars().count() <= 12_000, "{}", message.len());
-}
-
-#[test]
-fn test_apply_spawn_profile_rejects_conflicting_explicit_type() {
-    let roster = FleetRoster::built_ins_only();
+fn test_resolve_spawn_role_rejects_conflicting_explicit_type() {
     let mut request = parse_spawn_request(&json!({
         "prompt": "x",
         "profile": "reviewer",
         "type": "implementer"
     }))
     .expect("parse");
-    let err = apply_spawn_profile(&mut request, &roster).expect_err("type conflict should fail");
+    let err = resolve_spawn_role(&mut request).expect_err("type conflict should fail");
     let message = err.to_string();
     assert!(
         message.contains("profile 'reviewer' implies type reviewer"),
@@ -3964,33 +3861,27 @@ fn test_apply_spawn_profile_rejects_conflicting_explicit_type() {
 }
 
 #[test]
-fn test_apply_spawn_profile_accepts_agreeing_explicit_type() {
-    let roster = FleetRoster::built_ins_only();
+fn test_resolve_spawn_role_accepts_agreeing_explicit_type() {
     let mut request = parse_spawn_request(&json!({
         "prompt": "x",
         "profile": "reviewer",
         "type": "review"
     }))
     .expect("parse");
-    let member = apply_spawn_profile(&mut request, &roster)
-        .expect("agreeing type should pass")
-        .expect("member resolved");
-    assert_eq!(member.id, "reviewer");
+    resolve_spawn_role(&mut request).expect("agreeing type should pass");
     assert_eq!(request.agent_type, FleetRole::Reviewer);
+    assert_eq!(request.profile.as_deref(), Some("reviewer"));
     assert_eq!(request.assignment.role.as_deref(), Some("reviewer"));
 }
 
 #[test]
-fn test_apply_spawn_profile_scout_yields_explore_type_and_inherits_route() {
-    let roster = FleetRoster::built_ins_only();
+fn test_resolve_spawn_role_scout_yields_explore_type_and_inherits_route() {
     let mut request = parse_spawn_request(&json!({"prompt": "map the parser", "profile": "scout"}))
         .expect("parse");
-    let member = apply_spawn_profile(&mut request, &roster)
-        .expect("scout should resolve")
-        .expect("member resolved");
+    resolve_spawn_role(&mut request).expect("scout should resolve");
     assert_eq!(request.agent_type, FleetRole::Scout);
-    let selected = resolve_spawn_model_selection(&stub_runtime(), &request, Some(&member))
-        .expect("scout model selection");
+    let selected =
+        resolve_spawn_model_selection(&stub_runtime(), &request).expect("scout model selection");
     assert_eq!(
         selected.model_route,
         ModelRoute::Inherit,
@@ -4000,27 +3891,21 @@ fn test_apply_spawn_profile_scout_yields_explore_type_and_inherits_route() {
 }
 
 #[test]
-fn test_apply_spawn_profile_synthesizer_yields_plan_type() {
-    let roster = FleetRoster::built_ins_only();
-    let mut request =
-        parse_spawn_request(&json!({"prompt": "merge findings", "profile": "synthesizer"}))
-            .expect("parse");
-    apply_spawn_profile(&mut request, &roster).expect("synthesizer should resolve");
+fn test_resolve_spawn_role_accepts_legacy_alias() {
+    let mut request = parse_spawn_request(&json!({"prompt": "merge findings", "profile": "plan"}))
+        .expect("parse");
+    resolve_spawn_role(&mut request).expect("legacy alias should resolve");
     assert_eq!(request.agent_type, FleetRole::Planner);
+    assert_eq!(request.profile.as_deref(), Some("planner"));
 }
 
 #[test]
-fn spawn_model_selection_has_stable_four_tier_precedence_and_source() {
+fn spawn_model_selection_has_stable_three_tier_precedence_and_source() {
     let mut runtime = stub_runtime();
     runtime.model = "deepseek-v4-flash".to_string();
     runtime
         .role_models
         .insert("reviewer".to_string(), "deepseek-v4-flash".to_string());
-
-    let mut profile = custom_fleet_profile("reviewer");
-    profile.model = Some("deepseek-v4-pro".to_string());
-    let roster = fleet_roster_with("auditor", profile);
-    let member = roster.get("auditor").expect("auditor profile");
 
     let request = parse_spawn_request(&json!({
         "prompt": "x",
@@ -4028,8 +3913,7 @@ fn spawn_model_selection_has_stable_four_tier_precedence_and_source() {
         "model": "deepseek-v4-flash"
     }))
     .expect("task model request");
-    let selected = resolve_spawn_model_selection(&runtime, &request, Some(member))
-        .expect("task model selection");
+    let selected = resolve_spawn_model_selection(&runtime, &request).expect("task model selection");
     assert_eq!(
         selected,
         SpawnModelSelection {
@@ -4044,42 +3928,17 @@ fn spawn_model_selection_has_stable_four_tier_precedence_and_source() {
         "model_strength": "faster"
     }))
     .expect("task strength request");
-    let selected = resolve_spawn_model_selection(&runtime, &request, Some(member))
-        .expect("task strength selection");
+    let selected =
+        resolve_spawn_model_selection(&runtime, &request).expect("task strength selection");
     assert_eq!(selected.model_route, ModelRoute::Faster);
     assert_eq!(selected.source, SpawnRouteSource::TaskModelStrength);
 
+    // Roles pin no model: with no explicit task field the configured role
+    // default wins directly.
     let request =
-        parse_spawn_request(&json!({"prompt": "x", "role": "review"})).expect("profile request");
+        parse_spawn_request(&json!({"prompt": "x", "role": "review"})).expect("role request");
     let selected =
-        resolve_spawn_model_selection(&runtime, &request, Some(member)).expect("profile selection");
-    assert_eq!(
-        selected.model_route,
-        ModelRoute::Fixed("deepseek-v4-pro".to_string()),
-        "saved AgentProfile model must beat the configured role default"
-    );
-    assert_eq!(selected.source, SpawnRouteSource::AgentProfileModel);
-
-    let mut strong_profile = custom_fleet_profile("reviewer");
-    strong_profile.loadout = codewhale_config::FleetLoadout::Custom("strong".to_string());
-    let strong_roster = fleet_roster_with("architect", strong_profile);
-    let selected =
-        resolve_spawn_model_selection(&runtime, &request, strong_roster.get("architect"))
-            .expect("custom profile selection");
-    assert_eq!(selected.model_route, ModelRoute::Inherit);
-    assert_eq!(selected.source, SpawnRouteSource::RunModel);
-
-    let mut fast_profile = custom_fleet_profile("reviewer");
-    fast_profile.loadout = codewhale_config::FleetLoadout::Fast;
-    let fast_roster = fleet_roster_with("fast-reviewer", fast_profile);
-    let selected =
-        resolve_spawn_model_selection(&runtime, &request, fast_roster.get("fast-reviewer"))
-            .expect("fast profile selection");
-    assert_eq!(selected.model_route, ModelRoute::Faster);
-    assert_eq!(selected.source, SpawnRouteSource::AgentProfileLoadout);
-
-    let selected =
-        resolve_spawn_model_selection(&runtime, &request, None).expect("role default selection");
+        resolve_spawn_model_selection(&runtime, &request).expect("role default selection");
     assert_eq!(
         selected.model_route,
         ModelRoute::Fixed("deepseek-v4-flash".to_string())
@@ -4087,8 +3946,7 @@ fn spawn_model_selection_has_stable_four_tier_precedence_and_source() {
     assert_eq!(selected.source, SpawnRouteSource::RoleDefault);
 
     runtime.role_models.clear();
-    let selected =
-        resolve_spawn_model_selection(&runtime, &request, None).expect("run model selection");
+    let selected = resolve_spawn_model_selection(&runtime, &request).expect("run model selection");
     assert_eq!(selected.model_route, ModelRoute::Inherit);
     assert_eq!(selected.source, SpawnRouteSource::RunModel);
 }
@@ -4134,7 +3992,7 @@ fn providerless_spawn_model_gate_rejects_known_foreign_route_before_spawn() {
     let openrouter = stub_runtime_for_provider("openrouter");
     let mut explicit = SpawnModelSelection {
         model_route: ModelRoute::Fixed("deepseek-v4-pro".to_string()),
-        source: SpawnRouteSource::AgentProfileModel,
+        source: SpawnRouteSource::RoleDefault,
     };
     resolve_fixed_spawn_model_route(&openrouter, &mut explicit, false)
         .expect("an explicit aggregator route remains allowed");
@@ -4148,31 +4006,26 @@ fn providerless_spawn_model_gate_rejects_known_foreign_route_before_spawn() {
 #[test]
 fn providerless_foreign_spawn_default_inherits_session_route() {
     // #5099 / checklist §2.2: a moonshot parent spawning a default child whose
-    // role default — or unpinned fleet profile model — is a provider-less
-    // deepseek id must inherit the session route instead of hard-failing the
-    // spawn on a model the session never chose.
+    // role default is a provider-less deepseek id must inherit the session
+    // route instead of hard-failing the spawn on a model the session never
+    // chose.
     let runtime = stub_runtime_for_provider("moonshot");
-    for source in [
-        SpawnRouteSource::RoleDefault,
-        SpawnRouteSource::AgentProfileModel,
-    ] {
-        let mut selection = SpawnModelSelection {
-            model_route: ModelRoute::Fixed("deepseek-v4-flash".to_string()),
-            source,
-        };
-        resolve_fixed_spawn_model_route(&runtime, &mut selection, true)
-            .expect("provider-less foreign default must not fail the spawn");
-        assert_eq!(
-            selection.model_route,
-            ModelRoute::Inherit,
-            "default from {source:?} downgrades to the session route"
-        );
-        assert_eq!(
-            selection.source,
-            SpawnRouteSource::RunModel,
-            "receipt provenance reflects the inherit for {source:?}"
-        );
-    }
+    let mut selection = SpawnModelSelection {
+        model_route: ModelRoute::Fixed("deepseek-v4-flash".to_string()),
+        source: SpawnRouteSource::RoleDefault,
+    };
+    resolve_fixed_spawn_model_route(&runtime, &mut selection, true)
+        .expect("provider-less foreign default must not fail the spawn");
+    assert_eq!(
+        selection.model_route,
+        ModelRoute::Inherit,
+        "role default downgrades to the session route"
+    );
+    assert_eq!(
+        selection.source,
+        SpawnRouteSource::RunModel,
+        "receipt provenance reflects the inherit"
+    );
 
     // An explicit caller `task.model` pin keeps the pin-vs-inherit error; the
     // guard is only bypassed for defaults the session did not choose.
@@ -4204,72 +4057,60 @@ fn providerless_foreign_spawn_default_inherits_session_route() {
 }
 
 #[test]
-fn spawn_route_sources_refresh_reads_current_disk() {
-    // #5099 second defect: the launch-time roster/role_models snapshot kept
-    // supplying a model id that existed nowhere on current disk after a
-    // mid-session profile edit. The spawn path must re-read.
-    let _env_lock = crate::test_support::lock_test_env();
-    let home = tempfile::tempdir().expect("home tempdir");
-    let _codewhale_home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", home.path());
-    let workspace = tempfile::tempdir().expect("workspace tempdir");
-    let agents = workspace.path().join(".codewhale").join("agents");
-    std::fs::create_dir_all(&agents).expect("agents dir");
-    std::fs::write(
-        agents.join("builder.toml"),
-        "id = \"builder\"\nrole_hint = \"builder\"\nmodel = \"fresh-disk-model\"\n",
-    )
-    .expect("write workspace profile");
-
+fn spawn_route_sources_refresh_overlays_live_config_on_launch_time_defaults() {
+    // #5099: role-model defaults are a launch-time snapshot, so a mid-session
+    // `[subagents]` config change must still win at spawn time. There is no
+    // roster to re-read: the snapshot is kept and the live config overlays it.
     let mut runtime = stub_runtime();
-    runtime.context = ToolContext::new(workspace.path().to_path_buf());
-    // Simulate the launch-time snapshot: a stale pin nowhere on disk.
     runtime
         .role_models
         .insert("builder".to_string(), "stale-launch-model".to_string());
 
     refresh_spawn_route_sources(&mut runtime);
-
-    let member = runtime
-        .fleet_roster
-        .get("builder")
-        .expect("workspace profile joins the fresh roster");
-    assert_eq!(
-        member.profile.model.as_deref(),
-        Some("fresh-disk-model"),
-        "roster re-reads current disk"
-    );
-    assert_eq!(
-        member.origin,
-        crate::fleet::profile::ProfileOrigin::Workspace
-    );
     assert_eq!(
         runtime.role_models.get("builder").map(String::as_str),
-        Some("fresh-disk-model"),
-        "role defaults re-read current disk"
+        Some("stale-launch-model"),
+        "launch-time defaults survive a refresh with no live override"
+    );
+
+    let config = runtime.api_config.clone().expect("stub config");
+    let mut live = (*config).clone();
+    live.subagents = Some(crate::config::SubagentsConfig {
+        worker_model: Some("live-config-model".to_string()),
+        ..Default::default()
+    });
+    runtime.api_config = Some(std::sync::Arc::new(live));
+
+    refresh_spawn_route_sources(&mut runtime);
+    assert_eq!(
+        runtime.role_models.get("builder").map(String::as_str),
+        Some("stale-launch-model"),
+        "unrelated launch-time defaults are kept"
+    );
+    assert_eq!(
+        runtime.role_models.get("worker").map(String::as_str),
+        Some("live-config-model"),
+        "live config wins on top of the snapshot"
+    );
+    assert_eq!(
+        runtime.role_models.get("general").map(String::as_str),
+        Some("live-config-model"),
+        "worker override covers the general alias too"
     );
 }
 
 #[test]
-fn test_child_max_spawn_depth_profile_hint_only_narrows() {
-    // Profile hint narrows the inherited budget...
-    assert_eq!(child_max_spawn_depth_for_spawn(3, 1, None, Some(1)), 2);
-    // ...but never widens it.
-    assert_eq!(child_max_spawn_depth_for_spawn(2, 0, None, Some(6)), 2);
-    // Explicit request takes the min with the hint.
-    assert_eq!(child_max_spawn_depth_for_spawn(2, 0, Some(3), Some(1)), 1);
+fn test_child_max_spawn_depth_request_only_narrows() {
+    // No request: inherit unchanged.
+    assert_eq!(child_max_spawn_depth_for_spawn(5, 2, None), 5);
     // Explicit request alone still cannot widen past the inherited budget (#5253).
-    assert_eq!(child_max_spawn_depth_for_spawn(2, 0, Some(3), None), 2);
+    assert_eq!(child_max_spawn_depth_for_spawn(2, 0, Some(3)), 2);
     assert_eq!(
-        child_max_spawn_depth_for_spawn(
-            2,
-            0,
-            Some(codewhale_config::MAX_SPAWN_DEPTH_CEILING),
-            None
-        ),
+        child_max_spawn_depth_for_spawn(2, 0, Some(codewhale_config::MAX_SPAWN_DEPTH_CEILING)),
         2
     );
-    // Neither request nor hint: inherit unchanged.
-    assert_eq!(child_max_spawn_depth_for_spawn(5, 2, None, None), 5);
+    // A request below the inherited budget is still honored (clamp, don't force).
+    assert_eq!(child_max_spawn_depth_for_spawn(5, 0, Some(3)), 3);
 }
 
 /// A descendant subagent must not widen the absolute recursion budget its root
@@ -4284,61 +4125,28 @@ fn test_child_max_spawn_depth_request_cannot_widen_inherited_budget() {
     // MAX_SPAWN_DEPTH_CEILING (8), letting the descendant keep spawning past
     // the root's chosen boundary.
     assert_eq!(
-        child_max_spawn_depth_for_spawn(
-            2,
-            2,
-            Some(codewhale_config::MAX_SPAWN_DEPTH_CEILING),
-            None
-        ),
+        child_max_spawn_depth_for_spawn(2, 2, Some(codewhale_config::MAX_SPAWN_DEPTH_CEILING)),
         2
     );
-    // The inherited budget also caps an explicit request paired with a hint.
-    assert_eq!(child_max_spawn_depth_for_spawn(2, 1, Some(8), Some(6)), 2);
     // A request below the inherited budget is still honored (clamp, don't force).
-    assert_eq!(child_max_spawn_depth_for_spawn(5, 0, Some(3), None), 3);
+    assert_eq!(child_max_spawn_depth_for_spawn(5, 0, Some(3)), 3);
 }
 
+/// An explicit spawn-time thinking tier reaches the request unchanged: roles
+/// carry no reasoning tier of their own, so there is nothing to outrank or
+/// inherit — the caller's tier is the tier.
 #[test]
-fn test_apply_spawn_profile_depth_hint_flows_from_member() {
-    let mut profile = custom_fleet_profile("scout");
-    profile.delegation.max_spawn_depth = Some(1);
-    let roster = fleet_roster_with("survey", profile);
-    let mut request =
-        parse_spawn_request(&json!({"prompt": "x", "profile": "survey", "max_depth": 3}))
-            .expect("parse");
-    let member = apply_spawn_profile(&mut request, &roster)
-        .expect("resolve")
-        .expect("member resolved");
-    let effective = child_max_spawn_depth_for_spawn(
-        DEFAULT_MAX_SPAWN_DEPTH,
-        1,
-        request.max_depth,
-        member.profile.delegation.max_spawn_depth,
-    );
-    assert_eq!(
-        effective, 2,
-        "hint 1 caps the requested 3 at spawn_depth 1 + 1"
-    );
-}
-
-/// A saved Fleet profile's reasoning tier must reach the spawn itself, not
-/// only the headless `codewhale exec` argv. Direct and workflow spawns share
-/// `apply_spawn_profile`, so this covers both.
-#[test]
-fn test_apply_spawn_profile_carries_profile_reasoning_into_the_spawn() {
-    let mut profile = custom_fleet_profile("reviewer");
-    profile.reasoning_effort = Some("max".to_string());
-    let roster = fleet_roster_with("deep-reviewer", profile);
-    let mut request =
-        parse_spawn_request(&json!({"prompt": "review this", "profile": "deep-reviewer"}))
-            .expect("parse");
-
-    apply_spawn_profile(&mut request, &roster).expect("resolve");
-
+fn test_explicit_spawn_thinking_reaches_the_request() {
+    let mut request = parse_spawn_request(&json!({
+        "prompt": "review this",
+        "profile": "reviewer",
+        "thinking": "off"
+    }))
+    .expect("parse");
+    resolve_spawn_role(&mut request).expect("resolve");
     assert_eq!(
         request.thinking,
-        SubAgentThinking::Effort(ReasoningEffort::Max),
-        "profile reasoning must not be dropped on the way to spawn"
+        SubAgentThinking::Effort(ReasoningEffort::Off)
     );
 
     // And it actually lands on the resolved route.
@@ -4349,127 +4157,43 @@ fn test_apply_spawn_profile_carries_profile_reasoning_into_the_spawn() {
         request.thinking,
         "review this",
     );
-    assert_eq!(route.reasoning_effort.as_deref(), Some("max"));
+    assert_eq!(route.reasoning_effort.as_deref(), Some("off"));
 }
 
 #[test]
-fn test_apply_spawn_profile_reasoning_auto_reaches_the_spawn_as_auto() {
-    let mut profile = custom_fleet_profile("builder");
-    profile.reasoning_effort = Some("auto".to_string());
-    let roster = fleet_roster_with("auto-builder", profile);
-    let mut request =
-        parse_spawn_request(&json!({"prompt": "debug this crash", "profile": "auto-builder"}))
-            .expect("parse");
-
-    apply_spawn_profile(&mut request, &roster).expect("resolve");
-
-    assert_eq!(request.thinking, SubAgentThinking::Auto);
-    let route = fallback_subagent_assignment_route(
-        &stub_runtime(),
-        None,
-        ModelRoute::Inherit,
-        request.thinking,
-        "debug this crash",
-    );
-    // Resolved from the child prompt, never left as the raw `auto` sentinel.
-    assert_eq!(route.reasoning_effort.as_deref(), Some("max"));
-}
-
-#[test]
-fn test_explicit_spawn_thinking_still_outranks_the_profile_tier() {
-    let mut profile = custom_fleet_profile("reviewer");
-    profile.reasoning_effort = Some("max".to_string());
-    let roster = fleet_roster_with("deep-reviewer", profile);
-    let mut request = parse_spawn_request(&json!({
-        "prompt": "review this",
-        "profile": "deep-reviewer",
-        "thinking": "off"
-    }))
-    .expect("parse");
-
-    apply_spawn_profile(&mut request, &roster).expect("resolve");
-
-    assert_eq!(
-        request.thinking,
-        SubAgentThinking::Effort(ReasoningEffort::Off)
-    );
-}
-
-#[test]
-fn test_profile_reasoning_inherit_leaves_the_session_tier_alone() {
-    let mut profile = custom_fleet_profile("scout");
-    profile.reasoning_effort = Some("inherit".to_string());
-    let roster = fleet_roster_with("plain-scout", profile);
-    let mut request =
-        parse_spawn_request(&json!({"prompt": "look around", "profile": "plain-scout"}))
-            .expect("parse");
-
-    apply_spawn_profile(&mut request, &roster).expect("resolve");
-
+fn test_unset_spawn_thinking_inherits_the_session_tier() {
+    let mut request = parse_spawn_request(&json!({"prompt": "look around", "profile": "explore"}))
+        .expect("parse");
+    resolve_spawn_role(&mut request).expect("resolve");
     assert_eq!(request.thinking, SubAgentThinking::Inherit);
 }
 
-/// Named fleet profiles bind 1:1 to their configured route (#5046). The
-/// dispatching model cannot override `model` or `model_strength` for a named
-/// profile — only 'general' (no named profile) exposes those options.
+/// Roles bind no route (#5046 inverted): the dispatching model may always set
+/// `model` or `model_strength` — every role accepts model routing options.
 #[test]
-fn named_fleet_profile_rejects_model_override() {
-    let roster = FleetRoster::built_ins_only();
-
-    // Named profile (scout) + explicit model → must be rejected.
+fn role_dispatch_allows_model_and_model_strength_options() {
+    // Named role (explore) + explicit model → allowed.
     let mut request = parse_spawn_request(&json!({
         "prompt": "scan for callers",
-        "profile": "scout",
+        "profile": "explore",
         "model": "deepseek-v4-flash"
     }))
-    .expect("parse should succeed before apply");
-    let err = apply_spawn_profile(&mut request, &roster)
-        .expect_err("model override on named profile must fail");
-    let message = err.to_string();
-    assert!(
-        message.contains("Fleet profile 'scout'") && message.contains("'model' may not be set"),
-        "error should name the profile and the forbidden field: {message}"
-    );
-    assert!(
-        message.contains("general"),
-        "error should point to 'general' as the escape hatch: {message}"
-    );
+    .expect("parse should succeed");
+    resolve_spawn_role(&mut request).expect("model on a role must be allowed");
+    assert_eq!(request.agent_type, FleetRole::Scout);
+    assert_eq!(request.model.as_deref(), Some("deepseek-v4-flash"));
 
-    // Named profile (builder) + explicit model_strength → must be rejected.
+    // Named role (implement) + explicit model_strength → allowed.
     let mut request = parse_spawn_request(&json!({
         "prompt": "apply the fix",
-        "profile": "builder",
+        "profile": "implement",
         "model_strength": "faster",
         "write_roots": ["."]
     }))
-    .expect("parse should succeed before apply");
-    let err = apply_spawn_profile(&mut request, &roster)
-        .expect_err("model_strength override on named profile must fail");
-    let message = err.to_string();
-    assert!(
-        message.contains("Fleet profile 'builder'")
-            && message.contains("'model_strength' may not be set"),
-        "error should name the profile and the forbidden field: {message}"
-    );
-
-    // Named profile (reviewer) + explicit model_strength → rejected.
-    let mut request = parse_spawn_request(&json!({
-        "prompt": "review the diff",
-        "profile": "reviewer",
-        "model_strength": "same"
-    }))
-    .expect("parse should succeed before apply");
-    let err = apply_spawn_profile(&mut request, &roster)
-        .expect_err("model_strength on reviewer must fail");
-    assert!(err.to_string().contains("Fleet profile 'reviewer'"));
-}
-
-/// 'general' is the single escape hatch that accepts model and model_strength.
-/// Dispatching without a named profile (or explicitly to 'general') must allow
-/// model routing options (#5046).
-#[test]
-fn general_profile_allows_model_and_model_strength_options() {
-    let roster = FleetRoster::built_ins_only();
+    .expect("parse should succeed");
+    resolve_spawn_role(&mut request).expect("model_strength on a role must be allowed");
+    assert_eq!(request.agent_type, FleetRole::Builder);
+    assert!(request.model_strength_explicit);
 
     // Explicit profile=general with model → allowed.
     let mut request = parse_spawn_request(&json!({
@@ -4479,44 +4203,26 @@ fn general_profile_allows_model_and_model_strength_options() {
         "write_roots": ["."]
     }))
     .expect("parse should succeed");
-    apply_spawn_profile(&mut request, &roster)
-        .expect("model override on 'general' profile must be allowed");
+    resolve_spawn_role(&mut request).expect("model on 'general' must be allowed");
     assert_eq!(request.model.as_deref(), Some("deepseek-v4-flash"));
 
-    // Explicit profile=general with model_strength=faster → allowed.
-    let mut request = parse_spawn_request(&json!({
-        "prompt": "do work",
-        "profile": "general",
-        "model_strength": "faster",
-        "write_roots": ["."]
-    }))
-    .expect("parse should succeed");
-    apply_spawn_profile(&mut request, &roster)
-        .expect("model_strength on 'general' profile must be allowed");
-    assert!(request.model_strength_explicit);
-
     // No profile at all (default general) with model_strength → model and
-    // strength are allowed at parse time; apply_spawn_profile is not called.
+    // strength are allowed at parse time; resolve_spawn_role is a no-op.
     let request = parse_spawn_request(&json!({
         "prompt": "do some work",
         "model_strength": "faster",
         "write_roots": ["."]
     }))
-    .expect("unprofile spawn with model_strength should parse");
+    .expect("unprofiled spawn with model_strength should parse");
     assert!(request.profile.is_none());
     assert!(request.model_strength_explicit);
     assert_eq!(request.model_strength, SubAgentModelStrength::Faster);
 }
 
-/// A custom (non-built-in) fleet profile also binds strictly to its configured
-/// route — the guard is slot-based, not just for built-in named members (#5046).
+/// A custom (non-role) profile name fails closed: only the closed role set
+/// resolves — there are no saved members to promote.
 #[test]
-fn custom_fleet_profile_also_rejects_model_override() {
-    let mut profile = custom_fleet_profile("builder");
-    profile.model = Some("deepseek-v4-pro".to_string());
-    let roster = fleet_roster_with("my-builder", profile);
-
-    // Custom profile + model → must be rejected.
+fn custom_profile_name_fails_closed() {
     let mut request = parse_spawn_request(&json!({
         "prompt": "apply the patch",
         "profile": "my-builder",
@@ -4524,31 +4230,18 @@ fn custom_fleet_profile_also_rejects_model_override() {
         "write_roots": ["."]
     }))
     .expect("parse should succeed");
-    let err = apply_spawn_profile(&mut request, &roster)
-        .expect_err("model override on custom named profile must fail");
+    let err = resolve_spawn_role(&mut request).expect_err("unknown custom profile must fail");
     let message = err.to_string();
     assert!(
-        message.contains("Fleet profile 'my-builder'"),
+        message.contains("Unknown Fleet role/profile 'my-builder'"),
         "error must name the custom profile: {message}"
     );
-    assert!(
-        message.contains("pins model"),
-        "error must explain the pinned-model binding: {message}"
-    );
 }
 
-/// A type alias that matches a saved fleet roster member is promoted to that
-/// profile so the child gets the member's provider/model pin. An explicit
-/// `model` that matches the profile's pinned model is treated as redundant and
-/// ignored, which is the common case when a model reads the profile and repeats
-/// the model id.
+/// A type alias dispatches as its role and keeps an explicit `model`: there
+/// is no saved member to promote to and no pinned model to collide with.
 #[test]
-fn apply_spawn_profile_promotes_type_alias_to_matching_member_and_ignores_matching_model() {
-    let mut profile = custom_fleet_profile("builder");
-    profile.provider = Some("deepseek".to_string());
-    profile.model = Some("deepseek-v4-flash".to_string());
-    let roster = isolated_fleet_roster_with("builder", profile);
-
+fn type_alias_dispatch_keeps_explicit_model() {
     let mut request = parse_spawn_request(&json!({
         "prompt": "implement a feature",
         "type": "builder",
@@ -4556,46 +4249,12 @@ fn apply_spawn_profile_promotes_type_alias_to_matching_member_and_ignores_matchi
         "write_roots": ["."]
     }))
     .expect("parse should succeed");
-    let member = apply_spawn_profile(&mut request, &roster)
-        .expect("type alias matching a member should resolve")
-        .expect("member resolved");
-    assert_eq!(member.id, "builder");
+    resolve_spawn_role(&mut request).expect("type alias dispatches as its role");
     assert_eq!(request.agent_type, FleetRole::Builder);
-    assert_eq!(request.profile.as_deref(), Some("builder"));
-    assert!(
-        request.model.is_none(),
-        "redundant matching model should be dropped in favor of the profile pin"
-    );
-}
-
-#[test]
-fn apply_spawn_profile_promoted_alias_rejects_model_mismatch() {
-    let mut profile = custom_fleet_profile("builder");
-    profile.provider = Some("deepseek".to_string());
-    profile.model = Some("deepseek-v4-pro".to_string());
-    let roster = isolated_fleet_roster_with("builder", profile);
-
-    let mut request = parse_spawn_request(&json!({
-        "prompt": "implement a feature",
-        "type": "builder",
-        "model": "deepseek-v4-flash",
-        "write_roots": ["."]
-    }))
-    .expect("parse should succeed");
-    let err = apply_spawn_profile(&mut request, &roster)
-        .expect_err("mismatched model on promoted profile must fail");
-    let message = err.to_string();
-    assert!(
-        message.contains("builder"),
-        "error must name the member: {message}"
-    );
-    assert!(
-        message.contains("deepseek-v4-pro"),
-        "error must name the pinned model: {message}"
-    );
-    assert!(
-        message.contains("deepseek-v4-flash"),
-        "error must name the requested model: {message}"
+    assert_eq!(
+        request.model.as_deref(),
+        Some("deepseek-v4-flash"),
+        "explicit model is kept: roles pin no model"
     );
 }
 
@@ -4643,44 +4302,6 @@ fn a_concrete_runtime_tier_is_not_mistaken_for_auto() {
     );
 
     assert_eq!(route.reasoning_effort.as_deref(), Some("off"));
-}
-
-#[test]
-fn test_apply_spawn_profile_appends_instruction_overlay() {
-    let mut profile = custom_fleet_profile("reviewer");
-    profile.role.description = Some("Security-focused reviewer.".to_string());
-    profile.role.instructions = Some("Check unsafe blocks first.".to_string());
-    let roster = fleet_roster_with("auditor", profile);
-    let mut request =
-        parse_spawn_request(&json!({"prompt": "audit the crate", "profile": "auditor"}))
-            .expect("parse");
-    apply_spawn_profile(&mut request, &roster).expect("resolve");
-    assert!(
-        request.prompt.starts_with("audit the crate"),
-        "{}",
-        request.prompt
-    );
-    assert!(
-        request.prompt.contains("Fleet profile: auditor"),
-        "{}",
-        request.prompt
-    );
-    assert!(
-        request
-            .prompt
-            .contains("Profile description:\nSecurity-focused reviewer."),
-        "{}",
-        request.prompt
-    );
-    assert!(
-        request
-            .prompt
-            .contains("Profile instructions:\nCheck unsafe blocks first."),
-        "{}",
-        request.prompt
-    );
-    // Ledger objective keeps the original task; the overlay is prompt-only.
-    assert_eq!(request.assignment.objective, "audit the crate");
 }
 
 #[tokio::test]
@@ -4896,7 +4517,9 @@ fn test_parse_spawn_request_rejects_text_and_items_together() {
 }
 
 #[test]
-fn test_parse_spawn_request_accepts_human_role_selector_for_runtime_resolution() {
+fn test_parse_spawn_request_rejects_human_model_name_as_role() {
+    // A model name is not a role: without a roster of saved members there is
+    // nothing for it to resolve to, so it fails closed with the role list.
     let input = json!({
         "prompt": "do work",
         "role": "DeepSeek V4 Flash"
@@ -4905,15 +4528,12 @@ fn test_parse_spawn_request_accepts_human_role_selector_for_runtime_resolution()
     assert_eq!(parsed.profile.as_deref(), Some("DeepSeek V4 Flash"));
     assert_eq!(parsed.assignment.role.as_deref(), Some("DeepSeek V4 Flash"));
 
-    let mut profile = custom_fleet_profile("scout");
-    profile.provider = Some("deepseek".to_string());
-    profile.model = Some("deepseek-v4-flash".to_string());
-    let roster = isolated_fleet_roster_with("flash-scout", profile);
-    let member = apply_spawn_profile(&mut parsed, &roster)
-        .expect("human role selector should resolve")
-        .expect("matching Fleet member");
-    assert_eq!(member.id, "flash-scout");
-    assert_eq!(parsed.profile.as_deref(), Some("flash-scout"));
+    let err = resolve_spawn_role(&mut parsed).expect_err("a model name must not resolve as a role");
+    assert!(
+        err.to_string()
+            .contains("Unknown Fleet role/profile 'DeepSeek V4 Flash'"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -4928,21 +4548,18 @@ fn test_parse_spawn_request_accepts_fleet_role_token_for_runtime_resolution() {
     assert_eq!(parsed.assignment.role.as_deref(), Some("release_lead"));
     assert_eq!(parsed.profile.as_deref(), Some("release_lead"));
 
-    let roster = FleetRoster::built_ins_only();
+    // A saved-member id is not a role: it fails closed with the role list.
     let mut parsed = parsed;
-    let member = apply_spawn_profile(&mut parsed, &roster)
-        .expect("release_lead should resolve")
-        .expect("release_lead should select a roster member");
-    assert_eq!(member.id, "manager");
-    assert_eq!(parsed.profile.as_deref(), Some("manager"));
+    let err = resolve_spawn_role(&mut parsed).expect_err("release_lead must not resolve");
+    assert!(
+        err.to_string()
+            .contains("Unknown Fleet role/profile 'release_lead'"),
+        "{err}"
+    );
 
     let mut scout = parse_spawn_request(&json!({"prompt": "map it", "role": "scout"}))
         .expect("canonical scout role");
-    let member = apply_spawn_profile(&mut scout, &roster).expect("scout should resolve");
-    assert!(
-        member.is_none(),
-        "a role posture should not silently select a roster profile; use profile=scout"
-    );
+    resolve_spawn_role(&mut scout).expect("scout should resolve");
     assert_eq!(scout.agent_type, FleetRole::Scout);
 }
 
@@ -5011,29 +4628,24 @@ fn test_parse_spawn_request_accepts_full_role_vocabulary() {
         );
         assert!(
             parsed.profile.is_none(),
-            "descriptive role alias {role:?} must not become a roster profile"
+            "descriptive role alias {role:?} must not become a role profile"
         );
-        assert!(
-            apply_spawn_profile(&mut parsed, &FleetRoster::built_ins_only())
-                .unwrap_or_else(|e| panic!("role {role:?} should apply without a profile: {e}"))
-                .is_none(),
-            "descriptive role alias {role:?} should not require roster resolution"
-        );
+        resolve_spawn_role(&mut parsed)
+            .unwrap_or_else(|e| panic!("role {role:?} should resolve without a profile: {e}"));
     }
 }
 
 #[test]
 fn test_invalid_role_error_lists_real_aliases() {
-    // Well-formed fleet role tokens parse and then fail clearly at roster
-    // resolution time with both real roster members and type aliases (#4177).
-    let roster = FleetRoster::built_ins_only();
+    // Well-formed fleet role tokens parse and then fail clearly at role
+    // resolution time with the closed role set (#4177).
     let input = json!({
         "prompt": "do work",
         "role": "nonsense",
         "write_roots": ["."]
     });
     let mut request = parse_spawn_request(&input).expect("fleet role token should parse");
-    let err = apply_spawn_profile(&mut request, &roster)
+    let err = resolve_spawn_role(&mut request)
         .expect_err("unknown fleet role should fail at runtime resolution")
         .to_string();
     assert!(
@@ -5052,7 +4664,7 @@ fn test_invalid_role_error_lists_real_aliases() {
 }
 
 #[test]
-fn plugin_agent_profile_survives_restart_and_spawn_rechecks_disable() {
+fn plugin_agent_profile_loads_but_is_not_a_spawn_role() {
     let _lock = crate::test_support::lock_test_env();
     let fixture = crate::plugins::test_fixture::DeclarativePluginFixture::new();
     let config = codewhale_config::FleetConfigToml::default();
@@ -5071,27 +4683,22 @@ fn plugin_agent_profile_survives_restart_and_spawn_rechecks_disable() {
         "Agent profile must execute from the immutable staged snapshot"
     );
 
+    // Plugin Agents are durable-Fleet members, not spawn roles: dispatching
+    // one through the agent tool fails closed with the role list.
     let mut request = parse_spawn_request(&json!({
         "prompt": "inspect the plugin boundary",
         "profile": "plugin-scout"
     }))
     .expect("spawn request parses");
-    let applied = apply_spawn_profile(&mut request, &roster)
-        .expect("active plugin Agent passes the spawn boundary")
-        .expect("profile resolves");
-    assert_eq!(applied.id, "plugin-scout");
+    let denied = resolve_spawn_role(&mut request)
+        .expect_err("plugin Agent is not a spawn role")
+        .to_string();
+    assert!(
+        denied.contains("Unknown Fleet role/profile 'plugin-scout'"),
+        "{denied}"
+    );
 
     let inactive = fixture.disable_from_fresh_registry();
-    let mut stale_request = parse_spawn_request(&json!({
-        "prompt": "must fail closed",
-        "profile": "plugin-scout"
-    }))
-    .expect("spawn request parses");
-    let denied = apply_spawn_profile(&mut stale_request, &roster)
-        .expect_err("a stale roster cannot spawn a disabled plugin Agent")
-        .to_string();
-    assert!(denied.contains("was denied"), "{denied}");
-
     let reloaded = FleetRoster::load_with_plugins(&config, &fixture.workspace, &inactive);
     assert!(
         reloaded.get("plugin-scout").is_none(),
@@ -5234,7 +4841,6 @@ fn agent_tool_unadvertised_fields_remain_parse_accepted() {
     assert_eq!(request.model_strength, SubAgentModelStrength::Faster);
     assert!(request.model_strength_explicit);
     assert_eq!(subagent_thinking_label(request.thinking), "max");
-    assert!(request.thinking_explicit);
     assert_eq!(request.max_steps, Some(300));
     assert_eq!(request.wall_time, Some(Duration::from_secs(900)));
     assert_eq!(request.max_depth, Some(2));
@@ -7402,7 +7008,7 @@ fn subagent_feature_gates_match_parent_agent_surface() {
 /// deny list via `allows_bounded_readonly_bash`, so seeding the rule is what
 /// makes these tests exercise the carve-out rather than an absent denial.
 fn seed_read_only_role_deny_list(runtime: &mut SubAgentRuntime) {
-    use crate::fleet::exact::{MUTATING_TOOL_DENYLIST, RAW_SHELL_DENYLIST};
+    use crate::fleet::role::{MUTATING_TOOL_DENYLIST, RAW_SHELL_DENYLIST};
     for rule in RAW_SHELL_DENYLIST
         .iter()
         .chain(MUTATING_TOOL_DENYLIST.iter())
@@ -13023,7 +12629,6 @@ pub(crate) fn stub_runtime() -> SubAgentRuntime {
         reasoning_effort: None,
         reasoning_effort_auto: false,
         role_models: std::collections::HashMap::new(),
-        fleet_roster: std::sync::Arc::new(crate::fleet::roster::FleetRoster::built_ins_only()),
         context,
         allow_shell: true,
         accept_edits: false,
@@ -13320,44 +12925,16 @@ fn stub_client() -> DeepSeekClient {
     DeepSeekClient::new(&config).expect("stub client should construct")
 }
 
-// ---- #4193: interactive-TUI in-process spawn honors a profile's pinned provider ----
+// ---- Role-only dispatch inherits the session client ----
+//
+// There are no provider pins outside the durable Fleet runs: every child runs
+// on the parent's provider. Child and background runtimes clone the session
+// client and config unchanged — no cross-provider build, no misroute.
 
-/// A `Config` with two fully-configured providers, each on a DISTINCT host so a
-/// test can prove a child client actually re-pointed: `deepseek` is the session
-/// route, `zai` is a pinned route. Provider-scoped keys/base URLs are used (root
-/// `api_key` intentionally unset) so `deepseek_api_key`/`deepseek_base_url`
-/// resolve each provider independently.
-fn cross_provider_config() -> crate::config::Config {
+/// A session runtime on `deepseek` with the cross-provider `Config` threaded in,
+/// exactly as the engine wires it via `with_api_config`.
+fn cross_provider_runtime() -> SubAgentRuntime {
     let _ = rustls::crypto::ring::default_provider().install_default();
-    let mut custom = std::collections::HashMap::new();
-    custom.insert(
-        "lm-studio".to_string(),
-        crate::config::ProviderConfig {
-            kind: Some("openai-compatible".to_string()),
-            api_key: Some("lm-studio-key".to_string()),
-            base_url: Some("http://127.0.0.1:1234/v1".to_string()),
-            model: Some("qwen-2.5-7b".to_string()),
-            ..Default::default()
-        },
-    );
-    for (name, base_url, model) in [
-        ("custom-a", "http://127.0.0.1:18181/v1", "model-a"),
-        ("custom-b", "http://127.0.0.1:18182/v1", "model-b"),
-        ("CUSTOM", "http://127.0.0.1:18183/v1", "model-upper"),
-        ("custom", "http://127.0.0.1:18184/v1", "model-literal"),
-        ("OPENAI", "http://127.0.0.1:18185/v1", "model-openai"),
-    ] {
-        custom.insert(
-            name.to_string(),
-            crate::config::ProviderConfig {
-                kind: Some("openai-compatible".to_string()),
-                api_key: Some("local-test-key".to_string()),
-                base_url: Some(base_url.to_string()),
-                model: Some(model.to_string()),
-                ..Default::default()
-            },
-        );
-    }
     let providers = crate::config::ProvidersConfig {
         deepseek: crate::config::ProviderConfig {
             api_key: Some("session-key".to_string()),
@@ -13369,101 +12946,21 @@ fn cross_provider_config() -> crate::config::Config {
             base_url: Some("https://pinned-provider.example.com/v1".to_string()),
             ..Default::default()
         },
-        custom,
         ..crate::config::ProvidersConfig::default()
     };
-    crate::config::Config {
+    let config = crate::config::Config {
         provider: Some("deepseek".to_string()),
         providers: Some(providers),
         ..crate::config::Config::default()
-    }
-}
-
-/// A session runtime on `deepseek` with the cross-provider `Config` threaded in,
-/// exactly as the engine wires it via `with_api_config`.
-fn cross_provider_runtime() -> SubAgentRuntime {
-    let config = cross_provider_config();
+    };
     let client = DeepSeekClient::new(&config).expect("session client builds");
     let mut runtime = stub_runtime().with_api_config(config);
     runtime.client = client;
     runtime
 }
 
-/// A roster member whose profile explicitly pins `provider` (+ an arbitrary
-/// `model`), mirroring the on-disk `[fleet]` profile shape.
-fn member_pinning_provider(provider: &str, model: &str) -> crate::fleet::profile::AgentProfile {
-    let mut profile = custom_fleet_profile("worker");
-    profile.provider = Some(provider.to_string());
-    profile.model = Some(model.to_string());
-    crate::fleet::profile::AgentProfile {
-        id: format!("{provider}-worker"),
-        display_name: Some(format!("{provider} worker")),
-        description: None,
-        requires: Vec::new(),
-        profile,
-        source: std::path::PathBuf::from(format!("{provider}-worker.toml")),
-        origin: crate::fleet::roster::ProfileOrigin::Workspace,
-        plugin_authority: None,
-    }
-}
-
 #[test]
-fn vision_requirement_accepts_only_the_exact_supported_route() {
-    let mut member = member_pinning_provider("deepseek", "deepseek-v4-flash-vision-exp");
-    member.requires = vec!["vision".to_string()];
-
-    enforce_fleet_member_route_requirements(
-        Some(&member),
-        &stub_runtime(),
-        "deepseek-v4-flash-vision-exp",
-    )
-    .expect("official DeepSeek vision route has exact image_input support");
-}
-
-#[test]
-fn vision_requirement_rejects_known_text_only_route_without_rerouting() {
-    let mut member = member_pinning_provider("deepseek", "deepseek-v4-pro");
-    member.requires = vec!["vision".to_string()];
-
-    let error =
-        enforce_fleet_member_route_requirements(Some(&member), &stub_runtime(), "deepseek-v4-pro")
-            .expect_err("known text-only route must fail capability admission");
-    let message = error.to_string();
-    assert!(message.contains("requires vision"), "{message}");
-    assert!(message.contains("image_input=unsupported"), "{message}");
-    assert!(message.contains("will not reroute"), "{message}");
-}
-
-#[test]
-fn vision_requirement_rejects_same_name_custom_proxy_as_unknown() {
-    let config = crate::config::Config {
-        api_key: Some("test-key".to_string()),
-        base_url: Some("https://deepseek-proxy.example.test/v1".to_string()),
-        default_text_model: Some("deepseek-v4-flash-vision-exp".to_string()),
-        ..crate::config::Config::default()
-    };
-    let client = DeepSeekClient::new(&config).expect("proxy test client");
-    let mut runtime = stub_runtime().with_api_config(config);
-    runtime.client = client;
-    let mut member = member_pinning_provider("deepseek", "deepseek-v4-flash-vision-exp");
-    member.requires = vec!["vision".to_string()];
-
-    let error = enforce_fleet_member_route_requirements(
-        Some(&member),
-        &runtime,
-        "deepseek-v4-flash-vision-exp",
-    )
-    .expect_err("same-name custom proxy has no verified image_input fact");
-    let message = error.to_string();
-    assert!(message.contains("image_input=unknown"), "{message}");
-    assert!(message.contains("will not reroute"), "{message}");
-}
-
-#[test]
-fn spawn_child_client_targets_profile_pinned_provider() {
-    // Session runs on DeepSeek; the roster member pins Z.ai. The in-process
-    // child must issue its request to a Z.ai client (Z.ai base URL + creds),
-    // not the shared session DeepSeek client (#4193 acceptance criterion).
+fn spawn_child_runtime_inherits_session_client_and_config() {
     let runtime = cross_provider_runtime();
     assert_eq!(
         runtime.client.api_provider(),
@@ -13471,360 +12968,26 @@ fn spawn_child_client_targets_profile_pinned_provider() {
         "precondition: session is on DeepSeek"
     );
 
-    let member = member_pinning_provider("zai", "glm-4.6");
-    let child_client = child_client_for_member(&runtime, Some(&member))
-        .expect("pinned-provider client builds when its creds are configured");
-
-    assert_eq!(
-        child_client.api_provider(),
-        crate::config::ApiProvider::Zai,
-        "child client must target the profile-pinned provider (#4193)"
-    );
-    assert!(
-        child_client
-            .base_url()
-            .contains("pinned-provider.example.com"),
-        "child must talk to the pinned provider's endpoint, got {}",
-        child_client.base_url()
-    );
-    assert!(
-        !child_client
-            .base_url()
-            .contains("session-provider.example.com"),
-        "child must NOT reuse the session provider's endpoint (the #4093 misroute)"
-    );
-}
-
-#[test]
-fn spawn_child_client_targets_custom_profile_provider() {
-    // #3965: LM Studio and other user-named OpenAI-compatible providers live in
-    // `[providers.<name>]` tables. A profile pin must preserve that name so the
-    // child client resolves the custom table instead of rejecting it or
-    // silently inheriting the DeepSeek session client.
-    let runtime = cross_provider_runtime();
-    assert_eq!(
-        runtime.client.api_provider(),
-        crate::config::ApiProvider::Deepseek,
-        "precondition: session is on DeepSeek"
-    );
-
-    let member = member_pinning_provider("lm-studio", "qwen-2.5-7b");
-    let child_client = child_client_for_member(&runtime, Some(&member))
-        .expect("custom provider client builds from the named provider table");
-
-    assert_eq!(
-        child_client.api_provider(),
-        crate::config::ApiProvider::Custom
-    );
-    assert_eq!(child_client.base_url(), "http://127.0.0.1:1234/v1");
-}
-
-#[test]
-fn spawn_child_client_switches_between_exact_named_custom_endpoints() {
-    let mut config = cross_provider_config();
-    config.provider = Some("custom-a".to_string());
-    let client = DeepSeekClient::new(&config).expect("custom A session client");
-    assert_eq!(client.base_url(), "http://127.0.0.1:18181/v1");
-    let mut runtime = stub_runtime().with_api_config(config);
-    runtime.client = client;
-
-    let member = member_pinning_provider("custom-b", "model-b");
-    let child_client =
-        child_client_for_member(&runtime, Some(&member)).expect("custom B child client builds");
-
-    assert_eq!(
-        child_client.api_provider(),
-        crate::config::ApiProvider::Custom
-    );
-    assert_eq!(child_client.base_url(), "http://127.0.0.1:18182/v1");
-}
-
-#[test]
-fn cross_custom_child_rebinds_config_receipts_and_grandchild_route_atomically() {
-    let mut config = cross_provider_config();
-    config.provider = Some("custom-a".to_string());
-    let client = DeepSeekClient::new(&config).expect("custom A session client");
-    let mut runtime = stub_runtime().with_api_config(config);
-    runtime.client = client;
-
-    let member_b = member_pinning_provider("custom-b", "model-b");
-    let binding_b =
-        child_provider_binding(&runtime, Some(&member_b)).expect("custom B child provider binding");
-    let mut child_runtime = runtime.background_runtime();
-    child_runtime.client = binding_b.client;
-    child_runtime.api_config = binding_b.api_config;
-
-    assert_eq!(child_runtime.client.base_url(), "http://127.0.0.1:18182/v1");
-    assert_eq!(
-        child_runtime
-            .api_config
-            .as_ref()
-            .and_then(|config| config.provider.as_deref()),
-        Some("custom-b")
-    );
-    let worker_profile = worker_profile_for_spawn(
-        &child_runtime,
-        &FleetRole::Builder,
-        &AgentWorkerToolProfile::Inherited,
-        "model-b",
-        None,
-        false,
-    );
-    assert_eq!(worker_profile.provider.as_deref(), Some("custom-b"));
-
-    assert!(!provider_pin_matches_session(&child_runtime, "custom-a"));
-    let member_a = member_pinning_provider("custom-a", "model-a");
-    let binding_a = child_provider_binding(&child_runtime, Some(&member_a))
-        .expect("grandchild rebinds to custom A");
-    assert_eq!(binding_a.client.base_url(), "http://127.0.0.1:18181/v1");
-    assert_eq!(
-        binding_a
-            .api_config
-            .as_ref()
-            .and_then(|config| config.provider.as_deref()),
-        Some("custom-a")
-    );
-}
-
-#[test]
-fn spawn_child_client_does_not_collapse_case_colliding_custom_pins() {
-    let mut config = cross_provider_config();
-    config.provider = Some("custom-a".to_string());
-    let client = DeepSeekClient::new(&config).expect("custom A session client");
-    let mut runtime = stub_runtime().with_api_config(config);
-    runtime.client = client;
-
-    for (provider_id, model, endpoint) in [
-        ("CUSTOM", "model-upper", "http://127.0.0.1:18183/v1"),
-        ("custom", "model-literal", "http://127.0.0.1:18184/v1"),
-        ("OPENAI", "model-openai", "http://127.0.0.1:18185/v1"),
-    ] {
-        assert!(!provider_pin_matches_session(&runtime, provider_id));
-        let member = member_pinning_provider(provider_id, model);
-        let child = child_client_for_member(&runtime, Some(&member))
-            .expect("case-colliding custom client builds from exact table");
-        assert_eq!(child.api_provider(), crate::config::ApiProvider::Custom);
-        assert_eq!(child.base_url(), endpoint);
+    // A role-only child keeps the session client: even a provider that has
+    // full credentials configured (zai) is never selected without a pin.
+    for child in [runtime.child_runtime(), runtime.background_runtime()] {
+        assert_eq!(
+            child.client.api_provider(),
+            crate::config::ApiProvider::Deepseek
+        );
+        assert!(
+            child
+                .client
+                .base_url()
+                .contains("session-provider.example.com"),
+            "child stays on the session endpoint, got {}",
+            child.client.base_url()
+        );
+        assert!(std::sync::Arc::ptr_eq(
+            runtime.api_config.as_ref().expect("session config"),
+            child.api_config.as_ref().expect("child config")
+        ));
     }
-}
-
-#[test]
-fn removed_case_colliding_custom_pin_fails_closed() {
-    let mut config = cross_provider_config();
-    config.provider = Some("custom-a".to_string());
-    config
-        .providers
-        .as_mut()
-        .expect("providers")
-        .custom
-        .remove("CUSTOM");
-    let client = DeepSeekClient::new(&config).expect("custom A session client");
-    let mut runtime = stub_runtime().with_api_config(config);
-    runtime.client = client;
-
-    assert!(!provider_pin_matches_session(&runtime, "CUSTOM"));
-    let member = member_pinning_provider("CUSTOM", "model-upper");
-    let err = match child_client_for_member(&runtime, Some(&member)) {
-        Ok(_) => panic!("removed custom pin must not inherit active custom client"),
-        Err(err) => err,
-    };
-    assert!(err.to_string().contains("CUSTOM"), "{err}");
-}
-
-#[test]
-fn spawn_child_client_inherits_session_provider_without_pin() {
-    // Regression: profile-less members and members that pin no provider (or the
-    // session's own provider) keep the session client. No cross-provider build,
-    // no misroute, no behavior change from before #4193.
-    let runtime = cross_provider_runtime();
-
-    let inherited = child_client_for_member(&runtime, None)
-        .expect("profile-less spawn reuses the session client");
-    assert_eq!(
-        inherited.api_provider(),
-        crate::config::ApiProvider::Deepseek
-    );
-    assert!(
-        inherited
-            .base_url()
-            .contains("session-provider.example.com"),
-        "profile-less child stays on the session endpoint, got {}",
-        inherited.base_url()
-    );
-
-    // A member that pins the SAME provider as the session also stays put.
-    let same = member_pinning_provider("deepseek", "deepseek-v4-flash");
-    let same_client = child_client_for_member(&runtime, Some(&same))
-        .expect("same-provider pin reuses the session client");
-    assert_eq!(
-        same_client.api_provider(),
-        crate::config::ApiProvider::Deepseek
-    );
-    assert!(
-        same_client
-            .base_url()
-            .contains("session-provider.example.com")
-    );
-}
-
-fn coexisting_ollama_cloud_config(active_provider: &str) -> crate::config::Config {
-    crate::config::Config {
-        provider: Some(active_provider.to_string()),
-        providers: Some(crate::config::ProvidersConfig {
-            ollama: crate::config::ProviderConfig {
-                api_key: Some("legacy-cloud-inline-key".to_string()),
-                base_url: Some(codewhale_config::provider::OLLAMA_CLOUD_BASE_URL.to_string()),
-                model: Some("legacy-cloud-model".to_string()),
-                ..Default::default()
-            },
-            ollama_cloud: crate::config::ProviderConfig {
-                api_key: Some("explicit-cloud-inline-key".to_string()),
-                base_url: Some(crate::config::DEFAULT_OLLAMA_CLOUD_BASE_URL.to_string()),
-                model: Some("explicit-cloud-model".to_string()),
-                ..Default::default()
-            },
-            ..Default::default()
-        }),
-        ..Default::default()
-    }
-}
-
-#[test]
-fn legacy_ollama_cloud_session_reuses_only_the_legacy_pin() {
-    let config = coexisting_ollama_cloud_config("ollama");
-    let client = DeepSeekClient::new(&config).expect("legacy Cloud session client");
-    let mut runtime = stub_runtime().with_api_config(config);
-    runtime.client = client;
-
-    let legacy = member_pinning_provider("ollama", "legacy-cloud-model");
-    let legacy_binding =
-        child_provider_binding(&runtime, Some(&legacy)).expect("legacy pin reuses session");
-    assert!(std::sync::Arc::ptr_eq(
-        runtime.api_config.as_ref().expect("session config"),
-        legacy_binding.api_config.as_ref().expect("child config")
-    ));
-
-    let explicit = member_pinning_provider("ollama-cloud", "explicit-cloud-model");
-    let explicit_binding = child_provider_binding(&runtime, Some(&explicit))
-        .expect("explicit Cloud pin builds its own route");
-    let explicit_config = explicit_binding.api_config.as_ref().expect("scoped config");
-    assert!(!std::sync::Arc::ptr_eq(
-        runtime.api_config.as_ref().expect("session config"),
-        explicit_config
-    ));
-    assert!(!explicit_config.migrated_legacy_ollama_cloud_route);
-    assert_eq!(explicit_config.default_model(), "explicit-cloud-model");
-}
-
-#[test]
-fn scoped_legacy_ollama_cloud_child_does_not_capture_an_explicit_cloud_pin() {
-    let config = coexisting_ollama_cloud_config("ollama");
-    let identity = config
-        .resolve_provider_identity("ollama")
-        .expect("legacy Cloud identity");
-    let mut scoped = config.clone();
-    scoped.scope_to_provider_identity(&identity);
-    assert!(scoped.migrated_legacy_ollama_cloud_route);
-    assert_eq!(
-        scoped
-            .deepseek_api_key()
-            .expect("scoped child reads the legacy credential"),
-        "legacy-cloud-inline-key"
-    );
-
-    let client = DeepSeekClient::new(&scoped).expect("scoped legacy Cloud child client");
-    let mut runtime = stub_runtime().with_api_config(scoped);
-    runtime.client = client;
-
-    let legacy = member_pinning_provider("ollama", "legacy-cloud-model");
-    let legacy_binding =
-        child_provider_binding(&runtime, Some(&legacy)).expect("nested legacy pin reuses child");
-    assert!(std::sync::Arc::ptr_eq(
-        runtime.api_config.as_ref().expect("child config"),
-        legacy_binding.api_config.as_ref().expect("nested config")
-    ));
-
-    let explicit = member_pinning_provider("ollama-cloud", "explicit-cloud-model");
-    let explicit_binding = child_provider_binding(&runtime, Some(&explicit))
-        .expect("nested explicit Cloud pin builds its own route");
-    let explicit_config = explicit_binding.api_config.as_ref().expect("scoped config");
-    assert!(!std::sync::Arc::ptr_eq(
-        runtime.api_config.as_ref().expect("child config"),
-        explicit_config
-    ));
-    assert!(!explicit_config.migrated_legacy_ollama_cloud_route);
-    assert_eq!(explicit_config.default_model(), "explicit-cloud-model");
-    assert_eq!(
-        explicit_config
-            .deepseek_api_key()
-            .expect("explicit pin reads the first-class credential"),
-        "explicit-cloud-inline-key"
-    );
-}
-
-#[test]
-fn explicit_ollama_cloud_session_reuses_only_the_explicit_pin() {
-    let config = coexisting_ollama_cloud_config("ollama-cloud");
-    let client = DeepSeekClient::new(&config).expect("explicit Cloud session client");
-    let mut runtime = stub_runtime().with_api_config(config);
-    runtime.client = client;
-
-    let explicit = member_pinning_provider("ollama-cloud", "explicit-cloud-model");
-    let explicit_binding =
-        child_provider_binding(&runtime, Some(&explicit)).expect("explicit pin reuses session");
-    assert!(std::sync::Arc::ptr_eq(
-        runtime.api_config.as_ref().expect("session config"),
-        explicit_binding.api_config.as_ref().expect("child config")
-    ));
-
-    let legacy = member_pinning_provider("ollama", "legacy-cloud-model");
-    let legacy_binding =
-        child_provider_binding(&runtime, Some(&legacy)).expect("legacy pin builds its own route");
-    let legacy_config = legacy_binding.api_config.as_ref().expect("scoped config");
-    assert!(!std::sync::Arc::ptr_eq(
-        runtime.api_config.as_ref().expect("session config"),
-        legacy_config
-    ));
-    assert!(legacy_config.migrated_legacy_ollama_cloud_route);
-    assert_eq!(legacy_config.default_model(), "legacy-cloud-model");
-}
-
-#[test]
-fn ollama_cloud_pin_without_config_fails_closed_on_unknown_provenance() {
-    let config = coexisting_ollama_cloud_config("ollama-cloud");
-    let client = DeepSeekClient::new(&config).expect("explicit Cloud session client");
-    let mut runtime = stub_runtime();
-    runtime.client = client;
-    runtime.api_config = None;
-
-    assert!(!provider_pin_matches_session(&runtime, "ollama-cloud"));
-    let member = member_pinning_provider("ollama-cloud", "explicit-cloud-model");
-    let err = match child_client_for_member(&runtime, Some(&member)) {
-        Ok(_) => panic!("a Cloud pin with unknown provenance must not reuse the session client"),
-        Err(err) => err,
-    };
-    assert!(err.to_string().contains("Config was not threaded"), "{err}");
-}
-
-#[test]
-fn spawn_child_client_fails_closed_when_pinned_provider_unavailable() {
-    // Defense in depth (#4093): if the pinned provider's client cannot be built
-    // (here: no session Config threaded in), fail the spawn instead of silently
-    // sending the pinned model id to the session provider's endpoint.
-    let mut runtime = cross_provider_runtime();
-    runtime.api_config = None; // simulate a legacy/untethered runtime
-
-    let member = member_pinning_provider("zai", "glm-4.6");
-    // `DeepSeekClient` is not `Debug`, so match instead of `expect_err`.
-    let err = match child_client_for_member(&runtime, Some(&member)) {
-        Ok(_) => panic!("must fail closed when the pinned client cannot be built"),
-        Err(err) => err,
-    };
-    let msg = err.to_string();
-    assert!(
-        msg.contains("zai"),
-        "error must name the pinned provider so the failure is actionable: {msg}"
-    );
 }
 
 // ---- #405 session-boundary classification ----
@@ -18351,7 +17514,7 @@ async fn child_work_state_publishes_only_real_changes_from_its_own_list() {
 #[test]
 fn an_exact_member_with_tools_false_gets_no_model_tools_at_all() {
     let tmp = tempdir().expect("tempdir");
-    let authority = crate::fleet::exact::ChildAuthority::clamp(
+    let authority = crate::fleet::role::ChildAuthority::clamp(
         codewhale_workflow::PermissionCeiling::ROUTER,
         codewhale_workflow::PermissionCeiling::preset("full").expect("preset"),
     );
@@ -18389,7 +17552,7 @@ fn an_exact_member_with_tools_false_gets_no_model_tools_at_all() {
 #[tokio::test]
 async fn an_exact_member_without_a_network_tool_really_loses_the_network_surface() {
     let tmp = tempdir().expect("tempdir");
-    let authority = crate::fleet::exact::ChildAuthority::clamp(
+    let authority = crate::fleet::role::ChildAuthority::clamp(
         codewhale_workflow::PermissionCeiling::preset("read_write").expect("preset"),
         codewhale_workflow::PermissionCeiling::preset("full").expect("preset"),
     );
@@ -18528,7 +17691,7 @@ async fn a_read_only_inspection_member_gets_only_bounded_web_search() {
         delegation_depth: codewhale_config::DEFAULT_SPAWN_DEPTH,
         tools: true,
     };
-    let authority = crate::fleet::exact::ChildAuthority::from_runtime_role("scout", parent);
+    let authority = crate::fleet::role::ChildAuthority::from_runtime_role("scout", parent);
     assert_eq!(authority.posture_role, "explore");
     assert!(!authority.ceiling.network_tool);
 
@@ -18593,7 +17756,7 @@ async fn a_read_only_inspection_member_gets_only_bounded_web_search() {
     );
 
     // A Runtime builder under a full parent keeps the whole family.
-    let full_authority = crate::fleet::exact::ChildAuthority::from_runtime_role(
+    let full_authority = crate::fleet::role::ChildAuthority::from_runtime_role(
         "builder",
         codewhale_workflow::PermissionCeiling::preset("full").expect("preset"),
     );
@@ -18636,7 +17799,7 @@ async fn a_read_only_inspection_member_gets_only_bounded_web_search() {
 #[test]
 fn the_unified_rlm_action_cannot_bypass_a_denied_alias() {
     let tmp = tempdir().expect("tempdir");
-    let authority = crate::fleet::exact::ChildAuthority::clamp(
+    let authority = crate::fleet::role::ChildAuthority::clamp(
         codewhale_workflow::PermissionCeiling::preset("read_write").expect("preset"),
         codewhale_workflow::PermissionCeiling::preset("full").expect("preset"),
     );
@@ -18875,7 +18038,7 @@ async fn a_parent_read_only_session_narrows_a_full_exact_member_in_the_child_reg
         delegation_depth: 0,
         tools: true,
     };
-    let authority = crate::fleet::exact::ChildAuthority::clamp(
+    let authority = crate::fleet::role::ChildAuthority::clamp(
         codewhale_workflow::PermissionCeiling::preset("full").expect("preset"),
         session,
     );
@@ -18946,20 +18109,20 @@ fn the_session_ceiling_reflects_the_live_parent_posture() {
     runtime.allow_shell = true;
     runtime.worker_profile = WorkerRuntimeProfile::for_role(FleetRole::Builder);
 
-    let permissive = crate::fleet::exact::session_permission_ceiling(&runtime);
+    let permissive = super::session_permission_ceiling(&runtime);
     assert!(permissive.write);
     assert!(permissive.network_tool);
 
     // Turn the parent's network surface off and the ceiling follows.
     let mut narrowed = runtime.clone();
     narrowed.agent_tool_surface_options.web_search_enabled = false;
-    assert!(!crate::fleet::exact::session_permission_ceiling(&narrowed).network_tool);
+    assert!(!super::session_permission_ceiling(&narrowed).network_tool);
 
     // A parent with no shell cannot hand a child full shell.
     let mut no_shell = runtime.clone();
     no_shell.allow_shell = false;
     assert_ne!(
-        crate::fleet::exact::session_permission_ceiling(&no_shell).shell,
+        super::session_permission_ceiling(&no_shell).shell,
         codewhale_workflow::ShellCeiling::Full
     );
 }
@@ -18983,7 +18146,7 @@ fn the_session_ceiling_reflects_the_live_parent_posture() {
 /// The child registry a Runtime verifier under a full parent actually runs with.
 fn read_only_with_shell_registry() -> (tempfile::TempDir, SubAgentToolRegistry) {
     let tmp = tempdir().expect("tempdir");
-    let authority = crate::fleet::exact::ChildAuthority::from_runtime_role(
+    let authority = crate::fleet::role::ChildAuthority::from_runtime_role(
         "verifier",
         codewhale_workflow::PermissionCeiling::preset("full").expect("preset"),
     );
@@ -19247,7 +18410,7 @@ fn bounded_read_only_and_verification_paths_survive_the_ceiling() {
 #[test]
 fn a_write_capable_member_keeps_every_execution_gate() {
     let tmp = tempdir().expect("tempdir");
-    let authority = crate::fleet::exact::ChildAuthority::from_runtime_role(
+    let authority = crate::fleet::role::ChildAuthority::from_runtime_role(
         "builder",
         codewhale_workflow::PermissionCeiling::preset("full").expect("preset"),
     );
@@ -19325,7 +18488,7 @@ fn the_durable_work_families_resolve_their_actions_through_the_policy_seam() {
 /// grandchild asking for a clean surface must not hand it the network back.
 #[test]
 fn posture_denials_survive_a_child_that_declines_to_inherit() {
-    let authority = crate::fleet::exact::ChildAuthority::clamp(
+    let authority = crate::fleet::role::ChildAuthority::clamp(
         codewhale_workflow::PermissionCeiling::preset("read_write").expect("preset"),
         codewhale_workflow::PermissionCeiling::preset("full").expect("preset"),
     );
@@ -19338,7 +18501,7 @@ fn posture_denials_survive_a_child_that_declines_to_inherit() {
 
     // Exactly what the spawn path does for `inherit_disallowed_tools: false`.
     let mut child = inherited.clone();
-    child.retain(|rule| crate::fleet::exact::is_posture_denial(rule));
+    child.retain(|rule| crate::fleet::role::is_posture_denial(rule));
 
     for sealed in [
         "fetch_url",
@@ -19358,12 +18521,12 @@ fn posture_denials_survive_a_child_that_declines_to_inherit() {
         "an ordinary preference is still droppable; got {child:?}"
     );
     assert!(
-        !crate::fleet::exact::is_posture_denial("some_session_preference"),
+        !crate::fleet::role::is_posture_denial("some_session_preference"),
         "only ceiling-derived rules are sealed"
     );
-    for name in crate::fleet::exact::NON_SHELL_EXECUTION_DENYLIST {
+    for name in crate::fleet::role::NON_SHELL_EXECUTION_DENYLIST {
         assert!(
-            crate::fleet::exact::is_posture_denial(name),
+            crate::fleet::role::is_posture_denial(name),
             "{name} is installed by a ceiling and must be sealed"
         );
     }
@@ -19378,7 +18541,7 @@ fn posture_denials_survive_a_child_that_declines_to_inherit() {
 fn the_authority_fingerprint_distinguishes_every_envelope_it_names() {
     let session = codewhale_workflow::PermissionCeiling::preset("full").expect("preset");
     let fingerprint = |role: &str| {
-        crate::fleet::exact::ChildAuthority::from_runtime_role(role, session).fingerprint()
+        crate::fleet::role::ChildAuthority::from_runtime_role(role, session).fingerprint()
     };
 
     let mut seen = HashSet::new();
@@ -19402,7 +18565,7 @@ fn the_authority_fingerprint_distinguishes_every_envelope_it_names() {
     assert_eq!(fingerprint("verifier"), fingerprint("verifier"));
     // The parent posture is part of it: the same Runtime role under a narrower
     // parent is a different envelope.
-    let narrow = crate::fleet::exact::ChildAuthority::from_runtime_role(
+    let narrow = crate::fleet::role::ChildAuthority::from_runtime_role(
         "builder",
         codewhale_workflow::PermissionCeiling::preset("read_only").expect("preset"),
     );
@@ -19414,7 +18577,7 @@ fn the_authority_fingerprint_distinguishes_every_envelope_it_names() {
 /// is not enforced authority.
 #[test]
 fn the_spawn_boundary_fails_closed_on_a_missing_or_mismatched_authority() {
-    let authority = crate::fleet::exact::ChildAuthority::from_runtime_role(
+    let authority = crate::fleet::role::ChildAuthority::from_runtime_role(
         "verifier",
         codewhale_workflow::PermissionCeiling::preset("full").expect("preset"),
     );
@@ -19476,7 +18639,7 @@ fn the_spawn_boundary_fails_closed_on_a_missing_or_mismatched_authority() {
 /// and that fingerprint is what the spawn boundary accepts.
 #[test]
 fn the_launched_authority_is_the_one_the_spawn_boundary_accepts() {
-    let authority = crate::fleet::exact::ChildAuthority::from_runtime_role(
+    let authority = crate::fleet::role::ChildAuthority::from_runtime_role(
         "auditor",
         codewhale_workflow::PermissionCeiling::preset("analyst").expect("preset"),
     );
@@ -19497,7 +18660,7 @@ fn the_launched_authority_is_the_one_the_spawn_boundary_accepts() {
         .expect("the launched envelope must satisfy its own receipt");
 
     // A different member's envelope must not satisfy it.
-    let other = crate::fleet::exact::ChildAuthority::from_runtime_role(
+    let other = crate::fleet::role::ChildAuthority::from_runtime_role(
         "builder",
         codewhale_workflow::PermissionCeiling::preset("full").expect("preset"),
     );

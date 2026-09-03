@@ -19,7 +19,7 @@
 
 
                                                               ● working   ○ ready   ✓ done   ! cauti
-                                                              POD LEDGER
+                                                              FLEET LEDGER
                                                                 WHALE     │ASSIGNMENT │STATE
                                                               ▶ whale-1   │restyle th…│● working
                                                                 whale-2   │golden buf…│✓ done

@@ -359,8 +359,7 @@ Next for durable multi-worker work: [FLEET_WORKFLOW_TUTORIAL.md](FLEET_WORKFLOW_
 walks through fleet task specs, monitoring, and Workflow authoring.
 
 Fleet is the public noun for the durable roster. `codewhale fleet …` is
-the canonical command and `/fleet` the canonical slash command. `/pod` and
-`codewhale pod` remain accepted as compatibility aliases. The Fleet name is
+the command and `/fleet` the slash command. The Fleet name is
 shared by what has to stay stable across versions: the durable ledger
 `.codewhale/fleet.jsonl`, saved rosters `fleets/<name>.toml`, the `[fleet]` and
 `[fleets.*]` config tables, and the `codewhale workflow run --fleet` flag.
