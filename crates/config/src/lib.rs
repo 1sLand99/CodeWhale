@@ -14,6 +14,7 @@ pub mod provider;
 mod provider_defaults;
 mod provider_kind;
 pub mod provider_templates;
+pub mod resolve;
 pub mod route;
 pub mod settings_schema;
 pub mod setup_state;

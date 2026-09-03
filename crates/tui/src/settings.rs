@@ -15,6 +15,7 @@ use crate::config::{expand_path, normalize_model_name};
 use crate::localization::normalize_configured_locale;
 use crate::palette::{normalize_hex_rgb_color, normalize_theme_setting};
 use crate::tui::app::ReasoningEffort;
+use codewhale_config::resolve::Layer;
 
 const SETTINGS_FILE_NAME: &str = "settings.toml";
 
@@ -501,6 +502,13 @@ pub struct Settings {
     /// Never serialized: it describes what happened to a file, not a setting.
     #[serde(skip)]
     pub(crate) tui_prefs_migration: Option<TuiPrefsMigration>,
+    /// Which layer supplied the in-force value of each schema key: user
+    /// config for keys `settings.toml` named at load, the default for the
+    /// rest, session for keys `set()` touched since. Runtime only — the
+    /// resolver reads it, disk never sees it. CLI flags (2D) and managed
+    /// policy / project producers mark their own layers when they land.
+    #[serde(skip)]
+    pub(crate) provenance: std::collections::BTreeMap<String, Layer>,
 }
 
 impl Default for Settings {
@@ -584,6 +592,7 @@ impl Default for Settings {
             footer_hint_uses: std::collections::BTreeMap::new(),
             legacy_yolo_default: false,
             tui_prefs_migration: None,
+            provenance: std::collections::BTreeMap::new(),
         }
     }
 }
@@ -971,6 +980,12 @@ impl Settings {
                 settings.tui_prefs_migration = Some(receipt);
             }
         }
+        // The provenance ledger: keys the document named itself came from
+        // user config; everything else is the schema default until `set()`,
+        // a CLI flag, or a higher layer says otherwise.
+        for key in &explicit_keys {
+            settings.provenance.insert(key.clone(), Layer::UserConfig);
+        }
         Ok(settings)
     }
 
@@ -985,6 +1000,18 @@ impl Settings {
     /// Receipt for the one-time `tui.toml` fold, when this load performed one.
     pub(crate) fn tui_prefs_migration(&self) -> Option<&TuiPrefsMigration> {
         self.tui_prefs_migration.as_ref()
+    }
+
+    /// Which layer supplied the in-force value of `key`: the load ledger,
+    /// defaulting to [`Layer::Default`] for keys the document never named.
+    /// Aliases resolve to their canonical key first, so `/set collapse`
+    /// reports the same layer as the `tool_collapse` row.
+    pub(crate) fn provenance(&self, key: &str) -> Layer {
+        let canonical = Self::canonical_key(key).unwrap_or(key);
+        self.provenance
+            .get(canonical)
+            .copied()
+            .unwrap_or(Layer::Default)
     }
 
     /// Whether the user explicitly persisted an auto-compaction preference.
@@ -1308,7 +1335,71 @@ impl Settings {
     }
 
     /// Set a single setting by key
+    /// Canonical schema key for a `set()` spelling: the first pattern of each
+    /// match arm below. `None` means `set()` rejects the spelling, so the
+    /// ledger never learns it. Keep in sync with the arms — the
+    /// `set_marks_session_provenance` test enforces it per spelling.
+    fn canonical_key(key: &str) -> Option<&'static str> {
+        Some(match key {
+            "auto_compact" | "compact" => "auto_compact",
+            "auto_compact_threshold" | "auto_compact_threshold_percent" => {
+                "auto_compact_threshold_percent"
+            }
+            "calm_mode" | "calm" => "calm_mode",
+            "tool_collapse" | "tool_collapse_mode" | "collapse" => "tool_collapse",
+            "low_motion" | "motion" => "low_motion",
+            "fancy_animations" | "fancy" | "animations" => "fancy_animations",
+            "focus_texture" | "texture" => "focus_texture",
+            "work_surface_placement" | "work_surface" | "work_rail" => "work_surface_placement",
+            "rail_panel" | "rail" => "rail_panel",
+            "work_surface_top_height" | "work_top_height" => "work_surface_top_height",
+            "work_surface_side_width" | "work_side_width" => "work_surface_side_width",
+            "bracketed_paste" | "paste" => "bracketed_paste",
+            "paste_burst_detection" | "paste_burst" => "paste_burst_detection",
+            "mention_menu_limit" | "mention_limit" => "mention_menu_limit",
+            "mention_walk_depth" | "mention_depth" | "completions_walk_depth" => {
+                "mention_walk_depth"
+            }
+            "mention_menu_behavior" | "mention_behavior" | "mention_menu" => {
+                "mention_menu_behavior"
+            }
+            "show_thinking" | "thinking" => "show_thinking",
+            "thinking_default_expanded" | "thinking_expanded" => "thinking_default_expanded",
+            "thinking_preview_lines" | "thinking_preview" => "thinking_preview_lines",
+            "thinking_highlight" | "reasoning_highlight" => "thinking_highlight",
+            "help_expand_groups" | "help_expanded" => "help_expand_groups",
+            "pin_last_prompt" | "pin_prompt" => "pin_last_prompt",
+            "show_tool_details" | "tool_details" => "show_tool_details",
+            "inline_diffs" | "inline_diff" | "diffs" => "inline_diffs",
+            "locale" | "language" => "locale",
+            "theme" | "ui_theme" => "theme",
+            "background_color" | "background" | "bg" => "background_color",
+            "composer_density" | "composer" => "composer_density",
+            "composer_border" | "border" => "composer_border",
+            "composer_multiline_mode" | "multiline_mode" | "multiline" => "composer_multiline_mode",
+            "composer_vim_mode" | "vim_mode" | "vim" => "composer_vim_mode",
+            "transcript_spacing" | "spacing" => "transcript_spacing",
+            "status_indicator" | "indicator" => "status_indicator",
+            "synchronized_output" | "sync_output" | "sync" => "synchronized_output",
+            "workspace_follow_symlinks" | "follow_symlinks" => "workspace_follow_symlinks",
+            "default_mode" | "mode" => "default_mode",
+            "context_panel" | "context" | "session_panel" => "context_panel",
+            "sessions_rail" | "sessions_panel" | "session_rail" => "sessions_rail",
+            "session_auto_resume" | "auto_resume" => "session_auto_resume",
+            "cost_currency" | "currency" => "cost_currency",
+            "max_history" | "history" => "max_history",
+            "default_model" | "model" => "default_model",
+            "reasoning_effort" | "effort" => "reasoning_effort",
+            "permission_posture" | "permissions" => "permission_posture",
+            "sandbox_mode" | "sandbox" | "filesystem_sandbox" => "sandbox_mode",
+            _ => return None,
+        })
+    }
+
     pub fn set(&mut self, key: &str, value: &str) -> Result<()> {
+        // The ledger learns the canonical key only when the write below
+        // succeeds: a rejected value leaves the previous layer in force.
+        let canonical = Self::canonical_key(key);
         match key {
             "auto_compact" | "compact" => {
                 self.auto_compact = parse_bool(value)?;
@@ -1449,10 +1540,7 @@ impl Settings {
                 };
                 self.locale = locale.to_string();
             }
-            "theme" => {
-                self.theme = normalize_theme_setting(value).map_err(anyhow::Error::msg)?;
-            }
-            "ui_theme" => {
+            "theme" | "ui_theme" => {
                 self.theme = normalize_theme_setting(value).map_err(anyhow::Error::msg)?;
             }
             "background_color" | "background" | "bg" => {
@@ -1562,15 +1650,14 @@ impl Settings {
                     )
                 {
                     self.default_model = None;
-                    return Ok(());
+                } else {
+                    let Some(model) = normalize_default_model(trimmed) else {
+                        anyhow::bail!(
+                            "Failed to update setting: invalid model '{value}'. Expected: auto, a DeepSeek model ID (for example deepseek-v4-pro, deepseek-v4-flash), or none/default."
+                        );
+                    };
+                    self.default_model = Some(model);
                 }
-
-                let Some(model) = normalize_default_model(trimmed) else {
-                    anyhow::bail!(
-                        "Failed to update setting: invalid model '{value}'. Expected: auto, a DeepSeek model ID (for example deepseek-v4-pro, deepseek-v4-flash), or none/default."
-                    );
-                };
-                self.default_model = Some(model);
             }
             "reasoning_effort" | "effort" => {
                 self.reasoning_effort = normalize_reasoning_effort_setting(value)?;
@@ -1594,6 +1681,10 @@ impl Settings {
             _ => {
                 anyhow::bail!("Failed to update setting: unknown setting '{key}'.");
             }
+        }
+        if let Some(canonical) = canonical {
+            self.provenance
+                .insert(canonical.to_string(), Layer::SessionOverride);
         }
         Ok(())
     }
@@ -1752,6 +1843,30 @@ impl Settings {
             tr(locale, MessageId::SettingsConfigFile),
             Self::path().map_or_else(|_| "(unknown)".to_string(), |p| p.display().to_string())
         ));
+        // Provenance footer: which keys this load actually owns versus the
+        // schema defaults, so `/settings` says what the user set. Session
+        // marks only appear when the instance outlives a `set()` (the CLI
+        // and editor transactions reload from disk).
+        let mut user: Vec<&str> = Vec::new();
+        let mut session: Vec<&str> = Vec::new();
+        let mut keys: Vec<&str> = self.provenance.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        for key in keys {
+            match self.provenance(key) {
+                Layer::UserConfig => user.push(key),
+                Layer::SessionOverride => session.push(key),
+                Layer::ManagedPolicy | Layer::CliFlag | Layer::ProjectConfig | Layer::Default => {}
+            }
+        }
+        if !user.is_empty() || !session.is_empty() {
+            lines.push(String::new());
+            if !user.is_empty() {
+                lines.push(format!("  from settings.toml: {}", user.join(", ")));
+            }
+            if !session.is_empty() {
+                lines.push(format!("  session override: {}", session.join(", ")));
+            }
+        }
         lines.join("\n")
     }
 
@@ -5352,6 +5467,149 @@ mod tests {
             std::fs::read_to_string(&second).unwrap(),
             "theme = \"dark\"\n"
         );
+    }
+
+    /// A successful `set()` marks the canonical key as session-supplied,
+    /// whatever spelling was used; aliases report the same layer as the row.
+    /// A rejected value marks nothing.
+    #[test]
+    fn set_marks_session_provenance_for_every_spelling() {
+        let cases: &[(&[&str], &str)] = &[
+            (&["auto_compact", "compact"], "true"),
+            (
+                &["auto_compact_threshold_percent", "auto_compact_threshold"],
+                "80",
+            ),
+            (&["calm_mode", "calm"], "true"),
+            (
+                &["tool_collapse", "tool_collapse_mode", "collapse"],
+                "expanded",
+            ),
+            (&["low_motion", "motion"], "true"),
+            (&["fancy_animations", "fancy", "animations"], "true"),
+            (&["focus_texture", "texture"], "grain"),
+            (
+                &["work_surface_placement", "work_surface", "work_rail"],
+                "left",
+            ),
+            (&["rail_panel", "rail"], "tasks"),
+            (&["work_surface_top_height", "work_top_height"], "8"),
+            (&["work_surface_side_width", "work_side_width"], "40"),
+            (&["bracketed_paste", "paste"], "true"),
+            (&["paste_burst_detection", "paste_burst"], "true"),
+            (&["mention_menu_limit", "mention_limit"], "64"),
+            (
+                &[
+                    "mention_walk_depth",
+                    "mention_depth",
+                    "completions_walk_depth",
+                ],
+                "5",
+            ),
+            (
+                &["mention_menu_behavior", "mention_behavior", "mention_menu"],
+                "fuzzy",
+            ),
+            (&["show_thinking", "thinking"], "true"),
+            (&["thinking_default_expanded", "thinking_expanded"], "true"),
+            (&["thinking_preview_lines", "thinking_preview"], "3"),
+            (&["thinking_highlight", "reasoning_highlight"], "true"),
+            (&["help_expand_groups", "help_expanded"], "true"),
+            (&["pin_last_prompt", "pin_prompt"], "true"),
+            (&["show_tool_details", "tool_details"], "true"),
+            (&["inline_diffs", "inline_diff", "diffs"], "off"),
+            (&["locale", "language"], "en"),
+            (&["theme", "ui_theme"], "terminal"),
+            (&["background_color", "background", "bg"], "#1a1b26"),
+            (&["composer_density", "composer"], "compact"),
+            (&["composer_border", "border"], "true"),
+            (
+                &["composer_multiline_mode", "multiline_mode", "multiline"],
+                "true",
+            ),
+            (&["composer_vim_mode", "vim_mode", "vim"], "vim"),
+            (&["transcript_spacing", "spacing"], "compact"),
+            (&["status_indicator", "indicator"], "off"),
+            (&["synchronized_output", "sync_output", "sync"], "off"),
+            (&["workspace_follow_symlinks", "follow_symlinks"], "true"),
+            (&["default_mode", "mode"], "plan"),
+            (&["context_panel", "context", "session_panel"], "true"),
+            (&["sessions_rail", "sessions_panel", "session_rail"], "true"),
+            (&["session_auto_resume", "auto_resume"], "true"),
+            (&["cost_currency", "currency"], "cny"),
+            (&["max_history", "history"], "50"),
+            (&["default_model", "model"], "none"),
+            (&["reasoning_effort", "effort"], "low"),
+            (&["permission_posture", "permissions"], "ask"),
+            (
+                &["sandbox_mode", "sandbox", "filesystem_sandbox"],
+                "read-only",
+            ),
+        ];
+        for (spellings, value) in cases {
+            let canonical = spellings[0];
+            for spelling in *spellings {
+                let mut settings = Settings::default();
+                assert_eq!(settings.provenance(canonical), Layer::Default);
+                settings
+                    .set(spelling, value)
+                    .unwrap_or_else(|error| panic!("set({spelling}) rejected: {error:#}"));
+                assert_eq!(
+                    settings.provenance(canonical),
+                    Layer::SessionOverride,
+                    "{spelling} did not mark {canonical} as session"
+                );
+                assert_eq!(
+                    settings.provenance(spelling),
+                    Layer::SessionOverride,
+                    "{spelling} does not resolve to its own layer"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn set_rejection_marks_no_provenance() {
+        let mut settings = Settings::default();
+        assert!(settings.set("theme", "not-a-theme").is_err());
+        assert_eq!(settings.provenance("theme"), Layer::Default);
+        assert!(settings.set("no_such_key", "1").is_err());
+        assert_eq!(settings.provenance("no_such_key"), Layer::Default);
+    }
+
+    /// Keys the document named load as user config; the rest are default.
+    #[test]
+    fn load_marks_explicit_keys_as_user_config() {
+        let _g = config_path_test_guard();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(tmp.path().join("settings.toml"), "theme = \"light\"\n").expect("settings");
+        let _config_override =
+            EnvVarRestore::set("DEEPSEEK_CONFIG_PATH", tmp.path().join("config.toml"));
+
+        let loaded = Settings::load().expect("load settings");
+        assert_eq!(loaded.provenance("theme"), Layer::UserConfig);
+        assert_eq!(loaded.provenance("locale"), Layer::Default);
+    }
+
+    /// `/settings` names the keys the load owns, so the text surface says
+    /// what the user set instead of printing defaults silently.
+    #[test]
+    fn display_names_user_configured_keys() {
+        let _g = config_path_test_guard();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(tmp.path().join("settings.toml"), "theme = \"light\"\n").expect("settings");
+        let _config_override =
+            EnvVarRestore::set("DEEPSEEK_CONFIG_PATH", tmp.path().join("config.toml"));
+
+        let loaded = Settings::load().expect("load settings");
+        let text = loaded.display(crate::localization::Locale::En);
+        assert!(text.contains("from settings.toml: theme"), "{text}");
+        assert!(!text.contains("session override"), "{text}");
+
+        let mut session = Settings::default();
+        session.set("locale", "en").expect("set locale");
+        let text = session.display(crate::localization::Locale::En);
+        assert!(text.contains("session override: locale"), "{text}");
     }
 
     #[test]
