@@ -3424,6 +3424,44 @@ struct LaunchCardPlan {
     rows: Vec<(u16, LaunchCardPlanRow)>,
 }
 
+/// The mark rung the card would like on this stage, before knowing whether
+/// the interior can hold it. Width alone picks Small vs Tiny for braille;
+/// the bitmap tiers have one size.
+fn launch_mark_rung(stage: Rect, tier: MarkTier) -> (MarkTier, MarkSize) {
+    let margin = (stage.width / 10).clamp(2, 12);
+    let card_w = stage.width.saturating_sub(margin.saturating_mul(2));
+    let rung = if card_w < TINY_MARK_BELOW_WIDTH {
+        MarkSize::Tiny
+    } else {
+        MarkSize::Small
+    };
+    (tier, rung)
+}
+
+/// Step the mark down until it fits `interior_h` rows: bitmap → braille
+/// Small → braille Tiny → none. Each step keeps the whale on the card at
+/// the largest size the stage allows.
+fn step_mark_to_fit(tier: MarkTier, rung: MarkSize, interior_h: u16) -> (MarkTier, MarkSize) {
+    let mut tier = tier;
+    let mut rung = rung;
+    loop {
+        let rows = match tier {
+            MarkTier::Image | MarkTier::Sixel => crate::tui::mark::MARK_IMAGE_ROWS,
+            MarkTier::Braille => rung.cells().1,
+            MarkTier::None => return (tier, rung),
+        };
+        if interior_h >= rows {
+            return (tier, rung);
+        }
+        match (tier, rung) {
+            (MarkTier::Image | MarkTier::Sixel, _) => tier = MarkTier::Braille,
+            (MarkTier::Braille, MarkSize::Small) => rung = MarkSize::Tiny,
+            (MarkTier::Braille, MarkSize::Tiny) => tier = MarkTier::None,
+            (MarkTier::None, _) => return (tier, rung),
+        }
+    }
+}
+
 /// Lay out the launch card: title, one announcement line when true, then
 /// the new-session entry, the `Recent` heading over the recents, the
 /// see-all overflow, and the empty note when there is no recent work.
@@ -3438,6 +3476,7 @@ fn launch_card_plan(
     interactive: usize,
     has_recents: bool,
     empty_note: bool,
+    mark_rows: u16,
 ) -> Option<LaunchCardPlan> {
     let margin = (stage.width / 10).clamp(2, 12);
     let card_w = stage.width.saturating_sub(margin.saturating_mul(2));
@@ -3489,7 +3528,16 @@ fn launch_card_plan(
             return None;
         }
     }
-    let card_h = content_rows + 2;
+    // The mark is part of the card, not a decoration that fits when it
+    // happens to: reserve its rows whenever the stage can spare them, so a
+    // two-row card (title + new session) still carries the whale. Text rows
+    // keep their top-aligned positions inside the taller interior.
+    let interior_rows = if available >= mark_rows + 2 {
+        content_rows.max(mark_rows)
+    } else {
+        content_rows
+    };
+    let card_h = interior_rows + 2;
     let card = Rect {
         x: stage.x + margin,
         y: stage.y + 1 + notice_rows + (available - card_h) / 2,
@@ -3613,6 +3661,12 @@ fn render_launch_card(
     let rows = launch_card_rows(startup.locale, &startup.recent, startup.has_more_recent);
     let announcement = startup.state_line();
     let notice_rows = u16::from(startup.notice.is_some());
+    let (mark_tier, braille_rung) = launch_mark_rung(stage, startup.mark);
+    let mark_reserve = match mark_tier {
+        MarkTier::Image | MarkTier::Sixel => crate::tui::mark::MARK_IMAGE_ROWS,
+        MarkTier::Braille => braille_rung.cells().1,
+        MarkTier::None => 0,
+    };
     let Some(plan) = launch_card_plan(
         stage,
         layout,
@@ -3621,6 +3675,7 @@ fn render_launch_card(
         rows.len(),
         !startup.recent.is_empty(),
         startup.recent.is_empty() && !startup.has_more_recent,
+        mark_reserve,
     ) else {
         return Rect::new(0, 0, 0, 0);
     };
@@ -3668,12 +3723,11 @@ fn render_launch_card(
     // zero-width so the event loop emits nothing.
     let mut sixel_reserve = Rect::new(0, 0, 0, 0);
     let interior_h = card.height.saturating_sub(2);
-    let braille_rung = if card_w < TINY_MARK_BELOW_WIDTH {
-        MarkSize::Tiny
-    } else {
-        MarkSize::Small
-    };
-    let (mark_cols, mark_rows) = match startup.mark {
+    // The plan reserved rows for this rung; if the stage could not spare
+    // them, step down (Image/Sixel → braille Small → Tiny) before giving
+    // the mark up. No-mark is the last resort, never the first.
+    let (mark_tier, braille_rung) = step_mark_to_fit(mark_tier, braille_rung, interior_h);
+    let (mark_cols, mark_rows) = match mark_tier {
         MarkTier::Image | MarkTier::Sixel => (
             crate::tui::mark::MARK_IMAGE_COLS,
             crate::tui::mark::MARK_IMAGE_ROWS,
@@ -3681,7 +3735,7 @@ fn render_launch_card(
         MarkTier::Braille => braille_rung.cells(),
         MarkTier::None => (0, 0),
     };
-    let mark_fits = card_w >= 30 && interior_h >= mark_rows;
+    let mark_fits = mark_tier != MarkTier::None && card_w >= 30 && interior_h >= mark_rows;
     let text_x = if mark_fits {
         let mark_area = Rect {
             x: card.x + 2,
@@ -3689,7 +3743,7 @@ fn render_launch_card(
             width: mark_cols,
             height: mark_rows,
         };
-        match startup.mark {
+        match mark_tier {
             MarkTier::Image => {
                 crate::tui::mark::render_kitty_placeholders(
                     mark_area,
@@ -4019,6 +4073,12 @@ pub fn tideline_startup_row_hitboxes(
     let rows = launch_card_rows(startup.locale, &startup.recent, startup.has_more_recent);
     let layout = startup_layout(stage);
     let notice_rows = u16::from(startup.notice.is_some());
+    let (mark_tier, braille_rung) = launch_mark_rung(stage, startup.mark);
+    let mark_reserve = match mark_tier {
+        MarkTier::Image | MarkTier::Sixel => crate::tui::mark::MARK_IMAGE_ROWS,
+        MarkTier::Braille => braille_rung.cells().1,
+        MarkTier::None => 0,
+    };
     let Some(plan) = launch_card_plan(
         stage,
         &layout,
@@ -4027,6 +4087,7 @@ pub fn tideline_startup_row_hitboxes(
         rows.len(),
         !startup.recent.is_empty(),
         startup.recent.is_empty() && !startup.has_more_recent,
+        mark_reserve,
     ) else {
         return Vec::new();
     };
