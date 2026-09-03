@@ -2,8 +2,9 @@
 //!
 //! Settings are stored at ~/.codewhale/settings.toml, with legacy fallbacks.
 //!
-//! TUI-specific preferences (theme, keybinds, font_size) that survive project
-//! switches are stored separately in tui.toml. See [`TuiPrefs`].
+//! There is one persisted settings store. The historical `tui.toml` second
+//! store is folded into it on load and moved aside with a receipt — see
+//! [`TuiPrefsMigration`].
 
 use std::path::{Path, PathBuf};
 
@@ -59,220 +60,167 @@ impl InlineDiffMode {
 }
 
 // ============================================================================
-// TuiPrefs — ~/.codewhale/tui.toml
+// tui.toml — folded into settings.toml (0.9.12: one settings store)
 // ============================================================================
 
-/// TUI-specific preferences that are decoupled from agent/project config so
-/// they survive project switches (issue #437).
+/// What the one-time `tui.toml` fold did, so a session can say it out loud.
 ///
-/// Stored at `~/.codewhale/tui.toml` on new installs, with
-/// `~/.deepseek/tui.toml` retained as a legacy read fallback. When the file is
-/// absent the values fall back to the `[tui]` section of the normal
-/// `config.toml` (via [`TuiPrefs::load`]), and then to the struct's own
-/// defaults.
-///
-/// # Example `~/.codewhale/tui.toml`
-///
-/// ```toml
-/// theme    = "underwater"    # painted ocean field; "terminal" | "dark" | "light" | "grayscale" | ... remain available
-/// font_size = 14
-///
-/// [keybinds]
-/// submit   = "ctrl+enter"
-/// new_line = "enter"
-/// ```
-//
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct TuiPrefs {
-    /// UI colour theme.
-    /// Default `"underwater"`, the painted ocean field. `"terminal"` leaves
-    /// foreground and background to the host terminal while retaining
-    /// ANSI-safe semantic accents.
-    pub theme: String,
-    /// Terminal font size hint forwarded to supporting front-ends (e.g. the
-    /// Tauri shell). `0` means "use terminal default". Default `0`.
-    pub font_size: u16,
-    /// Key-binding overrides. Each field accepts an xterm-style chord string
-    /// such as `"ctrl+enter"`, `"alt+n"`, or `"f1"`.
-    pub keybinds: KeybindPrefs,
+/// `tui.toml` used to be a second persisted store for `theme`, `font_size`,
+/// and keybind overrides. Startup never read it, so a theme saved there could
+/// disagree with `settings.toml` forever and nothing told the user which store
+/// won. The file is now folded into `settings.toml` at load: a value
+/// `settings.toml` does not already own explicitly is adopted, a value it does
+/// own is reported as kept, and a key with no `Settings` field is quarantined
+/// by name. The original bytes are moved to a dated backup — never deleted,
+/// never silently dropped.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TuiPrefsMigration {
+    /// The `tui.toml` that was folded.
+    pub source: PathBuf,
+    /// Where its original bytes now live.
+    pub backup: Option<PathBuf>,
+    /// `(settings key, adopted value)` folded into `settings.toml`.
+    pub folded: Vec<(String, String)>,
+    /// `(settings key, tui.toml value, settings.toml value)` — settings.toml
+    /// already owned the key explicitly, so it won.
+    pub kept: Vec<(String, String, String)>,
+    /// `tui.toml` keys with no home in [`Settings`]. Listed, never dropped.
+    pub quarantined: Vec<String>,
 }
 
-impl Default for TuiPrefs {
-    fn default() -> Self {
-        Self {
-            theme: "underwater".to_string(),
-            font_size: 0,
-            keybinds: KeybindPrefs::default(),
+impl TuiPrefsMigration {
+    /// Whether anything at all is worth telling the user about.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.folded.is_empty() && self.kept.is_empty() && self.quarantined.is_empty()
+    }
+
+    /// One localized line per outcome, in the order a reader needs them:
+    /// what moved, what did not, and what was parked.
+    #[must_use]
+    pub fn lines(&self, locale: crate::localization::Locale) -> Vec<String> {
+        use crate::localization::{MessageId, tr};
+
+        let backup = self
+            .backup
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| self.source.display().to_string());
+        let mut lines = Vec::new();
+        for (key, value) in &self.folded {
+            lines.push(
+                tr(locale, MessageId::SettingsTuiPrefsFolded)
+                    .replace("{key}", key)
+                    .replace("{value}", value),
+            );
         }
+        for (key, from_prefs, from_settings) in &self.kept {
+            lines.push(
+                tr(locale, MessageId::SettingsTuiPrefsKept)
+                    .replace("{key}", key)
+                    .replace("{prefs}", from_prefs)
+                    .replace("{settings}", from_settings),
+            );
+        }
+        if !self.quarantined.is_empty() {
+            lines.push(
+                tr(locale, MessageId::SettingsTuiPrefsQuarantined)
+                    .replace("{keys}", &self.quarantined.join(", "))
+                    .replace("{path}", &backup),
+            );
+        }
+        lines
     }
 }
 
-/// Per-action keybinding overrides stored inside [`TuiPrefs`].
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(default)]
-pub struct KeybindPrefs {
-    /// Key to submit the current composer input to the model.
-    /// Default: `"ctrl+enter"`.
-    pub submit: Option<String>,
-    /// Key to insert a literal newline inside the composer.
-    /// Default: `"enter"`.
-    pub new_line: Option<String>,
-    /// Key to open the command palette.
-    /// Default: `"ctrl+k"`.
-    pub command_palette: Option<String>,
-    /// Key to cancel / interrupt a running turn.
-    /// Default: `"ctrl+c"`.
-    pub cancel: Option<String>,
-    /// Key to toggle the sidebar.
-    /// Default: `"ctrl+b"`.
-    pub toggle_sidebar: Option<String>,
+/// The `tui.toml` next to each settings candidate, first existing wins.
+fn tui_prefs_path_from_settings_candidates(
+    primary: Option<&Path>,
+    legacy_home: Option<&Path>,
+) -> Option<PathBuf> {
+    [primary, legacy_home]
+        .into_iter()
+        .flatten()
+        .map(|path| path.with_file_name(TUI_PREFS_FILE_NAME))
+        .find(|path| path.exists())
 }
 
-impl TuiPrefs {
-    /// Return the canonical path of the TUI preferences file:
-    /// `~/.codewhale/tui.toml`, or legacy `~/.deepseek/tui.toml` when present.
-    ///
-    /// Tests may override the home directory through the canonical
-    /// `CODEWHALE_CONFIG_PATH` environment variable. The parent directory of
-    /// the pointed-to config is used instead of the default settings home.
-    pub fn path() -> Result<PathBuf> {
-        #[cfg(test)]
-        {
-            let honor_guarded_environment =
-                crate::test_support::guarded_environment_provides_state_paths();
-            crate::test_support::with_test_env_lock(|| {
-                if honor_guarded_environment {
-                    tui_prefs_path_from_environment()
-                } else {
-                    Ok(crate::test_support::unsealed_test_state_root().join(TUI_PREFS_FILE_NAME))
+/// Move `path` aside to `tui.toml.migrated-<YYYYMMDD>`, never clobbering an
+/// existing backup. The bytes are preserved; only the name changes, so the
+/// dead store cannot reappear as a second source of truth on the next launch.
+fn back_up_tui_prefs(path: &Path) -> Result<PathBuf> {
+    let stamp = chrono::Local::now().format("%Y%m%d").to_string();
+    let base = format!("{TUI_PREFS_FILE_NAME}.migrated-{stamp}");
+    let mut candidate = path.with_file_name(&base);
+    let mut attempt = 1u32;
+    while candidate.exists() {
+        candidate = path.with_file_name(format!("{base}-{attempt}"));
+        attempt += 1;
+    }
+    std::fs::rename(path, &candidate)
+        .with_context(|| format!("Failed to move {} aside", path.display()))?;
+    Ok(candidate)
+}
+
+/// Fold a legacy `tui.toml` into `settings`, returning the receipt.
+///
+/// `explicit` reports whether `settings.toml` named a key itself; an explicit
+/// value always wins, and the disagreement is recorded rather than resolved
+/// behind the user's back. When `apply` is false (read-only diagnostics) the
+/// values are still folded in memory but no file is moved or written.
+fn fold_tui_prefs(
+    settings: &mut Settings,
+    explicit: &std::collections::BTreeSet<String>,
+    prefs_path: &Path,
+    apply: bool,
+) -> Option<TuiPrefsMigration> {
+    let raw = std::fs::read_to_string(prefs_path).ok()?;
+    let mut receipt = TuiPrefsMigration {
+        source: prefs_path.to_path_buf(),
+        ..TuiPrefsMigration::default()
+    };
+    match toml::from_str::<toml::Value>(&raw) {
+        Ok(toml::Value::Table(table)) => {
+            for (key, value) in table {
+                // `theme` is the only tui.toml key with a `Settings` field.
+                // `font_size` and `[keybinds]` never had one, so they are
+                // quarantined by name instead of being thrown away.
+                if key != "theme" {
+                    receipt.quarantined.push(key);
+                    continue;
                 }
-            })
-        }
-
-        #[cfg(not(test))]
-        tui_prefs_path_from_environment()
-    }
-
-    /// Load TUI preferences from `~/.codewhale/tui.toml` or a legacy fallback.
-    ///
-    /// If the file does not exist the struct defaults are returned — no error
-    /// is produced. Parse errors surface as `Err` so the caller can warn the
-    /// user without crashing the session.
-    #[allow(dead_code)] // Startup currently only validates tui.toml parse; load is the persistence API.
-    pub fn load() -> Result<Self> {
-        let path = Self::path()?;
-        #[cfg(test)]
-        {
-            crate::test_support::with_test_state_io_lock(|| Self::load_from_path(&path))
-        }
-        #[cfg(not(test))]
-        Self::load_from_path(&path)
-    }
-
-    fn load_from_path(path: &Path) -> Result<Self> {
-        if !path.exists() {
-            return Ok(Self::default());
-        }
-        let content = std::fs::read_to_string(path)
-            .with_context(|| format!("Failed to read tui.toml from {}", path.display()))?;
-        let prefs: TuiPrefs = match toml::from_str(&content) {
-            Ok(p) => p,
-            Err(e) => {
-                tracing::warn!("Failed to parse {} (using defaults): {e:#}", path.display());
-                return Ok(Self::default());
+                let Some(theme) = value.as_str().map(str::to_string) else {
+                    receipt.quarantined.push(key);
+                    continue;
+                };
+                let normalized = normalize_settings_theme(&theme);
+                if explicit.contains("theme") {
+                    if normalized != settings.theme {
+                        receipt.kept.push((key, normalized, settings.theme.clone()));
+                    }
+                } else {
+                    settings.theme = normalized.clone();
+                    receipt.folded.push((key, normalized));
+                }
             }
-        };
-        Ok(prefs)
-    }
-
-    /// Save TUI preferences to `~/.codewhale/tui.toml` (or a legacy file when
-    /// it already exists), creating the target directory if needed.
-    #[allow(dead_code)] // Persistence API; no settings UI write path yet.
-    pub fn save(&self) -> Result<()> {
-        let path = Self::path()?;
-        #[cfg(test)]
-        {
-            crate::test_support::with_test_state_io_lock(|| self.save_to_path(&path))
         }
-        #[cfg(not(test))]
-        self.save_to_path(&path)
-    }
-
-    fn save_to_path(&self, path: &Path) -> Result<()> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).with_context(|| {
-                format!("Failed to create config directory {}", parent.display())
-            })?;
+        _ => {
+            // Unreadable bytes are still the user's: park the whole file
+            // under its own name rather than guessing at its contents.
+            receipt.quarantined.push(TUI_PREFS_FILE_NAME.to_string());
         }
-        let serialized = toml::to_string_pretty(self).context("Failed to serialize TuiPrefs")?;
-        let body = if path.exists() {
-            let raw = std::fs::read_to_string(path)
-                .with_context(|| format!("Failed to read tui.toml at {}", path.display()))?;
-            codewhale_config::merge_and_preserve_comments(&serialized, &raw).unwrap_or_else(|e| {
-                tracing::warn!("failed to merge tui.toml comments, saving without them: {e:#}");
-                serialized
-            })
-        } else {
-            serialized
-        };
-        std::fs::write(path, body)
-            .with_context(|| format!("Failed to write tui.toml to {}", path.display()))?;
-        Ok(())
     }
+    receipt.quarantined.sort();
 
-    /// Validate field values and normalise them in place.
-    ///
-    /// Returns `Err` if an unrecognised `theme` value is found so callers can
-    /// surface a helpful message rather than silently ignoring a typo.
-    #[allow(dead_code)] // Persistence API; no settings UI write path yet.
-    pub fn validate(&mut self) -> Result<()> {
-        self.theme = normalize_theme_setting(&self.theme).map_err(anyhow::Error::msg)?;
-        Ok(())
+    if apply {
+        match back_up_tui_prefs(prefs_path) {
+            Ok(backup) => receipt.backup = Some(backup),
+            Err(error) => {
+                tracing::warn!("failed to move {} aside: {error:#}", prefs_path.display());
+            }
+        }
     }
-}
-
-fn tui_prefs_path_from_environment() -> Result<PathBuf> {
-    // Honour the same env-var escape hatch used by Settings::path so that
-    // integration tests can redirect all config I/O to a temp directory.
-    if let Some(parent) = config_override_parent() {
-        return Ok(parent.join("tui.toml"));
-    }
-
-    let primary = codewhale_config::codewhale_home()
-        .ok()
-        .map(|home| home.join(TUI_PREFS_FILE_NAME));
-    if codewhale_config::codewhale_home_is_explicit() {
-        return primary.ok_or_else(|| {
-            anyhow::anyhow!("Failed to resolve tui.toml path: no Codewhale home found.")
-        });
-    }
-    let legacy_home = codewhale_config::legacy_deepseek_home()
-        .ok()
-        .map(|home| home.join(TUI_PREFS_FILE_NAME));
-
-    resolve_tui_prefs_path_from_candidates(primary, legacy_home)
-}
-
-fn resolve_tui_prefs_path_from_candidates(
-    primary: Option<PathBuf>,
-    legacy_home: Option<PathBuf>,
-) -> Result<PathBuf> {
-    if let Some(path) = primary.as_ref()
-        && path.exists()
-    {
-        return Ok(path.clone());
-    }
-
-    if let Some(path) = legacy_home.as_ref()
-        && path.exists()
-    {
-        return Ok(path.clone());
-    }
-
-    primary.or(legacy_home).ok_or_else(|| {
-        anyhow::anyhow!("Failed to resolve tui preferences path: no home directory found.")
-    })
+    Some(receipt)
 }
 
 /// User settings with defaults
@@ -543,6 +491,10 @@ pub struct Settings {
     /// approval policy. It is never written back to disk.
     #[serde(skip)]
     pub(crate) legacy_yolo_default: bool,
+    /// Receipt for the one-time `tui.toml` fold performed by this load.
+    /// Never serialized: it describes what happened to a file, not a setting.
+    #[serde(skip)]
+    pub(crate) tui_prefs_migration: Option<TuiPrefsMigration>,
 }
 
 impl Default for Settings {
@@ -624,6 +576,7 @@ impl Default for Settings {
             yolo_deprecation_shown: false,
             behavioral_tip_impressions: std::collections::BTreeMap::new(),
             legacy_yolo_default: false,
+            tui_prefs_migration: None,
         }
     }
 }
@@ -855,11 +808,14 @@ impl Settings {
             .ok_or_else(|| {
                 anyhow::anyhow!("Failed to resolve settings path: no config directory found.")
             })?;
+        let tui_prefs_path =
+            tui_prefs_path_from_settings_candidates(primary.as_deref(), legacy_home.as_deref());
         let read_path =
             resolve_settings_path_from_candidates(primary, legacy_home, legacy_config_dir)
                 .unwrap_or_else(|_| write_path.clone());
 
-        let settings = if !read_path.exists() {
+        let mut explicit_keys = std::collections::BTreeSet::new();
+        let mut settings = if !read_path.exists() {
             Self::default()
         } else {
             let content = std::fs::read_to_string(&read_path)
@@ -880,6 +836,15 @@ impl Settings {
                     }
                 }
             };
+            // Which keys the document named itself. An explicit value is user
+            // intent and always wins over a default or a migrated one.
+            explicit_keys.extend(
+                parsed_document
+                    .as_ref()
+                    .and_then(toml::Value::as_table)
+                    .into_iter()
+                    .flat_map(|table| table.keys().cloned()),
+            );
             // A persisted threshold is itself an explicit request for
             // auto-compaction. Older versions accepted this setting while
             // leaving the default `auto_compact = false`, silently turning the
@@ -888,14 +853,8 @@ impl Settings {
             s.auto_compact_explicit = parsed_document
                 .as_ref()
                 .is_some_and(auto_compact_explicitly_configured_in_document);
-            s.rail_panel_explicit = parsed_document
-                .as_ref()
-                .and_then(toml::Value::as_table)
-                .is_some_and(|table| table.contains_key("rail_panel"));
-            s.work_surface_placement_explicit = parsed_document
-                .as_ref()
-                .and_then(toml::Value::as_table)
-                .is_some_and(|table| table.contains_key("work_surface_placement"));
+            s.rail_panel_explicit = explicit_keys.contains("rail_panel");
+            s.work_surface_placement_explicit = explicit_keys.contains("work_surface_placement");
             if parsed_document.as_ref().is_some_and(|document| {
                 document.as_table().is_some_and(|table| {
                     !table.contains_key("auto_compact")
@@ -981,6 +940,30 @@ impl Settings {
         if migrate_legacy_file {
             migrate_settings_file_to_primary_if_needed(&write_path, &read_path);
         }
+        // One store: fold the dead `tui.toml` in and say what happened.
+        if let Some(prefs_path) = tui_prefs_path.filter(|path| path.exists())
+            && let Some(receipt) = fold_tui_prefs(
+                &mut settings,
+                &explicit_keys,
+                &prefs_path,
+                migrate_legacy_file,
+            )
+        {
+            if migrate_legacy_file && !receipt.folded.is_empty() {
+                // The fold is only real once settings.toml owns the value;
+                // otherwise the next launch would read the moved-aside file's
+                // theme back out of nothing and quietly lose it.
+                if let Err(error) = settings.save_to_path(&write_path) {
+                    tracing::warn!(
+                        "failed to persist folded tui.toml values to {}: {error:#}",
+                        write_path.display()
+                    );
+                }
+            }
+            if !receipt.is_empty() {
+                settings.tui_prefs_migration = Some(receipt);
+            }
+        }
         Ok(settings)
     }
 
@@ -990,6 +973,11 @@ impl Settings {
     /// only Agent or Plan and serialize the independent permission posture.
     pub(crate) fn legacy_yolo_default_detected(&self) -> bool {
         self.legacy_yolo_default
+    }
+
+    /// Receipt for the one-time `tui.toml` fold, when this load performed one.
+    pub(crate) fn tui_prefs_migration(&self) -> Option<&TuiPrefsMigration> {
+        self.tui_prefs_migration.as_ref()
     }
 
     /// Whether the user explicitly persisted an auto-compaction preference.
@@ -4907,7 +4895,7 @@ mod tests {
     }
 
     // ────────────────────────────────────────────────────────────────────────
-    // TuiPrefs tests
+    // Settings store tests
     // ────────────────────────────────────────────────────────────────────────
 
     /// Serialise tests that mutate `DEEPSEEK_CONFIG_PATH` through this guard
@@ -5199,211 +5187,147 @@ mod tests {
         assert_eq!(loaded.work_surface_placement, "left");
     }
 
+    /// The dead `tui.toml` store is folded into `settings.toml` on load: a
+    /// value settings.toml does not own is adopted, a value it owns wins, the
+    /// original bytes are moved aside, and unmappable keys are named.
     #[test]
-    fn tui_prefs_path_defaults_to_codewhale_home_for_new_writes() {
+    fn tui_toml_theme_is_folded_when_settings_toml_is_silent() {
         let _g = config_path_test_guard();
         let tmp = tempfile::tempdir().expect("tempdir");
-        let _config_override = EnvVarRestore::remove("DEEPSEEK_CONFIG_PATH");
-        let _codewhale_home = EnvVarRestore::set("CODEWHALE_HOME", tmp.path().join(".codewhale"));
-        let _home = EnvVarRestore::set("HOME", tmp.path());
-
-        let got = TuiPrefs::path().expect("tui prefs path");
-
-        assert_eq!(got, tmp.path().join(".codewhale").join("tui.toml"));
-    }
-
-    #[test]
-    fn tui_prefs_path_ignores_legacy_home_when_codewhale_home_is_explicit() {
-        let _g = config_path_test_guard();
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let explicit_home = tmp.path().join("isolated-codewhale");
-        let legacy_dir = tmp.path().join(".deepseek");
-        std::fs::create_dir_all(&legacy_dir).expect("legacy dir");
-        std::fs::write(legacy_dir.join("tui.toml"), "theme = \"light\"\n").expect("legacy prefs");
-        let _config_override = EnvVarRestore::remove("DEEPSEEK_CONFIG_PATH");
-        let _codewhale_home = EnvVarRestore::set("CODEWHALE_HOME", &explicit_home);
-        let _home = EnvVarRestore::set("HOME", tmp.path());
-
-        let got = TuiPrefs::path().expect("tui prefs path");
-
-        assert_eq!(got, explicit_home.join("tui.toml"));
-    }
-
-    #[test]
-    fn tui_prefs_path_reads_legacy_deepseek_home_when_present() {
-        let _g = config_path_test_guard();
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let primary = tmp.path().join(".codewhale").join("tui.toml");
-        let legacy_dir = tmp.path().join(".deepseek");
-        std::fs::create_dir_all(&legacy_dir).expect("legacy dir");
-        let legacy_home = legacy_dir.join("tui.toml");
-        std::fs::write(&legacy_home, "theme = \"light\"\n").expect("legacy prefs");
-
-        let got = resolve_tui_prefs_path_from_candidates(Some(primary), Some(legacy_home.clone()))
-            .expect("tui prefs path");
-
-        assert_eq!(got, legacy_home);
-    }
-
-    #[test]
-    fn tui_prefs_defaults_inherit_the_terminal_zero_font() {
-        let prefs = TuiPrefs::default();
-        assert_eq!(prefs.theme, "underwater");
-        assert_eq!(prefs.font_size, 0);
-        assert!(prefs.keybinds.submit.is_none());
-        assert!(prefs.keybinds.new_line.is_none());
-    }
-
-    #[test]
-    fn tui_prefs_validate_accepts_known_themes() {
-        for theme in [
-            "terminal",
-            "dark",
-            "light",
-            "system",
-            "grayscale",
-            "catppuccin-mocha",
-            "tokyo-night",
-            "dracula",
-            "gruvbox-dark",
-            "solarized-light",
-        ] {
-            let mut prefs = TuiPrefs {
-                theme: theme.to_string(),
-                ..TuiPrefs::default()
-            };
-            prefs
-                .validate()
-                .unwrap_or_else(|e| panic!("validate({theme}) failed: {e}"));
-            assert_eq!(prefs.theme, theme);
-        }
-    }
-
-    #[test]
-    fn tui_prefs_validate_normalises_theme_case() {
-        let mut prefs = TuiPrefs {
-            theme: "MONO".to_string(),
-            ..TuiPrefs::default()
-        };
-        prefs
-            .validate()
-            .expect("MONO should normalise to grayscale");
-        assert_eq!(prefs.theme, "grayscale");
-    }
-
-    #[test]
-    fn tui_prefs_validate_rejects_unknown_theme() {
-        let mut prefs = TuiPrefs {
-            theme: "nord".to_string(),
-            ..TuiPrefs::default()
-        };
-        let err = prefs.validate().expect_err("nord is not a valid theme");
-        assert!(err.to_string().contains("invalid theme 'nord'"));
-        assert!(err.to_string().contains("custom:<name>"));
-    }
-
-    #[test]
-    fn tui_prefs_validate_custom_selector_without_loading_file() {
-        let mut prefs = TuiPrefs {
-            theme: "custom:Ocean_1".to_string(),
-            ..TuiPrefs::default()
-        };
-        prefs
-            .validate()
-            .expect("selector validation must not depend on the file system");
-        assert_eq!(prefs.theme, "custom:ocean_1");
-    }
-
-    #[test]
-    fn tui_prefs_round_trips_through_toml() {
-        let prefs = TuiPrefs {
-            theme: "light".to_string(),
-            font_size: 16,
-            keybinds: KeybindPrefs {
-                submit: Some("ctrl+enter".to_string()),
-                new_line: Some("enter".to_string()),
-                command_palette: None,
-                cancel: None,
-                toggle_sidebar: None,
-            },
-        };
-        let serialised = toml::to_string_pretty(&prefs).expect("serialise");
-        let de: TuiPrefs = toml::from_str(&serialised).expect("deserialise");
-        assert_eq!(de.theme, "light");
-        assert_eq!(de.font_size, 16);
-        assert_eq!(de.keybinds.submit.as_deref(), Some("ctrl+enter"));
-        assert_eq!(de.keybinds.new_line.as_deref(), Some("enter"));
-        assert!(de.keybinds.command_palette.is_none());
-    }
-
-    #[test]
-    fn tui_prefs_load_returns_defaults_when_file_absent() {
-        let _g = config_path_test_guard();
-        // Point config path at a non-existent location so tui.toml is absent.
-        let tmp = std::env::temp_dir().join("dst_tui_prefs_absent_test");
-        std::fs::create_dir_all(&tmp).unwrap();
-        let _config_override = EnvVarRestore::set("DEEPSEEK_CONFIG_PATH", tmp.join("config.toml"));
-        let prefs = TuiPrefs::load().expect("load should not fail when file absent");
-        assert_eq!(
-            prefs.theme, "underwater",
-            "should fall back to default theme"
-        );
-        let _ = std::fs::remove_dir_all(&tmp);
-    }
-
-    #[test]
-    fn tui_prefs_save_and_load_round_trip() {
-        let _g = config_path_test_guard();
-        let tmp = std::env::temp_dir().join("dst_tui_prefs_save_test");
-        std::fs::create_dir_all(&tmp).unwrap();
-        let _config_override = EnvVarRestore::set("DEEPSEEK_CONFIG_PATH", tmp.join("config.toml"));
-
-        let prefs = TuiPrefs {
-            theme: "light".to_string(),
-            font_size: 14,
-            keybinds: KeybindPrefs {
-                submit: Some("ctrl+enter".to_string()),
-                ..KeybindPrefs::default()
-            },
-        };
-        prefs.save().expect("save should succeed");
-
-        let loaded = TuiPrefs::load().expect("load after save");
-        assert_eq!(loaded.theme, "light");
-        assert_eq!(loaded.font_size, 14);
-        assert_eq!(loaded.keybinds.submit.as_deref(), Some("ctrl+enter"));
-
-        let _ = std::fs::remove_dir_all(&tmp);
-    }
-
-    #[test]
-    fn tui_prefs_save_preserves_comments() {
-        let _g = config_path_test_guard();
-        let tmp = std::env::temp_dir().join("dst_tui_prefs_comment_test");
-        std::fs::create_dir_all(&tmp).unwrap();
-        let config_file = tmp.join("config.toml");
-        let _config_override = EnvVarRestore::set("DEEPSEEK_CONFIG_PATH", &config_file);
-
-        // tui.toml lives next to config.toml
-        let tui_path = tmp.join("tui.toml");
         std::fs::write(
-            &tui_path,
-            "# my theme comment\ntheme = \"dark\"\n# footer note\n",
+            tmp.path().join("settings.toml"),
+            "cost_currency = \"usd\"\n",
         )
-        .unwrap();
+        .expect("settings");
+        let prefs_path = tmp.path().join("tui.toml");
+        std::fs::write(&prefs_path, "theme = \"light\"\n").expect("tui prefs");
+        let _config_override =
+            EnvVarRestore::set("DEEPSEEK_CONFIG_PATH", tmp.path().join("config.toml"));
 
-        let prefs = TuiPrefs {
-            theme: "light".to_string(),
-            ..TuiPrefs::default()
-        };
-        prefs.save().expect("save should succeed");
+        let loaded = Settings::load().expect("load settings");
 
-        let body = std::fs::read_to_string(&tui_path).expect("read tui.toml");
-        assert!(body.contains("# my theme comment"), "comment lost: {body}");
-        assert!(body.contains("# footer note"), "footer lost: {body}");
-        assert!(body.contains("light"), "new value not written: {body}");
+        assert_eq!(loaded.theme, "light");
+        let receipt = loaded.tui_prefs_migration().expect("receipt");
+        assert_eq!(
+            receipt.folded,
+            vec![("theme".to_string(), "light".to_string())]
+        );
+        assert!(receipt.kept.is_empty());
+        assert!(!prefs_path.exists(), "original must be moved aside");
+        let backup = receipt.backup.as_ref().expect("backup path");
+        assert_eq!(
+            std::fs::read_to_string(backup).expect("backup readable"),
+            "theme = \"light\"\n",
+            "backup keeps the original bytes"
+        );
+        // The fold is only real once settings.toml owns it on disk.
+        let persisted =
+            std::fs::read_to_string(tmp.path().join("settings.toml")).expect("settings.toml");
+        assert!(persisted.contains("light"), "not persisted: {persisted}");
+    }
 
-        let _ = std::fs::remove_dir_all(&tmp);
+    #[test]
+    fn explicit_settings_theme_wins_over_tui_toml_and_the_receipt_says_so() {
+        let _g = config_path_test_guard();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(tmp.path().join("settings.toml"), "theme = \"dark\"\n").expect("settings");
+        std::fs::write(tmp.path().join("tui.toml"), "theme = \"light\"\n").expect("tui prefs");
+        let _config_override =
+            EnvVarRestore::set("DEEPSEEK_CONFIG_PATH", tmp.path().join("config.toml"));
+
+        let loaded = Settings::load().expect("load settings");
+
+        assert_eq!(loaded.theme, "dark");
+        let receipt = loaded.tui_prefs_migration().expect("receipt");
+        assert!(receipt.folded.is_empty());
+        assert_eq!(
+            receipt.kept,
+            vec![("theme".to_string(), "light".to_string(), "dark".to_string())]
+        );
+        assert!(
+            !receipt.lines(crate::localization::Locale::En).is_empty(),
+            "a disagreement must be sayable"
+        );
+    }
+
+    #[test]
+    fn tui_toml_keys_without_a_setting_are_quarantined_never_dropped() {
+        let _g = config_path_test_guard();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let prefs_path = tmp.path().join("tui.toml");
+        std::fs::write(
+            &prefs_path,
+            "theme = \"light\"\nfont_size = 14\n\n[keybinds]\nsubmit = \"ctrl+enter\"\n",
+        )
+        .expect("tui prefs");
+        let _config_override =
+            EnvVarRestore::set("DEEPSEEK_CONFIG_PATH", tmp.path().join("config.toml"));
+
+        let loaded = Settings::load().expect("load settings");
+
+        let receipt = loaded.tui_prefs_migration().expect("receipt");
+        assert_eq!(receipt.quarantined, vec!["font_size", "keybinds"]);
+        let backup = receipt.backup.as_ref().expect("backup path");
+        let preserved = std::fs::read_to_string(backup).expect("backup readable");
+        assert!(preserved.contains("font_size = 14"), "{preserved}");
+        assert!(preserved.contains("ctrl+enter"), "{preserved}");
+        let line = receipt
+            .lines(crate::localization::Locale::En)
+            .join(" ")
+            .to_lowercase();
+        assert!(line.contains("font_size"), "{line}");
+        assert!(line.contains("keybinds"), "{line}");
+    }
+
+    #[test]
+    fn an_unparseable_tui_toml_is_parked_whole_rather_than_guessed_at() {
+        let _g = config_path_test_guard();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(tmp.path().join("tui.toml"), "theme = \n").expect("tui prefs");
+        let _config_override =
+            EnvVarRestore::set("DEEPSEEK_CONFIG_PATH", tmp.path().join("config.toml"));
+
+        let loaded = Settings::load().expect("load settings");
+
+        let receipt = loaded.tui_prefs_migration().expect("receipt");
+        assert_eq!(receipt.quarantined, vec!["tui.toml"]);
+        assert!(receipt.folded.is_empty());
+        assert!(receipt.backup.is_some(), "bytes must survive");
+    }
+
+    #[test]
+    fn a_read_only_load_never_moves_tui_toml_aside() {
+        let _g = config_path_test_guard();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let prefs_path = tmp.path().join("tui.toml");
+        std::fs::write(&prefs_path, "theme = \"light\"\n").expect("tui prefs");
+        let _config_override =
+            EnvVarRestore::set("DEEPSEEK_CONFIG_PATH", tmp.path().join("config.toml"));
+
+        let loaded = Settings::load_read_only().expect("read-only load");
+
+        assert_eq!(loaded.theme, "light");
+        assert!(prefs_path.exists(), "diagnostics must not mutate the disk");
+    }
+
+    #[test]
+    fn a_second_backup_never_clobbers_the_first() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let prefs_path = tmp.path().join("tui.toml");
+        std::fs::write(&prefs_path, "theme = \"light\"\n").expect("first");
+        let first = back_up_tui_prefs(&prefs_path).expect("first backup");
+        std::fs::write(&prefs_path, "theme = \"dark\"\n").expect("second");
+        let second = back_up_tui_prefs(&prefs_path).expect("second backup");
+
+        assert_ne!(first, second);
+        assert_eq!(
+            std::fs::read_to_string(&first).unwrap(),
+            "theme = \"light\"\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&second).unwrap(),
+            "theme = \"dark\"\n"
+        );
     }
 
     #[test]
@@ -5433,19 +5357,6 @@ mod tests {
         assert!(body.contains("cny"), "new value not written: {body}");
 
         let _ = std::fs::remove_dir_all(&tmp);
-    }
-
-    #[test]
-    fn tui_prefs_path_uses_home_codewhale_subdir_by_default() {
-        let _g = config_path_test_guard();
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let _config_override = EnvVarRestore::remove("DEEPSEEK_CONFIG_PATH");
-        let _codewhale_home = EnvVarRestore::set("CODEWHALE_HOME", tmp.path().join(".codewhale"));
-        let _home = EnvVarRestore::set("HOME", tmp.path());
-
-        let got = TuiPrefs::path().expect("path should resolve");
-
-        assert_eq!(got, tmp.path().join(".codewhale").join("tui.toml"));
     }
 
     #[test]

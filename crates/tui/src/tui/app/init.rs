@@ -136,18 +136,6 @@ impl App {
                 None
             }
         });
-        let tui_prefs_warning = crate::settings::TuiPrefs::path().ok().and_then(|p| {
-            if p.exists() {
-                std::fs::read_to_string(&p).ok().and_then(|raw| {
-                    ::toml::from_str::<::toml::Value>(&raw)
-                        .err()
-                        .map(|e| format!("⚠ tui.toml is malformed — using defaults ({e})"))
-                })
-            } else {
-                None
-            }
-        });
-
         let mut provider = config.api_provider();
 
         // A startup route saved explicitly from `/model` is a user choice and
@@ -288,6 +276,13 @@ impl App {
         let show_tool_details = settings.show_tool_details;
         let inline_diff_mode = InlineDiffMode::parse(&settings.inline_diffs);
         let ui_locale = resolve_locale(&settings.locale);
+        // The dead `tui.toml` store was folded into settings.toml on load.
+        // Say so once, in the user's language, rather than letting a theme
+        // move under them unexplained.
+        let tui_prefs_migration_notice = settings
+            .tui_prefs_migration()
+            .map(|receipt| receipt.lines(ui_locale).join(" "))
+            .filter(|line| !line.is_empty());
         let cost_currency = match (settings.cost_currency.as_str(), ui_locale.tag()) {
             ("usd", "zh-Hans") => CostCurrency::Cny,
             _ => CostCurrency::from_setting(&settings.cost_currency).unwrap_or(CostCurrency::Usd),
@@ -775,7 +770,7 @@ impl App {
             // broken instead of silently losing all settings.
             status_message: xai_dangling_repair_message
                 .or(settings_parse_warning)
-                .or(tui_prefs_warning)
+                .or(tui_prefs_migration_notice)
                 .or(theme_warning),
             status_toasts: VecDeque::new(),
             update_available: None,
