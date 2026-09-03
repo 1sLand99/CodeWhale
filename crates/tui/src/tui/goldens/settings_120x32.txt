@@ -21,7 +21,7 @@
 
 
                                                                           ● working   ○ ready   ✓ done   ! caution   ✗ f
-                                                                          POD LEDGER
+                                                                          FLEET LEDGER
                                                                             WHALE     │ASSIGNMENT         │STATE
                                                                           ▶ whale-1   │restyle the footer…│● working
                                                                             whale-2   │golden buffers     │✓ done

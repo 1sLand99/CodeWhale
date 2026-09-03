@@ -126,7 +126,7 @@ check_interval_hours = 24
 # ─────────────────────────────────────────────────────────────────────────────────
 # Hotbar slots (#2061 / #2064)
 # ─────────────────────────────────────────────────────────────────────────────────
-# Optional 1-8 sidebar hotbar bindings. Since #3807 a missing `hotbar` key
+# Optional 1-8 workbar hotbar bindings. Since #3807 a missing `hotbar` key
 # renders NO bar — the Hotbar is hidden until you configure [[hotbar]]
 # tables here (or via `/hotbar`). An explicit `hotbar = []` also disables it.
 #
@@ -134,7 +134,7 @@ check_interval_hours = 24
 # and unknown actions are preserved so the UI can show a disabled entry.
 # Slash commands can be bound as slash.<name>, for example slash.workflow.
 # `/hotbar on` writes the default slots: slash.workflow, slash.goal, slash.auto,
-# then Plan/Work/Operate, palette, and sidebar. Commands that require arguments
+# then Plan/Work/Operate, palette, and workbar toggle. Commands that require arguments
 # pre-fill the composer instead of running incomplete.
 #
 # [[hotbar]]

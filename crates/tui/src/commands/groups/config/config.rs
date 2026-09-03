@@ -608,15 +608,17 @@ pub fn screen(app: &mut App, target: ScreenMode, arg: Option<&str>) -> CommandRe
     CommandResult::action(AppAction::SetScreenMode(target))
 }
 
-/// Place the work rail or pick its panel.
+/// Place the workbar or pick its panel.
 ///
-/// `/rail top|left|right|off` sets placement; `/rail tasks|agents|context|
-/// pinned` picks the panel. The two are orthogonal: where the rail sits and
-/// what it shows. `/sidebar` remains registered as the alias users know.
-/// Bare `/rail` reports the rail's *actual* rendered state — never a claim
-/// about a surface that cannot render.
+/// `/workbar bottom|top|left|right|off` sets placement; `/workbar
+/// tasks|agents|context|pinned` picks the panel. The two are orthogonal:
+/// where the workbar sits and what it shows. `/rail` and `/sidebar` remain
+/// registered as the aliases users know.
+/// Bare `/workbar` reports the workbar's *actual* rendered state — never a
+/// claim about a surface that cannot render.
 pub fn sidebar(app: &mut App, arg: Option<&str>) -> CommandResult {
-    const USAGE: &str = "Usage: /rail [top|left|right|off|tasks|agents|context|pinned] [--save]";
+    const USAGE: &str =
+        "Usage: /workbar [bottom|top|left|right|off|tasks|agents|context|pinned] [--save]";
     let raw = arg.map(str::trim).unwrap_or("");
     let mut tokens = raw.split_whitespace().collect::<Vec<_>>();
     let persist = matches!(tokens.last(), Some(&"--save" | &"-s"));
@@ -628,8 +630,8 @@ pub fn sidebar(app: &mut App, arg: Option<&str>) -> CommandResult {
         [] => return CommandResult::message(rail_status_message(app)),
         [value] => {
             let value = value.to_ascii_lowercase();
-            // Legacy focus words map onto the closest rail concept so muscle
-            // memory keeps working: "on" restores the default bottom rail,
+            // Legacy focus words map onto the closest workbar concept so muscle
+            // memory keeps working: "on" restores the default bottom workbar,
             // "off" hides it, panel names select panels.
             let placement = match value.as_str() {
                 "top" => Some(crate::tui::work_surface::WorkSurfacePlacement::Top),
@@ -694,26 +696,26 @@ pub fn sidebar(app: &mut App, arg: Option<&str>) -> CommandResult {
     CommandResult::message(rail_status_message(app))
 }
 
-/// Truthful rail readout: the placement and panel that actually render, with
-/// the narrow-terminal fallback and an empty-Tasks collapse spelled out.
-/// Never claims a panel is visible when no rail area was produced.
+/// Truthful workbar readout: the placement and panel that actually render,
+/// with the narrow-terminal fallback and an empty-Tasks collapse spelled out.
+/// Never claims a panel is visible when no workbar area was produced.
 fn rail_status_message(app: &App) -> String {
     use crate::tui::work_surface::{RailPanel, WorkSurfacePlacement};
 
     let placement = app.work_surface.placement;
     if placement == WorkSurfacePlacement::Off {
-        return "Rail is off — no panel renders (/rail bottom|top|left|right to show it)"
+        return "Workbar is off — no panel renders (/workbar bottom|top|left|right to show it)"
             .to_string();
     }
     let panel = app.work_surface.panel;
     let mut message = format!(
-        "Rail: {} placement, {} panel",
+        "Workbar: {} placement, {} panel",
         placement.as_setting(),
         panel.title()
     );
     let effective = app.work_surface.effective_placement();
     if effective != placement && effective == WorkSurfacePlacement::Top {
-        message.push_str(" — side rails need a wider terminal, showing top for now");
+        message.push_str(" — side placements need a wider terminal, showing top for now");
     }
     if app.work_surface.last_area.is_none() {
         if panel == RailPanel::Tasks {
@@ -3583,7 +3585,7 @@ mod tests {
         app.work_surface.placement = crate::tui::work_surface::WorkSurfacePlacement::Left;
         // A 60-column host is below the side-rail floor, so the effective
         // placement falls back to top; the status must say so rather than
-        // claim a left rail renders.
+        // claim a left workbar renders.
         let _ = crate::tui::work_surface::height(&mut app, 60, 24, u16::MAX);
 
         let result = sidebar(&mut app, None);
@@ -3606,10 +3608,10 @@ mod tests {
             crate::tui::work_surface::WorkSurfacePlacement::Off
         );
         let message = result.message.unwrap_or_default();
-        assert!(message.contains("Rail is off"), "got: {message}");
+        assert!(message.contains("Workbar is off"), "got: {message}");
         assert!(
-            !message.contains("Sidebar is visible"),
-            "the readout must never claim a dead surface renders: {message}"
+            !message.contains("Workbar is visible"),
+            "the readout must never claim a hidden surface renders: {message}"
         );
     }
 
@@ -3625,7 +3627,7 @@ mod tests {
                 .message
                 .as_deref()
                 .unwrap_or_default()
-                .contains("Usage: /rail")
+                .contains("Usage: /workbar")
         );
     }
 

@@ -1379,7 +1379,7 @@ impl Settings {
                         | "pinned"
                 ) {
                     anyhow::bail!(
-                        "Failed to update setting: invalid rail panel '{value}'. Expected: tasks, agents, background, files, notepad, context, git, or price."
+                        "Failed to update setting: invalid workbar panel '{value}'. Expected: tasks, agents, background, files, notepad, context, git, or price."
                     );
                 }
                 self.rail_panel = normalize_rail_panel(&normalized).to_string();
@@ -1896,11 +1896,11 @@ impl Settings {
             ),
             (
                 "context_panel",
-                "Show the session context sidebar panel: on/off",
+                "Show the session context workbar panel: on/off",
             ),
             (
                 "sessions_rail",
-                "Show the persistent Sessions rail in the sidebar: on/off (default off)",
+                "Show the persistent Sessions workbar: on/off (default off)",
             ),
             (
                 "session_auto_resume",

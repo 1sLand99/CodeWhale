@@ -60,7 +60,7 @@ fn output_figures(app: &App) -> Option<(u64, Option<f64>)> {
 /// context, cost, time to first token, output rate, output tokens.
 ///
 /// Repository and branch left this row (2026-09-02): the launch header and
-/// the git bottom view own them. Pod, whale and automation counts left too —
+/// the git bottom view own them. Fleet, whale and automation counts left too —
 /// the posture bar's live counts own activity.
 pub(crate) fn info_segments(app: &App, width: u16) -> Vec<InfoSegment> {
     use crate::localization::MessageId;

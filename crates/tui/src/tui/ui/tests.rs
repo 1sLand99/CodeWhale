@@ -11598,7 +11598,7 @@ fn ctrl_alt_4_selects_pinned_rail_panel_without_switching_modes() {
         app.work_surface.panel,
         crate::tui::work_surface::RailPanel::Files
     );
-    assert_eq!(app.status_message.as_deref(), Some("Rail panel: files"));
+    assert_eq!(app.status_message.as_deref(), Some("Workbar panel: files"));
 }
 
 #[test]
@@ -11870,7 +11870,7 @@ fn ctrl_alt_0_turns_rail_off() {
         app.work_surface.placement,
         crate::tui::work_surface::WorkSurfacePlacement::Off
     );
-    assert_eq!(app.status_message.as_deref(), Some("Rail is off"));
+    assert_eq!(app.status_message.as_deref(), Some("Workbar is off"));
 }
 
 #[test]
@@ -11886,28 +11886,28 @@ fn ctrl_alt_0_restores_bottom_rail_when_already_off() {
     );
     assert_eq!(
         app.status_message.as_deref(),
-        Some("Rail: bottom placement")
+        Some("Workbar: bottom placement")
     );
 }
 
 #[test]
 fn rail_command_reports_off_without_claiming_visibility() {
     // Replaces the old sidebar_render_state tests: the render-state machine
-    // is gone with the classic sidebar, and the /rail status readout is the
-    // contract that replaces it. It must never claim a surface that cannot
-    // render is visible.
+    // is gone with the classic sidebar, and the /workbar status readout is
+    // the contract that replaces it. It must never claim a surface that
+    // cannot render is visible.
     let mut app = create_test_app();
-    let result = crate::commands::execute("/rail off", &mut app);
+    let result = crate::commands::execute("/workbar off", &mut app);
     assert!(!result.is_error);
     assert_eq!(
         app.work_surface.placement,
         crate::tui::work_surface::WorkSurfacePlacement::Off
     );
     let message = result.message.unwrap_or_default();
-    assert!(message.contains("Rail is off"), "got: {message}");
+    assert!(message.contains("Workbar is off"), "got: {message}");
     assert!(
-        !message.contains("Sidebar is visible"),
-        "no control may claim the dead sidebar renders: {message}"
+        !message.contains("Workbar is visible"),
+        "no control may claim a hidden surface renders: {message}"
     );
 }
 

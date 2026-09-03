@@ -125,10 +125,10 @@ pub(crate) fn apply_alt_0_shortcut(app: &mut App, modifiers: KeyModifiers) {
     if modifiers.contains(KeyModifiers::CONTROL) {
         if app.work_surface.placement == crate::tui::work_surface::WorkSurfacePlacement::Off {
             app.work_surface.placement = crate::tui::work_surface::WorkSurfacePlacement::Bottom;
-            app.status_message = Some("Rail: bottom placement".to_string());
+            app.status_message = Some("Workbar: bottom placement".to_string());
         } else {
             app.work_surface.placement = crate::tui::work_surface::WorkSurfacePlacement::Off;
-            app.status_message = Some("Rail is off".to_string());
+            app.status_message = Some("Workbar is off".to_string());
         }
         app.needs_redraw = true;
     }

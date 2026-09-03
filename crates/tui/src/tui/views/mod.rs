@@ -775,7 +775,7 @@ pub enum ViewEvent {
         delta: isize,
     },
     /// `⇧F` in the picker: add the row's exact route to the fleet (the
-    /// selected Pod), or remove it when it is already there (design §10 F1).
+    /// selected Fleet), or remove it when it is already there (design §10 F1).
     ModelPickerToggleFleet {
         provider: crate::config::ApiProvider,
         /// Exact named route for `Custom`; built-in providers leave this unset.
@@ -940,7 +940,7 @@ pub enum ViewEvent {
         reasoning_effort: Option<String>,
         locale: crate::localization::Locale,
     },
-    /// Emitted by the `/pod` roster view (`s` / Enter) to edit a member.
+    /// Emitted by the `/fleet` roster view (`s` / Enter) to edit a member.
     /// The host routes a selected v2 Fleet to its exact editor and uses the
     /// legacy profile wizard only when no named Fleet is selected.
     FleetRosterOpenSetupRequested {
@@ -948,22 +948,22 @@ pub enum ViewEvent {
         /// identify which row the operator selected.
         member_id: String,
     },
-    /// Emitted by the `/pod` roster `m` shortcut to open the selected
+    /// Emitted by the `/fleet` roster `m` shortcut to open the selected
     /// member's exact Fleet editor directly on its model picker.
     FleetRosterOpenModelRequested {
         /// Exact Fleet member id; roles are not unique and therefore cannot
         /// identify which row the operator selected.
         member_id: String,
     },
-    /// Open the live workers tab from the unified Pod surface.
+    /// Open the live workers tab from the unified Fleet surface.
     FleetRosterOpenWorkersRequested,
 
-    /// The roster asks the host to open the secondary named-Pod switcher
-    /// (`/pod pods`; `/pod fleets` remains compatible). Editing stays on
+    /// The roster asks the host to open the secondary named-Fleet switcher
+    /// (`/fleet fleets`; `/fleet fleets` remains compatible). Editing stays on
     /// setup; this is pick/select only.
     FleetRosterOpenFleetsRequested,
 
-    /// The Pod list view asks the host to open a saved Pod's detail view.
+    /// The Fleet list view asks the host to open a saved Fleet's detail view.
     FleetListOpenDetailRequested {
         name: String,
         scope: crate::fleet::store::FleetScope,
@@ -1672,7 +1672,7 @@ enum ConfigSection {
 pub(crate) enum ConfigCategory {
     Appearance,
     ModelsProviders,
-    Pod,
+    Fleet,
     Work,
     ToolsMcp,
     Trust,
@@ -1686,7 +1686,7 @@ impl ConfigCategory {
         match self {
             ConfigCategory::Appearance => codewhale_config::settings_schema::TAB_APPEARANCE,
             ConfigCategory::ModelsProviders => codewhale_config::settings_schema::TAB_MODELS,
-            ConfigCategory::Pod => codewhale_config::settings_schema::TAB_POD,
+            ConfigCategory::Fleet => codewhale_config::settings_schema::TAB_FLEET,
             ConfigCategory::Work => codewhale_config::settings_schema::TAB_WORK,
             ConfigCategory::ToolsMcp => codewhale_config::settings_schema::TAB_TOOLS,
             ConfigCategory::Trust => codewhale_config::settings_schema::TAB_TRUST,
@@ -1702,7 +1702,7 @@ impl ConfigCategory {
     const ALL: [ConfigCategory; 8] = [
         ConfigCategory::Appearance,
         ConfigCategory::ModelsProviders,
-        ConfigCategory::Pod,
+        ConfigCategory::Fleet,
         ConfigCategory::Work,
         ConfigCategory::ToolsMcp,
         ConfigCategory::Trust,
@@ -1716,7 +1716,7 @@ impl ConfigCategory {
             match self {
                 ConfigCategory::Appearance => MessageId::ConfigCategoryAppearance,
                 ConfigCategory::ModelsProviders => MessageId::ConfigCategoryModelsProviders,
-                ConfigCategory::Pod => MessageId::ConfigCategoryPod,
+                ConfigCategory::Fleet => MessageId::ConfigCategoryFleet,
                 ConfigCategory::Work => MessageId::ConfigCategoryWork,
                 ConfigCategory::ToolsMcp => MessageId::ConfigCategoryToolsMcp,
                 ConfigCategory::Trust => MessageId::ConfigCategoryTrust,
@@ -1780,7 +1780,7 @@ impl ConfigSection {
             ConfigSection::Network => "network",
             ConfigSection::Display => "display",
             ConfigSection::Composer => "composer",
-            ConfigSection::Sidebar => "sidebar",
+            ConfigSection::Sidebar => "workbar",
             ConfigSection::History => "history",
             ConfigSection::Mcp => "mcp",
             ConfigSection::Fleet => "fleet",
@@ -5538,7 +5538,7 @@ impl ModalView for SubAgentsView {
 
         if self.agents.is_empty() {
             lines.push(Line::from(Span::styled(
-                tr(self.locale, MessageId::SubagentsNoCurrentSessionPodWorkers),
+                tr(self.locale, MessageId::SubagentsNoCurrentSessionFleetWorkers),
                 Style::default().fg(palette::TEXT_MUTED),
             )));
             lines.push(Line::from(Span::styled(
@@ -5584,14 +5584,14 @@ impl ModalView for SubAgentsView {
             lines.push(Line::from(Span::styled(
                 tr(
                     self.locale,
-                    MessageId::SubagentsCurrentSessionPodWorkersTitle,
+                    MessageId::SubagentsCurrentSessionFleetWorkersTitle,
                 ),
                 Style::default().fg(palette::WHALE_ACTION).bold(),
             )));
             lines.push(Line::from(Span::styled(
                 tr(
                     self.locale,
-                    MessageId::SubagentsCurrentSessionPodWorkerRoles,
+                    MessageId::SubagentsCurrentSessionFleetWorkerRoles,
                 ),
                 Style::default().fg(palette::TEXT_DIM),
             )));
@@ -6221,7 +6221,7 @@ mod tests {
         assert_eq!(
             tr(
                 Locale::ZhHans,
-                MessageId::SubagentsCurrentSessionPodWorkersTitle
+                MessageId::SubagentsCurrentSessionFleetWorkersTitle
             ),
             "当前会话的舰队工作器"
         );
@@ -6259,7 +6259,7 @@ mod tests {
             source: "test".to_string(),
         });
         agent.git_branch = Some("feature/localize".to_string());
-        agent.workspace = Some(PathBuf::from("/tmp/pod-workers"));
+        agent.workspace = Some(PathBuf::from("/tmp/fleet-workers"));
         agent.result = Some("all checks passed".to_string());
         let mut interrupted = manager_agent(
             "agent_interrupted",
@@ -6285,7 +6285,7 @@ mod tests {
             "reason: manual review",
             "role: release",
             "posture: network=on · shell=read-only · write=on",
-            "git: branch feature/localize @ pod-workers",
+            "git: branch feature/localize @ fleet-workers",
             "objective: verify localized row",
             "result: all checks passed",
             "live worker status · role · objective · model · elapsed",
@@ -6323,7 +6323,7 @@ mod tests {
             "原因：manualreview",
             "角色：release",
             "权限：网络=开·Shell=只读·写入=开",
-            "Git：分支feature/localize@pod-workers",
+            "Git：分支feature/localize@fleet-workers",
             "目标：verifylocalizedrow",
             "结果：allcheckspassed",
             "刷新",
@@ -8144,10 +8144,10 @@ context_window = 262144
     fn config_view_filter_matches_group_and_rows() {
         let mut view = create_config_view(Locale::En);
 
-        type_filter(&mut view, "side");
+        type_filter(&mut view, "workbar");
 
-        assert_eq!(view.filter, "side");
-        assert_eq!(visible_section_labels(&view), vec!["Sidebar"]);
+        assert_eq!(view.filter, "workbar");
+        assert_eq!(visible_section_labels(&view), vec!["Workbar"]);
         assert_eq!(
             visible_row_keys(&view),
             vec![
@@ -8164,9 +8164,9 @@ context_window = 262144
     fn localized_config_view_filter_matches_english_section_and_scope_labels() {
         let mut view = create_config_view(Locale::PtBr);
 
-        type_filter(&mut view, "sidebar saved");
+        type_filter(&mut view, "workbar saved");
 
-        assert_eq!(view.filter, "sidebar saved");
+        assert_eq!(view.filter, "workbar saved");
         assert_eq!(visible_section_labels(&view), vec!["Barra lateral"]);
         assert_eq!(
             visible_row_keys(&view),
@@ -8904,7 +8904,7 @@ context_window = 262144
         );
         assert_eq!(
             category_of("fleet.exec.max_spawn_depth"),
-            ConfigCategory::Pod
+            ConfigCategory::Fleet
         );
         assert_eq!(category_of("composer_density"), ConfigCategory::Work);
         assert_eq!(category_of("work_surface_placement"), ConfigCategory::Work);
@@ -9401,13 +9401,13 @@ context_window = 262144
             assert!(dump.contains("Appearance"), "{w}x{h}:\n{dump}");
             assert!(dump.contains("Search:"), "{w}x{h}:\n{dump}");
 
-            // → → lands on Pod; the strip/rail follows and the Pod row is the
+            // → → lands on Fleet; the strip/rail follows and the Fleet row is the
             // selection (a read-only config.toml setting).
             assert!(matches!(key(&mut view, KeyCode::Right), ViewAction::None));
             assert!(matches!(key(&mut view, KeyCode::Right), ViewAction::None));
-            assert_eq!(view.category, ConfigCategory::Pod);
+            assert_eq!(view.category, ConfigCategory::Fleet);
             assert_eq!(view.rows[view.selected].key, "fleet.exec.max_spawn_depth");
-            let dump = snapshot(&view, "after → → (Pod)");
+            let dump = snapshot(&view, "after → → (Fleet)");
             assert!(dump.contains("Fleet"), "{w}x{h}:\n{dump}");
             assert!(
                 dump.contains(super::setting_affordance(SettingKind::ReadOnly, None)),
