@@ -546,93 +546,38 @@ pub(crate) fn restore_message_submit_denial(
     app.needs_redraw = true;
 }
 
-pub(crate) fn launch_worktree_slug(requested: &str) -> String {
-    let requested = requested.trim();
-    if requested.is_empty() {
-        return format!("session-{}", chrono::Utc::now().format("%Y%m%d-%H%M%S"));
-    }
-    let mut slug = String::new();
-    let mut separator = false;
-    for ch in requested.chars() {
-        if ch.is_ascii_alphanumeric() {
-            slug.push(ch.to_ascii_lowercase());
-            separator = false;
-        } else if matches!(ch, '-' | '_' | ' ' | '/' | '.') && !slug.is_empty() && !separator {
-            slug.push('-');
-            separator = true;
-        }
-    }
-    while slug.ends_with('-') {
-        slug.pop();
-    }
-    if slug.is_empty() {
-        format!("session-{}", chrono::Utc::now().format("%Y%m%d-%H%M%S"))
-    } else {
-        slug
-    }
-}
-
-pub(crate) fn launch_worktree_spec(
-    workspace: &std::path::Path,
-    requested: &str,
-) -> Result<codewhale_lane::WorktreeProvision> {
-    let output = std::process::Command::new("git")
-        .current_dir(workspace)
-        .args(["rev-parse", "--show-toplevel"])
-        .output()
-        .context("inspect Git repository for new worktree")?;
-    if !output.status.success() {
-        anyhow::bail!("new worktree requires a Git repository");
-    }
-    let repo_root = PathBuf::from(String::from_utf8(output.stdout)?.trim());
-    let repo_name = repo_root
-        .file_name()
-        .and_then(|name| name.to_str())
-        .filter(|name| !name.is_empty())
-        .unwrap_or("workspace");
-    let slug = launch_worktree_slug(requested);
-    let parent = repo_root.parent().unwrap_or(repo_root.as_path());
-    let path = parent
-        .join(".codewhale-worktrees")
-        .join(format!("{repo_name}-{slug}"));
-    if path.exists() {
-        anyhow::bail!("worktree path already exists: {}", path.display());
-    }
-    Ok(codewhale_lane::WorktreeProvision {
-        repo_root,
-        branch: format!("codex/{slug}"),
-        path,
-        base_ref: Some("HEAD".to_string()),
-    })
-}
-
-pub(crate) async fn provision_launch_worktree(
-    workspace: PathBuf,
-    requested: String,
-) -> Result<codewhale_lane::ProvisionedWorktree> {
-    let spec = launch_worktree_spec(&workspace, &requested)?;
-    tokio::task::spawn_blocking(move || codewhale_lane::provision_worktree(&spec))
-        .await
-        .context("new worktree task failed")?
-}
-
-/// Start the launch session inside a freshly provisioned worktree and leave a
-/// receipt in the transcript saying where it went: the card's New worktree
-/// entry used to succeed silently, which reads as having done nothing.
-pub(crate) fn begin_launch_worktree_session(
+/// Resume one recent-work row from the startup card by session id. Mirrors
+/// `/resume <id>`: the card dissolves and the saved session loads through
+/// the normal `LoadSession` path; a session that vanished behind the card
+/// leaves the card up with a status saying why instead of stranding the
+/// user on an empty stage.
+pub(crate) fn resume_launch_session(
     app: &mut App,
-    provisioned: codewhale_lane::ProvisionedWorktree,
+    session_id: &str,
 ) -> commands::CommandResult {
-    let receipt = app
-        .tr(MessageId::LaunchWorktreeCreated)
-        .replace("{path}", &provisioned.path.display().to_string())
-        .replace("{branch}", &provisioned.branch);
-    let result = begin_launch_session(app, Some(provisioned.path));
-    app.add_message(HistoryCell::System {
-        content: receipt.clone(),
-    });
-    app.status_message = Some(receipt);
-    result
+    let failed = |app: &mut App, err: &str| {
+        app.launch.status = Some(
+            app.tr(MessageId::LaunchResumeFailed)
+                .replace("{error}", err),
+        );
+        commands::CommandResult::ok()
+    };
+    let manager = match crate::session_manager::SessionManager::default_location() {
+        Ok(manager) => manager,
+        Err(err) => return failed(app, &err.to_string()),
+    };
+    let saved = match manager.load_session(session_id) {
+        Ok(saved) => saved,
+        Err(err) => return failed(app, &err.to_string()),
+    };
+    let path = manager
+        .sessions_dir()
+        .join(format!("{}.json", saved.metadata.id));
+    if !path.exists() {
+        return failed(app, "saved session file is gone");
+    }
+    app.launch.dissolve_card(app.ambient_clock_ms);
+    commands::CommandResult::action(AppAction::LoadSession(path))
 }
 
 pub(crate) fn begin_launch_session(
@@ -1213,114 +1158,50 @@ mod stall_outbox_tests {
 }
 
 #[cfg(test)]
-mod launch_worktree_tests {
+mod launch_resume_tests {
     use super::*;
 
-    fn git(dir: &std::path::Path, args: &[&str]) {
-        let status = std::process::Command::new("git")
-            .current_dir(dir)
-            .args(args)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .expect("git runs");
-        assert!(status.success(), "git {args:?} in {}", dir.display());
-    }
-
-    /// The launch card's New worktree entry must produce a real, checked-out
-    /// worktree and hand the new session that path — not just print a status.
-    #[tokio::test]
-    async fn new_worktree_creates_a_checkout_and_the_session_starts_inside_it() {
-        let root = tempfile::tempdir().expect("tempdir");
-        let repo = root.path().join("proj");
-        std::fs::create_dir_all(&repo).unwrap();
-        git(&repo, &["init", "-q", "-b", "main"]);
-        // Windows CI checks out with a global core.autocrlf=true; the
-        // byte-fidelity assertion below needs the worktree checkout to be
-        // verbatim.
-        git(&repo, &["config", "core.autocrlf", "false"]);
-        git(
-            &repo,
-            &[
-                "-c",
-                "user.email=t@t",
-                "-c",
-                "user.name=t",
-                "commit",
-                "-q",
-                "--allow-empty",
-                "-m",
-                "root",
-            ],
-        );
-        std::fs::write(repo.join("README.md"), "hello\n").unwrap();
-        git(&repo, &["add", "README.md"]);
-        git(
-            &repo,
-            &[
-                "-c",
-                "user.email=t@t",
-                "-c",
-                "user.name=t",
-                "commit",
-                "-q",
-                "-m",
-                "readme",
-            ],
-        );
-
-        let provisioned = provision_launch_worktree(repo.clone(), "Fix Login / v2".to_string())
-            .await
-            .expect("worktree provisioned");
-        let path = provisioned.path.clone();
-        assert_eq!(provisioned.branch, "codex/fix-login-v2");
-        // git reports the canonical toplevel (macOS: /private/var…), so
-        // compare canonical forms.
-        assert_eq!(
-            path.canonicalize().unwrap(),
-            root.path()
-                .join(".codewhale-worktrees")
-                .join("proj-fix-login-v2")
-                .canonicalize()
-                .unwrap()
-        );
-        assert!(path.join(".git").exists(), "worktree is a git checkout");
-        assert_eq!(
-            std::fs::read_to_string(path.join("README.md")).unwrap(),
-            "hello\n",
-            "worktree carries HEAD's files"
-        );
-        let head = std::process::Command::new("git")
-            .current_dir(&path)
-            .args(["rev-parse", "--abbrev-ref", "HEAD"])
-            .output()
-            .unwrap();
-        assert_eq!(
-            String::from_utf8_lossy(&head.stdout).trim(),
-            "codex/fix-login-v2"
-        );
-
-        // A second request for the same name says so instead of clobbering.
-        let err = provision_launch_worktree(repo.clone(), "fix login v2".to_string())
-            .await
-            .expect_err("duplicate path refused");
-        assert!(err.to_string().contains("already exists"), "{err}");
-
-        // The launch session is pointed at the worktree, not the origin repo.
+    /// A recent-work row that vanished behind the card must leave the card
+    /// up with a status — never strand the user on an empty stage.
+    #[test]
+    fn resume_missing_session_leaves_the_card_up_with_a_status() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = App::new(
             crate::test_support::test_tui_options(dir.path()),
             &Config::default(),
         );
         app.launch.visible = true;
-        let result = begin_launch_worktree_session(&mut app, provisioned);
-        assert_eq!(app.workspace, path);
-        assert!(!app.launch.visible);
-        let receipt = app.status_message.clone().expect("receipt");
-        assert!(receipt.contains("codex/fix-login-v2") && receipt.contains("proj-fix-login-v2"));
-        assert!(matches!(
-            result.action,
-            Some(AppAction::SyncSession { workspace, .. }) if workspace == path
-        ));
+        let result = resume_launch_session(&mut app, "no-such-session-000000");
+        assert!(result.action.is_none(), "nothing to load");
+        assert!(app.launch.visible, "the card stays up");
+        let status = app.launch.status.as_deref().expect("a status");
+        assert!(
+            status.contains("Resume failed"),
+            "the status says why: {status}"
+        );
+    }
+
+    /// The prominent new-session entry begins a fresh session in place.
+    #[test]
+    fn new_session_begins_a_fresh_session_and_leaves_the_card() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::new(
+            crate::test_support::test_tui_options(dir.path()),
+            &Config::default(),
+        );
+        app.launch.visible = true;
+        let result = begin_launch_session(&mut app, None);
+        assert!(!app.launch.visible, "the session began");
+        assert!(
+            app.current_session_id.is_some(),
+            "a fresh session id was minted"
+        );
+        assert!(
+            matches!(
+                result.action,
+                Some(AppAction::SyncSession { .. })
+            ),
+            "the engine syncs the fresh session"
+        );
     }
 }

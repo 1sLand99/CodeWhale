@@ -142,7 +142,7 @@ fn enter_live_shell(tui: &mut Harness) {
         .expect("choose Explore Offline");
     wait_or_panic(tui, "You're ready.", SETTLE_WAIT, "offline explore ready");
     tui.send(keys::key::enter()).expect("leave onboarding");
-    wait_or_panic(tui, "New worktree", STARTUP_WAIT, "launch card");
+    wait_or_panic(tui, "New session", STARTUP_WAIT, "launch card");
     // Typing goes straight to the composer; Enter sends the first message
     // and the session begins (the card dissolved on the first keystroke).
     tui.send("start the session")

@@ -10,7 +10,8 @@ use ratatui::layout::Rect;
 use unicode_width::UnicodeWidthChar;
 
 use super::{
-    MarkTier, McpFacts, TidelineStartup, render_tideline_startup, tideline_startup_hitboxes,
+    LaunchRecentEntry, MarkTier, McpFacts, TidelineStartup, render_tideline_startup,
+    tideline_startup_hitboxes,
 };
 use crate::palette::UI_THEME;
 use crate::tui::golden_harness::{
@@ -60,6 +61,21 @@ fn connected(theme: &crate::palette::UiTheme) -> TidelineStartup<'_> {
         needs_sign_in: 1,
         enabled: 3,
     }))
+    .recent(
+        vec![
+            LaunchRecentEntry {
+                id: "sess-aaa".to_string(),
+                title: "Fix login flow".to_string(),
+                detail: "2h ago · 4 msgs".to_string(),
+            },
+            LaunchRecentEntry {
+                id: "sess-bbb".to_string(),
+                title: "Plan export".to_string(),
+                detail: "3d ago · 12 msgs".to_string(),
+            },
+        ],
+        false,
+    )
     .composer(docked_composer());
     startup.version = "0.9.12";
     startup
@@ -105,12 +121,12 @@ fn startup_first_run_matches_its_golden() {
 #[test]
 fn startup_matches_golden_at_the_40x12_terminal_floor() {
     // A 40x12 terminal leaves the stage 10 rows after the topbar and merged
-    // footer: the tiny mark, the three header lines, the state line, and a
-    // four-row dock all still fit.
+    // footer: the tiny mark, the title, the new-session entry, and the dock
+    // all still fit.
     let text = draw(40, 10, &connected(&UI_THEME));
     assert_matches_golden("startup_40x10", &text);
     assert!(text.contains("codewhale"), "{text}");
-    assert!(text.contains("New worktree"), "{text}");
+    assert!(text.contains("New session"), "{text}");
     assert!(text.contains("❯"), "the floor keeps the composer: {text}");
 }
 
@@ -132,7 +148,7 @@ fn startup_surfacing_midpoint_matches_its_golden() {
 }
 
 #[test]
-fn the_card_states_the_workspace_menu_and_mcp_news() {
+fn the_card_states_the_workspace_recent_work_and_mcp_news() {
     let text = draw(100, 30, &connected(&UI_THEME));
     for fact in [
         "codewhale v0.9.12",
@@ -140,17 +156,33 @@ fn the_card_states_the_workspace_menu_and_mcp_news() {
         "Hmbown/CodeWhale · main",
         // The card's announcement: only when true.
         "● 2 MCP servers connected · 1 needs sign-in · run /mcp",
-        // The menu with its real chords.
-        "New worktree",
-        "ctrl+n",
-        "Resume session",
-        "ctrl+r",
-        "Changelog",
-        "ctrl+l",
-        "Quit",
-        "ctrl+q",
+        // The prominent new-session entry over the recent-work list.
+        "New session",
+        "Recent",
+        "Fix login flow",
+        "2h ago",
+        "Plan export",
+        "3d ago",
     ] {
         assert!(text.contains(fact), "missing {fact:?} in:\n{text}");
+    }
+    // The new-session entry leads the recent work.
+    assert!(
+        text.find("New session").unwrap() < text.find("Fix login flow").unwrap(),
+        "new session leads the list:\n{text}"
+    );
+    // The old menu is gone: no rows, no chords.
+    for gone in [
+        "New worktree",
+        "Resume session",
+        "Changelog",
+        "Quit",
+        "ctrl+n",
+        "ctrl+r",
+        "ctrl+l",
+        "ctrl+q",
+    ] {
+        assert!(!text.contains(gone), "{gone:?} is back:\n{text}");
     }
     // Row 0 is the thin top line; the wordmark lives in the card.
     let first = text.lines().next().unwrap_or_default();

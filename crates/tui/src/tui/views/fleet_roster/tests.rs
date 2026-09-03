@@ -87,7 +87,7 @@ fn session_subagent_tab_is_named_workers_not_durable_runs() {
     assert_eq!(
         tr(Locale::En, MessageId::FleetRosterWorkers),
         "workers",
-        "the w tab opens current-session sub-agents; durable runs belong to /pod runs"
+        "the w tab opens current-session sub-agents; durable runs belong to /fleet runs"
     );
 }
 
