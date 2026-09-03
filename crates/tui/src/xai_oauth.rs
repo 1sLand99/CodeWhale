@@ -18,15 +18,12 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
-use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-
-use codewhale_config::device_code::DevicePollOutcome;
 
 use crate::config::{ApiProvider, Config};
 
@@ -41,7 +38,9 @@ pub const XAI_OIDC_ISSUER: &str = "https://auth.x.ai";
 /// the user-principal login request.
 pub const DEFAULT_SCOPES: &str = "openid profile email offline_access api:access grok-cli:access";
 const REFRESH_SKEW_SECS: i64 = 60;
-const DEVICE_POLL_MAX_SECS: u64 = 900;
+/// Device-code lifetime fallback when the server omits `expires_in`.
+/// Shared with the unified flow until the constants move there in 3b-iii.
+pub(crate) const DEVICE_POLL_MAX_SECS: u64 = 900;
 /// Every xAI OAuth request shares one timeout; none of them are long-poll.
 const OAUTH_REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 const OAUTH_RESPONSE_BODY_LIMIT: u64 = 64 * 1024;
@@ -83,28 +82,6 @@ struct TokenResponse {
     interval: Option<u64>,
 }
 
-#[derive(Clone, Deserialize)]
-struct DeviceCodeResponse {
-    device_code: Option<String>,
-    user_code: Option<String>,
-    verification_uri: Option<String>,
-    verification_uri_complete: Option<String>,
-    expires_in: Option<u64>,
-    interval: Option<u64>,
-    error: Option<String>,
-    error_description: Option<String>,
-}
-
-#[derive(Clone)]
-struct DeviceCodeGrant {
-    device_code: String,
-    user_code: String,
-    verification_uri: Option<String>,
-    verification_uri_complete: Option<String>,
-    expires_in: Option<u64>,
-    interval: Option<u64>,
-}
-
 #[derive(Debug, Clone, Deserialize)]
 struct OidcDiscoveryResponse {
     issuer: Option<String>,
@@ -130,6 +107,26 @@ pub struct XaiOAuthCredentials {
     pub issuer: String,
     #[allow(dead_code)]
     pub client_id: String,
+}
+
+/// Transitional bridge: the unified flow in [`crate::oauth`] performs the
+/// login and hands back provider-neutral material; this converts it into the
+/// legacy pending shape the (not yet unified) activation path consumes.
+/// Deleted with the rest of this module when activation unifies in 3b-ii.
+pub(crate) fn pending_from_unified(
+    pending: crate::oauth::PendingOAuthLogin,
+) -> PendingXaiDeviceLogin {
+    PendingXaiDeviceLogin {
+        issuer: pending.issuer,
+        client_id: pending.client_id,
+        token: TokenResponse {
+            access_token: pending.token.access_token,
+            refresh_token: pending.token.refresh_token,
+            expires_in: pending.token.expires_in,
+            error: None,
+            interval: None,
+        },
+    }
 }
 
 /// A successful device-code exchange that has not yet been made active.
@@ -206,34 +203,6 @@ impl std::fmt::Debug for TokenResponse {
             .field("refresh_token", &redacted(self.refresh_token.is_some()))
             .field("expires_in", &self.expires_in)
             .field("error", &self.error)
-            .field("interval", &self.interval)
-            .finish()
-    }
-}
-
-impl std::fmt::Debug for DeviceCodeResponse {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("DeviceCodeResponse")
-            .field("device_code", &redacted(self.device_code.is_some()))
-            .field("user_code", &self.user_code)
-            .field("verification_uri", &self.verification_uri)
-            .field("verification_uri_complete", &self.verification_uri_complete)
-            .field("expires_in", &self.expires_in)
-            .field("interval", &self.interval)
-            .field("error", &self.error)
-            .field("error_description", &self.error_description)
-            .finish()
-    }
-}
-
-impl std::fmt::Debug for DeviceCodeGrant {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("DeviceCodeGrant")
-            .field("device_code", &redacted(true))
-            .field("user_code", &self.user_code)
-            .field("verification_uri", &self.verification_uri)
-            .field("verification_uri_complete", &self.verification_uri_complete)
-            .field("expires_in", &self.expires_in)
             .field("interval", &self.interval)
             .finish()
     }
@@ -580,96 +549,6 @@ where
         .filter(|t| !t.trim().is_empty())
         .context("xAI OAuth refresh returned an empty access token")?;
     Ok(credentials_from_entry(scope, &entry, token))
-}
-
-/// Interactive device-code login. Prints verification URL + user code to
-/// `stderr` and polls until approved. The returned bearer material remains
-/// pending in memory until [`activate_device_login`] commits an owned
-/// generation and its config pointer.
-///
-/// Public residual entry point for CLI/TUI wiring (`codewhale auth` /
-/// slash command). Call from a headless or TUI surface that can print the
-/// verification URL.
-pub async fn device_code_login() -> Result<PendingXaiDeviceLogin> {
-    let issuer = std::env::var("GROK_OIDC_ISSUER")
-        .or_else(|_| std::env::var("XAI_OIDC_ISSUER"))
-        .unwrap_or_else(|_| XAI_OIDC_ISSUER.to_string());
-    let client_id = std::env::var("GROK_OIDC_CLIENT_ID")
-        .or_else(|_| std::env::var("XAI_OIDC_CLIENT_ID"))
-        .unwrap_or_else(|_| GROK_OIDC_CLIENT_ID.to_string());
-    let scopes = std::env::var("GROK_OIDC_SCOPES")
-        .or_else(|_| std::env::var("XAI_OIDC_SCOPES"))
-        .unwrap_or_else(|_| DEFAULT_SCOPES.to_string());
-    let open_browser = std::env::var_os("CODEWHALE_XAI_OAUTH_NO_BROWSER").is_none();
-
-    device_code_login_on_blocking_thread(issuer, client_id, scopes, open_browser).await
-}
-
-async fn device_code_login_on_blocking_thread(
-    issuer: String,
-    client_id: String,
-    scopes: String,
-    open_browser: bool,
-) -> Result<PendingXaiDeviceLogin> {
-    tokio::task::spawn_blocking(move || {
-        device_code_login_with(&issuer, &client_id, &scopes, open_browser)
-    })
-    .await
-    .context("xAI device-code login worker failed")?
-}
-
-fn device_code_login_with(
-    issuer: &str,
-    client_id: &str,
-    scopes: &str,
-    open_browser: bool,
-) -> Result<PendingXaiDeviceLogin> {
-    let endpoints = resolve_device_oauth_endpoints(issuer);
-    let device = request_device_code(&endpoints.device_authorization_endpoint, client_id, scopes)?;
-    let verify = device
-        .verification_uri_complete
-        .clone()
-        .or(device.verification_uri.clone())
-        .unwrap_or_else(|| format!("{issuer}/device"));
-    // This string comes off the wire and is handed to `webbrowser::open`, so a
-    // malicious device-code response must not be able to launch something
-    // other than a browser navigation.
-    let verify = codewhale_config::device_code::validate_browser_verification_uri(
-        &verify,
-        "xAI device-code request",
-    )?;
-
-    eprintln!("xAI device-code login");
-    eprintln!("  Open:  {verify}");
-    eprintln!("  Code:  {}", device.user_code);
-    eprintln!("Waiting for approval in the browser… (Ctrl+C to abort)");
-    if open_browser && let Err(err) = webbrowser::open(&verify) {
-        eprintln!("Could not open the browser automatically: {err}");
-    }
-
-    let lifetime = Duration::from_secs(device.expires_in.unwrap_or(DEVICE_POLL_MAX_SECS).max(30));
-    let token = codewhale_config::device_code::DeviceCodePoll::new(
-        lifetime,
-        "xAI device-code authorization timed out. Re-run device login \
-         and approve the code before it expires.",
-    )
-    .interval_seconds(device.interval)
-    .wait_before_first_poll(true)
-    .slow_down_timeout_message(
-        "xAI device-code authorization timed out after one or more slow_down \
-         responses. That is usually clock drift in a WSL or VM environment; \
-         sync the clock, then re-run device login and approve the code before \
-         it expires.",
-    )
-    .run(thread::sleep, || {
-        poll_device_token(&endpoints.token_endpoint, client_id, &device.device_code)
-    })?;
-
-    Ok(PendingXaiDeviceLogin {
-        issuer: issuer.to_string(),
-        client_id: client_id.to_string(),
-        token,
-    })
 }
 
 /// Commit a pending device login as a uniquely named owned generation and
@@ -1286,93 +1165,6 @@ fn refresh_access_token(
     Ok(body)
 }
 
-fn request_device_code(
-    device_authorization_endpoint: &str,
-    client_id: &str,
-    scopes: &str,
-) -> Result<DeviceCodeGrant> {
-    let client = oauth_client("device-code")?;
-    let params = [("client_id", client_id), ("scope", scopes)];
-    #[cfg(test)]
-    crate::external_credentials::record_oauth_network();
-    let response = client
-        .post(device_authorization_endpoint)
-        .form(&params)
-        .send()
-        .context("xAI device-code request failed")?;
-    let (status, body): (_, DeviceCodeResponse) =
-        parse_oauth_json_response(response, "xAI device-code request")?;
-    if !status.is_success() || body.error.is_some() {
-        let err = oauth_failure_detail(
-            body.error.as_deref(),
-            body.error_description.as_deref(),
-            status,
-        );
-        bail!("xAI device-code request failed ({err})");
-    }
-    let device_code = body
-        .device_code
-        .filter(|value| !value.trim().is_empty())
-        .context("xAI device-code response missing device_code")?;
-    let user_code = body
-        .user_code
-        .filter(|value| !value.trim().is_empty())
-        .context("xAI device-code response missing user_code")?;
-    Ok(DeviceCodeGrant {
-        device_code,
-        user_code,
-        verification_uri: body.verification_uri,
-        verification_uri_complete: body.verification_uri_complete,
-        expires_in: body.expires_in,
-        interval: body.interval,
-    })
-}
-
-/// One poll of the device token endpoint, classified for the shared RFC 8628
-/// loop. Transient states (`authorization_pending`, `slow_down`) are values,
-/// not errors: the previous implementation returned them as `Err` and the
-/// caller substring-matched the message to decide whether to keep polling.
-fn poll_device_token(
-    token_endpoint: &str,
-    client_id: &str,
-    device_code: &str,
-) -> Result<DevicePollOutcome<TokenResponse>> {
-    let client = oauth_client("device-code poll")?;
-    let params = [
-        ("client_id", client_id),
-        ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
-        ("device_code", device_code),
-    ];
-    #[cfg(test)]
-    crate::external_credentials::record_oauth_network();
-    let response = client
-        .post(token_endpoint)
-        .form(&params)
-        .send()
-        .context("xAI device-code token poll failed")?;
-    let (status, body): (_, TokenResponse) =
-        parse_oauth_json_response(response, "xAI device-code token exchange")?;
-    if let Some(err) = body.error.as_deref() {
-        if err == "authorization_pending" {
-            return Ok(DevicePollOutcome::Pending);
-        }
-        if err == "slow_down" {
-            return Ok(DevicePollOutcome::SlowDown {
-                interval_seconds: body.interval,
-            });
-        }
-        // Poll requests carry the device credential. Keep diagnostics to the
-        // standard error code and HTTP status rather than echoing descriptions.
-        let detail = oauth_failure_detail(Some(err), None, status);
-        bail!("xAI device-code token exchange failed: {detail}");
-    }
-    if !status.is_success() {
-        let detail = oauth_failure_detail(None, None, status);
-        bail!("xAI device-code token exchange failed: {detail}");
-    }
-    Ok(DevicePollOutcome::Complete(body))
-}
-
 fn jwt_expiry_seconds(token: &str) -> Option<u64> {
     use base64::Engine as _;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -1434,7 +1226,7 @@ use std::os::unix::fs::PermissionsExt;
 mod tests {
     use super::*;
     use tempfile::TempDir;
-    use wiremock::matchers::{body_string_contains, header, method, path};
+    use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[test]
@@ -1781,46 +1573,6 @@ mod tests {
         assert_eq!(credentials.client_id, GROK_OIDC_CLIENT_ID);
     }
 
-    /// The verification URI is handed to `webbrowser::open`. Before this was
-    /// consolidated onto the shared primitive, Codewhale opened whatever the
-    /// device-code response said — pi validated it, Codewhale did not.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn device_login_refuses_a_verification_uri_that_is_not_a_web_page() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/.well-known/openid-configuration"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "issuer": server.uri(),
-                "device_authorization_endpoint": format!("{}/oauth2/device-advertised", server.uri()),
-                "token_endpoint": format!("{}/oauth2/token-advertised", server.uri())
-            })))
-            .expect(1)
-            .mount(&server)
-            .await;
-        Mock::given(method("POST"))
-            .and(path("/oauth2/device-advertised"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "device_code": "device-token",
-                "user_code": "CW-TEST",
-                "verification_uri": "https://auth.x.ai/device",
-                "verification_uri_complete": "vscode://attacker/run?code=CW-TEST",
-                "expires_in": 60,
-                "interval": 1
-            })))
-            .expect(1)
-            .mount(&server)
-            .await;
-        // No token-endpoint mock: the flow must fail before it ever polls.
-
-        let result = tokio::task::block_in_place(|| {
-            device_code_login_with(&server.uri(), GROK_OIDC_CLIENT_ID, DEFAULT_SCOPES, false)
-        });
-
-        let error = result.expect_err("a non-web verification URI must abort login");
-        let message = format!("{error:#}");
-        assert!(message.contains("untrusted verification URI"), "{message}");
-    }
-
     /// `Debug` reaches production through tracing's `?` sigil, anyhow context,
     /// and panic messages. Nothing that holds bearer material may print it.
     #[test]
@@ -1841,14 +1593,6 @@ mod tests {
             error: None,
             interval: None,
         };
-        let grant = DeviceCodeGrant {
-            device_code: "secret-device-code".to_string(),
-            user_code: "CW-TEST".to_string(),
-            verification_uri: Some("https://auth.x.ai/device".to_string()),
-            verification_uri_complete: None,
-            expires_in: Some(60),
-            interval: Some(5),
-        };
         let credentials = credentials_from_entry(
             format!("{XAI_OIDC_ISSUER}::{GROK_OIDC_CLIENT_ID}"),
             &entry,
@@ -1856,17 +1600,12 @@ mod tests {
         );
         let pending = pending_device_login_for_test("secret-access-token", "secret-refresh-token");
 
-        let rendered = format!("{entry:?} {token:?} {grant:?} {credentials:?} {pending:?}");
-        for secret in [
-            "secret-access-token",
-            "secret-refresh-token",
-            "secret-device-code",
-        ] {
+        let rendered = format!("{entry:?} {token:?} {credentials:?} {pending:?}");
+        for secret in ["secret-access-token", "secret-refresh-token"] {
             assert!(!rendered.contains(secret), "{secret} leaked: {rendered}");
         }
         // The shape stays useful for diagnosis.
         assert!(rendered.contains("<redacted>"), "{rendered}");
-        assert!(rendered.contains("CW-TEST"), "{rendered}");
         assert!(rendered.contains(GROK_OIDC_CLIENT_ID), "{rendered}");
     }
 
@@ -2491,8 +2230,6 @@ consent_version = 1
         );
         assert_eq!(XAI_OIDC_ISSUER, "https://auth.x.ai");
         assert_eq!(GROK_OIDC_CLIENT_ID.len(), 36);
-        // Keep device_code_login referenced so the residual entry point stays linked.
-        let _ = device_code_login;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2520,43 +2257,6 @@ consent_version = 1
                 token_endpoint: format!("{}/oauth2/token-advertised", server.uri()),
             }
         );
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn device_login_discovery_request_is_safe_inside_tokio_runtime() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/.well-known/openid-configuration"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "issuer": server.uri(),
-                "device_authorization_endpoint": format!("{}/oauth2/device-advertised", server.uri()),
-                "token_endpoint": format!("{}/oauth2/token-advertised", server.uri())
-            })))
-            .expect(1)
-            .mount(&server)
-            .await;
-        Mock::given(method("POST"))
-            .and(path("/oauth2/device-advertised"))
-            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
-                "error": "invalid_scope",
-                "error_description": "mock refusal before browser or polling"
-            })))
-            .expect(1)
-            .mount(&server)
-            .await;
-
-        let error = device_code_login_on_blocking_thread(
-            server.uri(),
-            "test-public-client".to_string(),
-            "openid".to_string(),
-            false,
-        )
-        .await
-        .expect_err("mock device request must fail without a runtime-drop panic");
-        let message = format!("{error:#}");
-
-        assert!(message.contains("invalid_scope"), "{message}");
-        assert!(message.contains("HTTP 400"), "{message}");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2683,131 +2383,6 @@ consent_version = 1
         );
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn current_device_endpoint_surfaces_structured_invalid_scope() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/oauth2/device/code"))
-            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
-                "error": "invalid_scope",
-                "error_description": "Scope 'team:read' is not valid for User principals"
-            })))
-            .expect(1)
-            .mount(&server)
-            .await;
-
-        let error = tokio::task::block_in_place(|| {
-            request_device_code(
-                &format!("{}/oauth2/device/code", server.uri()),
-                GROK_OIDC_CLIENT_ID,
-                "openid team:read",
-            )
-            .expect_err("invalid scope must fail")
-        });
-        let message = error.to_string();
-
-        assert!(message.contains("invalid_scope"), "{message}");
-        assert!(message.contains("team:read"), "{message}");
-        assert!(message.contains("HTTP 400"), "{message}");
-        assert!(!message.contains("missing device_code"), "{message}");
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn device_code_request_reports_non_json_without_echoing_body() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/oauth2/device"))
-            .respond_with(
-                ResponseTemplate::new(404)
-                    .set_body_raw("<html>private-upstream-detail</html>", "text/html"),
-            )
-            .expect(1)
-            .mount(&server)
-            .await;
-
-        let error = tokio::task::block_in_place(|| {
-            request_device_code(
-                &format!("{}/oauth2/device", server.uri()),
-                GROK_OIDC_CLIENT_ID,
-                DEFAULT_SCOPES,
-            )
-            .expect_err("non-JSON response must fail")
-        });
-        let message = error.to_string();
-
-        assert!(message.contains("HTTP 404"), "{message}");
-        assert!(message.contains("text/html"), "{message}");
-        assert!(message.contains("expected JSON"), "{message}");
-        assert!(!message.contains("private-upstream-detail"), "{message}");
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn device_code_login_exchanges_and_persists_tokens() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/.well-known/openid-configuration"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "issuer": server.uri(),
-                "device_authorization_endpoint": format!("{}/oauth2/device-advertised", server.uri()),
-                "token_endpoint": format!("{}/oauth2/token-advertised", server.uri())
-            })))
-            .expect(1)
-            .mount(&server)
-            .await;
-        Mock::given(method("POST"))
-            .and(path("/oauth2/device-advertised"))
-            .and(header("content-type", "application/x-www-form-urlencoded"))
-            .and(body_string_contains(format!(
-                "client_id={GROK_OIDC_CLIENT_ID}"
-            )))
-            .and(body_string_contains(
-                "scope=openid+profile+email+offline_access+api%3Aaccess+grok-cli%3Aaccess",
-            ))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "device_code": "device-token",
-                "user_code": "CW-TEST",
-                "verification_uri": format!("{}/verify", server.uri()),
-                "expires_in": 60,
-                "interval": 1
-            })))
-            .expect(1)
-            .mount(&server)
-            .await;
-        Mock::given(method("POST"))
-            .and(path("/oauth2/token-advertised"))
-            .and(header("content-type", "application/x-www-form-urlencoded"))
-            .and(body_string_contains(
-                "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Adevice_code",
-            ))
-            .and(body_string_contains(format!(
-                "client_id={GROK_OIDC_CLIENT_ID}"
-            )))
-            .and(body_string_contains("device_code=device-token"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "access_token": "test-xai-access",
-                "refresh_token": "test-xai-refresh",
-                "expires_in": 3600,
-                "token_type": "Bearer"
-            })))
-            .expect(1)
-            .mount(&server)
-            .await;
-
-        let result = tokio::task::block_in_place(|| {
-            device_code_login_with(&server.uri(), GROK_OIDC_CLIENT_ID, DEFAULT_SCOPES, false)
-        });
-
-        let pending = result.expect("device login");
-        assert_eq!(
-            pending.token.access_token.as_deref(),
-            Some("test-xai-access")
-        );
-        assert_eq!(
-            pending.token.refresh_token.as_deref(),
-            Some("test-xai-refresh")
-        );
-    }
-
     /// End-to-end regression for the v0.9.4 dogfood failure (#5032): starting
     /// from the exact state the dogfood machine was bricked in — a
     /// `providers.xai.oauth_credential_generation` pointer whose credential
@@ -2872,10 +2447,19 @@ consent_version = 1
         .unwrap();
         let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", &home);
 
-        let pending = tokio::task::block_in_place(|| {
-            device_code_login_with(&server.uri(), GROK_OIDC_CLIENT_ID, DEFAULT_SCOPES, false)
+        // The login half runs through the unified flow; only activation is
+        // still legacy here (3b-ii unifies it).
+        let inputs = crate::oauth::ResolvedOAuthInputs {
+            issuer: server.uri(),
+            client_id: GROK_OIDC_CLIENT_ID.to_string(),
+            scopes: DEFAULT_SCOPES.to_string(),
+            open_browser: false,
+        };
+        let unified = tokio::task::block_in_place(|| {
+            crate::oauth::device_code_login_with(crate::oauth::OAuthProvider::Xai, &inputs)
         })
         .expect("device login against mock xAI");
+        let pending = pending_from_unified(unified);
         let mut live = Config::default();
         let activation = activate_device_login(pending, Some(&config_path), Some(&mut live))
             .expect("dangling pointer must not brick activation");
@@ -2892,80 +2476,6 @@ consent_version = 1
         assert!(persisted.contains(activation.auth_path.file_name().unwrap().to_str().unwrap()));
         assert!(persisted.contains("auth_mode = \"oauth\""));
         assert!(credentials_valid(&live), "activated login must be usable");
-    }
-
-    /// Replaces `device_poll_backoff_follows_rfc8628`, which pinned the old
-    /// internal shape: a stringly-typed backoff helper that decided whether to
-    /// keep polling by substring-matching the poll error message. The same
-    /// RFC 8628 behaviours are now pinned in two places — the interval
-    /// arithmetic in `codewhale_config::device_code`, and the classification of
-    /// a real token-endpoint response here.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn poll_device_token_classifies_rfc8628_poll_states() {
-        async fn outcome(
-            body: serde_json::Value,
-            status: u16,
-        ) -> Result<DevicePollOutcome<TokenResponse>> {
-            let server = MockServer::start().await;
-            Mock::given(method("POST"))
-                .and(path("/oauth2/token"))
-                .respond_with(ResponseTemplate::new(status).set_body_json(body))
-                .expect(1)
-                .mount(&server)
-                .await;
-            tokio::task::block_in_place(|| {
-                poll_device_token(
-                    &format!("{}/oauth2/token", server.uri()),
-                    GROK_OIDC_CLIENT_ID,
-                    "device-token",
-                )
-            })
-        }
-
-        // authorization_pending keeps polling at the current interval.
-        assert!(matches!(
-            outcome(serde_json::json!({ "error": "authorization_pending" }), 400).await,
-            Ok(DevicePollOutcome::Pending)
-        ));
-
-        // slow_down backs off, and a server-supplied interval is carried
-        // through so the loop can prefer it over its own tracked value.
-        assert!(matches!(
-            outcome(
-                serde_json::json!({ "error": "slow_down", "interval": 12 }),
-                400
-            )
-            .await,
-            Ok(DevicePollOutcome::SlowDown {
-                interval_seconds: Some(12)
-            })
-        ));
-        assert!(matches!(
-            outcome(serde_json::json!({ "error": "slow_down" }), 400).await,
-            Ok(DevicePollOutcome::SlowDown {
-                interval_seconds: None
-            })
-        ));
-
-        // Terminal errors stop polling.
-        for error in ["access_denied", "expired_token"] {
-            let result = outcome(serde_json::json!({ "error": error }), 400).await;
-            let Err(failure) = result else {
-                panic!("{error} must stop polling");
-            };
-            assert!(failure.to_string().contains(error), "{failure}");
-        }
-
-        // Success carries the token material through.
-        let result = outcome(
-            serde_json::json!({ "access_token": "a", "refresh_token": "r", "expires_in": 3600 }),
-            200,
-        )
-        .await;
-        let Ok(DevicePollOutcome::Complete(token)) = result else {
-            panic!("an approved device code must complete");
-        };
-        assert_eq!(token.access_token.as_deref(), Some("a"));
     }
 
     #[test]
@@ -3031,183 +2541,6 @@ consent_version = 1
         assert!(
             error.to_string().contains("missing access_token"),
             "{error}"
-        );
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn device_code_login_polls_through_pending_and_slow_down() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/.well-known/openid-configuration"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "issuer": server.uri(),
-                "device_authorization_endpoint": format!("{}/oauth2/device-advertised", server.uri()),
-                "token_endpoint": format!("{}/oauth2/token-advertised", server.uri())
-            })))
-            .expect(1)
-            .mount(&server)
-            .await;
-        Mock::given(method("POST"))
-            .and(path("/oauth2/device-advertised"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "device_code": "device-token",
-                "user_code": "CW-TEST",
-                "verification_uri": format!("{}/verify", server.uri()),
-                "expires_in": 60,
-                "interval": 1
-            })))
-            .expect(1)
-            .mount(&server)
-            .await;
-        // wiremock matches mocks in mount order, so mount the one-shot
-        // transient-error responses before the terminal success response:
-        // poll 1 -> authorization_pending, poll 2 -> slow_down, poll 3 -> ok.
-        Mock::given(method("POST"))
-            .and(path("/oauth2/token-advertised"))
-            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
-                "error": "authorization_pending"
-            })))
-            .up_to_n_times(1)
-            .expect(1)
-            .mount(&server)
-            .await;
-        Mock::given(method("POST"))
-            .and(path("/oauth2/token-advertised"))
-            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
-                "error": "slow_down"
-            })))
-            .up_to_n_times(1)
-            .expect(1)
-            .mount(&server)
-            .await;
-        Mock::given(method("POST"))
-            .and(path("/oauth2/token-advertised"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "access_token": "test-xai-access",
-                "refresh_token": "test-xai-refresh",
-                "expires_in": 3600
-            })))
-            .expect(1)
-            .mount(&server)
-            .await;
-
-        let result = tokio::task::block_in_place(|| {
-            device_code_login_with(&server.uri(), GROK_OIDC_CLIENT_ID, DEFAULT_SCOPES, false)
-        });
-
-        let pending = result.expect("device login after pending and slow_down");
-        assert_eq!(
-            pending.token.access_token.as_deref(),
-            Some("test-xai-access")
-        );
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn device_code_login_surfaces_user_denial() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/.well-known/openid-configuration"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "issuer": server.uri(),
-                "device_authorization_endpoint": format!("{}/oauth2/device-advertised", server.uri()),
-                "token_endpoint": format!("{}/oauth2/token-advertised", server.uri())
-            })))
-            .expect(1)
-            .mount(&server)
-            .await;
-        Mock::given(method("POST"))
-            .and(path("/oauth2/device-advertised"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "device_code": "device-token",
-                "user_code": "CW-TEST",
-                "verification_uri": format!("{}/verify", server.uri()),
-                "expires_in": 60,
-                "interval": 1
-            })))
-            .expect(1)
-            .mount(&server)
-            .await;
-        Mock::given(method("POST"))
-            .and(path("/oauth2/token-advertised"))
-            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
-                "error": "access_denied",
-                "error_description": "The user denied the authorization request"
-            })))
-            .expect(1)
-            .mount(&server)
-            .await;
-
-        let result = tokio::task::block_in_place(|| {
-            device_code_login_with(&server.uri(), GROK_OIDC_CLIENT_ID, DEFAULT_SCOPES, false)
-        });
-
-        let error = result.expect_err("user denial must stop polling");
-        let message = format!("{error:#}");
-        assert!(message.contains("access_denied"), "{message}");
-        assert!(message.contains("HTTP 400"), "{message}");
-        assert!(!message.contains("authorization_pending"), "{message}");
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn poll_device_token_surfaces_expired_token() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/oauth2/token"))
-            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
-                "error": "expired_token",
-                "error_description": "The device code has expired"
-            })))
-            .expect(1)
-            .mount(&server)
-            .await;
-
-        let result = tokio::task::block_in_place(|| {
-            poll_device_token(
-                &format!("{}/oauth2/token", server.uri()),
-                GROK_OIDC_CLIENT_ID,
-                "device-token",
-            )
-        });
-        let Err(error) = result else {
-            panic!("expired device code must fail");
-        };
-        let message = error.to_string();
-
-        assert!(message.contains("expired_token"), "{message}");
-        assert!(message.contains("HTTP 400"), "{message}");
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn poll_device_token_reports_non_json_without_raw_parse_failure() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/oauth2/token"))
-            .respond_with(
-                ResponseTemplate::new(503)
-                    .set_body_raw("<html>upstream-maintenance-detail</html>", "text/html"),
-            )
-            .expect(1)
-            .mount(&server)
-            .await;
-
-        let result = tokio::task::block_in_place(|| {
-            poll_device_token(
-                &format!("{}/oauth2/token", server.uri()),
-                GROK_OIDC_CLIENT_ID,
-                "device-token",
-            )
-        });
-        let Err(error) = result else {
-            panic!("non-JSON response must fail");
-        };
-        let message = error.to_string();
-
-        assert!(message.contains("HTTP 503"), "{message}");
-        assert!(message.contains("text/html"), "{message}");
-        assert!(message.contains("expected JSON"), "{message}");
-        assert!(
-            !message.contains("upstream-maintenance-detail"),
-            "{message}"
         );
     }
 }

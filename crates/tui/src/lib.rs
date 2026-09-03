@@ -8140,8 +8140,12 @@ fn run_logout() -> Result<()> {
 }
 
 async fn run_xai_device_auth(config_path: Option<&Path>) -> Result<()> {
-    let pending = xai_oauth::device_code_login().await?;
-    let activation = xai_oauth::activate_device_login(pending, config_path, None)?;
+    let pending = crate::oauth::device_code_login(crate::oauth::OAuthProvider::Xai).await?;
+    let activation = xai_oauth::activate_device_login(
+        xai_oauth::pending_from_unified(pending),
+        config_path,
+        None,
+    )?;
     println!(
         "xAI OAuth is ready; activated {} via {}",
         codewhale_config::quote_os_path(&activation.auth_path),

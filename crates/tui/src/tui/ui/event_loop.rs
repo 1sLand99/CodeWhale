@@ -6274,7 +6274,9 @@ pub(crate) async fn run_xai_device_login_from_tui(
         app.use_mouse_capture,
         app.use_bracketed_paste,
     )?;
-    let login_result = crate::xai_oauth::device_code_login().await;
+    let login_result = crate::oauth::device_code_login(crate::oauth::OAuthProvider::Xai)
+        .await
+        .map(crate::xai_oauth::pending_from_unified);
     resume_terminal(
         terminal,
         app.use_alt_screen(),
