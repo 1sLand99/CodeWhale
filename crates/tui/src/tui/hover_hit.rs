@@ -10,11 +10,30 @@ use ratatui::{
 use crate::tui::ocean;
 
 /// Kind of interactive surface under the pointer.
+///
+/// Slice G central registry: every clickable primitive family has a kind so
+/// per-screen renderers register one rect and the shared
+/// [`crate::tui::hover_layer`] paints the feedback. Selection (keyboard)
+/// styling stays in [`crate::tui::menu_style`]; these kinds only drive the
+/// pointer layer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HoverTargetKind {
     Link,
     /// A compact row that omitted part of its full source label.
     TruncatedText,
+    /// A clickable button (`[ Apply ]`, approval options, dialog controls).
+    Button,
+    /// A clickable list/picker row (file/model/theme/session/provider rows,
+    /// choice options, work-surface rows).
+    Row,
+    /// A clickable tab (settings category strip, shell tabs).
+    Tab,
+    /// A clickable chip (key-hint chips, filter chips, header chips).
+    Chip,
+    /// A clickable hotbar slot.
+    HotbarSlot,
+    /// A clickable toggle (switches, check rows, on/off settings).
+    Toggle,
 }
 
 /// Result of a hover hit-test.
@@ -96,5 +115,47 @@ mod tests {
     #[test]
     fn copy_affordance_is_stable() {
         assert_eq!(copy_affordance(), "⧉ copy");
+    }
+
+    #[test]
+    fn every_control_kind_hit_tests_through_the_shared_registry() {
+        // Each Slice G primitive family must resolve through the same
+        // topmost-wins hit-test so per-screen registration is one call.
+        for kind in [
+            HoverTargetKind::Button,
+            HoverTargetKind::Row,
+            HoverTargetKind::Tab,
+            HoverTargetKind::Chip,
+            HoverTargetKind::HotbarSlot,
+            HoverTargetKind::Toggle,
+        ] {
+            let targets = vec![HoverHit {
+                kind,
+                area: Rect::new(4, 1, 12, 1),
+                label: "control".into(),
+                copyable: false,
+            }];
+            let hit = hit_test(6, 1, &targets).expect("hit");
+            assert_eq!(hit.kind, kind);
+        }
+        let targets = vec![
+            HoverHit {
+                kind: HoverTargetKind::Row,
+                area: Rect::new(0, 0, 20, 1),
+                label: "row".into(),
+                copyable: false,
+            },
+            HoverHit {
+                kind: HoverTargetKind::Button,
+                area: Rect::new(2, 0, 6, 1),
+                label: "button".into(),
+                copyable: false,
+            },
+        ];
+        assert_eq!(
+            hit_test(3, 0, &targets).expect("hit").kind,
+            HoverTargetKind::Button,
+            "topmost (last registered) control wins"
+        );
     }
 }

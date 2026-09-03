@@ -217,7 +217,7 @@ fn render_info_row(f: &mut Frame, app: &mut App, area: Rect) -> InfoLineInteract
             .last_infoline_hitboxes
             .iter()
             .find(|hb| {
-                hb.id == InfoSegmentId::Model
+                matches!(hb.id, InfoSegmentId::Model | InfoSegmentId::Context)
                     && hb.area.x <= mx
                     && mx < hb.area.right()
                     && hb.area.y == my
