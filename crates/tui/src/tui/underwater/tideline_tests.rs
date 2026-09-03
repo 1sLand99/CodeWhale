@@ -148,9 +148,6 @@ fn startup_surfacing_midpoint_matches_its_golden() {
 }
 
 #[test]
-<<<<<<< HEAD
-fn the_card_states_the_workspace_recent_work_and_mcp_news() {
-=======
 fn sixel_tier_reserves_a_blank_block_and_reports_it() {
     // The sixel tier paints no ink of its own: a blank 6x3 block the event
     // loop draws the raster over, reported back so the reconciler can
@@ -189,8 +186,7 @@ fn braille_content(buf: &Buffer) -> String {
 }
 
 #[test]
-fn the_card_states_the_workspace_menu_and_mcp_news() {
->>>>>>> fix/0912-logo-20260902
+fn the_card_states_the_workspace_recent_work_and_mcp_news() {
     let text = draw(100, 30, &connected(&UI_THEME));
     for fact in [
         "codewhale v0.9.12",

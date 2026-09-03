@@ -1068,8 +1068,10 @@ fn run_workflow_command(
             // loaded and validated before the run starts.
             if let Some(name) = fleet.as_deref() {
                 let roots = named_fleet_search_roots(&workspace);
-                let loaded = codewhale_workflow::load_named_fleet(name, &roots)
-                    .with_context(|| format!("load Fleet `{name}` from {}", display_roots(&roots)))?;
+                let loaded =
+                    codewhale_workflow::load_named_fleet(name, &roots).with_context(|| {
+                        format!("load Fleet `{name}` from {}", display_roots(&roots))
+                    })?;
                 if workflow == "stopship" || name == "stopship" {
                     loaded
                         .validate_stopship_roles()
