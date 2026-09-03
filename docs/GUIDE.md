@@ -211,7 +211,7 @@ The interactive TUI has a few stable regions:
 - Transcript: the conversation, tool calls, command output summaries, and
   model responses.
 - Composer: where you type prompts, slash commands, and file mentions.
-- Work bar: the strip above the transcript (or an optional side rail) that
+- Workbar: the strip under the composer (or an optional side workbar) that
   holds the active goal, the to-do list, and sub-agents. Rows stay for the
   whole session — finished work reads as done rather than disappearing — and
   clicking a row (or pressing `Enter` on it) opens its detail.
@@ -247,7 +247,7 @@ The composer accepts normal prompts and slash commands. Type `/` to discover
 available commands. Use file mentions when you want the model to focus on a
 specific file or directory instead of searching broadly.
 
-The work bar is useful when a turn spans multiple steps. It keeps the goal,
+The workbar is useful when a turn spans multiple steps. It keeps the goal,
 the to-do list, and agent state visible while the transcript continues to
 grow — including after the work settles, so you can still open what happened.
 

@@ -605,8 +605,8 @@ impl HotbarActionSource for BuiltinHotbarActionSource {
         registry.register(AppHotbarAction::new(
             "sidebar.toggle",
             "side",
-            "Toggle sidebar",
-            "Show or hide the sidebar.",
+            "Toggle workbar",
+            "Show or hide the workbar.",
             AppHotbarKind::SidebarToggle,
         ));
         registry.register(AppHotbarAction::new(
@@ -1017,11 +1017,11 @@ impl HotbarAction for AppHotbarAction {
                 {
                     app.work_surface.placement =
                         crate::tui::work_surface::WorkSurfacePlacement::Bottom;
-                    app.status_message = Some("Rail: bottom placement".to_string());
+                    app.status_message = Some("Workbar: bottom placement".to_string());
                 } else {
                     app.work_surface.placement =
                         crate::tui::work_surface::WorkSurfacePlacement::Off;
-                    app.status_message = Some("Rail is off".to_string());
+                    app.status_message = Some("Workbar is off".to_string());
                 }
                 app.needs_redraw = true;
                 Ok(HotbarDispatch::Handled)

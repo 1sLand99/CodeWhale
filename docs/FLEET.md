@@ -293,8 +293,8 @@ The short public vocabulary is:
   may finish separately; dispatch is never presented as completion.
 
 UI guidance: keep the main transcript calm. A Workflow run should appear as a
-compact progress card plus work-bar rows (the strip above the transcript, or
-a side rail) with phase names, worker counts, receipts, and nested
+compact progress card plus workbar rows (the strip under the composer, or
+a side workbar) with phase names, worker counts, receipts, and nested
 indentation for child workers. Use the whale mark sparingly as an active
 header/status signal; avoid repeating emoji-heavy rows for every worker.
 

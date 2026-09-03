@@ -676,7 +676,7 @@ pub const SETTINGS_SCHEMA: &[SettingDef] = &[
         "bottom",
         ui(
             TAB_WORK,
-            "sidebar",
+            "workbar",
             "ConfigLabelWorkSurfacePlacement",
             "ConfigHintWorkSurfacePlacement",
         ),
@@ -687,7 +687,7 @@ pub const SETTINGS_SCHEMA: &[SettingDef] = &[
         "8",
         ui(
             TAB_WORK,
-            "sidebar",
+            "workbar",
             "ConfigLabelTopHeight",
             "ConfigHintWorkSurfaceTopHeight",
         ),
@@ -698,7 +698,7 @@ pub const SETTINGS_SCHEMA: &[SettingDef] = &[
         "30",
         ui(
             TAB_WORK,
-            "sidebar",
+            "workbar",
             "ConfigLabelSideWidth",
             "ConfigHintWorkSurfaceSideWidth",
         ),
@@ -707,7 +707,7 @@ pub const SETTINGS_SCHEMA: &[SettingDef] = &[
         "rail_panel",
         SettingKind::Enum(RAIL_PANEL),
         "tasks",
-        ui(TAB_WORK, "sidebar", "", "ConfigHintRailPanel"),
+        ui(TAB_WORK, "workbar", "", "ConfigHintRailPanel"),
     ),
     // Sidebar panel toggles; driven by view actions and startup flags, not rows.
     def("context_panel", SettingKind::Bool(ON_OFF), "false", None),

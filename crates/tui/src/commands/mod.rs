@@ -561,11 +561,11 @@ mod tests {
         assert!(command_infos().iter().any(|cmd| cmd.name == "config"));
         let rail = command_infos()
             .into_iter()
-            .find(|cmd| cmd.name == "rail")
-            .expect("rail command should exist");
-        assert_eq!(rail.aliases, &["sidebar"]);
+            .find(|cmd| cmd.name == "workbar")
+            .expect("workbar command should exist");
+        assert_eq!(rail.aliases, &["rail", "sidebar"]);
         assert_eq!(rail.description_id, MessageId::CmdSidebarDescription);
-        assert!(rail.description_for(Locale::En).contains("rail"));
+        assert!(rail.description_for(Locale::En).contains("workbar"));
         assert!(command_infos().iter().any(|cmd| cmd.name == "links"));
         let hf = command_infos()
             .into_iter()
@@ -1336,7 +1336,7 @@ mod tests {
     fn execute_rail_sets_placement_and_reports_actual_state() {
         let mut app = create_test_app();
 
-        let result = execute("/rail off", &mut app);
+        let result = execute("/workbar off", &mut app);
         assert!(!result.is_error);
         assert_eq!(app.work_surface.placement, WorkSurfacePlacement::Off);
         assert!(
@@ -1344,7 +1344,7 @@ mod tests {
                 .message
                 .as_deref()
                 .unwrap_or_default()
-                .contains("Rail is off")
+                .contains("Workbar is off")
         );
 
         let result = execute("/rail right", &mut app);
@@ -1358,22 +1358,26 @@ mod tests {
                 .contains("right placement")
         );
 
-        // The /sidebar alias drives the same rail.
+        // The /rail and /sidebar aliases drive the same workbar.
         let result = execute("/sidebar left", &mut app);
         assert!(!result.is_error);
         assert_eq!(app.work_surface.placement, WorkSurfacePlacement::Left);
 
-        // Bare /rail reports the actual rendered state; it must never claim
+        let result = execute("/rail top", &mut app);
+        assert!(!result.is_error);
+        assert_eq!(app.work_surface.placement, WorkSurfacePlacement::Top);
+
+        // Bare /workbar reports the actual rendered state; it must never claim
         // visibility for a surface that cannot render.
         app.work_surface.placement = WorkSurfacePlacement::Off;
-        let result = execute("/rail", &mut app);
+        let result = execute("/workbar", &mut app);
         assert!(!result.is_error);
         assert!(
             result
                 .message
                 .as_deref()
                 .unwrap_or_default()
-                .contains("Rail is off")
+                .contains("Workbar is off")
         );
     }
 
@@ -1413,7 +1417,7 @@ mod tests {
         assert_eq!(
             app.work_surface.placement,
             WorkSurfacePlacement::Bottom,
-            "on restores the default bottom rail (round 3)"
+            "on restores the default bottom workbar (round 3)"
         );
 
         let result = execute("/sidebar none", &mut app);
@@ -1431,7 +1435,7 @@ mod tests {
                 .message
                 .as_deref()
                 .unwrap_or_default()
-                .contains("Usage: /rail")
+                .contains("Usage: /workbar")
         );
     }
 

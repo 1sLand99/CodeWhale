@@ -1780,7 +1780,7 @@ impl ConfigSection {
             ConfigSection::Network => "network",
             ConfigSection::Display => "display",
             ConfigSection::Composer => "composer",
-            ConfigSection::Sidebar => "sidebar",
+            ConfigSection::Sidebar => "workbar",
             ConfigSection::History => "history",
             ConfigSection::Mcp => "mcp",
             ConfigSection::Fleet => "fleet",
@@ -8144,10 +8144,10 @@ context_window = 262144
     fn config_view_filter_matches_group_and_rows() {
         let mut view = create_config_view(Locale::En);
 
-        type_filter(&mut view, "side");
+        type_filter(&mut view, "workbar");
 
-        assert_eq!(view.filter, "side");
-        assert_eq!(visible_section_labels(&view), vec!["Sidebar"]);
+        assert_eq!(view.filter, "workbar");
+        assert_eq!(visible_section_labels(&view), vec!["Workbar"]);
         assert_eq!(
             visible_row_keys(&view),
             vec![
@@ -8164,9 +8164,9 @@ context_window = 262144
     fn localized_config_view_filter_matches_english_section_and_scope_labels() {
         let mut view = create_config_view(Locale::PtBr);
 
-        type_filter(&mut view, "sidebar saved");
+        type_filter(&mut view, "workbar saved");
 
-        assert_eq!(view.filter, "sidebar saved");
+        assert_eq!(view.filter, "workbar saved");
         assert_eq!(visible_section_labels(&view), vec!["Barra lateral"]);
         assert_eq!(
             visible_row_keys(&view),
