@@ -610,6 +610,21 @@ pub struct LaunchState {
     /// Claude Code config was detected on this host (probed once at
     /// construction); drives the launch card's migration notice line.
     pub claude_code_detected: bool,
+    /// Sixel-tier plumbing (`MarkTier::Sixel`), all `None` until used:
+    /// - `sixel_cell_px`: the terminal's cell size in pixels, measured once
+    ///   at startup so the raster encodes to the block's exact pixels.
+    /// - `sixel_terminal_bg`: the probed terminal background, for
+    ///   transparent (`Reset`) theme stages whose ground the terminal owns.
+    /// - `sixel_mark_area`: the block the last launch render reserved, in
+    ///   stage coordinates; reset every frame by the frame renderer.
+    /// - `sixel_emitted`: the live image's block, in the same stage
+    ///   coordinates (identical to screen cells in fullscreen), or `None`
+    ///   when nothing is drawn. Compared against the reservation so the
+    ///   event loop re-emits only on moves and clears on tier exit.
+    pub sixel_cell_px: Option<(u16, u16)>,
+    pub sixel_terminal_bg: Option<Color>,
+    pub sixel_mark_area: Option<Rect>,
+    pub sixel_emitted: Option<Rect>,
 }
 
 /// The launch card's dissolve motion budget. One bounded motion; reduced
@@ -674,6 +689,10 @@ impl LaunchState {
             menu_selected: None,
             dissolve_started_ms: None,
             claude_code_detected,
+            sixel_cell_px: None,
+            sixel_terminal_bg: None,
+            sixel_mark_area: None,
+            sixel_emitted: None,
         }
     }
 

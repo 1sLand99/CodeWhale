@@ -2000,6 +2000,10 @@ mod launch_contract_tests {
             menu_selected: None,
             dissolve_started_ms: None,
             claude_code_detected: false,
+            sixel_cell_px: None,
+            sixel_terminal_bg: None,
+            sixel_mark_area: None,
+            sixel_emitted: None,
         }
     }
 
@@ -3085,11 +3089,15 @@ const TINY_MARK_BELOW_WIDTH: u16 = 40;
 const ROUTE_BUDGET: usize = 60;
 
 /// Which mark the stage paints. Decided by the caller from the terminal
-/// (`kitty_graphics_supported`, `ascii_safe_enabled`), never in here.
+/// (`kitty_graphics_supported`, `sixel_graphics_supported`,
+/// `ascii_safe_enabled`), never in here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MarkTier {
     /// Kitty graphics placeholders over the transmitted PNG.
     Image,
+    /// A blank block the event loop draws the sixel raster over after the
+    /// frame. Same block size as [`MarkTier::Image`]; same PNG.
+    Sixel,
     /// The braille rows.
     Braille,
     /// ASCII-safe: no mark, the wordmark line stands alone.
@@ -3607,13 +3615,14 @@ fn render_launch_top_line(
 /// one announcement line only when true, then the prominent new-session
 /// entry over the recent-work list (PRD 4.1). The dissolve fades every ink
 /// toward the surface colour; at progress 1.0 the caller stops painting
-/// the card entirely.
+/// the card entirely. Returns the sixel tier's reserved block (stage
+/// coordinates), or a zero-width rect when no sixel block was reserved.
 fn render_launch_card(
     stage: Rect,
     buf: &mut Buffer,
     startup: &TidelineStartup<'_>,
     layout: &StartupLayout,
-) {
+) -> Rect {
     let theme = startup.theme;
     let fade = startup.card_dissolve;
     let rows = launch_card_rows(startup.locale, &startup.recent, startup.has_more_recent);
@@ -3628,7 +3637,7 @@ fn render_launch_card(
         !startup.recent.is_empty(),
         startup.recent.is_empty() && !startup.has_more_recent,
     ) else {
-        return;
+        return Rect::new(0, 0, 0, 0);
     };
     let card = plan.card;
     let card_w = card.width;
@@ -3670,6 +3679,9 @@ fn render_launch_card(
     );
 
     // The mark: the card's left column, vertically centred in the interior.
+    // Only the sixel tier reports a block; every other tier leaves this
+    // zero-width so the event loop emits nothing.
+    let mut sixel_reserve = Rect::new(0, 0, 0, 0);
     let interior_h = card.height.saturating_sub(2);
     let braille_rung = if card_w < TINY_MARK_BELOW_WIDTH {
         MarkSize::Tiny
@@ -3677,9 +3689,9 @@ fn render_launch_card(
         MarkSize::Small
     };
     let (mark_cols, mark_rows) = match startup.mark {
-        MarkTier::Image => (
-            crate::tui::mark::KITTY_MARK_COLS,
-            crate::tui::mark::KITTY_MARK_ROWS,
+        MarkTier::Image | MarkTier::Sixel => (
+            crate::tui::mark::MARK_IMAGE_COLS,
+            crate::tui::mark::MARK_IMAGE_ROWS,
         ),
         MarkTier::Braille => braille_rung.cells(),
         MarkTier::None => (0, 0),
@@ -3699,6 +3711,16 @@ fn render_launch_card(
                     buf,
                     startup.surface_progress,
                 );
+            }
+            MarkTier::Sixel => {
+                // Binary visibility, no surfacing: the raster is either
+                // there (settled, like reduced motion) or gone. Once the
+                // card starts dissolving the block stays unreserved so the
+                // event loop clears the image instead of stranding it over
+                // the working screen.
+                if fade <= 0.0 {
+                    sixel_reserve = crate::tui::mark::render_sixel_reserve(mark_area, buf);
+                }
             }
             MarkTier::Braille => {
                 crate::tui::mark::render_mark(
@@ -3857,14 +3879,20 @@ fn render_launch_card(
             }
         }
     }
+    sixel_reserve
 }
 
 /// Paint the startup stage: top line, the launch card (or the working
 /// screen once dissolved), then the docked composer. Deterministic; every
-/// fact is injected.
-pub fn render_tideline_startup(stage: Rect, buf: &mut Buffer, startup: &TidelineStartup<'_>) {
+/// fact is injected. Returns the sixel tier's reserved block (stage
+/// coordinates), or a zero-width rect when no sixel block was reserved.
+pub fn render_tideline_startup(
+    stage: Rect,
+    buf: &mut Buffer,
+    startup: &TidelineStartup<'_>,
+) -> Rect {
     if stage.width < 8 || stage.height < 5 {
-        return;
+        return Rect::new(0, 0, 0, 0);
     }
     let theme = startup.theme;
     let layout = startup_layout(stage);
@@ -3874,6 +3902,9 @@ pub fn render_tideline_startup(stage: Rect, buf: &mut Buffer, startup: &Tideline
     let card_gone = startup.card_dissolve >= 1.0;
     render_launch_top_line(layout.header, buf, startup, card_gone);
 
+    // The sixel block reserved by this paint, if any. The card is its only
+    // source; the working screen and the composer never reserve.
+    let mut sixel_reserve = Rect::new(0, 0, 0, 0);
     if card_gone {
         // The working screen's first transcript receipt, only when the
         // session fact is true.
@@ -3895,7 +3926,7 @@ pub fn render_tideline_startup(stage: Rect, buf: &mut Buffer, startup: &Tideline
             &Span::styled(receipt, chrome(theme, ChromeInk::Metadata)),
         );
     } else {
-        render_launch_card(stage, buf, startup, &layout);
+        sixel_reserve = render_launch_card(stage, buf, startup, &layout);
     }
 
     // The docked pre-session composer is the same rounded Tideline shell
@@ -3967,6 +3998,7 @@ pub fn render_tideline_startup(stage: Rect, buf: &mut Buffer, startup: &Tideline
             );
         }
     }
+    sixel_reserve
 }
 
 /// Recorded interactive hitboxes for the startup stage: the docked
@@ -4113,6 +4145,16 @@ pub fn tideline_startup_from_app(app: &App) -> TidelineStartup<'_> {
         MarkTier::None
     } else if crate::tui::mark::kitty_graphics_supported() {
         MarkTier::Image
+    } else if app.use_alt_screen()
+        && app.launch.sixel_cell_px.is_some()
+        && crate::tui::mark::sixel_graphics_supported()
+        && crate::tui::mark::sixel_field_bg(&app.ui_theme, app.launch.sixel_terminal_bg).is_some()
+    {
+        // Sixel last: cursor-addressed pixels need the alternate screen
+        // (inline viewports have no stable CUP origin), a measured cell
+        // size, and an RGB field to composite the raster's corners onto.
+        // Anything missing keeps the braille tier.
+        MarkTier::Sixel
     } else {
         MarkTier::Braille
     };

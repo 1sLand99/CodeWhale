@@ -20,7 +20,7 @@ use crate::tui::golden_harness::{
 
 fn draw(width: u16, height: u16, startup: &TidelineStartup<'_>) -> String {
     render_golden_text(width, height, |buf| {
-        render_tideline_startup(Rect::new(0, 0, width, height), buf, startup)
+        let _ = render_tideline_startup(Rect::new(0, 0, width, height), buf, startup);
     })
 }
 
@@ -148,7 +148,49 @@ fn startup_surfacing_midpoint_matches_its_golden() {
 }
 
 #[test]
+<<<<<<< HEAD
 fn the_card_states_the_workspace_recent_work_and_mcp_news() {
+=======
+fn sixel_tier_reserves_a_blank_block_and_reports_it() {
+    // The sixel tier paints no ink of its own: a blank 6x3 block the event
+    // loop draws the raster over, reported back so the reconciler can
+    // position it. Braille and kitty tiers report nothing.
+    let area = Rect::new(0, 0, 80, 24);
+    let mut sixel = Buffer::empty(area);
+    let startup = connected(&UI_THEME).mark(MarkTier::Sixel);
+    let reserved = render_tideline_startup(area, &mut sixel, &startup);
+    assert_eq!((reserved.width, reserved.height), (6, 3));
+    for y in reserved.y..reserved.y + reserved.height {
+        for x in reserved.x..reserved.x + reserved.width {
+            assert_eq!(
+                sixel[(x, y)].symbol(),
+                " ",
+                "reserve cell ({x},{y}) is blank"
+            );
+        }
+    }
+    let mut braille = Buffer::empty(area);
+    let settled = render_tideline_startup(area, &mut braille, &connected(&UI_THEME));
+    assert_eq!(settled.width, 0, "braille tier reserves no block");
+    // The braille still frame carries the founder whale's dots, not blanks.
+    let dots = braille_content(&braille);
+    assert!(
+        dots.chars()
+            .any(|glyph| ('\u{2800}'..='\u{28ff}').contains(&glyph)),
+        "braille tier still paints dots"
+    );
+}
+
+/// Collect the card's mark cells as text for tier assertions.
+fn braille_content(buf: &Buffer) -> String {
+    (0..buf.area.height)
+        .flat_map(|y| (0..buf.area.width).map(move |x| buf[(x, y)].symbol().to_string()))
+        .collect()
+}
+
+#[test]
+fn the_card_states_the_workspace_menu_and_mcp_news() {
+>>>>>>> fix/0912-logo-20260902
     let text = draw(100, 30, &connected(&UI_THEME));
     for fact in [
         "codewhale v0.9.12",

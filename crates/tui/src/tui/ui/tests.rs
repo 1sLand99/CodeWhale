@@ -24510,3 +24510,57 @@ fn resumed_launch_keeps_the_loaded_session_id_for_the_engine() {
         crate::core::engine::Engine::new(build_engine_config(&app, &config), &config);
     assert_eq!(engine.session_id(), "800596e6-56fd-477c-9a0f-13ada7846194");
 }
+
+#[test]
+fn sixel_reconciler_emits_moves_and_clears() {
+    crate::tui::mark::set_sixel_supported_for_tests(true);
+    let mut app = create_test_app();
+    app.launch.sixel_cell_px = Some((10, 20));
+    // Force the transparent-stage branch: the raster composites onto the
+    // probed terminal background, and the clear below must repaint exactly
+    // that colour.
+    app.ui_theme.surface_bg = ratatui::style::Color::Reset;
+    app.launch.sixel_terminal_bg = Some(ratatui::style::Color::Rgb(3, 7, 13));
+    let mut writer: Vec<u8> = Vec::new();
+    // No reservation: silent, nothing tracked.
+    super::frame::reconcile_launch_sixel(&mut writer, &mut app);
+    assert!(writer.is_empty());
+    assert_eq!(app.launch.sixel_emitted, None);
+    // New block: one positioned emission, tracked in stage coordinates
+    // (stage cells are screen cells in fullscreen; CUP is 1-based, so
+    // stage (2,1) draws at row 2, column 3).
+    app.launch.sixel_mark_area = Some(Rect::new(2, 1, 6, 3));
+    super::frame::reconcile_launch_sixel(&mut writer, &mut app);
+    let text = String::from_utf8(writer.clone()).expect("ASCII stream");
+    assert!(text.contains("\x1b[2;3H"), "{text:?}");
+    assert!(text.contains("\x1bPq"), "{text:?}");
+    assert_eq!(app.launch.sixel_emitted, Some(Rect::new(2, 1, 6, 3)));
+    // Steady state: silent.
+    let settled = writer.len();
+    super::frame::reconcile_launch_sixel(&mut writer, &mut app);
+    assert_eq!(writer.len(), settled, "steady frame emits nothing");
+    // Moved block: the old screen block is wiped with the field colour,
+    // then the new block draws (stage (4,1) -> CUP row 3, column 6).
+    app.launch.sixel_mark_area = Some(Rect::new(4, 1, 6, 3));
+    super::frame::reconcile_launch_sixel(&mut writer, &mut app);
+    let text = String::from_utf8(writer.clone()).expect("ASCII stream");
+    let delta = &text[settled..];
+    assert!(delta.contains("48;2;"), "move clears the old block first");
+    assert!(
+        delta.contains("48;2;3;7;13m"),
+        "clear repaints the probed field: {delta:?}"
+    );
+    assert!(delta.contains("\x1b[2;5H"), "{delta:?}");
+    assert_eq!(app.launch.sixel_emitted, Some(Rect::new(4, 1, 6, 3)));
+    // Tier exit: the live block is wiped and tracking stops.
+    let moved = writer.len();
+    app.launch.sixel_mark_area = None;
+    super::frame::reconcile_launch_sixel(&mut writer, &mut app);
+    let text = String::from_utf8(writer.clone()).expect("ASCII stream");
+    assert!(
+        text[moved..].contains("48;2;"),
+        "exit clears the live block"
+    );
+    assert_eq!(app.launch.sixel_emitted, None);
+    crate::tui::mark::set_sixel_supported_for_tests(false);
+}

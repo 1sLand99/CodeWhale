@@ -26,7 +26,10 @@ pub(super) fn event_owner_is_active(
     !owner_session_id.is_empty() && current_session_id == Some(owner_session_id)
 }
 
-fn current_session_fleet_workers_status(locale: crate::localization::Locale, count: usize) -> String {
+fn current_session_fleet_workers_status(
+    locale: crate::localization::Locale,
+    count: usize,
+) -> String {
     crate::localization::tr(
         locale,
         crate::localization::MessageId::SubagentsCurrentSessionFleetWorkersStatus,
@@ -415,6 +418,10 @@ pub async fn run_tui(
     // Same window, same reason: the kitty graphics capability query answers
     // on stdin, so it is asked before the input pump exists.
     let kitty_graphics = crate::tui::mark::probe_kitty_graphics();
+    // Same window again: the sixel probe is a primary-DA query whose reply
+    // also arrives on stdin. Asked only after kitty — a kitty "yes" means
+    // the launch header never needs the sixel tier.
+    let sixel_graphics = crate::tui::mark::probe_sixel_graphics();
     let palette_mode = background.mode();
     tracing::debug!(
         ?color_depth,
@@ -422,6 +429,7 @@ pub async fn run_tui(
         background_source = ?background.source(),
         background_color = ?background.color(),
         kitty_graphics,
+        sixel_graphics,
         "terminal color profile detected"
     );
     let mut backend = ColorCompatBackend::new(stdout, color_depth, palette_mode);
@@ -446,6 +454,23 @@ pub async fn run_tui(
         .filter(|size| size.columns_rows.height > 0 && size.pixels.height > 0)
         .map(|size| size.pixels.height / size.columns_rows.height);
     crate::tui::mark::transmit_kitty_mark(terminal.backend_mut(), cell_height_px);
+    // Sixel needs both cell dimensions (its pixels are sized to the mark
+    // block exactly). Measured once: cell geometry survives resizes.
+    let sixel_cell_px = ratatui::backend::Backend::window_size(terminal.backend_mut())
+        .ok()
+        .filter(|size| {
+            size.columns_rows.width > 0
+                && size.columns_rows.height > 0
+                && size.pixels.width > 0
+                && size.pixels.height > 0
+        })
+        .map(|size| {
+            (
+                size.pixels.width / size.columns_rows.width,
+                size.pixels.height / size.columns_rows.height,
+            )
+        })
+        .filter(|(cell_w, cell_h)| *cell_w > 0 && *cell_h > 0);
     let event_broker = EventBroker::new();
 
     // Local mutable copy so runtime config flips (e.g. `/provider` switch)
@@ -453,6 +478,11 @@ pub async fn run_tui(
     let mut config = config.clone();
     let config = &mut config;
     let mut app = App::new_with_plugin_registry(options.clone(), config, plugin_registry);
+    // Without a measured cell the sixel tier cannot size its raster, so an
+    // unmeasured terminal keeps the braille tier by construction. The
+    // probed background grounds transparent theme stages the same way.
+    app.launch.sixel_cell_px = sixel_cell_px;
+    app.launch.sixel_terminal_bg = background.color();
     let _cursor_accent_guard = crate::tui::cursor_accent::CursorAccentGuard::install(
         app.low_motion || !app.fancy_animations,
         app.ui_theme.accent_primary,
@@ -847,6 +877,11 @@ pub async fn run_tui(
     cleanup_guard.defused = true;
     crate::tui::cursor_accent::restore_cursor_accent();
     crate::tui::mark::delete_kitty_mark(terminal.backend_mut());
+    // Sixel has no image registry: leaving the alternate screen drops the
+    // pixels anyway, but a stranded block (tier exited on the last frame)
+    // is still wiped first so nothing lingers into the teardown draws.
+    app.launch.sixel_mark_area = None;
+    crate::tui::ui::frame::reconcile_launch_sixel(terminal.backend_mut(), &mut app);
     pop_keyboard_enhancement_flags(terminal.backend_mut());
     disable_alternate_scroll_mode(terminal.backend_mut());
     execute!(terminal.backend_mut(), DisableFocusChange)?;
