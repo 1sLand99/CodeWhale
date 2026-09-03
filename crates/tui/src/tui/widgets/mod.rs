@@ -5318,7 +5318,7 @@ mod tests {
         let root = slash_completion_hints("/", 128, &[], Locale::En, None, ApiProvider::Deepseek);
         assert!(root.iter().any(|hint| hint.name == "/model"));
         assert!(!root.iter().any(|hint| hint.name == "/provider"));
-        assert!(!root.iter().any(|hint| hint.name == "/pod"));
+        assert!(!root.iter().any(|hint| hint.name == "/fleet"));
         assert!(!root.iter().any(|hint| hint.name == "/fleet"));
         assert!(!root.iter().any(|hint| hint.name == "/config"));
         assert!(!root.iter().any(|hint| hint.name == "/statusline"));
@@ -5526,16 +5526,19 @@ mod tests {
     }
 
     #[test]
-    fn slash_completion_migrates_legacy_pod_to_canonical_fleet() {
+    fn slash_completion_offers_no_retired_pod_entry() {
         let hints =
             slash_completion_hints("/pod", 128, &[], Locale::En, None, ApiProvider::Deepseek);
-        let entry = hints
-            .iter()
-            .find(|hint| hint.name == "/fleet")
-            .expect("legacy /pod should discover canonical /fleet");
-
-        assert_eq!(entry.alias_hint.as_deref(), Some("pod"));
-        assert!(!hints.iter().any(|hint| hint.name == "/pod"));
+        assert!(
+            !hints.iter().any(|hint| hint.name == "/pod"),
+            "the retired /pod spelling must not complete"
+        );
+        for entry in hints.iter().filter(|hint| hint.name == "/fleet") {
+            assert_eq!(
+                entry.alias_hint, None,
+                "no alias may point at the retired spelling"
+            );
+        }
     }
 
     #[test]

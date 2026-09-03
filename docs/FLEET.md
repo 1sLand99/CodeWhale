@@ -16,12 +16,10 @@ fleet member identity with delegated runtime execution.
 **Fleet** is the public product noun. The durable ledger, saved rosters, config
 tables, and `--fleet` flag share that name:
 
-| Surface | Canonical | Compatibility alias |
-| --- | --- | --- |
-| CLI | `codewhale fleet …` | `codewhale pod …` |
-| Slash command | `/fleet …` | `/pod …` |
-
-`/pod` and `codewhale pod` remain accepted as compatibility aliases.
+| Surface | Canonical |
+| --- | --- |
+| CLI | `codewhale fleet …` |
+| Slash command | `/fleet …` |
 
 These shared names are load-bearing wherever changing them would break
 existing workspaces, receipts, or scripts:

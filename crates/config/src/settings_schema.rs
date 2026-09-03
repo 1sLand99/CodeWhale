@@ -326,7 +326,7 @@ const RAIL_PANEL: &[SettingOption] = &[
 /// Rail tab ids.
 pub const TAB_APPEARANCE: &str = "appearance";
 pub const TAB_MODELS: &str = "models";
-pub const TAB_POD: &str = "pod";
+pub const TAB_FLEET: &str = "fleet";
 pub const TAB_WORK: &str = "work";
 pub const TAB_TOOLS: &str = "tools";
 pub const TAB_TRUST: &str = "trust";
@@ -367,7 +367,7 @@ pub const SETTINGS_SCHEMA: &[SettingDef] = &[
     def(
         "theme",
         SettingKind::String,
-        "terminal",
+        "underwater",
         ui(
             TAB_APPEARANCE,
             "display",
@@ -587,13 +587,13 @@ pub const SETTINGS_SCHEMA: &[SettingDef] = &[
             "ConfigHintReasoningEffort",
         ),
     ),
-    // ── pod ─────────────────────────────────────────────────────────────
+    // ── fleet ────────────────────────────────────────────────────────
     def(
         "fleet.exec.max_spawn_depth",
         SettingKind::Int,
         "3",
         ui(
-            TAB_POD,
+            TAB_FLEET,
             "fleet",
             "ConfigLabelFleetSpawnDepth",
             "ConfigHintFleetMaxSpawnDepth",
