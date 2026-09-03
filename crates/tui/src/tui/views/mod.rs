@@ -2999,7 +2999,6 @@ impl ConfigView {
         } else {
             ViewAction::None
         }
->>>>>>> fix/0912-theme-20260902
     }
 
     /// Apply the editor's value (Enter or the Apply control): the selected
