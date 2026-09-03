@@ -7,8 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.12] - 2026-09-03
+
 ### Added
 
+- Computer use ships with the binary. The `computer-use` plugin — 38 tools
+  across macOS, Windows, Linux and HarmonyOS, accessibility-first observation
+  with pixel fallback, screenshots, zoom, screen recording, and registered
+  remote computers over ssh and hdc — is embedded in Codewhale and written to
+  `$CODEWHALE_HOME/builtin-plugins` on first run, so every install channel
+  carries it. It lists as `builtin · not-reviewed` and stays disabled until
+  you review and enable it: shipping it is not consenting to it. The
+  stdlib-Python computer-use server it replaces is gone.
 - Alibaba Model Studio joins the data-driven provider table as an
   `openai-compatible` descriptor: international compatible-mode endpoint,
   `DASHSCOPE_API_KEY` credential, live `/v1/models` discovery. Qwen 3.8
@@ -7801,7 +7811,8 @@ overflow report and `/theme` picker edge-wrapping patch in #1814.
 
 Older releases (v0.8.39 and earlier) are archived in [docs/CHANGELOG_ARCHIVE.md](docs/CHANGELOG_ARCHIVE.md).
 
-[Unreleased]: https://github.com/Hmbown/CodeWhale/compare/v0.9.11...HEAD
+[Unreleased]: https://github.com/Hmbown/CodeWhale/compare/v0.9.12...HEAD
+[0.9.12]: https://github.com/Hmbown/CodeWhale/compare/v0.9.11...v0.9.12
 [0.9.11]: https://github.com/Hmbown/CodeWhale/compare/v0.9.10...v0.9.11
 [0.9.10]: https://github.com/Hmbown/CodeWhale/compare/v0.9.9...v0.9.10
 [0.9.9]: https://github.com/Hmbown/CodeWhale/compare/v0.9.8...v0.9.9
