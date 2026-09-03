@@ -2194,6 +2194,27 @@ fn list_values_fully_redacts_short_api_key() {
 }
 
 #[test]
+fn redacted_toml_value_keeps_shape_but_not_secret_bytes() {
+    let mut config = ConfigToml {
+        api_key: Some("sk-deepseek-secret-value".to_string()),
+        model: Some("deepseek-v4-pro".to_string()),
+        ..ConfigToml::default()
+    };
+    config.providers.openrouter.api_key = Some("openrouter-secret-value".to_string());
+
+    let value = config.redacted_toml_value();
+    let table = value.as_table().expect("dump renders a table");
+    let api_key = table
+        .get("api_key")
+        .and_then(toml::Value::as_str)
+        .expect("api_key keeps its slot");
+    assert!(!api_key.contains("secret"), "{api_key}");
+    let rendered = toml::to_string_pretty(&value).expect("dump serializes");
+    assert!(!rendered.contains("secret-value"), "{rendered}");
+    assert!(rendered.contains("deepseek-v4-pro"), "{rendered}");
+}
+
+#[test]
 fn get_display_value_redacts_sensitive_keys() {
     let mut config = ConfigToml {
         api_key: Some("sk-deepseek-secret".to_string()),

@@ -147,6 +147,11 @@ struct Cli {
     session_id: Option<String>,
     #[arg(short = 'p', long = "prompt", value_name = "PROMPT")]
     prompt_flag: Option<String>,
+    /// Per-run config override (`KEY=VALUE`), repeatable. Applied in memory
+    /// after load and never saved — `config set` persists instead. Long-only:
+    /// short `-c` is already `--continue`.
+    #[arg(long = "set", value_name = "KEY=VALUE")]
+    overrides: Vec<String>,
     #[arg(
         value_name = "PROMPT",
         trailing_var_arg = true,
@@ -1579,6 +1584,15 @@ enum ConfigCommand {
     },
     List,
     Path,
+    /// Open the config file in `$VISUAL`/`$EDITOR` (else `vi`).
+    Edit,
+    /// Check the loaded config: unknown keys, empty secrets, malformed
+    /// URLs. Read-only; prints warnings, fails on errors, never prints a
+    /// credential.
+    Doctor,
+    /// Print the effective config (including `--set` overlays) as TOML with
+    /// secrets redacted by key name.
+    Dump,
     /// Import a portable config bundle from a file, HTTPS URL, or stdin (-).
     Import(config_bundles::ImportArgs),
     /// Export a portable, secret-free config bundle.
@@ -1891,6 +1905,10 @@ fn run() -> Result<()> {
              use the subcommand's own flag (for example `codewhale exec --session-id <id>`)."
         );
     }
+    // Per-run `--set KEY=VALUE` overlays: validated and applied in memory,
+    // never saved. Mutating config subcommands refuse them below rather than
+    // letting a per-run value leak into the file.
+    apply_per_run_overrides(&mut store, &cli.overrides)?;
 
     match command {
         Some(Commands::Run(args)) => {
@@ -2102,7 +2120,12 @@ fn run() -> Result<()> {
                 Some(store.path().to_path_buf()),
                 Surface::Cli,
             );
-            let outcome = run_config_command(&mut store, args.command, project_bundle_scope);
+            let outcome = run_config_command(
+                &mut store,
+                args.command,
+                project_bundle_scope,
+                &cli.overrides,
+            );
             finish_cli_telemetry(session, &outcome);
             outcome
         }
@@ -4389,11 +4412,25 @@ fn run_config_command(
     store: &mut ConfigStore,
     command: ConfigCommand,
     project_bundle_scope: bool,
+    per_run_overrides: &[String],
 ) -> Result<()> {
     if project_bundle_scope && !codewhale_config::config_path_is_workspace_scoped(store.path()) {
         bail!(
             "--project requires a workspace config ({} is the user-global document)",
             store.path().display()
+        );
+    }
+    // A per-run overlay must never leak into the file: commands that write
+    // the store refuse it outright instead of saving a merged document.
+    if !per_run_overrides.is_empty()
+        && matches!(
+            command,
+            ConfigCommand::Set { .. } | ConfigCommand::Unset { .. } | ConfigCommand::Import(_)
+        )
+    {
+        bail!(
+            "--set is per-run and never saved; it cannot be combined with `config set`, \
+             `config unset`, or `config import`. Drop --set, or use a read command."
         );
     }
     match command {
@@ -4435,12 +4472,117 @@ fn run_config_command(
             println!("{}", store.path().display());
             Ok(())
         }
+        ConfigCommand::Edit => {
+            let path = store.path().to_path_buf();
+            println!("{}", path.display());
+            let editor = std::env::var("VISUAL")
+                .or_else(|_| std::env::var("EDITOR"))
+                .unwrap_or_else(|_| "vi".to_string());
+            let status = Command::new(&editor)
+                .arg(&path)
+                .status()
+                .with_context(|| format!("failed to launch editor {editor:?}"))?;
+            if !status.success() {
+                bail!("editor {editor:?} exited with {status}");
+            }
+            Ok(())
+        }
+        ConfigCommand::Doctor => run_config_doctor(store),
+        ConfigCommand::Dump => {
+            if !per_run_overrides.is_empty() {
+                println!(
+                    "# {} per-run --set override(s), not saved",
+                    per_run_overrides.len()
+                );
+            }
+            println!("# {}", store.path().display());
+            print!(
+                "{}",
+                toml::to_string_pretty(&store.config.redacted_toml_value())?
+            );
+            Ok(())
+        }
         ConfigCommand::Import(args) => {
             let workspace = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
             config_bundles::run_import(&args, store, &workspace)
         }
         ConfigCommand::Export(args) => config_bundles::run_export(&args, store),
     }
+}
+
+/// Apply per-run `--set KEY=VALUE` overlays to the loaded store in memory.
+/// Nothing is saved; callers that persist must refuse overrides first
+/// (see `run_config_command`).
+fn apply_per_run_overrides(store: &mut ConfigStore, specs: &[String]) -> Result<()> {
+    for spec in specs {
+        let (key, value) = spec
+            .split_once('=')
+            .with_context(|| format!("invalid --set {spec:?}: expected KEY=VALUE"))?;
+        store
+            .config
+            .set_value(key.trim(), value)
+            .with_context(|| format!("invalid --set {spec:?}"))?;
+    }
+    Ok(())
+}
+
+/// Read-only config check. Unknown keys warn (the loader preserves them,
+/// never applies them); empty secrets and non-HTTP endpoints fail. Never
+/// prints a credential — presence and shape only.
+fn run_config_doctor(store: &ConfigStore) -> Result<()> {
+    println!("# {}", store.path().display());
+    let mut warnings = 0;
+    let mut errors: Vec<String> = Vec::new();
+
+    let mut unknown: Vec<&String> = store.config.extras.keys().collect();
+    unknown.sort();
+    for key in unknown {
+        println!("warning: unrecognized key `{key}` (preserved, never applied)");
+        warnings += 1;
+    }
+
+    let mut secrets: Vec<(String, Option<String>)> =
+        vec![("api_key".to_string(), store.config.api_key.clone())];
+    let mut endpoints: Vec<(String, Option<String>)> =
+        vec![("base_url".to_string(), store.config.base_url.clone())];
+    for provider in ProviderKind::ALL {
+        let table = store.config.providers.for_provider(provider);
+        secrets.push((format!("{provider:?}.api_key"), table.api_key.clone()));
+        endpoints.push((format!("{provider:?}.base_url"), table.base_url.clone()));
+    }
+    for (name, secret) in secrets {
+        if secret
+            .as_deref()
+            .is_some_and(|value| value.trim().is_empty())
+        {
+            errors.push(format!("`{name}` is set but empty"));
+        }
+    }
+    for (name, endpoint) in endpoints {
+        if let Some(url) = endpoint.as_deref()
+            && !url.starts_with("http://")
+            && !url.starts_with("https://")
+        {
+            errors.push(format!("`{name}` is not an http(s) URL: {url}"));
+        }
+    }
+
+    if !errors.is_empty() {
+        for error in &errors {
+            println!("error: {error}");
+        }
+        bail!(
+            "doctor: {} error(s), {warnings} warning(s): {}",
+            errors.len(),
+            errors.join("; ")
+        );
+    }
+    if warnings == 0 {
+        println!("doctor: clean");
+    } else {
+        println!("doctor: {warnings} warning(s)");
+    }
+    Ok(())
 }
 
 /// An explicit `telemetry = true` re-enables a machine that previously declined
@@ -5617,6 +5759,122 @@ mod tests {
                 command: ConfigCommand::Path
             }))
         ));
+        assert!(matches!(
+            parse_ok(&["codewhale", "config", "edit"]).command,
+            Some(Commands::Config(ConfigArgs {
+                command: ConfigCommand::Edit
+            }))
+        ));
+        assert!(matches!(
+            parse_ok(&["codewhale", "config", "doctor"]).command,
+            Some(Commands::Config(ConfigArgs {
+                command: ConfigCommand::Doctor
+            }))
+        ));
+        assert!(matches!(
+            parse_ok(&["codewhale", "config", "dump"]).command,
+            Some(Commands::Config(ConfigArgs {
+                command: ConfigCommand::Dump
+            }))
+        ));
+    }
+
+    #[test]
+    fn parses_repeatable_global_set_overrides() {
+        let cli = parse_ok(&[
+            "codewhale",
+            "--set",
+            "verbosity=concise",
+            "--set",
+            "model=deepseek-v4-flash",
+            "config",
+            "get",
+            "verbosity",
+        ]);
+        assert_eq!(
+            cli.overrides,
+            vec![
+                "verbosity=concise".to_string(),
+                "model=deepseek-v4-flash".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn config_doctor_is_clean_on_minimal_config() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("config.toml");
+        write_config_fixture(&path, "verbosity = \"concise\"\n");
+        let store = ConfigStore::load(Some(path)).expect("load fixture");
+        run_config_doctor(&store).expect("clean doctor");
+    }
+
+    #[test]
+    fn config_doctor_warns_on_unknown_keys_but_passes() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("config.toml");
+        write_config_fixture(&path, "zzz_unknown = 1\n");
+        let store = ConfigStore::load(Some(path)).expect("load fixture");
+        assert!(!store.config.extras.is_empty());
+        run_config_doctor(&store).expect("unknown keys warn, not fail");
+    }
+
+    #[test]
+    fn config_doctor_fails_on_empty_secret_and_bad_url() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("config.toml");
+        write_config_fixture(&path, "api_key = \"\"\nbase_url = \"gopher://x\"\n");
+        let store = ConfigStore::load(Some(path)).expect("load fixture");
+        let error = run_config_doctor(&store).expect_err("doctor must fail");
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("api_key") && message.contains("empty"),
+            "{message}"
+        );
+        assert!(
+            message.contains("base_url") && message.contains("http"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn per_run_overrides_apply_in_memory_and_never_save() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("config.toml");
+        write_config_fixture(&path, "verbosity = \"normal\"\n");
+        let mut store = ConfigStore::load(Some(path.clone())).expect("load fixture");
+        apply_per_run_overrides(&mut store, &["verbosity=concise".to_string()])
+            .expect("overlay applies");
+        assert_eq!(store.config.verbosity.as_deref(), Some("concise"));
+        let error = apply_per_run_overrides(&mut store, &["no-equals-here".to_string()])
+            .expect_err("missing = must fail");
+        assert!(format!("{error:#}").contains("KEY=VALUE"));
+        // Nothing was saved: a reload sees the file, not the overlay.
+        let reloaded = ConfigStore::load(Some(path)).expect("reload");
+        assert_eq!(reloaded.config.verbosity.as_deref(), Some("normal"));
+    }
+
+    #[test]
+    fn mutating_config_commands_refuse_per_run_overrides() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("config.toml");
+        write_config_fixture(&path, "verbosity = \"normal\"\n");
+        let mut store = ConfigStore::load(Some(path)).expect("load fixture");
+        let overrides = vec!["verbosity=concise".to_string()];
+        let error = run_config_command(
+            &mut store,
+            ConfigCommand::Set {
+                key: "verbosity".to_string(),
+                value: "concise".to_string(),
+            },
+            false,
+            &overrides,
+        )
+        .expect_err("set with --set must refuse");
+        assert!(format!("{error:#}").contains("--set"), "{error:#}");
+        // Reads still work under an overlay.
+        run_config_command(&mut store, ConfigCommand::List, false, &overrides)
+            .expect("list with --set");
     }
 
     fn config_dispatch_from(
@@ -5716,7 +5974,7 @@ verbosity = "project-imported"
         assert_eq!(selected_path.as_deref(), Some(project_path.as_path()));
 
         let mut store = ConfigStore::load(selected_path).expect("load selected project config");
-        run_config_command(&mut store, command, project_bundle_scope)
+        run_config_command(&mut store, command, project_bundle_scope, &[])
             .expect("import project bundle");
         let project = ConfigStore::load(Some(project_path.clone())).expect("reload project");
         let global = ConfigStore::load(Some(global_path.clone())).expect("reload global");
@@ -5742,7 +6000,7 @@ verbosity = "project-imported"
         assert_eq!(selected_path.as_deref(), Some(global_path.as_path()));
         let mut explicit_store =
             ConfigStore::load(selected_path).expect("load explicit global config");
-        let error = run_config_command(&mut explicit_store, command, project_bundle_scope)
+        let error = run_config_command(&mut explicit_store, command, project_bundle_scope, &[])
             .expect_err("project import must reject an explicit non-workspace config");
         assert!(
             error
@@ -5781,7 +6039,7 @@ verbosity = "project-imported"
         assert_eq!(selected_path.as_deref(), Some(project_path.as_path()));
 
         let mut store = ConfigStore::load(selected_path).expect("load selected project config");
-        run_config_command(&mut store, command, project_bundle_scope)
+        run_config_command(&mut store, command, project_bundle_scope, &[])
             .expect("export project bundle");
         let body = std::fs::read_to_string(&output_path).expect("read portable export");
         let bundle = config_bundles::parse_bundle_str(&body, "portable.toml")
@@ -5814,7 +6072,7 @@ verbosity = "project-imported"
         assert_eq!(selected_path.as_deref(), Some(global_path.as_path()));
         let mut explicit_store =
             ConfigStore::load(selected_path).expect("load explicit global config");
-        let error = run_config_command(&mut explicit_store, command, project_bundle_scope)
+        let error = run_config_command(&mut explicit_store, command, project_bundle_scope, &[])
             .expect_err("project export must reject an explicit non-workspace config");
         assert!(
             error

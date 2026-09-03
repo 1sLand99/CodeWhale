@@ -6616,6 +6616,32 @@ fn redact_toml_value_for_display(key: &str, value: &toml::Value) -> String {
     redact_toml_value_for_display_inner(key, false, value).to_string()
 }
 
+impl ConfigToml {
+    /// Redacted TOML rendering of the effective config for `config dump`.
+    /// Structure is preserved; strings under sensitive key names (api_key,
+    /// token, secret, … — see `is_sensitive_config_key`, nested tables
+    /// inherit sensitivity from their ancestors) are redacted. Redaction is
+    /// name-based: an unrecognized key holding a secret-looking value would
+    /// pass through, so pasting dump output still deserves a glance.
+    #[must_use]
+    pub fn redacted_toml_value(&self) -> toml::Value {
+        let value =
+            toml::Value::try_from(self).expect("ConfigToml derives Serialize, so this holds");
+        match value {
+            toml::Value::Table(table) => toml::Value::Table(
+                table
+                    .into_iter()
+                    .map(|(key, value)| {
+                        let redacted = redact_toml_value_for_display_inner(&key, false, &value);
+                        (key, redacted)
+                    })
+                    .collect(),
+            ),
+            other => other,
+        }
+    }
+}
+
 fn toml_value_as_u64(value: &toml::Value) -> Option<u64> {
     match value {
         toml::Value::Integer(value) => u64::try_from(*value).ok(),
