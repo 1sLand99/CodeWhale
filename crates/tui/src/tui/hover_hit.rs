@@ -105,17 +105,10 @@ mod tests {
     }
 
     #[test]
-    fn every_control_kind_hit_tests_through_the_shared_registry() {
-        // Each Slice G primitive family must resolve through the same
-        // topmost-wins hit-test so per-screen registration is one call.
-        for kind in [
-            HoverTargetKind::Button,
-            HoverTargetKind::Row,
-            HoverTargetKind::Tab,
-            HoverTargetKind::Chip,
-            HoverTargetKind::HotbarSlot,
-            HoverTargetKind::Toggle,
-        ] {
+    fn every_kind_hit_tests_through_the_shared_registry() {
+        // Each registered kind must resolve through the same topmost-wins
+        // hit-test so per-screen registration is one call.
+        for kind in [HoverTargetKind::Link, HoverTargetKind::TruncatedText] {
             let targets = vec![HoverHit {
                 kind,
                 area: Rect::new(4, 1, 12, 1),
@@ -127,13 +120,13 @@ mod tests {
         }
         let targets = vec![
             HoverHit {
-                kind: HoverTargetKind::Row,
+                kind: HoverTargetKind::TruncatedText,
                 area: Rect::new(0, 0, 20, 1),
                 label: "row".into(),
                 copyable: false,
             },
             HoverHit {
-                kind: HoverTargetKind::Button,
+                kind: HoverTargetKind::Link,
                 area: Rect::new(2, 0, 6, 1),
                 label: "button".into(),
                 copyable: false,
@@ -141,7 +134,7 @@ mod tests {
         ];
         assert_eq!(
             hit_test(3, 0, &targets).expect("hit").kind,
-            HoverTargetKind::Button,
+            HoverTargetKind::Link,
             "topmost (last registered) control wins"
         );
     }
