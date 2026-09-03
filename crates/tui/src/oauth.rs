@@ -1,4 +1,6 @@
-//! OpenAI Codex / ChatGPT OAuth credential loading.
+//! The ONE access-route flow: Codex CLI import (read-only, consented) plus
+//! the unified OAuth login core every subscription provider runs through.
+//! Providers are data rows in the parameter table below, not modules.
 //!
 //! External Codex CLI credentials are read only after an exact, provider-scoped
 //! consent grant. Codewhale never refreshes or rewrites that external file.
@@ -8,15 +10,17 @@
 //! Token values are never logged or printed. All debug representations
 //! redact sensitive fields.
 
-use std::io::Read;
+use std::io::{Read, Write as _};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use codewhale_config::ExternalCredentialReadGrant;
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 
 /// OAuth token payload stored in `auth.json`.
 #[derive(Debug, Clone, Deserialize)]
@@ -289,12 +293,36 @@ pub struct OAuthProviderParams {
     /// means the issuer offers no device flow and device login must fail
     /// loudly instead of guessing (ChatGPT).
     pub device_code_path: Option<&'static str>,
+    /// `Some` browser authorization path under the issuer (ChatGPT PKCE);
+    /// `None` means the issuer offers no browser flow and browser login
+    /// fails the same loud way (xAI is device-code only).
+    pub authorize_path: Option<&'static str>,
     /// Token path under the issuer.
     pub token_path: &'static str,
     /// Whether the issuer was discovered (xAI) or pinned (ChatGPT paths).
     pub discover_endpoints: bool,
     /// Seconds the device-code poll runs past the server's `expires_in`.
     pub device_poll_floor_secs: u64,
+    /// Extra authorize-endpoint parameters beyond the standard OAuth set,
+    /// sent verbatim so the issuer sees exactly who is calling.
+    pub authorize_extras: &'static [(&'static str, &'static str)],
+    /// Honest client identity for issuers that require one (ChatGPT's
+    /// `originator`). Never impersonate another CLI.
+    pub originator: Option<&'static str>,
+    /// Remote revoke path under the issuer, pinned rather than discovered:
+    /// revoke must still clear local credentials when the issuer is
+    /// unreachable, so a discovery fetch would only add a failure mode to a
+    /// path whose contract is to clean up regardless. `None` when
+    /// revocation is purely local (xAI).
+    pub revoke_path: Option<&'static str>,
+    /// Registered loopback redirect for browser flows.
+    pub callback_path: &'static str,
+    /// Loopback ports the public client registered, in preference order.
+    pub loopback_ports: &'static [u16],
+    /// The command that re-runs this provider's login, for error guidance.
+    pub relogin_hint: &'static str,
+    /// What to tell the user when every callback port is taken.
+    pub callback_conflict_hint: &'static str,
 }
 
 pub const XAI_OAUTH_PARAMS: OAuthProviderParams = OAuthProviderParams {
@@ -311,9 +339,17 @@ pub const XAI_OAUTH_PARAMS: OAuthProviderParams = OAuthProviderParams {
         no_browser_var: "CODEWHALE_XAI_OAUTH_NO_BROWSER",
     },
     device_code_path: Some("oauth2/device/code"),
+    authorize_path: None,
     token_path: "oauth2/token",
     discover_endpoints: true,
     device_poll_floor_secs: 30,
+    authorize_extras: &[],
+    originator: None,
+    revoke_path: None,
+    callback_path: "",
+    loopback_ports: &[],
+    relogin_hint: "codewhale auth xai-device",
+    callback_conflict_hint: "",
 };
 
 pub const CHATGPT_OAUTH_PARAMS: OAuthProviderParams = OAuthProviderParams {
@@ -322,6 +358,7 @@ pub const CHATGPT_OAUTH_PARAMS: OAuthProviderParams = OAuthProviderParams {
     default_issuer: crate::chatgpt_oauth::CHATGPT_OAUTH_ISSUER,
     default_client_id: crate::chatgpt_oauth::CHATGPT_OAUTH_CLIENT_ID,
     default_scopes: crate::chatgpt_oauth::CHATGPT_OAUTH_SCOPE,
+    originator: Some(crate::chatgpt_oauth::CHATGPT_OAUTH_ORIGINATOR),
     env: OAuthEnvOverrides {
         issuer_vars: &["CODEWHALE_CHATGPT_OAUTH_ISSUER"],
         client_id_vars: &["CODEWHALE_CHATGPT_OAUTH_CLIENT_ID"],
@@ -329,9 +366,16 @@ pub const CHATGPT_OAUTH_PARAMS: OAuthProviderParams = OAuthProviderParams {
         no_browser_var: "CODEWHALE_CHATGPT_OAUTH_NO_BROWSER",
     },
     device_code_path: None,
+    authorize_path: Some("oauth/authorize"),
     token_path: "oauth/token",
     discover_endpoints: false,
     device_poll_floor_secs: 30,
+    authorize_extras: &[("id_token_add_organizations", "true")],
+    revoke_path: Some("api/accounts/oauth/revoke"),
+    callback_path: "/auth/callback",
+    loopback_ports: &[1455, 1457],
+    relogin_hint: "codewhale auth chatgpt",
+    callback_conflict_hint: "Stop the process holding that port, or import Codex CLI credentials with `codewhale auth external-consent`.",
 };
 
 /// The parameter table. A provider login looks its row up here; adding a
@@ -380,12 +424,15 @@ pub struct OAuthTokenMaterial {
     pub access_token: Option<String>,
     pub refresh_token: Option<String>,
     pub expires_in: Option<u64>,
+    /// OpenID Connect id token; carries the account claim when issued.
     #[serde(default)]
-    interval: Option<u64>,
+    pub id_token: Option<String>,
     #[serde(default)]
-    error: Option<String>,
+    pub interval: Option<u64>,
     #[serde(default)]
-    error_description: Option<String>,
+    pub error: Option<String>,
+    #[serde(default)]
+    pub error_description: Option<String>,
 }
 
 /// A completed login awaiting activation (owned-generation commit).
@@ -566,6 +613,8 @@ fn discover_oauth_endpoints(params: &OAuthProviderParams, issuer: &str) -> Resul
         issuer.trim_end_matches('/')
     );
     let client = oauth_http_client("OIDC discovery")?;
+    #[cfg(test)]
+    crate::external_credentials::record_oauth_network();
     let response = client
         .get(&discovery_url)
         .header(reqwest::header::ACCEPT, "application/json")
@@ -632,6 +681,8 @@ fn request_device_grant(
 ) -> Result<DeviceGrantResponse> {
     let client = oauth_http_client("device-code")?;
     let params = [("client_id", client_id), ("scope", scopes)];
+    #[cfg(test)]
+    crate::external_credentials::record_oauth_network();
     let response = client
         .post(device_authorization_endpoint)
         .form(&params)
@@ -675,6 +726,8 @@ fn poll_device_grant(
         ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
         ("device_code", device_code),
     ];
+    #[cfg(test)]
+    crate::external_credentials::record_oauth_network();
     let response = client
         .post(token_endpoint)
         .form(&params)
@@ -793,6 +846,634 @@ pub(crate) fn device_code_login_with(
         )
     })?;
 
+    Ok(PendingOAuthLogin {
+        provider,
+        issuer: inputs.issuer.clone(),
+        client_id: inputs.client_id.clone(),
+        token,
+    })
+}
+
+/// One login entry point for every provider: the params row decides whether
+/// the grant is device-code or browser PKCE. A provider with neither fails
+/// here with the reason.
+pub async fn login(provider: OAuthProvider) -> Result<PendingOAuthLogin> {
+    let params = oauth_provider_params(provider);
+    if params.device_code_path.is_some() {
+        device_code_login(provider).await
+    } else if params.authorize_path.is_some() {
+        pkce_login(provider).await
+    } else {
+        bail!("{} offers no sign-in flow", params.display_name);
+    }
+}
+
+// ── form-post transport seam ──────────────────────────────────────────
+//
+// One seam for every OAuth form post (PKCE exchange, refresh, revoke): the
+// production client is reqwest with the shared bounds; tests substitute a
+// mock issuer. The seam records network/refresh in test builds so the
+// side-effect trap can still prove "zero external I/O" assertions.
+
+pub(crate) trait OAuthFormClient {
+    fn post_form(&self, url: &str, form: &[(&str, &str)]) -> Result<(u16, String)>;
+}
+
+pub(crate) struct ReqwestOAuthFormClient;
+
+impl OAuthFormClient for ReqwestOAuthFormClient {
+    fn post_form(&self, url: &str, form: &[(&str, &str)]) -> Result<(u16, String)> {
+        #[cfg(test)]
+        crate::external_credentials::record_oauth_network();
+        let client = oauth_http_client("form")?;
+        let response = client
+            .post(url)
+            .form(form)
+            .send()
+            .context("OAuth form request failed")?;
+        let status = response.status().as_u16();
+        let mut reader = response.take(OAUTH_RESPONSE_BODY_LIMIT + 1);
+        let mut body = Vec::new();
+        reader
+            .read_to_end(&mut body)
+            .context("reading OAuth form response")?;
+        if body.len() as u64 > OAUTH_RESPONSE_BODY_LIMIT {
+            body.truncate(OAUTH_RESPONSE_BODY_LIMIT as usize);
+        }
+        Ok((status, String::from_utf8(body).unwrap_or_default()))
+    }
+}
+
+/// Token/authorize endpoint URLs for one provider row.
+pub(crate) fn form_token_url(params: &OAuthProviderParams, issuer: &str) -> String {
+    format!("{}/{}", issuer.trim_end_matches('/'), params.token_path)
+}
+
+/// Pinned remote revoke URL; `None` when the provider revokes locally only.
+pub(crate) fn remote_revoke_url(params: &OAuthProviderParams, issuer: &str) -> Option<String> {
+    params
+        .revoke_path
+        .map(|path| format!("{}/{}", issuer.trim_end_matches('/'), path))
+}
+
+/// Parse a form-post token response. Error bodies are never echoed: the
+/// detail names the error code only, so a hostile issuer cannot smuggle
+/// secret-bearing text back through diagnostics.
+pub(crate) fn parse_oauth_form_response(
+    status: u16,
+    body: &str,
+    operation: &str,
+    params: &OAuthProviderParams,
+) -> Result<OAuthTokenMaterial> {
+    let name = params.display_name;
+    let parsed: OAuthTokenMaterial = serde_json::from_str(body).map_err(|_| {
+        anyhow::anyhow!("{name} OAuth {operation} returned HTTP {status} that was not token JSON")
+    })?;
+    if !(200..300).contains(&status) || parsed.error.is_some() {
+        let err = parsed.error.as_deref().unwrap_or("token_error");
+        if matches!(
+            err,
+            "invalid_grant"
+                | "refresh_token_reused"
+                | "refresh_token_expired"
+                | "refresh_token_invalidated"
+        ) || status == 401
+        {
+            bail!(
+                "{name} OAuth {operation} failed permanently ({err}). Sign in again with `{}`.",
+                params.relogin_hint
+            );
+        }
+        bail!("{name} OAuth {operation} failed ({err})");
+    }
+    anyhow::ensure!(
+        parsed
+            .access_token
+            .as_deref()
+            .is_some_and(|token| !token.trim().is_empty()),
+        "{name} OAuth {operation} returned an empty access token"
+    );
+    Ok(parsed)
+}
+
+fn compact_form_error(body: &str) -> String {
+    body.chars().filter(|c| !c.is_control()).take(80).collect()
+}
+
+/// Refresh an owned token through the seam. Refresh is a Codewhale-owned
+/// credential operation only: external imports never refresh.
+pub(crate) fn refresh_access_token_via(
+    client: &dyn OAuthFormClient,
+    params: &OAuthProviderParams,
+    issuer: &str,
+    client_id: &str,
+    refresh_token: &str,
+) -> Result<OAuthTokenMaterial> {
+    #[cfg(test)]
+    crate::external_credentials::record_oauth_refresh();
+    let (status, body) = client.post_form(
+        &form_token_url(params, issuer),
+        &[
+            ("grant_type", "refresh_token"),
+            ("client_id", client_id),
+            ("refresh_token", refresh_token),
+        ],
+    )?;
+    parse_oauth_form_response(status, &body, "refresh", params)
+}
+
+/// Best-effort remote revoke through the seam. Callers clear local
+/// credentials regardless of this outcome.
+pub(crate) fn revoke_remote_token_via(
+    client: &dyn OAuthFormClient,
+    params: &OAuthProviderParams,
+    issuer: &str,
+    client_id: &str,
+    token: &str,
+) -> Result<()> {
+    let Some(revoke_url) = remote_revoke_url(params, issuer) else {
+        bail!("{} has no remote revoke endpoint", params.display_name);
+    };
+    let (status, body) =
+        client.post_form(&revoke_url, &[("token", token), ("client_id", client_id)])?;
+    if !(200..300).contains(&status) {
+        bail!(
+            "{} OAuth revoke failed with HTTP {status}: {}",
+            params.display_name,
+            compact_form_error(&body)
+        );
+    }
+    Ok(())
+}
+
+// ── PKCE browser login ────────────────────────────────────────────────
+
+/// RFC 7636 S256 PKCE pair. Custom Debug: the verifier is exchanged for
+/// bearer material and never prints.
+#[derive(Clone)]
+pub struct PkceChallenge {
+    pub verifier: String,
+    pub challenge: String,
+}
+
+impl std::fmt::Debug for PkceChallenge {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PkceChallenge")
+            .field("verifier", &"<redacted>")
+            .field("challenge", &self.challenge)
+            .finish()
+    }
+}
+
+/// A browser authorization request in flight: state, PKCE pair, and the
+/// registered redirect the callback server answers on.
+#[derive(Clone)]
+pub struct BrowserAuthRequest {
+    pub state: String,
+    pub pkce: PkceChallenge,
+    pub redirect_uri: String,
+    pub authorize_url: String,
+}
+
+impl std::fmt::Debug for BrowserAuthRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BrowserAuthRequest")
+            .field("state", &self.state)
+            .field("pkce", &self.pkce)
+            .field("redirect_uri", &self.redirect_uri)
+            .field("authorize_url", &self.authorize_url)
+            .finish()
+    }
+}
+
+/// Parsed callback query: a code+state pair, or the issuer's refusal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CallbackOutcome {
+    Success {
+        code: String,
+        state: String,
+    },
+    Error {
+        error: String,
+        description: Option<String>,
+        state: Option<String>,
+    },
+}
+
+/// RFC 7636 S256 PKCE pair.
+#[must_use]
+pub fn generate_pkce() -> PkceChallenge {
+    let verifier = random_url_token(32);
+    let digest = Sha256::digest(verifier.as_bytes());
+    PkceChallenge {
+        verifier,
+        challenge: URL_SAFE_NO_PAD.encode(digest),
+    }
+}
+
+#[must_use]
+pub fn generate_state() -> String {
+    random_url_token(16)
+}
+
+fn random_url_token(nbytes: usize) -> String {
+    let mut bytes = vec![0u8; nbytes.max(16)];
+    let mut offset = 0;
+    while offset < bytes.len() {
+        let chunk = uuid::Uuid::new_v4();
+        let take = (bytes.len() - offset).min(16);
+        bytes[offset..offset + take].copy_from_slice(&chunk.as_bytes()[..take]);
+        offset += take;
+    }
+    URL_SAFE_NO_PAD.encode(bytes)
+}
+
+pub fn build_authorize_url(
+    params: &OAuthProviderParams,
+    issuer: &str,
+    client_id: &str,
+    scopes: &str,
+    redirect_uri: &str,
+    state: &str,
+    pkce: &PkceChallenge,
+) -> Result<String> {
+    let Some(authorize_path) = params.authorize_path else {
+        bail!("{} offers no browser sign-in flow", params.display_name);
+    };
+    // A malformed configured issuer must fail loudly. Silently redirecting
+    // the browser to the production authorize endpoint would hand the
+    // issuer a sign-in the user aimed somewhere else.
+    let issuer_var = params
+        .env
+        .issuer_vars
+        .first()
+        .copied()
+        .unwrap_or("the issuer environment variable");
+    let mut url = reqwest::Url::parse(&format!(
+        "{}/{}",
+        issuer.trim_end_matches('/'),
+        authorize_path
+    ))
+    .with_context(|| {
+        format!(
+            "{} OAuth issuer is not a valid URL ({issuer:?}) — check {issuer_var}",
+            params.display_name
+        )
+    })?;
+    url.query_pairs_mut()
+        .append_pair("response_type", "code")
+        .append_pair("client_id", client_id)
+        .append_pair("redirect_uri", redirect_uri)
+        .append_pair("scope", scopes)
+        .append_pair("code_challenge", &pkce.challenge)
+        .append_pair("code_challenge_method", "S256")
+        .append_pair("state", state);
+    if let Some(originator) = params.originator {
+        url.query_pairs_mut().append_pair("originator", originator);
+    }
+    for (key, value) in params.authorize_extras {
+        url.query_pairs_mut().append_pair(key, value);
+    }
+    Ok(url.to_string())
+}
+
+pub fn parse_callback_query(params: &OAuthProviderParams, query: &str) -> Result<CallbackOutcome> {
+    let parsed = reqwest::Url::parse(&format!("http://127.0.0.1{}?{query}", params.callback_path))
+        .context("OAuth callback query is not valid")?;
+    let mut code = None;
+    let mut state = None;
+    let mut error = None;
+    let mut description = None;
+    for (key, value) in parsed.query_pairs() {
+        match key.as_ref() {
+            "code" => code = Some(value.into_owned()),
+            "state" => state = Some(value.into_owned()),
+            "error" => error = Some(value.into_owned()),
+            "error_description" => description = Some(value.into_owned()),
+            _ => {}
+        }
+    }
+    if let Some(error) = error {
+        return Ok(CallbackOutcome::Error {
+            error,
+            description,
+            state,
+        });
+    }
+    let code = code
+        .filter(|c| !c.trim().is_empty())
+        .context("OAuth callback missing authorization code")?;
+    let state = state
+        .filter(|s| !s.trim().is_empty())
+        .context("OAuth callback missing state")?;
+    Ok(CallbackOutcome::Success { code, state })
+}
+
+pub fn accept_callback(expected_state: &str, outcome: CallbackOutcome) -> Result<String> {
+    match outcome {
+        CallbackOutcome::Success { code, state } => {
+            anyhow::ensure!(
+                state == expected_state,
+                "OAuth callback state did not match the pending login"
+            );
+            Ok(code)
+        }
+        CallbackOutcome::Error {
+            error,
+            description,
+            state,
+        } => {
+            if let Some(state) = state {
+                anyhow::ensure!(
+                    state == expected_state,
+                    "OAuth error callback state did not match the pending login"
+                );
+            }
+            let detail = description
+                .filter(|text| !text.trim().is_empty())
+                .unwrap_or(error);
+            bail!("sign-in was not completed: {detail}")
+        }
+    }
+}
+
+fn parse_http_request_target(request_line: &str) -> Result<String> {
+    let mut parts = request_line.split_whitespace();
+    let method = parts.next().unwrap_or_default();
+    anyhow::ensure!(
+        method.eq_ignore_ascii_case("GET"),
+        "OAuth callback must be GET"
+    );
+    let target = parts
+        .next()
+        .context("OAuth callback missing request target")?;
+    Ok(target.to_string())
+}
+
+fn query_from_target<'a>(params: &OAuthProviderParams, target: &'a str) -> Result<&'a str> {
+    let path = target.split('?').next().unwrap_or(target);
+    anyhow::ensure!(
+        path == params.callback_path,
+        "OAuth callback path was not {}",
+        params.callback_path
+    );
+    Ok(target.split_once('?').map(|(_, q)| q).unwrap_or(""))
+}
+
+/// Bind the loopback callback on both IP stacks for the first free port.
+///
+/// The redirect URI has to say `localhost` — that is what is registered with
+/// the authorization server, and redirect matching is exact — but `localhost`
+/// resolves to `::1` before `127.0.0.1` on IPv6-first hosts. Binding only
+/// IPv4 left the browser connecting to a closed port, which browsers paper
+/// over with Happy Eyeballs fallback: a working sign-in becomes a slow one,
+/// and a broken one wherever that fallback is disabled. Binding both is the
+/// fix that keeps the registered redirect URI intact.
+///
+/// A host with only one stack available binds only that one and still works.
+pub fn bind_loopback_callback(params: &OAuthProviderParams) -> Result<Vec<TcpListener>> {
+    let name = params.display_name;
+    let mut last_error = None;
+    for port in params.loopback_ports {
+        let mut bound = Vec::new();
+        for addr in [
+            SocketAddr::from((Ipv4Addr::LOCALHOST, *port)),
+            SocketAddr::from((Ipv6Addr::LOCALHOST, *port)),
+        ] {
+            match TcpListener::bind(addr) {
+                Ok(listener) => {
+                    listener.set_nonblocking(true).with_context(|| {
+                        format!("{name} OAuth callback listener could not be set non-blocking")
+                    })?;
+                    bound.push(listener);
+                }
+                Err(error) => last_error = Some(error),
+            }
+        }
+        if !bound.is_empty() {
+            return Ok(bound);
+        }
+    }
+    let ports = params
+        .loopback_ports
+        .iter()
+        .map(u16::to_string)
+        .collect::<Vec<_>>()
+        .join(" or ");
+    let hint = if params.callback_conflict_hint.is_empty() {
+        String::new()
+    } else {
+        format!(" {}", params.callback_conflict_hint)
+    };
+    Err(last_error
+        .map(anyhow::Error::from)
+        .unwrap_or_else(|| anyhow::anyhow!("unable to bind {name} OAuth callback ports")))
+    .with_context(|| format!("{name} sign-in needs loopback port {ports}.{hint}"))
+}
+
+pub(crate) fn start_auth_request_on(
+    listeners: &[TcpListener],
+    params: &OAuthProviderParams,
+    inputs: &ResolvedOAuthInputs,
+) -> Result<BrowserAuthRequest> {
+    let port = listeners
+        .first()
+        .with_context(|| {
+            format!(
+                "{} OAuth callback has no bound listener",
+                params.display_name
+            )
+        })?
+        .local_addr()
+        .with_context(|| {
+            format!(
+                "{} OAuth callback listener has no local address",
+                params.display_name
+            )
+        })?
+        .port();
+    let redirect_uri = format!("http://localhost:{port}{}", params.callback_path);
+    let pkce = generate_pkce();
+    let state = generate_state();
+    let authorize_url = build_authorize_url(
+        params,
+        &inputs.issuer,
+        &inputs.client_id,
+        &inputs.scopes,
+        &redirect_uri,
+        &state,
+        &pkce,
+    )?;
+    Ok(BrowserAuthRequest {
+        state,
+        pkce,
+        redirect_uri,
+        authorize_url,
+    })
+}
+
+const CALLBACK_TIMEOUT: Duration = Duration::from_secs(300);
+const CALLBACK_HTML_OK: &str = "<!doctype html><html><body><p>Signed in to Codewhale. You can close this tab.</p></body></html>";
+const CALLBACK_HTML_ERR: &str = "<!doctype html><html><body><p>Sign-in did not complete. You can close this tab and retry in Codewhale.</p></body></html>";
+
+fn wait_for_callback(
+    listeners: &[TcpListener],
+    params: &OAuthProviderParams,
+    expected_state: &str,
+) -> Result<String> {
+    let deadline = Instant::now() + CALLBACK_TIMEOUT;
+    loop {
+        if Instant::now() >= deadline {
+            bail!(
+                "{} sign-in timed out waiting for the browser callback",
+                params.display_name
+            );
+        }
+        // Whichever stack `localhost` resolved to for the browser is the one
+        // that gets the connection; poll them all.
+        for listener in listeners {
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    return handle_callback_stream(stream, params, expected_state);
+                }
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::WouldBlock
+                        || error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(error) => {
+                    return Err(error).context(format!(
+                        "{} OAuth callback accept failed",
+                        params.display_name
+                    ));
+                }
+            }
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn handle_callback_stream(
+    mut stream: TcpStream,
+    params: &OAuthProviderParams,
+    expected_state: &str,
+) -> Result<String> {
+    // BSD sockets (macOS) hand the accepted stream the listener's O_NONBLOCK;
+    // the bounded read below needs a blocking socket with a timeout.
+    stream.set_nonblocking(false).with_context(|| {
+        format!(
+            "{} OAuth callback stream could not be set blocking",
+            params.display_name
+        )
+    })?;
+    stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+    // One read is not one request: TCP may deliver the callback in
+    // fragments, and a truncated query parses as a missing parameter.
+    // Read until the blank line that ends the HTTP headers.
+    let mut buf = [0u8; 4096];
+    let mut len = 0usize;
+    loop {
+        if len == buf.len() {
+            break;
+        }
+        let n = stream
+            .read(&mut buf[len..])
+            .with_context(|| format!("reading {} OAuth callback request", params.display_name))?;
+        if n == 0 {
+            break;
+        }
+        len += n;
+        if buf[..len].windows(4).any(|window| window == b"\r\n\r\n") {
+            break;
+        }
+    }
+    let request = String::from_utf8_lossy(&buf[..len]);
+    let request_line = request.lines().next().unwrap_or_default();
+    let result = (|| {
+        let target = parse_http_request_target(request_line)?;
+        let query = query_from_target(params, &target)?;
+        let outcome = parse_callback_query(params, query)?;
+        accept_callback(expected_state, outcome)
+    })();
+    let (status, body) = match &result {
+        Ok(_) => ("200 OK", CALLBACK_HTML_OK),
+        Err(_) => ("400 Bad Request", CALLBACK_HTML_ERR),
+    };
+    let _ = write!(
+        stream,
+        "HTTP/1.1 {status}\r\ncontent-type: text/html; charset=utf-8\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    result
+}
+
+pub(crate) fn exchange_authorization_code(
+    client: &dyn OAuthFormClient,
+    params: &OAuthProviderParams,
+    token_endpoint: &str,
+    client_id: &str,
+    redirect_uri: &str,
+    code: &str,
+    verifier: &str,
+) -> Result<OAuthTokenMaterial> {
+    let (status, body) = client.post_form(
+        token_endpoint,
+        &[
+            ("grant_type", "authorization_code"),
+            ("client_id", client_id),
+            ("redirect_uri", redirect_uri),
+            ("code", code),
+            ("code_verifier", verifier),
+        ],
+    )?;
+    parse_oauth_form_response(status, &body, "authorization code exchange", params)
+}
+
+/// Interactive PKCE browser login for any provider whose row offers it.
+/// Prints the authorize URL, opens a browser, and waits for the loopback
+/// callback. A provider with no browser flow (xAI) fails here with the
+/// reason, before any listener binds.
+pub async fn pkce_login(provider: OAuthProvider) -> Result<PendingOAuthLogin> {
+    let params = oauth_provider_params(provider);
+    if params.authorize_path.is_none() {
+        bail!(
+            "{} offers no browser sign-in flow; sign in through the device-code login instead",
+            params.display_name
+        );
+    }
+    let inputs = params.resolve_inputs();
+    let display_name = params.display_name;
+    tokio::task::spawn_blocking(move || pkce_login_with(provider, &inputs))
+        .await
+        .with_context(|| format!("{display_name} PKCE login worker failed"))?
+}
+
+/// Blocking worker body for [`pkce_login`]. `pub(crate)` so the activation
+/// tests can drive the unified login end to end until activation unifies.
+pub(crate) fn pkce_login_with(
+    provider: OAuthProvider,
+    inputs: &ResolvedOAuthInputs,
+) -> Result<PendingOAuthLogin> {
+    let params = oauth_provider_params(provider);
+    let display_name = params.display_name;
+    let listeners = bind_loopback_callback(params)?;
+    let request = start_auth_request_on(&listeners, params, inputs)?;
+    eprintln!("{display_name} sign-in (PKCE)");
+    eprintln!("  Open:  {}", request.authorize_url);
+    eprintln!("Waiting for the browser callback… (Ctrl+C to abort)");
+    if inputs.open_browser
+        && let Err(err) = webbrowser::open(&request.authorize_url)
+    {
+        eprintln!("Could not open the browser automatically: {err}");
+    }
+    let code = wait_for_callback(&listeners, params, &request.state)?;
+    let token = exchange_authorization_code(
+        &ReqwestOAuthFormClient,
+        params,
+        &form_token_url(params, &inputs.issuer),
+        &inputs.client_id,
+        &request.redirect_uri,
+        &code,
+        &request.pkce.verifier,
+    )?;
     Ok(PendingOAuthLogin {
         provider,
         issuer: inputs.issuer.clone(),
@@ -1556,5 +2237,348 @@ mod tests {
         let message = format!("{error:#}");
         assert!(message.contains("not valid credential JSON"), "{message}");
         assert!(!message.contains(sentinel), "{message}");
+    }
+
+    // ── unified PKCE core (ported from the deleted chatgpt_oauth flow) ──
+
+    use std::sync::Mutex;
+
+    type MockForm = Vec<(String, String)>;
+    type MockPost = (String, MockForm);
+
+    struct MockFormClient {
+        responses: Mutex<Vec<(u16, String)>>,
+        posts: Mutex<Vec<MockPost>>,
+    }
+
+    impl MockFormClient {
+        fn new(responses: Vec<(u16, String)>) -> Self {
+            Self {
+                responses: Mutex::new(responses),
+                posts: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl OAuthFormClient for MockFormClient {
+        fn post_form(&self, url: &str, form: &[(&str, &str)]) -> Result<(u16, String)> {
+            self.posts.lock().expect("posts").push((
+                url.to_string(),
+                form.iter()
+                    .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+                    .collect(),
+            ));
+            let mut responses = self.responses.lock().expect("responses");
+            anyhow::ensure!(
+                !responses.is_empty(),
+                "mock issuer has no remaining responses"
+            );
+            Ok(responses.remove(0))
+        }
+    }
+
+    fn jwt_with_account(account: &str) -> String {
+        let payload = URL_SAFE_NO_PAD.encode(format!(
+            r#"{{"https://api.openai.com/auth":{{"chatgpt_account_id":"{account}"}}}}"#
+        ));
+        format!("header.{payload}.sig")
+    }
+
+    fn chatgpt() -> &'static OAuthProviderParams {
+        oauth_provider_params(OAuthProvider::Chatgpt)
+    }
+
+    #[test]
+    fn pkce_verifier_and_challenge_are_s256() {
+        let pkce = generate_pkce();
+        assert!(pkce.verifier.len() >= 43);
+        assert_eq!(
+            pkce.challenge,
+            URL_SAFE_NO_PAD.encode(Sha256::digest(pkce.verifier.as_bytes()))
+        );
+        let other = generate_pkce();
+        assert_ne!(pkce.verifier, other.verifier);
+        assert_ne!(generate_state(), generate_state());
+    }
+
+    #[test]
+    fn malformed_issuer_fails_loudly_not_to_production() {
+        let pkce = PkceChallenge {
+            verifier: "verifier".into(),
+            challenge: "challenge".into(),
+        };
+        let err = build_authorize_url(
+            chatgpt(),
+            "not a url \\ ",
+            "client",
+            "openid",
+            "http://localhost:1455/auth/callback",
+            "state-1",
+            &pkce,
+        )
+        .expect_err("malformed issuer must not produce an authorize URL");
+        assert!(
+            format!("{err:#}").contains("CODEWHALE_CHATGPT_OAUTH_ISSUER"),
+            "{err:#}"
+        );
+    }
+
+    #[test]
+    fn authorize_url_is_honest_originator_and_pkce() {
+        let pkce = PkceChallenge {
+            verifier: "verifier".into(),
+            challenge: "challenge".into(),
+        };
+        let url = build_authorize_url(
+            chatgpt(),
+            crate::chatgpt_oauth::CHATGPT_OAUTH_ISSUER,
+            crate::chatgpt_oauth::CHATGPT_OAUTH_CLIENT_ID,
+            crate::chatgpt_oauth::CHATGPT_OAUTH_SCOPE,
+            "http://localhost:1455/auth/callback",
+            "state-1",
+            &pkce,
+        )
+        .expect("static issuer parses");
+        assert!(url.starts_with("https://auth.openai.com/oauth/authorize?"));
+        assert!(url.contains("code_challenge=challenge"));
+        assert!(url.contains("code_challenge_method=S256"));
+        assert!(url.contains("originator=codewhale"));
+        assert!(!url.contains("codex_cli_rs"));
+        assert!(url.contains("redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback"));
+        assert!(url.contains("id_token_add_organizations=true"));
+    }
+
+    #[test]
+    fn authorize_url_rejects_providers_without_a_browser_flow() {
+        let pkce = PkceChallenge {
+            verifier: "verifier".into(),
+            challenge: "challenge".into(),
+        };
+        let err = build_authorize_url(
+            oauth_provider_params(OAuthProvider::Xai),
+            "https://auth.x.ai",
+            "client",
+            "openid",
+            "http://localhost:1455/auth/callback",
+            "state-1",
+            &pkce,
+        )
+        .expect_err("xAI has no browser flow");
+        assert!(
+            format!("{err:#}").contains("no browser sign-in flow"),
+            "{err:#}"
+        );
+    }
+
+    #[test]
+    fn callback_success_requires_matching_state() {
+        let ok = parse_callback_query(chatgpt(), "code=abc&state=s1").unwrap();
+        assert_eq!(accept_callback("s1", ok).unwrap(), "abc");
+        let mismatch = parse_callback_query(chatgpt(), "code=abc&state=other").unwrap();
+        let err = accept_callback("s1", mismatch).unwrap_err().to_string();
+        assert!(err.contains("state did not match"), "{err}");
+    }
+
+    #[test]
+    fn callback_error_is_user_visible_without_code() {
+        let outcome = parse_callback_query(
+            chatgpt(),
+            "error=access_denied&error_description=nope&state=s1",
+        )
+        .unwrap();
+        let err = accept_callback("s1", outcome).unwrap_err().to_string();
+        assert!(err.contains("nope"), "{err}");
+        assert!(!err.contains("access_token"));
+    }
+
+    #[test]
+    fn callback_missing_code_fails() {
+        let err = parse_callback_query(chatgpt(), "state=s1")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("missing authorization code"), "{err}");
+    }
+
+    #[test]
+    fn token_exchange_uses_pkce_verifier_against_mock_issuer() {
+        let client = MockFormClient::new(vec![(
+            200,
+            serde_json::json!({
+                "access_token": "at-1",
+                "refresh_token": "rt-1",
+                "expires_in": 3600,
+                "id_token": jwt_with_account("acct-9")
+            })
+            .to_string(),
+        )]);
+        let token = exchange_authorization_code(
+            &client,
+            chatgpt(),
+            &form_token_url(chatgpt(), crate::chatgpt_oauth::CHATGPT_OAUTH_ISSUER),
+            crate::chatgpt_oauth::CHATGPT_OAUTH_CLIENT_ID,
+            "http://localhost:1455/auth/callback",
+            "auth-code",
+            "verifier",
+        )
+        .unwrap();
+        assert_eq!(token.access_token.as_deref(), Some("at-1"));
+        let posts = client.posts.lock().unwrap();
+        assert_eq!(posts.len(), 1);
+        assert_eq!(posts[0].0, "https://auth.openai.com/oauth/token");
+        let form: std::collections::BTreeMap<_, _> = posts[0].1.iter().cloned().collect();
+        assert_eq!(form["grant_type"], "authorization_code");
+        assert_eq!(form["code_verifier"], "verifier");
+        assert_eq!(form["code"], "auth-code");
+    }
+
+    #[test]
+    fn token_exchange_error_does_not_echo_body_secrets() {
+        let client = MockFormClient::new(vec![(
+            400,
+            serde_json::json!({
+                "error": "invalid_grant",
+                "error_description": "secret-must-not-leak"
+            })
+            .to_string(),
+        )]);
+        // OAuthTokenMaterial is deliberately Debug-free; extract the error
+        // without demanding a Debug bound on the success type.
+        let err = match exchange_authorization_code(
+            &client,
+            chatgpt(),
+            &form_token_url(chatgpt(), crate::chatgpt_oauth::CHATGPT_OAUTH_ISSUER),
+            crate::chatgpt_oauth::CHATGPT_OAUTH_CLIENT_ID,
+            "http://localhost:1455/auth/callback",
+            "bad",
+            "verifier",
+        ) {
+            Ok(_) => panic!("invalid_grant must fail"),
+            Err(err) => err.to_string(),
+        };
+        assert!(err.contains("permanently"), "{err}");
+        assert!(!err.contains("secret-must-not-leak"), "{err}");
+    }
+
+    #[test]
+    fn callback_server_handles_success_and_error_requests() {
+        use std::io::Write as _;
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind test port");
+        listener.set_nonblocking(false).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let state = "state-xyz".to_string();
+        let expected = state.clone();
+        let params = chatgpt();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept");
+            handle_callback_stream(stream, params, &expected)
+        });
+        let mut client = std::net::TcpStream::connect(addr).expect("connect");
+        write!(
+            client,
+            "GET /auth/callback?code=tok&state={state} HTTP/1.1\r\nHost: localhost\r\n\r\n"
+        )
+        .unwrap();
+        let code = server.join().expect("server").expect("callback ok");
+        assert_eq!(code, "tok");
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind error port");
+        listener.set_nonblocking(false).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let params = chatgpt();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept");
+            handle_callback_stream(stream, params, "state-xyz")
+        });
+        let mut client = std::net::TcpStream::connect(addr).expect("connect");
+        write!(
+            client,
+            "GET /auth/callback?error=access_denied&state=state-xyz HTTP/1.1\r\nHost: localhost\r\n\r\n"
+        )
+        .unwrap();
+        let err = server.join().expect("server").unwrap_err().to_string();
+        assert!(err.contains("not completed"), "{err}");
+    }
+
+    /// The registered redirect URI says `localhost`, which resolves to `::1`
+    /// as readily as `127.0.0.1`. A callback arriving on the IPv6 listener has
+    /// to be accepted, or an IPv6-first browser hangs until the timeout.
+    #[test]
+    fn callback_is_accepted_on_either_loopback_family() {
+        use std::io::Write as _;
+        for addr in [
+            SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+            SocketAddr::from((Ipv6Addr::LOCALHOST, 0)),
+        ] {
+            let Ok(target) = TcpListener::bind(addr) else {
+                // A host without this stack cannot exercise it; the other arm
+                // still covers the polling loop.
+                continue;
+            };
+            target.set_nonblocking(true).unwrap();
+            let target_addr = target.local_addr().unwrap();
+
+            // A second, permanently idle listener stands in for the family the
+            // browser did not pick: `wait_for_callback` must poll past it.
+            let idle = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+                .expect("bind idle listener");
+            idle.set_nonblocking(true).unwrap();
+
+            let listeners = vec![idle, target];
+            let params = chatgpt();
+            let server =
+                std::thread::spawn(move || wait_for_callback(&listeners, params, "state-xyz"));
+            let mut client = std::net::TcpStream::connect(target_addr).expect("connect");
+            write!(
+                client,
+                "GET /auth/callback?code=tok&state=state-xyz HTTP/1.1\r\nHost: localhost\r\n\r\n"
+            )
+            .unwrap();
+            let code = server
+                .join()
+                .expect("server")
+                .unwrap_or_else(|error| panic!("callback on {target_addr} rejected: {error}"));
+            assert_eq!(code, "tok", "callback on {target_addr}");
+        }
+    }
+
+    #[test]
+    fn form_refresh_and_revoke_target_the_row_endpoints() {
+        let client = MockFormClient::new(vec![
+            (
+                200,
+                serde_json::json!({"access_token": "fresh", "expires_in": 3600}).to_string(),
+            ),
+            (200, String::new()),
+        ]);
+        let refreshed = refresh_access_token_via(
+            &client,
+            chatgpt(),
+            crate::chatgpt_oauth::CHATGPT_OAUTH_ISSUER,
+            crate::chatgpt_oauth::CHATGPT_OAUTH_CLIENT_ID,
+            "rt-1",
+        )
+        .expect("refresh");
+        assert_eq!(refreshed.access_token.as_deref(), Some("fresh"));
+        revoke_remote_token_via(
+            &client,
+            chatgpt(),
+            crate::chatgpt_oauth::CHATGPT_OAUTH_ISSUER,
+            crate::chatgpt_oauth::CHATGPT_OAUTH_CLIENT_ID,
+            "rt-1",
+        )
+        .expect("revoke");
+        let posts = client.posts.lock().unwrap();
+        assert_eq!(posts.len(), 2, "{posts:?}");
+        assert!(posts[0].0.ends_with("/oauth/token"), "{posts:?}");
+        assert!(
+            posts[0]
+                .1
+                .iter()
+                .any(|(k, v)| k == "grant_type" && v == "refresh_token")
+        );
+        assert!(
+            posts[1].0.ends_with("/api/accounts/oauth/revoke"),
+            "{posts:?}"
+        );
     }
 }

@@ -8140,7 +8140,7 @@ fn run_logout() -> Result<()> {
 }
 
 async fn run_xai_device_auth(config_path: Option<&Path>) -> Result<()> {
-    let pending = crate::oauth::device_code_login(crate::oauth::OAuthProvider::Xai).await?;
+    let pending = crate::oauth::login(crate::oauth::OAuthProvider::Xai).await?;
     let activation = xai_oauth::activate_device_login(
         xai_oauth::pending_from_unified(pending),
         config_path,
@@ -8155,7 +8155,9 @@ async fn run_xai_device_auth(config_path: Option<&Path>) -> Result<()> {
 }
 
 async fn run_chatgpt_pkce_auth(config_path: Option<&Path>) -> Result<()> {
-    let pending = chatgpt_oauth::pkce_login().await?;
+    let pending = crate::oauth::login(crate::oauth::OAuthProvider::Chatgpt)
+        .await
+        .map(chatgpt_oauth::pending_from_unified)?;
     let activation = chatgpt_oauth::activate_pkce_login(pending, config_path, None)?;
     println!(
         "ChatGPT OAuth is ready; activated {} via {}",
