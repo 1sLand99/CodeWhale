@@ -1,6 +1,6 @@
-//! Runtime for an **exact named Pod** (`schema = "exact"`).
+//! Runtime for an **exact named Fleet** (`schema = "exact"`).
 //!
-//! The saved Pod is the Pod that runs. At Workflow start its definition is
+//! The saved Fleet is the Fleet that runs. At Workflow start its definition is
 //! read from the standard `FleetSearchRoot` locations, every worker route is
 //! **preflighted and frozen**, the attached Reasoning Router service is
 //! resolved, and the whole thing is captured into an immutable
@@ -19,12 +19,12 @@
 //!    is called. A rejected or capacity-blocked task spends no Router tokens
 //!    and discloses nothing to a Router's provider.
 //! 3. **Auto is a reasoning decision, and the attached Router makes it.**
-//!    `reasoning = "auto"` always goes to the Pod's Reasoning Router — no
+//!    `reasoning = "auto"` always goes to the Fleet's Reasoning Router — no
 //!    provider-native-adaptive bypass, no legacy model routing, no local
 //!    keyword heuristic. A manual tier calls no Router at all.
 //! 4. **Runtime owns authority.** After exact member selection, Runtime maps
 //!    the semantic role onto its closed role policy and intersects that policy
-//!    with the live parent. Pod identity never grants or withholds project
+//!    with the live parent. Fleet identity never grants or withholds project
 //!    trust, tools, writes, network reach, shell, or delegation.
 //! 5. **Receipts are truthful and content-free.** The tier a selector picked,
 //!    the control a provider actually receives, and what a Router cost are
@@ -52,7 +52,7 @@ use crate::models::Role;
 use crate::tools::subagent::public_role_label;
 use crate::tui::app::ReasoningEffort;
 
-/// Where exact Pod definitions and Reasoning Router profiles are looked up,
+/// Where exact Fleet definitions and Reasoning Router profiles are looked up,
 /// labelled so an identity can be qualified (`workspace/glm-pair`) instead of
 /// silently shadowed.
 fn personal_fleet_root() -> anyhow::Result<std::path::PathBuf> {
@@ -73,7 +73,7 @@ pub(crate) fn fleet_search_roots(workspace: &std::path::Path) -> Vec<FleetSearch
     roots
 }
 
-/// Load a Pod document by (optionally qualified) name from the standard
+/// Load a Fleet document by (optionally qualified) name from the standard
 /// roots. Ambiguity between origins is surfaced, never resolved by shadowing.
 pub(crate) fn load_fleet_document(
     name: &str,
@@ -303,7 +303,7 @@ pub(crate) const NON_SHELL_EXECUTION_DENYLIST: &[&str] = &[
 ///
 /// `inherit_disallowed_tools: false` exists so a child can start from a clean
 /// surface instead of the session's `--disallowed-tools` taste. It must not be
-/// able to drop a rule that expresses a *ceiling*: a Pod member clamped to
+/// able to drop a rule that expresses a *ceiling*: a Fleet member clamped to
 /// `network_tool = false` that spawns a grandchild with
 /// `inherit_disallowed_tools: false` would otherwise hand that grandchild the
 /// network back, which is a child widening its parent's envelope by asking
@@ -444,11 +444,11 @@ impl ChildAuthority {
     /// A stable, content-free fingerprint of the envelope this authority
     /// actually installs.
     ///
-    /// This is the value that turns "the Pod computed a ceiling" into
+    /// This is the value that turns "the Fleet computed a ceiling" into
     /// something a later layer can *check*. It covers every field a spawn
     /// carries — allowlist, deny list, write authority, delegation budget, and
     /// posture role — so a request that drifted between admission, routing, and
-    /// construction cannot pass for the one the Pod resolved. Two authorities
+    /// construction cannot pass for the one the Fleet resolved. Two authorities
     /// with the same fingerprint install the same child surface; that is the
     /// whole contract.
     ///
@@ -482,9 +482,9 @@ impl ChildAuthority {
         )
     }
 
-    /// Derive authority exclusively from Runtime policy after Pod identity
+    /// Derive authority exclusively from Runtime policy after Fleet identity
     /// selection. Free-form semantic roles map to Runtime `custom`; neither
-    /// the Pod definition nor its legacy `permissions` key participates.
+    /// the Fleet definition nor its legacy `permissions` key participates.
     #[must_use]
     pub(crate) fn from_runtime_role(role: &str, session: PermissionCeiling) -> Self {
         let runtime_role = runtime_role_for_member(role);
@@ -514,7 +514,7 @@ impl ChildAuthority {
 /// requested child role policy.
 ///
 /// Read off the live parent runtime rather than assumed: this is the value that
-/// makes "a Pod cannot widen what the operator is currently allowed to do"
+/// makes "a Fleet cannot widen what the operator is currently allowed to do"
 /// true at runtime instead of on paper.
 #[must_use]
 pub(crate) fn session_permission_ceiling(
@@ -533,7 +533,7 @@ pub(crate) fn session_permission_ceiling(
     }
 }
 
-/// Map the Pod's open semantic role label onto Runtime's closed role policy.
+/// Map the Fleet's open semantic role label onto Runtime's closed role policy.
 /// Unknown labels remain useful identity (`auditor`, `research-lead`, …) but
 /// execute under Runtime `custom`, whose capabilities still intersect with the
 /// live parent.
@@ -814,7 +814,7 @@ pub(crate) fn preflight_route(
 /// Preflight resolves a route from *configuration*; this proves the same route
 /// can be turned into a working client — the step that fails on a malformed
 /// base URL, an unusable auth mode, or a transport CodeWhale cannot construct.
-/// Doing it at Workflow start, for every member, is what stops a Pod from
+/// Doing it at Workflow start, for every member, is what stops a Fleet from
 /// paying for a Router decision and only then discovering that the worker it
 /// decided for could never have been launched.
 ///
@@ -1024,7 +1024,7 @@ impl FleetRouterCaller for LiveFleetRouter {
 
 // ── The Workflow ───────────────────────────────────────────────────────────
 
-/// An exact Pod, frozen at Workflow start.
+/// An exact Fleet, frozen at Workflow start.
 ///
 /// The snapshot, the preflight, and the roster projected from them are all
 /// immutable for the life of the run: editing `fleets/<name>.toml` afterwards
@@ -1096,7 +1096,7 @@ pub(crate) struct ExactMemberLaunch {
 }
 
 impl ExactFleetWorkflow {
-    /// Capture a Workflow from a parsed exact Pod document.
+    /// Capture a Workflow from a parsed exact Fleet document.
     ///
     /// Everything that can fail locally fails here, before any worker is
     /// dispatched: an unresolvable provider, an unknown model, a missing
@@ -1111,7 +1111,7 @@ impl ExactFleetWorkflow {
     ) -> Result<Self, String> {
         let exact = document
             .exact()
-            .ok_or_else(|| "this Pod is not an exact Pod".to_string())?;
+            .ok_or_else(|| "this Fleet is not an exact Fleet".to_string())?;
 
         // Resolve the attached Reasoning Router *reference* into the one
         // captured service both forms normalize onto.
@@ -1122,7 +1122,7 @@ impl ExactFleetWorkflow {
                 let (profile, router_id) =
                     ReasoningRouterProfile::load_by_name(&name, search_roots).map_err(|error| {
                         format!(
-                            "exact Pod `{}` references reasoning router `{name}`, which could \
+                            "exact Fleet `{}` references reasoning router `{name}`, which could \
                              not be loaded: {error}",
                             id.qualified()
                         )
@@ -1159,7 +1159,7 @@ impl ExactFleetWorkflow {
 
         let router_unavailable = match (snapshot.router(), &router) {
             (Some(_), None) => {
-                Some("the Pod's reasoning router could not be bound on this machine".to_string())
+                Some("the Fleet's reasoning router could not be bound on this machine".to_string())
             }
             _ => None,
         };
@@ -1183,8 +1183,8 @@ impl ExactFleetWorkflow {
     ) -> Result<(RoutePreflight, Option<Arc<dyn FleetRouterCaller>>), String> {
         let Some(config) = config else {
             return Err(format!(
-                "exact Pod `{}` cannot start: no session config is available to preflight its \
-                 members' providers and models. An exact Pod fails closed here rather than \
+                "exact Fleet `{}` cannot start: no session config is available to preflight its \
+                 members' providers and models. An exact Fleet fails closed here rather than \
                  dispatching a worker onto a route it never verified.",
                 snapshot.fleet().qualified()
             ));
@@ -1200,13 +1200,13 @@ impl ExactFleetWorkflow {
             )
             .map_err(|error| {
                 format!(
-                    "exact Pod `{}` cannot start: {error}",
+                    "exact Fleet `{}` cannot start: {error}",
                     snapshot.fleet().qualified()
                 )
             })?;
             route.require_ready().map_err(|error| {
                 format!(
-                    "exact Pod `{}` cannot start: {error}",
+                    "exact Fleet `{}` cannot start: {error}",
                     snapshot.fleet().qualified()
                 )
             })?;
@@ -1221,7 +1221,7 @@ impl ExactFleetWorkflow {
         for route in &workers {
             validate_route_client(route, config).map_err(|error| {
                 format!(
-                    "exact Pod `{}` cannot start: {error}",
+                    "exact Fleet `{}` cannot start: {error}",
                     snapshot.fleet().qualified()
                 )
             })?;
@@ -1236,15 +1236,15 @@ impl ExactFleetWorkflow {
                     router = Some(Arc::new(live));
                 }
                 Err(error) => {
-                    // Recorded rather than raised: a Pod with no `auto`
+                    // Recorded rather than raised: a Fleet with no `auto`
                     // member does not need its router to be usable, and
                     // failing the whole Workflow for an unused service would
                     // be the wrong trade.
                     if snapshot.has_auto_member() {
                         return Err(format!(
-                            "exact Pod `{}` cannot start: member(s) {} request reasoning \
-                             `auto` but the Pod's reasoning router is unusable ({}). Fix the \
-                             router profile or pin an explicit reasoning tier — exact Pods \
+                            "exact Fleet `{}` cannot start: member(s) {} request reasoning \
+                             `auto` but the Fleet's reasoning router is unusable ({}). Fix the \
+                             router profile or pin an explicit reasoning tier — exact Fleets \
                              never fall back to legacy model routing or a local heuristic.",
                             snapshot.fleet().qualified(),
                             snapshot.auto_member_ids().join(", "),
@@ -1259,7 +1259,7 @@ impl ExactFleetWorkflow {
     }
 
     /// Fail at Workflow start — not at task launch — when a member requests
-    /// `auto` and the Pod has no Router it can actually call.
+    /// `auto` and the Fleet has no Router it can actually call.
     fn reject_unusable_auto_members(&self) -> Result<(), String> {
         if !self.snapshot.has_auto_member() || self.router.is_some() {
             return Ok(());
@@ -1267,11 +1267,11 @@ impl ExactFleetWorkflow {
         let reason = self
             .router_unavailable
             .clone()
-            .unwrap_or_else(|| "this Pod references no reasoning router".to_string());
+            .unwrap_or_else(|| "this Fleet references no reasoning router".to_string());
         Err(format!(
-            "exact Pod `{}` cannot start: member(s) {} request reasoning `auto` but the Pod's \
+            "exact Fleet `{}` cannot start: member(s) {} request reasoning `auto` but the Fleet's \
              reasoning router is unusable ({reason}). Attach a working reasoning router or pin an \
-             explicit reasoning tier — exact Pods never fall back to legacy model routing or a \
+             explicit reasoning tier — exact Fleets never fall back to legacy model routing or a \
              local heuristic.",
             self.snapshot.fleet().qualified(),
             self.snapshot.auto_member_ids().join(", "),
@@ -1332,7 +1332,7 @@ impl ExactFleetWorkflow {
         let member = match (profile, role) {
             (None, None) => {
                 return Err(format!(
-                    "Pod `{fleet}` is an exact Pod: every task must name a member via `role` \
+                    "Fleet `{fleet}` is an exact Fleet: every task must name a member via `role` \
                      or `profile`. Members: {}",
                     self.member_names()
                 ));
@@ -1344,7 +1344,7 @@ impl ExactFleetWorkflow {
                 let by_role = self.lookup(role)?;
                 if by_profile.id != by_role.id {
                     return Err(format!(
-                        "Pod `{fleet}`: task names profile `{profile}` (member `{}`) and role \
+                        "Fleet `{fleet}`: task names profile `{profile}` (member `{}`) and role \
                          `{role}` (member `{}`), which are different members. A task must name \
                          one member; the two fields cannot disagree about who ran.",
                         by_profile.id, by_role.id
@@ -1356,7 +1356,7 @@ impl ExactFleetWorkflow {
 
         let route = self.preflight.worker(&member.id).ok_or_else(|| {
             format!(
-                "Pod `{fleet}`: member `{}` has no preflighted route",
+                "Fleet `{fleet}`: member `{}` has no preflighted route",
                 member.id
             )
         })?;
@@ -1374,7 +1374,7 @@ impl ExactFleetWorkflow {
     fn lookup(&self, key: &str) -> Result<&FleetSnapshotMember, String> {
         self.snapshot.member_by_id_or_role(key).ok_or_else(|| {
             format!(
-                "unknown exact Pod member `{key}` in `{}`. Members: {}",
+                "unknown exact Fleet member `{key}` in `{}`. Members: {}",
                 self.snapshot.fleet().qualified(),
                 self.member_names()
             )
@@ -1402,7 +1402,7 @@ impl ExactFleetWorkflow {
 
         let member = self.snapshot.member(&binding.member_id).ok_or_else(|| {
             format!(
-                "Pod `{}`: member `{}` vanished between admission and launch",
+                "Fleet `{}`: member `{}` vanished between admission and launch",
                 self.snapshot.fleet().qualified(),
                 binding.member_id
             )
@@ -1423,7 +1423,7 @@ impl ExactFleetWorkflow {
         let authority = ChildAuthority::from_runtime_role(&member.role, binding.session);
         if authority != binding.authority {
             return Err(format!(
-                "Pod `{}`: member `{}` resolved a different permission envelope at launch than \
+                "Fleet `{}`: member `{}` resolved a different permission envelope at launch than \
                  at admission, so the launch is refused. admitted={} launched={}",
                 self.snapshot.fleet().qualified(),
                 binding.member_id,
@@ -1443,7 +1443,7 @@ impl ExactFleetWorkflow {
         let decision = if binding.requires_router {
             let router = self.router.as_ref().ok_or_else(|| {
                 format!(
-                    "member `{}` requests reasoning `auto` but Pod `{}` has no usable reasoning \
+                    "member `{}` requests reasoning `auto` but Fleet `{}` has no usable reasoning \
                      router",
                     binding.member_id,
                     self.snapshot.fleet().qualified()
@@ -1502,7 +1502,7 @@ impl ExactFleetWorkflow {
             EffectiveReasoning::NativeAdaptive => {
                 return Err(format!(
                     "member `{}` resolved to provider-native adaptive reasoning, which an exact \
-                     Pod launch cannot place on a request. Pin an explicit reasoning tier.",
+                     Fleet launch cannot place on a request. Pin an explicit reasoning tier.",
                     binding.member_id
                 ));
             }
@@ -1564,7 +1564,7 @@ impl ExactFleetWorkflow {
 ///   is carried as the display name. Role is what gates and records mean; id is
 ///   what resolves a roster entry. Conflating them would make a gate keyed on
 ///   `builder` silently miss a member whose id happens to be `implementer`.
-/// - Runtime's closed role policy supplies the *posture* role. Free-form Pod
+/// - Runtime's closed role policy supplies the *posture* role. Free-form Fleet
 ///   roles remain visible identity but map to Runtime `custom`; the profile
 ///   carries no trust/permission/delegation input of its own.
 fn exact_member_profile(
@@ -1589,7 +1589,7 @@ fn exact_member_profile(
         slot: codewhale_config::FleetSlot::Custom(member.role.clone()),
         role: codewhale_config::FleetRole {
             name: posture_role.to_string(),
-            description: Some(format!("exact Pod member `{}`", member.id)),
+            description: Some(format!("exact Fleet member `{}`", member.id)),
             instructions: None,
         },
         loadout: codewhale_config::FleetLoadout::Inherit,
@@ -1612,14 +1612,14 @@ fn exact_member_profile(
         id: member.id.clone(),
         display_name: Some(member.role.clone()),
         description: Some(format!(
-            "Exact Pod member `{}` (role `{}`), pinned to {provider}/{wire_model}.",
+            "Exact Fleet member `{}` (role `{}`), pinned to {provider}/{wire_model}.",
             member.id, member.role
         )),
         requires: Vec::new(),
         profile,
         source: source
             .map(std::path::Path::to_path_buf)
-            .unwrap_or_else(|| std::path::PathBuf::from("<exact Pod>")),
+            .unwrap_or_else(|| std::path::PathBuf::from("<exact Fleet>")),
         origin: ProfileOrigin::Config,
         plugin_authority: None,
     }
@@ -1629,7 +1629,7 @@ fn exact_member_profile(
 
 /// A Router that answers with a fixed fixture string, recording what it saw.
 ///
-/// Test-only: it is how the exact-Pod reasoning path is exercised end to end
+/// Test-only: it is how the exact-Fleet reasoning path is exercised end to end
 /// without a provider call, and how "the router was never called" is asserted.
 #[cfg(test)]
 #[derive(Debug)]
@@ -1706,7 +1706,7 @@ impl ExactFleetWorkflow {
         router: Option<Arc<StaticFleetRouter>>,
         capability: ReasoningCapability,
     ) -> Self {
-        let exact = document.exact().expect("exact Pod");
+        let exact = document.exact().expect("exact Fleet");
         let captured = captured_legacy_inline_router(exact).or_else(|| {
             exact.reasoning_router.as_ref().map(|name| {
                 CapturedReasoningRouter::from_profile(
@@ -2024,7 +2024,7 @@ mod tests {
         EffectiveReasoningSource, ProviderEffectiveReasoning, RequestedReasoning,
     };
 
-    /// A Pod that references a saved, reusable Reasoning Router service.
+    /// A Fleet that references a saved, reusable Reasoning Router service.
     const GLM_FLEET: &str = r#"
 name = "glm-pair"
 schema = "exact"
@@ -2321,7 +2321,7 @@ permissions = "read_only"
             id(),
             "no credential configured for `openai`",
         )
-        .expect_err("an unusable router must not start an auto Pod");
+        .expect_err("an unusable router must not start an auto Fleet");
 
         assert!(err.contains("cannot start"), "{err}");
         assert!(err.contains("implementer"), "{err}");
@@ -2342,7 +2342,7 @@ permissions = "read_only"
         );
     }
 
-    /// Projection carries route and Runtime role, but no Pod-owned authority.
+    /// Projection carries route and Runtime role, but no Fleet-owned authority.
     #[test]
     fn projected_members_use_runtime_roles_and_neutral_compatibility_fields() {
         use crate::tools::subagent::FleetRole;
@@ -2744,10 +2744,10 @@ permissions = "read_only"
 
         let authority = ChildAuthority::clamp(member, session);
 
-        assert!(!authority.ceiling.write, "a Pod may not grant write");
+        assert!(!authority.ceiling.write, "a Fleet may not grant write");
         assert!(
             !authority.ceiling.network_tool,
-            "a Pod may not grant a network tool"
+            "a Fleet may not grant a network tool"
         );
         assert_eq!(authority.ceiling.shell, ShellCeiling::ReadOnly);
         assert_eq!(authority.ceiling.delegation_depth, 0);
@@ -3053,7 +3053,7 @@ permissions = "read_only"
 "#,
             crate::config::DEFAULT_OLLAMA_CLOUD_MODEL
         ))
-        .expect("legacy Cloud Pod parses");
+        .expect("legacy Cloud Fleet parses");
 
         // `capture` is the real Workflow-start path: it preflights readiness,
         // constructs every worker client, and freezes the run-scoped roster.
@@ -3064,7 +3064,7 @@ permissions = "read_only"
             Some(&config),
             &[],
         )
-        .expect("legacy Cloud Pod starts");
+        .expect("legacy Cloud Fleet starts");
         let route = workflow
             .preflight
             .worker("cloud-worker")
