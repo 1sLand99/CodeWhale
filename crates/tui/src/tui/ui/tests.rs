@@ -4497,8 +4497,8 @@ fn bottom_placement_keeps_the_stage_and_queued_preview_at_twelve_rows() {
 #[test]
 fn wide_underwater_canvas_carries_the_ocean_to_both_terminal_edges() {
     let mut app = create_test_app();
-    app.ui_theme = crate::palette::UI_THEME;
-    app.ocean_treatment = crate::tui::ocean::OceanTreatment::Deepsea;
+    app.theme_id = crate::palette::ThemeId::Underwater;
+    app.ui_theme = crate::palette::UNDERWATER_UI_THEME;
     app.onboarding_workspace_trust_gate = false;
     app.onboarding = OnboardingState::None;
     let surface_bg = app.ui_theme.surface_bg;
@@ -5678,13 +5678,13 @@ fn session_denied_notice_explains_cached_decision_and_recovery() {
 async fn cached_denial_explanation_survives_tool_completion_and_done_render() {
     use crate::core::engine::MockApprovalEvent;
     use crate::tools::spec::ToolError;
-    use crate::tui::ocean::OceanTreatment;
     use ratatui::{Terminal, backend::TestBackend};
 
     let mut app = create_test_app();
     app.onboarding = OnboardingState::None;
     app.launch.visible = false;
-    app.ocean_treatment = OceanTreatment::Deepsea;
+    app.theme_id = crate::palette::ThemeId::Underwater;
+    app.ui_theme = crate::palette::UNDERWATER_UI_THEME;
     app.is_loading = true;
     app.runtime_turn_status = Some("in_progress".to_string());
 
@@ -11598,7 +11598,7 @@ fn ctrl_alt_4_selects_pinned_rail_panel_without_switching_modes() {
         app.work_surface.panel,
         crate::tui::work_surface::RailPanel::Files
     );
-    assert_eq!(app.status_message.as_deref(), Some("Rail panel: files"));
+    assert_eq!(app.status_message.as_deref(), Some("Workbar panel: files"));
 }
 
 #[test]
@@ -11870,7 +11870,7 @@ fn ctrl_alt_0_turns_rail_off() {
         app.work_surface.placement,
         crate::tui::work_surface::WorkSurfacePlacement::Off
     );
-    assert_eq!(app.status_message.as_deref(), Some("Rail is off"));
+    assert_eq!(app.status_message.as_deref(), Some("Workbar is off"));
 }
 
 #[test]
@@ -11886,28 +11886,28 @@ fn ctrl_alt_0_restores_bottom_rail_when_already_off() {
     );
     assert_eq!(
         app.status_message.as_deref(),
-        Some("Rail: bottom placement")
+        Some("Workbar: bottom placement")
     );
 }
 
 #[test]
 fn rail_command_reports_off_without_claiming_visibility() {
     // Replaces the old sidebar_render_state tests: the render-state machine
-    // is gone with the classic sidebar, and the /rail status readout is the
-    // contract that replaces it. It must never claim a surface that cannot
-    // render is visible.
+    // is gone with the classic sidebar, and the /workbar status readout is
+    // the contract that replaces it. It must never claim a surface that
+    // cannot render is visible.
     let mut app = create_test_app();
-    let result = crate::commands::execute("/rail off", &mut app);
+    let result = crate::commands::execute("/workbar off", &mut app);
     assert!(!result.is_error);
     assert_eq!(
         app.work_surface.placement,
         crate::tui::work_surface::WorkSurfacePlacement::Off
     );
     let message = result.message.unwrap_or_default();
-    assert!(message.contains("Rail is off"), "got: {message}");
+    assert!(message.contains("Workbar is off"), "got: {message}");
     assert!(
-        !message.contains("Sidebar is visible"),
-        "no control may claim the dead sidebar renders: {message}"
+        !message.contains("Workbar is visible"),
+        "no control may claim a hidden surface renders: {message}"
     );
 }
 
@@ -24509,4 +24509,58 @@ fn resumed_launch_keeps_the_loaded_session_id_for_the_engine() {
     let (engine, _handle) =
         crate::core::engine::Engine::new(build_engine_config(&app, &config), &config);
     assert_eq!(engine.session_id(), "800596e6-56fd-477c-9a0f-13ada7846194");
+}
+
+#[test]
+fn sixel_reconciler_emits_moves_and_clears() {
+    crate::tui::mark::set_sixel_supported_for_tests(true);
+    let mut app = create_test_app();
+    app.launch.sixel_cell_px = Some((10, 20));
+    // Force the transparent-stage branch: the raster composites onto the
+    // probed terminal background, and the clear below must repaint exactly
+    // that colour.
+    app.ui_theme.surface_bg = ratatui::style::Color::Reset;
+    app.launch.sixel_terminal_bg = Some(ratatui::style::Color::Rgb(3, 7, 13));
+    let mut writer: Vec<u8> = Vec::new();
+    // No reservation: silent, nothing tracked.
+    super::frame::reconcile_launch_sixel(&mut writer, &mut app);
+    assert!(writer.is_empty());
+    assert_eq!(app.launch.sixel_emitted, None);
+    // New block: one positioned emission, tracked in stage coordinates
+    // (stage cells are screen cells in fullscreen; CUP is 1-based, so
+    // stage (2,1) draws at row 2, column 3).
+    app.launch.sixel_mark_area = Some(Rect::new(2, 1, 6, 3));
+    super::frame::reconcile_launch_sixel(&mut writer, &mut app);
+    let text = String::from_utf8(writer.clone()).expect("ASCII stream");
+    assert!(text.contains("\x1b[2;3H"), "{text:?}");
+    assert!(text.contains("\x1bPq"), "{text:?}");
+    assert_eq!(app.launch.sixel_emitted, Some(Rect::new(2, 1, 6, 3)));
+    // Steady state: silent.
+    let settled = writer.len();
+    super::frame::reconcile_launch_sixel(&mut writer, &mut app);
+    assert_eq!(writer.len(), settled, "steady frame emits nothing");
+    // Moved block: the old screen block is wiped with the field colour,
+    // then the new block draws (stage (4,1) -> CUP row 3, column 6).
+    app.launch.sixel_mark_area = Some(Rect::new(4, 1, 6, 3));
+    super::frame::reconcile_launch_sixel(&mut writer, &mut app);
+    let text = String::from_utf8(writer.clone()).expect("ASCII stream");
+    let delta = &text[settled..];
+    assert!(delta.contains("48;2;"), "move clears the old block first");
+    assert!(
+        delta.contains("48;2;3;7;13m"),
+        "clear repaints the probed field: {delta:?}"
+    );
+    assert!(delta.contains("\x1b[2;5H"), "{delta:?}");
+    assert_eq!(app.launch.sixel_emitted, Some(Rect::new(4, 1, 6, 3)));
+    // Tier exit: the live block is wiped and tracking stops.
+    let moved = writer.len();
+    app.launch.sixel_mark_area = None;
+    super::frame::reconcile_launch_sixel(&mut writer, &mut app);
+    let text = String::from_utf8(writer.clone()).expect("ASCII stream");
+    assert!(
+        text[moved..].contains("48;2;"),
+        "exit clears the live block"
+    );
+    assert_eq!(app.launch.sixel_emitted, None);
+    crate::tui::mark::set_sixel_supported_for_tests(false);
 }

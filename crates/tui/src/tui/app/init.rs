@@ -270,7 +270,6 @@ impl App {
         let low_motion = settings.low_motion;
         let constrained_frame_rate = settings.constrained_frame_rate;
         let fancy_animations = settings.fancy_animations;
-        let ocean_treatment = crate::tui::ocean::OceanTreatment::parse(&settings.ocean_treatment);
         let focus_texture =
             crate::tui::focus_texture::FocusTextureMode::parse(&settings.focus_texture)
                 .unwrap_or_default();
@@ -310,8 +309,8 @@ impl App {
         // the fallback's switch, honored only when bracketed paste is off.
         let use_paste_burst_detection = settings.paste_burst_detection && !use_bracketed_paste;
         // Resolve the named theme from settings; unknown values were already
-        // normalised to "system" in Settings::load. The background_color
-        // setting still overlays on top.
+        // normalised to the underwater default in Settings::load. The
+        // background_color setting still overlays on top.
         let background_color_override = settings
             .background_color
             .as_deref()
@@ -863,7 +862,6 @@ impl App {
             ocean_turn_history_start: 0,
             ocean_receipt_settle_start: None,
             fancy_animations,
-            ocean_treatment,
             focus_texture,
             launch,
             pending_launch_action: None,

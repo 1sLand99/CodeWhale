@@ -125,10 +125,10 @@ pub(crate) fn apply_alt_0_shortcut(app: &mut App, modifiers: KeyModifiers) {
     if modifiers.contains(KeyModifiers::CONTROL) {
         if app.work_surface.placement == crate::tui::work_surface::WorkSurfacePlacement::Off {
             app.work_surface.placement = crate::tui::work_surface::WorkSurfacePlacement::Bottom;
-            app.status_message = Some("Rail: bottom placement".to_string());
+            app.status_message = Some("Workbar: bottom placement".to_string());
         } else {
             app.work_surface.placement = crate::tui::work_surface::WorkSurfacePlacement::Off;
-            app.status_message = Some("Rail is off".to_string());
+            app.status_message = Some("Workbar is off".to_string());
         }
         app.needs_redraw = true;
     }
@@ -2037,14 +2037,12 @@ pub(crate) async fn apply_command_result(
                     // Avoids re-reading settings.toml from disk on every
                     // `/theme` invocation.
                     let original = app.theme_id.name().to_string();
-                    app.view_stack.push_boxed(
-                        crate::tui::theme_picker::ThemePickerView::boxed_with_treatment(
+                    app.view_stack
+                        .push_boxed(crate::tui::theme_picker::ThemePickerView::boxed(
                             original,
-                            app.ocean_treatment,
                             app.ui_locale,
                             app.background_color_override,
-                        ),
-                    );
+                        ));
                 }
             }
             AppAction::OpenSkillsManager => {

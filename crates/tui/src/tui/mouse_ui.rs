@@ -509,20 +509,46 @@ pub(crate) fn handle_mouse_event(app: &mut App, mouse: MouseEvent) -> Vec<ViewEv
 
     // The launch surface owns the whole frame until a session is chosen.
     // Consume every mouse event here so wheel input cannot leak into the
-    // transcript or composer behind the launch header. The composer is the
-    // screen's one focus owner, so a click can only submit; nothing else on
-    // the launch screen is a target.
+    // transcript or composer behind the launch header. Clicks land on the
+    // card's rows or the composer's send glyph; anything else keeps focus
+    // where it already is.
     if app.launch.visible {
-        if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
-            let send_hit = app
-                .launch
-                .send_area
-                .is_some_and(|area| mouse_hits_rect(mouse, Some(area)));
-            if send_hit && !app.input.trim().is_empty() {
-                // Same submit path as the composer's Enter key.
-                app.pending_launch_action =
-                    Some(crate::tui::underwater::LaunchAction::SendComposer);
+        match mouse.kind {
+            MouseEventKind::Moved => {
+                // Hover paints the shared selected-row treatment through
+                // the same row hitboxes clicks use.
+                let hovered = app
+                    .launch
+                    .row_hitboxes
+                    .iter()
+                    .position(|(_, area)| mouse_hits_rect(mouse, Some(*area)));
+                if hovered != app.launch.hovered_row {
+                    app.launch.hovered_row = hovered;
+                    app.needs_redraw = true;
+                }
             }
+            MouseEventKind::Down(MouseButton::Left) => {
+                let send_hit = app
+                    .launch
+                    .send_area
+                    .is_some_and(|area| mouse_hits_rect(mouse, Some(area)));
+                if send_hit && !app.input.trim().is_empty() {
+                    // Same submit path as the composer's Enter key.
+                    app.pending_launch_action =
+                        Some(crate::tui::underwater::LaunchAction::SendComposer);
+                } else if let Some(id) = app
+                    .launch
+                    .row_hitboxes
+                    .iter()
+                    .find(|(_, area)| mouse_hits_rect(mouse, Some(*area)))
+                    .map(|(id, _)| id.clone())
+                {
+                    // Same actions the keyboard's Enter runs.
+                    app.pending_launch_action =
+                        Some(crate::tui::underwater::launch_row_click_action(&id));
+                }
+            }
+            _ => {}
         }
         app.needs_redraw = true;
         return Vec::new();
@@ -1879,9 +1905,10 @@ mod tests {
     fn send_click_matches_the_keyboard_submit_and_focus_never_leaves_the_composer() {
         let mut app = create_test_app();
         app.launch.visible = true;
-        app.launch.worktree_available = true;
         let stage = Rect::new(0, 1, 80, 22); // the frame's stage slot at 80x24
-        let hitboxes = crate::tui::underwater::tideline_startup_hitboxes(stage);
+        let startup = crate::tui::underwater::tideline_startup_from_app(&app);
+        let mut hitboxes = crate::tui::underwater::tideline_startup_hitboxes(stage);
+        hitboxes.rows = crate::tui::underwater::tideline_startup_row_hitboxes(stage, &startup);
         crate::tui::underwater::apply_launch_hitboxes(&hitboxes, &mut app.launch);
         let composer = app.launch.composer_area.expect("composer hitbox");
         let send = app.launch.send_area.expect("send hitbox");
@@ -1924,6 +1951,38 @@ mod tests {
         );
         assert!(app.launch.composer_focus);
         assert_eq!(app.pending_launch_action, None);
+    }
+
+    #[test]
+    fn launch_row_hover_and_click_run_the_keyboard_actions() {
+        let mut app = create_test_app();
+        app.launch.visible = true;
+        let stage = Rect::new(0, 1, 80, 22); // the frame's stage slot at 80x24
+        let startup = crate::tui::underwater::tideline_startup_from_app(&app);
+        let mut hitboxes = crate::tui::underwater::tideline_startup_hitboxes(stage);
+        hitboxes.rows = crate::tui::underwater::tideline_startup_row_hitboxes(stage, &startup);
+        crate::tui::underwater::apply_launch_hitboxes(&hitboxes, &mut app.launch);
+        assert!(
+            !app.launch.row_hitboxes.is_empty(),
+            "the card always lists a first row"
+        );
+        let (first_id, first_rect) = app.launch.row_hitboxes[0].clone();
+
+        // Hover highlights the row and repaints; moving away clears it.
+        app.needs_redraw = false;
+        handle_mouse_event(&mut app, mouse_move(first_rect.x + 1, first_rect.y));
+        assert_eq!(app.launch.hovered_row, Some(0));
+        assert!(app.needs_redraw, "hovering a row must repaint");
+        handle_mouse_event(&mut app, mouse_move(0, 0));
+        assert_eq!(app.launch.hovered_row, None);
+
+        // Clicking a row queues the same action the keyboard's Enter runs.
+        handle_mouse_event(&mut app, left_click(first_rect.x + 1, first_rect.y));
+        assert_eq!(
+            app.pending_launch_action.take(),
+            Some(crate::tui::underwater::launch_row_click_action(&first_id))
+        );
+        assert!(app.launch.composer_focus);
     }
 
     #[test]

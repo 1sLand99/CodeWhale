@@ -358,48 +358,51 @@ fn workspace_status_reports_head_and_dirty_counts() -> Result<()> {
 }
 
 #[test]
-fn session_detail_tool_use_preserves_caller_metadata() {
-    let detail = session_to_detail(saved_session_with_blocks(vec![
-        crate::models::ContentBlock::ToolUse {
-            id: "tool-1".to_string(),
-            name: "task_shell_start".to_string(),
-            input: json!({ "cmd": "cargo test" }),
-            caller: Some(crate::models::ToolCaller {
-                caller_type: "subagent".to_string(),
-                tool_id: Some("parent-tool".to_string()),
-            }),
-            thought_signature: None,
-        },
-    ]));
+fn session_detail_scenario() {
+    // Scenario consolidation of: session_detail_tool_use_preserves_caller_metadata, session_detail_tool_result_keeps_fallback_content_with_blocks
+    // from session_detail_tool_use_preserves_caller_metadata
+    {
+        let detail = session_to_detail(saved_session_with_blocks(vec![
+            crate::models::ContentBlock::ToolUse {
+                id: "tool-1".to_string(),
+                name: "task_shell_start".to_string(),
+                input: json!({ "cmd": "cargo test" }),
+                caller: Some(crate::models::ToolCaller {
+                    caller_type: "subagent".to_string(),
+                    tool_id: Some("parent-tool".to_string()),
+                }),
+                thought_signature: None,
+            },
+        ]));
 
-    let block = &detail.messages[0]["content"][0];
-    assert_eq!(block["type"].as_str(), Some("tool_use"));
-    assert_eq!(block["caller"]["type"].as_str(), Some("subagent"));
-    assert_eq!(block["caller"]["tool_id"].as_str(), Some("parent-tool"));
-}
+        let block = &detail.messages[0]["content"][0];
+        assert_eq!(block["type"].as_str(), Some("tool_use"));
+        assert_eq!(block["caller"]["type"].as_str(), Some("subagent"));
+        assert_eq!(block["caller"]["tool_id"].as_str(), Some("parent-tool"));
+    }
+    // from session_detail_tool_result_keeps_fallback_content_with_blocks
+    {
+        let detail = session_to_detail(saved_session_with_blocks(vec![
+            crate::models::ContentBlock::ToolResult {
+                tool_use_id: "tool-1".to_string(),
+                content: "fallback text".to_string(),
+                is_error: Some(false),
+                content_blocks: Some(vec![json!({
+                    "type": "text",
+                    "text": "structured text"
+                })]),
+            },
+        ]));
 
-#[test]
-fn session_detail_tool_result_keeps_fallback_content_with_blocks() {
-    let detail = session_to_detail(saved_session_with_blocks(vec![
-        crate::models::ContentBlock::ToolResult {
-            tool_use_id: "tool-1".to_string(),
-            content: "fallback text".to_string(),
-            is_error: Some(false),
-            content_blocks: Some(vec![json!({
-                "type": "text",
-                "text": "structured text"
-            })]),
-        },
-    ]));
-
-    let block = &detail.messages[0]["content"][0];
-    assert_eq!(block["type"].as_str(), Some("tool_result"));
-    assert_eq!(block["content"].as_str(), Some("fallback text"));
-    assert_eq!(
-        block["content_blocks"][0]["text"].as_str(),
-        Some("structured text")
-    );
-    assert_eq!(block["is_error"].as_bool(), Some(false));
+        let block = &detail.messages[0]["content"][0];
+        assert_eq!(block["type"].as_str(), Some("tool_result"));
+        assert_eq!(block["content"].as_str(), Some("fallback text"));
+        assert_eq!(
+            block["content_blocks"][0]["text"].as_str(),
+            Some("structured text")
+        );
+        assert_eq!(block["is_error"].as_bool(), Some(false));
+    }
 }
 
 #[test]
@@ -663,84 +666,87 @@ fn legacy_exact_thread_export_normalizes_provider_kind_and_id() {
 }
 
 #[test]
-fn runtime_auth_generates_token_by_default() {
-    let auth = resolve_runtime_auth(None, None, false);
-    assert!(auth.generated);
-    let token = auth.token.expect("generated token");
-    assert!(token.starts_with("cwrt_"));
-    assert!(token.len() > 32);
+fn runtime_auth_scenario() {
+    // Scenario consolidation of: runtime_auth_generates_token_by_default, runtime_auth_status_does_not_render_generated_token, runtime_auth_requires_explicit_insecure_for_no_token, runtime_auth_prefers_cli_token_over_env_token, runtime_auth_ignores_blank_configured_tokens
+    // from runtime_auth_generates_token_by_default
+    {
+        let auth = resolve_runtime_auth(None, None, false);
+        assert!(auth.generated);
+        let token = auth.token.expect("generated token");
+        assert!(token.starts_with("cwrt_"));
+        assert!(token.len() > 32);
+    }
+    // from runtime_auth_status_does_not_render_generated_token
+    {
+        let auth = ResolvedRuntimeAuth {
+            token: Some("cwrt_super_secret_test_token".to_string()),
+            generated: true,
+        };
+        let rendered = runtime_auth_status_lines(&auth).join("\n");
+
+        assert!(!rendered.contains("cwrt_super_secret_test_token"));
+        assert!(rendered.contains("not printed"));
+    }
+    // from runtime_auth_requires_explicit_insecure_for_no_token
+    {
+        let auth = resolve_runtime_auth(None, None, true);
+        assert_eq!(
+            auth,
+            ResolvedRuntimeAuth {
+                token: None,
+                generated: false,
+            }
+        );
+    }
+    // from runtime_auth_prefers_cli_token_over_env_token
+    {
+        let auth = resolve_runtime_auth(
+            Some(" cli-token ".to_string()),
+            Some("env-token".to_string()),
+            false,
+        );
+        assert_eq!(
+            auth,
+            ResolvedRuntimeAuth {
+                token: Some("cli-token".to_string()),
+                generated: false,
+            }
+        );
+    }
+    // from runtime_auth_ignores_blank_configured_tokens
+    {
+        let auth = resolve_runtime_auth(Some(" ".to_string()), Some("\t".to_string()), false);
+        assert!(auth.generated);
+        assert!(auth.token.is_some());
+    }
 }
 
 #[test]
-fn runtime_auth_status_does_not_render_generated_token() {
-    let auth = ResolvedRuntimeAuth {
-        token: Some("cwrt_super_secret_test_token".to_string()),
-        generated: true,
-    };
-    let rendered = runtime_auth_status_lines(&auth).join("\n");
+fn runtime_token_scenario() {
+    // Scenario consolidation of: runtime_token_environment_prefers_the_codewhale_name, runtime_token_environment_falls_through_a_blank_primary_to_the_legacy_alias
+    // from runtime_token_environment_prefers_the_codewhale_name
+    {
+        let environment = runtime_token_environment(&|name| match name {
+            RUNTIME_TOKEN_ENV => Some(" canonical-token ".to_string()),
+            LEGACY_RUNTIME_TOKEN_ENV => Some("legacy-token".to_string()),
+            _ => None,
+        });
 
-    assert!(!rendered.contains("cwrt_super_secret_test_token"));
-    assert!(rendered.contains("not printed"));
-}
+        assert_eq!(environment.token.as_deref(), Some("canonical-token"));
+        assert!(!environment.legacy_alias_used);
+        assert!(runtime_token_alias_warning(None, &environment).is_none());
+    }
+    // from runtime_token_environment_falls_through_a_blank_primary_to_the_legacy_alias
+    {
+        let environment = runtime_token_environment(&|name| match name {
+            RUNTIME_TOKEN_ENV => Some(" \t ".to_string()),
+            LEGACY_RUNTIME_TOKEN_ENV => Some(" legacy-token ".to_string()),
+            _ => None,
+        });
 
-#[test]
-fn runtime_auth_requires_explicit_insecure_for_no_token() {
-    let auth = resolve_runtime_auth(None, None, true);
-    assert_eq!(
-        auth,
-        ResolvedRuntimeAuth {
-            token: None,
-            generated: false,
-        }
-    );
-}
-
-#[test]
-fn runtime_auth_prefers_cli_token_over_env_token() {
-    let auth = resolve_runtime_auth(
-        Some(" cli-token ".to_string()),
-        Some("env-token".to_string()),
-        false,
-    );
-    assert_eq!(
-        auth,
-        ResolvedRuntimeAuth {
-            token: Some("cli-token".to_string()),
-            generated: false,
-        }
-    );
-}
-
-#[test]
-fn runtime_auth_ignores_blank_configured_tokens() {
-    let auth = resolve_runtime_auth(Some(" ".to_string()), Some("\t".to_string()), false);
-    assert!(auth.generated);
-    assert!(auth.token.is_some());
-}
-
-#[test]
-fn runtime_token_environment_prefers_the_codewhale_name() {
-    let environment = runtime_token_environment(&|name| match name {
-        RUNTIME_TOKEN_ENV => Some(" canonical-token ".to_string()),
-        LEGACY_RUNTIME_TOKEN_ENV => Some("legacy-token".to_string()),
-        _ => None,
-    });
-
-    assert_eq!(environment.token.as_deref(), Some("canonical-token"));
-    assert!(!environment.legacy_alias_used);
-    assert!(runtime_token_alias_warning(None, &environment).is_none());
-}
-
-#[test]
-fn runtime_token_environment_falls_through_a_blank_primary_to_the_legacy_alias() {
-    let environment = runtime_token_environment(&|name| match name {
-        RUNTIME_TOKEN_ENV => Some(" \t ".to_string()),
-        LEGACY_RUNTIME_TOKEN_ENV => Some(" legacy-token ".to_string()),
-        _ => None,
-    });
-
-    assert_eq!(environment.token.as_deref(), Some("legacy-token"));
-    assert!(environment.legacy_alias_used);
+        assert_eq!(environment.token.as_deref(), Some("legacy-token"));
+        assert!(environment.legacy_alias_used);
+    }
 }
 
 #[test]
@@ -6777,75 +6783,76 @@ async fn skill_toggle_endpoint_404s_for_unknown_skill() -> Result<()> {
 }
 
 #[test]
-fn resolve_skills_dir_finds_workspace_local_agents_skills() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let workspace = tmp.path();
-    let local_skills = workspace.join(".agents").join("skills");
-    fs::create_dir_all(&local_skills).expect("create skills dir");
+fn resolve_skills_scenario() {
+    // Scenario consolidation of: resolve_skills_dir_finds_workspace_local_agents_skills, resolve_skills_dir_finds_workspace_local_skills_fallback, resolve_skills_dir_respects_codewhale_only_scan, resolve_skills_dir_preserves_explicit_dir_in_codewhale_only_scan
+    // from resolve_skills_dir_finds_workspace_local_agents_skills
+    {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let workspace = tmp.path();
+        let local_skills = workspace.join(".agents").join("skills");
+        fs::create_dir_all(&local_skills).expect("create skills dir");
 
-    let config = Config::default();
-    let resolved = resolve_skills_dir(&config, workspace);
+        let config = Config::default();
+        let resolved = resolve_skills_dir(&config, workspace);
 
-    let expected = fs::canonicalize(&local_skills).expect("canonical local skills");
-    assert_eq!(resolved, expected);
-}
+        let expected = fs::canonicalize(&local_skills).expect("canonical local skills");
+        assert_eq!(resolved, expected);
+    }
+    // from resolve_skills_dir_finds_workspace_local_skills_fallback
+    {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let workspace = tmp.path();
+        let local_skills = workspace.join("skills");
+        fs::create_dir_all(&local_skills).expect("create skills dir");
 
-#[test]
-fn resolve_skills_dir_finds_workspace_local_skills_fallback() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let workspace = tmp.path();
-    let local_skills = workspace.join("skills");
-    fs::create_dir_all(&local_skills).expect("create skills dir");
+        let config = Config::default();
+        let resolved = resolve_skills_dir(&config, workspace);
 
-    let config = Config::default();
-    let resolved = resolve_skills_dir(&config, workspace);
+        let expected = fs::canonicalize(&local_skills).expect("canonical local skills");
+        assert_eq!(resolved, expected);
+    }
+    // from resolve_skills_dir_respects_codewhale_only_scan
+    {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let workspace = tmp.path();
+        let agents_skills = workspace.join(".agents").join("skills");
+        let codewhale_skills = workspace.join(".codewhale").join("skills");
+        fs::create_dir_all(&agents_skills).expect("create agents skills dir");
+        fs::create_dir_all(&codewhale_skills).expect("create codewhale skills dir");
 
-    let expected = fs::canonicalize(&local_skills).expect("canonical local skills");
-    assert_eq!(resolved, expected);
-}
-
-#[test]
-fn resolve_skills_dir_respects_codewhale_only_scan() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let workspace = tmp.path();
-    let agents_skills = workspace.join(".agents").join("skills");
-    let codewhale_skills = workspace.join(".codewhale").join("skills");
-    fs::create_dir_all(&agents_skills).expect("create agents skills dir");
-    fs::create_dir_all(&codewhale_skills).expect("create codewhale skills dir");
-
-    let config = Config {
-        skills: Some(crate::config::SkillsConfig {
-            scan_codewhale_only: Some(true),
+        let config = Config {
+            skills: Some(crate::config::SkillsConfig {
+                scan_codewhale_only: Some(true),
+                ..Default::default()
+            }),
             ..Default::default()
-        }),
-        ..Default::default()
-    };
-    let resolved = resolve_skills_dir(&config, workspace);
+        };
+        let resolved = resolve_skills_dir(&config, workspace);
 
-    let expected = fs::canonicalize(&codewhale_skills).expect("canonical codewhale skills");
-    assert_eq!(resolved, expected);
-}
+        let expected = fs::canonicalize(&codewhale_skills).expect("canonical codewhale skills");
+        assert_eq!(resolved, expected);
+    }
+    // from resolve_skills_dir_preserves_explicit_dir_in_codewhale_only_scan
+    {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let workspace = tmp.path().join("workspace");
+        let codewhale_skills = workspace.join(".codewhale").join("skills");
+        let configured_skills = tmp.path().join("configured-skills");
+        fs::create_dir_all(&codewhale_skills).expect("create codewhale skills dir");
+        fs::create_dir_all(&configured_skills).expect("create configured skills dir");
 
-#[test]
-fn resolve_skills_dir_preserves_explicit_dir_in_codewhale_only_scan() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let workspace = tmp.path().join("workspace");
-    let codewhale_skills = workspace.join(".codewhale").join("skills");
-    let configured_skills = tmp.path().join("configured-skills");
-    fs::create_dir_all(&codewhale_skills).expect("create codewhale skills dir");
-    fs::create_dir_all(&configured_skills).expect("create configured skills dir");
-
-    let config = Config {
-        skills_dir: Some(configured_skills.to_string_lossy().into_owned()),
-        skills: Some(crate::config::SkillsConfig {
-            scan_codewhale_only: Some(true),
+        let config = Config {
+            skills_dir: Some(configured_skills.to_string_lossy().into_owned()),
+            skills: Some(crate::config::SkillsConfig {
+                scan_codewhale_only: Some(true),
+                ..Default::default()
+            }),
             ..Default::default()
-        }),
-        ..Default::default()
-    };
-    let resolved = resolve_skills_dir(&config, &workspace);
+        };
+        let resolved = resolve_skills_dir(&config, &workspace);
 
-    assert_eq!(resolved, configured_skills);
+        assert_eq!(resolved, configured_skills);
+    }
 }
 
 #[test]
