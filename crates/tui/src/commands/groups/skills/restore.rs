@@ -39,7 +39,10 @@ impl RegisterCommand<CommandResult> for RestoreCmd {
     }
 
     fn handler() -> CommandHandler<CommandResult> {
-        CommandHandler::Contextual(restore_contextual)
+        CommandHandler::Contextual {
+            capabilities: codewhale_command_contract::handler::CommandCapabilities::SKILL_GROUP,
+            handler: restore_contextual,
+        }
     }
 }
 

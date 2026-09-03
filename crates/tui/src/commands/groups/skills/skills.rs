@@ -254,7 +254,10 @@ impl RegisterCommand<CommandResult> for SkillsCmd {
     }
 
     fn handler() -> CommandHandler<CommandResult> {
-        CommandHandler::Contextual(skills_contextual)
+        CommandHandler::Contextual {
+            capabilities: codewhale_command_contract::handler::CommandCapabilities::SKILL_GROUP,
+            handler: skills_contextual,
+        }
     }
 }
 
@@ -621,7 +624,11 @@ impl RegisterCommand<CommandResult> for SkillCmd {
     }
 
     fn handler() -> CommandHandler<CommandResult> {
-        CommandHandler::Contextual(skill_contextual)
+        CommandHandler::Contextual {
+            capabilities: codewhale_command_contract::handler::CommandCapabilities::SKILL_GROUP
+                .union(codewhale_command_contract::handler::CommandCapabilities::SKILLS),
+            handler: skill_contextual,
+        }
     }
 }
 

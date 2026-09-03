@@ -35,7 +35,10 @@ impl RegisterCommand<CommandResult> for ReviewCmd {
     }
 
     fn handler() -> CommandHandler<CommandResult> {
-        CommandHandler::Contextual(review_contextual)
+        CommandHandler::Contextual {
+            capabilities: codewhale_command_contract::handler::CommandCapabilities::SKILL_GROUP,
+            handler: review_contextual,
+        }
     }
 }
 
