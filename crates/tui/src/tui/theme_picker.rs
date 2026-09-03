@@ -552,7 +552,7 @@ mod tests {
     #[test]
     fn enter_commits_with_persist_true() {
         let mut v = ThemePickerView::new("system".to_string());
-        v.handle_key(key(KeyCode::Char('7'))); // -> CatppuccinMocha
+        v.handle_key(key(KeyCode::Char('8'))); // -> CatppuccinMocha
         let action = v.handle_key(key(KeyCode::Enter));
         match action {
             ViewAction::EmitAndClose(ViewEvent::ThemeSelectionUpdated { theme, persist }) => {

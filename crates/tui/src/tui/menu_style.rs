@@ -36,9 +36,7 @@ pub fn selected_row_style() -> Style {
 /// apply this only when `!selected`; selection always wins.
 #[must_use]
 pub fn hovered_row_style() -> Style {
-    Style::default()
-        .fg(palette::TEXT_PRIMARY)
-        .add_modifier(Modifier::UNDERLINED | Modifier::BOLD)
+    Style::default().bg(palette::SURFACE_ELEVATED)
 }
 
 /// Selected row with a caller-chosen foreground (the provider picker tints
@@ -189,17 +187,6 @@ mod tests {
                 .bg(palette::SELECTION_BG)
                 .add_modifier(Modifier::BOLD)
         );
-    }
-
-    #[test]
-    fn hovered_row_differs_from_unhovered_without_selection_fill() {
-        let hovered = hovered_row_style();
-        // Visible feedback: underline + bold.
-        assert!(hovered.add_modifier.contains(Modifier::UNDERLINED));
-        assert!(hovered.add_modifier.contains(Modifier::BOLD));
-        // Never masquerades as keyboard selection: no background band.
-        assert_eq!(hovered.bg, None);
-        assert_ne!(hovered, selected_row_style());
     }
 
     #[test]
