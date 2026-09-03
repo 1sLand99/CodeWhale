@@ -750,6 +750,43 @@ fn runtime_token_scenario() {
 }
 
 #[test]
+fn mobile_listener_fails_closed_outside_loopback_without_verified_transport() {
+    let non_loopback = RuntimeApiOptions {
+        host: "0.0.0.0".to_string(),
+        mobile: true,
+        insecure_no_auth: true,
+        ..RuntimeApiOptions::default()
+    };
+    let err = validate_runtime_listener_security(&non_loopback).unwrap_err();
+    assert!(err.to_string().contains("mobile is loopback-only"));
+
+    for host in ["127.0.0.1", "::1"] {
+        let loopback = RuntimeApiOptions {
+            host: host.to_string(),
+            mobile: true,
+            ..RuntimeApiOptions::default()
+        };
+        assert!(
+            validate_runtime_listener_security(&loopback).is_ok(),
+            "host={host}"
+        );
+    }
+    assert_eq!(
+        runtime_bind_address("::1", 7878)
+            .expect("IPv6 loopback bind address")
+            .to_string(),
+        "[::1]:7878"
+    );
+
+    let ordinary_http = RuntimeApiOptions {
+        host: "0.0.0.0".to_string(),
+        mobile: false,
+        ..RuntimeApiOptions::default()
+    };
+    assert!(validate_runtime_listener_security(&ordinary_http).is_ok());
+}
+
+#[test]
 fn consumed_legacy_runtime_token_reports_one_value_free_deprecation_line() {
     let secret = "legacy-super-secret-token";
     let environment = runtime_token_environment(&|name| {
@@ -772,28 +809,6 @@ fn explicit_cli_runtime_token_does_not_warn_about_an_unused_legacy_alias() {
 
     assert!(runtime_token_alias_warning(Some("cli-token"), &environment).is_none());
     assert!(runtime_token_alias_warning(Some(" \t"), &environment).is_some());
-}
-
-#[test]
-fn url_query_component_percent_encodes_token() {
-    assert_eq!(
-        url_query_component("abc ABC+/?:=&%"),
-        "abc%20ABC%2B%2F%3F%3A%3D%26%25"
-    );
-}
-
-#[test]
-fn token_from_cookie_header_decodes_percent_encoded_token() {
-    assert_eq!(
-        token_from_cookie_header(Some(
-            "theme=dark; codewhale_runtime_token=abc%20ABC%2B%2F%3F%3A%3D%26%25"
-        )),
-        Some("abc ABC+/?:=&%".to_string())
-    );
-    assert_eq!(
-        token_from_cookie_header(Some("codewhale_runtime_token=bad%ZZ")),
-        None
-    );
 }
 
 async fn spawn_test_server_with_root(
@@ -877,6 +892,7 @@ struct TestServerOverrides {
     config: Option<Config>,
     config_path: Option<PathBuf>,
     config_profile: Option<String>,
+    mobile: Option<mobile::RuntimeMobileState>,
     web: Option<web::RuntimeWebState>,
     compat_stream_test_hook: Option<mpsc::UnboundedSender<CompatStreamTestPoint>>,
     plugin_discovery: Option<Arc<crate::plugins::PluginDiscoveryContext>>,
@@ -978,6 +994,15 @@ async fn spawn_test_server_with_root_token_mobile_workspace_and_overrides(
         Err(err) => return Err(err.into()),
     };
     let addr = listener.local_addr()?;
+    let mobile = if mobile_enabled && runtime_token.is_some() {
+        Some(
+            overrides
+                .mobile
+                .unwrap_or_else(|| mobile::RuntimeMobileState::new().0),
+        )
+    } else {
+        None
+    };
     let state = RuntimeApiState {
         config: Arc::new(parking_lot::RwLock::new(config)),
         workspace,
@@ -1001,6 +1026,7 @@ async fn spawn_test_server_with_root_token_mobile_workspace_and_overrides(
         bind_host: "127.0.0.1".to_string(),
         bind_port: addr.port(),
         mobile_enabled,
+        mobile,
         web: overrides.web,
         fleet_codewhale_binary: overrides
             .fleet_codewhale_binary
@@ -1521,14 +1547,10 @@ async fn runtime_token_guard_protects_v1_routes() -> Result<()> {
 
     let cookie_token = client
         .get(format!("http://{addr}/v1/threads/summary"))
-        .header(
-            header::COOKIE,
-            format!("codewhale_runtime_token={}", url_query_component(&token)),
-        )
+        .header(header::COOKIE, format!("codewhale_runtime_token={token}"))
         .send()
-        .await?
-        .error_for_status()?;
-    assert_eq!(cookie_token.status(), StatusCode::OK);
+        .await?;
+    assert_eq!(cookie_token.status(), StatusCode::UNAUTHORIZED);
 
     let codewhale_header = client
         .get(format!("http://{addr}/v1/threads/summary"))
@@ -6044,7 +6066,11 @@ async fn mobile_page_is_available_only_when_enabled() -> Result<()> {
     assert!(html.contains("Codewhale Mobile"));
     assert!(html.contains("/v1/approvals/"));
     assert!(html.contains("MAX_VISIBLE_EVENTS = 100"));
-    assert!(html.contains("replay_limit="));
+    assert!(html.contains("replay_limit:"));
+    assert!(html.contains("X-Codewhale-Mobile-Request"));
+    assert!(!html.contains("localStorage.getItem"));
+    assert!(!html.contains("localStorage.setItem"));
+    assert!(!html.contains("setRuntimeTokenCookie"));
 
     handle.abort();
     Ok(())
@@ -6071,7 +6097,10 @@ async fn mobile_page_serves_shell_when_auth_enabled() -> Result<()> {
         .error_for_status()?;
     let html = shell.text().await?;
     assert!(html.contains("Codewhale Mobile"));
-    assert!(html.contains("TOKEN_COOKIE"));
+    assert!(html.contains("codewhale_mobile_session_proof"));
+    assert!(html.contains("/__codewhale/mobile/session"));
+    assert!(!html.contains("codewhale_runtime_token="));
+    assert!(!html.contains("localStorage.setItem"));
 
     let bearer = client
         .get(format!("http://{addr}/mobile"))
@@ -6080,6 +6109,230 @@ async fn mobile_page_serves_shell_when_auth_enabled() -> Result<()> {
         .await?
         .error_for_status()?;
     assert!(bearer.text().await?.contains("Codewhale Mobile"));
+
+    handle.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn mobile_bootstrap_uses_opaque_origin_bound_session_and_single_use_stream_ticket()
+-> Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let root = tmp.path().to_path_buf();
+    let sessions_dir = root.join("sessions");
+    let workspace = root.join("workspace");
+    let token = "mobile-runtime-test-token".to_string();
+    let (mobile_state, nonce) = mobile::RuntimeMobileState::new();
+    let Some((addr, _runtime_threads, handle)) =
+        spawn_test_server_with_root_token_mobile_workspace_and_overrides(
+            root,
+            sessions_dir,
+            Some(token.clone()),
+            true,
+            workspace,
+            TestServerOverrides {
+                mobile: Some(mobile_state),
+                ..TestServerOverrides::default()
+            },
+        )
+        .await?
+    else {
+        return Ok(());
+    };
+    let client = crate::tls::reqwest_client_builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?;
+    let origin = format!("http://{addr}");
+
+    let shell = client.get(format!("{origin}/mobile")).send().await?;
+    assert_eq!(shell.status(), StatusCode::OK);
+    assert_eq!(
+        shell
+            .headers()
+            .get(header::REFERRER_POLICY)
+            .and_then(|value| value.to_str().ok()),
+        Some("no-referrer")
+    );
+    let shell = shell.text().await?;
+    assert!(!shell.contains(&token));
+    assert!(!shell.contains("localStorage.setItem"));
+    assert!(!shell.contains("localStorage.getItem"));
+    assert!(!shell.contains("codewhale_runtime_token="));
+
+    let unauthenticated_session = client
+        .post(format!("{origin}/__codewhale/mobile/session"))
+        .send()
+        .await?;
+    assert_eq!(unauthenticated_session.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        unauthenticated_session
+            .headers()
+            .get(header::CACHE_CONTROL)
+            .and_then(|value| value.to_str().ok()),
+        Some("no-store")
+    );
+
+    let manual_session = client
+        .post(format!("{origin}/__codewhale/mobile/session"))
+        .bearer_auth(&token)
+        .send()
+        .await?;
+    assert_eq!(manual_session.status(), StatusCode::OK);
+    let manual_cookie = manual_session
+        .headers()
+        .get(header::SET_COOKIE)
+        .and_then(|value| value.to_str().ok())
+        .context("manual mobile session Set-Cookie")?
+        .to_string();
+    assert!(manual_cookie.starts_with("codewhale_mobile_session=cwms_"));
+    assert!(manual_cookie.ends_with("; Max-Age=1800; HttpOnly; SameSite=Strict; Path=/"));
+    assert!(!manual_cookie.contains(&token));
+    let manual_body = manual_session.text().await?;
+    assert!(!manual_body.contains(&token));
+
+    let bootstrap = client
+        .get(format!("{origin}/__codewhale/mobile/bootstrap/{nonce}"))
+        .send()
+        .await?;
+    assert_eq!(bootstrap.status(), StatusCode::SEE_OTHER);
+    let bootstrap_cookie = bootstrap
+        .headers()
+        .get(header::SET_COOKIE)
+        .and_then(|value| value.to_str().ok())
+        .context("bootstrap mobile session Set-Cookie")?
+        .to_string();
+    assert!(bootstrap_cookie.starts_with("codewhale_mobile_session=cwms_"));
+    assert!(!bootstrap_cookie.contains(&token));
+    let location = bootstrap
+        .headers()
+        .get(header::LOCATION)
+        .and_then(|value| value.to_str().ok())
+        .context("bootstrap mobile redirect")?;
+    assert!(location.starts_with("/mobile#request_proof=cwmr_"));
+    assert!(location.contains("&stream_ticket=cwmt_"));
+    assert!(!location.contains(&token));
+
+    let bootstrap_cookie_pair = bootstrap_cookie
+        .split(';')
+        .next()
+        .context("bootstrap mobile cookie pair")?
+        .to_string();
+    let fragment = location
+        .strip_prefix("/mobile#")
+        .context("bootstrap redirect must use a fragment")?;
+    let request_proof = fragment
+        .split('&')
+        .find_map(|part| part.strip_prefix("request_proof="))
+        .context("bootstrap request proof")?
+        .to_string();
+    let stream_ticket = fragment
+        .split('&')
+        .find_map(|part| part.strip_prefix("stream_ticket="))
+        .context("bootstrap stream ticket")?
+        .to_string();
+
+    let cookie_only = client
+        .get(format!("{origin}/v1/threads/summary"))
+        .header(header::COOKIE, &bootstrap_cookie_pair)
+        .send()
+        .await?;
+    assert_eq!(cookie_only.status(), StatusCode::UNAUTHORIZED);
+
+    let sibling_port_replay = client
+        .get(format!("{origin}/v1/threads/summary"))
+        .header(header::COOKIE, &bootstrap_cookie_pair)
+        .header(mobile::MOBILE_REQUEST_HEADER, &request_proof)
+        .header(header::ORIGIN, "http://127.0.0.1:3000")
+        .header("sec-fetch-site", "same-site")
+        .send()
+        .await?;
+    assert_eq!(sibling_port_replay.status(), StatusCode::UNAUTHORIZED);
+
+    let same_origin = client
+        .get(format!("{origin}/v1/threads/summary"))
+        .header(header::COOKIE, &bootstrap_cookie_pair)
+        .header(mobile::MOBILE_REQUEST_HEADER, &request_proof)
+        .header(header::ORIGIN, &origin)
+        .header("sec-fetch-site", "same-origin")
+        .send()
+        .await?;
+    assert_eq!(same_origin.status(), StatusCode::OK);
+
+    let created: serde_json::Value = client
+        .post(format!("{origin}/v1/threads"))
+        .header(header::COOKIE, &bootstrap_cookie_pair)
+        .header(mobile::MOBILE_REQUEST_HEADER, &request_proof)
+        .header(header::ORIGIN, &origin)
+        .header("sec-fetch-site", "same-origin")
+        .json(&json!({}))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let thread_id = created["id"].as_str().context("mobile-created thread id")?;
+
+    let stream_url =
+        format!("{origin}/v1/threads/{thread_id}/events?mobile_stream_ticket={stream_ticket}");
+    let stream = client
+        .get(&stream_url)
+        .header(header::COOKIE, &bootstrap_cookie_pair)
+        .header(header::ORIGIN, &origin)
+        .header("sec-fetch-site", "same-origin")
+        .send()
+        .await?;
+    assert_eq!(stream.status(), StatusCode::OK);
+    drop(stream);
+
+    let replayed_stream = client
+        .get(&stream_url)
+        .header(header::COOKIE, &bootstrap_cookie_pair)
+        .header(header::ORIGIN, &origin)
+        .header("sec-fetch-site", "same-origin")
+        .send()
+        .await?;
+    assert_eq!(replayed_stream.status(), StatusCode::UNAUTHORIZED);
+
+    let refreshed: serde_json::Value = client
+        .post(format!("{origin}/__codewhale/mobile/stream-ticket"))
+        .header(header::COOKIE, &bootstrap_cookie_pair)
+        .header(mobile::MOBILE_REQUEST_HEADER, &request_proof)
+        .header(header::ORIGIN, &origin)
+        .header("sec-fetch-site", "same-origin")
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let refreshed_ticket = refreshed["stream_ticket"]
+        .as_str()
+        .context("refreshed stream ticket")?;
+    let refreshed_stream_url =
+        format!("{origin}/v1/threads/{thread_id}/events?mobile_stream_ticket={refreshed_ticket}");
+    let sibling_stream_replay = client
+        .get(&refreshed_stream_url)
+        .header(header::COOKIE, &bootstrap_cookie_pair)
+        .header(header::ORIGIN, "http://127.0.0.1:3000")
+        .header("sec-fetch-site", "same-site")
+        .send()
+        .await?;
+    assert_eq!(sibling_stream_replay.status(), StatusCode::UNAUTHORIZED);
+
+    let same_origin_stream = client
+        .get(&refreshed_stream_url)
+        .header(header::COOKIE, &bootstrap_cookie_pair)
+        .header(header::ORIGIN, &origin)
+        .header("sec-fetch-site", "same-origin")
+        .send()
+        .await?;
+    assert_eq!(same_origin_stream.status(), StatusCode::OK);
+    drop(same_origin_stream);
+
+    let reused_bootstrap = client
+        .get(format!("{origin}/__codewhale/mobile/bootstrap/{nonce}"))
+        .send()
+        .await?;
+    assert_eq!(reused_bootstrap.status(), StatusCode::UNAUTHORIZED);
 
     handle.abort();
     Ok(())

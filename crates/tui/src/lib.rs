@@ -1305,7 +1305,7 @@ struct ServeArgs {
     /// Start ACP server over stdio for editor clients such as Zed
     #[arg(long)]
     acp: bool,
-    /// Bind host for HTTP server (default localhost; --mobile defaults to 0.0.0.0)
+    /// Bind host for HTTP server (default loopback; mobile is always loopback-only)
     #[arg(long)]
     host: Option<String>,
     /// Bind port for HTTP server
@@ -1334,23 +1334,11 @@ struct ServeArgs {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ServeBindHost {
     host: String,
-    mobile_rebound_to_lan: bool,
 }
 
-fn resolve_serve_bind_host(mobile: bool, host: Option<String>) -> ServeBindHost {
-    match (mobile, host) {
-        (true, None) => ServeBindHost {
-            host: "0.0.0.0".to_string(),
-            mobile_rebound_to_lan: true,
-        },
-        (_, Some(host)) => ServeBindHost {
-            host,
-            mobile_rebound_to_lan: false,
-        },
-        (false, None) => ServeBindHost {
-            host: "127.0.0.1".to_string(),
-            mobile_rebound_to_lan: false,
-        },
+fn resolve_serve_bind_host(_mobile: bool, host: Option<String>) -> ServeBindHost {
+    ServeBindHost {
+        host: host.unwrap_or_else(|| "127.0.0.1".to_string()),
     }
 }
 
@@ -2484,11 +2472,6 @@ async fn run_async_main_dispatch(
                     let bind_host = resolve_serve_bind_host(args.mobile, args.host);
                     if args.web && bind_host.host != "127.0.0.1" {
                         bail!("Codewhale web is loopback-only and must bind to 127.0.0.1");
-                    }
-                    if bind_host.mobile_rebound_to_lan {
-                        println!(
-                            "WARNING: --mobile is binding to 0.0.0.0 so LAN devices can reach the mobile control page. Use --host 127.0.0.1 to keep mobile loopback-only."
-                        );
                     }
                     runtime_api::run_http_server(
                         config,
@@ -12442,18 +12425,16 @@ mod serve_bind_host_tests {
             resolve_serve_bind_host(false, None),
             ServeBindHost {
                 host: "127.0.0.1".to_string(),
-                mobile_rebound_to_lan: false,
             }
         );
     }
 
     #[test]
-    fn mobile_default_rebinds_to_lan_with_warning_flag() {
+    fn mobile_defaults_to_loopback() {
         assert_eq!(
             resolve_serve_bind_host(true, None),
             ServeBindHost {
-                host: "0.0.0.0".to_string(),
-                mobile_rebound_to_lan: true,
+                host: "127.0.0.1".to_string(),
             }
         );
     }
@@ -12464,7 +12445,6 @@ mod serve_bind_host_tests {
             resolve_serve_bind_host(true, Some("127.0.0.1".to_string())),
             ServeBindHost {
                 host: "127.0.0.1".to_string(),
-                mobile_rebound_to_lan: false,
             }
         );
     }
@@ -12487,7 +12467,6 @@ mod serve_bind_host_tests {
             resolve_serve_bind_host(false, None),
             ServeBindHost {
                 host: "127.0.0.1".to_string(),
-                mobile_rebound_to_lan: false,
             }
         );
     }
