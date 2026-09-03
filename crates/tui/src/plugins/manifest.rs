@@ -2312,7 +2312,18 @@ args = ["server.js", "--mode=worker", "-e", "console.log('ready')"]
         let validated = PluginManifest::validate_from_path(&root.join("plugin.json"))
             .expect("in-repo computer-use bundle must validate");
         assert_eq!(validated.manifest.plugin.name, "computer-use");
+        // One declared skills *root* (`skills/`), which holds both skills.
         assert_eq!(validated.inventory.skills, 1);
+        let skills_root = validated.components.skills.first().expect("skills root");
+        let mut skill_dirs: Vec<String> = fs::read_dir(skills_root)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        skill_dirs.sort();
+        assert_eq!(skill_dirs, ["computer-use", "recording"]);
+        for skill in &skill_dirs {
+            assert!(skills_root.join(skill).join("SKILL.md").is_file());
+        }
         assert_eq!(validated.components.commands.len(), 1);
         assert!(validated.warnings.is_empty(), "{:?}", validated.warnings);
 
@@ -2320,11 +2331,20 @@ args = ["server.js", "--mode=worker", "-e", "console.log('ready')"]
         let servers =
             agent_plugin::parse_mcp_json(&mcp_text).expect("computer-use mcp.json must parse");
         let computer = servers.get("computer").expect("computer server");
-        assert_eq!(computer.command.as_deref(), Some("python3"));
+        assert_eq!(computer.command.as_deref(), Some("node"));
         assert!(
-            computer.args.iter().any(|arg| arg.ends_with("server.py")),
+            computer.args.iter().any(|arg| arg.ends_with("server.mjs")),
             "{:?}",
             computer.args
         );
+        // The entrypoint must stay inside the bundle: the engine launches it
+        // with `cwd` set to the plugin root.
+        for arg in &computer.args {
+            assert!(
+                !Path::new(arg).is_absolute() && !arg.split('/').any(|part| part == ".."),
+                "{arg} must stay inside the bundle"
+            );
+            assert!(root.join(arg).is_file(), "{arg} must exist in the bundle");
+        }
     }
 }

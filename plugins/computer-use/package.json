@@ -1,0 +1,17 @@
+{
+  "name": "codewhale-cu",
+  "version": "0.1.0",
+  "description": "Codewhale Computer Use plugin: frontier computer-use abilities (accessibility-first control, screenshots, zoom, recording) on macOS, Windows, Linux, and HarmonyOS, with multi-computer switching as a default. Zero runtime dependencies.",
+  "license": "MIT",
+  "type": "module",
+  "private": true,
+  "main": "./mcp/server.mjs",
+  "scripts": {
+    "test": "node --test tests/*.test.mjs",
+    "smoke": "node scripts/smoke.mjs",
+    "smoke:protocol": "node scripts/smoke-protocol.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
