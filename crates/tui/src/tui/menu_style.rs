@@ -57,6 +57,16 @@ pub fn disabled_selected_row_style() -> Style {
         .add_modifier(Modifier::DIM)
 }
 
+/// Hovered-but-not-selected row: every clickable row paints this while the
+/// pointer is over it, so hover always answers visibly without stealing the
+/// keyboard selection. The elevated-surface band reads on every theme and
+/// never copies the selection trio (ink + background + bold), so hover and
+/// selection stay distinguishable when they meet on adjacent rows.
+#[must_use]
+pub fn hovered_row_style() -> Style {
+    Style::default().bg(palette::SURFACE_ELEVATED)
+}
+
 /// Theme-preview variant: the theme picker shows each candidate theme's *own*
 /// selection treatment, so ink and background come from the previewed theme
 /// rather than the global tokens. `UiTheme` has no dedicated selection-ink
@@ -188,6 +198,14 @@ mod tests {
                 .bg(palette::SURFACE_ELEVATED)
                 .add_modifier(Modifier::DIM)
         );
+    }
+
+    #[test]
+    fn hovered_row_is_elevated_band_without_selection_ink() {
+        let hovered = hovered_row_style();
+        assert_eq!(hovered, Style::default().bg(palette::SURFACE_ELEVATED));
+        assert_ne!(hovered, selected_row_style());
+        assert_ne!(hovered, selected_row_bg_style());
     }
 
     #[test]

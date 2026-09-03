@@ -43,7 +43,7 @@ pub fn load_effective_roster(
         Ok(selected) => selected,
         Err(_) => {
             return FleetRoster::failed(
-                "Selected Fleet is missing or unreadable; inspect /pod and repair or clear the selection.",
+                "Selected Fleet is missing or unreadable; inspect /fleet and repair or clear the selection.",
             );
         }
     };
@@ -58,7 +58,7 @@ pub fn load_effective_roster(
         Err(_) => {
             let name = bounded_fleet_label(&selected.name);
             return FleetRoster::failed(format!(
-                "Selected {} Fleet `{name}` is invalid or unreadable; inspect /pod and repair or clear the selection.",
+                "Selected {} Fleet `{name}` is invalid or unreadable; inspect /fleet and repair or clear the selection.",
                 selected.scope.label()
             ));
         }

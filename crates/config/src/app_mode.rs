@@ -14,7 +14,7 @@ pub enum AppMode {
 impl AppMode {
     /// Productive keyboard cycle: Plan -> Act -> Operate -> Plan.
     ///
-    /// Operate joins the visible cycle as the always-on pod operation:
+    /// Operate joins the visible cycle as the always-on fleet operation:
     /// a lead plans slices, then workers execute against an optional burn rate.
     pub const CYCLE: [Self; 3] = [Self::Plan, Self::Agent, Self::Operate];
 
@@ -101,7 +101,7 @@ impl AppMode {
             AppMode::Agent => "Act mode - direct work in the current session with tools",
             AppMode::Plan => "Plan mode - research and design before implementing",
             AppMode::Operate => {
-                "Operate mode - always-on pod operation: lead plans, optional $/time burn rate, workers follow the plan"
+                "Operate mode - always-on fleet operation: lead plans, optional $/time burn rate, workers follow the plan"
             }
         }
     }
