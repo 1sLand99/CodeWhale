@@ -12047,7 +12047,6 @@ async fn build_direct_workflow_tool(
     )
     .with_role_models(role_models)
     .with_api_config(config.clone())
-    .with_fleet_roster(roster)
     .with_auto_model(route.auto_model)
     .with_reasoning_effort(reasoning_effort, reasoning_effort_auto)
     .with_agent_tool_surface_options(surface)

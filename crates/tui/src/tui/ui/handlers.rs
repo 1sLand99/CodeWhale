@@ -1610,7 +1610,11 @@ pub(crate) async fn handle_view_events(
                             content: if zh {
                                 format!("已保存 Fleet 配置：{}", target.display())
                             } else {
-                                format!("Fleet {} profile saved: {}", scope.label(), target.display())
+                                format!(
+                                    "Fleet {} profile saved: {}",
+                                    scope.label(),
+                                    target.display()
+                                )
                             },
                         });
                         app.status_message = Some(if zh {
@@ -1622,7 +1626,11 @@ pub(crate) async fn handle_view_events(
                                 draft.id
                             )
                         } else {
-                            format!("Fleet {} profile saved: {}", scope.label(), draft.file_name())
+                            format!(
+                                "Fleet {} profile saved: {}",
+                                scope.label(),
+                                draft.file_name()
+                            )
                         });
                     }
                     Err(err) => {

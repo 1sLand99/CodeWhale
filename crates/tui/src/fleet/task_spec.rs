@@ -180,7 +180,9 @@ fn validate_fleet_identity(field: &str, value: &str) -> Result<()> {
         bail!("fleet {field} cannot be empty");
     }
     if value.len() > MAX_FLEET_ID_BYTES || !value.chars().all(is_worker_token_char) {
-        bail!("fleet {field} must be a simple ASCII token no longer than {MAX_FLEET_ID_BYTES} bytes");
+        bail!(
+            "fleet {field} must be a simple ASCII token no longer than {MAX_FLEET_ID_BYTES} bytes"
+        );
     }
     Ok(())
 }
@@ -190,7 +192,9 @@ fn validate_fleet_name(field: &str, value: &str) -> Result<()> {
         bail!("fleet {field} cannot be empty");
     }
     if value.len() > MAX_FLEET_NAME_BYTES || value.chars().any(char::is_control) {
-        bail!("fleet {field} must be one printable line no longer than {MAX_FLEET_NAME_BYTES} bytes");
+        bail!(
+            "fleet {field} must be one printable line no longer than {MAX_FLEET_NAME_BYTES} bytes"
+        );
     }
     Ok(())
 }
@@ -236,7 +240,9 @@ fn validate_worker_token(task_id: &str, field: &str, value: Option<&str>) -> Res
         bail!("fleet task {task_id} {field} cannot be empty");
     }
     if trimmed != value || !trimmed.chars().all(is_worker_token_char) {
-        bail!("fleet task {task_id} {field} must be a simple token, not a path or provider/model id");
+        bail!(
+            "fleet task {task_id} {field} must be a simple token, not a path or provider/model id"
+        );
     }
     Ok(())
 }
@@ -351,7 +357,8 @@ pub fn prepare_verification_receipt(
         "evidence": verification.evidence.clone(),
         "artifacts": input.artifacts.clone(),
     });
-    let bytes = serde_json::to_vec_pretty(&evidence).context("serializing fleet receipt evidence")?;
+    let bytes =
+        serde_json::to_vec_pretty(&evidence).context("serializing fleet receipt evidence")?;
     // Content-address the evidence as well as namespacing it by attempt. A
     // stale verifier may finish after a retry has started; it is allowed to
     // leave an orphaned evidence file, but it must never overwrite the file a

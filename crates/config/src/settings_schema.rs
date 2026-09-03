@@ -326,7 +326,6 @@ const RAIL_PANEL: &[SettingOption] = &[
 /// Rail tab ids.
 pub const TAB_APPEARANCE: &str = "appearance";
 pub const TAB_MODELS: &str = "models";
-
 pub const TAB_WORK: &str = "work";
 pub const TAB_TOOLS: &str = "tools";
 pub const TAB_TRUST: &str = "trust";

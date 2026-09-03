@@ -129,10 +129,9 @@ where
             .iter()
             .filter(|route| route_matches(route, event.class))
         {
-            let adapter =
-                self.config.adapters.get(&route.adapter).ok_or_else(|| {
-                    anyhow!("Fleet alert adapter {} is not configured", route.adapter)
-                })?;
+            let adapter = self.config.adapters.get(&route.adapter).ok_or_else(|| {
+                anyhow!("Fleet alert adapter {} is not configured", route.adapter)
+            })?;
             let prepared = prepare_alert(&route.adapter, adapter, event, self.config.dry_run)?;
             let sent = if self.config.dry_run {
                 false

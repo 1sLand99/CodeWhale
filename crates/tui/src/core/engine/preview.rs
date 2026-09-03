@@ -275,7 +275,6 @@ impl Engine {
             api_config: route.config.clone(),
             locale_tag: self.config.locale_tag.clone(),
             role_models: self.subagent_role_models(),
-            fleet_roster: self.config.fleet_roster.clone(),
             auto_model: inputs.auto_model,
             reasoning_effort: reasoning_effort.clone(),
             reasoning_effort_auto,

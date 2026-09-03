@@ -4436,7 +4436,6 @@ impl Engine {
                 .with_locale_tag(route.locale_tag.clone())
                 .with_role_models(route.role_models.clone())
                 .with_api_config((*route.api_config).clone())
-                .with_fleet_roster(route.fleet_roster.clone())
                 .with_auto_model(route.auto_model)
                 .with_reasoning_effort(route.reasoning_effort.clone(), route.reasoning_effort_auto)
                 .with_agent_tool_surface_options(
@@ -5060,7 +5059,6 @@ impl Engine {
                     api_config: route_api_config,
                     locale_tag: self.config.locale_tag.clone(),
                     role_models: self.subagent_role_models(),
-                    fleet_roster: self.config.fleet_roster.clone(),
                     auto_model,
                     reasoning_effort: self.session.reasoning_effort.clone(),
                     reasoning_effort_auto: self.session.reasoning_effort_auto,
@@ -5852,7 +5850,6 @@ impl Engine {
             api_config: Box::new(self.api_config.clone()),
             locale_tag: self.config.locale_tag.clone(),
             role_models: self.subagent_role_models(),
-            fleet_roster: self.config.fleet_roster.clone(),
             auto_model: self.session.auto_model,
             reasoning_effort: self.session.reasoning_effort.clone(),
             reasoning_effort_auto: self.session.reasoning_effort_auto,
@@ -5882,7 +5879,6 @@ impl Engine {
         .with_locale_tag(self.config.locale_tag.clone())
         .with_role_models(self.subagent_role_models())
         .with_api_config(self.api_config.clone())
-        .with_fleet_roster(self.config.fleet_roster.clone())
         .with_auto_model(self.session.auto_model)
         .with_reasoning_effort(
             self.session.reasoning_effort.clone(),
@@ -7536,7 +7532,6 @@ pub(crate) struct TurnRouteContext {
     pub(crate) api_config: Box<crate::config::Config>,
     pub(crate) locale_tag: String,
     pub(crate) role_models: HashMap<String, String>,
-    pub(crate) fleet_roster: Arc<crate::fleet::roster::FleetRoster>,
     pub(crate) auto_model: bool,
     pub(crate) reasoning_effort: Option<String>,
     pub(crate) reasoning_effort_auto: bool,

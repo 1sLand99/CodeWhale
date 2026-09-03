@@ -40,9 +40,9 @@ use ratatui::{
 
 use crate::config::Config;
 use crate::fleet::profile::FleetProfileScope;
+use crate::fleet::role::public_role_label;
 use crate::localization::{MessageId, tr};
 use crate::palette;
-use crate::tools::subagent::public_role_label;
 use crate::tui::app::App;
 use crate::tui::menu_style;
 use crate::tui::views::{

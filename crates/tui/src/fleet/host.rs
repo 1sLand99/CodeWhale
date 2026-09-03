@@ -522,7 +522,9 @@ impl SshFleetHostConfig {
             codewhale_binary,
         } = spec
         else {
-            return Err(FleetHostError::configuration("expected SSH Fleet host spec"));
+            return Err(FleetHostError::configuration(
+                "expected SSH Fleet host spec",
+            ));
         };
         let working_directory = working_directory.clone().ok_or_else(|| {
             FleetHostError::configuration("SSH Fleet host spec requires working_directory")
