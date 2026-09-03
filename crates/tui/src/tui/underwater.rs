@@ -833,8 +833,8 @@ fn permission_label(app: &App) -> Cow<'static, str> {
 /// has, and printing `files: workspace` on every frame of every session spent
 /// seventeen columns of the primary chrome saying so. A notice that is always
 /// on cannot signal anything; folding the expected case away is what lets
-/// `files: full disk` and `files: workspace (unenforced)` land as warnings
-/// when they do appear.
+/// `files: workspace (unenforced)` and the Full-Access-but-confined case land
+/// as warnings when they do appear.
 ///
 /// `read-only` under Plan is dropped for the same reason from the other side:
 /// the permission word there is already the literal phrase "read only".
@@ -868,7 +868,13 @@ fn filesystem_scope_notice(app: &App) -> Option<Cow<'static, str>> {
         crate::sandbox::SandboxPolicy::ReadOnly => {
             (app.mode != AppMode::Plan).then_some(Cow::Borrowed("files: read-only"))
         }
-        crate::sandbox::SandboxPolicy::DangerFullAccess => Some(Cow::Borrowed("files: full disk")),
+        // `DangerFullAccess` only ever arises from the Bypass posture
+        // (`sandbox_policy_for_turn`), whose permission chip already reads
+        // "Full Access" two words to the left. The name is the disclosure;
+        // restating it as `files: full disk` spent columns saying it twice.
+        // The scope chip speaks in this posture only when the scope is
+        // *narrower* than the name implies (the WorkspaceWrite arm below).
+        crate::sandbox::SandboxPolicy::DangerFullAccess => None,
         crate::sandbox::SandboxPolicy::ExternalSandbox { .. } => {
             Some(Cow::Borrowed("files: external sandbox"))
         }
@@ -2905,16 +2911,23 @@ mod header_tests {
     }
 
     #[test]
-    fn a_deviating_scope_still_takes_the_header() {
-        // The chip exists for exactly this: tool-approval "Full Access" being
-        // read as unrestricted disk writes. Folding the default away is what
-        // makes this one land.
+    fn full_access_is_the_disclosure_and_is_not_restated() {
+        // Full disk access is stated once, by the permission chip's own
+        // name. A second `files: full disk` chip beside it said the same
+        // thing twice; the mode name stays prominent and does the work.
         let mut app = app();
         app.approval_mode = ApprovalMode::Bypass;
         app.configured_sandbox_mode = Some("danger-full-access".to_string());
-        let notice = filesystem_scope_notice(&app).expect("full disk must be stated");
-        assert_eq!(notice, "files: full disk");
-        assert!(header_line(&app, 120).contains("files: full disk"));
+        assert!(filesystem_scope_notice(&app).is_none());
+        let line = header_line(&app, 120);
+        assert!(!line.contains("files:"), "{line:?}");
+        assert!(
+            line.contains(&*super::tr(
+                app.ui_locale,
+                super::MessageId::ChipPermissionFullAccess
+            )),
+            "{line:?}"
+        );
     }
 
     #[test]
@@ -3468,16 +3481,50 @@ fn step_mark_to_fit(tier: MarkTier, rung: MarkSize, interior_h: u16) -> (MarkTie
 /// Pure geometry shared by the painter and
 /// [`tideline_startup_row_hitboxes`], so rects match painted cells
 /// wherever both run on the same stage.
-fn launch_card_plan(
-    stage: Rect,
-    layout: &StartupLayout,
+/// What the launch card has to place: counted once by the caller so the
+/// painter and the hitbox pass hand the plan the same inputs.
+#[derive(Debug, Clone, Copy)]
+struct LaunchCardContent {
     notice_rows: u16,
     announcement: bool,
     interactive: usize,
     has_recents: bool,
     empty_note: bool,
     mark_rows: u16,
+}
+
+impl LaunchCardContent {
+    fn for_startup(startup: &TidelineStartup<'_>, stage: Rect, interactive: usize) -> Self {
+        let (mark_tier, braille_rung) = launch_mark_rung(stage, startup.mark);
+        let mark_rows = match mark_tier {
+            MarkTier::Image | MarkTier::Sixel => crate::tui::mark::MARK_IMAGE_ROWS,
+            MarkTier::Braille => braille_rung.cells().1,
+            MarkTier::None => 0,
+        };
+        Self {
+            notice_rows: u16::from(startup.notice.is_some()),
+            announcement: startup.state_line().is_some(),
+            interactive,
+            has_recents: !startup.recent.is_empty(),
+            empty_note: startup.recent.is_empty() && !startup.has_more_recent,
+            mark_rows,
+        }
+    }
+}
+
+fn launch_card_plan(
+    stage: Rect,
+    layout: &StartupLayout,
+    content: LaunchCardContent,
 ) -> Option<LaunchCardPlan> {
+    let LaunchCardContent {
+        notice_rows,
+        announcement,
+        interactive,
+        has_recents,
+        empty_note,
+        mark_rows,
+    } = content;
     let margin = (stage.width / 10).clamp(2, 12);
     let card_w = stage.width.saturating_sub(margin.saturating_mul(2));
     // Vertically centred between the top line (and the notice row it keeps
@@ -3660,22 +3707,11 @@ fn render_launch_card(
     let fade = startup.card_dissolve;
     let rows = launch_card_rows(startup.locale, &startup.recent, startup.has_more_recent);
     let announcement = startup.state_line();
-    let notice_rows = u16::from(startup.notice.is_some());
     let (mark_tier, braille_rung) = launch_mark_rung(stage, startup.mark);
-    let mark_reserve = match mark_tier {
-        MarkTier::Image | MarkTier::Sixel => crate::tui::mark::MARK_IMAGE_ROWS,
-        MarkTier::Braille => braille_rung.cells().1,
-        MarkTier::None => 0,
-    };
     let Some(plan) = launch_card_plan(
         stage,
         layout,
-        notice_rows,
-        announcement.is_some(),
-        rows.len(),
-        !startup.recent.is_empty(),
-        startup.recent.is_empty() && !startup.has_more_recent,
-        mark_reserve,
+        LaunchCardContent::for_startup(startup, stage, rows.len()),
     ) else {
         return Rect::new(0, 0, 0, 0);
     };
@@ -4072,22 +4108,10 @@ pub fn tideline_startup_row_hitboxes(
 ) -> Vec<(crate::tui::app::LaunchRowId, Rect)> {
     let rows = launch_card_rows(startup.locale, &startup.recent, startup.has_more_recent);
     let layout = startup_layout(stage);
-    let notice_rows = u16::from(startup.notice.is_some());
-    let (mark_tier, braille_rung) = launch_mark_rung(stage, startup.mark);
-    let mark_reserve = match mark_tier {
-        MarkTier::Image | MarkTier::Sixel => crate::tui::mark::MARK_IMAGE_ROWS,
-        MarkTier::Braille => braille_rung.cells().1,
-        MarkTier::None => 0,
-    };
     let Some(plan) = launch_card_plan(
         stage,
         &layout,
-        notice_rows,
-        startup.state_line().is_some(),
-        rows.len(),
-        !startup.recent.is_empty(),
-        startup.recent.is_empty() && !startup.has_more_recent,
-        mark_reserve,
+        LaunchCardContent::for_startup(startup, stage, rows.len()),
     ) else {
         return Vec::new();
     };
