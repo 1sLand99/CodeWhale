@@ -2012,6 +2012,11 @@
   "LaunchMenuNewWorktree": "Worktree mới",
   "LaunchMenuResume": "Tiếp tục phiên",
   "LaunchMenuQuit": "Thoát",
-  "LaunchNoticeClaude": "Đến từ Claude Code? Tiếp tục phiên với ctrl+r",
+  "LaunchNoticeClaude": "Đến từ Claude Code? Các phiên gần đây được liệt kê bên dưới.",
+  "LaunchNewSession": "Phiên mới",
+  "LaunchRecentHeading": "Gần đây",
+  "LaunchSeeAllSessions": "Xem tất cả các phiên…",
+  "LaunchNoRecentSessions": "Chưa có phiên gần đây — nhập bên dưới để bắt đầu.",
+  "LaunchResumeFailed": "Tiếp tục thất bại: {error}",
   "ReceiptSessionHooks": "hook {count}"
 }

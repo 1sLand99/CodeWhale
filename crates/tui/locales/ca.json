@@ -2012,6 +2012,11 @@
   "LaunchMenuNewWorktree": "Nou worktree",
   "LaunchMenuResume": "Reprendre la sessió",
   "LaunchMenuQuit": "Surt",
-  "LaunchNoticeClaude": "Ve de Claude Code? Repreni la sessió amb ctrl+r",
+  "LaunchNoticeClaude": "Ve de Claude Code? Les sessions recents són a sota.",
+  "LaunchNewSession": "Nova sessió",
+  "LaunchRecentHeading": "Recents",
+  "LaunchSeeAllSessions": "Mostra totes les sessions…",
+  "LaunchNoRecentSessions": "Encara no hi ha sessions recents — escriu a sota per començar.",
+  "LaunchResumeFailed": "La represa ha fallat: {error}",
   "ReceiptSessionHooks": "hooks {count}"
 }

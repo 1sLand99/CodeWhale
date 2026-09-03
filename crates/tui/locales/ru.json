@@ -2012,6 +2012,11 @@
   "LaunchMenuNewWorktree": "Новый worktree",
   "LaunchMenuResume": "Продолжить сессию",
   "LaunchMenuQuit": "Выход",
-  "LaunchNoticeClaude": "Пришли из Claude Code? Возобновите сессию через ctrl+r",
+  "LaunchNoticeClaude": "Пришли из Claude Code? Недавние сессии перечислены ниже.",
+  "LaunchNewSession": "Новая сессия",
+  "LaunchRecentHeading": "Недавние",
+  "LaunchSeeAllSessions": "Показать все сессии…",
+  "LaunchNoRecentSessions": "Пока нет недавних сессий — введите ниже, чтобы начать.",
+  "LaunchResumeFailed": "Не удалось возобновить: {error}",
   "ReceiptSessionHooks": "хуков: {count}"
 }

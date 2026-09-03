@@ -2012,6 +2012,11 @@
   "LaunchMenuNewWorktree": "Novo worktree",
   "LaunchMenuResume": "Retomar sessão",
   "LaunchMenuQuit": "Sair",
-  "LaunchNoticeClaude": "Vem do Claude Code? Retome sua sessão com ctrl+r",
+  "LaunchNoticeClaude": "Vem do Claude Code? Suas sessões recentes estão listadas abaixo.",
+  "LaunchNewSession": "Nova sessão",
+  "LaunchRecentHeading": "Recentes",
+  "LaunchSeeAllSessions": "Ver todas as sessões…",
+  "LaunchNoRecentSessions": "Ainda não há sessões recentes — digite abaixo para começar.",
+  "LaunchResumeFailed": "Falha ao retomar: {error}",
   "ReceiptSessionHooks": "hooks {count}"
 }

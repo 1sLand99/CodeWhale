@@ -1075,11 +1075,15 @@ pub(crate) fn render(f: &mut Frame, app: &mut App, _config: &Config) -> Option<(
         let footer_area = areas.get(1).copied().unwrap_or_default();
         let info_area = areas.get(2).copied().unwrap_or_default();
         let startup = crate::tui::underwater::tideline_startup_from_app(app);
-        let hitboxes = if startup.composer.enclosed {
+        let mut hitboxes = if startup.composer.enclosed {
             crate::tui::underwater::tideline_startup_hitboxes(stage_area)
         } else {
             crate::tui::underwater::tideline_startup_hitboxes_with_composer(stage_area, false)
         };
+        // The card's clickable rows share the painter's plan geometry, so
+        // hover and click rects match painted cells.
+        hitboxes.rows =
+            crate::tui::underwater::tideline_startup_row_hitboxes(stage_area, &startup);
         crate::tui::underwater::render_tideline_startup(stage_area, f.buffer_mut(), &startup);
         // The completion popup paints above the docked composer's input row,
         // over the stage rows it needs — the same caller-computed entries

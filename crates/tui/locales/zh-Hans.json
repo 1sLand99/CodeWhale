@@ -2012,6 +2012,11 @@
   "LaunchMenuNewWorktree": "新建工作树",
   "LaunchMenuResume": "恢复会话",
   "LaunchMenuQuit": "退出",
-  "LaunchNoticeClaude": "从 Claude Code 过来？按 ctrl+r 恢复会话",
+  "LaunchNoticeClaude": "从 Claude Code 过来？最近会话已在下方列出。",
+  "LaunchNewSession": "新建会话",
+  "LaunchRecentHeading": "最近",
+  "LaunchSeeAllSessions": "查看全部会话…",
+  "LaunchNoRecentSessions": "暂无最近会话 — 在下方输入以开始。",
+  "LaunchResumeFailed": "恢复失败：{error}",
   "ReceiptSessionHooks": "钩子 {count}"
 }

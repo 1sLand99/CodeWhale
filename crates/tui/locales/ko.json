@@ -2012,6 +2012,11 @@
   "LaunchMenuNewWorktree": "새 워크트리",
   "LaunchMenuResume": "세션 재개",
   "LaunchMenuQuit": "종료",
-  "LaunchNoticeClaude": "Claude Code에서 오셨나요? ctrl+r로 세션을 다시 시작하세요",
+  "LaunchNoticeClaude": "Claude Code에서 오셨나요? 최근 세션이 아래에 나열됩니다.",
+  "LaunchNewSession": "새 세션",
+  "LaunchRecentHeading": "최근",
+  "LaunchSeeAllSessions": "모든 세션 보기…",
+  "LaunchNoRecentSessions": "최근 세션이 아직 없습니다 — 아래에 입력하여 시작하세요.",
+  "LaunchResumeFailed": "다시 시작 실패: {error}",
   "ReceiptSessionHooks": "훅 {count}"
 }

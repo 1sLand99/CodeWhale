@@ -2012,6 +2012,11 @@
   "LaunchMenuNewWorktree": "नया वर्कट्री",
   "LaunchMenuResume": "सेशन फिर से शुरू करें",
   "LaunchMenuQuit": "बंद करें",
-  "LaunchNoticeClaude": "Claude Code से आए हैं? ctrl+r से सेशन फिर से शुरू करें",
+  "LaunchNoticeClaude": "Claude Code से आए हैं? आपके हाल के सत्र नीचे सूचीबद्ध हैं।",
+  "LaunchNewSession": "नया सत्र",
+  "LaunchRecentHeading": "हाल के",
+  "LaunchSeeAllSessions": "सभी सत्र देखें…",
+  "LaunchNoRecentSessions": "अभी कोई हालिया सत्र नहीं — शुरू करने के लिए नीचे लिखें।",
+  "LaunchResumeFailed": "फिर से शुरू विफल: {error}",
   "ReceiptSessionHooks": "हुक {count}"
 }

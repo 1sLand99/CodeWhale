@@ -530,23 +530,57 @@ impl Default for LspRepairState {
     }
 }
 
+/// One recent session for the startup card's recent-work list (PRD 4.1).
+/// Loaded once with the launch state — never on the render path — and
+/// refreshed whenever the card is restored after a picker closes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LaunchRecentSession {
+    pub id: String,
+    pub title: String,
+    pub updated_at: DateTime<Utc>,
+    pub message_count: usize,
+}
+
+/// Identity of one interactive row on the startup card. The card's rows are
+/// a single ordered list — the prominent new-session entry first, then
+/// recent work, then the see-all overflow — so keyboard, mouse, and paint
+/// share one indexing through
+/// [`crate::tui::underwater::launch_card_rows`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LaunchRowId {
+    NewSession,
+    Recent(String),
+    SeeAll,
+}
+
+/// How many recent sessions the startup card lists inline before the
+/// see-all overflow opens the full picker.
+pub(crate) const LAUNCH_RECENT_INLINE_LIMIT: usize = 5;
+
 /// Pre-session launch menu state for the underwater shell.
 ///
 /// This is deliberately separate from onboarding and from the post-launch
-/// empty session. It selects real session/worktree actions before the
+/// empty session. It selects a fresh session or recent work before the
 /// transcript and composer become active.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LaunchState {
     pub visible: bool,
-    pub worktree_input: Option<String>,
     pub status: Option<String>,
-    pub workspace_session_count: usize,
-    pub worktree_available: bool,
+    /// Canonical workspace this launch state is scoped to. Recent work is
+    /// the workspace's own sessions (archived and empty auto-created ones
+    /// excluded, like the resume picker); the row hitboxes below are
+    /// refreshed with it.
+    pub workspace: PathBuf,
+    /// Recent workspace sessions, most recent first, capped at
+    /// [`LAUNCH_RECENT_INLINE_LIMIT`].
+    pub recent: Vec<LaunchRecentSession>,
+    /// All workspace sessions behind the inline list; when this exceeds
+    /// `recent.len()` the card paints the see-all overflow row.
+    pub total_workspace_sessions: usize,
     /// Whether launch keys type into the pre-session composer. The composer
     /// is the launch screen's one focus owner, so this is `true` from first
-    /// paint; only the worktree-name prompt takes the keyboard while open.
-    /// The composer itself is the session `App`'s own `ComposerState` — this
-    /// flag only decides where keystrokes go.
+    /// paint. The composer itself is the session `App`'s own
+    /// `ComposerState` — this flag only decides where keystrokes go.
     pub composer_focus: bool,
     /// Composer input-row hitbox from the most recent launch render (the
     /// docked strip below the option strip). A click here focuses the
@@ -555,11 +589,19 @@ pub struct LaunchState {
     /// Send-glyph hitbox inside the composer row. A click here submits the
     /// composed message through the normal dispatch path.
     pub send_area: Option<Rect>,
-    /// The launch card's highlighted menu entry (index into the four entries
-    /// the card paints, all of whose chords exist). `None` until the user
-    /// arrows onto the menu: nothing is pre-selected, so a reflexive Enter at
-    /// launch does nothing rather than running "New worktree" (founder
-    /// live-test, 2026-09-02). Esc clears it again.
+    /// Clickable rects for the card's rows from the most recent launch
+    /// render, in the same order as
+    /// [`crate::tui::underwater::launch_card_rows`].
+    pub row_hitboxes: Vec<(LaunchRowId, Rect)>,
+    /// Card row under the pointer, if any (index into `row_hitboxes`).
+    /// Painted with the shared selected-row treatment so every clickable
+    /// element responds visibly on hover.
+    pub hovered_row: Option<usize>,
+    /// The launch card's highlighted row (index into the rows the card
+    /// paints). `None` until the user arrows onto the list: nothing is
+    /// pre-selected, so a reflexive Enter at launch does nothing rather
+    /// than starting or resuming a session by accident (founder live-test,
+    /// 2026-09-02). Esc clears it again.
     pub menu_selected: Option<usize>,
     /// Ambient-clock millisecond reading when the card began dissolving, if
     /// it has. The first keystroke or a launched command dissolves the card
@@ -574,30 +616,38 @@ pub struct LaunchState {
 /// motion dissolves instantly (same drawing at its endpoint).
 pub(crate) const LAUNCH_CARD_DISSOLVE_MS: u128 = 240;
 
+/// Load the startup card's recent-work list: the workspace's own sessions,
+/// most recent first (`list_sessions` already sorts that way), skipping
+/// archived sessions and empty auto-created ones exactly like the resume
+/// picker and `--continue` do. Returns the inline-capped list plus the
+/// total behind it for the see-all overflow.
+fn load_launch_recent(workspace: &std::path::Path) -> (Vec<LaunchRecentSession>, usize) {
+    let sessions = crate::session_manager::SessionManager::default_location()
+        .and_then(|manager| manager.list_sessions())
+        .unwrap_or_default();
+    let mut scoped: Vec<LaunchRecentSession> = sessions
+        .into_iter()
+        .filter(|session| {
+            !session.archived
+                && !crate::session_manager::is_empty_auto_created_session(session)
+                && crate::session_manager::workspace_scope_matches(&session.workspace, workspace)
+        })
+        .map(|session| LaunchRecentSession {
+            id: session.id,
+            title: session.title,
+            updated_at: session.updated_at,
+            message_count: session.message_count,
+        })
+        .collect();
+    let total = scoped.len();
+    scoped.truncate(LAUNCH_RECENT_INLINE_LIMIT);
+    (scoped, total)
+}
+
 impl LaunchState {
     #[must_use]
     pub fn new(visible: bool, workspace: &std::path::Path) -> Self {
-        let workspace_session_count = crate::session_manager::SessionManager::default_location()
-            .and_then(|manager| manager.list_sessions())
-            .map(|sessions| {
-                sessions
-                    .into_iter()
-                    .filter(|session| {
-                        crate::session_manager::workspace_scope_matches(
-                            &session.workspace,
-                            workspace,
-                        )
-                    })
-                    .count()
-            })
-            .unwrap_or(0);
-        let worktree_available = std::process::Command::new("git")
-            .current_dir(workspace)
-            .args(["rev-parse", "--show-toplevel"])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .is_ok_and(|status| status.success());
+        let (recent, total_workspace_sessions) = load_launch_recent(workspace);
         // The launch card's migration notice is only painted when it is true:
         // Claude Code leaves its sessions under `~/.claude/projects`. One
         // stat at construction, never on the render path.
@@ -612,17 +662,28 @@ impl LaunchState {
             .unwrap_or(false);
         Self {
             visible,
-            worktree_input: None,
             status: None,
-            workspace_session_count,
-            worktree_available,
+            workspace: workspace.to_path_buf(),
+            recent,
+            total_workspace_sessions,
             composer_focus: true,
             composer_area: None,
             send_area: None,
+            row_hitboxes: Vec::new(),
+            hovered_row: None,
             menu_selected: None,
             dissolve_started_ms: None,
             claude_code_detected,
         }
+    }
+
+    /// Re-read the recent-work list from disk (same filter as
+    /// construction). Called when the card is restored after a picker
+    /// closes so a session created or renamed behind the picker shows up.
+    pub fn refresh_recent(&mut self) {
+        let (recent, total) = load_launch_recent(&self.workspace.clone());
+        self.recent = recent;
+        self.total_workspace_sessions = total;
     }
 
     /// Begin the card dissolve once (idempotent). The first keystroke or a
@@ -633,14 +694,17 @@ impl LaunchState {
         }
     }
 
-    /// Bring the card back after a launch flow (resume picker, changelog,
-    /// worktree prompt) is left with Esc: every launch path has a way back
-    /// to the card, so a dismissed picker never strands the user on an empty
-    /// stage. The menu comes back with nothing highlighted.
+    /// Bring the card back after a launch flow (the sessions picker) is
+    /// left with Esc: every launch path has a way back to the card, so a
+    /// dismissed picker never strands the user on an empty stage. The list
+    /// comes back with nothing highlighted, and the recent-work list is
+    /// re-read so sessions created behind the picker show up.
     pub fn restore_card(&mut self) {
         self.dissolve_started_ms = None;
         self.menu_selected = None;
+        self.hovered_row = None;
         self.status = None;
+        self.refresh_recent();
     }
 
     /// How far the card has dissolved, `[0.0 intact ..= 1.0 gone]`. Reduced

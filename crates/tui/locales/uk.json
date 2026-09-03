@@ -2012,6 +2012,11 @@
   "LaunchMenuNewWorktree": "Новий worktree",
   "LaunchMenuResume": "Відновити сесію",
   "LaunchMenuQuit": "Вихід",
-  "LaunchNoticeClaude": "Прийшли з Claude Code? Відновіть сесію через ctrl+r",
+  "LaunchNoticeClaude": "Прийшли з Claude Code? Нещодавні сесії перелічено нижче.",
+  "LaunchNewSession": "Нова сесія",
+  "LaunchRecentHeading": "Нещодавні",
+  "LaunchSeeAllSessions": "Показати всі сесії…",
+  "LaunchNoRecentSessions": "Поки немає нещодавніх сесій — введіть нижче, щоб почати.",
+  "LaunchResumeFailed": "Не вдалося відновити: {error}",
   "ReceiptSessionHooks": "гачків: {count}"
 }

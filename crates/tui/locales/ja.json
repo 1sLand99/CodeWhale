@@ -2012,6 +2012,11 @@
   "LaunchMenuNewWorktree": "新しいワークツリー",
   "LaunchMenuResume": "セッションを再開",
   "LaunchMenuQuit": "終了",
-  "LaunchNoticeClaude": "Claude Code からのお乗り換えですか？ctrl+r でセッションを再開できます",
+  "LaunchNoticeClaude": "Claude Code からのお乗り換えですか？最近のセッションは下に一覧表示されます。",
+  "LaunchNewSession": "新しいセッション",
+  "LaunchRecentHeading": "最近",
+  "LaunchSeeAllSessions": "すべてのセッションを表示…",
+  "LaunchNoRecentSessions": "最近のセッションはまだありません — 下に入力して開始します。",
+  "LaunchResumeFailed": "再開に失敗しました：{error}",
   "ReceiptSessionHooks": "フック {count}"
 }

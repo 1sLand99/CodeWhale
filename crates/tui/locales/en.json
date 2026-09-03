@@ -2012,6 +2012,11 @@
   "LaunchMenuNewWorktree": "New worktree",
   "LaunchMenuResume": "Resume session",
   "LaunchMenuQuit": "Quit",
-  "LaunchNoticeClaude": "Coming from Claude Code? Resume your session with ctrl+r",
+  "LaunchNoticeClaude": "Coming from Claude Code? Your recent sessions are listed below.",
+  "LaunchNewSession": "New session",
+  "LaunchRecentHeading": "Recent",
+  "LaunchSeeAllSessions": "See all sessions…",
+  "LaunchNoRecentSessions": "No recent sessions yet — type below to start.",
+  "LaunchResumeFailed": "Resume failed: {error}",
   "ReceiptSessionHooks": "hooks {count}"
 }

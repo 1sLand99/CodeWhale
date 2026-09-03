@@ -2012,6 +2012,11 @@
   "LaunchMenuNewWorktree": "Worktree baru",
   "LaunchMenuResume": "Lanjutkan sesi",
   "LaunchMenuQuit": "Keluar",
-  "LaunchNoticeClaude": "Datang dari Claude Code? Lanjutkan sesi dengan ctrl+r",
+  "LaunchNoticeClaude": "Datang dari Claude Code? Sesi terbaru Anda tercantum di bawah.",
+  "LaunchNewSession": "Sesi baru",
+  "LaunchRecentHeading": "Terkini",
+  "LaunchSeeAllSessions": "Lihat semua sesi…",
+  "LaunchNoRecentSessions": "Belum ada sesi terkini — ketik di bawah untuk memulai.",
+  "LaunchResumeFailed": "Melanjutkan gagal: {error}",
   "ReceiptSessionHooks": "hook {count}"
 }
