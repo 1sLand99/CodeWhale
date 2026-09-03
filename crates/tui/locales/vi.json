@@ -2012,7 +2012,7 @@
   "LaunchMenuNewWorktree": "Worktree mới",
   "LaunchMenuResume": "Tiếp tục phiên",
   "LaunchMenuQuit": "Thoát",
-  "LaunchNoticeClaude": "Đến từ Claude Code? Các phiên gần đây được liệt kê bên dưới.",
+  "LaunchNoticeClaude": "Đã phát hiện Claude Code. Chạy /import-claude để xem những gì có thể chuyển sang: máy chủ MCP, cài đặt an toàn và quyền. Không có gì được áp dụng nếu bạn chưa duyệt.",
   "LaunchNewSession": "Phiên mới",
   "LaunchRecentHeading": "Gần đây",
   "LaunchSeeAllSessions": "Xem tất cả các phiên…",

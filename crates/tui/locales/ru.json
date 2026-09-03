@@ -2012,7 +2012,7 @@
   "LaunchMenuNewWorktree": "Новый worktree",
   "LaunchMenuResume": "Продолжить сессию",
   "LaunchMenuQuit": "Выход",
-  "LaunchNoticeClaude": "Пришли из Claude Code? Недавние сессии перечислены ниже.",
+  "LaunchNoticeClaude": "Обнаружен Claude Code. Выполните /import-claude, чтобы посмотреть, что можно перенести: MCP-серверы, безопасные настройки и разрешения. Ничего не применяется без вашего согласия.",
   "LaunchNewSession": "Новая сессия",
   "LaunchRecentHeading": "Недавние",
   "LaunchSeeAllSessions": "Показать все сессии…",

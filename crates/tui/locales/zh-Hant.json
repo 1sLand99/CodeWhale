@@ -2012,7 +2012,7 @@
   "LaunchMenuNewWorktree": "新增工作樹",
   "LaunchMenuResume": "恢復會話",
   "LaunchMenuQuit": "結束",
-  "LaunchNoticeClaude": "從 Claude Code 過來？最近會話已在下方列出。",
+  "LaunchNoticeClaude": "偵測到 Claude Code。執行 /import-claude 查看可遷移的內容：MCP 伺服器、安全設定與權限。未經你確認不會套用任何變更。",
   "LaunchNewSession": "新增會話",
   "LaunchRecentHeading": "最近",
   "LaunchSeeAllSessions": "查看全部會話…",

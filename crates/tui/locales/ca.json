@@ -2012,7 +2012,7 @@
   "LaunchMenuNewWorktree": "Nou worktree",
   "LaunchMenuResume": "Reprendre la sessió",
   "LaunchMenuQuit": "Surt",
-  "LaunchNoticeClaude": "Ve de Claude Code? Les sessions recents són a sota.",
+  "LaunchNoticeClaude": "Claude Code detectat. Executa /import-claude per revisar què es pot importar: servidors MCP, valors segurs i permisos. Res s'aplica sense el teu consentiment.",
   "LaunchNewSession": "Nova sessió",
   "LaunchRecentHeading": "Recents",
   "LaunchSeeAllSessions": "Mostra totes les sessions…",

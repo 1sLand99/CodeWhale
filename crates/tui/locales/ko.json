@@ -2012,7 +2012,7 @@
   "LaunchMenuNewWorktree": "새 워크트리",
   "LaunchMenuResume": "세션 재개",
   "LaunchMenuQuit": "종료",
-  "LaunchNoticeClaude": "Claude Code에서 오셨나요? 최근 세션이 아래에 나열됩니다.",
+  "LaunchNoticeClaude": "Claude Code가 감지되었습니다. /import-claude를 실행해 가져올 수 있는 항목(MCP 서버, 안전한 설정, 권한)을 검토하세요. 승인 없이는 아무것도 적용되지 않습니다.",
   "LaunchNewSession": "새 세션",
   "LaunchRecentHeading": "최근",
   "LaunchSeeAllSessions": "모든 세션 보기…",

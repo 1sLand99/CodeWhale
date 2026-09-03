@@ -2012,7 +2012,7 @@
   "LaunchMenuNewWorktree": "नया वर्कट्री",
   "LaunchMenuResume": "सेशन फिर से शुरू करें",
   "LaunchMenuQuit": "बंद करें",
-  "LaunchNoticeClaude": "Claude Code से आए हैं? आपके हाल के सत्र नीचे सूचीबद्ध हैं।",
+  "LaunchNoticeClaude": "Claude Code मिला। क्या लाया जा सकता है यह देखने के लिए /import-claude चलाएँ: MCP सर्वर, सुरक्षित सेटिंग्स और अनुमतियाँ। आपकी स्वीकृति के बिना कुछ लागू नहीं होता।",
   "LaunchNewSession": "नया सत्र",
   "LaunchRecentHeading": "हाल के",
   "LaunchSeeAllSessions": "सभी सत्र देखें…",

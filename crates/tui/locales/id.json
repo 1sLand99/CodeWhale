@@ -2012,7 +2012,7 @@
   "LaunchMenuNewWorktree": "Worktree baru",
   "LaunchMenuResume": "Lanjutkan sesi",
   "LaunchMenuQuit": "Keluar",
-  "LaunchNoticeClaude": "Datang dari Claude Code? Sesi terbaru Anda tercantum di bawah.",
+  "LaunchNoticeClaude": "Claude Code terdeteksi. Jalankan /import-claude untuk meninjau apa yang bisa dibawa: server MCP, pengaturan aman, dan izin. Tidak ada yang diterapkan tanpa persetujuan Anda.",
   "LaunchNewSession": "Sesi baru",
   "LaunchRecentHeading": "Terkini",
   "LaunchSeeAllSessions": "Lihat semua sesi…",

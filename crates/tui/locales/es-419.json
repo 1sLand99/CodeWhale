@@ -2012,7 +2012,7 @@
   "LaunchMenuNewWorktree": "Nuevo worktree",
   "LaunchMenuResume": "Reanudar sesión",
   "LaunchMenuQuit": "Salir",
-  "LaunchNoticeClaude": "¿Vienes de Claude Code? Tus sesiones recientes están abajo.",
+  "LaunchNoticeClaude": "Claude Code detectado. Ejecuta /import-claude para revisar qué puede importarse: servidores MCP, ajustes seguros y permisos. Nada se aplica sin tu aprobación.",
   "LaunchNewSession": "Nueva sesión",
   "LaunchRecentHeading": "Recientes",
   "LaunchSeeAllSessions": "Ver todas las sesiones…",
