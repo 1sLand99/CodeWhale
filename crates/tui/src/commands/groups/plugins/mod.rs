@@ -19,11 +19,10 @@
 //!
 //! FEAT-020 converts this group to the portable command contract: every
 //! production handler consumes workspace, presentation, and plugin facets —
-//! never concrete `App`, `PluginRegistry`, or `Config`. The legacy
-//! `RegisterCommand` shell below builds the capability bundle from `App` and
-//! delegates to the portable dispatch; Phase 6 replaces it with
-//! `ContextualCommand::from_contract`. `CommandResult` and `AppAction` remain
-//! temporary TUI-owned references until FEAT-037.
+//! never concrete `App`, `PluginRegistry`, or `Config`. Production registration
+//! uses `ContextualCommand::from_contract`; a test-only shell builds the same
+//! capability bundle for focused parity tests. `CommandResult` and `AppAction`
+//! remain temporary TUI-owned references until FEAT-037.
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -223,8 +222,8 @@ fn reload(
     }
 }
 
-/// Rank already installed bundle metadata for a task without changing trust,
-/// enablement, disk state, or network state.
+/// Rank installed bundles and locally-added marketplace candidates for a task
+/// without changing trust, enablement, disk state, or network state.
 fn suggest_bundles(
     _presentation: &mut dyn CommandPresentationContext,
     plugin: &dyn CommandPluginContext,
@@ -237,14 +236,11 @@ fn suggest_bundles(
     let suggestions = plugin.suggest(task).unwrap_or_default();
     if suggestions.is_empty() {
         return CommandResult::message(format!(
-            "No installed plugin bundles matched `{}`.\n\nInstall a reviewed bundle with /plugin install <source>. Nothing was installed, trusted, or enabled.",
+            "No installed or catalog plugin matched `{}`.\n\nInstall a reviewed bundle with /plugin install <source>, or add a catalog with /plugin marketplace add. Nothing was installed, trusted, or enabled.",
             escape_review_text(task)
         ));
     }
-    let mut output = format!(
-        "Suggested installed plugins for `{}`:\n",
-        escape_review_text(task)
-    );
+    let mut output = format!("Suggested plugins for `{}`:\n", escape_review_text(task));
     output.push_str("─────────────────────────────\n");
     for suggestion in suggestions {
         let why = suggestion
@@ -261,7 +257,7 @@ fn suggest_bundles(
             escape_review_text(&suggestion.description)
         );
         let _ = writeln!(output, "    Why: {why}");
-        let _ = writeln!(output, "    {}", escape_review_text(&suggestion.next_step));
+        let _ = writeln!(output, "    {}", suggestion.next_step);
     }
     output.push_str("\nNothing was installed, trusted, or enabled.");
     CommandResult::message(output)
@@ -269,7 +265,7 @@ fn suggest_bundles(
 
 fn list_bundles_and_legacy_tools(
     presentation: &mut dyn CommandPresentationContext,
-    plugin: &dyn CommandPluginContext,
+    plugin: &mut dyn CommandPluginContext,
 ) -> CommandResult {
     let summaries = plugin.summaries().unwrap_or_default();
     let mut output = if summaries.is_empty() {
@@ -322,6 +318,11 @@ fn list_bundles_and_legacy_tools(
                 escape_review_path(&tool.path)
             );
         }
+    }
+
+    if let Some(nudge) = plugin.reload_nudge() {
+        output.push('\n');
+        output.push_str(&nudge);
     }
 
     CommandResult::message(output)
@@ -693,13 +694,6 @@ pub(crate) fn plugin_network_policy() -> crate::network_policy::NetworkPolicy {
         .network
         .map(|policy| policy.into_runtime())
         .unwrap_or_default()
-}
-
-pub(crate) fn run_async<F, T>(future: F) -> T
-where
-    F: std::future::Future<Output = T>,
-{
-    tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(future))
 }
 
 fn needs_approval_message(host: &str) -> String {

@@ -7,9 +7,8 @@
 use crate::facets::{
     CommandCostContext, CommandMediaContext, CommandMemoryContext, CommandModePolicyContext,
     CommandModelContext, CommandPluginContext, CommandPresentationContext, CommandProjectContext,
-    CommandSessionContext,
-    CommandSkillGroupContext, CommandSkillsContext, CommandSystemPromptContext,
-    CommandWorkspaceContext,
+    CommandSessionContext, CommandSkillGroupContext, CommandSkillsContext,
+    CommandSystemPromptContext, CommandWorkspaceContext,
 };
 
 /// Exact host capabilities exposed to one contextual command handler.

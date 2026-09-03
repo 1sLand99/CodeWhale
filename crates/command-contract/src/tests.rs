@@ -990,6 +990,10 @@ impl CommandPluginContext for FakePlugin {
         self.summaries.is_empty()
     }
 
+    fn reload_nudge(&mut self) -> Option<String> {
+        None
+    }
+
     fn state_path(&self) -> Option<PathBuf> {
         Some(PathBuf::from("/plugins/state.json"))
     }
@@ -1113,7 +1117,7 @@ impl CommandPluginContext for FakePlugin {
 
     fn marketplace_state(&self) -> Result<PluginMarketplaceState, String> {
         Ok(PluginMarketplaceState {
-            official: PluginMarketplaceCatalog {
+            official: Some(PluginMarketplaceCatalog {
                 id: "official".to_string(),
                 source_path: None,
                 display_name: None,
@@ -1125,7 +1129,7 @@ impl CommandPluginContext for FakePlugin {
                 warning_count: 0,
                 candidates: Vec::new(),
                 diagnostics: Vec::new(),
-            },
+            }),
             stored: Vec::new(),
         })
     }
@@ -1247,8 +1251,9 @@ fn plugin_managed_and_marketplace_values_are_portable() {
     assert_eq!(scan.candidates[0].license.as_deref(), Some("MIT"));
 
     let state = plugin.marketplace_state().unwrap();
-    assert_eq!(state.official.id, "official");
-    assert_eq!(state.official.tier, "official");
+    let official = state.official.as_ref().expect("fake official catalog");
+    assert_eq!(official.id, "official");
+    assert_eq!(official.tier, "official");
     assert!(state.stored.is_empty());
 
     let add = plugin
@@ -1315,10 +1320,9 @@ fn plugin_capability_bit_is_stable_and_distinct() {
     assert_eq!(plugin, CommandCapabilities::PLUGIN);
     assert!(plugin.contains(CommandCapabilities::PLUGIN));
     assert!(!plugin.contains(CommandCapabilities::MEMORY));
+    assert!(!plugin.contains(CommandCapabilities::PROJECT));
+    assert!(!plugin.contains(CommandCapabilities::SKILL_GROUP));
     assert!(!plugin.contains(CommandCapabilities::WORKSPACE));
-    // Existing bits are unchanged by the plugin extension.
-    assert_eq!(CommandCapabilities::MEMORY, CommandCapabilities::MEMORY);
-    assert_eq!(CommandCapabilities::SESSION, CommandCapabilities::SESSION);
 
     let plugin_workspace = CommandCapabilities::PLUGIN.union(CommandCapabilities::WORKSPACE);
     assert!(plugin_workspace.contains(CommandCapabilities::PLUGIN));
@@ -1333,9 +1337,10 @@ fn plugin_capability_bit_is_stable_and_distinct() {
     assert!(exact.contains(CommandCapabilities::PRESENTATION));
     assert!(!exact.contains(CommandCapabilities::MEDIA));
     assert!(!exact.contains(CommandCapabilities::MEMORY));
+    assert!(!exact.contains(CommandCapabilities::PROJECT));
+    assert!(!exact.contains(CommandCapabilities::SKILL_GROUP));
     assert!(!exact.contains(CommandCapabilities::SKILLS));
 }
-
 
 // FEAT-022: skill-group facet (CommandSkillGroupContext)
 // ---------------------------------------------------------------------------

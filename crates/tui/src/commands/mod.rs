@@ -2502,7 +2502,6 @@ mod tests {
         // handler-level tests; here we assert the envelope carries both.
     }
 
-
     // ---------------------------------------------------------------------
     // FEAT-020 plugins group public dispatch (Phase 6)
     // ---------------------------------------------------------------------
@@ -2564,6 +2563,14 @@ mod tests {
         assert!(
             !capabilities
                 .contains(codewhale_command_contract::handler::CommandCapabilities::SKILLS)
+        );
+        assert!(
+            !capabilities
+                .contains(codewhale_command_contract::handler::CommandCapabilities::PROJECT)
+        );
+        assert!(
+            !capabilities
+                .contains(codewhale_command_contract::handler::CommandCapabilities::SKILL_GROUP)
         );
     }
 

@@ -555,10 +555,14 @@ pub struct PluginMarketplaceAddReceipt {
     pub catalog: PluginMarketplaceCatalog,
 }
 
-/// Portable marketplace state: stored catalogs plus the builtin `official` one.
+/// Portable marketplace state: stored catalogs plus an optional host-provided
+/// built-in `official` catalog.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PluginMarketplaceState {
-    pub official: PluginMarketplaceCatalog,
+    /// Optional host-provided built-in catalog. Current main provides none;
+    /// retaining the option keeps the portable boundary future-compatible
+    /// without inventing a catalog in the handler.
+    pub official: Option<PluginMarketplaceCatalog>,
     pub stored: Vec<PluginMarketplaceCatalog>,
 }
 
@@ -603,6 +607,9 @@ pub trait CommandPluginContext {
     fn reload(&mut self) -> Result<usize, String>;
     /// Read-only: whether the registry is empty.
     fn is_empty(&self) -> bool;
+    /// Return the one-shot on-disk-change nudge, if the host detects one.
+    /// The host owns the mutable catalog-stamp state; handlers only render.
+    fn reload_nudge(&mut self) -> Option<String>;
     /// Read-only: persistence store path for marketplace state.
     fn state_path(&self) -> Option<PathBuf>;
     /// Read-only: recommend installed bundles for a task without side effects.
@@ -645,7 +652,7 @@ pub trait CommandPluginContext {
         canonical_path: &Path,
         expected_content_hash: &str,
     ) -> Result<PluginMutationReceipt, String>;
-    /// Read-only: marketplace state (builtin official + stored catalogs).
+    /// Read-only: marketplace state (optional host catalog + stored catalogs).
     fn marketplace_state(&self) -> Result<PluginMarketplaceState, String>;
     /// Mutation: add a local catalog document to the marketplace store.
     fn marketplace_add(
@@ -662,7 +669,6 @@ pub trait CommandPluginContext {
         candidate: &str,
     ) -> Result<PluginMutationReceipt, String>;
 }
-
 
 // ---------------------------------------------------------------------------
 // Skill group (FEAT-022 D1)

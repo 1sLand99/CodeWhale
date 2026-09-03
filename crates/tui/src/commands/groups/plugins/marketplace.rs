@@ -86,16 +86,18 @@ fn list(
             ));
         }
     };
-    let mut output = String::from("Marketplace catalogs:\n");
-    output.push('\n');
-    output.push_str(&render_catalog_summary("official", &state.official));
-    output.push_str("  built into this Codewhale release; nothing is downloaded\n");
-    output.push_str(&render_candidates(presentation, &state.official, false));
-    if state.stored.is_empty() {
-        output.push_str(&format!(
-            "\nNo other catalogs are registered.\n{USAGE}\n\
-             `add` reads a LOCAL catalog file; nothing is fetched over the network.\n"
+    if state.official.is_none() && state.stored.is_empty() {
+        return CommandResult::message(format!(
+            "No marketplace catalogs are registered.\n{USAGE}\n\
+             Reads a LOCAL catalog file; nothing is fetched over the network."
         ));
+    }
+    let mut output = String::from("Marketplace catalogs:\n");
+    if let Some(official) = &state.official {
+        output.push('\n');
+        output.push_str(&render_catalog_summary("official", official));
+        output.push_str("  built into this Codewhale release; nothing is downloaded\n");
+        output.push_str(&render_candidates(presentation, official, false));
     }
     for catalog in &state.stored {
         output.push('\n');
@@ -123,7 +125,7 @@ fn show(
         }
     };
     let catalog = if name == "official" {
-        Some(&state.official)
+        state.official.as_ref()
     } else {
         state.stored.iter().find(|catalog| catalog.id == name)
     };
@@ -149,9 +151,6 @@ fn remove(
     plugin: &mut dyn CommandPluginContext,
     name: &str,
 ) -> CommandResult {
-    if name == "official" {
-        return CommandResult::error("`official` is built into Codewhale and cannot be removed.");
-    }
     match plugin.marketplace_remove(name) {
         Ok(true) => CommandResult::message(format!(
             "Removed marketplace `{}`. Installed plugins and their trust state are unaffected.",

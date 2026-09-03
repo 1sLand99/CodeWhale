@@ -36,18 +36,18 @@ use codewhale_command_contract::facets::{
     CommandModePolicyContext, CommandModelContext, CommandPluginContext,
     CommandPresentationContext, CommandProjectContext, CommandSessionContext,
     CommandSkillGroupContext, CommandSkillsContext, CommandSystemPromptContext,
-    CommandWorkspaceContext, MediaAttachmentReceipt, MemoryDelete, MemoryDeleteScope,
-    MemoryExport, MemoryGetOutcome, MemoryHit, MemoryImportOutcome, MemoryReindex,
-    MemoryRememberTarget, MemoryRemembered, MemoryStatus, PluginDetail, PluginDiagnostic,
-    PluginDiagnosticLevel, PluginExportReceipt, PluginLegacyScan, PluginLegacyTool,
-    PluginManagedCandidate, PluginManagedScan, PluginMarketplaceAddReceipt,
-    PluginMarketplaceCandidate, PluginMarketplaceCatalog, PluginMarketplaceInstallPlan,
-    PluginMarketplaceState, PluginMcpServerDetail, PluginMcpTransport, PluginMutationOutcome,
-    PluginMutationReceipt, PluginSuggestion, PluginSummary, ProjectGoalState, ProjectGoalStatus,
-    ProjectShareProjection, RemoteRegistryOutcome, RemoteSkillEntry, ReviewOutcome,
-    SkillActivationError, SkillActivationOutcome, SkillBundledTier, SkillEntry,
-    SkillMutationOutcome, SkillMutationReceipt, SkillRecommendation, SkillRegistryProjection,
-    SkillSourceKind, SkillSyncEntry, SkillSyncOutcome, SkillTargetScope, SnapshotEntry,
+    CommandWorkspaceContext, MediaAttachmentReceipt, MemoryDelete, MemoryDeleteScope, MemoryExport,
+    MemoryGetOutcome, MemoryHit, MemoryImportOutcome, MemoryReindex, MemoryRememberTarget,
+    MemoryRemembered, MemoryStatus, PluginDetail, PluginDiagnostic, PluginDiagnosticLevel,
+    PluginExportReceipt, PluginLegacyScan, PluginLegacyTool, PluginManagedCandidate,
+    PluginManagedScan, PluginMarketplaceAddReceipt, PluginMarketplaceCandidate,
+    PluginMarketplaceCatalog, PluginMarketplaceInstallPlan, PluginMarketplaceState,
+    PluginMcpServerDetail, PluginMcpTransport, PluginMutationOutcome, PluginMutationReceipt,
+    PluginSuggestion, PluginSummary, ProjectGoalState, ProjectGoalStatus, ProjectShareProjection,
+    RemoteRegistryOutcome, RemoteSkillEntry, ReviewOutcome, SkillActivationError,
+    SkillActivationOutcome, SkillBundledTier, SkillEntry, SkillMutationOutcome,
+    SkillMutationReceipt, SkillRecommendation, SkillRegistryProjection, SkillSourceKind,
+    SkillSyncEntry, SkillSyncOutcome, SkillTargetScope, SnapshotEntry,
 };
 #[cfg(test)]
 use codewhale_command_contract::handler::ContextParts;
@@ -59,7 +59,7 @@ use codewhale_config::AppMode;
 use codewhale_core::request::{Message, SystemPrompt};
 use codewhale_execpolicy::ApprovalMode;
 
-use crate::commands::groups::plugins::{plugin_network_policy, run_async};
+use crate::commands::groups::plugins::plugin_network_policy;
 
 use crate::localization::{MessageId, tr};
 use crate::network_policy::NetworkPolicy;
@@ -1626,7 +1626,8 @@ impl CommandSkillGroupContext for SkillGroupAdapter<'_> {
 /// Owns every concrete plugin service the live `/plugin` branch closure
 /// consumes: registry reads/mutations, the async mutation/network-policy
 /// bridge (D11), export, legacy executable-tool scan, Kimi managed import,
-/// and the marketplace store (including the builtin `official` catalog).
+/// and the marketplace store. Current main has no invented remote or built-in
+/// `official` catalog; an optional host catalog remains representable.
 /// Every method borrows `App` only for the duration of one call and converts
 /// host values to portable contract values before returning. Handlers receive
 /// only the portable facet and never name `PluginRegistry`, `LoadedPlugin`,
@@ -1778,7 +1779,7 @@ fn portable_detail(plugin: &crate::plugins::types::LoadedPlugin) -> PluginDetail
 }
 
 /// Convert a TUI mutation receipt into the portable contract receipt.
-fn portable_mutation_receipt(
+fn portable_plugin_mutation_receipt(
     receipt: &crate::plugins::mutation::PluginMutationReceipt,
 ) -> PluginMutationReceipt {
     let outcome = match &receipt.outcome {
@@ -1885,13 +1886,6 @@ fn portable_marketplace_candidate(
             .collect(),
         has_errors: candidate.has_errors(),
     }
-}
-
-/// Convert one TUI marketplace catalog into the portable value.
-fn portable_marketplace_catalog(
-    catalog: &crate::plugins::marketplace::types::MarketplaceCatalog,
-) -> PluginMarketplaceCatalog {
-    portable_marketplace_catalog_with_source(catalog, None)
 }
 
 /// Convert one stored TUI marketplace catalog (with its source path).
@@ -2169,46 +2163,6 @@ fn escape_review_path(path: &Path) -> String {
     crate::commands::groups::plugins::render::escape_review_path(path)
 }
 
-/// The catalog built into every Codewhale release. It lists bundles that
-/// ship inside the binary (`builtin:<name>` install specs), so there is
-/// nothing to fetch; installing still goes through the reviewed installer
-/// and lands disabled and untrusted like everything else.
-fn builtin_official_catalog() -> crate::plugins::marketplace::store::StoredMarketplaceCatalog {
-    fn official_catalog_document() -> serde_json::Value {
-        serde_json::json!({
-            "name": "official",
-            "description": "Plugins built into this Codewhale release",
-            "version": crate::plugins::install::BUILTIN_BUNDLE_NAMES.len().to_string(),
-            "plugins": [
-                {
-                    "name": codewhale_computer_use::bundle::BUNDLE_NAME,
-                    "source": format!("builtin:{}", codewhale_computer_use::bundle::BUNDLE_NAME),
-                    "version": codewhale_computer_use::bundle::version(),
-                    "description": "See and operate this desktop or an attached Android / HarmonyOS device with a vision model (deepseek-v4-flash-vision-exp): screenshots, clicks, typing, scrolling, app launch. Also: `codewhale computer-use setup`.",
-                    "homepage": "https://github.com/Hmbown/CodeWhale/blob/main/docs/COMPUTER_USE.md"
-                }
-            ]
-        })
-    }
-    use crate::plugins::marketplace::parsers::{MarketplaceDocument, parse_catalog};
-    use crate::plugins::marketplace::types::{
-        CatalogTier, MarketplaceCatalogId, MarketplaceFormat,
-    };
-    let mut catalog = parse_catalog(MarketplaceDocument {
-        catalog_id: MarketplaceCatalogId::new("official"),
-        format: MarketplaceFormat::Codewhale,
-        root: official_catalog_document(),
-        base: None,
-    });
-    catalog.provenance.tier = CatalogTier::Official;
-    catalog.provenance.publisher = Some("Codewhale".to_string());
-    crate::plugins::marketplace::store::StoredMarketplaceCatalog {
-        added_at: "builtin".to_string(),
-        source_path: "builtin:official".to_string(),
-        catalog,
-    }
-}
-
 impl CommandPluginContext for PluginAdapter<'_> {
     fn summaries(&self) -> Result<Vec<PluginSummary>, String> {
         let app = self.host.app.borrow();
@@ -2260,6 +2214,13 @@ impl CommandPluginContext for PluginAdapter<'_> {
         Ok(app.plugin_registry.len())
     }
 
+    fn reload_nudge(&mut self) -> Option<String> {
+        let mut app = self.host.app.borrow_mut();
+        let registry = app.plugin_registry.clone();
+        crate::plugins::plugin_reload_nudge(registry.as_ref(), &mut app.plugin_reload_nudge_stamp)
+            .map(str::to_string)
+    }
+
     fn state_path(&self) -> Option<PathBuf> {
         self.host
             .app
@@ -2275,69 +2236,56 @@ impl CommandPluginContext for PluginAdapter<'_> {
             return Err("Usage: /plugin suggest <task of at least 3 characters>".to_string());
         }
         let app = self.host.app.borrow();
-        let mut skills = std::collections::BTreeMap::new();
-        for plugin in app.plugin_registry.list() {
-            let mut description_parts = plugin
-                .manifest
-                .plugin
-                .description
-                .iter()
-                .cloned()
-                .collect::<Vec<_>>();
-            let mut keywords = Vec::new();
-            for skill in &plugin.skill_snapshots {
-                description_parts.push(skill.name.clone());
-                description_parts.push(skill.description.clone());
-                keywords.push(skill.name.clone());
-                keywords.extend(skill.aliases.iter().cloned());
-            }
-            skills.insert(
-                plugin.name().to_string(),
-                crate::skills::RegistryEntry {
-                    source: plugin.id.as_str().to_string(),
-                    description: (!description_parts.is_empty())
-                        .then(|| description_parts.join(" ")),
-                    keywords,
-                    domains: plugin.inventory.network_hosts.clone(),
-                },
-            );
-        }
-        let index = crate::skills::RegistryDocument { skills };
-        let recommendations = crate::skills::recommend::recommend_remote_skills(task, &index, 3);
-        let mut suggestions = Vec::new();
-        for recommendation in recommendations {
-            let Some(plugin) = app.plugin_registry.get(&recommendation.entry.source) else {
-                continue;
-            };
-            let description = plugin
-                .manifest
-                .plugin
-                .description
-                .as_deref()
-                .filter(|description| !description.trim().is_empty())
-                .unwrap_or("No description provided.")
-                .to_string();
-            let next_step = if plugin.active() {
-                format!("Already active: /plugin show {}", plugin.name())
-            } else if !plugin.trusted() {
-                format!("Review before enabling: /plugin trust {}", plugin.name())
-            } else if !plugin.enabled {
-                format!(
-                    "Enable if that review still applies: /plugin enable {}",
-                    plugin.name()
-                )
-            } else {
-                format!("Inspect its inactive state: /plugin show {}", plugin.name())
-            };
-            suggestions.push(PluginSuggestion {
-                name: plugin.name().to_string(),
-                state_label: plugin.state_label().to_string(),
-                description,
-                why: recommendation.matched_terms.clone(),
-                next_step,
-            });
-        }
-        Ok(suggestions)
+        let marketplace = crate::plugins::recommend::load_marketplace_candidates(
+            app.plugin_registry.state_path(),
+        );
+        let recommendations = crate::plugins::recommend::recommend_plugins_for_task(
+            task,
+            app.plugin_registry.as_ref(),
+            &marketplace,
+            crate::plugins::recommend::RecommendOptions::default(),
+        );
+        Ok(recommendations
+            .into_iter()
+            .map(|recommendation| {
+                let description = match &recommendation.source {
+                    crate::plugins::recommend::PluginMatchSource::Installed { id } => app
+                        .plugin_registry
+                        .get(id)
+                        .and_then(|plugin| plugin.manifest.plugin.description.clone())
+                        .filter(|description| !description.trim().is_empty())
+                        .unwrap_or_else(|| "No description provided.".to_string()),
+                    crate::plugins::recommend::PluginMatchSource::Marketplace { catalog_id } => {
+                        marketplace
+                            .iter()
+                            .find(|candidate| {
+                                candidate.name.eq_ignore_ascii_case(&recommendation.name)
+                                    && candidate.catalog_id.as_str() == catalog_id
+                            })
+                            .and_then(|candidate| candidate.description.clone())
+                            .filter(|description| !description.trim().is_empty())
+                            .unwrap_or_else(|| "Catalog plugin.".to_string())
+                    }
+                };
+                let state_label = match &recommendation.source {
+                    crate::plugins::recommend::PluginMatchSource::Installed { id } => app
+                        .plugin_registry
+                        .get(id)
+                        .map(|plugin| plugin.state_label().to_string())
+                        .unwrap_or_else(|| "installed".to_string()),
+                    crate::plugins::recommend::PluginMatchSource::Marketplace { .. } => {
+                        "not installed".to_string()
+                    }
+                };
+                PluginSuggestion {
+                    name: recommendation.name.clone(),
+                    state_label,
+                    description,
+                    why: recommendation.matched_terms.clone(),
+                    next_step: recommendation.command(),
+                }
+            })
+            .collect())
     }
 
     fn trust(&mut self, selector: &str, token: &str) -> Result<(), String> {
@@ -2345,7 +2293,7 @@ impl CommandPluginContext for PluginAdapter<'_> {
             let app = self.host.app.borrow();
             app.plugin_registry
                 .get(selector)
-                .map(|plugin| format!("{}.{}", plugin.content_hash, plugin.capability_hash))
+                .map(crate::plugins::types::LoadedPlugin::review_token)
                 .ok_or_else(|| format!("no plugin named {selector}"))?
         };
         if token != expected {
@@ -2438,7 +2386,7 @@ impl CommandPluginContext for PluginAdapter<'_> {
         });
         match outcome {
             Ok(receipt) => {
-                let portable = portable_mutation_receipt(&receipt);
+                let portable = portable_plugin_mutation_receipt(&receipt);
                 // Rediscover and refresh the skill cache after any install.
                 if matches!(receipt.outcome, PluginMutationOutcome::Installed) {
                     let workspace = app.workspace.clone();
@@ -2475,7 +2423,7 @@ impl CommandPluginContext for PluginAdapter<'_> {
         });
         match outcome {
             Ok(receipt) => {
-                let portable = portable_mutation_receipt(&receipt);
+                let portable = portable_plugin_mutation_receipt(&receipt);
                 if matches!(receipt.outcome, PluginMutationOutcome::Updated) {
                     let workspace = app.workspace.clone();
                     app.plugin_registry = app.plugin_registry.rediscover_for_workspace(&workspace);
@@ -2511,7 +2459,7 @@ impl CommandPluginContext for PluginAdapter<'_> {
         });
         match outcome {
             Ok(receipt) => {
-                let portable = portable_mutation_receipt(&receipt);
+                let portable = portable_plugin_mutation_receipt(&receipt);
                 if matches!(receipt.outcome, PluginMutationOutcome::Uninstalled) {
                     let workspace = app.workspace.clone();
                     app.plugin_registry = app.plugin_registry.rediscover_for_workspace(&workspace);
@@ -2610,7 +2558,7 @@ impl CommandPluginContext for PluginAdapter<'_> {
         });
         match outcome {
             Ok(receipt) => {
-                let portable = portable_mutation_receipt(&receipt);
+                let portable = portable_plugin_mutation_receipt(&receipt);
                 if matches!(receipt.outcome, PluginMutationOutcome::Installed) {
                     let workspace = app.workspace.clone();
                     app.plugin_registry = app.plugin_registry.rediscover_for_workspace(&workspace);
@@ -2624,8 +2572,6 @@ impl CommandPluginContext for PluginAdapter<'_> {
 
     fn marketplace_state(&self) -> Result<PluginMarketplaceState, String> {
         let app = self.host.app.borrow();
-        let official = builtin_official_catalog();
-        let official = portable_marketplace_catalog(&official.catalog);
         let store = crate::plugins::marketplace::store::MarketplaceStore::open(
             app.plugin_registry.state_path(),
         )
@@ -2644,7 +2590,10 @@ impl CommandPluginContext for PluginAdapter<'_> {
                 )
             })
             .collect();
-        Ok(PluginMarketplaceState { official, stored })
+        Ok(PluginMarketplaceState {
+            official: None,
+            stored,
+        })
     }
 
     fn marketplace_add(
@@ -2652,22 +2601,6 @@ impl CommandPluginContext for PluginAdapter<'_> {
         name: &str,
         path: &Path,
     ) -> Result<PluginMarketplaceAddReceipt, String> {
-        let name_valid = !name.is_empty()
-            && name.len() <= 64
-            && name
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.');
-        if !name_valid {
-            return Err(
-                "Marketplace name must be 1-64 characters of letters, digits, `-`, `_`, or `.`"
-                    .to_string(),
-            );
-        }
-        if name == "official" {
-            return Err(
-                "`official` is the catalog built into Codewhale; pick another name.".to_string(),
-            );
-        }
         let app = self.host.app.borrow();
         let store = crate::plugins::marketplace::store::MarketplaceStore::open(
             app.plugin_registry.state_path(),
@@ -2676,44 +2609,19 @@ impl CommandPluginContext for PluginAdapter<'_> {
             "This plugin registry has no persistence store, so marketplace catalogs cannot be saved."
                 .to_string()
         })?;
-        let path = if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            app.workspace.join(path)
-        };
-        let canonical = canonical_document(&path)?;
-        let body = read_bounded(&canonical)?;
-        let root = serde_json::from_str::<serde_json::Value>(&body).map_err(|error| {
-            format!(
-                "Catalog at {} is not valid JSON: {error}",
-                canonical.display()
-            )
-        })?;
-        let document = crate::plugins::marketplace::parsers::MarketplaceDocument {
-            catalog_id: crate::plugins::marketplace::types::MarketplaceCatalogId::new(name),
-            format: crate::plugins::marketplace::types::MarketplaceFormat::Auto,
-            root,
-            base: Some(canonical.display().to_string()),
-        };
-        let catalog = crate::plugins::marketplace::parsers::parse_catalog(document);
-        if catalog.candidates.is_empty() && catalog.error_count() > 0 {
-            return Err(format!(
-                "Catalog `{}` could not be parsed as any known marketplace format (kimi, claude, codex, codewhale):\n{}",
-                name,
-                render_diagnostics_inline(&catalog.diagnostics)
-            ));
-        }
-        let candidate_count = catalog.total_candidates();
-        let warning_count = catalog.warning_count();
-        let portable_catalog = portable_marketplace_catalog(&catalog);
-        let entry = crate::plugins::marketplace::store::StoredMarketplaceCatalog {
-            added_at: chrono::Utc::now().to_rfc3339(),
-            source_path: canonical.display().to_string(),
-            catalog,
-        };
-        store
-            .add(&entry.catalog.id.clone(), entry)
-            .map_err(|error| error.to_string())?;
+        let raw_path = path.to_string_lossy();
+        let loaded = crate::plugins::marketplace::document::load_catalog_document(
+            name,
+            &app.workspace,
+            &raw_path,
+        )?;
+        let candidate_count = loaded.candidate_count;
+        let warning_count = loaded.warning_count;
+        let portable_catalog = portable_marketplace_catalog_with_source(
+            &loaded.entry.catalog,
+            Some(loaded.entry.source_path.as_str()),
+        );
+        store.add(&loaded.entry.catalog.id.clone(), loaded.entry)?;
         Ok(PluginMarketplaceAddReceipt {
             name: name.to_string(),
             candidate_count,
@@ -2723,9 +2631,6 @@ impl CommandPluginContext for PluginAdapter<'_> {
     }
 
     fn marketplace_remove(&mut self, name: &str) -> Result<bool, String> {
-        if name == "official" {
-            return Err("`official` is built into Codewhale and cannot be removed.".to_string());
-        }
         let app = self.host.app.borrow();
         let store = crate::plugins::marketplace::store::MarketplaceStore::open(
             app.plugin_registry.state_path(),
@@ -2751,39 +2656,42 @@ impl CommandPluginContext for PluginAdapter<'_> {
                 .to_string()
         })?;
         let state = store.load()?;
-        let entry = if catalog == "official" {
-            Some(builtin_official_catalog())
-        } else {
-            state.get(catalog).cloned()
+        let catalog_text = escape_review_text(catalog);
+        let candidate_text = escape_review_text(candidate);
+        let entry = state.get(catalog).cloned().ok_or_else(|| {
+            format!("No marketplace named `{catalog_text}`. Use /plugin marketplace list.")
+        })?;
+        let candidate_entry = entry.catalog.candidate_by_name(candidate).ok_or_else(|| {
+            format!("No candidate `{candidate_text}` in marketplace `{catalog_text}`.")
+        })?;
+        let spec = match crate::plugins::marketplace::document::resolve_candidate_install(
+            &entry,
+            candidate_entry,
+        ) {
+            crate::plugins::marketplace::document::CatalogInstallResolution::Supported {
+                spec,
+                ..
+            } => spec,
+            crate::plugins::marketplace::document::CatalogInstallResolution::Unsupported {
+                reason,
+            } => {
+                let localized = key_to_plugin_message_id(&reason)
+                    .map(|message_id| tr(app.ui_locale, message_id).into_owned())
+                    .unwrap_or(reason);
+                return Err(format!(
+                    "Candidate `{candidate_text}` cannot be installed by Codewhale: {}",
+                    escape_review_text(&localized)
+                ));
+            }
+            crate::plugins::marketplace::document::CatalogInstallResolution::HasErrors {
+                diagnostics,
+            } => {
+                return Err(format!(
+                    "Candidate `{candidate_text}` has parse errors and cannot be installed:\n{}",
+                    escape_review_text(&diagnostics)
+                ));
+            }
         };
-        let Some(entry) = entry else {
-            return Err(format!(
-                "No marketplace named `{}`. Use /plugin marketplace list.",
-                catalog
-            ));
-        };
-        let Some(candidate_entry) = entry.catalog.candidate_by_name(candidate) else {
-            return Err(format!(
-                "No candidate `{}` in marketplace `{}`.",
-                candidate, catalog
-            ));
-        };
-        if candidate_entry.has_errors() {
-            return Err(format!(
-                "Candidate `{}` has parse errors and cannot be installed:\n{}",
-                candidate,
-                render_diagnostics_inline(&candidate_entry.diagnostics)
-            ));
-        }
-        let crate::plugins::marketplace::types::MarketplaceInstallPlan::Supported { spec, .. } =
-            &candidate_entry.install_plan
-        else {
-            return Err(format!(
-                "Candidate `{}` cannot be installed by Codewhale.",
-                candidate
-            ));
-        };
-        let spec = resolve_marketplace_spec(&entry.source_path, &candidate_entry.source, spec);
         drop(app);
         self.install(&spec, None)
     }
@@ -2794,83 +2702,6 @@ fn default_codewhale_tools_dir() -> Option<PathBuf> {
     codewhale_config::codewhale_home()
         .ok()
         .map(|home| home.join("tools"))
-}
-
-/// Resolve a user-supplied document path to an existing regular file without
-/// following a final symlink (the document is untrusted input).
-fn canonical_document(path: &Path) -> Result<PathBuf, String> {
-    let metadata = std::fs::symlink_metadata(path)
-        .map_err(|e| format!("Cannot read catalog at {}: {e}", path.display()))?;
-    if metadata.is_symlink() {
-        return Err(format!(
-            "Catalog path {} is a symlink; marketplace documents must be regular files",
-            path.display()
-        ));
-    }
-    if !metadata.is_file() {
-        return Err(format!(
-            "Catalog path {} is not a regular file",
-            path.display()
-        ));
-    }
-    Ok(path.to_path_buf())
-}
-
-/// Read a catalog document with a bounded size (4 MiB cap, mirrors legacy).
-fn read_bounded(path: &Path) -> Result<String, String> {
-    use std::io::Read;
-    const MAX_CATALOG_BYTES: u64 = 4 * 1024 * 1024;
-    let file = std::fs::File::open(path)
-        .map_err(|e| format!("Cannot read catalog at {}: {e}", path.display()))?;
-    if file.metadata().map_err(|e| e.to_string())?.len() > MAX_CATALOG_BYTES {
-        return Err(format!(
-            "Catalog at {} exceeds the {} byte limit",
-            path.display(),
-            MAX_CATALOG_BYTES
-        ));
-    }
-    let mut text = String::new();
-    let mut limited = file.take(MAX_CATALOG_BYTES + 1);
-    limited
-        .read_to_string(&mut text)
-        .map_err(|e| format!("Cannot read catalog at {}: {e}", path.display()))?;
-    Ok(text)
-}
-
-/// Resolve a marketplace install spec against the catalog's own directory.
-fn resolve_marketplace_spec(
-    source_path: &str,
-    source: &crate::plugins::marketplace::types::MarketplaceSourceSpec,
-    spec: &str,
-) -> String {
-    if let crate::plugins::marketplace::types::MarketplaceSourceSpec::LocalPath { path } = source
-        && path.is_relative()
-        && let Some(dir) = Path::new(source_path).parent()
-    {
-        return format!("path:{}", dir.join(path).display());
-    }
-    spec.to_string()
-}
-
-/// Inline diagnostics renderer shared by marketplace error paths.
-fn render_diagnostics_inline(
-    diagnostics: &[crate::plugins::marketplace::types::MarketplaceDiagnostic],
-) -> String {
-    diagnostics
-        .iter()
-        .map(|d| {
-            format!(
-                "{} {}: {}",
-                match d.level {
-                    crate::plugins::types::PluginDiagnosticLevel::Error => "error",
-                    crate::plugins::types::PluginDiagnosticLevel::Warning => "warning",
-                },
-                d.code,
-                d.message
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("; ")
 }
 
 // ---------------------------------------------------------------------------
@@ -2958,7 +2789,8 @@ impl<'a> CommandContextBundle<'a> {
             .union(CommandCapabilities::MEDIA)
             .union(CommandCapabilities::MEMORY)
             .union(CommandCapabilities::PROJECT)
-            .union(CommandCapabilities::SKILL_GROUP);
+            .union(CommandCapabilities::SKILL_GROUP)
+            .union(CommandCapabilities::PLUGIN);
         self.contexts(all_test_capabilities).into_parts()
     }
 }
@@ -4293,7 +4125,6 @@ mod tests {
         assert!(parts.project.is_some());
         assert!(parts.skills.is_some());
     }
-
 
     // ------------------------------------------------------------------
     // FEAT-020 plugin adapter tests

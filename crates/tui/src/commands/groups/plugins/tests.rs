@@ -145,6 +145,33 @@ fn list_show_validate_are_read_only_and_label_legacy_tools() {
 }
 
 #[test]
+fn list_preserves_the_one_shot_on_disk_reload_nudge() {
+    let _lock = crate::test_support::lock_test_env();
+    let root = TempDir::new().unwrap();
+    let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", root.path().join("home"));
+    let (mut app, _temp) = create_test_app(root.path());
+
+    // Mutate the on-disk catalog after discovery. Listing must report the
+    // current-main nudge without rediscovering or changing trust state.
+    write_bundle(root.path());
+    let first = plugins_with_kimi_home_override(&mut app, Some("list"), None)
+        .message
+        .unwrap();
+    assert!(
+        first.contains(crate::plugins::PLUGIN_RELOAD_NUDGE),
+        "{first}"
+    );
+
+    let second = plugins_with_kimi_home_override(&mut app, Some("list"), None)
+        .message
+        .unwrap();
+    assert!(
+        !second.contains(crate::plugins::PLUGIN_RELOAD_NUDGE),
+        "nudge must appear once per catalog stamp: {second}"
+    );
+}
+
+#[test]
 fn suggest_ranks_installed_plugins_without_trusting_or_enabling_them() {
     let _lock = crate::test_support::lock_test_env();
     let root = TempDir::new().unwrap();
@@ -194,7 +221,7 @@ fn suggest_matches_manifest_keywords_for_a_named_integration() {
     .unwrap();
     let (mut app, _temp) = create_test_app(root.path());
 
-    let result = plugins(&mut app, Some("suggest add supabase auth"));
+    let result = plugins_with_kimi_home_override(&mut app, Some("suggest add supabase auth"), None);
     assert!(!result.is_error, "{result:?}");
     let message = result.message.expect("suggestion message");
     assert!(message.contains("supabase"), "{message}");

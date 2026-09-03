@@ -174,7 +174,41 @@ fn marketplace_add_list_show_remove_roundtrip() {
     let empty = plugins_with_kimi_home_override(&mut app, Some("marketplace list"), None)
         .message
         .unwrap();
-    assert!(empty.contains("No other catalogs"), "{empty}");
+    assert!(empty.contains("No marketplace catalogs"), "{empty}");
+}
+
+#[test]
+fn plugin_suggest_preserves_current_main_marketplace_candidates() {
+    let _lock = crate::test_support::lock_test_env();
+    let root = TempDir::new().unwrap();
+    let codewhale_home = root.path().join("home");
+    let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", &codewhale_home);
+    let (mut app, _temp) = create_test_app(root.path());
+    let catalogs = root.path().join("catalogs");
+    fs::create_dir_all(&catalogs).unwrap();
+    let catalog_path = write_kimi_catalog(&catalogs);
+
+    let added = plugins_with_kimi_home_override(
+        &mut app,
+        Some(&format!("marketplace add kimi {}", catalog_path.display())),
+        None,
+    );
+    assert!(!added.is_error, "{:?}", added.message);
+
+    let suggested = plugins_with_kimi_home_override(&mut app, Some("suggest demo"), None);
+    assert!(!suggested.is_error, "{suggested:?}");
+    let message = suggested.message.expect("suggestion message");
+    assert!(message.contains("Suggested plugins"), "{message}");
+    assert!(
+        message.contains(r"demo\-bundle — not installed"),
+        "{message}"
+    );
+    assert!(
+        message.contains("/plugin marketplace install kimi demo-bundle"),
+        "{message}"
+    );
+    assert!(message.contains("Nothing was installed, trusted, or enabled."));
+    assert!(app.plugin_registry.get("demo-bundle").is_none());
 }
 
 #[test]
@@ -227,7 +261,7 @@ fn marketplace_add_rejects_symlinks_and_bad_documents() {
         plugins_with_kimi_home_override(&mut app, Some("marketplace list"), None)
             .message
             .unwrap()
-            .contains("No other catalogs")
+            .contains("No marketplace catalogs")
     );
 
     // corrupt stored state fails closed and is never rewritten
@@ -343,91 +377,4 @@ fn marketplace_codex_installed_by_default_never_auto_installs() {
     // Foreign auto-install policy never ran anything: no bundle on disk.
     assert!(!codewhale_home.join("plugins/defaulted-thing").exists());
     assert!(app.plugin_registry.get("defaulted-thing").is_none());
-}
-
-/// The built-in `official` catalog is always listed, installs the embedded
-/// computer-use bundle through the reviewed installer (disabled + untrusted,
-/// `builtin:` provenance), updates from the binary, and can neither be
-/// removed nor shadowed by `add`.
-#[test]
-fn official_catalog_installs_the_builtin_computer_use_bundle() {
-    let _lock = crate::test_support::lock_test_env();
-    let root = TempDir::new().unwrap();
-    let codewhale_home = root.path().join("home");
-    let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", &codewhale_home);
-    let (mut app, _temp) = create_test_app(root.path());
-
-    let list = plugins_with_kimi_home_override(&mut app, Some("marketplace list"), None)
-        .message
-        .unwrap();
-    assert!(list.contains("`official`"), "{list}");
-    assert!(list.contains(r"computer\-use"), "{list}");
-    assert!(list.contains("built into this Codewhale"), "{list}");
-    assert!(list.contains("tier=official"), "{list}");
-    assert!(
-        !marketplace_state_path(&codewhale_home).exists(),
-        "listing never writes state"
-    );
-
-    let show = plugins_with_kimi_home_override(&mut app, Some("marketplace show official"), None)
-        .message
-        .unwrap();
-    assert!(show.contains(r"computer\-use"), "{show}");
-
-    assert!(
-        plugins_with_kimi_home_override(&mut app, Some("marketplace remove official"), None)
-            .is_error
-    );
-    let bogus = root.path().join("nope.json");
-    fs::write(&bogus, "{}").unwrap();
-    let shadow = plugins_with_kimi_home_override(
-        &mut app,
-        Some(&format!("marketplace add official {}", bogus.display())),
-        None,
-    );
-    assert!(shadow.is_error);
-    assert!(shadow.message.unwrap().contains("built into Codewhale"));
-
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(2)
-        .enable_all()
-        .build()
-        .unwrap();
-    runtime.block_on(async {
-        let installed = plugins_with_kimi_home_override(
-            &mut app,
-            Some("marketplace install official computer-use"),
-            None,
-        );
-        assert!(!installed.is_error, "{:?}", installed.message);
-        let message = installed.message.unwrap();
-        assert!(message.contains("disabled and untrusted"), "{message}");
-        assert!(
-            message
-                .lines()
-                .any(|line| line.starts_with("/plugin trust computer-use ")),
-            "install must route into the trust review: {message}"
-        );
-        let plugin = app.plugin_registry.get("computer-use").unwrap();
-        assert!(!plugin.enabled && !plugin.trusted());
-        assert_eq!(plugin.inventory.stdio_mcp_servers, 1);
-        assert_eq!(plugin.inventory.skills, 1);
-        let marker =
-            fs::read_to_string(codewhale_home.join("plugins/computer-use/.installed-from"))
-                .unwrap();
-        assert!(marker.contains("\"builtin:computer-use\""), "{marker}");
-
-        // Same bytes in the binary → nothing to update; never a network error.
-        let update = plugins_with_kimi_home_override(&mut app, Some("update computer-use"), None);
-        assert!(!update.is_error, "{:?}", update.message);
-
-        // Installing again is refused like any other duplicate.
-        let again =
-            plugins_with_kimi_home_override(&mut app, Some("install builtin:computer-use"), None);
-        assert!(again.is_error, "{:?}", again.message);
-        // Unknown built-ins name the available ones.
-        let unknown = plugins_with_kimi_home_override(&mut app, Some("install builtin:nope"), None);
-        assert!(unknown.is_error);
-        assert!(unknown.message.unwrap().contains("computer-use"));
-    });
 }
