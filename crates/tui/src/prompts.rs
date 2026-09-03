@@ -1161,6 +1161,11 @@ pub(crate) fn system_prompt_for_mode_with_context_skills_session_and_approval_fo
     let skill_discovery_mode = crate::skills::SkillDiscoveryMode::from_codewhale_only(
         session_context.skills_scan_codewhale_only,
     );
+    // The index budget scales with the route's context window (5%, floored),
+    // so a 1M route sees the whole catalogue while a small local window still
+    // keeps every skill name. Session-pinned: the window is fixed per route.
+    let skills_budget =
+        crate::skills::skills_prompt_budget_chars(session_context.context_window_override);
     let skills_block = match skills_dir {
         Some(dir) => {
             crate::skills::render_available_skills_context_for_workspace_and_dir_with_mode_and_plugins(
@@ -1169,6 +1174,7 @@ pub(crate) fn system_prompt_for_mode_with_context_skills_session_and_approval_fo
                 skill_discovery_mode,
                 session_context.locale_tag,
                 session_context.plugin_registry,
+                skills_budget,
             )
         }
         None => crate::skills::render_available_skills_context_for_workspace_with_mode_and_plugins(
@@ -1176,6 +1182,7 @@ pub(crate) fn system_prompt_for_mode_with_context_skills_session_and_approval_fo
             skill_discovery_mode,
             session_context.locale_tag,
             session_context.plugin_registry,
+            skills_budget,
         ),
     };
     if let Some(block) = skills_block {

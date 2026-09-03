@@ -477,6 +477,22 @@ fn inspect_skills(group: &mut dyn CommandSkillGroupContext) -> CommandResult {
             {
                 let _ = writeln!(output, "    path: {}", path);
             }
+            // The model index caps each description; say so here instead of
+            // cutting an imported skill mid-sentence with nobody told.
+            let description_chars = skill
+                .description
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .chars()
+                .count();
+            if description_chars > crate::skills::MAX_SKILL_DESCRIPTION_CHARS {
+                let _ = writeln!(
+                    output,
+                    "    note: description is {description_chars} chars; the model index shows at most {} — trim it, or end it with `Use when: <trigger>` so the trigger survives shortening",
+                    crate::skills::MAX_SKILL_DESCRIPTION_CHARS
+                );
+            }
         }
     }
 
