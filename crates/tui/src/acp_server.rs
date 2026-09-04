@@ -1443,6 +1443,8 @@ impl AcpServer {
                 )))
             }
             "session/new" => Ok(AcpDispatch::Response(self.new_session(params)?)),
+            "session/list" => Ok(AcpDispatch::Response(self.list_sessions())),
+            "session/load" => Ok(AcpDispatch::Response(self.load_session(params)?)),
             "session/listProviders" => Ok(AcpDispatch::Response(self.list_providers())),
             "session/currentModel" => Ok(AcpDispatch::Response(self.current_model())),
             "session/selectModel" => Ok(AcpDispatch::Response(self.select_model(params)?)),
@@ -1487,6 +1489,81 @@ impl AcpServer {
             },
         );
         Ok(json!({ "sessionId": session_id }))
+    }
+
+    /// Durable Codewhale sessions an ACP client can resume (#5864).
+    ///
+    /// ACP sessions are in-memory and capped; Codewhale's own sessions are the
+    /// durable record, and an IDE that offers "resume" means those. A store
+    /// that cannot be read is an empty list, not a failed request: enumeration
+    /// is discovery, and a client asking what exists should not be broken by a
+    /// missing sessions directory.
+    fn list_sessions(&self) -> Value {
+        let sessions = Self::session_manager()
+            .and_then(|manager| manager.list_sessions().ok())
+            .unwrap_or_default();
+        let sessions: Vec<Value> = sessions
+            .into_iter()
+            .map(|meta| {
+                json!({
+                    "sessionId": meta.id,
+                    "title": meta.title,
+                    "cwd": meta.workspace.to_string_lossy(),
+                    "createdAt": meta.created_at.to_rfc3339(),
+                    "updatedAt": meta.updated_at.to_rfc3339(),
+                    "messageCount": meta.message_count,
+                })
+            })
+            .collect();
+        json!({ "sessions": sessions })
+    }
+
+    /// Rehydrate a durable Codewhale session as this connection's ACP session.
+    ///
+    /// The loaded session keeps its own id so a client can list, load, and
+    /// prompt against one identity. Its `cwd` comes from the saved workspace,
+    /// not the server default, because the tool registry is built over it.
+    fn load_session(&mut self, params: Value) -> std::result::Result<Value, AcpError> {
+        let session_id = params
+            .get("sessionId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| AcpError::invalid_params("session/load requires sessionId"))?
+            .to_string();
+        let manager = Self::session_manager()
+            .ok_or_else(|| AcpError::internal("no Codewhale session store is available"))?;
+        let saved = manager
+            .load_session_by_prefix(&session_id)
+            .map_err(|error| {
+                AcpError::invalid_params(format!("could not load session {session_id}: {error}"))
+            })?;
+
+        let cwd = saved.metadata.workspace.clone();
+        let tool_registry = Arc::new(build_acp_tool_registry(
+            &self.config,
+            &cwd,
+            self.client_supports_terminal,
+        ));
+        let resolved_id = saved.metadata.id.clone();
+        if self.sessions.len() >= MAX_ACP_SESSIONS
+            && let Some(oldest) = self.insertion_order.pop_front()
+        {
+            self.sessions.remove(&oldest);
+        }
+        self.insertion_order.push_back(resolved_id.clone());
+        self.sessions.insert(
+            resolved_id.clone(),
+            AcpSession {
+                cwd,
+                messages: saved.messages,
+                tool_registry,
+            },
+        );
+        Ok(json!({ "sessionId": resolved_id }))
+    }
+
+    fn session_manager() -> Option<crate::session_manager::SessionManager> {
+        let dir = crate::session_manager::default_sessions_dir().ok()?;
+        crate::session_manager::SessionManager::new(dir).ok()
     }
 
     fn session_tool_registry(&self, session_id: &str) -> Option<Arc<ToolRegistry>> {
@@ -2100,6 +2177,15 @@ impl AcpError {
         }
     }
 
+    /// JSON-RPC internal error: the request was well-formed and the agent
+    /// could not serve it.
+    fn internal(message: impl Into<String>) -> Self {
+        Self {
+            code: -32603,
+            message: message.into(),
+        }
+    }
+
     fn method_not_found(method: &str) -> Self {
         Self {
             code: -32601,
@@ -2114,7 +2200,7 @@ fn initialize_result(client_protocol_version: Option<u64>, config: &Config) -> V
             .map(|version| version.min(ACP_PROTOCOL_VERSION))
             .unwrap_or(ACP_PROTOCOL_VERSION),
         "agentCapabilities": {
-            "loadSession": false,
+            "loadSession": true,
             "modelSelection": true,
             "promptCapabilities": {
                 "image": false,
@@ -2125,7 +2211,10 @@ fn initialize_result(client_protocol_version: Option<u64>, config: &Config) -> V
                 "http": false,
                 "sse": false
             },
-            "sessionCapabilities": {}
+            "sessionCapabilities": {
+                "list": true,
+                "load": true
+            }
         },
         "agentInfo": {
             "name": "codewhale",
@@ -2330,13 +2419,96 @@ mod tests {
         assert_eq!(content[1]["content"]["data"], "QUJD");
     }
 
+    /// #5864: `serve --acp` implemented `initialize` and `session/new` and
+    /// nothing else, so ACP clients that offer session history could not
+    /// enumerate or resume anything. ACP sessions are in-memory and capped;
+    /// the durable Codewhale sessions are what "resume" means.
+    #[tokio::test]
+    async fn session_list_and_load_reach_the_durable_codewhale_sessions() {
+        let _guard = crate::test_support::lock_test_env();
+        let home = tempfile::TempDir::new().expect("isolated codewhale home");
+        let _home_guard =
+            crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", home.path().as_os_str());
+
+        let workspace = home.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        let saved = crate::session_manager::create_saved_session(
+            &[Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: "what did we decide?".to_string(),
+                    cache_control: None,
+                }],
+            }],
+            "deepseek-v4-flash",
+            &workspace,
+            42,
+            None,
+        );
+        let saved_id = saved.metadata.id.clone();
+        let manager = crate::session_manager::SessionManager::new(
+            crate::session_manager::default_sessions_dir().expect("sessions dir"),
+        )
+        .expect("session manager");
+        manager.save_session(&saved).expect("save fixture session");
+
+        let mut server = AcpServer::new(
+            Config::default(),
+            "deepseek-v4-flash".to_string(),
+            workspace.clone(),
+        );
+
+        let listed = server.list_sessions();
+        let ids: Vec<&str> = listed["sessions"]
+            .as_array()
+            .expect("sessions array")
+            .iter()
+            .filter_map(|entry| entry["sessionId"].as_str())
+            .collect();
+        assert!(
+            ids.contains(&saved_id.as_str()),
+            "session/list must enumerate durable sessions: {ids:?}"
+        );
+
+        let loaded = server
+            .load_session(json!({ "sessionId": saved_id }))
+            .expect("session/load");
+        assert_eq!(loaded["sessionId"], saved_id);
+        let session = server
+            .sessions
+            .get(&saved_id)
+            .expect("loaded session is addressable by its own id");
+        assert_eq!(session.cwd, workspace, "cwd comes from the saved workspace");
+        assert_eq!(
+            session.messages.len(),
+            1,
+            "the conversation is rehydrated, not started empty"
+        );
+
+        // A session that does not exist is a client error, not a panic.
+        let missing = server.load_session(json!({ "sessionId": "codewhale-nope" }));
+        assert_eq!(missing.expect_err("unknown session").code, -32602);
+        let no_id = server.load_session(json!({}));
+        assert_eq!(no_id.expect_err("missing sessionId").code, -32602);
+    }
+
     #[test]
     fn initialize_advertises_baseline_acp_agent() {
         let result = initialize_result(Some(1), &Config::default());
 
         assert_eq!(result["protocolVersion"], 1);
         assert_eq!(result["agentInfo"]["name"], "codewhale");
-        assert_eq!(result["agentCapabilities"]["loadSession"], false);
+        // #5864: enumerating and resuming durable Codewhale sessions is now
+        // served, so the capability says so rather than declining it.
+        assert_eq!(result["agentCapabilities"]["loadSession"], true);
+        assert_eq!(
+            result["agentCapabilities"]["sessionCapabilities"]["list"],
+            true
+        );
+        assert_eq!(
+            result["agentCapabilities"]["sessionCapabilities"]["load"],
+            true
+        );
         assert_eq!(
             result["agentCapabilities"]["promptCapabilities"]["embeddedContext"],
             true
