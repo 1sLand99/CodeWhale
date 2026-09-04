@@ -14,6 +14,7 @@ use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
+use codewhale_release::install::GITHUB_MIGRATION_HELP;
 use codewhale_release::{
     CHECKSUM_MANIFEST_ASSET, InstallMethod, ReleaseChannel, ReleaseQuery, UPDATE_USER_AGENT,
     cnb_mirror_override_active, cnb_mirror_supports_target, cnb_release_base_url,
@@ -38,18 +39,6 @@ const UPDATE_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 /// connection and then stalls. GitHub gets the first attempt; an unavailable
 /// manifest falls back to the supported mirror without waiting for a binary.
 const MANIFEST_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
-const GITHUB_MIGRATION_HELP: &str = r#"Install the official GitHub release into a fresh user directory (macOS/Linux):
-  mkdir -p "$HOME/.local"
-  codewhale_install_dir="$(mktemp -d "$HOME/.local/codewhale-release.XXXXXX")"
-  curl -fsSL https://codewhale.net/install.sh | CODEWHALE_INSTALL_DIR="$codewhale_install_dir" sh
-  "$codewhale_install_dir/codewhale" --version
-  export PATH="$codewhale_install_dir:$PATH"
-  hash -r
-  command -v codewhale codew
-Future updates: "$codewhale_install_dir/codewhale" update
-Keep the chosen PATH directory in your shell profile after verifying it.
-Windows: https://github.com/Hmbown/CodeWhale/releases/latest
-PATH and migration: https://github.com/Hmbown/CodeWhale/blob/main/docs/INSTALL.md"#;
 #[cfg(target_os = "android")]
 const ANDROID_PROC_SELF_MAPS: &str = "/proc/self/maps";
 
@@ -1071,25 +1060,15 @@ fn legacy_binary_message(current_exe: &Path) -> String {
         "\
 this binary ({exe}) is using the legacy deepseek/deepseek-tui command name.
 
-The package has been renamed to `codewhale`. This update will install the
-canonical `codewhale` command and refresh any existing `codew` or
-`codewhale-tui` compatibility command from the same binary beside the legacy
-command when the install directory is writable.
+The package has been renamed to `codewhale`. A supported direct update can
+install the canonical `codewhale` command beside this legacy command when a
+newer verified release is available and the destination paths are safe to use.
 DeepSeek provider support is unchanged.
 
-For a fresh macOS/Linux GitHub release install in a separate user directory:
-
-  curl -fsSL https://codewhale.net/install.sh | sh
-  \"$HOME/.local/bin/codewhale\" --version
-  export PATH=\"$HOME/.local/bin:$PATH\"
-  hash -r
-  command -v codewhale codew
-
-Windows and archive downloads:
-  https://github.com/Hmbown/CodeWhale/releases/latest
+{GITHUB_MIGRATION_HELP}
 
 Existing npm, Cargo, Homebrew, or system-managed commands are left to their
-package manager. See docs/INSTALL.md for migration and secondary package routes.
+package manager. See docs/INSTALL.md for secondary package routes.
 
 Once `codewhale` is on your PATH, run `codewhale update` for future updates.",
         exe = current_exe.display(),
@@ -2719,7 +2698,8 @@ mod tests {
         assert!(message.contains("canonical `codewhale` command"));
         assert!(message.contains("DeepSeek provider support"));
         assert!(message.contains("is unchanged"));
-        assert!(message.contains("https://codewhale.net/install.sh"));
+        assert!(message.contains(GITHUB_MIGRATION_HELP));
+        assert!(!message.contains("This update will install"));
         assert!(message.contains("command -v codewhale codew"));
         assert!(message.contains("package manager"));
         assert!(!message.contains("uninstall"));

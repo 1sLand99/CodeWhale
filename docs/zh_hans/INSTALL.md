@@ -538,7 +538,7 @@ codewhale --version
 
 命令默认安装到 `~/.cargo/bin/`；请确保该目录在你的 `PATH` 上。
 
-### FreeBSD 14+（解决 #1097）
+### FreeBSD 14+ 源码构建替代方案（#1097）
 
 FreeBSD 没有预编译的 GitHub Release 资源——`npm install -g codewhale` 会故意失败，提示 `Unsupported platform: freebsd` 并指向 Cargo。从源码安装：
 
