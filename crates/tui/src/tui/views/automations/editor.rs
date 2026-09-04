@@ -825,13 +825,13 @@ impl AutomationEditor {
                 self.adjust_time(if key.code == KeyCode::Up { 15 } else { -15 })
             }
             KeyCode::Up | KeyCode::Down if self.focus == Field::Date => {
-                if let Ok(date) = NaiveDate::parse_from_str(&self.date.value, "%Y-%m-%d") {
-                    if let Some(next) = date.checked_add_signed(chrono::Duration::days(
+                if let Ok(date) = NaiveDate::parse_from_str(&self.date.value, "%Y-%m-%d")
+                    && let Some(next) = date.checked_add_signed(chrono::Duration::days(
                         if key.code == KeyCode::Up { 1 } else { -1 },
-                    )) {
-                        self.date = TextField::new(next.to_string());
-                        self.schedule_changed = true;
-                    }
+                    ))
+                {
+                    self.date = TextField::new(next.to_string());
+                    self.schedule_changed = true;
                 }
             }
             KeyCode::Left | KeyCode::Right if self.focus == Field::Days => {
