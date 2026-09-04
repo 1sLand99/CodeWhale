@@ -220,6 +220,10 @@ pub struct ShellJobSnapshot {
     pub owner_agent_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_agent_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_tool_call_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_turn_id: Option<String>,
     /// Immutable root session that launched the job. Empty legacy records are
     /// intentionally hidden from session-scoped completion drains.
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -247,6 +251,10 @@ pub struct ShellCompletionEvent {
     pub owner_agent_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_agent_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_tool_call_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_turn_id: Option<String>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub owner_session_id: String,
 }
@@ -302,6 +310,8 @@ impl ShellCompletionEvidence {
             "status": format!("{:?}", self.event.status),
             "exit_code": self.event.exit_code,
             "duration_ms": self.event.duration_ms,
+            "origin_tool_call_id": self.event.origin_tool_call_id,
+            "origin_turn_id": self.event.origin_turn_id,
             "stdout": stream(&self.stdout, self.stdout_omitted),
             "stderr": stream(&self.stderr, self.stderr_omitted),
         })
@@ -936,6 +946,8 @@ pub struct BackgroundShell {
     pub linked_task_id: Option<String>,
     pub owner_agent: Option<ShellJobOwner>,
     owner_session_id: String,
+    origin_tool_call_id: Option<String>,
+    origin_turn_id: Option<String>,
     ownership: ShellOwnership,
     stdout_buffer: SharedRawOutput,
     stderr_buffer: Option<SharedRawOutput>,
@@ -1023,6 +1035,8 @@ struct ShellSpawnIntentGuard {
 struct ShellSpawnContext {
     owner_agent: Option<ShellJobOwner>,
     owner_session_id: String,
+    origin_tool_call_id: Option<String>,
+    origin_turn_id: Option<String>,
     work_lifecycle: Option<ShellWorkLifecycle>,
 }
 
@@ -1524,6 +1538,8 @@ impl BackgroundShell {
                 .owner_agent
                 .as_ref()
                 .map(|owner| owner.agent_name.clone()),
+            origin_tool_call_id: self.origin_tool_call_id.clone(),
+            origin_turn_id: self.origin_turn_id.clone(),
             owner_session_id: self.owner_session_id.clone(),
         }
     }
@@ -1558,6 +1574,8 @@ impl BackgroundShell {
             linked_task_id: snapshot.linked_task_id,
             owner_agent_id: snapshot.owner_agent_id,
             owner_agent_name: snapshot.owner_agent_name,
+            origin_tool_call_id: snapshot.origin_tool_call_id,
+            origin_turn_id: snapshot.origin_turn_id,
             owner_session_id: snapshot.owner_session_id,
         }
     }
@@ -1791,6 +1809,8 @@ impl ShellManager {
                 linked_task_id: None,
                 owner_agent: None,
                 owner_session_id: String::new(),
+                origin_tool_call_id: None,
+                origin_turn_id: None,
                 ownership: ShellOwnership::Managed,
                 stdout_buffer: new_shared_raw_output(),
                 stderr_buffer: Some(new_shared_raw_output()),
@@ -1922,6 +1942,8 @@ impl ShellManager {
             owner_session_id.to_string(),
             None,
             None,
+            None,
+            None,
             false,
             (1_000, 600_000),
         )
@@ -1954,6 +1976,8 @@ impl ShellManager {
             extra_env,
             owner_agent,
             String::new(),
+            None,
+            None,
             None,
             None,
             false,
@@ -1990,6 +2014,8 @@ impl ShellManager {
             owner_session_id.to_string(),
             None,
             None,
+            None,
+            None,
             false,
             (1_000, 600_000),
         )
@@ -2009,6 +2035,8 @@ impl ShellManager {
         extra_env: HashMap<String, String>,
         owner_agent: Option<ShellJobOwner>,
         owner_session_id: String,
+        origin_tool_call_id: Option<String>,
+        origin_turn_id: Option<String>,
         work_lifecycle: Option<ShellWorkLifecycle>,
         readonly_workspace: Option<&std::path::Path>,
         persist_pending: bool,
@@ -2065,6 +2093,8 @@ impl ShellManager {
                 ShellSpawnContext {
                     owner_agent,
                     owner_session_id,
+                    origin_tool_call_id,
+                    origin_turn_id,
                     work_lifecycle,
                 },
                 persist_pending,
@@ -2421,6 +2451,8 @@ impl ShellManager {
         let ShellSpawnContext {
             owner_agent,
             owner_session_id,
+            origin_tool_call_id,
+            origin_turn_id,
             work_lifecycle,
         } = spawn_context;
         let task_id = format!("shell_{}", &Uuid::new_v4().to_string()[..8]);
@@ -2619,6 +2651,8 @@ impl ShellManager {
             linked_task_id: None,
             owner_agent,
             owner_session_id,
+            origin_tool_call_id,
+            origin_turn_id,
             ownership: if persist_pending {
                 ShellOwnership::PersistPending
             } else {
@@ -3253,6 +3287,8 @@ impl ShellManager {
                 linked_task_id,
                 owner_agent_id: None,
                 owner_agent_name: None,
+                origin_tool_call_id: None,
+                origin_turn_id: None,
                 owner_session_id: String::new(),
             },
         );
@@ -4111,6 +4147,8 @@ async fn execute_foreground_via_background(
             extra_env,
             owner,
             context.state_namespace.clone(),
+            context.origin_tool_call_id.clone(),
+            context.origin_turn_id.clone(),
             lifecycle,
             direct_argv.then_some(context.workspace.as_path()),
             false,
@@ -5129,6 +5167,8 @@ impl ToolSpec for BashTool {
                 extra_env,
                 shell_job_owner_from_context(context),
                 context.state_namespace.clone(),
+                context.origin_tool_call_id.clone(),
+                context.origin_turn_id.clone(),
                 shell_work_lifecycle_from_context(context),
                 None,
                 persist,
