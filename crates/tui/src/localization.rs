@@ -1405,6 +1405,9 @@ pub enum MessageId {
     SetupGuidedNotes,
     // Underwater launch screen (pre-session menu + worktree flow).
     LaunchStartTitle,
+    /// Arming line for a clicked recent-work row. Resuming replaces the whole
+    /// session context, so the click arms and a second activation confirms.
+    LaunchResumeConfirm,
     LaunchWorkDescription,
     LaunchChatDescription,
     LaunchWorkspaceGitReady,
@@ -3478,6 +3481,7 @@ pub const ALL_MESSAGE_IDS: &[MessageId] = &[
     MessageId::SetupGuidedEvidenceReleaseReceipts,
     MessageId::SetupGuidedNotes,
     MessageId::LaunchStartTitle,
+    MessageId::LaunchResumeConfirm,
     MessageId::LaunchWorkDescription,
     MessageId::LaunchChatDescription,
     MessageId::LaunchWorkspaceGitReady,

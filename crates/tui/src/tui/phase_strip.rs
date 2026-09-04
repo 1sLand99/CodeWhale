@@ -949,10 +949,24 @@ fn live_counts(
     // idle footer disappears into punctuation. Live counts already carry
     // `Active`; this is the idle case earning the same "you can click this".
     if counts.is_empty() && app.work_surface.last_area.is_none() {
-        counts.push((
-            RailPanel::Tasks.title().to_ascii_lowercase(),
-            ChromeInk::MetadataValue,
-        ));
+        // The word alone did not say it was an affordance, let alone which
+        // key opened it — founder live-test: "what do we press at the bottom
+        // to get the workbar to show up?". It carries its chord until the
+        // binding has been used, exactly like the permission and mode chips.
+        let label = RailPanel::Tasks.title().to_ascii_lowercase();
+        let chord = crate::tui::shell_key_routing::binding(
+            crate::tui::shell_key_routing::ShellBindingId::ViewCycle,
+        )
+        .footer_chord;
+        let label = if crate::tui::footer_hints::retired(
+            &app.footer_hint_uses,
+            crate::tui::footer_hints::DOCK_OPEN,
+        ) {
+            label
+        } else {
+            format!("{label} ({chord})")
+        };
+        counts.push((label, ChromeInk::MetadataValue));
         panels.push(RailPanel::Tasks);
     }
     (counts, panels)

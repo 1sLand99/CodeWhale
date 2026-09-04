@@ -23,6 +23,9 @@ pub(crate) const MODE_CYCLE: &str = "mode_cycle";
 pub(crate) const ESC_INTERRUPT: &str = "esc_interrupt";
 pub(crate) const ENTER_AGAIN: &str = "enter_again";
 pub(crate) const AGENT_ARROWS: &str = "agent_arrows";
+/// The idle bottom-of-screen affordance that opens the work dock. Founder
+/// live-test: "what do we press at the bottom to get the workbar to show up?"
+pub(crate) const DOCK_OPEN: &str = "dock_open";
 
 /// Whether the hint for `key` has been used often enough to retire.
 pub(crate) fn retired(uses: &BTreeMap<String, u8>, key: &str) -> bool {

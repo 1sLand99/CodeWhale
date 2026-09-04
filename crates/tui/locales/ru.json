@@ -1214,6 +1214,7 @@
   "CommandPaletteSubtitle": "Найти и выполнить одно действие",
   "ConfigSubtitle": "Сначала настройки; сырые ключи — в расширенных деталях",
   "LaunchStartTitle": "Начните здесь",
+  "LaunchResumeConfirm": "Возобновить {title}? Нажмите ещё раз или Enter для подтверждения.",
   "LaunchWorkDescription": "Используйте локальные инструменты в этой папке; изменения подчиняются политике подтверждений.",
   "LaunchChatDescription": "Только разговор и планирование; файлы не изменяются.",
   "LaunchWorkspaceGitReady": "Рабочая область · {name} · область Git",

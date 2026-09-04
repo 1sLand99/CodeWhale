@@ -1214,6 +1214,7 @@
   "CommandPaletteSubtitle": "Знайдіть і виконайте одну дію",
   "ConfigSubtitle": "Спочатку налаштування; сирі ключі — в розширених деталях",
   "LaunchStartTitle": "Почніть тут",
+  "LaunchResumeConfirm": "Відновити {title}? Натисніть ще раз або Enter для підтвердження.",
   "LaunchWorkDescription": "Використовуйте локальні інструменти в цій папці; зміни підпорядковуються політиці схвалення.",
   "LaunchChatDescription": "Лише розмова й планування; файли не змінюються.",
   "LaunchWorkspaceGitReady": "Робочий простір · {name} · простір Git",

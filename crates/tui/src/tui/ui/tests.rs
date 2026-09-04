@@ -695,6 +695,32 @@ fn no_shell_binding_changes_meaning_once_the_composer_has_text() {
 }
 
 #[test]
+fn tab_cycles_the_mode_on_the_launch_screen() {
+    // Founder live-test: "from here tab needs to work". The launch screen's
+    // composer is focused from first paint and the card's rows are arrowed,
+    // so Tab has no focus left to move — it is the shell's mode cycle there,
+    // exactly as in a live session.
+    let mut app = focus_test_app();
+    app.prompt_suggestion = None;
+    app.launch.visible = true;
+    assert_eq!(app.focus(), crate::tui::shell_key_routing::Focus::Launch);
+    let before = app.mode;
+
+    let dispatch = dispatch_tab_key(
+        &mut app,
+        &KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+        &[],
+        &[],
+    );
+
+    assert!(
+        matches!(dispatch, TabDispatch::ModeCycled { .. }),
+        "Tab on the launch screen dispatched {dispatch:?}"
+    );
+    assert_ne!(app.mode, before, "the mode must actually change");
+}
+
+#[test]
 fn tab_still_cycles_the_mode_after_the_user_has_typed() {
     // Regression: Tab used to stop working the moment the composer held any
     // text, which is most of the time you are actually using the product.

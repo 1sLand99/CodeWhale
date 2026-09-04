@@ -4291,6 +4291,13 @@ pub fn tideline_startup_row_hitboxes(
     stage: Rect,
     startup: &TidelineStartup<'_>,
 ) -> Vec<(crate::tui::app::LaunchRowId, Rect)> {
+    // A hitbox describes a painted row, so it dies with the row. The painter
+    // stops drawing the card at `card_dissolve >= 1.0`; without this the
+    // rects outlived it, and a click on empty stage where the recent-work
+    // list used to be still resumed that session.
+    if startup.card_dissolve >= 1.0 {
+        return Vec::new();
+    }
     let rows = launch_card_rows(startup.locale, &startup.recent, startup.has_more_recent);
     let layout = startup_layout(stage);
     let Some(plan) = launch_card_plan(

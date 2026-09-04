@@ -1237,6 +1237,7 @@
   "CommandPaletteSubtitle": "Encontre e execute uma ação",
   "ConfigSubtitle": "Configurações primeiro; chaves brutas no detalhe avançado",
   "LaunchStartTitle": "Comece aqui",
+  "LaunchResumeConfirm": "Retomar {title}? Clique novamente ou pressione Enter para confirmar.",
   "LaunchWorkDescription": "Use esta pasta com ferramentas locais; as alterações seguem sua política de aprovação.",
   "LaunchChatDescription": "Somente conversa e planejamento; nenhum arquivo é alterado.",
   "LaunchWorkspaceGitReady": "Workspace · {name} · workspace Git",

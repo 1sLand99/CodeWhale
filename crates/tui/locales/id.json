@@ -1214,6 +1214,7 @@
   "CommandPaletteSubtitle": "Temukan dan jalankan satu aksi",
   "ConfigSubtitle": "Pengaturan dulu; kunci mentah di detail lanjutan",
   "LaunchStartTitle": "Mulai di sini",
+  "LaunchResumeConfirm": "Lanjutkan {title}? Klik lagi atau tekan Enter untuk mengonfirmasi.",
   "LaunchWorkDescription": "Gunakan folder ini dengan alat lokal; perubahan mengikuti kebijakan persetujuan Anda.",
   "LaunchChatDescription": "Hanya percakapan dan perencanaan; tidak ada perubahan file.",
   "LaunchWorkspaceGitReady": "Ruang kerja · {name} · ruang kerja Git",

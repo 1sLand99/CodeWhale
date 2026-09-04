@@ -227,17 +227,27 @@ pub const SHELL_BINDINGS: &[ShellBinding] = &[
 /// advertising a key that does nothing for many users. Not `?` either — bare
 /// `?` is composer text in every focus state, and help only answers to
 /// `Alt+?`, which stays unadvertised until it is proven in real terminals
-/// (TUI-DOG-003). `Ctrl+/` is the chord [`is_help_shortcut`] accepts
-/// unconditionally, together with its legacy `Ctrl+7` / `Ctrl+_` encodings,
-/// so it is the one hint chrome can print honestly.
-pub const HELP_CHROME_CHORD: &str = "Ctrl+/";
+/// (TUI-DOG-003). `Ctrl+/` remains accepted, together with its legacy
+/// `Ctrl+7` / `Ctrl+_` encodings, but it is no longer what chrome advertises:
+/// how a terminal encodes Ctrl+/ varies enough that the printed hint was a
+/// promise the product could not keep on the founder's own machine. `/help`
+/// is a slash command — it reaches the same view through the composer, it
+/// works in every terminal, and typing `/` already reveals it.
+pub const HELP_CHROME_CHORD: &str = "/help";
 
-/// The info line's single right-hand key hint, e.g. `Ctrl+/ help`.
+/// The info line's single right-hand key hint.
+///
+/// A slash command names itself, so it prints bare (`/help`); a key chord
+/// still needs the word (`Ctrl+/ help`).
 #[must_use]
 pub fn info_help_hint(locale: crate::localization::Locale) -> String {
+    let chord = binding(ShellBindingId::Help).footer_chord;
+    if chord.starts_with('/') {
+        return chord.to_string();
+    }
     format!(
         "{} {}",
-        binding(ShellBindingId::Help).footer_chord,
+        chord,
         crate::localization::tr(locale, crate::localization::MessageId::InfoLineHelp)
     )
 }
@@ -489,9 +499,15 @@ mod tests {
     fn chrome_never_advertises_a_key_terminals_eat() {
         // F1 stays in the catalog (it works where delivered) but no chrome
         // hint may print it; the help hint is derived from the binding.
-        assert_eq!(binding(ShellBindingId::Help).footer_chord, "Ctrl+/");
+        // Ctrl+/ is still accepted, but chrome advertises the route that
+        // works in every terminal.
+        assert_eq!(binding(ShellBindingId::Help).footer_chord, "/help");
         let hint = info_help_hint(crate::localization::Locale::En);
-        assert!(hint.starts_with("Ctrl+/ "), "{hint}");
+        assert_eq!(hint, "/help", "a slash command names itself");
+        assert!(
+            is_help_shortcut(&KeyEvent::new(KeyCode::Char('/'), KeyModifiers::CONTROL)),
+            "Ctrl+/ must keep working for the terminals that deliver it"
+        );
         for binding in SHELL_BINDINGS {
             assert!(!binding.footer_chord.contains("F1"), "{:?}", binding.id);
             assert!(!binding.footer_chord.contains("Alt+?"), "{:?}", binding.id);

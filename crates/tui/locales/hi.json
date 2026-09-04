@@ -1214,6 +1214,7 @@
   "CommandPaletteSubtitle": "एक कार्रवाई खोजें और चलाएँ",
   "ConfigSubtitle": "पहले सेटिंग्स; रॉ कुंजियाँ उन्नत विवरण में",
   "LaunchStartTitle": "यहाँ से शुरू करें",
+  "LaunchResumeConfirm": "{title} फिर से शुरू करें? पुष्टि के लिए दोबारा क्लिक करें या Enter दबाएँ।",
   "LaunchWorkDescription": "इस फ़ोल्डर में स्थानीय टूल इस्तेमाल करें; बदलाव आपकी स्वीकृति नीति के अनुसार होंगे।",
   "LaunchChatDescription": "सिर्फ़ बातचीत और योजना; फ़ाइलों में कोई बदलाव नहीं।",
   "LaunchWorkspaceGitReady": "वर्कस्पेस · {name} · Git वर्कस्पेस",

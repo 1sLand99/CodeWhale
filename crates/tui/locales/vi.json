@@ -1237,6 +1237,7 @@
   "CommandPaletteSubtitle": "Tìm và chạy một thao tác",
   "ConfigSubtitle": "Cài đặt trước; khóa thô ở chi tiết nâng cao",
   "LaunchStartTitle": "Bắt đầu tại đây",
+  "LaunchResumeConfirm": "Tiếp tục {title}? Nhấp lại hoặc nhấn Enter để xác nhận.",
   "LaunchWorkDescription": "Dùng công cụ cục bộ trong thư mục này; mọi thay đổi tuân theo chính sách phê duyệt của bạn.",
   "LaunchChatDescription": "Chỉ trò chuyện và lập kế hoạch; không thay đổi tệp.",
   "LaunchWorkspaceGitReady": "Không gian làm việc · {name} · không gian Git",

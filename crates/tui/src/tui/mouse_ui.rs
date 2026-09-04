@@ -536,16 +536,51 @@ pub(crate) fn handle_mouse_event(app: &mut App, mouse: MouseEvent) -> Vec<ViewEv
                     // Same submit path as the composer's Enter key.
                     app.pending_launch_action =
                         Some(crate::tui::underwater::LaunchAction::SendComposer);
-                } else if let Some(id) = app
+                } else if let Some((index, id)) = app
                     .launch
                     .row_hitboxes
                     .iter()
-                    .find(|(_, area)| mouse_hits_rect(mouse, Some(*area)))
-                    .map(|(id, _)| id.clone())
+                    .position(|(_, area)| mouse_hits_rect(mouse, Some(*area)))
+                    .and_then(|index| {
+                        app.launch
+                            .row_hitboxes
+                            .get(index)
+                            .map(|(id, _)| (index, id.clone()))
+                    })
                 {
-                    // Same actions the keyboard's Enter runs.
-                    app.pending_launch_action =
-                        Some(crate::tui::underwater::launch_row_click_action(&id));
+                    // Resuming replaces the whole session context, and a
+                    // single click did it instantly — founder live-test:
+                    // "you just click it and boom you're there ... you don't
+                    // realize it's happening". So a recent row arms first and
+                    // resumes on the second activation, which is the same
+                    // two-step the keyboard already has (arrow, then Enter).
+                    // New-session and see-all stay one click: neither
+                    // discards anything.
+                    let already_armed = app.launch.menu_selected == Some(index);
+                    match &id {
+                        crate::tui::app::LaunchRowId::Recent(session_id) if !already_armed => {
+                            let title = app
+                                .launch
+                                .recent
+                                .iter()
+                                .find(|entry| entry.id == *session_id)
+                                .map(|entry| entry.title.clone())
+                                .unwrap_or_else(|| session_id.clone());
+                            app.launch.menu_selected = Some(index);
+                            app.launch.status = Some(
+                                crate::localization::tr(
+                                    app.ui_locale,
+                                    crate::localization::MessageId::LaunchResumeConfirm,
+                                )
+                                .replace("{title}", &title),
+                            );
+                        }
+                        _ => {
+                            app.launch.status = None;
+                            app.pending_launch_action =
+                                Some(crate::tui::underwater::launch_row_click_action(&id));
+                        }
+                    }
                 }
             }
             _ => {}
@@ -575,6 +610,8 @@ pub(crate) fn handle_mouse_event(app: &mut App, mouse: MouseEvent) -> Vec<ViewEv
             .and_then(|target| target.mouse_action)
     {
         crate::tui::work_surface::select_dock_panel(app, panel);
+        // Clicking the affordance teaches it just as well as the chord does.
+        app.note_footer_hint_used(crate::tui::footer_hints::DOCK_OPEN);
         return Vec::new();
     }
 
@@ -1880,6 +1917,70 @@ mod tests {
             row,
             modifiers: KeyModifiers::NONE,
         }
+    }
+
+    #[test]
+    fn a_recent_row_arms_on_the_first_click_and_resumes_on_the_second() {
+        // Founder live-test: "you just click it and boom you're there ...
+        // you don't realize it's happening". Resuming replaces the whole
+        // session context, so one click arms it and names what will happen;
+        // the second click is the approval.
+        let mut app = create_test_app();
+        app.launch.visible = true;
+        app.launch.recent = vec![crate::tui::app::LaunchRecentSession {
+            id: "sess-1".to_string(),
+            title: "refactor the parser".to_string(),
+            updated_at: chrono::Utc::now(),
+            message_count: 12,
+        }];
+        let row = Rect::new(2, 5, 30, 1);
+        app.launch.row_hitboxes = vec![(
+            crate::tui::app::LaunchRowId::Recent("sess-1".to_string()),
+            row,
+        )];
+        app.launch.menu_selected = None;
+        app.pending_launch_action = None;
+
+        handle_mouse_event(&mut app, left_click(4, 5));
+        assert_eq!(
+            app.pending_launch_action, None,
+            "the first click must not resume anything"
+        );
+        assert_eq!(app.launch.menu_selected, Some(0), "the row is armed");
+        let status = app.launch.status.clone().expect("an arming line");
+        assert!(
+            status.contains("refactor the parser"),
+            "the arming line names the session: {status}"
+        );
+
+        handle_mouse_event(&mut app, left_click(4, 5));
+        assert_eq!(
+            app.pending_launch_action,
+            Some(crate::tui::underwater::LaunchAction::ResumeSession(
+                "sess-1".to_string()
+            )),
+            "the second click resumes"
+        );
+    }
+
+    #[test]
+    fn a_new_session_row_still_takes_one_click() {
+        // Only resuming discards context, so New session keeps its single
+        // click; adding a confirm step there would be friction for nothing.
+        let mut app = create_test_app();
+        app.launch.visible = true;
+        app.launch.row_hitboxes = vec![(
+            crate::tui::app::LaunchRowId::NewSession,
+            Rect::new(2, 5, 30, 1),
+        )];
+        app.pending_launch_action = None;
+
+        handle_mouse_event(&mut app, left_click(4, 5));
+        assert_eq!(
+            app.pending_launch_action,
+            Some(crate::tui::underwater::LaunchAction::NewSession),
+            "New session runs on the first click"
+        );
     }
 
     #[test]

@@ -1237,6 +1237,7 @@
   "CommandPaletteSubtitle": "操作を見つけて実行",
   "ConfigSubtitle": "設定を先に。生キーは高度な詳細へ",
   "LaunchStartTitle": "ここから始める",
+  "LaunchResumeConfirm": "{title} を再開しますか？もう一度クリックするか Enter で確定します。",
   "LaunchWorkDescription": "このフォルダーでローカルツールを使います。変更は承認ポリシーに従います。",
   "LaunchChatDescription": "会話と計画のみ。ファイルは変更しません。",
   "LaunchWorkspaceGitReady": "ワークスペース · {name} · Git ワークスペース",

@@ -1214,6 +1214,7 @@
   "CommandPaletteSubtitle": "Eine Aktion finden und ausführen",
   "ConfigSubtitle": "Einstellungen zuerst; Rohschlüssel im erweiterten Detail",
   "LaunchStartTitle": "Hier starten",
+  "LaunchResumeConfirm": "{title} fortsetzen? Erneut klicken oder Enter drücken zum Bestätigen.",
   "LaunchWorkDescription": "Diesen Ordner mit lokalen Werkzeugen verwenden; Änderungen folgen der Genehmigungsrichtlinie.",
   "LaunchChatDescription": "Nur Unterhaltung und Planung; keine Dateiänderungen.",
   "LaunchWorkspaceGitReady": "Arbeitsbereich · {name} · Git-Arbeitsbereich",

@@ -4514,6 +4514,7 @@ pub(crate) async fn run_event_loop(
                 }
                 Some(ShellBindingId::ViewCycle) => {
                     crate::tui::work_surface::cycle_view(app, true);
+                    app.note_footer_hint_used(crate::tui::footer_hints::DOCK_OPEN);
                     continue;
                 }
                 Some(ShellBindingId::ViewCycleBack) => {

@@ -1237,6 +1237,7 @@
   "CommandPaletteSubtitle": "查找并执行一个操作",
   "ConfigSubtitle": "设置优先；原始键在高级详情",
   "LaunchStartTitle": "从这里开始",
+  "LaunchResumeConfirm": "恢复 {title}？再次点击或按 Enter 确认。",
   "LaunchWorkDescription": "在此文件夹中使用本地工具；更改遵循你的审批策略。",
   "LaunchChatDescription": "仅对话和规划；不会更改文件。",
   "LaunchWorkspaceGitReady": "工作区 · {name} · Git 工作区",
