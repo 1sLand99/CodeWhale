@@ -11191,6 +11191,7 @@ async fn marketplace_catalog_lifecycle_over_http_lists_installs_and_removes() ->
     Ok(())
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn marketplace_add_rejects_symlink_documents_over_http() -> Result<()> {
     let tmp = tempfile::tempdir()?;
@@ -11204,10 +11205,7 @@ async fn marketplace_add_rejects_symlink_documents_over_http() -> Result<()> {
     fs::write(&real, r#"{"plugins":[]}"#)?;
     #[cfg(unix)]
     let link = catalog_dir.join("link.json");
-    #[cfg(unix)]
     std::os::unix::fs::symlink(&real, &link)?;
-    #[cfg(not(unix))]
-    let link = real;
 
     let Some((addr, handle)) = spawn_plugin_api_server(root, workspace).await? else {
         return Ok(());
@@ -11222,10 +11220,7 @@ async fn marketplace_add_rejects_symlink_documents_over_http() -> Result<()> {
         }))
         .send()
         .await?;
-    #[cfg(unix)]
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-    #[cfg(not(unix))]
-    assert!(resp.status().is_success());
 
     handle.abort();
     Ok(())

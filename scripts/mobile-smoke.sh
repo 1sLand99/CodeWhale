@@ -165,44 +165,27 @@ assert_status GET "/v1/threads/summary" 200
 
 stop_server
 
-# ── Test Group 3: Binding warnings ──────────────────────────────────────────
+# ── Test Group 3: Non-loopback binding rejection ────────────────────────────
 
 PORT=$(pick_port)
 
-log "=== Test Group 3: Binding warnings (loopback default) ==="
-STDOUT_FILE=$(mktemp)
-"$BINARY" serve --port "$PORT" --mobile --insecure > "$STDOUT_FILE" 2>&1 &
-SERVER_PID=$!
-SERVER_READY=0
-for _ in $(seq 1 30); do
-    if curl -sf --max-time 2 "http://127.0.0.1:${PORT}/health" > /dev/null 2>&1; then
-        SERVER_READY=1
-        break
-    fi
-    sleep 0.3
-done
-if [[ "$SERVER_READY" -ne 1 ]]; then
-    rm -f "$STDOUT_FILE"
-    fail "Server did not become ready on port $PORT"
-    cleanup
-    exit 1
-fi
-STDOUT=$(cat "$STDOUT_FILE")
-rm -f "$STDOUT_FILE"
+log "=== Test Group 3: Reject non-loopback mobile binding ==="
+set +e
+BIND_OUTPUT=$("$BINARY" serve --host 0.0.0.0 --port "$PORT" --mobile --insecure 2>&1)
+BIND_STATUS=$?
+set -e
 
-if echo "$STDOUT" | grep -qi "loopback"; then
-    pass "stdout/stderr contains loopback binding warning"
+if [[ "$BIND_STATUS" -ne 0 ]]; then
+    pass "mobile rejects a 0.0.0.0 binding"
 else
-    fail "stdout/stderr missing loopback binding warning"
+    fail "mobile unexpectedly accepted a 0.0.0.0 binding"
 fi
 
-if echo "$STDOUT" | grep -qi "mobile"; then
-    pass "stdout contains mobile URL hint"
+if echo "$BIND_OUTPUT" | grep -qi "loopback-only"; then
+    pass "rejection explains the loopback-only boundary"
 else
-    fail "stdout missing mobile URL hint"
+    fail "rejection missing loopback-only guidance"
 fi
-
-stop_server
 
 # ── summary ──────────────────────────────────────────────────────────────────
 

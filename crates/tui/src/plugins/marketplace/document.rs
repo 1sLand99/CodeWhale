@@ -208,25 +208,18 @@ mod tests {
         assert!(!valid_marketplace_name("a".repeat(65).as_str()));
     }
 
+    #[cfg(unix)]
     #[test]
     fn load_refuses_symlink_documents() {
         let dir = tempfile::tempdir().unwrap();
         let real = dir.path().join("real.json");
         std::fs::write(&real, "{}").unwrap();
-        #[cfg(unix)]
         let link = dir.path().join("link.json");
-        #[cfg(unix)]
         std::os::unix::fs::symlink(&real, &link).unwrap();
-        #[cfg(not(unix))]
-        let link = real;
 
-        #[cfg(unix)]
         let error = load_catalog_document("test", dir.path(), link.to_str().unwrap())
             .expect_err("symlink document must be refused");
-        #[cfg(unix)]
         assert!(error.contains("symlink"), "{error}");
-        #[cfg(not(unix))]
-        let _ = load_catalog_document("test", dir.path(), link.to_str().unwrap());
     }
 
     #[test]
