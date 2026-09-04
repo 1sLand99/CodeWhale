@@ -397,6 +397,18 @@ pub struct EngineConfig {
     /// immediately; positive values opt coordinator goals into a cancellable
     /// quiet period (#5508).
     pub goal_continuation_delay_seconds: u64,
+    /// Maximum number of automatic re-requests when the model returns only
+    /// reasoning without any answer or tool call. Defaults to 2.
+    /// Resolved from `[reasoning_only] max_reprompts` in config.toml.
+    pub reasoning_only_max_reprompts: u32,
+    /// Nudge carried by a reasoning-only re-request once a bare retry has
+    /// already come back answerless. `None` uses the built-in text; an empty
+    /// string disables the nudge and keeps every retry a bare one.
+    ///
+    /// The nudge is attached to one outbound request and never added to the
+    /// session — see the reasoning-only branch in `turn_loop`.
+    /// Resolved from `[reasoning_only] reprompt_message` in config.toml.
+    pub reasoning_only_reprompt_message: Option<String>,
     /// Tool restriction from custom slash command frontmatter.
     /// `None` means the current turn may use the normal tool set.
     pub allowed_tools: Option<Vec<String>>,
@@ -557,6 +569,11 @@ impl Default for EngineConfig {
             goal_status: GoalStatus::Active,
             goal_max_continuations: crate::goal_loop::DEFAULT_MAX_GOAL_CONTINUATIONS,
             goal_continuation_delay_seconds: 0,
+            reasoning_only_max_reprompts: crate::config::DEFAULT_REASONING_ONLY_REPROMPTS,
+            // `None` means "use the built-in nudge". Storing the default text
+            // here instead would make an operator's explicit empty string
+            // indistinguishable from having set nothing.
+            reasoning_only_reprompt_message: None,
             allowed_tools: None,
             disallowed_tools: None,
             max_tool_calls: None,
@@ -7729,8 +7746,6 @@ use self::tool_catalog::{
 };
 pub(crate) use self::tool_execution::emit_tool_audit;
 use self::tool_preparation::{prepare_tool_call, reprepare_tool_call_after_hook};
-#[cfg(test)]
-use self::turn_loop::MAX_REASONING_ONLY_REPROMPTS;
 use crate::tools::js_execution::execute_js_execution_tool;
 
 #[cfg(test)]

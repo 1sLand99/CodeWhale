@@ -47,6 +47,18 @@ pub(crate) use codewhale_config::{ConfigApiKeyValueKind, classify_config_api_key
 pub const DEFAULT_ZAI_PROVIDER_MAX_CONCURRENCY: usize = 3;
 pub const MAX_PROVIDER_REQUEST_CONCURRENCY: usize = 64;
 
+/// Default maximum number of automatic re-requests when a reasoning model
+/// returns only hidden thinking without any answer text or tool call.
+pub const DEFAULT_REASONING_ONLY_REPROMPTS: u32 = 2;
+
+/// Nudge sent with a reasoning-only re-request once a bare retry has already
+/// come back answerless. Overridable with `[reasoning_only] reprompt_message`.
+///
+/// It is never written to the session: it rides one outbound request and is
+/// discarded, so the transcript never gains a message the user did not send.
+pub const DEFAULT_REASONING_ONLY_REPROMPT_MESSAGE: &str =
+    "Continue: give your answer, or make the next tool call.";
+
 pub fn default_stop_words() -> Vec<String> {
     ["stop", "wait", "pause"]
         .into_iter()
@@ -2307,6 +2319,25 @@ pub struct GoalConfig {
     pub continuation_delay_seconds: Option<u64>,
 }
 
+/// Reasoning-only recovery controls (`[reasoning_only]` table in config.toml).
+/// When the model returns only hidden reasoning (thinking) without any answer
+/// text or tool call, the engine can re-request the answer automatically.
+#[derive(Debug, Clone, Deserialize, Default, PartialEq, Eq)]
+#[serde(default)]
+pub struct ReasoningOnlyConfig {
+    /// Maximum number of automatic re-requests when the model returns only
+    /// reasoning without any answer or tool call.
+    /// Defaults to 2. Set to 0 to disable automatic recovery.
+    pub max_reprompts: Option<u32>,
+    /// Nudge attached to a reasoning-only re-request after the first bare
+    /// retry has already come back answerless. Unset uses the built-in text.
+    ///
+    /// The nudge rides a single outbound request and is never added to the
+    /// session, so it does not persist, does not appear in the transcript or
+    /// exports, and is not re-sent on later turns.
+    pub reprompt_message: Option<String>,
+}
+
 /// One configurable footer item.
 ///
 /// Order in the user's `Vec<StatusItem>` is preserved: items in the left
@@ -3177,6 +3208,12 @@ pub struct Config {
     /// `[goal] max_continuations`.
     #[serde(default)]
     pub goal: Option<GoalConfig>,
+
+    /// Reasoning-only recovery controls. When absent, the engine uses the
+    /// built-in default (2 retries, no custom message). Configure with
+    /// `[reasoning_only] max_reprompts` and/or `[reasoning_only] reprompt_message`.
+    #[serde(default)]
+    pub reasoning_only: Option<ReasoningOnlyConfig>,
 
     /// User-level memory (#489). Default behaviour is **opt-in**:
     /// loading + injection happens only when `[memory] enabled = true` or
@@ -7196,6 +7233,29 @@ impl Config {
             .min(crate::goal_loop::MAX_GOAL_CONTINUATION_DELAY_SECONDS)
     }
 
+    /// Maximum number of automatic re-requests when the model returns only
+    /// reasoning without any answer or tool call. Defaults to 2.
+    /// Set via `[reasoning_only] max_reprompts` in config.toml.
+    #[must_use]
+    pub fn reasoning_only_max_reprompts(&self) -> u32 {
+        self.reasoning_only
+            .as_ref()
+            .and_then(|cfg| cfg.max_reprompts)
+            .unwrap_or(DEFAULT_REASONING_ONLY_REPROMPTS)
+    }
+
+    /// Optional custom message sent to the model on each re-request when the
+    /// model returns only reasoning without any answer or tool call.
+    /// Set via `[reasoning_only] reprompt_message` in config.toml.
+    /// When unset, the built-in default is used.
+    #[must_use]
+    pub fn reasoning_only_reprompt_message(&self) -> &str {
+        self.reasoning_only
+            .as_ref()
+            .and_then(|cfg| cfg.reprompt_message.as_deref())
+            .unwrap_or(DEFAULT_REASONING_ONLY_REPROMPT_MESSAGE)
+    }
+
     /// Resolve the explicit local-memory backend.
     #[must_use]
     pub fn memory_backend(&self) -> MemoryBackend {
@@ -10588,6 +10648,7 @@ fn merge_config(base: Config, override_cfg: Config) -> Config {
         runtime_thread_inference_unrelated: override_cfg.runtime_thread_inference_unrelated
             || base.runtime_thread_inference_unrelated,
         mini_window: override_cfg.mini_window.or(base.mini_window),
+        reasoning_only: override_cfg.reasoning_only.or(base.reasoning_only),
         title: override_cfg.title.or(base.title),
     }
 }
