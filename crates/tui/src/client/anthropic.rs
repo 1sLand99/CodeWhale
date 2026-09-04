@@ -35,6 +35,7 @@ use crate::tools::schema_sanitize;
 
 use super::prepared::WireDialect;
 use super::role_placement::{RolePlacement, role_placement};
+use super::wire::{extract_sse_data_value, next_sse_line};
 use super::{DeepSeekClient, ERROR_BODY_MAX_BYTES, bounded_error_text};
 
 /// Maximum `cache_control` breakpoints Anthropic accepts per request.
@@ -342,7 +343,7 @@ impl DeepSeekClient {
                 }
 
                 loop {
-                    let line = match super::next_sse_line(&mut buffer, ended) {
+                    let line = match next_sse_line(&mut buffer, ended) {
                         Ok(Some(line)) => line,
                         Ok(None) => break,
                         Err(err) => {
@@ -353,7 +354,7 @@ impl DeepSeekClient {
 
                     // `event:` lines are redundant (the data payload carries
                     // `type`) and comment/heartbeat lines are ignorable.
-                    let Some(data) = super::extract_sse_data_value(&line) else {
+                    let Some(data) = extract_sse_data_value(&line) else {
                         continue;
                     };
 
