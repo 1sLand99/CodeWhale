@@ -758,6 +758,10 @@ export interface DocsWebDict {
   authLead: string;
   localTitle: string;
   localLead: string;
+  /** Remote control of a running local session from the signed-in web app. */
+  remoteTitle: string;
+  remoteLead: string;
+  remoteBody: string;
   troubleshootingTitle: string;
   troubleshootingLead: string;
   sourceNote: string;

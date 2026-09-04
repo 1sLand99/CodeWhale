@@ -62,7 +62,7 @@ export const home: HomeDict = {
     "O terminal é o produto lançado. Todo o resto está listado no estado em que realmente se encontra.",
   availability: [
     ["Terminal", "Lançado", "npm, Cargo e binários pré-compilados para Linux, macOS e Windows. Android no Termux é uma prévia."],
-    ["Aplicativo web", "Login na conta disponível", "Entre ou crie uma conta em app.codewhale.net. A bancada no navegador em si ainda é uma prévia de desenvolvimento."],
+    ["Aplicativo web", "Login e controle remoto disponíveis", "Entre ou crie uma conta e digite /rc em uma sessão local em andamento para continuar exatamente essa sessão pelo navegador. O restante da bancada no navegador ainda é uma prévia de desenvolvimento."],
     ["Desktop", "Build de desenvolvimento", "Existem builds alfa para macOS, Linux e Windows. Ainda não há um aplicativo desktop lançado."],
     ["Computadores na nuvem", "Ainda não disponível", "Executar trabalho em um computador hospedado está em desenvolvimento. Esta página dirá quando funcionar."],
   ],

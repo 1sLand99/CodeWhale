@@ -62,7 +62,7 @@ export const home: HomeDict = {
     "El terminal és el producte publicat. Tota la resta apareix amb l’estat en què realment es troba.",
   availability: [
     ["Terminal", "Publicat", "npm, Cargo i binaris precompilats per a Linux, macOS i Windows. Android amb Termux és una vista prèvia."],
-    ["Aplicació web", "Inici de sessió disponible", "Inicia sessió o crea un compte a app.codewhale.net. El banc de treball al navegador continua sent una vista prèvia de desenvolupament."],
+    ["Aplicació web", "Inici de sessió i control remot disponibles", "Inicia sessió o crea un compte i escriu /rc en una sessió local en marxa per continuar exactament aquella sessió des del navegador. La resta del banc de treball al navegador continua sent una vista prèvia de desenvolupament."],
     ["Escriptori", "Build de desenvolupament", "Hi ha builds alfa per a macOS, Linux i Windows. Encara no hi ha cap aplicació d’escriptori publicada."],
     ["Ordinadors al núvol", "Encara no disponible", "Executar feina en un ordinador allotjat està en desenvolupament. Aquesta pàgina ho dirà quan funcioni."],
   ],

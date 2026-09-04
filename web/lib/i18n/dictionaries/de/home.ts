@@ -62,7 +62,7 @@ export const home: HomeDict = {
     "Das Terminal ist das veröffentlichte Produkt. Alles andere steht hier in dem Zustand, in dem es tatsächlich ist.",
   availability: [
     ["Terminal", "Veröffentlicht", "npm, Cargo und vorgebaute Binaries für Linux, macOS und Windows. Android unter Termux ist eine Vorschau."],
-    ["Web-App", "Konto-Anmeldung verfügbar", "Melde dich an oder erstelle ein Konto auf app.codewhale.net. Die Werkbank im Browser selbst ist eine Entwicklungsvorschau."],
+    ["Web-App", "Anmeldung und Fernsteuerung verfügbar", "Melde dich an oder erstelle ein Konto und tippe /rc in einer laufenden lokalen Sitzung, um genau diese Sitzung im Browser fortzusetzen. Der Rest der Werkbank im Browser ist eine Entwicklungsvorschau."],
     ["Desktop", "Entwicklungsbuild", "Für macOS, Linux und Windows gibt es Alpha-Builds. Eine veröffentlichte Desktop-App gibt es noch nicht."],
     ["Cloud-Computer", "Noch nicht verfügbar", "Arbeit auf einem gehosteten Computer auszuführen ist in Entwicklung. Diese Seite sagt es, sobald es funktioniert."],
   ],

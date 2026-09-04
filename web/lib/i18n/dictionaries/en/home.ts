@@ -86,8 +86,8 @@ export const home: HomeDict = {
     ],
     [
       "Web app",
-      "Account sign-in available",
-      "Sign in or create an account at app.codewhale.net. The browser workbench itself is a development preview.",
+      "Sign-in and remote control available",
+      "Sign in or create an account, then type /rc in a running local session to continue that exact session from the browser. The rest of the browser workbench is a development preview.",
     ],
     [
       "Desktop",

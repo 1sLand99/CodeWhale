@@ -86,10 +86,10 @@ export const PRODUCT_COPY = {
     },
     {
       surface: { en: "Web app", zh: "网页应用" },
-      status: { en: "Account sign-in available", zh: "账户登录可用" },
+      status: { en: "Sign-in and remote control available", zh: "登录与远程控制可用" },
       detail: {
-        en: "Sign in or create an account. The browser workbench itself is a development preview; no account is required for the terminal, and an account is never a paid plan by itself.",
-        zh: "登录或创建账户。浏览器工作台本身仍是开发预览；终端不需要账户，账户本身也从不等于付费方案。",
+        en: "Sign in or create an account, then type /rc in a running local session to continue that exact session from the browser — the browser takes new prompts and approvals while the terminal stays a readable safety surface, and /rc stop hands it back. The rest of the browser workbench is a development preview; no account is required for the terminal, and an account is never a paid plan by itself.",
+        zh: "登录或创建账户，然后在正在运行的本地会话里输入 /rc，就能在浏览器中继续这同一个会话——浏览器接管新的提示与审批，终端保持为可读的安全界面，/rc stop 可交还控制权。浏览器工作台的其余部分仍是开发预览；终端不需要账户，账户本身也从不等于付费方案。",
       },
       href: "/signin",
       linkLabel: { en: "Sign in", zh: "登录" },

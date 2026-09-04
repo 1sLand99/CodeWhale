@@ -62,7 +62,7 @@ export const home: HomeDict = {
     "Terminal yayınlanmış üründür. Geri kalan her şey gerçekte bulunduğu durumla listelenir.",
   availability: [
     ["Terminal", "Yayınlandı", "npm, Cargo ve Linux, macOS ile Windows için önceden derlenmiş ikili dosyalar. Termux üzerinde Android önizlemedir."],
-    ["Web uygulaması", "Hesap girişi kullanılabilir", "app.codewhale.net üzerinde giriş yap ya da hesap oluştur. Tarayıcıdaki çalışma tezgâhının kendisi bir geliştirme önizlemesidir."],
+    ["Web uygulaması", "Giriş ve uzaktan kontrol kullanılabilir", "Giriş yap ya da hesap oluştur, sonra çalışan yerel bir oturumda /rc yazarak tam o oturuma tarayıcıdan devam et. Tarayıcıdaki çalışma tezgâhının geri kalanı geliştirme önizlemesidir."],
     ["Masaüstü", "Geliştirme derlemesi", "macOS, Linux ve Windows için alfa derlemeleri var. Henüz yayınlanmış bir masaüstü uygulaması yok."],
     ["Bulut bilgisayarlar", "Henüz kullanılamıyor", "Barındırılan bir bilgisayarda iş çalıştırmak geliştirme aşamasında. Çalıştığında bu sayfa bunu söyleyecek."],
   ],
