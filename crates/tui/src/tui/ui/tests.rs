@@ -14974,6 +14974,83 @@ async fn enter_while_model_waiting_queues_instead_of_steering() {
     );
 }
 
+/// Ops contract: Queue disposition must echo `HistoryCell::User` into the
+/// transcript before the model runs (swarm shot 12 / queued follow-up).
+#[tokio::test]
+async fn queue_disposition_echoes_user_turn_into_history() {
+    let mut app = create_test_app();
+    app.is_loading = true;
+    app.streaming_message_index = None;
+    let config = Config::default();
+    let engine = crate::core::engine::mock_engine_handle();
+    let queued = QueuedMessage::new("hello queued".to_string(), None);
+
+    submit_or_steer_message(
+        &mut app,
+        &config,
+        &engine.handle,
+        queued,
+        DispatchRecovery::Immediate,
+    )
+    .await
+    .expect("busy submit queues");
+
+    assert_eq!(app.queued_message_count(), 1);
+    assert!(
+        app.queued_messages
+            .front()
+            .is_some_and(|msg| msg.history_echoed),
+        "queued message must remember the history echo"
+    );
+    let user_cells: Vec<_> = app
+        .history
+        .iter()
+        .filter_map(|cell| match cell {
+            HistoryCell::User { content } => Some(content.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(user_cells, vec!["hello queued"]);
+}
+
+/// Draining a previously-echoed queued turn into Immediate prepare must not
+/// paint a second User bubble.
+#[test]
+fn prepare_skips_user_echo_when_history_echoed() {
+    let mut app = create_test_app();
+    app.add_message(HistoryCell::User {
+        content: "hello queued".to_string(),
+    });
+    let mut message = QueuedMessage::new("hello queued".to_string(), None);
+    message.history_echoed = true;
+    let before = app
+        .history
+        .iter()
+        .filter(|cell| matches!(cell, HistoryCell::User { .. }))
+        .count();
+
+    let _prepare = prepare_user_dispatch(&mut app, &Config::default(), message)
+        .expect("prepare echoed message");
+
+    let after = app
+        .history
+        .iter()
+        .filter(|cell| matches!(cell, HistoryCell::User { .. }))
+        .count();
+    assert_eq!(before, 1);
+    assert_eq!(
+        after, 1,
+        "history_echoed prepare must not double the User cell"
+    );
+    assert!(
+        matches!(
+            app.history.first(),
+            Some(HistoryCell::User { content }) if content == "hello queued"
+        ),
+        "existing echoed User cell must remain the reference target"
+    );
+}
+
 #[test]
 fn engine_drain_budget_respects_event_and_time_limits() {
     let start = Instant::now();

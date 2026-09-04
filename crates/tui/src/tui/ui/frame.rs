@@ -427,6 +427,7 @@ pub(crate) async fn build_preview_request_inputs(
         display: prompt.clone(),
         skill_instruction: app.active_skill.clone(),
         skill_provenance: app.active_skill_provenance.clone(),
+        history_echoed: false,
     };
     let mut git_cache = crate::tui::git_mention::GitMentionCache::default();
     // Same failure surface as a real submit: a plugin-skill authority mismatch
