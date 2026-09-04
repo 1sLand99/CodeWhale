@@ -20,13 +20,26 @@
 
 /** Contributors whose PRs were merged or harvested into this release. */
 export const RELEASE_CONTRIBUTORS: string[] = [
-  "@bistack",
-  "@aboimpinto",
+  "@h3c-hexin",
+  "@qiuYliangM",
   "@wuisabel-gif",
+  "@aboimpinto",
+  "@musichen",
+  "@gaord",
+  "@SparkofSpike",
+  "@M-Maciej",
+  "@serephus",
+  "@whp233",
+  "@Gabriel-Degret",
+  "@huangxianzhan",
+  "@zhuowp",
 ];
 
-/** Contributors who helped with reports, reproductions, and verification. */
-export const RELEASE_HELPERS: string[] = [
-  "@Lstarsky0",
-  "@RepentStar",
-];
+/**
+ * Contributors who helped with reports, reproductions, and verification.
+ *
+ * Empty for 0.9.12: every credited contribution this cycle arrived as code
+ * that landed. Leaving a name here that no landed change can point at would
+ * be a nicer-looking ledger and a less true one.
+ */
+export const RELEASE_HELPERS: string[] = [];

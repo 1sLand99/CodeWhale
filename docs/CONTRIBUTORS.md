@@ -45,7 +45,9 @@ notes, and relevant issue/PR comments.
   accent (#5599), and `/copy` for the latest completed response (#5692)
 - **[Paulo Aboim Pinto / aboimpinto](https://github.com/aboimpinto)** —
   preserved Windows verbatim-path operands through POSIX word splitting
-  (#5610) and moved the plugins group onto the command shapes (#5657)
+  (#5610), moved the plugins group onto the command shapes (#5657), built
+  FEAT-022 skills command shapes with retained-host validation (#5825), and
+  re-landed FEAT-020 plugin command shapes on main (#5865)
 - **[Alex Musichen / musichen](https://github.com/musichen)** — fixed the
   configured-view DeepSeek model picker so it shows a stable DeepSeek heading
   and keeps every official catalog model for the active provider visible
@@ -56,10 +58,22 @@ notes, and relevant issue/PR comments.
   English documentation inaccuracies and contributed the first zh_hans
   translations for the Tier-2 docs (#5613)
 - **[M-Maciej](https://github.com/M-Maciej)** — goal continuation cadence fix
-  (#5591)
+  (#5591) and the per-session control socket (#5533, #5831)
 - **[Serephus / serephus](https://github.com/serephus)** — nixpkgs update
   (#5669)
-
+- **[秋月凉梦 / qiuYliangM](https://github.com/qiuYliangM)** — co-authored the
+  authoritative edit-last-turn boundaries (#5621), Kimi Code k3-256k support
+  (#5622), and post-compaction input-token reporting (#5623)
+- **[whp233](https://github.com/whp233)** — `wire = responses|anthropic` for
+  openai-compatible custom routes and opencode-zen muse-spark (#5716, landed
+  as #5719)
+- **[Gabriel Degret / Gabriel-Degret](https://github.com/Gabriel-Degret)** —
+  found the reasoning-only retry gap and built the first fix; landed as the
+  `[reasoning_only]` retry ceiling with a request-scoped nudge (#5867)
+- **[huangxianzhan](https://github.com/huangxianzhan)** — the
+  `x-opencode-session` header for OpenCode Go and Zen gateways (#5868)
+- **[zhuowp](https://github.com/zhuowp)** — task origin preserved in job
+  snapshots (#5869)
 </details>
 
 <details>

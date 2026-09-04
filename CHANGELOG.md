@@ -132,6 +132,48 @@ record is retained below the categorized release highlights.
 - TUI/CLI: Pod is the public roster surface. User-facing Fleet wording
   moves to Pod; durable receipt keys stay compatible (#5776).
 
+### Contributors
+
+- **hexin ([@h3c-hexin](https://github.com/h3c-hexin))** — provider-native web
+  search across four routes (#5682, #5683, #5685, #5687), authoritative
+  edit-last-turn boundaries (#5621), Kimi Code k3-256k (#5622),
+  post-compaction input-token reporting (#5623), and preserving the scheduled
+  model selection in automations (#5650).
+- **秋月凉梦 ([@qiuYliangM](https://github.com/qiuYliangM))** — co-authored the
+  edit-last-turn boundary fix (#5621), Kimi Code k3-256k support (#5622), and
+  post-compaction input-token reporting (#5623).
+- **Isabel Wu ([@wuisabel-gif](https://github.com/wuisabel-gif))** — live
+  session token totals (#5624), persisted context-pressure warnings (#5629),
+  discoverable Fleet roster editing (#5604), the capability-gated cursor
+  accent (#5599), and `/copy` for the latest completed response (#5692).
+- **Paulo Aboim Pinto ([@aboimpinto](https://github.com/aboimpinto))** —
+  Windows verbatim-path operands preserved through POSIX word splitting
+  (#5610), the plugins group moved onto the command shapes (#5657), FEAT-022
+  skills command shapes with retained-host validation (#5825), and FEAT-020
+  plugin command shapes re-landed on main (#5865).
+- **Alex Musichen ([@musichen](https://github.com/musichen))** — a stable
+  DeepSeek heading in the configured-view model picker, keeping every official
+  catalog model for the active provider visible (#5689).
+- **[@gaord](https://github.com/gaord)** — the `GET /v1/fleet/profiles`
+  runtime API endpoint, reusing the FleetManager validation path (#5688).
+- **Sh1Zuku ([@SparkofSpike](https://github.com/SparkofSpike))** — corrected
+  English documentation inaccuracies and the first zh_hans translations for
+  the Tier-2 docs (#5613).
+- **[@M-Maciej](https://github.com/M-Maciej)** — goal continuation cadence
+  (#5591) and the per-session control socket (#5533, #5831).
+- **Serephus ([@serephus](https://github.com/serephus))** — nixpkgs update
+  (#5669).
+- **[@whp233](https://github.com/whp233)** — `wire = responses|anthropic` for
+  openai-compatible custom routes and opencode-zen muse-spark (#5716, landed
+  as #5719).
+- **Gabriel Degret ([@Gabriel-Degret](https://github.com/Gabriel-Degret))** —
+  found the reasoning-only retry gap and built the first fix; landed as the
+  `[reasoning_only]` retry ceiling with a request-scoped nudge (#5867).
+- **[@huangxianzhan](https://github.com/huangxianzhan)** — the
+  `x-opencode-session` header for OpenCode Go and Zen gateways (#5868).
+- **[@zhuowp](https://github.com/zhuowp)** — task origin preserved in job
+  snapshots (#5869).
+
 ### Added
 
 - Native ChatGPT sign-in for the `openai-codex` route: `codewhale auth
