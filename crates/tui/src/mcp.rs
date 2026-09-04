@@ -4307,9 +4307,9 @@ impl McpServerSnapshot {
     /// over error-text sniffing so a needs-auth server always routes to
     /// `/mcp login <name>`.
     #[must_use]
-    pub fn recovery_kind(&self, oauth_capable: bool) -> McpRecoveryKind {
+    pub fn recovery_kind(&self, oauth_capable: bool) -> Option<McpRecoveryKind> {
         if self.enabled && !self.connected && self.auth_required {
-            return McpRecoveryKind::Reauth;
+            return Some(McpRecoveryKind::Reauth);
         }
         mcp_recovery_kind(
             self.enabled,
@@ -4407,26 +4407,30 @@ pub fn mcp_recovery_kind(
     connected: bool,
     error: Option<&str>,
     oauth_capable: bool,
-) -> McpRecoveryKind {
+) -> Option<McpRecoveryKind> {
     if !enabled {
-        return McpRecoveryKind::Enable;
+        return Some(McpRecoveryKind::Enable);
     }
     if let Some(error) = error {
         if oauth::error_text_looks_auth_required(error) {
-            return McpRecoveryKind::Reauth;
+            return Some(McpRecoveryKind::Reauth);
         }
-        return McpRecoveryKind::Diagnose;
+        return Some(McpRecoveryKind::Diagnose);
     }
     if !inspected {
-        return McpRecoveryKind::Connect;
+        return Some(McpRecoveryKind::Connect);
     }
     if connected {
-        return McpRecoveryKind::Diagnose;
+        // A server that is enabled, inspected, connected and erroring on
+        // nothing needs no recovery. It used to be labelled `diagnose`, so
+        // every healthy row advertised a repair it did not need — founder
+        // live-test: "even the ones that are connected say diagnose lol".
+        return None;
     }
     if oauth_capable {
-        return McpRecoveryKind::Reauth;
+        return Some(McpRecoveryKind::Reauth);
     }
-    McpRecoveryKind::Reconnect
+    Some(McpRecoveryKind::Reconnect)
 }
 
 pub fn load_config(path: &Path) -> Result<McpConfig> {

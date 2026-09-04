@@ -960,27 +960,34 @@ fn mcp_model(app: &App, locale: Locale) -> ExtensionsTabModel {
                 Some(server) => server.recovery_kind(oauth_capable),
                 None => crate::mcp::mcp_recovery_kind(enabled, false, false, None, oauth_capable),
             };
-            let action = if initializing {
-                ExtensionAction::Status {
+            let action = match (initializing, recovery) {
+                // Still connecting: the state is the whole story.
+                (true, _) => ExtensionAction::Status {
                     label: state.clone(),
+                },
+                // Healthy. A row that needs nothing offers nothing — the
+                // actionable rows are the ones worth finding in a list of 20.
+                (false, None) => ExtensionAction::Status {
+                    label: state.clone(),
+                },
+                (false, Some(recovery))
+                    if crate::mcp::mcp_name_is_command_safe(&name)
+                        || matches!(
+                            recovery,
+                            crate::mcp::McpRecoveryKind::Connect
+                                | crate::mcp::McpRecoveryKind::Reconnect
+                                | crate::mcp::McpRecoveryKind::Diagnose
+                        ) =>
+                {
+                    ExtensionAction::Command {
+                        label: tr(locale, recovery.label_key()).into_owned(),
+                        command: recovery.slash_command(&name),
+                    }
                 }
-            } else if crate::mcp::mcp_name_is_command_safe(&name)
-                || matches!(
-                    recovery,
-                    crate::mcp::McpRecoveryKind::Connect
-                        | crate::mcp::McpRecoveryKind::Reconnect
-                        | crate::mcp::McpRecoveryKind::Diagnose
-                )
-            {
-                ExtensionAction::Command {
-                    label: tr(locale, recovery.label_key()).into_owned(),
-                    command: recovery.slash_command(&name),
-                }
-            } else {
-                ExtensionAction::Command {
+                (false, Some(_)) => ExtensionAction::Command {
                     label: tr(locale, MessageId::ExtensionsActionDiagnose).into_owned(),
                     command: "/mcp validate".into(),
-                }
+                },
             };
             ExtensionItem {
                 id: name.clone(),
@@ -1553,15 +1560,28 @@ mod tests {
     #[test]
     fn mcp_item_action_for_stale_oauth_is_login() {
         let recovery =
-            crate::mcp::mcp_recovery_kind(true, true, false, Some("401 Unauthorized"), true);
+            crate::mcp::mcp_recovery_kind(true, true, false, Some("401 Unauthorized"), true)
+                .expect("stale oauth needs recovery");
         assert_eq!(recovery, McpRecoveryKind::Reauth);
         assert_eq!(recovery.slash_command("github"), "/mcp login github");
         assert_eq!(tr(Locale::En, recovery.label_key()).as_ref(), "re-auth");
     }
 
     #[test]
+    fn a_healthy_server_offers_no_recovery_action() {
+        // Founder live-test: "even the ones that are connected say diagnose
+        // lol". Enabled, inspected, connected and erroring on nothing is not
+        // a state anything repairs.
+        assert_eq!(
+            crate::mcp::mcp_recovery_kind(true, true, true, None, false),
+            None
+        );
+    }
+
+    #[test]
     fn mcp_item_action_for_disconnected_server_is_reconnect() {
-        let recovery = crate::mcp::mcp_recovery_kind(true, true, false, None, false);
+        let recovery = crate::mcp::mcp_recovery_kind(true, true, false, None, false)
+            .expect("a disconnected server needs recovery");
         assert_eq!(recovery, McpRecoveryKind::Reconnect);
         assert_eq!(recovery.slash_command("playwright"), "/mcp reload");
         assert_eq!(tr(Locale::En, recovery.label_key()).as_ref(), "reconnect");

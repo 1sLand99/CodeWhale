@@ -5726,36 +5726,34 @@ fn removed_runtime_server_config_can_be_retried_with_same_name() {
 fn mcp_recovery_kind_names_real_login_and_reload_commands() {
     assert_eq!(
         mcp_recovery_kind(false, true, false, None, false),
-        McpRecoveryKind::Enable
+        Some(McpRecoveryKind::Enable)
     );
     assert_eq!(
         mcp_recovery_kind(true, false, false, None, false),
-        McpRecoveryKind::Connect
+        Some(McpRecoveryKind::Connect)
     );
     assert_eq!(
         mcp_recovery_kind(true, true, false, Some("connection refused"), false),
-        McpRecoveryKind::Diagnose
+        Some(McpRecoveryKind::Diagnose)
     );
     assert_eq!(
         mcp_recovery_kind(true, true, false, Some("connection refused"), true),
-        McpRecoveryKind::Diagnose
+        Some(McpRecoveryKind::Diagnose)
     );
     assert_eq!(
         mcp_recovery_kind(true, true, false, Some("401 Unauthorized"), true),
-        McpRecoveryKind::Reauth
+        Some(McpRecoveryKind::Reauth)
     );
     assert_eq!(
         mcp_recovery_kind(true, true, false, None, true),
-        McpRecoveryKind::Reauth
+        Some(McpRecoveryKind::Reauth)
     );
     assert_eq!(
         mcp_recovery_kind(true, true, false, None, false),
-        McpRecoveryKind::Reconnect
+        Some(McpRecoveryKind::Reconnect)
     );
-    assert_eq!(
-        mcp_recovery_kind(true, true, true, None, false),
-        McpRecoveryKind::Diagnose
-    );
+    // Enabled, inspected, connected, no error: nothing to recover.
+    assert_eq!(mcp_recovery_kind(true, true, true, None, false), None);
 
     assert_eq!(
         McpRecoveryKind::Reauth.slash_command("github"),
@@ -6149,9 +6147,12 @@ async fn needs_auth_server_advertises_synthetic_authenticate_tool() {
         .expect("wikiserver in snapshot");
     assert!(wiki.auth_required, "{wiki:?}");
     assert!(!wiki.connected);
-    assert_eq!(wiki.recovery_kind(false), McpRecoveryKind::Reauth);
+    let recovery = wiki
+        .recovery_kind(false)
+        .expect("a server needing auth has a recovery");
+    assert_eq!(recovery, McpRecoveryKind::Reauth);
     assert_eq!(
-        wiki.recovery_kind(false).slash_command("wikiserver"),
+        recovery.slash_command("wikiserver"),
         "/mcp login wikiserver"
     );
 
@@ -6694,7 +6695,7 @@ async fn mid_session_revocation_lands_in_the_same_auth_required_state() {
         .expect("wikiserver in snapshot");
     assert!(wiki.auth_required, "{wiki:?}");
     assert!(!wiki.connected);
-    assert_eq!(wiki.recovery_kind(false), McpRecoveryKind::Reauth);
+    assert_eq!(wiki.recovery_kind(false), Some(McpRecoveryKind::Reauth));
 
     mock.task.abort();
 }
