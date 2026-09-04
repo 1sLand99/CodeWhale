@@ -1786,6 +1786,11 @@ pub(crate) async fn apply_command_result(
             }
             AppAction::OpenModelPicker => {
                 if app.view_stack.top_kind() != Some(ModalKind::ModelPicker) {
+                    // Slash `/model` and the picker share one grammar: the
+                    // composer must not keep a leftover `/model` buffer
+                    // (or a held paste-burst) under the picker query.
+                    app.clear_input();
+                    app.paste_burst.clear_after_explicit_paste();
                     app.view_stack
                         .push(crate::tui::model_picker::ModelPickerView::new(app, config));
                 }

@@ -2953,6 +2953,7 @@ mod tests {
             display: "q".to_string(),
             skill_instruction: None,
             skill_provenance: None,
+            history_echoed: false,
         });
         {
             let mut bundle = app.command_contexts();

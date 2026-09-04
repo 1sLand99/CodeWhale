@@ -11203,7 +11203,6 @@ async fn marketplace_add_rejects_symlink_documents_over_http() -> Result<()> {
     fs::create_dir_all(&catalog_dir)?;
     let real = catalog_dir.join("real.json");
     fs::write(&real, r#"{"plugins":[]}"#)?;
-    #[cfg(unix)]
     let link = catalog_dir.join("link.json");
     std::os::unix::fs::symlink(&real, &link)?;
 

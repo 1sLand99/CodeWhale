@@ -337,6 +337,72 @@ fn handle_plugin_cta_mouse(app: &mut App, mouse: MouseEvent) -> Option<Vec<ViewE
     Some(Vec::new())
 }
 
+/// Slash-autocomplete rows painted inside the composer. Click selects
+/// (second click on the same row applies, matching the command palette);
+/// wheel moves the highlight. Returns true when the event was consumed so
+/// the composer caret / draft-scroll path does not also handle it.
+fn handle_slash_autocomplete_mouse(app: &mut App, mouse: MouseEvent) -> bool {
+    let hitboxes = app.viewport.last_slash_menu_hitboxes.borrow();
+    if hitboxes.is_empty() {
+        return false;
+    }
+    let over_row = hitboxes
+        .iter()
+        .find_map(|(idx, rect)| mouse_hits_rect(mouse, Some(*rect)).then_some(*idx));
+    let over_menu = over_row.is_some()
+        || hitboxes.iter().any(|(_, rect)| {
+            mouse.row >= rect.y
+                && mouse.row < rect.y.saturating_add(rect.height)
+                && mouse.column >= rect.x
+                && mouse.column < rect.x.saturating_add(rect.width)
+        });
+    // Wheel over any painted slash row moves selection (mouse == keys).
+    // Clicks only fire when the pointer is on a row rect.
+    match mouse.kind {
+        MouseEventKind::ScrollUp if over_menu => {
+            drop(hitboxes);
+            let entries = crate::tui::slash_menu::visible_slash_menu_entries(app, 128);
+            if entries.is_empty() {
+                return false;
+            }
+            crate::tui::composer_ui::select_previous_slash_menu_entry(app, entries.len());
+            app.needs_redraw = true;
+            true
+        }
+        MouseEventKind::ScrollDown if over_menu => {
+            drop(hitboxes);
+            let entries = crate::tui::slash_menu::visible_slash_menu_entries(app, 128);
+            if entries.is_empty() {
+                return false;
+            }
+            crate::tui::composer_ui::select_next_slash_menu_entry(app, entries.len());
+            app.needs_redraw = true;
+            true
+        }
+        MouseEventKind::Down(MouseButton::Left) => {
+            let Some(idx) = over_row else {
+                return false;
+            };
+            drop(hitboxes);
+            let entries = crate::tui::slash_menu::visible_slash_menu_entries(app, 128);
+            if entries.is_empty() || idx >= entries.len() {
+                return false;
+            }
+            // Same as command palette: click the highlighted row to apply;
+            // click another row to move the highlight (mouse == keys).
+            if app.slash_menu_selected == idx {
+                let _ = crate::tui::slash_menu::apply_slash_menu_selection(app, &entries, true);
+            } else {
+                app.slash_menu_selected = idx;
+                app.slash_menu_hidden = false;
+            }
+            app.needs_redraw = true;
+            true
+        }
+        _ => false,
+    }
+}
+
 /// Handle mouse events within the composer area.
 /// Returns true if the event was consumed.
 pub(crate) fn handle_composer_mouse(app: &mut App, mouse: MouseEvent) -> bool {
@@ -350,6 +416,11 @@ pub(crate) fn handle_composer_mouse(app: &mut App, mouse: MouseEvent) -> bool {
         || mouse.row >= area.y + area.height
     {
         return false;
+    }
+    // Slash autocomplete owns its painted rows before caret placement or
+    // draft scroll — otherwise a click on `/model` would only move the caret.
+    if handle_slash_autocomplete_mouse(app, mouse) {
+        return true;
     }
     // Resolve the border- and submit-aware input plane through the same
     // persistent prompt geometry used by rendering, cursor placement, and
@@ -1795,7 +1866,8 @@ pub(crate) fn selection_to_text(app: &App) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        agent_transcript_text, build_context_menu_entries, handle_mouse_event, sidebar_click_action,
+        agent_transcript_text, build_context_menu_entries, handle_composer_mouse,
+        handle_mouse_event, sidebar_click_action,
     };
     use crate::config::Config;
     use crate::models::Role;
@@ -2025,6 +2097,81 @@ mod tests {
         assert!(app.needs_redraw, "leaving a target must clear its popover");
         assert!(crate::tui::hover_layer::current_hover().is_none());
         crate::tui::hover_layer::clear_pointer();
+    }
+
+    #[test]
+    fn slash_autocomplete_click_selects_and_second_click_applies() {
+        let mut app = create_test_app();
+        app.launch.visible = false;
+        app.work_surface.last_area = None;
+        app.input = "/he".to_string();
+        app.cursor_position = app.input.chars().count();
+        app.slash_menu_hidden = false;
+        app.slash_menu_selected = 0;
+        // Simulate two painted rows from ComposerWidget.
+        app.viewport.last_composer_area = Some(Rect::new(0, 18, 80, 6));
+        *app.viewport.last_slash_menu_hitboxes.borrow_mut() =
+            vec![(0, Rect::new(1, 20, 78, 1)), (1, Rect::new(1, 21, 78, 1))];
+
+        assert!(
+            handle_composer_mouse(&mut app, left_click(5, 21)),
+            "slash row click must be consumed by the composer"
+        );
+        assert_eq!(
+            app.slash_menu_selected, 1,
+            "click on another row highlights it"
+        );
+        let before = app.input.clone();
+        assert_eq!(
+            before, "/he",
+            "select-only click must not rewrite the composer"
+        );
+
+        assert!(handle_composer_mouse(&mut app, left_click(5, 21)));
+        assert_ne!(app.input, before, "click on the highlighted row applies it");
+        assert!(
+            app.input.starts_with('/'),
+            "applied slash entry must replace the composer: {:?}",
+            app.input
+        );
+    }
+
+    #[test]
+    fn slash_autocomplete_wheel_moves_selection() {
+        let mut app = create_test_app();
+        app.launch.visible = false;
+        app.work_surface.last_area = None;
+        app.input = "/he".to_string();
+        app.cursor_position = app.input.chars().count();
+        app.slash_menu_hidden = false;
+        app.slash_menu_selected = 0;
+        app.viewport.last_composer_area = Some(Rect::new(0, 18, 80, 6));
+        *app.viewport.last_slash_menu_hitboxes.borrow_mut() =
+            vec![(0, Rect::new(1, 20, 78, 1)), (1, Rect::new(1, 21, 78, 1))];
+        let entries = crate::tui::slash_menu::visible_slash_menu_entries(&app, 128);
+        assert!(entries.len() >= 2, "prefix must offer multiple entries");
+
+        assert!(handle_composer_mouse(
+            &mut app,
+            MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: 5,
+                row: 20,
+                modifiers: KeyModifiers::NONE,
+            },
+        ));
+        assert_eq!(app.slash_menu_selected, 1);
+
+        assert!(handle_composer_mouse(
+            &mut app,
+            MouseEvent {
+                kind: MouseEventKind::ScrollUp,
+                column: 5,
+                row: 20,
+                modifiers: KeyModifiers::NONE,
+            },
+        ));
+        assert_eq!(app.slash_menu_selected, 0);
     }
 
     #[test]

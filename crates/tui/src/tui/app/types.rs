@@ -752,6 +752,10 @@ pub struct QueuedMessage {
     pub display: String,
     pub skill_instruction: Option<String>,
     pub skill_provenance: Option<crate::plugins::types::PluginAuthority>,
+    /// True once this turn has been painted into `history` as `HistoryCell::User`.
+    /// Queue/offline submit echoes before the model runs; Immediate prepare skips
+    /// a second paint when this is set so drained queued turns do not double.
+    pub history_echoed: bool,
 }
 
 /// Prefix for the bounded, tool-less model turn produced by `/workflow`.
@@ -832,6 +836,7 @@ impl QueuedMessage {
             display,
             skill_instruction,
             skill_provenance: None,
+            history_echoed: false,
         }
     }
 

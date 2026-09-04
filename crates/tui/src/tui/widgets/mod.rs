@@ -1357,6 +1357,13 @@ impl<'a> ComposerWidget<'a> {
 
 impl Renderable for ComposerWidget<'_> {
     fn render(&self, area: Rect, buf: &mut Buffer) {
+        // Slash rows are re-recorded below; clear first so a closed or
+        // resized menu cannot keep stale hitboxes from the prior frame.
+        self.app
+            .viewport
+            .last_slash_menu_hitboxes
+            .borrow_mut()
+            .clear();
         let background = Style::default().bg(self.app.ui_theme.composer_bg);
         let has_panel = self.has_panel(area);
         let inner_area = self.inner_area(area);
@@ -1815,15 +1822,23 @@ impl Renderable for ComposerWidget<'_> {
                     Span::styled(desc_display, desc_style),
                 ]));
 
+                let row_y = inner_area
+                    .y
+                    .saturating_add(u16::try_from(row_line_index).unwrap_or(u16::MAX));
+                if row_y < inner_area.bottom() && inner_area.width > 0 {
+                    self.app
+                        .viewport
+                        .last_slash_menu_hitboxes
+                        .borrow_mut()
+                        .push((idx, Rect::new(inner_area.x, row_y, inner_area.width, 1)));
+                }
+
                 if name_was_truncated || description_was_truncated {
                     let full_text = if entry.description.trim().is_empty() {
                         display_name
                     } else {
                         format!("{display_name}  {}", entry.description)
                     };
-                    let row_y = inner_area
-                        .y
-                        .saturating_add(u16::try_from(row_line_index).unwrap_or(u16::MAX));
                     if row_y < inner_area.bottom() {
                         crate::tui::hover_layer::register_rect(
                             crate::tui::hover_hit::HoverTargetKind::TruncatedText,
