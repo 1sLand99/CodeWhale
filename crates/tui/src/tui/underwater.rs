@@ -184,6 +184,19 @@ pub fn launch_row_click_action(id: &crate::tui::app::LaunchRowId) -> LaunchActio
     }
 }
 
+/// The launch composer's hint line, with the newline chord this terminal can
+/// actually deliver substituted in.
+///
+/// One owner so the live path and the golden fixtures cannot disagree about
+/// what the row says.
+#[must_use]
+pub fn launch_composer_hint(locale: crate::localization::Locale) -> String {
+    tr(locale, MessageId::LaunchComposerHint).replace(
+        "{newline}",
+        crate::tui::composer_ui::advertised_newline_chord(),
+    )
+}
+
 /// Ask before resuming: open the confirmation popup for `session_id`.
 ///
 /// Both the card's Enter and a click on a recent row route here. Resuming
@@ -1225,7 +1238,7 @@ impl<'a> LaunchComposerDisplay<'a> {
             caret: app.composer_display_cursor(),
             low_motion: app.low_motion,
             placeholder: tr(app.ui_locale, MessageId::ComposerPlaceholder),
-            hint: tr(app.ui_locale, MessageId::LaunchComposerHint),
+            hint: std::borrow::Cow::Owned(launch_composer_hint(app.ui_locale)),
             enclosed: app.composer_border,
         }
     }
@@ -2152,7 +2165,7 @@ mod launch_composer_tests {
         render_launch_completion_popup, render_tideline_startup, run_launch_card_row,
         tideline_startup_from_app, tideline_startup_hitboxes,
     };
-    use crate::localization::{Locale, MessageId, tr};
+    use crate::localization::Locale;
     use crate::tui::app::App;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::buffer::Buffer;
@@ -2780,7 +2793,7 @@ mod launch_composer_tests {
         let hint_row = row_text(&buf, area, hint_y);
         assert!(
             hint_row.contains(
-                &tr(Locale::En, MessageId::LaunchComposerHint)
+                &super::launch_composer_hint(Locale::En)
                     .chars()
                     .take(20)
                     .collect::<String>()

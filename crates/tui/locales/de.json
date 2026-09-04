@@ -1244,7 +1244,7 @@
   "LaunchWorktreeFailed": "Worktree fehlgeschlagen: {error}",
   "LaunchWorktreeCreated": "Neuer Worktree {path} auf Branch {branch}",
   "LaunchNoSavedSessions": "Keine gespeicherten Sitzungen für diesen Workspace.",
-  "LaunchComposerHint": "Enter senden · Shift+Enter neue Zeile · Esc zurück",
+  "LaunchComposerHint": "Enter senden · {newline} neue Zeile · Esc zurück",
   "LaunchNoModelConnected": "kein Modell verbunden",
   "LaunchRunCommand": "{command} ausführen",
   "LaunchMcpConnectedOne": "1 MCP-Server verbunden",

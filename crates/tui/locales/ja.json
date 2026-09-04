@@ -1267,7 +1267,7 @@
   "LaunchWorktreeFailed": "ワークツリーの作成に失敗: {error}",
   "LaunchWorktreeCreated": "新しいワークツリー {path}（ブランチ {branch}）",
   "LaunchNoSavedSessions": "このワークスペースには保存済みセッションがありません。",
-  "LaunchComposerHint": "Enter 送信 · Shift+Enter 改行 · Esc 戻る",
+  "LaunchComposerHint": "Enter 送信 · {newline} 改行 · Esc 戻る",
   "LaunchNoModelConnected": "モデル未接続",
   "LaunchRunCommand": "{command} を実行",
   "LaunchMcpConnectedOne": "MCP サーバー 1 台接続済み",

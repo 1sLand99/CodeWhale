@@ -1244,7 +1244,7 @@
   "LaunchWorktreeFailed": "Worktree не вдався: {error}",
   "LaunchWorktreeCreated": "Новий worktree {path} у гілці {branch}",
   "LaunchNoSavedSessions": "Немає збережених сесій для цього робочого простору.",
-  "LaunchComposerHint": "Enter — надіслати · Shift+Enter — новий рядок · Esc — назад",
+  "LaunchComposerHint": "Enter надіслати · {newline} новий рядок · Esc назад",
   "LaunchNoModelConnected": "модель не підключено",
   "LaunchRunCommand": "виконайте {command}",
   "LaunchMcpConnectedOne": "підключено 1 сервер MCP",

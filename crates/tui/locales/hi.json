@@ -1244,7 +1244,7 @@
   "LaunchWorktreeFailed": "worktree विफल: {error}",
   "LaunchWorktreeCreated": "नया worktree {path}, ब्रांच {branch} पर",
   "LaunchNoSavedSessions": "इस वर्कस्पेस के लिए कोई सहेजा सत्र नहीं।",
-  "LaunchComposerHint": "Enter भेजें · Shift+Enter नई पंक्ति · Esc वापस",
+  "LaunchComposerHint": "Enter भेजें · {newline} नई पंक्ति · Esc वापस",
   "LaunchNoModelConnected": "कोई मॉडल कनेक्ट नहीं",
   "LaunchRunCommand": "{command} चलाएँ",
   "LaunchMcpConnectedOne": "1 MCP सर्वर कनेक्टेड",

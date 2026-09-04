@@ -1244,7 +1244,7 @@
   "LaunchWorktreeFailed": "El worktree ha fallat: {error}",
   "LaunchWorktreeCreated": "Nou worktree {path} a la branca {branch}",
   "LaunchNoSavedSessions": "No hi ha sessions desades per a aquest espai de treball.",
-  "LaunchComposerHint": "Enter envia · Shift+Enter línia nova · Esc torna",
+  "LaunchComposerHint": "Retorn envia · {newline} nova línia · Esc enrere",
   "LaunchNoModelConnected": "cap model connectat",
   "LaunchRunCommand": "executa {command}",
   "LaunchMcpConnectedOne": "1 servidor MCP connectat",

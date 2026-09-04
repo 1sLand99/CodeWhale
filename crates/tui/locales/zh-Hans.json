@@ -1267,7 +1267,7 @@
   "LaunchWorktreeFailed": "工作树创建失败：{error}",
   "LaunchWorktreeCreated": "新工作树 {path}，分支 {branch}",
   "LaunchNoSavedSessions": "此工作区没有已保存的会话。",
-  "LaunchComposerHint": "Enter 发送 · Shift+Enter 换行 · Esc 返回",
+  "LaunchComposerHint": "Enter 发送 · {newline} 换行 · Esc 返回",
   "LaunchNoModelConnected": "未连接模型",
   "LaunchRunCommand": "运行 {command}",
   "LaunchMcpConnectedOne": "已连接 1 个 MCP 服务器",

@@ -1244,7 +1244,7 @@
   "LaunchWorktreeFailed": "Worktree gagal: {error}",
   "LaunchWorktreeCreated": "Worktree baru {path} di branch {branch}",
   "LaunchNoSavedSessions": "Tidak ada sesi tersimpan untuk workspace ini.",
-  "LaunchComposerHint": "Enter kirim · Shift+Enter baris baru · Esc kembali",
+  "LaunchComposerHint": "Enter kirim · {newline} baris baru · Esc kembali",
   "LaunchNoModelConnected": "tidak ada model terhubung",
   "LaunchRunCommand": "jalankan {command}",
   "LaunchMcpConnectedOne": "1 server MCP terhubung",

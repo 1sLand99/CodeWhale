@@ -33,11 +33,7 @@ fn docked_composer() -> super::LaunchComposerDisplay<'static> {
         crate::localization::MessageId::ComposerPlaceholder,
     )
     .into_owned();
-    let hint_focused = crate::localization::tr(
-        crate::localization::Locale::En,
-        crate::localization::MessageId::LaunchComposerHint,
-    )
-    .into_owned();
+    let hint_focused = super::launch_composer_hint(crate::localization::Locale::En);
     super::LaunchComposerDisplay {
         focused: true,
         placeholder: std::borrow::Cow::Owned(placeholder),

@@ -173,6 +173,38 @@ pub(crate) fn handle_composer_alt_word_motion_key(app: &mut App, key: KeyEvent) 
     }
 }
 
+/// Whether this terminal can deliver `Shift+Enter` as distinct from `Enter`.
+///
+/// Only the kitty keyboard protocol disambiguates them; a legacy terminal
+/// sends the same byte for both, so the app never sees the modifier no matter
+/// what the code does with it. macOS Terminal.app is the common case here.
+/// Probed once — the answer cannot change for the life of the process.
+pub(crate) fn terminal_can_report_shift_enter() -> bool {
+    // Tests answer `false` without probing: the goldens paint this chord, and
+    // a live probe would make them depend on whichever terminal happened to
+    // run them. `false` is also the honest default — it names a chord that
+    // works everywhere.
+    if cfg!(test) {
+        return false;
+    }
+    static SUPPORTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *SUPPORTED.get_or_init(|| crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false))
+}
+
+/// The newline chord chrome may honestly advertise on this terminal.
+///
+/// `Ctrl+J` is the fallback because it is a plain control byte every terminal
+/// sends. Advertising `Shift+Enter` where it cannot arrive is the same defect
+/// as the old `Ctrl+/` help hint: a promise the product cannot keep.
+#[must_use]
+pub(crate) fn advertised_newline_chord() -> &'static str {
+    if terminal_can_report_shift_enter() {
+        "Shift+Enter"
+    } else {
+        "Ctrl+J"
+    }
+}
+
 pub(crate) fn is_composer_newline_key(key: KeyEvent, multiline_mode: bool) -> bool {
     match key.code {
         KeyCode::Char('j') => key.modifiers.contains(KeyModifiers::CONTROL),

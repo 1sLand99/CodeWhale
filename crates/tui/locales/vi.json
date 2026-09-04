@@ -1267,7 +1267,7 @@
   "LaunchWorktreeFailed": "Worktree thất bại: {error}",
   "LaunchWorktreeCreated": "Worktree mới {path} trên nhánh {branch}",
   "LaunchNoSavedSessions": "Không có phiên đã lưu cho workspace này.",
-  "LaunchComposerHint": "Enter gửi · Shift+Enter dòng mới · Esc quay lại",
+  "LaunchComposerHint": "Enter gửi · {newline} dòng mới · Esc quay lại",
   "LaunchNoModelConnected": "chưa kết nối mô hình",
   "LaunchRunCommand": "chạy {command}",
   "LaunchMcpConnectedOne": "1 máy chủ MCP đã kết nối",
