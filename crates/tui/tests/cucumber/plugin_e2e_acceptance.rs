@@ -844,6 +844,38 @@ fn wait_for_log(tui: &mut Harness, path: &std::path::Path, needle: &str) {
     }
 }
 
+/// A focused composer and a streamed answer can both appear before the turn
+/// settles. Use the runtime's terminal receipt, not either paint, to admit the
+/// next prompt; otherwise this fixture exercises the busy-turn queue by accident.
+#[cfg(all(unix, feature = "long-running-tests"))]
+fn wait_for_turn_receipt(tui: &mut Harness, outbox: &std::path::Path, count: usize, kind: &str) {
+    let receipt = || {
+        std::fs::read_to_string(outbox)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .filter(|event| event["event"] == "turn_end")
+            .collect::<Vec<_>>()
+    };
+    if tui
+        .wait_for(|_| receipt().len() >= count, BINARY_ACCEPTANCE_TIMEOUT)
+        .is_err()
+    {
+        panic!(
+            "terminal turn receipt {count} not observed within {:?}\n{}",
+            qa_harness::harness::ci_scaled(BINARY_ACCEPTANCE_TIMEOUT),
+            short_diagnostics(tui, Some(outbox)),
+        );
+    }
+    let events = receipt();
+    assert_eq!(
+        events.len(),
+        count,
+        "one terminal receipt per submitted turn"
+    );
+    assert_eq!(events[count - 1]["kind"], kind, "terminal turn outcome");
+}
+
 /// Exercise the distributed binary through a real PTY and a sealed home. The
 /// only socket is a test-owned loopback model endpoint; plugin execution is
 /// stdio-only and receives no real credentials or ambient secret environment.
@@ -857,6 +889,14 @@ async fn plugin_toml_binary_lifecycle_skill_and_stdio_mcp_acceptance() {
     let workspace = make_sealed_workspace().expect("sealed workspace");
     let bundle = write_reviewed_bundle_fixture(workspace.workspace());
     let mcp_log = workspace.home().join(".codewhale/plugin-acceptance.log");
+    let outbox = workspace.home().join(".codewhale/lifecycle-outbox.jsonl");
+    let config_path = workspace.home().join(".codewhale/config.toml");
+    let mut config = std::fs::read_to_string(&config_path).expect("sealed config");
+    config.push_str(&format!(
+        "\n[lifecycle_outbox]\npath = {}\n",
+        serde_json::json!(outbox.to_string_lossy()),
+    ));
+    std::fs::write(config_path, config).expect("configure sealed lifecycle receipt");
     let (base_url, shutdown_tx, model_thread) = spawn_hermetic_model_server();
     let mut tui = Harness::builder(Harness::cargo_bin("codewhale-tui"))
         .cwd(workspace.workspace())
@@ -884,6 +924,7 @@ async fn plugin_toml_binary_lifecycle_skill_and_stdio_mcp_acceptance() {
     // The binary begins at Tideline Startup, so choose its real New Session
     // action before exercising the existing-session plugin contract.
     begin_new_session_from_startup(&mut tui);
+    wait_for_turn_receipt(&mut tui, &outbox, 1, "turn.completed");
     wait_for_composer_ready(&mut tui);
     submit_tui_command(&mut tui, "/plugin show demo");
     expect_visible(
@@ -944,12 +985,12 @@ async fn plugin_toml_binary_lifecycle_skill_and_stdio_mcp_acceptance() {
         "binary plugin call complete",
         "plugin tool result returned to model",
     );
+    wait_for_turn_receipt(&mut tui, &outbox, 2, "turn.completed");
 
     submit_tui_command(&mut tui, "hang plugin call");
     wait_for_log(&mut tui, &mcp_log, "call:hang");
     tui.send([0x03]).expect("interrupt hanging plugin turn");
-    std::thread::sleep(std::time::Duration::from_millis(300));
-    tui.pump();
+    wait_for_turn_receipt(&mut tui, &outbox, 3, "turn.interrupted");
     tui.send([0x15])
         .expect("clear the interrupted prompt restored into the composer");
     submit_tui_command(&mut tui, "/plugin revoke demo");
@@ -965,6 +1006,19 @@ async fn plugin_toml_binary_lifecycle_skill_and_stdio_mcp_acceptance() {
     assert!(state.contains("\"enabled\": true"));
     assert!(state.contains("\"trust\": null"));
     assert!(bundle.join("server.py").exists(), "source bundle preserved");
+
+    submit_tui_command(&mut tui, "/exit");
+    assert_eq!(
+        tui.wait_for_exit(BINARY_ACCEPTANCE_TIMEOUT),
+        Some(0),
+        "the TUI must exit gracefully after revoking the plugin",
+    );
+    let receipts = std::fs::read_to_string(&outbox).expect("outbox after process exit");
+    let final_event: serde_json::Value =
+        serde_json::from_str(receipts.lines().last().expect("final receipt"))
+            .expect("complete final JSONL event");
+    assert_eq!(final_event["event"], "session_end");
+    assert_eq!(final_event["kind"], "session.ended");
 
     let _ = tui.shutdown();
     let _ = shutdown_tx.send(());
