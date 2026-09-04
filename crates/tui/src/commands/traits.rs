@@ -160,13 +160,18 @@ impl CommandInfo {
         self.discovery().show_at_root()
     }
 
-    pub fn show_in_slash_completion(&self, prefix: &str) -> bool {
-        if !prefix.trim_start_matches('/').trim().is_empty() {
-            return true;
-        }
-        BARE_SLASH_DISCOVERY_COMMANDS
-            .iter()
-            .any(|name| self.name == *name || self.aliases.contains(name))
+    /// Whether this command may appear in slash completion at all.
+    ///
+    /// Always: the menu is how the command surface is discovered, so hiding
+    /// commands from it makes them unfindable. Founder live-test: "I like how
+    /// we prioritize the slash thing but it should still be able to find all
+    /// of them." A bare `/` used to return only
+    /// [`BARE_SLASH_DISCOVERY_COMMANDS`], which is a *ranking* concern — the
+    /// menu already sorts those six to the top and the popup scrolls around
+    /// the selection, so the short list is preserved as the head of a
+    /// complete one rather than as the whole of a truncated one.
+    pub fn show_in_slash_completion(&self, _prefix: &str) -> bool {
+        true
     }
 }
 

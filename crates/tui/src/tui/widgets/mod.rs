@@ -3864,21 +3864,17 @@ pub(crate) fn slash_completion_hints_with_model_candidates(
         }
     }
 
-    // A bare slash is an invitation, not a manual. Keep the root list to the
-    // small task-oriented set while leaving every command available once the
-    // user types a prefix or searches Help. User commands retain token
-    // ownership, but do not flood the empty root.
+    // A bare slash is an invitation, not a manual — but an invitation you
+    // cannot walk past is a dead end. The small task-oriented set is sorted
+    // to the head below (`root_rank`) instead of being the only thing kept,
+    // so the first six rows are unchanged and arrowing down reaches every
+    // other command. Founder live-test: "I like how we prioritize the slash
+    // thing but it should still be able to find all of them."
     if prefix_lower.is_empty() {
-        entries.retain(|entry| {
-            let key = entry.name.trim_start_matches('/');
-            commands::traits::BARE_SLASH_DISCOVERY_COMMANDS
-                .iter()
-                .any(|name| {
-                    key == *name
-                        || commands::get_command_info(key)
-                            .is_some_and(|info| info.aliases.contains(name))
-                })
-        });
+        // Skills are the exception, and for a different reason: they are user
+        // content with their own triggers (`$name`, `/skill`), and there can
+        // be hundreds. Commands are what this menu is for.
+        entries.retain(|entry| !entry.is_skill);
         for entry in &mut entries {
             if entry.name == "/subagents" {
                 entry.name = "/agents".to_string();
@@ -5205,13 +5201,19 @@ mod tests {
     }
 
     #[test]
-    fn bare_slash_menu_is_bounded_and_the_long_tail_remains_searchable() {
-        let hints = slash_completion_hints("/", 128, &[], Locale::En, None, ApiProvider::Deepseek);
+    fn bare_slash_menu_leads_with_the_small_set_and_reaches_the_long_tail() {
+        let hints = slash_completion_hints("/", 512, &[], Locale::En, None, ApiProvider::Deepseek);
         let names: Vec<&str> = hints.iter().map(|hint| hint.name.as_str()).collect();
         assert_eq!(
-            names,
-            ["/help", "/setup", "/model", "/settings", "/resume", "/rc",],
-            "bare / should offer the small starting set: {names:?}"
+            names.iter().take(6).copied().collect::<Vec<_>>(),
+            ["/help", "/setup", "/model", "/settings", "/resume", "/rc"],
+            "the small starting set still leads: {names:?}"
+        );
+        // Founder ruling: the ranking is welcome, the truncation is not — a
+        // command you cannot reach from the menu is a command you cannot find.
+        assert!(
+            names.len() > 6,
+            "the long tail follows the starting set: {names:?}"
         );
         assert!(
             slash_completion_hints("/wor", 128, &[], Locale::En, None, ApiProvider::Deepseek)
@@ -5285,6 +5287,36 @@ mod tests {
     }
 
     #[test]
+    fn a_bare_slash_leads_with_the_short_list_and_still_reaches_every_command() {
+        // Founder live-test: "I like how we prioritize the slash thing but it
+        // should still be able to find all of them." The curated six stay at
+        // the head; the rest follow instead of being filtered away, and the
+        // popup scrolls around the selection to reach them.
+        let hints = slash_completion_hints("/", 512, &[], Locale::En, None, ApiProvider::Deepseek);
+        let names: Vec<String> = hints.iter().map(|h| h.name.clone()).collect();
+
+        let head: Vec<String> = crate::commands::traits::BARE_SLASH_DISCOVERY_COMMANDS
+            .iter()
+            .map(|name| format!("/{name}"))
+            .collect();
+        assert_eq!(
+            names.iter().take(head.len()).cloned().collect::<Vec<_>>(),
+            head,
+            "the short task sequence still leads"
+        );
+        assert!(
+            names.len() > head.len(),
+            "a bare slash must reach past the short list: {} entries",
+            names.len()
+        );
+        // A command deliberately outside the short list must be reachable.
+        assert!(
+            names.iter().any(|name| name == "/mcp"),
+            "every command is findable from a bare slash"
+        );
+    }
+
+    #[test]
     fn slash_completion_hints_keep_prefix_match_alphabetical_within_tier() {
         // Within the same rank tier (no exact-alias match), entries fall
         // back to alphabetical name order, same as the prior behavior.
@@ -5314,19 +5346,30 @@ mod tests {
     }
 
     #[test]
-    fn slash_completion_hints_hide_toolbox_commands_until_typed() {
-        let root = slash_completion_hints("/", 128, &[], Locale::En, None, ApiProvider::Deepseek);
-        assert!(root.iter().any(|hint| hint.name == "/model"));
-        assert!(!root.iter().any(|hint| hint.name == "/provider"));
-        assert!(!root.iter().any(|hint| hint.name == "/fleet"));
-        assert!(!root.iter().any(|hint| hint.name == "/fleet"));
-        assert!(!root.iter().any(|hint| hint.name == "/config"));
-        assert!(!root.iter().any(|hint| hint.name == "/statusline"));
-        assert!(!root.iter().any(|hint| hint.name == "/rlm"));
-        assert!(!root.iter().any(|hint| hint.name == "/modeldb"));
-        assert!(!root.iter().any(|hint| hint.name == "/models"));
-        assert!(!root.iter().any(|hint| hint.name == "/plugin"));
-        assert!(!root.iter().any(|hint| hint.name == "/subagents"));
+    fn slash_completion_hints_rank_toolbox_commands_below_the_starting_set() {
+        let root = slash_completion_hints("/", 512, &[], Locale::En, None, ApiProvider::Deepseek);
+        let position = |name: &str| root.iter().position(|hint| hint.name == name);
+        // The task-oriented set leads; the toolbox is reachable behind it
+        // rather than hidden until guessed at.
+        assert_eq!(position("/model"), Some(2));
+        for toolbox in [
+            "/provider",
+            "/fleet",
+            "/config",
+            "/statusline",
+            "/rlm",
+            "/modeldb",
+            "/models",
+            "/plugin",
+        ] {
+            let rank = position(toolbox)
+                .unwrap_or_else(|| panic!("{toolbox} must be reachable from a bare slash"));
+            assert!(rank >= 6, "{toolbox} must rank below the starting set");
+        }
+        // `/subagents` is renamed at the root, so its canonical name is the
+        // one that must not appear.
+        assert!(position("/subagents").is_none());
+        assert!(position("/agents").is_some());
 
         let rlm = slash_completion_hints("/rl", 128, &[], Locale::En, None, ApiProvider::Deepseek);
         assert!(rlm.iter().any(|hint| hint.name == "/rlm"));
@@ -5718,9 +5761,12 @@ mod tests {
             None,
             ApiProvider::Deepseek,
         );
-        assert!(!hints.iter().any(|hint| hint.name == "/skill"));
-        assert!(!hints.iter().any(|hint| hint.name == "/skills"));
+        // Individual skills stay out of the root: they are user content with
+        // their own triggers (`$name`, `/skill`) and there can be hundreds.
         assert!(!hints.iter().any(|hint| hint.is_skill));
+        // The commands that reach them are commands like any other, and a
+        // bare slash must be able to find every command.
+        assert!(hints.iter().any(|hint| hint.name == "/skill"));
     }
 
     #[test]

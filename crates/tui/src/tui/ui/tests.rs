@@ -14169,18 +14169,22 @@ fn visible_slash_menu_entries_respects_hide_flag() {
 }
 
 #[test]
-fn visible_slash_menu_starts_with_six_tasks_and_keeps_long_tail_searchable() {
+fn visible_slash_menu_starts_with_six_tasks_and_still_lists_the_rest() {
     let mut app = create_test_app();
     app.input = "/".to_string();
 
     let entries = visible_slash_menu_entries(&app, SLASH_MENU_LIMIT);
+    let names: Vec<&str> = entries.iter().map(|entry| entry.name.as_str()).collect();
     assert_eq!(
-        entries
-            .iter()
-            .map(|entry| entry.name.as_str())
-            .collect::<Vec<_>>(),
-        ["/help", "/setup", "/model", "/settings", "/resume", "/rc"]
+        names.iter().take(6).copied().collect::<Vec<_>>(),
+        ["/help", "/setup", "/model", "/settings", "/resume", "/rc"],
+        "the six tasks still lead"
     );
+    // The rest follow rather than being withheld: the popup scrolls around
+    // the selection, so arrowing down reaches every command.
+    assert!(names.len() > 6, "the long tail is listed: {names:?}");
+    assert!(names.contains(&"/mcp"));
+    // Retired and internal spellings stay out regardless.
     assert!(!entries.iter().any(|entry| entry.name == "/set"));
     assert!(!entries.iter().any(|entry| entry.name == "/codewhale"));
 
