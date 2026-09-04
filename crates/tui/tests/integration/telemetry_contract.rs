@@ -332,13 +332,15 @@ async fn assert_short_cli_buffered_without_network(
 /// Short CLI commands must preserve the session for a later interactive flush
 /// without making command latency depend on the telemetry endpoint.
 #[tokio::test(flavor = "current_thread")]
-async fn default_on_buffers_one_complete_session_without_network() {
+async fn current_explicit_consent_buffers_one_complete_session_without_network() {
     let server = start_recorder().await;
     let fixture = Fixture::new().with_endpoint(&server.uri());
 
+    fixture.write_config("telemetry = true\n");
+    fixture.record_notice(true);
     fixture.run_completions();
 
-    assert_short_cli_buffered_without_network(&fixture, &server, "the documented default").await;
+    assert_short_cli_buffered_without_network(&fixture, &server, "current explicit consent").await;
 }
 
 // ── Off is real ──────────────────────────────────────────────────────────
@@ -419,28 +421,25 @@ async fn an_unparseable_telemetry_env_value_sends_zero_requests() {
     );
 }
 
-/// A fresh headless run follows the documented default even before the
-/// interactive disclosure has been shown.
+/// A fresh headless run cannot infer processor consent from silence.
 #[tokio::test(flavor = "current_thread")]
-async fn telemetry_enabled_without_notice_buffers_a_complete_session() {
+async fn telemetry_enabled_without_notice_creates_no_state() {
     let server = start_recorder().await;
     let fixture = Fixture::new().with_endpoint(&server.uri());
     // Deliberately no `record_notice`.
 
     fixture.run_completions();
 
-    assert_short_cli_buffered_without_network(
-        &fixture,
-        &server,
-        "default-on without a notice decision",
-    )
-    .await;
+    assert_no_batches(&server, "missing current explicit consent").await;
+    assert!(
+        !fixture.telemetry_root().exists(),
+        "unconsented runs create no telemetry state"
+    );
 }
 
-/// A prior acceptance does not pause counting when the disclosure version
-/// changes; the refreshed notice is still owed on the next interactive run.
+/// A prior disclosure never authorizes the newly introduced processor.
 #[tokio::test(flavor = "current_thread")]
-async fn a_stale_accepted_notice_version_buffers_a_complete_session() {
+async fn a_stale_accepted_notice_version_creates_no_state() {
     let server = start_recorder().await;
     let fixture = Fixture::new().with_endpoint(&server.uri());
     fixture.write_config("telemetry = true\n");
@@ -452,12 +451,11 @@ async fn a_stale_accepted_notice_version_buffers_a_complete_session() {
 
     fixture.run_completions();
 
-    assert_short_cli_buffered_without_network(
-        &fixture,
-        &server,
-        "an acceptance recorded for an older notice version",
-    )
-    .await;
+    assert_no_batches(&server, "missing current explicit consent").await;
+    assert!(
+        !fixture.telemetry_root().exists(),
+        "unconsented runs create no telemetry state"
+    );
 }
 
 // ── Nothing survives a disable ───────────────────────────────────────────
@@ -638,12 +636,11 @@ async fn skip_onboarding_writes_no_telemetry_decision() {
             "skip-onboarding must leave the telemetry decision unset"
         );
     }
-    assert_short_cli_buffered_without_network(
-        &fixture,
-        &server,
-        "`--skip-onboarding` follows the default",
-    )
-    .await;
+    assert_no_batches(&server, "missing current explicit consent").await;
+    assert!(
+        !fixture.telemetry_root().exists(),
+        "unconsented runs create no telemetry state"
+    );
 }
 
 // ── Payload red lines, through a real turn ───────────────────────────────

@@ -2887,10 +2887,9 @@ impl ConfigToml {
         }
 
         if key == "telemetry" {
-            // #5441: telemetry resolves ON by default, so an unset file key
-            // must not read "key not found" (or as a bare file value) on a
-            // machine whose batches ship. Show the resolved consent with its
-            // source — a truth change, not a behaviour change.
+            // Report the resolved configuration preference even when the key is
+            // absent. The telemetry owner additionally requires current
+            // explicit processor acceptance before collection or delivery.
             let (on, source) = resolved_telemetry_consent(self.telemetry);
             return Some(format!(
                 "{} ({})",
@@ -3409,10 +3408,10 @@ impl ConfigToml {
             .clone()
             .or_else(|| env.log_level.clone())
             .or_else(|| self.log_level.clone());
-        // Telemetry consent resolves once, in the shared core behind
-        // [`resolved_telemetry_consent`], so the runtime and the
-        // doctor/config provenance surfaces cannot disagree about what is
-        // shipping (#5441). The comments that matter live there: the
+        // The telemetry preference resolves once in the shared core behind
+        // [`resolved_telemetry_consent`]. Actual collection also requires the
+        // current processor acceptance checked by the telemetry owner. The
+        // comments that matter live there: the
         // environment/file/default chain, and why every kill switch is a
         // floor (`telemetry = false` persisted in the file is the *persistent*
         // off switch; an explicit env "off", an unreadable env value, or a
@@ -3528,8 +3527,8 @@ fn merge_project_provider_config(target: &mut ProviderConfigToml, source: &Provi
 /// Where an enabled session's batches go when nobody has said otherwise.
 ///
 /// The first-party ingest service — a Cloudflare Worker that appends to Workers
-/// Analytics Engine and stores nothing else. See `docs/TELEMETRY.md` for what a
-/// batch contains and `telemetry-ingest/` for the handler.
+/// Analytics Engine, with an optional disclosed PostHog sink. See
+/// `docs/TELEMETRY.md` for what a batch contains and `telemetry-ingest/` for the handler.
 ///
 /// This is a *default*, not a floor, and it changes nothing about permission:
 /// `CODEWHALE_TELEMETRY=0`, `telemetry = false`, and a recorded decline all
@@ -3595,7 +3594,7 @@ pub enum TelemetrySource {
     Env,
     /// `telemetry = …` written to the config file.
     Config,
-    /// Nobody said anything; the shipped default (`on`) applies silently.
+    /// Nobody said anything; the shipped preference is off.
     Default,
 }
 
@@ -3630,7 +3629,7 @@ fn read_telemetry_env() -> (Option<bool>, bool) {
         Ok(value) => (Some(value), false),
         Err(_) => {
             tracing::warn!(
-                "Invalid CODEWHALE_TELEMETRY/DEEPSEEK_TELEMETRY value '{raw}'; expected one of \
+                "Invalid CODEWHALE_TELEMETRY/DEEPSEEK_TELEMETRY value; expected one of \
                  1/0, true/false, yes/no, on/off, enabled/disabled. Telemetry is forced off."
             );
             (None, true)
@@ -3645,9 +3644,10 @@ fn read_telemetry_env() -> (Option<bool>, bool) {
 /// This is the same resolution [`ConfigToml::resolve_runtime_options`]
 /// applies without its CLI term: environment first (an explicit value, an
 /// unreadable one, or a dispatcher floor), then the file, then the shipped
-/// default of `on`; a persisted `telemetry = false` is a floor no later
+/// default of `off`; a persisted `telemetry = false` is a floor no later
 /// term can climb over. The runtime resolver calls this directly, so the
-/// surfaces and the shipped batches can never disagree.
+/// preference surfaces agree. The telemetry owner also checks current explicit
+/// processor consent, which this configuration-only resolver cannot grant.
 #[must_use]
 pub fn resolved_telemetry_consent(file_telemetry: Option<bool>) -> (bool, TelemetrySource) {
     let (env_telemetry, env_invalid) = read_telemetry_env();
@@ -3669,7 +3669,7 @@ fn telemetry_consent_from_env(
     file_telemetry: Option<bool>,
 ) -> (bool, TelemetrySource) {
     let persisted_off = file_telemetry == Some(false);
-    let allowed = env_telemetry.or(file_telemetry).unwrap_or(true);
+    let allowed = env_telemetry.or(file_telemetry).unwrap_or(false);
     let on = allowed && env_telemetry != Some(false) && !env_invalid && !floor && !persisted_off;
     let source = if !on && (env_telemetry == Some(false) || env_invalid || floor) {
         // An environment kill switch decided the outcome.

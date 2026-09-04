@@ -118,7 +118,7 @@ struct Cli {
     #[arg(
         long,
         value_name = "BOOL",
-        help = "Control anonymous usage counting for this run (default on; \
+        help = "Control usage counting (default off; review consent: config telemetry; \
                 CODEWHALE_TELEMETRY=0 always wins)"
     )]
     telemetry: Option<bool>,
@@ -1604,6 +1604,12 @@ enum ConfigCommand {
     },
     Unset {
         key: String,
+    },
+    /// Review aggregate usage counting by Codewhale and PostHog (default off).
+    Telemetry {
+        /// Explicitly accept this processor notice version and enable future sessions.
+        #[arg(long, value_name = "VERSION")]
+        accept_notice: Option<u32>,
     },
     List,
     Path,
@@ -4513,7 +4519,12 @@ fn run_config_command(
     if !per_run_overrides.is_empty()
         && matches!(
             command,
-            ConfigCommand::Set { .. } | ConfigCommand::Unset { .. } | ConfigCommand::Import(_)
+            ConfigCommand::Set { .. }
+                | ConfigCommand::Unset { .. }
+                | ConfigCommand::Import(_)
+                | ConfigCommand::Telemetry {
+                    accept_notice: Some(_)
+                }
         )
     {
         bail!(
@@ -4525,15 +4536,45 @@ fn run_config_command(
         ConfigCommand::Get { key } => {
             if let Some(value) = store.config.get_display_value(&key) {
                 println!("{value}");
+                if key == "telemetry" {
+                    println!(
+                        "configuration preference; current processor consent: {}",
+                        telemetry_notice_status()
+                    );
+                    println!("review or accept: codewhale config telemetry");
+                }
                 return Ok(());
             }
             bail!("key not found: {key}");
         }
         ConfigCommand::Set { key, value } => {
-            clear_recorded_telemetry_opt_out_if_reenabled(&key, &value)?;
             store.config.set_value(&key, &value)?;
             store.save()?;
             println!("set {key}");
+            if key == "telemetry" && store.config.telemetry == Some(true) {
+                println!(
+                    "Collection also requires current processor consent: {}. Review or accept with `codewhale config telemetry`.",
+                    telemetry_notice_status()
+                );
+            }
+            Ok(())
+        }
+        ConfigCommand::Telemetry { accept_notice } => {
+            println!("{}\n", telemetry::notice::NOTICE_BODY);
+            if let Some(version) = accept_notice {
+                let receipt = codewhale_tui::accept_telemetry_notice(
+                    Some(store.path().to_path_buf()),
+                    version,
+                )?;
+                println!("{receipt}");
+            } else {
+                println!("Current processor consent: {}", telemetry_notice_status());
+                println!(
+                    "To opt in: codewhale config telemetry --accept-notice {}",
+                    codewhale_config::TELEMETRY_NOTICE_VERSION
+                );
+                println!("To opt out: codewhale config set telemetry false");
+            }
             Ok(())
         }
         ConfigCommand::Unset { key } => {
@@ -4673,24 +4714,14 @@ fn run_config_doctor(store: &ConfigStore) -> Result<()> {
     Ok(())
 }
 
-/// An explicit `telemetry = true` re-enables a machine that previously declined
-/// the notice. Fresh machines keep the notice owed, so the disclosure still
-/// appears on their first interactive launch.
-fn clear_recorded_telemetry_opt_out_if_reenabled(key: &str, value: &str) -> Result<()> {
-    let turning_on = matches!(
-        value.trim().to_ascii_lowercase().as_str(),
-        "1" | "true" | "yes" | "on" | "enabled"
-    );
-    if key != "telemetry" || !turning_on {
-        return Ok(());
-    }
-    if let Some(mut state) = SetupState::load()?
-        && state.telemetry_opted_out()
+fn telemetry_notice_status() -> &'static str {
+    if telemetry::load_setup_state_for_decision()
+        .is_some_and(|state| state.telemetry_accepted(codewhale_config::TELEMETRY_NOTICE_VERSION))
     {
-        state.record_telemetry_notice(codewhale_config::TELEMETRY_NOTICE_VERSION, true);
-        state.save()?;
+        "accepted"
+    } else {
+        "required"
     }
-    Ok(())
 }
 
 fn model_command_provider_hint(
@@ -10036,7 +10067,7 @@ verbosity = "project-imported"
             "expected a help string beside --telemetry, got: {telemetry_line}"
         );
         assert!(
-            telemetry_line.contains("default on"),
+            telemetry_line.contains("default off"),
             "the help string must disclose the default: {telemetry_line}"
         );
         assert!(
@@ -10044,6 +10075,106 @@ verbosity = "project-imported"
                 && telemetry_line.contains("wins"),
             "the help string must document the always-winning opt-out: {telemetry_line}"
         );
+        let help = help_for(&["codewhale", "config", "telemetry", "--help"]);
+        assert!(help.contains("PostHog"));
+        assert!(help.contains("--accept-notice"));
+    }
+
+    #[test]
+    fn cli_telemetry_acceptance_is_versioned_and_reuses_settings_persistence() {
+        let _lock = env_lock();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("CODEWHALE_HOME", temp.path().to_str().unwrap());
+        let path = temp.path().join("config.toml");
+        write_config_fixture(&path, "telemetry = false\nverbosity = \"concise\"\n");
+        let mut state = SetupState::default();
+        state.record_telemetry_notice("3", false);
+        state.save().expect("seed decline");
+        let mut store = ConfigStore::load(Some(path.clone())).expect("load config");
+
+        // The old command must never upgrade a decline to processor consent.
+        run_config_command(
+            &mut store,
+            ConfigCommand::Set {
+                key: "telemetry".into(),
+                value: "true".into(),
+            },
+            false,
+            &[],
+        )
+        .expect("save configuration preference");
+        assert!(SetupState::load().unwrap().unwrap().telemetry_opted_out());
+        assert_eq!(telemetry_notice_status(), "required");
+        let before = std::fs::read(SetupState::path().unwrap()).unwrap();
+        run_config_command(
+            &mut store,
+            ConfigCommand::Telemetry {
+                accept_notice: None,
+            },
+            false,
+            &[],
+        )
+        .expect("read notice");
+        assert!(
+            run_config_command(
+                &mut store,
+                ConfigCommand::Telemetry {
+                    accept_notice: Some(3)
+                },
+                false,
+                &[]
+            )
+            .is_err()
+        );
+        assert_eq!(std::fs::read(SetupState::path().unwrap()).unwrap(), before);
+
+        run_config_command(
+            &mut store,
+            ConfigCommand::Telemetry {
+                accept_notice: Some(telemetry::CONSENT_VERSION),
+            },
+            false,
+            &[],
+        )
+        .expect("accept current processor notice");
+        assert_eq!(telemetry_notice_status(), "accepted");
+        let saved = ConfigStore::load(Some(path)).unwrap();
+        assert_eq!(saved.config.telemetry, Some(true));
+        assert_eq!(saved.config.verbosity.as_deref(), Some("concise"));
+        assert!(
+            !temp.path().join("telemetry").exists(),
+            "acceptance never arms this process"
+        );
+    }
+
+    #[test]
+    fn cli_telemetry_acceptance_refuses_overlays_and_corrupt_privacy_records() {
+        let _lock = env_lock();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("CODEWHALE_HOME", temp.path().to_str().unwrap());
+        let path = temp.path().join("config.toml");
+        write_config_fixture(&path, "telemetry = false\n");
+        std::fs::write(SetupState::path().unwrap(), "not-json").unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let mut store = ConfigStore::load(Some(path.clone())).unwrap();
+        for overrides in [vec![], vec!["telemetry=true".to_string()]] {
+            assert!(
+                run_config_command(
+                    &mut store,
+                    ConfigCommand::Telemetry {
+                        accept_notice: Some(telemetry::CONSENT_VERSION),
+                    },
+                    false,
+                    &overrides
+                )
+                .is_err()
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+            assert_eq!(
+                std::fs::read_to_string(SetupState::path().unwrap()).unwrap(),
+                "not-json"
+            );
+        }
     }
 
     #[test]

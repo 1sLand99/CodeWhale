@@ -218,6 +218,7 @@ fn flush(context: &Context) -> FlushOutcome {
 
     let batch = Batch {
         schema_version: SCHEMA_VERSION,
+        consent_version: crate::event::CONSENT_VERSION,
         sent_at: envelope::now_rfc3339(),
         install_id: install.install_id,
         app_version: context.app_version.clone(),

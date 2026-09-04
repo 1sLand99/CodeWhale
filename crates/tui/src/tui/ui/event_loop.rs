@@ -967,23 +967,6 @@ pub async fn run_tui(
     result
 }
 
-/// Commit the already-rendered inline disclosure and then arm from the exact
-/// applied setup state. A concurrent opt-out or failed persistence replaces
-/// the optimistic one-line receipt with the truthful existing localized
-/// result and remains retry-safe on the next launch.
-fn apply_telemetry_after_disclosure_draw(
-    app: &mut App,
-    pending: crate::telemetry_notice::PendingTelemetryNotice,
-) {
-    let applied = crate::telemetry_notice::apply_decision(&pending, true);
-    if applied.status_message_id != MessageId::TelemetryNoticeReceiptEnabled {
-        let receipt = app.tr(applied.status_message_id);
-        app.push_status_toast(receipt.into_owned(), StatusToastLevel::Info, Some(12_000));
-        app.needs_redraw = true;
-    }
-    crate::apply_tui_telemetry_decision(&pending, &applied.setup_state);
-}
-
 /// Submit the pre-session composer's message as the first message of a new
 /// session.
 ///
@@ -1229,14 +1212,6 @@ pub(crate) async fn run_event_loop(
         .checked_sub(TERMINAL_INPUT_RECOVERY_COOLDOWN)
         .unwrap_or_else(Instant::now);
     let mut last_recovery_snapshot_at: Option<Instant> = None;
-    // Disclosure is queued in the chosen locale, rendered once as a normal
-    // non-blocking receipt, and only then allowed to arm telemetry. Keeping
-    // the applied state separate makes the draw itself the privacy boundary:
-    // a failed draw exits without arming.
-    let mut telemetry_waiting_for_disclosure_draw: Option<
-        crate::telemetry_notice::PendingTelemetryNotice,
-    > = None;
-
     // Fire-and-forget version check — runs once per session in the
     // background. On success, a short status toast advertises the update
     // without replacing the user's configured footer/status-line chips.
@@ -1276,14 +1251,10 @@ pub(crate) async fn run_event_loop(
     let mut pending_subagent_list_refresh = false;
 
     loop {
-        if telemetry_waiting_for_disclosure_draw.is_none()
-            && app.onboarding == OnboardingState::None
-            && let Some(pending) = pending_telemetry_notice.take()
-        {
-            let receipt = app.tr(MessageId::TelemetryNoticeReceiptEnabled);
+        if app.onboarding == OnboardingState::None && pending_telemetry_notice.take().is_some() {
+            let receipt = app.tr(MessageId::TelemetryNoticeConsentRequired);
             app.push_status_toast(receipt.into_owned(), StatusToastLevel::Info, Some(12_000));
             app.needs_redraw = true;
-            telemetry_waiting_for_disclosure_draw = Some(pending);
         }
 
         // A manual compaction deferred by a full engine mailbox retries here
@@ -4089,9 +4060,6 @@ pub(crate) async fn run_event_loop(
         }
         if app.needs_redraw && draw_wait.is_none() {
             draw_app_frame_inner(terminal, app, config, force_terminal_repaint)?;
-            if let Some(pending) = telemetry_waiting_for_disclosure_draw.take() {
-                apply_telemetry_after_disclosure_draw(app, pending);
-            }
             force_terminal_repaint = false;
             frame_rate_limiter.mark_emitted(Instant::now());
             app.needs_redraw = false;
@@ -4306,9 +4274,6 @@ pub(crate) async fn run_event_loop(
                     backend.set_terminal_size(new_size);
                 }
                 draw_app_frame_inner(terminal, app, config, true)?;
-                if let Some(pending) = telemetry_waiting_for_disclosure_draw.take() {
-                    apply_telemetry_after_disclosure_draw(app, pending);
-                }
                 {
                     let backend = terminal.backend_mut();
                     backend.clear_forced_size();

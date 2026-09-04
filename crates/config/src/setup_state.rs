@@ -45,7 +45,7 @@ pub const SETUP_STATE_FILE_NAME: &str = "setup_state.json";
 /// when the collection policy, schema, or disclosure materially changes. Prior
 /// declines remain off. Keying it to the app version would re-prompt every
 /// release, which is nagging with extra steps.
-pub const TELEMETRY_NOTICE_VERSION: &str = "3";
+pub const TELEMETRY_NOTICE_VERSION: &str = "4";
 
 /// Canonical setup step ids. The ordering matches the first-run spine so a
 /// `BTreeMap<SetupStep, _>` renders in wizard order.
@@ -331,14 +331,13 @@ pub struct SetupState {
     pub inherited: bool,
 
     // ── Telemetry notice ────────────────────────────────────────────────
-    /// [`TELEMETRY_NOTICE_VERSION`] whose telemetry disclosure was shown.
+    /// [`TELEMETRY_NOTICE_VERSION`] whose telemetry processor disclosure was explicitly accepted or declined.
     /// `None` means the notice is still owed.
     ///
     /// Never auto-completed and never deferred-completed: unlike the
     /// constitution checkpoint, which records a `Deferred` completion on the
-    /// skip-onboarding path, a telemetry notice that was not rendered leaves
-    /// this `None`. Collection follows the documented default
-    /// while the notice remains owed on the next interactive launch.
+    /// skip-onboarding path, no explicit choice leaves this `None`. Collection
+    /// remains off while the notice is owed on the next interactive launch.
     ///
     /// These are *fields* rather than a new [`SetupStep`] variant on purpose:
     /// an unknown enum variant fails the whole record parse and silently drops
@@ -348,7 +347,7 @@ pub struct SetupState {
     pub telemetry_notice_decided_for: Option<String>,
     /// The privacy preference recorded with the notice. `false` with any
     /// recorded notice version is a durable opt-out; `true` records that the
-    /// default-on disclosure was shown for that version.
+    /// processor disclosure was explicitly accepted for that version.
     #[serde(default, skip_serializing_if = "is_false")]
     pub telemetry_opt_in: bool,
 }
@@ -494,7 +493,7 @@ impl SetupState {
 
     /// Record the privacy preference associated with the telemetry notice.
     ///
-    /// Default-on may be recorded only after the notice was actually rendered;
+    /// Acceptance is recorded only after an explicit choice to share counts;
     /// an explicit opt-out may also arrive from Settings. Deferral,
     /// skip-onboarding, and non-interactive surfaces leave it untouched.
     pub fn record_telemetry_notice(
@@ -507,7 +506,7 @@ impl SetupState {
         self
     }
 
-    /// True when the current default-on disclosure was shown and remains on.
+    /// True when the current processor disclosure was explicitly accepted.
     #[must_use]
     pub fn telemetry_accepted(&self, version: &str) -> bool {
         !self.needs_telemetry_notice(version) && self.telemetry_opt_in
@@ -524,8 +523,7 @@ impl SetupState {
 
     /// Whether any recorded telemetry notice was explicitly declined.
     ///
-    /// Declines recorded by the former opt-in notice remain durable opt-outs
-    /// after telemetry becomes default-on. A notice-version bump may explain a
+    /// Declines recorded by any former notice remain durable opt-outs. A notice-version bump may explain a
     /// changed policy, but it must never erase a user's earlier "no".
     #[must_use]
     pub fn telemetry_opted_out(&self) -> bool {

@@ -1,8 +1,12 @@
 # Codewhale 产品遥测
 
-> 本文翻译自英文版 [TELEMETRY.md](../TELEMETRY.md)，与英文修订 `fa50abf68`（2026-08-17）同步。
+> 与本次英文版 [TELEMETRY.md](../TELEMETRY.md) 的 schema v2 / 同意版本 4 同步。
 
-**0.9.6 的状态：匿名使用计数默认开启，可以立即关闭。** 首次交互式启动会汇总统计了哪些内容，链接到逐字段的精确 schema，并在原生启动弹窗中预选"保持开启"。用方向键或 Tab 选择，Enter 确认，`Y`/`N` 是直接快捷键。遥测在做出该选择之前不会启动。无头（headless）界面遵循相同的文档化默认值，不会假装展示过交互式提示。此前 0.9.4 opt-in 提示记录到的每一次拒绝，在升级后都保持关闭。
+**0.9.12 源码要求先明确同意，再开始采集。** 首次交互启动显示本地化、非阻塞提示，指向 `/settings` 中的遥测设置。仅显示提示不会记录同意。主动启用该设置表示接受同意版本 `4`：Codewhale 和数据处理方 **PostHog** 可以处理下文列出的有限汇总计数，下一次启动生效。所有运行界面（包括无头命令）在缺少同意或同意版本过旧时均保持关闭；此前的拒绝继续有效。单独设置配置项或环境变量为 `true` 不能代替接受新版数据处理说明。
+
+PostHog 转发默认未配置，只有运维另行授权、配置项目令牌和允许的区域主机，并记录实际出口不会转发原始客户端 IP 的预发布验证证据后才启用。源码和本地测试不代表已经部署、激活处理服务、验证出口或验证保留期限。
+
+无头用户可用 `codewhale config telemetry` 阅读相同说明，再运行 `codewhale config telemetry --accept-notice 4` 明确接受当前版本。它复用 Settings 的两个持久化记录写入流程，保存当前同意和 `telemetry = true`，供新会话使用；旧版本、不可读的隐私记录或同时使用每次运行的 `--set` 覆盖都会被拒绝。单独执行 `config set telemetry true` 只保存偏好，不能接受处理方或替换此前拒绝。`config get telemetry` 分别报告配置偏好和当前同意状态。环境及命令行关闭开关仍然有效。
 
 Codewhale 不会收集对话、代码、提示词、文件、文件名/仓库名/分支名、模型内容或凭据。它不发送任何按回合或按工具的时间线。它只发送下面这个封闭的聚合 schema：版本和平台类别、会话时长/结果、功能/错误计数器，以及一个每 90 天轮换一次的随机安装 id。
 
@@ -22,7 +26,7 @@ CODEWHALE_TELEMETRY=0 codewhale          # 终止开关：停止采集，不擦�
 codewhale --telemetry false              # 同样的终止开关，仅对单条命令生效
 ```
 
-**配置文件中的 `telemetry = false` 就是选择退出。** 它是一个底线：`--telemetry true` 和 `CODEWHALE_TELEMETRY=1` 都会输给它，因为一个可能被包装脚本意外撤销的设置算不上设置。它会删除随机安装 id，截断每个已缓冲事件和每条 dry-run 记录，并写入一个 tombstone。追加、身份/状态写入和投递共享同一次擦除的排序锁，因此一旦选择退出返回，就不会有任何退出前写入或 POST 仍在飞行。如果擦除的任何部分失败，tombstone 依然存在，缓冲区无法再排空——擦除失败即失败关闭。只要该设置仍然生效，每一次后续运行都会重新断言同一个 tombstone，因此它能一直存活；重新开启遥测意味着在同一个位置写入 `telemetry = true`，而这也是清除它的方式。此前缓冲的任何内容都永远不会被发送。
+**配置文件中的 `telemetry = false` 就是选择退出。** 它是一个底线：`--telemetry true` 和 `CODEWHALE_TELEMETRY=1` 都会输给它，因为一个可能被包装脚本意外撤销的设置算不上设置。它会删除随机安装 id，截断每个已缓冲事件和每条 dry-run 记录，并写入一个 tombstone。追加、身份/状态写入和投递共享同一次擦除的排序锁，因此一旦选择退出返回，就不会有任何退出前写入或 POST 仍在飞行。如果擦除的任何部分失败，tombstone 依然存在，缓冲区无法再排空——擦除失败即失败关闭。只要该设置仍然生效，每一次后续运行都会重新断言同一个 tombstone，因此它能一直存活；重新开启需要在 `/settings` 中明确接受当前说明并写入两个隐私记录；之后的新启动才能清除 tombstone。此前缓冲的任何内容都永远不会被发送。
 
 **环境变量和 flag 是终止开关，不是选择退出。** 本次运行期间遥测关闭，不写入任何内容，不发送任何内容——磁盘上也什么都不触碰、不删除。这是刻意的：一个为某条命令设置 `CODEWHALE_TELEMETRY=0` 的 harness 或 agent，绝不能悄悄丢弃机器所有者的安装 id 和 dry-run 记录。如果你想要会擦除的那种，请使用配置文件。
 
@@ -53,7 +57,7 @@ Codewhale 没有恢复出厂设置命令，因此本文档也不会声称有。
 
 ## 发送时机与发送去向
 
-当持久选择退出或运行级终止开关生效时，不会发送任何内容。否则恰好只有一个 flush 点：关机期间的一次尝试，限时三秒。没有启动时 flush、会话中途 flush、按回合 flush 或按工具调用 flush。关机 flush 会在执行前立即从磁盘重新解析你的设置，因此从另一个终端写入的 `codewhale config set telemetry false` 会阻止一个已经在运行的会话的 flush。
+缺少当前明确同意、持久选择退出或运行级终止开关生效时，不采集也不发送内容。TUI 和 exec 在退出时尝试一次网络 flush，限时三秒。短 CLI 命令仅将 session_end 封存到本地缓冲，留给后续交互会话发送；端点为空时可直接写入本地 dry-run。没有启动时 flush、会话中途 flush、按回合 flush 或按工具调用 flush。关机 flush 会在执行前立即从磁盘重新解析你的设置，因此从另一个终端写入的 `codewhale config set telemetry false` 会阻止一个已经在运行的会话的 flush。
 
 一次 flush 就是对已解析端点的一次 **`POST`**——默认是 `https://telemetry.codewhale.net/v1/telemetry`。请求携带 `content-type: application/json` 头、`user-agent: codewhale-telemetry/<app_version>` 头，以及批次主体。仅此而已：没有 cookie（HTTP 客户端在构建时就没有可禁用的 cookie jar）、没有重定向（直接拒绝）、没有 `Authorization` 头、没有自定义头、没有查询字符串。响应主体被丢弃不读；只查看状态类别。
 
@@ -65,13 +69,14 @@ Codewhale 没有恢复出厂设置命令，因此本文档也不会声称有。
 
 ## 事件 schema
 
-`SCHEMA_VERSION = 1`。除恰好三个有界字符串（`app_version`、`git_sha`、`panic_site`）外，每个字段都是整数、布尔值或**封闭枚举字符串**。这三个字符串各自都有成文规则和一个钉住该规则的测试。**该 schema 中没有自由格式字符串类型，也没有开放键映射。** 正是这一性质使红线 3 可强制执行，而不是停留在愿望层面。
+`SCHEMA_VERSION = 2`，要求 `consent_version = 4`。保留旧 v1 格式以接收旧运行客户端，但旧批次只写入第一方 Analytics Engine，绝不转发到 PostHog；v1 不接受新字段、新界面或 product_usage 事件。除恰好三个有界字符串（`app_version`、`git_sha`、`panic_site`）外，每个字段都是整数、布尔值或**封闭枚举字符串**。这三个字符串各自都有成文规则和一个钉住该规则的测试。**该 schema 中没有自由格式字符串类型，也没有开放键映射。** 正是这一性质使红线 3 可强制执行，而不是停留在愿望层面。
 
 ### 批次信封——每次 POST 都会发送
 
 ```jsonc
 {
-  "schema_version": 1,
+  "schema_version": 2,
+  "consent_version": 4,
   "sent_at":     "2026-08-03T18:04:11Z",   // RFC3339 UTC，秒级精度
   "install_id":  "3f2a…",                  // uuid v4，每 90 天轮换
   "app_version": "0.9.4",
@@ -92,22 +97,20 @@ Codewhale 没有恢复出厂设置命令，因此本文档也不会声称有。
 | `install_id` | uuid v4 | `crates/telemetry/src/envelope.rs` | 随机、绝不派生，每 90 天轮换。见上文"数据存放位置"。 |
 | `app_version` | string | `env!("CARGO_PKG_VERSION")`，即 `crates/telemetry/src/lib.rs:112` 处 | 必须匹配 `^\d+\.\d+\.\d+(-[0-9A-Za-z.]+)?$`。 |
 | `git_sha` | string \| null | `option_env!("CODEWHALE_RELEASE_BUILD_SHA")`——一个**新的** rustc-env | 前 12 个十六进制字符。仅当 `codewhale_build_support::release_build_sha` 在构建环境中看到 `DEEPSEEK_BUILD_SHA` 或 `GITHUB_SHA` 时才发送，即仅对发布 CI 构建。对所有本地构建的二进制无条件为 `null`，且不做任何形式的运行时查找。**绝不**是 `CODEWHALE_BUILD_COMMIT`——那会回退到 `git_commit`，是构建者的私有 HEAD。**绝不**是 `Thread.git_sha`（`crates/state/src/lib.rs:93`）——那是用户工作区的提交，是一条红线，只隔一个名字。 |
-| `surface` | enum | 在每次子命令分发时显式设置 | `tui \| exec \| cli \| app-server \| mcp-server \| serve`。**不能从可执行文件推导**：`codewhale-tui` 至少服务五个 surface，且 app-server 在 `codewhale` *进程内* 运行（`crates/cli/src/lib.rs:4225`），因此 `current_exe()` 会把每次 app-server 会话都报成 CLI。`desktop` 被省略——不存在桌面 surface。哪些 surface 能发送由选择退出策略决定，而非由 surface 决定：见下文"哪些 surface 会发送"。 |
+| `surface` | enum | 由发出批次的客户端明确设置 | `tui \| exec \| cli \| app-server \| mcp-server \| serve \| website \| web-app \| desktop \| control-plane`。运行时复用现有计数器；允许某界面不代表其客户端已部署。 |
 | `os` | enum | `std::env::consts::OS`，即 `crates/cli/src/update.rs:41` 处 | allowlist：`linux \| macos \| windows \| freebsd \| android \| other`。 |
 | `arch` | enum | `std::env::consts::ARCH` | `x86_64 \| aarch64 \| other`。 |
 | `libc` | enum | `cfg!(target_env)`——**编译期** | `gnu \| musl \| none`。运行时检测会读取发行版厂商字符串；编译期免费且不泄露任何内容。 |
 | `tty` | bool | `std::io::IsTerminal`，即 `crates/telemetry/src/envelope.rs:196` 处 | `stdin().is_terminal() && stdout().is_terminal()`。 |
-| `events` | array | 被排空的缓冲区 | 每个元素都只能是下面四种事件之一，没有其他。每批次上限为 200 个事件或 64 KiB；超出任一上限的批次会把剩余部分留到下一次 flush。 |
+| `events` | array | 被排空的缓冲区 | 每个元素都只能是下面六种事件之一，没有其他。每批次上限为 200 个事件或 64 KiB；超出任一上限的批次会把剩余部分留到下一次 flush。 |
 
 **`os_major` 不会被收集。** 读取它需要两个平台上的不安全 FFI 外加第三个平台上的文件解析器，而这正是那个以"小到足以审计"为全部价值的 crate——而 `os`、`arch`、`libc` 是免费的，并且能回答平台问题。如果存储的数据将来显示 OS 版本切分正是分诊所缺的，可以重新考虑；光凭直觉不是那样的证据。
 
-### 哪些 surface 会发送
+### 哪些界面发送
 
-除非机器有持久选择退出或本次运行有终止开关，否则 surface 默认发送。提示只在 TTY 上渲染。因此：
+所有运行界面使用同一个 `decide` 与发送前复查：要求当前明确同意、可读的隐私状态、可用的主目录、有效端点，并且没有持久退出或运行级终止开关。TUI 提供设置入口，无头命令不会代替用户同意。现有运行事件和计数器不变，不增加第二套采集器。
 
-- **`tui`** ——先进入原生 TUI，把披露内容显示为启动弹窗，在第一次交互选择之前保持未启动状态，然后遵循该选择。
-- **`exec`、`cli`、`app-server`、`mcp-server`、`serve`** ——在新主目录上遵循文档化默认值，在任何主目录上遵循所有持久/运行级选择退出。
-- **Fleet worker 在任何 surface 上都不会发送**，这是构造层面的保证（`crates/tui/src/fleet/host.rs:1386-1388`）。
+网站和应用使用 `product_usage`：同意版本 `4`，浏览器本地随机 v4 ID 每 90 天轮换；`os = other`、`arch = other`、`libc = none`、`tty = false`、`git_sha = null`，不读取浏览器指纹。同源代理仅向第一方采集端转发封闭 JSON，不转发入站 cookie、请求头、URL 或身份。未配置端点时不发送。浏览器退出统计会清除待发送计数和本地 ID；同意之前的操作不会补发。
 
 ### 事件：install_or_upgrade
 
@@ -203,11 +206,54 @@ Codewhale 没有恢复出厂设置命令，因此本文档也不会声称有。
 
 **panic 消息绝不发送。** `crates/tui/src/lib.rs:1590-1596` 处的 hook 从 payload 构建 `msg`；遥测绝不能读取它。切片（slicing）panic 会嵌入正在被切片的整个字符串，而本代码库在几十处切片用户和模型文本。
 
+### 事件：product_usage
+
+只统计明确的产品交互，所有字段均为饱和 `u32`，包括零值。不得包含页面路径、URL、来源页、搜索词、账号或会话 ID、文本或操作时间戳。页面退出或隐藏时汇总发送，不逐次发送操作。
+
+```jsonc
+{
+  "event": "product_usage",
+  "counters": {
+    "page_view": 1,
+    "docs_view": 0,
+    "install_copy": 0,
+    "download": 0,
+    "signup": 0,
+    "login": 0,
+    "session_create": 0,
+    "session_resume": 0,
+    "turn_submit": 0,
+    "turn_complete": 0,
+    "settings_open": 0,
+    "integration_connect": 0,
+    "error_shown": 0
+  }
+}
+```
+
+`page_view` 是页面访问次数，`docs_view` 是文档访问次数，`install_copy` 和 `download` 是安装操作次数。`signup`、`login` 只统计成功操作，不含身份。`session_create`、`session_resume`、`turn_submit`、`turn_complete` 统计相应操作。`settings_open`、`integration_connect`、`error_shown` 不包含具体设置、集成名称、错误正文或工作内容。零值不代表某功能可用或已被使用。
+
+### 事件：operations_summary
+
+复用控制平面现有信号记录，汇总匿名服务健康状况。仅允许下列六个饱和 `u32` 字段，且界面必须为 `control-plane`。此路径要求独立于用户分析选择的明确运维投递/处理方配置。每批使用新的随机 v4 `install_id`，不关联用户、账号或会话。不允许逐请求记录、路由、请求摘要、ID、错误正文、追踪或时间序列。`requests` 和 `errors` 统计请求与失败；`duration_ms_total` 和 `duration_ms_max` 是汇总延迟；`probes` 和 `probes_failed` 统计健康探测。
+
+```jsonc
+{
+  "event": "operations_summary",
+  "requests": 10,
+  "errors": 1,
+  "duration_ms_total": 1500,
+  "duration_ms_max": 300,
+  "probes": 2,
+  "probes_failed": 0
+}
+```
+
 ### 端点做什么——发布门槛，而非脚注
 
 本节曾是配置任何非回环端点的门槛。端点现在默认已配置，因此这是对已存在服务的描述，而不是对可能存在的服务的承诺。
 
-**它是什么。** `https://telemetry.codewhale.net/v1/telemetry` ——一个名为 `codewhale-telemetry-ingest` 的 Cloudflare Worker，其完整源码就在本仓库的 [`telemetry-ingest/`](../../telemetry-ingest/) 中。它是唯一的组件；路径上没有队列、没有代理、没有其他服务。它只写：Worker 中没有任何东西能回读已存储的内容，查询通过 Cloudflare 的 SQL API、以所有者的 token 带外进行。主机名刻意自描述，因此任何检查自己网络流量的人光看名字就能知道它是什么。
+**它是什么。** `https://telemetry.codewhale.net/v1/telemetry` ——一个名为 `codewhale-telemetry-ingest` 的 Cloudflare Worker，其完整源码就在本仓库的 [`telemetry-ingest/`](../../telemetry-ingest/) 中。它是唯一的 schema 与存储权威；浏览器应用可使用只转发主体的同源代理。没有遥测队列或第二套运行时采集器。它只写：Worker 中没有任何东西能回读已存储的内容，查询通过 Cloudflare 的 SQL API、以所有者的 token 带外进行。主机名刻意自描述，因此任何检查自己网络流量的人光看名字就能知道它是什么。
 
 **它存储什么。** 本文档中的一切，仅此而已，存放在 Workers Analytics Engine——每个事件一行。`telemetry-ingest/src/schema.ts` 中的校验器是一个**封闭**字段集：批次任意位置的未知键都会以 `400` 拒绝整个批次。未来某个客户端 bug 开始附带路径、提示词或 provider 表名时，会被服务器拒绝，而不是被悄悄存储。`telemetry-ingest/test/schema-doc.test.ts` 会从*本文件*中解析出字段名和枚举拼写，并断言与校验器的集合相等；`telemetry-ingest/test/ingest.test.ts` 会发布 Rust 客户端自己钉住的 golden 批次，并断言它被逐字节接受——因此本文档、客户端和端点不会在没有红色测试的情况下彼此漂移。
 
@@ -222,7 +268,11 @@ Codewhale 没有恢复出厂设置命令，因此本文档也不会声称有。
 
 **保留期：三个月。** 这是 Analytics Engine 的固定窗口，不可配置，因此它是上限而非策略——没有任何设置能让它更长。
 
-**客户端与存储之间没有第三方分析处理器。** 端点或运行时二进制中没有广告 SDK、分析 SDK、会话回放。
+**可选 PostHog 数据处理方。** 第一方存储完成后，明确配置的采集服务可把已验证的 schema-v2 / consent-v4 批次发往 [PostHog 批量采集 API](https://posthog.com/docs/api/capture)。只允许 `https://us.i.posthog.com` 和 `https://eu.i.posthog.com`；v1 批次永不进入此路径。PostHog 接收相同的有限字段，以批次时间作为事件时间，以 `codewhale:<install_id>` 作为匿名 `distinct_id`；事件名添加 `codewhale_` 前缀。固定设置 `$process_person_profile = false`、`$geoip_disable = true`、`$ip = null`。不转发请求元数据、身份识别、自动采集、会话回放、广告或工作内容，不添加 SDK。全新的服务端请求不携带用户 cookie 或身份验证头，不跟随重定向，限时 1.5 秒，不重试、不记录日志；处理方失败不改变已成功的第一方响应。
+
+PostHog 项目的保留期限和隐私设置是单独的部署配置，启用前必须复核。Analytics Engine 的三个月上限不能代表 PostHog 的保留期限。本地退出统计不会删除已经发送到处理方的数据；客户端没有远程删除 API。
+
+**边缘网络出口还需预发布验证。** [Cloudflare 文档](https://developers.cloudflare.com/fundamentals/reference/http-headers/#cf-connecting-ip-in-worker-subrequests)说明，Worker 向非 Cloudflare 区域发出的子请求可能被平台添加客户端 IP 请求头。新建 JavaScript 请求头和本地 fetch 模拟测试无法证明平台不会添加这些头。除主机和令牌外，`POSTHOG_IP_SAFE_EGRESS_VERIFIED="true"` 是单独的运维前提；在实际部署和所选区域目的地的验证证据确认所有接收头（包括 `CF-Connecting-IP`、`X-Forwarded-For`、`X-Real-IP`）均不含原始客户端 IP 之前，必须保持未设置。该标志本身不删除平台头。出口变化后需重新验证；若无法满足要求，保持转发关闭，或将发送环节移到与入站请求上下文分离的第一方环境。此源码变更不构成任何线上出口验证。
 
 **每个响应都是带空主体的裸状态码**——`204` 接受、`400` schema 违规、`404`/`405` 路径或方法错误、`413` 过大、`415` 内容类型错误、`429` 被限流、`500` 内部错误。端点无法回显它收到或持有的内容，而且由于客户端会在任何非 2xx 时丢弃批次，拒绝对你而言在构造上就是不可见的，服务器错误也永远不会表现为客户端可见的失败。
 

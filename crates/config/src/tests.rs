@@ -8720,9 +8720,9 @@ fn a_run_scoped_off_is_a_kill_switch_and_not_a_revocation() {
 fn telemetry_consent_names_its_source() {
     let guard = TelemetryEnvGuard::take();
 
-    // Nobody said anything: on, by default.
+    // Nobody said anything: off, by default.
     let (on, source) = resolved_telemetry_consent(None);
-    assert!(on);
+    assert!(!on);
     assert_eq!(source, TelemetrySource::Default);
 
     // The config file owns the answer.
@@ -8778,7 +8778,7 @@ fn resolved_runtime_options_reports_telemetry_source() {
     let guard = TelemetryEnvGuard::take();
 
     let resolved = ConfigToml::default().resolve_runtime_options(&CliRuntimeOverrides::default());
-    assert!(resolved.telemetry);
+    assert!(!resolved.telemetry);
     assert_eq!(resolved.telemetry_source, TelemetrySource::Default);
 
     // The CLI flag owns the answer for this run, off or on.
@@ -8810,7 +8810,7 @@ fn config_display_for_telemetry_reports_resolved_consent_with_source() {
     let config = ConfigToml::default();
     assert_eq!(
         config.get_display_value("telemetry").as_deref(),
-        Some("on (default)")
+        Some("off (default)")
     );
 
     let config = ConfigToml {
@@ -8912,9 +8912,9 @@ fn telemetry_env_invalid_is_recorded_rather_than_swallowed() {
 fn telemetry_explicit_off_distinguishes_an_answer_from_the_default() {
     let _guard = TelemetryEnvGuard::take();
 
-    // Nobody said anything: default on, with no explicit opt-out.
+    // Nobody said anything: default off, with no explicit opt-out.
     let resolved = ConfigToml::default().resolve_runtime_options(&CliRuntimeOverrides::default());
-    assert!(resolved.telemetry);
+    assert!(!resolved.telemetry);
     assert!(!resolved.telemetry_explicit_off);
 
     // The config file says no.
@@ -8967,9 +8967,8 @@ fn an_unconfigured_endpoint_resolves_to_the_shipped_default() {
         "an unconfigured endpoint must resolve to the shipped default"
     );
 
-    // …and the product default is anonymous usage counting on unless one of
-    // the documented kill switches says otherwise.
-    assert!(resolved.telemetry);
+    // An endpoint being available does not enable collection.
+    assert!(!resolved.telemetry);
     assert!(!resolved.telemetry_explicit_off);
 }
 

@@ -64,6 +64,9 @@ export const BLOB_COLUMNS = [
   "providers", // blob15 comma-joined, already sorted and deduplicated
   "panic_site", // blob16
   "sent_at", // blob17 the batch timestamp; events carry none
+  "aggregate_counters", // blob18 closed product/operations JSON count object
+  "schema_version", // blob19
+  "consent_version", // blob20 empty on legacy v1
 ] as const;
 
 /**
@@ -95,6 +98,8 @@ function toDataPoint(batch: Batch, event: Event): DataPoint {
   blobs[6] = batch.git_sha ?? "";
   blobs[7] = batch.tty ? "true" : "false";
   blobs[16] = batch.sent_at;
+  blobs[18] = String(batch.schema_version);
+  blobs[19] = batch.consent_version === undefined ? "" : String(batch.consent_version);
 
   let doubles = EMPTY_DOUBLES;
 
@@ -116,6 +121,14 @@ function toDataPoint(batch: Batch, event: Event): DataPoint {
         ...ERROR_FIELDS.map((field) => event.errors[field]),
         ...TURN_WALL_FIELDS.map((field) => event.turn_wall[field]),
       ];
+      break;
+    case "operations_summary": {
+      const { event: _event, ...counts } = event;
+      blobs[17] = JSON.stringify(counts);
+      break;
+    }
+    case "product_usage":
+      blobs[17] = JSON.stringify(event.counters);
       break;
     case "panic":
       blobs[15] = event.site;

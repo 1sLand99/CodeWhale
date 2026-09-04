@@ -1,4 +1,4 @@
-//! Default-on, user-disableable anonymous product usage counting for Codewhale.
+//! Explicitly opted-in, user-disableable product usage counting for Codewhale.
 //!
 //! The whole of what this crate may ever send is [`event`]. The whole of what
 //! decides whether it may send anything is [`decision`]. Nothing else in the
@@ -57,8 +57,9 @@ pub use decision::{
 };
 pub use envelope::reduce_panic_site;
 pub use event::{
-    Arch, Batch, ColdStartBucket, Counters, DurationBucket, Errors, Event, ExitClass, InstallKind,
-    Libc, Os, SCHEMA_VERSION, SessionSource, Surface, TurnWall,
+    Arch, Batch, CONSENT_VERSION, ColdStartBucket, Counters, DurationBucket, Errors, Event,
+    ExitClass, InstallKind, Libc, Os, ProductCounters, SCHEMA_VERSION, SessionSource, Surface,
+    TurnWall,
 };
 
 /// How long the shutdown flush may hold the process.
