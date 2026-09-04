@@ -192,8 +192,9 @@ pub enum ProviderKind {
     )]
     ModelstudioCodingPlanAnthropic,
     /// Google Antigravity (`agy` CLI) — consent-gated read-only credential
-    /// import only; the cloud-code wire protocol is not implemented and
-    /// requests fail closed with an actionable message.
+    /// import plus the `/v1internal` cloud-code streaming wire. Text-only
+    /// turns work; tool calls are not implemented and fail closed with an
+    /// actionable message, so this route cannot run an agentic turn.
     #[serde(alias = "agy")]
     Antigravity,
     /// Google — Gemini OpenAI-compatible endpoint. Its own backend, not an

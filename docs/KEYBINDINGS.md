@@ -148,22 +148,29 @@ When `[memory] enabled = true`, typing `# foo` and pressing `Enter` appends `foo
 
 | Chord                | Action                                              |
 |----------------------|-----------------------------------------------------|
-| `↑` / `↓` / `j` / `k`| Scroll one line (v0.8.13+: bare arrows also scroll when composer empty) |
-| `Alt-↑` / `Alt-↓`    | Scroll transcript (alternative)                         |
+| `↑` / `↓`            | Scroll one line (bare arrows scroll when the composer is empty) |
+| `Alt-↑` / `Alt-↓`    | Scroll transcript (works with a draft in the composer)  |
 | `PgUp` / `PgDn`      | Scroll one page                                    |
-| `Home` / `g`         | Jump to top                                         |
-| `End` / `G`          | Jump to bottom                                     |
+| `Alt-G` / `Alt-Shift-G` | Jump to top / bottom                            |
 | `Ctrl-Home` / `Ctrl-End` | Jump to top / bottom (also works from the composer)  |
 | `Alt-[` / `Alt-]`    | Jump between tool output blocks                     |
 | `Esc Esc`            | Backtrack to a previous user message (`←`/`→` steps, `Enter` rewinds) |
 | `Esc`                | Return focus to composer                           |
-| `y`                  | Copy the focused transcript block content          |
-| `Y`                  | Copy the focused transcript block with metadata    |
+| `Ctrl-Y`             | With an empty composer, copy the focused transcript cell |
+| `Alt-V`              | Open raw detail for the focused tool or message    |
+| `Ctrl-O`             | Open reasoning detail for the focused turn         |
 | `Enter`              | Open the focused transcript block fullscreen       |
-| `r`                  | Open the focused block's raw markdown/detail view  |
 | Mouse drag           | Select transcript text in Codewhale                |
 | `Ctrl-C`             | Copy an active Codewhale selection                 |
 | `Cmd-click` (macOS) / `Ctrl-click` (Linux/Windows) | Open an OSC 8 link in a supporting terminal (terminal-owned) |
+
+Bare printable keys are never transcript shortcuts. Under TUI-DOG-002 a
+printable character always belongs to the composer — `j`, `k`, `g`, `G`, `y`,
+`Y`, `r`, `v`, and `l` type themselves in every focus state, including
+transcript selection. Earlier revisions of this table documented them as
+navigation; they were never wired, and the help catalog has a test
+(`transcript_navigation_catalog_does_not_advertise_bare_typing_keys`) that
+keeps them out.
 
 For terminal-native selection, hold `Shift` while dragging (terminal support
 varies), then use the terminal's own copy command: usually `Cmd-C` on macOS or
@@ -171,6 +178,22 @@ varies), then use the terminal's own copy command: usually `Cmd-C` on macOS or
 terminal and are intentionally separate from Codewhale's `Ctrl-C` selection
 binding. Over SSH, Codewhale sends copy requests back through OSC 52, or via
 tmux's `load-buffer -w` path when running inside tmux.
+
+## Pointer (mouse)
+
+The mouse is a first-class input. Every row here is wired in
+`crates/tui/src/tui/mouse_ui.rs`.
+
+| Gesture              | Action                                              |
+|----------------------|-----------------------------------------------------|
+| Wheel up / down      | Scroll the transcript; over the composer, move the cursor a line at a time |
+| Click                | Activate the row, chip, or tool block under the pointer |
+| Drag                 | Select transcript text, or drag the scrollbar       |
+| Right click          | Open context actions for paste, selection, message details, context, and help |
+
+Hover feedback follows the same rule: anything that responds to a click
+highlights under the pointer. A row that highlights but does nothing, or acts
+without highlighting first, is a bug worth reporting.
 
 ## Work bar (after `Alt-W` claims focus)
 
