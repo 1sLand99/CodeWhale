@@ -4030,6 +4030,74 @@ async fn connect_all_reports_one_error_per_failed_required_server() {
     );
 }
 
+/// A dead server must not be re-dialed on every turn.
+///
+/// The turn loop rebuilds the tool catalog on each user message, and that
+/// path calls `connect_all`. Before the cooldown, a wall of unreachable
+/// servers meant a full round of connect timeouts before every first token —
+/// the "MCP is always reloading and slowing things down" report. The second
+/// pass must produce the same diagnosis without dialing anything.
+#[tokio::test]
+async fn a_failed_server_waits_out_a_cooldown_instead_of_redialing_every_turn() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("mcp.json");
+    fs::write(
+        &path,
+        r#"{
+            "mcpServers": {
+                "broken": {
+                    "command": "codewhale-tui-test-this-binary-does-not-exist-9f8e7d6c5b4a",
+                    "args": []
+                }
+            }
+        }"#,
+    )
+    .unwrap();
+
+    let mut pool = McpPool::from_config_path(&path).unwrap();
+    let first = pool.connect_all().await;
+    assert_eq!(first.len(), 1, "first pass should dial and fail once");
+
+    // Second pass: still reported as failing, but nothing is queued to dial.
+    let (pending, errors) = pool.collect_pending_connects();
+    assert!(
+        pending.is_empty(),
+        "a server inside its cooldown must not be re-dialed: {:?}",
+        pending.iter().map(|(name, _)| name).collect::<Vec<_>>()
+    );
+    assert_eq!(errors.len(), 1, "the failure must still be reported");
+    assert_eq!(errors[0].0, "broken");
+    assert!(
+        format!("{:#}", errors[0].1)
+            .to_lowercase()
+            .contains("spawn"),
+        "the replayed diagnosis must be the real one: {:#}",
+        errors[0].1
+    );
+
+    // Asking for that server by name is explicit intent and lifts the wait.
+    assert!(pool.retry_connection("broken").await.is_err());
+    let (pending, _) = pool.collect_pending_connects();
+    assert!(
+        pending.is_empty(),
+        "the failed retry restarts the ladder rather than clearing it"
+    );
+}
+
+#[test]
+fn connect_backoff_doubles_then_holds_at_the_ceiling() {
+    use std::time::Duration;
+    assert_eq!(connect_backoff_delay(1), Duration::from_secs(30));
+    assert_eq!(connect_backoff_delay(2), Duration::from_secs(60));
+    assert_eq!(connect_backoff_delay(3), Duration::from_secs(120));
+    assert_eq!(connect_backoff_delay(6), Duration::from_secs(600));
+    assert_eq!(
+        connect_backoff_delay(50),
+        Duration::from_secs(600),
+        "the ceiling holds; a long-dead server is retried every ten minutes"
+    );
+}
+
 #[test]
 fn parse_sse_message_data_extracts_message_events() {
     let body = "event: message\r\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\r\n\r\n";
