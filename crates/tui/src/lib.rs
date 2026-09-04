@@ -312,7 +312,7 @@ enum Commands {
     Logout,
     /// Manage provider authentication flows.
     Auth(TuiAuthArgs),
-    /// List available models from the configured API endpoint
+    /// List cached models, or update catalogs for configured providers
     Models(ModelsArgs),
     /// Generate speech audio with Xiaomi MiMo TTS models
     #[command(visible_alias = "tts")]
@@ -1154,6 +1154,12 @@ struct ModelsArgs {
     /// Print models as pretty JSON
     #[arg(long, default_value_t = false)]
     json: bool,
+    /// Refresh catalogs for all configured providers (no inference requests)
+    #[arg(long, visible_alias = "refresh")]
+    update: bool,
+    /// Limit listing or refresh to this exact provider identity
+    #[arg(long, value_name = "ID")]
+    provider: Option<String>,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -7549,35 +7555,7 @@ fn run_features_command(config: &Config, command: FeaturesCli) -> Result<()> {
 }
 
 async fn run_models(config: &Config, args: ModelsArgs) -> Result<()> {
-    use crate::client::DeepSeekClient;
-
-    let client = DeepSeekClient::new(config)?;
-    let mut models = client.list_models().await?;
-    models.sort_by(|a, b| a.id.cmp(&b.id));
-
-    if args.json {
-        println!("{}", serde_json::to_string_pretty(&models)?);
-        return Ok(());
-    }
-
-    if models.is_empty() {
-        println!("No models returned by the API.");
-        return Ok(());
-    }
-
-    let default_model = config.default_model();
-
-    println!("Available models (default: {default_model})");
-    for model in models {
-        let marker = if model.id == default_model { "*" } else { " " };
-        if let Some(owner) = model.owned_by {
-            println!("{marker} {} ({owner})", model.id);
-        } else {
-            println!("{marker} {}", model.id);
-        }
-    }
-
-    Ok(())
+    crate::provider_lake::run_models(config, args.update, args.provider.as_deref(), args.json).await
 }
 
 async fn run_speech(config: &Config, args: SpeechArgs) -> Result<()> {

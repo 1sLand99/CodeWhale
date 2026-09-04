@@ -36,9 +36,7 @@ use crate::model_profile::{
 use crate::model_registry;
 use crate::models_dev_live::{self, ModelsDevFreshness};
 use crate::palette;
-use crate::provider_lake::{
-    all_catalog_models_for_provider, catalog_offering_for_model, configured_providers,
-};
+use crate::provider_lake::{catalog_offering_for_model, configured_providers};
 use crate::settings::PinnedModel;
 use crate::tui::app::{App, ReasoningEffort};
 use crate::tui::menu_style;
@@ -1336,7 +1334,11 @@ fn picker_model_rows_for_app(app: &App, config: &Config) -> Vec<ModelPickerRow> 
         let mut model_ids = if provider == ApiProvider::OpenaiCodex {
             codex_roster.model_ids()
         } else {
-            provider_catalog_model_ids(provider)
+            provider_catalog_model_ids(
+                provider,
+                &config.provider_identity_for(provider),
+                &config.base_url_for_route(provider),
+            )
         };
         if let Some(model) = app
             .provider_models
@@ -1604,11 +1606,15 @@ fn push_configured_provider_model(
     }
 }
 
-fn provider_catalog_model_ids(provider: ApiProvider) -> Vec<String> {
+fn provider_catalog_model_ids(
+    provider: ApiProvider,
+    identity: &str,
+    base_url: &str,
+) -> Vec<String> {
     let mut models = Vec::new();
-    for id in all_catalog_models_for_provider(provider) {
-        // The catalog describes the built-in provider route. A custom route's
-        // endpoint-owned current/configured model is appended separately.
+    for id in crate::provider_lake::catalog_models_for_route(provider, identity, base_url) {
+        // Cached IDs belong to this exact endpoint. The configured/current
+        // model is appended separately so users can still select saved IDs.
         push_model_id(&mut models, picker_visible_model_id(provider, &id, false));
     }
     models
@@ -1619,7 +1625,11 @@ fn provider_scoped_model_ids_for_app(app: &App, include_current_model: bool) -> 
     // separate custom/current-model row.
     let mut models = Vec::new();
     push_model_id(&mut models, "auto");
-    for id in provider_catalog_model_ids(app.api_provider) {
+    for id in provider_catalog_model_ids(
+        app.api_provider,
+        app.provider_identity_for_persistence(),
+        &app.active_route_base_url,
+    ) {
         push_model_id(&mut models, &id);
     }
 

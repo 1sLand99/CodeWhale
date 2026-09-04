@@ -289,7 +289,7 @@ pub async fn refresh(force_network: bool) -> Result<usize, ModelsDevRefreshError
         ModelsDevFreshness::Live,
     )?;
     if let Some(path) = cache_path() {
-        let _ = save_cache_file(
+        save_cache_file(
             &path,
             &PersistedModelsDevCache {
                 schema_version: CACHE_SCHEMA_VERSION,
@@ -298,7 +298,8 @@ pub async fn refresh(force_network: bool) -> Result<usize, ModelsDevRefreshError
                 source_label: url,
                 body,
             },
-        );
+        )
+        .inspect_err(|error| mark_failed(error.clone()))?;
     }
     Ok(count)
 }
@@ -348,7 +349,7 @@ async fn refresh_from_path(path: &Path) -> Result<usize, ModelsDevRefreshError> 
         ModelsDevFreshness::Live,
     )?;
     if let Some(cache) = cache_path() {
-        let _ = save_cache_file(
+        save_cache_file(
             &cache,
             &PersistedModelsDevCache {
                 schema_version: CACHE_SCHEMA_VERSION,
@@ -357,7 +358,8 @@ async fn refresh_from_path(path: &Path) -> Result<usize, ModelsDevRefreshError> 
                 source_label: label,
                 body,
             },
-        );
+        )
+        .inspect_err(|error| mark_failed(error.clone()))?;
     }
     Ok(count)
 }
