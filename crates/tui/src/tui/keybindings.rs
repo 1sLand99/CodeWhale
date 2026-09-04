@@ -184,7 +184,11 @@ pub const KEYBINDINGS: &[KeybindingEntry] = &[
         section: KeybindingSection::Editing,
     },
     KeybindingEntry {
-        chord: "Ctrl+J / Alt+Enter / Shift+Enter",
+        // Ctrl+J leads because it is a plain control byte every terminal
+        // sends. Shift+Enter only arrives where the kitty keyboard protocol
+        // is live — see `composer_ui::terminal_can_report_shift_enter` — so
+        // it is listed last rather than taught first.
+        chord: "Ctrl+J / Alt+Enter / Shift+Enter (enhanced terminals)",
         description_id: crate::localization::MessageId::KbInsertNewline,
         section: KeybindingSection::Editing,
     },
@@ -434,7 +438,7 @@ mod tests {
 
         assert_eq!(
             chord_for(crate::localization::MessageId::KbInsertNewline),
-            "Ctrl+J / Alt+Enter / Shift+Enter"
+            "Ctrl+J / Alt+Enter / Shift+Enter (enhanced terminals)"
         );
         assert!(
             KEYBINDINGS
@@ -778,7 +782,7 @@ mod tests {
         );
         assert_eq!(
             entry_for(crate::localization::MessageId::KbInsertNewline).chord,
-            "Ctrl+J / Alt+Enter / Shift+Enter"
+            "Ctrl+J / Alt+Enter / Shift+Enter (enhanced terminals)"
         );
 
         let newline_copy = crate::localization::tr(

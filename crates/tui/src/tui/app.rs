@@ -662,10 +662,15 @@ impl LaunchState {
     #[must_use]
     pub fn new(visible: bool, workspace: &std::path::Path) -> Self {
         let (recent, total_workspace_sessions) = load_launch_recent(workspace);
-        // The launch card's migration notice is only painted when it is true:
-        // Claude Code leaves its sessions under `~/.claude/projects`. One
-        // stat at construction, never on the render path.
-        let claude_code_detected = std::env::var_os("HOME")
+        // The migration notice answers a question you have exactly once:
+        // "I have Claude Code, what comes over?". It used to key on
+        // `~/.claude/projects` alone, so anyone who keeps Claude Code
+        // installed saw it on every single launch forever. It now retires as
+        // soon as `/import-claude` has been run — that command always writes
+        // its report, so the report is the durable receipt that the question
+        // has been answered. Two stats at construction, never on the render
+        // path.
+        let has_claude_code = std::env::var_os("HOME")
             .as_ref()
             .map(|home| {
                 std::path::Path::new(home)
@@ -674,6 +679,14 @@ impl LaunchState {
                     .is_dir()
             })
             .unwrap_or(false);
+        let import_already_reviewed = codewhale_config::codewhale_home()
+            .map(|home| {
+                home.join("imports")
+                    .join("claude-import-report.md")
+                    .exists()
+            })
+            .unwrap_or(false);
+        let claude_code_detected = has_claude_code && !import_already_reviewed;
         Self {
             visible,
             status: None,

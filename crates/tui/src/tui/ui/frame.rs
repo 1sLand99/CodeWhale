@@ -1066,120 +1066,13 @@ pub(crate) fn render(f: &mut Frame, app: &mut App, _config: &Config) -> Option<(
         return None;
     }
 
-    if app.launch.visible {
-        // The launch screen lives inside the session shell frame (spec
-        // §5b): the Tideline startup stage as the body, then the posture row
-        // and the info line beneath it — the same chrome every post-session
-        // screen wears, so opening Codewhale and working in it are one
-        // design. Nothing paints above the stage; the launch header is the
-        // stage's own. The pre-session composer docks in the stage's bottom
-        // rows; completion entries are computed here — the same way the
-        // session path below computes them for ComposerWidget — so the
-        // stage can paint its popup (#5698 review finding 2); the mention
-        // walker needs &mut App, rendering does not.
-        let launch_slash_menu_entries = visible_slash_menu_entries(app, SLASH_MENU_LIMIT);
-        let launch_mention_menu_entries =
-            crate::tui::file_mention::visible_mention_menu_entries(app, app.mention_menu_limit);
-        // The posture bar and the metrics line appear only once a session
-        // exists: while the launch card is up the stage owns every row.
-        let card_up = {
-            let motion = app.motion_policy().allows_decorative() && !app.low_motion;
-            app.launch
-                .card_dissolve_progress(app.ambient_clock_ms, motion)
-                < 1.0
-        };
-        let areas = if card_up {
-            Layout::default()
-                .direction(Direction::Vertical)
-                .flex(ratatui::layout::Flex::Start)
-                .constraints([Constraint::Min(1)])
-                .split(size)
-        } else {
-            Layout::default()
-                .direction(Direction::Vertical)
-                .flex(ratatui::layout::Flex::Start)
-                .constraints([
-                    Constraint::Min(1),    // stage: Tideline startup
-                    Constraint::Length(1), // posture row (merged footer, slots 6+8)
-                    Constraint::Length(1), // info line
-                ])
-                .split(size)
-        };
-        let stage_area = areas[0];
-        let footer_area = areas.get(1).copied().unwrap_or_default();
-        let info_area = areas.get(2).copied().unwrap_or_default();
-        // Advance the ambient clock here: the transcript widget that
-        // normally samples it is not built while the launch screen is up,
-        // and the mark's surfacing, the card's dissolve and the water all
-        // read this one clock.
-        app.sample_ambient_clock_ms();
-        let startup = crate::tui::underwater::tideline_startup_from_app(app).ocean(
-            crate::tui::underwater::launch_ocean_from_app(app, stage_area),
-        );
-        let mut hitboxes = if startup.composer.enclosed {
-            crate::tui::underwater::tideline_startup_hitboxes(stage_area)
-        } else {
-            crate::tui::underwater::tideline_startup_hitboxes_with_composer(stage_area, false)
-        };
-        // The card's clickable rows share the painter's plan geometry, so
-        // hover and click rects match painted cells.
-        hitboxes.rows = crate::tui::underwater::tideline_startup_row_hitboxes(stage_area, &startup);
-        let sixel_area =
-            crate::tui::underwater::render_tideline_startup(stage_area, f.buffer_mut(), &startup);
-        app.launch.sixel_mark_area = if sixel_area.width > 0 {
-            Some(sixel_area)
-        } else {
-            None
-        };
-        // The completion popup paints above the docked composer's input row,
-        // over the stage rows it needs — the same caller-computed entries
-        // the session popup rides.
-        if let Some(input_row) = hitboxes
-            .input
-            .map(|area| area.y.saturating_sub(stage_area.y))
-        {
-            crate::tui::underwater::render_launch_completion_popup(
-                stage_area,
-                f.buffer_mut(),
-                app,
-                input_row,
-                &launch_slash_menu_entries,
-                &launch_mention_menu_entries,
-            );
-        }
-        crate::tui::underwater::apply_launch_hitboxes(&hitboxes, &mut app.launch);
-        // The merged footer is the screen's last row on every screen.
-        if footer_area.height > 0 {
-            let facts = crate::tui::phase_strip::tideline_footer_from_app(app, footer_area.width);
-            let footer = facts.widget(
-                &app.ui_theme,
-                crate::tui::color_compat::ascii_safe_enabled(),
-            );
-            let buf = f.buffer_mut();
-            Block::default()
-                .style(Style::default().bg(app.ui_theme.footer_bg))
-                .render(footer_area, buf);
-            crate::tui::phase_strip::render_tideline_footer(footer_area, buf, &footer);
-        }
-        // The info line is the screen's last row, under the posture row. At
-        // a height with no row for it, the stale rects must go too, or a
-        // model/context click could route against cells nothing paints.
-        let mut info_interactions = InfoLineInteractionHitboxes::default();
-        if info_area.height > 0 {
-            info_interactions = render_info_row(f, app, info_area);
-        } else {
-            app.viewport.last_infoline_hitboxes.clear();
-        }
-        register_info_interaction_targets(app, info_interactions);
-        if !app.view_stack.is_empty() {
-            if app.view_stack.top_kind() == Some(ModalKind::Approval) {
-                app.viewport.last_approval_area = app.view_stack.top_occupied_region(size);
-            }
-            let buf = f.buffer_mut();
-            app.view_stack.render(size, buf);
-        }
-        return None;
-    }
+    // The opening screen is no longer a separate surface. Founder ruling:
+    // "we don't have to have a different look for the opening screen ... we
+    // can make it an asset that exists there instead". The launch card is now
+    // the idle transcript's own empty state (`underwater::launch_empty_state`),
+    // so the composer below it is the real one, the footer and info line are
+    // the ones every other screen wears, and Tab means what it means
+    // everywhere else — there is no second input authority left to arbitrate.
 
     // Mini-window mode: when the host terminal window is pinned into its
     // small always-on-top form, hide the shell chrome and keep only what the
@@ -1433,6 +1326,22 @@ pub(crate) fn render(f: &mut Frame, app: &mut App, _config: &Config) -> Option<(
             shell_ocean = chat_widget.ocean_column();
             let buf = f.buffer_mut();
             chat_widget.render(chat_area, buf);
+        }
+        // The launch card's rows are clickable where they painted. The row
+        // offsets come from the same builder that produced the lines, so a
+        // hitbox cannot describe a row the transcript did not draw.
+        if app.launch.visible {
+            let rows = crate::tui::underwater::launch_empty_state(app, chat_area).rows;
+            app.launch.row_hitboxes = rows
+                .into_iter()
+                .filter_map(|(id, row)| {
+                    let y = chat_area.y.checked_add(u16::try_from(row).ok()?)?;
+                    (y < chat_area.y.saturating_add(chat_area.height))
+                        .then_some((id, Rect::new(chat_area.x, y, chat_area.width, 1)))
+                })
+                .collect();
+        } else if !app.launch.row_hitboxes.is_empty() {
+            app.launch.row_hitboxes.clear();
         }
     }
 

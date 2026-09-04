@@ -567,7 +567,15 @@ fn build_entries(
     for binding in KEYBINDINGS {
         // macOS renders Alt chords with the Option glyph (`⌥V`), never
         // `Alt`/`Cmd` (TUI-DOG-002 acceptance).
-        let label = crate::tui::shell_key_routing::display_chord(binding.chord).into_owned();
+        let mut label = crate::tui::shell_key_routing::display_chord(binding.chord).into_owned();
+        // The newline row is the one chord whose availability depends on the
+        // terminal rather than the platform, so it is answered here instead
+        // of listing a key that may do nothing.
+        if label.contains("Shift+Enter")
+            && !crate::tui::composer_ui::terminal_can_report_shift_enter()
+        {
+            label = label.replace(" / Shift+Enter (enhanced terminals)", "");
+        }
         let description = tr(locale, binding.description_id).into_owned();
         let haystack = format!(
             "{} {}",

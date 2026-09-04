@@ -7193,13 +7193,23 @@ mod tests {
         let mut transcript = Buffer::empty(transcript_area);
         ChatWidget::new(&mut app, transcript_area).render(transcript_area, &mut transcript);
 
-        // Pre-session launch stage (the Tideline startup surface).
+        // The opening screen is the ordinary idle transcript now, so its
+        // content comes from the same empty-state builder every other screen
+        // uses rather than a second surface.
         app.launch.visible = true;
         let launch_area = Rect::new(0, 0, 100, 32);
+        let launch_lines = crate::tui::underwater::empty_state_lines(&app, launch_area);
         let mut launch = Buffer::empty(launch_area);
-        {
-            let startup = crate::tui::underwater::tideline_startup_from_app(&app).ascii_safe(true);
-            crate::tui::underwater::render_tideline_startup(launch_area, &mut launch, &startup);
+        for (row, line) in launch_lines.iter().enumerate() {
+            if let Ok(y) = u16::try_from(row) {
+                if y < launch_area.height {
+                    ratatui::widgets::Widget::render(
+                        ratatui::widgets::Paragraph::new(line.clone()),
+                        Rect::new(0, y, launch_area.width, 1),
+                        &mut launch,
+                    );
+                }
+            }
         }
         app.launch.visible = false;
 

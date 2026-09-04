@@ -191,20 +191,6 @@ pub(crate) fn terminal_can_report_shift_enter() -> bool {
     *SUPPORTED.get_or_init(|| crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false))
 }
 
-/// The newline chord chrome may honestly advertise on this terminal.
-///
-/// `Ctrl+J` is the fallback because it is a plain control byte every terminal
-/// sends. Advertising `Shift+Enter` where it cannot arrive is the same defect
-/// as the old `Ctrl+/` help hint: a promise the product cannot keep.
-#[must_use]
-pub(crate) fn advertised_newline_chord() -> &'static str {
-    if terminal_can_report_shift_enter() {
-        "Shift+Enter"
-    } else {
-        "Ctrl+J"
-    }
-}
-
 pub(crate) fn is_composer_newline_key(key: KeyEvent, multiline_mode: bool) -> bool {
     match key.code {
         KeyCode::Char('j') => key.modifiers.contains(KeyModifiers::CONTROL),

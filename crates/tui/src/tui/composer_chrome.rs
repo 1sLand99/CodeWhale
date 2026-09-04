@@ -146,9 +146,6 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::palette::{ChromeInk, UiTheme, chrome_style};
 
-/// The composer's fixed docked height in the work-screen shell (spec §5b).
-pub const TIDELINE_COMPOSER_HEIGHT: u16 = 4;
-
 /// Fixed width of the painted `[↑]` submit control.
 pub const TIDELINE_COMPOSER_SUBMIT_WIDTH: u16 = 3;
 
@@ -261,8 +258,6 @@ pub struct TidelineComposerGeometry {
     pub content: Rect,
     /// The visible three-cell `[↑]` submit affordance.
     pub submit: Rect,
-    /// The full rounded shell; clicking it focuses the composer.
-    pub focus: Rect,
 }
 
 /// Derive the fixed shell geometry. The caller must only paint the rounded
@@ -289,11 +284,7 @@ pub fn tideline_composer_geometry(area: Rect) -> TidelineComposerGeometry {
         width: content_right.saturating_sub(content_x),
         height: area.height.saturating_sub(2),
     };
-    TidelineComposerGeometry {
-        content,
-        submit,
-        focus: area,
-    }
+    TidelineComposerGeometry { content, submit }
 }
 
 /// Paint only the shared rounded shell and its visible `[↑]` submit target.
@@ -461,25 +452,6 @@ fn truncate_cells(text: &str, width: usize) -> String {
         used += w;
     }
     out
-}
-
-/// Recorded hitboxes for one rendered composer (spec §6): the `[↑]` submit
-/// rect and the full rounded shell (click = focus the composer).
-#[derive(Debug, Clone, Copy)]
-pub struct TidelineComposerHitboxes {
-    pub submit: Rect,
-    pub border: Rect,
-}
-
-/// Compute the composer hitboxes for one render area; same inputs as
-/// [`render_tideline_composer`] so the submit rect matches painted cells.
-#[must_use]
-pub fn tideline_composer_hitboxes(area: Rect) -> TidelineComposerHitboxes {
-    let geometry = tideline_composer_geometry(area);
-    TidelineComposerHitboxes {
-        submit: geometry.submit,
-        border: geometry.focus,
-    }
 }
 
 #[cfg(test)]

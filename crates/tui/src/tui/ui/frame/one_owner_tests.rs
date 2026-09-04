@@ -102,6 +102,38 @@ fn count_rows_containing(rows: &[String], needle: &str) -> usize {
     rows.iter().filter(|row| row.contains(needle)).count()
 }
 
+/// Visual probe (ignored): print the unified launch screen.
+#[test]
+#[ignore = "visual probe"]
+fn show_unified_launch_screen() {
+    let mut app = frame_app();
+    app.is_loading = false;
+    app.history.clear();
+    app.subagent_cache.clear();
+    app.launch.visible = true;
+    app.launch.recent = vec![
+        crate::tui::app::LaunchRecentSession {
+            id: "s1".into(),
+            title: "hi so we've been working on codewhale for quite a while".into(),
+            updated_at: chrono::Utc::now() - chrono::Duration::days(3),
+            message_count: 370,
+        },
+        crate::tui::app::LaunchRecentSession {
+            id: "s2".into(),
+            title: "test".into(),
+            updated_at: chrono::Utc::now() - chrono::Duration::hours(23),
+            message_count: 5,
+        },
+    ];
+    app.launch.total_workspace_sessions = 12;
+    for (w, h) in [(120u16, 32u16), (80, 24)] {
+        eprintln!("\n===== {w}x{h} =====");
+        for row in draw(&mut app, w, h) {
+            eprintln!("|{}|", row.trim_end());
+        }
+    }
+}
+
 /// Every chrome fact paints in exactly one row of the composed default
 /// frame: the context reading, the mode and permission chips, the model,
 /// the cost, the agent count, and the help hint.
