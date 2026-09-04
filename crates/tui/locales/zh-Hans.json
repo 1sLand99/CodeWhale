@@ -47,6 +47,8 @@
   "ExtensionsProductCuaDescription": "带有原生 macOS 驱动的本地计算机操作运行时。",
   "ExtensionsProductDetail": "发布者：{publisher} · 组件：{components} · 来源：{source}",
   "ExtensionsProductPlaywrightDescription": "基于 Microsoft Playwright MCP 的浏览器自动化。",
+  "ExtensionsProductCodewhaleComputerUseDescription": "看见屏幕并操作它：以无障碍接口为先的控制、截图、缩放与录屏，还可通过 ssh 操作远程计算机。",
+  "ExtensionsStateFirstParty": "随 Codewhale 内置",
   "ExtensionsProductSandboxDescription": "用于隔离插件所提供本地命令的进程层。",
   "ExtensionsSearchLabel": "搜索：",
   "ExtensionsSkillRootCompatibleGlobal": "兼容的全局目录（{harness}）",

@@ -47,6 +47,8 @@
   "ExtensionsProductCuaDescription": "macOS ネイティブドライバーを備えたローカルのコンピューター操作ランタイム。",
   "ExtensionsProductDetail": "発行元: {publisher} · コンポーネント: {components} · ソース: {source}",
   "ExtensionsProductPlaywrightDescription": "Microsoft の Playwright MCP を基盤とするブラウザ自動化。",
+  "ExtensionsProductCodewhaleComputerUseDescription": "画面を見て操作する。アクセシビリティ優先の操作、スクリーンショット、ズーム、画面録画に加え、ssh 経由のリモートコンピューター。",
+  "ExtensionsStateFirstParty": "Codewhale に同梱",
   "ExtensionsProductSandboxDescription": "プラグインが提供するローカルコマンド用のプロセス分離レイヤー。",
   "ExtensionsSearchLabel": "検索: ",
   "ExtensionsSkillRootCompatibleGlobal": "互換グローバル ({harness})",

@@ -47,6 +47,8 @@
   "ExtensionsProductCuaDescription": "네이티브 macOS 드라이버를 갖춘 로컬 컴퓨터 사용 런타임입니다.",
   "ExtensionsProductDetail": "게시자: {publisher} · 구성 요소: {components} · 소스: {source}",
   "ExtensionsProductPlaywrightDescription": "Microsoft의 Playwright MCP를 기반으로 한 브라우저 자동화입니다.",
+  "ExtensionsProductCodewhaleComputerUseDescription": "화면을 보고 조작합니다. 접근성 우선 제어, 스크린샷, 확대, 화면 녹화에 ssh 원격 컴퓨터까지.",
+  "ExtensionsStateFirstParty": "Codewhale에 기본 포함",
   "ExtensionsProductSandboxDescription": "플러그인이 제공하는 로컬 명령을 위한 프로세스 격리 계층입니다.",
   "ExtensionsSearchLabel": "검색: ",
   "ExtensionsSkillRootCompatibleGlobal": "호환 전역 ({harness})",

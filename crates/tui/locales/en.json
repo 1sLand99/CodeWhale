@@ -47,6 +47,8 @@
   "ExtensionsProductCuaDescription": "Local computer-use runtime with a native macOS driver.",
   "ExtensionsProductDetail": "publisher: {publisher} · components: {components} · source: {source}",
   "ExtensionsProductPlaywrightDescription": "Browser automation built around Microsoft's Playwright MCP.",
+  "ExtensionsProductCodewhaleComputerUseDescription": "See the screen and operate it: accessibility-first control, screenshots, zoom, and screen recording, plus remote computers over ssh.",
+  "ExtensionsStateFirstParty": "Ships with Codewhale",
   "ExtensionsProductSandboxDescription": "Process isolation layer for plugin-provided local commands.",
   "ExtensionsSearchLabel": "Search: ",
   "ExtensionsSkillRootCompatibleGlobal": "Compatible global ({harness})",

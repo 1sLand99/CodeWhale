@@ -47,6 +47,8 @@
   "ExtensionsProductCuaDescription": "Lokale Computersteuerungs-Laufzeit mit nativem macOS-Treiber.",
   "ExtensionsProductDetail": "Herausgeber: {publisher} · Komponenten: {components} · Quelle: {source}",
   "ExtensionsProductPlaywrightDescription": "Browser-Automatisierung auf Basis von Microsofts Playwright MCP.",
+  "ExtensionsProductCodewhaleComputerUseDescription": "Den Bildschirm sehen und bedienen: Steuerung über Bedienungshilfen, Screenshots, Zoom und Bildschirmaufnahme, dazu entfernte Rechner über ssh.",
+  "ExtensionsStateFirstParty": "Mit Codewhale ausgeliefert",
   "ExtensionsProductSandboxDescription": "Prozessisolierung für lokale Befehle, die Plugins bereitstellen.",
   "ExtensionsSearchLabel": "Suchen: ",
   "ExtensionsSkillRootCompatibleGlobal": "Kompatibel global ({harness})",

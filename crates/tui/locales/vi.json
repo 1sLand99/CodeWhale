@@ -47,6 +47,8 @@
   "ExtensionsProductCuaDescription": "Môi trường chạy điều khiển máy tính cục bộ với trình điều khiển macOS gốc.",
   "ExtensionsProductDetail": "nhà phát hành: {publisher} · thành phần: {components} · nguồn: {source}",
   "ExtensionsProductPlaywrightDescription": "Tự động hóa trình duyệt dựa trên Playwright MCP của Microsoft.",
+  "ExtensionsProductCodewhaleComputerUseDescription": "Nhìn màn hình và điều khiển: điều khiển ưu tiên trợ năng, ảnh chụp, thu phóng và ghi màn hình, cùng máy tính từ xa qua ssh.",
+  "ExtensionsStateFirstParty": "Có sẵn trong Codewhale",
   "ExtensionsProductSandboxDescription": "Lớp cô lập tiến trình cho các lệnh cục bộ do plugin cung cấp.",
   "ExtensionsSearchLabel": "Tìm kiếm: ",
   "ExtensionsSkillRootCompatibleGlobal": "Toàn cục tương thích ({harness})",

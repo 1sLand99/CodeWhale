@@ -47,6 +47,8 @@
   "ExtensionsProductCuaDescription": "Runtime penggunaan komputer lokal dengan driver macOS native.",
   "ExtensionsProductDetail": "penerbit: {publisher} · komponen: {components} · sumber: {source}",
   "ExtensionsProductPlaywrightDescription": "Otomatisasi browser yang dibangun dengan Playwright MCP Microsoft.",
+  "ExtensionsProductCodewhaleComputerUseDescription": "Melihat layar dan mengoperasikannya: kendali berbasis aksesibilitas, tangkapan layar, zoom, dan perekaman layar, plus komputer jarak jauh lewat ssh.",
+  "ExtensionsStateFirstParty": "Disertakan dengan Codewhale",
   "ExtensionsProductSandboxDescription": "Lapisan isolasi proses untuk perintah lokal yang disediakan plugin.",
   "ExtensionsSearchLabel": "Cari: ",
   "ExtensionsSkillRootCompatibleGlobal": "Global kompatibel ({harness})",

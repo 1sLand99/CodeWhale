@@ -47,6 +47,8 @@
   "ExtensionsProductCuaDescription": "Локальная среда управления компьютером с нативным драйвером macOS.",
   "ExtensionsProductDetail": "издатель: {publisher} · компоненты: {components} · источник: {source}",
   "ExtensionsProductPlaywrightDescription": "Автоматизация браузера на основе Playwright MCP от Microsoft.",
+  "ExtensionsProductCodewhaleComputerUseDescription": "Видит экран и управляет им: управление через специальные возможности, снимки, масштаб и запись экрана, а также удалённые компьютеры по ssh.",
+  "ExtensionsStateFirstParty": "Входит в Codewhale",
   "ExtensionsProductSandboxDescription": "Слой изоляции процессов для локальных команд, предоставляемых плагинами.",
   "ExtensionsSearchLabel": "Поиск: ",
   "ExtensionsSkillRootCompatibleGlobal": "Совместимые глобальные ({harness})",

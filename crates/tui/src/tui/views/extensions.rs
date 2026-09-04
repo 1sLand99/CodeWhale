@@ -278,6 +278,27 @@ impl ExtensionsSnapshot {
         }
 
         for item in &mut group.items {
+            // The first-party row is not an MCP recommendation: the plugin is
+            // already in the binary, so the row asks the registry what it
+            // wants — trust it, enable it, or open it — through the same
+            // ladder the Plugins tab uses.
+            if item.id == "codewhale-computer-use" {
+                item.action = match app
+                    .plugin_registry
+                    .list()
+                    .into_iter()
+                    .find(|plugin| plugin.name() == "computer-use")
+                {
+                    Some(plugin) => {
+                        item.state = localized_plugin_state(app.ui_locale, plugin.state_label());
+                        Some(plugin_row_action(app.ui_locale, plugin))
+                    }
+                    None => Some(ExtensionAction::Status {
+                        label: tr(app.ui_locale, MessageId::PickerActionUnavailable).into_owned(),
+                    }),
+                };
+                continue;
+            }
             let recommendation = match item.id.as_str() {
                 "playwright-browser" => Some(("playwright", "playwright")),
                 "chrome-devtools" => Some(("chrome-devtools", "chrome-devtools")),
@@ -334,6 +355,31 @@ impl ExtensionsSnapshot {
 /// manifests produced by the packaging lane remain the installation authority.
 fn reviewed_product_catalog(locale: Locale) -> Vec<PluginProduct> {
     vec![
+        // Codewhale's own, and the reason this row exists: someone browsing
+        // the marketplace for computer use saw Cua and Browser Use and not
+        // the plugin that already ships inside the binary.
+        PluginProduct {
+            id: "codewhale-computer-use".into(),
+            name: "Computer Use".into(),
+            description: tr(
+                locale,
+                MessageId::ExtensionsProductCodewhaleComputerUseDescription,
+            )
+            .into_owned(),
+            publisher: "Codewhale".into(),
+            source_reference: "plugins/computer-use".into(),
+            components: vec![
+                PluginProductComponent {
+                    kind: PluginProductComponentKind::Mcp,
+                    name: "Computer Use MCP".into(),
+                },
+                PluginProductComponent {
+                    kind: PluginProductComponentKind::Skills,
+                    name: "Computer Use Skill".into(),
+                },
+            ],
+            maturity: tr(locale, MessageId::ExtensionsStateFirstParty).into_owned(),
+        },
         PluginProduct {
             id: "playwright-browser".into(),
             name: "Playwright Browser".into(),
@@ -631,6 +677,42 @@ fn localized_skill_root(locale: Locale, kind: crate::skills::roots::SkillRootKin
     }
 }
 
+/// The one action a plugin row offers, wherever that row is drawn.
+///
+/// The Plugins tab and the marketplace's first-party row both need "what does
+/// this plugin want from me right now?", and a second copy of the ladder is
+/// how the marketplace ends up offering `Enable` for something already active.
+fn plugin_row_action(
+    locale: Locale,
+    plugin: &crate::plugins::types::LoadedPlugin,
+) -> ExtensionAction {
+    let has_error_diagnostics = plugin
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.level == crate::plugins::types::PluginDiagnosticLevel::Error);
+    if has_error_diagnostics {
+        ExtensionAction::Command {
+            label: tr(locale, MessageId::ExtensionsActionDiagnose).into_owned(),
+            command: format!("/plugin validate {}", plugin.name()),
+        }
+    } else if plugin.active() {
+        ExtensionAction::Command {
+            label: tr(locale, MessageId::LaunchHintOpen).into_owned(),
+            command: format!("/plugin show {}", plugin.name()),
+        }
+    } else if plugin.trusted() && !plugin.enabled {
+        ExtensionAction::Command {
+            label: tr(locale, MessageId::ExtensionsActionEnable).into_owned(),
+            command: format!("/plugin enable {}", plugin.name()),
+        }
+    } else {
+        ExtensionAction::Command {
+            label: tr(locale, MessageId::AutomationActionInspect).into_owned(),
+            command: format!("/plugin trust {}", plugin.name()),
+        }
+    }
+}
+
 fn plugins_model(app: &App, locale: Locale) -> ExtensionsTabModel {
     let mut by_scope = [Vec::new(), Vec::new(), Vec::new()];
     for plugin in app.plugin_registry.list() {
@@ -640,30 +722,7 @@ fn plugins_model(app: &App, locale: Locale) -> ExtensionsTabModel {
             crate::plugins::types::PluginScope::Workspace => 2,
         };
         let diagnostic_count = plugin.diagnostics.len();
-        let has_error_diagnostics = plugin.diagnostics.iter().any(|diagnostic| {
-            diagnostic.level == crate::plugins::types::PluginDiagnosticLevel::Error
-        });
-        let action = if has_error_diagnostics {
-            ExtensionAction::Command {
-                label: tr(locale, MessageId::ExtensionsActionDiagnose).into_owned(),
-                command: format!("/plugin validate {}", plugin.name()),
-            }
-        } else if plugin.active() {
-            ExtensionAction::Command {
-                label: tr(locale, MessageId::LaunchHintOpen).into_owned(),
-                command: format!("/plugin show {}", plugin.name()),
-            }
-        } else if plugin.trusted() && !plugin.enabled {
-            ExtensionAction::Command {
-                label: tr(locale, MessageId::ExtensionsActionEnable).into_owned(),
-                command: format!("/plugin enable {}", plugin.name()),
-            }
-        } else {
-            ExtensionAction::Command {
-                label: tr(locale, MessageId::AutomationActionInspect).into_owned(),
-                command: format!("/plugin trust {}", plugin.name()),
-            }
-        };
+        let action = plugin_row_action(locale, plugin);
         by_scope[scope].push(ExtensionItem {
             id: plugin.id.as_str().to_string(),
             label: plugin.name().to_string(),

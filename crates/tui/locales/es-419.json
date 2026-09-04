@@ -47,6 +47,8 @@
   "ExtensionsProductCuaDescription": "Entorno local de uso de computadora con controlador nativo de macOS.",
   "ExtensionsProductDetail": "publicador: {publisher} · componentes: {components} · fuente: {source}",
   "ExtensionsProductPlaywrightDescription": "Automatización del navegador basada en Playwright MCP de Microsoft.",
+  "ExtensionsProductCodewhaleComputerUseDescription": "Ve la pantalla y la opera: control basado en accesibilidad, capturas, zoom y grabación de pantalla, además de equipos remotos por ssh.",
+  "ExtensionsStateFirstParty": "Incluido con Codewhale",
   "ExtensionsProductSandboxDescription": "Capa de aislamiento de procesos para comandos locales provistos por plugins.",
   "ExtensionsSearchLabel": "Buscar: ",
   "ExtensionsSkillRootCompatibleGlobal": "Global compatible ({harness})",

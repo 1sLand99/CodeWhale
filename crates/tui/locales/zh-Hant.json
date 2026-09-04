@@ -47,6 +47,8 @@
   "ExtensionsProductCuaDescription": "具備原生 macOS 驅動程式的本機電腦操作執行環境。",
   "ExtensionsProductDetail": "發行者：{publisher} · 元件：{components} · 來源：{source}",
   "ExtensionsProductPlaywrightDescription": "以 Microsoft Playwright MCP 為基礎的瀏覽器自動化。",
+  "ExtensionsProductCodewhaleComputerUseDescription": "看見螢幕並操作它：以無障礙介面為先的控制、螢幕擷取、縮放與錄影，還可透過 ssh 操作遠端電腦。",
+  "ExtensionsStateFirstParty": "隨 Codewhale 內建",
   "ExtensionsProductSandboxDescription": "隔離外掛所提供本機指令的程序層。",
   "ExtensionsSearchLabel": "搜尋：",
   "ExtensionsSkillRootCompatibleGlobal": "相容的全域目錄（{harness}）",
