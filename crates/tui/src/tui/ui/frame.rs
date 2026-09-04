@@ -82,13 +82,22 @@ pub(crate) fn info_segments(app: &App, width: u16) -> Vec<InfoSegment> {
     } else {
         // The context reading and the metrics claim the rest of the row;
         // the route sheds its own qualifiers first.
-        let budget = (usize::from(width)).saturating_sub(60).max(24);
+        let budget = crate::tui::phase_strip::info_route_budget(width);
         let fields = crate::tui::phase_strip::route_identity_fields(app, tier, budget)
-            .unwrap_or_else(|| vec![model]);
+            .unwrap_or_else(|| {
+                vec![crate::tui::phase_strip::RouteIdentityField {
+                    kind: crate::tui::phase_strip::RouteFieldKind::Model,
+                    text: model,
+                }]
+            });
         segments.push(InfoSegment::new(
             InfoSegmentId::Model,
             "",
-            fields.join(" · "),
+            fields
+                .iter()
+                .map(|field| field.text.as_str())
+                .collect::<Vec<_>>()
+                .join(ROUTE_FIELD_JOIN),
             ChromeInk::Identity,
         ));
     }
@@ -195,7 +204,71 @@ pub(crate) fn info_segments(app: &App, width: u16) -> Vec<InfoSegment> {
 #[derive(Debug, Clone, Copy, Default)]
 struct InfoLineInteractionHitboxes {
     context: Option<Rect>,
+    /// The provider name inside the route segment, when the row is wide
+    /// enough to render one.
     route: Option<Rect>,
+    /// The model name and its effort tier — one span, because they are
+    /// always adjacent and `/model` owns both.
+    model: Option<Rect>,
+}
+
+/// Separator between rendered route fields. Three columns wide, matching
+/// `phase_strip::ITEM_SEPARATOR_WIDTH`, which is what the shed budget counts.
+const ROUTE_FIELD_JOIN: &str = " · ";
+
+/// Split the route segment's rect back into its fields.
+///
+/// The segment renders as `provider · model · effort`; a click on the
+/// provider belongs to `/provider` and a click on the model or its effort
+/// tier belongs to `/model`. Widths come from the same field texts the
+/// segment was built from, so the split cannot disagree with what is on
+/// screen. Returns `(provider, model-and-effort)`.
+fn split_route_hitbox(
+    fields: &[crate::tui::phase_strip::RouteIdentityField],
+    area: Rect,
+) -> (Option<Rect>, Option<Rect>) {
+    use crate::tui::phase_strip::RouteFieldKind;
+    use unicode_width::UnicodeWidthStr as _;
+
+    let join = ROUTE_FIELD_JOIN.width();
+    let right = usize::from(area.right());
+    let mut x = usize::from(area.x);
+    let mut provider = None;
+    let mut model: Option<Rect> = None;
+    for (index, field) in fields.iter().enumerate() {
+        if index > 0 {
+            x += join;
+        }
+        let end = (x + field.text.width()).min(right);
+        if x >= end {
+            break;
+        }
+        let rect = Rect {
+            x: x as u16,
+            y: area.y,
+            width: (end - x) as u16,
+            height: 1,
+        };
+        match field.kind {
+            RouteFieldKind::Provider => provider = Some(rect),
+            // Model and effort are adjacent and share a destination, so the
+            // span grows rather than replacing — a two-target registration
+            // for one idea just gives the pointer a seam to fall into.
+            RouteFieldKind::Model | RouteFieldKind::Effort => {
+                model = Some(match model {
+                    Some(prev) => Rect {
+                        x: prev.x,
+                        y: prev.y,
+                        width: rect.right().saturating_sub(prev.x),
+                        height: 1,
+                    },
+                    None => rect,
+                });
+            }
+        }
+        x = end;
+    }
+    (provider, model)
 }
 
 /// Render the info line into its one row and record its segment
@@ -229,12 +302,28 @@ fn render_info_row(f: &mut Frame, app: &mut App, area: Rect) -> InfoLineInteract
         .ascii_safe(crate::tui::color_compat::ascii_safe_enabled())
         .hovered(hovered);
     let hitboxes = infoline_hitboxes(&info, area);
+    let route_area = hitboxes
+        .iter()
+        .find(|hitbox| hitbox.id == InfoSegmentId::Model)
+        .map(|hitbox| hitbox.area);
+    // Same pure call `info_segments` made, with the same budget owner, so the
+    // split lines up with the text that was just measured.
+    let route_fields = crate::tui::phase_strip::route_identity_fields(
+        app,
+        crate::tui::underwater::ShellTier::for_chrome_width(area.width),
+        crate::tui::phase_strip::info_route_budget(area.width),
+    );
+    let (provider_area, model_area) = match (route_area, route_fields.as_deref()) {
+        (Some(area), Some(fields)) => split_route_hitbox(fields, area),
+        // No configured model: the segment says so and is not a route control.
+        // No drawn segment: nothing to point at either way.
+        (area, None) => (None, area),
+        (None, Some(_)) => (None, None),
+    };
     let interaction_hitboxes = InfoLineInteractionHitboxes {
         context: crate::tui::infoline::context_meter_hitbox(&info, area),
-        route: hitboxes
-            .iter()
-            .find(|hitbox| hitbox.id == InfoSegmentId::Model)
-            .map(|hitbox| hitbox.area),
+        route: provider_area,
+        model: model_area,
     };
     // Keep the row's quiet background under the widget itself.
     let buf = f.buffer_mut();
@@ -278,6 +367,18 @@ fn register_info_interaction_targets(app: &mut App, hitboxes: InfoLineInteractio
                 inspect_detail: crate::tui::tideline::InspectDetail::Route,
             });
     }
+    if let Some(hitbox) = hitboxes.model {
+        app.viewport
+            .interaction_targets
+            .register(crate::tui::tideline::InteractionTarget {
+                id: crate::tui::tideline::InteractionTargetId::HEADER_MODEL,
+                area: hitbox,
+                focus: crate::tui::tideline::InteractionFocus::Direct,
+                keyboard_action: Some(crate::tui::tideline::InteractionAction::OpenModelPicker),
+                mouse_action: Some(crate::tui::tideline::InteractionAction::OpenModelPicker),
+                inspect_detail: crate::tui::tideline::InspectDetail::Route,
+            });
+    }
 
     for target in app.viewport.interaction_targets.iter() {
         let label = match target.mouse_action {
@@ -301,6 +402,15 @@ fn register_info_interaction_targets(app: &mut App, hitboxes: InfoLineInteractio
                 crate::localization::tr(
                     app.ui_locale,
                     crate::localization::MessageId::CmdProviderDescription,
+                ),
+            ),
+            // `/model` is a command name, not prose, so it stays verbatim in
+            // every locale; only the description is translated.
+            Some(crate::tui::tideline::InteractionAction::OpenModelPicker) => format!(
+                "/model · {}",
+                crate::localization::tr(
+                    app.ui_locale,
+                    crate::localization::MessageId::CmdModelDescription,
                 ),
             ),
             Some(crate::tui::tideline::InteractionAction::ShowDockPanel(panel)) => {
@@ -1883,23 +1993,44 @@ mod tests {
             .iter()
             .find(|hitbox| hitbox.id == crate::tui::infoline::InfoSegmentId::Model)
             .expect("a wide info line should paint its model segment");
-        let target = app
-            .viewport
-            .interaction_targets
-            .iter()
-            .find(|target| target.id == crate::tui::tideline::InteractionTargetId::HEADER_ROUTE)
-            .expect("painted route segment should have a typed target");
+        let target_for = |id| {
+            app.viewport
+                .interaction_targets
+                .iter()
+                .find(|target| target.id == id)
+                .cloned()
+                .unwrap_or_else(|| panic!("painted route segment should register {id:?}"))
+        };
+        // The segment reads `provider · model · effort`. Pointing at the
+        // provider is a different request from pointing at the model, so the
+        // one target became two: the whole span used to open `/provider` no
+        // matter which name was under the pointer.
+        let provider = target_for(crate::tui::tideline::InteractionTargetId::HEADER_ROUTE);
+        let model = target_for(crate::tui::tideline::InteractionTargetId::HEADER_MODEL);
 
-        assert_eq!(target.area, segment.area);
+        assert_eq!(provider.area.x, segment.area.x);
+        assert!(
+            provider.area.right() < model.area.x,
+            "provider {:?} and model {:?} must not overlap",
+            provider.area,
+            model.area
+        );
+        assert_eq!(model.area.right(), segment.area.right());
         assert_eq!(
-            target.keyboard_action,
+            provider.keyboard_action,
             Some(crate::tui::tideline::InteractionAction::OpenProviderPicker)
         );
-        assert_eq!(target.mouse_action, target.keyboard_action);
         assert_eq!(
-            target.inspect_detail,
-            crate::tui::tideline::InspectDetail::Route
+            model.keyboard_action,
+            Some(crate::tui::tideline::InteractionAction::OpenModelPicker)
         );
+        for target in [&provider, &model] {
+            assert_eq!(target.mouse_action, target.keyboard_action);
+            assert_eq!(
+                target.inspect_detail,
+                crate::tui::tideline::InspectDetail::Route
+            );
+        }
     }
 
     /// "Where did the github info go?" — the workspace segment names the

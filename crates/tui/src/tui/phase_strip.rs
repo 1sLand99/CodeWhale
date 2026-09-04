@@ -54,27 +54,62 @@ pub(crate) fn route_identity_fields(
     app: &App,
     tier: ShellTier,
     budget: usize,
-) -> Option<Vec<String>> {
+) -> Option<Vec<RouteIdentityField>> {
     let (provider, model) = app.effective_route_identity_display();
     let effort = app.reasoning_effort_display_label();
     if model.is_empty() {
         return None;
     }
-    let mut candidates: Vec<Vec<String>> = Vec::new();
+    let field = |kind, text: String| RouteIdentityField { kind, text };
+    let mut candidates: Vec<Vec<RouteIdentityField>> = Vec::new();
     if tier != ShellTier::Compact && !provider.is_empty() && !effort.is_empty() {
         // The smallest shell never repeats the provider: model and effort are
         // the two facts that change what comes back.
-        candidates.push(vec![provider, model.clone(), effort.clone()]);
+        candidates.push(vec![
+            field(RouteFieldKind::Provider, provider),
+            field(RouteFieldKind::Model, model.clone()),
+            field(RouteFieldKind::Effort, effort.clone()),
+        ]);
     }
     if !effort.is_empty() {
-        candidates.push(vec![model.clone(), effort]);
+        candidates.push(vec![
+            field(RouteFieldKind::Model, model.clone()),
+            field(RouteFieldKind::Effort, effort),
+        ]);
     }
-    candidates.push(vec![model]);
+    candidates.push(vec![field(RouteFieldKind::Model, model)]);
     candidates.into_iter().find(|fields| {
-        let width = fields.iter().map(|field| field.width()).sum::<usize>()
+        let width = fields.iter().map(|field| field.text.width()).sum::<usize>()
             + fields.len().saturating_sub(1) * ITEM_SEPARATOR_WIDTH;
         width <= budget
     })
+}
+
+/// Which route fact a rendered field is. The info line needs this to send a
+/// click to the surface that owns the fact the user pointed at: the provider
+/// name to `/provider`, the model and its effort tier to `/model`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RouteFieldKind {
+    Provider,
+    Model,
+    Effort,
+}
+
+/// One rendered route field: what it says, and what it is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RouteIdentityField {
+    pub kind: RouteFieldKind,
+    pub text: String,
+}
+
+/// The info line's route budget: the row's width less the brand lockup,
+/// meter, and clock floor, never below 24.
+///
+/// One owner. The rule used to be written out at the call site in
+/// `ui/frame.rs` and copied again into two tests with a comment pointing
+/// back at the original, which is how a shed rule drifts.
+pub(crate) fn info_route_budget(width: u16) -> usize {
+    usize::from(width).saturating_sub(60).max(24)
 }
 
 /// Split a notice at its joints, coarsest first.
@@ -396,14 +431,18 @@ mod tests {
 
         // The info line's own budget rule (ui/frame.rs): width minus the brand
         // lockup, meter, and clock floor, never below 24.
-        let info_budget = |width: u16| (usize::from(width)).saturating_sub(60).max(24);
         let fields = |width: u16| {
-            route_identity_fields(&app, ShellTier::for_chrome_width(width), info_budget(width))
+            route_identity_fields(
+                &app,
+                ShellTier::for_chrome_width(width),
+                info_route_budget(width),
+            )
         };
 
         let wide = fields(140).expect("wide budget keeps the route");
         assert!(
-            wide.iter().any(|f| f.contains("DeepSeek")) && wide.iter().any(|f| f == model),
+            wide.iter().any(|f| f.text.contains("DeepSeek"))
+                && wide.iter().any(|f| f.text == model),
             "{wide:?}"
         );
 
@@ -413,13 +452,13 @@ mod tests {
             let shed = fields(width).unwrap_or_default();
             for field in &shed {
                 assert!(
-                    !field.contains('…'),
+                    !field.text.contains('…'),
                     "{width} dangled a clipped field: {shed:?}"
                 );
             }
-            if shed.iter().any(|f| f.contains("deepseek-v4-flash-p")) {
+            if shed.iter().any(|f| f.text.contains("deepseek-v4-flash-p")) {
                 assert!(
-                    shed.iter().any(|f| f == model),
+                    shed.iter().any(|f| f.text == model),
                     "{width} clipped the model name: {shed:?}"
                 );
             }
@@ -441,26 +480,33 @@ mod tests {
         );
         app.model = model.to_string();
 
-        let info_budget = |width: u16| (usize::from(width)).saturating_sub(60).max(24);
         for width in [30u16, 40, 50, 60, 70, 80, 160] {
-            let shed =
-                route_identity_fields(&app, ShellTier::for_chrome_width(width), info_budget(width))
-                    .unwrap_or_default();
+            let shed = route_identity_fields(
+                &app,
+                ShellTier::for_chrome_width(width),
+                info_route_budget(width),
+            )
+            .unwrap_or_default();
             for field in &shed {
                 assert!(
-                    !field.contains('…'),
+                    !field.text.contains('…'),
                     "{width} dangled a clipped field: {shed:?}"
                 );
             }
-            if shed.iter().any(|f| f.contains("deepseek-v4-flash-vision")) {
+            if shed
+                .iter()
+                .any(|f| f.text.contains("deepseek-v4-flash-vision"))
+            {
                 assert!(
-                    shed.iter().any(|f| f == model),
+                    shed.iter().any(|f| f.text == model),
                     "{width} clipped the model name: {shed:?}"
                 );
             }
             assert!(
-                !shed.iter().any(|f| f.contains("acme-research-gateway-eu-c")
-                    && f != "acme-research-gateway-eu-central"),
+                !shed
+                    .iter()
+                    .any(|f| f.text.contains("acme-research-gateway-eu-c")
+                        && f.text != "acme-research-gateway-eu-central"),
                 "{width} clipped the provider name: {shed:?}"
             );
         }

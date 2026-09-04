@@ -1973,6 +1973,12 @@ pub(crate) async fn handle_view_events(
             ViewEvent::TopbarRoutePickerRequested => {
                 open_provider_picker(app, config, engine_handle).await;
             }
+            ViewEvent::TopbarModelPickerRequested => {
+                if app.view_stack.top_kind() != Some(ModalKind::ModelPicker) {
+                    app.view_stack
+                        .push(crate::tui::model_picker::ModelPickerView::new(app, config));
+                }
+            }
             ViewEvent::ProviderPickerDismissed {
                 catalog_view,
                 selected_provider_id,

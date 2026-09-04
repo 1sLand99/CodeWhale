@@ -500,6 +500,9 @@ pub(crate) fn handle_mouse_event(app: &mut App, mouse: MouseEvent) -> Vec<ViewEv
                 InteractionAction::OpenProviderPicker => {
                     vec![ViewEvent::TopbarRoutePickerRequested]
                 }
+                InteractionAction::OpenModelPicker => {
+                    vec![ViewEvent::TopbarModelPickerRequested]
+                }
                 InteractionAction::ShowDockPanel(_) | InteractionAction::DismissDock => {
                     unreachable!("dock targets defer to the strip")
                 }

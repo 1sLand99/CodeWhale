@@ -581,13 +581,6 @@ pub struct LaunchState {
     /// paint. The composer itself is the session `App`'s own
     /// `ComposerState` — this flag only decides where keystrokes go.
     pub composer_focus: bool,
-    /// Composer input-row hitbox from the most recent launch render (the
-    /// docked strip below the option strip). A click here focuses the
-    /// composer, exactly like the Tab key.
-    pub composer_area: Option<Rect>,
-    /// Send-glyph hitbox inside the composer row. A click here submits the
-    /// composed message through the normal dispatch path.
-    pub send_area: Option<Rect>,
     /// Clickable rects for the card's rows from the most recent launch
     /// render, in the same order as
     /// [`crate::tui::underwater::launch_card_rows`].
@@ -694,8 +687,6 @@ impl LaunchState {
             recent,
             total_workspace_sessions,
             composer_focus: true,
-            composer_area: None,
-            send_area: None,
             row_hitboxes: Vec::new(),
             hovered_row: None,
             menu_selected: None,

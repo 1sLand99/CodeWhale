@@ -802,6 +802,9 @@ pub enum ViewEvent {
     /// surface. It carries no catalog, readiness, or selected-route payload:
     /// those facts remain owned by the provider picker and its apply path.
     TopbarRoutePickerRequested,
+    /// The info line's model field requested the normal `/model` surface.
+    /// Same rule as the route segment: an entry point carrying no catalog.
+    TopbarModelPickerRequested,
     /// Emitted by the `/provider` picker on Esc so the next open can restore
     /// the browsing context — view mode and highlighted row.
     ProviderPickerDismissed {
