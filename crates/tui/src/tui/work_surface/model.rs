@@ -524,7 +524,9 @@ impl WorkSurfaceState {
         let selectable = rows.iter().filter(|row| row.selectable).collect::<Vec<_>>();
         if selectable.is_empty() {
             self.selected = None;
-            self.focused = false;
+            // An explicitly opened empty panel still owns its tabs and Esc.
+            // Preserve that focus; ordinary typing can still release it.
+            self.focused &= self.explicit_view;
             self.scroll_offset = 0;
             return;
         }

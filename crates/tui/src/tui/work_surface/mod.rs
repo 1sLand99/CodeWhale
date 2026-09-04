@@ -778,6 +778,21 @@ mod tests {
         );
     }
 
+    /// A chosen panel remains usable when only one content row fits.
+    #[test]
+    fn compact_explicit_view_keeps_content_ahead_of_goal_chrome() {
+        let mut app = app();
+        app.goal.objective = Some("ship the release".to_string());
+        super::select_dock_panel(&mut app, super::RailPanel::Agents);
+        let text = render_text(&mut app, 40, 3);
+        assert!(text.contains("no agents have run this session"), "{text:?}");
+        assert!(app.work_surface.focused);
+        assert!(
+            super::handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)).is_some()
+        );
+        assert!(!app.work_surface.explicit_view);
+    }
+
     /// Top titles only when a live goal is set — never the panel name.
     #[test]
     fn top_title_is_goal_only_never_panel_chrome() {
