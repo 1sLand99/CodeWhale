@@ -85,6 +85,16 @@ roster supplies its exact ID. Codewhale never guesses availability or substitute
 a different billing route. Missing/stale rosters, CLI failures, and unsupported
 OAuth catalogs are reported explicitly.
 
+Codewhale's observed Codex rosters are bound to the exact filesystem home
+and the metadata version of its `auth.json`; tokens are never read for this
+cache binding. Replacing that login invalidates the observation. A native
+Codex cache fetched before an observed login-file change is also stale.
+Keyring-only accounts without an observable login file can still load a live
+roster, but the receipt reports `codex_observation_not_persisted` and no
+Codewhale observation is retained. The separately attributed Codex-owned
+native cache keeps its existing freshness policy when no login-file version
+can be observed; this is not proof of account identity in an external keyring.
+
 The canonical provider IDs are the 42 entries of `ProviderKind::ALL`
 (`crates/config/src/provider_kind.rs`), in that order:
 

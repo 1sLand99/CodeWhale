@@ -745,7 +745,13 @@ fn codex_roster_receipt(
             .and_then(|timestamp| u64::try_from(timestamp.timestamp()).ok()),
         base_url_fingerprint: None,
         model_count: roster.models.len(),
-        error: (!fresh).then_some("codex_cache_unavailable"),
+        error: if !fresh {
+            Some("codex_cache_unavailable")
+        } else if roster.source == "codex_app_server" && !roster.observation_persisted {
+            Some("codex_observation_not_persisted")
+        } else {
+            None
+        },
     }
 }
 
@@ -1277,6 +1283,26 @@ mod tests {
             home.path().join("other-auth.json"),
         );
         assert!(!codex_route_matches_cli_account(&config));
+    }
+
+    #[test]
+    fn codex_live_roster_receipt_discloses_skipped_persistence() {
+        let identity = Config::default()
+            .resolve_provider_identity("openai-codex")
+            .unwrap();
+        let roster = codex_model_cache::CodexModelRoster {
+            models: Vec::new(),
+            freshness: codex_model_cache::CodexModelCacheFreshness::Fresh,
+            fetched_at: None,
+            observed_at: Some(chrono::Utc::now()),
+            source: "codex_app_server",
+            observation_persisted: false,
+        };
+        let receipt = codex_roster_receipt(&identity, &roster);
+        assert_eq!(receipt.status, CatalogStatus::Fresh);
+        assert_eq!(receipt.error, Some("codex_observation_not_persisted"));
+        assert_eq!(receipt.fetched_at, None);
+        assert!(receipt.observed_at.is_some());
     }
 
     #[tokio::test]

@@ -18,6 +18,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
 use crate::config::DEFAULT_OPENAI_CODEX_MODEL;
@@ -57,6 +58,8 @@ pub(crate) struct CodexModelRoster {
     pub(crate) fetched_at: Option<DateTime<Utc>>,
     pub(crate) observed_at: Option<DateTime<Utc>>,
     pub(crate) source: &'static str,
+    /// Applies only to observations from `model/list`, not Codex's own cache.
+    pub(crate) observation_persisted: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -84,6 +87,7 @@ impl CodexModelRoster {
             fetched_at,
             observed_at: None,
             source: "codex_cli_cache",
+            observation_persisted: false,
         }
     }
 
@@ -229,6 +233,15 @@ fn load_model_roster_from_home_at(home: &Path, now: DateTime<Utc>) -> CodexModel
     if age > MODEL_CACHE_MAX_AGE {
         return CodexModelRoster::fallback(CodexModelCacheFreshness::Stale, Some(cache.fetched_at));
     }
+    // Codex owns this cache, but an observed file-based login replacement
+    // after its fetch invalidates the account attribution. No credential
+    // content is opened to check that boundary.
+    if std::fs::metadata(home.join("auth.json"))
+        .and_then(|metadata| metadata.modified())
+        .is_ok_and(|modified| DateTime::<Utc>::from(modified) > cache.fetched_at)
+    {
+        return CodexModelRoster::fallback(CodexModelCacheFreshness::Stale, Some(cache.fetched_at));
+    }
 
     let mut indexed: Vec<_> = cache.models.into_iter().enumerate().collect();
     indexed.sort_by_key(|(index, model)| (model.priority.unwrap_or(i64::MAX), *index));
@@ -287,6 +300,7 @@ fn load_model_roster_from_home_at(home: &Path, now: DateTime<Utc>) -> CodexModel
         fetched_at: Some(cache.fetched_at),
         observed_at: None,
         source: "codex_cli_cache",
+        observation_persisted: false,
     }
 }
 
@@ -351,7 +365,44 @@ struct CliSnapshot {
 
 fn cli_snapshot_path(home: &Path) -> Option<PathBuf> {
     let catalog_path = crate::models_dev_live::cache_path()?;
-    let identity = codewhale_config::catalog::base_url_fingerprint(&home.to_string_lossy());
+    let home = std::fs::canonicalize(home).ok()?;
+    // A URL sanitizer collapses absolute filesystem paths to its single
+    // invalid-URL value. Hash exact OS path bytes instead, with a new domain
+    // so the old unscoped observations are never imported.
+    let mut identity = Sha256::new();
+    identity.update(b"codewhale-codex-observation-v2\0");
+    identity.update(home.as_os_str().as_encoded_bytes());
+    identity.update(b"\0");
+    // Bind offline observations to the file-based login's version without
+    // reading tokens. Keyring-only accounts cannot prove an offline account
+    // binding here; their live command can still load a roster, with skipped
+    // persistence disclosed by the receipt.
+    let auth = std::fs::metadata(home.join("auth.json")).ok()?;
+    if !auth.is_file() {
+        return None;
+    }
+    identity.update(auth.len().to_le_bytes());
+    identity.update(
+        auth.modified()
+            .ok()?
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .ok()?
+            .as_nanos()
+            .to_le_bytes(),
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        identity.update(auth.dev().to_le_bytes());
+        identity.update(auth.ino().to_le_bytes());
+        identity.update(auth.ctime().to_le_bytes());
+        identity.update(auth.ctime_nsec().to_le_bytes());
+    }
+    let identity: String = identity
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
     Some(
         catalog_path
             .parent()?
@@ -390,6 +441,7 @@ fn load_cli_snapshot(path: &Path, now: DateTime<Utc>) -> Option<CodexModelRoster
         fetched_at: None,
         observed_at: Some(snapshot.observed_at),
         source: "codex_app_server",
+        observation_persisted: true,
     })
 }
 
@@ -408,8 +460,13 @@ async fn update_from_codex_command(
     timeout: std::time::Duration,
 ) -> Result<CodexModelRoster, &'static str> {
     let home = codex_home_path();
-    let path = cli_snapshot_path(&home).ok_or("cache_path_unavailable")?;
-    let roster = query_codex_cli(command, timeout, &model_roster()).await?;
+    let path = cli_snapshot_path(&home);
+    let mut roster = query_codex_cli(command, timeout, &model_roster()).await?;
+    let Some(path) = path.filter(|before| cli_snapshot_path(&home).as_ref() == Some(before)) else {
+        // A login changed while querying, or its version cannot be observed.
+        // Preserve the command's live result, never an unbound offline copy.
+        return Ok(roster);
+    };
     let snapshot = CliSnapshot {
         observed_at: roster.observed_at.ok_or("codex_invalid_response")?,
         models: roster.models.clone(),
@@ -423,6 +480,7 @@ async fn update_from_codex_command(
     if let Ok(mut memo) = ROSTER_MEMO.lock() {
         *memo = None;
     }
+    roster.observation_persisted = true;
     Ok(roster)
 }
 
@@ -476,6 +534,12 @@ async fn query_codex_cli(
             command.env(name, value);
         }
     }
+    // A relative CODEX_HOME belongs to the caller's cwd, not the isolated
+    // directory used below to avoid forwarding workspace context to Codex.
+    command.env(
+        "CODEX_HOME",
+        std::path::absolute(codex_home_path()).map_err(|_| "codex_home_unavailable")?,
+    );
     command
         .args([
             "app-server",
@@ -666,6 +730,7 @@ fn roster_from_cli_models(
         fetched_at: None,
         observed_at: Some(Utc::now()),
         source: "codex_app_server",
+        observation_persisted: false,
     })
 }
 
@@ -715,6 +780,8 @@ done
         let _codex = crate::test_support::EnvVarGuard::set("CODEX_HOME", home.path().join("codex"));
         let _codewhale =
             crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", home.path().join("codewhale"));
+        std::fs::create_dir_all(codex_home_path()).unwrap();
+        std::fs::write(codex_home_path().join("auth.json"), "fixture login").unwrap();
         let _key = crate::test_support::EnvVarGuard::set("OPENAI_API_KEY", "private-test-key");
         let _token = crate::test_support::EnvVarGuard::set(
             "OPENAI_CODEX_ACCESS_TOKEN",
@@ -783,6 +850,131 @@ done
         assert_eq!(failure.unwrap_err(), "codex_cli_unavailable");
         assert_eq!(std::fs::read(&path).unwrap(), before);
         assert_eq!(model_roster(), roster);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn codex_observations_are_isolated_by_absolute_home_and_login_version() {
+        let _lock = crate::test_support::lock_test_env();
+        let fixture = tempfile::tempdir().unwrap();
+        let _codewhale = crate::test_support::EnvVarGuard::set(
+            "CODEWHALE_HOME",
+            fixture.path().join("codewhale"),
+        );
+        let first = fixture.path().join("account-a");
+        let second = fixture.path().join("account-b");
+        for home in [&first, &second] {
+            std::fs::create_dir(home).unwrap();
+            std::fs::write(home.join("auth.json"), "fixture login").unwrap();
+        }
+        let first_path = cli_snapshot_path(&first).unwrap();
+        let second_path = cli_snapshot_path(&second).unwrap();
+        assert_ne!(
+            first_path, second_path,
+            "absolute homes must not share an observation"
+        );
+        let trace = fixture.path().join("trace");
+        {
+            let _codex = crate::test_support::EnvVarGuard::set("CODEX_HOME", &first);
+            let roster = update_from_codex_command(
+                fake_codex(
+                    &CLI_FIXTURE.replace("gpt-new-account-model", "gpt-account-a"),
+                    &trace,
+                ),
+                std::time::Duration::from_secs(3),
+            )
+            .await
+            .unwrap();
+            assert!(roster.observation_persisted);
+            assert_eq!(model_roster().model_ids()[0], "gpt-account-a");
+        }
+        {
+            let _codex = crate::test_support::EnvVarGuard::set("CODEX_HOME", &second);
+            assert_eq!(model_roster().model_ids(), [DEFAULT_OPENAI_CODEX_MODEL]);
+            update_from_codex_command(
+                fake_codex(
+                    &CLI_FIXTURE.replace("gpt-new-account-model", "gpt-account-b"),
+                    &trace,
+                ),
+                std::time::Duration::from_secs(3),
+            )
+            .await
+            .unwrap();
+            assert_eq!(model_roster().model_ids()[0], "gpt-account-b");
+        }
+        let _codex = crate::test_support::EnvVarGuard::set("CODEX_HOME", &first);
+        assert_eq!(model_roster().model_ids()[0], "gpt-account-a");
+        let previous = std::fs::read(&first_path).unwrap();
+        std::fs::write(first.join("auth.json"), "replacement fixture login").unwrap();
+        assert_ne!(cli_snapshot_path(&first).unwrap(), first_path);
+        assert_eq!(model_roster().model_ids(), [DEFAULT_OPENAI_CODEX_MODEL]);
+        assert_eq!(
+            std::fs::read(&first_path).unwrap(),
+            previous,
+            "old cache remains untouched"
+        );
+
+        // A login replacement during the CLI query also prevents persistence.
+        let script =
+            format!("printf '%s' 'rotated fixture' > \"$CODEX_HOME/auth.json\"\n{CLI_FIXTURE}");
+        let roster = update_from_codex_command(
+            fake_codex(&script, &trace),
+            std::time::Duration::from_secs(3),
+        )
+        .await
+        .unwrap();
+        assert!(!roster.observation_persisted);
+        assert_eq!(roster.model_ids()[0], "gpt-new-account-model");
+        assert!(!cli_snapshot_path(&first).unwrap().exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn codex_live_observation_remains_usable_without_a_bound_login_file() {
+        let _lock = crate::test_support::lock_test_env();
+        let fixture = tempfile::tempdir().unwrap();
+        let _codewhale = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", fixture.path());
+        let _codex =
+            crate::test_support::EnvVarGuard::set("CODEX_HOME", "codex-relative-test-home");
+        let trace = fixture.path().join("trace");
+        let script = format!("test \"$CODEX_HOME\" = \"$2\" || exit 72\n{CLI_FIXTURE}");
+        let mut command = fake_codex(&script, &trace);
+        command.arg(std::path::absolute("codex-relative-test-home").unwrap());
+        let roster = update_from_codex_command(command, std::time::Duration::from_secs(3))
+            .await
+            .unwrap();
+        assert_eq!(roster.model_ids()[0], "gpt-new-account-model");
+        assert!(!roster.observation_persisted);
+        assert!(cli_snapshot_path(&codex_home_path()).is_none());
+        assert_eq!(model_roster().model_ids(), [DEFAULT_OPENAI_CODEX_MODEL]);
+    }
+
+    #[test]
+    fn codex_native_cache_predating_an_observed_login_change_is_stale() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(home.path().join("auth.json"), "fixture login").unwrap();
+        let now = Utc::now();
+        let mut cache: Value = serde_json::from_str(FIXTURE).unwrap();
+        cache["fetched_at"] = json!(now - Duration::minutes(1));
+        std::fs::write(
+            home.path().join(MODEL_CACHE_FILE),
+            serde_json::to_vec(&cache).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            load_model_roster_from_home_at(home.path(), now).freshness,
+            CodexModelCacheFreshness::Stale,
+        );
+        cache["fetched_at"] = json!(now);
+        std::fs::write(
+            home.path().join(MODEL_CACHE_FILE),
+            serde_json::to_vec(&cache).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            load_model_roster_from_home_at(home.path(), now).freshness,
+            CodexModelCacheFreshness::Fresh,
+        );
     }
 
     #[cfg(unix)]
