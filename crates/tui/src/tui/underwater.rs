@@ -54,9 +54,6 @@ pub enum LaunchAction {
     /// The see-all overflow: open the full session picker.
     BrowseSessions,
     Help,
-    /// Submit the composed pre-session message: begin the launch session,
-    /// then hand the text to the normal composer dispatch path.
-    SendComposer,
 }
 
 /// Translate a launch key into one product action. Reached only through

@@ -4391,21 +4391,6 @@ pub(crate) async fn run_event_loop(
                         crate::tui::underwater::LaunchAction::Help => {
                             toggle_help_view(app);
                         }
-                        crate::tui::underwater::LaunchAction::SendComposer => {
-                            // Mouse send: same path as the keyboard submit.
-                            if dispatch_launch_composer_submit(
-                                terminal,
-                                app,
-                                &mut engine_handle,
-                                &task_manager,
-                                config,
-                                ComposerSubmitChord::Enter,
-                            )
-                            .await?
-                            {
-                                return Ok(());
-                            }
-                        }
                     }
                     app.needs_redraw = true;
                 }
@@ -4959,11 +4944,9 @@ pub(crate) async fn run_event_loop(
                         }
                         crate::tui::underwater::LaunchAction::Help => {
                             toggle_help_view(app);
-                        }
-                        // `handle_launch_key` never yields this; the mouse send
-                        // path above is the only producer. The arm keeps the
-                        // match exhaustive.
-                        crate::tui::underwater::LaunchAction::SendComposer => {}
+                        } // `handle_launch_key` never yields this; the mouse send
+                          // path above is the only producer. The arm keeps the
+                          // match exhaustive.
                     }
                     app.needs_redraw = true;
                     continue;
