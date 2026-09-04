@@ -2482,6 +2482,28 @@ iTerm2, WezTerm, Ghostty, and kitty are matched first and use their own
 notification protocols, and `method = "osc9"` / `"bel"` / `"off"` opt out
 of the `osascript` path explicitly.
 
+## Automations in the terminal
+
+Open `/automation`, then choose **New automation** (`n`) or **Edit automation**
+(`e`). The form edits the name, multiline prompt, schedule, model, workspace,
+and enabled status. `Tab` moves between fields; `Enter` inserts a newline in
+the prompt. Schedule presets include daily, weekly, hourly, once, and a custom
+RRULE. Time fields accept `HH:MM`; their arrow controls change the time by
+15 minutes. Weekly day buttons and model search support mouse and keyboard.
+
+The next-run preview uses the scheduler's local time zone, shown with its UTC
+offset. An enabled automation can run after **Save** (`Ctrl+S`); a paused one
+has no scheduled next run. **Cancel** (`Esc`) discards the draft. Editing keeps
+existing permission settings, custom schedules, and additional workspace
+entries unless the corresponding supported field is explicitly changed.
+
+Choosing a concrete model pins both the model and its exact configured
+provider, including named custom routes. Later changes to the active provider
+do not move that automation's pin. The default-model choice and legacy
+definitions without a provider pin keep the runtime's existing default
+behavior. New automation records use schema v2 and tasks use v3 so older
+runtimes reject records whose provider pins they cannot preserve.
+
 ## Lifecycle Outbox (`[lifecycle_outbox]`)
 
 The lifecycle outbox is an opt-in, machine-readable stream of session,

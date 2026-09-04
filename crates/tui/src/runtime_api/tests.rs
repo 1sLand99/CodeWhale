@@ -1401,6 +1401,28 @@ async fn omitted_runtime_models_use_the_active_provider_default() -> Result<()> 
             return Ok(());
         };
 
+        // A provider pin cannot borrow the active provider's default model.
+        // It must reach the same explicit-model guard as direct task creation.
+        for pin in [
+            json!({"model_provider": "openai"}),
+            json!({"model_provider_id": "other-route"}),
+        ] {
+            let mut request = pin;
+            request["prompt"] = json!("reject missing pinned model");
+            let rejected = crate::tls::reqwest_client()
+                .post(format!("http://{addr}/v1/tasks"))
+                .json(&request)
+                .send()
+                .await?;
+            assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+            assert!(
+                rejected
+                    .text()
+                    .await?
+                    .contains("pinned task provider requires an explicit model")
+            );
+        }
+
         let created: serde_json::Value = crate::tls::reqwest_client()
             .post(format!("http://{addr}/v1/tasks"))
             .json(&json!({ "prompt": format!("{label} omitted model") }))

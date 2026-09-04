@@ -167,6 +167,14 @@ impl ToolSpec for AutomationTool {
                 json!({ "type": "array", "items": { "type": "string" }, "description": "Working directories for scheduled runs (action=create/update)." }),
             );
             properties.insert(
+                "model_provider".to_string(),
+                json!({ "type": "string", "description": "Provider kind for the pinned model. Omit to inherit the configured provider." }),
+            );
+            properties.insert(
+                "model_provider_id".to_string(),
+                json!({ "type": "string", "description": "Exact configured provider id, including named custom routes. Keeps the model on that route." }),
+            );
+            properties.insert(
                 "model".to_string(),
                 json!({ "type": "string", "description": "Model id for scheduled runs (action=create/update)." }),
             );
@@ -301,6 +309,8 @@ impl AutomationTool {
                 .map(PathBuf::from)
                 .collect(),
             model: optional_str(input, "model")?.map(ToString::to_string),
+            model_provider: optional_str(input, "model_provider")?.map(ToString::to_string),
+            model_provider_id: optional_str(input, "model_provider_id")?.map(ToString::to_string),
             mode: optional_str(input, "mode")?.map(ToString::to_string),
             allow_shell: optional_bool_value(input, "allow_shell"),
             trust_mode: optional_bool_value(input, "trust_mode"),
@@ -393,6 +403,8 @@ impl AutomationTool {
                 None
             },
             model: optional_str(input, "model")?.map(ToString::to_string),
+            model_provider: optional_str(input, "model_provider")?.map(ToString::to_string),
+            model_provider_id: optional_str(input, "model_provider_id")?.map(ToString::to_string),
             mode: optional_str(input, "mode")?.map(ToString::to_string),
             allow_shell: optional_bool_value(input, "allow_shell"),
             trust_mode: optional_bool_value(input, "trust_mode"),
@@ -468,6 +480,8 @@ fn legacy_action_schema(action: &str) -> Value {
                 },
                 "cwds": { "type": "array", "items": { "type": "string" } },
                 "model": { "type": "string", "description": "Model id for scheduled runs." },
+                "model_provider": { "type": "string", "description": "Provider kind for the pinned model." },
+                "model_provider_id": { "type": "string", "description": "Exact configured provider id." },
                 "mode": { "type": "string", "description": "Task mode for scheduled runs. Defaults to agent when omitted." },
                 "allow_shell": { "type": "boolean", "default": false },
                 "trust_mode": { "type": "boolean", "default": false },
@@ -499,6 +513,8 @@ fn legacy_action_schema(action: &str) -> Value {
                 "rrule": { "type": "string" },
                 "cwds": { "type": "array", "items": { "type": "string" } },
                 "model": { "type": "string", "description": "Model id for scheduled runs." },
+                "model_provider": { "type": "string", "description": "Provider kind for the pinned model." },
+                "model_provider_id": { "type": "string", "description": "Exact configured provider id." },
                 "mode": { "type": "string", "description": "Task mode for scheduled runs. Defaults to agent when omitted." },
                 "allow_shell": { "type": "boolean" },
                 "trust_mode": { "type": "boolean" },
