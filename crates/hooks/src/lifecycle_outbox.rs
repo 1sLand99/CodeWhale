@@ -36,11 +36,13 @@
 //! If no tokio runtime is available the event is dropped with a warning.
 //! Webhook POSTs (`{"at": …, "event": …}`) are attempted after the local
 //! append; failures are logged and dropped, never retried into the agent
-//! loop.
+//! loop. Process owners call [`LifecycleOutbox::flush`] before runtime teardown
+//! to give queued terminal events a bounded opportunity to finish delivery.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use chrono::Utc;
@@ -48,6 +50,7 @@ use codewhale_protocol::runtime::{RUNTIME_EVENT_ENVELOPE_SCHEMA_VERSION, Runtime
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+use tokio::sync::oneshot;
 
 use crate::WebhookHookSink;
 
@@ -157,18 +160,41 @@ impl LifecycleOutbox {
         let Some(inner) = self.inner.clone() else {
             return;
         };
-        if let Err(error) = inner.enqueue(event) {
+        if let Err(error) = inner.enqueue(OutboxCommand::Event(event)) {
             tracing::warn!(target: "lifecycle_outbox", %error, "lifecycle event dropped");
         }
     }
+
+    /// Wait for events queued before this call to finish their delivery attempt.
+    ///
+    /// Local writes are flushed before the writer acknowledges this barrier.
+    /// Delivery errors remain logged and best effort; a stalled writer/webhook
+    /// or a stopped runtime returns an error within `timeout` instead of holding
+    /// process teardown indefinitely. This does not close other cloned handles.
+    pub async fn flush(&self, timeout: Duration) -> Result<()> {
+        let Some(inner) = self.inner.as_ref() else {
+            return Ok(());
+        };
+        let (reply, completed) = oneshot::channel();
+        inner.enqueue(OutboxCommand::Flush(reply))?;
+        tokio::time::timeout(timeout, completed)
+            .await
+            .context("lifecycle outbox flush timed out; queued events may be incomplete")?
+            .context("lifecycle outbox writer stopped before flush completed")
+    }
+}
+
+enum OutboxCommand {
+    Event(LifecycleEvent),
+    Flush(oneshot::Sender<()>),
 }
 
 struct OutboxInner {
     path: PathBuf,
     webhook: Option<WebhookHookSink>,
-    sender: UnboundedSender<LifecycleEvent>,
+    sender: UnboundedSender<OutboxCommand>,
     /// The writer task's receive half. Taken exactly once by the writer task.
-    receiver: Mutex<Option<UnboundedReceiver<LifecycleEvent>>>,
+    receiver: Mutex<Option<UnboundedReceiver<OutboxCommand>>>,
     writer_spawned: AtomicBool,
     /// Serializes the lazy writer-task spawn so two racing first emits cannot
     /// start two writers.
@@ -180,9 +206,9 @@ impl OutboxInner {
     ///
     /// Ordering: `send` happens before the spawn so events queued before the
     /// writer starts are drained first, preserving enqueue order.
-    fn enqueue(self: &Arc<Self>, event: LifecycleEvent) -> Result<()> {
+    fn enqueue(self: &Arc<Self>, command: OutboxCommand) -> Result<()> {
         self.sender
-            .send(event)
+            .send(command)
             .map_err(|_| anyhow::anyhow!("lifecycle outbox writer task is gone"))?;
         self.ensure_writer_spawned();
         Ok(())
@@ -235,13 +261,20 @@ struct WriterState {
     /// Next seq to assign; filled in by [`Self::recover_seq`] on first use.
     next_seq: u64,
     recovered: bool,
-    receiver: UnboundedReceiver<LifecycleEvent>,
+    receiver: UnboundedReceiver<OutboxCommand>,
 }
 
 impl WriterState {
     /// Drain the queue until every sender is dropped, then exit.
     async fn run(&mut self) {
-        while let Some(event) = self.receiver.recv().await {
+        while let Some(command) = self.receiver.recv().await {
+            let event = match command {
+                OutboxCommand::Event(event) => event,
+                OutboxCommand::Flush(reply) => {
+                    let _ = reply.send(());
+                    continue;
+                }
+            };
             if let Err(error) = self.deliver(event).await {
                 tracing::warn!(
                     target: "lifecycle_outbox",
@@ -451,6 +484,94 @@ mod tests {
         text.lines()
             .map(|line| serde_json::from_str::<Value>(line).expect("json line"))
             .collect()
+    }
+
+    #[test]
+    fn flush_persists_queued_turn_boundaries_before_runtime_teardown() {
+        let (_dir, path) = temp_outbox_path("shutdown.jsonl");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let outbox = LifecycleOutbox::new(Some(path.clone()), None, None);
+            outbox.emit(event("turn_start", "turn.started"));
+            let clone = outbox.clone();
+            clone.emit(event("turn_end", "turn.completed"));
+            outbox.flush(Duration::from_secs(2)).await.expect("flush");
+        });
+        drop(runtime);
+
+        let contents = std::fs::read_to_string(path).expect("outbox persisted before exit");
+        let lines: Vec<Value> = contents
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("complete JSONL record"))
+            .collect();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0]["event"], "turn_start");
+        assert_eq!(lines[0]["seq"], 1);
+        assert_eq!(lines[1]["event"], "turn_end");
+        assert_eq!(lines[1]["seq"], 2);
+    }
+
+    #[tokio::test]
+    async fn flush_disabled_or_unused_outbox_creates_no_file() {
+        let (_dir, path) = temp_outbox_path("unused.jsonl");
+        LifecycleOutbox::disabled()
+            .flush(Duration::ZERO)
+            .await
+            .expect("disabled flush");
+        LifecycleOutbox::new(Some(path.clone()), None, None)
+            .flush(Duration::from_secs(2))
+            .await
+            .expect("unused flush");
+        assert!(!path.exists());
+    }
+
+    #[tokio::test]
+    async fn flush_is_bounded_when_webhook_delivery_stalls() {
+        let (_dir, path) = temp_outbox_path("stalled.jsonl");
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_delay(Duration::from_secs(5)))
+            .mount(&server)
+            .await;
+        let outbox = LifecycleOutbox::new(Some(path), Some(server.uri()), None);
+        outbox.emit(event("turn_start", "turn.started"));
+        let error = tokio::time::timeout(
+            Duration::from_secs(1),
+            outbox.flush(Duration::from_millis(20)),
+        )
+        .await
+        .expect("the flush deadline must bound a blocked writer")
+        .expect_err("stalled delivery must report incomplete drain");
+        assert!(error.to_string().contains("flush timed out"));
+    }
+
+    #[test]
+    fn flush_reports_a_writer_lost_with_its_runtime() {
+        let (_dir, path) = temp_outbox_path("stopped.jsonl");
+        let outbox = LifecycleOutbox::new(Some(path), None, None);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("first runtime");
+        runtime.block_on(async {
+            outbox.emit(event("turn_start", "turn.started"));
+            outbox
+                .flush(Duration::from_secs(2))
+                .await
+                .expect("first flush");
+        });
+        drop(runtime);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("second runtime");
+        let error = runtime
+            .block_on(outbox.flush(Duration::from_secs(2)))
+            .expect_err("a closed writer cannot acknowledge delivery");
+        assert!(error.to_string().contains("writer task is gone"));
     }
 
     #[tokio::test]

@@ -1077,6 +1077,13 @@ pub(crate) async fn run_exec_agent(
         }
     }
 
+    // Drain the terminal receipt before either returning or taking the explicit
+    // retryable-failure process exit below. Outbox failures cannot change the
+    // authoritative turn outcome.
+    if let Err(error) = lifecycle_outbox.flush(Duration::from_secs(2)).await {
+        tracing::warn!(target: "lifecycle_outbox", %error, "exec lifecycle outbox did not drain before exit");
+    }
+
     if json_output {
         println!("{}", serde_json::to_string_pretty(&summary)?);
     }

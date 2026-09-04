@@ -883,6 +883,12 @@ pub async fn run_tui(
         });
     }
 
+    // Keep the final session/turn receipts ahead of runtime teardown. A failed
+    // observability sink must not prevent the user's session from shutting down.
+    if let Err(error) = app.lifecycle_outbox.flush(Duration::from_secs(2)).await {
+        tracing::warn!(target: "lifecycle_outbox", %error, "TUI lifecycle outbox did not drain before exit");
+    }
+
     // Flush the persistence actor, collect the durability report (write
     // failures are surfaced, not discarded), then shut down gracefully.
     //
