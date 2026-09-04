@@ -1472,6 +1472,32 @@ pub(crate) async fn run_event_loop(
             deliver_constitution_draft_result(app, model_label, draft_locale, outcome);
         }
 
+        // Poll the MCP OAuth login cell (same background pattern).
+        let mcp_login_delivery = app
+            .mcp_login_cell
+            .try_lock()
+            .ok()
+            .and_then(|mut guard| guard.take());
+        if let Some((server, outcome)) = mcp_login_delivery {
+            if app
+                .mcp_login_cancel
+                .as_ref()
+                .is_some_and(|(pending, _)| *pending == server)
+            {
+                app.mcp_login_cancel = None;
+            }
+            app.status_message = Some(match outcome {
+                Ok(()) => format!(
+                    "Stored OAuth credentials for MCP server '{server}'. Run /mcp reload to reconnect it."
+                ),
+                Err(error) if error == "cancelled" => {
+                    format!("Cancelled the OAuth login for MCP server '{server}'.")
+                }
+                Err(error) => format!("OAuth login for MCP server '{server}' failed: {error}"),
+            });
+            app.needs_redraw = true;
+        }
+
         // #1830/#2317: service any already-arrived terminal keys before a
         // potentially long engine batch so composer/modal input stays live.
         collect_pending_terminal_events(&terminal_input, &mut pending_terminal_events)?;
@@ -5431,6 +5457,19 @@ pub(crate) async fn run_event_loop(
                 {
                     let _ = engine_handle.send(Op::Shutdown).await;
                     return Ok(());
+                }
+                // A pending MCP OAuth login owns Esc first: the notice that
+                // starts it promises "Esc cancels", and abandoning a login
+                // opened by a misclick must not depend on what else is focused.
+                KeyCode::Esc if app.mcp_login_cancel.is_some() => {
+                    if let Some((server, token)) = app.mcp_login_cancel.take() {
+                        token.cancel();
+                        app.status_message = Some(format!(
+                            "Cancelled the OAuth login for MCP server '{server}'."
+                        ));
+                        app.needs_redraw = true;
+                    }
+                    continue;
                 }
                 // Agent focus: Esc on an empty composer returns to the main
                 // conversation before any other Esc meaning applies.

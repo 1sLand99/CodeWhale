@@ -512,7 +512,12 @@ pub(crate) async fn handle_mcp_ui_action(
                 .map(|()| message = Some(format!("Removed MCP server '{name}'")))
         }
         crate::tui::app::McpUiAction::Login { name, scopes } => {
-            let result = async {
+            // Only the handshake runs inline: it is a couple of HTTP calls and
+            // it yields the authorization URL. The five-minute browser-callback
+            // wait goes to the background task pattern, because awaiting it
+            // here parked the event loop — a misclicked `[re-auth]` row left
+            // the session unusable with no way to back out.
+            let begun = async {
                 let cfg = mcp::load_config_with_workspace_and_plugins(
                     &path,
                     &app.workspace,
@@ -522,23 +527,47 @@ pub(crate) async fn handle_mcp_ui_action(
                     .servers
                     .get(&name)
                     .ok_or_else(|| anyhow::anyhow!("MCP server '{name}' not found"))?;
-                let explicit_scopes = (!scopes.is_empty()).then_some(scopes);
-                mcp::oauth::perform_oauth_login_for_server(
+                mcp::oauth::begin_oauth_login_for_server_tool(
                     &name,
                     server,
-                    explicit_scopes,
+                    (!scopes.is_empty()).then_some(scopes),
                     config.mcp_oauth_callback_port,
                     config.mcp_oauth_callback_url.as_deref(),
                 )
                 .await
             }
             .await;
-            result.map(|()| {
-                changed = true;
-                message = Some(format!(
-                    "Stored OAuth credentials for MCP server '{name}'. Run /mcp reload to reconnect it."
-                ));
-            })
+
+            match begun {
+                Ok(login) => {
+                    // Replace any login already in flight so two clicks cannot
+                    // hold two callback listeners.
+                    if let Some((_, token)) = app.mcp_login_cancel.take() {
+                        token.cancel();
+                    }
+                    let token = tokio_util::sync::CancellationToken::new();
+                    let url = login.authorization_url().to_string();
+                    let cell = app.mcp_login_cell.clone();
+                    let task_token = token.clone();
+                    let task_name = name.clone();
+                    tokio::spawn(async move {
+                        let outcome = tokio::select! {
+                            biased;
+                            () = task_token.cancelled() => Err("cancelled".to_string()),
+                            result = login.finish() => result.map_err(|err| err.to_string()),
+                        };
+                        if let Ok(mut guard) = cell.lock() {
+                            *guard = Some((task_name, outcome));
+                        }
+                    });
+                    app.mcp_login_cancel = Some((name.clone(), token));
+                    message = Some(format!(
+                        "Authorizing '{name}' in your browser — Esc cancels. {url}"
+                    ));
+                    Ok(())
+                }
+                Err(err) => Err(err),
+            }
         }
         crate::tui::app::McpUiAction::Logout { name } => {
             let result = (|| {

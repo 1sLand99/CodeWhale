@@ -892,6 +892,7 @@ impl McpOAuthToolLogin {
 pub async fn begin_oauth_login_for_server_tool(
     name: &str,
     server: &McpServerConfig,
+    explicit_scopes: Option<Vec<String>>,
     callback_port: Option<u16>,
     callback_url: Option<&str>,
 ) -> Result<McpOAuthToolLogin> {
@@ -900,7 +901,7 @@ pub async fn begin_oauth_login_for_server_tool(
             "OAuth is disabled for plugin-contributed MCP servers; use a reviewed environment-backed header or bearer token"
         );
     }
-    let (url, resolved_scopes) = resolve_oauth_login(name, server, None).await?;
+    let (url, resolved_scopes) = resolve_oauth_login(name, server, explicit_scopes).await?;
     let flow = OauthLoginFlow::new(
         name,
         &url,

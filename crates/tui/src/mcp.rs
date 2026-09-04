@@ -3269,6 +3269,7 @@ impl McpPool {
         let login = oauth::begin_oauth_login_for_server_tool(
             server_name,
             &server,
+            None,
             self.oauth_callback_port,
             self.oauth_callback_url.as_deref(),
         )

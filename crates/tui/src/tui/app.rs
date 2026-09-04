@@ -2204,6 +2204,17 @@ pub struct App {
             )>,
         >,
     >,
+    /// Shared cell for async MCP OAuth login delivery.
+    ///
+    /// The browser callback wait is up to five minutes. Awaiting it inside the
+    /// action handler parked the whole event loop: no input, no redraw, and no
+    /// way to back out of a login started by a misclick. The login runs on the
+    /// background pattern instead, and `mcp_login_cancel` is what Esc trips.
+    #[allow(clippy::type_complexity)]
+    pub mcp_login_cell: std::sync::Arc<std::sync::Mutex<Option<(String, Result<(), String>)>>>,
+    /// Cancels the in-flight MCP OAuth login, if any, and names the server it
+    /// belongs to so the footer/notice can say what Esc would abandon.
+    pub mcp_login_cancel: Option<(String, tokio_util::sync::CancellationToken)>,
     /// Shared cell for async prompt suggestion delivery from background task.
     pub prompt_suggestion_cell: std::sync::Arc<std::sync::Mutex<Option<(u64, String)>>>,
     /// Tracks whether the initial balance fetch has been attempted for this session.
