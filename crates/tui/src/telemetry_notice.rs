@@ -1,10 +1,9 @@
 //! Eligibility and persistence for the interactive telemetry disclosure.
 //!
-//! Rendering belongs to the native TUI in [`crate::tui::telemetry_notice`].
+//! Rendering belongs to the native TUI event loop.
 //! This module owns only the privacy-sensitive state transitions: deciding
-//! whether a disclosure is owed, recording that the default-on disclosure was
-//! drawn, and applying an explicit Settings opt-out without weakening failure
-//! posture.
+//! whether disclosure is owed and applying the explicit Settings preference.
+//! Drawing a notice never records acceptance or arms collection.
 
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
@@ -15,14 +14,9 @@ use codewhale_telemetry::SessionSource;
 
 use crate::localization::{Locale, MessageId, tr};
 
-/// Everything the native notice needs to commit the choice against the same
-/// files and session source that were resolved before the first TUI frame.
+/// Marker for a nonblocking invitation to review the explicit Settings choice.
 #[derive(Debug, Clone)]
-pub(crate) struct PendingTelemetryNotice {
-    pub(crate) config_path: Option<PathBuf>,
-    pub(crate) setup_state_path: PathBuf,
-    pub(crate) session_source: SessionSource,
-}
+pub(crate) struct PendingTelemetryNotice;
 
 /// Whether an interactive launch owes the native notice, may arm immediately,
 /// or must stay unarmed because the durable privacy state could not be read.
@@ -44,18 +38,6 @@ impl TelemetryNoticePlan {
             Self::NotDue | Self::SuppressArming => None,
         }
     }
-}
-
-/// The choice after applying it to an in-memory setup state.
-///
-/// `setup_state` is deliberately returned even if both writes failed. The
-/// telemetry predicate consumes this value immediately, so selecting Disable
-/// can never arm the current process merely because the filesystem was
-/// unwritable.
-#[derive(Debug)]
-pub(crate) struct AppliedTelemetryDecision {
-    pub(crate) setup_state: SetupState,
-    pub(crate) status_message_id: MessageId,
 }
 
 /// Typed result of changing the durable telemetry preference from `/settings`.
@@ -143,7 +125,7 @@ pub(crate) fn plan_if_due(
 fn plan_for_store_and_state(
     store: codewhale_config::ConfigStore,
     setup_state_path: PathBuf,
-    session_source: SessionSource,
+    _session_source: SessionSource,
 ) -> TelemetryNoticePlan {
     let resolved = store
         .config
@@ -165,91 +147,15 @@ fn plan_for_store_and_state(
         floor_in_force: codewhale_config::telemetry_floor_in_force(),
     };
     if gate.may_ask() {
-        TelemetryNoticePlan::Due(PendingTelemetryNotice {
-            config_path: Some(store.path().to_path_buf()),
-            setup_state_path,
-            session_source,
-        })
+        TelemetryNoticePlan::Due(PendingTelemetryNotice)
     } else {
         TelemetryNoticePlan::NotDue
     }
 }
 
-/// Apply the native disclosure decision without ever making telemetry a
-/// launch blocker.
-///
-/// Disable remains supported for the legacy notice path and is durable when
-/// either the root config or setup-state write lands. Default-on is durable
-/// when the notice-version record lands. When no write can land, the decision
-/// still governs this process and the notice is shown again next launch.
-pub(crate) fn apply_decision(
-    pending: &PendingTelemetryNotice,
-    enabled: bool,
-) -> AppliedTelemetryDecision {
-    let (mut state, state_may_be_saved) = match load_notice_state_at(&pending.setup_state_path) {
-        Ok(state) => (state, true),
-        Err(error) => {
-            tracing::warn!("telemetry decision could not reload setup state: {error}");
-            (SetupState::default(), false)
-        }
-    };
-
-    // The modal can remain open while another Codewhale process records an
-    // opt-out. A stale Keep-on click must not overwrite that newer privacy
-    // decision after we reload the shared setup state.
-    if enabled && state.telemetry_opted_out() {
-        return AppliedTelemetryDecision {
-            setup_state: state,
-            status_message_id: MessageId::TelemetryNoticeReceiptDisabled,
-        };
-    }
-
-    state.record_telemetry_notice(TELEMETRY_NOTICE_VERSION, enabled);
-
-    let config_saved = if enabled {
-        false
-    } else {
-        match write_config_opt_out(pending.config_path.clone()) {
-            Ok(()) => true,
-            Err(error) => {
-                tracing::warn!("telemetry opt-out was not saved to config: {error}");
-                false
-            }
-        }
-    };
-    let state_saved = state_may_be_saved
-        && match state.save_to(&pending.setup_state_path) {
-            Ok(()) => true,
-            Err(error) => {
-                tracing::warn!("telemetry decision was not saved: {error}");
-                false
-            }
-        };
-    let durable = if enabled {
-        state_saved
-    } else {
-        config_saved || state_saved
-    };
-
-    let status_message_id = if durable && enabled {
-        MessageId::TelemetryNoticeReceiptEnabled
-    } else if durable {
-        MessageId::TelemetryNoticeReceiptDisabled
-    } else if enabled {
-        MessageId::TelemetryNoticeReceiptEnabledUnsaved
-    } else {
-        MessageId::TelemetryNoticeReceiptDisabledUnsaved
-    };
-
-    AppliedTelemetryDecision {
-        setup_state: state,
-        status_message_id,
-    }
-}
-
 /// Return the saved telemetry preference shown by `/settings`.
 ///
-/// A missing setup record is the documented default-on state. An existing
+/// A missing or older setup record has not accepted the current processor. An existing
 /// unreadable record may contain an opt-out, so the Settings row fails closed
 /// and shows Off rather than guessing.
 pub(crate) fn saved_preference_enabled(config: &crate::config::Config) -> bool {
@@ -260,14 +166,14 @@ pub(crate) fn saved_preference_enabled(config: &crate::config::Config) -> bool {
 }
 
 fn saved_preference_enabled_at(config: &crate::config::Config, setup_state_path: &Path) -> bool {
-    if config.telemetry == Some(false) {
+    if config.telemetry != Some(true) {
         return false;
     }
     match codewhale_telemetry::load_setup_state_for_decision_at(setup_state_path) {
         // The telemetry owner returns a fresh default state for a genuinely
         // absent sidecar. `None` therefore means an existing record was
         // unreadable (or the path could not be inspected) and must fail closed.
-        Some(state) => !state.telemetry_opted_out(),
+        Some(state) => state.telemetry_accepted(TELEMETRY_NOTICE_VERSION),
         None => false,
     }
 }
@@ -465,13 +371,6 @@ impl NoticeGate {
     }
 }
 
-/// Persist the immediate opt-out in the exact config this process loaded.
-fn write_config_opt_out(config_path: Option<PathBuf>) -> Result<()> {
-    let mut store = codewhale_config::ConfigStore::load(config_path)?;
-    store.config.set_value("telemetry", "false")?;
-    store.save()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -490,14 +389,6 @@ mod tests {
         }
     }
 
-    fn pending_at(config_path: PathBuf, setup_state_path: PathBuf) -> PendingTelemetryNotice {
-        PendingTelemetryNotice {
-            config_path: Some(config_path),
-            setup_state_path,
-            session_source: SessionSource::Interactive,
-        }
-    }
-
     #[test]
     fn the_notice_is_not_put_to_someone_who_already_answered_durably() {
         assert!(gate(true, false, false, false).may_ask());
@@ -505,88 +396,6 @@ mod tests {
         assert!(!gate(true, false, true, false).may_ask());
         assert!(!gate(true, false, false, true).may_ask());
         assert!(!gate(false, false, false, false).may_ask());
-    }
-
-    #[test]
-    fn opting_out_updates_both_durable_registers() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let config_path = dir.path().join("config.toml");
-        let state_path = dir.path().join("setup_state.json");
-        std::fs::write(&config_path, "").expect("seed config");
-        let applied = apply_decision(&pending_at(config_path.clone(), state_path.clone()), false);
-
-        assert!(applied.setup_state.telemetry_opted_out());
-        assert!(
-            std::fs::read_to_string(config_path)
-                .expect("read config")
-                .contains("telemetry = false")
-        );
-        assert!(
-            SetupState::load_from(&state_path)
-                .expect("saved state")
-                .telemetry_opted_out()
-        );
-        assert_eq!(
-            applied.status_message_id,
-            MessageId::TelemetryNoticeReceiptDisabled
-        );
-    }
-
-    #[test]
-    fn keeping_on_records_the_notice_without_rewriting_config() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let config_path = dir.path().join("config.toml");
-        let state_path = dir.path().join("setup_state.json");
-        std::fs::write(&config_path, "# keep me\n").expect("seed config");
-        let applied = apply_decision(&pending_at(config_path.clone(), state_path.clone()), true);
-
-        assert_eq!(
-            std::fs::read_to_string(config_path).expect("read config"),
-            "# keep me\n"
-        );
-        assert!(
-            SetupState::load_from(&state_path)
-                .expect("saved state")
-                .telemetry_accepted(TELEMETRY_NOTICE_VERSION)
-        );
-        assert_eq!(
-            applied.status_message_id,
-            MessageId::TelemetryNoticeReceiptEnabled
-        );
-    }
-
-    #[test]
-    fn a_stale_keep_choice_cannot_overwrite_a_newer_external_opt_out() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let config_path = dir.path().join("config.toml");
-        let state_path = dir.path().join("setup_state.json");
-        std::fs::write(&config_path, "# keep me\n").expect("seed config");
-        let pending = pending_at(config_path.clone(), state_path.clone());
-
-        // The notice was already open when another process recorded Disable.
-        let mut externally_updated = SetupState::default();
-        externally_updated.record_telemetry_notice(TELEMETRY_NOTICE_VERSION, false);
-        externally_updated
-            .save_to(&state_path)
-            .expect("save concurrent opt-out");
-
-        let applied = apply_decision(&pending, true);
-
-        assert!(applied.setup_state.telemetry_opted_out());
-        assert_eq!(
-            applied.status_message_id,
-            MessageId::TelemetryNoticeReceiptDisabled
-        );
-        assert!(
-            SetupState::load_from(&state_path)
-                .expect("reloaded state")
-                .telemetry_opted_out(),
-            "the stale modal must preserve the newer on-disk decline"
-        );
-        assert_eq!(
-            std::fs::read_to_string(config_path).expect("read config"),
-            "# keep me\n"
-        );
     }
 
     #[test]
@@ -612,63 +421,30 @@ mod tests {
     }
 
     #[test]
-    fn an_unpersisted_disable_choice_still_exists_in_memory() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        // A directory cannot be loaded/saved as a TOML config file, so this
-        // deterministically exercises the no-durable-register path even when
-        // tests run as a privileged user.
-        let unwritable_config = dir.path().to_path_buf();
-        let corrupt_state = dir.path().join("setup_state.json");
-        std::fs::write(&corrupt_state, "not-json").expect("seed corrupt state");
-        let applied = apply_decision(&pending_at(unwritable_config, corrupt_state.clone()), false);
-
-        assert!(applied.setup_state.telemetry_opted_out());
-        assert_eq!(
-            applied.status_message_id,
-            MessageId::TelemetryNoticeReceiptDisabledUnsaved
-        );
-        assert_eq!(
-            std::fs::read_to_string(corrupt_state).expect("read corrupt state"),
-            "not-json"
-        );
-    }
-
-    #[test]
-    fn an_unpersisted_keep_choice_is_reported_as_selected_but_unsaved() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let config_path = dir.path().join("config.toml");
-        let corrupt_state = dir.path().join("setup_state.json");
-        std::fs::write(&config_path, "").expect("seed config");
-        std::fs::write(&corrupt_state, "not-json").expect("seed corrupt state");
-
-        let applied = apply_decision(&pending_at(config_path, corrupt_state.clone()), true);
-
-        assert!(
-            applied
-                .setup_state
-                .telemetry_accepted(TELEMETRY_NOTICE_VERSION),
-            "the explicit choice still governs this process"
-        );
-        assert_eq!(
-            applied.status_message_id,
-            MessageId::TelemetryNoticeReceiptEnabledUnsaved
-        );
-        assert_eq!(
-            std::fs::read_to_string(corrupt_state).expect("read corrupt state"),
-            "not-json"
-        );
-    }
-
-    #[test]
-    fn settings_saved_preference_is_default_on_but_fails_closed_on_unreadable_state() {
+    fn settings_saved_preference_requires_current_processor_acceptance() {
         let dir = tempfile::tempdir().expect("tempdir");
         let state_path = dir.path().join("setup_state.json");
-        let config = crate::config::Config::default();
+        let config = crate::config::Config {
+            telemetry: Some(true),
+            ..crate::config::Config::default()
+        };
 
         assert!(
-            saved_preference_enabled_at(&config, &state_path),
-            "a genuinely missing privacy record uses the documented default"
+            !saved_preference_enabled_at(&config, &state_path),
+            "a missing privacy record has not accepted the processor"
         );
+
+        let mut state = SetupState::default();
+        state.record_telemetry_notice("3", true);
+        state.save_to(&state_path).expect("seed old acceptance");
+        assert!(!saved_preference_enabled_at(&config, &state_path));
+        state.record_telemetry_notice(TELEMETRY_NOTICE_VERSION, true);
+        state.save_to(&state_path).expect("seed current acceptance");
+        assert!(saved_preference_enabled_at(&config, &state_path));
+        assert!(!saved_preference_enabled_at(
+            &crate::config::Config::default(),
+            &state_path
+        ));
 
         std::fs::write(&state_path, "not-json").expect("seed corrupt state");
         assert!(

@@ -158,6 +158,20 @@ fn every_event() -> Vec<Event> {
         Event::Panic {
             site: "crates/tui/src/tui/ui.rs:8801:17".to_string(),
         },
+        Event::ProductUsage {
+            counters: ProductCounters {
+                page_view: 1,
+                ..ProductCounters::default()
+            },
+        },
+        Event::OperationsSummary {
+            requests: 10,
+            errors: 1,
+            duration_ms_total: 1500,
+            duration_ms_max: 300,
+            probes: 2,
+            probes_failed: 0,
+        },
     ]
 }
 
@@ -165,11 +179,12 @@ fn every_event() -> Vec<Event> {
 pub(crate) fn every_field_batch() -> Batch {
     Batch {
         schema_version: SCHEMA_VERSION,
+        consent_version: CONSENT_VERSION,
         sent_at: "2026-08-03T18:04:11Z".to_string(),
         install_id: "3f2a9c1e-0000-4000-8000-000000000001".to_string(),
         app_version: "0.9.4".to_string(),
         git_sha: Some("abcdef012345".to_string()),
-        surface: Surface::Tui,
+        surface: Surface::ControlPlane,
         os: Os::Macos,
         arch: Arch::Aarch64,
         libc: Libc::None,
@@ -557,7 +572,7 @@ fn decision_matrix_is_exhaustive() {
     let home = temp_home();
     let path = home.path();
 
-    // Row: nobody has said anything. Anonymous usage counting is default-on.
+    // Row: nobody has said anything. No acceptance is inferred.
     assert!(matches!(
         decide_in_home(
             Some(path),
@@ -565,7 +580,7 @@ fn decision_matrix_is_exhaustive() {
             &SetupState::default(),
             Surface::Tui
         ),
-        TelemetryDecision::Enabled(_)
+        TelemetryDecision::ForcedOff
     ));
 
     // Row: a human said off. That is an answer.
@@ -579,7 +594,7 @@ fn decision_matrix_is_exhaustive() {
         TelemetryDecision::OptedOut
     ));
 
-    // Row: on, notice not yet shown. Headless/default-on still works.
+    // Row: config on but no explicit processor acceptance.
     assert!(matches!(
         decide_in_home(
             Some(path),
@@ -587,7 +602,7 @@ fn decision_matrix_is_exhaustive() {
             &SetupState::default(),
             Surface::Tui
         ),
-        TelemetryDecision::Enabled(_)
+        TelemetryDecision::ForcedOff
     ));
 
     // Row: on, asked, declined.
@@ -602,7 +617,7 @@ fn decision_matrix_is_exhaustive() {
     ));
 
     // Row: on, but the notice content changed since they answered yes. A
-    // disclosure refresh does not pause usage counting.
+    // processor change requires a fresh explicit choice.
     assert!(matches!(
         decide_in_home(
             Some(path),
@@ -610,7 +625,7 @@ fn decision_matrix_is_exhaustive() {
             &stale_setup(),
             Surface::Tui
         ),
-        TelemetryDecision::Enabled(_)
+        TelemetryDecision::ForcedOff
     ));
 
     // Row: on and accepted, no home to keep state in.
@@ -667,14 +682,14 @@ fn decision_matrix_is_exhaustive() {
     // switches.
     for surface in Surface::ALL {
         assert!(
-            decide_in_home(
+            !decide_in_home(
                 Some(path),
                 &resolved(true, false, None),
                 &SetupState::default(),
                 *surface
             )
             .is_enabled(),
-            "{surface:?} must be able to emit by default"
+            "{surface:?} must require explicit current consent"
         );
     }
 }
@@ -712,6 +727,8 @@ fn only_opt_out_touches_disk() {
     // byte-identical. This is the finding that a "wipe on resolved false" would
     // have broken: `false` is the *default*, so it fired on every ordinary run.
     let forced_off_rows: Vec<(ResolvedRuntimeOptions, SetupState)> = vec![
+        (resolved(true, false, None), SetupState::default()),
+        (resolved(true, false, None), stale_setup()),
         (resolved(false, false, None), accepted_setup()),
         (
             resolved(true, false, Some("http://example.com/t")),
@@ -758,6 +775,34 @@ fn only_opt_out_touches_disk() {
     );
     assert!(!buffer::install_id_path(&root).exists());
     assert!(!buffer::state_path(&root).exists());
+}
+
+#[test]
+fn default_off_does_not_hide_a_durable_sidecar_decline() {
+    let home = temp_home();
+    let root = root_of(&home);
+    buffer::ensure_dir(&root).expect("create root");
+    let before = seed_consenting_home(&root);
+    let mut options = resolved(false, false, None);
+
+    // A run-scoped kill switch still preserves the preexisting ordering.
+    options.telemetry_source = codewhale_config::TelemetrySource::Env;
+    assert!(matches!(
+        decide_in_home(Some(home.path()), &options, &declined_setup(), Surface::Tui),
+        TelemetryDecision::ForcedOff
+    ));
+    assert_eq!(snapshot(&root), before);
+
+    // Once that temporary switch is gone, the durable decline must wipe even
+    // though the new shipped configuration preference is also off.
+    options.telemetry_source = codewhale_config::TelemetrySource::Default;
+    assert!(matches!(
+        decide_in_home(Some(home.path()), &options, &declined_setup(), Surface::Tui),
+        TelemetryDecision::OptedOut
+    ));
+    assert!(buffer::tombstone_present(&root));
+    assert!(!buffer::install_id_path(&root).exists());
+    assert!(buffer::read_lines(&buffer::buffer_path(&root)).is_empty());
 }
 
 #[test]
@@ -1499,7 +1544,7 @@ fn no_public_api_accepts_a_bare_bool() {
         decide_in_home(
             Some(home.path()),
             &resolved(true, false, None),
-            &SetupState::default(),
+            &accepted_setup(),
             Surface::Cli
         )
         .is_enabled()
@@ -1509,7 +1554,7 @@ fn no_public_api_accepts_a_bare_bool() {
 // ------------------------------------------------- docs and code are welded --
 
 const TELEMETRY_DOC: &str = include_str!("../../../docs/TELEMETRY.md");
-const GOLDEN_V1: &str = include_str!("../tests/golden/v1.json");
+const GOLDEN_V2: &str = include_str!("../tests/golden/v2.json");
 
 /// Extract the fenced ```jsonc blocks from the schema doc, in order.
 fn jsonc_blocks(doc: &str) -> Vec<String> {
@@ -1635,7 +1680,7 @@ fn event_field_names_match_documented_schema() {
     let blocks = jsonc_blocks(TELEMETRY_DOC);
     assert_eq!(
         blocks.len(),
-        5,
+        7,
         "expected one jsonc block for the envelope and one per event variant; \
          a parse miss must fail rather than silently pass"
     );
@@ -1715,8 +1760,9 @@ fn event_field_names_match_documented_schema() {
 }
 
 #[test]
-fn golden_payload_v1() {
-    // `crates/telemetry/tests/golden/v1.json` is one fully-populated instance of
+fn golden_payload_v2() {
+    assert_eq!(CONSENT_VERSION.to_string(), TELEMETRY_NOTICE_VERSION);
+    // `crates/telemetry/tests/golden/v2.json` is one fully-populated instance of
     // the envelope and every event. Any field add, remove, or retype fails here
     // until the developer re-blesses it under a bumped `SCHEMA_VERSION` — and it
     // is also the artifact a future receiver author reads to know exactly what
@@ -1732,15 +1778,15 @@ fn golden_payload_v1() {
     rendered.push('\n');
 
     if std::env::var("CODEWHALE_BLESS_TELEMETRY_GOLDEN").is_ok() {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden/v1.json");
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden/v2.json");
         std::fs::create_dir_all(path.parent().expect("parent")).expect("create golden dir");
         std::fs::write(&path, &rendered).expect("write golden");
         return;
     }
 
     assert_eq!(
-        rendered, GOLDEN_V1,
-        "the v1 payload changed; bump SCHEMA_VERSION and re-bless the golden file"
+        rendered, GOLDEN_V2,
+        "the v2 payload changed; bump SCHEMA_VERSION and re-bless the golden file"
     );
 }
 
@@ -1809,6 +1855,8 @@ fn the_notice_summarizes_what_the_schema_collects_and_states_every_red_line() {
         "aggregate feature and error counters",
         "random ID stored on this machine",
         "every 90 days",
+        "explicit opt-in",
+        "PostHog",
     ] {
         assert!(
             flat.contains(&claim.split_whitespace().collect::<String>()),

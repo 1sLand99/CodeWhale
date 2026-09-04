@@ -7,9 +7,9 @@
 //!
 //! Two properties of the wording are deliberate and load-bearing:
 //!
-//! 1. **The default is stated plainly and the opt-out is immediate.** The
-//!    native TUI starts on the yes choice and makes the opt-out equally
-//!    reachable.
+//! 1. **Collection requires explicit versioned opt-in.** The nonblocking
+//!    native notice points to the ordinary Settings toggle and never accepts
+//!    on a user's behalf.
 //! 2. **The red lines are stated as "not collected", not as "anonymized".**
 //!    Sampling and hashing are not the same promise, and a notice that implies
 //!    them when neither is true is worse than no notice.
@@ -33,4 +33,7 @@ You are identified only by a random ID stored on this machine, replaced
 every 90 days. Change your mind any time:
                               codewhale config set telemetry false
 
-Full schema, field by field:  docs/TELEMETRY.md";
+Full schema, field by field:  docs/TELEMETRY.md
+
+Only after your explicit opt-in, Codewhale and PostHog process these
+counts. No IP is collected.";

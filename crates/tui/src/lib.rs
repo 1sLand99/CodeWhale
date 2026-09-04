@@ -2005,22 +2005,21 @@ fn arm_telemetry(cli: &Cli, command: Option<&Commands>) {
     );
 }
 
-/// Apply the choice made in the native TUI disclosure.
-///
-/// The in-memory setup state is authoritative for this process. In particular,
-/// a Disable choice reaches `decide` as an opt-out even when neither durable
-/// write landed, so the current launch cannot arm and any existing buffer is
-/// wiped whenever the telemetry home remains reachable.
-pub(crate) fn apply_tui_telemetry_decision(
-    pending: &crate::telemetry_notice::PendingTelemetryNotice,
-    setup: &codewhale_config::SetupState,
-) {
-    arm_telemetry_with_setup(
-        pending.config_path.clone(),
-        codewhale_telemetry::Surface::Tui,
-        pending.session_source,
-        Some(setup),
-    );
+/// Accept the disclosed processor version through the same durable transition
+/// as Settings. Used by the headless CLI; it never arms the current process.
+pub fn accept_telemetry_notice(config_path: Option<PathBuf>, version: u32) -> Result<String> {
+    if version != codewhale_telemetry::CONSENT_VERSION {
+        anyhow::bail!(
+            "read `codewhale config telemetry`, then explicitly accept current notice version {}",
+            codewhale_config::TELEMETRY_NOTICE_VERSION
+        );
+    }
+    let applied = crate::telemetry_notice::apply_persistent_preference(config_path, true);
+    let message = applied.message(crate::localization::Locale::En);
+    if applied.is_error() {
+        anyhow::bail!("{message}");
+    }
+    Ok(message)
 }
 
 /// Close the armed session and flush, bounded.
@@ -6302,12 +6301,19 @@ fn doctor_control_socket_posture_line(config: &Config) -> String {
 
 /// Resolved telemetry consent and where it came from (#5441).
 ///
-/// Telemetry ships ON by default, and no posture surface reported that — a
-/// user who never opted in saw nothing saying "telemetry: on (default)".
-/// Truth change only: the resolution itself is [`codewhale_config`]'s.
+/// Report the saved current processor acceptance as well as the environment
+/// preference, without arming or touching telemetry state.
 fn doctor_runtime_telemetry(config: &Config) -> (bool, &'static str) {
     let (on, source) = codewhale_config::resolved_telemetry_consent(config.telemetry);
-    (on, source.as_str())
+    if on
+        && !codewhale_telemetry::load_setup_state_for_decision().is_some_and(|state| {
+            state.telemetry_accepted(codewhale_config::TELEMETRY_NOTICE_VERSION)
+        })
+    {
+        (false, "consent_required")
+    } else {
+        (on, source.as_str())
+    }
 }
 
 fn doctor_operate_fleet_report_json(config: &Config, workspace: &Path) -> serde_json::Value {
@@ -13509,9 +13515,8 @@ mod doctor_setup_state_tests {
         );
     }
 
-    /// #5441: telemetry ships ON by default, and the runtime-posture doctor
-    /// section must say so — with the source that decided it — instead of
-    /// staying silent about the one default users never opted into.
+    /// Doctor must distinguish a configured preference from current processor
+    /// consent, and accurately report the default-off posture.
     #[test]
     fn doctor_reports_resolved_telemetry_with_its_source() {
         let _guard = crate::test_support::lock_test_env();
@@ -13530,12 +13535,35 @@ mod doctor_setup_state_tests {
         assert!(config.telemetry.is_none());
         let line = doctor_runtime_posture_line(&config, &workspace);
         assert!(
-            line.contains("telemetry=on (default)"),
+            line.contains("telemetry=off (default)"),
             "doctor line should name the defaulted consent: {line}"
         );
         let report = doctor_setup_report_json(&config, &workspace);
-        assert_eq!(report["runtime_posture"]["telemetry"]["value"], true);
+        assert_eq!(report["runtime_posture"]["telemetry"]["value"], false);
         assert_eq!(report["runtime_posture"]["telemetry"]["source"], "default");
+
+        let configured_on = Config {
+            telemetry: Some(true),
+            ..Config::default()
+        };
+        assert_eq!(
+            doctor_runtime_telemetry(&configured_on),
+            (false, "consent_required")
+        );
+        let mut accepted = codewhale_config::SetupState::default();
+        accepted.record_telemetry_notice("3", true);
+        accepted.save().expect("old acceptance");
+        assert_eq!(
+            doctor_runtime_telemetry(&configured_on),
+            (false, "consent_required")
+        );
+        accepted.record_telemetry_notice(codewhale_config::TELEMETRY_NOTICE_VERSION, true);
+        accepted.save().expect("current acceptance");
+        assert_eq!(doctor_runtime_telemetry(&configured_on), (true, "config"));
+        {
+            let _env_on = crate::test_support::EnvVarGuard::set("CODEWHALE_TELEMETRY", "true");
+            assert_eq!(doctor_runtime_telemetry(&Config::default()), (true, "env"));
+        }
 
         // A persisted opt-out is reported as the config file's decision.
         let config = Config {
