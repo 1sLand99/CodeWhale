@@ -1,6 +1,6 @@
 # 安装 Codewhale
 
-> 本文翻译自英文版 [INSTALL.md](../INSTALL.md)，与英文修订 `1563ce351`（2026-08-18）同步。
+> 本文依据英文版 [INSTALL.md](../INSTALL.md)。GitHub 优先安装与更新说明于 2026-09-04 更新；其余平台说明沿用现有译文。
 
 本文涵盖所有受支持的安装方式，以及最常见的"没装上"失败场景，包括 **Linux ARM64** 和其他不太常见的平台。
 
@@ -8,7 +8,7 @@
 
 本分支描述的是 **v0.9.12 源码候选版**。使用 `latest` 的安装命令会解析到最新已发布的包或 GitHub Release，这可能落后于源码候选版。候选版只有在对应的包、标签、校验和与发布资源齐备之后，才算正式发布的安装。
 
-在 macOS 和 Linux 上，网站安装器是最短的安装/更新路径：
+推荐使用官方 GitHub Releases。在 macOS 和 Linux 上首次安装：
 
 ```bash
 curl -fsSL https://codewhale.net/install.sh | sh
@@ -16,25 +16,53 @@ curl -fsSL https://codewhale.net/install.sh | sh
 
 它会下载匹配的 `codewhale` 和 `codew` 发布二进制，对照 `codewhale-artifacts-sha256.txt` 校验，默认安装到 `~/.local/bin`，并暴露 `codew` 便捷命令。
 
+已有的直接安装使用 `codewhale update --check` 和 `codewhale update`。更新器先使用
+GitHub；受支持的 Linux x64 平台仅在 GitHub 校验清单失败后才尝试 CNB。每次清单请求
+最多 10 秒、最多三次尝试。镜像和显式版本也不能绕过版本检查：例如源码 v0.9.12
+不会被已发布的 v0.9.11 覆盖。
+
+npm 和 Cargo 是次要打包方式。安装器不使用自动 sudo，也不覆盖不同的已有文件或符号链接；
+包管理器继续管理自己的可执行文件。更新器会保留指向当前二进制的符号链接，并拒绝覆盖
+内容不同的同目录命令。遇到旧版分离的 dispatcher/TUI 或多个安装时，选择新的空目录：
+
+```bash
+mkdir -p "$HOME/.local"
+codewhale_install_dir="$(mktemp -d "$HOME/.local/codewhale-release.XXXXXX")"
+curl -fsSL https://codewhale.net/install.sh | CODEWHALE_INSTALL_DIR="$codewhale_install_dir" sh
+"$codewhale_install_dir/codewhale" --version
+export PATH="$codewhale_install_dir:$PATH"
+hash -r
+command -v codewhale codew
+```
+
+验证路径和版本后，将所选目录放到 shell 配置的 PATH 最前面。今后使用该目录中
+`codewhale` 的完整路径运行 `update`。Windows 使用官方 GitHub Release 安装器或压缩包，
+并通过 `Get-Command codewhale, codew -All` 检查路径。完整迁移说明见
+[英文安装指南](../INSTALL.md#recommended-official-github-releases)。
+
 ---
 
 ## 1. 支持平台
 
+2026-09-04 检查的[最新稳定版 v0.9.11](https://github.com/Hmbown/CodeWhale/releases/tag/v0.9.11)
+包含 Linux、macOS、Windows 的 x64/arm64 资源及 Android arm64 资源。
+资源存在不等于真机验收；下表的包管理器支持和静态构建说明仍属于 v0.9.12 源码候选版。
+
 已发布的 Codewhale 版本会为受支持的平台/架构组合提供配套的 `codewhale` 和 `codew` 预编译二进制。下表是 v0.9.12 候选版的预期矩阵；Android/Termux 为预览状态，等待真机 QA。Linux ARM64 自 v0.8.8 起可用。Linux RISC-V 预编译暂时暂停，因为锁定的 `rquickjs-sys` 依赖没有提供 `riscv64gc-unknown-linux-gnu` 绑定。
 
-| 平台 | 架构 | npm install | `cargo install` | GitHub 发布资源 |
-| ------------ | ------------ | :---------: | :-------------: | ----------------------------------------------------- |
-| Linux | x64 (x86_64) | ✅ | ✅ | `codewhale-linux-x64`, `codew-linux-x64` |
-| Linux | arm64 | ✅ | ✅ | `codewhale-linux-arm64`, `codew-linux-arm64` |
-| Android / Termux | arm64 (aarch64) | ⚠️⁴ 预览版 | ⚠️⁴ 预览版 | `codewhale-android-arm64.tar.gz` 发布时的预览压缩包 |
-| Linux | riscv64 | ❌¹ | ❌³ | 暂时不支持，待上游绑定落地 |
-| macOS | x64 | ✅ | ✅ | `codewhale-macos-x64`, `codew-macos-x64` |
-| macOS | arm64 (M 系列) | ✅ | ✅ | `codewhale-macos-arm64`, `codew-macos-arm64` |
-| Windows | x64 | ✅ | ✅ | `codewhale-windows-x64.exe`, `codew-windows-x64.exe` |
-| Windows | arm64 | ✅ | ✅ | `codewhale-windows-arm64.exe`, `codew-windows-arm64.exe` |
-| Linux x64 或 arm64 上的 musl（Alpine） | 原生架构 | ✅（静态） | ✅ | 匹配的静态 Linux 资源 |
-| 其他 Linux（其他架构上的 musl） | — | ❌¹ | ✅² | 从源码构建 |
-| FreeBSD 14+ / OpenBSD | x64, arm64 | ❌ | ✅² | `cargo install codewhale-cli --locked`（无预编译；见 § FreeBSD） |
+| 平台 | 架构 | GitHub 发布资源 | npm install | `cargo install` |
+| ------------ | ------------ | ----------------------------------------------------- | :---------: | :-------------: |
+| Linux | x64 (x86_64) | `codewhale-linux-x64`, `codew-linux-x64` | ✅ | ✅ |
+| Linux | arm64 | `codewhale-linux-arm64`, `codew-linux-arm64` | ✅ | ✅ |
+| Android / Termux | arm64 (aarch64) | `codewhale-android-arm64.tar.gz` 发布时的预览压缩包 | ⚠️⁴ 预览版 | ⚠️⁴ 预览版 |
+| Linux | riscv64 | 暂时不支持，待上游绑定落地 | ❌¹ | ❌³ |
+| macOS | x64 | `codewhale-macos-x64`, `codew-macos-x64` | ✅ | ✅ |
+| macOS | arm64 (M 系列) | `codewhale-macos-arm64`, `codew-macos-arm64` | ✅ | ✅ |
+| Windows | x64 | `codewhale-windows-x64.exe`, `codew-windows-x64.exe` | ✅ | ✅ |
+| Windows | arm64 | `codewhale-windows-arm64.exe`, `codew-windows-arm64.exe` | ✅ | ✅ |
+| Linux x64 或 arm64 上的 musl（Alpine） | 原生架构 | 匹配的静态 Linux 资源 | ✅（静态） | ✅ |
+| 其他 Linux（其他架构上的 musl） | — | 从源码构建 | ❌¹ | ✅² |
+| FreeBSD 14+ / OpenBSD | x64, arm64 | `cargo install codewhale-cli --locked`（无预编译；见 § FreeBSD） | ❌ | ✅² |
 
 ¹ npm 包会以明确错误退出，并引导你到这里。
 ² 前提是你的工具链能编译较新的 Rust workspace；见下文[从源码构建](#7-从源码构建)。
@@ -156,7 +184,7 @@ sha256sum -c codewhale-artifacts-sha256.txt --ignore-missing
 
 ## 3. 通过 npm 安装
 
-npm 是推荐的安装方式（Node 18+；包装器适用于 v0.8.56 及更高版本）。它安装的是 注册表（registry） 上最新发布的版本，而不是未发布的源码候选版。
+npm 是次要安装方式（Node 18+；包装器适用于 v0.8.56 及更高版本）。它安装的是 注册表（registry） 上最新发布的版本，而不是未发布的源码候选版。
 
 ```bash
 npm install -g codewhale

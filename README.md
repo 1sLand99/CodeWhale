@@ -22,14 +22,23 @@ improved in public with the people who use it.
 
 ## Install
 
+macOS / Linux — install the official GitHub release:
+
 ```bash
-npm install -g codewhale
-codewhale
+curl -fsSL https://codewhale.net/install.sh | sh
+"$HOME/.local/bin/codewhale"
 ```
 
+Windows: download the matching installer or archive from
+[GitHub Releases](https://github.com/Hmbown/CodeWhale/releases/latest).
+For an existing direct install, run `codewhale update` (or `codewhale update --check`
+to inspect it). The updater prints the executable path and keeps newer builds.
+
+
 The first run helps you connect a provider or stay offline. Codewhale also
-supports Cargo, Docker, Nix, Scoop, prebuilt archives, Android/Termux, and a CNB
-mirror. See [the installation guide](docs/INSTALL.md).
+supports npm and Cargo as secondary packaging routes, plus Docker, Nix, Scoop,
+Android/Termux, and an optional CNB mirror. Existing package-managed installs
+receive migration instructions. See [installation and PATH help](docs/INSTALL.md).
 
 Tab completion is one command per shell — `codewhale completion bash|zsh|fish|powershell|elvish`.
 See [shell completions](docs/INSTALL.md#8-shell-completions).

@@ -21,7 +21,8 @@ use std::process::{Command, Stdio};
 /// Accepts `npm`, `homebrew` (or `brew`), `cargo`, `omarchy`, and `binary`.
 /// Anything else is ignored and detection falls back to automatic detection.
 /// Packagers who relocate the binary somewhere the heuristics cannot read —
-/// and users debugging a wrong guess — set this.
+/// and users debugging a wrong guess — set this. Recognized managed paths
+/// take precedence; `binary` cannot authorize overwriting a package-owned file.
 pub const INSTALL_METHOD_ENV: &str = "CODEWHALE_INSTALL_METHOD";
 
 /// The package manager (if any) that owns the running executable.
@@ -49,13 +50,19 @@ impl InstallMethod {
     /// `Cellar` rather than in the manager's flat `bin` shim directory.
     #[must_use]
     pub fn detect(exe: &Path) -> Self {
+        let detected = Self::detect_with_omarchy_probe(exe, omarchy_package_owns);
+        // An override can identify a relocated package, but cannot authorize
+        // replacing a file that a known package manager owns.
+        if !detected.supports_self_update() {
+            return detected;
+        }
         if let Some(forced) = std::env::var(INSTALL_METHOD_ENV)
             .ok()
             .and_then(|raw| Self::from_token(&raw))
         {
             return forced;
         }
-        Self::detect_with_omarchy_probe(exe, omarchy_package_owns)
+        detected
     }
 
     fn detect_with_omarchy_probe(exe: &Path, owns_package: impl FnOnce(&Path) -> bool) -> Self {

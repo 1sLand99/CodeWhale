@@ -15,7 +15,9 @@ This branch describes the **v0.9.12 source candidate**. Install commands that us
 trail the source candidate. A candidate is not a published install until the
 matching package, tag, checksums, and release assets exist.
 
-On macOS and Linux, the website installer is the shortest install/update path:
+## Recommended: official GitHub Releases
+
+For a new macOS or Linux install:
 
 ```bash
 curl -fsSL https://codewhale.net/install.sh | sh
@@ -24,30 +26,100 @@ curl -fsSL https://codewhale.net/install.sh | sh
 It downloads the matching `codewhale` and `codew` release binaries,
 verifies them against `codewhale-artifacts-sha256.txt`, installs to
 `~/.local/bin` by default, and exposes the `codew` convenience command.
+It does not use npm or compile with Cargo. The source installer refuses different
+existing files, symlink destinations, managed directories, and automatic `sudo`.
+Use a writable, empty user directory for a fresh install.
+
+For Windows, choose the matching installer or portable archive from
+[official GitHub Releases](https://github.com/Hmbown/CodeWhale/releases/latest).
+
+For an existing direct binary install:
+
+```bash
+codewhale update --check
+codewhale update
+```
+
+The command prints the executable it will change. GitHub is tried first; Linux
+x64 can fall back to the first-party CNB mirror only if GitHub's manifest fails
+or cannot cover the platform. Each manifest request has a 10-second timeout
+and at most three attempts. Explicit mirror settings remain supported. `CODEWHALE_VERSION` pins the mirror
+version; `DEEPSEEK_TUI_VERSION` and `DEEPSEEK_VERSION` remain legacy aliases. The
+manifest and binary must come from the same source, and checksum failure never
+permits replacement. An explicit version or mirror cannot bypass the version
+check: a newer development build is kept, including v0.9.12 when public latest
+is v0.9.11. Use a separate directory for deliberate rollback.
+
+### Migrating from npm, Cargo, or another installation
+
+Package managers continue to own their files. `codewhale update` gives migration
+instructions for npm, Cargo, Homebrew, and Omarchy instead of overwriting them.
+Known system/package directories are also protected. A `CODEWHALE_INSTALL_METHOD=binary`
+override cannot bypass a recognized managed path.
+
+Create a fresh destination when `~/.local/bin` is occupied or a sibling command
+has different bytes. This leaves every existing installation in place:
+
+```bash
+mkdir -p "$HOME/.local"
+codewhale_install_dir="$(mktemp -d "$HOME/.local/codewhale-release.XXXXXX")"
+curl -fsSL https://codewhale.net/install.sh | CODEWHALE_INSTALL_DIR="$codewhale_install_dir" sh
+"$codewhale_install_dir/codewhale" --version
+export PATH="$codewhale_install_dir:$PATH"
+hash -r
+command -v codewhale codew
+"$codewhale_install_dir/codewhale" update --check
+```
+
+After verifying the version and command paths, keep that directory first in your
+shell profile. In PowerShell, use `Get-Command codewhale, codew -All` to inspect
+resolution; run the selected executable using its full path. A successful update
+only changes its own install directory, so another earlier PATH entry can still
+launch an older copy.
+
+Modern matched `codewhale`, `codew`, and compatibility copies update from the
+same verified bytes. Symlinks to the running binary are preserved. A different
+or unrelated sibling is named in the error and left untouched; no sibling is
+executed merely to guess its owner. Use the fresh-directory migration above
+for older installs with separate dispatcher/TUI binaries.
+
+To retain a secondary package-managed install, use its manager:
+
+```bash
+npm install -g codewhale@latest
+# or
+cargo install codewhale-cli --locked --force
+```
+
+Homebrew uses `brew upgrade codewhale`; Omarchy uses `omarchy update`. These
+commands update their own copies, so verify PATH again afterward.
 
 ---
 
 ## 1. Supported platforms
 
-Published Codewhale releases ship matched `codewhale` and `codew` prebuilt binaries for their supported platform/architecture
-combinations. The table below is the intended v0.9.12 candidate matrix;
+As checked on 2026-09-04, [latest stable v0.9.11](https://github.com/Hmbown/CodeWhale/releases/tag/v0.9.11)
+publishes Linux x64/arm64, macOS x64/arm64, Windows x64/arm64, and Android arm64
+assets. Artifact presence is distinct from platform qualification.
+The table below describes the v0.9.12 source candidate's platform and secondary
+packaging support; `latest` installation still selects the published release.
 Android/Termux is preview pending real-device QA. Linux ARM64 is available from
 v0.8.8 onward. Linux RISC-V prebuilts are temporarily paused because the locked
 `rquickjs-sys` dependency does not ship `riscv64gc-unknown-linux-gnu` bindings.
 
-| Platform     | Architecture | npm install | `cargo install` | GitHub release asset                                  |
-| ------------ | ------------ | :---------: | :-------------: | ----------------------------------------------------- |
-| Linux        | x64 (x86_64) |     ✅      |       ✅        | `codewhale-linux-x64`, `codew-linux-x64`        |
-| Linux        | arm64        |     ✅      |       ✅        | `codewhale-linux-arm64`, `codew-linux-arm64`    |
-| Android / Termux | arm64 (aarch64) | ⚠️⁴ preview | ⚠️⁴ preview | `codewhale-android-arm64.tar.gz` preview archive when published |
-| Linux        | riscv64      |     ❌¹     |       ❌³       | temporarily unsupported until upstream bindings land |
-| macOS        | x64          |     ✅      |       ✅        | `codewhale-macos-x64`, `codew-macos-x64`        |
-| macOS        | arm64 (M-series) | ✅      |       ✅        | `codewhale-macos-arm64`, `codew-macos-arm64`    |
-| Windows      | x64          |     ✅      |       ✅        | `codewhale-windows-x64.exe`, `codew-windows-x64.exe` |
-| Windows      | arm64        |     ✅      |       ✅        | `codewhale-windows-arm64.exe`, `codew-windows-arm64.exe` |
-| Linux x64 or arm64 on musl (Alpine) | native arch | ✅ (static) | ✅ | matching static Linux asset |
-| Other Linux (musl on other arches) | — | ❌¹ | ✅² | build from source                                     |
-| FreeBSD 14+ / OpenBSD          | x64, arm64 |   ❌      |       ✅²       | `cargo install codewhale-cli --locked` (no prebuilt; see § FreeBSD) |
+| Platform | Architecture | GitHub release asset | npm install | `cargo install` |
+| ------------ | ------------ | ----------------------------------------------------- | :---------: | :-------------: |
+| Linux | x64 (x86_64) | `codewhale-linux-x64`, `codew-linux-x64` | ✅ | ✅ |
+| Linux | arm64 | `codewhale-linux-arm64`, `codew-linux-arm64` | ✅ | ✅ |
+| Android / Termux | arm64 (aarch64) | `codewhale-android-arm64.tar.gz` (published in v0.9.11; device support is preview) | ⚠️⁴ preview | ⚠️⁴ preview |
+| Linux | riscv64 | temporarily unsupported until upstream bindings land | ❌¹ | ❌³ |
+| macOS | x64 | `codewhale-macos-x64`, `codew-macos-x64` | ✅ | ✅ |
+| macOS | arm64 (M-series) | `codewhale-macos-arm64`, `codew-macos-arm64` | ✅ | ✅ |
+| Windows | x64 | `codewhale-windows-x64.exe`, `codew-windows-x64.exe` | ✅ | ✅ |
+| Windows | arm64 | `codewhale-windows-arm64.exe`, `codew-windows-arm64.exe` | ✅ | ✅ |
+| Linux x64 or arm64 on musl (Alpine) | native arch | matching static Linux asset | ✅ (static) | ✅ |
+| Other Linux (musl on other arches) | — | build from source | ❌¹ | ✅² |
+| FreeBSD 14+ / OpenBSD | x64, arm64 | `cargo install codewhale-cli --locked` (no prebuilt; see § FreeBSD) | ❌ | ✅² |
 
 ¹ The npm package will exit with a clear error and point you here.
 ² Provided your toolchain can compile a recent Rust workspace; see
@@ -222,7 +294,7 @@ a download sourced from an impersonating repository or mirror.
 
 ## 3. Install via npm
 
-npm is the recommended install path (Node 18+; wrapper available for v0.8.56
+npm is a secondary packaging option (Node 18+; wrapper available for v0.8.56
 and later). It installs the registry's latest published version, not an
 unpublished source candidate.
 
@@ -283,6 +355,8 @@ support instructions should use only the Codewhale names.
 ---
 
 ## 4. Install via Cargo (any Tier-1 Rust target)
+
+Cargo is a secondary option for source builds or platforms without a release asset.
 
 If GitHub releases are slow, blocked, or you're on an unsupported architecture,
 install from crates.io directly. One Cargo package is required:
@@ -471,45 +545,36 @@ the **bare binaries** (`codewhale-<platform>` and `codew-<platform>`, no extensi
 (`codewhale-<platform>.tar.gz`) that bundles the same commands plus an
 `install.sh`. The npm wrapper and the in-app `codewhale update` download the
 matched runtime binaries; the archive is the easiest manual install (see §6).
-The steps below use the bare binaries directly.
-
-Grab the matching command set for your platform from the
-[Releases page](https://github.com/Hmbown/CodeWhale/releases) and drop them
-side by side into a directory on your `PATH` (e.g. `~/.local/bin`):
-
-```bash
-# Linux ARM64 example
-mkdir -p ~/.local/bin
-curl -L -o ~/.local/bin/codewhale      \
-    https://github.com/Hmbown/CodeWhale/releases/latest/download/codewhale-linux-arm64
-curl -L -o ~/.local/bin/codew          \
-    https://github.com/Hmbown/CodeWhale/releases/latest/download/codew-linux-arm64
-chmod +x ~/.local/bin/codewhale ~/.local/bin/codew
-codewhale --version
-```
-
-> **macOS Gatekeeper note.** If you downloaded the binaries with a browser,
-> macOS may block them with "Apple cannot verify" warnings. Clear the quarantine
-> attribute on both binaries and retry:
-> ```bash
-> xattr -d com.apple.quarantine ~/.local/bin/codewhale ~/.local/bin/codew 2>/dev/null || true
-> ```
-
-Verify integrity against the per-release SHA-256 manifest:
+For a new macOS/Linux install, prefer the checksum-verifying website installer
+above. To install an archive manually, download it into a temporary directory,
+verify the archive before extracting or running its installer, then use an empty
+user prefix. For example, on Linux ARM64:
 
 ```bash
-curl -L -o /tmp/codewhale-artifacts-sha256.txt \
-    https://github.com/Hmbown/CodeWhale/releases/latest/download/codewhale-artifacts-sha256.txt
-( cd ~/.local/bin && sha256sum -c /tmp/codewhale-artifacts-sha256.txt --ignore-missing )
+codewhale_archive_dir="$(mktemp -d)"
+cd "$codewhale_archive_dir"
+curl -fsSLO https://github.com/Hmbown/CodeWhale/releases/latest/download/codewhale-linux-arm64.tar.gz
+curl -fsSLO https://github.com/Hmbown/CodeWhale/releases/latest/download/codewhale-bundles-sha256.txt
+sha256sum -c codewhale-bundles-sha256.txt --ignore-missing
+tar -xzf codewhale-linux-arm64.tar.gz
+cd codewhale-linux-arm64
+./install.sh
 ```
 
-(Use `shasum -a 256 -c /tmp/codewhale-artifacts-sha256.txt --ignore-missing`
-instead of `sha256sum -c` on macOS.)
+On macOS, choose the matching macOS archive and use
+`shasum -a 256 -c codewhale-bundles-sha256.txt --ignore-missing`.
+The archive installer defaults to `~/.local/bin`; `PREFIX=/an/empty/user/prefix`
+selects `/an/empty/user/prefix/bin`. Existing differing files are left intact;
+use the updater or a fresh prefix. The website installer instead accepts
+`CODEWHALE_INSTALL_DIR`, which names the command directory directly.
 
 ### Roll back to a previous release
 
 If a new release is bad on your machine, install the last known-good version
-explicitly. Replace `X.Y.Z` with the version you want to restore.
+explicitly in a separate directory, verify it, then choose that directory on
+PATH. `codewhale update` and the fresh-install scripts do not overwrite a newer
+build with an older release. Replace `X.Y.Z` with the version you want to restore.
+The following commands apply only to the secondary package-manager routes:
 
 ```bash
 # npm wrapper, only for versions that were published to npm
@@ -879,33 +944,21 @@ command surface at the version that produced it, not a live query.
 ### `Unsupported architecture: arm64 on platform linux`
 
 You're on a release earlier than v0.8.8 that doesn't publish Linux ARM64
-binaries. Either upgrade (`npm i -g codewhale@latest`) or use
+binaries. Use the GitHub installer in a fresh directory as described above, or use
 `cargo install` per [Section 4](#4-install-via-cargo-any-tier-1-rust-target).
 
 ### `MISSING_COMPANION_BINARY` after upgrading an older install
 
 The current single binary runs the TUI in-process and does not require a
-companion executable. This error identifies a stale pre-v0.9.5 dispatcher;
-replace that installation with the current npm package or Cargo binary instead
-of downloading an extra runtime:
-
-```bash
-npm install -g codewhale
-# or
-cargo install codewhale-cli --locked --force
-```
+companion executable. This error identifies a stale pre-v0.9.5 dispatcher.
+Use the fresh-directory GitHub migration above, then verify the selected
+`codewhale` and `codew` paths. Do not download another separate runtime.
 
 ### `codewhale update` reports `no asset found for platform codewhale-linux-aarch64`
 
-This is [#503](https://github.com/Hmbown/CodeWhale/issues/503) in v0.8.7 —
-the self-updater used Rust's `aarch64`/`x86_64` arch names instead of the
-release artifact's `arm64`/`x64`. Workaround until v0.8.8:
-
-```bash
-npm i -g codewhale@latest
-# or
-cargo install codewhale-cli --locked
-```
+Older updaters used Rust architecture names that did not match the published
+asset names. Use the official installer in a fresh directory as described above,
+then run the newly installed command by its full path.
 
 ### npm download is slow or times out from mainland China
 
@@ -923,10 +976,14 @@ still forces CNB only on Linux x64 / OpenHarmony x64.
 
 ### `codewhale update` is blocked by GitHub from mainland China
 
-`codewhale update` normally contacts GitHub Releases for metadata and binary
-assets. On networks where GitHub is blocked or unreliable, use the CNB source
-mirror instead and install the `codewhale-cli` package from the release tag.
-Cargo installs the `codewhale` command:
+`codewhale update` prefers GitHub Releases. On supported Linux x64 targets,
+a failed GitHub manifest permits the matching CNB manifest and binary fallback.
+If GitHub metadata is also unreachable, explicitly select a known published CNB
+version (`CODEWHALE_USE_CNB_MIRROR=1 CODEWHALE_VERSION=X.Y.Z codewhale update`)
+or a binary mirror below. Existing newer builds are kept.
+
+Building from the CNB source mirror with Cargo is a secondary option. Cargo
+installs its own `codewhale` command:
 
 To check the latest release without downloading or replacing binaries, run
 `codewhale update --check`.

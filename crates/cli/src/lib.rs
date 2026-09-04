@@ -399,7 +399,10 @@ The command prints the completion script to stdout; redirect it to a path your s
     },
     /// Print a usage rollup from the audit log and session store.
     Metrics(MetricsArgs),
-    /// Check for and apply updates to the `codewhale` binary.
+    /// Update this release binary from GitHub (package-managed installs get migration instructions).
+    #[command(
+        after_help = "GitHub Releases is the default source. Supported mirrors are explicit overrides or manifest-failure fallbacks. Checksums are required; older releases never replace a newer build.\n\nThe command prints the executable it will update. If you have multiple installs, run the intended binary by its full path.\n\nNew macOS/Linux install: curl -fsSL https://codewhale.net/install.sh | sh\nInstallation and PATH help: https://github.com/Hmbown/CodeWhale/blob/main/docs/INSTALL.md"
+    )]
     Update(UpdateArgs),
     /// Export the route catalog (`providers export --json`).
     Providers(ProvidersArgs),

@@ -128,10 +128,13 @@ pub(super) fn resolve_updater(
 pub(super) fn managed_install_message(method: InstallMethod) -> String {
     format!(
         "Codewhale was installed with {label}, which owns this binary.\n\
-         Run `{command}` in a shell, then restart Codewhale.\n\n\
-         /update deliberately will not self-update here: replacing a binary {label} manages \
-         leaves its metadata describing a version that is no longer on disk, and the next \
-         upgrade silently reverts you.",
+         Recommended: install the official GitHub release in a separate user directory.\n\
+         On macOS/Linux: `curl -fsSL https://codewhale.net/install.sh | sh`\n\
+         Verify `\"$HOME/.local/bin/codewhale\" --version`, put that directory first on PATH,\n\
+         then use `\"$HOME/.local/bin/codewhale\" update` for future updates.\n\
+         Windows and PATH instructions: https://github.com/Hmbown/CodeWhale/blob/main/docs/INSTALL.md\n\n\
+         To keep this secondary {label} installation, run `{command}` in a shell.\n\
+         /update will not replace a binary owned by {label}; restart Codewhale after changing installs.",
         label = method.label(),
         command = method.update_command(),
     )
