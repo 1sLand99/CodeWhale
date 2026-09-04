@@ -6,7 +6,7 @@
 
 如果你只想看精简的版本，请看[主 README](../../README.md#install) 或[简体中文 README](../../README.zh-CN.md#安装)。
 
-本分支描述的是 **v0.9.11 源码候选版**。使用 `latest` 的安装命令会解析到最新已发布的包或 GitHub Release，这可能落后于源码候选版。候选版只有在对应的包、标签、校验和与发布资源齐备之后，才算正式发布的安装。
+本分支描述的是 **v0.9.12 源码候选版**。使用 `latest` 的安装命令会解析到最新已发布的包或 GitHub Release，这可能落后于源码候选版。候选版只有在对应的包、标签、校验和与发布资源齐备之后，才算正式发布的安装。
 
 在 macOS 和 Linux 上，网站安装器是最短的安装/更新路径：
 
@@ -20,7 +20,7 @@ curl -fsSL https://codewhale.net/install.sh | sh
 
 ## 1. 支持平台
 
-已发布的 Codewhale 版本会为受支持的平台/架构组合提供配套的 `codewhale` 和 `codew` 预编译二进制。下表是 v0.9.11 候选版的预期矩阵；Android/Termux 为预览状态，等待真机 QA。Linux ARM64 自 v0.8.8 起可用。Linux RISC-V 预编译暂时暂停，因为锁定的 `rquickjs-sys` 依赖没有提供 `riscv64gc-unknown-linux-gnu` 绑定。
+已发布的 Codewhale 版本会为受支持的平台/架构组合提供配套的 `codewhale` 和 `codew` 预编译二进制。下表是 v0.9.12 候选版的预期矩阵；Android/Termux 为预览状态，等待真机 QA。Linux ARM64 自 v0.8.8 起可用。Linux RISC-V 预编译暂时暂停，因为锁定的 `rquickjs-sys` 依赖没有提供 `riscv64gc-unknown-linux-gnu` 绑定。
 
 | 平台 | 架构 | npm install | `cargo install` | GitHub 发布资源 |
 | ------------ | ------------ | :---------: | :-------------: | ----------------------------------------------------- |
@@ -39,11 +39,11 @@ curl -fsSL https://codewhale.net/install.sh | sh
 ¹ npm 包会以明确错误退出，并引导你到这里。
 ² 前提是你的工具链能编译较新的 Rust workspace；见下文[从源码构建](#7-从源码构建)。
 ³ RISC-V 源码构建目前需要上游 `rquickjs-sys` 的 RISC-V 绑定，或启用 bindgen 的依赖构建。
-⁴ v0.9.11 源码候选版的 npm 包装器能识别 Android arm64，并解析匹配的 `codewhale` 和 `codew` Android 资源。npm 安装仅对 GitHub Release 已发布的、匹配的包版本有效。在 #4236 和 #4242 跟踪的真机编译、启动、审批、文件工具与更新检查完成之前，Android/Termux 路径仍为预览。
+⁴ v0.9.12 源码候选版的 npm 包装器能识别 Android arm64，并解析匹配的 `codewhale` 和 `codew` Android 资源。npm 安装仅对 GitHub Release 已发布的、匹配的包版本有效。在 #4236 和 #4242 跟踪的真机编译、启动、审批、文件工具与更新检查完成之前，Android/Termux 路径仍为预览。
 
 Android / Termux 与 Linux arm64 不是同一个目标。不要在 Termux 里安装 Linux 的 `codewhale-linux-arm64` 压缩包；当某个发布版或候选版发布了 Termux 专用的 Android 压缩包时请使用它，或在 Termux 内从源码构建。
 
-Linux 的 **x64 和 arm64** v0.9.11 候选版资源是**静态 musl 构建**。x64 发布路径自 v0.8.65 起使用 musl；v0.9.6 将同样的构建与静态启动检查扩展到 arm64。这些二进制没有 glibc 依赖，可在匹配的架构上跨 Ubuntu、Debian、RHEL/CentOS 和 Alpine/musl 运行。SQLite 通过 `rusqlite` 内置，因此无需单独的 `libsqlite3` 运行时包。
+Linux 的 **x64 和 arm64** v0.9.12 候选版资源是**静态 musl 构建**。x64 发布路径自 v0.8.65 起使用 musl；v0.9.6 将同样的构建与静态启动检查扩展到 arm64。这些二进制没有 glibc 依赖，可在匹配的架构上跨 Ubuntu、Debian、RHEL/CentOS 和 Alpine/musl 运行。SQLite 通过 `rusqlite` 内置，因此无需单独的 `libsqlite3` 运行时包。
 
 ### Linux ARM64 可移植性
 
@@ -54,7 +54,7 @@ Ubuntu 22.04 自带 glibc 2.35，因此，那些较老的 arm64 二进制可能�
 version `GLIBC_2.39' not found
 ```
 
-npm 包装器、`codewhale update` 和 Unix 压缩包安装器对较旧版本仍保留 GNU 二进制预检查。v0.9.11 arm64 候选版改用 `aarch64-unknown-linux-musl`，因此没有 `GLIBC_*` 最低要求。如果你要在较旧的 arm64 发行版上安装早期版本，请使用：
+npm 包装器、`codewhale update` 和 Unix 压缩包安装器对较旧版本仍保留 GNU 二进制预检查。v0.9.12 arm64 候选版改用 `aarch64-unknown-linux-musl`，因此没有 `GLIBC_*` 最低要求。如果你要在较旧的 arm64 发行版上安装早期版本，请使用：
 
 ```bash
 cargo install codewhale-cli --locked   # 安装 codewhale

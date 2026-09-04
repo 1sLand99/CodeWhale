@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.9.12] - 2026-09-03
 
+Codewhale v0.9.12 puts computer use in the binary, opens two new routes —
+Alibaba Model Studio through the data-driven provider table and Concentrate
+as an opt-in BYOK Responses gateway — and adds cloud dispatch plus a
+config-gated per-session control socket. The shell is the other half of the
+release: a new launch card, the work surface docked under the composer, one
+focus owner for Tab, tool cells that carry their own state, and `fleet` as
+the public word for the live collective. The complete item-level change
+record is retained below the categorized release highlights.
+
 ### Added
 
 - Computer use ships with the binary. The `computer-use` plugin — 38 tools
