@@ -11766,6 +11766,60 @@ mod tests {
     }
 
     #[test]
+    fn provider_regression_5820_ollama_config_reaches_the_wire_with_safe_output() {
+        let _lock = crate::test_support::lock_test_env();
+        let _canonical = crate::test_support::EnvVarGuard::remove("CODEWHALE_MAX_OUTPUT_TOKENS");
+        let _legacy = crate::test_support::EnvVarGuard::remove("DEEPSEEK_MAX_OUTPUT_TOKENS");
+        let config = Config {
+            provider: Some("ollama".to_string()),
+            providers: Some(ProvidersConfig {
+                ollama: ProviderConfig {
+                    model: Some("qwen2.5:7b".to_string()),
+                    context_window: Some(32_768),
+                    base_url: Some("http://127.0.0.1:11434".to_string()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let client = DeepSeekClient::new(&config).unwrap();
+        assert_eq!(
+            client
+                .route_limits()
+                .and_then(|limits| limits.context_tokens),
+            Some(32_768)
+        );
+        assert_eq!(client.effective_max_output_tokens("qwen2.5:7b"), 8_192);
+        let prepared = client
+            .prepare_outbound_request(
+                MessageRequest {
+                    model: "qwen2.5:7b".to_string(),
+                    messages: vec![Message {
+                        role: Role::User,
+                        content: vec![ContentBlock::Text {
+                            text: "hello".to_string(),
+                            cache_control: None,
+                        }],
+                    }],
+                    max_tokens: 64_000,
+                    system: None,
+                    tools: None,
+                    tool_choice: None,
+                    metadata: None,
+                    thinking: None,
+                    reasoning_effort: None,
+                    stream: Some(false),
+                    temperature: None,
+                    top_p: None,
+                },
+                false,
+            )
+            .unwrap();
+        assert_eq!(prepared.body["max_tokens"], 8_192);
+    }
+
+    #[test]
     fn outbound_seam_clamps_every_dialect_to_the_exact_route_envelope() {
         let _lock = crate::test_support::lock_test_env();
         let _canonical =

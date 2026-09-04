@@ -230,10 +230,29 @@ pub(crate) fn effective_max_output_tokens_for_route(
     model: &str,
     route_limits: Option<RouteLimits>,
 ) -> u32 {
-    let requested_cap = effective_max_output_tokens(model);
+    let window = route_context_window_tokens(provider, model, route_limits);
     let compatibility_source = output_ceiling_source(provider, model);
     let compatibility_cap = compatibility_source.clamp_tokens();
     let route_cap = route_output_limit_tokens(route_limits);
+    // With a known route window and no published output limit, reserve a
+    // conservative part of that window. The model-only fallback reserved 64K even
+    // for a configured 32K Ollama route, leaving just 1K for input (#5820).
+    // Explicit requests and documented ceilings retain their existing rules.
+    let requested_cap = if explicit_max_output_tokens_override().is_none()
+        && crate::models::max_output_tokens_for_model(model).is_none()
+        && route_cap.is_none()
+        && matches!(
+            compatibility_source,
+            OutputCeilingSource::RouteDeclaredUnknown | OutputCeilingSource::Uncatalogued(_)
+        )
+        && route_limits
+            .and_then(|limits| limits.context_tokens)
+            .is_some_and(|tokens| (1..=u64::from(u32::MAX)).contains(&tokens))
+    {
+        (window / 4).clamp(1, UNCATALOGUED_COMPAT_MAX_OUTPUT_TOKENS)
+    } else {
+        effective_max_output_tokens(model)
+    };
     // Unknown means unknown only where a route *declares* it: membership ids
     // such as the `kimi-for-coding` family, and operator-owned self-hosted
     // engines. For those there is nothing to clamp against and the requested
@@ -259,8 +278,6 @@ pub(crate) fn effective_max_output_tokens_for_route(
     // capability fallback rather than an explicit offering. This keeps a
     // suffix/config/catalog-derived small window from ever receiving a request
     // cap larger than the window itself.
-    let window = route_context_window_tokens(provider, model, route_limits);
-
     u32::try_from(ContextBudget::new(u64::from(window), 0, u64::from(cap)).output_cap_tokens)
         .unwrap_or(cap)
         .max(1)
@@ -328,6 +345,67 @@ pub(crate) fn auto_compact_default_for_route(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provider_regression_5820_small_unknown_windows_keep_room_for_input() {
+        let _lock = crate::test_support::lock_test_env();
+        let _canonical = crate::test_support::EnvVarGuard::remove("CODEWHALE_MAX_OUTPUT_TOKENS");
+        let _legacy = crate::test_support::EnvVarGuard::remove("DEEPSEEK_MAX_OUTPUT_TOKENS");
+        let model = "qwen2.5:7b";
+        assert!(crate::models::max_output_tokens_for_model(model).is_none());
+        for provider in [
+            ApiProvider::Ollama,
+            ApiProvider::Sglang,
+            ApiProvider::Vllm,
+            ApiProvider::Custom,
+        ] {
+            for (window, expected_output) in [
+                (16_384, 4_096),
+                (32_768, 8_192),
+                (65_536, 8_192),
+                (262_144, 8_192),
+            ] {
+                let limits = Some(RouteLimits {
+                    context_tokens: Some(window),
+                    ..RouteLimits::default()
+                });
+                let wire_cap = effective_max_output_tokens_for_route(provider, model, limits);
+                let budget = route_context_budget(provider, model, limits, 6_225).unwrap();
+                assert_eq!(wire_cap, expected_output, "{provider:?}, window={window}");
+                assert_eq!(budget.output_cap_tokens, u64::from(wire_cap));
+                assert_eq!(
+                    budget.input_budget_ceiling,
+                    window - u64::from(wire_cap) - 1_024
+                );
+                assert!(
+                    budget.input_tokens < budget.input_budget_ceiling,
+                    "{budget:?}"
+                );
+                assert!(!budget.should_compact(), "{budget:?}");
+            }
+        }
+        let _explicit =
+            crate::test_support::EnvVarGuard::set("CODEWHALE_MAX_OUTPUT_TOKENS", "16384");
+        let limits = RouteLimits {
+            context_tokens: Some(32_768),
+            ..RouteLimits::default()
+        };
+        assert_eq!(
+            effective_max_output_tokens_for_route(ApiProvider::Ollama, model, Some(limits)),
+            16_384
+        );
+        assert_eq!(
+            effective_max_output_tokens_for_route(
+                ApiProvider::Ollama,
+                model,
+                Some(RouteLimits {
+                    output_tokens: Some(4_096),
+                    ..limits
+                })
+            ),
+            4_096
+        );
+    }
 
     /// Absence of a catalogue row is not evidence of a large ceiling. An
     /// unrecognized wire alias on a remote OpenAI-compatible route keeps the
