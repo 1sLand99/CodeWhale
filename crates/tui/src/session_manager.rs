@@ -216,6 +216,75 @@ fn live_sessions() -> &'static std::sync::RwLock<std::collections::HashSet<Strin
     LIVE_SESSIONS.get_or_init(Default::default)
 }
 
+/// Session directories held open by a runtime store, refcounted.
+///
+/// `LIVE_SESSIONS` is a single-slot interactive claim — `set_live_session`
+/// clears it — so it cannot describe the *other* sessions a process is running
+/// at the same time: a scheduled automation, a background task, a subagent.
+/// Those mint a session directory under `sessions/<id>/runtime` before any
+/// `<id>.json` record exists, which is exactly the shape
+/// `reclaim_orphaned_session_dirs` deletes. It was deleting the store out from
+/// under running automations, which then failed with "Failed to open Runtime
+/// store state" or "Failed to open Runtime event lock" against a path that no
+/// longer existed.
+///
+/// Refcounted because several stores can be scoped to one session id, and
+/// released by guard drop so a crash still leaves the directory reclaimable.
+static CLAIMED_SESSION_DIRS: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<String, usize>>,
+> = std::sync::OnceLock::new();
+
+fn claimed_session_dirs() -> &'static std::sync::Mutex<std::collections::HashMap<String, usize>> {
+    CLAIMED_SESSION_DIRS.get_or_init(Default::default)
+}
+
+/// Holds `sessions/<id>/` against orphan reclamation until dropped.
+#[derive(Debug)]
+pub struct SessionDirClaim {
+    session_id: String,
+}
+
+impl Drop for SessionDirClaim {
+    fn drop(&mut self) {
+        if let Ok(mut claims) = claimed_session_dirs().lock()
+            && let Some(count) = claims.get_mut(&self.session_id)
+        {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                claims.remove(&self.session_id);
+            }
+        }
+    }
+}
+
+/// Claim `sessions/<session_id>/` for as long as the returned guard lives.
+///
+/// Any writer that creates a session directory before its `<id>.json` record
+/// exists must hold one of these, or the orphan sweep may reclaim the
+/// directory while it is still in use.
+#[must_use]
+pub fn claim_session_dir(session_id: &str) -> Option<SessionDirClaim> {
+    let session_id = session_id.trim();
+    if session_id.is_empty() || !is_session_uuid(session_id) {
+        // Only UUID-shaped directories are reclaimable, so only those need a
+        // claim. Anything else is already left alone by the sweep.
+        return None;
+    }
+    let mut claims = claimed_session_dirs().lock().ok()?;
+    *claims.entry(session_id.to_string()).or_insert(0) += 1;
+    Some(SessionDirClaim {
+        session_id: session_id.to_string(),
+    })
+}
+
+/// Is this session directory claimed by a runtime store in this process?
+#[must_use]
+pub fn is_claimed_session_dir(session_id: &str) -> bool {
+    claimed_session_dirs()
+        .lock()
+        .is_ok_and(|claims| claims.contains_key(session_id))
+}
+
 /// Who is asking to mutate a saved session.
 ///
 /// This is an authority distinction, not a convenience one: the owner may
@@ -1746,7 +1815,7 @@ impl SessionManager {
             let Ok(session_path) = self.validated_session_path(id) else {
                 continue;
             };
-            if session_path.exists() || is_live_session(id) {
+            if session_path.exists() || is_live_session(id) || is_claimed_session_dir(id) {
                 continue;
             }
             if self
@@ -2875,6 +2944,37 @@ mod tests {
         assert!(
             tmp.path().join(live).join("artifacts").exists(),
             "a directory whose session still exists must be left alone"
+        );
+    }
+
+    #[test]
+    fn a_claimed_session_dir_is_not_reclaimed_while_its_runtime_store_is_open() {
+        // The automation regression: a scheduled run mints
+        // `sessions/<id>/runtime` before any `<id>.json` exists, so the sweep
+        // saw the shape it reclaims and deleted the store mid-run. The run
+        // then failed with "Failed to open Runtime store state" against a path
+        // that no longer existed. Without the claim this directory is gone.
+        let tmp = tempdir().expect("tempdir");
+        let manager = SessionManager::new(tmp.path().to_path_buf()).expect("manager");
+        let running = "44444444-4444-4444-8444-444444444444";
+        let runtime = tmp.path().join(running).join("runtime");
+        fs::create_dir_all(&runtime).expect("runtime dir");
+        fs::write(runtime.join("state.json"), b"{}").expect("state");
+
+        let claim = claim_session_dir(running).expect("uuid dirs are claimable");
+        manager.cleanup_old_sessions().expect("cleanup");
+        assert!(
+            runtime.join("state.json").exists(),
+            "a running automation's store must outlive the orphan sweep"
+        );
+
+        // Dropping the claim returns it to the reclaimable set, so a crashed
+        // run still cannot strand its directory forever.
+        drop(claim);
+        manager.cleanup_old_sessions().expect("cleanup");
+        assert!(
+            !tmp.path().join(running).exists(),
+            "an unclaimed orphan is still reclaimed"
         );
     }
 

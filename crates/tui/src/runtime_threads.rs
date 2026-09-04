@@ -1029,6 +1029,14 @@ pub struct RuntimeThreadStore {
     owner_id: String,
     state_path: PathBuf,
     event_lock_path: PathBuf,
+    /// Holds `sessions/<id>/` against orphan reclamation while this store is
+    /// open. A session-scoped store creates its directory before any
+    /// `<id>.json` record exists, which is precisely what
+    /// `reclaim_orphaned_session_dirs` treats as garbage — it was deleting the
+    /// store out from under running automations. `None` for stores that are
+    /// not session-scoped (the shared task runtime, an explicit
+    /// `CODEWHALE_RUNTIME_DIR`), which the sweep never touches anyway.
+    _session_dir_claim: Option<Arc<crate::session_manager::SessionDirClaim>>,
     /// Serializes load-modify-save operations on thread records. The guard is
     /// synchronous and must never cross an `.await`; JSON records are small,
     /// and one global guard avoids per-thread lock lifecycle races.
@@ -1083,6 +1091,7 @@ impl RuntimeThreadStore {
         // same store. Reuse the root event lock before any owner-derived path
         // is computed so all processes load exactly one durable owner.
         let owner_id = load_or_create_runtime_store_owner(&owner_path, &event_lock_path)?;
+        let session_dir_claim = session_dir_claim_for_store_root(&root);
         let store = Self {
             threads_dir,
             turns_dir,
@@ -1094,6 +1103,7 @@ impl RuntimeThreadStore {
             owner_id,
             state_path,
             event_lock_path,
+            _session_dir_claim: session_dir_claim,
             thread_mutation: Arc::new(parking_lot::Mutex::new(())),
             turn_mutation: Arc::new(parking_lot::Mutex::new(())),
             mail_mutation: Arc::new(parking_lot::Mutex::new(())),
@@ -2070,6 +2080,23 @@ fn default_runtime_store_root(task_data_dir: &Path, session_id: Option<&str>) ->
         },
         None => task_data_dir.join("runtime"),
     }
+}
+
+/// The session-directory claim a store at `root` needs, if any.
+///
+/// Session-scoped roots are `<sessions_dir>/<uuid>/runtime`, so the id is the
+/// parent directory's name. Everything else — the shared task runtime, an
+/// explicit `CODEWHALE_RUNTIME_DIR` — is outside the swept tree and needs no
+/// claim.
+fn session_dir_claim_for_store_root(
+    root: &Path,
+) -> Option<Arc<crate::session_manager::SessionDirClaim>> {
+    let sessions_dir = crate::session_manager::default_sessions_dir().ok()?;
+    let session_dir = root.parent()?;
+    if session_dir.parent() != Some(sessions_dir.as_path()) {
+        return None;
+    }
+    crate::session_manager::claim_session_dir(session_dir.file_name()?.to_str()?).map(Arc::new)
 }
 
 fn is_runtime_session_scope(id: &str) -> bool {

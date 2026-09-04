@@ -1998,7 +1998,20 @@ fn sort_model_rows_for_view(
             .unwrap_or(usize::MAX)
     };
     match view {
-        ModelListView::Configured | ModelListView::Catalog => rows.sort_by_key(|row| pin_rank(row)),
+        // Pins first, then one contiguous block per provider+family with the
+        // newest model at its head. Sorting by pin rank alone left families
+        // interleaved — `glm` and `DeepSeek` each drew two headers, and the
+        // older member of a family (GLM-5.2) stranded at the bottom of the
+        // list well below its newer sibling.
+        ModelListView::Configured | ModelListView::Catalog => rows.sort_by(|left, right| {
+            pin_rank(left)
+                .cmp(&pin_rank(right))
+                .then_with(|| row_group_key(left).cmp(&row_group_key(right)))
+                .then_with(|| {
+                    model_version_key(right.id.as_str()).cmp(&model_version_key(left.id.as_str()))
+                })
+                .then_with(|| left.id.cmp(&right.id))
+        }),
         ModelListView::Recent => rows.sort_by(|left, right| {
             offering_fetched_at(right)
                 .cmp(&offering_fetched_at(left))
@@ -2029,6 +2042,53 @@ fn sort_model_rows_for_view(
                 .then_with(|| left.id.cmp(&right.id))
         }),
     }
+}
+
+/// Stable grouping key so a provider's families render as one contiguous
+/// block each, which is what the family-header logic already assumes when it
+/// only compares against the previous row.
+fn row_group_key(row: &ModelPickerRow) -> (String, String) {
+    let provider = row_provider_identity(row)
+        .map(str::to_ascii_lowercase)
+        .or_else(|| {
+            row.provider
+                .map(|provider| provider.as_str().to_ascii_lowercase())
+        })
+        .unwrap_or_default();
+    let family = row
+        .provider
+        .and_then(|provider| catalog_family_for(provider, &row.id))
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    (provider, family)
+}
+
+/// Version ordinal for "newest first" inside a family.
+///
+/// Model ids carry their version as dotted or dashed numbers (`GLM-5.3`,
+/// `deepseek-v4-pro`, `gpt-5.6-terra`), so the comparison is on the numeric
+/// components in order, not on the string — otherwise `GLM-5.10` would sort
+/// below `GLM-5.2`. Ids with no digits compare equal and fall through to the
+/// alphabetical tiebreak.
+fn model_version_key(id: &str) -> Vec<u32> {
+    let mut parts = Vec::new();
+    let mut current: Option<u32> = None;
+    for ch in id.chars() {
+        if let Some(digit) = ch.to_digit(10) {
+            current = Some(
+                current
+                    .unwrap_or(0)
+                    .saturating_mul(10)
+                    .saturating_add(digit),
+            );
+        } else if let Some(value) = current.take() {
+            parts.push(value);
+        }
+    }
+    if let Some(value) = current {
+        parts.push(value);
+    }
+    parts
 }
 
 fn row_provider_identity(row: &ModelPickerRow) -> Option<&str> {
