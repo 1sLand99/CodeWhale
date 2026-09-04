@@ -119,6 +119,10 @@ pub struct TranscriptViewCache {
     options: TranscriptRenderOptions,
     /// Fold state affects rendering without changing cell revisions.
     folded_cells: HashSet<usize>,
+    /// Index of the newest durable Work receipt (checklist / plan snapshot)
+    /// in the last pass. When a new one lands the previous newest must
+    /// re-render collapsed, and its revision alone would not say so.
+    newest_work_receipt: Option<usize>,
     reasoning_action_target: Option<ReasoningActionTarget>,
     transcript_action_owner: Option<TranscriptActionOwner>,
     identity_epoch: Option<u64>,
@@ -144,6 +148,7 @@ impl TranscriptViewCache {
             width: 0,
             options: TranscriptRenderOptions::default(),
             folded_cells: HashSet::new(),
+            newest_work_receipt: None,
             reasoning_action_target: None,
             transcript_action_owner: None,
             identity_epoch: None,
@@ -278,7 +283,23 @@ impl TranscriptViewCache {
         self.transcript_action_owner = action_owner;
         let layout_changed = self.width != width || self.options != options || identity_changed;
         let folded_changed = self.folded_cells != *folded_cells;
-        if layout_changed || folded_changed {
+        // `todo_write` replaces the whole list on every call, so only the
+        // newest snapshot is worth a full card (#5871). When a new one lands
+        // the previous newest must re-render collapsed; its own revision has
+        // not changed, so supersession has to invalidate the cache itself.
+        let cells: Vec<&'a HistoryCell> = cells.collect();
+        let newest_work_receipt = cells
+            .iter()
+            .copied()
+            .enumerate()
+            .filter(|(_, cell)| {
+                matches!(cell, HistoryCell::Tool(tool) if tool.is_durable_work_receipt())
+            })
+            .map(|(idx, _)| idx)
+            .next_back();
+        let work_receipt_changed = self.newest_work_receipt != newest_work_receipt;
+        self.newest_work_receipt = newest_work_receipt;
+        if layout_changed || folded_changed || work_receipt_changed {
             self.per_cell.clear();
         }
         self.width = width;
@@ -291,7 +312,8 @@ impl TranscriptViewCache {
         // destructive identity epoch also prevents revision reuse after an
         // index is removed and later filled by a different cell.
         let old_len = self.per_cell.len();
-        let mut any_dirty = layout_changed || folded_changed || old_len != total_cells;
+        let mut any_dirty =
+            layout_changed || folded_changed || work_receipt_changed || old_len != total_cells;
         let mut first_dirty: Option<usize> = if old_len != total_cells {
             Some(old_len.min(total_cells))
         } else {
@@ -428,6 +450,11 @@ impl TranscriptViewCache {
 
             let mut cell_options = options;
             cell_options.reasoning_preview_extra_lines = 0;
+            cell_options.superseded_work_receipt = matches!(
+                cell,
+                HistoryCell::Tool(tool) if tool.is_durable_work_receipt()
+            ) && newest_work_receipt
+                .is_some_and(|newest| newest != idx);
             new_per_cell.push(render_cached_cell(
                 cell,
                 current_rev,

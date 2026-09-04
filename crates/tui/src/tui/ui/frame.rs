@@ -376,6 +376,22 @@ fn register_clickable_chrome_for_hover(app: &App) {
             false,
         );
     }
+
+    // The composer's `[↑]` submit control. It registers only when a click
+    // there would actually send: an affordance that lights up and then does
+    // nothing is the same defect as one that acts without lighting up.
+    if let Some(composer) = app.viewport.last_composer_area
+        && let Some(submit) = crate::tui::widgets::active_composer_submit_rect(app, composer)
+        && app.composer_enter_would_submit()
+    {
+        crate::tui::hover_layer::register_rect(
+            crate::tui::hover_hit::HoverTargetKind::Link,
+            submit,
+            crate::localization::tr(app.ui_locale, crate::localization::MessageId::KbSendDraft)
+                .into_owned(),
+            false,
+        );
+    }
 }
 
 /// Register the info line's drawn controls as one typed input surface.
@@ -2034,6 +2050,46 @@ mod tests {
             registered.iter().any(|hit| hit.area == button),
             "the jump-to-latest button handles a click in mouse_ui and must \
              light up under the pointer; registered: {registered:?}"
+        );
+    }
+
+    /// The composer's `[↑]` answered clicks and showed nothing under the
+    /// pointer — the last of the clickable-but-dark controls. It lights up
+    /// only when a click there would actually send.
+    #[test]
+    fn composer_send_target_lights_up_only_when_it_would_send() {
+        let _guard = crate::tui::hover_layer::HOVER_TEST_LOCK.lock().unwrap();
+        let mut app =
+            crate::test_support::test_app_with_options(crate::test_support::test_tui_options("."));
+        app.launch.visible = false;
+        app.composer_border = true;
+        let area = ratatui::layout::Rect::new(0, 20, 80, 4);
+        app.viewport.last_composer_area = Some(area);
+        app.viewport.last_composer_content = Some(ratatui::layout::Rect::new(1, 21, 73, 2));
+        let submit = crate::tui::widgets::active_composer_submit_rect(&app, area)
+            .expect("enclosed composer submit");
+
+        // Empty draft: the click path refuses, so the pointer must not promise.
+        app.input.clear();
+        app.cursor_position = 0;
+        crate::tui::hover_layer::begin_frame();
+        super::register_clickable_chrome_for_hover(&app);
+        assert!(
+            !crate::tui::hover_layer::registered_targets()
+                .iter()
+                .any(|hit| hit.area == submit),
+            "an inert send target must not advertise itself"
+        );
+
+        app.input = "ship it".to_string();
+        app.cursor_position = app.input.chars().count();
+        crate::tui::hover_layer::begin_frame();
+        super::register_clickable_chrome_for_hover(&app);
+        assert!(
+            crate::tui::hover_layer::registered_targets()
+                .iter()
+                .any(|hit| hit.area == submit),
+            "a live send target must light up under the pointer"
         );
     }
 

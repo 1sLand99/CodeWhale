@@ -212,6 +212,16 @@ pub struct TranscriptRenderOptions {
     /// `[transcript] prose_measure` so the main cache and the full-screen
     /// overlay agree on the same effective width.
     pub(crate) prose_measure: Option<u16>,
+    /// This cell is a durable Work receipt that a later one has replaced.
+    ///
+    /// `todo_write` writes the whole list every time, so a long session grew a
+    /// stack of full checklist cards that could only be cleared by `/clear` or
+    /// `/new` — both of which also drop `api_messages` and the compaction
+    /// summary, so tidying the view cost the conversation (#5871). A
+    /// superseded snapshot collapses to its summary line in the live
+    /// transcript; the full card stays in the transcript overlay and in the
+    /// tool detail record, because the receipt that the tool ran is evidence.
+    pub(crate) superseded_work_receipt: bool,
     /// Extra raw reasoning body rows available to the newest transcript cell.
     /// The transcript cache derives this from genuinely unused viewport rows;
     /// non-layout-aware renderers and historical cells retain the compact
@@ -226,6 +236,7 @@ pub struct TranscriptRenderOptions {
 impl Default for TranscriptRenderOptions {
     fn default() -> Self {
         Self {
+            superseded_work_receipt: false,
             locale: Locale::En,
             show_thinking: true,
             thinking_highlight: true,
@@ -479,6 +490,20 @@ impl HistoryCell {
                         Style::default().fg(palette::TEXT_MUTED).italic(),
                     ));
                 }
+                lines
+            }
+            HistoryCell::Tool(cell) if options.superseded_work_receipt => {
+                // A durable Work receipt a later one replaced keeps its header
+                // — the progress reading — and drops the body (#5871). The full
+                // card stays in the transcript overlay and the detail record,
+                // so the evidence that the tool ran is not rewritten away.
+                let mut lines =
+                    cell.lines_with_motion_and_locale(width, options.low_motion, options.locale);
+                lines.truncate(1);
+                lines.push(details_affordance_line(
+                    &crate::tui::key_shortcuts::tool_details_shortcut_action_hint("details"),
+                    Style::default().fg(palette::TEXT_MUTED).italic(),
+                ));
                 lines
             }
             HistoryCell::Tool(cell) => {

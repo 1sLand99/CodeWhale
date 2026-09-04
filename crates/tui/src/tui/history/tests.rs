@@ -2602,3 +2602,52 @@ fn rail_and_glyph_split_only_where_the_card_has_settled() {
         "a finished read keeps the accent it wore while running"
     );
 }
+
+/// Issue #5871: `todo_write` replaces the whole list on every call, so a long
+/// session stacked full checklist cards that could only be cleared by `/clear`
+/// or `/new` — and both of those also drop `api_messages` and the compaction
+/// summary. Only the newest snapshot keeps its card; the ones it replaced keep
+/// their header (the progress reading) and a details affordance.
+#[test]
+fn superseded_todo_snapshots_collapse_to_their_header() {
+    let snapshot = |done: usize| {
+        let items: Vec<String> = (0..3)
+            .map(|i| {
+                let status = if i < done { "completed" } else { "pending" };
+                format!(r#"{{"content":"step {i}","status":"{status}"}}"#)
+            })
+            .collect();
+        let mut cell = generic_tool("todo_write", ToolStatus::Success);
+        cell.output = Some(format!(r#"{{"items":[{}]}}"#, items.join(",")));
+        HistoryCell::Tool(ToolCell::Generic(cell))
+    };
+
+    let mut options = TranscriptRenderOptions {
+        show_tool_details: true,
+        ..Default::default()
+    };
+    let older = snapshot(1);
+
+    let expanded = older.lines_with_options(120, options);
+    assert!(
+        expanded.len() > 2,
+        "the newest snapshot renders its full card: {expanded:?}"
+    );
+
+    options.superseded_work_receipt = true;
+    let collapsed = older.lines_with_options(120, options);
+    assert_eq!(
+        collapsed.len(),
+        2,
+        "a replaced snapshot keeps its header plus the details affordance"
+    );
+    let header: String = collapsed[0]
+        .spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect();
+    assert!(
+        header.contains("1/3"),
+        "the collapsed row keeps the progress reading: {header}"
+    );
+}

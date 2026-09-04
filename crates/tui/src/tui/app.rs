@@ -5304,6 +5304,7 @@ impl App {
 
     pub fn transcript_render_options(&self) -> TranscriptRenderOptions {
         TranscriptRenderOptions {
+            superseded_work_receipt: false,
             locale: self.ui_locale,
             show_thinking: self.show_thinking,
             thinking_highlight: self.thinking_highlight,
