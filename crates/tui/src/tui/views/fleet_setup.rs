@@ -483,6 +483,32 @@ fn push_unique_model(models: &mut Vec<String>, model: &str) {
 
 /// Human-readable label for a built-in provider id, falling back to an exact
 /// named custom id verbatim.
+/// Does this provider/model route match a typed filter?
+///
+/// Substring over the model id, the provider id, and the provider's display
+/// label, because a person types "sonnet", "anthropic", or "Claude" and means
+/// the same row. The inherit row also answers to the words describing it.
+/// Shared so the setup wizard and the Fleet editor cannot disagree about what
+/// a query means — the editor had no filter at all, which made picking one
+/// model out of every configured route an arrow-key errand.
+pub(super) fn route_matches_query(
+    query: &str,
+    provider: &str,
+    model: &str,
+    is_inherit_row: bool,
+) -> bool {
+    let query = query.trim().to_ascii_lowercase();
+    if query.is_empty() {
+        return true;
+    }
+    model.to_ascii_lowercase().contains(&query)
+        || provider.to_ascii_lowercase().contains(&query)
+        || provider_display_label(provider)
+            .to_ascii_lowercase()
+            .contains(&query)
+        || (is_inherit_row && "inherit same as session current".contains(&query))
+}
+
 pub(super) fn provider_display_label(provider_id: &str) -> String {
     crate::config::ApiProvider::parse(provider_id)
         .filter(|provider| provider.as_str() == provider_id)
@@ -1176,19 +1202,10 @@ impl FleetSetupView {
     /// (#4639). Empty query shows every row; otherwise substring match over
     /// provider id/label and model id.
     fn filtered_model_indices(&self) -> Vec<usize> {
-        let query = self.model_query.trim().to_ascii_lowercase();
-        if query.is_empty() {
-            return (0..self.model_choices.len()).collect();
-        }
         (0..self.model_choices.len())
             .filter(|idx| {
                 let (provider, model) = &self.model_routes[*idx];
-                model.to_ascii_lowercase().contains(&query)
-                    || provider.to_ascii_lowercase().contains(&query)
-                    || provider_display_label(provider)
-                        .to_ascii_lowercase()
-                        .contains(&query)
-                    || (*idx == 0 && "inherit same current".contains(&query))
+                route_matches_query(&self.model_query, provider, model, *idx == 0)
             })
             .collect()
     }

@@ -8,7 +8,7 @@
 
 use std::path::PathBuf;
 
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     buffer::Buffer,
     layout::{Constraint, Direction, Layout, Rect},
@@ -75,7 +75,12 @@ pub struct FleetDetailView {
     step: DetailStep,
     pick_target: PickTarget,
     routes: Vec<RouteRow>,
+    /// Highlight position *within the filtered list*, not into `routes`.
     pick_row: usize,
+    /// Typed filter for the route picker. Letters filter directly — no mode
+    /// to discover — because the list is every configured provider/model
+    /// route and arrowing through it was the whole complaint.
+    pick_query: String,
     // Inline rename.
     rename_mode: bool,
     rename_input: String,
@@ -161,6 +166,7 @@ impl FleetDetailView {
             pick_target: PickTarget::Operator,
             routes,
             pick_row: 0,
+            pick_query: String::new(),
             rename_mode: false,
             rename_input: String::new(),
             pending_remove: false,
@@ -240,12 +246,37 @@ impl FleetDetailView {
         }
     }
 
+    /// Rows passing the typed filter, as indices into `routes`.
+    fn filtered_routes(&self) -> Vec<usize> {
+        (0..self.routes.len())
+            .filter(|idx| {
+                let route = &self.routes[*idx];
+                crate::tui::views::fleet_setup::route_matches_query(
+                    &self.pick_query,
+                    route.provider.as_deref().unwrap_or(""),
+                    route.model.as_deref().unwrap_or(""),
+                    *idx == 0,
+                )
+            })
+            .collect()
+    }
+
+    /// The `routes` index currently highlighted, or `None` when the filter
+    /// excludes everything.
+    fn picked_route_index(&self) -> Option<usize> {
+        let filtered = self.filtered_routes();
+        filtered
+            .get(self.pick_row.min(filtered.len().saturating_sub(1)))
+            .copied()
+    }
+
     /// Enter the route-picker step for the target.
     fn open_route_picker(&mut self, target: PickTarget) {
         self.step = DetailStep::PickRoute;
         self.pick_target = target;
         // Preselect the row matching the current pin (or the inherit row).
         self.pick_row = 0;
+        self.pick_query.clear();
         let current: Option<(&str, &str)> = match target {
             PickTarget::Operator => self
                 .fleet
@@ -259,6 +290,8 @@ impl FleetDetailView {
                 .and_then(|m| m.provider.as_deref().zip(m.model.as_deref())),
         };
         if let Some((provider, model)) = current {
+            // The filter is empty on open, so a `routes` index is also its
+            // position in the filtered list.
             for (idx, route) in self.routes.iter().enumerate() {
                 if route.provider.as_deref() == Some(provider)
                     && route.model.as_deref() == Some(model)
@@ -271,7 +304,7 @@ impl FleetDetailView {
     }
 
     fn apply_route_pick(&mut self) -> Option<ViewAction> {
-        let route = self.routes.get(self.pick_row)?;
+        let route = self.routes.get(self.picked_route_index()?)?;
         match self.pick_target {
             PickTarget::Operator => {
                 self.fleet.operator = match (&route.provider, &route.model) {
@@ -457,9 +490,17 @@ impl FleetDetailView {
     fn footer_hints(&self) -> Vec<ActionHint> {
         match self.step {
             DetailStep::PickRoute => vec![
+                ActionHint::new("type", "filter"),
                 ActionHint::new("↑/↓", "move"),
                 ActionHint::new("Enter", "pick"),
-                ActionHint::new("Esc", "back"),
+                ActionHint::new(
+                    "Esc",
+                    if self.pick_query.is_empty() {
+                        "back"
+                    } else {
+                        "clear filter"
+                    },
+                ),
             ],
             DetailStep::Overview => {
                 let mut hints = vec![
@@ -495,25 +536,44 @@ impl ModalView for FleetDetailView {
     fn handle_key(&mut self, key: KeyEvent) -> ViewAction {
         match self.step {
             DetailStep::PickRoute => match key.code {
+                // Esc clears a filter before it leaves, so a mistyped query
+                // does not cost the step.
+                KeyCode::Esc if !self.pick_query.is_empty() => {
+                    self.pick_query.clear();
+                    self.pick_row = 0;
+                    ViewAction::None
+                }
                 KeyCode::Esc => {
                     self.step = DetailStep::Overview;
                     ViewAction::None
                 }
-                KeyCode::Up | KeyCode::Char('k') => {
-                    if !self.routes.is_empty() {
-                        self.pick_row =
-                            crate::tui::list_nav::wrap_index(self.pick_row, self.routes.len(), -1);
+                KeyCode::Up => {
+                    let len = self.filtered_routes().len();
+                    if len > 0 {
+                        self.pick_row = crate::tui::list_nav::wrap_index(self.pick_row, len, -1);
                     }
                     ViewAction::None
                 }
-                KeyCode::Down | KeyCode::Char('j') => {
-                    if !self.routes.is_empty() {
-                        self.pick_row =
-                            crate::tui::list_nav::wrap_index(self.pick_row, self.routes.len(), 1);
+                KeyCode::Down => {
+                    let len = self.filtered_routes().len();
+                    if len > 0 {
+                        self.pick_row = crate::tui::list_nav::wrap_index(self.pick_row, len, 1);
                     }
                     ViewAction::None
                 }
                 KeyCode::Enter => self.apply_route_pick().unwrap_or(ViewAction::None),
+                KeyCode::Backspace => {
+                    self.pick_query.pop();
+                    self.pick_row = 0;
+                    ViewAction::None
+                }
+                // Letters filter. `j`/`k` used to navigate here, which is why
+                // typing a model name did nothing useful.
+                KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.pick_query.push(c);
+                    self.pick_row = 0;
+                    ViewAction::None
+                }
                 _ => ViewAction::None,
             },
             DetailStep::Overview => {
@@ -763,6 +823,7 @@ impl FleetDetailView {
         if area.width == 0 || area.height == 0 {
             return;
         }
+        let filtered = self.filtered_routes();
         let rows_visible = usize::from(area.height).max(1);
         let pick_scroll = self.pick_row.saturating_sub(rows_visible.saturating_sub(1));
         let target_label = match self.pick_target {
@@ -776,15 +837,31 @@ impl FleetDetailView {
         };
         let mut lines: Vec<Line<'static>> = Vec::new();
         lines.push(Line::from(Span::styled(
-            format!("  Model for {target_label} — Enter picks, Esc back."),
+            if self.pick_query.is_empty() {
+                format!("  Model for {target_label} — type to filter, Enter picks.")
+            } else {
+                format!(
+                    "  Model for {target_label} — filter: {} ({} of {})",
+                    self.pick_query,
+                    filtered.len(),
+                    self.routes.len()
+                )
+            },
             Style::default().fg(palette::TEXT_MUTED),
         )));
         lines.push(Line::from(""));
-        for (idx, route) in self.routes.iter().enumerate() {
-            if idx < pick_scroll || idx >= pick_scroll + rows_visible {
+        if filtered.is_empty() {
+            lines.push(Line::from(Span::styled(
+                "  No route matches. Backspace to widen the filter.",
+                Style::default().fg(palette::TEXT_DIM),
+            )));
+        }
+        for (position, route_idx) in filtered.iter().enumerate() {
+            if position < pick_scroll || position >= pick_scroll + rows_visible {
                 continue;
             }
-            let selected = idx == self.pick_row;
+            let route = &self.routes[*route_idx];
+            let selected = position == self.pick_row.min(filtered.len().saturating_sub(1));
             let base = if selected {
                 Style::default().fg(palette::WHALE_ACTION).bold()
             } else {
@@ -1019,6 +1096,88 @@ mod tests {
         view.handle_key(key(KeyCode::Enter));
         let op = view.fleet.operator.as_ref().expect("pinned operator");
         assert!(!op.provider.is_empty() && !op.model.is_empty());
+    }
+
+    /// "It is too hard to assign a model from a specific provider to a
+    /// specific fleet role." The picker listed every configured
+    /// provider/model route and offered only arrow keys; `j` and `k` moved
+    /// the highlight instead of typing. Letters now narrow the list.
+    #[test]
+    fn typing_narrows_the_route_picker_and_enter_picks_from_the_narrowed_list() {
+        let ws = tempfile::TempDir::new().unwrap();
+        let fleet = sample_fleet("Fleet Filter");
+        save_fleet(&fleet, FleetScope::Workspace, ws.path()).unwrap();
+
+        let mut view = FleetDetailView::open(
+            &app_in(ws.path().to_path_buf()),
+            &Config::default(),
+            "Fleet Filter",
+            FleetScope::Workspace,
+        )
+        .expect("open");
+
+        view.handle_key(key(KeyCode::Char('o')));
+        assert_eq!(view.step, DetailStep::PickRoute);
+        let unfiltered = view.filtered_routes().len();
+        assert!(unfiltered > 1, "the picker needs rows to narrow");
+
+        // Type the provider of a concrete row and confirm the list shrinks to
+        // rows that actually mention it.
+        let target = view.routes[1..]
+            .iter()
+            .find_map(|route| route.provider.clone())
+            .expect("a concrete route row");
+        for ch in target.chars() {
+            view.handle_key(key(KeyCode::Char(ch)));
+        }
+        let filtered = view.filtered_routes();
+        assert!(!filtered.is_empty(), "the typed provider must match itself");
+        assert!(
+            filtered.len() < unfiltered || unfiltered == filtered.len(),
+            "filtering must never grow the list"
+        );
+        for idx in &filtered {
+            let route = &view.routes[*idx];
+            assert!(
+                crate::tui::views::fleet_setup::route_matches_query(
+                    &target,
+                    route.provider.as_deref().unwrap_or(""),
+                    route.model.as_deref().unwrap_or(""),
+                    *idx == 0,
+                ),
+                "row {:?} survived a filter it does not match",
+                route.label
+            );
+        }
+
+        // Enter picks from the narrowed list, not from the raw index.
+        let expected = view.routes[filtered[0]].clone();
+        view.handle_key(key(KeyCode::Enter));
+        assert_eq!(view.step, DetailStep::Overview);
+        match (expected.provider, expected.model) {
+            (Some(provider), Some(model)) => {
+                let op = view.fleet.operator.as_ref().expect("pinned operator");
+                assert_eq!(op.provider, provider);
+                assert_eq!(op.model, model);
+            }
+            _ => assert!(view.fleet.operator.is_none(), "inherit row clears the pin"),
+        }
+
+        // Backspace widens again, and Esc clears a filter before it leaves.
+        view.handle_key(key(KeyCode::Char('o')));
+        view.handle_key(key(KeyCode::Char('z')));
+        view.handle_key(key(KeyCode::Char('z')));
+        view.handle_key(key(KeyCode::Backspace));
+        assert_eq!(view.pick_query, "z");
+        view.handle_key(key(KeyCode::Esc));
+        assert!(view.pick_query.is_empty());
+        assert_eq!(
+            view.step,
+            DetailStep::PickRoute,
+            "the first Esc spends itself on the filter"
+        );
+        view.handle_key(key(KeyCode::Esc));
+        assert_eq!(view.step, DetailStep::Overview);
     }
 
     #[test]
