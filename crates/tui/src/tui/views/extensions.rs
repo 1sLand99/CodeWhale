@@ -152,6 +152,7 @@ impl PluginProduct {
         ExtensionItem {
             id: self.id,
             label: self.name,
+            tone: ExtensionTone::Idle,
             description: self.description,
             state: self.maturity,
             detail: localize(
@@ -168,12 +169,46 @@ impl PluginProduct {
     }
 }
 
+/// What a row's state *means*, independent of the words it uses to say it.
+///
+/// Every row on this screen used to paint in one colour, so twenty servers,
+/// four of them broken, read as one undifferentiated wall — "incredibly
+/// boring, plain, and hard on the eyes because of the sameness". The tone is
+/// typed rather than sniffed out of the localized state string, because a
+/// screen that only colours correctly in English is not coloured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ExtensionTone {
+    /// Working: connected, enabled, active.
+    Ready,
+    /// Wants a person: auth required, disconnected, not yet reviewed.
+    Attention,
+    /// Broken: an error or a rejected entry.
+    Failure,
+    /// Deliberately off, or simply not configured.
+    #[default]
+    Idle,
+}
+
+impl ExtensionTone {
+    fn ink(self) -> crate::palette::ChromeInk {
+        use crate::palette::ChromeInk;
+        match self {
+            Self::Ready => ChromeInk::Outcome,
+            Self::Attention => ChromeInk::Attention,
+            Self::Failure => ChromeInk::Failure,
+            Self::Idle => ChromeInk::Metadata,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExtensionItem {
     pub id: String,
     pub label: String,
     pub description: String,
     pub state: String,
+    /// Semantic reading of `state`, resolved through the theme's ink grammar.
+    pub tone: ExtensionTone,
     pub detail: String,
     pub action: Option<ExtensionAction>,
 }
@@ -469,6 +504,11 @@ fn hooks_model(app: &App, locale: Locale) -> ExtensionsTabModel {
         .enumerate()
         .map(|(index, hook)| ExtensionItem {
             id: format!("hook-{index}"),
+            tone: if config.enabled {
+                ExtensionTone::Ready
+            } else {
+                ExtensionTone::Idle
+            },
             label: hook.name.clone().unwrap_or_else(|| {
                 localize(
                     locale,
@@ -507,6 +547,11 @@ fn hooks_model(app: &App, locale: Locale) -> ExtensionsTabModel {
         .enumerate()
         .map(|(index, problem)| ExtensionItem {
             id: format!("hook-problem-{index}"),
+            tone: if problem.rejected {
+                ExtensionTone::Failure
+            } else {
+                ExtensionTone::Attention
+            },
             label: problem.name.clone().unwrap_or_else(|| {
                 tr(locale, MessageId::ExtensionsHooksConfiguration).into_owned()
             }),
@@ -548,6 +593,7 @@ fn hooks_model(app: &App, locale: Locale) -> ExtensionsTabModel {
             label: tr(locale, MessageId::ExtensionsGroupConfigured).into_owned(),
             items: vec![ExtensionItem {
                 id: "hooks-add".into(),
+                tone: ExtensionTone::Idle,
                 label: tr(locale, MessageId::ExtensionsHooksAddLabel).into_owned(),
                 description: tr(locale, MessageId::ExtensionsHooksAddDescription).into_owned(),
                 state: tr(locale, MessageId::ExtensionsStateAvailable).into_owned(),
@@ -739,6 +785,25 @@ fn plugin_row_action(
     }
 }
 
+/// How a plugin row reads, using the same ladder as [`plugin_row_action`].
+fn plugin_row_tone(plugin: &crate::plugins::types::LoadedPlugin) -> ExtensionTone {
+    let has_error_diagnostics = plugin
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.level == crate::plugins::types::PluginDiagnosticLevel::Error);
+    if has_error_diagnostics {
+        ExtensionTone::Failure
+    } else if plugin.active() {
+        ExtensionTone::Ready
+    } else if plugin.trusted() {
+        // Trusted and deliberately disabled: off, not wrong.
+        ExtensionTone::Idle
+    } else {
+        // Untrusted is not broken either; it is waiting on a person.
+        ExtensionTone::Attention
+    }
+}
+
 fn plugins_model(app: &App, locale: Locale) -> ExtensionsTabModel {
     let mut by_scope = [Vec::new(), Vec::new(), Vec::new()];
     for plugin in app.plugin_registry.list() {
@@ -751,6 +816,7 @@ fn plugins_model(app: &App, locale: Locale) -> ExtensionsTabModel {
         let action = plugin_row_action(locale, plugin);
         by_scope[scope].push(ExtensionItem {
             id: plugin.id.as_str().to_string(),
+            tone: plugin_row_tone(plugin),
             label: plugin.name().to_string(),
             description: plugin
                 .manifest
@@ -809,6 +875,7 @@ fn plugins_model(app: &App, locale: Locale) -> ExtensionsTabModel {
         .enumerate()
         .map(|(index, diagnostic)| ExtensionItem {
             id: format!("plugin-diagnostic-{index}"),
+            tone: ExtensionTone::Failure,
             label: diagnostic.code.to_string(),
             description: diagnostic.message.clone(),
             state: if diagnostic.level == crate::plugins::types::PluginDiagnosticLevel::Error {
@@ -875,6 +942,7 @@ fn marketplace_model(app: &App, locale: Locale) -> ExtensionsTabModel {
                     .iter()
                     .map(|candidate| ExtensionItem {
                         id: candidate.id.as_str().to_string(),
+                        tone: ExtensionTone::Attention,
                         label: candidate
                             .display_name
                             .clone()
@@ -959,6 +1027,7 @@ fn skills_model(app: &App, locale: Locale) -> ExtensionsTabModel {
         let position = groups.iter().position(|group| group.id == group_id);
         let item = ExtensionItem {
             id: format!("{}:{}", group_id, skill.id.canonical_name),
+            tone: ExtensionTone::Ready,
             label: skill.name,
             description: skill.description.unwrap_or_default(),
             state: match skill.parser {
@@ -1087,6 +1156,17 @@ fn mcp_model(app: &App, locale: Locale) -> ExtensionsTabModel {
             };
             ExtensionItem {
                 id: name.clone(),
+                tone: match (enabled, initializing, recovery) {
+                    (false, ..) => ExtensionTone::Idle,
+                    (true, true, _) => ExtensionTone::Attention,
+                    (true, false, None) => ExtensionTone::Ready,
+                    // A server that reports an error is broken; one that only
+                    // wants a login or a reconnect is waiting on a person.
+                    (true, false, Some(crate::mcp::McpRecoveryKind::Diagnose)) => {
+                        ExtensionTone::Failure
+                    }
+                    (true, false, Some(_)) => ExtensionTone::Attention,
+                },
                 label: name,
                 description: observed.map_or_else(String::new, |server| {
                     localize(
@@ -1188,13 +1268,19 @@ pub struct ExtensionsView {
     selected: [usize; 5],
     scroll: [usize; 5],
     folded_groups: BTreeSet<String>,
+    /// The live theme, captured at open so row ink resolves through the same
+    /// grammar the rest of the chrome uses instead of raw palette constants.
+    theme: crate::palette::UiTheme,
     hits: RefCell<HitAreas>,
 }
 
 impl ExtensionsView {
     #[must_use]
     pub fn new(app: &App, tab: ExtensionsTab) -> Self {
-        Self::from_snapshot_with_locale(ExtensionsSnapshot::from_app(app), tab, app.ui_locale)
+        let mut view =
+            Self::from_snapshot_with_locale(ExtensionsSnapshot::from_app(app), tab, app.ui_locale);
+        view.theme = app.ui_theme;
+        view
     }
 
     fn from_snapshot_with_locale(
@@ -1211,6 +1297,7 @@ impl ExtensionsView {
             selected: [0; 5],
             scroll: [0; 5],
             folded_groups: BTreeSet::new(),
+            theme: crate::palette::UI_THEME,
             hits: RefCell::new(HitAreas::default()),
         }
     }
@@ -1573,33 +1660,52 @@ impl ModalView for ExtensionsView {
             } else {
                 Style::default().fg(palette::TEXT_PRIMARY)
             };
-            let text = match entry {
+            // Rows are built as (text, optional ink) pairs. The ink is what
+            // stops every row on the screen from reading the same: the action
+            // chip is an invitation, the state is a verdict, the description
+            // is background. A selected row keeps one style — a highlight the
+            // eye can follow beats four colours fighting a fill.
+            let mut parts: Vec<(String, Option<crate::palette::ChromeInk>)> = Vec::new();
+            match entry {
                 VisibleEntry::Group(group) => {
                     let folded = self.folded_groups.contains(&self.fold_key(group));
-                    format!(
-                        "{} {} ({})",
-                        if folded { "▸" } else { "▾" },
-                        group.label,
-                        group.items.len()
-                    )
+                    parts.push((
+                        format!(
+                            "{} {} ({})",
+                            if folded { "▸" } else { "▾" },
+                            group.label,
+                            group.items.len()
+                        ),
+                        None,
+                    ));
                 }
                 VisibleEntry::Item(_, item) => {
-                    let action = item
-                        .action
-                        .as_ref()
-                        .map(|action| format!("[{}] ", action.label()))
-                        .unwrap_or_default();
+                    parts.push(("  ".into(), None));
+                    if let Some(action) = item.action.as_ref() {
+                        parts.push((
+                            format!("[{}] ", action.label()),
+                            Some(match action {
+                                ExtensionAction::Command { .. } => {
+                                    crate::palette::ChromeInk::Identity
+                                }
+                                ExtensionAction::Status { .. } => item.tone.ink(),
+                            }),
+                        ));
+                    }
+                    parts.push((item.label.clone(), None));
+                    parts.push((format!(" [{}]", item.state), Some(item.tone.ink())));
                     if spacious && !item.description.is_empty() {
-                        format!(
-                            "  {action}{} [{}] — {}",
-                            item.label, item.state, item.description
-                        )
-                    } else {
-                        format!("  {action}{} [{}]", item.label, item.state)
+                        parts.push((
+                            format!(" — {}", item.description),
+                            Some(crate::palette::ChromeInk::MetadataHint),
+                        ));
                     }
                 }
-                VisibleEntry::Problem(problem) => format!("! {problem}"),
-                VisibleEntry::Empty => {
+                VisibleEntry::Problem(problem) => parts.push((
+                    format!("! {problem}"),
+                    Some(crate::palette::ChromeInk::Failure),
+                )),
+                VisibleEntry::Empty => parts.push((
                     if self.query.is_empty() {
                         tr(self.locale, MessageId::ExtensionsNoItems).into_owned()
                     } else {
@@ -1608,14 +1714,34 @@ impl ModalView for ExtensionsView {
                             MessageId::ExtensionsNoMatches,
                             &[("query", &self.query)],
                         )
-                    }
-                }
+                    },
+                    Some(crate::palette::ChromeInk::MetadataHint),
+                )),
+            }
+
+            // Truncate across the whole row, not per span, so the width bound
+            // is the one the flat row always had.
+            let joined = parts
+                .iter()
+                .map(|(text, _)| text.as_str())
+                .collect::<String>();
+            let clipped = truncate_view_text(&joined, usize::from(row_area.width));
+            let spans = if is_selected || clipped.len() != joined.len() {
+                vec![Span::styled(clipped, style)]
+            } else {
+                parts
+                    .into_iter()
+                    .filter(|(text, _)| !text.is_empty())
+                    .map(|(text, ink)| {
+                        let span_style = match ink {
+                            Some(ink) => Style::default().fg(ink.color(&self.theme)),
+                            None => style,
+                        };
+                        Span::styled(text, span_style)
+                    })
+                    .collect()
             };
-            Paragraph::new(Line::from(Span::styled(
-                truncate_view_text(&text, usize::from(row_area.width)),
-                style,
-            )))
-            .render(row_area, buf);
+            Paragraph::new(Line::from(spans)).render(row_area, buf);
             hits.rows.push((row_area, entry_index));
         }
 
@@ -1697,6 +1823,34 @@ mod tests {
         assert_eq!(recovery, McpRecoveryKind::Reconnect);
         assert_eq!(recovery.slash_command("playwright"), "/mcp reload");
         assert_eq!(tr(Locale::En, recovery.label_key()).as_ref(), "reconnect");
+    }
+
+    /// Four distinct tones, four distinct inks, and none of them read out of
+    /// a localized string — a screen that only colours correctly in English
+    /// is not coloured.
+    #[test]
+    fn every_tone_paints_a_distinct_ink() {
+        use crate::palette::ChromeInk;
+        let theme = crate::palette::ThemeId::Whale.ui_theme();
+        let inks: Vec<ChromeInk> = [
+            ExtensionTone::Ready,
+            ExtensionTone::Attention,
+            ExtensionTone::Failure,
+            ExtensionTone::Idle,
+        ]
+        .into_iter()
+        .map(ExtensionTone::ink)
+        .collect();
+        let colors: std::collections::BTreeSet<String> = inks
+            .iter()
+            .map(|ink| format!("{:?}", ink.color(&theme)))
+            .collect();
+        assert_eq!(
+            colors.len(),
+            4,
+            "each tone must be visually separable: {inks:?}"
+        );
+        assert_eq!(ExtensionTone::default(), ExtensionTone::Idle);
     }
 
     /// The grokbuild grammar: Tab / Shift+Tab move across the tab bar, even
