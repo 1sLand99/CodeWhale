@@ -305,7 +305,7 @@ fn load_model_roster_from_home_at(home: &Path, now: DateTime<Utc>) -> CodexModel
 }
 
 fn read_cache_bytes(path: &Path) -> Result<Vec<u8>, CodexModelCacheFreshness> {
-    let path_metadata = match std::fs::symlink_metadata(&path) {
+    let path_metadata = match std::fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Err(CodexModelCacheFreshness::Missing);
@@ -315,7 +315,7 @@ fn read_cache_bytes(path: &Path) -> Result<Vec<u8>, CodexModelCacheFreshness> {
     if !path_metadata.file_type().is_file() || path_metadata.len() > MAX_MODEL_CACHE_BYTES {
         return Err(CodexModelCacheFreshness::Invalid);
     }
-    let mut file = match open_cache_file(&path) {
+    let mut file = match open_cache_file(path) {
         Ok(file) => file,
         Err(_) => return Err(CodexModelCacheFreshness::Invalid),
     };

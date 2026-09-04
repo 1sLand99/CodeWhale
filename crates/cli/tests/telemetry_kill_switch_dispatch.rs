@@ -27,7 +27,7 @@ fn env_off_beats_cli_on_end_to_end() {
     let on = dispatch_and_read_telemetry(None);
     let dry_run = on
         .dry_run
-        .expect("`--telemetry true` must write the dry-run sink");
+        .expect("current consent plus `--telemetry true` must write the dry-run sink");
     assert!(
         dry_run.contains("\"event\":\"session_start\"")
             && dry_run.contains("\"event\":\"session_end\""),
@@ -45,7 +45,8 @@ fn env_off_beats_cli_on_end_to_end() {
 /// network latency. The next interactive session owns delivery.
 #[test]
 fn short_cli_exit_persists_without_network_delivery() {
-    let evidence = dispatch_and_read_telemetry_with_endpoint(None, None);
+    let evidence =
+        dispatch_and_read_telemetry_with_endpoint(None, None, Some(TELEMETRY_NOTICE_VERSION));
     let pending = evidence
         .pending
         .expect("short CLI must seal its pending telemetry before process exit");
@@ -71,10 +72,10 @@ fn an_unparseable_telemetry_env_value_keeps_the_in_process_runtime_off() {
     );
 }
 
-/// Re-enabling through the documented settings command must clear a decline
-/// recorded by the former opt-in notice as well as the config-file floor.
+/// A generic configuration flag cannot accept a new processor notice. Only
+/// explicit acceptance of the current version may clear a historical decline.
 #[test]
-fn config_set_true_reenables_a_historical_decline() {
+fn config_set_true_preserves_decline_until_current_notice_is_explicitly_accepted() {
     let fixture = TempDir::new().expect("fixture root");
     let home = fixture.path().join("home");
     let codewhale_home = fixture.path().join("codewhale-home");
@@ -93,22 +94,22 @@ fn config_set_true_reenables_a_historical_decline() {
     let config_path = fixture.path().join("config.toml");
     fs::write(&config_path, "telemetry = false\n").expect("write config");
 
-    let output = Command::new(codewhale_binary())
-        .current_dir(&workspace)
-        .env_clear()
-        .env("PATH", std::env::var_os("PATH").expect("PATH"))
-        .env("HOME", &home)
-        .env("USERPROFILE", &home)
-        .env("CODEWHALE_HOME", &codewhale_home)
-        .env("CODEWHALE_SECRET_BACKEND", "file")
-        .args([
-            "--config",
-            config_path.to_str().expect("config path"),
-            "config",
-            "set",
-            "telemetry",
-            "true",
-        ])
+    let command = || {
+        let mut command = Command::new(codewhale_binary());
+        command
+            .current_dir(&workspace)
+            .env_clear()
+            .env("PATH", std::env::var_os("PATH").expect("PATH"))
+            .env("HOME", &home)
+            .env("USERPROFILE", &home)
+            .env("CODEWHALE_HOME", &codewhale_home)
+            .env("CODEWHALE_SECRET_BACKEND", "file")
+            .arg("--config")
+            .arg(&config_path);
+        command
+    };
+    let output = command()
+        .args(["config", "set", "telemetry", "true"])
         .output()
         .expect("run config set");
     assert!(
@@ -123,8 +124,48 @@ fn config_set_true_reenables_a_historical_decline() {
             .contains("telemetry = true")
     );
     let state = SetupState::load_from(&state_path).expect("read setup state");
+    assert!(!state.telemetry_accepted(TELEMETRY_NOTICE_VERSION));
+    assert!(state.telemetry_opted_out());
+
+    let outdated = command()
+        .args(["config", "telemetry", "--accept-notice", "3"])
+        .output()
+        .expect("attempt outdated consent");
+    assert!(!outdated.status.success());
+    assert!(
+        SetupState::load_from(&state_path)
+            .expect("read declined state")
+            .telemetry_opted_out()
+    );
+
+    let accepted = command()
+        .args([
+            "config",
+            "telemetry",
+            "--accept-notice",
+            TELEMETRY_NOTICE_VERSION,
+        ])
+        .output()
+        .expect("accept current notice");
+    assert!(
+        accepted.status.success(),
+        "current notice acceptance failed: {}",
+        String::from_utf8_lossy(&accepted.stderr)
+    );
+    let state = SetupState::load_from(&state_path).expect("read accepted state");
     assert!(state.telemetry_accepted(TELEMETRY_NOTICE_VERSION));
     assert!(!state.telemetry_opted_out());
+}
+
+#[test]
+fn cli_flag_cannot_upgrade_missing_or_old_processor_consent() {
+    for version in [None, Some("1"), Some("3")] {
+        let evidence = dispatch_and_read_telemetry_with_endpoint(None, Some(""), version);
+        assert!(
+            !evidence.telemetry_dir_exists && evidence.dry_run.is_none(),
+            "a generic CLI flag must not upgrade consent version {version:?}"
+        );
+    }
 }
 
 struct DispatchEvidence {
@@ -136,12 +177,17 @@ struct DispatchEvidence {
 /// Run the real dispatcher into a keyless in-process command and report the
 /// telemetry state it actually left behind.
 fn dispatch_and_read_telemetry(telemetry_env: Option<&str>) -> DispatchEvidence {
-    dispatch_and_read_telemetry_with_endpoint(telemetry_env, Some(""))
+    dispatch_and_read_telemetry_with_endpoint(
+        telemetry_env,
+        Some(""),
+        Some(TELEMETRY_NOTICE_VERSION),
+    )
 }
 
 fn dispatch_and_read_telemetry_with_endpoint(
     telemetry_env: Option<&str>,
     endpoint: Option<&str>,
+    consent_version: Option<&str>,
 ) -> DispatchEvidence {
     let fixture = TempDir::new().expect("fixture root");
     let home = fixture.path().join("home");
@@ -149,6 +195,14 @@ fn dispatch_and_read_telemetry_with_endpoint(
     let workspace = fixture.path().join("workspace");
     for dir in [&home, &codewhale_home, &workspace] {
         fs::create_dir_all(dir).expect("create fixture dir");
+    }
+
+    if let Some(version) = consent_version {
+        let mut state = SetupState::default();
+        state.record_telemetry_notice(version, true);
+        state
+            .save_to(&codewhale_home.join("setup_state.json"))
+            .expect("write fixture consent");
     }
 
     let config_path = fixture.path().join("config.toml");
