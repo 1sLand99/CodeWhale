@@ -79,7 +79,7 @@ export const CHANGELOG: ChangelogRelease[] = [
           "Gabriel Degret (@Gabriel-Degret) — found the reasoning-only retry gap and built the first fix; landed as the [reasoning_only] retry ceiling with a request-scoped nudge (#5867).",
           "@huangxianzhan — the x-opencode-session header for OpenCode Go and Zen gateways (#5868)."
         ],
-        "itemCount": 13
+        "itemCount": 16
       },
       {
         "heading": "Added",

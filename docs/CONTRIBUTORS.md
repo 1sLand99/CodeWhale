@@ -74,6 +74,16 @@ notes, and relevant issue/PR comments.
   `x-opencode-session` header for OpenCode Go and Zen gateways (#5868)
 - **[zhuowp](https://github.com/zhuowp)** — task origin preserved in job
   snapshots (#5869)
+- **[AdityaG / AdityaVG13](https://github.com/AdityaVG13)** — a ten-commit
+  performance pass across the TUI and config: zero-copy LaTeX streaming,
+  single-pass token accounting, memoized provider resolution, once-per-process
+  models.dev catalog parsing (interactive boot -70%), adaptive shell-completion
+  poll cadence, and diagnostic worker caps
+- **[Nightt / nightt5879](https://github.com/nightt5879)** — isolated remote
+  recovery lease generations (#5790)
+- **[WissssleyL / Lstarsky0](https://github.com/Lstarsky0)** — moved
+  `docs/subagents` and `docs/mcp` onto the dictionary spine (#5337), with the
+  metaTitle probe that keeps them there
 </details>
 
 <details>
