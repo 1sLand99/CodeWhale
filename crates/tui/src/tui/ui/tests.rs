@@ -4913,6 +4913,29 @@ fn raw_paste_beginning_with_space_preserves_payload_over_reasoning_action() {
 }
 
 #[test]
+fn paste_burst_does_not_leak_into_composer_while_a_modal_owns_keys() {
+    // `/model` opens a picker with its own query. A held paste-burst from
+    // typing the slash command must not flush into the composer under it.
+    let mut app = Box::new(create_test_app());
+    app.use_paste_burst_detection = true;
+    app.bracketed_paste_seen = false;
+    let now = Instant::now();
+    let slash = KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE);
+    assert!(handle_plain_key_before_composer(&mut app, &slash, now));
+    app.view_stack.push(HelpView::new());
+    let flushed = flush_paste_burst_before_composer(
+        &mut app,
+        now + crate::tui::paste_burst::PasteBurst::recommended_flush_delay(),
+    );
+    assert!(!flushed, "modal-owned keys must not flush into the composer");
+    assert!(
+        app.input.is_empty() || app.input == "/",
+        "composer must not gain leaked burst text under a modal: {:?}",
+        app.input
+    );
+}
+
+#[test]
 fn active_raw_paste_keeps_space_as_payload_over_reasoning_action() {
     let mut app = create_test_app();
     app.use_paste_burst_detection = true;

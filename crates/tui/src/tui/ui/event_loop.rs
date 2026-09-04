@@ -152,6 +152,12 @@ fn handle_focused_transcript_action_char(app: &mut App, ch: char) -> bool {
 /// transcript action only when the composer is still empty and the last
 /// rendered owner accepts it; otherwise it remains ordinary input.
 pub(super) fn flush_paste_burst_before_composer(app: &mut App, now: Instant) -> bool {
+    if !app.view_stack.is_empty() {
+        // One grammar buffer: a modal owns keys. Held burst must not leak
+        // into the composer (leaky `/model` after the picker opens).
+        app.paste_burst.clear_after_explicit_paste();
+        return false;
+    }
     match app.take_paste_burst_flush_if_enabled(now) {
         crate::tui::paste_burst::FlushResult::Paste(text) => {
             app.insert_str(&text);
