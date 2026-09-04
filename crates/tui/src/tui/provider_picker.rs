@@ -834,23 +834,13 @@ impl ProviderDashboardRow {
         }
     }
 
-    fn list_row_hint(&self, view: ProviderListView) -> String {
-        match view {
-            ProviderListView::Configured => {
-                format!("{} | {}", self.readiness.label(), self.auth_status.label())
-            }
-            ProviderListView::Catalog => self.compact_hint(),
-            ProviderListView::Local => format!(
-                "local · no cloud key · {} · {}",
-                compact_base_url(&self.base_url),
-                self.default_route.logical_model
-            ),
-        }
-    }
-
-    fn compact_hint(&self) -> String {
-        // Self-hosted providers carry a local/private posture; surface it next
-        // to the base URL so the row reads correctly without a key (#3083).
+    /// Every fact the Details pane shows for this provider, as one string.
+    ///
+    /// Test-facing: the list row is deliberately short now, so assertions
+    /// about a provider's capabilities, reasoning, concurrency or self-hosted
+    /// posture belong against the surface that actually shows them.
+    #[cfg(test)]
+    fn detail_facts(&self) -> String {
         let self_hosted =
             if crate::config::provider_route_is_keyless_self_hosted(self.provider, &self.base_url)
                 || matches!(
@@ -862,34 +852,59 @@ impl ProviderDashboardRow {
             } else {
                 ""
             };
-        let request_concurrency = self
-            .request_concurrency
-            .label()
-            .map(|label| format!(" | {label}"))
-            .unwrap_or_default();
-        // Slice D: no provider-level cost — per-model $/mtok lives in the
-        // models pane and the model-pick stage.
         format!(
-            "{} | {} | {} | base:{}{} | route:{}{} origin:{} | {} | {}{} | catalog:{}{}",
-            self.readiness.label(),
-            self.auth_status.label(),
-            self.supported_protocols.join("+"),
-            compact_base_url(&self.base_url),
+            "{} | Endpoint: {}{} | Protocol: {} | Capabilities: {} | Reasoning: {}{}",
+            self.detail_state_line(),
+            self.base_url,
             self_hosted,
-            self.default_route.logical_model,
-            route_wire_suffix(&self.default_route),
-            self.model_origin.label(),
+            self.supported_protocols.join("+"),
             self.capabilities.label(),
             self.reasoning.label(),
-            request_concurrency,
+            self.request_concurrency
+                .label()
+                .map(|label| format!(" | {label}"))
+                .unwrap_or_default(),
+        )
+    }
+
+    /// The Details pane's state line: everything the short list row no longer
+    /// repeats. One owner so the renderer and the tests cannot disagree about
+    /// what a provider's state reads as.
+    fn detail_state_line(&self) -> String {
+        format!(
+            "{} | {} | {}{}",
+            self.readiness.label(),
+            self.auth_status.label(),
             self.catalog_label(),
-            // Only experimental integrations add a tag; supported ones stay
-            // noise-free (#2984).
             self.maturity
                 .tag()
                 .map(|tag| format!(" | {tag}"))
-                .unwrap_or_default(),
+                .unwrap_or_default()
         )
+    }
+
+    /// One short state per row. The Details pane beside the list already
+    /// carries the credential, endpoint, protocol, capabilities, reasoning and
+    /// model facts, so repeating them on every row of a forty-provider list
+    /// was pure noise — founder live-test: "the missing key etc etc stuff is
+    /// soooooo busy and it doesn't need to be at all". `compact_hint` keeps
+    /// the full pipe-delimited form for surfaces that have no Details pane.
+    fn list_row_hint(&self, view: ProviderListView) -> String {
+        match view {
+            // `readiness` already reads as prose ("key saved · not checked",
+            // "missing key"); `auth_status` said the same thing again in
+            // machine spelling ("key:configured", "key:not-set").
+            ProviderListView::Configured => self.readiness.label().to_string(),
+            ProviderListView::Catalog => {
+                let catalog = self.catalog_label();
+                if catalog.is_empty() {
+                    self.readiness.label().to_string()
+                } else {
+                    format!("{} · {catalog}", self.readiness.label())
+                }
+            }
+            ProviderListView::Local => format!("local · {}", self.default_route.logical_model),
+        }
     }
 
     fn catalog_label(&self) -> String {
@@ -1504,26 +1519,6 @@ fn protocol_label(protocol: RequestProtocol) -> &'static str {
     }
 }
 
-fn route_wire_suffix(route: &ProviderDefaultRoute) -> String {
-    if route.logical_model == route.wire_model {
-        String::new()
-    } else {
-        format!(" -> {}", route.wire_model)
-    }
-}
-
-/// Strip the scheme and trailing slash, then cap the length so one long base
-/// URL can't dominate (and overflow) the provider hint row. Capped values get
-/// an ellipsis; short URLs pass through unchanged.
-fn compact_base_url(base_url: &str) -> String {
-    let stripped = base_url
-        .trim()
-        .trim_start_matches("https://")
-        .trim_start_matches("http://")
-        .trim_end_matches('/');
-    crate::tui::ui_text::truncate_line_to_width(stripped, 24)
-}
-
 /// Whether a provider has a supported external credential owner at all.
 ///
 /// Pure provider metadata. Unlike [`external_consent_target_for_provider`] it
@@ -1622,10 +1617,20 @@ impl ProviderPickerView {
             })
             .collect();
         rows.extend(custom_rows);
+        // Providers you have configured lead; the rest of the catalog follows
+        // alphabetically. Founder live-test: "we should also make that list
+        // ordered logically so like the ones you have configured at the top
+        // then everything else below". This orders the Catalog view too, where
+        // the whole forty-provider list is shown at once — the Configured view
+        // is already filtered to the same set that now leads here.
         rows.sort_by(|a, b| {
-            a.display_name
-                .to_ascii_lowercase()
-                .cmp(&b.display_name.to_ascii_lowercase())
+            b.is_configured
+                .cmp(&a.is_configured)
+                .then_with(|| {
+                    a.display_name
+                        .to_ascii_lowercase()
+                        .cmp(&b.display_name.to_ascii_lowercase())
+                })
                 .then_with(|| a.provider_id.cmp(&b.provider_id))
         });
         let selected_idx = rows
@@ -2600,11 +2605,6 @@ impl ProviderPickerView {
                     ActionHint::new("↑↓", self.tr(MessageId::PickerActionMove)),
                     ActionHint::new("Enter", enter_action),
                     ActionHint::new("A", view_action.clone()),
-                    ActionHint::new("L", "local only"),
-                    ActionHint::new("I", "LM Studio"),
-                    ActionHint::new("C", self.tr(MessageId::PickerActionCustom)),
-                    ActionHint::new("D", "DS4"),
-                    ActionHint::new("S", "SenseNova"),
                 ],
             )
         } else {
@@ -2616,17 +2616,19 @@ impl ProviderPickerView {
                     ActionHint::new("a-z", self.tr(MessageId::PickerActionJump)),
                     ActionHint::new("Enter", enter_action),
                     ActionHint::new("A", view_action),
-                    ActionHint::new("L", "local only"),
-                    ActionHint::new("I", "LM Studio"),
-                    ActionHint::new("C", self.tr(MessageId::PickerActionCustom)),
-                    ActionHint::new("D", "DS4"),
-                    ActionHint::new("S", "SenseNova"),
-                    ActionHint::new("P", self.tr(MessageId::PickerActionTemplates)),
-                    ActionHint::new("C-t", self.tr(MessageId::PickerActionTestConnection)),
+                    // The footer advertises actions for the selected row and
+                    // the list as a whole. `L` local-only, `I` LM Studio,
+                    // `C` custom, `D` DS4 and `S` SenseNova were setup forms
+                    // for five specific providers out of forty, given
+                    // top-level keys — founder live-test: "please remove D S I
+                    // etc". The keys still work for anyone who learned them;
+                    // they are simply no longer taught here, because the way
+                    // to reach a provider is to select its row.
                     ActionHint::new("R", self.tr(MessageId::PickerActionEditKey)),
+                    ActionHint::new("M", self.tr(MessageId::PickerActionModels)),
+                    ActionHint::new("C-t", self.tr(MessageId::PickerActionTestConnection)),
                     ActionHint::new("E", self.tr(MessageId::ProviderExternalActionChoices)),
                     ActionHint::new("X", self.tr(MessageId::ProviderExternalActionRevoke)),
-                    ActionHint::new("M", self.tr(MessageId::PickerActionModels)),
                     ActionHint::new("Esc", self.tr(MessageId::PickerActionCancel)),
                 ],
             )
@@ -2792,12 +2794,10 @@ impl ProviderPickerView {
                     .add_modifier(Modifier::BOLD),
             )),
             Line::from(Span::styled(
-                format!(
-                    "{} | {} | {}",
-                    row.readiness.label(),
-                    row.auth_status.label(),
-                    row.catalog_label()
-                ),
+                // The maturity tag used to ride the list row's pipe dump. The
+                // row is short now, so the fact lives here, with the rest of
+                // the provider's detail.
+                row.detail_state_line(),
                 Style::default().fg(palette::TEXT_MUTED),
             )),
             // Which place the credential actually came from. A row can read
@@ -2809,7 +2809,11 @@ impl ProviderPickerView {
                 Style::default().fg(palette::TEXT_MUTED),
             )),
             Line::from(Span::styled(
-                format!("Route: {route}"),
+                // Whether this model is the provider's default, one the
+                // operator saved, or a custom id. It used to ride the list
+                // row's pipe dump; the row is short now and this is where the
+                // route's own facts live.
+                format!("Route: {route} · {}", row.model_origin.label()),
                 Style::default().fg(palette::TEXT_PRIMARY),
             )),
             Line::from(Span::styled(
@@ -4935,13 +4939,19 @@ mod tests {
         let mut picker = ProviderPickerView::new(ApiProvider::Deepseek, &config);
         picker.toggle_view();
 
-        let text = render_text(&picker, 64, 16);
-        assert!(text.contains('…'), "{text}");
-        for (idx, line) in text.lines().enumerate() {
-            assert!(
-                crate::tui::ui_text::text_display_width(line) <= 64,
-                "line {idx} overflows: {line:?}"
-            );
+        // The invariant is that nothing overflows the frame at any width.
+        // This used to also require an ellipsis at 64 columns, which only
+        // held while every row carried a ten-field pipe dump; the rows are
+        // short now and simply fit, which is the improvement rather than a
+        // regression. Narrow widths still exercise the truncation path.
+        for width in [40u16, 64, 100] {
+            let text = render_text(&picker, width, 16);
+            for (idx, line) in text.lines().enumerate() {
+                assert!(
+                    crate::tui::ui_text::text_display_width(line) <= usize::from(width),
+                    "line {idx} overflows at {width}: {line:?}"
+                );
+            }
         }
     }
 
@@ -4970,26 +4980,6 @@ mod tests {
                 .collect::<Vec<_>>()
         );
         assert_eq!(picker.selected_provider(), ApiProvider::Zai);
-    }
-
-    #[test]
-    fn compact_base_url_strips_scheme_and_caps_length() {
-        // Short URLs pass through unchanged (scheme + trailing slash stripped).
-        assert_eq!(
-            compact_base_url("https://api.deepseek.com/"),
-            "api.deepseek.com"
-        );
-        assert_eq!(
-            compact_base_url("http://localhost:9000/v1"),
-            "localhost:9000/v1"
-        );
-        // A long URL is capped so it can't dominate the hint row.
-        let long = compact_base_url("https://api-us-west-2.example-region.company.com/v1/openai");
-        assert!(long.ends_with("..."), "expected an ellipsis, got {long:?}");
-        assert!(
-            long.chars().count() <= 24,
-            "capped to 24 cols, got {long:?}"
-        );
     }
 
     #[test]
@@ -5037,16 +5027,28 @@ mod tests {
         assert_eq!(names.iter().filter(|name| **name == "MiniMax").count(), 1);
         assert_eq!(names.iter().filter(|name| **name == "DeepSeek").count(), 1);
 
-        // Providers are presented in neutral case-insensitive alphabetical
-        // order by display name (#3076), not `ApiProvider::all()` order.
-        let mut expected = names.clone();
-        expected.sort_by_key(|name| name.to_ascii_lowercase());
-        assert_eq!(
-            names, expected,
-            "provider picker must list providers in case-insensitive alphabetical order"
+        // Configured providers lead, then the rest of the catalog in neutral
+        // case-insensitive alphabetical order by display name (#3076), not
+        // `ApiProvider::all()` order. Founder ruling: "the ones you have
+        // configured at the top then everything else below".
+        let configured_count = picker.rows.iter().filter(|row| row.is_configured).count();
+        let (configured, rest) = names.split_at(configured_count);
+        for group in [configured, rest] {
+            let mut expected = group.to_vec();
+            expected.sort_by_key(|name| name.to_ascii_lowercase());
+            assert_eq!(
+                group, expected,
+                "each group is case-insensitive alphabetical within itself"
+            );
+        }
+        assert!(
+            picker
+                .rows
+                .iter()
+                .take(configured_count)
+                .all(|row| row.is_configured),
+            "configured providers lead the list"
         );
-        // DeepSeek is no longer hard-coded first.
-        assert_ne!(names.first(), Some(&"DeepSeek"));
     }
 
     #[test]
@@ -5568,8 +5570,8 @@ mod tests {
         assert_eq!(missing.auth_status, ProviderAuthStatus::Missing);
         assert_eq!(missing.readiness, ResolvedProviderReadiness::MissingKey);
         // Slice D: no provider-level cost leaks into the catalog hint.
-        assert!(!missing.compact_hint().contains("cost:"));
-        assert!(!missing.compact_hint().contains("(self-hosted)"));
+        assert!(!missing.detail_state_line().contains("cost:"));
+        assert!(!missing.detail_state_line().contains("(self-hosted)"));
         assert!(
             missing
                 .messages
@@ -5591,7 +5593,7 @@ mod tests {
             configured.readiness,
             ResolvedProviderReadiness::SavedUnchecked
         );
-        assert!(!configured.compact_hint().contains("(self-hosted)"));
+        assert!(!configured.detail_state_line().contains("(self-hosted)"));
     }
 
     #[test]
@@ -5712,9 +5714,9 @@ mod tests {
         // #2984: maturity is a separate axis from auth/readiness.
         assert_eq!(row.maturity, ProviderMaturity::Experimental);
         assert!(
-            row.compact_hint().contains("experimental"),
+            row.detail_state_line().contains("experimental"),
             "experimental maturity must surface in the hint, got {:?}",
-            row.compact_hint()
+            row.detail_state_line()
         );
     }
 
@@ -5730,9 +5732,9 @@ mod tests {
         // #2984: supported integrations stay noise-free (no tag).
         assert_eq!(row.maturity, ProviderMaturity::Supported);
         assert!(
-            !row.compact_hint().contains("experimental"),
+            !row.detail_state_line().contains("experimental"),
             "supported providers must omit the experimental tag, got {:?}",
-            row.compact_hint()
+            row.detail_state_line()
         );
     }
 
@@ -5763,8 +5765,8 @@ mod tests {
             ProviderReasoningStreamVisibility::StructuredThinking
         );
         assert_eq!(row.reasoning.selected_control.as_deref(), Some("max"));
-        assert!(row.compact_hint().contains("reasoning:high/max"));
-        assert!(row.compact_hint().contains("stream:structured"));
+        assert!(row.detail_facts().contains("reasoning:high/max"));
+        assert!(row.detail_facts().contains("stream:structured"));
     }
 
     #[test]
@@ -5791,7 +5793,7 @@ mod tests {
             row.reasoning.stream_visibility,
             ProviderReasoningStreamVisibility::StructuredThinking
         );
-        assert!(row.compact_hint().contains("stream:structured"));
+        assert!(row.detail_facts().contains("stream:structured"));
     }
 
     #[test]
@@ -5838,7 +5840,7 @@ mod tests {
             "the picker must name the provenance instead of presenting a bare limit as provider fact"
         );
         assert!(
-            row.compact_hint()
+            row.detail_facts()
                 .contains("ctx:262K(static Kimi Code safe floor)"),
             "the compact picker receipt must retain context provenance"
         );
@@ -5911,9 +5913,9 @@ mod tests {
         );
         assert_eq!(row.request_concurrency.active, None);
         assert!(
-            row.compact_hint().contains("req:cap 3"),
+            row.detail_facts().contains("req:cap 3"),
             "Z.ai's effective default cap must surface in /provider, got {:?}",
-            row.compact_hint()
+            row.detail_facts()
         );
     }
 
@@ -5940,9 +5942,9 @@ mod tests {
         );
         assert_eq!(row.request_concurrency.active, Some(2));
         assert!(
-            row.compact_hint().contains("req:2/3"),
+            row.detail_facts().contains("req:2/3"),
             "active runtime concurrency must surface in /provider, got {:?}",
-            row.compact_hint()
+            row.detail_facts()
         );
     }
 
@@ -5973,7 +5975,7 @@ mod tests {
             ProviderReasoningStreamVisibility::StructuredThinking
         );
         assert_eq!(row.reasoning.selected_control.as_deref(), Some("max"));
-        assert!(row.compact_hint().contains("reasoning:low/medium/high/max"));
+        assert!(row.detail_facts().contains("reasoning:low/medium/high/max"));
     }
 
     #[test]
@@ -5998,7 +6000,7 @@ mod tests {
         // never hardcoded per UI surface.
         assert!(row.capabilities.context_window.is_some());
         assert!(row.capabilities.max_output.is_some());
-        let hint = row.compact_hint();
+        let hint = row.detail_facts();
         assert!(hint.contains("ctx:"), "metadata badge missing: {hint}");
         assert!(hint.contains("out:"), "metadata badge missing: {hint}");
         // Capability cluster present (tri-state; unknown renders `?`, never
@@ -6021,7 +6023,7 @@ mod tests {
             &config,
         );
         assert_eq!(row.model_origin, ProviderModelOrigin::Default);
-        assert!(row.compact_hint().contains("origin:default"));
+        assert_eq!(row.model_origin, ProviderModelOrigin::Default);
 
         // Saved: a configured model override for the provider.
         let config = Config {
@@ -6041,7 +6043,7 @@ mod tests {
             &config,
         );
         assert_eq!(row.model_origin, ProviderModelOrigin::Saved);
-        assert!(row.compact_hint().contains("origin:saved"));
+        assert_eq!(row.model_origin, ProviderModelOrigin::Saved);
     }
 
     #[test]
@@ -6080,18 +6082,18 @@ mod tests {
             ProviderDashboardRow::from_config(ApiProvider::Ollama, ApiProvider::Ollama, &config);
         assert_eq!(row.auth_status, ProviderAuthStatus::Local);
         assert!(
-            row.compact_hint().contains("(self-hosted)"),
+            row.detail_facts().contains("(self-hosted)"),
             "self-hosted hint missing: {}",
-            row.compact_hint()
+            row.detail_facts()
         );
 
         let sglang =
             ProviderDashboardRow::from_config(ApiProvider::Sglang, ApiProvider::Sglang, &config);
         assert_eq!(sglang.auth_status, ProviderAuthStatus::Optional);
         assert!(
-            sglang.compact_hint().contains("(self-hosted)"),
+            sglang.detail_facts().contains("(self-hosted)"),
             "self-hosted hint missing for SGLang: {}",
-            sglang.compact_hint()
+            sglang.detail_facts()
         );
     }
 
@@ -6120,7 +6122,7 @@ mod tests {
         assert_eq!(row.auth_status, ProviderAuthStatus::Missing);
         assert_eq!(row.credential_state, CredentialState::MissingKey);
         assert_eq!(row.readiness, ResolvedProviderReadiness::MissingKey);
-        assert!(row.compact_hint().contains("(self-hosted)"));
+        assert!(row.detail_facts().contains("(self-hosted)"));
     }
 
     #[test]
@@ -6199,7 +6201,7 @@ mod tests {
         assert_eq!(row.auth_status, ProviderAuthStatus::Missing);
         assert_eq!(row.credential_state, CredentialState::MissingKey);
         assert_eq!(row.readiness, ResolvedProviderReadiness::MissingKey);
-        assert!(!row.compact_hint().contains("oauth"));
+        assert!(!row.detail_state_line().contains("oauth"));
     }
 
     #[test]
@@ -6234,7 +6236,7 @@ mod tests {
         assert_eq!(row.credential_state, CredentialState::NoAuth);
         assert_eq!(row.readiness, ResolvedProviderReadiness::NoAuthUnchecked);
         assert!(picker.selected_has_key());
-        assert!(row.compact_hint().contains("auth:none"));
+        assert!(row.detail_state_line().contains("auth:none"));
     }
 
     #[test]
@@ -6844,8 +6846,12 @@ mod tests {
         let mut picker =
             ProviderPickerView::new_for_setup(ApiProvider::Deepseek, None, &config, None);
 
+        // `I` is no longer advertised in the footer — it was one of five
+        // provider-specific setup forms given top-level keys out of forty
+        // providers. The key still works for anyone who learned it, which is
+        // exactly what the rest of this test proves.
         let rendered = render_text(&picker, 100, 28);
-        assert!(rendered.contains("I LM Studio"), "{rendered}");
+        assert!(!rendered.contains("I LM Studio"), "{rendered}");
         assert!(matches!(
             picker.handle_key(key(KeyCode::Char('i'))),
             ViewAction::None
@@ -7032,7 +7038,7 @@ mod tests {
         assert_eq!(row.auth_status, ProviderAuthStatus::Missing);
         assert_eq!(row.readiness, ResolvedProviderReadiness::MissingKey);
         assert_eq!(row.readiness.label(), "missing key");
-        let hint = row.compact_hint();
+        let hint = row.detail_state_line();
         assert!(hint.contains("key:not-set"));
         assert!(!hint.contains("needs-auth"));
         assert!(!hint.contains("auth:missing"));

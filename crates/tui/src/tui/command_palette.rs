@@ -102,6 +102,9 @@ pub fn build_entries_with_plugins(
     commands::user_registry::with_registry_for_workspace(Some(workspace), |user_registry| {
         let all_user_commands = user_registry.iter().collect::<Vec<_>>();
         for command in commands::command_infos() {
+            if command.is_unlisted() {
+                continue;
+            }
             if commands::discovery::user_command_shadows_builtin_canonical(
                 command,
                 &all_user_commands,
@@ -1737,13 +1740,19 @@ mod tests {
             .iter()
             .filter(|command| user_registry.get(command.name).is_some())
             .count();
+        // Unlisted commands run when typed but are never advertised — see
+        // `commands::traits::UNLISTED_COMMANDS`.
+        let unlisted = commands::command_infos()
+            .iter()
+            .filter(|command| command.is_unlisted() && user_registry.get(command.name).is_none())
+            .count();
         assert_eq!(
             command_entries.len(),
-            commands::command_infos().len() - shadowed_builtins + visible_user_commands
+            commands::command_infos().len() - shadowed_builtins - unlisted + visible_user_commands
         );
 
         for command in commands::command_infos() {
-            if user_registry.get(command.name).is_some() {
+            if user_registry.get(command.name).is_some() || command.is_unlisted() {
                 continue;
             }
             let label = format!("/{}", command.name);
@@ -1889,7 +1898,7 @@ mod tests {
         let user_registry = commands::user_registry::registry_for_workspace(Some(tmp.path()));
 
         for command in commands::command_infos() {
-            if user_registry.get(command.name).is_some() {
+            if user_registry.get(command.name).is_some() || command.is_unlisted() {
                 continue;
             }
             let label = format!("/{}", command.name);

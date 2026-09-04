@@ -56,6 +56,18 @@ pub(crate) const ADVANCED_DISCOVERY_COMMANDS: &[&str] = &[
 
 pub(crate) const COMPATIBILITY_DISCOVERY_COMMANDS: &[&str] = &["subagents"];
 
+/// Commands that exist and run, but are not advertised anywhere the operator
+/// browses: not in slash completion, not in `/help`, not in the palette.
+///
+/// This is for surfaces that are real but not ready to be recommended. Typing
+/// the command still works, the `codewhale <verb>` CLI is untouched, and the
+/// hotbar still registers a binding for it — `codewhale-lane` resolves its
+/// control-plane actions through that registry, so it is a substrate rather
+/// than a place to browse. The entry here only stops the product from
+/// *teaching* a route it is not standing behind yet. Founder, 2026-09-03:
+/// "remove /lane", "hide dispatch for now".
+pub(crate) const UNLISTED_COMMANDS: &[&str] = &["lane", "dispatch"];
+
 /// Small, task-oriented starting set for a bare `/` in the composer.
 ///
 /// The full command catalog remains searchable through `/help`, the command
@@ -171,7 +183,16 @@ impl CommandInfo {
     /// the selection, so the short list is preserved as the head of a
     /// complete one rather than as the whole of a truncated one.
     pub fn show_in_slash_completion(&self, _prefix: &str) -> bool {
-        true
+        !self.is_unlisted()
+    }
+
+    /// Whether this command is deliberately not advertised — see
+    /// [`UNLISTED_COMMANDS`]. It still runs when typed.
+    #[must_use]
+    pub fn is_unlisted(&self) -> bool {
+        UNLISTED_COMMANDS
+            .iter()
+            .any(|name| self.name == *name || self.aliases.contains(name))
     }
 }
 

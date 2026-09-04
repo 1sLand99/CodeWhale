@@ -645,6 +645,13 @@ impl HotbarActionSource for SlashCommandHotbarActionSource {
     }
 
     fn register_actions(&self, registry: &mut HotbarActionRegistry) {
+        // Every command registers, including unlisted ones. The hotbar is a
+        // binding substrate, not a discovery surface: `codewhale-lane`'s
+        // control-plane descriptors resolve their `slash.<verb>` action id
+        // through this registry, so dropping an unlisted command here breaks
+        // a real contract (`control_plane_commands_are_bound_and_bare_dispatch_is_read_only`).
+        // Unlisted governs what is *advertised* — the slash menu, `/help`,
+        // and the command palette.
         for info in commands::command_infos() {
             registry.register(SlashHotbarAction::new(info));
         }
@@ -1809,7 +1816,26 @@ mod tests {
             .map(|action| action.id().to_string())
             .collect::<BTreeSet<_>>();
 
-        assert_eq!(hotbar_slash_ids, palette_slash_ids);
+        // The hotbar is a binding substrate and registers every command; the
+        // palette is a browsing surface and omits the unlisted ones. So the
+        // palette is a subset, and the difference is exactly the unlisted set.
+        let unlisted_ids = commands::command_infos()
+            .iter()
+            .filter(|info| info.is_unlisted())
+            .map(|info| format!("slash.{}", info.name))
+            .collect::<BTreeSet<_>>();
+        assert!(
+            palette_slash_ids.is_subset(&hotbar_slash_ids),
+            "the palette must not offer a command the hotbar cannot bind"
+        );
+        assert_eq!(
+            hotbar_slash_ids
+                .difference(&palette_slash_ids)
+                .cloned()
+                .collect::<BTreeSet<_>>(),
+            unlisted_ids,
+            "the only commands the hotbar has and the palette hides are the unlisted ones"
+        );
     }
 
     #[test]
