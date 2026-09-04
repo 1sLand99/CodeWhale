@@ -4,9 +4,11 @@
 //! (workflow runs, fleet, extensions): ↑↓ move, Enter opens the detail, Esc
 //! backs out, Tab flips list ↔ detail. The actions an automation affords —
 //! pause / resume, run now, cancel a live run, delete — are single keys and
-//! every one of them goes through the same `/automation …` and `/task cancel`
+//! every one of those actions goes through the same `/automation …` and `/task cancel`
 //! commands the transcript already accepts, so a keypress here and a typed
 //! command leave identical receipts.
+//! Create/edit keep a local draft until Save calls the shared manager; Cancel
+//! discards that draft. The room then shows the persisted definition and receipt.
 //!
 //! Automations are user-global (`~/.codewhale/automations`): they follow the
 //! person into every repository, which is why the room says where each one
@@ -39,6 +41,9 @@ use crate::localization::{Locale, MessageId, tr};
 use crate::palette;
 use crate::tui::app::App;
 use crate::tui::list_nav::wrap_index;
+
+mod editor;
+use editor::{AutomationEditor, EditorAction};
 
 /// Recent runs kept per automation in the detail pane.
 const RECENT_RUNS: usize = 5;
@@ -77,12 +82,18 @@ pub struct AutomationsView {
     problem: Option<String>,
     /// Screen rect of the list body, recorded at render for mouse parity.
     list_body: Cell<Rect>,
+    config: crate::config::Config,
+    workspace: std::path::PathBuf,
+    editor: Option<AutomationEditor>,
+    notice: Option<String>,
+    new_button: Cell<Rect>,
+    edit_button: Cell<Rect>,
 }
 
 impl AutomationsView {
     /// Open the room, optionally focused on one automation id.
     #[must_use]
-    pub fn new(app: &App, focus: Option<&str>) -> Self {
+    pub fn new(app: &App, config: &crate::config::Config, focus: Option<&str>) -> Self {
         let mut view = Self {
             rows: Vec::new(),
             row: 0,
@@ -93,6 +104,12 @@ impl AutomationsView {
             last_refresh_at: Instant::now(),
             problem: None,
             list_body: Cell::new(Rect::ZERO),
+            config: config.clone(),
+            workspace: app.workspace.clone(),
+            editor: None,
+            notice: None,
+            new_button: Cell::new(Rect::ZERO),
+            edit_button: Cell::new(Rect::ZERO),
         };
         view.refresh();
         if let Some(focus) = focus
@@ -116,7 +133,82 @@ impl AutomationsView {
             last_refresh_at: Instant::now(),
             problem: None,
             list_body: Cell::new(Rect::ZERO),
+            config: crate::config::Config::default(),
+            workspace: std::env::temp_dir(),
+            editor: None,
+            notice: None,
+            new_button: Cell::new(Rect::ZERO),
+            edit_button: Cell::new(Rect::ZERO),
         }
+    }
+
+    fn open_editor(&mut self, edit: bool) {
+        let original = if edit {
+            let Some(row) = self.selected() else {
+                return;
+            };
+            Some(row.record.clone())
+        } else {
+            None
+        };
+        self.notice = None;
+        self.editor = Some(AutomationEditor::new(
+            &self.config,
+            &self.workspace,
+            self.locale,
+            original,
+        ));
+    }
+
+    fn editor_action(&mut self, action: EditorAction) -> ViewAction {
+        match action {
+            EditorAction::Cancel => self.editor = None,
+            EditorAction::Save => {
+                let result = self
+                    .manager
+                    .as_ref()
+                    .ok_or_else(|| {
+                        tr(self.locale, MessageId::AutomationManagerUnavailable).into_owned()
+                    })
+                    .and_then(|manager| {
+                        manager.try_lock().map_err(|_| {
+                            tr(self.locale, MessageId::AutomationEditorBusy).into_owned()
+                        })
+                    })
+                    .and_then(|manager| {
+                        self.editor
+                            .as_ref()
+                            .unwrap()
+                            .save(&manager)
+                            .map_err(|error| error.to_string())
+                    });
+                match result {
+                    Ok(record) => {
+                        self.editor = None;
+                        self.refresh();
+                        if let Some(index) =
+                            self.rows.iter().position(|row| row.record.id == record.id)
+                        {
+                            self.row = index;
+                        }
+                        self.detail_open = true;
+                        self.detail_scroll = 0;
+                        self.notice = Some(
+                            tr(self.locale, MessageId::AutomationEditorSaved)
+                                .replace("{name}", &display_text(&record.name)),
+                        );
+                    }
+                    Err(error) => {
+                        self.editor.as_mut().unwrap().problem = Some(
+                            tr(self.locale, MessageId::AutomationEditorSaveFailed)
+                                .replace("{error}", &error),
+                        )
+                    }
+                }
+            }
+            EditorAction::None => {}
+        }
+        ViewAction::None
     }
 
     /// Re-read definitions and recent runs, keeping the selected id when the
@@ -291,7 +383,7 @@ impl AutomationsView {
                 format!("  {}", tr(self.locale, MessageId::AutomationScopeNote)),
                 Style::default().fg(palette::TEXT_DIM),
             )),
-            Line::from(""),
+            Line::from(self.notice.clone().unwrap_or_default()),
         ]
     }
 
@@ -421,8 +513,17 @@ impl AutomationsView {
         }
         if let Some(model) = record.model.as_deref() {
             lines.push(Line::from(vec![
-                label(MessageId::AutomationModeLabel),
-                value(model.to_string()),
+                label(MessageId::SetupCardModelLabel),
+                value(
+                    record
+                        .model_provider_id
+                        .as_ref()
+                        .or(record.model_provider.as_ref())
+                        .map_or_else(
+                            || model.to_string(),
+                            |provider| format!("{provider} / {model}"),
+                        ),
+                ),
             ]));
         }
         lines.push(Line::from(""));
@@ -530,7 +631,19 @@ impl ModalView for AutomationsView {
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> ViewAction {
+        if let Some(editor) = self.editor.as_mut() {
+            let action = editor.key(key);
+            return self.editor_action(action);
+        }
         match key.code {
+            KeyCode::Char('n') => {
+                self.open_editor(false);
+                ViewAction::None
+            }
+            KeyCode::Char('e') => {
+                self.open_editor(true);
+                ViewAction::None
+            }
             KeyCode::Esc => {
                 if self.detail_open {
                     self.detail_open = false;
@@ -584,6 +697,21 @@ impl ModalView for AutomationsView {
     }
 
     fn handle_mouse(&mut self, mouse: MouseEvent) -> ViewAction {
+        if let Some(editor) = self.editor.as_mut() {
+            let action = editor.mouse(mouse);
+            return self.editor_action(action);
+        }
+        if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+            let point = (mouse.column, mouse.row).into();
+            if self.new_button.get().contains(point) {
+                self.open_editor(false);
+                return ViewAction::None;
+            }
+            if self.edit_button.get().contains(point) {
+                self.open_editor(true);
+                return ViewAction::None;
+            }
+        }
         if self.detail_open {
             return ViewAction::None;
         }
@@ -606,6 +734,14 @@ impl ModalView for AutomationsView {
         ViewAction::None
     }
 
+    fn handle_paste(&mut self, text: &str) -> bool {
+        if let Some(editor) = self.editor.as_mut() {
+            editor.paste(text);
+            return true;
+        }
+        false
+    }
+
     fn tick(&mut self) -> ViewAction {
         let interval = if self.rows.iter().any(|row| row.live_run().is_some()) {
             Duration::from_millis(500)
@@ -623,15 +759,45 @@ impl ModalView for AutomationsView {
         Block::default()
             .style(Style::default().bg(palette::WHALE_BG))
             .render(area, buf);
+        if let Some(editor) = &self.editor {
+            editor.render(area, buf);
+            return;
+        }
         let hints = self.footer_hints();
         let content = render_modal_footer(area, buf, &hints);
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(3), Constraint::Min(1)])
+            .constraints([Constraint::Length(4), Constraint::Min(1)])
             .split(content);
-        Paragraph::new(self.header_lines())
-            .wrap(Wrap { trim: false })
-            .render(chunks[0], buf);
+        // Each header fact owns one row. Wrapping the counts/scope at compact
+        // widths must not push the explicit Save receipt out of the header.
+        Paragraph::new(self.header_lines()).render(chunks[0], buf);
+        let mut x = chunks[0].x;
+        self.new_button.set(Rect::ZERO);
+        self.edit_button.set(Rect::ZERO);
+        for (key, label, hit) in [
+            ("n", MessageId::AutomationEditorNew, &self.new_button),
+            ("e", MessageId::AutomationEditorEdit, &self.edit_button),
+        ] {
+            if key == "e" && self.selected().is_none() {
+                continue;
+            }
+            let text = format!("[{key} {}] ", tr(self.locale, label));
+            let width = u16::try_from(crate::tui::ui_text::text_display_width(&text))
+                .unwrap_or(u16::MAX)
+                .min(chunks[0].right().saturating_sub(x));
+            let rect = Rect::new(
+                x,
+                chunks[0].y + chunks[0].height.saturating_sub(1),
+                width,
+                1,
+            );
+            Paragraph::new(text)
+                .style(Style::default().fg(palette::WHALE_ACTION))
+                .render(rect, buf);
+            hit.set(rect);
+            x += width;
+        }
         if self.detail_open {
             self.render_detail(chunks[1], buf);
         } else {
@@ -656,6 +822,8 @@ mod tests {
             rrule: "FREQ=DAILY;BYHOUR=17".to_string(),
             cwds: vec![std::path::PathBuf::from("/tmp/cwc")],
             model: None,
+            model_provider: None,
+            model_provider_id: None,
             mode: None,
             allow_shell: None,
             trust_mode: None,
@@ -763,6 +931,75 @@ mod tests {
             view.handle_key(key(KeyCode::Esc)),
             ViewAction::Close
         ));
+    }
+
+    #[test]
+    fn editor_save_and_cancel_require_explicit_room_actions() {
+        let _env = crate::test_support::lock_test_env();
+        let root = tempfile::tempdir().unwrap();
+        let manager = std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::automation_manager::AutomationManager::open(root.path().join("store")).unwrap(),
+        ));
+        let mut view = AutomationsView::from_rows(Vec::new(), Locale::En);
+        view.workspace = root.path().to_path_buf();
+        view.manager = Some(manager.clone());
+        view.handle_key(key(KeyCode::Char('n')));
+        assert!(view.handle_paste("draft"));
+        view.handle_key(key(KeyCode::Tab));
+        view.handle_paste("line one\nline two");
+        assert!(
+            manager
+                .try_lock()
+                .unwrap()
+                .list_automations()
+                .unwrap()
+                .is_empty()
+        );
+        let area = Rect::new(0, 0, 40, 12);
+        let mut buffer = Buffer::empty(area);
+        view.render(area, &mut buffer);
+        let cancel = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 17,
+            row: 11,
+            modifiers: KeyModifiers::NONE,
+        };
+        view.handle_mouse(cancel);
+        assert!(view.editor.is_none());
+        assert!(
+            manager
+                .try_lock()
+                .unwrap()
+                .list_automations()
+                .unwrap()
+                .is_empty()
+        );
+
+        view.handle_key(key(KeyCode::Char('n')));
+        view.handle_paste("saved");
+        view.handle_key(key(KeyCode::Tab));
+        view.handle_paste("prompt");
+        view.render(area, &mut buffer);
+        view.handle_mouse(MouseEvent {
+            column: 2,
+            ..cancel
+        });
+        assert!(view.editor.is_none());
+        assert_eq!(
+            manager
+                .try_lock()
+                .unwrap()
+                .list_automations()
+                .unwrap()
+                .len(),
+            1
+        );
+        view.render(area, &mut buffer);
+        let receipt: String = (0..40).map(|x| buffer[(x, 2)].symbol()).collect();
+        assert!(
+            receipt.contains("Saved saved"),
+            "compact receipt: {receipt}"
+        );
     }
 
     #[test]

@@ -2126,6 +2126,8 @@ pub(crate) async fn apply_command_result(
                 let request = NewTaskRequest {
                     prompt: prompt.clone(),
                     model: Some(app.model.clone()),
+                    model_provider: Some(app.api_provider.as_str().to_string()),
+                    model_provider_id: Some(app.provider_identity_for_persistence().to_string()),
                     workspace: Some(app.workspace.clone()),
                     mode: Some(task_mode_label(app.mode).to_string()),
                     allow_shell: Some(app.allow_shell),
@@ -2214,7 +2216,8 @@ pub(crate) async fn apply_command_result(
                 refresh_active_task_panel(app, task_manager).await;
             }
             AppAction::Automation(action) => {
-                crate::tui::automation_routing::handle_action(app, action, task_manager).await;
+                crate::tui::automation_routing::handle_action(app, config, action, task_manager)
+                    .await;
             }
             AppAction::ShellJob(action) => {
                 handle_shell_job_action(app, action);

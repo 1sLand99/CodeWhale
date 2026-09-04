@@ -22508,6 +22508,8 @@ mod work_sidebar_projection_tests {
             status,
             prompt_summary: format!("task {id}"),
             model: "deepseek-v4-flash".to_string(),
+            model_provider: None,
+            model_provider_id: None,
             mode: "agent".to_string(),
             workspace: std::path::PathBuf::from("/tmp"),
             created_at,

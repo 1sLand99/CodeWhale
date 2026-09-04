@@ -1,8 +1,8 @@
 //! Persistent background task manager for Codewhale agent work.
 //!
 //! Tasks are durable across restarts and execute with a bounded worker pool.
-//! Execution stays DeepSeek-only and now links every task to runtime
-//! thread/turn records for unified timelines.
+//! Execution uses the shared runtime provider route and links every task to
+//! runtime thread/turn records for unified timelines.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
@@ -38,10 +38,8 @@ const ARTIFACT_THRESHOLD: usize = 1200;
 const TASK_EVENT_CHANNEL_CAPACITY: usize = 256;
 const EVENT_CURSOR_BATCH: usize = 256;
 const EVENT_CATCHUP_POLL: Duration = Duration::from_millis(200);
-// `lifecycle_seq` is an additive, serde-defaulted field. Keep the durable task
-// schema at v2 so a v0.9.1 rollback can ignore it and still open tasks written
-// by this build; no existing field changed meaning.
-const CURRENT_TASK_SCHEMA_VERSION: u32 = 2;
+// v3 adds a provider pin; older executors must not silently ignore it.
+const CURRENT_TASK_SCHEMA_VERSION: u32 = 3;
 
 const fn default_task_schema_version() -> u32 {
     CURRENT_TASK_SCHEMA_VERSION
@@ -274,6 +272,10 @@ pub struct TaskRecord {
     pub id: String,
     pub prompt: String,
     pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_provider_id: Option<String>,
     pub workspace: PathBuf,
     pub mode: String,
     pub allow_shell: bool,
@@ -329,6 +331,10 @@ pub struct TaskSummary {
     pub status: TaskStatus,
     pub prompt_summary: String,
     pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_provider_id: Option<String>,
     pub mode: String,
     pub workspace: PathBuf,
     pub created_at: DateTime<Utc>,
@@ -358,6 +364,8 @@ impl From<&TaskRecord> for TaskSummary {
             status: value.status,
             prompt_summary: summarize_text(&value.prompt, TIMELINE_SUMMARY_LIMIT),
             model: value.model.clone(),
+            model_provider: value.model_provider.clone(),
+            model_provider_id: value.model_provider_id.clone(),
             mode: value.mode.clone(),
             workspace: value.workspace.clone(),
             created_at: value.created_at,
@@ -390,6 +398,10 @@ pub struct TaskCounts {
 pub struct NewTaskRequest {
     pub prompt: String,
     pub model: Option<String>,
+    #[serde(default)]
+    pub model_provider: Option<String>,
+    #[serde(default)]
+    pub model_provider_id: Option<String>,
     pub workspace: Option<PathBuf>,
     pub mode: Option<String>,
     pub allow_shell: Option<bool>,
@@ -405,6 +417,8 @@ impl NewTaskRequest {
         Self {
             prompt: prompt.into(),
             model: None,
+            model_provider: None,
+            model_provider_id: None,
             workspace: None,
             mode: None,
             allow_shell: None,
@@ -580,11 +594,47 @@ pub struct ExecutionTask {
     id: String,
     prompt: String,
     model: String,
+    model_provider: Option<String>,
+    model_provider_id: Option<String>,
     workspace: PathBuf,
     mode_label: String,
     allow_shell: bool,
     trust_mode: bool,
     auto_approve: bool,
+}
+
+impl From<&TaskRecord> for ExecutionTask {
+    fn from(task: &TaskRecord) -> Self {
+        Self {
+            id: task.id.clone(),
+            prompt: task.prompt.clone(),
+            model: task.model.clone(),
+            model_provider: task.model_provider.clone(),
+            model_provider_id: task.model_provider_id.clone(),
+            workspace: task.workspace.clone(),
+            mode_label: task.mode.clone(),
+            allow_shell: task.allow_shell,
+            trust_mode: task.trust_mode,
+            auto_approve: task.auto_approve,
+        }
+    }
+}
+
+impl ExecutionTask {
+    pub(crate) fn thread_request(&self) -> CreateThreadRequest {
+        CreateThreadRequest {
+            model: Some(self.model.clone()),
+            model_provider: self.model_provider.clone(),
+            model_provider_id: self.model_provider_id.clone(),
+            workspace: Some(self.workspace.clone()),
+            mode: Some(self.mode_label.clone()),
+            allow_shell: Some(self.allow_shell),
+            trust_mode: Some(self.trust_mode),
+            auto_approve: Some(self.auto_approve),
+            task_id: Some(self.id.clone()),
+            ..Default::default()
+        }
+    }
 }
 
 /// Event stream produced by an executor while a task runs.
@@ -670,7 +720,7 @@ pub trait TaskExecutor: Send + Sync {
     ) -> TaskExecutionResult;
 }
 
-/// Engine-backed executor (DeepSeek-only).
+/// Executor backed by the shared runtime and its canonical provider resolver.
 pub struct EngineTaskExecutor {
     runtime_threads: SharedRuntimeThreadManager,
     limits: TaskExecutionLimits,
@@ -696,18 +746,7 @@ impl TaskExecutor for EngineTaskExecutor {
     ) -> TaskExecutionResult {
         let thread = match self
             .runtime_threads
-            .create_thread(CreateThreadRequest {
-                model: Some(task.model.clone()),
-                workspace: Some(task.workspace.clone()),
-                mode: Some(task.mode_label.clone()),
-                allow_shell: Some(task.allow_shell),
-                trust_mode: Some(task.trust_mode),
-                auto_approve: Some(task.auto_approve),
-                archived: false,
-                system_prompt: None,
-                task_id: Some(task.id.clone()),
-                ..Default::default()
-            })
+            .create_thread(task.thread_request())
             .await
         {
             Ok(thread) => thread,
@@ -1226,6 +1265,14 @@ impl TaskManager {
         if prompt.is_empty() {
             bail!("Task prompt cannot be empty");
         }
+        if (req.model_provider.is_some() || req.model_provider_id.is_some())
+            && req
+                .model
+                .as_deref()
+                .is_none_or(|model| model.trim().is_empty())
+        {
+            bail!("A pinned task provider requires an explicit model");
+        }
         if task_id.len() != 21
             || !task_id.starts_with("task_")
             || !task_id[5..].chars().all(|ch| ch.is_ascii_hexdigit())
@@ -1244,6 +1291,8 @@ impl TaskManager {
             id: task_id,
             prompt,
             model: req.model.unwrap_or_else(|| self.cfg.default_model.clone()),
+            model_provider: req.model_provider,
+            model_provider_id: req.model_provider_id,
             workspace: match req.workspace {
                 Some(workspace) => workspace,
                 None => self.default_workspace().await,
@@ -1620,18 +1669,7 @@ impl TaskManager {
                                     },
                                 );
 
-                                let request = {
-                                    ExecutionTask {
-                                        id: task.id.clone(),
-                                        prompt: task.prompt.clone(),
-                                        model: task.model.clone(),
-                                        workspace: task.workspace.clone(),
-                                        mode_label: task.mode.clone(),
-                                        allow_shell: task.allow_shell,
-                                        trust_mode: task.trust_mode,
-                                        auto_approve: task.auto_approve,
-                                    }
-                                };
+                                let request = ExecutionTask::from(&*task);
                                 let cancel = CancellationToken::new();
                                 state.running_cancel.insert(task_id.clone(), cancel.clone());
 
@@ -2836,8 +2874,8 @@ mod tests {
             .await?;
         assert_eq!(created.id, id);
         assert_eq!(
-            created.schema_version, 2,
-            "the additive lifecycle field must remain rollback-readable"
+            created.schema_version, 3,
+            "provider pins require readers that preserve the route"
         );
         assert_eq!(created.lifecycle_seq, 1);
         let collision = manager
@@ -3081,6 +3119,8 @@ mod tests {
             id: task_id.clone(),
             prompt: "long-running shell work".to_string(),
             model: "deepseek-v4-flash".to_string(),
+            model_provider: None,
+            model_provider_id: None,
             workspace: PathBuf::from("."),
             mode: "agent".to_string(),
             allow_shell: true,
@@ -3322,6 +3362,8 @@ mod tests {
         let req = NewTaskRequest {
             prompt: "fix TODOs and write a README".to_string(),
             model: None,
+            model_provider: None,
+            model_provider_id: None,
             workspace: None,
             mode: None,
             allow_shell: None,
@@ -3740,6 +3782,8 @@ mod tests {
             id: "task_0123456789abcdef".to_string(),
             prompt: "bound timeline".to_string(),
             model: "deepseek-v4-flash".to_string(),
+            model_provider: None,
+            model_provider_id: None,
             workspace: PathBuf::from("."),
             mode: "agent".to_string(),
             allow_shell: false,

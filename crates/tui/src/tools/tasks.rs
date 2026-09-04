@@ -225,6 +225,14 @@ impl ToolSpec for TasksTool {
                 json!({ "type": "string", "description": "Work prompt for the durable task (action=create)." }),
             );
             properties.insert(
+                "model_provider".to_string(),
+                json!({ "type": "string", "description": "Provider kind for the pinned model. Omit to inherit the configured provider." }),
+            );
+            properties.insert(
+                "model_provider_id".to_string(),
+                json!({ "type": "string", "description": "Exact configured provider id, including named custom routes. Keeps the model on that route." }),
+            );
+            properties.insert(
                 "model".to_string(),
                 json!({ "type": "string", "description": "(action=create)" }),
             );
@@ -377,6 +385,8 @@ fn legacy_action_schema(action: &str) -> Value {
             "properties": {
                 "prompt": { "type": "string", "description": "Work prompt for the durable task." },
                 "model": { "type": "string" },
+                "model_provider": { "type": "string", "description": "Provider kind for the pinned model." },
+                "model_provider_id": { "type": "string", "description": "Exact configured provider id." },
                 "workspace": { "type": "string", "description": "Workspace path; defaults to current workspace." },
                 "mode": { "type": "string", "enum": ["agent", "plan", "operate"] },
                 "allow_shell": { "type": "boolean" },
@@ -461,6 +471,8 @@ impl TasksTool {
         let req = NewTaskRequest {
             prompt: prompt.clone(),
             model: optional_str(input, "model")?.map(ToString::to_string),
+            model_provider: optional_str(input, "model_provider")?.map(ToString::to_string),
+            model_provider_id: optional_str(input, "model_provider_id")?.map(ToString::to_string),
             workspace: Some(workspace),
             mode: optional_str(input, "mode")?.map(ToString::to_string),
             // Authority declarations: read strictly. A malformed value that
