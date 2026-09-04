@@ -20,6 +20,7 @@
   "ExtensionsGroupProblems": "समस्याएँ",
   "ExtensionsGroupRecommended": "अनुशंसित",
   "ExtensionsGroupServers": "सर्वर",
+  "ExtensionsGroupNeedsAttention": "ध्यान चाहिए",
   "ExtensionsGroupStatus": "{count} आइटम · समेटने के लिए Enter",
   "ExtensionsGroupUser": "उपयोगकर्ता",
   "ExtensionsGroupWorkspace": "कार्यस्थान",

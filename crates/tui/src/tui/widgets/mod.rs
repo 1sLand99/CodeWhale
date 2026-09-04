@@ -7201,14 +7201,14 @@ mod tests {
         let launch_lines = crate::tui::underwater::empty_state_lines(&app, launch_area);
         let mut launch = Buffer::empty(launch_area);
         for (row, line) in launch_lines.iter().enumerate() {
-            if let Ok(y) = u16::try_from(row) {
-                if y < launch_area.height {
-                    ratatui::widgets::Widget::render(
-                        ratatui::widgets::Paragraph::new(line.clone()),
-                        Rect::new(0, y, launch_area.width, 1),
-                        &mut launch,
-                    );
-                }
+            if let Ok(y) = u16::try_from(row)
+                && y < launch_area.height
+            {
+                ratatui::widgets::Widget::render(
+                    ratatui::widgets::Paragraph::new(line.clone()),
+                    Rect::new(0, y, launch_area.width, 1),
+                    &mut launch,
+                );
             }
         }
         app.launch.visible = false;

@@ -20,6 +20,7 @@
   "ExtensionsGroupProblems": "Probleme",
   "ExtensionsGroupRecommended": "Empfohlen",
   "ExtensionsGroupServers": "Server",
+  "ExtensionsGroupNeedsAttention": "Braucht Aufmerksamkeit",
   "ExtensionsGroupStatus": "{count} Einträge · Enter klappt ein",
   "ExtensionsGroupUser": "Benutzer",
   "ExtensionsGroupWorkspace": "Arbeitsbereich",

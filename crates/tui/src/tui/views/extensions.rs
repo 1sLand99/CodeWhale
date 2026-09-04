@@ -1037,15 +1037,31 @@ fn mcp_model(app: &App, locale: Locale) -> ExtensionsTabModel {
             }
         })
         .collect();
+    // Everything that needs a human leads. With twenty servers configured, the
+    // four that failed or want re-auth were impossible to pick out of a flat
+    // alphabetical list — founder live-test on the same screen. A server is
+    // "attention" exactly when it carries a recovery command; a healthy one
+    // renders its state and sorts below.
+    let (attention, healthy): (Vec<_>, Vec<_>) = items
+        .into_iter()
+        .partition(|item| item.action.as_ref().is_some_and(|a| a.command().is_some()));
+    let mut groups = Vec::new();
+    if !attention.is_empty() {
+        groups.push(ExtensionGroup {
+            id: "attention".into(),
+            label: tr(locale, MessageId::ExtensionsGroupNeedsAttention).into_owned(),
+            items: attention,
+        });
+    }
+    if !healthy.is_empty() {
+        groups.push(ExtensionGroup {
+            id: "servers".into(),
+            label: tr(locale, MessageId::ExtensionsGroupServers).into_owned(),
+            items: healthy,
+        });
+    }
     ExtensionsTabModel {
-        groups: (!items.is_empty())
-            .then(|| ExtensionGroup {
-                id: "servers".into(),
-                label: tr(locale, MessageId::ExtensionsGroupServers).into_owned(),
-                items,
-            })
-            .into_iter()
-            .collect(),
+        groups,
         problem: (configured.is_none() && app.mcp_configured_count > total).then(|| {
             localize(
                 locale,

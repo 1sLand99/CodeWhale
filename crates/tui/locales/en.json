@@ -20,6 +20,7 @@
   "ExtensionsGroupProblems": "Problems",
   "ExtensionsGroupRecommended": "Recommended",
   "ExtensionsGroupServers": "Servers",
+  "ExtensionsGroupNeedsAttention": "Needs attention",
   "ExtensionsGroupStatus": "{count} items · Enter folds",
   "ExtensionsGroupUser": "User",
   "ExtensionsGroupWorkspace": "Workspace",

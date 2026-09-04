@@ -20,6 +20,7 @@
   "ExtensionsGroupProblems": "Sự cố",
   "ExtensionsGroupRecommended": "Đề xuất",
   "ExtensionsGroupServers": "Máy chủ",
+  "ExtensionsGroupNeedsAttention": "Cần chú ý",
   "ExtensionsGroupStatus": "{count} mục · Enter để thu gọn",
   "ExtensionsGroupUser": "Người dùng",
   "ExtensionsGroupWorkspace": "Không gian làm việc",

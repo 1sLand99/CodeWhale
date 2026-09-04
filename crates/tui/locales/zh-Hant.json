@@ -20,6 +20,7 @@
   "ExtensionsGroupProblems": "問題",
   "ExtensionsGroupRecommended": "推薦",
   "ExtensionsGroupServers": "伺服器",
+  "ExtensionsGroupNeedsAttention": "需要處理",
   "ExtensionsGroupStatus": "{count} 項 · 按 Enter 摺疊",
   "ExtensionsGroupUser": "使用者",
   "ExtensionsGroupWorkspace": "工作區",

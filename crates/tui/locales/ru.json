@@ -20,6 +20,7 @@
   "ExtensionsGroupProblems": "Проблемы",
   "ExtensionsGroupRecommended": "Рекомендуемые",
   "ExtensionsGroupServers": "Серверы",
+  "ExtensionsGroupNeedsAttention": "Требует внимания",
   "ExtensionsGroupStatus": "Элементов: {count} · Enter сворачивает",
   "ExtensionsGroupUser": "Пользователь",
   "ExtensionsGroupWorkspace": "Рабочая область",

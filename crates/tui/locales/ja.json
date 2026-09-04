@@ -20,6 +20,7 @@
   "ExtensionsGroupProblems": "問題",
   "ExtensionsGroupRecommended": "おすすめ",
   "ExtensionsGroupServers": "サーバー",
+  "ExtensionsGroupNeedsAttention": "要対応",
   "ExtensionsGroupStatus": "{count} 件 · Enter で折りたたみ",
   "ExtensionsGroupUser": "ユーザー",
   "ExtensionsGroupWorkspace": "ワークスペース",

@@ -20,6 +20,7 @@
   "ExtensionsGroupProblems": "문제",
   "ExtensionsGroupRecommended": "추천",
   "ExtensionsGroupServers": "서버",
+  "ExtensionsGroupNeedsAttention": "조치 필요",
   "ExtensionsGroupStatus": "{count}개 항목 · Enter로 접기",
   "ExtensionsGroupUser": "사용자",
   "ExtensionsGroupWorkspace": "작업 공간",
