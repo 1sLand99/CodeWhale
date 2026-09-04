@@ -12,15 +12,20 @@
 //! them).
 
 use std::collections::BTreeMap;
+use std::io::Read;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
-use codewhale_config::catalog::{CatalogOffering, CatalogSnapshot, bundled_catalog_offerings};
+use codewhale_config::catalog::{
+    CatalogOffering, CatalogSnapshot, CatalogStatus, ProviderCatalogCache, base_url_fingerprint,
+    bundled_catalog_offerings, now_unix,
+};
 
 use crate::codex_model_cache;
 use crate::config::{
-    ApiProvider, Config, model_completion_names_for_provider, opencode_go_chat_model_id,
-    provider_is_configured_for_active,
+    ApiProvider, Config, ProviderIdentity, model_completion_names_for_provider,
+    opencode_go_chat_model_id, provider_is_configured_for_active,
 };
 
 static BUNDLED_SNAPSHOT: std::sync::OnceLock<CatalogSnapshot> = std::sync::OnceLock::new();
@@ -495,10 +500,567 @@ pub fn models_for_provider(
     provider: ApiProvider,
 ) -> Vec<String> {
     if provider_is_configured_for_active(config, provider, active) {
-        all_catalog_models_for_provider(provider)
+        catalog_models_for_route(
+            provider,
+            &config.provider_identity_for(provider),
+            &config.base_url_for_route(provider),
+        )
     } else {
         Vec::new()
     }
+}
+
+const PROVIDER_CATALOG_MAX_BYTES: u64 = 8 * 1024 * 1024;
+const PROVIDER_CATALOG_TTL_SECS: u64 = 24 * 60 * 60;
+type ProviderCacheMemo = BTreeMap<
+    PathBuf,
+    (
+        Option<std::time::SystemTime>,
+        u64,
+        Arc<ProviderCatalogCache>,
+    ),
+>;
+static PROVIDER_CACHE_MEMO: RwLock<ProviderCacheMemo> = RwLock::new(BTreeMap::new());
+
+fn provider_catalog_path(identity: &str, base_url: &str) -> anyhow::Result<PathBuf> {
+    let catalog = crate::models_dev_live::cache_path()
+        .and_then(|path| path.parent().map(std::path::Path::to_path_buf))
+        .ok_or_else(|| anyhow::anyhow!("catalog directory unavailable"))?;
+    // One file per exact configured identity + endpoint. Concurrent refreshes
+    // of different routes never overwrite one another, and URLs/keys are not
+    // written into filenames or receipts.
+    Ok(catalog.join(format!(
+        "provider-{}-{}.json",
+        base_url_fingerprint(identity),
+        base_url_fingerprint(base_url),
+    )))
+}
+
+fn load_provider_catalog(
+    identity: &str,
+    base_url: &str,
+) -> anyhow::Result<Arc<ProviderCatalogCache>> {
+    let path = provider_catalog_path(identity, base_url)?;
+    let metadata = match std::fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(Arc::new(ProviderCatalogCache::new()));
+        }
+        Err(error) => return Err(error.into()),
+    };
+    anyhow::ensure!(
+        metadata.is_file() && metadata.len() <= PROVIDER_CATALOG_MAX_BYTES,
+        "invalid catalog cache"
+    );
+    let modified = metadata.modified().ok();
+    if let Ok(memo) = PROVIDER_CACHE_MEMO.read()
+        && let Some((cached_modified, cached_len, cache)) = memo.get(&path)
+        && *cached_modified == modified
+        && *cached_len == metadata.len()
+    {
+        return Ok(Arc::clone(cache));
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    let file = options.open(&path)?;
+    let mut body = Vec::new();
+    file.take(PROVIDER_CATALOG_MAX_BYTES + 1)
+        .read_to_end(&mut body)?;
+    anyhow::ensure!(
+        body.len() as u64 <= PROVIDER_CATALOG_MAX_BYTES,
+        "catalog cache too large"
+    );
+    let cache: ProviderCatalogCache = serde_json::from_slice(&body)?;
+    let fingerprint = base_url_fingerprint(base_url);
+    anyhow::ensure!(
+        cache.entries.values().all(|entry| {
+            entry.provider == identity
+                && entry.base_url_fingerprint == fingerprint
+                && entry
+                    .offerings
+                    .iter()
+                    .all(|row| valid_catalog_model_id(&row.wire_model_id))
+        }),
+        "catalog scope mismatch"
+    );
+    let cache = Arc::new(cache);
+    if let Ok(mut memo) = PROVIDER_CACHE_MEMO.write() {
+        memo.insert(path, (modified, metadata.len(), Arc::clone(&cache)));
+    }
+    Ok(cache)
+}
+
+pub(crate) fn valid_catalog_model_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 256
+        && value.bytes().any(|byte| byte.is_ascii_alphanumeric())
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'/' | b'-')
+        })
+}
+
+/// Endpoint-scoped roster for CLI, pickers and inventory. A cached provider
+/// listing is authoritative for IDs, including removals. Failed/stale rows
+/// remain usable offline; configured models are retained by the caller.
+#[must_use]
+pub(crate) fn catalog_models_for_route(
+    provider: ApiProvider,
+    identity: &str,
+    base_url: &str,
+) -> Vec<String> {
+    if provider == ApiProvider::OpenaiCodex {
+        return codex_model_cache::model_roster().model_ids();
+    }
+    if let Ok(cache) = load_provider_catalog(identity, base_url)
+        && let Some(entry) = cache.get(identity, &base_url_fingerprint(base_url))
+        && entry.fetched_at > 0
+    {
+        return entry
+            .offerings
+            .iter()
+            .map(|row| row.wire_model_id.clone())
+            .collect();
+    }
+    // Custom endpoints must never inherit models from another configured
+    // endpoint that happens to have the same generic provider kind.
+    if provider == ApiProvider::Custom {
+        Vec::new()
+    } else {
+        all_catalog_models_for_provider(provider)
+    }
+}
+
+#[derive(serde::Serialize)]
+struct CatalogUpdateReceipt {
+    provider: String,
+    source: &'static str,
+    outcome: &'static str,
+    status: CatalogStatus,
+    fetched_at: Option<u64>,
+    observed_at: Option<u64>,
+    base_url_fingerprint: Option<String>,
+    model_count: usize,
+    error: Option<&'static str>,
+}
+
+fn cached_receipt(config: &Config, identity: &ProviderIdentity) -> CatalogUpdateReceipt {
+    let base_url = config.base_url_for_route_identity(identity.provider, &identity.key);
+    let fingerprint = base_url_fingerprint(&base_url);
+    let cache = load_provider_catalog(&identity.key, &base_url);
+    let entry = cache
+        .as_ref()
+        .ok()
+        .and_then(|cache| cache.get(&identity.key, &fingerprint));
+    CatalogUpdateReceipt {
+        provider: identity.key.clone(),
+        source: "provider_models",
+        outcome: "cached",
+        status: cache.as_ref().map_or(CatalogStatus::Unknown, |cache| {
+            cache.status(&identity.key, &fingerprint, now_unix())
+        }),
+        fetched_at: entry
+            .map(|entry| entry.fetched_at)
+            .filter(|timestamp| *timestamp > 0),
+        observed_at: None,
+        base_url_fingerprint: Some(fingerprint),
+        model_count: entry.map_or(0, |entry| entry.offerings.len()),
+        error: cache.is_err().then_some("cache_read_failed"),
+    }
+}
+
+fn catalog_identities(
+    config: &Config,
+    selected: Option<&str>,
+    update: bool,
+) -> anyhow::Result<Vec<ProviderIdentity>> {
+    if let Some(selected) = selected {
+        return Ok(vec![
+            config
+                .resolve_provider_identity(selected)
+                .map_err(anyhow::Error::msg)?,
+        ]);
+    }
+    let active = config
+        .active_provider_identity(config.api_provider())
+        .map_err(anyhow::Error::msg)?;
+    if !update {
+        return Ok(vec![active]);
+    }
+    let mut identities = vec![active];
+    for provider in configured_providers(config, config.api_provider()) {
+        if provider != ApiProvider::Custom {
+            identities.push(
+                config
+                    .active_provider_identity(provider)
+                    .map_err(anyhow::Error::msg)?,
+            );
+        }
+    }
+    if let Some(providers) = &config.providers {
+        for (name, entry) in &providers.custom {
+            if !entry.is_openai_compatible_custom() {
+                continue;
+            }
+            identities.push(
+                config
+                    .resolve_provider_identity(name)
+                    .map_err(anyhow::Error::msg)?,
+            );
+        }
+    }
+    identities.sort_by(|a, b| a.key.cmp(&b.key));
+    identities.dedup_by(|a, b| a.key == b.key);
+    Ok(identities)
+}
+
+fn codex_receipt(identity: &ProviderIdentity) -> CatalogUpdateReceipt {
+    let roster = codex_model_cache::model_roster();
+    codex_roster_receipt(identity, &roster)
+}
+
+fn codex_roster_receipt(
+    identity: &ProviderIdentity,
+    roster: &codex_model_cache::CodexModelRoster,
+) -> CatalogUpdateReceipt {
+    let fresh = roster.freshness == codex_model_cache::CodexModelCacheFreshness::Fresh;
+    CatalogUpdateReceipt {
+        provider: identity.key.clone(),
+        source: roster.source,
+        outcome: "cached",
+        status: if fresh {
+            CatalogStatus::Fresh
+        } else {
+            CatalogStatus::Unknown
+        },
+        fetched_at: roster
+            .fetched_at
+            .and_then(|timestamp| u64::try_from(timestamp.timestamp()).ok()),
+        observed_at: roster
+            .observed_at
+            .and_then(|timestamp| u64::try_from(timestamp.timestamp()).ok()),
+        base_url_fingerprint: None,
+        model_count: roster.models.len(),
+        error: if !fresh {
+            Some("codex_cache_unavailable")
+        } else if roster.source == "codex_app_server" && !roster.observation_persisted {
+            Some("codex_observation_not_persisted")
+        } else {
+            None
+        },
+    }
+}
+
+fn codex_route_matches_cli_account(config: &Config) -> bool {
+    if config.provider_uses_custom_endpoint(ApiProvider::OpenaiCodex)
+        || [
+            "OPENAI_CODEX_ACCESS_TOKEN",
+            "CODEX_ACCESS_TOKEN",
+            "OPENAI_CODEX_ACCOUNT_ID",
+            "CODEX_ACCOUNT_ID",
+        ]
+        .iter()
+        .any(|name| std::env::var(name).is_ok_and(|value| !value.trim().is_empty()))
+    {
+        return false;
+    }
+    let cli_auth_path = codex_model_cache::codex_home_path().join("auth.json");
+    let cli_auth_path = std::fs::canonicalize(&cli_auth_path).unwrap_or(cli_auth_path);
+    crate::oauth::auth_file_path() == cli_auth_path
+}
+
+async fn update_provider_catalog(
+    config: &Config,
+    identity: &ProviderIdentity,
+) -> CatalogUpdateReceipt {
+    if identity.provider == ApiProvider::OpenaiCodex {
+        if !codex_route_matches_cli_account(config) {
+            let mut receipt = codex_receipt(identity);
+            receipt.outcome = "skipped";
+            receipt.error = Some("codex_account_route_mismatch");
+            return receipt;
+        }
+        return match codex_model_cache::update_from_codex_cli().await {
+            Ok(roster) => {
+                let mut receipt = codex_roster_receipt(identity, &roster);
+                receipt.outcome = "loaded";
+                receipt
+            }
+            Err(error) => {
+                let mut receipt = codex_receipt(identity);
+                receipt.outcome = "failed";
+                receipt.error = Some(error);
+                receipt
+            }
+        };
+    }
+    let mut route_config = config.clone();
+    route_config.scope_to_provider_identity(identity);
+    let base_url = route_config.deepseek_base_url();
+    let fingerprint = base_url_fingerprint(&base_url);
+    let mut receipt = cached_receipt(&route_config, identity);
+    if identity.provider == ApiProvider::Antigravity {
+        receipt.outcome = "skipped";
+        receipt.error = Some("provider_retired");
+        return receipt;
+    }
+    if crate::config::explicit_cli_api_key_override().is_some()
+        && config
+            .active_provider_identity(config.api_provider())
+            .ok()
+            .as_ref()
+            != Some(identity)
+    {
+        receipt.outcome = "skipped";
+        receipt.error = Some("cli_key_is_scoped_to_active_provider");
+        return receipt;
+    }
+    if route_config
+        .auth_mode_for_provider(identity.provider)
+        .is_some_and(|mode| mode.eq_ignore_ascii_case("oauth"))
+    {
+        receipt.outcome = "skipped";
+        receipt.error = Some("oauth_catalog_unavailable");
+        return receipt;
+    }
+    // Ordinary model listing never constructs a client. Explicit refresh uses
+    // the existing read-only resolver: no secret migration or OAuth refresh.
+    let client = route_config
+        .with_read_only_api_key_for_diagnostic()
+        .and_then(|config| crate::client::DeepSeekClient::new(&config));
+    let client = match client {
+        Ok(client) => client,
+        Err(_) => {
+            receipt.outcome = "skipped";
+            receipt.error = Some("credentials_or_route_unavailable");
+            return receipt;
+        }
+    };
+    let mut cache = match load_provider_catalog(&identity.key, &base_url) {
+        Ok(cache) => (*cache).clone(),
+        Err(_) => {
+            receipt.outcome = "failed";
+            // Do not overwrite an unreadable/corrupt prior cache.
+            return receipt;
+        }
+    };
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        client.fetch_catalog_delta(),
+    )
+    .await
+    .unwrap_or(Err(codewhale_config::catalog::CatalogRefreshError::Network));
+    match result {
+        Ok(mut delta) => {
+            if delta.base_url_fingerprint != fingerprint {
+                receipt.outcome = "failed";
+                receipt.error = Some("catalog_endpoint_mismatch");
+                return receipt;
+            }
+            delta.provider = identity.key.clone();
+            cache.record_success(delta, PROVIDER_CATALOG_TTL_SECS);
+            receipt.outcome = "updated";
+        }
+        Err(reason) => {
+            cache.record_failure(&identity.key, &fingerprint, reason);
+            receipt.outcome = "failed";
+        }
+    }
+    let save = provider_catalog_path(&identity.key, &base_url).and_then(|path| {
+        codewhale_config::persistence::atomic_write_json(&path, &cache)?;
+        if let Ok(mut memo) = PROVIDER_CACHE_MEMO.write() {
+            memo.remove(&path);
+        }
+        Ok(())
+    });
+    if save.is_err() {
+        receipt.outcome = "failed";
+        receipt.error = Some("cache_write_failed");
+        return receipt;
+    }
+    let outcome = receipt.outcome;
+    receipt = cached_receipt(&route_config, identity);
+    receipt.outcome = outcome;
+    receipt
+}
+
+pub(crate) async fn run_models(
+    config: &Config,
+    update: bool,
+    selected: Option<&str>,
+    json: bool,
+) -> anyhow::Result<()> {
+    use crate::localization::{MessageId, resolve_locale, tr};
+    let locale = resolve_locale(
+        &crate::settings::Settings::load_persisted()
+            .unwrap_or_default()
+            .locale,
+    );
+    let identities = catalog_identities(config, selected, update)?;
+    crate::models_dev_live::maybe_load_persisted_cache();
+    if update {
+        let mut receipts = Vec::new();
+        if selected.is_none() {
+            let result = crate::models_dev_live::refresh(true).await;
+            let status = crate::models_dev_live::status();
+            receipts.push(CatalogUpdateReceipt {
+                provider: "models.dev".to_string(),
+                source: "models.dev",
+                outcome: if result.is_ok() { "updated" } else { "failed" },
+                status: if result.is_ok() {
+                    CatalogStatus::Fresh
+                } else {
+                    CatalogStatus::Unknown
+                },
+                fetched_at: status.fetched_at,
+                observed_at: None,
+                base_url_fingerprint: None,
+                model_count: status.offering_count,
+                error: result.err().map(|error| match error {
+                    crate::models_dev_live::ModelsDevRefreshError::Disabled => "fetch_disabled",
+                    crate::models_dev_live::ModelsDevRefreshError::Network(_) => "network",
+                    crate::models_dev_live::ModelsDevRefreshError::HttpStatus(_) => "http_status",
+                    crate::models_dev_live::ModelsDevRefreshError::InvalidResponse(_) => {
+                        "invalid_response"
+                    }
+                    crate::models_dev_live::ModelsDevRefreshError::EmptyCatalog => "empty_catalog",
+                    crate::models_dev_live::ModelsDevRefreshError::Io(_) => "cache_io",
+                }),
+            });
+        }
+        use futures_util::StreamExt;
+        receipts.extend(
+            futures_util::stream::iter(&identities)
+                .map(|identity| update_provider_catalog(config, identity))
+                .buffered(4)
+                .collect::<Vec<_>>()
+                .await,
+        );
+        let updated = receipts
+            .iter()
+            .filter(|receipt| receipt.outcome == "updated")
+            .count();
+        let loaded = receipts
+            .iter()
+            .filter(|receipt| receipt.outcome == "loaded")
+            .count();
+        let failed = receipts
+            .iter()
+            .filter(|receipt| receipt.outcome == "failed")
+            .count();
+        let skipped = receipts
+            .iter()
+            .filter(|receipt| receipt.outcome == "skipped")
+            .count();
+        if json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "updated": updated, "loaded": loaded, "failed": failed, "skipped": skipped,
+                    "catalogs": receipts,
+                }))?
+            );
+        } else {
+            println!(
+                "{}",
+                tr(locale, MessageId::ModelsUpdateSummary)
+                    .replace("{updated}", &updated.to_string())
+                    .replace("{loaded}", &loaded.to_string())
+                    .replace("{failed}", &failed.to_string())
+                    .replace("{skipped}", &skipped.to_string())
+            );
+            for receipt in &receipts {
+                println!(
+                    "{}\t{}\tmodels={}\tfetched_at={}\tobserved_at={}\tsource={}\tstatus={}{}",
+                    receipt.provider,
+                    receipt.outcome,
+                    receipt.model_count,
+                    receipt
+                        .fetched_at
+                        .map_or_else(|| "unknown".to_string(), |timestamp| timestamp.to_string()),
+                    receipt
+                        .observed_at
+                        .map_or_else(|| "unknown".to_string(), |timestamp| timestamp.to_string()),
+                    receipt.source,
+                    serde_json::to_string(&receipt.status)?,
+                    receipt
+                        .error
+                        .map_or_else(String::new, |error| format!("\terror={error}"))
+                );
+            }
+            if receipts
+                .iter()
+                .any(|receipt| matches!(receipt.source, "codex_cli_cache" | "codex_app_server"))
+            {
+                println!("{}", tr(locale, MessageId::ModelsCodexHint));
+            }
+        }
+        if failed > 0 {
+            anyhow::bail!("{}", tr(locale, MessageId::ModelsUpdatePartial));
+        }
+        return Ok(());
+    }
+    let identity = &identities[0];
+    let mut route_config = config.clone();
+    route_config.scope_to_provider_identity(identity);
+    let mut models = catalog_models_for_route(
+        identity.provider,
+        &identity.key,
+        &route_config.deepseek_base_url(),
+    );
+    let default_model = route_config.default_model();
+    if !default_model.is_empty() && !default_model.eq_ignore_ascii_case("auto") {
+        push_unique_model(&mut models, &default_model);
+    }
+    models.sort();
+    models.dedup();
+    if json {
+        // Preserve the existing array + AvailableModel field shape.
+        let rows: Vec<_> = models
+            .iter()
+            .map(|id| crate::client::AvailableModel {
+                id: id.clone(),
+                owned_by: None,
+                created: None,
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&rows)?);
+    } else {
+        println!(
+            "{}",
+            tr(locale, MessageId::ModelsListHeader)
+                .replace("{provider}", &identity.key)
+                .replace("{model}", &default_model)
+        );
+        let receipt = if identity.provider == ApiProvider::OpenaiCodex {
+            codex_receipt(identity)
+        } else {
+            cached_receipt(&route_config, identity)
+        };
+        println!(
+            "source={}\tstatus={}\tfetched_at={}\tobserved_at={}",
+            receipt.source,
+            serde_json::to_string(&receipt.status)?,
+            receipt
+                .fetched_at
+                .map_or_else(|| "unknown".to_string(), |timestamp| timestamp.to_string()),
+            receipt
+                .observed_at
+                .map_or_else(|| "unknown".to_string(), |timestamp| timestamp.to_string())
+        );
+        if receipt.model_count == 0 {
+            println!("{}", tr(locale, MessageId::ModelsSourceFallback));
+        }
+        for model in models {
+            println!("{} {model}", if model == default_model { "*" } else { " " });
+        }
+        println!("{}", tr(locale, MessageId::ModelsListHint));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -506,6 +1068,311 @@ mod tests {
     use super::*;
     use crate::config::{DEFAULT_TOGETHER_FLASH_MODEL, DEFAULT_TOGETHER_MODEL};
     use codewhale_config::catalog::CatalogSource;
+
+    fn catalog_test_config(first_url: &str, second_url: &str) -> Config {
+        use crate::config::{ProviderConfig, ProvidersConfig};
+        Config {
+            provider: Some("catalog-first".to_string()),
+            providers: Some(ProvidersConfig {
+                custom: [
+                    ("catalog-first", first_url, "first-route-test-key"),
+                    ("catalog-second", second_url, "second-route-test-key"),
+                ]
+                .into_iter()
+                .map(|(name, base_url, key)| {
+                    (
+                        name.to_string(),
+                        ProviderConfig {
+                            kind: Some("openai-compatible".to_string()),
+                            base_url: Some(base_url.to_string()),
+                            api_key: Some(key.to_string()),
+                            model: Some("saved-model".to_string()),
+                            ..Default::default()
+                        },
+                    )
+                })
+                .collect(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    async fn catalog_mock(
+        server: &wiremock::MockServer,
+        key: &str,
+        status: u16,
+        body: serde_json::Value,
+    ) {
+        use wiremock::matchers::{header, method, path};
+        wiremock::Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .and(header("Authorization", format!("Bearer {key}")))
+            .respond_with(wiremock::ResponseTemplate::new(status).set_body_json(body))
+            .expect(1)
+            .mount(server)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn models_update_persists_exact_routes_and_keeps_prior_rows_after_failure() {
+        let _env = crate::test_support::lock_test_env();
+        let home = tempfile::tempdir().unwrap();
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", home.path());
+        let _cli_key = crate::test_support::EnvVarGuard::remove(codewhale_config::CLI_API_KEY_ENV);
+        let first = wiremock::MockServer::start().await;
+        let second = wiremock::MockServer::start().await;
+        let config = catalog_test_config(&first.uri(), &second.uri());
+        let first_id = config.resolve_provider_identity("catalog-first").unwrap();
+        let second_id = config.resolve_provider_identity("catalog-second").unwrap();
+        catalog_mock(
+            &first,
+            "first-route-test-key",
+            200,
+            serde_json::json!({"data":[{"id":"new-first-model"}]}),
+        )
+        .await;
+        catalog_mock(
+            &second,
+            "second-route-test-key",
+            200,
+            serde_json::json!({"data":[{"id":"new-second-model"}]}),
+        )
+        .await;
+        assert_eq!(
+            update_provider_catalog(&config, &first_id).await.outcome,
+            "updated"
+        );
+        assert_eq!(
+            update_provider_catalog(&config, &second_id).await.outcome,
+            "updated"
+        );
+        assert_eq!(config.provider.as_deref(), Some("catalog-first"));
+        assert_eq!(config.default_model(), "saved-model");
+        // Simulate restart: remove only this memo, not any persistent state.
+        PROVIDER_CACHE_MEMO.write().unwrap().clear();
+        assert_eq!(
+            catalog_models_for_route(ApiProvider::Custom, "catalog-first", &first.uri()),
+            ["new-first-model"]
+        );
+        assert_eq!(
+            catalog_models_for_route(ApiProvider::Custom, "catalog-second", &second.uri()),
+            ["new-second-model"]
+        );
+        assert!(
+            catalog_models_for_route(ApiProvider::Custom, "catalog-first", &second.uri())
+                .is_empty()
+        );
+        let prior = cached_receipt(&config, &first_id).fetched_at;
+        first.reset().await;
+        catalog_mock(
+            &first,
+            "first-route-test-key",
+            401,
+            serde_json::json!({"error":"first-route-test-key"}),
+        )
+        .await;
+        let receipt = update_provider_catalog(&config, &first_id).await;
+        assert_eq!(receipt.outcome, "failed");
+        assert_eq!(receipt.fetched_at, prior);
+        assert!(matches!(
+            receipt.status,
+            CatalogStatus::Failed {
+                reason: codewhale_config::catalog::CatalogRefreshError::Unauthorized
+            }
+        ));
+        assert_eq!(
+            catalog_models_for_route(ApiProvider::Custom, "catalog-first", &first.uri()),
+            ["new-first-model"]
+        );
+        let body =
+            std::fs::read_to_string(provider_catalog_path("catalog-first", &first.uri()).unwrap())
+                .unwrap();
+        assert!(!body.contains("first-route-test-key"));
+        assert!(!body.contains(&first.uri()));
+        assert!(
+            !serde_json::to_string(&receipt)
+                .unwrap()
+                .contains("first-route-test-key")
+        );
+    }
+
+    #[tokio::test]
+    async fn models_update_removes_withdrawn_ids_and_rejects_secret_or_control_ids() {
+        let _env = crate::test_support::lock_test_env();
+        let home = tempfile::tempdir().unwrap();
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", home.path());
+        let _cli_key = crate::test_support::EnvVarGuard::remove(codewhale_config::CLI_API_KEY_ENV);
+        let server = wiremock::MockServer::start().await;
+        let config = catalog_test_config(&server.uri(), &server.uri());
+        let identity = config.resolve_provider_identity("catalog-first").unwrap();
+        for model in [
+            "old-model",
+            "new-model",
+            "first-route-test-key",
+            "bad\u{1b}[31m-model",
+        ] {
+            server.reset().await;
+            catalog_mock(
+                &server,
+                "first-route-test-key",
+                200,
+                serde_json::json!({"data":[{"id": model}]}),
+            )
+            .await;
+            let receipt = update_provider_catalog(&config, &identity).await;
+            if model.starts_with("old-") || model.starts_with("new-") {
+                assert_eq!(receipt.outcome, "updated");
+                assert_eq!(
+                    catalog_models_for_route(ApiProvider::Custom, &identity.key, &server.uri()),
+                    [model]
+                );
+            } else {
+                assert_eq!(receipt.outcome, "failed");
+                assert_eq!(
+                    catalog_models_for_route(ApiProvider::Custom, &identity.key, &server.uri()),
+                    ["new-model"]
+                );
+            }
+        }
+        server.reset().await;
+        catalog_mock(
+            &server,
+            "first-route-test-key",
+            200,
+            serde_json::json!({"data":[]}),
+        )
+        .await;
+        let receipt = update_provider_catalog(&config, &identity).await;
+        // The existing provider adapter treats an empty list as a failed
+        // refresh. Preserve the last usable rows and disclose that failure.
+        assert_eq!(receipt.outcome, "failed");
+        assert_eq!(
+            catalog_models_for_route(ApiProvider::Custom, &identity.key, &server.uri()),
+            ["new-model"]
+        );
+    }
+
+    #[test]
+    fn codex_update_does_not_attribute_another_accounts_roster_to_overridden_credentials() {
+        let _env = crate::test_support::lock_test_env();
+        let home = tempfile::tempdir().unwrap();
+        let _home = crate::test_support::EnvVarGuard::set("CODEX_HOME", home.path());
+        let _overrides: Vec<_> = [
+            "OPENAI_CODEX_AUTH_FILE",
+            "OPENAI_CODEX_ACCESS_TOKEN",
+            "CODEX_ACCESS_TOKEN",
+            "OPENAI_CODEX_ACCOUNT_ID",
+            "CODEX_ACCOUNT_ID",
+        ]
+        .iter()
+        .map(|name| crate::test_support::EnvVarGuard::remove(name))
+        .collect();
+        let config = Config {
+            provider: Some("openai-codex".to_string()),
+            ..Default::default()
+        };
+        assert!(codex_route_matches_cli_account(&config));
+        {
+            let _token =
+                crate::test_support::EnvVarGuard::set("CODEX_ACCESS_TOKEN", "standalone-token");
+            assert!(!codex_route_matches_cli_account(&config));
+        }
+        let _other = crate::test_support::EnvVarGuard::set(
+            "OPENAI_CODEX_AUTH_FILE",
+            home.path().join("other-auth.json"),
+        );
+        assert!(!codex_route_matches_cli_account(&config));
+    }
+
+    #[test]
+    fn codex_live_roster_receipt_discloses_skipped_persistence() {
+        let identity = Config::default()
+            .resolve_provider_identity("openai-codex")
+            .unwrap();
+        let roster = codex_model_cache::CodexModelRoster {
+            models: Vec::new(),
+            freshness: codex_model_cache::CodexModelCacheFreshness::Fresh,
+            fetched_at: None,
+            observed_at: Some(chrono::Utc::now()),
+            source: "codex_app_server",
+            observation_persisted: false,
+        };
+        let receipt = codex_roster_receipt(&identity, &roster);
+        assert_eq!(receipt.status, CatalogStatus::Fresh);
+        assert_eq!(receipt.error, Some("codex_observation_not_persisted"));
+        assert_eq!(receipt.fetched_at, None);
+        assert!(receipt.observed_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn models_listing_is_offline_and_update_never_forwards_another_routes_cli_key() {
+        let _env = crate::test_support::lock_test_env();
+        let home = tempfile::tempdir().unwrap();
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", home.path());
+        let _source =
+            crate::test_support::EnvVarGuard::set(codewhale_config::CLI_API_KEY_SOURCE_ENV, "cli");
+        let _key = crate::test_support::EnvVarGuard::set(
+            codewhale_config::CLI_API_KEY_ENV,
+            "active-route-cli-key",
+        );
+        let server = wiremock::MockServer::start().await;
+        let config = catalog_test_config(&server.uri(), &server.uri());
+        run_models(&config, false, Some("catalog-first"), true)
+            .await
+            .unwrap();
+        let other = config.resolve_provider_identity("catalog-second").unwrap();
+        let receipt = update_provider_catalog(&config, &other).await;
+        assert_eq!(receipt.outcome, "skipped");
+        assert_eq!(receipt.error, Some("cli_key_is_scoped_to_active_provider"));
+        assert!(server.received_requests().await.unwrap().is_empty());
+        assert!(
+            !provider_catalog_path("catalog-first", &server.uri())
+                .unwrap()
+                .exists()
+        );
+    }
+
+    #[tokio::test]
+    async fn models_update_reports_io_failure_without_claiming_persistence() {
+        let _env = crate::test_support::lock_test_env();
+        let home = tempfile::tempdir().unwrap();
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", home.path());
+        let _cli_key = crate::test_support::EnvVarGuard::remove(codewhale_config::CLI_API_KEY_ENV);
+        let server = wiremock::MockServer::start().await;
+        let config = catalog_test_config(&server.uri(), &server.uri());
+        let identity = config.resolve_provider_identity("catalog-first").unwrap();
+        let path = provider_catalog_path(&identity.key, &server.uri()).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"broken cache").unwrap();
+        let receipt = update_provider_catalog(&config, &identity).await;
+        assert_eq!(receipt.outcome, "failed");
+        assert_eq!(receipt.error, Some("cache_read_failed"));
+        assert_eq!(std::fs::read(&path).unwrap(), b"broken cache");
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[test]
+    fn models_update_scope_includes_every_named_identity_once() {
+        let _env = crate::test_support::lock_test_env();
+        let config = catalog_test_config("http://localhost:1", "http://localhost:2");
+        let identities = catalog_identities(&config, None, true).unwrap();
+        for name in ["catalog-first", "catalog-second"] {
+            assert_eq!(
+                identities
+                    .iter()
+                    .filter(|identity| identity.key == name)
+                    .count(),
+                1
+            );
+        }
+        assert_eq!(
+            catalog_identities(&config, Some("catalog-second"), true)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
 
     #[test]
     fn together_catalog_includes_flash_from_bundled_asset() {

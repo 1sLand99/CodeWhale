@@ -2497,10 +2497,27 @@ impl DeepSeekClient {
             });
         }
 
-        let body = response
-            .text()
+        // Catalogs are untrusted remote data, retained locally by `models --update`.
+        const MAX_CATALOG_BYTES: usize = 8 * 1024 * 1024;
+        if response
+            .content_length()
+            .is_some_and(|size| size > MAX_CATALOG_BYTES as u64)
+        {
+            return Err(CatalogRefreshError::InvalidResponse);
+        }
+        let mut response = response;
+        let mut body = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
             .await
-            .map_err(|_| CatalogRefreshError::Network)?;
+            .map_err(|_| CatalogRefreshError::Network)?
+        {
+            if body.len().saturating_add(chunk.len()) > MAX_CATALOG_BYTES {
+                return Err(CatalogRefreshError::InvalidResponse);
+            }
+            body.extend_from_slice(&chunk);
+        }
+        let body = String::from_utf8(body).map_err(|_| CatalogRefreshError::InvalidResponse)?;
 
         let provider = self.catalog_provider_id();
         let fingerprint = base_url_fingerprint(&self.base_url);
@@ -2580,6 +2597,15 @@ impl DeepSeekClient {
                 .collect()
         };
 
+        if offerings.iter().any(|row| {
+            !crate::provider_lake::valid_catalog_model_id(&row.wire_model_id)
+                || self
+                    .model_bound_secret_values
+                    .iter()
+                    .any(|secret| !secret.is_empty() && row.wire_model_id.contains(secret))
+        }) {
+            return Err(CatalogRefreshError::InvalidResponse);
+        }
         Ok(ProviderCatalogDelta {
             provider,
             base_url_fingerprint: fingerprint,

@@ -42,6 +42,59 @@ Sources to keep in sync:
 
 ## Provider Selection
 
+Refresh model catalogs without installing a new Codewhale release:
+
+```sh
+codewhale models --update
+codewhale models --update --provider openai
+codewhale models --provider openai --json
+```
+
+`models --update` (also `--refresh`) updates the shared Models.dev metadata
+and calls the existing `/models` endpoint for each configured provider with
+its own credentials. `--provider ID` restricts the refresh to that exact
+provider, including named custom endpoints. It makes no inference requests
+and never changes the saved provider or model. A command-line API key is
+confined to the active provider; other routes are reported as skipped for
+that invocation.
+
+Plain `models` lists the active provider's saved catalog without provider requests or
+authentication checks. Successful refreshes are saved under Codewhale's
+catalog directory and used by the model/provider pickers. Cache files are
+scoped to provider identity and endpoint; a failed refresh preserves prior
+rows. Text output reports source, last successful fetch time (Unix seconds),
+and freshness. `--update --json` adds per-source receipts and aggregate counts;
+partial failures return a nonzero exit code after writing those receipts.
+Ordinary `models --json` keeps its model-array format. Bundled/configured
+fallbacks are not proof that an account can use every listed model.
+
+`codewhale models --update --provider openai-codex` asks the installed Codex
+CLI for its signed-in ChatGPT account's model list through the documented
+[app-server stdio API](https://learn.chatgpt.com/docs/app-server). Pagination
+and supported reasoning efforts are preserved. This requires a Codex version
+with `account/read` and `model/list` support. It starts no conversation, imports
+no tokens, and sends no Codewhale provider keys to Codex. Standalone credential
+overrides or custom endpoints that could select a different account are skipped.
+
+Codex controls its own upstream cache policy; `model/list` does not expose a
+force-refresh option. Receipts therefore count the result as `loaded`, with an
+`observed_at` lookup time and no claimed upstream `fetched_at`. The observed
+roster is saved for offline listing and pickers, alongside the existing Codex
+cache fallback. A new model, such as GPT-6 Astra, appears only if that account's
+roster supplies its exact ID. Codewhale never guesses availability or substitutes
+a different billing route. Missing/stale rosters, CLI failures, and unsupported
+OAuth catalogs are reported explicitly.
+
+Codewhale's observed Codex rosters are bound to the exact filesystem home
+and the metadata version of its `auth.json`; tokens are never read for this
+cache binding. Replacing that login invalidates the observation. A native
+Codex cache fetched before an observed login-file change is also stale.
+Keyring-only accounts without an observable login file can still load a live
+roster, but the receipt reports `codex_observation_not_persisted` and no
+Codewhale observation is retained. The separately attributed Codex-owned
+native cache keeps its existing freshness policy when no login-file version
+can be observed; this is not proof of account identity in an external keyring.
+
 The canonical provider IDs are the 42 entries of `ProviderKind::ALL`
 (`crates/config/src/provider_kind.rs`), in that order:
 

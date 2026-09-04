@@ -43,9 +43,7 @@ use crate::model_profile::{
 };
 use crate::models_dev_live::{self, ModelsDevFreshness};
 use crate::palette;
-use crate::provider_lake::{
-    all_catalog_models_for_provider, catalog_model_count_for_provider, catalog_offering_for_model,
-};
+use crate::provider_lake::{catalog_model_count_for_provider, catalog_offering_for_model};
 use crate::provider_readiness::{
     CredentialState, ProviderReadinessSnapshot, ProviderRouteIdentity, ResolvedProviderReadiness,
     credential_state_for_provider, route_identity_for_model,
@@ -1462,7 +1460,11 @@ fn model_cost_label(provider: ApiProvider, model: &str) -> String {
 /// alphabetical. Falls back to the default route when the catalog has no rows
 /// for the provider, so the pane never renders empty.
 fn provider_pane_models(row: &ProviderDashboardRow, limit: usize) -> Vec<(String, String, bool)> {
-    let mut models = all_catalog_models_for_provider(row.provider);
+    let mut models = crate::provider_lake::catalog_models_for_route(
+        row.provider,
+        &row.provider_id,
+        &row.base_url,
+    );
     if models.is_empty() && !row.default_route.logical_model.trim().is_empty() {
         models.push(row.default_route.logical_model.clone());
     }
@@ -2181,7 +2183,12 @@ impl ProviderPickerView {
         } else {
             route.logical_model.clone()
         };
-        let mut models = crate::provider_lake::all_catalog_models_for_provider(provider);
+        let row = &self.rows[self.selected_idx];
+        let mut models = crate::provider_lake::catalog_models_for_route(
+            provider,
+            &row.provider_id,
+            &row.base_url,
+        );
         if kimi_code_k3
             && !preferred.trim().is_empty()
             && !models
@@ -2944,7 +2951,12 @@ impl ProviderPickerView {
             }
             lines.push(Line::from(spans));
         }
-        let total_models = all_catalog_models_for_provider(row.provider).len();
+        let total_models = crate::provider_lake::catalog_models_for_route(
+            row.provider,
+            &row.provider_id,
+            &row.base_url,
+        )
+        .len();
         if total_models > pane_models.len() {
             lines.push(Line::from(Span::styled(
                 format!("  +{} more · M for all", total_models - pane_models.len()),
