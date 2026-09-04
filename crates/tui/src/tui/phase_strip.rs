@@ -942,10 +942,16 @@ fn live_counts(
     // dock (founder, 2026-09-03: the bar opens when used, or when you click
     // something at the bottom to ask for it). The word is the dock's own
     // TODO view title; it disappears while the dock is up.
+    //
+    // It reads at `MetadataValue`, not `MetadataDim`: `TEXT_DIM` is aliased to
+    // `TEXT_HINT` in every theme but Solarized, so a dim affordance paints the
+    // exact grey as the separators around it and the one clickable word in an
+    // idle footer disappears into punctuation. Live counts already carry
+    // `Active`; this is the idle case earning the same "you can click this".
     if counts.is_empty() && app.work_surface.last_area.is_none() {
         counts.push((
             RailPanel::Tasks.title().to_ascii_lowercase(),
-            ChromeInk::MetadataDim,
+            ChromeInk::MetadataValue,
         ));
         panels.push(RailPanel::Tasks);
     }
