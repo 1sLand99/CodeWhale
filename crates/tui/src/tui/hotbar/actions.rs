@@ -2542,6 +2542,13 @@ mod tests {
 
     #[test]
     fn reasoning_cycle_uses_codex_effort_tiers() {
+        // Codex tiers are now per-model, read from the OAuth roster. Point
+        // CODEX_HOME at an empty directory so this exercises the static
+        // fallback ladder instead of whatever roster the developer's own
+        // machine happens to have cached.
+        let _lock = crate::test_support::lock_test_env();
+        let codex_home = tempfile::TempDir::new().expect("codex home");
+        let _codex_home = crate::test_support::EnvVarGuard::set("CODEX_HOME", codex_home.path());
         let registry = HotbarActionRegistry::with_builtins();
         let reasoning = registry.get("reasoning.cycle").expect("reasoning action");
         let mut app = test_app();
@@ -2552,7 +2559,7 @@ mod tests {
         for (expected_effort, expected_label) in [
             (ReasoningEffort::Medium, "medium"),
             (ReasoningEffort::High, "high"),
-            (ReasoningEffort::Max, "xhigh"),
+            (ReasoningEffort::Max, "max"),
             (ReasoningEffort::Low, "low"),
         ] {
             assert!(matches!(

@@ -5965,18 +5965,15 @@ mod tests {
                 "low".to_string(),
                 "medium".to_string(),
                 "high".to_string(),
-                "xhigh".to_string(),
+                "max".to_string(),
             ]
         );
         assert_eq!(
             row.reasoning.stream_visibility,
             ProviderReasoningStreamVisibility::StructuredThinking
         );
-        assert_eq!(row.reasoning.selected_control.as_deref(), Some("xhigh"));
-        assert!(
-            row.compact_hint()
-                .contains("reasoning:low/medium/high/xhigh")
-        );
+        assert_eq!(row.reasoning.selected_control.as_deref(), Some("max"));
+        assert!(row.compact_hint().contains("reasoning:low/medium/high/max"));
     }
 
     #[test]

@@ -8391,7 +8391,7 @@ context_window = 262144
             .find(|row| row.key == "reasoning_effort")
             .expect("reasoning_effort row");
 
-        assert_eq!(row.value, "xhigh");
+        assert_eq!(row.value, "max");
     }
 
     #[test]

@@ -7,6 +7,8 @@
 use std::collections::HashSet;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::time::SystemTime;
 
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
@@ -56,6 +58,11 @@ pub(crate) struct CodexModelMetadata {
     pub(crate) id: String,
     pub(crate) context_window: Option<u32>,
     pub(crate) reasoning: Option<bool>,
+    /// Effort names the roster advertises for this model, lowercased and in
+    /// the order the cache lists them (`low`, `medium`, `high`, `xhigh`,
+    /// `max`, `ultra`). Empty when the roster published none, which keeps the
+    /// caller on its static ladder instead of inventing tiers.
+    pub(crate) efforts: Vec<String>,
 }
 
 impl CodexModelRoster {
@@ -65,6 +72,7 @@ impl CodexModelRoster {
                 id: DEFAULT_OPENAI_CODEX_MODEL.to_string(),
                 context_window: None,
                 reasoning: None,
+                efforts: Vec::new(),
             }],
             freshness,
             fetched_at,
@@ -111,10 +119,17 @@ struct CacheModel {
     context_window: Option<u32>,
     #[serde(default)]
     supported_reasoning_levels: Option<Vec<CacheReasoningLevel>>,
+    /// `hide` marks a roster entry the vendor does not offer for selection
+    /// (`gpt-reserve`, `codex-auto-review`). Absent means listable.
+    #[serde(default)]
+    visibility: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
-struct CacheReasoningLevel {}
+struct CacheReasoningLevel {
+    #[serde(default)]
+    effort: Option<String>,
+}
 
 /// Resolve the Codex home without consulting OAuth-file overrides.
 ///
@@ -133,9 +148,50 @@ pub(crate) fn codex_home_path() -> PathBuf {
         })
 }
 
+/// Last parsed roster, keyed by the identity of the file it came from.
+///
+/// The roster is read from the picker's render path, and the cache file is a
+/// couple hundred kilobytes of JSON (it carries full instruction templates),
+/// so parsing it per frame is visible as input lag while a picker is open.
+/// The key is the resolved path plus the file's mtime and length, so a Codex
+/// refresh is picked up on the next call and a test pointing `CODEX_HOME`
+/// somewhere else never reads another test's entry.
+type RosterCacheKey = (PathBuf, Option<SystemTime>, u64);
+static ROSTER_MEMO: Mutex<Option<(RosterCacheKey, CodexModelRoster)>> = Mutex::new(None);
+
 #[must_use]
 pub(crate) fn model_roster() -> CodexModelRoster {
-    load_model_roster_from_home_at(&codex_home_path(), Utc::now())
+    let home = codex_home_path();
+    let path = home.join(MODEL_CACHE_FILE);
+    let key: Option<RosterCacheKey> = std::fs::symlink_metadata(&path)
+        .ok()
+        .map(|metadata| (path, metadata.modified().ok(), metadata.len()));
+
+    // A missing or unreadable cache is cheap to re-check, so it stays uncached
+    // and keeps reporting live freshness.
+    let Some(key) = key else {
+        return load_model_roster_from_home_at(&home, Utc::now());
+    };
+
+    // A `Fresh` roster ages into `Stale` on the clock, not on a file change,
+    // so the memo is only trusted while the entry it was built from still
+    // reads fresh.
+    if let Ok(memo) = ROSTER_MEMO.lock()
+        && let Some((cached_key, roster)) = memo.as_ref()
+        && *cached_key == key
+        && roster.freshness == CodexModelCacheFreshness::Fresh
+        && roster
+            .fetched_at
+            .is_some_and(|fetched| Utc::now().signed_duration_since(fetched) <= MODEL_CACHE_MAX_AGE)
+    {
+        return roster.clone();
+    }
+
+    let roster = load_model_roster_from_home_at(&home, Utc::now());
+    if let Ok(mut memo) = ROSTER_MEMO.lock() {
+        *memo = Some((key, roster.clone()));
+    }
+    roster
 }
 
 fn load_model_roster_from_home_at(home: &Path, now: DateTime<Utc>) -> CodexModelRoster {
@@ -198,8 +254,29 @@ fn load_model_roster_from_home_at(home: &Path, now: DateTime<Utc>) -> CodexModel
         if !valid_model_id(slug) {
             continue;
         }
+        // A roster entry the vendor hides is not a model the operator can
+        // pick. Listing it puts a route in the picker that is not on offer.
+        if model
+            .visibility
+            .as_deref()
+            .is_some_and(|visibility| visibility.trim().eq_ignore_ascii_case("hide"))
+        {
+            continue;
+        }
         let identity = slug.to_ascii_lowercase();
         if seen.insert(identity) {
+            let efforts: Vec<String> = model
+                .supported_reasoning_levels
+                .as_ref()
+                .map(|levels| {
+                    levels
+                        .iter()
+                        .filter_map(|level| level.effort.as_deref())
+                        .map(|effort| effort.trim().to_ascii_lowercase())
+                        .filter(|effort| !effort.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default();
             models.push(CodexModelMetadata {
                 id: slug.to_string(),
                 context_window: model
@@ -207,7 +284,9 @@ fn load_model_roster_from_home_at(home: &Path, now: DateTime<Utc>) -> CodexModel
                     .filter(|window| (1..=16_000_000).contains(window)),
                 reasoning: model
                     .supported_reasoning_levels
+                    .as_ref()
                     .map(|levels| !levels.is_empty()),
+                efforts,
             });
         }
     }
@@ -258,7 +337,7 @@ mod tests {
     }
 
     #[test]
-    fn valid_cache_uses_priority_order_and_keeps_route_available_rows() {
+    fn valid_cache_uses_priority_order_and_drops_vendor_hidden_models() {
         let home = tempfile::tempdir().expect("temp CODEX_HOME");
         write_fixture(home.path());
 
@@ -267,14 +346,14 @@ mod tests {
 
         assert_eq!(roster.freshness, CodexModelCacheFreshness::Fresh);
         assert_eq!(roster.fetched_at, Some(fixture_time()));
+        // `codex-test-review` is `visibility: hide` in the fixture, the same
+        // marker the live roster puts on `gpt-reserve` and `codex-auto-review`.
+        // A model the vendor does not offer must not reach the picker.
         assert_eq!(
             roster.model_ids(),
-            [
-                "gpt-test-primary",
-                "gpt-test-secondary",
-                "codex-test-review"
-            ]
+            ["gpt-test-primary", "gpt-test-secondary"]
         );
+        assert!(roster.metadata_for("codex-test-review").is_none());
         let primary = roster
             .metadata_for("gpt-test-primary")
             .expect("primary metadata");
@@ -284,6 +363,10 @@ mod tests {
             .metadata_for("gpt-test-secondary")
             .expect("secondary metadata");
         assert_eq!(secondary.context_window, Some(128_000));
+        // The effort names survive parsing: the picker builds a per-model
+        // thinking ladder from them instead of one static list per provider.
+        assert_eq!(primary.efforts, ["high"]);
+        assert_eq!(secondary.efforts, ["medium"]);
     }
 
     #[test]

@@ -2846,13 +2846,7 @@ impl ModelPickerView {
                     ReasoningEffort::High => "deeper reasoning".to_string(),
                     ReasoningEffort::XHigh => "extra-high reasoning".to_string(),
                     ReasoningEffort::Ultra => "ultra reasoning".to_string(),
-                    ReasoningEffort::Max => {
-                        if effort_provider == ApiProvider::OpenaiCodex {
-                            "extra-high reasoning".to_string()
-                        } else {
-                            "maximum reasoning".to_string()
-                        }
-                    }
+                    ReasoningEffort::Max => "maximum reasoning".to_string(),
                 };
                 PaneRow::effort(label, hint)
             })
@@ -2887,7 +2881,13 @@ pub(crate) fn picker_efforts_for_route(
         return KIMI_CODE_K3_PICKER_EFFORTS.to_vec();
     }
     if provider == ApiProvider::OpenaiCodex {
-        return CODEX_PICKER_EFFORTS.to_vec();
+        // The OAuth roster publishes a per-model ladder, and the models differ:
+        // gpt-5.6-sol/terra go up to `ultra`, gpt-5.6-luna stops at `max`, and
+        // gpt-5.5 and older stop at `xhigh`. Returning one static list for the
+        // whole provider offered tiers a model does not have and hid tiers it
+        // does. Fall back to the static ladder only when the roster is missing
+        // or published no levels for this model.
+        return codex_picker_efforts(wire_model).unwrap_or_else(|| CODEX_PICKER_EFFORTS.to_vec());
     }
     if let Some(catalog_efforts) = catalog_picker_efforts(provider, wire_model) {
         return catalog_efforts;
@@ -2899,6 +2899,24 @@ pub(crate) fn picker_efforts_for_route(
         return DEEPSEEK_PICKER_EFFORTS.to_vec();
     }
     DEFAULT_PICKER_EFFORTS.to_vec()
+}
+
+/// Thinking tiers for one Codex model, taken from the OAuth roster's
+/// `supported_reasoning_levels`. `None` when the roster does not describe the
+/// model, so the caller keeps the static Codex ladder rather than inventing
+/// tiers.
+fn codex_picker_efforts(wire_model: &str) -> Option<Vec<ReasoningEffort>> {
+    let roster = crate::codex_model_cache::model_roster();
+    let metadata = roster.metadata_for(wire_model)?;
+    let mut efforts = Vec::new();
+    for raw in &metadata.efforts {
+        if let Some(effort) = catalog_effort_value(raw)
+            && !efforts.contains(&effort)
+        {
+            efforts.push(effort);
+        }
+    }
+    (!efforts.is_empty()).then_some(efforts)
 }
 
 /// Build thinking-tier rows from Models.dev `reasoning_options` when present.

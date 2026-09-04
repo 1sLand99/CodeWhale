@@ -280,7 +280,13 @@ impl ReasoningEffort {
             (ApiProvider::OpenaiCodex, Self::Low) => "low",
             (ApiProvider::OpenaiCodex, Self::Medium) => "medium",
             (ApiProvider::OpenaiCodex, Self::High) => "high",
-            (ApiProvider::OpenaiCodex, Self::XHigh | Self::Ultra | Self::Max) => "xhigh",
+            // `xhigh`, `max` and `ultra` are three distinct rungs the Codex
+            // roster publishes per model; collapsing them onto "xhigh" dates
+            // from when xhigh was the ceiling and made the top tiers
+            // unreachable and indistinguishable.
+            (ApiProvider::OpenaiCodex, Self::XHigh) => "xhigh",
+            (ApiProvider::OpenaiCodex, Self::Ultra) => "ultra",
+            (ApiProvider::OpenaiCodex, Self::Max) => "max",
             (ApiProvider::Xai, Self::XHigh) => "xhigh",
             (_, effort) => effort.short_label(),
         }
@@ -463,8 +469,8 @@ impl ReasoningEffort {
             Self::Medium => "medium",
             Self::High => "high",
             Self::XHigh => "xhigh",
-            Self::Ultra => "xhigh",
-            Self::Max => "xhigh",
+            Self::Ultra => "ultra",
+            Self::Max => "max",
             Self::Off => "low",
             Self::Auto => "medium",
         })
