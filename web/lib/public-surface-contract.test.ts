@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import {
   chmodSync,
   existsSync,
@@ -570,34 +569,43 @@ done
     expect(footer).toContain("GITEE_ENABLED &&");
   });
 
-  it("keeps the README and website on one optimized canonical product screenshot", () => {
+  it("keeps the README and website on one canonical product screenshot", () => {
+    // The website serves the founder's original PNG untouched; the README
+    // carries a lossless WebP of the same pixels so both surfaces show the
+    // same v0.9.12 development-build capture.
     const readmeImage = bytes(matrix.screenshot.readme);
     const websiteImage = bytes(matrix.screenshot.website);
-    const digest = (image: Buffer) => createHash("sha256").update(image).digest("hex");
 
-    expect(digest(readmeImage)).toBe(digest(websiteImage));
-    expect(imageDimensions(readmeImage)).toEqual([1562, 1256]);
+    expect(imageDimensions(websiteImage)).toEqual([1136, 698]);
+    expect(imageDimensions(readmeImage)).toEqual([1136, 698]);
     expect(statSync(new URL(matrix.screenshot.readme, root)).size).toBeLessThan(500_000);
+    expect(statSync(new URL(matrix.screenshot.website, root)).size).toBeLessThan(500_000);
     expect(matrix.screenshot.terminal).toBe("unrecorded");
+    // A development-build capture, never a release claim.
+    expect(matrix.screenshot.capture).toContain("development build");
+    expect(matrix.screenshot.capture).toContain("not a default");
 
     const readme = text("README.md");
     const homepage = text("web/app/[locale]/page.tsx");
     expect(readme).toContain("assets/screenshot.webp");
-    expect(homepage).toContain('src="/codewhale-tui.webp"');
-    // Alt text and figcaption are dictionary-backed (#4934); the screenshot
-    // contract now runs through the EN reference value and the page's use of
-    // it, and every routed locale must caption the same session honestly.
+    expect(homepage).toContain('src="/codewhale-tui.png"');
+    expect(homepage).toContain("width={1136}");
+    expect(homepage).toContain("height={698}");
+    // Alt text and caption are dictionary-backed; every routed locale must
+    // describe the capture as what it is — a v0.9.12 development build in
+    // Work mode with Full Access, not a release and not a default.
     expect(homepage).toContain("alt={d.screenshotAlt}");
-    expect(homepage).toContain("<figcaption>{d.figcaption}</figcaption>");
-    expect(getHome("en").figcaption).toBe(
-      "Codewhale session · Operate mode · permissions: Ask",
-    );
-    expect(getHome("en").screenshotAlt).toContain("Operate mode");
-    for (const locale of ["zh", "ja", "vi", "ko", "ru", "uk", "es", "pt-BR", "id"]) {
+    expect(homepage).toContain("fill(d.shotBuild, { version: sourceVersion })");
+    expect(getHome("en").shotBuild).toBe("v{version} development build");
+    expect(getHome("en").screenshotAlt).toContain("development build");
+    expect(getHome("en").screenshotAlt).toContain("Full Access");
+    expect(getHome("en").screenshotAlt).toContain("Work mode");
+    for (const locale of ["zh", "ja", "vi", "ko", "ru", "uk", "es", "pt-BR", "id", "fr", "de", "ca", "hi", "tr", "it", "pl", "ar"]) {
       const home = getHome(locale);
-      expect(home.figcaption, `${locale} figcaption`).toContain("Operate");
-      expect(home.figcaption, `${locale} figcaption`).toContain("Ask");
-      expect(home.screenshotAlt.trim().length, `${locale} alt`).toBeGreaterThan(0);
+      expect(home.shotBuild, `${locale} shotBuild`).toContain("{version}");
+      expect(home.screenshotAlt, `${locale} alt`).toContain("Full Access");
+      expect(home.screenshotAlt, `${locale} alt`).toContain("Work");
+      expect(home.screenshotAlt, `${locale} alt`).toContain("0.9.12");
     }
   });
 

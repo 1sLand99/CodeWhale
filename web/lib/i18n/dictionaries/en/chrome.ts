@@ -24,6 +24,13 @@ export const chrome: ChromeDict = {
   navCommunitySecondary: "社区",
   navContributeSecondary: "贡献",
 
+  navProduct: "Product",
+  navModels: "Models",
+  navPricing: "Pricing",
+  navProductSecondary: "产品",
+  navModelsSecondary: "模型",
+  navPricingSecondary: "价格",
+
   skipToContent: "Skip to main content",
 
 
@@ -33,7 +40,7 @@ export const chrome: ChromeDict = {
   installCta: "Install →",
 
   authSignIn: "Sign in",
-  authRegister: "Register",
+  authRegister: "Create account",
   authGroupAria: "Account",
 
   wordmarkSeal: "深",
@@ -68,7 +75,7 @@ export const chrome: ChromeDict = {
   themeTitle: "Docs theme · auto / light / dark",
 
   footerTagline:
-    "Codewhale dives into the deep so you don't have to — docs, source, and community for the open-source runtime.",
+    "Your models. More capable together. Docs, source, and community for the open-source runtime.",
   footerProduct: "Product",
   footerProject: "Project",
   footerDocs: "Docs",

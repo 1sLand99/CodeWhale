@@ -1,37 +1,28 @@
 import type { HomeDict } from "../types";
 
 /**
- * Vietnamese home pack. Native rewrite mirroring the current English copy —
- * the "dives into the deep / any model, on your machine" direction; no trace
- * of the old positioning. Terminology matches `vi/chrome.ts` and the TUI
- * locale pack: nhà cung cấp (provider), phiên (session), kho mã
- * (repository), mức quyền (permission posture), biên nhận (receipt), nhiệm
- * vụ (task). Modes (Plan / Work / Operate), permission postures (Ask /
- * Auto-Review / Full Access), commands (`codewhale exec`), fleet, Workflow,
- * Runtime and the product name stay literal, exactly as the TUI renders
- * them.
- *
- * The `seal*` glyphs are marks, not prose, and are shared with English.
+ * Vietnamese home dictionary — native copy for the Tidal Folio landing page,
+ * in the current direction: your models, more capable together; agents
+ * and control on your own machine; availability stated per surface as it
+ * is today. Product vocabulary stays literal (Plan / Work / Operate, Ask /
+ * Auto-Review / Full Access, Codewhale, TUI, codewhale exec, Fleet).
  */
+
 export const home: HomeDict = {
-  metaTitle: "Codewhale — lặn xuống biển sâu để bạn khỏi phải lặn.",
+  metaTitle: "Codewhale — Mô hình của bạn. Mạnh hơn khi làm việc cùng nhau.",
   metaDescription:
-    "Codewhale lặn xuống biển sâu để bạn khỏi phải lặn — tác nhân lập trình mã nguồn mở trong terminal. Mang theo mô hình của bạn. Chạy trên máy của bạn. Rust, MIT.",
-
-  kicker: "Nguồn mở · Mang theo mô hình của bạn · Chạy trong terminal của bạn",
-  heroTitleA: "Codewhale lặn xuống biển sâu",
-  heroTitleB: "để bạn khỏi phải lặn.",
+    "Codewhale là hệ thống điện toán tác tử mã nguồn mở. Mang những mô hình bạn đang dùng — hosted, qua gateway, hoặc cục bộ — vào terminal và để chúng làm việc cùng nhau trên máy của bạn, dưới sự kiểm soát của bạn. Rust, MIT.",
+  kicker: "Điện toán tác tử, theo điều kiện của bạn",
+  heroTitleA: "Mô hình của bạn.",
+  heroTitleB: "Mạnh hơn khi làm việc cùng nhau.",
   heroIntro:
-    "{brand} là tác nhân lập trình mã nguồn mở trong terminal của bạn. Giao cho nó một mô hình và một nhiệm vụ — nó đọc mã của bạn, sửa tệp, tự chạy kiểm tra, và dừng lại khi việc đã xong hoặc khi nó cần bạn. Mang bất kỳ mô hình nào, hoặc trộn nhiều mô hình: ghim một mô hình riêng cho từng vai trò.",
-  install: "Cài đặt",
-  docs: "Tài liệu",
-  copy: "Sao chép",
-  copied: "Đã sao chép ✓",
-
-  installEyebrow: "cài đặt một dòng lệnh",
-  installRequirement: "cần Node 18+ — không cần bộ công cụ Rust",
-  installOtherWays: "cách khác →",
-
+    "{brand} gom các mô hình bạn đang dùng vào một terminal và để chúng làm việc như một thủy thủ đoàn — đọc mã, sửa tệp, chạy kiểm tra — trong khi bạn quyết định mỗi mô hình được phép làm gì. Mã nguồn mở, chạy trên máy của bạn.",
+  getCodewhale: "Tải Codewhale",
+  exploreProduct: "Khám phá sản phẩm",
+  shotPreview: "Xem trước terminal",
+  shotBuild: "bản phát triển v{version}",
+  screenshotAlt:
+    "Bản phát triển Codewhale v0.9.12 trong terminal: biểu tượng cá voi bằng chữ nổi, phiên mới chưa có lịch sử, ô soạn tin, và thanh chân trang hiển thị Full Access, chế độ Work, hai tác vụ đã lên lịch, máy chủ MCP đang kết nối và mô hình GLM-5.3 ở mức tối đa",
   latestRelease: "Bản phát hành mới nhất {tag}",
   releaseUnavailable: "Không có trạng thái phát hành",
   currentSource: "Mã nguồn",
@@ -39,53 +30,45 @@ export const home: HomeDict = {
   providerRoutes: "{count} nhà cung cấp",
   publishedRelease: "đã phát hành",
   figcaptionSourceCandidate: "chưa phát hành",
-
-  shotSession: "Phiên hiện tại",
-  screenshotAlt:
-    "Phiên terminal Codewhale hiện tại hiển thị chế độ Operate, hình cá voi, khung soạn thảo và thanh chân màn hình",
-  figcaption: "Phiên Codewhale hiện tại · chế độ Operate · mức quyền Ask",
-
-  proofHeading: "Một lớp vỏ terminal dưới lòng biển. Mọi mô hình. Trên máy của bạn.",
-  proofBody:
-    "Mang theo mô hình bạn đang dùng — hosted, gateway hoặc cục bộ. Plan / Work / Operate cùng các mức quyền khai báo rõ giữ cuộc lặn luôn trong tầm kiểm soát của bạn.",
-
-  sealDecides: "法",
-  decidesEyebrow: "Xem cách nó quyết định",
-  decidesHeading: "Luật lệ bạn quan sát được ngay trong mạch suy luận",
-  decidesLede:
-    "Trích đoạn từ phiên thật — thứ bậc luật lệ của dự án thấy được trong suy luận của mô hình, không chỉ là lời hứa trên trang chủ.",
-
-  sealWorkflow: "行",
-  workflowHeading: "Từ nhiệm vụ đến thay đổi đã kiểm chứng.",
-  workflow: [
-    ["Khảo sát", "Đọc kho mã, các hướng dẫn của nó và nhiệm vụ."],
-    ["Hành động", "Sửa tệp trong ranh giới phê duyệt rõ ràng."],
-    ["Xác minh", "Chạy các bước kiểm tra và xem kết quả."],
-    ["Báo cáo", "Để lại một biên nhận ngắn gọn, bền lâu."],
+  chapterTerminal: "Terminal của bạn",
+  chapterTerminalTitle: "Một nơi quen thuộc để bắt đầu.",
+  gainHeading:
+    "Thứ bạn nhận được không phải chatbot, mà là đòn bẩy cho những mô hình bạn đã trả tiền.",
+  gainLede:
+    "Một phiên có thể giữ nhiều mô hình cùng lúc, mỗi mô hình một vai trò bạn giao, tất cả cùng làm việc trong một kho mã theo cùng một bộ quy tắc.",
+  gain: [
+    ["Mô hình của bạn", "Khóa hosted, một gateway, hoặc runtime cục bộ không cần khóa. Ghim mỗi vai trò một mô hình khác nhau và giữ nguyên nhà cung cấp bạn chọn — tên mô hình không bao giờ tự đổi nhà cung cấp."],
+    ["Tác tử có năng lực", "Các chế độ Plan, Work và Operate; một fleet tác tử con cho một việc; công cụ cho tệp, shell, web và MCP; phiên lưu được, tiếp tục được và quay lui được."],
+    ["Kiểm soát trên máy của bạn", "Ask, Auto-Review hoặc Full Access — bạn đặt mức nó được làm trước khi hỏi. Chạy cục bộ, có sandbox khi hệ điều hành cho phép, kèm nhật ký kiểm toán bạn đọc được."],
   ],
-  receiptAria: "Ví dụ biên nhận công việc",
-  receiptInspect: "kho mã và hướng dẫn",
-  receiptAct: "sửa theo mức quyền đã chọn",
-  receiptReport: "kiểm tra đạt · đã lưu biên nhận",
-
-  sealStart: "起",
-  startHeading: "Mới dùng Codewhale? Bốn bước từ đầu đến cuối.",
+  chapterModels: "Mô hình của bạn",
+  modelsHeading: "Mang theo những gì bạn có. Không đổi gì bạn chưa chọn.",
+  modelsBody:
+    "Codewhale đi kèm {count} nhà cung cấp và đối xử bình đẳng với tất cả. Lưu khóa một lần, đặt tên mô hình, và tuyến đường giữ nguyên như bạn đặt. Mô hình cục bộ qua vLLM, SGLang hoặc Ollama không cần khóa.",
+  modelsFacts: [
+    ["Hosted", "Khóa API của bạn, lưu bằng codewhale auth set"],
+    ["Gateway", "Một endpoint cho nhiều mô hình, nhà cung cấp vẫn do bạn chọn"],
+    ["Cục bộ", "vLLM, SGLang, Ollama trên localhost — thường không cần khóa"],
+  ],
+  modelsLink: "Xem mọi nhà cung cấp",
+  startHeading: "Bốn bước tới phiên đầu tiên.",
   startLede:
-    "Cài đặt → phiên đầu không cần khóa → kết nối nhà cung cấp → Workflow fleet đầu tiên. Thuật ngữ được định nghĩa ở trang thuật ngữ.",
-  startGuideLink: "Đọc hướng dẫn bắt đầu →",
-  startVocabularyLink: "Xem thuật ngữ sản phẩm →",
-
-  sealBoundaries: "界",
-  boundariesHeadingA: "Mô hình của bạn.",
-  boundariesHeadingB: "Ranh giới của bạn.",
-  boundariesBody:
-    "Chọn rõ ràng mô hình, chế độ làm việc và mức quyền. Chi phí chưa biết vẫn được ghi là chưa biết, và những phần còn ở bản xem trước luôn được ghi nhãn đúng như vậy.",
-  hostedGatewayLocal: "Mô hình hosted, gateway và cục bộ",
-  planActOperateDesc: "Từ lập kế hoạch chỉ đọc đến vận hành tự chủ",
-  askAutoReviewDesc: "Chọn mức quyền cho công việc",
-  tuiExecWebDesc: "Giao diện runtime tương tác và headless",
-
-  sealSurfaces: "面",
+    "Cài đặt, mở phiên không cần khóa, kết nối nhà cung cấp, rồi lập fleet khi một mô hình là chưa đủ.",
+  startGuideLink: "Đọc hướng dẫn bắt đầu",
+  startVocabularyLink: "Xem thuật ngữ sản phẩm",
+  chapterAccount: "Nơi nó chạy hôm nay",
+  availabilityHeading: "Đã có, đang phát triển, và chưa có — nói thẳng.",
+  availabilityLede:
+    "Terminal là sản phẩm đã phát hành. Mọi thứ khác được liệt kê đúng trạng thái thực tế.",
+  availability: [
+    ["Terminal", "Đã phát hành", "npm, Cargo và binary dựng sẵn cho Linux, macOS và Windows. Android trên Termux là bản xem trước."],
+    ["Ứng dụng web", "Đăng nhập tài khoản đã có", "Đăng nhập hoặc tạo tài khoản tại app.codewhale.net. Bản thân bàn làm việc trên trình duyệt vẫn là bản xem trước phát triển."],
+    ["Máy tính để bàn", "Bản phát triển", "Có bản alpha cho macOS, Linux và Windows. Chưa có ứng dụng desktop phát hành chính thức."],
+    ["Máy tính đám mây", "Chưa có", "Việc chạy công việc trên máy tính được host đang được phát triển. Trang này sẽ nói khi nó hoạt động."],
+  ],
+  availabilityNote:
+    "Terminal không cần tài khoản. Tài khoản tự nó không bao giờ là gói trả phí, và không gì trên trang này có thể tính phí bạn.",
+  accountLink: "Tạo tài khoản",
   surfacesHeading: "Dùng runtime ngay nơi công việc diễn ra.",
   surfaces: [
     ["TUI", "Làm việc tương tác trong terminal"],
@@ -94,14 +77,13 @@ export const home: HomeDict = {
     ["Runtime API + MCP", "Tích hợp cục bộ"],
     ["fleet", "Công việc nhiều tác tử, bền vững"],
   ],
-  runtimeLink: "Xem các giao diện runtime và ghi chú về độ ổn định →",
-
+  runtimeLink: "Xem các giao diện runtime và ghi chú về độ ổn định",
   installBandHeading: "Bắt đầu chỉ bằng một lệnh.",
+  copy: "Sao chép",
+  copied: "Đã sao chép ✓",
   binaries: "Bản nhị phân",
   chinaMirrors: "Mirror Trung Quốc",
-  installGuideLink: "Đọc hướng dẫn cài đặt →",
-
-  sealCommunity: "众",
+  installGuideLink: "Đọc hướng dẫn cài đặt",
   communityHeading: "Xây dựng công khai",
   communityBody:
     "Giấy phép MIT, được định hình bởi những người đóng góp trên khắp runtime, nhà cung cấp, nền tảng, tài liệu và kiểm thử.",

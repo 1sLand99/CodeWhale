@@ -37,17 +37,17 @@ describe("public website copy contracts", () => {
     expect(roadmap).not.toContain("Required login / accounts");
     expect(footer).not.toContain("App preview");
     expect(footer).not.toContain("app.codewhale.net");
-    expect(footer).not.toMatch(/Create account|Sign up/);
 
-    // Footer copy is dictionary-driven now, so the same ban has to hold
-    // wherever the strings actually live — in every locale, not just the TSX.
+    // Account entry is a real, working flow (sign-in and registration), so
+    // the chrome may name it. It must never call the app a "preview" or bake
+    // the app host into copy — the links own the destination.
     for (const locale of [
       "en", "zh", "ja", "vi", "ko", "ru", "uk", "es", "pt-BR", "id",
       "fr", "de", "ca", "hi", "tr", "it", "pl", "ar",
     ]) {
       const values = Object.values(getChrome(locale)).join("\n");
       expect(values, `${locale} chrome`).not.toContain("app.codewhale.net");
-      expect(values, `${locale} chrome`).not.toMatch(/Create account|Sign up|App preview/);
+      expect(values, `${locale} chrome`).not.toMatch(/App preview/);
     }
     expect(EN_CHROME.footerLicense).toBe("MIT license");
   });

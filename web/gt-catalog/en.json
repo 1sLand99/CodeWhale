@@ -12,12 +12,18 @@
     "navFaqSecondary": "问答",
     "navCommunitySecondary": "社区",
     "navContributeSecondary": "贡献",
+    "navProduct": "Product",
+    "navModels": "Models",
+    "navPricing": "Pricing",
+    "navProductSecondary": "产品",
+    "navModelsSecondary": "模型",
+    "navPricingSecondary": "价格",
     "skipToContent": "Skip to main content",
     "navPrimaryAria": "Primary",
     "navHomeAria": "Codewhale home",
     "installCta": "Install →",
     "authSignIn": "Sign in",
-    "authRegister": "Register",
+    "authRegister": "Create account",
     "authGroupAria": "Account",
     "wordmarkSeal": "深",
     "wordmarkTag": "any model, on your machine",
@@ -43,7 +49,7 @@
     "themeDark": "dark",
     "themeAria": "Docs theme: {mode} (click to cycle)",
     "themeTitle": "Docs theme · auto / light / dark",
-    "footerTagline": "Codewhale dives into the deep so you don't have to — docs, source, and community for the open-source runtime.",
+    "footerTagline": "Your models. More capable together. Docs, source, and community for the open-source runtime.",
     "footerProduct": "Product",
     "footerProject": "Project",
     "footerDocs": "Docs",
@@ -68,19 +74,17 @@
     "partialBadge": "(partial)"
   },
   "home": {
-    "metaTitle": "Codewhale — dives into the deep so you don't have to.",
-    "metaDescription": "Codewhale dives into the deep so you don't have to — an open-source terminal coding agent. Bring your own model. Runs on your machine. Rust, MIT.",
-    "kicker": "Open source · Bring your own model · Runs in your terminal",
-    "heroTitleA": "Codewhale dives into the deep",
-    "heroTitleB": "so you don't have to.",
-    "heroIntro": "{brand} is an open-source coding agent for your terminal. Give it a model and a task. It reads your code, edits files, runs the checks, and stops when the job is done or it needs you. Use any model, or a different one for each role.",
-    "install": "Install",
-    "docs": "Docs",
-    "copy": "Copy",
-    "copied": "Copied ✓",
-    "installEyebrow": "one-line install",
-    "installRequirement": "needs Node 18+ — no Rust toolchain",
-    "installOtherWays": "other ways →",
+    "metaTitle": "Codewhale — Your models. More capable together.",
+    "metaDescription": "Codewhale is an open-source agentic computing system. Bring the models you already use — hosted, through a gateway, or local — and put them to work together in your terminal, on your machine, with you in control. Rust, MIT.",
+    "kicker": "Agentic computing, on your terms",
+    "heroTitleA": "Your models.",
+    "heroTitleB": "More capable together.",
+    "heroIntro": "{brand} brings the models you already use into one terminal and lets them work as a crew — reading your code, editing, running the checks — while you decide what each one may do. Open source, on your machine.",
+    "getCodewhale": "Get Codewhale",
+    "exploreProduct": "Explore the product",
+    "shotPreview": "Terminal preview",
+    "shotBuild": "v{version} development build",
+    "screenshotAlt": "Codewhale v0.9.12 development build in a terminal: the braille whale mark, a new session with no recent sessions yet, the message composer, and a footer showing Full Access, Work mode, two scheduled tasks, MCP servers connecting, and the GLM-5.3 model at max effort",
     "latestRelease": "Latest release {tag}",
     "releaseUnavailable": "Release status unavailable",
     "currentSource": "Source",
@@ -88,53 +92,73 @@
     "providerRoutes": "{count} providers",
     "publishedRelease": "released",
     "figcaptionSourceCandidate": "unreleased",
-    "shotSession": "Session",
-    "screenshotAlt": "Codewhale terminal session in Operate mode: the whale, the composer, and the status footer",
-    "figcaption": "Codewhale session · Operate mode · permissions: Ask",
-    "proofHeading": "A coding agent in your terminal. Any model. On your machine.",
-    "proofBody": "Use the model you already have — hosted, through a gateway, or local. Pick a mode: Plan, Work, or Operate. Pick how much it does without asking: Ask, Auto-Review, or Full Access.",
-    "sealDecides": "法",
-    "decidesEyebrow": "How it decides",
-    "decidesHeading": "The reasoning, in its own words",
-    "decidesLede": "Session excerpts. Each shows the project rule the model applied and what it did next.",
-    "sealWorkflow": "行",
-    "workflowHeading": "From task to verified change.",
-    "workflow": [
+    "chapterTerminal": "Your terminal",
+    "chapterTerminalTitle": "A familiar place to begin.",
+    "gainHeading": "What you get is not a chatbot. It is leverage over the models you already pay for.",
+    "gainLede": "One session can hold several models at once, each in a role you gave it, all working in the same repository under the same rules.",
+    "gain": [
       [
-        "Inspect",
-        "Read the repository, its instructions, and the task."
+        "Your models",
+        "Hosted keys, a gateway, or a local runtime with no key at all. Pin a different model to each role and keep the provider you chose — a model name never switches it for you."
       ],
       [
-        "Act",
-        "Edit files, asking first where you told it to."
+        "Capable agents",
+        "Plan, Work, and Operate modes; a fleet of sub-agents for one job; tools for files, shell, web, and MCP; sessions that save, resume, and roll back."
       ],
       [
-        "Verify",
-        "Run the checks and read the result."
-      ],
-      [
-        "Report",
-        "Say what changed and what passed."
+        "Control on your machine",
+        "Ask, Auto-Review, or Full Access — you set how much it does before it asks. Runs locally, sandboxed where the OS allows, with an audit log you can read."
       ]
     ],
-    "receiptAria": "Example run summary",
-    "receiptInspect": "repository and instructions",
-    "receiptAct": "edit files under the permissions you set",
-    "receiptReport": "checks passed · summary saved",
-    "sealStart": "起",
-    "startHeading": "New here? Four steps.",
-    "startLede": "Install → first session, no key → connect a provider → set up a fleet.",
-    "startGuideLink": "Read the getting-started guide →",
-    "startVocabularyLink": "Look up a term →",
-    "sealBoundaries": "界",
-    "boundariesHeadingA": "Your model.",
-    "boundariesHeadingB": "Your boundaries.",
-    "boundariesBody": "You choose the model, the mode, and how much it may do without asking. The provider and model never change unless you change them. Preview features are marked preview.",
-    "hostedGatewayLocal": "Hosted, gateway, and local models",
-    "planActOperateDesc": "From read-only planning to autonomous operation",
-    "askAutoReviewDesc": "How much it does before asking you",
-    "tuiExecWebDesc": "Interactive or scripted",
-    "sealSurfaces": "面",
+    "chapterModels": "Your models",
+    "modelsHeading": "Bring what you have. Change nothing you did not choose.",
+    "modelsBody": "Codewhale ships with {count} providers and treats them as peers. Save a key once, name a model, and the route stays exactly as you set it. Local models over vLLM, SGLang, or Ollama need no key.",
+    "modelsFacts": [
+      [
+        "Hosted",
+        "Your own API key, saved with codewhale auth set"
+      ],
+      [
+        "Gateway",
+        "One endpoint for many models, provider still chosen by you"
+      ],
+      [
+        "Local",
+        "vLLM, SGLang, Ollama on localhost — usually no key"
+      ]
+    ],
+    "modelsLink": "See every provider",
+    "startHeading": "Four steps to a first session.",
+    "startLede": "Install, open a session with no key, connect a provider, then set up a fleet when one model is not enough.",
+    "startGuideLink": "Read the getting-started guide",
+    "startVocabularyLink": "Look up a term",
+    "chapterAccount": "Where it runs today",
+    "availabilityHeading": "Available now, in development, and not yet — stated plainly.",
+    "availabilityLede": "The terminal is the released product. Everything else is listed with the state it is actually in.",
+    "availability": [
+      [
+        "Terminal",
+        "Released",
+        "npm, Cargo, and prebuilt binaries for Linux, macOS, and Windows. Android on Termux is a preview."
+      ],
+      [
+        "Web app",
+        "Account sign-in available",
+        "Sign in or create an account at app.codewhale.net. The browser workbench itself is a development preview."
+      ],
+      [
+        "Desktop",
+        "Development build",
+        "Alpha builds exist for macOS, Linux, and Windows. There is no released desktop app yet."
+      ],
+      [
+        "Cloud computers",
+        "Not available yet",
+        "Running work on a hosted computer is in development. This page will say so when it works."
+      ]
+    ],
+    "availabilityNote": "No account is needed for the terminal. An account is never a paid plan by itself, and nothing on this site can charge you.",
+    "accountLink": "Create an account",
     "surfacesHeading": "Use it where the work happens.",
     "surfaces": [
       [
@@ -158,12 +182,13 @@
         "Several agents on one job"
       ]
     ],
-    "runtimeLink": "Runtime surfaces and what is stable →",
+    "runtimeLink": "Runtime surfaces and what is stable",
     "installBandHeading": "Start with one command.",
+    "copy": "Copy",
+    "copied": "Copied ✓",
     "binaries": "Binaries",
     "chinaMirrors": "China mirrors",
-    "installGuideLink": "Read the install guide →",
-    "sealCommunity": "众",
+    "installGuideLink": "Read the install guide",
     "communityHeading": "Built in public",
     "communityBody": "MIT license. Contributors work on the runtime, providers, platforms, docs, and tests.",
     "communityLinksAria": "Community links",

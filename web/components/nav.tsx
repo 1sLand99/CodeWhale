@@ -1,7 +1,7 @@
 import Link from "next/link";
 import type { Locale } from "@/lib/i18n/config";
 import { getChrome } from "@/lib/i18n/dictionaries";
-import { navLinks, REPO_URL, APP_LOGIN_URL, APP_SIGNUP_URL } from "@/lib/i18n/links";
+import { navLinks, secondaryNavLinks, REPO_URL, APP_LOGIN_URL, APP_SIGNUP_URL } from "@/lib/i18n/links";
 import { fetchRepoStats, formatStars } from "@/lib/github";
 import { getEnv } from "@/lib/kv";
 import { LocaleSwitcher } from "./locale-switcher";
@@ -14,6 +14,7 @@ import { Whale } from "./whale";
 export async function Nav({ locale = "en" }: { locale?: Locale }) {
   const chrome = getChrome(locale);
   const links = navLinks(locale, chrome);
+  const moreLinks = secondaryNavLinks(locale, chrome);
   const homeHref = `/${locale}`;
 
   // Live star count — cached by fetchRepoStats. Falls back to a plain GitHub
@@ -30,14 +31,14 @@ export async function Nav({ locale = "en" }: { locale?: Locale }) {
     <header className="site-nav paper-nav">
       <div className="site-nav-inner paper-nav-inner">
         <Link href={homeHref} className="site-wordmark paper-wordmark" aria-label={chrome.navHomeAria}>
-          {/* The nav sits on the dark Tideline field on every route (the
-              docs light sheet is scoped below it), so the mark is the white
-              brand ink and the wordmark is the inverted trace. */}
+          {/* The nav sits on the paper sheet on every route (the opt-in docs
+              dark sheet is scoped below it), so the mark is brand navy and
+              the wordmark is the navy trace. */}
           <div className="paper-wordmark-text">
             <Whale size={22} className="paper-wordmark-mark" />
             <img
               className="paper-wordmark-logo"
-              src="/brand/wordmark-inverted.svg"
+              src="/brand/wordmark.svg"
               alt=""
               width={142}
               height={20}
@@ -65,10 +66,10 @@ export async function Nav({ locale = "en" }: { locale?: Locale }) {
             ★ {stars > 0 ? formatStars(stars) : chrome.githubFallback}
           </Link>
           <span className="paper-auth" role="group" aria-label={chrome.authGroupAria}>
-            <Link href={APP_LOGIN_URL} className="paper-auth-signin hidden lg:inline-flex">
+            <Link href={APP_LOGIN_URL} className="paper-auth-signin hidden lg:inline-flex" data-usage="login">
               {chrome.authSignIn}
             </Link>
-            <Link href={APP_SIGNUP_URL} className="paper-auth-register hidden lg:inline-flex">
+            <Link href={APP_SIGNUP_URL} className="paper-auth-register hidden lg:inline-flex" data-usage="signup">
               {chrome.authRegister}
             </Link>
           </span>
@@ -86,6 +87,7 @@ export async function Nav({ locale = "en" }: { locale?: Locale }) {
             registerHref={APP_SIGNUP_URL}
             registerLabel={chrome.authRegister}
             links={links}
+            moreLinks={moreLinks}
             openLabel={chrome.menuOpen}
             closeLabel={chrome.menuClose}
             navAria={chrome.navPrimaryAria}

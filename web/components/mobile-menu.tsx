@@ -8,6 +8,7 @@ import { currentNavHref, type ChromeLink } from "@/lib/i18n/links";
 
 export function MobileMenu({
   links,
+  moreLinks,
   installHref,
   installLabel,
   signInHref,
@@ -19,6 +20,8 @@ export function MobileMenu({
   navAria,
 }: {
   links: ChromeLink[];
+  /** The second group on the sheet: start, install, FAQ, community, contribute. */
+  moreLinks: ChromeLink[];
   installHref: string;
   installLabel: string;
   signInHref: string;
@@ -37,8 +40,9 @@ export function MobileMenu({
   const [closing, setClosing] = useState(false);
   const closeTimer = useRef<number | null>(null);
   const pathname = usePathname();
-  // One link is the page; ancestors are not. See currentNavHref.
-  const currentHref = currentNavHref(links, pathname);
+  // One link is the page; ancestors are not. See currentNavHref. Both
+  // groups compete for the one current mark.
+  const currentHref = currentNavHref([...links, ...moreLinks], pathname);
   const toggleRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
 
@@ -201,8 +205,8 @@ export function MobileMenu({
               landmark name and the inner nav stays unlabeled — two nested
               "Primary" landmarks would read as duplication. */}
           <nav className="px-6 py-4">
-            <ul className="divide-y divide-[rgba(106,174,242,0.16)]">
-              {links.map((l) => {
+            <ul className="divide-y divide-[rgba(20,35,82,0.14)]">
+              {[...links, ...moreLinks].map((l) => {
                 const isActive = l.href === currentHref;
                 return (
                   <li key={l.href}>
@@ -233,6 +237,7 @@ export function MobileMenu({
             <div className="mt-3 grid grid-cols-2 gap-3">
               <Link
                 href={signInHref}
+                data-usage="login"
                 onClick={() => setOpen(false)}
                 className="block text-center px-5 py-3 hairline-t hairline-b hairline-l hairline-r font-mono text-sm uppercase tracking-wider hover:bg-paper-deep transition-colors"
               >
@@ -240,6 +245,7 @@ export function MobileMenu({
               </Link>
               <Link
                 href={registerHref}
+                data-usage="signup"
                 onClick={() => setOpen(false)}
                 className="block text-center px-5 py-3 hairline-t hairline-b hairline-l hairline-r font-mono text-sm uppercase tracking-wider text-indigo hover:bg-paper-deep transition-colors"
               >

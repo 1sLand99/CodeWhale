@@ -29,10 +29,32 @@ export interface ChromeLink {
   secondary?: string;
 }
 
-/** The six primary nav links, identical in shape for every routed locale. */
+/**
+ * The four primary nav links — Product / Models / Pricing / Docs — identical
+ * in shape for every routed locale. This is the strip a serious product
+ * shows; discovery and community routes live in `secondaryNavLinks` (the
+ * compact sheet's second group) and the footer.
+ */
 export function navLinks(locale: string, chrome: ChromeDict): ChromeLink[] {
   return [
+    {
+      href: `/${locale}/product`,
+      label: chrome.navProduct,
+      secondary: chrome.navProductSecondary,
+    },
+    { href: `/${locale}/models`, label: chrome.navModels, secondary: chrome.navModelsSecondary },
+    {
+      href: `/${locale}/pricing`,
+      label: chrome.navPricing,
+      secondary: chrome.navPricingSecondary,
+    },
     { href: `/${locale}/docs`, label: chrome.navDocs, secondary: chrome.navDocsSecondary },
+  ];
+}
+
+/** The compact sheet's second group: getting started, install, and community. */
+export function secondaryNavLinks(locale: string, chrome: ChromeDict): ChromeLink[] {
+  return [
     {
       href: `/${locale}/docs/guide`,
       label: chrome.navStart,
@@ -60,6 +82,7 @@ export function navLinks(locale: string, chrome: ChromeDict): ChromeLink[] {
 /** Footer "Product" column — the in-site discovery links. */
 export function footerProductLinks(locale: string, chrome: ChromeDict): ChromeLink[] {
   return [
+    { href: `/${locale}/product`, label: chrome.navProduct },
     { href: `/${locale}/docs`, label: chrome.footerDocs },
     { href: `/${locale}/docs/guide`, label: chrome.footerGuide },
     { href: `/${locale}/install`, label: chrome.footerInstall },

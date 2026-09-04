@@ -34,6 +34,13 @@ export const chrome: ChromeDict = {
   navCommunitySecondary: "Community",
   navContributeSecondary: "Contribute",
 
+  navProduct: "제품",
+  navModels: "모델",
+  navPricing: "요금",
+  navProductSecondary: "Product",
+  navModelsSecondary: "Models",
+  navPricingSecondary: "Pricing",
+
   skipToContent: "본문으로 건너뛰기",
 
 
@@ -80,7 +87,7 @@ export const chrome: ChromeDict = {
   themeTitle: "문서 테마 · 자동 / 밝게 / 어둡게",
 
   footerTagline:
-    "Codewhale이 깊은 곳으로 대신 잠수하니 당신은 잠수하지 않아도 됩니다 — 오픈 소스 런타임의 문서, 소스, 커뮤니티.",
+    "당신의 모델, 함께라서 더 유능하게. 오픈소스 런타임의 문서, 소스, 커뮤니티.",
   footerProduct: "제품",
   footerProject: "프로젝트",
   footerDocs: "문서",

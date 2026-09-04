@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { recordUsage } from "./usage-consent";
 
 interface Props {
   cmd: string;
@@ -16,6 +17,7 @@ export function InstallCodeBlock({ cmd, copyLabel = "Copy", copiedLabel = "Copie
     try {
       await navigator.clipboard.writeText(cmd);
       setCopied(true);
+      recordUsage("install_copy");
       setTimeout(() => setCopied(false), 1400);
     } catch {
       // Clipboard write failed (permissions, non-secure context, or a focused

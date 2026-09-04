@@ -1,38 +1,28 @@
 import type { HomeDict } from "../types";
 
 /**
- * Indonesian home dictionary — native rewrite mirroring the current English
- * direction: "dives into the deep", bring-your-own-model, runs on your
- * machine. Every trace of the old positioning has been dropped.
- *
- * Product vocabulary stays fixed: modes Plan / Work / Operate, permission
- * postures Ask / Auto-Review / Full Access, and the product name Codewhale —
- * exactly as the TUI locale pack (`crates/tui/locales/id.json`) renders them.
- * Commands, package names, and surface names (`codewhale exec`, fleet,
- * Runtime API + MCP) stay literal; only the prose around them is translated.
- *
- * Section seals (法 行 起 界 面 众) are the paper's marks, shared across
- * locales.
+ * Indonesian home dictionary — native copy for the Tidal Folio landing page,
+ * in the current direction: your models, more capable together; agents
+ * and control on your own machine; availability stated per surface as it
+ * is today. Product vocabulary stays literal (Plan / Work / Operate, Ask /
+ * Auto-Review / Full Access, Codewhale, TUI, codewhale exec, Fleet).
  */
+
 export const home: HomeDict = {
-  metaTitle: "Codewhale — menyelam ke laut dalam, jadi Anda tidak perlu.",
+  metaTitle: "Codewhale — Model Anda. Lebih mampu bersama.",
   metaDescription:
-    "Codewhale menyelam ke laut dalam, jadi Anda tidak perlu — agen coding terminal sumber terbuka. Bawa model sendiri. Berjalan di mesin Anda. Rust, MIT.",
-
-  kicker: "Sumber terbuka · Bawa model sendiri · Berjalan di terminal Anda",
-  heroTitleA: "Codewhale menyelam ke laut dalam",
-  heroTitleB: "jadi Anda tidak perlu.",
+    "Codewhale adalah sistem komputasi agentik sumber terbuka. Bawa model yang sudah Anda pakai — hosted, lewat gateway, atau lokal — dan biarkan mereka bekerja bersama di terminal Anda, di mesin Anda, di bawah kendali Anda. Rust, MIT.",
+  kicker: "Komputasi agentik, dengan syarat Anda",
+  heroTitleA: "Model Anda.",
+  heroTitleB: "Lebih mampu bersama.",
   heroIntro:
-    "{brand} adalah agen coding sumber terbuka untuk terminal Anda. Beri ia model dan tugas — ia membaca kode Anda, mengedit berkas, menjalankan pemeriksaannya sendiri, dan berhenti saat pekerjaan selesai atau saat butuh Anda. Bawa model apa pun, atau campurkan: pasang model berbeda untuk tiap peran.",
-  install: "Instal",
-  docs: "Dokumentasi",
-  copy: "Salin",
-  copied: "Tersalin ✓",
-
-  installEyebrow: "instalasi satu baris",
-  installRequirement: "perlu Node 18+ — tanpa toolchain Rust",
-  installOtherWays: "cara lain →",
-
+    "{brand} mengumpulkan model yang sudah Anda pakai ke dalam satu terminal dan membuat mereka bekerja seperti satu awak — membaca kode, mengedit, menjalankan pemeriksaan — sementara Anda yang menentukan apa yang boleh dilakukan tiap model. Sumber terbuka, di mesin Anda.",
+  getCodewhale: "Dapatkan Codewhale",
+  exploreProduct: "Jelajahi produk",
+  shotPreview: "Pratinjau terminal",
+  shotBuild: "build pengembangan v{version}",
+  screenshotAlt:
+    "Build pengembangan Codewhale v0.9.12 di terminal: tanda paus dari titik braille, sesi baru tanpa riwayat, kotak pesan, dan footer yang menampilkan Full Access, mode Work, dua tugas terjadwal, server MCP yang sedang terhubung, dan model GLM-5.3 pada upaya maksimal",
   latestRelease: "Rilis terbaru {tag}",
   releaseUnavailable: "Status rilis tidak tersedia",
   currentSource: "Sumber",
@@ -40,53 +30,46 @@ export const home: HomeDict = {
   providerRoutes: "{count} penyedia",
   publishedRelease: "dirilis",
   figcaptionSourceCandidate: "belum dirilis",
-
-  shotSession: "Sesi saat ini",
-  screenshotAlt:
-    "Sesi terminal Codewhale saat ini yang menampilkan mode Operate, sang paus, komposer, dan bilah bawah",
-  figcaption: "Sesi Codewhale saat ini · mode Operate · postur izin Ask",
-
-  proofHeading: "Shell terminal bawah laut. Model apa pun. Di mesin Anda.",
-  proofBody:
-    "Bawa model yang sudah Anda pakai — di-host, gateway, atau lokal. Plan / Work / Operate dan postur izin eksplisit menjaga penyelaman tetap dalam kendali Anda.",
-
-  sealDecides: "法",
-  decidesEyebrow: "Lihat bagaimana ia memutuskan",
-  decidesHeading: "Aturan yang bisa Anda saksikan di jejak",
-  decidesLede:
-    "Cuplikan sesi nyata — aturan proyek yang berjenjang terlihat di penalaran model, bukan sekadar klaim di halaman depan.",
-
-  sealWorkflow: "行",
-  workflowHeading: "Dari tugas hingga perubahan terverifikasi.",
-  workflow: [
-    ["Memeriksa", "Membaca repositori, instruksinya, dan tugasnya."],
-    ["Bertindak", "Mengedit berkas dalam batas persetujuan yang eksplisit."],
-    ["Memverifikasi", "Menjalankan pemeriksaan dan menelaah hasilnya."],
-    ["Melaporkan", "Meninggalkan tanda terima yang ringkas dan tahan lama."],
+  chapterTerminal: "Terminal Anda",
+  chapterTerminalTitle: "Tempat yang akrab untuk memulai.",
+  gainHeading:
+    "Yang Anda dapat bukan chatbot, melainkan daya ungkit atas model yang sudah Anda bayar.",
+  gainLede:
+    "Satu sesi bisa menampung beberapa model sekaligus, masing-masing dalam peran yang Anda beri, semuanya bekerja di repositori yang sama dengan aturan yang sama.",
+  gain: [
+    ["Model Anda", "Kunci hosted, sebuah gateway, atau runtime lokal tanpa kunci sama sekali. Sematkan model berbeda untuk tiap peran dan pertahankan penyedia yang Anda pilih — nama model tidak pernah mengganti penyedia untuk Anda."],
+    ["Agen yang cakap", "Mode Plan, Work, dan Operate; satu fleet sub-agen untuk satu pekerjaan; alat untuk berkas, shell, web, dan MCP; sesi yang bisa disimpan, dilanjutkan, dan dikembalikan."],
+    ["Kendali di mesin Anda", "Ask, Auto-Review, atau Full Access — Anda menentukan seberapa jauh ia bekerja sebelum bertanya. Berjalan lokal, dalam sandbox jika OS mengizinkan, dengan log audit yang bisa Anda baca."],
   ],
-  receiptAria: "Contoh tanda terima kerja",
-  receiptInspect: "repositori dan instruksi",
-  receiptAct: "mengedit melalui postur izin yang dipilih",
-  receiptReport: "pemeriksaan lulus · tanda terima tersimpan",
-
-  sealStart: "起",
-  startHeading: "Baru mengenal Codewhale? Empat langkah dari awal sampai akhir.",
+  chapterModels: "Model Anda",
+  modelsHeading: "Bawa yang Anda punya. Jangan ubah yang tidak Anda pilih.",
+  modelsBody:
+    "Codewhale hadir dengan {count} penyedia dan memperlakukan semuanya setara. Simpan kunci sekali, sebutkan model, dan rute tetap persis seperti yang Anda atur. Model lokal lewat vLLM, SGLang, atau Ollama tidak butuh kunci.",
+  modelsFacts: [
+    ["Hosted", "Kunci API Anda sendiri, disimpan dengan codewhale auth set"],
+    ["Gateway", "Satu endpoint untuk banyak model, penyedia tetap Anda yang pilih"],
+    ["Lokal", "vLLM, SGLang, Ollama di localhost — biasanya tanpa kunci"],
+  ],
+  modelsLink: "Lihat semua penyedia",
+  startHeading: "Empat langkah menuju sesi pertama.",
   startLede:
-    "Instal → sesi pertama tanpa kunci → hubungkan penyedia → workflow fleet pertama. Istilah didefinisikan di halaman kosakata.",
-  startGuideLink: "Baca panduan memulai →",
-  startVocabularyLink: "Lihat kosakata produk →",
-
-  sealBoundaries: "界",
-  boundariesHeadingA: "Model Anda.",
-  boundariesHeadingB: "Batas Anda.",
-  boundariesBody:
-    "Pilih model, mode kerja, dan postur izin secara eksplisit. Biaya yang tidak diketahui tetap tidak diketahui, dan antarmuka pratinjau tetap ditandai sebagai pratinjau.",
-  hostedGatewayLocal: "Model di-host, gateway, dan lokal",
-  planActOperateDesc: "Perencanaan baca-saja hingga pengoperasian otonom",
-  askAutoReviewDesc: "Pilih postur izin untuk pekerjaan yang dijalankan",
-  tuiExecWebDesc: "Antarmuka runtime interaktif dan headless",
-
-  sealSurfaces: "面",
+    "Pasang, buka sesi tanpa kunci, hubungkan penyedia, lalu siapkan fleet saat satu model tidak cukup.",
+  startGuideLink: "Baca panduan memulai",
+  startVocabularyLink: "Lihat kosakata produk",
+  chapterAccount: "Di mana ia berjalan hari ini",
+  availabilityHeading:
+    "Tersedia sekarang, dalam pengembangan, dan belum — dinyatakan apa adanya.",
+  availabilityLede:
+    "Terminal adalah produk yang sudah dirilis. Yang lain dicantumkan sesuai keadaannya yang sebenarnya.",
+  availability: [
+    ["Terminal", "Dirilis", "npm, Cargo, dan biner siap pakai untuk Linux, macOS, dan Windows. Android di Termux masih pratinjau."],
+    ["Aplikasi web", "Masuk akun tersedia", "Masuk atau buat akun di app.codewhale.net. Meja kerja di peramban sendiri masih pratinjau pengembangan."],
+    ["Desktop", "Build pengembangan", "Ada build alfa untuk macOS, Linux, dan Windows. Belum ada aplikasi desktop yang dirilis."],
+    ["Komputer cloud", "Belum tersedia", "Menjalankan pekerjaan di komputer yang di-host masih dalam pengembangan. Halaman ini akan mengatakannya saat sudah berfungsi."],
+  ],
+  availabilityNote:
+    "Terminal tidak memerlukan akun. Akun tidak pernah dengan sendirinya menjadi paket berbayar, dan tidak ada apa pun di situs ini yang bisa menagih Anda.",
+  accountLink: "Buat akun",
   surfacesHeading: "Gunakan runtime di tempat pekerjaan berlangsung.",
   surfaces: [
     ["TUI", "Kerja terminal interaktif"],
@@ -95,14 +78,13 @@ export const home: HomeDict = {
     ["Runtime API + MCP", "Integrasi lokal"],
     ["fleet", "Kerja multi-agen yang tahan lama"],
   ],
-  runtimeLink: "Lihat antarmuka runtime dan catatan stabilitas →",
-
+  runtimeLink: "Lihat antarmuka runtime dan catatan stabilitas",
   installBandHeading: "Mulai dengan satu perintah.",
+  copy: "Salin",
+  copied: "Tersalin ✓",
   binaries: "Biner",
   chinaMirrors: "Mirror Tiongkok",
-  installGuideLink: "Baca panduan instalasi →",
-
-  sealCommunity: "众",
+  installGuideLink: "Baca panduan instalasi",
   communityHeading: "Dibangun secara terbuka",
   communityBody:
     "Berlisensi MIT dan dibentuk oleh para kontributor di berbagai runtime, penyedia, platform, dokumentasi, dan pengujian.",
