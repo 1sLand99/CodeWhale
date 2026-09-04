@@ -48,6 +48,7 @@ use crate::models::{
 
 use super::prepared::WireDialect;
 use super::role_placement::{RolePlacement, role_placement};
+use super::wire::{extract_sse_data_value, flush_sse_line, take_sse_line};
 use super::{
     DeepSeekClient, ERROR_BODY_MAX_BYTES, SSE_BACKPRESSURE_HIGH_WATERMARK,
     SSE_BACKPRESSURE_SLEEP_MS, SSE_MAX_LINES_PER_CHUNK, acquire_stream_buffer,
@@ -1442,7 +1443,7 @@ impl DeepSeekClient {
                 // U+FFFD; genuine invalid bytes fail closed.
                 let mut lines_processed = 0usize;
                 loop {
-                    let line = match super::take_sse_line(&mut byte_buf) {
+                    let line = match take_sse_line(&mut byte_buf) {
                         Ok(Some(line)) => line,
                         Ok(None) => break,
                         Err(err) => {
@@ -1499,7 +1500,7 @@ impl DeepSeekClient {
                         continue;
                     }
 
-                    if let Some(data) = super::extract_sse_data_value(&line) {
+                    if let Some(data) = extract_sse_data_value(&line) {
                         // The SSE spec joins multiple `data:` fields within one
                         // event with '\n'; concatenating with no separator would
                         // yield `{…}{…}` and fail JSON parsing, silently dropping
@@ -1533,9 +1534,9 @@ impl DeepSeekClient {
             // Skipped after `[DONE]`, whose frame was already processed, and
             // after a fail-closed UTF-8 error.
             if !saw_done && !decode_failed {
-                match super::flush_sse_line(&mut byte_buf) {
+                match flush_sse_line(&mut byte_buf) {
                     Ok(Some(line)) => {
-                        if let Some(data) = super::extract_sse_data_value(&line) {
+                        if let Some(data) = extract_sse_data_value(&line) {
                             if !line_buf.is_empty() {
                                 line_buf.push('\n');
                             }

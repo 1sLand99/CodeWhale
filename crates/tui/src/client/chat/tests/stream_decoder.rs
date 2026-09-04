@@ -4,6 +4,7 @@
 //! harness (issue #69 tracks that). For #103 we exercise the chunk decoder
 //! directly to verify each "class of stream failure" the engine relies on.
 use super::*;
+use crate::client::wire::{InvalidSseUtf8, SseLineDecoder};
 use crate::models::{ContentBlockStart, Delta, StreamEvent};
 
 /// Decode a raw SSE-data JSON chunk into our internal events, mirroring
@@ -60,9 +61,7 @@ fn decode_chunks_with_style(
 
 /// Drive the Chat Completions SSE path with raw byte chunks so tests can
 /// split a multi-byte UTF-8 character across HTTP/2-style DATA boundaries.
-fn decode_sse_byte_chunks(
-    chunks: &[&[u8]],
-) -> Result<Vec<StreamEvent>, super::super::InvalidSseUtf8> {
+fn decode_sse_byte_chunks(chunks: &[&[u8]]) -> Result<Vec<StreamEvent>, InvalidSseUtf8> {
     struct FrameState {
         line_buf: String,
         content_index: u32,
@@ -92,7 +91,7 @@ fn decode_sse_byte_chunks(
             if line.is_empty() {
                 return matches!(self.flush_frame(), SseDataFrame::Done);
             }
-            if let Some(data) = super::super::extract_sse_data_value(line) {
+            if let Some(data) = extract_sse_data_value(line) {
                 if !self.line_buf.is_empty() {
                     self.line_buf.push('\n');
                 }
@@ -125,7 +124,7 @@ fn decode_sse_byte_chunks(
         }
     }
 
-    let mut decoder = super::super::SseLineDecoder::new();
+    let mut decoder = SseLineDecoder::new();
     let mut state = FrameState::new();
     for chunk in chunks {
         for line in decoder.push(chunk)? {
