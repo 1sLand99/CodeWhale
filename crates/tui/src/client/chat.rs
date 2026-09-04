@@ -89,10 +89,7 @@ fn apply_openai_reasoning_effort(
     let is_openai_reasoning =
         provider == ApiProvider::Openai && model_is_openai_reasoning_family(model);
     let is_muse_spark = provider == ApiProvider::Meta
-        && matches!(
-            model_lower.as_str(),
-            "muse-spark-1.1" | "muse-spark-1.2" | "muse-spark-1.2-contributor"
-        );
+        && (model_lower == "muse-spark" || model_lower.starts_with("muse-spark-"));
     if !is_openai_reasoning && !is_muse_spark {
         return;
     }
@@ -5862,6 +5859,42 @@ mod alias_thinking_detection_tests {
         assert_eq!(body["max_tokens"], json!(8192));
         assert!(body.get("max_completion_tokens").is_none());
         assert_eq!(body["reasoning_effort"], json!("xhigh"));
+    }
+
+    #[test]
+    fn provider_regression_5853_muse_family_preserves_reasoning_effort() {
+        for model in [
+            "muse-spark-1.2",
+            "muse-spark-1.3",
+            "muse-spark-1.3-contributor",
+            " MUSE-SPARK-1.3 ",
+        ] {
+            for (effort, wire) in [
+                ("low", "low"),
+                ("medium", "medium"),
+                ("high", "high"),
+                ("xhigh", "xhigh"),
+                ("max", "xhigh"),
+                ("ultra", "xhigh"),
+            ] {
+                let mut body = json!({"model": model});
+                apply_openai_reasoning_effort(&mut body, ApiProvider::Meta, model, Some(effort));
+                assert_eq!(body["reasoning_effort"], wire, "{model}, effort={effort}");
+            }
+        }
+        for (provider, model, effort) in [
+            (ApiProvider::Openai, "muse-spark-1.3", Some("high")),
+            (ApiProvider::Meta, "muse-glimmer-fixture", Some("high")),
+            (ApiProvider::Meta, "muse-sparks-fixture", Some("high")),
+            (ApiProvider::Meta, "muse-spark-1.3", None),
+        ] {
+            let mut body = json!({"model": model});
+            apply_openai_reasoning_effort(&mut body, provider, model, effort);
+            assert!(
+                body.get("reasoning_effort").is_none(),
+                "{provider:?}, {model}"
+            );
+        }
     }
 
     #[test]
