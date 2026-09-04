@@ -909,6 +909,11 @@ pub struct ViewportState {
     /// Vertical padding above the first text line in the composer,
     /// stored at render time for mouse coordinate mapping.
     pub last_composer_top_padding: usize,
+    /// Slash-autocomplete rows painted inside the composer on the latest
+    /// frame. Cleared and rewritten during `ComposerWidget::render` so a
+    /// resized or closed menu cannot swallow a click. Index is the entry
+    /// index into the visible slash menu (same as `slash_menu_selected`).
+    pub last_slash_menu_hitboxes: RefCell<Vec<(usize, Rect)>>,
 }
 
 impl Default for ViewportState {
@@ -940,6 +945,7 @@ impl Default for ViewportState {
             last_composer_content: None,
             last_composer_scroll_offset: 0,
             last_composer_top_padding: 0,
+            last_slash_menu_hitboxes: RefCell::new(Vec::new()),
         }
     }
 }
