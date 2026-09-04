@@ -111,7 +111,10 @@ pub fn height(app: &mut App, width: u16, terminal_height: u16, rail_budget: u16)
     // by `top_cap`. An explicitly opened empty view keeps one row for its
     // "nothing here yet" line so cycling never lands on a blank band.
     let cap = top_cap(app, terminal_height, rail_budget);
-    if cap < model::TOP_HEIGHT_MIN {
+    // On compact terminals an explicit choice can fit in three rows:
+    // divider, tabs, and one usable content row. The usual five-row
+    // preference must not turn an accepted open command into a no-op.
+    if cap < model::TOP_HEIGHT_MIN && (!explicit || cap < 3) {
         collapse_strip(app);
         return 0;
     }
@@ -124,7 +127,7 @@ pub fn height(app: &mut App, width: u16, terminal_height: u16, rail_budget: u16)
         .saturating_add(progress)
         .saturating_add(goal_rows)
         .saturating_add(2);
-    desired.clamp(model::TOP_HEIGHT_MIN, cap)
+    desired.clamp(model::TOP_HEIGHT_MIN.min(cap), cap)
 }
 
 /// The ceilings the *terminal* imposes, independent of anything the user
@@ -192,7 +195,7 @@ pub(crate) fn collapse_strip(app: &mut App) {
 pub fn split_chat(app: &mut App, area: Rect, min_chat_width: u16) -> (Rect, Option<Rect>) {
     let placement = effective_placement(app.work_surface.placement, area.width);
     app.work_surface.effective_placement = placement;
-    if placement == WorkSurfacePlacement::Top || placement == WorkSurfacePlacement::Off {
+    if placement.is_strip() || placement == WorkSurfacePlacement::Off {
         return (area, None);
     }
     // Same empty-collapse rule as Top: a panel with nothing to show does not

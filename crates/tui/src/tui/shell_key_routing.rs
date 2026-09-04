@@ -210,13 +210,14 @@ pub const SHELL_BINDINGS: &[ShellBinding] = &[
         // (Ctrl+F is), tmux, iTerm2, Terminal.app, or Windows Terminal.
         catalog_chord: "Ctrl+Tab / Ctrl+]",
         footer_chord: "Ctrl+]",
-        focus: FocusScope::SessionShell,
+        // The launch card advertises this same work-bar control.
+        focus: FocusScope::AnyShell,
     },
     ShellBinding {
         id: ShellBindingId::ViewCycleBack,
         catalog_chord: "Ctrl+Shift+Tab",
         footer_chord: "Ctrl+Shift+Tab",
-        focus: FocusScope::SessionShell,
+        focus: FocusScope::AnyShell,
     },
 ];
 
@@ -385,7 +386,8 @@ pub fn is_permission_cycle_shortcut(key: &KeyEvent) -> bool {
 }
 
 /// Ctrl+Tab (kitty protocol: `Tab` + CONTROL) or Ctrl+] cycles the bottom
-/// dock view forward. AltGr chords stay text (#4723).
+/// dock view forward. Legacy terminals send Ctrl+] as ASCII 0x1d, which
+/// crossterm decodes as Ctrl+5. AltGr chords stay text (#4723).
 #[must_use]
 pub fn is_view_cycle_shortcut(key: &KeyEvent) -> bool {
     if crate::tui::widgets::key_hint::is_altgr(key.modifiers) {
@@ -395,7 +397,7 @@ pub fn is_view_cycle_shortcut(key: &KeyEvent) -> bool {
         && !key
             .modifiers
             .intersects(KeyModifiers::ALT | KeyModifiers::SUPER | KeyModifiers::SHIFT);
-    ctrl_only && matches!(key.code, KeyCode::Tab | KeyCode::Char(']'))
+    ctrl_only && matches!(key.code, KeyCode::Tab | KeyCode::Char(']' | '5'))
 }
 
 /// Ctrl+Shift+Tab (kitty protocol: `BackTab` or `Tab` with CONTROL|SHIFT)
@@ -469,6 +471,34 @@ mod tests {
         );
         // Modals keep every key.
         assert_eq!(route(Focus::Modal(ModalKind::Pager), &ctrl_bracket), None);
+    }
+
+    #[test]
+    fn work_bar_accepts_legacy_and_enhanced_keys_on_launch() {
+        for code in [KeyCode::Tab, KeyCode::Char(']'), KeyCode::Char('5')] {
+            let key = KeyEvent::new(code, KeyModifiers::CONTROL);
+            assert_eq!(route(Focus::Launch, &key), Some(ShellBindingId::ViewCycle));
+            assert_eq!(route(Focus::Onboarding, &key), None);
+            assert_eq!(route(Focus::Modal(ModalKind::Pager), &key), None);
+        }
+        for modifiers in [
+            KeyModifiers::NONE,
+            KeyModifiers::ALT,
+            KeyModifiers::CONTROL | KeyModifiers::ALT,
+        ] {
+            assert!(!is_view_cycle_shortcut(&KeyEvent::new(
+                KeyCode::Char('5'),
+                modifiers
+            )));
+        }
+        let backwards = KeyEvent::new(
+            KeyCode::BackTab,
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        );
+        assert_eq!(
+            route(Focus::Launch, &backwards),
+            Some(ShellBindingId::ViewCycleBack)
+        );
     }
 
     #[test]

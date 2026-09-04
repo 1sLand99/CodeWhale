@@ -110,8 +110,12 @@ pub(crate) fn rail_row_budget(
     terminal_height: u16,
     idle_empty: bool,
 ) -> u16 {
-    let ambient_mark_can_draw =
-        idle_empty && terminal_width >= crate::tui::underwater::AMBIENT_MIN_CHAT_WIDTH;
+    // An explicit work-bar choice takes priority over decorative empty-state
+    // space, just as real transcript content does. Otherwise Ctrl+] can be
+    // accepted while the ambient floor immediately hides its result.
+    let ambient_mark_can_draw = idle_empty
+        && !app.work_surface.explicit_view
+        && terminal_width >= crate::tui::underwater::AMBIENT_MIN_CHAT_WIDTH;
     let chat_floor = if ambient_mark_can_draw {
         crate::tui::underwater::AMBIENT_MIN_CHAT_HEIGHT
     } else {

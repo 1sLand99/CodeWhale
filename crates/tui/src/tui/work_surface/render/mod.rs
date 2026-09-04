@@ -107,8 +107,8 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
         .then(|| top_todo_progress(app, &rows))
         .flatten();
     // Pin goal title, then progress receipt, above the scrollable rows.
-    // At the minimum two-row surface keep one usable content row + divider.
-    let goal_height = u16::from(goal_title.is_some() && body_area.height >= 1);
+    // A compact strip keeps its last usable row for content, ahead of headers.
+    let goal_height = u16::from(goal_title.is_some() && body_area.height >= 2);
     let fold_progress = progress_shares_goal_row(body_area.width, goal_height > 0);
     let progress_height = u16::from(
         todo_progress.is_some()

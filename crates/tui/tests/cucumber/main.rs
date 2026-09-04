@@ -20,3 +20,5 @@ mod plugin_e2e_acceptance;
 #[cfg(all(unix, feature = "long-running-tests"))]
 mod screen_mode_inline_pty;
 mod tool_lifecycle_acceptance;
+#[cfg(all(unix, feature = "long-running-tests"))]
+mod work_bar_keys_pty;
