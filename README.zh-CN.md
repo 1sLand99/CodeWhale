@@ -14,10 +14,17 @@ Codewhale 是一款面向终端的开源编程智能体，使用 Rust 构建，�
 
 ## 安装
 
+macOS / Linux：推荐安装官方 GitHub Release。
+
 ```bash
-npm install -g codewhale
-codewhale
+curl -fsSL https://codewhale.net/install.sh | sh
+"$HOME/.local/bin/codewhale"
 ```
+
+Windows 请使用 [GitHub Releases](https://github.com/Hmbown/CodeWhale/releases/latest)
+中的安装器或压缩包。已有的直接安装使用 `codewhale update`；它会显示当前可执行文件路径，
+并保留比已发布版本更新的构建。npm 和 Cargo 是次要打包选项。
+迁移与 PATH 排查见[安装指南](docs/zh_hans/INSTALL.md)。
 
 首次运行会帮助你连接提供商，也可以选择保持离线。Codewhale 还支持 Cargo、Docker、Nix、Scoop、预构建压缩包、Android/Termux 和 CNB 镜像。请参阅[安装指南](docs/INSTALL.md)。
 
