@@ -964,6 +964,9 @@ pub enum AppAction {
         mode: AppMode,
     },
     OpenConfigView,
+    /// Open this workspace's `.codewhale/hooks.toml` in `$EDITOR`, creating
+    /// it from a commented template first when it does not exist yet.
+    EditProjectHooks,
     /// Open the native git worktree manager.
     OpenWorktreeManager,
     /// Open the `/model` two-pane picker (Pro/Flash + Off/High/Max).

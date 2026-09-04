@@ -1,6 +1,9 @@
 {
   "ExtensionsActionAdd": "添加",
   "ExtensionsActionEnable": "启用",
+  "ExtensionsActionEdit": "编辑",
+  "ExtensionsHooksAddLabel": "添加钩子",
+  "ExtensionsHooksAddDescription": "在你的编辑器中打开本项目的钩子文件",
   "ExtensionsActionReload": "重新加载",
   "ExtensionsActionConnect": "连接",
   "ExtensionsActionReconnect": "重新连接",

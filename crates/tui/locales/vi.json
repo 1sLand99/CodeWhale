@@ -1,6 +1,9 @@
 {
   "ExtensionsActionAdd": "thêm",
   "ExtensionsActionEnable": "bật",
+  "ExtensionsActionEdit": "Sửa",
+  "ExtensionsHooksAddLabel": "Thêm hook",
+  "ExtensionsHooksAddDescription": "Mở tệp hook của dự án này trong trình soạn thảo",
   "ExtensionsActionReload": "tải lại",
   "ExtensionsActionConnect": "kết nối",
   "ExtensionsActionReconnect": "kết nối lại",

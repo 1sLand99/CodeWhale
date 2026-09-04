@@ -17,7 +17,7 @@ use super::CommandResult;
 pub(in crate::commands) const COMMAND_INFO: CommandInfo = CommandInfo {
     name: "hooks",
     aliases: &["hook", "gouzi"],
-    usage: "/hooks [list|events]",
+    usage: "/hooks [list|events|edit]",
     description_id: MessageId::CmdHooksDescription,
 };
 
@@ -39,6 +39,10 @@ impl RegisterCommand for HooksCmd {
 /// * `/hooks list`    — show every configured hook grouped by event,
 ///   noting whether the global `[hooks].enabled` flag suppresses
 ///   them.
+/// * `/hooks edit`    — open this workspace's `.codewhale/hooks.toml` in
+///   `$EDITOR`, seeding it with a commented template on first use. This is
+///   the "add a hook" path: the Hooks screen is a reader, the file is the
+///   authority.
 /// * `/hooks events`  — list every supported `HookEvent` value the
 ///   user can target in `[[hooks.hooks]]` entries. Useful for
 ///   discovery — without this, the only way to learn the event
@@ -53,8 +57,9 @@ pub fn hooks(app: &App, arg: Option<&str>) -> CommandResult {
     match sub.as_str() {
         "" | "list" | "ls" | "show" => list(app),
         "events" | "event" | "list-events" => events(),
+        "edit" | "add" | "new" => CommandResult::action(AppAction::EditProjectHooks),
         other => CommandResult::error(format!(
-            "unknown subcommand `{other}`. Try `/hooks list` or `/hooks events`."
+            "unknown subcommand `{other}`. Try `/hooks list`, `/hooks events`, or `/hooks edit`."
         )),
     }
 }

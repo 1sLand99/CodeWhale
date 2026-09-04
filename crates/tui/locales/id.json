@@ -1,6 +1,9 @@
 {
   "ExtensionsActionAdd": "tambahkan",
   "ExtensionsActionEnable": "aktifkan",
+  "ExtensionsActionEdit": "Ubah",
+  "ExtensionsHooksAddLabel": "Tambah hook",
+  "ExtensionsHooksAddDescription": "Buka berkas hook proyek ini di editor Anda",
   "ExtensionsActionReload": "muat ulang",
   "ExtensionsActionConnect": "hubungkan",
   "ExtensionsActionReconnect": "hubungkan ulang",

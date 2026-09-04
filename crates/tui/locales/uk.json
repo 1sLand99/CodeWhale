@@ -1,6 +1,9 @@
 {
   "ExtensionsActionAdd": "додати",
   "ExtensionsActionEnable": "увімкнути",
+  "ExtensionsActionEdit": "Змінити",
+  "ExtensionsHooksAddLabel": "Додати хук",
+  "ExtensionsHooksAddDescription": "Відкрити файл хуків цього проєкту у вашому редакторі",
   "ExtensionsActionReload": "перезавантажити",
   "ExtensionsActionConnect": "підключити",
   "ExtensionsActionReconnect": "перепідключити",

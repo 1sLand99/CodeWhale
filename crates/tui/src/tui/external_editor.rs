@@ -114,6 +114,63 @@ pub fn run_editor_raw(seed: &str) -> io::Result<EditorOutcome> {
     }
 }
 
+/// Run the external editor on a real file, in place.
+///
+/// Unlike [`run_editor_raw`] there is no temp file and no seed: the file on
+/// disk *is* the document, so a `hooks.toml` the user edits stays edited even
+/// if the editor exits non-zero. The outcome only reports whether the bytes
+/// moved, which is what the caller needs in order to decide whether to reload.
+pub fn run_editor_on_path(path: &std::path::Path) -> io::Result<EditorOutcome> {
+    let before = fs::read_to_string(path).unwrap_or_default();
+
+    let raw = resolve_editor();
+    let parts = match split_command(&raw) {
+        Some(p) if !p.is_empty() => p,
+        _ => return Ok(EditorOutcome::Cancelled),
+    };
+    let mut cmd = Command::new(&parts[0]);
+    if parts.len() > 1 {
+        cmd.args(&parts[1..]);
+    }
+    cmd.arg(path);
+    let status = match cmd.status() {
+        Ok(status) => status,
+        Err(_) => return Ok(EditorOutcome::Cancelled),
+    };
+
+    let after = fs::read_to_string(path).unwrap_or_default();
+    if after == before {
+        // A non-zero exit with no change is the editor being quit; a
+        // non-zero exit that *did* change the file still changed the file.
+        return Ok(if status.success() {
+            EditorOutcome::Unchanged
+        } else {
+            EditorOutcome::Cancelled
+        });
+    }
+    Ok(EditorOutcome::Edited(after))
+}
+
+/// Suspend the TUI, run the external editor on `path`, then re-enter it.
+///
+/// The suspend/resume dance is [`spawn_editor_for_input`]'s, factored so the
+/// composer and a file editor cannot drift on terminal-mode restoration.
+pub(crate) fn spawn_editor_for_path(
+    terminal: &mut Terminal<ColorCompatBackend<Stdout>>,
+    use_alt_screen: bool,
+    use_mouse_capture: bool,
+    use_bracketed_paste: bool,
+    path: &std::path::Path,
+) -> io::Result<EditorOutcome> {
+    with_suspended_tui(
+        terminal,
+        use_alt_screen,
+        use_mouse_capture,
+        use_bracketed_paste,
+        || run_editor_on_path(path),
+    )
+}
+
 /// Suspend the TUI, run the external editor on `current`, then re-enter the
 /// TUI. Returns the new composer text iff the user saved changes.
 ///
@@ -125,6 +182,27 @@ pub(crate) fn spawn_editor_for_input(
     use_mouse_capture: bool,
     use_bracketed_paste: bool,
     current: &str,
+) -> io::Result<EditorOutcome> {
+    with_suspended_tui(
+        terminal,
+        use_alt_screen,
+        use_mouse_capture,
+        use_bracketed_paste,
+        || run_editor_raw(current),
+    )
+}
+
+/// Hand the terminal to a child, run `body`, and restore the TUI.
+///
+/// Restoration is best-effort and runs on every path, including a `body` that
+/// failed: leaving raw mode or the alt screen wrong is worse than the error
+/// being reported.
+fn with_suspended_tui(
+    terminal: &mut Terminal<ColorCompatBackend<Stdout>>,
+    use_alt_screen: bool,
+    use_mouse_capture: bool,
+    use_bracketed_paste: bool,
+    body: impl FnOnce() -> io::Result<EditorOutcome>,
 ) -> io::Result<EditorOutcome> {
     // 1. Suspend.
     // Focus reporting is about to be disabled. Fail closed to the quiet state
@@ -146,8 +224,8 @@ pub(crate) fn spawn_editor_for_input(
         let _ = super::ui::leave_alt_screen(terminal.backend_mut());
     }
 
-    // 2. Run the editor (synchronous; inherits stdio).
-    let result = run_editor_raw(current);
+    // 2. Run the child (synchronous; inherits stdio).
+    let result = body();
 
     // 3. Resume — best-effort restoration regardless of `result`.
     let _ = enable_raw_mode();
@@ -224,6 +302,42 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The file on disk is the document: a `hooks.toml` the user edits stays
+    /// edited, and the outcome only reports whether the bytes moved.
+    #[test]
+    #[cfg(unix)]
+    fn editing_a_path_in_place_reports_only_whether_the_bytes_moved() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _guard = EnvGuard::new(&["VISUAL", "EDITOR"]);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hooks.toml");
+        fs::write(&path, "# seed\n").unwrap();
+
+        // An editor that saves nothing.
+        unsafe { env::set_var("VISUAL", "true") };
+        unsafe { env::remove_var("EDITOR") };
+        assert_eq!(
+            run_editor_on_path(&path).unwrap(),
+            EditorOutcome::Unchanged,
+            "an editor that changes nothing must not trigger a reload"
+        );
+
+        // An editor that appends a line.
+        let script = dir.path().join("append.sh");
+        fs::write(&script, "#!/bin/sh\nprintf 'x\\n' >> \"$1\"\n").unwrap();
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        unsafe { env::set_var("VISUAL", script.to_str().unwrap()) };
+        match run_editor_on_path(&path).unwrap() {
+            EditorOutcome::Edited(text) => assert!(text.contains("# seed") && text.contains('x')),
+            other => panic!("expected Edited, got {other:?}"),
+        }
+        assert!(
+            fs::read_to_string(&path).unwrap().contains('x'),
+            "the edit belongs to the real file, not a temp copy"
+        );
     }
 
     #[test]

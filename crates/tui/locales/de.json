@@ -1,6 +1,9 @@
 {
   "ExtensionsActionAdd": "hinzufügen",
   "ExtensionsActionEnable": "aktivieren",
+  "ExtensionsActionEdit": "Bearbeiten",
+  "ExtensionsHooksAddLabel": "Hook hinzufügen",
+  "ExtensionsHooksAddDescription": "Die Hook-Datei dieses Projekts im Editor öffnen",
   "ExtensionsActionReload": "neu laden",
   "ExtensionsActionConnect": "verbinden",
   "ExtensionsActionReconnect": "neu verbinden",

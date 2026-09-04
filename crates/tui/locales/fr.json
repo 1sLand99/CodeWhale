@@ -1,6 +1,9 @@
 {
   "ExtensionsActionAdd": "ajouter",
   "ExtensionsActionEnable": "activer",
+  "ExtensionsActionEdit": "Modifier",
+  "ExtensionsHooksAddLabel": "Ajouter un hook",
+  "ExtensionsHooksAddDescription": "Ouvre le fichier de hooks de ce projet dans votre éditeur",
   "ExtensionsActionReload": "recharger",
   "ExtensionsActionConnect": "connecter",
   "ExtensionsActionReconnect": "reconnecter",

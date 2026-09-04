@@ -1,6 +1,9 @@
 {
   "ExtensionsActionAdd": "追加",
   "ExtensionsActionEnable": "有効化",
+  "ExtensionsActionEdit": "編集",
+  "ExtensionsHooksAddLabel": "フックを追加",
+  "ExtensionsHooksAddDescription": "このプロジェクトのフックファイルをエディタで開く",
   "ExtensionsActionReload": "再読み込み",
   "ExtensionsActionConnect": "接続",
   "ExtensionsActionReconnect": "再接続",

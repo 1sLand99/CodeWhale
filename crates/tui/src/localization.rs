@@ -460,6 +460,9 @@ pub enum MessageId {
     CmdPluginDescription,
     ExtensionsActionAdd,
     ExtensionsActionEnable,
+    ExtensionsActionEdit,
+    ExtensionsHooksAddLabel,
+    ExtensionsHooksAddDescription,
     ExtensionsActionReload,
     ExtensionsActionConnect,
     ExtensionsActionReconnect,
@@ -2591,6 +2594,9 @@ pub const ALL_MESSAGE_IDS: &[MessageId] = &[
     MessageId::CmdPluginDescription,
     MessageId::ExtensionsActionAdd,
     MessageId::ExtensionsActionEnable,
+    MessageId::ExtensionsActionEdit,
+    MessageId::ExtensionsHooksAddLabel,
+    MessageId::ExtensionsHooksAddDescription,
     MessageId::ExtensionsActionReload,
     MessageId::ExtensionsActionConnect,
     MessageId::ExtensionsActionReconnect,
@@ -5697,7 +5703,7 @@ mod tests {
             .filter(|key| key.starts_with("Extensions"))
             .cloned()
             .collect::<Vec<_>>();
-        assert_eq!(keys.len(), 90, "the complete extensions locale set changed");
+        assert_eq!(keys.len(), 93, "the complete extensions locale set changed");
 
         let prose_keys = [
             "ExtensionsMarketplaceUnavailable",

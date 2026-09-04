@@ -1,6 +1,9 @@
 {
   "ExtensionsActionAdd": "新增",
   "ExtensionsActionEnable": "啟用",
+  "ExtensionsActionEdit": "編輯",
+  "ExtensionsHooksAddLabel": "新增掛鉤",
+  "ExtensionsHooksAddDescription": "在你的編輯器中開啟本專案的掛鉤檔案",
   "ExtensionsActionReload": "重新載入",
   "ExtensionsActionConnect": "連線",
   "ExtensionsActionReconnect": "重新連線",

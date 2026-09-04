@@ -495,7 +495,10 @@ fn hooks_model(app: &App, locale: Locale) -> ExtensionsTabModel {
                     ),
                 ],
             ),
-            action: None,
+            action: Some(ExtensionAction::Command {
+                label: tr(locale, MessageId::ExtensionsActionEdit).into_owned(),
+                command: "/hooks edit".into(),
+            }),
         })
         .collect::<Vec<_>>();
     let problems = config
@@ -515,7 +518,10 @@ fn hooks_model(app: &App, locale: Locale) -> ExtensionsTabModel {
             }
             .into_owned(),
             detail: problem.summary(),
-            action: None,
+            action: Some(ExtensionAction::Command {
+                label: tr(locale, MessageId::ExtensionsActionEdit).into_owned(),
+                command: "/hooks edit".into(),
+            }),
         })
         .collect::<Vec<_>>();
     let mut groups = Vec::new();
@@ -531,6 +537,26 @@ fn hooks_model(app: &App, locale: Locale) -> ExtensionsTabModel {
             id: "problems".into(),
             label: tr(locale, MessageId::ExtensionsGroupProblems).into_owned(),
             items: problems,
+        });
+    }
+    // A screen with nothing on it and nothing to press is where "need to be
+    // able to add hooks!" comes from. The row that teaches the file is the
+    // row that opens it.
+    if groups.is_empty() {
+        groups.push(ExtensionGroup {
+            id: "start".into(),
+            label: tr(locale, MessageId::ExtensionsGroupConfigured).into_owned(),
+            items: vec![ExtensionItem {
+                id: "hooks-add".into(),
+                label: tr(locale, MessageId::ExtensionsHooksAddLabel).into_owned(),
+                description: tr(locale, MessageId::ExtensionsHooksAddDescription).into_owned(),
+                state: tr(locale, MessageId::ExtensionsStateAvailable).into_owned(),
+                detail: ".codewhale/hooks.toml".into(),
+                action: Some(ExtensionAction::Command {
+                    label: tr(locale, MessageId::ExtensionsActionEdit).into_owned(),
+                    command: "/hooks edit".into(),
+                }),
+            }],
         });
     }
     ExtensionsTabModel {

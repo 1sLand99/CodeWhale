@@ -1,6 +1,9 @@
 {
   "ExtensionsActionAdd": "afegeix",
   "ExtensionsActionEnable": "activa",
+  "ExtensionsActionEdit": "Edita",
+  "ExtensionsHooksAddLabel": "Afegeix un ganxo",
+  "ExtensionsHooksAddDescription": "Obre el fitxer de ganxos d'aquest projecte al teu editor",
   "ExtensionsActionReload": "torna a carregar",
   "ExtensionsActionConnect": "connecta",
   "ExtensionsActionReconnect": "torna a connectar",

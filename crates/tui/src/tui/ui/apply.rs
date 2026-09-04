@@ -1881,6 +1881,9 @@ pub(crate) async fn apply_command_result(
                     }
                 }
             }
+            AppAction::EditProjectHooks => {
+                edit_project_hooks_from_tui(terminal, app, config);
+            }
             AppAction::StartXaiDeviceLogin => {
                 let _switched =
                     run_xai_device_login_from_tui(terminal, app, engine_handle, config).await?;
@@ -2309,6 +2312,94 @@ pub(crate) async fn apply_command_result(
     }
 
     Ok(false)
+}
+
+/// Open this workspace's `.codewhale/hooks.toml` in `$EDITOR`.
+///
+/// The Hooks screen could only ever be read: it listed what was configured
+/// and offered no way to configure anything. Rather than grow a second
+/// authority over hook definitions inside the TUI, this hands the file to the
+/// editor the user already has, seeds it with a commented template the first
+/// time, and reloads the hook set on return so the screen reflects the edit
+/// immediately.
+fn edit_project_hooks_from_tui(terminal: &mut AppTerminal, app: &mut App, config: &Config) {
+    let dir = app.workspace.join(".codewhale");
+    let path = dir.join("hooks.toml");
+    if !path.exists()
+        && let Err(error) = std::fs::create_dir_all(&dir)
+            .and_then(|()| std::fs::write(&path, crate::hooks::PROJECT_HOOKS_TEMPLATE))
+    {
+        app.push_status_toast(
+            format!("Could not create {}: {error}", path.display()),
+            StatusToastLevel::Warning,
+            Some(8_000),
+        );
+        return;
+    }
+
+    let outcome = crate::tui::external_editor::spawn_editor_for_path(
+        terminal,
+        app.use_alt_screen(),
+        app.use_mouse_capture,
+        app.use_bracketed_paste,
+        &path,
+    );
+    app.needs_redraw = true;
+
+    match outcome {
+        Ok(crate::tui::external_editor::EditorOutcome::Edited(_)) => {
+            app.hooks = app.hooks.rebind(
+                crate::hooks::HooksConfig::load_with_project_and_plugins(
+                    config.hooks_config(),
+                    &app.workspace,
+                    Some(app.plugin_registry.as_ref()),
+                ),
+                app.workspace.clone(),
+            );
+            app.runtime_services.hook_executor = Some(std::sync::Arc::new(app.hooks.clone()));
+            let reloaded = app.hooks.config();
+            let mut content = format!(
+                "Reloaded hooks from {} — {} configured.",
+                path.display(),
+                reloaded.hooks.len()
+            );
+            // Project hooks are executable repository configuration; an
+            // untrusted workspace parses them and then ignores them, which is
+            // a silent no-op unless it is said out loud.
+            if !crate::hooks::workspace_allows_project_hooks(&app.workspace) {
+                content.push_str(
+                    " This workspace is not trusted, so project hooks are read but not run \
+                     (`/trust` to allow them).",
+                );
+            }
+            if !reloaded.problems.is_empty() {
+                content.push_str(&format!(
+                    " {} entr{} rejected — see the Hooks screen.",
+                    reloaded.problems.len(),
+                    if reloaded.problems.len() == 1 {
+                        "y"
+                    } else {
+                        "ies"
+                    }
+                ));
+            }
+            app.add_message(HistoryCell::System { content });
+        }
+        Ok(crate::tui::external_editor::EditorOutcome::Unchanged) => {
+            app.push_status_toast(
+                "Hooks unchanged.".to_string(),
+                StatusToastLevel::Info,
+                Some(4_000),
+            );
+        }
+        Ok(crate::tui::external_editor::EditorOutcome::Cancelled) | Err(_) => {
+            app.push_status_toast(
+                format!("Editor did not save {}", path.display()),
+                StatusToastLevel::Warning,
+                Some(6_000),
+            );
+        }
+    }
 }
 
 pub(crate) fn apply_workspace_runtime_state(app: &mut App, config: &Config, workspace: PathBuf) {

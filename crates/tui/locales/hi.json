@@ -1,6 +1,9 @@
 {
   "ExtensionsActionAdd": "जोड़ें",
   "ExtensionsActionEnable": "सक्षम करें",
+  "ExtensionsActionEdit": "संपादित करें",
+  "ExtensionsHooksAddLabel": "हुक जोड़ें",
+  "ExtensionsHooksAddDescription": "इस प्रोजेक्ट की हुक फ़ाइल अपने एडिटर में खोलें",
   "ExtensionsActionReload": "पुनः लोड करें",
   "ExtensionsActionConnect": "कनेक्ट करें",
   "ExtensionsActionReconnect": "फिर कनेक्ट करें",

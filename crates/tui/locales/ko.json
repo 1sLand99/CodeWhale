@@ -1,6 +1,9 @@
 {
   "ExtensionsActionAdd": "추가",
   "ExtensionsActionEnable": "활성화",
+  "ExtensionsActionEdit": "편집",
+  "ExtensionsHooksAddLabel": "훅 추가",
+  "ExtensionsHooksAddDescription": "이 프로젝트의 훅 파일을 편집기에서 엽니다",
   "ExtensionsActionReload": "다시 로드",
   "ExtensionsActionConnect": "연결",
   "ExtensionsActionReconnect": "다시 연결",
