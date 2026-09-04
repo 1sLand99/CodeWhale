@@ -551,29 +551,13 @@ pub(crate) fn handle_mouse_event(app: &mut App, mouse: MouseEvent) -> Vec<ViewEv
                     // Resuming replaces the whole session context, and a
                     // single click did it instantly — founder live-test:
                     // "you just click it and boom you're there ... you don't
-                    // realize it's happening". So a recent row arms first and
-                    // resumes on the second activation, which is the same
-                    // two-step the keyboard already has (arrow, then Enter).
-                    // New-session and see-all stay one click: neither
-                    // discards anything.
-                    let already_armed = app.launch.menu_selected == Some(index);
+                    // realize it's happening". A recent row opens the
+                    // confirmation popup; New session and See all stay one
+                    // click, because neither discards anything.
                     match &id {
-                        crate::tui::app::LaunchRowId::Recent(session_id) if !already_armed => {
-                            let title = app
-                                .launch
-                                .recent
-                                .iter()
-                                .find(|entry| entry.id == *session_id)
-                                .map(|entry| entry.title.clone())
-                                .unwrap_or_else(|| session_id.clone());
+                        crate::tui::app::LaunchRowId::Recent(session_id) => {
                             app.launch.menu_selected = Some(index);
-                            app.launch.status = Some(
-                                crate::localization::tr(
-                                    app.ui_locale,
-                                    crate::localization::MessageId::LaunchResumeConfirm,
-                                )
-                                .replace("{title}", &title),
-                            );
+                            crate::tui::underwater::open_launch_resume_confirm(app, session_id);
                         }
                         _ => {
                             app.launch.status = None;
@@ -1920,11 +1904,13 @@ mod tests {
     }
 
     #[test]
-    fn a_recent_row_arms_on_the_first_click_and_resumes_on_the_second() {
-        // Founder live-test: "you just click it and boom you're there ...
-        // you don't realize it's happening". Resuming replaces the whole
-        // session context, so one click arms it and names what will happen;
-        // the second click is the approval.
+    fn clicking_a_recent_row_opens_the_resume_confirmation_popup() {
+        // Founder live-test: "you just click it and boom you're there ... you
+        // don't realize it's happening", then, on the first fix: "the
+        // resuming confirmation needs to be a popup not something in the
+        // composer that's even more confusing". Resuming replaces the whole
+        // session context, so the click opens a popup that names the session
+        // and asks; nothing resumes until that is confirmed.
         let mut app = create_test_app();
         app.launch.visible = true;
         app.launch.recent = vec![crate::tui::app::LaunchRecentSession {
@@ -1933,33 +1919,25 @@ mod tests {
             updated_at: chrono::Utc::now(),
             message_count: 12,
         }];
-        let row = Rect::new(2, 5, 30, 1);
         app.launch.row_hitboxes = vec![(
             crate::tui::app::LaunchRowId::Recent("sess-1".to_string()),
-            row,
+            Rect::new(2, 5, 30, 1),
         )];
-        app.launch.menu_selected = None;
         app.pending_launch_action = None;
 
         handle_mouse_event(&mut app, left_click(4, 5));
         assert_eq!(
             app.pending_launch_action, None,
-            "the first click must not resume anything"
+            "the click must not resume anything on its own"
         );
-        assert_eq!(app.launch.menu_selected, Some(0), "the row is armed");
-        let status = app.launch.status.clone().expect("an arming line");
-        assert!(
-            status.contains("refactor the parser"),
-            "the arming line names the session: {status}"
-        );
-
-        handle_mouse_event(&mut app, left_click(4, 5));
         assert_eq!(
-            app.pending_launch_action,
-            Some(crate::tui::underwater::LaunchAction::ResumeSession(
-                "sess-1".to_string()
-            )),
-            "the second click resumes"
+            app.view_stack.top_kind(),
+            Some(crate::tui::views::ModalKind::LaunchResumeConfirm),
+            "it opens the confirmation popup instead"
+        );
+        assert!(
+            app.launch.status.is_none(),
+            "and nothing is written over the composer dock"
         );
     }
 

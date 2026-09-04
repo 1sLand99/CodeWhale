@@ -2190,6 +2190,15 @@ pub(crate) async fn handle_view_events(
                     update_backtrack_overlay_selection(app, idx);
                 }
             }
+            // The launch card's resume confirmation was accepted. Hand it to
+            // the same pending-action path the card's own Enter uses, so the
+            // resume runs through one code path rather than two.
+            ViewEvent::LaunchResumeConfirmed { session_id } => {
+                app.pending_launch_action = Some(
+                    crate::tui::underwater::LaunchAction::ResumeSession(session_id),
+                );
+                app.needs_redraw = true;
+            }
             ViewEvent::BacktrackConfirm => {
                 if let Some(depth) = app.backtrack.confirm() {
                     apply_backtrack(app, depth);

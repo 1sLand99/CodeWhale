@@ -81,6 +81,9 @@ pub enum ModalKind {
     /// The scheduled-automation room (`/automation`): every automation the
     /// person owns, with pause / resume / run / cancel / delete.
     Automations,
+    /// "Resume this session?" over the launch card. Resuming replaces the
+    /// whole session context, so it asks first.
+    LaunchResumeConfirm,
 }
 
 /// Clear and paint a modal popup with an opaque surface.
@@ -1056,6 +1059,11 @@ pub enum ViewEvent {
     },
     /// Toggle owned-only vs compatible audit scan inside the skills manager.
     SkillsManagerToggleCompatible,
+    /// The launch card's resume confirmation was accepted. The host resumes
+    /// the named session through the same path the card's own Enter uses.
+    LaunchResumeConfirmed {
+        session_id: String,
+    },
 }
 
 #[derive(Debug, Clone)]

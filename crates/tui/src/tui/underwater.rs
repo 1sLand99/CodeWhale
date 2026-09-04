@@ -184,6 +184,40 @@ pub fn launch_row_click_action(id: &crate::tui::app::LaunchRowId) -> LaunchActio
     }
 }
 
+/// Ask before resuming: open the confirmation popup for `session_id`.
+///
+/// Both the card's Enter and a click on a recent row route here. Resuming
+/// replaces the whole session context, and the popup is where that is said —
+/// an arming line over the composer read as chrome rather than as a question.
+pub fn open_launch_resume_confirm(app: &mut App, session_id: &str) {
+    if app.view_stack.top_kind() == Some(crate::tui::views::ModalKind::LaunchResumeConfirm) {
+        return;
+    }
+    let entry = app
+        .launch
+        .recent
+        .iter()
+        .find(|entry| entry.id == session_id);
+    let title = entry
+        .map(|entry| entry.title.clone())
+        .unwrap_or_else(|| session_id.to_string());
+    let detail = entry
+        .map(|entry| {
+            let when =
+                crate::tui::session_picker::format_relative_time(&entry.updated_at, app.ui_locale);
+            format!("{when} · {} msgs", entry.message_count)
+        })
+        .unwrap_or_default();
+    app.view_stack.push(
+        crate::tui::launch_resume_confirm::LaunchResumeConfirmView::new(
+            session_id.to_string(),
+            title,
+            detail,
+            app.ui_locale,
+        ),
+    );
+    app.needs_redraw = true;
+}
 /// Run the card's highlighted row. Enter on the card is the list's runner;
 /// an untouched list runs nothing.
 pub fn run_launch_card_row(rows: &[LaunchCardRow], menu_selected: Option<usize>) -> LaunchAction {

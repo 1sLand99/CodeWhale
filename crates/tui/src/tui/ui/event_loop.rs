@@ -251,6 +251,61 @@ pub(crate) fn dispatch_tab_key(
     }
 }
 
+/// Whether a mouse event is a wheel/trackpad scroll in any direction.
+fn is_scroll_event(mouse: &crossterm::event::MouseEvent) -> bool {
+    matches!(
+        mouse.kind,
+        crossterm::event::MouseEventKind::ScrollUp
+            | crossterm::event::MouseEventKind::ScrollDown
+            | crossterm::event::MouseEventKind::ScrollLeft
+            | crossterm::event::MouseEventKind::ScrollRight
+    )
+}
+
+/// Bound on how many scroll events one gesture may fold into a single frame,
+/// so a stuck wheel cannot starve the draw.
+const MAX_COALESCED_SCROLLS: usize = 64;
+
+/// Apply every queued scroll event of the current gesture except the last,
+/// and return that last one for the caller to handle normally.
+///
+/// A trackpad emits a burst of scroll events. Handling them one per loop
+/// iteration meant one frame each, and the frame limiter then spaced those
+/// frames out, so the scroll arrived as a slow crawl long after the fingers
+/// stopped. Resize events have been coalesced this way since #65; scroll
+/// never was. The scroll handlers only accumulate into
+/// `viewport.pending_scroll_delta`, so folding the burst in costs one cheap
+/// call each and exactly one draw for the whole gesture.
+///
+/// A non-scroll event ends the burst and is pushed back unread.
+pub(crate) fn coalesce_scroll_burst(
+    app: &mut App,
+    first: crossterm::event::MouseEvent,
+    input: &TerminalInputPump,
+    pending: &mut VecDeque<Event>,
+) -> std::io::Result<crossterm::event::MouseEvent> {
+    if !is_scroll_event(&first) {
+        return Ok(first);
+    }
+    let mut latest = first;
+    for _ in 0..MAX_COALESCED_SCROLLS {
+        let Some(next_evt) = try_next_terminal_event(input, pending)? else {
+            break;
+        };
+        match next_evt {
+            Event::Mouse(next) if is_scroll_event(&next) => {
+                let _ = handle_mouse_event(app, latest);
+                latest = next;
+            }
+            other => {
+                pending.push_back(other);
+                break;
+            }
+        }
+    }
+    Ok(latest)
+}
+
 /// Run the interactive TUI event loop.
 ///
 /// # Examples
@@ -4270,6 +4325,13 @@ pub(crate) async fn run_event_loop(
                 if should_drop_loading_mouse_motion(app, mouse) {
                     continue;
                 }
+                // Fold the rest of this wheel gesture into one frame.
+                let mouse = coalesce_scroll_burst(
+                    app,
+                    mouse,
+                    &terminal_input,
+                    &mut pending_terminal_events,
+                )?;
                 let events = handle_mouse_event(app, mouse);
                 if handle_view_events_boxed(
                     terminal,

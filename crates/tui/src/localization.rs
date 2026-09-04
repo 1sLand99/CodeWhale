@@ -1408,6 +1408,10 @@ pub enum MessageId {
     /// Arming line for a clicked recent-work row. Resuming replaces the whole
     /// session context, so the click arms and a second activation confirms.
     LaunchResumeConfirm,
+    LaunchResumeConfirmTitle,
+    LaunchResumeConfirmBody,
+    LaunchResumeConfirmResume,
+    LaunchResumeConfirmCancel,
     LaunchWorkDescription,
     LaunchChatDescription,
     LaunchWorkspaceGitReady,
@@ -3482,6 +3486,10 @@ pub const ALL_MESSAGE_IDS: &[MessageId] = &[
     MessageId::SetupGuidedNotes,
     MessageId::LaunchStartTitle,
     MessageId::LaunchResumeConfirm,
+    MessageId::LaunchResumeConfirmTitle,
+    MessageId::LaunchResumeConfirmBody,
+    MessageId::LaunchResumeConfirmResume,
+    MessageId::LaunchResumeConfirmCancel,
     MessageId::LaunchWorkDescription,
     MessageId::LaunchChatDescription,
     MessageId::LaunchWorkspaceGitReady,

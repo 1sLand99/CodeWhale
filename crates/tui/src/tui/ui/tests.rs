@@ -24582,3 +24582,72 @@ fn sixel_reconciler_emits_moves_and_clears() {
     assert_eq!(app.launch.sixel_emitted, None);
     crate::tui::mark::set_sixel_supported_for_tests(false);
 }
+
+/// A wheel gesture is one frame, not one frame per tick.
+///
+/// Founder live-test: "the mouse scrolling is still laggy af". Rendering was
+/// never the cost — a frame with a 400-message transcript measures ~2.2ms.
+/// The cost was structural: a trackpad emits a burst of scroll events and the
+/// loop handled one per iteration, drawing each time, with the frame limiter
+/// spacing those draws out. Resize events have been folded this way since #65.
+#[test]
+fn a_scroll_burst_is_folded_into_one_frame() {
+    let mut app = create_test_app();
+    app.launch.visible = false;
+    app.viewport.last_transcript_area = Some(Rect::new(0, 0, 80, 20));
+    app.viewport.pending_scroll_delta = 0;
+
+    let scroll = |kind| {
+        Event::Mouse(crossterm::event::MouseEvent {
+            kind,
+            column: 10,
+            row: 5,
+            modifiers: KeyModifiers::NONE,
+        })
+    };
+    let (tx, rx) = std::sync::mpsc::channel();
+    // Nine more ticks behind the one already in hand, then a key press that
+    // must end the burst and survive unread.
+    for _ in 0..9 {
+        tx.send(TerminalInputMessage::Event(scroll(
+            crossterm::event::MouseEventKind::ScrollDown,
+        )))
+        .expect("send scroll");
+    }
+    tx.send(TerminalInputMessage::Event(Event::Key(KeyEvent::new(
+        KeyCode::Char('x'),
+        KeyModifiers::NONE,
+    ))))
+    .expect("send key");
+    let input = TerminalInputPump {
+        rx,
+        stop: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        paused: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        paused_ack: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        handle: None,
+        last_alive_at: std::cell::Cell::new(Instant::now()),
+    };
+    let mut pending = VecDeque::new();
+
+    let first = crossterm::event::MouseEvent {
+        kind: crossterm::event::MouseEventKind::ScrollDown,
+        column: 10,
+        row: 5,
+        modifiers: KeyModifiers::NONE,
+    };
+    let last = super::event_loop::coalesce_scroll_burst(&mut app, first, &input, &mut pending)
+        .expect("coalesce");
+    assert!(
+        matches!(last.kind, crossterm::event::MouseEventKind::ScrollDown),
+        "the final tick of the burst is returned for normal handling"
+    );
+
+    // Nine ticks were applied inside the burst; the tenth is `last`, which
+    // the caller handles. The accumulated delta is what one draw will spend.
+    let folded = app.viewport.pending_scroll_delta;
+    assert_ne!(folded, 0, "the burst accumulated a scroll delta");
+
+    // The key press ended the burst and is still queued, unread.
+    assert_eq!(pending.len(), 1, "the non-scroll event was pushed back");
+    assert!(matches!(pending.front(), Some(Event::Key(_))));
+}

@@ -65,6 +65,7 @@ pub mod infoline;
 pub mod key_actions;
 pub mod key_shortcuts;
 pub mod keybindings;
+pub mod launch_resume_confirm;
 pub mod list_nav;
 pub mod live_transcript;
 pub mod mark;
