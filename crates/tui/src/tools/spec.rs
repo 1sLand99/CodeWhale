@@ -593,6 +593,11 @@ pub struct ToolExecutionState {
     /// jobs can be attributed in UI surfaces.
     pub owner_agent_id: Option<String>,
     pub owner_agent_name: Option<String>,
+    /// Tool call and engine turn that created long-running work through this
+    /// context. Hosts use these stable identities to reconcile later updates
+    /// with the originating transcript position.
+    pub(crate) origin_tool_call_id: Option<String>,
+    pub(crate) origin_turn_id: Option<String>,
     /// Outer process authority cap installed by Fleet/headless dispatch.
     /// `None` for ordinary interactive/root sessions.
     pub(crate) tool_authority: Option<Arc<ToolAuthorityEnvelope>>,
@@ -768,6 +773,8 @@ impl ToolContext {
                 file_read_tracker: new_shared_file_read_tracker(),
                 owner_agent_id: None,
                 owner_agent_name: None,
+                origin_tool_call_id: None,
+                origin_turn_id: None,
                 tool_authority,
                 trust_mode,
                 sandbox_policy: SandboxPolicy::None,
@@ -842,6 +849,20 @@ impl ToolContext {
         let agent_name = agent_name.into();
         self.owner_agent_id = (!agent_id.trim().is_empty()).then_some(agent_id);
         self.owner_agent_name = (!agent_name.trim().is_empty()).then_some(agent_name);
+        self
+    }
+
+    /// Bind long-running work to the engine turn that created it.
+    #[must_use]
+    pub(crate) fn with_origin_turn_id(mut self, turn_id: impl Into<String>) -> Self {
+        self.origin_turn_id = Some(turn_id.into());
+        self
+    }
+
+    /// Bind long-running work to the tool call that created it.
+    #[must_use]
+    pub(crate) fn with_origin_tool_call_id(mut self, tool_call_id: impl Into<String>) -> Self {
+        self.origin_tool_call_id = Some(tool_call_id.into());
         self
     }
 

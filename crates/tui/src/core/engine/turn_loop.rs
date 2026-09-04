@@ -2436,6 +2436,7 @@ impl Engine {
             let outcomes = self
                 .execute_planned_tools(
                     plans,
+                    &turn.id,
                     &current_text_visible,
                     &tool_catalog,
                     &mut active_tool_names,
@@ -3165,6 +3166,7 @@ impl Engine {
     async fn execute_planned_tools(
         &mut self,
         plans: Vec<ToolExecutionPlan>,
+        origin_turn_id: &str,
         current_text_visible: &str,
         tool_catalog: &[crate::models::Tool],
         active_tool_names: &mut std::collections::HashSet<String>,
@@ -3313,7 +3315,9 @@ impl Engine {
                 continue;
             }
 
-            let batch_tool_context = self.live_tool_context(tool_registry);
+            let batch_tool_context = self
+                .live_tool_context(tool_registry)
+                .map(|context| context.with_origin_turn_id(origin_turn_id));
 
             if parallel_allowed {
                 let parallel_plan_receipts: Vec<_> = plans
@@ -3371,7 +3375,8 @@ impl Engine {
                     let started_at = Instant::now();
                     let shell_permits = shell_permits.clone();
                     let workspace = self.session.workspace.clone();
-                    let context_override = batch_tool_context.clone();
+                    let context_override =
+                        tool_context_for_call(batch_tool_context.clone(), &plan.id);
                     let cancel_token = self.cancel_token.clone();
 
                     tool_tasks.push(async move {
@@ -3553,7 +3558,7 @@ impl Engine {
                                 tool_input.clone(),
                                 tool_registry,
                                 tool_exec_lock.clone(),
-                                batch_tool_context.clone(),
+                                tool_context_for_call(batch_tool_context.clone(), &tool_id),
                             ) => match result {
                                 Ok(rich) => (
                                     ToolExecutionOutcome::from_legacy(Ok(rich.result)),
@@ -3871,7 +3876,10 @@ impl Engine {
                                     self.session.workspace.clone(),
                                     tool_registry,
                                     mcp_pool.clone(),
-                                    context_override.or_else(|| batch_tool_context.clone()),
+                                    tool_context_for_call(
+                                        context_override.or_else(|| batch_tool_context.clone()),
+                                        &tool_id,
+                                    ),
                                 ) => (result, false),
                             }
                         };
@@ -4988,6 +4996,13 @@ impl Engine {
     }
 }
 
+fn tool_context_for_call(
+    context: Option<crate::tools::ToolContext>,
+    tool_call_id: &str,
+) -> Option<crate::tools::ToolContext> {
+    context.map(|context| context.with_origin_tool_call_id(tool_call_id))
+}
+
 pub(super) fn shell_completion_status_text(
     events: &[crate::tools::shell::ShellCompletionEvent],
     timing: &str,
@@ -5834,6 +5849,18 @@ mod tests {
     use std::time::Duration;
     use tempfile::tempdir;
 
+    #[test]
+    fn tool_context_for_call_preserves_turn_and_sets_call_origin() {
+        let context = crate::tools::ToolContext::new(".").with_origin_turn_id("turn-origin");
+
+        let context = tool_context_for_call(Some(context), "tool-origin")
+            .expect("tool context remains available");
+
+        assert_eq!(context.origin_turn_id.as_deref(), Some("turn-origin"));
+        assert_eq!(context.origin_tool_call_id.as_deref(), Some("tool-origin"));
+        assert!(tool_context_for_call(None, "tool-origin").is_none());
+    }
+
     #[tokio::test]
     async fn child_owned_background_completion_is_not_delivered_to_parent() {
         let tmp = tempdir().expect("tempdir");
@@ -6048,6 +6075,8 @@ mod tests {
                 linked_task_id: Some("task_1".to_string()),
                 owner_agent_id: Some("agent_verifier".to_string()),
                 owner_agent_name: Some("verifier".to_string()),
+                origin_tool_call_id: Some("tool_abc".to_string()),
+                origin_turn_id: Some("turn_abc".to_string()),
                 owner_session_id: "session-test".to_string(),
             }],
             "",
@@ -6072,6 +6101,8 @@ mod tests {
                 linked_task_id: Some("task_1".to_string()),
                 owner_agent_id: Some("agent_verifier".to_string()),
                 owner_agent_name: Some("verifier".to_string()),
+                origin_tool_call_id: Some("tool_abc".to_string()),
+                origin_turn_id: Some("turn_abc".to_string()),
                 owner_session_id: "session-test".to_string(),
             },
         ]);
@@ -6089,6 +6120,8 @@ mod tests {
         assert!(text.contains("art_shell_abc"));
         assert!(text.contains("cargo test -p codewhale-tui"));
         assert!(text.contains("test failed"));
+        assert!(text.contains(r#""origin_tool_call_id":"tool_abc""#));
+        assert!(text.contains(r#""origin_turn_id":"turn_abc""#));
     }
 
     #[test]
