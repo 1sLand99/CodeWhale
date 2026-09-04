@@ -667,46 +667,53 @@ impl ModelPickerView {
                 });
     }
 
+    /// Both panes rotate rather than stop at the ends. Thinking is four to six
+    /// rows, so a hard stop at the bottom reads as a dead key rather than as a
+    /// boundary; the model list wraps for the same reason.
     fn move_up(&mut self) -> bool {
         match self.focus {
             Pane::Model => {
-                if self.selected_model_idx > 0 {
-                    self.selected_model_idx -= 1;
-                    self.select_effort_for_current_model();
-                    return true;
+                let count = self.model_row_count();
+                if count == 0 {
+                    return false;
                 }
+                self.selected_model_idx = wrapping_prev(self.selected_model_idx, count);
+                self.select_effort_for_current_model();
+                true
             }
             Pane::Effort => {
-                if self.selected_effort_idx > 0 {
-                    self.selected_effort_idx -= 1;
-                    self.selected_effort_request = self.resolved_effort();
-                    return true;
+                let count = self.current_efforts().len();
+                if count == 0 {
+                    return false;
                 }
+                self.selected_effort_idx = wrapping_prev(self.selected_effort_idx, count);
+                self.selected_effort_request = self.resolved_effort();
+                true
             }
         }
-        false
     }
 
     fn move_down(&mut self) -> bool {
         match self.focus {
             Pane::Model => {
-                let max = self.model_row_count().saturating_sub(1);
-                if self.selected_model_idx < max {
-                    self.selected_model_idx += 1;
-                    self.select_effort_for_current_model();
-                    return true;
+                let count = self.model_row_count();
+                if count == 0 {
+                    return false;
                 }
+                self.selected_model_idx = wrapping_next(self.selected_model_idx, count);
+                self.select_effort_for_current_model();
+                true
             }
             Pane::Effort => {
-                let max = self.current_efforts().len().saturating_sub(1);
-                if self.selected_effort_idx < max {
-                    self.selected_effort_idx += 1;
-                    self.selected_effort_request = self.resolved_effort();
-                    return true;
+                let count = self.current_efforts().len();
+                if count == 0 {
+                    return false;
                 }
+                self.selected_effort_idx = wrapping_next(self.selected_effort_idx, count);
+                self.selected_effort_request = self.resolved_effort();
+                true
             }
         }
-        false
     }
 
     fn toggle_focus(&mut self) {
@@ -2863,6 +2870,22 @@ impl ModelPickerView {
             },
         );
     }
+}
+
+/// Previous index in a list that rotates: 0 wraps to the last row.
+/// `count` must be non-zero.
+fn wrapping_prev(index: usize, count: usize) -> usize {
+    if index == 0 {
+        count - 1
+    } else {
+        (index - 1).min(count - 1)
+    }
+}
+
+/// Next index in a list that rotates: the last row wraps to 0.
+/// `count` must be non-zero.
+fn wrapping_next(index: usize, count: usize) -> usize {
+    if index + 1 >= count { 0 } else { index + 1 }
 }
 
 pub(crate) fn picker_efforts_for_route(
