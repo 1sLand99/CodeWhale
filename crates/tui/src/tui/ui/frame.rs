@@ -335,6 +335,49 @@ fn render_info_row(f: &mut Frame, app: &mut App, area: Rect) -> InfoLineInteract
     interaction_hitboxes
 }
 
+/// Register the chrome that already answers a click, so it also answers the
+/// pointer.
+///
+/// "What responds to the pointer going over it right now across the entire
+/// app" — the honest answer had been: links, truncated text, and the info
+/// line. The jump-to-latest button, the plugin call-to-action, and the
+/// workflow panel all handled clicks in `mouse_ui` and lit up for nothing,
+/// which teaches a person that pointing at things does not work here.
+///
+/// This runs after the frame body has recorded its rects and before hover is
+/// resolved, so it stays one list rather than a `register_rect` scattered
+/// through every widget that happens to remember.
+fn register_clickable_chrome_for_hover(app: &App) {
+    use crate::localization::MessageId;
+    let targets: [(Option<Rect>, MessageId); 4] = [
+        (
+            app.viewport.jump_to_latest_button_area,
+            MessageId::KbJumpTopBottom,
+        ),
+        (
+            app.viewport.last_plugin_cta_review_area,
+            MessageId::PluginCtaReview,
+        ),
+        (
+            app.viewport.last_plugin_cta_dismiss_area,
+            MessageId::KbCloseMenu,
+        ),
+        (
+            app.viewport.last_workflow_panel_area,
+            MessageId::CmdWorkflowDescription,
+        ),
+    ];
+    for (area, label) in targets {
+        let Some(area) = area else { continue };
+        crate::tui::hover_layer::register_rect(
+            crate::tui::hover_hit::HoverTargetKind::Link,
+            area,
+            crate::localization::tr(app.ui_locale, label).into_owned(),
+            false,
+        );
+    }
+}
+
 /// Register the info line's drawn controls as one typed input surface.
 ///
 /// Both the launch stage and a live session use this exact registration, so
@@ -1628,6 +1671,7 @@ pub(crate) fn render(f: &mut Frame, app: &mut App, _config: &Config) -> Option<(
             );
         }
     }
+    register_clickable_chrome_for_hover(app);
     crate::tui::hover_layer::apply_resolved_effects(
         f.buffer_mut(),
         app.effective_low_motion_for_status(),
@@ -1971,6 +2015,27 @@ pub(crate) fn workflow_tool_is_running(app: &App) -> bool {
 mod tests {
     use super::{register_info_interaction_targets, render_info_row, short_title_truncate};
     use ratatui::{Terminal, backend::TestBackend};
+
+    /// Chrome that answers a click must also answer the pointer, or the app
+    /// teaches people that pointing at things does not work here.
+    #[test]
+    fn clickable_chrome_registers_a_hover_target() {
+        let _guard = crate::tui::hover_layer::HOVER_TEST_LOCK.lock().unwrap();
+        crate::tui::hover_layer::begin_frame();
+        let mut app =
+            crate::test_support::test_app_with_options(crate::test_support::test_tui_options("."));
+        let button = ratatui::layout::Rect::new(70, 10, 3, 3);
+        app.viewport.jump_to_latest_button_area = Some(button);
+
+        super::register_clickable_chrome_for_hover(&app);
+
+        let registered = crate::tui::hover_layer::registered_targets();
+        assert!(
+            registered.iter().any(|hit| hit.area == button),
+            "the jump-to-latest button handles a click in mouse_ui and must \
+             light up under the pointer; registered: {registered:?}"
+        );
+    }
 
     #[test]
     fn infoline_route_segment_registers_interaction_target() {
