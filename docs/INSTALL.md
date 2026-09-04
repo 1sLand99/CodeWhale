@@ -740,7 +740,7 @@ codewhale --version
 The command lands in `~/.cargo/bin/` by default; make sure that directory is
 on your `PATH`.
 
-### FreeBSD 14+ (resolves #1097)
+### FreeBSD 14+ source-build workaround (#1097)
 
 FreeBSD has no prebuilt GitHub Release asset — `npm install -g codewhale` intentionally
 fails with `Unsupported platform: freebsd` and points to Cargo. Install from source:
