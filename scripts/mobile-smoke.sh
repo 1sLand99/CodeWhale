@@ -171,11 +171,39 @@ PORT=$(pick_port)
 
 log "=== Test Group 3: Reject non-loopback mobile binding ==="
 set +e
-BIND_OUTPUT=$("$BINARY" serve --host 0.0.0.0 --port "$PORT" --mobile --insecure 2>&1)
+BIND_OUTPUT=$(python3 - "$BINARY" "$PORT" <<'PY'
+import os
+import signal
+import subprocess
+import sys
+
+probe = subprocess.Popen(
+    [sys.argv[1], "serve", "--host", "0.0.0.0", "--port", sys.argv[2], "--mobile", "--insecure"],
+    stdout=subprocess.PIPE,
+    stderr=subprocess.STDOUT,
+    start_new_session=True,
+)
+try:
+    output, _ = probe.communicate(timeout=10)
+except subprocess.TimeoutExpired:
+    try:
+        os.killpg(probe.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    output, _ = probe.communicate()
+    sys.stdout.buffer.write(output)
+    print("Non-loopback rejection probe timed out; terminated and reaped its process group.")
+    sys.exit(124)
+sys.stdout.buffer.write(output)
+sys.exit(probe.returncode)
+PY
+)
 BIND_STATUS=$?
 set -e
 
-if [[ "$BIND_STATUS" -ne 0 ]]; then
+if [[ "$BIND_STATUS" -eq 124 ]]; then
+    fail "mobile did not reject a 0.0.0.0 binding within 10 seconds"
+elif [[ "$BIND_STATUS" -ne 0 ]]; then
     pass "mobile rejects a 0.0.0.0 binding"
 else
     fail "mobile unexpectedly accepted a 0.0.0.0 binding"
