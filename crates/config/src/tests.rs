@@ -5248,8 +5248,15 @@ fn provider_metadata_registry_covers_every_provider_kind_once() {
     let providers = provider::all_providers();
     // Full registry keeps legacy dialect/plan kinds for provider_for_kind.
     assert_eq!(providers.len(), 48);
-    // Catalog surface is one identity per vendor (no dual-wire / plan rows).
-    assert_eq!(ProviderKind::ALL.len(), 43);
+    // Catalog surface is one identity per vendor (no dual-wire / plan rows),
+    // and never a retired tombstone: Antigravity stays in the full registry
+    // so old config parses and can be cleared, but it left `ALL` when it
+    // stopped being selectable (PRD §4.4 PROD-002).
+    assert_eq!(ProviderKind::ALL.len(), 42);
+    assert!(
+        !ProviderKind::ALL.contains(&ProviderKind::Antigravity),
+        "a tombstone must never be offered as a selectable provider"
+    );
     assert!(ProviderKind::ALL.len() < providers.len());
 
     let mut ids = std::collections::BTreeSet::new();

@@ -2029,11 +2029,7 @@ impl DeepSeekClient {
         // adapter is what stops an unrepresentable role from being discovered
         // as an opaque provider 400 (Anthropic) or from vanishing silently
         // (the OpenAI-shaped dialects) depending on which adapter ran.
-        let outbound_dialect = if self.api_provider == crate::config::ApiProvider::Antigravity {
-            WireDialect::GoogleCloudCode
-        } else {
-            WireDialect::from_wire_format(self.wire_format)
-        };
+        let outbound_dialect = WireDialect::from_wire_format(self.wire_format);
         role_placement::reject_unsupported_roles(&request.messages, outbound_dialect)?;
         let clamp_output_cap = |mut request: MessageRequest, route_limits: Option<RouteLimits>| {
             let route_cap =
@@ -2049,21 +2045,6 @@ impl DeepSeekClient {
             }
             request
         };
-        if self.api_provider == crate::config::ApiProvider::Antigravity {
-            let request =
-                clamp_output_cap(self.prepare_model_bound_request(request), self.route_limits);
-            let body = cloud_code::build_generate_content_body(&request)?;
-            let url = cloud_code::stream_generate_content_url(&self.base_url);
-            return Ok(PreparedOutboundRequest::new(
-                WireDialect::GoogleCloudCode,
-                self.endpoint_identity(url, RouteShape::CloudCode),
-                request.model.clone(),
-                body,
-                request.reasoning_effort.clone(),
-                None,
-                CallerStreamMode::from_stream_flag(stream),
-            ));
-        }
         let (request, request_route_limits) =
             self.bind_request_to_protocol(self.prepare_model_bound_request(request))?;
         let mut request = clamp_output_cap(request, request_route_limits);
@@ -2075,7 +2056,7 @@ impl DeepSeekClient {
             }
         }
         let requested_effort = request.reasoning_effort.clone();
-        // Same value computed for the seam above; Antigravity already returned.
+        // Same value computed for the seam above.
         let dialect = outbound_dialect;
         // `stream` is the caller's entry point, not a wire fact: each dialect
         // decides for itself what the body's `stream` field says.
@@ -2391,7 +2372,7 @@ impl DeepSeekClient {
             let response = match prepared.dialect {
                 WireDialect::OpenAiResponses => self.handle_responses_message(&prepared).await?,
                 WireDialect::AnthropicMessages => self.handle_anthropic_message(&prepared).await?,
-                WireDialect::ChatCompletions | WireDialect::GoogleCloudCode => unreachable!(),
+                WireDialect::ChatCompletions => unreachable!(),
             };
             return translation_text_from_response(&response);
         }
@@ -3086,9 +3067,6 @@ impl DeepSeekClient {
             WireDialect::OpenAiResponses => isolated.handle_responses_message(&prepared).await,
             WireDialect::AnthropicMessages => isolated.handle_anthropic_message(&prepared).await,
             WireDialect::ChatCompletions => isolated.create_message_chat(&prepared, false).await,
-            WireDialect::GoogleCloudCode => anyhow::bail!(
-                "Antigravity cloud-code is stream-only; blocking create_message is not implemented"
-            ),
         }
     }
 }
@@ -3166,9 +3144,6 @@ impl LlmClient for DeepSeekClient {
             WireDialect::OpenAiResponses => self.handle_responses_message(&prepared).await,
             WireDialect::AnthropicMessages => self.handle_anthropic_message(&prepared).await,
             WireDialect::ChatCompletions => self.create_message_chat(&prepared, cacheable).await,
-            WireDialect::GoogleCloudCode => anyhow::bail!(
-                "Antigravity cloud-code is stream-only; blocking create_message is not implemented"
-            ),
         }
     }
 
@@ -3179,15 +3154,6 @@ impl LlmClient for DeepSeekClient {
         let inference = self.acquire_remote_control_inference_permit().await;
         let permit = self.acquire_provider_request_permit().await;
         let prepared = self.prepare_outbound_request(request, true)?;
-        if self.api_provider == crate::config::ApiProvider::Antigravity {
-            let stream = Self::hold_provider_request_permit_for_stream(
-                self.handle_cloud_code_stream(&prepared).await?,
-                permit,
-            );
-            return Ok(Self::hold_remote_control_inference_permit_for_stream(
-                stream, inference,
-            ));
-        }
         let projection_warning = (!prepared.omitted_tool_names.is_empty()).then(|| {
             let omitted_tool_count = prepared.omitted_tool_names.len();
             (
@@ -3202,9 +3168,6 @@ impl LlmClient for DeepSeekClient {
             WireDialect::OpenAiResponses => self.handle_responses_stream(&prepared).await?,
             WireDialect::AnthropicMessages => self.handle_anthropic_stream(&prepared).await?,
             WireDialect::ChatCompletions => self.handle_chat_completion_stream(prepared).await?,
-            WireDialect::GoogleCloudCode => {
-                unreachable!("Antigravity streams before dialect match")
-            }
         };
         let stream = match projection_warning {
             Some((provider, omitted_tool_names, omitted_tool_count)) => {
@@ -4080,7 +4043,6 @@ impl DeepSeekClient {
 
 mod anthropic;
 mod chat;
-pub(crate) mod cloud_code;
 mod deepseek_effort;
 #[cfg(test)]
 mod ds4_tests;

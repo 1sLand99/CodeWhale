@@ -113,10 +113,8 @@ pub enum ApiProvider {
     /// backend, not an OpenAI alias: thought signatures on tool calls are
     /// captured and replayed per Google's contract.
     Google,
-    /// Google Antigravity (`agy`). Consent-gated read-only import of the
-    /// official CLI's login, then a text-only cloud-code stream
-    /// (`/v1internal:streamGenerateContent`). Tools and non-text parts
-    /// fail closed.
+    /// Retired Antigravity identity retained only to deserialize and clear
+    /// legacy Codewhale configuration. It is never selectable or runnable.
     Antigravity,
     /// Jiangsu Telecom TokenHub — OpenAI-compatible AI gateway.
     Telecomjs,
@@ -163,6 +161,11 @@ pub(crate) struct ProviderIdentity {
     pub(crate) migrated_legacy_ollama_cloud_route: bool,
 }
 
+pub(crate) fn is_legacy_antigravity_identity(value: &str) -> bool {
+    codewhale_config::ProviderKind::parse_config_identity(value)
+        == Some(codewhale_config::ProviderKind::Antigravity)
+}
+
 impl ProviderIdentity {
     #[must_use]
     pub(crate) fn persisted_id(&self) -> Option<&str> {
@@ -188,6 +191,9 @@ impl ApiProvider {
     #[must_use]
     pub fn parse(value: &str) -> Option<Self> {
         let trimmed = value.trim();
+        if is_legacy_antigravity_identity(trimmed) {
+            return None;
+        }
         // ApiProvider-specific: "deepseek-cn" is a legacy variant here,
         // while ProviderKind treats it as a Deepseek alias.
         if trimmed.eq_ignore_ascii_case("deepseek-cn")
@@ -1684,8 +1690,7 @@ pub fn model_completion_names_for_provider(provider: ApiProvider) -> Vec<&'stati
             "gemini-2.5-pro",
             "gemini-2.5-flash",
         ],
-        // The cloud-code wire protocol is not implemented; no model is
-        // advertised for the credential-import-only route.
+        // Legacy tombstone only; never advertise a runnable model.
         ApiProvider::Antigravity => Vec::new(),
         ApiProvider::Edenai => vec![DEFAULT_EDENAI_MODEL],
         ApiProvider::Concentrate => vec![DEFAULT_CONCENTRATE_MODEL],
@@ -4904,6 +4909,13 @@ impl Config {
 
     /// Validate that critical config fields are present.
     pub fn validate(&self) -> Result<()> {
+        if self
+            .provider
+            .as_deref()
+            .is_some_and(is_legacy_antigravity_identity)
+        {
+            anyhow::bail!(codewhale_config::LEGACY_ANTIGRAVITY_TOMBSTONE_MESSAGE);
+        }
         if let Some(provider) = self.provider.as_deref()
             && ApiProvider::parse(provider).is_none()
             && self
@@ -5045,6 +5057,18 @@ impl Config {
                 .is_some()
         {
             return ApiProvider::Custom;
+        }
+        // The retired Antigravity selection is not selectable (`parse` rejects
+        // it) but it must still resolve to its own tombstone identity here:
+        // falling through to the base-URL sniff would silently run a legacy
+        // `provider = "antigravity"` config as DeepSeek and bypass every
+        // fail-closed tombstone branch in the client and credential resolver.
+        if self
+            .provider
+            .as_deref()
+            .is_some_and(is_legacy_antigravity_identity)
+        {
+            return ApiProvider::Antigravity;
         }
         if let Some(provider) = self.provider.as_deref().and_then(ApiProvider::parse) {
             if provider == ApiProvider::Ollama && self.selects_legacy_ollama_cloud_route() {
@@ -6712,6 +6736,9 @@ impl Config {
 
     fn deepseek_api_key_with_secret_store_mode(&self, read_only: bool) -> Result<String> {
         let provider = self.api_provider();
+        if provider == ApiProvider::Antigravity {
+            anyhow::bail!(codewhale_config::LEGACY_ANTIGRAVITY_TOMBSTONE_MESSAGE);
+        }
         let auth_mode = self.auth_mode_for_provider(provider);
         if auth_mode_disables_api_key(auth_mode.as_deref()) {
             return Ok(String::new());
@@ -6907,41 +6934,6 @@ impl Config {
             ) && let Some(value) = crate::dsh_credentials::deepseek_api_key_from_grant(&grant)?
             {
                 return Ok(value);
-            }
-        }
-
-        // Official Antigravity (`agy`) login. `ANTIGRAVITY_API_KEY` config
-        // and env slots were already checked above; here the process's own
-        // `AGY_ADC_AUTH` wins over the consented `state.vscdb`, which is
-        // imported read-only from the one pinned path. The token is then
-        // used on the cloud-code stream; it is never logged.
-        if provider == ApiProvider::Antigravity && !custom_endpoint {
-            let grant = self
-                .external_credential_read_grant(
-                    provider,
-                    codewhale_config::ExternalCredentialSource::AgyCli,
-                    &codewhale_config::default_agy_credentials_path(),
-                )
-                .ok();
-            let process_env: std::collections::HashMap<String, String> = std::env::vars().collect();
-            match crate::agy_credentials::antigravity_credential_precedence(
-                None,
-                &process_env,
-                grant.as_ref(),
-            ) {
-                crate::agy_credentials::AntigravityCredential::ProcessEnv(token) => {
-                    return Ok(token);
-                }
-                crate::agy_credentials::AntigravityCredential::ExternalFile(token) => {
-                    return Ok(token);
-                }
-                other => {
-                    tracing::debug!(
-                        target: "config",
-                        source = other.source_label(),
-                        "antigravity credential plane did not yield a sendable token"
-                    );
-                }
             }
         }
 
@@ -8118,7 +8110,7 @@ fn provider_env_base_url_override(provider: ApiProvider) -> Option<String> {
         ApiProvider::Xai => &["XAI_BASE_URL"],
         ApiProvider::Mistral => &["MISTRAL_BASE_URL"],
         ApiProvider::Google => &["GOOGLE_BASE_URL", "GEMINI_BASE_URL"],
-        ApiProvider::Antigravity => &["ANTIGRAVITY_BASE_URL"],
+        ApiProvider::Antigravity => &[],
         ApiProvider::Telecomjs => &["TELECOMJS_BASE_URL"],
         ApiProvider::Edenai => &["EDENAI_BASE_URL"],
         ApiProvider::Concentrate => &["CONCENTRATE_BASE_URL"],
@@ -8481,13 +8473,7 @@ fn apply_env_overrides_unlocked(config: &mut Config, policy: ConfigEnvironmentPo
                     .google
                     .base_url = Some(value);
             }
-            ApiProvider::Antigravity => {
-                config
-                    .providers
-                    .get_or_insert_with(ProvidersConfig::default)
-                    .antigravity
-                    .base_url = Some(value);
-            }
+            ApiProvider::Antigravity => {}
             ApiProvider::Telecomjs => {
                 config
                     .providers
@@ -12102,10 +12088,10 @@ fn validate_external_credential_before_consent(
                 .map(|_| ())
                 .context("the DeepSeek Harness credentials file holds no DEEPSEEK_API_KEY")
         }
+        // Retired: the reader is gone, so a legacy consent record validates
+        // to nothing rather than resolving a route (PRD §4.4 PROD-002).
         codewhale_config::ExternalCredentialSource::AgyCli => {
-            crate::agy_credentials::antigravity_oauth_token_from_grant(&grant)?
-                .map(|_| ())
-                .context("the Antigravity credential store holds no OAuth token")
+            anyhow::bail!(codewhale_config::LEGACY_ANTIGRAVITY_TOMBSTONE_MESSAGE)
         }
         codewhale_config::ExternalCredentialSource::KimiCodeCli => anyhow::bail!(
             "Kimi CLI credentials are never imported; configure a Kimi API key instead"
