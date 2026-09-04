@@ -10,7 +10,7 @@ Global key chords are not yet user-configurable — tracked for a future release
 
 | Chord                | Action                                                        |
 |----------------------|---------------------------------------------------------------|
-| `F1` or `Ctrl-/`     | Toggle the help overlay                                       |
+| `/help`, `F1` or `Ctrl-/` | Toggle the help overlay. `/help` is what the chrome advertises: it is the one route every terminal delivers, where `F1` is eaten by tmux and some emulators and `Ctrl-/` encoding varies |
 | `F2`                 | Toggle the typed Settings editor                              |
 | `F3`                 | Open the provider/model picker (same as `/provider`)          |
 | `Ctrl-K`             | Open the command palette (slash-command finder)                |
@@ -27,6 +27,8 @@ Global key chords are not yet user-configurable — tracked for a future release
 | `Ctrl-Alt-O`         | Open the whole-turn Turn Inspector, regardless of composer contents |
 | `Alt-V` / `Option-V` (macOS) | Open the details pager for the selected, visible, or most recent tool/sub-agent card; terminals that emit the legacy Option-V glyph are also handled |
 | `Ctrl-Shift-E` / `Cmd-Shift-E` | Toggle the file tree in the workbar                   |
+| `Ctrl-]` or `Ctrl-Tab` | Cycle the work dock: TODO → Agents → Jobs → Background. `Ctrl-]` is the portable chord — `Ctrl-Tab` only arrives under the kitty keyboard protocol |
+| `Ctrl-Shift-Tab`     | Cycle the work dock backwards                                  |
 | `Alt-G` / `Alt-Shift-G` | Scroll transcript to top / bottom when the composer is empty |
 | `Alt-1`-`Alt-8`      | Dispatch Hotbar slots 1-8 when no modal or inline picker is open |
 | `Alt-!` / `Alt-@` / `Alt-#` / `Alt-$` | Select the workbar panel: Tasks / Agents / Context / Files |

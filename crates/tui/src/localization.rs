@@ -465,6 +465,7 @@ pub enum MessageId {
     ExtensionsActionReconnect,
     ExtensionsActionReauth,
     ExtensionsActionDiagnose,
+    ExtensionsActionManage,
     ExtensionsActionFocus,
     ExtensionsActionFold,
     ExtensionsActionTabs,
@@ -794,6 +795,8 @@ pub enum MessageId {
     KbContextMenu,
     KbAttachPath,
     KbHelpOverlay,
+    KbCycleWorkDock,
+    KbCycleWorkDockBack,
     KbToggleHelp,
     KbToggleHelpSlash,
     HelpUsageLabel,
@@ -2586,6 +2589,7 @@ pub const ALL_MESSAGE_IDS: &[MessageId] = &[
     MessageId::ExtensionsActionReconnect,
     MessageId::ExtensionsActionReauth,
     MessageId::ExtensionsActionDiagnose,
+    MessageId::ExtensionsActionManage,
     MessageId::ExtensionsActionFocus,
     MessageId::ExtensionsActionFold,
     MessageId::ExtensionsActionTabs,
@@ -2915,6 +2919,8 @@ pub const ALL_MESSAGE_IDS: &[MessageId] = &[
     MessageId::KbContextMenu,
     MessageId::KbAttachPath,
     MessageId::KbHelpOverlay,
+    MessageId::KbCycleWorkDock,
+    MessageId::KbCycleWorkDockBack,
     MessageId::KbToggleHelp,
     MessageId::KbToggleHelpSlash,
     MessageId::HelpUsageLabel,
@@ -5677,7 +5683,7 @@ mod tests {
             .filter(|key| key.starts_with("Extensions"))
             .cloned()
             .collect::<Vec<_>>();
-        assert_eq!(keys.len(), 86, "the complete extensions locale set changed");
+        assert_eq!(keys.len(), 87, "the complete extensions locale set changed");
 
         let prose_keys = [
             "ExtensionsMarketplaceUnavailable",

@@ -885,7 +885,18 @@ fn skills_model(app: &App, locale: Locale) -> ExtensionsTabModel {
             }
             .into_owned(),
             detail: skill.safe_display_path,
-            action: None,
+            // Enter opens the skills manager, which is where install, update,
+            // remove and trust already live (`views/skills_manager.rs`, 1,000
+            // lines, driving `skills::mutation::SkillMutationRequest`). This
+            // tab used to dead-end on `action: None` — founder live-test:
+            // "skills - no way to delete them or edit or anything either" —
+            // even though the manager it needed was one command away. Routing
+            // rather than reimplementing: the mutation authority stays in one
+            // place.
+            action: Some(ExtensionAction::Command {
+                label: tr(locale, MessageId::ExtensionsActionManage).into_owned(),
+                command: "/skills".into(),
+            }),
         };
         if let Some(position) = position {
             groups[position].items.push(item);

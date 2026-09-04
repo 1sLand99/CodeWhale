@@ -372,11 +372,25 @@ pub const KEYBINDINGS: &[KeybindingEntry] = &[
     },
     // --- Help ---
     KeybindingEntry {
-        // F1 is primary (with /help); Ctrl+/ is the secondary fallback.
-        // Alt+? stays an unadvertised handler (TUI-DOG-003).
-        chord: "F1 / Ctrl+/",
+        // `/help` leads because it is the one route that works in every
+        // terminal. F1 is eaten by tmux and several emulators, and how a
+        // terminal encodes Ctrl+/ varies; both still open help where they
+        // arrive. Alt+? stays an unadvertised handler (TUI-DOG-003).
+        chord: "/help / F1 / Ctrl+/",
         description_id: crate::localization::MessageId::KbHelpOverlay,
         section: KeybindingSection::Help,
+    },
+    KeybindingEntry {
+        // The work dock was reachable but never listed here, so the only way
+        // to learn the chord was the footer's one-time hint.
+        chord: "Ctrl+] / Ctrl+Tab",
+        description_id: crate::localization::MessageId::KbCycleWorkDock,
+        section: KeybindingSection::Navigation,
+    },
+    KeybindingEntry {
+        chord: "Ctrl+Shift+Tab",
+        description_id: crate::localization::MessageId::KbCycleWorkDockBack,
+        section: KeybindingSection::Navigation,
     },
 ];
 
