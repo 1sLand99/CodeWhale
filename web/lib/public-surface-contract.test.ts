@@ -574,14 +574,13 @@ done
     expect(footer).toContain("GITEE_ENABLED &&");
   });
 
-  it("keeps the README and website on one canonical product screenshot", () => {
-    // The website serves the founder's original PNG untouched; the README
-    // carries a lossless WebP of the same pixels so both surfaces show the
-    // same v0.9.12 development-build capture.
+  it("keeps supplied terminal screenshots and website dimensions truthful", () => {
+    // The website serves the new founder PNG untouched. The README still
+    // carries the earlier development capture until its owner updates it.
     const readmeImage = bytes(matrix.screenshot.readme);
     const websiteImage = bytes(matrix.screenshot.website);
 
-    expect(imageDimensions(websiteImage)).toEqual([1136, 698]);
+    expect(imageDimensions(websiteImage)).toEqual([2760, 1494]);
     expect(imageDimensions(readmeImage)).toEqual([1136, 698]);
     expect(statSync(new URL(matrix.screenshot.readme, root)).size).toBeLessThan(500_000);
     expect(statSync(new URL(matrix.screenshot.website, root)).size).toBeLessThan(500_000);
@@ -594,8 +593,8 @@ done
     const homepage = text("web/app/[locale]/page.tsx");
     expect(readme).toContain("assets/screenshot.webp");
     expect(homepage).toContain('src="/codewhale-tui.png"');
-    expect(homepage).toContain("width={1136}");
-    expect(homepage).toContain("height={698}");
+    expect(homepage).toContain("width={2760}");
+    expect(homepage).toContain("height={1494}");
     // Alt text and caption are dictionary-backed; every routed locale must
     // describe the capture as what it is — a v0.9.12 development build in
     // Work mode with Full Access, not a release and not a default.

@@ -71,7 +71,7 @@ export const GETTING_STARTED_STEPS: GuideStep[] = [
   },
   {
     id: "fleet-workflow",
-    title: { en: "Set up your ideal fleet", zh: "配置你的理想 fleet" },
+    title: { en: "Optional: set up a fleet", zh: "可选：配置 fleet" },
     body: {
       en: "Optional in v0.9.11: /fleet setup edits the selected named fleet, or opens profile setup when none is selected. Review the model and save scope before saving. Fleet configuration does not grant execution permissions. You can start with a single agent.",
       zh: "v0.9.11 的可选步骤：/fleet setup 编辑当前选中的命名 fleet；未选中时则打开角色档案设置。保存前检查模型与保存范围。Fleet 配置不会授予执行权限。你可以先从一个智能体开始。",
