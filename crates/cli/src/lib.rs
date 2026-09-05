@@ -139,6 +139,9 @@ struct Cli {
     no_mouse_capture: bool,
     #[arg(long = "skip-onboarding")]
     skip_onboarding: bool,
+    /// Start a fresh session without automatic resume or crash recovery.
+    #[arg(long)]
+    fresh: bool,
     /// Skip loading project-level config, including the workspace-specific
     /// `[workspace]`/`[projects]` overlay from user config. Must appear before
     /// the subcommand; it is applied before subcommand dispatch.
@@ -5322,6 +5325,9 @@ fn tui_argv(cli: &Cli, passthrough: Vec<String>) -> Vec<String> {
     if cli.skip_onboarding {
         args.push("--skip-onboarding".to_string());
     }
+    if cli.fresh {
+        args.push("--fresh".to_string());
+    }
     if cli.no_project_config {
         args.push("--no-project-config".to_string());
     }
@@ -10260,6 +10266,77 @@ verbosity = "project-imported"
     }
 
     #[test]
+    fn root_fresh_and_mouse_flags_forward_as_separate_tui_arguments() {
+        for flags in [
+            ["--fresh", "--mouse-capture"],
+            ["--mouse-capture", "--fresh"],
+        ] {
+            let cli = parse_ok(&[
+                "codewhale",
+                "--workspace",
+                "workspace with spaces",
+                "--no-project-config",
+                flags[0],
+                flags[1],
+            ]);
+            assert_eq!(
+                tui_argv(&cli, root_tui_passthrough(&cli).unwrap()),
+                [
+                    "codewhale",
+                    "--workspace",
+                    "workspace with spaces",
+                    "--mouse-capture",
+                    "--fresh",
+                    "--no-project-config",
+                ],
+                "{flags:?} must remain launch flags, not a joined prompt"
+            );
+        }
+    }
+
+    #[test]
+    fn root_fresh_preserves_quoted_prompt_whitespace_and_split_tail() {
+        let cli = parse_ok(&[
+            "codewhale",
+            "--fresh",
+            "--mouse-capture",
+            "--prompt",
+            "Keep  two spaces\nand a tab\there",
+            "then",
+            "explain them",
+        ]);
+        assert_eq!(
+            tui_argv(&cli, root_tui_passthrough(&cli).unwrap()),
+            [
+                "codewhale",
+                "--mouse-capture",
+                "--fresh",
+                "--prompt",
+                "Keep  two spaces\nand a tab\there then explain them",
+            ]
+        );
+    }
+
+    #[test]
+    fn root_prompt_tail_does_not_reinterpret_literal_launch_flags() {
+        let cli = parse_ok(&[
+            "codewhale",
+            "Explain",
+            "--fresh",
+            "--mouse-capture",
+            "as literal flags",
+        ]);
+        assert_eq!(
+            tui_argv(&cli, root_tui_passthrough(&cli).unwrap()),
+            [
+                "codewhale",
+                "--prompt",
+                "Explain --fresh --mouse-capture as literal flags",
+            ]
+        );
+    }
+
+    #[test]
     fn parses_top_level_continue_for_interactive_resume() {
         let cli = parse_ok(&["codewhale", "--continue"]);
 
@@ -10422,6 +10499,7 @@ verbosity = "project-imported"
             "--mouse-capture",
             "--no-mouse-capture",
             "--skip-onboarding",
+            "--fresh",
             "--continue",
             "--prompt",
         ] {
