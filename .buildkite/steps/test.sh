@@ -4,6 +4,9 @@ cd "$(dirname "$0")/../.."
 # shellcheck source=/dev/null
 . .buildkite/steps/common.sh
 
+echo "--- hermetic test-home boundary"
+sh scripts/with-hermetic-test-home.test.sh
+
 # nextest profile `ci` lives in .config/nextest.toml alongside the test-group
 # bounds that serialize the binary-spawning integration suites.
 if ! command -v cargo-nextest >/dev/null 2>&1; then
@@ -24,9 +27,9 @@ fi
 # exercise them is a weaker gate reporting green.
 run_suite() {
   echo "--- workspace tests"
-  cargo nextest run --workspace --all-features --locked --profile ci
+  scripts/with-hermetic-test-home.sh cargo nextest run --workspace --all-features --locked --profile ci
   echo "--- doctests"
-  cargo test --workspace --all-features --locked --doc
+  scripts/with-hermetic-test-home.sh cargo test --workspace --all-features --locked --doc
 }
 
 if [ "$(id -u)" = "0" ] && [ "$(uname -s)" = "Linux" ]; then
@@ -35,6 +38,8 @@ if [ "$(id -u)" = "0" ] && [ "$(uname -s)" = "Linux" ]; then
   # both must belong to the user that will actually run the suite.
   chown -R builder:builder . "$CARGO_HOME" "$RUSTUP_HOME" 2>/dev/null || true
   echo "--- re-exec as unprivileged user (root ignores permission bits)"
+  # The suite is expanded by the unprivileged child shell.
+  # shellcheck disable=SC2016
   exec runuser -u builder -- env \
     HOME=/home/builder \
     PATH="$PATH" CARGO_HOME="$CARGO_HOME" RUSTUP_HOME="$RUSTUP_HOME" \
@@ -44,9 +49,9 @@ if [ "$(id -u)" = "0" ] && [ "$(uname -s)" = "Linux" ]; then
     bash -eo pipefail -c '
       cd "$1"
       echo "--- workspace tests (uid $(id -u))"
-      cargo nextest run --workspace --all-features --locked --profile ci
+      scripts/with-hermetic-test-home.sh cargo nextest run --workspace --all-features --locked --profile ci
       echo "--- doctests"
-      cargo test --workspace --all-features --locked --doc
+      scripts/with-hermetic-test-home.sh cargo test --workspace --all-features --locked --doc
     ' _ "$PWD"
 fi
 
