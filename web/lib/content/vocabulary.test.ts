@@ -126,9 +126,9 @@ describe("shared getting-started path", () => {
 
   it("describes the first session truthfully: keyless launch, provider for replies", () => {
     const first = GETTING_STARTED_STEPS.find((s) => s.id === "first-session")!;
-    expect(first.body.en).toContain("without any API key");
-    expect(first.body.en).toContain("Plan mode");
-    expect(first.body.en).toMatch(/Model replies need a provider/);
+    expect(first.body.en).toMatch(/without an API key/);
+    expect(first.body.en).toContain("Plan blocks file mutation and shell execution");
+    expect(first.body.en).toMatch(/model replies need a configured provider/);
     // The keyless-launch claim must stay backed by documented runtime
     // behavior. Assert the meaning docs/GUIDE.md owes this step -- a first
     // launch that asks only for the decisions still needed, and a provider

@@ -44,7 +44,7 @@ export const home: HomeDict = {
   chapterModels: "Twoje modele",
   modelsHeading: "Przynieś to, co masz. Nie zmieniaj niczego, czego nie wybrałeś.",
   modelsBody:
-    "Codewhale ma wbudowanych {count} dostawców i traktuje ich równo. Zapisz klucz raz, podaj model, a trasa pozostanie dokładnie taka, jaką ustawiłeś. Lokalne modele przez vLLM, SGLang lub Ollamę nie potrzebują klucza.",
+    "Podłącz obsługiwanego dostawcę zdalnego, bramę lub lokalny serwer modeli. Przed rozpoczęciem sprawdź dostawcę i model. Lokalny serwer również może wymagać uwierzytelnienia.",
   modelsFacts: [
     ["Hostowane", "Twój własny klucz API zapisany przez codewhale auth set"],
     ["Bramka", "Jeden endpoint do wielu modeli, dostawcę nadal wybierasz Ty"],

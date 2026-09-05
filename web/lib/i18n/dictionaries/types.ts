@@ -245,7 +245,7 @@ export interface HomeDict {
   gainLede: string;
   gain: [string, string][];
 
-  /** Models chapter. `modelsBody` carries a `{count}` token. */
+  /** Models chapter. */
   chapterModels: string;
   modelsHeading: string;
   modelsBody: string;

@@ -39,8 +39,6 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
   const sourceVersion = facts.version ?? "unknown";
   const publishedRelease = facts.latestPublishedRelease;
   const sourceIsPublished = publishedRelease?.version === sourceVersion;
-  const providerCount = facts.providers.length;
-  const providerRoutes = fill(d.providerRoutes, { count: providerCount });
 
   // The install URL resolves published artifacts, so its structured version
   // must come from the published-release receipt rather than source-candidate
@@ -127,7 +125,6 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
                 <span>
                   {`${sourceIsPublished ? d.currentSource : d.sourceCandidate} v${sourceVersion}`}
                 </span>
-                <span>{providerRoutes}</span>
                 <span>{facts.license ?? "MIT"}</span>
               </p>
             </figcaption>
@@ -162,7 +159,7 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
           <div>
             <span className="folio-running-head">02 / {d.chapterModels}</span>
             <h2>{d.modelsHeading}</h2>
-            <p className="folio-section-lede">{fill(d.modelsBody, { count: providerCount })}</p>
+            <p className="folio-section-lede">{d.modelsBody}</p>
             <Link href={`/${locale}/models`} className="folio-link">
               {d.modelsLink}
             </Link>

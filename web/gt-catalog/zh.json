@@ -79,7 +79,7 @@
     "kicker": "智能体计算，由你定规矩",
     "heroTitleA": "你的模型，",
     "heroTitleB": "协作更强。",
-    "heroIntro": "{brand} 把你已经在用的模型带进同一个终端，让它们像一支船员一样协作——读代码、改文件、跑检查——而每个模型能做什么，由你来定。开源，跑在你自己的机器上。",
+    "heroIntro": "{brand} 把编程智能体带进终端，用来读代码、改文件、跑检查。选择支持的模型，并设置会话的权限策略。开源，运行在你自己的机器上。",
     "getCodewhale": "获取 Codewhale",
     "exploreProduct": "了解产品",
     "shotPreview": "终端预览",
@@ -95,11 +95,11 @@
     "chapterTerminal": "你的终端",
     "chapterTerminalTitle": "从熟悉的地方开始。",
     "gainHeading": "让你的模型把任务做完。",
-    "gainLede": "一个会话可以同时容纳多个模型，各司其职，在同一个仓库里按同一套规则工作。",
+    "gainLede": "先从一个模型开始。用 Fleet 保存成员配置；当任务适合分工时，再把部分工作委派给其他智能体。",
     "gain": [
       [
         "你的模型",
-        "托管密钥、网关，或者完全不需要密钥的本地运行时。给每个角色固定一个模型，提供商始终是你选的那个——模型名不会替你切换。"
+        "使用支持的托管提供商、网关或本地模型服务。Fleet 保存可复用智能体角色的模型选择。"
       ],
       [
         "能干的智能体",
@@ -111,8 +111,8 @@
       ]
     ],
     "chapterModels": "你的模型",
-    "modelsHeading": "带上你已有的，不改你未选的。",
-    "modelsBody": "Codewhale 内置 {count} 个提供商，一视同仁。保存一次密钥，指定一个模型，路由就保持你设定的样子。vLLM、SGLang 或 Ollama 上的本地模型不需要密钥。",
+    "modelsHeading": "为你选择的模型留一个位置。",
+    "modelsBody": "连接支持的托管提供商、网关或本地模型服务。开始工作前，检查所选提供商与模型。本地服务是否需要 API 密钥，取决于它的配置。",
     "modelsFacts": [
       [
         "托管",
@@ -127,7 +127,7 @@
         "localhost 上的 vLLM、SGLang、Ollama——通常无需密钥"
       ]
     ],
-    "modelsLink": "查看所有提供商",
+    "modelsLink": "了解提供商选项",
     "startHeading": "四步开始第一个会话。",
     "startLede": "安装，无需密钥打开会话，接入提供商；一个模型不够时，再配置 fleet。",
     "startGuideLink": "阅读新手指引",
@@ -143,13 +143,13 @@
       ],
       [
         "网页应用",
-        "登录与远程控制可用",
-        "登录或创建账户，然后在正在运行的本地会话里输入 /rc，即可在浏览器中继续这同一个会话。浏览器工作台的其余部分仍是开发预览。"
+        "开发预览",
+        "账户页面与浏览器配对已在开发版本中实现。公开服务上的端到端远程控制尚未验证；已发布的任务执行入口是终端。"
       ],
       [
         "桌面端",
         "开发版本",
-        "macOS、Linux、Windows 有 alpha 构建。桌面应用尚未正式发布。"
+        "本地 macOS 开发构建已做过测试。尚无已发布的桌面应用可供下载。"
       ],
       [
         "云端计算机",
@@ -157,7 +157,7 @@
         "在托管计算机上运行工作仍在开发中。等它真正可用时，本页会如实说明。"
       ]
     ],
-    "availabilityNote": "终端不需要账户。账户本身从不等于付费方案，本站也无法向你收费。",
+    "availabilityNote": "终端不需要 Codewhale 账户。托管模型按你自己的提供商账户计费；创建 Codewhale 账户不会购买模型访问权限。",
     "accountLink": "创建账户",
     "surfacesHeading": "活在哪里干，就在哪里用。",
     "surfaces": [
@@ -171,7 +171,7 @@
       ],
       [
         "本地 Web 客户端",
-        "本机界面；托管远程控制使用网页应用"
+        "本机界面；托管浏览器工作台仍在开发中"
       ],
       [
         "运行时 API + MCP",
@@ -358,7 +358,7 @@
     "runLead": "Runtime 的 fleet 运行投影存放在工作区的 .codewhale/fleet.jsonl 台账中，worker 日志在 .codewhale/fleet/ 下。codewhale fleet resume <run-id> 会让 Runtime 重放台账并调和过期租约；该操作幂等，可在管理进程退出、笔记本睡眠或运行时重启后安全执行。",
     "statusLead": "TUI 命令 {fleetStatusTui} 与 shell 命令 {fleetStatusShell} 读取同一份持久 fleet 台账。若要查看仅附着于当前交互会话的子 Agent，请使用 {fleetWorkers}（或 {subagents}）。",
     "profilesTitle": "已保存 fleet、角色与 /fleet setup",
-    "profilesLead": "{fleetSaved} 打开已命名保存 fleet 的选择器；裸 /fleet 打开当前所选 fleet 的成员花名册。/fleet setup 打开渐进式向导来编写可复用的花名册成员：依次选择语义角色、模型（继承或具体已配置路由）和思考档位，再核对准确的身份与路由后保存。档案可写在项目级（.codewhale/agents/<role>.toml）或个人级（$CODEWHALE_HOME/agents/<role>.toml）；同 ID 的项目档案优先。Runtime 另行负责信任、文件系统/网络范围、密钥、审批、沙箱和工具，因此档案存储范围不会扩大执行权限。",
+    "profilesLead": "{fleetSaved} 打开已命名保存 fleet 的选择器；裸 /fleet 打开当前所选 fleet 的成员花名册。在 v0.9.11 中，/fleet setup 编辑当前选中的命名 fleet。未选中命名 fleet 时，它打开角色档案设置：选择角色与模型、按需调整思考设置，然后核对并保存。档案可写在项目级（.codewhale/agents/<role>.toml）或个人级（$CODEWHALE_HOME/agents/<role>.toml）；同 ID 的项目档案优先。Runtime 另行负责信任、文件系统/网络范围、密钥、审批、沙箱和工具，因此档案存储范围不会扩大执行权限。",
     "workflowTitle": "Workflow 编排",
     "workflowLead": "普通多 Agent 工作不需要 Workflow：在 Operate 里直接发消息，需要并行、隔离或长时间工作时让 Codewhale 优先委派后台 worker 即可。只有当工作需要有序阶段、门禁、共享预算、回放或确定性汇总时才用 Workflow。Workflow 脚本只负责协调：它选择 fleet 成员，但没有自己的文件系统或 shell；Runtime 在实时权限策略下启动真正的 worker。脚本使用编译专用的声明式 JS 子集，降低到类型化 WorkflowSpec 后由 Rust 校验与执行；import、fetch、process、eval、async/await 会被拒绝。",
     "workflowLimits": "默认校验边界：每次 Workflow 运行最多 1,000 个 worker Agent、Workflow IR 结构嵌套深度不超过 5、循环必须声明 max_iterations、动态 expand 节点必须声明 max_children 和模板。Runtime 的子委派是独立执行预算：默认 3 层，可选择启用的硬上限为 8 层。这些是数量与结构上限，而非并发要求：Runtime 每个运行最多接纳 16 个存活 worker，其余排队。省略 max_steps 或设为 0 都保持无界；只有正值才增加模型轮次上限。",

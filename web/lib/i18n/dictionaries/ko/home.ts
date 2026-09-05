@@ -42,7 +42,7 @@ export const home: HomeDict = {
   chapterModels: "당신의 모델",
   modelsHeading: "가진 것을 가져오세요. 고르지 않은 것은 바뀌지 않습니다.",
   modelsBody:
-    "Codewhale에는 {count}개의 제공자가 내장되어 있고 모두 동등하게 다뤄집니다. 키를 한 번 저장하고 모델을 지정하면 경로는 설정한 그대로 유지됩니다. vLLM, SGLang, Ollama의 로컬 모델은 키가 필요 없습니다.",
+    "지원되는 호스팅 제공업체, 게이트웨이 또는 로컬 모델 서버를 연결하세요. 시작하기 전에 제공업체와 모델을 확인하세요. 로컬 서버도 설정에 따라 인증이 필요할 수 있습니다.",
   modelsFacts: [
     ["호스팅", "codewhale auth set으로 저장한 내 API 키"],
     ["게이트웨이", "하나의 엔드포인트로 여러 모델, 제공자는 여전히 내가 선택"],

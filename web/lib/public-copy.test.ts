@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { FACTS } from "./facts.generated";
 import { RELEASE_CONTRIBUTORS, RELEASE_HELPERS } from "./release-credits";
-import { EN_CHROME, EN_DOCS_SHELL, EN_HOME, getChrome, getHome } from "./i18n/dictionaries";
+import { EN_CHROME, EN_DOCS_SHELL, EN_HOME, getChrome } from "./i18n/dictionaries";
 
 function pageSource(path: string): string {
   return readFileSync(new URL(`../app/[locale]/${path}`, import.meta.url), "utf8");
@@ -94,12 +94,8 @@ describe("public website copy contracts", () => {
     // the internal "source candidate" / "provider routes" vocabulary.
     expect(EN_HOME.sourceCandidate).toBe("Unreleased");
     expect(EN_HOME.currentSource).toBe("Source");
-    expect(homepage).toContain("fill(d.providerRoutes, { count: providerCount })");
-    expect(EN_HOME.providerRoutes).toBe("{count} providers");
-    for (const locale of ["zh", "ja", "ru", "pt-BR"]) {
-      expect(getHome(locale).providerRoutes, `${locale} providerRoutes`).toContain("{count}");
-      expect(getHome(locale).sourceCandidate.trim().length).toBeGreaterThan(0);
-    }
+    // A development-source route count is not a released-provider total.
+    expect(homepage).not.toContain("<span>{providerRoutes}</span>");
     expect(homepage).not.toContain("releases/tag/v${version}");
     expect(homepage).not.toMatch(/Codewhale v0\.9\.1|\"v0\.9\.1 \u00b7/);
     expect(install).toContain("publishedRelease.tag");
