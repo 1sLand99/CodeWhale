@@ -1,36 +1,28 @@
 import type { HomeDict } from "../types";
 
 /**
- * Catalan home dictionary — la pàgina d’inici «diari-oceà».
- *
- * Reescriptura nativa en la direcció anglesa actual: porta el teu model,
- * tot passa a la teva màquina. El vocabulari de producte es manté literal
- * i coincideix amb el pack TUI: Plan / Work / Operate, Ask / Auto-Review /
- * Full Access, Codewhale, TUI, `codewhale exec`, Runtime API + MCP, fleet,
- * Node 18+, Rust, MIT.
- *
- * Els segells de secció (法, 行, …) són glifs compartits amb l’edició
- * anglesa — marques, no prosa.
+ * Catalan home dictionary — native copy for the Tidal Folio landing page,
+ * in the current direction: your models, more capable together; agents
+ * and control on your own machine; availability stated per surface as it
+ * is today. Product vocabulary stays literal (Plan / Work / Operate, Ask /
+ * Auto-Review / Full Access, Codewhale, TUI, codewhale exec, Fleet).
  */
+
 export const home: HomeDict = {
-  metaTitle: "Codewhale — s’immergeix a les profunditats per tu.",
+  metaTitle: "Codewhale — Els teus models. Més capaços junts.",
   metaDescription:
-    "Codewhale s’immergeix a les profunditats per tu — un agent de programació de codi obert per al terminal. Porta el teu model. A la teva màquina. En Rust, amb llicència MIT.",
-
-  kicker: "Codi obert · Porta el teu model · Al teu terminal",
-  heroTitleA: "Codewhale s’immergeix a les profunditats",
-  heroTitleB: "perquè tu no ho hagis de fer.",
+    "Codewhale és un sistema de computació agèntica de codi obert. Porta els models que ja fas servir —allotjats, per gateway o locals— i fes-los treballar junts al teu terminal, a la teva màquina, sota el teu control. Rust, MIT.",
+  kicker: "Computació agèntica, en els teus termes",
+  heroTitleA: "Els teus models.",
+  heroTitleB: "Més capaços junts.",
   heroIntro:
-    "{brand} és un agent de programació de codi obert per al teu terminal. Dóna-li un model i una tasca: llegeix el teu codi, edita fitxers, executa les seves pròpies comprovacions i s’atura quan la feina és feta o quan et necessita. Porta el model que vulguis, o barreja’ls: fixa un model diferent per a cada rol.",
-  install: "Instal·la",
-  docs: "Documentació",
-  copy: "Copia",
-  copied: "Copiat ✓",
-
-  installEyebrow: "instal·lació en una línia",
-  installRequirement: "cal Node 18+ — sense cadena d’eines Rust",
-  installOtherWays: "altres mètodes →",
-
+    "{brand} reuneix els models que ja fas servir en un sol terminal i els fa treballar com una tripulació —llegint el teu codi, editant, executant les comprovacions— mentre tu decideixes què pot fer cadascun. Codi obert, a la teva màquina.",
+  getCodewhale: "Obtenir Codewhale",
+  exploreProduct: "Explorar el producte",
+  shotPreview: "Vista prèvia del terminal",
+  shotBuild: "build de desenvolupament v{version}",
+  screenshotAlt:
+    "Build de desenvolupament de Codewhale v0.9.12 en un terminal: la marca de la balena en braille, una sessió nova sense historial, el compositor de missatges i un peu que mostra Full Access, mode Work, dues tasques programades, servidors MCP connectant-se i el model GLM-5.3 al màxim esforç",
   latestRelease: "Última versió {tag}",
   releaseUnavailable: "Estat de la versió no disponible",
   currentSource: "Font",
@@ -38,53 +30,45 @@ export const home: HomeDict = {
   providerRoutes: "{count} proveïdors",
   publishedRelease: "publicada",
   figcaptionSourceCandidate: "sense publicar",
-
-  shotSession: "Sessió actual",
-  screenshotAlt:
-    "Sessió de terminal actual de Codewhale amb el mode Operate, la balena, el compositor i el peu de pàgina",
-  figcaption: "Sessió actual de Codewhale · mode Operate · postura de permisos Ask",
-
-  proofHeading: "Un intèrpret d’ordres submarí. Qualsevol model. A la teva màquina.",
-  proofBody:
-    "Porta el model que ja utilitzes — allotjat, via gateway o local. Plan / Work / Operate i les postures de permisos explícites mantenen la immersió sota el teu control.",
-
-  sealDecides: "法",
-  decidesEyebrow: "Mira com decideix",
-  decidesHeading: "Regles que pots veure a la traça",
-  decidesLede:
-    "Extractes de sessions reals: la jerarquia de regles del projecte es veu al raonament del model, no és només una afirmació de la portada.",
-
-  sealWorkflow: "行",
-  workflowHeading: "De la tasca al canvi verificat.",
-  workflow: [
-    ["Inspeccionar", "Llegir el repositori, les seves instruccions i la tasca."],
-    ["Actuar", "Editar fitxers dins de límits d’aprovació explícits."],
-    ["Verificar", "Executar les comprovacions i inspeccionar el resultat."],
-    ["Reportar", "Deixar un resguard concís i durable."],
+  chapterTerminal: "El teu terminal",
+  chapterTerminalTitle: "Un lloc familiar per començar.",
+  gainHeading:
+    "El que obtens no és un chatbot. És palanca sobre els models que ja pagues.",
+  gainLede:
+    "Una sessió pot tenir diversos models alhora, cadascun en el rol que li has donat, tots treballant al mateix repositori amb les mateixes regles.",
+  gain: [
+    ["Els teus models", "Claus allotjades, un gateway o un runtime local sense cap clau. Fixa un model diferent a cada rol i conserva el proveïdor que has triat: un nom de model mai el canvia per tu."],
+    ["Agents capaços", "Modes Plan, Work i Operate; un fleet de subagents per a una mateixa feina; eines per a fitxers, shell, web i MCP; sessions que es desen, es reprenen i es reverteixen."],
+    ["Control a la teva màquina", "Ask, Auto-Review o Full Access: tu fixes quant fa abans de preguntar. S’executa en local, en sandbox on el sistema ho permet, amb un registre d’auditoria que pots llegir."],
   ],
-  receiptAria: "Exemple de resguard de feina",
-  receiptInspect: "repositori i instruccions",
-  receiptAct: "edició segons la postura de permisos triada",
-  receiptReport: "comprovacions superades · resguard desat",
-
-  sealStart: "起",
-  startHeading: "Nou a Codewhale? Quatre passos de principi a fi.",
+  chapterModels: "Els teus models",
+  modelsHeading: "Porta el que tens. No canviïs res que no hagis triat.",
+  modelsBody:
+    "Codewhale inclou {count} proveïdors i els tracta com a iguals. Desa una clau un cop, anomena un model i la ruta es queda exactament com l’has fixat. Els models locals sobre vLLM, SGLang o Ollama no necessiten clau.",
+  modelsFacts: [
+    ["Allotjat", "La teva pròpia clau d’API, desada amb codewhale auth set"],
+    ["Gateway", "Un endpoint per a molts models; el proveïdor el segueixes triant tu"],
+    ["Local", "vLLM, SGLang, Ollama a localhost; normalment sense clau"],
+  ],
+  modelsLink: "Veure tots els proveïdors",
+  startHeading: "Quatre passos fins a la primera sessió.",
   startLede:
-    "Instal·lar → primera sessió sense claus → connectar un proveïdor → configurar la teva fleet. Els termes es defineixen a la pàgina de vocabulari.",
-  startGuideLink: "Llegeix la guia d’inici →",
-  startVocabularyLink: "Consulta el vocabulari del producte →",
-
-  sealBoundaries: "界",
-  boundariesHeadingA: "El teu model.",
-  boundariesHeadingB: "Els teus límits.",
-  boundariesBody:
-    "Tria explícitament el model, el mode de treball i la postura de permisos. El cost desconegut es declara desconegut, i les superfícies en previsualització es marquen com a tals.",
-  hostedGatewayLocal: "Models allotjats, de gateway i locals",
-  planActOperateDesc: "De la planificació de només lectura a l’operació autònoma",
-  askAutoReviewDesc: "Tria la postura de permisos per a la feina",
-  tuiExecWebDesc: "Superfícies de runtime interactives i sense interfície",
-
-  sealSurfaces: "面",
+    "Instal·la, obre una sessió sense clau, connecta un proveïdor i després configura un fleet quan un model no sigui prou.",
+  startGuideLink: "Llegeix la guia d’inici",
+  startVocabularyLink: "Consulta el vocabulari del producte",
+  chapterAccount: "On funciona avui",
+  availabilityHeading: "Disponible ara, en desenvolupament i encara no: dit clarament.",
+  availabilityLede:
+    "El terminal és el producte publicat. Tota la resta apareix amb l’estat en què realment es troba.",
+  availability: [
+    ["Terminal", "Publicat", "npm, Cargo i binaris precompilats per a Linux, macOS i Windows. Android amb Termux és una vista prèvia."],
+    ["Aplicació web", "Inici de sessió i control remot disponibles", "Inicia sessió o crea un compte i escriu /rc en una sessió local en marxa per continuar exactament aquella sessió des del navegador. La resta del banc de treball al navegador continua sent una vista prèvia de desenvolupament."],
+    ["Escriptori", "Build de desenvolupament", "Hi ha builds alfa per a macOS, Linux i Windows. Encara no hi ha cap aplicació d’escriptori publicada."],
+    ["Ordinadors al núvol", "Encara no disponible", "Executar feina en un ordinador allotjat està en desenvolupament. Aquesta pàgina ho dirà quan funcioni."],
+  ],
+  availabilityNote:
+    "El terminal no necessita compte. Un compte mai és per si sol un pla de pagament, i res en aquest lloc et pot cobrar.",
+  accountLink: "Crear un compte",
   surfacesHeading: "Fes servir el runtime on passa la feina.",
   surfaces: [
     ["TUI", "Treball interactiu al terminal"],
@@ -93,14 +77,13 @@ export const home: HomeDict = {
     ["Runtime API + MCP", "Integracions locals"],
     ["fleet", "Feina multiagent durable"],
   ],
-  runtimeLink: "Veure les superfícies del runtime i les notes d’estabilitat →",
-
+  runtimeLink: "Veure les superfícies del runtime i les notes d’estabilitat",
   installBandHeading: "Comença amb una sola ordre.",
+  copy: "Copia",
+  copied: "Copiat ✓",
   binaries: "Binaris",
   chinaMirrors: "Mirrors a la Xina",
-  installGuideLink: "Llegeix la guia d’instal·lació →",
-
-  sealCommunity: "众",
+  installGuideLink: "Llegeix la guia d’instal·lació",
   communityHeading: "Construït en públic",
   communityBody:
     "Amb llicència MIT i format per col·laboradors de runtimes, proveïdors, plataformes, documentació i tests.",

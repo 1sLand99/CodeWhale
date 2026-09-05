@@ -31,6 +31,13 @@ export const chrome: ChromeDict = {
   navCommunitySecondary: "Community",
   navContributeSecondary: "Contribute",
 
+  navProduct: "Sản phẩm",
+  navModels: "Mô hình",
+  navPricing: "Giá",
+  navProductSecondary: "Product",
+  navModelsSecondary: "Models",
+  navPricingSecondary: "Pricing",
+
   skipToContent: "Bỏ qua tới nội dung chính",
 
 
@@ -75,7 +82,7 @@ export const chrome: ChromeDict = {
   themeTitle: "Giao diện tài liệu · tự động / sáng / tối",
 
   footerTagline:
-    "Codewhale lặn xuống biển sâu để bạn khỏi phải lặn — tài liệu, mã nguồn và cộng đồng của runtime mã nguồn mở.",
+    "Mô hình của bạn. Mạnh hơn khi làm việc cùng nhau. Tài liệu, mã nguồn và cộng đồng của runtime mã nguồn mở.",
   footerProduct: "Sản phẩm",
   footerProject: "Dự án",
   footerDocs: "Tài liệu",

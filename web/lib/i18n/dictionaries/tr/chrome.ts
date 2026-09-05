@@ -29,6 +29,13 @@ export const chrome: ChromeDict = {
   navCommunitySecondary: "Community",
   navContributeSecondary: "Contribute",
 
+  navProduct: "Ürün",
+  navModels: "Modeller",
+  navPricing: "Fiyatlar",
+  navProductSecondary: "Product",
+  navModelsSecondary: "Models",
+  navPricingSecondary: "Pricing",
+
   skipToContent: "Ana içeriğe geç",
 
   navPrimaryAria: "Ana gezinme",
@@ -72,7 +79,7 @@ export const chrome: ChromeDict = {
   themeTitle: "Belge teması · otomatik / açık / koyu",
 
   footerTagline:
-    "Derinlere Codewhale dalar — senin dalmana gerek yok: açık kaynak çalışma zamanı için belgeler, kaynak ve topluluk.",
+    "Senin modellerin. Birlikte daha yetenekli. Açık kaynak runtime'ın belgeleri, kaynak kodu ve topluluğu.",
   footerProduct: "Ürün",
   footerProject: "Proje",
   footerDocs: "Belgeler",

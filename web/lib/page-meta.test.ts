@@ -100,7 +100,7 @@ describe("page metadata", () => {
     const brand = new RegExp(`\\b${SITE_NAME}\\b`, "gi");
     const ogImage = readFileSync(new URL("../app/opengraph-image.tsx", import.meta.url), "utf8");
 
-    expect(IDENTITY_PHRASE).toBe("Codewhale dives into the deep so you don't have to.");
+    expect(IDENTITY_PHRASE).toBe("Codewhale — your models, more capable together.");
     expect(OG_ALT).toBe(IDENTITY_PHRASE);
     expect(OG_ALT.match(brand)).toHaveLength(1);
     expect(ogImage).toContain("{IDENTITY_PHRASE}");

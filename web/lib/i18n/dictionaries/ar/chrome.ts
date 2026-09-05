@@ -27,6 +27,13 @@ export const chrome: ChromeDict = {
   navCommunitySecondary: "Community",
   navContributeSecondary: "Contribute",
 
+  navProduct: "المنتج",
+  navModels: "النماذج",
+  navPricing: "الأسعار",
+  navProductSecondary: "Product",
+  navModelsSecondary: "Models",
+  navPricingSecondary: "Pricing",
+
   skipToContent: "الانتقال إلى المحتوى الرئيسي",
 
   navPrimaryAria: "التنقل الرئيسي",
@@ -70,7 +77,7 @@ export const chrome: ChromeDict = {
   themeTitle: "سمة التوثيق · تلقائي / فاتح / داكن",
 
   footerTagline:
-    "Codewhale يغوص في الأعماق بدلًا منك — توثيق ومصدر ومجتمع لِ Runtime مفتوح المصدر.",
+    "نماذجك. أكثر قدرة معًا. الوثائق والمصدر والمجتمع لبيئة التشغيل مفتوحة المصدر.",
   footerProduct: "المنتج",
   footerProject: "المشروع",
   footerDocs: "التوثيق",

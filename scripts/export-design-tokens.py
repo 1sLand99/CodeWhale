@@ -2,8 +2,9 @@
 """Export the TUI whale palette to the other Codewhale clients.
 
 `crates/tui/src/palette/tokens.rs` is the single source for the whale colors.
-This script parses its `WHALE_*_RGB` consts (aliases included) and writes the
-same values as CSS custom properties so the web app stops hand-copying hexes.
+This script parses its `WHALE_*_RGB` and `LIGHT_*_RGB` consts (aliases
+included) and writes the same values as CSS custom properties so the web app
+stops hand-copying hexes.
 
 Target: <repo>/web/app/tokens.css. This script writes nothing outside this
 repository.
@@ -25,8 +26,8 @@ TOKENS_RS = REPO / "crates/tui/src/palette/tokens.rs"
 SOURCE_LABEL = "crates/tui/src/palette/tokens.rs"
 
 CONST_RE = re.compile(
-    r"^pub const (WHALE_[A-Z0-9_]+)_RGB: \(u8, u8, u8\) = "
-    r"(?:\((\d+), (\d+), (\d+)\)|(WHALE_[A-Z0-9_]+)_RGB);",
+    r"^pub const ((?:WHALE|LIGHT)_[A-Z0-9_]+)_RGB: \(u8, u8, u8\) = "
+    r"(?:\((\d+), (\d+), (\d+)\)|((?:WHALE|LIGHT)_[A-Z0-9_]+)_RGB);",
     re.MULTILINE,
 )
 
@@ -52,6 +53,11 @@ def parse_tokens(text: str) -> list[tuple[str, tuple[int, int, int] | str]]:
 
 
 def css_name(name: str) -> str:
+    """`WHALE_*` exports as `--whale-*`; the Blue Stage light preset's
+    `LIGHT_*` consts export as `--light-*` so the website's paper surface can
+    reference the same light-mode ink and border values the TUI ships."""
+    if name.startswith("LIGHT_"):
+        return "--light-" + name.removeprefix("LIGHT_").lower().replace("_", "-")
     return "--whale-" + name.removeprefix("WHALE_").lower().replace("_", "-")
 
 

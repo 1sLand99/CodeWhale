@@ -241,14 +241,16 @@
   },
   "screenshot": {
     "readme": "assets/screenshot.webp",
-    "website": "web/public/codewhale-tui.webp",
+    "website": "web/public/codewhale-tui.png",
     "sourceVersion": null,
     "sourceCommit": null,
     "terminal": "unrecorded",
     "theme": "Blue Stage dark",
-    "capture": "current Codewhale session; exact binary identity was not recorded, so this image makes no published-release or exact-candidate claim",
+    "capture": "founder-supplied capture of the v0.9.12 development build on 2026-09-04: a new session, the braille C-curl whale, Work mode, Full Access; the exact commit was not recorded, so this image makes no published-release or exact-candidate claim, and Full Access is the capture's posture, not a default",
     "sources": [
-      "crates/tui"
+      "crates/tui",
+      "web/public/codewhale-tui.png",
+      "assets/screenshot.webp"
     ]
   }
 }

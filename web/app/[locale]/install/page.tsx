@@ -389,6 +389,7 @@ codewhale doctor`;
               ) : (
                 <a
                   href="https://github.com/Hmbown/CodeWhale/releases/latest"
+                  data-usage="download"
                   className="body-link"
                 >
                   {isZh ? "查看最新 GitHub 发布" : "Check the latest GitHub release"}

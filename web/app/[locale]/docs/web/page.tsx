@@ -63,6 +63,12 @@ export default async function WebClientPage({ params }: { params: Promise<{ loca
         <p className={`${t.bodyClassName} mt-3`}>{withCodeSpans(t.localLead)}</p>
       </section>
 
+      <section id="remote-control" className="scroll-mt-32">
+        <h2 className="font-display text-2xl mb-1">{t.remoteTitle}</h2>
+        <p className={`${t.bodyClassName} mt-3`}>{t.remoteLead}</p>
+        <p className={`${t.bodyClassName} mt-3`}>{t.remoteBody}</p>
+      </section>
+
       <section id="troubleshooting" className="scroll-mt-32">
         <h2 className="font-display text-2xl mb-1">{t.troubleshootingTitle}</h2>
         <p className={`${t.bodyClassName} mt-3`}>{t.troubleshootingLead}</p>

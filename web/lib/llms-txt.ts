@@ -9,6 +9,12 @@ import { IDENTITY_PHRASE, SITE_NAME, SITE_URL } from "./page-meta";
  */
 const EXTRA_PAGES: readonly { path: string; title: string; description: string }[] = [
   {
+    path: "/product",
+    title: "Product",
+    description:
+      "What Codewhale is and what a person gains: their own models, capable agents, and control on their own machine — with availability stated per surface.",
+  },
+  {
     path: "/docs",
     title: "Documentation",
     description:
