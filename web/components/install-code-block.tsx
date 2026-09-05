@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { recordUsage } from "./usage-consent";
+import { recordUsage } from "./usage-counting";
 
 interface Props {
   cmd: string;

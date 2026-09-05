@@ -1,9 +1,10 @@
 /**
- * product-usage.ts — aggregate, consented usage counting for the website.
+ * product-usage.ts — aggregate, default-on, user-disableable usage counting
+ * for the website.
  *
  * This is the browser side of the first-party telemetry contract
  * (telemetry-ingest/src/schema.ts, docs/TELEMETRY.md): closed schema version
- * 2, explicit consent version 4, one `product_usage` event carrying thirteen
+ * 3 carrying policy notice version 5, one `product_usage` event with thirteen
  * unsigned counters, a random v4 install id unrelated to any person and
  * rotated every 90 days, and nothing else — no page, URL, referrer, error
  * text, account, or content ever enters the envelope. There is no analytics
@@ -11,24 +12,29 @@
  * (app/api/product-telemetry) forwards a validated batch to the canonical
  * ingest only when the operator has configured that exact endpoint.
  *
- * Consent fails closed. A missing, unreadable, declined, or older-version
- * decision means nothing is counted and nothing is stored. Revoking consent
- * clears the queued counts and the install id, cancels any pending delivery,
- * and — through the `storage` event — does the same in every other open tab.
+ * Counting is on by default and every recorded opt-out stays off. The only
+ * stored state is the person's own choice: an explicit "off" from any policy
+ * version disables counting, an explicit "on" keeps it, and the absence of a
+ * record is the default. Unreadable stored state fails closed. The notice
+ * version is policy metadata, never a record that anyone accepted anything.
+ * Turning counting off clears the queued counts and the install id, cancels
+ * any pending delivery, and — through the `storage` event — does the same in
+ * every other open tab.
  *
  * Framework-free and injectable so the contract is testable in Node: the
  * storage, clock, id source, and transport are parameters with browser
  * defaults.
  */
 
-export const SCHEMA_VERSION = 2;
-export const CONSENT_VERSION = 4;
+export const SCHEMA_VERSION = 3;
+export const NOTICE_VERSION = 5;
 export const INSTALL_ID_ROTATION_MS = 90 * 24 * 60 * 60 * 1000;
 export const MAX_ENVELOPE_BYTES = 4 * 1024;
 /** Counts wait this long after the last interaction before one delivery. */
 export const FLUSH_DELAY_MS = 20_000;
 
-export const CONSENT_STORAGE_KEY = "cw-usage-consent";
+/** Kept under its historical key so an opt-out recorded under the old policy still counts. */
+export const PREFERENCE_STORAGE_KEY = "cw-usage-consent";
 export const INSTALL_STORAGE_KEY = "cw-usage-install";
 export const COUNTERS_STORAGE_KEY = "cw-usage-counters";
 
@@ -56,7 +62,7 @@ export type Surface = (typeof SURFACES)[number];
 
 export const ENVELOPE_FIELDS = [
   "schema_version",
-  "consent_version",
+  "notice_version",
   "sent_at",
   "install_id",
   "app_version",
@@ -70,8 +76,8 @@ export const ENVELOPE_FIELDS = [
 ] as const;
 
 export interface ProductUsageEnvelope {
-  schema_version: 2;
-  consent_version: 4;
+  schema_version: 3;
+  notice_version: 5;
   sent_at: string;
   install_id: string;
   app_version: string;
@@ -119,7 +125,7 @@ export function validateEnvelope(
   const keyError = keysExactly(value, ENVELOPE_FIELDS);
   if (keyError) return { ok: false, reason: `envelope: ${keyError}` };
   if (value.schema_version !== SCHEMA_VERSION) return { ok: false, reason: "schema_version" };
-  if (value.consent_version !== CONSENT_VERSION) return { ok: false, reason: "consent_version" };
+  if (value.notice_version !== NOTICE_VERSION) return { ok: false, reason: "notice_version" };
   if (typeof value.sent_at !== "string" || !SENT_AT_RE.test(value.sent_at)) return { ok: false, reason: "sent_at" };
   if (typeof value.install_id !== "string" || !INSTALL_ID_RE.test(value.install_id)) return { ok: false, reason: "install_id" };
   if (typeof value.app_version !== "string" || value.app_version.length > 64 || !VERSION_RE.test(value.app_version)) {
@@ -163,7 +169,7 @@ export function buildEnvelope(input: {
 }): ProductUsageEnvelope {
   return {
     schema_version: SCHEMA_VERSION,
-    consent_version: CONSENT_VERSION,
+    notice_version: NOTICE_VERSION,
     sent_at: sentAt(input.now),
     install_id: input.installId,
     app_version: input.appVersion,
@@ -177,35 +183,42 @@ export function buildEnvelope(input: {
   };
 }
 
-// ------------------------------------------------------------------ consent
+// --------------------------------------------------------------- preference
 
-export interface ConsentRecord {
+export interface UsagePreferenceRecord {
+  /** Policy notice version in force when the choice was made. Metadata only. */
   version: number;
   granted: boolean;
   decidedAt: string;
 }
 
-export type ConsentState = "granted" | "declined" | "undecided";
+/** `default` is the absence of a record: counting is on. `on` / `off` are explicit choices. */
+export type UsagePreference = "on" | "off" | "default";
 
 /**
- * Reads the stored decision and fails closed: anything that is not a
- * current-version, explicitly granted record counts as no consent. An older
- * version's grant is `undecided` — the person has to see the current
- * disclosure again — while any current-version refusal stays `declined`.
+ * Reads the stored choice. Counting is on by default, so no record means
+ * `default`. Any explicit refusal — from this policy version or an older one
+ * — stays `off`; an old decline is still a decline. A record that exists but
+ * cannot be read fails closed as `off` rather than being replaced by the
+ * default.
  */
-export function readConsent(raw: string | null | undefined): ConsentState {
-  if (!raw) return "undecided";
+export function readUsagePreference(raw: string | null | undefined): UsagePreference {
+  if (raw === null || raw === undefined || raw === "") return "default";
   try {
-    const parsed = JSON.parse(raw) as Partial<ConsentRecord>;
-    if (!isPlainObject(parsed) || parsed.version !== CONSENT_VERSION) return "undecided";
-    return parsed.granted === true ? "granted" : "declined";
+    const parsed = JSON.parse(raw) as Partial<UsagePreferenceRecord>;
+    if (!isPlainObject(parsed) || typeof parsed.granted !== "boolean") return "off";
+    return parsed.granted ? "on" : "off";
   } catch {
-    return "undecided";
+    return "off";
   }
 }
 
-export function consentRecord(granted: boolean, now: number): string {
-  const record: ConsentRecord = { version: CONSENT_VERSION, granted, decidedAt: sentAt(now) };
+export function usageCountingEnabled(preference: UsagePreference): boolean {
+  return preference !== "off";
+}
+
+export function usagePreferenceRecord(granted: boolean, now: number): string {
+  const record: UsagePreferenceRecord = { version: NOTICE_VERSION, granted, decidedAt: sentAt(now) };
   return JSON.stringify(record);
 }
 
@@ -292,10 +305,12 @@ export interface RecorderOptions {
 }
 
 export interface UsageRecorder {
-  consent(): ConsentState;
-  grant(): void;
-  decline(): void;
-  /** Re-read consent from storage (another tab may have changed it). */
+  preference(): UsagePreference;
+  /** Deliberately turn counting back on after an opt-out. */
+  enable(): void;
+  /** Record a durable opt-out and clear everything queued in this browser. */
+  disable(): void;
+  /** Re-read the preference from storage (another tab may have changed it). */
   sync(): void;
   record(counter: ProductCounter): void;
   /** Deliver whatever is queued now (also used on pagehide). */
@@ -371,7 +386,8 @@ export function createUsageRecorder(options: RecorderOptions): UsageRecorder {
     remove(INSTALL_STORAGE_KEY);
   };
 
-  const consent = () => readConsent(read(CONSENT_STORAGE_KEY));
+  const preference = () => readUsagePreference(read(PREFERENCE_STORAGE_KEY));
+  const enabled = () => usageCountingEnabled(preference());
 
   const schedule = () => {
     if (timer !== null) return;
@@ -384,7 +400,7 @@ export function createUsageRecorder(options: RecorderOptions): UsageRecorder {
   const flush = async () => {
     if (inFlight) return;
     cancelTimer();
-    if (consent() !== "granted") {
+    if (!enabled()) {
       clearAll();
       return;
     }
@@ -414,27 +430,27 @@ export function createUsageRecorder(options: RecorderOptions): UsageRecorder {
   };
 
   // Hydrate any counts a previous page on this origin left behind, but only
-  // when consent is current; otherwise clear them as a stale grant's debris.
-  if (consent() === "granted") {
+  // while counting is allowed; otherwise clear them as an opt-out's debris.
+  if (enabled()) {
     counters = readCounters(read(COUNTERS_STORAGE_KEY));
   } else {
     clearAll();
   }
 
   return {
-    consent,
-    grant() {
-      write(CONSENT_STORAGE_KEY, consentRecord(true, now()));
+    preference,
+    enable() {
+      write(PREFERENCE_STORAGE_KEY, usagePreferenceRecord(true, now()));
     },
-    decline() {
-      write(CONSENT_STORAGE_KEY, consentRecord(false, now()));
+    disable() {
+      write(PREFERENCE_STORAGE_KEY, usagePreferenceRecord(false, now()));
       clearAll();
     },
     sync() {
-      if (consent() !== "granted") clearAll();
+      if (!enabled()) clearAll();
     },
     record(counter) {
-      if (consent() !== "granted") {
+      if (!enabled()) {
         clearAll();
         return;
       }

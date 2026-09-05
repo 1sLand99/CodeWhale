@@ -19,7 +19,7 @@ export const home: HomeDict = {
   heroTitleA: "Your models.",
   heroTitleB: "More capable together.",
   heroIntro:
-    "{brand} puts coding agents in your terminal to read code, edit files, and run checks. Choose supported models and the session’s permission posture. Open source, on your machine.",
+    "{brand} puts coding agents in your terminal to read code, edit files, and run checks. Choose supported models and set the session’s permissions. Open source, on your machine.",
   getCodewhale: "Get Codewhale",
   exploreProduct: "Explore the product",
 

@@ -1,4 +1,8 @@
 import Link from "next/link";
+import { UsagePreferenceControl } from "@/components/usage-counting";
+import { USAGE_COUNTING_COPY } from "@/lib/content/usage-counting";
+import { BUILD_FACTS } from "@/lib/facts";
+import { pickText } from "@/lib/i18n/dictionaries";
 import { buildPageMetadata } from "@/lib/page-meta";
 import { LEGAL_UPDATED, PRIVACY_SECTIONS } from "@/lib/legal-copy";
 
@@ -34,6 +38,10 @@ export default async function PrivacyPage({ params }: { params: Promise<{ locale
             <p>{section.body}</p>
           </section>
         ))}
+        <section id="usage-counting" className="scroll-mt-32">
+          <h2>{pickText(USAGE_COUNTING_COPY.heading, locale)}</h2>
+          <UsagePreferenceControl locale={locale} appVersion={BUILD_FACTS.version ?? "0.0.0"} />
+        </section>
         <p className="legal-doc-nav">
           <Link href={`/${locale}/legal/terms`}>{isZh ? "服务条款" : "Terms of service"}</Link>
           <Link href={`/${locale}/pricing`}>{isZh ? "价格" : "Pricing"}</Link>

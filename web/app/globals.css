@@ -3890,108 +3890,44 @@ html[data-theme="dark"] .docs-theme {
 /* A quiet sheet at the foot of the viewport, on paper, with the site's own
    inks. It is not a modal: the page stays usable, and the choice is one
    click either way. */
-.usage-consent {
-  position: fixed;
-  inset-inline: 0;
-  bottom: 0;
-  z-index: 40;
+.usage-counting {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 1rem 2rem;
-  align-items: center;
-  width: var(--container);
-  margin: 0 auto 1rem;
-  padding: 1rem 1.25rem;
-  border: 1px solid var(--hairline);
-  border-radius: 8px;
-  background: var(--light-panel);
-  color: var(--light-text-body);
-  box-shadow: 0 18px 40px -24px rgb(var(--whale-bg-rgb) / 0.55);
+  gap: 0.75rem;
+  margin-top: 0.5rem;
 }
 
-.usage-consent-copy strong {
-  display: block;
-  margin-bottom: 0.3rem;
-  font-family: var(--font-serif), "Newsreader", Georgia, serif;
-  font-size: 1.15rem;
+.usage-counting-status {
+  color: var(--light-text-body);
   font-weight: 500;
 }
 
-.usage-consent-copy p {
-  max-width: 64ch;
-  color: var(--light-text-soft);
-  font-size: 0.86rem;
-  line-height: 1.55;
-}
-.usage-consent-copy summary { min-height: 44px; padding-block: 0.6rem; cursor: pointer; font-size: 0.86rem; }
-.usage-consent-heading { display: flex; justify-content: space-between; align-items: center; gap: 1rem; }
-.usage-consent-dismiss { flex: 0 0 44px; width: 44px; height: 44px; color: var(--light-text-body); font-size: 1.5rem; }
-.usage-consent-dismiss:hover { background: var(--paper); }
-.usage-consent-dismiss:focus-visible { outline: 2px solid var(--indigo); outline-offset: 2px; }
-
-.usage-consent-status {
-  margin-top: 0.4rem;
+.usage-counting-elsewhere {
   color: var(--light-text-muted);
+  font-size: 0.9rem;
 }
 
-.usage-consent-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.5rem;
-}
-
-.usage-consent-button {
+.usage-counting-button {
   display: inline-flex;
-  min-height: 2.5rem;
+  justify-self: start;
+  min-height: 2.75rem;
   align-items: center;
-  padding: 0.5rem 1rem;
+  padding: 0.5rem 1.1rem;
   border: 1px solid var(--whale-composer);
   border-radius: 5px;
   color: var(--whale-composer);
-  font-size: 0.9rem;
+  font-size: 0.95rem;
   font-weight: 500;
+  cursor: pointer;
   transition: background-color 150ms ease, color 150ms ease;
 }
 
-.usage-consent-button:hover {
+.usage-counting-button:hover {
   background: rgb(var(--whale-cobalt-rgb) / 0.1);
 }
 
-.usage-consent-button-primary {
-  background: var(--whale-composer);
-  color: var(--whale-text-body);
-}
-
-.usage-consent-button-primary:hover {
-  background: var(--whale-cobalt);
-  border-color: var(--whale-cobalt);
-}
-
-.usage-consent-button:focus-visible {
+.usage-counting-button:focus-visible {
   outline: 2px solid var(--whale-cobalt);
   outline-offset: 2px;
-}
-
-.usage-data-link {
-  color: inherit;
-  font: inherit;
-  cursor: pointer;
-}
-
-.usage-data-link:hover {
-  color: var(--ocean-current);
-}
-
-@media (max-width: 640px) {
-  .usage-consent {
-    grid-template-columns: 1fr;
-    margin-bottom: 0.5rem;
-  }
-
-  .usage-consent-button {
-    flex: 1 1 auto;
-    justify-content: center;
-  }
 }
 
 /* ---------- docs: the reading sheet ---------- */
@@ -4127,4 +4063,21 @@ html[data-theme="dark"] .docs-theme {
   font-family: var(--font-serif), "Newsreader", Georgia, serif;
   font-weight: 500;
   font-size: 1.4rem;
+}
+
+/* The terminal is the main product image, at a readable full-column scale. */
+.folio-hero-grid { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto auto auto; row-gap: 2rem; }
+.folio-hero-copy { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); column-gap: clamp(2rem, 5vw, 5rem); max-width: none; grid-column: 1; grid-row: 1; padding-bottom: 0; }
+.folio-hero-copy .folio-kicker { grid-column: 1 / -1; }
+.folio-hero-copy h1 { grid-column: 1; grid-row: 2 / 4; font-size: clamp(2.75rem, 5vw, 4.5rem); }
+.folio-hero-copy .folio-lede { grid-column: 2; grid-row: 2; margin-top: 0; align-self: end; }
+.folio-hero-copy .folio-actions { grid-column: 2; grid-row: 3; align-self: start; margin-top: 1.25rem; }
+.folio-shot { grid-column: 1; grid-row: 2; width: 100%; margin-top: 0; }
+.folio-chapter { grid-column: 1; grid-row: 3; justify-self: start; }
+.product-install-grid > div, .product-composer, .product-composer > div { min-width: 0; }
+@media (max-width: 760px) {
+  .folio-hero-copy { display: block; }
+  .folio-hero-copy h1 { max-width: 16ch; }
+  .folio-hero-copy .folio-lede { margin-top: 1.25rem; }
+  .folio-shot { width: 100%; }
 }

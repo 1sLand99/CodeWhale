@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import { IBM_Plex_Sans, IBM_Plex_Sans_Condensed, JetBrains_Mono, Newsreader } from "next/font/google";
 import { Nav } from "@/components/nav";
 import { Footer } from "@/components/footer";
-import { UsageConsent } from "@/components/usage-consent";
+import { UsageCounting } from "@/components/usage-counting";
 import { BUILD_FACTS } from "@/lib/facts";
 import { localeDirection, locales, type Locale } from "@/lib/i18n/config";
 import { getChrome, getHome } from "@/lib/i18n/dictionaries";
@@ -101,9 +101,9 @@ export default async function LocaleLayout({
         <Nav locale={locale as Locale} />
         <main id="main-content">{children}</main>
         <Footer locale={locale as Locale} />
-        {/* Consented, aggregate usage counting — see lib/telemetry. Nothing
-            is counted or stored until the person allows it. */}
-        <UsageConsent locale={locale} appVersion={BUILD_FACTS.version ?? "0.0.0"} />
+        {/* Aggregate usage counting, on by default — see lib/telemetry. The
+            choice lives on the privacy page; every opt-out stays off. */}
+        <UsageCounting appVersion={BUILD_FACTS.version ?? "0.0.0"} />
       </body>
     </html>
   );

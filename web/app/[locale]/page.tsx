@@ -95,9 +95,9 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
             <Image
               src="/codewhale-tui.png"
               alt={d.screenshotAlt}
-              width={1136}
-              height={698}
-              sizes="(max-width: 1050px) calc(100vw - 2rem), 52vw"
+              width={2760}
+              height={1494}
+              sizes="(max-width: 1280px) calc(100vw - 2rem), 1248px"
               priority
             />
             <figcaption>
