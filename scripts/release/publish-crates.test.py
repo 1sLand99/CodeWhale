@@ -14,6 +14,8 @@ SCRIPTS = Path(__file__).resolve().parent
 
 class PublishPreflightTests(unittest.TestCase):
     def setUp(self):
+        real_cargo = shutil.which("cargo")
+        self.assertIsNotNone(real_cargo, "Cargo 1.90+ must be installed to run release preflight tests")
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
@@ -58,6 +60,8 @@ class PublishPreflightTests(unittest.TestCase):
         cargo = bin_dir / "cargo"
         cargo.write_text(
             '#!/usr/bin/env bash\nset -euo pipefail\n'
+            'if [[ "${1:-}" == --version && -n "${TEST_CARGO_VERSION:-}" ]]; then\n'
+            '  echo "$TEST_CARGO_VERSION"; exit 0\nfi\n'
             # Cargo publish --dry-run still contacts the registry. Keep its real
             # tarball build for the old-script regression check, fully offline.
             'if [[ "${1:-}" == publish ]]; then\n'
@@ -74,7 +78,7 @@ class PublishPreflightTests(unittest.TestCase):
         curl.chmod(0o755)
         self.env = {
             **os.environ,
-            "TEST_REAL_CARGO": shutil.which("cargo"),
+            "TEST_REAL_CARGO": real_cargo,
             "TEST_UPLOADS": str(self.uploads),
             "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"],
             "CARGO_NET_OFFLINE": "true",
@@ -98,6 +102,29 @@ class PublishPreflightTests(unittest.TestCase):
         )
         self.assertFalse(self.uploads.exists(), "upload reached before all packages passed")
         self.assertIn("payload.txt", output)
+
+    def test_old_cargo_fails_before_packaging_or_upload(self):
+        for version in ("cargo 1.88.0 (fixture)", "cargo 1.89.0 (fixture)", "unknown"):
+            with self.subTest(version=version):
+                self.env["TEST_CARGO_VERSION"] = version
+                output = self.run_command(
+                    ["bash", str(self.scripts / "publish-crates.sh"), "publish"], success=False
+                )
+                self.assertIn("requires Cargo 1.90 or newer", output)
+                self.assertFalse(self.uploads.exists())
+                self.assertFalse((self.root / "target/package").exists())
+
+    def test_resume_verifies_tarballs_and_skips_existing_versions(self):
+        manifest = self.root / "app/Cargo.toml"
+        manifest.write_text(manifest.read_text().replace('exclude = ["src/payload.txt"]\n', ""))
+        (self.root / "bin/curl").write_text("#!/bin/sh\nexit 0\n")
+        output = self.run_command(
+            ["bash", str(self.scripts / "publish-crates.sh"), "publish"], success=True
+        )
+        self.assertIn("Skipping codewhale-preflight-base", output)
+        self.assertIn("Skipping codewhale-preflight-app", output)
+        self.assertTrue((self.root / "target/package/codewhale-preflight-app-0.0.0.crate").exists())
+        self.assertFalse(self.uploads.exists())
 
     def test_dry_run_builds_dependent_tarball(self):
         self.assert_missing_asset_blocks("dry-run")

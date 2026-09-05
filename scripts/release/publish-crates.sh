@@ -14,6 +14,15 @@ case "${mode}" in
     ;;
 esac
 
+# Multi-package publication verification was stabilized in Cargo 1.90.
+# Release tooling can require a newer Cargo than the runtime's Rust MSRV.
+cargo_version="$(cargo --version)"
+if [[ ! "${cargo_version}" =~ ^cargo[[:space:]]+([0-9]+)\.([0-9]+)\. ]] ||
+   (( BASH_REMATCH[1] < 1 || (BASH_REMATCH[1] == 1 && BASH_REMATCH[2] < 90) )); then
+  echo "Release preflight requires Cargo 1.90 or newer; found ${cargo_version}. Run rustup update stable and use that toolchain." >&2
+  exit 1
+fi
+
 packages=("${release_crates[@]}")
 crates_user_agent="CodeWhale release publish check (https://github.com/Hmbown/CodeWhale)"
 
@@ -42,10 +51,10 @@ if [[ "${mode}" == "publish" ]]; then
   "${script_dir}/verify-release-assets.sh"
 fi
 
-# Package the complete release together. Cargo resolves unpublished workspace
-# dependencies through a temporary local registry, then builds each unpacked
-# tarball. A file inventory alone cannot detect missing embedded assets.
-package_args=(--locked)
+# Verify the complete release together, including Cargo's publication checks.
+# Unpublished dependencies resolve through a temporary local registry, and
+# each unpacked tarball builds before the first real upload is attempted.
+package_args=(--dry-run --locked --registry crates-io)
 if [[ "${mode}" == "dry-run" ]]; then
   package_args+=(--allow-dirty)
 fi
@@ -54,7 +63,7 @@ for package in "${packages[@]}"; do
 done
 
 echo "Verifying all ${#packages[@]} release package tarballs before any upload..."
-cargo package "${package_args[@]}"
+cargo publish "${package_args[@]}"
 if [[ "${mode}" == "dry-run" ]]; then
   echo "Release package verification OK; no crates uploaded."
   exit 0
@@ -88,7 +97,7 @@ for package in "${packages[@]}"; do
   if crate_version_exists "${package}" "${workspace_version}"; then
     echo "Skipping ${package} ${workspace_version}; already published."
   else
-    cargo publish --locked -p "${package}"
+    cargo publish --locked --registry crates-io -p "${package}"
     wait_for_crate_version "${package}" "${workspace_version}"
   fi
   echo "::endgroup::"
