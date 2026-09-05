@@ -81,6 +81,11 @@ notes, and relevant issue/PR comments.
   poll cadence, and diagnostic worker caps
 - **[Nightt / nightt5879](https://github.com/nightt5879)** — isolated remote
   recovery lease generations (#5790)
+- **[yiheng-kkk](https://github.com/yiheng-kkk)** — replaced stale todo
+  transcript snapshots so a rewritten todo list renders its current tasks
+  (#5871, #5873)
+- **[Lfanxing](https://github.com/Lfanxing)** — Moonshot routes degrade
+  incompatible tool definitions per request instead of failing the turn
 - **[WissssleyL / Lstarsky0](https://github.com/Lstarsky0)** — moved
   `docs/subagents` and `docs/mcp` onto the dictionary spine (#5337), with the
   metaTitle probe that keeps them there

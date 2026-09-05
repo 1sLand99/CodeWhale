@@ -139,11 +139,18 @@ test("registering an ssh computer installs the agent and probes the platform", a
   assert.equal(r.agentInstall.remotePlatform, process.platform, "platform probed via agent");
   assert.ok(fs.existsSync(path.join(fakeHome, ".codewhale-cu", "agent", "agent.mjs")), "agent pushed");
   assert.ok(fs.existsSync(path.join(fakeHome, ".codewhale-cu", "agent", "src", "backends", "darwin.mjs")), "src tree pushed");
-  // dispatch a real tool to the "remote" computer
+  // dispatch a real tool to the "remote" computer. A headless Linux host
+  // (CI) has no window manager tooling, so the remote backend fails closed
+  // with its named reason; that error still proves the round trip.
   const apps = await tool("list_apps", { computer: "box" });
-  assert.equal(apps.ok, true, JSON.stringify(apps.error ?? {}));
-  assert.equal(apps.computer.id, "box");
-  assert.ok(Array.isArray(apps.apps) && apps.apps.length > 0, "apps returned over the wire");
+  if (apps.ok) {
+    assert.equal(apps.computer.id, "box");
+    assert.ok(Array.isArray(apps.apps) && apps.apps.length > 0, "apps returned over the wire");
+  } else {
+    assert.equal(process.platform, "linux", JSON.stringify(apps.error ?? {}));
+    assert.equal(apps.error.code, "tool_error");
+    assert.match(apps.error.message, /wmctrl|swaymsg|hyprctl/u);
+  }
 });
 
 test("unknown computer fails closed with a named error", async () => {

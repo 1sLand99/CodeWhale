@@ -13,7 +13,9 @@ real_rustup_home=${RUSTUP_HOME:-${HOME}/.rustup}
 rustc_bin=$(RUSTUP_HOME="$real_rustup_home" rustup which rustc)
 toolchain_bin=${rustc_bin%/*}
 test_home_root=$(mktemp -d "${TMPDIR:-/tmp}/codewhale-test-home.XXXXXX")
-trap 'rm -rf -- "$test_home_root"' EXIT
+# Materialized builtin plugins leave read-only runtime trees behind; make the
+# tree writable first so cleanup never masks the command's own exit status.
+trap 'chmod -R u+w -- "$test_home_root" 2>/dev/null || true; rm -rf -- "$test_home_root" 2>/dev/null || true' EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM

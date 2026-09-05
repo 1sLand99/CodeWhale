@@ -4160,7 +4160,20 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         write_demo_bundle(tmp.path());
         let mut app = plugin_test_app(&tmp);
-        let discovery = crate::plugins::PluginDiscoveryContext::capture_pre_dotenv();
+        // Discover only the demo bundle: the host's real `~/.codewhale/plugins`
+        // and materialized builtin plugins must not leak diagnostics into this
+        // assertion (they did on a shared CI agent).
+        let plugin_config = crate::plugins::discovery::DiscoveryConfig {
+            workspace: tmp.path().to_path_buf(),
+            user_plugins_dir: tmp.path().join("user-plugins"),
+            workspace_plugins_dir: tmp.path().join(".codewhale/plugins"),
+            builtin_plugin_dirs: Vec::new(),
+            state_path: tmp.path().join("user-plugins/state.json"),
+        };
+        let discovery = crate::plugins::PluginDiscoveryContext::from_config_and_environment(
+            &plugin_config,
+            crate::plugins::HostEnvironment::capture(),
+        );
         app.plugin_registry = discovery.registry_for_workspace(tmp.path());
         let mut bundle = app.command_contexts();
         let mut parts = bundle
@@ -4203,7 +4216,20 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         write_demo_bundle(tmp.path());
         let mut app = plugin_test_app(&tmp);
-        let discovery = crate::plugins::PluginDiscoveryContext::capture_pre_dotenv();
+        // Discover only the demo bundle: the host's real `~/.codewhale/plugins`
+        // and materialized builtin plugins must not leak diagnostics into this
+        // assertion (they did on a shared CI agent).
+        let plugin_config = crate::plugins::discovery::DiscoveryConfig {
+            workspace: tmp.path().to_path_buf(),
+            user_plugins_dir: tmp.path().join("user-plugins"),
+            workspace_plugins_dir: tmp.path().join(".codewhale/plugins"),
+            builtin_plugin_dirs: Vec::new(),
+            state_path: tmp.path().join("user-plugins/state.json"),
+        };
+        let discovery = crate::plugins::PluginDiscoveryContext::from_config_and_environment(
+            &plugin_config,
+            crate::plugins::HostEnvironment::capture(),
+        );
         app.plugin_registry = discovery.registry_for_workspace(tmp.path());
         // Capture the review token before borrowing the mutable facet.
         let demo = app.plugin_registry.get("demo").unwrap();
