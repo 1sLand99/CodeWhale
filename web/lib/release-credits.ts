@@ -42,9 +42,11 @@ export const RELEASE_CONTRIBUTORS: string[] = [
 
 /**
  * Contributors who helped with reports, reproductions, and verification.
- *
- * Empty for 0.9.12: every credited contribution this cycle arrived as code
- * that landed. Leaving a name here that no landed change can point at would
- * be a nicer-looking ledger and a less true one.
+ * Each name points at a landed change in the 0.9.12 changelog.
  */
-export const RELEASE_HELPERS: string[] = [];
+export const RELEASE_HELPERS: string[] = [
+  "@slowly247",
+  "@ronohara",
+  "@Lujc0523",
+  "@senka9h",
+];

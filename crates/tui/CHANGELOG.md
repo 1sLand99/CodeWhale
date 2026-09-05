@@ -204,6 +204,18 @@ record is retained below the categorized release highlights.
   `docs/subagents` and `docs/mcp` onto the dictionary spine (#5337), with the
   metaTitle probe that keeps them there.
 
+Reports and reproductions that shaped this release:
+
+- **[@slowly247](https://github.com/slowly247)** — reported the Ollama input
+  budget collapsing to 1,024 tokens on 32K local models (#5820).
+- **[@ronohara](https://github.com/ronohara)** — reported the engine stopping
+  after recoverable network errors, with the reproduction that pinned the
+  discarded approval (#5769).
+- **[@Lujc0523](https://github.com/Lujc0523)** — asked for ACP session
+  configuration of mode and model (#5863).
+- **[@senka9h](https://github.com/senka9h)** — reported that `serve --acp`
+  lacked `session/list` and `session/load` (#5864).
+
 ### Added
 
 - Native ChatGPT sign-in for the `openai-codex` route: `codewhale auth
