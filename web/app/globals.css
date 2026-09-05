@@ -4,51 +4,56 @@
 @tailwind components;
 @tailwind utilities;
 
-/* ---------- root tokens — Codewhale Tideline ---------- */
+/* ---------- root tokens — Tidal Folio ---------- */
 /*
- * The site is the deep-ocean stage the Tideline TUI redesign paints: one dark
- * field everywhere, with the whale palette's semantic inks on top. The token
- * NAMES below keep their historical shape (`--paper`, `--ink`, `--indigo`) so
- * component rules and the docs light theme stay diffable, but the values now
- * resolve through ./tokens.css, generated from crates/tui/src/palette/tokens.rs
- * by scripts/export-design-tokens.py — the same field, chrome, and ink the
- * product renders, with no hand-copied hexes.
+ * The site is a folio read under the sea: paper at the surface, the whale's
+ * navy at depth. Above the waterline the field is Whale Ivory — the same
+ * ivory the TUI uses as body ink on its dark stage — and the ink is the Blue
+ * Stage light preset's navy. Below the waterline (`.ocean-column`, the
+ * footer, every terminal plate) the same names resolve to the dark whale
+ * tokens, so a component written once reads correctly on either side.
+ *
+ * The token NAMES keep their historical shape (`--paper`, `--ink`,
+ * `--indigo`) so every component rule stays diffable; the VALUES resolve
+ * through ./tokens.css, generated from crates/tui/src/palette/tokens.rs by
+ * scripts/export-design-tokens.py — no hand-copied hexes.
  */
 :root {
   /* RGB channel triples backing the Tailwind surface/ink tokens (see
-     tailwind.config.ts). The docs light theme overrides them for its
-     opt-in light sheet. */
-  --c-paper: var(--whale-bg-rgb);
-  --c-paper-deep: var(--whale-panel-rgb);
-  --c-paper-edge: var(--whale-border-rgb);
-  --c-ink: var(--whale-text-body-rgb);
-  --c-ink-soft: var(--whale-text-soft-rgb);
-  --c-ink-mute: var(--whale-text-muted-rgb);
-  --c-indigo: var(--whale-action-rgb);
-  --c-indigo-deep: 143 196 248; /* lifted action blue — hover on dark */
+     tailwind.config.ts). `.ocean-column` and the opt-in docs dark sheet
+     override them for their dark subtree. */
+  --c-paper: var(--whale-text-body-rgb);
+  --c-paper-deep: var(--light-elevated-rgb);
+  --c-paper-edge: var(--light-border-rgb);
+  --c-ink: var(--light-text-body-rgb);
+  --c-ink-soft: var(--light-text-soft-rgb);
+  --c-ink-mute: var(--light-text-muted-rgb);
+  --c-indigo: var(--whale-cobalt-rgb);
+  --c-indigo-deep: var(--whale-composer-rgb);
   --c-stage-soft: var(--whale-text-soft-rgb);
 
-  --paper: var(--whale-bg);
-  --paper-deep: var(--whale-panel);
-  --paper-edge: var(--whale-border);
-  /* Cards are the TUI's panel plate resting on the deep field. */
-  --paper-card: var(--whale-panel);
-  --paper-line: var(--whale-border);
-  --paper-line-soft: var(--whale-border);
-  --ink: var(--whale-text-body);
-  --ink-soft: var(--whale-text-soft);
-  --ink-mute: var(--whale-text-muted);
-  --indigo: var(--whale-action);
-  --indigo-deep: #8fc4f8;
-  --indigo-pale: rgb(var(--whale-action-rgb) / 0.16);
+  /* The sheet. */
+  --paper: var(--whale-text-body);
+  --paper-deep: var(--light-elevated);
+  --paper-edge: var(--light-border);
+  --paper-card: var(--light-panel);
+  --paper-line: var(--light-border);
+  --paper-line-soft: var(--light-border);
+  --ink: var(--light-text-body);
+  --ink-soft: var(--light-text-soft);
+  --ink-mute: var(--light-text-muted);
+  /* Action on paper is the ombre's dark end; hover sinks to brand navy. */
+  --indigo: var(--whale-cobalt);
+  --indigo-deep: var(--whale-composer);
+  --indigo-pale: rgb(var(--whale-cobalt-rgb) / 0.1);
   --action-on-dark: var(--whale-action);
-  /* Semantic state inks, straight from the status-bar grammar: green is
-     outcome, coral is cognition/attention, gold is the human mark. */
-  --ochre: var(--whale-human);
-  --jade: var(--whale-working-green);
+  /* Semantic state inks at their light-preset values so they clear AA on
+     ivory: green is outcome, coral is attention, gold is the human mark. */
+  --ochre: var(--light-human);
+  --jade: var(--light-live);
   --seafoam: var(--whale-accent-secondary);
-  --cobalt: var(--whale-action);
-  --cyan: var(--whale-cyan); /* reserved for the composer prompt glyph only */
+  --cobalt: var(--whale-cobalt);
+  --cyan: var(--light-live); /* reserved for the composer prompt glyph and the release line */
   --settings-state-active: var(--indigo);
   --settings-state-ready: var(--jade);
   --settings-state-muted: var(--ink-mute);
@@ -56,17 +61,16 @@
   --ocean-mid: var(--whale-panel);
   --ocean-current: var(--whale-ice);
   --ocean-mist: var(--whale-text-soft);
-  --ocean-coral: var(--whale-warning);
-  --signal-gold: var(--whale-human);
-  /* The whale mark is white ink on the deep-blue tile; off the tile it is a
-     white silhouette on the field. Gold stays reserved for human moments. */
-  --mark-ink: #ffffff;
+  --ocean-coral: var(--light-warning);
+  --signal-gold: var(--light-human);
+  /* The whale mark is brand navy on paper; below the waterline it is the
+     white silhouette. Gold stays reserved for human moments. */
+  --mark-ink: var(--whale-composer);
   --stage-text: var(--whale-text-body);
   --stage-soft: var(--whale-text-soft);
   --stage-muted: var(--whale-text-muted);
 
-  /* Blue Stage field, verbatim from crates/tui/src/palette/tokens.rs — the
-     same gradient the TUI samples down its water column. */
+  /* The water column, verbatim from crates/tui/src/palette/tokens.rs. */
   --stage-field-top: var(--whale-panel); /* surface */
   --stage-field-mid: var(--whale-chrome); /* the authored 42% break */
   --stage-field-deep: var(--whale-bg); /* deep field, and the footer seabed */
@@ -78,14 +82,16 @@
   --stage-dim: var(--whale-text-muted);
   --violet: var(--whale-mode-operate); /* 1px rules only, never text */
 
-  /* Type stacks. IBM Plex Sans Condensed carries the display voice; IBM Plex
-     Sans carries body copy, and JetBrains Mono carries terminal code. */
+  /* Type stacks. Newsreader carries the folio's display voice (h1/h2); IBM
+     Plex Sans Condensed carries the small headings; IBM Plex Sans carries
+     body copy, and JetBrains Mono carries terminal code. */
   --font-cjk: "PingFang SC", "Hiragino Sans GB", "Source Han Serif SC",
     "Noto Serif CJK SC", serif;
 
-  /* Hairline + code surfaces routed through vars so the docs light theme can
-     re-ink them without touching every rule. */
-  --hairline: rgb(var(--whale-action-rgb) / 0.2);
+  /* Hairline + code surfaces routed through vars so the dark subtrees can
+     re-ink them without touching every rule. Code plates are always the
+     terminal's own navy, on either side of the waterline. */
+  --hairline: rgb(var(--light-text-body-rgb) / 0.14);
   --code-bg: var(--whale-chrome);
   --code-fg: var(--whale-text-body);
 
@@ -94,9 +100,48 @@
   --container: min(100% - 2rem, 76rem);
   --hero-pad: clamp(3rem, 6vw, 4.75rem);
   --section-pad: clamp(2.75rem, 5vw, 4rem);
-  color-scheme: dark;
+  color-scheme: light;
 }
 
+/*
+ * Below the waterline. One rule, applied to every dark subtree — the water
+ * column on the homepage, the footer seabed, the opt-in docs dark sheet
+ * (`.docs-portal` is the docs layout root, which also carries `.docs-theme`)
+ * — so a component never needs to know which side of the surface it is on.
+ */
+.ocean-column,
+.site-footer,
+html[data-theme="dark"] .docs-portal {
+  --c-paper: var(--whale-bg-rgb);
+  --c-paper-deep: var(--whale-panel-rgb);
+  --c-paper-edge: var(--whale-border-rgb);
+  --c-ink: var(--whale-text-body-rgb);
+  --c-ink-soft: var(--whale-text-soft-rgb);
+  --c-ink-mute: var(--whale-text-muted-rgb);
+  --c-indigo: var(--whale-action-rgb);
+  --c-indigo-deep: 143 196 248; /* lifted action blue — hover on dark */
+  --paper: var(--whale-bg);
+  --paper-deep: var(--whale-panel);
+  --paper-edge: var(--whale-border);
+  --paper-card: var(--whale-panel);
+  --paper-line: var(--whale-border);
+  --paper-line-soft: var(--whale-border);
+  --ink: var(--whale-text-body);
+  --ink-soft: var(--whale-text-soft);
+  --ink-mute: var(--whale-text-muted);
+  --indigo: var(--whale-action);
+  --indigo-deep: #8fc4f8;
+  --indigo-pale: rgb(var(--whale-action-rgb) / 0.16);
+  --ochre: var(--whale-human);
+  --jade: var(--whale-working-green);
+  --cyan: var(--whale-cyan);
+  --ocean-coral: var(--whale-warning);
+  --signal-gold: var(--whale-human);
+  --mark-ink: #ffffff;
+  --settings-state-muted: var(--ink-mute);
+  --hairline: rgb(var(--whale-action-rgb) / 0.2);
+  color-scheme: dark;
+}
 /* ---------- base ---------- */
 html {
   -webkit-font-smoothing: antialiased;
@@ -106,14 +151,9 @@ html {
 }
 
 body {
-  /* The Tideline deepsea stage: one cool glow high on the field, then the
-     authored panel → chrome → deep descent. Fixed so the page scrolls over
-     the water instead of dragging a second gradient with it. */
-  background:
-    radial-gradient(1100px 460px at 68% -6%, rgb(var(--whale-action-rgb) / 0.13), transparent 67%),
-    linear-gradient(174deg, var(--stage-field-top) 0%, var(--stage-field-mid) 42%, var(--stage-field-deep) 82%);
-  background-attachment: fixed;
-  background-color: var(--paper);
+  /* The sheet: one opaque paper field. The descent into the water is drawn
+     by the waterline band and the ocean column, never by a page gradient. */
+  background: var(--paper);
   color: var(--ink);
   font-family: var(--font-body), "IBM Plex Sans", "Noto Sans SC", system-ui, sans-serif;
   font-feature-settings: "ss01", "cv11", "tnum";
@@ -127,7 +167,13 @@ body {
 main, header, footer, nav { position: relative; z-index: 1; }
 
 /* ---------- type ---------- */
-.font-display { font-family: var(--font-display), ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; font-weight: 500; }
+/* The folio voice: Newsreader for the big headings, set at book weight with
+   a little negative tracking so it reads as a title page rather than a
+   blog. Small headings stay on Plex Sans Condensed — the product's own
+   label face. */
+.font-display { font-family: var(--font-serif), "Newsreader", Georgia, "Times New Roman", serif; font-weight: 500; }
+.font-serif { font-family: var(--font-serif), "Newsreader", Georgia, "Times New Roman", serif; }
+.font-condensed { font-family: var(--font-display), ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; font-weight: 600; }
 .font-cjk { font-family: var(--font-cjk), "PingFang SC", "Source Han Serif SC", serif; }
 
 /* CJK paragraph rhythm — looser leading, wider tracking for body; tighter for headings */
@@ -181,17 +227,28 @@ html[lang="ko"] .dotline {
   letter-spacing: 0;
 }
 
-h1, h2, h3, h4 {
+h1, h2 {
+  font-family: var(--font-serif), "Newsreader", Georgia, "Times New Roman", serif;
+  font-weight: 500;
+  letter-spacing: -0.022em;
+  color: var(--ink);
+  text-wrap: balance;
+}
+h3, h4 {
   font-family: var(--font-display), ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   font-weight: 600;
   letter-spacing: -0.01em;
   color: var(--ink);
 }
 
-h1 { font-size: clamp(2.25rem, 4.8vw, 4.25rem); line-height: 1; word-break: keep-all; overflow-wrap: anywhere; }
-h2 { font-size: clamp(1.45rem, 2.6vw, 2.35rem); line-height: 1.08; word-break: keep-all; overflow-wrap: anywhere; }
-h3, h4 { font-size: 1.12rem; line-height: 1.25; font-weight: 500; }
-h1.font-display, h2.font-display { font-weight: 600; }
+h1 { font-size: clamp(2.5rem, 5.6vw, 5rem); line-height: 1.02; word-break: keep-all; overflow-wrap: anywhere; }
+h2 { font-size: clamp(1.6rem, 2.9vw, 2.6rem); line-height: 1.1; word-break: keep-all; overflow-wrap: anywhere; }
+h3, h4 { font-size: 1.12rem; line-height: 1.25; font-weight: 600; }
+h1.font-display, h2.font-display { font-weight: 500; }
+/* Han has no serif/sans distinction to spend; the CJK stack already leads
+   with a serif. */
+html[lang="zh"] h1, html[lang="ja"] h1, html[lang="ko"] h1,
+html[lang="zh"] h2, html[lang="ja"] h2, html[lang="ko"] h2 { letter-spacing: 0; font-weight: 600; }
 
 /* `overflow-wrap: anywhere` keeps long English headings safe, but can strand
    CJK punctuation — or a lone numeral — on a line of its own. Strict CJK
@@ -246,7 +303,7 @@ html[lang="ko"] h3 {
   position: relative;
   overflow: hidden;
   border-bottom: 1px solid var(--hairline);
-  background: var(--paper);
+  background: transparent;
   color: var(--ink);
   padding-block: var(--hero-pad);
 }
@@ -419,7 +476,7 @@ mark.search-highlight {
   z-index: 30;
   top: 0;
   border-bottom: 1px solid var(--hairline);
-  background: rgb(var(--whale-bg-rgb) / 0.88);
+  background: rgb(var(--whale-text-body-rgb) / 0.94);
   backdrop-filter: blur(10px);
 }
 
@@ -497,7 +554,7 @@ mark.search-highlight {
   align-items: center;
   min-height: 2.25rem;
   padding: 0.35rem 0.85rem;
-  background: var(--indigo);
+  background: var(--indigo-deep);
   color: var(--paper);
   font-family: var(--font-mono), "JetBrains Mono", monospace;
   font-size: 0.7rem;
@@ -509,7 +566,7 @@ mark.search-highlight {
 }
 
 .paper-install-cta:hover {
-  background: var(--indigo-deep);
+  background: var(--indigo);
   color: var(--paper);
 }
 
@@ -600,10 +657,29 @@ mark.search-highlight {
 
 /* ---------- footer ---------- */
 .site-footer {
-  border-top: 1px solid rgb(var(--c-stage-soft) / 0.13);
+  position: relative;
   background: var(--ocean-deep);
   color: var(--stage-soft);
 }
+
+/* The waterline before the seabed. Every page that is still on paper when
+   it reaches the footer descends here; the homepage is already under water
+   by then, so its column hides the band and the seabed simply continues. */
+.site-footer-waterline {
+  position: relative;
+  height: clamp(9rem, 18vw, 15rem);
+  overflow: hidden;
+  background: var(--whale-text-body);
+}
+.site-footer-waterline > svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+main:has(.ocean-column) + .site-footer .site-footer-waterline { display: none; }
+.site-footer-main { border-top: 1px solid rgb(var(--c-stage-soft) / 0.13); }
+main:has(.ocean-column) + .site-footer .site-footer-main { border-top-color: transparent; }
 
 .site-footer-main,
 .site-footer-meta {
@@ -782,53 +858,12 @@ mark.search-highlight {
 /*  Motion — entrances, considered hovers, and one-shot settles        */
 /* ------------------------------------------------------------------ */
 /*
- * Grammar: content settles into place the way type is laid on the sheet —
- * a short rise, an ease-out, and done; groups that read as groups arrive in
- * sequence. Everything in this section animates transform and/or opacity
- * only: nothing here can trigger layout, and the moving rules are gated on
- * `no-preference`, so reduced motion is the *absence* of motion rather than
- * an override fighting it.
- *
- * Arming is a JS concern (components/reveal-on-scroll.tsx): [data-reveal]
- * elements and [data-reveal-group] children are hidden only once the observer
- * has confirmed they are below the fold. Without JS, without
- * IntersectionObserver, or with reduced motion, the marks are inert and the
- * page is complete and static.
+ * Grammar: the page is complete and static; motion answers a person's action
+ * (a hover draws a rule, a press stamps a copy). The one authored ambient
+ * moment is the column breath above. Everything here animates transform
+ * and/or opacity only and is gated on `no-preference`, so reduced motion is
+ * the *absence* of motion rather than an override fighting it.
  */
-@media (prefers-reduced-motion: no-preference) {
-  [data-reveal].reveal-armed,
-  [data-reveal-group] > .reveal-armed {
-    opacity: 0;
-    transform: translateY(var(--reveal-rise, 14px));
-    transition:
-      opacity 340ms cubic-bezier(0.25, 0.46, 0.45, 0.94),
-      transform 340ms cubic-bezier(0.25, 0.46, 0.45, 0.94);
-    transition-delay: var(--reveal-delay, 0ms);
-  }
-
-  /* Group children arrive in sequence; a tighter rise keeps the queue reading
-     as one gesture rather than as separate hops. */
-  [data-reveal-group] > .reveal-armed {
-    --reveal-rise: 10px;
-  }
-
-  [data-reveal].reveal-armed.reveal-in,
-  [data-reveal-group] > .reveal-armed.reveal-in {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-
-/* A print or a reader-mode capture taken mid-scroll must not lose sections to
-   an armed-but-never-revealed state. */
-@media print {
-  [data-reveal].reveal-armed,
-  [data-reveal-group] > .reveal-armed {
-    opacity: 1;
-    transform: none;
-  }
-}
-
 /* The nav-link underline draw, extended to the other mono-voice links. Hover
    draws the rule; the transition is the whole effect, so reduced motion keeps
    the existing colour change and simply skips the draw. */
@@ -1915,8 +1950,13 @@ a.body-link:hover { background-size: 100% 6px; color: var(--ink); }
 }
 
 /* ------------------------------------------------------------------ */
-/*  Product home — the Tideline stage: one dark field, terminal chrome,     */
-/*  and the whale mark.                                                       */
+/*  Product home — the Tidal Folio: a sheet read under the sea.        */
+/*                                                                    */
+/*  The hero is one illustrated plate: paper at the top left, the      */
+/*  whale's water rising from the bottom right, and the real terminal  */
+/*  capture floating at the waterline. The reading sections that       */
+/*  follow are plain paper; the page descends for good at the          */
+/*  waterline band, and the footer is the seabed.                      */
 /* ------------------------------------------------------------------ */
 
 .product-home {
@@ -1929,343 +1969,352 @@ a.body-link:hover { background-size: 100% 6px; color: var(--ink); }
   margin-inline: auto;
 }
 
-/* Product hero background is now the shared `.hero` band defined above. */
+/* ---------- the hero plate ---------- */
 
-.product-hero-brandline {
-  display: flex;
-  align-items: center;
-  gap: 0.65rem;
-  margin-bottom: 1.35rem;
-  color: var(--ink);
-  font-size: 0.78rem;
-  font-weight: 600;
-}
-
-.product-hero-brandline em {
-  margin-left: 0.25rem;
-  padding: 0.2rem 0.48rem;
-  border: 1px solid var(--hairline);
-  border-radius: 4px;
-  color: var(--ink-mute);
-  font-family: var(--font-mono), "JetBrains Mono", monospace;
-  font-size: 0.7rem;
-  font-style: normal;
-  font-weight: 500;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
-
-.product-kicker {
-  margin: 0 0 0.85rem;
-  color: var(--ink-mute);
-  font-family: var(--font-mono), "JetBrains Mono", ui-monospace, monospace;
-  font-size: 0.7rem;
-  font-weight: 500;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-}
-
-.product-hero-grid,
-.paper-hero-grid {
+.folio-hero {
   position: relative;
+  isolation: isolate;
+  overflow: hidden;
+  padding-block: clamp(3rem, 7vh, 5.5rem) 0;
+  /* The plate ends on the deep field so the drawing can run to the edge. */
+  background: var(--paper);
+}
+
+/* The strata: geometry, not a picture. Anchored to the bottom edge so the
+   water always fills the plate's floor whatever the copy height. */
+.folio-strata {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+/* Copy on the paper at the left; the terminal and its running head on the
+   water at the right, so the plate reads as a page with a marginal figure
+   rather than a screenshot with a caption. */
+.folio-hero-grid {
+  position: relative;
+  z-index: 1;
   display: grid;
-  grid-template-columns: minmax(22rem, 1fr) minmax(22rem, 1fr);
-  gap: clamp(1.75rem, 3.5vw, 3.5rem);
-  align-items: start;
-  min-height: 0;
+  grid-template-columns: minmax(0, 1.15fr) minmax(18rem, 0.85fr);
+  grid-template-rows: auto auto;
+  column-gap: clamp(2rem, 5vw, 5rem);
+  row-gap: clamp(1.25rem, 2.5vw, 2rem);
+  align-items: end;
+  padding-bottom: clamp(3rem, 7vw, 6rem);
 }
 
-.product-hero-copy h1,
-.paper-hero-copy h1 {
-  color: var(--ink);
-  max-width: 38rem;
-  font-size: clamp(2.25rem, 4.6vw, 4.1rem);
-  line-height: 1;
-  letter-spacing: -0.01em;
+.folio-hero-copy {
+  position: relative;
+  isolation: isolate;
+  grid-column: 1;
+  grid-row: 1 / 3;
+  align-self: start;
+  max-width: 40rem;
+  padding-bottom: clamp(0.5rem, 2vw, 1.5rem);
 }
+.folio-hero-copy::before { content: ""; position: absolute; inset: -2rem -3rem; z-index: -1; background: var(--paper); filter: blur(24px); pointer-events: none; }
 
-.product-hero-copy,
-.product-install {
-  min-width: 0;
-}
-
-.product-hero-copy h1 span,
-.paper-hero-accent {
-  color: var(--indigo);
-}
-
-.paper-hero-lede,
-.product-hero-copy > p {
-  max-width: 38rem;
-  margin-top: 1.35rem;
+/* The one tracked line on the site: the plate's title-page rubric, set in
+   the terminal's mono because it is the product's own register. */
+.folio-kicker {
+  margin: 0 0 1.4rem;
   color: var(--ink-soft);
-  font-size: clamp(1rem, 1.5vw, 1.12rem);
-  line-height: 1.72;
+  font-family: var(--font-mono), "JetBrains Mono", ui-monospace, monospace;
+  font-size: 0.75rem;
+  font-weight: 500;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
 }
 
-.product-actions,
-.paper-actions {
+.folio-hero-copy h1 {
+  max-width: 14ch;
+  font-size: clamp(2.75rem, 6.4vw, 5.75rem);
+  line-height: 0.98;
+}
+
+.folio-lede {
+  max-width: 34rem;
+  margin: 1.6rem 0 0;
+  color: var(--ink-soft);
+  font-size: clamp(1.02rem, 1.5vw, 1.2rem);
+  line-height: 1.6;
+}
+
+.folio-actions {
   display: flex;
   flex-wrap: wrap;
   gap: 0.75rem;
-  margin-top: 1.55rem;
+  margin-top: 1.9rem;
 }
 
-.product-button {
+/* Buttons on paper: brand navy fills the primary; the secondary is an
+   outlined sheet. Sentence case in the body face — this is a title page,
+   not a status bar. */
+.folio-button {
   display: inline-flex;
-  min-width: 6.4rem;
-  min-height: 2.75rem;
+  min-height: 3rem;
   align-items: center;
   justify-content: center;
-  padding: 0.65rem 1rem;
-  border: 1px solid var(--stage-line);
+  gap: 0.5rem;
+  padding: 0.7rem 1.35rem;
+  border: 1px solid var(--indigo-deep);
   border-radius: 5px;
-  color: var(--ink);
-  font-family: var(--font-mono), "JetBrains Mono", monospace;
-  font-size: 0.75rem;
-  font-weight: 600;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  transition: border-color 150ms ease, background-color 150ms ease, color 150ms ease;
-}
-
-.product-button:hover {
-  border-color: var(--indigo);
-  background: var(--indigo-pale);
   color: var(--indigo-deep);
+  font-family: var(--font-body), "IBM Plex Sans", system-ui, sans-serif;
+  font-size: 0.95rem;
+  font-weight: 500;
+  line-height: 1;
+  transition: background-color 150ms ease, border-color 150ms ease, color 150ms ease;
 }
 
-.product-button-primary {
-  border-color: var(--indigo);
-  background: var(--indigo);
-  color: var(--paper);
+.folio-button:hover {
+  background: var(--indigo-pale);
 }
 
-.product-button-primary:hover {
-  border-color: var(--indigo-deep);
+.folio-button-primary {
   background: var(--indigo-deep);
   color: var(--paper);
 }
 
-.product-button-ghost {
-  border-color: transparent;
-  color: var(--ink-mute);
+.folio-button-primary:hover {
+  background: var(--indigo);
+  border-color: var(--indigo);
+  color: var(--paper);
 }
 
-.product-button-ghost:hover {
-  border-color: transparent;
-  background: transparent;
-  color: var(--indigo);
-}
+/* ---------- the terminal at the waterline ---------- */
 
-.product-install,
-.paper-install {
-  max-width: 32rem;
-  margin-top: 1.5rem;
-}
-
-.product-install pre.code-block,
-.paper-install pre.code-block {
-  border-color: var(--ocean-mid);
-  background: var(--code-bg);
-  color: var(--stage-text);
-}
-
-.paper-install-meta {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.5rem 1rem;
-  margin-top: 0.55rem;
-  font-family: var(--font-mono), "JetBrains Mono", monospace;
-  font-size: 0.75rem;
-  color: var(--ink-mute);
-}
-
-/* The hero status line is the TUI header, typeset on paper: a `cw` chip and
-   then a dot chain of the facts the binary would report about itself. Spacing
-   comes from `.dotline`; the separators are CSS punctuation. */
-.product-facts,
-.paper-facts {
-  margin-top: 1.1rem;
-  /* !important because this <p> is also `.product-hero-copy > p`, which sets
-     the lede's clamp at higher specificity. The status line is not a lede. */
-  font-size: 0.75rem !important;
-  color: var(--ink-mute);
-  line-height: 1.55;
-}
-
-.paper-facts .dotline-chip {
-  padding: 0.08rem 0.36rem;
-  border-radius: 3px;
-  background: var(--paper-deep);
-  color: var(--ink);
-  font-weight: 600;
-}
-
-.paper-facts > *:not(:last-child)::after {
-  color: var(--ink-mute);
-}
-
-/* Ocean terminal frame around the newest session capture */
-.product-shot,
-.paper-shot {
+.folio-shot {
+  grid-column: 2;
+  grid-row: 1;
+  align-self: end;
   position: relative;
+  width: min(100%, 40rem);
+  margin-top: clamp(4rem, 12vw, 11rem);
   margin: 0;
+  border: 1px solid rgb(var(--whale-ice-rgb) / 0.22);
+  border-radius: 8px;
   overflow: hidden;
-  border: 1px solid rgb(var(--whale-chrome-rgb) / 0.88);
-  border-radius: 6px;
-  background: var(--ocean-deep);
+  background: var(--whale-bg);
+  /* The one shadow on the site: the plate is lifted off the water, so the
+     shadow is soft, blue, and offset downward the way light through water
+     would cast it. */
+  box-shadow: 0 30px 60px -24px rgb(var(--whale-bg-rgb) / 0.75);
 }
 
-.product-shot-toolbar,
-.paper-shot-toolbar {
-  display: flex;
-  min-height: 2.55rem;
-  align-items: center;
-  justify-content: space-between;
-  gap: 1rem;
-  padding: 0.5rem 0.8rem;
-  border-bottom: 1px solid rgb(var(--whale-accent-secondary-rgb) / 0.16);
-  background: linear-gradient(180deg, var(--whale-chrome) 0%, var(--whale-bg) 100%);
-  color: var(--stage-muted);
-  font-family: var(--font-mono), "JetBrains Mono", monospace;
-  font-size: 0.7rem;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-}
-
-.product-shot-toolbar > span:first-child {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.5rem;
-  color: var(--signal-gold);
-}
-
-.product-shot img {
+.folio-shot img {
   display: block;
   width: 100%;
   height: auto;
-  background: var(--ocean-deep);
+  background: var(--whale-bg);
 }
 
-.product-shot figcaption {
-  padding: 0.6rem 0.8rem;
-  border-top: 1px solid rgb(var(--whale-accent-secondary-rgb) / 0.12);
-  background: var(--whale-bg);
-  color: var(--stage-muted);
+.folio-shot figcaption {
+  display: grid;
+  gap: 0.35rem;
+  padding: 0.7rem 0.95rem 0.8rem;
+  border-top: 1px solid rgb(var(--whale-ice-rgb) / 0.14);
+  background: var(--whale-chrome);
+  color: var(--stage-soft);
   font-family: var(--font-mono), "JetBrains Mono", monospace;
   font-size: 0.75rem;
-  text-align: right;
+  line-height: 1.5;
 }
 
-/* Paper home keeps light sticky nav (no dark ocean override). */
-/* The sticky nav is the same Tideline chrome on every route — no per-page
-   overrides. */
+/* The status line under the capture is the TUI header, typeset as facts:
+   a `cw` chip and a dot chain. Spacing comes from `.dotline`; the
+   separators are CSS punctuation. */
+.folio-shot .paper-facts {
+  color: var(--stage-muted);
+}
 
-.paper-start {
+.folio-shot .paper-facts .dotline-chip {
+  padding: 0.08rem 0.36rem;
+  border-radius: 3px;
+  background: var(--whale-panel);
+  color: var(--stage-text);
+  font-weight: 600;
+}
+
+.folio-shot .paper-facts > *:not(:last-child)::after {
+  color: var(--stage-hint);
+}
+
+/* The chapter marker on the water: the plate's running head. */
+.folio-chapter {
+  grid-column: 2;
+  grid-row: 2;
+  align-self: start;
+  justify-self: start;
+  width: min(100%, 22rem);
+  color: var(--stage-text);
+}
+
+.folio-chapter-num {
+  display: block;
+  padding-bottom: 0.7rem;
+  border-bottom: 1px solid rgb(var(--whale-ice-rgb) / 0.3);
+  color: var(--action-on-dark);
+  font-family: var(--font-mono), "JetBrains Mono", monospace;
+  font-size: 0.75rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.folio-chapter-title {
+  margin: 0.9rem 0 0;
+  font-family: var(--font-serif), "Newsreader", Georgia, serif;
+  font-size: clamp(1.35rem, 1.9vw, 1.7rem);
+  line-height: 1.25;
+}
+
+/* ---------- reading sections on paper ---------- */
+
+.folio-section {
+  padding-block: clamp(3.5rem, 7vw, 6rem);
   border-bottom: 1px solid var(--hairline);
-  padding-block: clamp(2.75rem, 5vw, 4.5rem);
 }
 
-.paper-start .product-start-lede {
-  margin-bottom: 1.5rem;
+.folio-section h2 {
+  max-width: 24ch;
 }
 
-/* The pull-quote band: one raised panel plate on the field. */
-.product-proof {
-  border-bottom: 1px solid var(--hairline);
-  background: var(--paper-card);
-}
-
-.product-proof-grid {
-  display: grid;
-  grid-template-columns: minmax(0, 1.15fr) minmax(18rem, 0.85fr);
-  gap: clamp(2rem, 6vw, 6rem);
-  align-items: center;
-  padding-block: clamp(2.7rem, 5vw, 4.5rem);
-}
-
-.product-proof h2 {
-  font-size: clamp(1.8rem, 3.3vw, 3rem);
-}
-
-.product-proof p {
-  padding-left: clamp(1.5rem, 4vw, 3rem);
-  border-left: 1px solid var(--paper-edge);
+.folio-section-lede {
+  max-width: 40rem;
+  margin: 1.1rem 0 0;
   color: var(--ink-soft);
-  line-height: 1.75;
+  font-size: 1.05rem;
+  line-height: 1.65;
 }
 
-/* Workflow: four numbered steps as panel plates on the field. */
-.product-workflow {
-  position: relative;
-  overflow: hidden;
-  padding-block: clamp(4rem, 8vw, 7rem);
-  border-bottom: 1px solid var(--hairline);
-}
-
-.product-workflow h2 {
-  max-width: 54rem;
-  color: var(--ink);
-  font-size: clamp(1.8rem, 3.3vw, 3rem);
-}
-
-/* Hairline-ruled panel plates on the field. No shadow on the plates
-   themselves: the hairline carries the separation. */
-.product-workflow-steps {
+/* What you gain: three ruled columns, no cards, no icons. */
+.folio-gain-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 1rem;
-  margin-top: clamp(2.5rem, 5vw, 4.5rem);
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin-top: clamp(2rem, 4vw, 3rem);
+  border-top: 1px solid var(--hairline);
 }
 
-.product-workflow-steps li {
-  position: relative;
-  min-height: 12rem;
-  padding: 1rem 1.1rem;
-  border: 1px solid var(--stage-line);
-  border-radius: 6px;
-  background: var(--paper-card);
+.folio-gain-grid > div {
+  padding: 1.5rem 1.75rem 1.75rem 0;
 }
 
-.product-workflow-steps li > span {
+.folio-gain-grid > div + div {
+  padding-left: 1.75rem;
+  border-left: 1px solid var(--hairline);
+}
+
+.folio-gain-grid h3 {
+  font-family: var(--font-serif), "Newsreader", Georgia, serif;
+  font-size: 1.45rem;
+  font-weight: 500;
+  letter-spacing: -0.015em;
+  line-height: 1.2;
+}
+
+.folio-gain-grid p {
+  margin-top: 0.75rem;
+  color: var(--ink-soft);
+  font-size: 0.95rem;
+  line-height: 1.65;
+}
+
+/* A two-column chapter: the argument on the left, the facts on the right. */
+.folio-chapter-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(16rem, 0.8fr);
+  gap: clamp(2rem, 6vw, 6rem);
+  align-items: start;
+}
+
+.folio-running-head {
+  display: block;
+  margin-bottom: 1.1rem;
   color: var(--indigo);
   font-family: var(--font-mono), "JetBrains Mono", monospace;
   font-size: 0.75rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
 }
 
-.product-workflow-steps h3 {
-  margin-top: 2.5rem;
+.folio-fact-list {
+  border-top: 1px solid var(--hairline);
+}
+
+.folio-fact-list > div {
+  display: grid;
+  grid-template-columns: minmax(8rem, 0.5fr) minmax(0, 1fr);
+  gap: 1rem;
+  padding: 0.95rem 0;
+  border-bottom: 1px solid var(--hairline);
+}
+
+.folio-fact-list dt {
   color: var(--ink);
-  font-size: 1.12rem;
+  font-family: var(--font-mono), "JetBrains Mono", monospace;
+  font-size: 0.8rem;
+  font-weight: 500;
 }
 
-.product-workflow-steps p {
-  margin-top: 0.65rem;
+.folio-fact-list dd {
   color: var(--ink-soft);
-  font-size: 0.84rem;
-  line-height: 1.65;
+  font-size: 0.92rem;
+  line-height: 1.55;
 }
+
+.folio-link {
+  display: inline-block;
+  margin-top: 1.4rem;
+  color: var(--indigo);
+  font-size: 0.95rem;
+  font-weight: 500;
+  text-decoration: underline;
+  text-decoration-color: rgb(var(--c-indigo) / 0.35);
+  text-underline-offset: 0.25em;
+  transition: text-decoration-color 150ms ease;
+}
+
+.folio-link:hover {
+  text-decoration-color: currentColor;
+}
+
+/* ---------- the waterline band ---------- */
+
+.folio-waterline {
+  position: relative;
+  height: clamp(11rem, 24vw, 20rem);
+  overflow: hidden;
+  background: var(--paper);
+}
+
+.folio-waterline > svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
 
 /* ---------- product: start-here band + shared getting-started steps ---------- */
 
 .product-start {
-  padding-block: clamp(4rem, 8vw, 7rem);
+  padding-block: clamp(3.5rem, 7vw, 6rem);
   border-bottom: 1px solid var(--hairline);
 }
 
 .product-start h2 {
-  max-width: 54rem;
-  font-size: clamp(1.8rem, 3.3vw, 3rem);
+  max-width: 24ch;
 }
 
 .product-start-lede {
-  margin-top: 0.9rem;
-  max-width: 46rem;
+  margin-top: 1.1rem;
+  max-width: 40rem;
   color: var(--ink-soft);
-  line-height: 1.75;
+  font-size: 1.05rem;
+  line-height: 1.65;
 }
 
 .product-start-links {
@@ -2277,8 +2326,8 @@ a.body-link:hover { background-size: 100% 6px; color: var(--ink); }
 
 .product-start-links a {
   color: var(--indigo);
-  font-family: var(--font-mono), "JetBrains Mono", monospace;
-  font-size: 0.78rem;
+  font-size: 0.95rem;
+  font-weight: 500;
 }
 
 .product-start-links a:hover {
@@ -2306,6 +2355,8 @@ a.body-link:hover { background-size: 100% 6px; color: var(--ink); }
   padding-left: 1.5rem;
   border-left: 1px solid var(--hairline);
 }
+.docs-content .gs-steps { grid-template-columns: minmax(0, 1fr); }
+.docs-content .gs-steps li + li { padding-left: 0; border-left: 0; }
 
 .gs-step-index {
   color: var(--indigo);
@@ -2499,17 +2550,19 @@ pre.gs-step-commands {
   font-size: 0.88rem;
 }
 
-/* ---------- one water column ---------- */
+/* ---------- below the waterline ---------- */
 /*                                                                            */
-/*  Tideline: the whole page is the deep-ocean stage. The field gradient      */
-/*  lives on <body> (fixed), so the column wrapper is transparent — bands      */
-/*  keep their own spacing and stage-line rules, but no band restarts the      */
-/*  gradient. The footer's --ocean-deep is the field's deep stop, so the       */
-/*  seabed continues without a seam and `.site-footer` needs no change.        */
+/*  The water column. Its tokens are the dark whale palette (see the shared    */
+/*  rule beside :root), so every component inside reads correctly without     */
+/*  knowing it is under water. The field starts at the panel surface just     */
+/*  under the waterline band and sinks to the deep stop the footer continues, */
+/*  so the seabed arrives without a seam.                                     */
 /* -------------------------------------------------------------------------- */
 .ocean-column {
   position: relative;
   isolation: isolate;
+  background: linear-gradient(180deg, var(--whale-chrome) 0%, var(--whale-bg) 38rem);
+  color: var(--ink);
 }
 
 /* Bands inside the column carry no field of their own. */
@@ -2526,27 +2579,62 @@ pre.gs-step-commands {
   border-color: var(--stage-line);
 }
 
-/* Hierarchy comes the TUI way — colour weight and ` · ` chains, not scale. */
 .ocean-column h2 {
-  max-width: 54rem;
+  max-width: 24ch;
   color: var(--stage-text);
-  font-size: clamp(1.6rem, 2.6vw, 2.4rem);
-  font-weight: 600;
-  letter-spacing: -0.025em;
-  line-height: 1.12;
 }
 
-/* Tight tracking collides with Han; extend the existing zh overrides rather
-   than routing around them. */
-html[lang="zh"] .ocean-column h2,
-html[lang="ja"] .ocean-column h2,
-html[lang="ko"] .ocean-column h2 {
-  letter-spacing: 0;
-  line-height: 1.5;
+/* Where Codewhale runs today: one honest table, no badges. */
+.folio-availability {
+  padding-block: clamp(3.5rem, 7vw, 6rem);
+  border-bottom: 1px solid var(--stage-line);
+}
+
+.folio-availability-list {
+  margin-top: clamp(2rem, 4vw, 3rem);
+  border-top: 1px solid var(--stage-line);
+}
+
+.folio-availability-list > div {
+  display: grid;
+  grid-template-columns: minmax(9rem, 0.35fr) minmax(0, 1fr);
+  gap: 1.25rem;
+  padding: 1.15rem 0;
+  border-bottom: 1px solid var(--stage-line);
+}
+
+.folio-availability-list dt {
+  color: var(--stage-text);
+  font-family: var(--font-serif), "Newsreader", Georgia, serif;
+  font-size: 1.3rem;
+  font-weight: 500;
+  line-height: 1.2;
+}
+
+.folio-availability-list dd {
+  color: var(--stage-soft);
+  font-size: 0.95rem;
+  line-height: 1.6;
+}
+
+.folio-availability-list dd strong {
+  display: block;
+  margin-bottom: 0.2rem;
+  color: var(--stage-text);
+  font-weight: 600;
+}
+
+.folio-availability-note {
+  max-width: 40rem;
+  margin-top: 1.4rem;
+  color: var(--stage-muted);
+  font-size: 0.88rem;
+  line-height: 1.6;
 }
 
 .product-surfaces {
-  padding-block: clamp(4rem, 8vw, 7rem);
+  padding-block: clamp(3.5rem, 7vw, 6rem);
+  border-bottom: 1px solid var(--stage-line);
 }
 
 .product-surface-list {
@@ -2576,22 +2664,14 @@ html[lang="ko"] .ocean-column h2 {
   display: inline-block;
   margin-top: 1.5rem;
   color: var(--action-on-dark);
-  font-size: 0.82rem;
+  font-size: 0.95rem;
 }
 
-/* The install band is the TUI composer.
- *
- * It used to be `--indigo-deep` full-bleed: a third register belonging to
- * neither system, and the last thing on the page that looked like a generic
- * marketing CTA. The composer is a *raised* plate in the product, so this one
- * band is opaque over the column rather than transparent through it, bracketed
- * above by Signal Gold and below by Operate violet — the product's exact
- * composer framing, and the one place gold is legitimate here, because what it
- * brackets is the point of human intent.
- *
- * The descendant selector is deliberate: it has to out-rank
- * `.ocean-column > section { background: transparent }`.
- */
+/* The install band is the TUI composer: a raised plate on the column,
+   bracketed above by Signal Gold and below by Operate violet — the
+   product's exact composer framing, and the one place gold is legitimate
+   here, because what it brackets is the point of human intent. The
+   descendant selector out-ranks `.ocean-column > section { transparent }`. */
 .ocean-column .product-install-band {
   padding-block: clamp(3rem, 6vw, 5rem);
   border-top: 1px solid color-mix(in srgb, var(--signal-gold) 40%, transparent);
@@ -2617,8 +2697,6 @@ html[lang="ko"] .ocean-column h2 {
   padding-left: 2.6rem;
 }
 
-/* The copy control sits on the field plate and must not inherit the band's
-   text ink. */
 .product-composer button {
   color: var(--ink);
 }
@@ -2628,7 +2706,7 @@ html[lang="ko"] .ocean-column h2 {
   top: 1rem;
   left: 1.1rem;
   z-index: 1;
-  color: var(--action-on-dark);
+  color: var(--cyan);
   font-family: var(--font-mono), "JetBrains Mono", ui-monospace, monospace;
   font-size: 0.78rem;
   line-height: 1.55;
@@ -2663,12 +2741,10 @@ html[lang="ko"] .ocean-column h2 {
   padding-bottom: 0.2rem;
   border-bottom: 1px solid var(--stage-line);
   color: var(--action-on-dark);
-  font-size: 0.82rem;
+  font-size: 0.95rem;
   transition: border-color 150ms ease;
 }
 
-/* The underline is already there; hover just sharpens it to the link's own
-   blue. No draw needed where a hairline already sits. */
 .product-install-band a:hover {
   border-color: var(--action-on-dark);
 }
@@ -2679,27 +2755,9 @@ html[lang="ko"] .ocean-column h2 {
 
 .product-community-grid {
   display: grid;
-  grid-template-columns: minmax(9rem, 0.42fr) minmax(0, 1.08fr) minmax(16rem, 0.75fr);
+  grid-template-columns: minmax(0, 1.1fr) minmax(16rem, 0.75fr);
   gap: clamp(2rem, 5vw, 5rem);
   align-items: end;
-}
-
-.product-community-illustration {
-  display: grid;
-  min-height: 10rem;
-  place-items: center;
-}
-
-.product-community-illustration svg {
-  max-width: 100%;
-}
-
-/* The closing full stop stays, in Ice rather than Signal Gold. Gold's budget
-   on this page is three marks — the whale, the composer's upper hairline, the
-   receipt's `report` line — and a decorative period is not one of them. */
-.product-community h2::after {
-  content: ".";
-  color: var(--ocean-current);
 }
 
 .product-community p {
@@ -2720,8 +2778,8 @@ html[lang="ko"] .ocean-column h2 {
 
 .product-community nav a {
   color: var(--ocean-current);
-  font-size: 0.82rem;
-  font-weight: 600;
+  font-size: 0.95rem;
+  font-weight: 500;
 }
 
 .product-community nav a:hover {
@@ -2734,38 +2792,49 @@ html[lang="ko"] .ocean-column h2 {
 }
 
 @media (max-width: 1050px) {
-  .product-hero-grid,
-  .paper-hero-grid {
+  .folio-hero-grid {
     grid-template-columns: 1fr;
-    min-height: auto;
+    grid-template-rows: auto auto auto;
   }
 
-  .product-hero-copy {
-    max-width: 48rem;
+  .folio-hero-copy {
+    max-width: 44rem;
   }
 
-  .product-shot {
-    width: min(100%, 56rem);
+  .folio-hero-copy {
+    grid-row: 1;
+  }
+
+  .folio-shot {
+    grid-column: 1;
+    grid-row: 2;
+    width: min(100%, 44rem);
+    margin-top: clamp(1.5rem, 6vw, 3rem);
+  }
+
+  .folio-chapter {
+    grid-column: 1;
+    grid-row: 3;
+    justify-self: start;
   }
 }
 
 @media (max-width: 760px) {
-  .product-proof-grid,
-  .product-boundaries-grid,
-  .product-install-grid,
-  .product-community-grid {
+  .folio-gain-grid {
     grid-template-columns: 1fr;
   }
 
-  .product-proof p {
-    padding-top: 1.5rem;
-    padding-left: 0;
-    border-top: 1px solid var(--paper-edge);
+  .folio-gain-grid > div,
+  .folio-gain-grid > div + div {
+    padding: 1.35rem 0;
     border-left: 0;
+    border-bottom: 1px solid var(--hairline);
   }
 
-  .product-workflow-steps {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+  .folio-chapter-grid,
+  .product-install-grid,
+  .product-community-grid {
+    grid-template-columns: 1fr;
   }
 
   .gs-steps {
@@ -2777,7 +2846,7 @@ html[lang="ko"] .ocean-column h2 {
     border-left: 0;
   }
 
-  .product-boundary-list > div,
+  .folio-availability-list > div,
   .product-surface-list > div {
     grid-template-columns: 1fr;
     gap: 0.45rem;
@@ -2803,10 +2872,9 @@ html[lang="ko"] .ocean-column h2 {
     max-width: 9.75rem;
   }
 
-  .product-hero-copy h1,
-  .paper-hero-copy h1 {
+  .folio-hero-copy h1 {
     max-width: 100%;
-    font-size: clamp(2rem, 10vw, 3rem);
+    font-size: clamp(2.3rem, 11vw, 3.2rem);
     word-break: normal;
     overflow-wrap: break-word;
   }
@@ -2815,21 +2883,13 @@ html[lang="ko"] .ocean-column h2 {
     display: none;
   }
 
-  .product-actions {
+  .folio-actions {
     display: grid;
     grid-template-columns: 1fr;
   }
 
-  .product-workflow-steps {
-    grid-template-columns: 1fr;
-  }
-
-  .product-workflow-steps li,
-  .product-workflow-steps li + li,
-  .product-workflow-steps li:nth-child(3) {
-    min-height: 0;
-    padding: 1rem 1.1rem;
-    border-left: 0;
+  .folio-button {
+    width: 100%;
   }
 
   .gs-steps {
@@ -2843,14 +2903,11 @@ html[lang="ko"] .ocean-column h2 {
     border-left: 0;
   }
 
-  .product-workflow-steps h3 {
-    margin-top: 1.25rem;
-  }
-
   .product-community nav {
     grid-template-columns: 1fr;
   }
 }
+
 
 /* ------------------------------------------------------------------ */
 /*  Documentation portal                                              */
@@ -3274,21 +3331,23 @@ html[lang="ko"] .ocean-column h2 {
 }
 
 /* ------------------------------------------------------------------ */
-/*  Docs theme — Tideline dark is the site default                     */
+/*  Docs theme — paper is the site default                            */
 /*                                                                    */
-/*  The site is dark everywhere. The docs theme toggle (docs routes     */
-/*  only) offers the Blue Stage light sheet as an opt-in, exactly the   */
-/*  way the TUI keeps Light as a preset beside the dark default. The    */
-/*  light override is set on `html[data-theme="light"] .docs-theme`;    */
-/*  the attribute is applied before paint by the inline script in the   */
-/*  locale layout, so there is no theme flash.                          */
+/*  The docs sheet reads on the same paper as the rest of the folio.   */
+/*  The theme toggle (docs routes only) offers the whale's dark stage  */
+/*  as an opt-in, exactly the way the TUI keeps Blue Stage beside its  */
+/*  light preset. The dark override is set on                          */
+/*  `html[data-theme="dark"] .docs-theme` through the shared            */
+/*  below-the-waterline rule beside :root; the attribute is applied     */
+/*  before paint by the inline script in the locale layout, so there   */
+/*  is no theme flash.                                                 */
 /* ------------------------------------------------------------------ */
 
 .docs-theme {
-  --docs-accent: var(--whale-action);
-  --docs-button-bg: var(--whale-panel);
-  --docs-button-border: var(--whale-border);
-  --docs-button-text: var(--whale-text-body);
+  --docs-accent: var(--whale-cobalt);
+  --docs-button-bg: var(--light-panel);
+  --docs-button-border: var(--light-border);
+  --docs-button-text: var(--light-text-body);
   background: var(--paper);
   color: var(--ink);
 }
@@ -3311,46 +3370,19 @@ html[lang="ko"] .ocean-column h2 {
   outline-offset: 2px;
 }
 
-/* The opt-in light sheet: Blue Stage light tokens, scoped to the docs
-   subtree so the shared nav/footer keep the Tideline field. */
-html[data-theme="light"] .docs-theme {
-  color-scheme: light;
-  --c-paper: 244 247 251;
-  --c-paper-deep: 232 238 248;
-  --c-paper-edge: 203 211 223;
-  --c-ink: 20 33 58;
-  --c-ink-soft: 69 81 104;
-  --c-ink-mute: 91 103 128;
-  --c-indigo: 49 95 216;
-  --c-indigo-deep: 36 72 166;
-  --paper: #f4f7fb;
-  --paper-deep: #e8eef8;
-  --paper-edge: #cbd3df;
-  --paper-card: #fffdf8;
-  --paper-line: #1b2230;
-  --paper-line-soft: #cbd3df;
-  --ink: #14213a;
-  --ink-soft: #455168;
-  --ink-mute: #5b6780;
-  --indigo: var(--whale-cobalt);
-  --indigo-deep: #2448a6;
-  --indigo-pale: #e8eef8;
-  --ochre: #7a5500;
-  --jade: #08766d;
-  --cobalt: var(--whale-cobalt);
-  /* 5.3:1 on --paper and 4.9:1 on --paper-deep, so the 0.62rem release-truth
-     label clears body-text contrast on the light sheet too. */
-  --cyan: #0b6f8c;
-  /* The whale silhouette re-inks to the brand navy (#142352). */
-  --mark-ink: var(--whale-composer);
-  --hairline: rgba(20, 35, 70, 0.14);
-  --code-bg: var(--whale-bg);
+/* The opt-in dark sheet: the whale's stage tokens, scoped to the docs
+   subtree so the shared nav keeps the paper. Surface/ink tokens come from
+   the shared below-the-waterline rule; only the docs-specific inks are
+   restated here. */
+html[data-theme="dark"] .docs-theme {
+  --docs-accent: var(--whale-action);
+  --docs-button-bg: var(--whale-panel);
+  --docs-button-border: var(--whale-border);
+  --docs-button-text: var(--whale-text-body);
+  --code-bg: var(--whale-chrome);
   --code-fg: var(--whale-text-body);
-  --docs-accent: var(--whale-cobalt);
-  --docs-button-bg: #fff;
-  --docs-button-border: #aeb8c6;
-  --docs-button-text: #1b2230;
 }
+
 
 /* ------------------------------------------------------------------ */
 /*  Shared surface states — empty / loading / error (surface-state.tsx) */
@@ -3838,4 +3870,261 @@ html[data-theme="light"] .docs-theme {
 
 @media (max-width: 640px) {
   .changelog-facts { grid-template-columns: 1fr; }
+}
+
+/* ---------- /product: the availability table on paper ---------- */
+/* The same list the homepage sets in the water, re-inked for the sheet. */
+.product-availability-paper,
+.product-availability-paper > div {
+  border-color: var(--hairline);
+}
+.product-availability-paper dt,
+.product-availability-paper dd strong {
+  color: var(--ink);
+}
+.product-availability-paper dd {
+  color: var(--ink-soft);
+}
+
+/* ---------- usage counting: the consent sheet and its footer control ---------- */
+/* A quiet sheet at the foot of the viewport, on paper, with the site's own
+   inks. It is not a modal: the page stays usable, and the choice is one
+   click either way. */
+.usage-consent {
+  position: fixed;
+  inset-inline: 0;
+  bottom: 0;
+  z-index: 40;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 1rem 2rem;
+  align-items: center;
+  width: var(--container);
+  margin: 0 auto 1rem;
+  padding: 1rem 1.25rem;
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  background: var(--light-panel);
+  color: var(--light-text-body);
+  box-shadow: 0 18px 40px -24px rgb(var(--whale-bg-rgb) / 0.55);
+}
+
+.usage-consent-copy strong {
+  display: block;
+  margin-bottom: 0.3rem;
+  font-family: var(--font-serif), "Newsreader", Georgia, serif;
+  font-size: 1.15rem;
+  font-weight: 500;
+}
+
+.usage-consent-copy p {
+  max-width: 64ch;
+  color: var(--light-text-soft);
+  font-size: 0.86rem;
+  line-height: 1.55;
+}
+.usage-consent-copy summary { min-height: 44px; padding-block: 0.6rem; cursor: pointer; font-size: 0.86rem; }
+.usage-consent-heading { display: flex; justify-content: space-between; align-items: center; gap: 1rem; }
+.usage-consent-dismiss { flex: 0 0 44px; width: 44px; height: 44px; color: var(--light-text-body); font-size: 1.5rem; }
+.usage-consent-dismiss:hover { background: var(--paper); }
+.usage-consent-dismiss:focus-visible { outline: 2px solid var(--indigo); outline-offset: 2px; }
+
+.usage-consent-status {
+  margin-top: 0.4rem;
+  color: var(--light-text-muted);
+}
+
+.usage-consent-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.usage-consent-button {
+  display: inline-flex;
+  min-height: 2.5rem;
+  align-items: center;
+  padding: 0.5rem 1rem;
+  border: 1px solid var(--whale-composer);
+  border-radius: 5px;
+  color: var(--whale-composer);
+  font-size: 0.9rem;
+  font-weight: 500;
+  transition: background-color 150ms ease, color 150ms ease;
+}
+
+.usage-consent-button:hover {
+  background: rgb(var(--whale-cobalt-rgb) / 0.1);
+}
+
+.usage-consent-button-primary {
+  background: var(--whale-composer);
+  color: var(--whale-text-body);
+}
+
+.usage-consent-button-primary:hover {
+  background: var(--whale-cobalt);
+  border-color: var(--whale-cobalt);
+}
+
+.usage-consent-button:focus-visible {
+  outline: 2px solid var(--whale-cobalt);
+  outline-offset: 2px;
+}
+
+.usage-data-link {
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.usage-data-link:hover {
+  color: var(--ocean-current);
+}
+
+@media (max-width: 640px) {
+  .usage-consent {
+    grid-template-columns: 1fr;
+    margin-bottom: 0.5rem;
+  }
+
+  .usage-consent-button {
+    flex: 1 1 auto;
+    justify-content: center;
+  }
+}
+
+/* ---------- docs: the reading sheet ---------- */
+/* Read mode: comprehension first. The article gets a book measure, the serif
+   title voice on its headings, generous leading, and a contents rail that
+   stays put while the sheet scrolls. */
+.docs-content {
+  max-width: 46rem;
+}
+
+.docs-content h1 {
+  font-size: clamp(2.2rem, 3.6vw, 3rem);
+  line-height: 1.05;
+  margin-bottom: 0.35rem;
+}
+
+.docs-content h2 {
+  font-family: var(--font-serif), "Newsreader", Georgia, serif;
+  font-weight: 500;
+  font-size: clamp(1.5rem, 2.2vw, 1.9rem);
+  line-height: 1.15;
+  letter-spacing: -0.015em;
+  margin-bottom: 0.25rem;
+}
+
+.docs-content h3 {
+  font-size: 1.05rem;
+}
+
+.docs-content p,
+.docs-content li {
+  max-width: 66ch;
+  font-size: 1rem;
+  line-height: 1.7;
+}
+
+.docs-content > section + section {
+  padding-top: 0.5rem;
+}
+
+.docs-content code.inline {
+  background: var(--paper-card);
+  border-color: var(--hairline);
+}
+
+.docs-content pre.code-block {
+  margin-block: 1rem;
+}
+
+/* The contents rail: a running index in the margin, sticky on tall screens. */
+@media (min-width: 901px) {
+  .docs-sidebar {
+    position: sticky;
+    top: 5.25rem;
+    max-height: calc(100vh - 6rem);
+    overflow-y: auto;
+    padding-right: 0.5rem;
+  }
+}
+
+.docs-sidebar-heading {
+  font-family: var(--font-serif), "Newsreader", Georgia, serif;
+  font-size: 1.05rem;
+  font-weight: 500;
+}
+
+.docs-sidebar-category {
+  font-family: var(--font-mono), "JetBrains Mono", monospace;
+  font-size: 0.68rem;
+  letter-spacing: 0.14em;
+}
+
+.docs-sidebar-link {
+  font-size: 0.86rem;
+  padding-block: 0.36rem;
+}
+
+.docs-sidebar-link-current {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.docs-sidebar-link-current::before {
+  content: "";
+  display: inline-block;
+  width: 0.4rem;
+  height: 1px;
+  margin-right: 0.45rem;
+  vertical-align: middle;
+  background: var(--indigo);
+}
+
+/* Topic rows on the hub: a title with room to breathe, the source path quiet. */
+.docs-topic-title {
+  font-size: 0.98rem;
+}
+
+.docs-topic-main p {
+  font-size: 0.86rem;
+  line-height: 1.6;
+}
+
+.docs-result-heading h2 {
+  font-family: var(--font-serif), "Newsreader", Georgia, serif;
+  font-weight: 500;
+  font-size: 1.6rem;
+}
+
+/* The docs hero band: the mark and the release line as one running head. */
+.docs-portal .hero {
+  padding-block: 1rem;
+  background: var(--paper-deep);
+}
+
+.docs-portal .portal-mark {
+  color: var(--ink);
+  font-family: var(--font-serif), "Newsreader", Georgia, serif;
+  font-size: 1.05rem;
+  font-weight: 500;
+}
+
+.release-truth {
+  margin-top: 0;
+}
+
+/* Contextual help plate at the foot of every page, on the sheet's own card. */
+.docs-help {
+  background: var(--paper-card);
+  border-color: var(--hairline);
+}
+
+.docs-help-copy h2 {
+  font-family: var(--font-serif), "Newsreader", Georgia, serif;
+  font-weight: 500;
+  font-size: 1.4rem;
 }

@@ -32,6 +32,13 @@ export const chrome: ChromeDict = {
   navCommunitySecondary: "Community",
   navContributeSecondary: "Contribute",
 
+  navProduct: "Produit",
+  navModels: "Modèles",
+  navPricing: "Tarifs",
+  navProductSecondary: "Product",
+  navModelsSecondary: "Models",
+  navPricingSecondary: "Pricing",
+
   skipToContent: "Aller au contenu principal",
 
   navPrimaryAria: "Navigation principale",
@@ -75,7 +82,7 @@ export const chrome: ChromeDict = {
   themeTitle: "Thème de la documentation · auto / clair / sombre",
 
   footerTagline:
-    "Codewhale plonge dans les profondeurs à votre place — documentation, code source et communauté du runtime open source.",
+    "Vos modèles. Plus capables ensemble. Documentation, code source et communauté du runtime open source.",
   footerProduct: "Produit",
   footerProject: "Projet",
   footerDocs: "Documentation",

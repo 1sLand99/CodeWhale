@@ -1,41 +1,28 @@
 import type { HomeDict } from "../types";
 
 /**
- * Spanish home dictionary — native rewrite in neutral (pan-Hispanic)
- * Spanish, informal `tú`, mirroring the current English direction:
- * bring-your-own-model, runs on your machine, no trace of the old
- * positioning.
- *
- * The hero keeps the English slogan's structure: the whale is the subject
- * that dives ("Codewhale se sumerge …"), so the second line ("para que tú
- * no tengas que hacerlo") reads as the contrast it is instead of telling
- * the reader to dive and then not to.
- *
- * Fixed vocabulary, matching crates/tui/locales/es-419.json: Plan / Act /
- * Operate, Ask / Auto-Review / Full Access, "postura de permisos",
- * "recibo", `Runtime`, `fleet`, `Workflow`, "compositor", "pie de página",
- * "alojado" for hosted. Commands, package names, and surface names stay
- * literal.
+ * Spanish home dictionary — native copy for the Tidal Folio landing page,
+ * in the current direction: your models, more capable together; agents
+ * and control on your own machine; availability stated per surface as it
+ * is today. Product vocabulary stays literal (Plan / Work / Operate, Ask /
+ * Auto-Review / Full Access, Codewhale, TUI, codewhale exec, Fleet).
  */
+
 export const home: HomeDict = {
-  metaTitle: "Codewhale — se sumerge en las profundidades para que tú no tengas que hacerlo.",
+  metaTitle: "Codewhale — Tus modelos. Más capaces juntos.",
   metaDescription:
-    "Codewhale se sumerge en las profundidades para que tú no tengas que hacerlo: un agente de programación de código abierto para la terminal. Trae tu propio modelo. Se ejecuta en tu máquina. Rust, MIT.",
-
-  kicker: "Código abierto · Trae tu propio modelo · Se ejecuta en tu terminal",
-  heroTitleA: "Codewhale se sumerge en las profundidades",
-  heroTitleB: "para que tú no tengas que hacerlo.",
+    "Codewhale es un sistema de computación agéntica de código abierto. Trae los modelos que ya usas —alojados, por gateway o locales— y ponlos a trabajar juntos en tu terminal, en tu máquina, bajo tu control. Rust, MIT.",
+  kicker: "Computación agéntica, en tus términos",
+  heroTitleA: "Tus modelos.",
+  heroTitleB: "Más capaces juntos.",
   heroIntro:
-    "{brand} es un agente de programación de código abierto para tu terminal. Dale un modelo y una tarea: lee tu código, edita archivos, ejecuta sus propias comprobaciones y se detiene cuando el trabajo está hecho o te necesita. Trae cualquier modelo, o combínalos: asigna un modelo distinto a cada rol.",
-  install: "Instalar",
-  docs: "Documentación",
-  copy: "Copiar",
-  copied: "Copiado ✓",
-
-  installEyebrow: "instalación en una línea",
-  installRequirement: "requiere Node 18+ — no hace falta Rust",
-  installOtherWays: "otras formas →",
-
+    "{brand} reúne los modelos que ya usas en una sola terminal y los hace trabajar como una tripulación —leyendo tu código, editando, ejecutando las comprobaciones— mientras tú decides qué puede hacer cada uno. Código abierto, en tu máquina.",
+  getCodewhale: "Obtener Codewhale",
+  exploreProduct: "Explorar el producto",
+  shotPreview: "Vista previa de la terminal",
+  shotBuild: "build de desarrollo v{version}",
+  screenshotAlt:
+    "Build de desarrollo de Codewhale v0.9.12 en una terminal: la marca de la ballena en braille, una sesión nueva sin historial, el compositor de mensajes y un pie que muestra Full Access, modo Work, dos tareas programadas, servidores MCP conectándose y el modelo GLM-5.3 al máximo esfuerzo",
   latestRelease: "Último lanzamiento {tag}",
   releaseUnavailable: "Estado del lanzamiento no disponible",
   currentSource: "Fuente",
@@ -43,53 +30,45 @@ export const home: HomeDict = {
   providerRoutes: "{count} proveedores",
   publishedRelease: "publicado",
   figcaptionSourceCandidate: "sin publicar",
-
-  shotSession: "Sesión actual",
-  screenshotAlt:
-    "Sesión de terminal actual de Codewhale con el modo Operate, la ballena, el compositor y el pie de página",
-  figcaption: "Sesión actual de Codewhale · modo Operate · postura de permisos Ask",
-
-  proofHeading: "Un shell de terminal submarino. Cualquier modelo. En tu máquina.",
-  proofBody:
-    "Trae el modelo que ya usas: alojado, de gateway o local. Plan / Work / Operate y las posturas de permisos explícitas mantienen la inmersión bajo tu control.",
-
-  sealDecides: "法",
-  decidesEyebrow: "Mira cómo decide",
-  decidesHeading: "Reglas que puedes ver en la traza",
-  decidesLede:
-    "Extractos de sesiones reales: la jerarquía de reglas del proyecto se observa en el razonamiento del modelo, no es solo una afirmación de esta página.",
-
-  sealWorkflow: "行",
-  workflowHeading: "De la tarea al cambio verificado.",
-  workflow: [
-    ["Inspeccionar", "Lee el repositorio, sus instrucciones y la tarea."],
-    ["Actuar", "Edita archivos dentro de límites de aprobación explícitos."],
-    ["Verificar", "Ejecuta las comprobaciones e inspecciona el resultado."],
-    ["Reportar", "Deja un recibo conciso y duradero."],
+  chapterTerminal: "Tu terminal",
+  chapterTerminalTitle: "Un lugar familiar para empezar.",
+  gainHeading:
+    "Lo que obtienes no es un chatbot. Es palanca sobre los modelos que ya pagas.",
+  gainLede:
+    "Una sesión puede tener varios modelos a la vez, cada uno en el rol que le diste, todos trabajando en el mismo repositorio bajo las mismas reglas.",
+  gain: [
+    ["Tus modelos", "Claves alojadas, un gateway o un runtime local sin clave alguna. Fija un modelo distinto a cada rol y conserva el proveedor que elegiste: un nombre de modelo nunca lo cambia por ti."],
+    ["Agentes capaces", "Modos Plan, Work y Operate; un fleet de subagentes para un mismo trabajo; herramientas para archivos, shell, web y MCP; sesiones que se guardan, se reanudan y se revierten."],
+    ["Control en tu máquina", "Ask, Auto-Review o Full Access: tú fijas cuánto hace antes de preguntar. Corre en local, en sandbox donde el sistema lo permite, con un registro de auditoría que puedes leer."],
   ],
-  receiptAria: "Ejemplo de recibo de trabajo",
-  receiptInspect: "repositorio e instrucciones",
-  receiptAct: "editar según la postura de permisos elegida",
-  receiptReport: "comprobaciones superadas · recibo guardado",
-
-  sealStart: "起",
-  startHeading: "¿Nuevo en Codewhale? Cuatro pasos de principio a fin.",
+  chapterModels: "Tus modelos",
+  modelsHeading: "Trae lo que tienes. No cambies nada que no hayas elegido.",
+  modelsBody:
+    "Codewhale incluye {count} proveedores y los trata como iguales. Guarda una clave una vez, nombra un modelo y la ruta se queda exactamente como la fijaste. Los modelos locales sobre vLLM, SGLang u Ollama no necesitan clave.",
+  modelsFacts: [
+    ["Alojado", "Tu propia clave de API, guardada con codewhale auth set"],
+    ["Gateway", "Un endpoint para muchos modelos; el proveedor lo sigues eligiendo tú"],
+    ["Local", "vLLM, SGLang, Ollama en localhost; normalmente sin clave"],
+  ],
+  modelsLink: "Ver todos los proveedores",
+  startHeading: "Cuatro pasos hasta la primera sesión.",
   startLede:
-    "Instalar → primera sesión sin claves → conectar un proveedor → primer Workflow de fleet. Los términos se definen en la página de vocabulario.",
-  startGuideLink: "Leer la guía de primeros pasos →",
-  startVocabularyLink: "Ver el vocabulario del producto →",
-
-  sealBoundaries: "界",
-  boundariesHeadingA: "Tu modelo.",
-  boundariesHeadingB: "Tus límites.",
-  boundariesBody:
-    "Elige explícitamente el modelo, el modo de trabajo y la postura de permisos. El costo desconocido se declara desconocido, y las interfaces en vista previa se marcan como tales.",
-  hostedGatewayLocal: "Modelos alojados, de gateway y locales",
-  planActOperateDesc: "De la planificación de solo lectura a la operación autónoma",
-  askAutoReviewDesc: "Elige la postura de permisos para el trabajo",
-  tuiExecWebDesc: "Interfaces de runtime interactivas y headless",
-
-  sealSurfaces: "面",
+    "Instala, abre una sesión sin clave, conecta un proveedor y luego configura un fleet cuando un modelo no baste.",
+  startGuideLink: "Leer la guía de primeros pasos",
+  startVocabularyLink: "Ver el vocabulario del producto",
+  chapterAccount: "Dónde funciona hoy",
+  availabilityHeading: "Disponible ahora, en desarrollo y todavía no: dicho sin rodeos.",
+  availabilityLede:
+    "La terminal es el producto publicado. Todo lo demás aparece con el estado en que realmente está.",
+  availability: [
+    ["Terminal", "Publicada", "Binarios de GitHub Releases para Linux, macOS y Windows; npm y Cargo son alternativas. Android en Termux está en vista previa."],
+    ["Aplicación web", "Inicio de sesión y control remoto disponibles", "Inicia sesión o crea una cuenta y escribe /rc en una sesión local en marcha para continuar esa misma sesión desde el navegador. El resto del banco de trabajo en el navegador sigue siendo una vista previa de desarrollo."],
+    ["Escritorio", "Build de desarrollo", "Existen builds alfa para macOS, Linux y Windows. Todavía no hay una aplicación de escritorio publicada."],
+    ["Computadoras en la nube", "Todavía no disponible", "Ejecutar trabajo en una computadora alojada está en desarrollo. Esta página lo dirá cuando funcione."],
+  ],
+  availabilityNote:
+    "La terminal no necesita cuenta. Una cuenta nunca es por sí misma un plan de pago, y nada en este sitio puede cobrarte.",
+  accountLink: "Crear una cuenta",
   surfacesHeading: "Usa el runtime donde ocurre el trabajo.",
   surfaces: [
     ["TUI", "Trabajo interactivo en la terminal"],
@@ -98,14 +77,13 @@ export const home: HomeDict = {
     ["Runtime API + MCP", "Integraciones locales"],
     ["fleet", "Trabajo multiagente duradero"],
   ],
-  runtimeLink: "Ver las interfaces de runtime y las notas de estabilidad →",
-
+  runtimeLink: "Ver las interfaces de runtime y las notas de estabilidad",
   installBandHeading: "Empieza con un solo comando.",
+  copy: "Copiar",
+  copied: "Copiado ✓",
   binaries: "Binarios",
   chinaMirrors: "Espejos en China",
-  installGuideLink: "Leer la guía de instalación →",
-
-  sealCommunity: "众",
+  installGuideLink: "Leer la guía de instalación",
   communityHeading: "Construido en público",
   communityBody:
     "Con licencia MIT y moldeado por colaboradores en runtimes, proveedores, plataformas, documentación y pruebas.",

@@ -8,18 +8,19 @@ import { readFileSync } from "node:fs";
  * each site variable uses (`--paper: var(--whale-bg)`) instead of repeating the
  * hex. The contract tests still need the literal color to check parity and
  * contrast, so this reads the generated file and flattens the alias chains
- * (`--whale-success` -> `--whale-working-green` -> `#9bd66f`).
+ * (`--whale-success` -> `--whale-working-green` -> `#9bd66f`). The Blue Stage
+ * light preset's `LIGHT_*` consts export as `--light-*` beside them.
  *
  * Node-only (`node:fs`): imported by the contract tests, never by a component.
  */
 const RAW: Record<string, string> = (() => {
   const css = readFileSync(new URL("../app/tokens.css", import.meta.url), "utf8");
   const raw: Record<string, string> = {};
-  for (const match of css.matchAll(/--(whale-[\w-]+):\s*([^;]+);/g)) {
+  for (const match of css.matchAll(/--((?:whale|light)-[\w-]+):\s*([^;]+);/g)) {
     raw[match[1]] = match[2].trim();
   }
   if (Object.keys(raw).length === 0) {
-    throw new Error("app/tokens.css defines no --whale-* properties");
+    throw new Error("app/tokens.css defines no --whale-* / --light-* properties");
   }
   return raw;
 })();
@@ -33,8 +34,8 @@ function flatten(name: string, seen = new Set<string>()): string {
   return flatten(alias[1], seen.add(name));
 }
 
-/** Resolve a `var(--whale-*)` reference to its literal value; pass anything else through. */
+/** Resolve a `var(--whale-*)` or `var(--light-*)` reference to its literal value; pass anything else through. */
 export function resolveWhale(value: string): string {
-  const match = value.match(/^var\(--(whale-[\w-]+)\)$/);
+  const match = value.match(/^var\(--((?:whale|light)-[\w-]+)\)$/);
   return match ? flatten(match[1]) : value;
 }

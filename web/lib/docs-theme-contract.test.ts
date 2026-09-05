@@ -5,7 +5,7 @@ import { resolveWhale } from "./whale-tokens";
 const CSS = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
 
 function selectorBlock(selector: string): string {
-  const match = CSS.match(new RegExp(`${selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*\\{([^}]*)\\}`, "s"));
+  const match = CSS.match(new RegExp(`(?:^|\n)${selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*\\{([^}]*)\\}`, "s"));
   if (!match) throw new Error(`Missing CSS selector: ${selector}`);
   return match[1];
 }
@@ -40,12 +40,19 @@ function contrastRatio(foreground: string, background: string): number {
 }
 
 describe("docs theme contrast contract", () => {
-  // Tideline: dark is the site default (the bare `.docs-theme` block inherits
-  // the dark surface tokens from `:root`), and the light sheet is the opt-in
-  // override. Both are checked.
+  // Tidal Folio: paper is the site default (the bare `.docs-theme` block
+  // inherits the paper tokens from `:root`), and the whale's dark stage is
+  // the opt-in override, set through the shared below-the-waterline rule
+  // plus the docs-specific inks. Both are checked.
+  const belowWaterline = () =>
+    selectorVars('.ocean-column,\n.site-footer,\nhtml[data-theme="dark"] .docs-portal');
   const themes = () => [
     { ...selectorVars(":root"), ...selectorVars(".docs-theme") },
-    { ...selectorVars(":root"), ...selectorVars('html[data-theme="light"] .docs-theme') },
+    {
+      ...selectorVars(":root"),
+      ...belowWaterline(),
+      ...selectorVars('html[data-theme="dark"] .docs-theme'),
+    },
   ];
 
   it("keeps current and hover sidebar text at WCAG AA contrast", () => {

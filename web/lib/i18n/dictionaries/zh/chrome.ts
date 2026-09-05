@@ -22,6 +22,13 @@ export const chrome: ChromeDict = {
   navCommunitySecondary: "Community",
   navContributeSecondary: "Contribute",
 
+  navProduct: "产品",
+  navModels: "模型",
+  navPricing: "价格",
+  navProductSecondary: "Product",
+  navModelsSecondary: "Models",
+  navPricingSecondary: "Pricing",
+
   skipToContent: "跳转到主要内容",
 
 
@@ -31,7 +38,7 @@ export const chrome: ChromeDict = {
   installCta: "安装 →",
 
   authSignIn: "登录",
-  authRegister: "注册",
+  authRegister: "创建账户",
   authGroupAria: "账户",
 
   wordmarkSeal: "深",
@@ -65,7 +72,8 @@ export const chrome: ChromeDict = {
   themeAria: "文档主题：{mode}（点击切换）",
   themeTitle: "文档主题 · 自动 / 浅色 / 深色",
 
-  footerTagline: "Codewhale 潜入深海，你不必亲自下潜——开源运行时的文档、源码与社区。",
+  footerTagline:
+    "你的模型，协作更强。开源运行时的文档、源码与社区。",
   footerProduct: "产品",
   footerProject: "项目",
   footerDocs: "文档",

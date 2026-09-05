@@ -51,18 +51,14 @@ const NON_PROSE_KEYS = new Set([
   "dateLocale",
   "githubFallback",
   "tickerLiveTag",
-  "sealDecides",
-  "sealWorkflow",
-  "sealStart",
-  "sealBoundaries",
-  "sealSurfaces",
-  "sealCommunity",
 ]);
 
 /** Chrome keys that are real sentences/labels and must be translated. */
 const CHROME_PROSE_KEYS = [
   "skipToContent",
   "navDocs",
+  "navProduct",
+  "navPricing",
   "navCommunity",
   "navPrimaryAria",
   "navHomeAria",
@@ -112,28 +108,28 @@ const HOME_PROSE_KEYS = [
   "heroTitleA",
   "heroTitleB",
   "heroIntro",
-  "installEyebrow",
-  "installRequirement",
-  "installOtherWays",
-  "shotSession",
+  "getCodewhale",
+  "exploreProduct",
+  "shotPreview",
+  "shotBuild",
   "screenshotAlt",
-  "figcaption",
-  "proofHeading",
-  "proofBody",
-  "decidesEyebrow",
-  "decidesHeading",
-  "decidesLede",
-  "workflowHeading",
-  "receiptAria",
-  "receiptInspect",
-  "receiptAct",
-  "receiptReport",
+  "chapterTerminal",
+  "chapterTerminalTitle",
+  "gainHeading",
+  "gainLede",
+  "chapterModels",
+  "modelsHeading",
+  "modelsBody",
+  "modelsLink",
   "startHeading",
   "startLede",
   "startGuideLink",
   "startVocabularyLink",
-  "boundariesBody",
-  "hostedGatewayLocal",
+  "chapterAccount",
+  "availabilityHeading",
+  "availabilityLede",
+  "availabilityNote",
+  "accountLink",
   "surfacesHeading",
   "runtimeLink",
   "installBandHeading",
@@ -153,9 +149,10 @@ function flattenStrings(dict: object): Record<string, string> {
     if (typeof value === "string") {
       out[key] = value;
     } else if (Array.isArray(value)) {
-      value.forEach((pair, i) => {
-        out[`${key}[${i}][0]`] = pair[0];
-        out[`${key}[${i}][1]`] = pair[1];
+      value.forEach((row: string[], i: number) => {
+        row.forEach((cell, j) => {
+          out[`${key}[${i}][${j}]`] = cell;
+        });
       });
     }
   }
@@ -458,14 +455,17 @@ describe("website dictionaries", () => {
     expect(pickText(pair, "ja"), "non-zh locales read the English side").toBe("English");
   });
 
-  it("keeps workflow and surface lists structurally aligned", () => {
+  it("keeps the gain, models, availability, and surface lists structurally aligned", () => {
     for (const locale of DICTIONARY_LOCALES) {
       const home = getHome(locale);
-      expect(home.workflow, `${locale} workflow`).toHaveLength(4);
+      expect(home.gain, `${locale} gain`).toHaveLength(3);
+      expect(home.modelsFacts, `${locale} modelsFacts`).toHaveLength(3);
+      expect(home.availability, `${locale} availability`).toHaveLength(4);
       expect(home.surfaces, `${locale} surfaces`).toHaveLength(5);
-      for (const pair of [...home.workflow, ...home.surfaces]) {
-        expect(pair[0].length, `${locale} empty title`).toBeGreaterThan(0);
-        expect(pair[1].length, `${locale} empty description`).toBeGreaterThan(0);
+      for (const row of [...home.gain, ...home.modelsFacts, ...home.availability, ...home.surfaces]) {
+        for (const cell of row) {
+          expect(cell.length, `${locale} empty cell`).toBeGreaterThan(0);
+        }
       }
     }
   });

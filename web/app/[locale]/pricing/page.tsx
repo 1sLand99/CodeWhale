@@ -37,7 +37,7 @@ export default async function PricingPage({ params }: { params: Promise<{ locale
             {pickText(PUBLIC_MEMBERSHIP_COPY.note, locale)}
           </p>
           <div className="portal-actions">
-            <a className="portal-button portal-button-primary" href={APP_SIGNUP_URL}>
+            <a className="portal-button portal-button-primary" href={APP_SIGNUP_URL} data-usage="signup">
               {pickText(PUBLIC_MEMBERSHIP_COPY.actions.createAccount, locale)}
             </a>
             <Link className="portal-button portal-button-secondary" href={`/${locale}/install`}>
@@ -45,7 +45,7 @@ export default async function PricingPage({ params }: { params: Promise<{ locale
             </Link>
           </div>
           <p className="pricing-note">
-            <a href={APP_LOGIN_URL} className="body-link">{pickText(PUBLIC_MEMBERSHIP_COPY.actions.signIn, locale)}</a>
+            <a href={APP_LOGIN_URL} className="body-link" data-usage="login">{pickText(PUBLIC_MEMBERSHIP_COPY.actions.signIn, locale)}</a>
           </p>
         </div>
       </section>

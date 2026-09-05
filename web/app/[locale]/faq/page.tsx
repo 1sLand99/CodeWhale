@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { GETTING_STARTED_STEPS } from "@/lib/content/getting-started";
 import { Seal } from "@/components/seal";
 import { FaqSearch } from "@/components/faq-search";
 import { buildFaqPageJsonLd } from "@/lib/faq-schema";
@@ -43,7 +44,10 @@ const faqEn: FaqItem[] = [
       <>
         <p className="mb-2">Published channels differ in timing and platform support:</p>
         <pre className="code-block mb-2">
-{`# npm (recommended — no Rust toolchain needed)
+{`# GitHub release binaries (recommended on macOS / Linux)
+${GETTING_STARTED_STEPS[0].commands[0]}
+
+# npm alternative — no Rust toolchain needed
 npm install -g codewhale
 
 # Cargo (needs Rust 1.88+; installs the codewhale command)
@@ -408,7 +412,10 @@ const faqZh: FaqItem[] = [
       <>
         <p className="mb-2">已发布渠道的更新时间与平台覆盖各不相同：</p>
         <pre className="code-block mb-2">
-{`# npm（推荐 — 无需 Rust 工具链）
+{`# GitHub Releases 二进制（macOS / Linux 推荐方式）
+${GETTING_STARTED_STEPS[0].commands[0]}
+
+# npm 其他方式 — 无需 Rust 工具链
 npm install -g codewhale
 
 # Cargo（需要 Rust 1.88+；安装 codewhale 命令）
