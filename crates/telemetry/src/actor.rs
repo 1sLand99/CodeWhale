@@ -266,3 +266,41 @@ pub(crate) fn parse_events(lines: &[String]) -> Vec<Event> {
     }
     events
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn local_persistence_times_out_behind_a_stalled_writer() {
+        // Hold the receiver alive without consuming it: the writer cannot
+        // acknowledge the FIFO barrier. No sleep or worker scheduling race.
+        let (tx, rx) = channel();
+        let handle = Handle { tx };
+        handle.record(Event::SessionStart {
+            source: crate::SessionSource::Unknown,
+        });
+        let started = std::time::Instant::now();
+        assert_eq!(
+            handle.persist_local(crate::CLI_PERSIST_TIMEOUT),
+            FlushOutcome::TimedOut
+        );
+        assert!(started.elapsed() >= crate::CLI_PERSIST_TIMEOUT);
+        // A generous liveness watchdog, separate from the unchanged 250ms
+        // production budget, avoids timing a busy test scheduler as the writer.
+        assert!(started.elapsed() < Duration::from_secs(5));
+
+        assert!(matches!(rx.try_recv(), Ok(Message::Event(_))));
+        let Message::PersistLocal(ack) = rx.try_recv().expect("local persistence request") else {
+            panic!("short CLI persistence must not request a network shutdown flush");
+        };
+        assert!(
+            ack.send(FlushOutcome::Buffered).is_err(),
+            "a late acknowledgement must not keep the exiting caller alive"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "the timeout must not enqueue a retry"
+        );
+    }
+}

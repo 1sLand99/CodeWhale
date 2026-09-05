@@ -10,9 +10,9 @@
 //!
 //! Two disciplines make the zero-request assertions non-vacuous:
 //!
-//! 1. Short CLI tests prove enabled runs persist complete local sessions while
-//!    disabled runs create no telemetry state. Short commands deliberately do
-//!    not wait for network delivery.
+//! 1. Short CLI tests require complete local sessions after an acknowledged
+//!    flush, or an explicit bounded-writer timeout. Disabled runs create no
+//!    telemetry state. Short commands do not wait for network delivery.
 //! 2. Full `exec` tests prove the buffered events reach a live recorder while
 //!    respecting the same persistent and run-scoped opt-outs.
 //!
@@ -29,6 +29,7 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
 use codewhale_config::{SetupState, TELEMETRY_NOTICE_VERSION};
+use futures_util::FutureExt;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use wait_timeout::ChildExt;
@@ -162,12 +163,14 @@ impl Fixture {
     }
 
     /// The cheapest subcommand that still traverses the whole telemetry
-    /// lifecycle: arm, `session_start`, dispatch, `session_end`, local
-    /// persistence. `completions` loads no config of its own, so its telemetry
-    /// state cannot be confused with subcommand-owned state.
+    /// lifecycle: arm, `session_start`, dispatch, `session_end`, bounded local
+    /// persistence. Verbose logging exposes the actual persistence outcome.
+    /// `completions` loads no config of its own, so its telemetry state cannot
+    /// be confused with subcommand-owned state.
     fn run_completions(&self) -> Output {
         let mut command = self.command();
         command.args([
+            "--verbose",
             "--config",
             self.config_path.to_str().expect("config path"),
             "completions",
@@ -309,12 +312,33 @@ fn buffered_events(fixture: &Fixture) -> Vec<Value> {
         .collect()
 }
 
-async fn assert_short_cli_buffered_without_network(
+async fn assert_short_cli_persistence_without_network(
     fixture: &Fixture,
     server: &MockServer,
+    output: &Output,
     why: &str,
 ) {
     assert_no_batches(server, why).await;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let outcomes: Vec<_> = stderr
+        .lines()
+        .filter_map(|line| {
+            line.split_once("telemetry local persistence outcome=")
+                .map(|(_, outcome)| outcome)
+        })
+        .collect();
+    assert_eq!(
+        outcomes.len(),
+        1,
+        "{why}: require exactly one persistence outcome, not an inference from exit time: {stderr}"
+    );
+    match outcomes[0] {
+        // The detached writer may still be queued when the bounded CLI exits.
+        // Only the real timeout receipt excuses an incomplete local session.
+        "TimedOut" => return,
+        "Buffered" => {}
+        outcome => panic!("{why}: unexpected local persistence outcome: {outcome}"),
+    }
     let events = buffered_events(fixture);
     assert!(
         events.iter().any(|event| event["event"] == "session_start"),
@@ -326,10 +350,10 @@ async fn assert_short_cli_buffered_without_network(
     );
 }
 
-// ── Short CLI persistence works ──────────────────────────────────────────
+// ── Short CLI persistence is bounded and observable ──────────────────────
 
-/// Short CLI commands must preserve the session for a later interactive flush
-/// without making command latency depend on the telemetry endpoint.
+/// An acknowledged short CLI flush must preserve a complete session. A slow
+/// local writer must report its deadline without waiting for the endpoint.
 #[tokio::test(flavor = "current_thread")]
 async fn current_explicit_consent_buffers_one_complete_session_without_network() {
     let server = start_recorder().await;
@@ -337,9 +361,86 @@ async fn current_explicit_consent_buffers_one_complete_session_without_network()
 
     fixture.write_config("telemetry = true\n");
     fixture.record_notice(true);
-    fixture.run_completions();
+    let output = fixture.run_completions();
 
-    assert_short_cli_buffered_without_network(&fixture, &server, "current explicit consent").await;
+    assert_short_cli_persistence_without_network(
+        &fixture,
+        &server,
+        &output,
+        "current explicit consent",
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn default_on_reports_local_persistence_without_network() {
+    let server = start_recorder().await;
+    let fixture = Fixture::new().with_endpoint(&server.uri());
+
+    let output = fixture.run_completions();
+
+    assert_short_cli_persistence_without_network(
+        &fixture,
+        &server,
+        &output,
+        "the documented default",
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn incomplete_short_cli_sessions_require_an_explicit_timeout() {
+    use std::os::unix::process::ExitStatusExt;
+
+    let server = start_recorder().await;
+    let fixture = Fixture::new().with_endpoint(&server.uri());
+    std::fs::create_dir_all(fixture.telemetry_root()).expect("create local buffer root");
+    std::fs::write(
+        fixture.telemetry_root().join("buffer.jsonl"),
+        "{\"event\":\"session_start\",\"source\":\"unknown\"}\n",
+    )
+    .expect("write incomplete session");
+
+    // A successful process exit, an acknowledged but incomplete append, or an
+    // unrecognized outcome must not be relabelled as an allowed deadline.
+    for diagnostic in [
+        "",
+        "info telemetry local persistence outcome=Buffered\n",
+        "info telemetry local persistence outcome=Dropped\n",
+        "info telemetry local persistence outcome=TimedOutLater\n",
+        "info telemetry local persistence outcome=TimedOut\ninfo telemetry local persistence outcome=Buffered\n",
+    ] {
+        let output = Output {
+            status: std::process::ExitStatus::from_raw(0),
+            stdout: Vec::new(),
+            stderr: diagnostic.as_bytes().to_vec(),
+        };
+        let rejected = std::panic::AssertUnwindSafe(assert_short_cli_persistence_without_network(
+            &fixture,
+            &server,
+            &output,
+            "unexplained missing session_end",
+        ))
+        .catch_unwind()
+        .await;
+        assert!(
+            rejected.is_err(),
+            "accepted invalid receipt: {diagnostic:?}"
+        );
+    }
+
+    let timed_out = Output {
+        status: std::process::ExitStatus::from_raw(0),
+        stdout: Vec::new(),
+        stderr: b"info telemetry local persistence outcome=TimedOut\n".to_vec(),
+    };
+    assert_short_cli_persistence_without_network(
+        &fixture,
+        &server,
+        &timed_out,
+        "explicit bounded writer timeout",
+    )
+    .await;
 }
 
 // ── Off is real ──────────────────────────────────────────────────────────
@@ -427,9 +528,10 @@ async fn telemetry_defaults_on_without_notice_buffers_a_complete_session() {
     let fixture = Fixture::new().with_endpoint(&server.uri());
     // Deliberately no `record_notice`.
 
-    fixture.run_completions();
+    let output = fixture.run_completions();
 
-    assert_short_cli_buffered_without_network(&fixture, &server, "default-on usage").await;
+    assert_short_cli_persistence_without_network(&fixture, &server, &output, "default-on usage")
+        .await;
     let state = SetupState::load_from(&fixture.setup_state_path()).expect("shown state");
     assert_eq!(
         state.telemetry_notice_shown_for.as_deref(),
@@ -450,9 +552,10 @@ async fn a_stale_accepted_notice_remains_on_without_synthesizing_current_accepta
         .save_to(&fixture.setup_state_path())
         .expect("write setup state");
 
-    fixture.run_completions();
+    let output = fixture.run_completions();
 
-    assert_short_cli_buffered_without_network(&fixture, &server, "default-on usage").await;
+    assert_short_cli_persistence_without_network(&fixture, &server, &output, "default-on usage")
+        .await;
     let state = SetupState::load_from(&fixture.setup_state_path()).expect("shown state");
     assert_eq!(
         state.telemetry_notice_shown_for.as_deref(),
@@ -614,6 +717,7 @@ async fn skip_onboarding_writes_no_telemetry_decision() {
     let mut command = fixture.command();
     let output = command
         .args([
+            "--verbose",
             "--config",
             fixture.config_path.to_str().expect("config path"),
             "--skip-onboarding",
@@ -639,7 +743,13 @@ async fn skip_onboarding_writes_no_telemetry_decision() {
             "skip-onboarding must leave the telemetry decision unset"
         );
     }
-    assert_short_cli_buffered_without_network(&fixture, &server, "default-on usage").await;
+    assert_short_cli_persistence_without_network(
+        &fixture,
+        &server,
+        &output,
+        "`--skip-onboarding` follows the default",
+    )
+    .await;
     let state = SetupState::load_from(&fixture.setup_state_path()).expect("shown state");
     assert_eq!(
         state.telemetry_notice_shown_for.as_deref(),
