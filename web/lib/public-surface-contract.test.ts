@@ -496,10 +496,12 @@ done
 
     expect(matrix.trust.hostedProviderBoundary).toContain("selected hosted provider");
     expect(matrix.trust.localInference).toContain("loopback local-model route");
-    // 0.9.6 makes anonymous usage counting default-on. The trust gate therefore
-    // requires both plain disclosure and a durable opt-out, plus explicit red
-    // lines around product content and agent timelines.
-    expect(matrix.trust.telemetry).toContain("on by default");
+    // The source candidate requires current processor consent. Disclosure
+    // alone is not acceptance, and existing opt-outs remain authoritative.
+    expect(matrix.trust.telemetry).toContain(`${matrix.sourceCandidate.version} source`);
+    expect(matrix.trust.telemetry).toContain("off by default");
+    expect(matrix.trust.telemetry).toContain("requires explicit consent to notice version 4");
+    expect(matrix.trust.telemetry).toContain("Codewhale and PostHog");
     expect(matrix.trust.telemetry).toContain("clear first-run disclosure");
     expect(matrix.trust.telemetry).toContain("durable opt-out");
     expect(matrix.trust.telemetry).toContain("does not collect conversations");

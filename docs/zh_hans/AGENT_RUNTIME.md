@@ -133,7 +133,7 @@ CodeWhale 应该在**形态**上与 Claude Code 收敛，而不是在品牌上�
 - `CODEWHALE_HOME` 设置为全新的每运行目录；
 - `CODEWHALE_SECRET_BACKEND=file`;`
 - `CODEWHALE_MCP_CONFIG` 指向一个生成的每运行 MCP JSON 文件，其中只包含 harness 提供的任务服务器（`{"mcpServers":{"task-tools":{"url":""}}}`；`mcpServers` 别名和基于 URL 的 Streamable HTTP / SSE 传输已经存在）；
-- `CODEWHALE_MEMORY=false` 和 `CODEWHALE_TELEMETRY=false`。匿名用量计数默认开启，所以每个封闭的 harness 都会显式设置运行级 kill 开关。它也保护调用者复用的 home，其普通会话会把聚合计数发送到实时端点（`https://telemetry.codewhale.net/v1/telemetry`，已发布的默认值），而不是发送到本地文件。这是一个硬地板——环境中显式的 "off" 胜过 `--telemetry true` 和配置里的 `telemetry = true`。如果 harness 想让已启用的 home 继续本地缓冲而不联系任何东西，则改为设置 `CODEWHALE_TELEMETRY_ENDPOINT=`（空）。参见 [`docs/TELEMETRY.md`](../TELEMETRY.md)；
+- `CODEWHALE_MEMORY=false` 和 `CODEWHALE_TELEMETRY=false`。0.9.12 源码中的匿名用量计数默认关闭，采集还要求明确接受当前版本的告知。每个封闭的 harness 仍应显式设置运行级 kill 开关，以保护调用者复用的、此前已同意采集的 home；这些 home 的普通会话可能把聚合计数发送到第一方端点（`https://telemetry.codewhale.net/v1/telemetry`），而不是本地文件。这是一个硬底线——环境中显式的 "off" 胜过 `--telemetry true` 和配置里的 `telemetry = true`。如果 harness 想让已启用且同意采集的 home 继续本地缓冲而不联系任何东西，则改为设置 `CODEWHALE_TELEMETRY_ENDPOINT=`（空）。参见 [`docs/TELEMETRY.md`](../TELEMETRY.md)；
 - `CODEWHALE_ALLOW_INSECURE_HTTP=1` **仅当** harness 提供受信任的 `http://` 拦截端点时设置（容器/隧道端点不总是回环）；
 - 当调用者提供 `--append-system-prompt` 和 `--disallowed-tools` 时使用它们。
 
