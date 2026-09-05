@@ -997,14 +997,10 @@ mod tests {
         let config = crate::config::Config {
             provider: Some("modelstudio-token-plan-anthropic".to_string()),
             providers: Some(crate::config::ProvidersConfig {
-                // All four plan/dialect variants share one key slot
-                // (modelstudio-token-plan); only the base URL is read from the
-                // anthropic entry.
-                modelstudio_token_plan: crate::config::ProviderConfig {
-                    api_key: Some("test-key".to_string()),
-                    ..Default::default()
-                },
+                // Durable secret-store keys share a family slot, but a literal
+                // config key belongs to the selected route's own table.
                 modelstudio_token_plan_anthropic: crate::config::ProviderConfig {
+                    api_key: Some("test-key".to_string()),
                     base_url: Some(base_url.to_string()),
                     ..Default::default()
                 },
