@@ -2,29 +2,20 @@
 
 > 阅读简体中文版：[zh_hans/TELEMETRY.md](zh_hans/TELEMETRY.md)
 
-**The 0.9.12 source requires explicit consent before collection.** The first
-interactive launch shows a localized, nonblocking invitation to review telemetry
-in `/settings`. Merely drawing that notice never records acceptance. Enabling
-telemetry in Settings accepts notice version `4`, which names **Codewhale and
-PostHog** as processors of the bounded counts below, and takes effect next launch.
-Missing or older acceptance remains off on every runtime surface, including
-headless commands. Every prior decline remains off. A config or environment
-`true` alone cannot accept the revised processor disclosure.
+**Usage analytics are on by default in the current 0.9.12 source.** The first
+interactive launch gives a localized, nonblocking disclosure naming **Codewhale
+and PostHog**, with a direct route to turn counting off. Notice version `5`
+describes this policy; displaying it is not recorded as human acceptance.
+Missing an older acceptance record does not turn a fresh installation off.
+Existing explicit opt-outs remain off across upgrades, and unreadable privacy
+state fails closed. Environment and CLI kill switches still take precedence.
 
-Headless users review the same disclosure with `codewhale config telemetry`,
-then explicitly accept its version:
-
-```sh
-codewhale config telemetry --accept-notice 4
-```
-
-This uses the same two-register transition as Settings: save the current
-acceptance and `telemetry = true`, taking effect for new sessions. Older version
-arguments, unreadable privacy records, and per-run `--set` overlays are refused.
-`config set telemetry true` saves only a preference and cannot accept the
-processor or silently replace a previous decline. `config get telemetry`
-reports the configuration preference and whether current consent is accepted.
-All environment/CLI kill switches remain effective after acceptance.
+Read the disclosure with `codewhale config telemetry`. Turn usage off in
+`/settings` or run `codewhale config set telemetry false`. Turning it back on
+in Settings or with `codewhale config set telemetry true` updates the existing
+durable preference and privacy records for new sessions. The compatibility
+command `codewhale config telemetry --accept-notice 5` remains available, but
+is not required for a fresh installation. Collection never includes work content or credentials.
 
 The PostHog sink is optional and inert until the ingest operator explicitly
 configures a project token and approved regional host, and records staging
@@ -44,7 +35,7 @@ which is the shipped default for `telemetry_endpoint`. What that service is,
 what it stores, and what it structurally cannot store is spelled out in "What
 the endpoint does" below.
 
-**To send nothing anywhere, keep telemetry off** (see "Turning it off"). To stay
+**To send nothing anywhere, turn telemetry off** (see "Turning it off"). To stay
 enabled but contact nobody, set `telemetry_endpoint = ""`: batches are then
 appended to `$CODEWHALE_HOME/telemetry/dryrun.jsonl` on your own machine, byte
 for byte what the server would have received, and no HTTP client is ever
@@ -75,8 +66,8 @@ share the wipe's ordering lock, so once opt-out returns no pre-opt-out write or
 POST remains in flight. If any part of that wipe fails, the tombstone is still
 there and the buffer is undrainable — a failed wipe fails closed. Every later
 run re-asserts the same tombstone for as long as the setting stands, so it
-survives. Turning telemetry back on in `/settings` records current explicit
-consent in both privacy registers; a fresh launch can then clear the tombstone. Nothing buffered before that point is
+survives. Turning telemetry back on in `/settings` records that explicit preference
+in both existing privacy registers; a fresh launch can then clear the tombstone. Nothing buffered before that point is
 ever sent.
 
 **The environment variable and the flag are kill switches, not opt-outs.**
@@ -129,8 +120,8 @@ claim one.
 
 ## When anything is sent, and where
 
-Nothing is collected or sent without current explicit consent, or when a
-persistent opt-out or run-scoped kill switch is in force. TUI and `exec` sessions have exactly one network flush point: an attempt
+Nothing is collected or sent when a persistent opt-out or run-scoped kill
+switch is in force, or when privacy state is unreadable. TUI and `exec` sessions have exactly one network flush point: an attempt
 during shutdown, bounded at three seconds. Short CLI commands such as `config`,
 `doctor`, and `auth` do not wait for that network request. They record
 `session_end`, seal the event to the local buffer with a much shorter bound, and
@@ -166,10 +157,12 @@ most once per flush point and never grows a queue.
 
 ## Event schema
 
-`SCHEMA_VERSION = 2`. `consent_version = 4` is required. The unchanged v1
-wire contract is still accepted for older runtime clients, but is stored only
-in first-party Analytics Engine and **never sent to PostHog**. New fields,
-surfaces, or `product_usage` events are refused in v1.
+`SCHEMA_VERSION = 3`. `notice_version = 5` identifies the disclosed default-on
+policy; it does not assert human consent or that a notice was seen. The closed
+v2 contract still accepts only `consent_version = 4`, retaining its original
+explicit opt-in meaning. Fields cannot be mixed between versions. The unchanged
+v1 contract remains first-party only and **never sent to PostHog**; it refuses
+new fields, surfaces, and `product_usage` events.
 
  Every field is an integer, a boolean, or a **closed enum string**, except exactly three bounded strings: `app_version`, `git_sha`, `panic_site`. Each of the three has a written rule and a test pinning the rule. **There is no free-form string type in this schema, and no open-keyed map.** That is the property that makes red line 3 enforceable rather than aspirational.
 
@@ -177,8 +170,8 @@ surfaces, or `product_usage` events are refused in v1.
 
 ```jsonc
 {
-  "schema_version": 2,
-  "consent_version": 4,
+  "schema_version": 3,
+  "notice_version": 5,
   "sent_at":     "2026-08-03T18:04:11Z",   // RFC3339 UTC, second precision
   "install_id":  "3f2a…",                  // uuid v4, rotates every 90 days
   "app_version": "0.9.12",
@@ -195,7 +188,7 @@ surfaces, or `product_usage` events are refused in v1.
 | Field | Type | Source anchor | Rule |
 |---|---|---|---|
 | `schema_version` | `u32` | const in `crates/telemetry/src/event.rs` | Bumped on any field add/remove/retype. Never reused. Pinned by a golden snapshot test. |
-| `consent_version` | `u32` | explicit processor choice, checked before init and flush | Exactly `4`; old disclosure or config alone does not authorize processing. |
+| `notice_version` | `u32` | policy constant in `crates/telemetry/src/event.rs` | Exactly `5`; identifies the disclosed opt-out policy, not a human acceptance record. |
 | `sent_at` | RFC3339 | `chrono::Utc::now()` | Second precision. Per-**batch** only — events carry no timestamps at all. |
 | `install_id` | uuid v4 | `crates/telemetry/src/envelope.rs` | Random, never derived, rotated every 90 days. See "Where it lives" above. |
 | `app_version` | string | `env!("CARGO_PKG_VERSION")`, as at `crates/telemetry/src/lib.rs:112` | Must match `^\d+\.\d+\.\d+(-[0-9A-Za-z.]+)?$`. |
@@ -211,19 +204,21 @@ surfaces, or `product_usage` events are refused in v1.
 
 ### Which surfaces emit
 
-Every runtime surface uses the same `decide` and flush recheck: current explicit
-acceptance, readable privacy state, resolvable home, valid endpoint, and no
-persistent opt-out or run kill switch. The interactive TUI shows the notice;
+Every runtime surface uses the same `decide` and flush recheck: readable privacy
+state, resolvable home, valid endpoint, and no persistent opt-out or run kill
+switch. Missing preferences default on. The interactive TUI shows the disclosure;
 headless commands never synthesize consent. Existing runtime events and counters
 are unchanged; adding PostHog does not add a second runtime collector.
 
-Website and application clients use `product_usage`, with consent version `4`,
+Website and application clients use `product_usage`, with notice version `5`,
 a random browser-local v4 ID rotated after 90 days, `os = other`, `arch = other`,
 `libc = none`, `tty = false`, and `git_sha = null`. They do not inspect the browser
 fingerprint. Their configured same-origin proxy forwards only this bounded JSON
 to the first-party ingest, with no incoming cookies, headers, URLs, or identities.
 The browser endpoint is inert if unconfigured. Browser opt-out clears pending
-counts and local identity; no pre-consent actions are backfilled.
+counts and local identity; actions taken while disabled are never backfilled.
+Product usage settings belong in the app and runtime; marketing privacy details
+and any website opt-out belong on the privacy page.
 
 ### Event: `install_or_upgrade`
 
@@ -399,7 +394,8 @@ Batches are **IP-stripped at ingest**. No IP is stored, logged, or joined to `in
 **Retention: three months.** That is Cloudflare's fixed window for Analytics Engine and it is not configurable, so it is a ceiling rather than a policy — there is no setting that could make it longer.
 
 **Optional PostHog processor.** After first-party storage, an explicitly
-configured ingest may forward only validated schema-v2 / consent-v4 batches to
+configured ingest may forward validated schema-v3 / notice-v5 batches and
+legacy schema-v2 / consent-v4 batches to
 PostHog's [batch capture API](https://posthog.com/docs/api/capture). The only
 permitted origins are `https://us.i.posthog.com` and `https://eu.i.posthog.com`.
 Legacy v1 batches cannot reach that path. PostHog receives the same bounded

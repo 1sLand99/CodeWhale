@@ -13,9 +13,12 @@ and coupling the two would mean a telemetry change rebuilding the marketing site
 is the shipped default for `telemetry_endpoint`. workers.dev is disabled; that
 hostname is the only way in.
 
-The current source requires explicit notice-version-4 opt-in before new runtime
-collection. Prior declines and older/missing acceptance remain off. Legacy
-schema-v1 clients are accepted only into first-party Analytics Engine. A user who wants
+The current source defaults usage analytics on under notice version5, with a
+clear opt-out. Prior explicit declines remain off; a missing acceptance record
+is not treated as consent. Schema3 carries `notice_version: 5` policy metadata;
+legacy schema2 retains its original explicit `consent_version: 4` contract.
+Schema1 clients are accepted only into first-party Analytics Engine. Local
+schema3 validation is not proof this updated Worker has been deployed. A user who wants
 to contact nobody sets `telemetry_endpoint = ""`, which writes batches to
 `$CODEWHALE_HOME/telemetry/dryrun.jsonl` instead.
 
@@ -33,8 +36,8 @@ an untrusted host leaves the sink off.
 Deployment, token configuration, retention/privacy settings, and activation
 require separate operator approval; none is established by the local tests.
 
-Only validated schema-v2 batches carrying explicit `consent_version: 4` can
-reach the processor. Legacy v1 always remains first-party only. Capture uses
+Validated schema3 batches carrying `notice_version: 5` and legacy schema2
+batches carrying explicit `consent_version: 4` can reach the processor. Legacy v1 always remains first-party only. Capture uses
 `/batch/`, fixed anonymous/no-geo controls, no incoming headers, no cookies,
 no redirects, no response parsing, no retries, and a 1.5-second timeout.
 PostHog failure is isolated from the successful Analytics Engine write.
@@ -54,10 +57,11 @@ mocks do not prove edge behavior. See [Cloudflare's header behavior](https://dev
 
 The cross-repository CWC contract is generated, not independently authored:
 `node scripts/export-product-schema.mjs` (Node 22.18+) exports
-`schema/cwc-product-v2.schema.json` from this validator's constants. It accepts
+`schema/cwc-product-v3.schema.json` from this validator's constants. The v2
+artifact remains available for existing clients. It accepts
 only `web-app` / `desktop`, one closed `product_usage` event, and the fixed
 no-fingerprint browser envelope. Copies must be compared with this generated
-artifact when changing the schema. `test/golden/browser-v2.json` is a complete
+artifact when changing the schema. `test/golden/browser-v3.json` is a complete
 website wire example; CWC changes only its surface to `web-app` or `desktop`.
 `operations_summary` is separate operator-consented service health: six `u32`
 aggregates on `control-plane` with a new random install ID per batch, never
@@ -147,7 +151,7 @@ take the next free slot.
 | `blob17` | `sent_at` — the *batch* timestamp. Events carry none. |
 | `blob18` | `aggregate_counters` — closed JSON counts, for `product_usage` or `operations_summary` |
 | `blob19` | `schema_version` |
-| `blob20` | `consent_version`, empty for legacy v1 |
+| `blob20` | `privacy_version`: notice5 for v3, consent4 for v2, empty for v1; `blob19` keeps their meanings distinct |
 | `double1..10` | `counters`: `turns`, `tool_calls`, `fleet_dispatch`, `workflow_run`, `subagent_spawn`, `mcp_server_connected`, `memory_search`, `approval_modal_shown`, `approval_auto_allowed`, `command_palette_open` |
 | `double11..16` | `errors`: `auth_preflight_failed`, `provider_http_4xx`, `provider_http_5xx`, `tool_denied_by_policy`, `tool_timeout`, `network_error` |
 | `double17..20` | `turn_wall`: `lt_5s`, `5_30s`, `30_120s`, `gte_120s` |

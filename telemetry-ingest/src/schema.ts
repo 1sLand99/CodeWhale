@@ -17,7 +17,10 @@
  */
 
 /** `SCHEMA_VERSION` in `crates/telemetry/src/event.rs`. */
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
+
+/** Disclosed default-on policy, not a record of human acceptance. */
+export const NOTICE_VERSION = 5;
 
 /** Explicit consent to the PostHog processor disclosure. */
 export const CONSENT_VERSION = 4;
@@ -146,7 +149,7 @@ export const COLD_START_BUCKETS = [
 /** `Batch::FIELDS`, in declaration order. */
 export const ENVELOPE_FIELDS = [
   "schema_version",
-  "consent_version",
+  "notice_version",
   "sent_at",
   "install_id",
   "app_version",
@@ -160,7 +163,9 @@ export const ENVELOPE_FIELDS = [
 ] as const;
 
 /** The unchanged v1 contract never establishes processor consent. */
-export const LEGACY_ENVELOPE_FIELDS = ENVELOPE_FIELDS.filter((field) => field !== "consent_version");
+export const LEGACY_ENVELOPE_FIELDS = ENVELOPE_FIELDS.filter((field) => field !== "notice_version");
+/** V2 retains its original explicit-consent meaning and closed field set. */
+export const V2_ENVELOPE_FIELDS = [...LEGACY_ENVELOPE_FIELDS, "consent_version"];
 
 /** Aggregate product interactions; no page, account, session, or tool identifiers. */
 export const PRODUCT_COUNTER_FIELDS = [
@@ -280,15 +285,15 @@ const U32_MAX = 4294967295;
 /** Derived contract for CWC's product-only ingress; runtime events stay here. */
 export const CWC_PRODUCT_SCHEMA = {
   $schema: "http://json-schema.org/draft-07/schema#",
-  $id: "https://codewhale.net/schemas/cwc-product-telemetry-v2.json",
-  title: "Codewhale CWC aggregate telemetry v2, consent v4",
+  $id: "https://codewhale.net/schemas/cwc-product-telemetry-v3.json",
+  title: "Codewhale CWC aggregate telemetry v3, notice v5",
   description: "Generated from telemetry-ingest/src/schema.ts; do not edit the JSON artifact. No content or identity fields.",
   type: "object",
   additionalProperties: false,
   required: ENVELOPE_FIELDS,
   properties: {
     schema_version: { const: SCHEMA_VERSION },
-    consent_version: { const: CONSENT_VERSION },
+    notice_version: { const: NOTICE_VERSION },
     sent_at: { type: "string", pattern: SENT_AT_RE.source },
     install_id: { type: "string", pattern: INSTALL_ID_RE.source },
     app_version: { type: "string", maxLength: MAX_VERSION_LEN, pattern: VERSION_RE.source },
@@ -356,6 +361,7 @@ export type Event =
 export interface Batch {
   schema_version: number;
   consent_version?: number;
+  notice_version?: number;
   sent_at: string;
   install_id: string;
   app_version: string;
@@ -535,14 +541,18 @@ export function validateBatch(value: unknown): Accepted | Rejection {
   if (!isPlainObject(value)) return { ok: false, reason: "batch: not an object" };
 
   const legacy = value.schema_version === 1;
-  const keyError = keysExactly(value, legacy ? LEGACY_ENVELOPE_FIELDS : ENVELOPE_FIELDS, "batch");
-  if (keyError) return { ok: false, reason: keyError };
-
-  if (!legacy && value.schema_version !== SCHEMA_VERSION) {
+  const explicitConsent = value.schema_version === 2;
+  if (!legacy && !explicitConsent && value.schema_version !== SCHEMA_VERSION) {
     return { ok: false, reason: "batch.schema_version: unsupported" };
   }
-  if (!legacy && value.consent_version !== CONSENT_VERSION) {
+  const fields = legacy ? LEGACY_ENVELOPE_FIELDS : explicitConsent ? V2_ENVELOPE_FIELDS : ENVELOPE_FIELDS;
+  const keyError = keysExactly(value, fields, "batch");
+  if (keyError) return { ok: false, reason: keyError };
+  if (explicitConsent && value.consent_version !== CONSENT_VERSION) {
     return { ok: false, reason: "batch.consent_version: explicit current consent required" };
+  }
+  if (!legacy && !explicitConsent && value.notice_version !== NOTICE_VERSION) {
+    return { ok: false, reason: "batch.notice_version: current policy required" };
   }
   if (typeof value.sent_at !== "string" || !SENT_AT_RE.test(value.sent_at)) {
     return { ok: false, reason: "batch.sent_at: not RFC3339 UTC seconds" };
@@ -585,7 +595,7 @@ export function validateBatch(value: unknown): Accepted | Rejection {
     const event = value.events[index];
     if (isPlainObject(event)) {
       if (legacy && (event.event === "product_usage" || event.event === "operations_summary")) {
-        return { ok: false, reason: "events: aggregate product/operations events require schema v2" };
+        return { ok: false, reason: "events: aggregate product/operations events require schema v2 or v3" };
       }
       if (event.event === "operations_summary" && value.surface !== "control-plane") {
         return { ok: false, reason: "events: operations_summary requires control-plane surface" };

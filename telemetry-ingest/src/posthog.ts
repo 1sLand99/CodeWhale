@@ -1,5 +1,5 @@
 /** Optional processor for the existing validated ingest; no second collector. */
-import { CONSENT_VERSION, SCHEMA_VERSION, type Batch } from "./schema";
+import { CONSENT_VERSION, NOTICE_VERSION, SCHEMA_VERSION, type Batch } from "./schema";
 
 export interface PostHogConfig {
   /** Unset by default. Exactly one of the two regional HTTPS capture origins. */
@@ -13,11 +13,12 @@ export interface PostHogConfig {
 export const POSTHOG_TIMEOUT_MS = 1_500;
 const HOSTS = ["https://us.i.posthog.com", "https://eu.i.posthog.com"];
 
-/** Only v2 proves consent to third-party processing. Old accepted batches stay first-party. */
+/** V2 keeps its opt-in contract; v3 identifies the disclosed opt-out policy. */
 export async function deliverPostHog(batch: Batch, config: PostHogConfig): Promise<void> {
+  const explicitConsent = batch.schema_version === 2 && batch.consent_version === CONSENT_VERSION;
+  const disclosedPolicy = batch.schema_version === SCHEMA_VERSION && batch.notice_version === NOTICE_VERSION;
   if (
-    batch.schema_version !== SCHEMA_VERSION ||
-    batch.consent_version !== CONSENT_VERSION ||
+    !(explicitConsent || disclosedPolicy) ||
     batch.events.length === 0 ||
     config.POSTHOG_IP_SAFE_EGRESS_VERIFIED !== "true" ||
     !config.POSTHOG_HOST || !HOSTS.includes(config.POSTHOG_HOST) ||

@@ -3,6 +3,6 @@ import { writeFileSync } from "node:fs";
 import { CWC_PRODUCT_SCHEMA } from "../src/schema.ts";
 
 writeFileSync(
-  new URL("../schema/cwc-product-v2.schema.json", import.meta.url),
+  new URL("../schema/cwc-product-v3.schema.json", import.meta.url),
   `${JSON.stringify(CWC_PRODUCT_SCHEMA, null, 2)}\n`,
 );

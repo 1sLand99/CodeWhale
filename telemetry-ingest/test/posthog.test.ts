@@ -8,7 +8,8 @@ import {
 } from "../src/schema";
 import { goldenBatch, harness, postJson } from "./support";
 
-const browser = () => JSON.parse(readFileSync(new URL("./golden/browser-v2.json", import.meta.url), "utf8"));
+const browserV2 = () => JSON.parse(readFileSync(new URL("./golden/browser-v2.json", import.meta.url), "utf8"));
+const browser = () => JSON.parse(readFileSync(new URL("./golden/browser-v3.json", import.meta.url), "utf8"));
 const current = () => JSON.parse(readFileSync(new URL("../../crates/telemetry/tests/golden/v2.json", import.meta.url), "utf8"));
 const configured = () => ({
   ...harness().env,
@@ -19,7 +20,7 @@ const configured = () => ({
 
 afterEach(() => vi.unstubAllGlobals());
 
-describe("versioned processor consent", () => {
+describe("versioned processor policy", () => {
   it("accepts the original v1 byte shape first-party only even with an active sink", async () => {
     const fetch = vi.fn(); vi.stubGlobal("fetch", fetch);
     const { env, written } = harness();
@@ -31,16 +32,48 @@ describe("versioned processor consent", () => {
 
   it.each([undefined, 0, 3, 5, "4", true])("rejects missing or non-current consent %s before any sink", async (consent) => {
     const fetch = vi.fn(); vi.stubGlobal("fetch", fetch);
-    const batch = browser(); batch.consent_version = consent;
+    const batch = browserV2(); batch.consent_version = consent;
     const { env, written } = harness();
     expect((await worker.fetch(postJson(batch), { ...configured(), ...env })).status).toBe(400);
     expect(written).toHaveLength(0);
     expect(fetch).not.toHaveBeenCalled();
   });
 
+  it.each([undefined, 0, 4, 6, "5", true])("rejects missing or invalid v3 notice %s before any sink", async (notice) => {
+    const fetch = vi.fn(); vi.stubGlobal("fetch", fetch);
+    const batch = browser(); batch.notice_version = notice;
+    const { env, written } = harness();
+    expect((await worker.fetch(postJson(batch), { ...configured(), ...env })).status).toBe(400);
+    expect(written).toHaveLength(0);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("keeps explicit v2 consent distinct from default-on v3 notice metadata", async () => {
+    const fetch = vi.fn().mockResolvedValue(new Response(null, { status: 200 }));
+    vi.stubGlobal("fetch", fetch);
+    const { env, written } = harness();
+    for (const batch of [browserV2(), browser()]) {
+      expect((await worker.fetch(postJson(batch), { ...configured(), ...env })).status).toBe(204);
+    }
+    expect(written.map((point) => point.blobs.slice(18))).toEqual([["2", "4"], ["3", "5"]]);
+    const properties = fetch.mock.calls.map(([, init]) => JSON.parse(init.body).batch[0].properties);
+    expect(properties[0]).toMatchObject({ schema_version: 2, consent_version: 4 });
+    expect(properties[0]).not.toHaveProperty("notice_version");
+    expect(properties[1]).toMatchObject({ schema_version: 3, notice_version: 5 });
+    expect(properties[1]).not.toHaveProperty("consent_version");
+
+    fetch.mockClear();
+    for (const batch of [{ ...browserV2(), notice_version: 5 }, { ...browser(), consent_version: 4 }]) {
+      expect((await worker.fetch(postJson(batch), { ...configured(), ...env })).status).toBe(400);
+    }
+    expect(written).toHaveLength(2);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
   it("does not retrofit legacy batches with current consent or new events", async () => {
     for (const batch of [
       { ...goldenBatch(), consent_version: 4 },
+      { ...goldenBatch(), notice_version: 5 },
       { ...goldenBatch(), events: browser().events },
       { ...goldenBatch(), events: current().events.slice(-1) },
     ]) {
@@ -50,8 +83,9 @@ describe("versioned processor consent", () => {
 });
 
 describe("closed aggregate schema", () => {
-  it("accepts the runtime v2 fixture and browser product fixture", () => {
+  it("accepts the runtime v2 fixture and both browser product versions", () => {
     expect(validateBatch(current()).ok).toBe(true);
+    expect(validateBatch(browserV2()).ok).toBe(true);
     expect(validateBatch(browser()).ok).toBe(true);
   });
 
@@ -91,7 +125,7 @@ describe("closed aggregate schema", () => {
   });
 
   it("keeps the cross-repo JSON Schema derived from this authority", () => {
-    const artifact = JSON.parse(readFileSync(new URL("../schema/cwc-product-v2.schema.json", import.meta.url), "utf8"));
+    const artifact = JSON.parse(readFileSync(new URL("../schema/cwc-product-v3.schema.json", import.meta.url), "utf8"));
     expect(artifact).toEqual(CWC_PRODUCT_SCHEMA);
     expect(Object.keys(artifact.properties).sort()).toEqual([...ENVELOPE_FIELDS].sort());
     expect(artifact.properties.surface.enum).toEqual(["web-app", "desktop"]);
@@ -151,7 +185,7 @@ describe("bounded optional PostHog delivery", () => {
     expect(captured[0]).toMatchObject({
       event: "codewhale_product_usage", timestamp: browser().sent_at,
       properties: {
-        consent_version: 4, surface: "website",
+        schema_version: 3, notice_version: 5, surface: "website",
         distinct_id: `codewhale:${browser().install_id}`,
         $process_person_profile: false, $geoip_disable: true, $ip: null,
         counters: browser().events[0].counters,
@@ -159,6 +193,7 @@ describe("bounded optional PostHog delivery", () => {
     });
     expect(Object.keys(JSON.parse(init.body)).sort()).toEqual(["api_key", "batch"]);
     expect(captured[0].properties).not.toHaveProperty("install_id");
+    expect(captured[0].properties).not.toHaveProperty("consent_version");
   });
 
   it.each(["throws", 302, 429, 500])("isolates processor failure %s from first-party success without retry", async (failure) => {

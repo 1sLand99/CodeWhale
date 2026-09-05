@@ -1,18 +1,18 @@
 # Codewhale 产品遥测
 
-> 与本次英文版 [TELEMETRY.md](../TELEMETRY.md) 的 schema v2 / 同意版本 4 同步。
+> 与本次英文版 [TELEMETRY.md](../TELEMETRY.md) 的 schema v3 / 告知版本 5 同步。
 
-**0.9.12 源码要求先明确同意，再开始采集。** 首次交互启动显示本地化、非阻塞提示，指向 `/settings` 中的遥测设置。仅显示提示不会记录同意。主动启用该设置表示接受同意版本 `4`：Codewhale 和数据处理方 **PostHog** 可以处理下文列出的有限汇总计数，下一次启动生效。所有运行界面（包括无头命令）在缺少同意或同意版本过旧时均保持关闭；此前的拒绝继续有效。单独设置配置项或环境变量为 `true` 不能代替接受新版数据处理说明。
+**当前 0.9.12 源码默认开启匿名使用统计，可随时退出。** 首次交互启动显示本地化、非阻塞告知，列明 **Codewhale 和 PostHog**，并提供关闭入口。第 `5` 版告知说明这一默认开启政策；显示告知不等于代替用户记录同意。新安装缺少旧同意记录时仍默认开启；此前明确退出的选择继续有效，隐私状态不可读时保持关闭。环境和命令行关闭开关仍然优先。
 
 PostHog 转发默认未配置，只有运维另行授权、配置项目令牌和允许的区域主机，并记录实际出口不会转发原始客户端 IP 的预发布验证证据后才启用。源码和本地测试不代表已经部署、激活处理服务、验证出口或验证保留期限。
 
-无头用户可用 `codewhale config telemetry` 阅读相同说明，再运行 `codewhale config telemetry --accept-notice 4` 明确接受当前版本。它复用 Settings 的两个持久化记录写入流程，保存当前同意和 `telemetry = true`，供新会话使用；旧版本、不可读的隐私记录或同时使用每次运行的 `--set` 覆盖都会被拒绝。单独执行 `config set telemetry true` 只保存偏好，不能接受处理方或替换此前拒绝。`config get telemetry` 分别报告配置偏好和当前同意状态。环境及命令行关闭开关仍然有效。
+可用 `codewhale config telemetry` 阅读告知。通过 `/settings` 或 `codewhale config set telemetry false` 关闭统计。在 Settings 中明确重新开启，或执行 `codewhale config set telemetry true`，会更新现有偏好和隐私记录，供新会话使用。兼容命令 `codewhale config telemetry --accept-notice 5` 仍可使用，但新安装无需执行该命令。默认开启不会创建用户已同意的记录。
 
 Codewhale 不会收集对话、代码、提示词、文件、文件名/仓库名/分支名、模型内容或凭据。它不发送任何按回合或按工具的时间线。它只发送下面这个封闭的聚合 schema：版本和平台类别、会话时长/结果、功能/错误计数器，以及一个每 90 天轮换一次的随机安装 id。
 
 **现在有了一个真实的端点。** 已启用的会话会将其批次发送到第一方采集服务 `https://telemetry.codewhale.net/v1/telemetry`，这也是 `telemetry_endpoint` 的出厂默认值。该服务是什么、存储什么、结构上不可能存储什么，都在下面的"端点做什么"一节中说明。
 
-**要想不向任何地方发送任何内容，请保持遥测关闭**（见"关闭遥测"）。想保持启用但不联系任何人，请设置 `telemetry_endpoint = ""`：此时批次会被追加到你本机的 `$CODEWHALE_HOME/telemetry/dryrun.jsonl`，与服务端本会收到的内容逐字节一致，而且永远不会构造任何 HTTP 客户端。这个文件就是你对照现实审计本文档的方式。
+**要想不向任何地方发送任何内容，请关闭遥测**（见"关闭遥测"）。想保持启用但不联系任何人，请设置 `telemetry_endpoint = ""`：此时批次会被追加到你本机的 `$CODEWHALE_HOME/telemetry/dryrun.jsonl`，与服务端本会收到的内容逐字节一致，而且永远不会构造任何 HTTP 客户端。这个文件就是你对照现实审计本文档的方式。
 
 本文档就是 schema。它不是 schema 的摘要：`crates/telemetry` 中的一个测试会解析本文件的字段名，并断言与序列化器实际使用的结构体集合相等，因此文档里有而代码里没有——或代码里有而文档里没有——都会导致构建失败。
 
@@ -26,7 +26,7 @@ CODEWHALE_TELEMETRY=0 codewhale          # 终止开关：停止采集，不擦�
 codewhale --telemetry false              # 同样的终止开关，仅对单条命令生效
 ```
 
-**配置文件中的 `telemetry = false` 就是选择退出。** 它是一个底线：`--telemetry true` 和 `CODEWHALE_TELEMETRY=1` 都会输给它，因为一个可能被包装脚本意外撤销的设置算不上设置。它会删除随机安装 id，截断每个已缓冲事件和每条 dry-run 记录，并写入一个 tombstone。追加、身份/状态写入和投递共享同一次擦除的排序锁，因此一旦选择退出返回，就不会有任何退出前写入或 POST 仍在飞行。如果擦除的任何部分失败，tombstone 依然存在，缓冲区无法再排空——擦除失败即失败关闭。只要该设置仍然生效，每一次后续运行都会重新断言同一个 tombstone，因此它能一直存活；重新开启需要在 `/settings` 中明确接受当前说明并写入两个隐私记录；之后的新启动才能清除 tombstone。此前缓冲的任何内容都永远不会被发送。
+**配置文件中的 `telemetry = false` 就是选择退出。** 它是一个底线：`--telemetry true` 和 `CODEWHALE_TELEMETRY=1` 都会输给它，因为一个可能被包装脚本意外撤销的设置算不上设置。它会删除随机安装 id，截断每个已缓冲事件和每条 dry-run 记录，并写入一个 tombstone。追加、身份/状态写入和投递共享同一次擦除的排序锁，因此一旦选择退出返回，就不会有任何退出前写入或 POST 仍在飞行。如果擦除的任何部分失败，tombstone 依然存在，缓冲区无法再排空——擦除失败即失败关闭。只要该设置仍然生效，每一次后续运行都会重新断言同一个 tombstone，因此它能一直存活；重新开启需要在 `/settings` 中明确修改偏好并更新现有两个隐私记录；之后的新启动才能清除 tombstone。此前缓冲的任何内容都永远不会被发送。
 
 **环境变量和 flag 是终止开关，不是选择退出。** 本次运行期间遥测关闭，不写入任何内容，不发送任何内容——磁盘上也什么都不触碰、不删除。这是刻意的：一个为某条命令设置 `CODEWHALE_TELEMETRY=0` 的 harness 或 agent，绝不能悄悄丢弃机器所有者的安装 id 和 dry-run 记录。如果你想要会擦除的那种，请使用配置文件。
 
@@ -57,7 +57,7 @@ Codewhale 没有恢复出厂设置命令，因此本文档也不会声称有。
 
 ## 发送时机与发送去向
 
-缺少当前明确同意、持久选择退出或运行级终止开关生效时，不采集也不发送内容。TUI 和 exec 在退出时尝试一次网络 flush，限时三秒。短 CLI 命令仅将 session_end 封存到本地缓冲，留给后续交互会话发送；端点为空时可直接写入本地 dry-run。没有启动时 flush、会话中途 flush、按回合 flush 或按工具调用 flush。关机 flush 会在执行前立即从磁盘重新解析你的设置，因此从另一个终端写入的 `codewhale config set telemetry false` 会阻止一个已经在运行的会话的 flush。
+持久选择退出、运行级终止开关生效或隐私状态不可读时，不采集也不发送内容。TUI 和 exec 在退出时尝试一次网络 flush，限时三秒。短 CLI 命令仅将 session_end 封存到本地缓冲，留给后续交互会话发送；端点为空时可直接写入本地 dry-run。没有启动时 flush、会话中途 flush、按回合 flush 或按工具调用 flush。关机 flush 会在执行前立即从磁盘重新解析你的设置，因此从另一个终端写入的 `codewhale config set telemetry false` 会阻止一个已经在运行的会话的 flush。
 
 一次 flush 就是对已解析端点的一次 **`POST`**——默认是 `https://telemetry.codewhale.net/v1/telemetry`。请求携带 `content-type: application/json` 头、`user-agent: codewhale-telemetry/<app_version>` 头，以及批次主体。仅此而已：没有 cookie（HTTP 客户端在构建时就没有可禁用的 cookie jar）、没有重定向（直接拒绝）、没有 `Authorization` 头、没有自定义头、没有查询字符串。响应主体被丢弃不读；只查看状态类别。
 
@@ -69,14 +69,14 @@ Codewhale 没有恢复出厂设置命令，因此本文档也不会声称有。
 
 ## 事件 schema
 
-`SCHEMA_VERSION = 2`，要求 `consent_version = 4`。保留旧 v1 格式以接收旧运行客户端，但旧批次只写入第一方 Analytics Engine，绝不转发到 PostHog；v1 不接受新字段、新界面或 product_usage 事件。除恰好三个有界字符串（`app_version`、`git_sha`、`panic_site`）外，每个字段都是整数、布尔值或**封闭枚举字符串**。这三个字符串各自都有成文规则和一个钉住该规则的测试。**该 schema 中没有自由格式字符串类型，也没有开放键映射。** 正是这一性质使红线 3 可强制执行，而不是停留在愿望层面。
+`SCHEMA_VERSION = 3`，`notice_version = 5` 表示已公开说明的默认开启政策，不表示用户已同意或已看到告知。保留 v2 的封闭格式及 `consent_version = 4` 原有明确同意含义，各版本字段不能混用。v1 批次仍只写入第一方 Analytics Engine，绝不转发到 PostHog，也不接受新字段、新界面或 product_usage 事件。除恰好三个有界字符串（`app_version`、`git_sha`、`panic_site`）外，每个字段都是整数、布尔值或**封闭枚举字符串**。这三个字符串各自都有成文规则和一个钉住该规则的测试。**该 schema 中没有自由格式字符串类型，也没有开放键映射。** 正是这一性质使红线 3 可强制执行，而不是停留在愿望层面。
 
 ### 批次信封——每次 POST 都会发送
 
 ```jsonc
 {
-  "schema_version": 2,
-  "consent_version": 4,
+  "schema_version": 3,
+  "notice_version": 5,
   "sent_at":     "2026-08-03T18:04:11Z",   // RFC3339 UTC，秒级精度
   "install_id":  "3f2a…",                  // uuid v4，每 90 天轮换
   "app_version": "0.9.4",
@@ -93,7 +93,8 @@ Codewhale 没有恢复出厂设置命令，因此本文档也不会声称有。
 | 字段 | 类型 | 来源锚点 | 规则 |
 |---|---|---|---|
 | `schema_version` | `u32` | `crates/telemetry/src/event.rs` 中的常量 | 任何字段新增/删除/改型时递增。绝不复用。由 golden snapshot 测试钉住。 |
-| tsent_att | RFC3339 | tchrono::Utc::now()t | 秒级精度。仅按**批次**——事件本身完全不携带时间戳。 |
+| `notice_version` | `u32` | `crates/telemetry/src/event.rs` 中的政策常量 | 固定为 `5`；表明默认开启、可退出的政策版本，不是用户同意记录。 |
+| `sent_at` | RFC3339 | `chrono::Utc::now()` | 秒级精度。仅按**批次**——事件本身完全不携带时间戳。 |
 | `install_id` | uuid v4 | `crates/telemetry/src/envelope.rs` | 随机、绝不派生，每 90 天轮换。见上文"数据存放位置"。 |
 | `app_version` | string | `env!("CARGO_PKG_VERSION")`，即 `crates/telemetry/src/lib.rs:112` 处 | 必须匹配 `^\d+\.\d+\.\d+(-[0-9A-Za-z.]+)?$`。 |
 | `git_sha` | string \| null | `option_env!("CODEWHALE_RELEASE_BUILD_SHA")`——一个**新的** rustc-env | 前 12 个十六进制字符。仅当 `codewhale_build_support::release_build_sha` 在构建环境中看到 `DEEPSEEK_BUILD_SHA` 或 `GITHUB_SHA` 时才发送，即仅对发布 CI 构建。对所有本地构建的二进制无条件为 `null`，且不做任何形式的运行时查找。**绝不**是 `CODEWHALE_BUILD_COMMIT`——那会回退到 `git_commit`，是构建者的私有 HEAD。**绝不**是 `Thread.git_sha`（`crates/state/src/lib.rs:93`）——那是用户工作区的提交，是一条红线，只隔一个名字。 |
@@ -108,9 +109,9 @@ Codewhale 没有恢复出厂设置命令，因此本文档也不会声称有。
 
 ### 哪些界面发送
 
-所有运行界面使用同一个 `decide` 与发送前复查：要求当前明确同意、可读的隐私状态、可用的主目录、有效端点，并且没有持久退出或运行级终止开关。TUI 提供设置入口，无头命令不会代替用户同意。现有运行事件和计数器不变，不增加第二套采集器。
+所有运行界面使用同一个 `decide` 与发送前复查：要求可读的隐私状态、可用的主目录、有效端点，并且没有持久退出或运行级终止开关；新用户缺少偏好时默认开启。TUI 提供告知和设置入口，无头命令不会代替用户记录同意。现有运行事件和计数器不变，不增加第二套采集器。
 
-网站和应用使用 `product_usage`：同意版本 `4`，浏览器本地随机 v4 ID 每 90 天轮换；`os = other`、`arch = other`、`libc = none`、`tty = false`、`git_sha = null`，不读取浏览器指纹。同源代理仅向第一方采集端转发封闭 JSON，不转发入站 cookie、请求头、URL 或身份。未配置端点时不发送。浏览器退出统计会清除待发送计数和本地 ID；同意之前的操作不会补发。
+网站和应用使用 `product_usage`：告知版本 `5`，浏览器本地随机 v4 ID 每 90 天轮换；`os = other`、`arch = other`、`libc = none`、`tty = false`、`git_sha = null`，不读取浏览器指纹。同源代理仅向第一方采集端转发封闭 JSON，不转发入站 cookie、请求头、URL 或身份。未配置端点时不发送。浏览器退出统计会清除待发送计数和本地 ID；关闭期间的操作不会补发。产品使用统计设置放在应用和运行时；营销网站的隐私说明及退出入口放在隐私页面。
 
 ### 事件：install_or_upgrade
 
@@ -268,7 +269,7 @@ Codewhale 没有恢复出厂设置命令，因此本文档也不会声称有。
 
 **保留期：三个月。** 这是 Analytics Engine 的固定窗口，不可配置，因此它是上限而非策略——没有任何设置能让它更长。
 
-**可选 PostHog 数据处理方。** 第一方存储完成后，明确配置的采集服务可把已验证的 schema-v2 / consent-v4 批次发往 [PostHog 批量采集 API](https://posthog.com/docs/api/capture)。只允许 `https://us.i.posthog.com` 和 `https://eu.i.posthog.com`；v1 批次永不进入此路径。PostHog 接收相同的有限字段，以批次时间作为事件时间，以 `codewhale:<install_id>` 作为匿名 `distinct_id`；事件名添加 `codewhale_` 前缀。固定设置 `$process_person_profile = false`、`$geoip_disable = true`、`$ip = null`。不转发请求元数据、身份识别、自动采集、会话回放、广告或工作内容，不添加 SDK。全新的服务端请求不携带用户 cookie 或身份验证头，不跟随重定向，限时 1.5 秒，不重试、不记录日志；处理方失败不改变已成功的第一方响应。
+**可选 PostHog 数据处理方。** 第一方存储完成后，明确配置的采集服务可把已验证的 schema-v3 / notice-v5 批次及保留原有含义的 schema-v2 / consent-v4 批次发往 [PostHog 批量采集 API](https://posthog.com/docs/api/capture)。只允许 `https://us.i.posthog.com` 和 `https://eu.i.posthog.com`；v1 批次永不进入此路径。PostHog 接收相同的有限字段，以批次时间作为事件时间，以 `codewhale:<install_id>` 作为匿名 `distinct_id`；事件名添加 `codewhale_` 前缀。固定设置 `$process_person_profile = false`、`$geoip_disable = true`、`$ip = null`。不转发请求元数据、身份识别、自动采集、会话回放、广告或工作内容，不添加 SDK。全新的服务端请求不携带用户 cookie 或身份验证头，不跟随重定向，限时 1.5 秒，不重试、不记录日志；处理方失败不改变已成功的第一方响应。
 
 PostHog 项目的保留期限和隐私设置是单独的部署配置，启用前必须复核。Analytics Engine 的三个月上限不能代表 PostHog 的保留期限。本地退出统计不会删除已经发送到处理方的数据；客户端没有远程删除 API。
 

@@ -66,7 +66,7 @@ export const BLOB_COLUMNS = [
   "sent_at", // blob17 the batch timestamp; events carry none
   "aggregate_counters", // blob18 closed product/operations JSON count object
   "schema_version", // blob19
-  "consent_version", // blob20 empty on legacy v1
+  "privacy_version", // blob20: v3 notice, v2 consent, empty on v1; blob19 disambiguates
 ] as const;
 
 /**
@@ -99,7 +99,8 @@ function toDataPoint(batch: Batch, event: Event): DataPoint {
   blobs[7] = batch.tty ? "true" : "false";
   blobs[16] = batch.sent_at;
   blobs[18] = String(batch.schema_version);
-  blobs[19] = batch.consent_version === undefined ? "" : String(batch.consent_version);
+  const privacyVersion = batch.schema_version === 3 ? batch.notice_version : batch.consent_version;
+  blobs[19] = privacyVersion === undefined ? "" : String(privacyVersion);
 
   let doubles = EMPTY_DOUBLES;
 

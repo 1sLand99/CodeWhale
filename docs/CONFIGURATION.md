@@ -1073,9 +1073,9 @@ the `CODEWHALE_*` value wins.
 - `CODEWHALE_MEMORY` (`1|on|true|yes|y|enabled` turns user memory on)
 - `CODEWHALE_MEMORY_PATH`
 - `CODEWHALE_TELEMETRY` / `DEEPSEEK_TELEMETRY` (legacy alias) — anonymous usage
-  counting is off by default in the 0.9.12 source and requires explicit
-  acceptance of the current processor disclosure. A `true` value sets a
-  preference; it cannot supply consent. Accepts `0|1|true|false|yes|no|on|off|enabled|
+  counting is on by default in the current 0.9.12 source, with a disclosure
+  naming Codewhale and PostHog and an easy durable opt-out. Prior explicit
+  declines remain off. Accepts `0|1|true|false|yes|no|on|off|enabled|
   disabled`. An explicit "off" is a **floor**: it beats `--telemetry true` and
   `telemetry = true` in config, and a value this list cannot read also resolves
   to off, because a typo in a kill switch must never resolve to "on". See
@@ -1795,29 +1795,21 @@ reasoning contract, and all four membership ids omit generic sampling fields.
   `eval`) default to `concise` unless config/env/CLI overrides it.
   Override per process with `CODEWHALE_VERBOSITY` or the legacy
   `DEEPSEEK_VERBOSITY` alias.
-- `telemetry` (bool, optional): anonymous usage counting, **`false` by default
-  in the 0.9.12 source**. Collection also requires explicit acceptance of
-  notice version `4`, which names Codewhale and PostHog. The first-run
-  disclosure and a `true` preference alone never grant consent. An explicit
-  `false` here is the durable
-  *opt-out* — it deletes the random install id,
-  truncates every buffered event, and leaves a tombstone that every later run
-  re-asserts for as long as the key says `false`. It is also a floor: `--telemetry true` and
-  `CODEWHALE_TELEMETRY=1` both lose to it. To enable collection for new sessions,
-  review and accept the notice in `/settings` or with
-  `codewhale config telemetry --accept-notice 4`; this records current consent
-  and saves `telemetry = true`. Override the preference per process with
-  `CODEWHALE_TELEMETRY` (legacy
-  alias `DEEPSEEK_TELEMETRY`), where an explicit "off" is a hard floor that
-  beats both this key and `--telemetry true` — but is a *kill switch*, not an
-  opt-out: it stops the run and erases nothing, so a harness disabling
-  telemetry for one command never discards the machine owner's install id or
-  dry-run records. A repo-local `.codewhale/config.toml` cannot set it. The
-  configuration preference and current consent are reported separately by
-  `codewhale config get telemetry`. Use `codewhale config telemetry` to read
-  the disclosure and acceptance status. Full
-  schema and red lines:
-  [`TELEMETRY.md`](TELEMETRY.md).
+- `telemetry` (bool, optional): anonymous usage counting, **`true` by default
+  in the current 0.9.12 source**. Notice version `5` names Codewhale and PostHog
+  and describes the opt-out policy; no acceptance is invented for a default
+  user. Existing explicit declines remain off. An explicit `false` here is the
+  durable *opt-out*: it deletes the random install id, truncates buffered and
+  dry-run events, and leaves a tombstone reasserted while the setting is false.
+  It is a floor: `--telemetry true` and `CODEWHALE_TELEMETRY=1` lose to it.
+  Use `/settings` or `codewhale config set telemetry true` to turn counting
+  back on explicitly for new sessions through the existing privacy transition. `CODEWHALE_TELEMETRY`
+  (legacy alias `DEEPSEEK_TELEMETRY`) and `--telemetry false` provide a run-scoped
+  kill switch that stops collection and delivery without erasing the owner's
+  state. A repo-local `.codewhale/config.toml` cannot set this preference.
+  `codewhale config telemetry` shows the disclosure; `codewhale config get
+  telemetry` reports preference and privacy status. Full schema and opt-out
+  behavior: [`TELEMETRY.md`](TELEMETRY.md).
 - `telemetry_endpoint` (string, optional): where batches are POSTed. Leaving it
   unset selects the shipped default,
   **`https://telemetry.codewhale.net/v1/telemetry`** — the first-party ingest
