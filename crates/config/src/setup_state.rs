@@ -39,13 +39,13 @@ pub const SETUP_STATE_FILE_NAME: &str = "setup_state.json";
 /// Version of the *telemetry notice content* — not the app version.
 ///
 /// The notice is owed whenever
-/// [`SetupState::telemetry_notice_decided_for`] does not match this string.
+/// [`SetupState::needs_telemetry_notice`] reports that it has not been shown.
 /// Bumping it re-shows the disclosure to prior acceptors and unanswered users,
 /// so it is bumped only
 /// when the collection policy, schema, or disclosure materially changes. Prior
 /// declines remain off. Keying it to the app version would re-prompt every
 /// release, which is nagging with extra steps.
-pub const TELEMETRY_NOTICE_VERSION: &str = "4";
+pub const TELEMETRY_NOTICE_VERSION: &str = "5";
 
 /// Canonical setup step ids. The ordering matches the first-run spine so a
 /// `BTreeMap<SetupStep, _>` renders in wizard order.
@@ -332,12 +332,8 @@ pub struct SetupState {
 
     // ── Telemetry notice ────────────────────────────────────────────────
     /// [`TELEMETRY_NOTICE_VERSION`] whose telemetry processor disclosure was explicitly accepted or declined.
-    /// `None` means the notice is still owed.
-    ///
-    /// Never auto-completed and never deferred-completed: unlike the
-    /// constitution checkpoint, which records a `Deferred` completion on the
-    /// skip-onboarding path, no explicit choice leaves this `None`. Collection
-    /// remains off while the notice is owed on the next interactive launch.
+    /// `None` means no explicit preference was recorded. Usage defaults on;
+    /// presenting a disclosure never changes these preference fields.
     ///
     /// These are *fields* rather than a new [`SetupStep`] variant on purpose:
     /// an unknown enum variant fails the whole record parse and silently drops
@@ -350,6 +346,10 @@ pub struct SetupState {
     /// processor disclosure was explicitly accepted for that version.
     #[serde(default, skip_serializing_if = "is_false")]
     pub telemetry_opt_in: bool,
+    /// Most recent telemetry policy disclosure actually presented locally.
+    /// This is display bookkeeping, never evidence of human acceptance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub telemetry_notice_shown_for: Option<String>,
 }
 
 #[allow(clippy::trivially_copy_pass_by_ref)]
@@ -375,6 +375,7 @@ impl Default for SetupState {
             inherited: false,
             telemetry_notice_decided_for: None,
             telemetry_opt_in: false,
+            telemetry_notice_shown_for: None,
         }
     }
 }
@@ -488,7 +489,39 @@ impl SetupState {
     /// count: the content changed, so the disclosure is owed again.
     #[must_use]
     pub fn needs_telemetry_notice(&self, version: &str) -> bool {
-        self.telemetry_notice_decided_for.as_deref() != Some(version)
+        self.telemetry_notice_shown_for.as_deref() != Some(version)
+            && self.telemetry_notice_decided_for.as_deref() != Some(version)
+    }
+
+    /// Record presentation without inventing a privacy preference.
+    pub fn record_telemetry_notice_shown(&mut self, version: impl Into<String>) -> &mut Self {
+        self.telemetry_notice_shown_for = Some(version.into());
+        self
+    }
+
+    /// Update only telemetry metadata from the latest readable sidecar.
+    ///
+    /// Disclosure bookkeeping and explicit preference writes share this lock:
+    /// a stale disclosure write must never erase a concurrently saved decline.
+    /// Missing state is fresh; corrupt state is never replaced with defaults.
+    pub fn update_telemetry_at(path: &Path, update: impl FnOnce(&mut Self)) -> Result<()> {
+        let parent = path.parent().context("setup-state path has no parent")?;
+        std::fs::create_dir_all(parent)?;
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(path.with_extension("telemetry.lock"))?;
+        let mut lock = fd_lock::RwLock::new(file);
+        let _guard = lock.try_write()?;
+        let mut state = if path.try_exists()? {
+            Self::load_from(path).context("setup state could not be read")?
+        } else {
+            Self::default()
+        };
+        update(&mut state);
+        state.save_to(path)
     }
 
     /// Record the privacy preference associated with the telemetry notice.
@@ -509,7 +542,7 @@ impl SetupState {
     /// True when the current processor disclosure was explicitly accepted.
     #[must_use]
     pub fn telemetry_accepted(&self, version: &str) -> bool {
-        !self.needs_telemetry_notice(version) && self.telemetry_opt_in
+        self.telemetry_notice_decided_for.as_deref() == Some(version) && self.telemetry_opt_in
     }
 
     /// True when the current notice record contains an explicit opt-out.
@@ -518,7 +551,7 @@ impl SetupState {
     /// only an opt-out may be acted on destructively.
     #[must_use]
     pub fn telemetry_declined(&self, version: &str) -> bool {
-        !self.needs_telemetry_notice(version) && !self.telemetry_opt_in
+        self.telemetry_notice_decided_for.as_deref() == Some(version) && !self.telemetry_opt_in
     }
 
     /// Whether any recorded telemetry notice was explicitly declined.

@@ -33,10 +33,10 @@ use serde::{Deserialize, Serialize};
 
 /// Wire schema version. Bumped on any field add, remove, or retype; never
 /// reused. `crates/telemetry/tests/golden/v1.json` pins what v1 was.
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 3;
 
-/// Explicit acceptance of the PostHog processor disclosure.
-pub const CONSENT_VERSION: u32 = 4;
+/// Default-on policy disclosure version. This is not human consent.
+pub const NOTICE_VERSION: u32 = 5;
 
 /// Which product surface produced a batch.
 ///
@@ -774,8 +774,8 @@ pub fn is_known_provider_id(value: &str) -> bool {
 pub struct Batch {
     /// [`SCHEMA_VERSION`].
     pub schema_version: u32,
-    /// [`CONSENT_VERSION`], accepted before collection and rechecked before flush.
-    pub consent_version: u32,
+    /// [`NOTICE_VERSION`], policy metadata rather than proof of acceptance.
+    pub notice_version: u32,
     /// RFC3339 UTC, second precision. Per-**batch** only — events carry no
     /// timestamps at all.
     pub sent_at: String,
@@ -804,7 +804,7 @@ impl Batch {
     /// Envelope field names in declaration order, for the doc-match test.
     pub const FIELDS: &'static [&'static str] = &[
         "schema_version",
-        "consent_version",
+        "notice_version",
         "sent_at",
         "install_id",
         "app_version",

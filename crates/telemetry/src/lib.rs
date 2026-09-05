@@ -1,4 +1,4 @@
-//! Explicitly opted-in, user-disableable product usage counting for Codewhale.
+//! Default-on, user-disableable aggregate product usage counting for Codewhale.
 //!
 //! The whole of what this crate may ever send is [`event`]. The whole of what
 //! decides whether it may send anything is [`decision`]. Nothing else in the
@@ -57,9 +57,8 @@ pub use decision::{
 };
 pub use envelope::reduce_panic_site;
 pub use event::{
-    Arch, Batch, CONSENT_VERSION, ColdStartBucket, Counters, DurationBucket, Errors, Event,
-    ExitClass, InstallKind, Libc, Os, ProductCounters, SCHEMA_VERSION, SessionSource, Surface,
-    TurnWall,
+    Arch, Batch, ColdStartBucket, Counters, DurationBucket, Errors, Event, ExitClass, InstallKind,
+    Libc, NOTICE_VERSION, Os, ProductCounters, SCHEMA_VERSION, SessionSource, Surface, TurnWall,
 };
 
 /// How long the shutdown flush may hold the process.
@@ -110,6 +109,8 @@ pub fn init(consent: TelemetryConsent) {
         tracing::debug!("telemetry could not prepare its buffer: {error}");
         return;
     }
+
+    notice::show_startup_disclosure(consent.surface());
 
     let context = actor::Context {
         root: root.clone(),

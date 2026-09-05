@@ -44,6 +44,19 @@ record is retained below the categorized release highlights.
 
 ### Changed
 
+- **Anonymous usage counting is on by default.** The 0.9.11 release asked
+  first; 0.9.12 counts the same aggregate version/platform, session, feature
+  and error totals unless you turn it off, and says so once at first launch
+  (policy notice version 5, schema 3, `notice_version` replacing
+  `consent_version`). Every recorded opt-out stays off: a durable
+  `telemetry = false`, a decline recorded under the old opt-in notice,
+  unreadable privacy state, and the `CODEWHALE_TELEMETRY=0` / `--telemetry
+  false` kill switches. Showing the disclosure records only that it was
+  shown, never an acceptance. `codewhale config set telemetry false` turns
+  it off and wipes queued counts; `codewhale config set telemetry true`
+  deliberately re-enables it. Nothing new is collected: no conversations,
+  code, prompts, files, names, model content, credentials, or IP.
+
 - The launch screen is our own card take: a thin top line
   `⑂ branch  path`; a centred bordered card with the whale mark,
   `Codewhale` + version, one announcement line only when it is true (the

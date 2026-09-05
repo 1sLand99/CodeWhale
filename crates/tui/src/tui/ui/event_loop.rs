@@ -1264,9 +1264,10 @@ pub(crate) async fn run_event_loop(
 
     loop {
         if app.onboarding == OnboardingState::None && pending_telemetry_notice.take().is_some() {
-            let receipt = app.tr(MessageId::TelemetryNoticeConsentRequired);
+            let receipt = app.tr(MessageId::TelemetryNoticeDefaultOn);
             app.push_status_toast(receipt.into_owned(), StatusToastLevel::Info, Some(12_000));
             app.needs_redraw = true;
+            crate::telemetry_notice::record_presented();
         }
 
         // A manual compaction deferred by a full engine mailbox retries here
