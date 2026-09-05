@@ -935,6 +935,8 @@ impl App {
             theme_id,
             theme_name,
             onboarding,
+            redaction_gate: false,
+            redaction_gate_confirming: false,
             onboarding_needs_api_key: needs_api_key,
             onboarding_provider: provider,
             onboarding_workspace_trust_gate,
