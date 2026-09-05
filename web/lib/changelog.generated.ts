@@ -48,6 +48,7 @@ export const CHANGELOG: ChangelogRelease[] = [
       {
         "heading": "Changed",
         "items": [
+          "Anonymous usage counting is on by default. The 0.9.11 release asked first; 0.9.12 counts the same aggregate version/platform, session, feature and error totals unless you turn it off, and says so once at first launch (policy notice version 5, schema 3, notice_version replacing consent_version). Every recorded opt-out stays off: a durable telemetry = false, a decline recorded under the old opt-in notice, unreadable privacy state, and the CODEWHALE_TELEMETRY=0 / --telemetry…",
           "The launch screen is our own card take: a thin top line ⑂ branch path; a centred bordered card with the whale mark, Codewhale + version, one announcement line only when it is true (the no-model warning, or MCP news), and the menu New worktree / Resume session / Changelog / Quit with their real chords right-aligned. Enter runs the highlighted entry, Up/Down move it, and typing goes straight to the composer. The card dissolves on the first keystroke or command (≤240 ms,…",
           "The work surface sits under the composer by default, keeping history readable and leaving the stage unencumbered (#5809).",
           "Skills command shapes: FEAT-022 command shapes and retained-host validation (#5825, #5829).",
@@ -58,10 +59,9 @@ export const CHANGELOG: ChangelogRelease[] = [
           "Local Ollama: the header names a model only when the local catalog can serve it, and says unknown until it knows. The startup mark, web and app icon carry the new side-view prompt-eye whale (#5795).",
           "One focus owner: Tab and Shift+Tab work regardless of what is in the composer; Alt shortcuts survive mid-draft; Ctrl+Tab no longer cycles the mode by accident (#5798).",
           "Tool cells carry their own state: a running, failed or warned tool reads as such in the transcript itself, with per-entry rail dots and family-coloured glyphs (#5799).",
-          "Web: docs hub with task search, shared empty/loading/error states, an offline-to-back-online banner, /changelog in every locale, and real 404s with correct metadata (#5743).",
-          "Web: the app's colours come from one file generated from the TUI whale palette; re-typing a colour by hand fails web CI (#5797)."
+          "Web: docs hub with task search, shared empty/loading/error states, an offline-to-back-online banner, /changelog in every locale, and real 404s with correct metadata (#5743)."
         ],
-        "itemCount": 25
+        "itemCount": 26
       },
       {
         "heading": "Contributors",
