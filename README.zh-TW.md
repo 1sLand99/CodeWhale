@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:e421b94e9f7e -->
+<!-- source: README.md sha256:dcbd5aa09403 -->
 # Codewhale
 
 Codewhale 是一款在終端機中使用的開源程式設計代理，以 Rust 打造，並與使用者一起透過公開協作持續改進。
@@ -14,10 +14,14 @@ Codewhale 是一款在終端機中使用的開源程式設計代理，以 Rust �
 
 ## 安裝
 
+在 macOS 或 Linux 上首次安裝時，請使用官方 GitHub Release：
+
 ```bash
-npm install -g codewhale
-codewhale
+curl -fsSL https://codewhale.net/install.sh | sh
+"$HOME/.local/bin/codewhale"
 ```
+
+Windows 請從 [GitHub Releases](https://github.com/Hmbown/CodeWhale/releases/latest) 下載對應的安裝程式或封存檔。已有的直接安裝使用 `codewhale update`；若只想檢查，使用 `codewhale update --check`。更新器會顯示執行檔路徑，並保留較新的建置版本。npm 和 Cargo 是次要套件安裝方式；套件管理器安裝的遷移與 PATH 設定請參閱[安裝指南](docs/INSTALL.md)。
 
 第一次執行時，系統會協助你連線至供應商，也可以選擇保持離線。Codewhale 亦支援 Cargo、Docker、Nix、Scoop、預先建置的封存檔、Android/Termux 與 CNB 映像。請參閱[安裝指南](docs/INSTALL.md)。
 

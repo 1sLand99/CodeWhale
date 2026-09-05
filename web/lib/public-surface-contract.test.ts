@@ -189,7 +189,7 @@ describe("public surface contracts", () => {
     expect(matrix.product.license).toBe("MIT");
     expect(matrix.product.description).toBe(npmPackage.description);
     expect(license).toContain("MIT License");
-    expect(matrix.install.recommended).toBe("npm install -g codewhale");
+    expect(matrix.install.recommended).toBe("curl -fsSL https://codewhale.net/install.sh | sh");
     expect(readme).toContain(matrix.install.recommended);
     expect(Object.keys(npmPackage.bin)).toEqual(matrix.install.binaries);
     expect(matrix.install.channels).toEqual({
@@ -209,7 +209,10 @@ describe("public surface contracts", () => {
     // failure looked like a copy defect rather than a stale test.
     expect(install).toContain(`v${FACTS.version} source candidate`);
     expect(install).toContain("unpublished source candidate");
-    expect(install).toMatch(/Android \/ Termux \| arm64 \(aarch64\) \| ⚠️⁴ preview/);
+    const androidRow = install.split("\n").find((line) => line.startsWith("| Android / Termux |"));
+    expect(androidRow).toContain("arm64 (aarch64)");
+    expect(androidRow).toContain("`codewhale-android-arm64.tar.gz`");
+    expect(androidRow).toContain("⚠️⁴ preview");
     expect(install).not.toContain(`wrapper is published at\nv${FACTS.version}`);
     expect(npmReadme).toMatch(/^- Android arm64 \/ Termux \(preview;/m);
     expect(npmReadme).toContain("requires matching Android assets");

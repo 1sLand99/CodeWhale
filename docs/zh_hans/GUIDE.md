@@ -36,21 +36,19 @@ Codewhale 是一个终端编码智能体（agent）。你从某个工作区运�
 
 ## 2. 首次启动
 
-用适合你机器的路径安装 Codewhale。发布安装器在 `codewhale` 和 `codew` 两个命令名下提供同一运行时；每条受支持的安装路径都提供 `codewhale` 调度器，`codewhale-tui` 运行时已内置。
+在 macOS 或 Linux 上首次安装时，使用官方 GitHub Release。安装器会校验发布资源，
+并在 `codewhale` 和 `codew` 两个命令名下提供同一运行时：
 
 ```bash
-# npm
-npm install -g codewhale
-
-# Cargo
-cargo install codewhale-cli --locked
-# Cargo 安装后可选的短命令名：
-ln -s "$(command -v codewhale)" "$(dirname "$(command -v codewhale)")/codew"
-
-# Homebrew
-brew tap Hmbown/deepseek-tui
-brew install codewhale
+curl -fsSL https://codewhale.net/install.sh | sh
 ```
+
+Windows 用户请选择 [GitHub Releases](https://github.com/Hmbown/CodeWhale/releases/latest)
+中的对应安装器或压缩包。已有的直接安装先运行 `codewhale update --check`，再运行
+`codewhale update`。npm 和 Cargo 是次要打包方式；没有兼容预编译资源的平台仍可使用
+受支持的 Cargo 源码构建路径。目录已占用、包管理器安装及 PATH 配置请参阅
+[安装与迁移指南](INSTALL.md)。Android/Termux 使用专用的
+[预览压缩包或源码构建路径](INSTALL.md#android--termux-arm64)。
 
 当你想要隔离的运行时，也可以用 Docker：
 
@@ -64,11 +62,14 @@ docker run --rm -it \
   ghcr.io/hmbown/codewhale:latest
 ```
 
-从你希望它工作的仓库或目录启动 Codewhale：
+把安装目录加入 PATH 后，从你希望它工作的仓库或目录启动 Codewhale：
 
 ```bash
 codewhale
 ```
+
+使用 GitHub 安装器的默认目录时，在把该目录加入 PATH 之前，可以通过
+`"$HOME/.local/bin/codewhale"` 启动。
 
 首次启动时，Codewhale 只询问本次安装仍然需要的决定：无法推断语言时询问语言，未配置可用路由时询问提供商，文件夹需要决定时询问工作区信任。提供商步骤包含明确的离线路由。就绪界面随后打开真正的编辑器，保留命令行中提供的任务，或为当前文件夹建议第一个任务。
 

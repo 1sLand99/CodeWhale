@@ -45,24 +45,22 @@ runtime model.
 
 ## 2. First Launch
 
-Install Codewhale with the path that fits your machine. Release installers
-provide the same runtime under the `codewhale` and `codew` command names, and
-every supported install path ships the `codewhale` dispatcher with the
-`codewhale-tui` runtime built in.
+For a new macOS or Linux installation, use the official GitHub release.
+The installer verifies the release checksums and provides the same runtime
+under the `codewhale` and `codew` command names:
 
 ```bash
-# npm
-npm install -g codewhale
-
-# Cargo
-cargo install codewhale-cli --locked
-# Optional short name after Cargo install:
-ln -s "$(command -v codewhale)" "$(dirname "$(command -v codewhale)")/codew"
-
-# Homebrew
-brew tap Hmbown/deepseek-tui
-brew install codewhale
+curl -fsSL https://codewhale.net/install.sh | sh
 ```
+
+Windows users should choose the matching installer or archive from
+[GitHub Releases](https://github.com/Hmbown/CodeWhale/releases/latest).
+For an existing direct install, use `codewhale update --check`, then
+`codewhale update`. npm and Cargo remain secondary packaging routes; Cargo
+also supports source builds where a compatible prebuilt is unavailable.
+For occupied directories, package-managed installs, and PATH setup, follow
+[the installation and migration guide](INSTALL.md#recommended-official-github-releases).
+Android/Termux uses its own [preview archive or source-build path](INSTALL.md#android--termux-arm64).
 
 Docker is also available when you want an isolated runtime:
 
@@ -76,11 +74,15 @@ docker run --rm -it \
   ghcr.io/hmbown/codewhale:latest
 ```
 
-Launch Codewhale from the repository or directory you want it to work in:
+Once the install directory is on PATH, launch Codewhale from the repository or
+directory you want it to work in:
 
 ```bash
 codewhale
 ```
+
+For the default GitHub installer destination, you can use
+`"$HOME/.local/bin/codewhale"` until that directory is on PATH.
 
 On first launch, Codewhale asks only for decisions this installation still
 needs: language when it cannot infer one, a provider when no usable route is
