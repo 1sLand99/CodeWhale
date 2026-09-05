@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:e421b94e9f7e -->
+<!-- source: README.md sha256:dcbd5aa09403 -->
 # Codewhale
 
 Codewhale, terminaliniz için Rust ile geliştirilmiş ve kullanıcılarıyla birlikte açık biçimde iyileştirilen açık kaynaklı bir kodlama ajanıdır.
@@ -14,10 +14,14 @@ Codewhale, terminaliniz için Rust ile geliştirilmiş ve kullanıcılarıyla bi
 
 ## Kurulum
 
+macOS veya Linux üzerinde yeni kurulum için resmî GitHub sürümünü kullanın:
+
 ```bash
-npm install -g codewhale
-codewhale
+curl -fsSL https://codewhale.net/install.sh | sh
+"$HOME/.local/bin/codewhale"
 ```
+
+Windows’ta [GitHub Releases](https://github.com/Hmbown/CodeWhale/releases/latest) üzerinden uygun yükleyiciyi veya arşivi indirin. Mevcut doğrudan kurulumu güncellemek için `codewhale update`, yalnızca kontrol etmek için `codewhale update --check` çalıştırın. Güncelleyici çalıştırılabilir dosyanın yolunu gösterir ve daha yeni derlemeleri korur. npm ve Cargo ikincil paketleme seçenekleridir. Paket yöneticisinden geçiş ve PATH ayarları için [kurulum kılavuzuna](docs/INSTALL.md) bakın.
 
 Codewhale ilk çalıştırmada bir sağlayıcıya bağlanmanıza veya çevrimdışı kalmanıza yardımcı olur. Cargo, Docker, Nix, Scoop, önceden derlenmiş arşivler, Android/Termux ve CNB aynasını da destekler. [Kurulum kılavuzuna](docs/INSTALL.md) bakın.
 

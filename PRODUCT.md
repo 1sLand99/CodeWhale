@@ -37,8 +37,12 @@ no hosted runtime to sell.
 
 ## Operating Context
 
-- Install: `npm install -g codewhale` (Node 18+, no Rust toolchain); source
-  builds via cargo. Facts (version, provider count, tool count, license) are
+- Install: official GitHub Releases first. New macOS/Linux installs use
+  `curl -fsSL https://codewhale.net/install.sh | sh`; Windows uses the matching
+  GitHub installer/archive. Existing direct installs use `codewhale update`.
+  npm and Cargo are secondary packaging routes; migration and PATH handling
+  follow `docs/INSTALL.md`. `latest` selects a published release, not the source
+  candidate. Facts (version, provider count, tool count, license) are
   derived from the repository by `npm run prebuild` into
   `web/lib/facts.generated.ts` and must never be hand-edited.
 - Docs pages mirror `docs/*.md` in the repository; `npm run check:docs`

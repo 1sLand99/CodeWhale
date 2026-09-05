@@ -44,7 +44,7 @@
     ]
   },
   "install": {
-    "recommended": "npm install -g codewhale",
+    "recommended": "curl -fsSL https://codewhale.net/install.sh | sh",
     "binaries": [
       "codewhale",
       "codew"
