@@ -61,7 +61,7 @@ export const home: HomeDict = {
   availabilityLede:
     "Terminal jest wydanym produktem. Wszystko inne wymieniamy w stanie, w jakim naprawdę jest.",
   availability: [
-    ["Terminal", "Wydany", "npm, Cargo oraz gotowe pliki binarne dla Linuksa, macOS i Windows. Android w Termuksie to wersja poglądowa."],
+    ["Terminal", "Wydany", "Pliki binarne z GitHub Releases dla Linuksa, macOS i Windows; npm i Cargo to alternatywy. Android w Termuksie to wersja poglądowa."],
     ["Aplikacja webowa", "Logowanie i zdalne sterowanie dostępne", "Zaloguj się lub załóż konto, a potem wpisz /rc w uruchomionej sesji lokalnej, aby kontynuować dokładnie tę sesję z przeglądarki. Reszta warsztatu w przeglądarce to wciąż podgląd deweloperski."],
     ["Desktop", "Kompilacja deweloperska", "Istnieją kompilacje alfa dla macOS, Linuksa i Windows. Wydanej aplikacji desktopowej jeszcze nie ma."],
     ["Komputery w chmurze", "Jeszcze niedostępne", "Uruchamianie pracy na hostowanym komputerze jest w budowie. Ta strona powie, kiedy zacznie działać."],

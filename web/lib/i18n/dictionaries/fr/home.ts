@@ -61,7 +61,7 @@ export const home: HomeDict = {
   availabilityLede:
     "Le terminal est le produit publié. Tout le reste est listé dans l’état où il se trouve réellement.",
   availability: [
-    ["Terminal", "Publié", "npm, Cargo et binaires précompilés pour Linux, macOS et Windows. Android sous Termux est en aperçu."],
+    ["Terminal", "Publié", "Binaires GitHub Releases pour Linux, macOS et Windows ; npm et Cargo sont des alternatives. Android sous Termux est en aperçu."],
     ["Application web", "Connexion et contrôle à distance disponibles", "Connectez-vous ou créez un compte, puis tapez /rc dans une session locale en cours pour continuer exactement cette session depuis le navigateur. Le reste de l’établi dans le navigateur reste un aperçu de développement."],
     ["Bureau", "Build de développement", "Des builds alpha existent pour macOS, Linux et Windows. Il n’y a pas encore d’application de bureau publiée."],
     ["Ordinateurs cloud", "Pas encore disponible", "Exécuter du travail sur un ordinateur hébergé est en développement. Cette page le dira quand ça fonctionnera."],

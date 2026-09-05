@@ -1,3 +1,4 @@
+import { BodyReadError, readBoundedBody } from "@/lib/bounded-body";
 import { NextResponse } from "next/server";
 import { MAX_ENVELOPE_BYTES, validateEnvelope } from "@/lib/telemetry/product-usage";
 
@@ -8,8 +9,10 @@ import { MAX_ENVELOPE_BYTES, validateEnvelope } from "@/lib/telemetry/product-us
  * to the exact canonical first-party ingest, the route accepts nothing and
  * forwards nothing. With it set, a batch is forwarded only when it passes the
  * closed-set validator for the `website` surface and fits in 4 KiB. The
- * forward carries the body alone — no client address, cookie, referrer, or
- * user agent — and is bounded to 1.5 seconds with no retry. The response is
+ * forward sets only a content-type header and the validated body; it does not
+ * copy client headers. Hosting infrastructure may add transport headers, so
+ * this is not a claim of network anonymity. Forwarding has a 1.5-second timeout
+ * with no retry. The response is
  * `{ accepted, reason? }`, never the ingest's own body.
  *
  * The PostHog token, if the ingest has one, lives there. This route never
@@ -50,10 +53,16 @@ export async function handleProductTelemetry(
 
   if (!target) return reply(200, false, "disabled");
 
-  const length = Number(request.headers.get("content-length") ?? "0");
-  if (length > MAX_ENVELOPE_BYTES) return reply(413, false, "too_large");
-  const text = await request.text();
-  if (text.length > MAX_ENVELOPE_BYTES) return reply(413, false, "too_large");
+  let text: string;
+  try {
+    const bytes = await readBoundedBody(request, MAX_ENVELOPE_BYTES);
+    text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch (cause) {
+    if (cause instanceof BodyReadError) {
+      return reply(cause.status, false, cause.status === 413 ? "too_large" : "invalid_body");
+    }
+    return reply(422, false, "invalid_json");
+  }
 
   let parsed: unknown;
   try {

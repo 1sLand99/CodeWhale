@@ -60,7 +60,7 @@ export const home: HomeDict = {
   availabilityLede:
     "Il terminale è il prodotto rilasciato. Tutto il resto è elencato nello stato in cui si trova davvero.",
   availability: [
-    ["Terminale", "Rilasciato", "npm, Cargo e binari precompilati per Linux, macOS e Windows. Android su Termux è un’anteprima."],
+    ["Terminale", "Rilasciato", "Binari di GitHub Releases per Linux, macOS e Windows; npm e Cargo sono alternative. Android su Termux è un’anteprima."],
     ["App web", "Accesso e controllo remoto disponibili", "Accedi o crea un account, poi digita /rc in una sessione locale in corso per continuare proprio quella sessione dal browser. Il resto del banco di lavoro nel browser è ancora un’anteprima di sviluppo."],
     ["Desktop", "Build di sviluppo", "Esistono build alfa per macOS, Linux e Windows. Non c’è ancora un’app desktop rilasciata."],
     ["Computer cloud", "Non ancora disponibile", "Eseguire lavoro su un computer hosted è in sviluppo. Questa pagina lo dirà quando funzionerà."],

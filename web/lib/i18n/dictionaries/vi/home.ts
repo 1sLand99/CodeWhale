@@ -61,7 +61,7 @@ export const home: HomeDict = {
   availabilityLede:
     "Terminal là sản phẩm đã phát hành. Mọi thứ khác được liệt kê đúng trạng thái thực tế.",
   availability: [
-    ["Terminal", "Đã phát hành", "npm, Cargo và binary dựng sẵn cho Linux, macOS và Windows. Android trên Termux là bản xem trước."],
+    ["Terminal", "Đã phát hành", "Binary trên GitHub Releases cho Linux, macOS và Windows; npm và Cargo là các lựa chọn thay thế. Android trên Termux là bản xem trước."],
     ["Ứng dụng web", "Đăng nhập và điều khiển từ xa đã có", "Đăng nhập hoặc tạo tài khoản, rồi gõ /rc trong một phiên cục bộ đang chạy để tiếp tục chính phiên đó từ trình duyệt. Phần còn lại của bàn làm việc trên trình duyệt vẫn là bản xem trước phát triển."],
     ["Máy tính để bàn", "Bản phát triển", "Có bản alpha cho macOS, Linux và Windows. Chưa có ứng dụng desktop phát hành chính thức."],
     ["Máy tính đám mây", "Chưa có", "Việc chạy công việc trên máy tính được host đang được phát triển. Trang này sẽ nói khi nó hoạt động."],

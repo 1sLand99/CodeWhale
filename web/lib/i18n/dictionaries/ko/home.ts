@@ -57,7 +57,7 @@ export const home: HomeDict = {
   availabilityHeading: "지금 가능한 것, 개발 중인 것, 아직 아닌 것 — 있는 그대로.",
   availabilityLede: "터미널이 출시된 제품입니다. 나머지는 실제 상태 그대로 적었습니다.",
   availability: [
-    ["터미널", "출시됨", "npm, Cargo, 그리고 Linux·macOS·Windows용 빌드된 바이너리. Android의 Termux는 미리보기입니다."],
+    ["터미널", "출시됨", "Linux·macOS·Windows용 GitHub Releases 바이너리를 권장합니다. npm과 Cargo도 사용할 수 있습니다. Android의 Termux는 미리보기입니다."],
     ["웹 앱", "로그인과 원격 제어 가능", "로그인하거나 계정을 만든 뒤, 실행 중인 로컬 세션에서 /rc를 입력하면 바로 그 세션을 브라우저에서 이어갈 수 있습니다. 브라우저 워크벤치의 나머지는 개발 미리보기입니다."],
     ["데스크톱", "개발 빌드", "macOS, Linux, Windows용 알파 빌드가 있습니다. 출시된 데스크톱 앱은 아직 없습니다."],
     ["클라우드 컴퓨터", "아직 이용 불가", "호스팅된 컴퓨터에서 작업을 실행하는 기능은 개발 중입니다. 작동하게 되면 이 페이지에서 알리겠습니다."],

@@ -229,6 +229,77 @@ describe("same-origin forwarder", () => {
     expect(calls).toHaveLength(1);
   });
 
+  it.each([undefined, "1", "4096"])("cancels oversized chunks with declared length %s and never forwards", async (length) => {
+    let cancelled = false;
+    let forwarded = 0;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array(2048));
+        controller.enqueue(new Uint8Array(2049));
+        // Deliberately leave the source open: overflow must cancel it.
+      },
+      cancel() { cancelled = true; },
+    });
+    const request = new Request("http://localhost/api/product-telemetry", {
+      method: "POST", body, duplex: "half",
+      headers: length === undefined ? {} : { "content-length": length },
+    } as RequestInit);
+    const response = await handleProductTelemetry(request, {
+      ingestUrl: CANONICAL_INGEST_URL,
+      forward: async () => { forwarded += 1; return { ok: true }; },
+    });
+    expect(response.status).toBe(413);
+    expect(await response.json()).toEqual({ accepted: false, reason: "too_large" });
+    expect(cancelled).toBe(true);
+    expect(request.body?.locked).toBe(false);
+    expect(forwarded).toBe(0);
+  });
+
+  it("bounds UTF-8 bytes rather than JS character count", async () => {
+    let forwarded = 0;
+    const response = await handleProductTelemetry(post("鲸".repeat(1400)), {
+      ingestUrl: CANONICAL_INGEST_URL,
+      forward: async () => { forwarded += 1; return { ok: true }; },
+    });
+    expect(response.status).toBe(413);
+    expect(forwarded).toBe(0);
+  });
+
+  it("accepts an exact 4096-byte valid envelope across chunks", async () => {
+    const json = JSON.stringify(envelope);
+    const bytes = new TextEncoder().encode(json + " ".repeat(4096 - new TextEncoder().encode(json).byteLength));
+    const body = new ReadableStream<Uint8Array>({ start(controller) {
+      for (let offset = 0; offset < bytes.length; offset += 7) controller.enqueue(bytes.slice(offset, offset + 7));
+      controller.close();
+    } });
+    let forwarded = 0;
+    const response = await handleProductTelemetry(new Request("http://localhost/api/product-telemetry", {
+      method: "POST", body, duplex: "half",
+    } as RequestInit), {
+      ingestUrl: CANONICAL_INGEST_URL,
+      forward: async (_url, value) => { forwarded += 1; expect(JSON.parse(value)).toEqual(envelope); return { ok: true }; },
+    });
+    expect(await response.json()).toEqual({ accepted: true });
+    expect(forwarded).toBe(1);
+  });
+
+  it.each(["stream_failure", "invalid_utf8", "invalid_length"])("rejects %s without forwarding", async (kind) => {
+    const body = new ReadableStream<Uint8Array>({ start(controller) {
+      if (kind === "stream_failure") controller.error(new Error("read failed"));
+      else { controller.enqueue(new Uint8Array([0xff])); controller.close(); }
+    } });
+    let forwarded = 0;
+    const response = await handleProductTelemetry(new Request("http://localhost/api/product-telemetry", {
+      method: "POST", body, duplex: "half",
+      headers: kind === "invalid_length" ? { "content-length": "no" } : {},
+    } as RequestInit), {
+      ingestUrl: CANONICAL_INGEST_URL,
+      forward: async () => { forwarded += 1; return { ok: true }; },
+    });
+    expect(response.status).toBe(kind === "invalid_utf8" ? 422 : 400);
+    expect(forwarded).toBe(0);
+  });
+
   it("reports an unreachable ingest as unavailable without retrying", async () => {
     let attempts = 0;
     const response = await handleProductTelemetry(post(envelope), {

@@ -261,8 +261,9 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
                 />
               </div>
               <p className="dotline">
+                <span>GitHub Releases · {d.binaries}</span>
+                <span>npm</span>
                 <span>Cargo</span>
-                <span>{d.binaries}</span>
                 <span>Docker</span>
                 <span>Nix</span>
                 <span>Windows</span>

@@ -82,7 +82,7 @@ export const home: HomeDict = {
     [
       "Terminal",
       "Released",
-      "npm, Cargo, and prebuilt binaries for Linux, macOS, and Windows. Android on Termux is a preview.",
+      "GitHub release binaries for Linux, macOS, and Windows; npm and Cargo are alternatives. Android on Termux is a preview.",
     ],
     [
       "Web app",

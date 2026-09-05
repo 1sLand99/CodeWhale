@@ -78,8 +78,8 @@ export const PRODUCT_COPY = {
       surface: { en: "Terminal", zh: "终端" },
       status: { en: "Released", zh: "已发布" },
       detail: {
-        en: "Install with npm, Cargo, or a prebuilt binary for Linux, macOS, and Windows. Android on Termux is a preview. The interactive TUI and codewhale exec for scripts ship together.",
-        zh: "通过 npm、Cargo 或 Linux、macOS、Windows 的预编译二进制安装。Android 上的 Termux 为预览。交互式 TUI 与用于脚本的 codewhale exec 一同发布。",
+        en: "Install GitHub release binaries for Linux, macOS, and Windows. npm and Cargo are alternatives. Android on Termux is a preview. The interactive TUI and codewhale exec for scripts ship together.",
+        zh: "优先使用 GitHub Releases 中适用于 Linux、macOS、Windows 的二进制；npm 和 Cargo 为其他安装方式。Android 上的 Termux 为预览。交互式 TUI 与用于脚本的 codewhale exec 一同发布。",
       },
       href: "/install",
       linkLabel: { en: "Install guide", zh: "安装指南" },

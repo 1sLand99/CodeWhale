@@ -139,7 +139,7 @@
       [
         "终端",
         "已发布",
-        "npm、Cargo 与 Linux、macOS、Windows 的预编译二进制。Android 上的 Termux 为预览。"
+        "优先使用 GitHub Releases 中适用于 Linux、macOS、Windows 的二进制；npm 和 Cargo 为其他安装方式。Android 上的 Termux 为预览。"
       ],
       [
         "网页应用",

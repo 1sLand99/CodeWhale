@@ -57,7 +57,7 @@ export const home: HomeDict = {
   availabilityHeading: "已可用、开发中、暂不可用——如实说明。",
   availabilityLede: "终端是已发布的产品。其余的按实际状态列出。",
   availability: [
-    ["终端", "已发布", "npm、Cargo 与 Linux、macOS、Windows 的预编译二进制。Android 上的 Termux 为预览。"],
+    ["终端", "已发布", "优先使用 GitHub Releases 中适用于 Linux、macOS、Windows 的二进制；npm 和 Cargo 为其他安装方式。Android 上的 Termux 为预览。"],
     ["网页应用", "登录与远程控制可用", "登录或创建账户，然后在正在运行的本地会话里输入 /rc，即可在浏览器中继续这同一个会话。浏览器工作台的其余部分仍是开发预览。"],
     ["桌面端", "开发版本", "macOS、Linux、Windows 有 alpha 构建。桌面应用尚未正式发布。"],
     ["云端计算机", "暂不可用", "在托管计算机上运行工作仍在开发中。等它真正可用时，本页会如实说明。"],

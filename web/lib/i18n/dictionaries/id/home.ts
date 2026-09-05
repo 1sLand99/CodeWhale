@@ -62,7 +62,7 @@ export const home: HomeDict = {
   availabilityLede:
     "Terminal adalah produk yang sudah dirilis. Yang lain dicantumkan sesuai keadaannya yang sebenarnya.",
   availability: [
-    ["Terminal", "Dirilis", "npm, Cargo, dan biner siap pakai untuk Linux, macOS, dan Windows. Android di Termux masih pratinjau."],
+    ["Terminal", "Dirilis", "Biner GitHub Releases untuk Linux, macOS, dan Windows; npm dan Cargo adalah alternatif. Android di Termux masih pratinjau."],
     ["Aplikasi web", "Masuk dan kendali jarak jauh tersedia", "Masuk atau buat akun, lalu ketik /rc di sesi lokal yang sedang berjalan untuk melanjutkan sesi itu juga dari peramban. Bagian lain meja kerja di peramban masih pratinjau pengembangan."],
     ["Desktop", "Build pengembangan", "Ada build alfa untuk macOS, Linux, dan Windows. Belum ada aplikasi desktop yang dirilis."],
     ["Komputer cloud", "Belum tersedia", "Menjalankan pekerjaan di komputer yang di-host masih dalam pengembangan. Halaman ini akan mengatakannya saat sudah berfungsi."],
