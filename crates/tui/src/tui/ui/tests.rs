@@ -20927,6 +20927,10 @@ fn recoverable_engine_error_does_not_enter_offline_mode() {
         "recoverable error must keep the session online so the user can retry"
     );
     assert!(!app.is_loading);
+    assert!(app.runtime_turn_status.is_none());
+    assert!(ignore_stale_stream_event_while_idle(
+        &stream_drop_approval_event()
+    ));
     assert!(app.turn_error_posted, "turn_error_posted must be set");
     assert!(
         app.status_message.is_none(),
@@ -21327,29 +21331,82 @@ async fn provider_switch_rollback_corrects_setup_receipt_when_persistence_fails(
     assert!(!provider_model_result.contains("kimi-key"));
 }
 
+fn stream_drop_approval_event() -> EngineEvent {
+    EngineEvent::ApprovalRequired {
+        id: "stream-drop-tool".to_string(),
+        tool_name: "bash".to_string(),
+        description: "Fixture workspace counter".to_string(),
+        input: serde_json::json!({"command": "printf once >> counter.txt"}),
+        approval_key: "stream-drop-key".to_string(),
+        approval_grouping_key: "stream-drop-group".to_string(),
+        intent_summary: None,
+        approval_force_prompt: false,
+    }
+}
+
 #[test]
-fn stream_error_marks_active_turn_failed_without_waiting_for_turn_complete() {
-    use crate::error_taxonomy::ErrorEnvelope;
+fn recoverable_stream_error_keeps_active_turn_for_pending_approval() {
+    use crate::core::authority::ApprovalRequestDisposition;
+    use crate::error_taxonomy::{ErrorCategory, ErrorEnvelope, ErrorSeverity};
 
     let mut app = create_test_app();
     app.is_loading = true;
     app.runtime_turn_id = Some("turn_decode_error".to_string());
     app.runtime_turn_status = Some("in_progress".to_string());
+    let dispatch_started_at = Instant::now();
+    app.dispatch_started_at = Some(dispatch_started_at);
     handle_tool_call_started(
         &mut app,
         "tool-running",
-        "exec_shell",
-        &serde_json::json!({"command": "cargo test --workspace"}),
+        "bash",
+        &serde_json::json!({"command": "printf once >> counter.txt"}),
     );
     assert!(app.active_cell.is_some(), "precondition: live tool cell");
 
     apply_engine_error_to_app(
         &mut app,
-        ErrorEnvelope::classify("chunk decode error".to_string(), true),
+        ErrorEnvelope::new(
+            ErrorCategory::Network,
+            ErrorSeverity::Warning,
+            true,
+            "fixture_stream_drop",
+            "opaque fixture message",
+        ),
     );
 
-    assert!(!app.is_loading);
-    assert_eq!(app.runtime_turn_status.as_deref(), Some("failed"));
+    assert!(app.is_loading, "the engine still owns the pending decision");
+    assert_eq!(app.runtime_turn_status.as_deref(), Some("in_progress"));
+    assert_eq!(app.dispatch_started_at, Some(dispatch_started_at));
+    assert!(!app.suppress_stream_events_until_turn_complete);
+    assert!(
+        app.is_loading || !ignore_stale_stream_event_while_idle(&stream_drop_approval_event()),
+        "the event loop must deliver the pending approval after the error"
+    );
+    // Delivery must preserve the user's existing permission posture. In
+    // particular, Never must reach its denial instead of waiting invisibly.
+    for (posture, expected) in [
+        (ApprovalMode::Suggest, ApprovalRequestDisposition::Prompt),
+        (
+            ApprovalMode::Never,
+            ApprovalRequestDisposition::AutoDenyNeverPosture,
+        ),
+        (
+            ApprovalMode::Auto,
+            ApprovalRequestDisposition::AutoDenyAutoReview,
+        ),
+    ] {
+        app.approval_mode = posture;
+        assert_eq!(
+            resolve_ui_approval_disposition(
+                &app,
+                "bash",
+                "stream-drop-group",
+                "stream-drop-key",
+                false,
+            ),
+            expected,
+        );
+    }
     assert!(
         app.active_cell.is_none(),
         "stream error should flush live cells so no row stays visually running"
@@ -21359,11 +21416,34 @@ fn stream_error_marks_active_turn_failed_without_waiting_for_turn_complete() {
             matches!(
                 cell,
                 crate::tui::history::HistoryCell::Error { message, .. }
-                    if message.contains("chunk decode error")
+                    if message == "opaque fixture message"
             )
         }),
         "stream decode error should remain visible in transcript"
     );
+}
+
+#[test]
+fn recoverable_stream_error_after_local_cancel_keeps_approval_suppressed() {
+    let mut app = create_test_app();
+    app.is_loading = true;
+    app.runtime_turn_status = Some("in_progress".to_string());
+    mark_active_turn_cancelled_locally(&mut app);
+
+    apply_engine_error_to_app(
+        &mut app,
+        crate::error_taxonomy::StreamError::Stall { timeout_secs: 60 }.into_envelope(),
+    );
+
+    assert!(!app.is_loading);
+    assert!(app.runtime_turn_status.is_none());
+    assert!(app.suppress_stream_events_until_turn_complete);
+    assert!(suppress_engine_event_after_local_cancel(
+        &stream_drop_approval_event()
+    ));
+    assert!(ignore_stale_stream_event_while_idle(
+        &stream_drop_approval_event()
+    ));
 }
 
 /// Hard failures (auth, billing, malformed request) DO need to flip offline
@@ -21374,6 +21454,9 @@ fn non_recoverable_engine_error_enters_offline_mode() {
     use crate::error_taxonomy::ErrorEnvelope;
     let mut app = create_test_app();
     assert!(!app.offline_mode);
+    app.is_loading = true;
+    app.runtime_turn_status = Some("in_progress".to_string());
+    app.dispatch_started_at = Some(Instant::now());
 
     apply_engine_error_to_app(
         &mut app,
@@ -21385,6 +21468,8 @@ fn non_recoverable_engine_error_enters_offline_mode() {
         "non-recoverable error must enter offline mode"
     );
     assert!(!app.is_loading);
+    assert_eq!(app.runtime_turn_status.as_deref(), Some("failed"));
+    assert!(app.dispatch_started_at.is_none());
     assert!(app.turn_error_posted, "turn_error_posted must be set");
     assert!(
         app.status_message.is_none(),
