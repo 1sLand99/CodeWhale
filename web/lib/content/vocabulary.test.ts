@@ -24,6 +24,7 @@ function repoText(path: string): string {
 
 const matrix = JSON.parse(repoText("docs/public-surface-facts.json")) as {
   product: { terminology: Record<string, string> };
+  install: { recommended: string };
   control: { modes: string[]; permissionPostures: string[] };
 };
 
@@ -148,7 +149,8 @@ describe("shared getting-started path", () => {
     // leading with the Fleet noun; see its naming/compatibility section.
     const fleetDoc = repoText("docs/FLEET.md");
     const install = GETTING_STARTED_STEPS.find((s) => s.id === "install")!;
-    expect(install.commands).toContain("npm install -g codewhale");
+    expect(install.commands[0]).toBe(matrix.install.recommended);
+    expect(repoText("docs/INSTALL.md")).toContain(install.commands[0]);
     expect(guide).toContain("codewhale doctor");
     const provider = GETTING_STARTED_STEPS.find((s) => s.id === "connect-provider")!;
     expect(provider.commands).toContain("codewhale auth set --provider deepseek");

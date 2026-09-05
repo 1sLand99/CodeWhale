@@ -34,10 +34,10 @@ export const GETTING_STARTED_STEPS: GuideStep[] = [
     id: "install",
     title: { en: "Install Codewhale", zh: "安装 Codewhale" },
     body: {
-      en: "One npm command installs the terminal runtime. Cargo, prebuilt archives, Docker, Nix, and China mirrors also work. All of them install published releases.",
-      zh: "一条 npm 命令即可安装终端运行时。Cargo、预编译包、Docker、Nix 和中国镜像也可以。它们安装的都是已发布版本。",
+      en: "Install a published GitHub release on macOS or Linux. Run codewhale update for later releases. npm and Cargo remain alternatives in the full guide. Local development builds are separate.",
+      zh: "在 macOS 或 Linux 上安装 GitHub 已发布版本。之后运行 codewhale update 获取新版本。完整指南中也提供 npm 和 Cargo 安装方式。本地开发构建与已发布版本分开。",
     },
-    commands: ["npm install -g codewhale", "codewhale doctor"],
+    commands: ["curl -fsSL https://codewhale.net/install.sh | sh", "codewhale doctor"],
     link: {
       href: "/install",
       label: { en: "Full install guide", zh: "完整安装指南" },

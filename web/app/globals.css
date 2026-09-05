@@ -2330,6 +2330,11 @@ a.body-link:hover { background-size: 100% 6px; color: var(--ink); }
   font-size: 0.75rem;
 }
 
+pre.gs-step-commands {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .gs-step-link {
   display: inline-block;
   margin-top: 0.9rem;
