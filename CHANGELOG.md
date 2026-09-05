@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.9.12] - 2026-09-03
+## [0.9.12] - 2026-09-04
 
 Codewhale v0.9.12 puts computer use in the binary, opens two new routes —
 Alibaba Model Studio through the data-driven provider table and Concentrate
@@ -195,6 +195,11 @@ record is retained below the categorized release highlights.
   across the read-only diagnostic family.
 - **Nightt ([@nightt5879](https://github.com/nightt5879))** — isolated remote
   recovery lease generations (#5790).
+- **[@yiheng-kkk](https://github.com/yiheng-kkk)** — replaced stale todo
+  transcript snapshots so a rewritten todo list renders its current tasks
+  (#5871, #5873).
+- **[@Lfanxing](https://github.com/Lfanxing)** — Moonshot routes now degrade
+  incompatible tool definitions per request instead of failing the turn.
 - **WissssleyL ([@Lstarsky0](https://github.com/Lstarsky0))** — moved
   `docs/subagents` and `docs/mcp` onto the dictionary spine (#5337), with the
   metaTitle probe that keeps them there.

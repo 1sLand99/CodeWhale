@@ -30,7 +30,7 @@ export const CHANGELOG: ChangelogRelease[] = [
   },
   {
     "version": "0.9.12",
-    "date": "2026-09-03",
+    "date": "2026-09-04",
     "unreleased": false,
     "compareUrl": "https://github.com/Hmbown/CodeWhale/compare/v0.9.11...v0.9.12",
     "sections": [
@@ -79,7 +79,7 @@ export const CHANGELOG: ChangelogRelease[] = [
           "Gabriel Degret (@Gabriel-Degret) — found the reasoning-only retry gap and built the first fix; landed as the [reasoning_only] retry ceiling with a request-scoped nudge (#5867).",
           "@huangxianzhan — the x-opencode-session header for OpenCode Go and Zen gateways (#5868)."
         ],
-        "itemCount": 16
+        "itemCount": 18
       },
       {
         "heading": "Added",

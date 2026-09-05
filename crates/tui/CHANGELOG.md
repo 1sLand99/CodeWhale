@@ -7,7 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.9.12] - 2026-09-03
+## [0.9.12] - 2026-09-04
+
+Codewhale v0.9.12 puts computer use in the binary, opens two new routes —
+Alibaba Model Studio through the data-driven provider table and Concentrate
+as an opt-in BYOK Responses gateway — and adds cloud dispatch plus a
+config-gated per-session control socket. The shell is the other half of the
+release: a new launch card, the work surface docked under the composer, one
+focus owner for Tab, tool cells that carry their own state, and `fleet` as
+the public word for the live collective. The complete item-level change
+record is retained below the categorized release highlights.
 
 ### Added
 
@@ -34,6 +43,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   message, interrupt, relaunch, and status JSON-RPC verbs (#5533, #5831).
 
 ### Changed
+
+- **Anonymous usage counting is on by default.** The 0.9.11 release asked
+  first; 0.9.12 counts the same aggregate version/platform, session, feature
+  and error totals unless you turn it off, and says so once at first launch
+  (policy notice version 5, schema 3, `notice_version` replacing
+  `consent_version`). Every recorded opt-out stays off: a durable
+  `telemetry = false`, a decline recorded under the old opt-in notice,
+  unreadable privacy state, and the `CODEWHALE_TELEMETRY=0` / `--telemetry
+  false` kill switches. Showing the disclosure records only that it was
+  shown, never an acceptance. `codewhale config set telemetry false` turns
+  it off and wipes queued counts; `codewhale config set telemetry true`
+  deliberately re-enables it. Nothing new is collected: no conversations,
+  code, prompts, files, names, model content, credentials, or IP.
 
 - The launch screen is our own card take: a thin top line
   `⑂ branch  path`; a centred bordered card with the whale mark,
@@ -122,6 +144,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - TUI/CLI: Pod is the public roster surface. User-facing Fleet wording
   moves to Pod; durable receipt keys stay compatible (#5776).
+
+### Contributors
+
+- **hexin ([@h3c-hexin](https://github.com/h3c-hexin))** — provider-native web
+  search across four routes (#5682, #5683, #5685, #5687), authoritative
+  edit-last-turn boundaries (#5621), Kimi Code k3-256k (#5622),
+  post-compaction input-token reporting (#5623), and preserving the scheduled
+  model selection in automations (#5650).
+- **秋月凉梦 ([@qiuYliangM](https://github.com/qiuYliangM))** — co-authored the
+  edit-last-turn boundary fix (#5621), Kimi Code k3-256k support (#5622), and
+  post-compaction input-token reporting (#5623).
+- **Isabel Wu ([@wuisabel-gif](https://github.com/wuisabel-gif))** — live
+  session token totals (#5624), persisted context-pressure warnings (#5629),
+  discoverable Fleet roster editing (#5604), the capability-gated cursor
+  accent (#5599), and `/copy` for the latest completed response (#5692).
+- **Paulo Aboim Pinto ([@aboimpinto](https://github.com/aboimpinto))** —
+  Windows verbatim-path operands preserved through POSIX word splitting
+  (#5610), the plugins group moved onto the command shapes (#5657), FEAT-022
+  skills command shapes with retained-host validation (#5825), and FEAT-020
+  plugin command shapes re-landed on main (#5865).
+- **Alex Musichen ([@musichen](https://github.com/musichen))** — a stable
+  DeepSeek heading in the configured-view model picker, keeping every official
+  catalog model for the active provider visible (#5689).
+- **[@gaord](https://github.com/gaord)** — the `GET /v1/fleet/profiles`
+  runtime API endpoint, reusing the FleetManager validation path (#5688).
+- **Sh1Zuku ([@SparkofSpike](https://github.com/SparkofSpike))** — corrected
+  English documentation inaccuracies and the first zh_hans translations for
+  the Tier-2 docs (#5613).
+- **[@M-Maciej](https://github.com/M-Maciej)** — goal continuation cadence
+  (#5591) and the per-session control socket (#5533, #5831).
+- **Serephus ([@serephus](https://github.com/serephus))** — nixpkgs update
+  (#5669).
+- **[@whp233](https://github.com/whp233)** — `wire = responses|anthropic` for
+  openai-compatible custom routes and opencode-zen muse-spark (#5716, landed
+  as #5719).
+- **Gabriel Degret ([@Gabriel-Degret](https://github.com/Gabriel-Degret))** —
+  found the reasoning-only retry gap and built the first fix; landed as the
+  `[reasoning_only]` retry ceiling with a request-scoped nudge (#5867).
+- **[@huangxianzhan](https://github.com/huangxianzhan)** — the
+  `x-opencode-session` header for OpenCode Go and Zen gateways (#5868).
+- **[@zhuowp](https://github.com/zhuowp)** — task origin preserved in job
+  snapshots (#5869).
+- **AdityaG ([@AdityaVG13](https://github.com/AdityaVG13))** — a ten-commit
+  performance pass: a zero-copy LaTeX fast path for streaming render,
+  single-pass token accounting on the per-turn pressure paths, memoized
+  provider resolution in the catalog cutline, parsing the bundled and
+  on-disk models.dev catalogs once per process (interactive boot -70%),
+  adaptive poll cadence for foreground shell completion, and worker caps
+  across the read-only diagnostic family.
+- **Nightt ([@nightt5879](https://github.com/nightt5879))** — isolated remote
+  recovery lease generations (#5790).
+- **[@yiheng-kkk](https://github.com/yiheng-kkk)** — replaced stale todo
+  transcript snapshots so a rewritten todo list renders its current tasks
+  (#5871, #5873).
+- **[@Lfanxing](https://github.com/Lfanxing)** — Moonshot routes now degrade
+  incompatible tool definitions per request instead of failing the turn.
+- **WissssleyL ([@Lstarsky0](https://github.com/Lstarsky0))** — moved
+  `docs/subagents` and `docs/mcp` onto the dictionary spine (#5337), with the
+  metaTitle probe that keeps them there.
 
 ### Added
 
