@@ -19,7 +19,7 @@ export const home: HomeDict = {
   heroTitleA: "Your models.",
   heroTitleB: "More capable together.",
   heroIntro:
-    "{brand} brings the models you already use into one terminal and lets them work as a crew — reading your code, editing, running the checks — while you decide what each one may do. Open source, on your machine.",
+    "{brand} puts coding agents in your terminal to read code, edit files, and run checks. Choose supported models and the session’s permission posture. Open source, on your machine.",
   getCodewhale: "Get Codewhale",
   exploreProduct: "Explore the product",
 
@@ -41,11 +41,11 @@ export const home: HomeDict = {
 
   gainHeading: "Give your models a job to finish.",
   gainLede:
-    "One session can hold several models at once, each in a role you gave it, all working in the same repository under the same rules.",
+    "Start with one model. Use Fleet to save a roster, and delegate parts of a task when the work benefits from more than one agent.",
   gain: [
     [
       "Your models",
-      "Hosted keys, a gateway, or a local runtime with no key at all. Pin a different model to each role and keep the provider you chose — a model name never switches it for you.",
+      "Use a supported hosted provider, gateway, or local model server. Fleet stores model choices for reusable agent roles.",
     ],
     [
       "Capable agents",
@@ -58,15 +58,15 @@ export const home: HomeDict = {
   ],
 
   chapterModels: "Your models",
-  modelsHeading: "Bring what you have. Change nothing you did not choose.",
+  modelsHeading: "A place for the models you choose.",
   modelsBody:
-    "Codewhale ships with {count} providers and treats them as peers. Save a key once, name a model, and the route stays exactly as you set it. Local models over vLLM, SGLang, or Ollama need no key.",
+    "Connect a supported hosted provider, a gateway, or a local model server. Check the selected provider and model before starting work. Local servers may run without an API key, depending on their configuration.",
   modelsFacts: [
     ["Hosted", "Your own API key, saved with codewhale auth set"],
     ["Gateway", "One endpoint for many models, provider still chosen by you"],
     ["Local", "vLLM, SGLang, Ollama on localhost — usually no key"],
   ],
-  modelsLink: "See every provider",
+  modelsLink: "Explore provider options",
 
   startHeading: "Four steps to a first session.",
   startLede:
@@ -86,13 +86,13 @@ export const home: HomeDict = {
     ],
     [
       "Web app",
-      "Sign-in and remote control available",
-      "Sign in or create an account, then type /rc in a running local session to continue that exact session from the browser. The rest of the browser workbench is a development preview.",
+      "Development preview",
+      "Account pages and browser pairing are implemented in development. Public end-to-end remote control has not been verified; use the terminal for released task execution.",
     ],
     [
       "Desktop",
       "Development build",
-      "Alpha builds exist for macOS, Linux, and Windows. There is no released desktop app yet.",
+      "A local macOS development build has been tested. There is no released desktop app to download.",
     ],
     [
       "Cloud computers",
@@ -101,14 +101,14 @@ export const home: HomeDict = {
     ],
   ],
   availabilityNote:
-    "No account is needed for the terminal. An account is never a paid plan by itself, and nothing on this site can charge you.",
+    "The terminal needs no Codewhale account. Hosted model providers bill under your own provider account; creating a Codewhale account does not purchase model access.",
   accountLink: "Create an account",
 
   surfacesHeading: "Use it where the work happens.",
   surfaces: [
     ["TUI", "Interactive terminal work"],
     ["codewhale exec", "Scripts and CI"],
-    ["Local web client", "Localhost interface; hosted remote control uses the Web app"],
+    ["Local web client", "Localhost interface; hosted browser workbench in development"],
     ["Runtime API + MCP", "Local integrations"],
     ["Fleet", "Several agents on one job"],
   ],

@@ -44,7 +44,7 @@ export const home: HomeDict = {
   chapterModels: "Els teus models",
   modelsHeading: "Porta el que tens. No canviïs res que no hagis triat.",
   modelsBody:
-    "Codewhale inclou {count} proveïdors i els tracta com a iguals. Desa una clau un cop, anomena un model i la ruta es queda exactament com l’has fixat. Els models locals sobre vLLM, SGLang o Ollama no necessiten clau.",
+    "Connecta un proveïdor allotjat compatible, una passarel·la o un servidor de models local. Revisa el proveïdor i el model abans de començar. Un servidor local pot requerir autenticació.",
   modelsFacts: [
     ["Allotjat", "La teva pròpia clau d’API, desada amb codewhale auth set"],
     ["Gateway", "Un endpoint per a molts models; el proveïdor el segueixes triant tu"],

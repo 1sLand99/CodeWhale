@@ -79,7 +79,7 @@
     "kicker": "Agentic computing, on your terms",
     "heroTitleA": "Your models.",
     "heroTitleB": "More capable together.",
-    "heroIntro": "{brand} brings the models you already use into one terminal and lets them work as a crew — reading your code, editing, running the checks — while you decide what each one may do. Open source, on your machine.",
+    "heroIntro": "{brand} puts coding agents in your terminal to read code, edit files, and run checks. Choose supported models and the session’s permission posture. Open source, on your machine.",
     "getCodewhale": "Get Codewhale",
     "exploreProduct": "Explore the product",
     "shotPreview": "Terminal preview",
@@ -95,11 +95,11 @@
     "chapterTerminal": "Your terminal",
     "chapterTerminalTitle": "A familiar place to begin.",
     "gainHeading": "Give your models a job to finish.",
-    "gainLede": "One session can hold several models at once, each in a role you gave it, all working in the same repository under the same rules.",
+    "gainLede": "Start with one model. Use Fleet to save a roster, and delegate parts of a task when the work benefits from more than one agent.",
     "gain": [
       [
         "Your models",
-        "Hosted keys, a gateway, or a local runtime with no key at all. Pin a different model to each role and keep the provider you chose — a model name never switches it for you."
+        "Use a supported hosted provider, gateway, or local model server. Fleet stores model choices for reusable agent roles."
       ],
       [
         "Capable agents",
@@ -111,8 +111,8 @@
       ]
     ],
     "chapterModels": "Your models",
-    "modelsHeading": "Bring what you have. Change nothing you did not choose.",
-    "modelsBody": "Codewhale ships with {count} providers and treats them as peers. Save a key once, name a model, and the route stays exactly as you set it. Local models over vLLM, SGLang, or Ollama need no key.",
+    "modelsHeading": "A place for the models you choose.",
+    "modelsBody": "Connect a supported hosted provider, a gateway, or a local model server. Check the selected provider and model before starting work. Local servers may run without an API key, depending on their configuration.",
     "modelsFacts": [
       [
         "Hosted",
@@ -127,7 +127,7 @@
         "vLLM, SGLang, Ollama on localhost — usually no key"
       ]
     ],
-    "modelsLink": "See every provider",
+    "modelsLink": "Explore provider options",
     "startHeading": "Four steps to a first session.",
     "startLede": "Install, open a session with no key, connect a provider, then set up a fleet when one model is not enough.",
     "startGuideLink": "Read the getting-started guide",
@@ -143,13 +143,13 @@
       ],
       [
         "Web app",
-        "Sign-in and remote control available",
-        "Sign in or create an account, then type /rc in a running local session to continue that exact session from the browser. The rest of the browser workbench is a development preview."
+        "Development preview",
+        "Account pages and browser pairing are implemented in development. Public end-to-end remote control has not been verified; use the terminal for released task execution."
       ],
       [
         "Desktop",
         "Development build",
-        "Alpha builds exist for macOS, Linux, and Windows. There is no released desktop app yet."
+        "A local macOS development build has been tested. There is no released desktop app to download."
       ],
       [
         "Cloud computers",
@@ -157,7 +157,7 @@
         "Running work on a hosted computer is in development. This page will say so when it works."
       ]
     ],
-    "availabilityNote": "No account is needed for the terminal. An account is never a paid plan by itself, and nothing on this site can charge you.",
+    "availabilityNote": "The terminal needs no Codewhale account. Hosted model providers bill under your own provider account; creating a Codewhale account does not purchase model access.",
     "accountLink": "Create an account",
     "surfacesHeading": "Use it where the work happens.",
     "surfaces": [
@@ -171,7 +171,7 @@
       ],
       [
         "Local web client",
-        "Localhost interface; hosted remote control uses the Web app"
+        "Localhost interface; hosted browser workbench in development"
       ],
       [
         "Runtime API + MCP",
@@ -358,7 +358,7 @@
     "runLead": "The Runtime's fleet-run projection lives in the workspace's .codewhale/fleet.jsonl ledger, with worker logs under .codewhale/fleet/. codewhale fleet resume <run-id> asks Runtime to replay the ledger and reconcile stale leases; it is idempotent after a manager exit, laptop sleep, or runtime restart.",
     "statusLead": "The TUI command {fleetStatusTui} and the shell command {fleetStatusShell} read the same durable fleet ledger. Use {fleetWorkers} (or {subagents}) for the sub-agents attached only to the current interactive session.",
     "profilesTitle": "Saved fleets, roles, and /fleet setup",
-    "profilesLead": "{fleetSaved} opens the picker for named saved fleets; bare /fleet opens the selected fleet's member roster. /fleet setup opens a progressive wizard for authoring a reusable roster member: one focused choice at a time — semantic role, model (inherit or a concrete configured route), thinking tier, then an exact identity/route review before save. Profiles live in project scope (.codewhale/agents/<role>.toml) or personal scope ($CODEWHALE_HOME/agents/<role>.toml); a same-id project profile wins. Runtime separately owns trust, filesystem/network reach, secrets, approvals, sandboxing, and tools, so profile storage scope never widens execution authority.",
+    "profilesLead": "{fleetSaved} opens the picker for named saved fleets; bare /fleet opens the selected fleet's member roster. In v0.9.11, /fleet setup edits the selected named fleet. With no named fleet selected, it opens profile setup: choose a role and model, adjust optional thinking settings, then review before saving. Profiles live in project scope (.codewhale/agents/<role>.toml) or personal scope ($CODEWHALE_HOME/agents/<role>.toml); a same-id project profile wins. Runtime separately owns trust, filesystem/network reach, secrets, approvals, sandboxing, and tools, so profile storage scope never widens execution authority.",
     "workflowTitle": "Workflow orchestration",
     "workflowLead": "Ordinary multi-agent work does not need Workflow: send normal messages in Operate and let Codewhale prefer background workers when parallelism, isolation, or duration makes delegation useful. Use Workflow when ordered phases, gates, shared budgets, replay, or deterministic fan-in matter. A Workflow script coordinates only: it selects fleet members but has no filesystem or shell; Runtime launches the real workers under live authority policy. Scripts use a declarative compile-only JS subset that lowers to a typed WorkflowSpec validated and executed by Rust; import, fetch, process, eval, and async/await are rejected.",
     "workflowLimits": "Default validation bounds: up to 1,000 worker agents per Workflow run, Workflow IR structural nesting no deeper than 5, loops must declare max_iterations, and dynamic expand nodes must declare max_children plus a template. Runtime child delegation is a separate execution budget: it defaults to 3 levels and has an opt-in hard ceiling of 8. These are population and shape limits, not launch concurrency: Runtime admits at most 16 live workers for one run and queues the rest. Omitted or zero max_steps stays unbounded; only a positive value adds a model-turn ceiling.",

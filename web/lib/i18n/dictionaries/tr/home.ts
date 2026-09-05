@@ -44,7 +44,7 @@ export const home: HomeDict = {
   chapterModels: "Senin modellerin",
   modelsHeading: "Elindekini getir. Seçmediğin hiçbir şeyi değiştirme.",
   modelsBody:
-    "Codewhale {count} sağlayıcıyla gelir ve hepsine eşit davranır. Anahtarı bir kez kaydet, bir model adı ver; rota tam senin ayarladığın gibi kalır. vLLM, SGLang ya da Ollama üzerindeki yerel modeller anahtar gerektirmez.",
+    "Desteklenen bir barındırılan sağlayıcıya, ağ geçidine veya yerel model sunucusuna bağlanın. Başlamadan önce sağlayıcıyı ve modeli kontrol edin. Yerel sunucular da kimlik doğrulaması gerektirebilir.",
   modelsFacts: [
     ["Barındırılan", "codewhale auth set ile kaydedilen kendi API anahtarın"],
     ["Gateway", "Birçok model için tek uç nokta, sağlayıcıyı yine sen seçersin"],

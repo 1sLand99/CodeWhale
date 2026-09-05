@@ -44,7 +44,7 @@ export const home: HomeDict = {
   chapterModels: "Mô hình của bạn",
   modelsHeading: "Mang theo những gì bạn có. Không đổi gì bạn chưa chọn.",
   modelsBody:
-    "Codewhale đi kèm {count} nhà cung cấp và đối xử bình đẳng với tất cả. Lưu khóa một lần, đặt tên mô hình, và tuyến đường giữ nguyên như bạn đặt. Mô hình cục bộ qua vLLM, SGLang hoặc Ollama không cần khóa.",
+    "Kết nối nhà cung cấp được hỗ trợ, cổng trung gian hoặc máy chủ mô hình cục bộ. Kiểm tra nhà cung cấp và mô hình trước khi bắt đầu. Máy chủ cục bộ cũng có thể yêu cầu xác thực.",
   modelsFacts: [
     ["Hosted", "Khóa API của bạn, lưu bằng codewhale auth set"],
     ["Gateway", "Một endpoint cho nhiều mô hình, nhà cung cấp vẫn do bạn chọn"],

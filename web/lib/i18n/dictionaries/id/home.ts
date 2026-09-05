@@ -44,7 +44,7 @@ export const home: HomeDict = {
   chapterModels: "Model Anda",
   modelsHeading: "Bawa yang Anda punya. Jangan ubah yang tidak Anda pilih.",
   modelsBody:
-    "Codewhale hadir dengan {count} penyedia dan memperlakukan semuanya setara. Simpan kunci sekali, sebutkan model, dan rute tetap persis seperti yang Anda atur. Model lokal lewat vLLM, SGLang, atau Ollama tidak butuh kunci.",
+    "Hubungkan penyedia yang didukung, gateway, atau server model lokal. Periksa penyedia dan model sebelum mulai bekerja. Server lokal juga dapat memerlukan autentikasi.",
   modelsFacts: [
     ["Hosted", "Kunci API Anda sendiri, disimpan dengan codewhale auth set"],
     ["Gateway", "Satu endpoint untuk banyak model, penyedia tetap Anda yang pilih"],

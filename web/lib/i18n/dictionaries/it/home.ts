@@ -43,7 +43,7 @@ export const home: HomeDict = {
   chapterModels: "I tuoi modelli",
   modelsHeading: "Porta quello che hai. Non cambiare nulla che tu non abbia scelto.",
   modelsBody:
-    "Codewhale include {count} provider e li tratta da pari. Salva una chiave una volta, indica un modello e la rotta resta esattamente come l’hai impostata. I modelli locali su vLLM, SGLang o Ollama non hanno bisogno di chiave.",
+    "Collega un provider ospitato supportato, un gateway o un server di modelli locale. Controlla provider e modello prima di iniziare. Anche un server locale può richiedere autenticazione.",
   modelsFacts: [
     ["Hosted", "La tua chiave API, salvata con codewhale auth set"],
     ["Gateway", "Un endpoint per molti modelli, il provider lo scegli sempre tu"],

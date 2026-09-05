@@ -44,7 +44,7 @@ export const home: HomeDict = {
   chapterModels: "Tus modelos",
   modelsHeading: "Trae lo que tienes. No cambies nada que no hayas elegido.",
   modelsBody:
-    "Codewhale incluye {count} proveedores y los trata como iguales. Guarda una clave una vez, nombra un modelo y la ruta se queda exactamente como la fijaste. Los modelos locales sobre vLLM, SGLang u Ollama no necesitan clave.",
+    "Conecta un proveedor alojado compatible, una pasarela o un servidor de modelos local. Revisa el proveedor y el modelo antes de empezar. Un servidor local puede requerir autenticación.",
   modelsFacts: [
     ["Alojado", "Tu propia clave de API, guardada con codewhale auth set"],
     ["Gateway", "Un endpoint para muchos modelos; el proveedor lo sigues eligiendo tú"],
