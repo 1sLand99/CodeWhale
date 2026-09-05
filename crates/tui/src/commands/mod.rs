@@ -1692,7 +1692,15 @@ mod tests {
             }
             let (mut app, tmpdir, _guard) = create_isolated_test_app();
             let invocation = invocation_for(command.name, command.name, tmpdir.path());
+            // Breadcrumb for a terminated run: the last line names the handler
+            // that never returned.
+            eprintln!("dispatch smoke: {invocation}");
+            let started = std::time::Instant::now();
             let result = execute(&invocation, &mut app);
+            eprintln!(
+                "dispatch smoke: {invocation} returned in {:?}",
+                started.elapsed()
+            );
             if let Some(msg) = &result.message {
                 assert!(
                     !msg.contains("Unknown command"),
@@ -1714,7 +1722,13 @@ mod tests {
             for alias in command.aliases {
                 let (mut app, tmpdir, _guard) = create_isolated_test_app();
                 let invocation = invocation_for(command.name, alias, tmpdir.path());
+                eprintln!("dispatch smoke: {invocation}");
+                let started = std::time::Instant::now();
                 let result = execute(&invocation, &mut app);
+                eprintln!(
+                    "dispatch smoke: {invocation} returned in {:?}",
+                    started.elapsed()
+                );
                 if let Some(msg) = &result.message {
                     assert!(
                         !msg.contains("Unknown command"),
