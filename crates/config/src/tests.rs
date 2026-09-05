@@ -8720,9 +8720,9 @@ fn a_run_scoped_off_is_a_kill_switch_and_not_a_revocation() {
 fn telemetry_consent_names_its_source() {
     let guard = TelemetryEnvGuard::take();
 
-    // Nobody said anything: off, by default.
+    // Nobody said anything: on, by default.
     let (on, source) = resolved_telemetry_consent(None);
-    assert!(!on);
+    assert!(on);
     assert_eq!(source, TelemetrySource::Default);
 
     // The config file owns the answer.
@@ -8778,7 +8778,7 @@ fn resolved_runtime_options_reports_telemetry_source() {
     let guard = TelemetryEnvGuard::take();
 
     let resolved = ConfigToml::default().resolve_runtime_options(&CliRuntimeOverrides::default());
-    assert!(!resolved.telemetry);
+    assert!(resolved.telemetry);
     assert_eq!(resolved.telemetry_source, TelemetrySource::Default);
 
     // The CLI flag owns the answer for this run, off or on.
@@ -8810,7 +8810,7 @@ fn config_display_for_telemetry_reports_resolved_consent_with_source() {
     let config = ConfigToml::default();
     assert_eq!(
         config.get_display_value("telemetry").as_deref(),
-        Some("off (default)")
+        Some("on (default)")
     );
 
     let config = ConfigToml {
@@ -8912,9 +8912,9 @@ fn telemetry_env_invalid_is_recorded_rather_than_swallowed() {
 fn telemetry_explicit_off_distinguishes_an_answer_from_the_default() {
     let _guard = TelemetryEnvGuard::take();
 
-    // Nobody said anything: default off, with no explicit opt-out.
+    // Nobody said anything: default on, with no explicit opt-out.
     let resolved = ConfigToml::default().resolve_runtime_options(&CliRuntimeOverrides::default());
-    assert!(!resolved.telemetry);
+    assert!(resolved.telemetry);
     assert!(!resolved.telemetry_explicit_off);
 
     // The config file says no.
@@ -8967,8 +8967,8 @@ fn an_unconfigured_endpoint_resolves_to_the_shipped_default() {
         "an unconfigured endpoint must resolve to the shipped default"
     );
 
-    // An endpoint being available does not enable collection.
-    assert!(!resolved.telemetry);
+    // The shipped usage preference is on without an acceptance prerequisite.
+    assert!(resolved.telemetry);
     assert!(!resolved.telemetry_explicit_off);
 }
 
@@ -9238,4 +9238,71 @@ fn telemetry_notice_fields_round_trip_and_stay_absent_when_unanswered() {
         serde_json::from_str(r#"{"schema_version":1}"#).expect("legacy record loads");
     assert_eq!(legacy.telemetry_notice_decided_for, None);
     assert!(!legacy.telemetry_opt_in);
+}
+
+#[test]
+fn telemetry_disclosure_records_presentation_without_acceptance_or_erasing_old_declines() {
+    for version in [None, Some("1"), Some("4")] {
+        for enabled in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("setup_state.json");
+            let mut state = SetupState {
+                constitution_preview_version: 12,
+                ..Default::default()
+            };
+            if let Some(version) = version {
+                state.record_telemetry_notice(version, enabled);
+            }
+            state.save_to(&path).unwrap();
+            SetupState::update_telemetry_at(&path, |latest| {
+                latest.record_telemetry_notice_shown(TELEMETRY_NOTICE_VERSION);
+            })
+            .unwrap();
+            let shown = SetupState::load_from(&path).unwrap();
+            assert!(!shown.needs_telemetry_notice(TELEMETRY_NOTICE_VERSION));
+            assert!(!shown.telemetry_accepted(TELEMETRY_NOTICE_VERSION));
+            assert!(!shown.telemetry_declined(TELEMETRY_NOTICE_VERSION));
+            assert_eq!(shown.telemetry_opted_out(), version.is_some() && !enabled);
+            assert_eq!(
+                shown.telemetry_notice_decided_for,
+                state.telemetry_notice_decided_for
+            );
+            assert_eq!(shown.telemetry_opt_in, state.telemetry_opt_in);
+            assert_eq!(shown.constitution_preview_version, 12);
+        }
+    }
+}
+
+#[test]
+fn telemetry_metadata_update_refuses_corrupt_or_busy_state_and_reloads_the_saved_decline() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("setup_state.json");
+    std::fs::write(&path, "not-json").unwrap();
+    assert!(SetupState::update_telemetry_at(&path, |_| {}).is_err());
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "not-json");
+    SetupState::default().save_to(&path).unwrap();
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path.with_extension("telemetry.lock"))
+        .unwrap();
+    let mut lock = fd_lock::RwLock::new(file);
+    let guard = lock.write().unwrap();
+    assert!(
+        SetupState::update_telemetry_at(&path, |state| {
+            state.record_telemetry_notice_shown(TELEMETRY_NOTICE_VERSION);
+        })
+        .is_err(),
+        "display bookkeeping must never block startup"
+    );
+    drop(guard);
+    SetupState::update_telemetry_at(&path, |state| {
+        state.record_telemetry_notice("4", false);
+    })
+    .unwrap();
+    SetupState::update_telemetry_at(&path, |state| {
+        state.record_telemetry_notice_shown(TELEMETRY_NOTICE_VERSION);
+    })
+    .unwrap();
+    assert!(SetupState::load_from(&path).unwrap().telemetry_opted_out());
 }

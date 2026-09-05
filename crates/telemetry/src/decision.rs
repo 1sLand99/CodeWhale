@@ -10,9 +10,7 @@
 
 use std::path::{Path, PathBuf};
 
-use codewhale_config::{
-    ResolvedRuntimeOptions, SetupState, TELEMETRY_NOTICE_VERSION, TelemetrySource,
-};
+use codewhale_config::{ResolvedRuntimeOptions, SetupState, TelemetrySource};
 
 use crate::buffer;
 use crate::event::Surface;
@@ -242,14 +240,12 @@ pub fn load_setup_state_for_decision_at(path: &Path) -> Option<SetupState> {
 ///    resolved `false` from a run-scoped or invalid-value floor → `ForcedOff`.
 /// 2. Any recorded notice decline → `OptedOut`, including a decline recorded
 ///    by the former opt-in notice.
-/// 3. No explicit acceptance of the current processor notice → `ForcedOff`.
-/// 4. No resolvable home → `ForcedOff`.
-/// 5. Endpoint configured but refused by [`validate_endpoint`] → `ForcedOff`.
-/// 6. Otherwise `Enabled`.
+/// 3. No resolvable home → `ForcedOff`.
+/// 4. Endpoint configured but refused by [`validate_endpoint`] → `ForcedOff`.
+/// 5. Otherwise `Enabled`, including an absent configuration preference.
 ///
-/// The notice is only ever *rendered* on a TTY. The interactive TUI draws a
-/// localized nonblocking notice pointing to the explicit Settings choice.
-/// Headless surfaces need the same saved versioned acceptance and kill switches.
+/// The disclosure is policy metadata, not a consent gate. Every armed surface
+/// presents a startup disclosure; the TUI also has a localized notice.
 pub fn decide_in_home(
     home: Option<&Path>,
     resolved: &ResolvedRuntimeOptions,
@@ -292,7 +288,7 @@ fn evaluate_in_home(
             || (resolved.telemetry_source == TelemetrySource::Default
                 && setup.telemetry_opted_out())
         {
-            // The default-off preference must not hide a durable decline in
+            // A run-scoped preference must not hide a durable decline in
             // the sidecar when the config register was never written.
             return TelemetryEvaluation::OptedOut(root);
         }
@@ -303,12 +299,6 @@ fn evaluate_in_home(
     //    version bumps may update disclosure, never reverse a user's "no".
     if setup.telemetry_opted_out() {
         return TelemetryEvaluation::OptedOut(root);
-    }
-
-    // A former disclosure, a config bool, and merely drawing a notice do not
-    // authorize the newly disclosed processor. Missing consent never wipes.
-    if !setup.telemetry_accepted(TELEMETRY_NOTICE_VERSION) {
-        return TelemetryEvaluation::ForcedOff;
     }
 
     // Nowhere to keep an install id or a buffer.

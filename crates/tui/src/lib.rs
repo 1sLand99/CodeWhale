@@ -2005,16 +2005,22 @@ fn arm_telemetry(cli: &Cli, command: Option<&Commands>) {
     );
 }
 
-/// Accept the disclosed processor version through the same durable transition
-/// as Settings. Used by the headless CLI; it never arms the current process.
+/// Compatibility command to explicitly enable usage under the current policy.
+/// This optional choice never arms the current process.
 pub fn accept_telemetry_notice(config_path: Option<PathBuf>, version: u32) -> Result<String> {
-    if version != codewhale_telemetry::CONSENT_VERSION {
+    if version != codewhale_telemetry::NOTICE_VERSION {
         anyhow::bail!(
             "read `codewhale config telemetry`, then explicitly accept current notice version {}",
             codewhale_config::TELEMETRY_NOTICE_VERSION
         );
     }
-    let applied = crate::telemetry_notice::apply_persistent_preference(config_path, true);
+    set_telemetry_preference(config_path, true)
+}
+
+/// Set the durable usage preference through the same transition as Settings.
+/// Enabling affects the next launch; disabling immediately erases queued usage.
+pub fn set_telemetry_preference(config_path: Option<PathBuf>, enabled: bool) -> Result<String> {
+    let applied = crate::telemetry_notice::apply_persistent_preference(config_path, enabled);
     let message = applied.message(crate::localization::Locale::En);
     if applied.is_error() {
         anyhow::bail!("{message}");
@@ -2088,11 +2094,9 @@ async fn run_async_main_inner(
     // ahead of it collects nothing.
     spawn_signal_cleanup_task();
 
-    // A due interactive disclosure belongs to the first native TUI frame. In
-    // that one case arming is deferred until its decision event; every other
-    // surface keeps the ordinary pre-dispatch predicate. This is what lets an
-    // immediate Disable choice stop this very session without printing or
-    // blocking on a shell questionnaire first.
+    // A due interactive disclosure belongs to the native TUI. Presentation
+    // does not gate the default-on policy; unreadable privacy state does.
+    // Settings can disable this session and erase its pending aggregates.
     let surface = telemetry_surface(command.as_ref());
     let telemetry_notice_plan = if surface == codewhale_telemetry::Surface::Tui {
         crate::telemetry_notice::plan_if_due(
@@ -6301,18 +6305,17 @@ fn doctor_control_socket_posture_line(config: &Config) -> String {
 
 /// Resolved telemetry consent and where it came from (#5441).
 ///
-/// Report the saved current processor acceptance as well as the environment
-/// preference, without arming or touching telemetry state.
+/// Report the durable opt-out and environment preference without arming or
+/// touching telemetry state. Notice presentation is not a permission gate.
 fn doctor_runtime_telemetry(config: &Config) -> (bool, &'static str) {
     let (on, source) = codewhale_config::resolved_telemetry_consent(config.telemetry);
-    if on
-        && !codewhale_telemetry::load_setup_state_for_decision().is_some_and(|state| {
-            state.telemetry_accepted(codewhale_config::TELEMETRY_NOTICE_VERSION)
-        })
-    {
-        (false, "consent_required")
-    } else {
-        (on, source.as_str())
+    if !on {
+        return (false, source.as_str());
+    }
+    match codewhale_telemetry::load_setup_state_for_decision() {
+        Some(state) if state.telemetry_opted_out() => (false, "recorded_opt_out"),
+        Some(_) => (true, source.as_str()),
+        None => (false, "privacy_state_unreadable"),
     }
 }
 
@@ -13535,28 +13538,22 @@ mod doctor_setup_state_tests {
         assert!(config.telemetry.is_none());
         let line = doctor_runtime_posture_line(&config, &workspace);
         assert!(
-            line.contains("telemetry=off (default)"),
+            line.contains("telemetry=on (default)"),
             "doctor line should name the defaulted consent: {line}"
         );
         let report = doctor_setup_report_json(&config, &workspace);
-        assert_eq!(report["runtime_posture"]["telemetry"]["value"], false);
+        assert_eq!(report["runtime_posture"]["telemetry"]["value"], true);
         assert_eq!(report["runtime_posture"]["telemetry"]["source"], "default");
 
         let configured_on = Config {
             telemetry: Some(true),
             ..Config::default()
         };
-        assert_eq!(
-            doctor_runtime_telemetry(&configured_on),
-            (false, "consent_required")
-        );
+        assert_eq!(doctor_runtime_telemetry(&configured_on), (true, "config"));
         let mut accepted = codewhale_config::SetupState::default();
         accepted.record_telemetry_notice("3", true);
         accepted.save().expect("old acceptance");
-        assert_eq!(
-            doctor_runtime_telemetry(&configured_on),
-            (false, "consent_required")
-        );
+        assert_eq!(doctor_runtime_telemetry(&configured_on), (true, "config"));
         accepted.record_telemetry_notice(codewhale_config::TELEMETRY_NOTICE_VERSION, true);
         accepted.save().expect("current acceptance");
         assert_eq!(doctor_runtime_telemetry(&configured_on), (true, "config"));

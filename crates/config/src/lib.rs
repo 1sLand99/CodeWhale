@@ -2888,8 +2888,8 @@ impl ConfigToml {
 
         if key == "telemetry" {
             // Report the resolved configuration preference even when the key is
-            // absent. The telemetry owner additionally requires current
-            // explicit processor acceptance before collection or delivery.
+            // absent. The telemetry owner also preserves recorded opt-outs
+            // and fails closed when existing privacy state is unreadable.
             let (on, source) = resolved_telemetry_consent(self.telemetry);
             return Some(format!(
                 "{} ({})",
@@ -3409,8 +3409,8 @@ impl ConfigToml {
             .or_else(|| env.log_level.clone())
             .or_else(|| self.log_level.clone());
         // The telemetry preference resolves once in the shared core behind
-        // [`resolved_telemetry_consent`]. Actual collection also requires the
-        // current processor acceptance checked by the telemetry owner. The
+        // [`resolved_telemetry_consent`]. The telemetry owner also checks old
+        // durable declines and unreadable privacy state. The
         // comments that matter live there: the
         // environment/file/default chain, and why every kill switch is a
         // floor (`telemetry = false` persisted in the file is the *persistent*
@@ -3594,7 +3594,7 @@ pub enum TelemetrySource {
     Env,
     /// `telemetry = …` written to the config file.
     Config,
-    /// Nobody said anything; the shipped preference is off.
+    /// Nobody said anything; the shipped preference is on.
     Default,
 }
 
@@ -3644,10 +3644,10 @@ fn read_telemetry_env() -> (Option<bool>, bool) {
 /// This is the same resolution [`ConfigToml::resolve_runtime_options`]
 /// applies without its CLI term: environment first (an explicit value, an
 /// unreadable one, or a dispatcher floor), then the file, then the shipped
-/// default of `off`; a persisted `telemetry = false` is a floor no later
+/// default of `on`; a persisted `telemetry = false` is a floor no later
 /// term can climb over. The runtime resolver calls this directly, so the
-/// preference surfaces agree. The telemetry owner also checks current explicit
-/// processor consent, which this configuration-only resolver cannot grant.
+/// preference surfaces agree. The telemetry owner also checks historical
+/// durable declines and fails closed on unreadable privacy state.
 #[must_use]
 pub fn resolved_telemetry_consent(file_telemetry: Option<bool>) -> (bool, TelemetrySource) {
     let (env_telemetry, env_invalid) = read_telemetry_env();
@@ -3669,7 +3669,7 @@ fn telemetry_consent_from_env(
     file_telemetry: Option<bool>,
 ) -> (bool, TelemetrySource) {
     let persisted_off = file_telemetry == Some(false);
-    let allowed = env_telemetry.or(file_telemetry).unwrap_or(false);
+    let allowed = env_telemetry.or(file_telemetry).unwrap_or(true);
     let on = allowed && env_telemetry != Some(false) && !env_invalid && !floor && !persisted_off;
     let source = if !on && (env_telemetry == Some(false) || env_invalid || floor) {
         // An environment kill switch decided the outcome.

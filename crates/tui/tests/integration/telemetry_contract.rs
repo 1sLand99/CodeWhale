@@ -113,9 +113,8 @@ impl Fixture {
 
     /// Record the answer a user would have given on a TTY.
     ///
-    /// Machine-scoped consent: the notice is only ever *rendered* on a
-    /// terminal, but the decision it records lives on this `CODEWHALE_HOME` and
-    /// authorizes later non-TTY runs against the same home.
+    /// Explicit preferences are machine-scoped and preserve historical no
+    /// across TTY and headless launches. Presentation records no preference.
     fn record_notice(&self, opt_in: bool) {
         let mut state = SetupState::default();
         state.record_telemetry_notice(TELEMETRY_NOTICE_VERSION, opt_in);
@@ -421,25 +420,27 @@ async fn an_unparseable_telemetry_env_value_sends_zero_requests() {
     );
 }
 
-/// A fresh headless run cannot infer processor consent from silence.
+/// A fresh headless run defaults on and records presentation, not acceptance.
 #[tokio::test(flavor = "current_thread")]
-async fn telemetry_enabled_without_notice_creates_no_state() {
+async fn telemetry_defaults_on_without_notice_buffers_a_complete_session() {
     let server = start_recorder().await;
     let fixture = Fixture::new().with_endpoint(&server.uri());
     // Deliberately no `record_notice`.
 
     fixture.run_completions();
 
-    assert_no_batches(&server, "missing current explicit consent").await;
-    assert!(
-        !fixture.telemetry_root().exists(),
-        "unconsented runs create no telemetry state"
+    assert_short_cli_buffered_without_network(&fixture, &server, "default-on usage").await;
+    let state = SetupState::load_from(&fixture.setup_state_path()).expect("shown state");
+    assert_eq!(
+        state.telemetry_notice_shown_for.as_deref(),
+        Some(TELEMETRY_NOTICE_VERSION)
     );
+    assert!(!state.telemetry_accepted(TELEMETRY_NOTICE_VERSION));
 }
 
-/// A prior disclosure never authorizes the newly introduced processor.
+/// A previous acceptance remains enabled under the default-on policy.
 #[tokio::test(flavor = "current_thread")]
-async fn a_stale_accepted_notice_version_creates_no_state() {
+async fn a_stale_accepted_notice_remains_on_without_synthesizing_current_acceptance() {
     let server = start_recorder().await;
     let fixture = Fixture::new().with_endpoint(&server.uri());
     fixture.write_config("telemetry = true\n");
@@ -451,11 +452,13 @@ async fn a_stale_accepted_notice_version_creates_no_state() {
 
     fixture.run_completions();
 
-    assert_no_batches(&server, "missing current explicit consent").await;
-    assert!(
-        !fixture.telemetry_root().exists(),
-        "unconsented runs create no telemetry state"
+    assert_short_cli_buffered_without_network(&fixture, &server, "default-on usage").await;
+    let state = SetupState::load_from(&fixture.setup_state_path()).expect("shown state");
+    assert_eq!(
+        state.telemetry_notice_shown_for.as_deref(),
+        Some(TELEMETRY_NOTICE_VERSION)
     );
+    assert!(!state.telemetry_accepted(TELEMETRY_NOTICE_VERSION));
 }
 
 // ── Nothing survives a disable ───────────────────────────────────────────
@@ -636,11 +639,13 @@ async fn skip_onboarding_writes_no_telemetry_decision() {
             "skip-onboarding must leave the telemetry decision unset"
         );
     }
-    assert_no_batches(&server, "missing current explicit consent").await;
-    assert!(
-        !fixture.telemetry_root().exists(),
-        "unconsented runs create no telemetry state"
+    assert_short_cli_buffered_without_network(&fixture, &server, "default-on usage").await;
+    let state = SetupState::load_from(&fixture.setup_state_path()).expect("shown state");
+    assert_eq!(
+        state.telemetry_notice_shown_for.as_deref(),
+        Some(TELEMETRY_NOTICE_VERSION)
     );
+    assert!(!state.telemetry_accepted(TELEMETRY_NOTICE_VERSION));
 }
 
 // ── Payload red lines, through a real turn ───────────────────────────────
@@ -677,6 +682,14 @@ async fn batch_contains_no_planted_sentinel() {
         !batches.is_empty(),
         "this test is only meaningful against a batch that was actually sent"
     );
+    for batch in &batches {
+        assert_eq!(batch["schema_version"], 3);
+        assert_eq!(batch["notice_version"], 5);
+        assert!(batch.get("consent_version").is_none());
+    }
+    let shown = SetupState::load_from(&fixture.setup_state_path()).expect("disclosure marker");
+    assert_eq!(shown.telemetry_notice_decided_for, None);
+    assert!(!shown.telemetry_opt_in);
     let serialized = serde_json::to_string(&batches).expect("serialize batches");
     for sentinel in [
         SENTINEL_PROMPT,
@@ -1030,8 +1043,13 @@ fn sentinel_config(base_url: &str, telemetry: bool) -> String {
 }
 
 fn plant_sentinels(fixture: &Fixture, base_url: &str) {
-    fixture.write_config(&sentinel_config(base_url, true));
-    fixture.record_notice(true);
+    let config = sentinel_config(base_url, true);
+    fixture.write_config(
+        config
+            .strip_prefix("telemetry = true\n")
+            .expect("fixture preference"),
+    );
+    // No saved preference or acceptance: the real exec path must use default-on.
     std::fs::write(
         fixture.workspace.join(SENTINEL_FILENAME),
         "sentinel workspace file\n",

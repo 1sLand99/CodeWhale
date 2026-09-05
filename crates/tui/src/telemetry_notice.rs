@@ -14,7 +14,7 @@ use codewhale_telemetry::SessionSource;
 
 use crate::localization::{Locale, MessageId, tr};
 
-/// Marker for a nonblocking invitation to review the explicit Settings choice.
+/// Marker for a nonblocking disclosure of default-on usage and Settings opt-out.
 #[derive(Debug, Clone)]
 pub(crate) struct PendingTelemetryNotice;
 
@@ -29,7 +29,7 @@ pub(crate) enum TelemetryNoticePlan {
 
 impl TelemetryNoticePlan {
     pub(crate) fn should_arm_before_tui(&self) -> bool {
-        matches!(self, Self::NotDue)
+        !matches!(self, Self::SuppressArming)
     }
 
     pub(crate) fn into_pending(self) -> Option<PendingTelemetryNotice> {
@@ -153,9 +153,22 @@ fn plan_for_store_and_state(
     }
 }
 
+/// Record that the interactive disclosure was drawn for this policy version.
+///
+/// Display bookkeeping only: it never touches the preference registers, and a
+/// failed write merely repeats the notice on a later launch.
+pub(crate) fn record_presented() {
+    let Ok(path) = SetupState::path() else {
+        return;
+    };
+    let _ = SetupState::update_telemetry_at(&path, |state| {
+        state.record_telemetry_notice_shown(TELEMETRY_NOTICE_VERSION);
+    });
+}
+
 /// Return the saved telemetry preference shown by `/settings`.
 ///
-/// A missing or older setup record has not accepted the current processor. An existing
+/// A missing preference defaults on. An existing
 /// unreadable record may contain an opt-out, so the Settings row fails closed
 /// and shows Off rather than guessing.
 pub(crate) fn saved_preference_enabled(config: &crate::config::Config) -> bool {
@@ -166,20 +179,20 @@ pub(crate) fn saved_preference_enabled(config: &crate::config::Config) -> bool {
 }
 
 fn saved_preference_enabled_at(config: &crate::config::Config, setup_state_path: &Path) -> bool {
-    if config.telemetry != Some(true) {
+    if config.telemetry == Some(false) {
         return false;
     }
     match codewhale_telemetry::load_setup_state_for_decision_at(setup_state_path) {
         // The telemetry owner returns a fresh default state for a genuinely
         // absent sidecar. `None` therefore means an existing record was
         // unreadable (or the path could not be inspected) and must fail closed.
-        Some(state) => state.telemetry_accepted(TELEMETRY_NOTICE_VERSION),
+        Some(state) => !state.telemetry_opted_out(),
         None => false,
     }
 }
 
 /// Persist the `/settings` telemetry toggle through the same two privacy
-/// registers as the first-run disclosure.
+/// registers as the CLI preference command.
 ///
 /// Turning off is successful when either durable register records the opt-out;
 /// existing local telemetry is then wiped under the telemetry ordering lock.
@@ -218,8 +231,8 @@ fn apply_persistent_preference_at(
         // Keep a durable Off floor in place until both privacy registers have
         // accepted the explicit re-enable. This makes every partial failure
         // resolve Off on the next launch.
-        let mut state = match load_notice_state_at(&setup_state_path) {
-            Ok(state) => state,
+        match load_notice_state_at(&setup_state_path) {
+            Ok(_) => {}
             Err(error) => {
                 return AppliedTelemetryPreference {
                     outcome: TelemetryPreferenceOutcome::SaveFailed(bounded_failure_detail(
@@ -235,8 +248,9 @@ fn apply_persistent_preference_at(
                 ))),
             };
         }
-        state.record_telemetry_notice(TELEMETRY_NOTICE_VERSION, true);
-        if let Err(error) = state.save_to(&setup_state_path) {
+        if let Err(error) = SetupState::update_telemetry_at(&setup_state_path, |state| {
+            state.record_telemetry_notice(TELEMETRY_NOTICE_VERSION, true);
+        }) {
             return AppliedTelemetryPreference {
                 outcome: TelemetryPreferenceOutcome::SaveFailed(bounded_failure_detail(format!(
                     "privacy record: {error}"
@@ -251,8 +265,9 @@ fn apply_persistent_preference_at(
             // The config Off floor is authoritative, but put the privacy
             // sidecar back in the same fail-closed state as well. Otherwise a
             // later manual edit could expose the partial enable as consent.
-            state.record_telemetry_notice(TELEMETRY_NOTICE_VERSION, false);
-            if let Err(rollback) = state.save_to(&setup_state_path) {
+            if let Err(rollback) = SetupState::update_telemetry_at(&setup_state_path, |state| {
+                state.record_telemetry_notice(TELEMETRY_NOTICE_VERSION, false);
+            }) {
                 failures.push(format!("restoring the privacy opt-out: {rollback}"));
             }
             return AppliedTelemetryPreference {
@@ -267,9 +282,8 @@ fn apply_persistent_preference_at(
     }
 
     let config_result = write_config_preference(config_path, false);
-    let state_result = load_notice_state_at(&setup_state_path).and_then(|mut state| {
+    let state_result = SetupState::update_telemetry_at(&setup_state_path, |state| {
         state.record_telemetry_notice(TELEMETRY_NOTICE_VERSION, false);
-        state.save_to(&setup_state_path)
     });
     // Wipe even if both durable writes fail: a successful tombstone stops the
     // already-armed process for the remainder of this session.
@@ -399,6 +413,25 @@ mod tests {
     }
 
     #[test]
+    fn a_due_disclosure_does_not_gate_default_on_collection() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(&config_path, "").unwrap();
+        let store = codewhale_config::ConfigStore::load(Some(config_path)).unwrap();
+        let plan = plan_for_store_and_state(
+            store,
+            dir.path().join("setup_state.json"),
+            SessionSource::Interactive,
+        );
+        assert!(matches!(plan, TelemetryNoticePlan::Due(_)));
+        assert!(plan.should_arm_before_tui());
+        assert!(
+            !dir.path().join("setup_state.json").exists(),
+            "planning is not presentation or acceptance"
+        );
+    }
+
+    #[test]
     fn corrupt_setup_state_is_never_replaced_with_telemetry_defaults() {
         let dir = tempfile::tempdir().expect("tempdir");
         let config_path = dir.path().join("config.toml");
@@ -421,7 +454,7 @@ mod tests {
     }
 
     #[test]
-    fn settings_saved_preference_requires_current_processor_acceptance() {
+    fn settings_preference_defaults_on_and_preserves_old_declines() {
         let dir = tempfile::tempdir().expect("tempdir");
         let state_path = dir.path().join("setup_state.json");
         let config = crate::config::Config {
@@ -430,18 +463,21 @@ mod tests {
         };
 
         assert!(
-            !saved_preference_enabled_at(&config, &state_path),
-            "a missing privacy record has not accepted the processor"
+            saved_preference_enabled_at(&config, &state_path),
+            "a missing privacy record uses default-on"
         );
 
         let mut state = SetupState::default();
         state.record_telemetry_notice("3", true);
         state.save_to(&state_path).expect("seed old acceptance");
+        assert!(saved_preference_enabled_at(&config, &state_path));
+        state.record_telemetry_notice("4", false);
+        state.save_to(&state_path).expect("seed historical decline");
         assert!(!saved_preference_enabled_at(&config, &state_path));
         state.record_telemetry_notice(TELEMETRY_NOTICE_VERSION, true);
         state.save_to(&state_path).expect("seed current acceptance");
         assert!(saved_preference_enabled_at(&config, &state_path));
-        assert!(!saved_preference_enabled_at(
+        assert!(saved_preference_enabled_at(
             &crate::config::Config::default(),
             &state_path
         ));
