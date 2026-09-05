@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import {
   chmodSync,
   existsSync,
@@ -189,7 +188,7 @@ describe("public surface contracts", () => {
     expect(matrix.product.license).toBe("MIT");
     expect(matrix.product.description).toBe(npmPackage.description);
     expect(license).toContain("MIT License");
-    expect(matrix.install.recommended).toBe("npm install -g codewhale");
+    expect(matrix.install.recommended).toBe("curl -fsSL https://codewhale.net/install.sh | sh");
     expect(readme).toContain(matrix.install.recommended);
     expect(Object.keys(npmPackage.bin)).toEqual(matrix.install.binaries);
     expect(matrix.install.channels).toEqual({
@@ -209,7 +208,10 @@ describe("public surface contracts", () => {
     // failure looked like a copy defect rather than a stale test.
     expect(install).toContain(`v${FACTS.version} source candidate`);
     expect(install).toContain("unpublished source candidate");
-    expect(install).toMatch(/Android \/ Termux \| arm64 \(aarch64\) \| ⚠️⁴ preview/);
+    const androidRow = install.split("\n").find((line) => line.startsWith("| Android / Termux |"));
+    expect(androidRow).toContain("arm64 (aarch64)");
+    expect(androidRow).toContain("`codewhale-android-arm64.tar.gz`");
+    expect(androidRow).toContain("⚠️⁴ preview");
     expect(install).not.toContain(`wrapper is published at\nv${FACTS.version}`);
     expect(npmReadme).toMatch(/^- Android arm64 \/ Termux \(preview;/m);
     expect(npmReadme).toContain("requires matching Android assets");
@@ -494,12 +496,17 @@ done
 
     expect(matrix.trust.hostedProviderBoundary).toContain("selected hosted provider");
     expect(matrix.trust.localInference).toContain("loopback local-model route");
-    // 0.9.6 makes anonymous usage counting default-on. The trust gate therefore
-    // requires both plain disclosure and a durable opt-out, plus explicit red
-    // lines around product content and agent timelines.
-    expect(matrix.trust.telemetry).toContain("on by default");
-    expect(matrix.trust.telemetry).toContain("clear first-run disclosure");
-    expect(matrix.trust.telemetry).toContain("durable opt-out");
+    // The source candidate counts by default and says so. Disclosure alone
+    // is never acceptance, every opt-out stays authoritative, and the
+    // published release's earlier opt-in behavior is named, not blurred.
+    expect(matrix.trust.telemetry).toContain(`Codewhale ${matrix.sourceCandidate.version} counts anonymous usage by default`);
+    expect(matrix.trust.telemetry).toContain("discloses it at first launch");
+    expect(matrix.trust.telemetry).toContain("policy notice version 5");
+    expect(matrix.trust.telemetry).toContain("Codewhale and PostHog");
+    expect(matrix.trust.telemetry).toContain(`published ${matrix.latestPublishedRelease.version} release asked first`);
+    expect(matrix.trust.telemetry).toContain("never records any acceptance");
+    expect(matrix.trust.telemetry).toContain("opt-out recorded under the earlier opt-in policy stays off");
+    expect(matrix.trust.telemetry).not.toContain("requires explicit consent");
     expect(matrix.trust.telemetry).toContain("does not collect conversations");
     expect(matrix.trust.telemetry).toContain("per-turn/per-tool timelines");
     // The destination is now named, and named exactly — a trust claim that says
@@ -570,34 +577,42 @@ done
     expect(footer).toContain("GITEE_ENABLED &&");
   });
 
-  it("keeps the README and website on one optimized canonical product screenshot", () => {
+  it("keeps supplied terminal screenshots and website dimensions truthful", () => {
+    // The website serves the new founder PNG untouched. The README still
+    // carries the earlier development capture until its owner updates it.
     const readmeImage = bytes(matrix.screenshot.readme);
     const websiteImage = bytes(matrix.screenshot.website);
-    const digest = (image: Buffer) => createHash("sha256").update(image).digest("hex");
 
-    expect(digest(readmeImage)).toBe(digest(websiteImage));
-    expect(imageDimensions(readmeImage)).toEqual([1562, 1256]);
+    expect(imageDimensions(websiteImage)).toEqual([2760, 1494]);
+    expect(imageDimensions(readmeImage)).toEqual([1136, 615]);
     expect(statSync(new URL(matrix.screenshot.readme, root)).size).toBeLessThan(500_000);
+    expect(statSync(new URL(matrix.screenshot.website, root)).size).toBeLessThan(500_000);
     expect(matrix.screenshot.terminal).toBe("unrecorded");
+    // A development-build capture, never a release claim.
+    expect(matrix.screenshot.capture).toContain("development build");
+    expect(matrix.screenshot.capture).toContain("not a default");
 
     const readme = text("README.md");
     const homepage = text("web/app/[locale]/page.tsx");
     expect(readme).toContain("assets/screenshot.webp");
-    expect(homepage).toContain('src="/codewhale-tui.webp"');
-    // Alt text and figcaption are dictionary-backed (#4934); the screenshot
-    // contract now runs through the EN reference value and the page's use of
-    // it, and every routed locale must caption the same session honestly.
+    expect(homepage).toContain('src="/codewhale-tui.png"');
+    expect(homepage).toContain("width={2760}");
+    expect(homepage).toContain("height={1494}");
+    // Alt text and caption are dictionary-backed; every routed locale must
+    // describe the capture as what it is — a v0.9.12 development build in
+    // Work mode with Full Access, not a release and not a default.
     expect(homepage).toContain("alt={d.screenshotAlt}");
-    expect(homepage).toContain("<figcaption>{d.figcaption}</figcaption>");
-    expect(getHome("en").figcaption).toBe(
-      "Codewhale session · Operate mode · permissions: Ask",
-    );
-    expect(getHome("en").screenshotAlt).toContain("Operate mode");
-    for (const locale of ["zh", "ja", "vi", "ko", "ru", "uk", "es", "pt-BR", "id"]) {
+    expect(homepage).toContain("fill(d.shotBuild, { version: sourceVersion })");
+    expect(getHome("en").shotBuild).toBe("v{version} development build");
+    expect(getHome("en").screenshotAlt).toContain("development build");
+    expect(getHome("en").screenshotAlt).toContain("Full Access");
+    expect(getHome("en").screenshotAlt).toContain("Work mode");
+    for (const locale of ["zh", "ja", "vi", "ko", "ru", "uk", "es", "pt-BR", "id", "fr", "de", "ca", "hi", "tr", "it", "pl", "ar"]) {
       const home = getHome(locale);
-      expect(home.figcaption, `${locale} figcaption`).toContain("Operate");
-      expect(home.figcaption, `${locale} figcaption`).toContain("Ask");
-      expect(home.screenshotAlt.trim().length, `${locale} alt`).toBeGreaterThan(0);
+      expect(home.shotBuild, `${locale} shotBuild`).toContain("{version}");
+      expect(home.screenshotAlt, `${locale} alt`).toContain("Full Access");
+      expect(home.screenshotAlt, `${locale} alt`).toContain("Work");
+      expect(home.screenshotAlt, `${locale} alt`).toContain("0.9.12");
     }
   });
 

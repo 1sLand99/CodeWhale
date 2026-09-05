@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { GETTING_STARTED_STEPS } from "@/lib/content/getting-started";
 import { Seal } from "@/components/seal";
 import { FaqSearch } from "@/components/faq-search";
 import { buildFaqPageJsonLd } from "@/lib/faq-schema";
@@ -43,7 +44,10 @@ const faqEn: FaqItem[] = [
       <>
         <p className="mb-2">Published channels differ in timing and platform support:</p>
         <pre className="code-block mb-2">
-{`# npm (recommended — no Rust toolchain needed)
+{`# GitHub release binaries (recommended on macOS / Linux)
+${GETTING_STARTED_STEPS[0].commands[0]}
+
+# npm alternative — no Rust toolchain needed
 npm install -g codewhale
 
 # Cargo (needs Rust 1.88+; installs the codewhale command)
@@ -224,14 +228,19 @@ codewhale --provider openrouter --model deepseek/deepseek-v4-pro
     a: (
       <>
         The Codewhale runtime, workspace state, and audit log stay on your machine.
-        Anonymous usage counting is on by default with a clear first-run disclosure
-        and a durable opt-out. It posts aggregate session, feature, and error counts
+        Codewhale 0.9.12 counts anonymous usage by default and says so at first launch
+        (the published 0.9.11 release asked first). Turning it off is a saved choice that
+        later versions keep, and an opt-out recorded under the earlier opt-in policy stays
+        off; showing the notice never records any acceptance on your behalf. While on, a
+        session posts aggregate session, feature, and error counts
         and closed enums to the first-party endpoint{" "}
         <code className="inline">https://telemetry.codewhale.net/v1/telemetry</code>,
         a Cloudflare Worker whose full source is in the repo under{" "}
         <code className="inline">telemetry-ingest/</code>. Its storage has no IP,
-        country, or geo column — structurally, not as a setting — nothing is logged,
-        and retention is a fixed three months. Set{" "}
+        country, or geo column, records no request logs,
+        and retains records for three months. Optional PostHog forwarding requires
+        separate operator configuration and verified IP-safe egress; its retention
+        is a separate project setting. Source support does not establish activation. Set{" "}
         <code className="inline">telemetry_endpoint = &quot;&quot;</code> to stay
         enabled and contact nobody. It never carries conversations, code, prompts,
         files, file/repo/branch names, model content, credentials, or a per-turn or
@@ -408,7 +417,10 @@ const faqZh: FaqItem[] = [
       <>
         <p className="mb-2">已发布渠道的更新时间与平台覆盖各不相同：</p>
         <pre className="code-block mb-2">
-{`# npm（推荐 — 无需 Rust 工具链）
+{`# GitHub Releases 二进制（macOS / Linux 推荐方式）
+${GETTING_STARTED_STEPS[0].commands[0]}
+
+# npm 其他方式 — 无需 Rust 工具链
 npm install -g codewhale
 
 # Cargo（需要 Rust 1.88+；安装 codewhale 命令）
@@ -585,11 +597,12 @@ codewhale --provider openrouter --model deepseek/deepseek-v4-pro
     q: "我的代码安全吗？Codewhale 使用什么沙箱机制？",
     a: (
       <>
-        Codewhale 运行时、工作区状态与审计日志保留在你的机器上。匿名使用计数默认开启，首次运行会清楚说明，并可随时永久关闭。
-        它只会把聚合的会话、功能与错误计数以及封闭枚举 POST 到第一方端点{" "}
+        Codewhale 运行时、工作区状态与审计日志保留在你的机器上。Codewhale 0.9.12 默认统计匿名使用量，并在首次启动时告知你（已发布的 0.9.11 版本会先询问）。
+        关闭是会被后续版本保留的选择，在早先的自愿开启政策下记录的关闭也始终有效；显示告知绝不会代你记录任何同意。开启时，会话只会把聚合的会话、功能与错误计数以及封闭枚举 POST 到第一方端点{" "}
         <code className="inline">https://telemetry.codewhale.net/v1/telemetry</code>，
         那是一个 Cloudflare Worker，完整源码就在仓库的 <code className="inline">telemetry-ingest/</code> 目录里。
-        它的存储中没有 IP、国家或任何地理位置列——这是结构上不存在，而不是某个开关——不写任何日志，保留期固定为三个月。
+        它的存储中没有 IP、国家或地理位置列，不记录请求日志，保留期固定为三个月。
+        可选的 PostHog 转发需要运营方单独配置，并验证出口不会转发客户端 IP；其保留期由项目另行设置。源码支持不代表已启用。
         若想保持启用但不联系任何服务器，设置 <code className="inline">telemetry_endpoint = &quot;&quot;</code>。
         它永远不会携带对话、代码、prompt、文件、文件/仓库/分支名、模型内容、凭据，也不发送逐轮或逐工具时间线（schema 见 <code className="inline">docs/TELEMETRY.md</code>；
         可用 <code className="inline">codewhale config set telemetry false</code> 或

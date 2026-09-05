@@ -512,7 +512,12 @@ pub(crate) async fn handle_mcp_ui_action(
                 .map(|()| message = Some(format!("Removed MCP server '{name}'")))
         }
         crate::tui::app::McpUiAction::Login { name, scopes } => {
-            let result = async {
+            // Only the handshake runs inline: it is a couple of HTTP calls and
+            // it yields the authorization URL. The five-minute browser-callback
+            // wait goes to the background task pattern, because awaiting it
+            // here parked the event loop — a misclicked `[re-auth]` row left
+            // the session unusable with no way to back out.
+            let begun = async {
                 let cfg = mcp::load_config_with_workspace_and_plugins(
                     &path,
                     &app.workspace,
@@ -522,23 +527,47 @@ pub(crate) async fn handle_mcp_ui_action(
                     .servers
                     .get(&name)
                     .ok_or_else(|| anyhow::anyhow!("MCP server '{name}' not found"))?;
-                let explicit_scopes = (!scopes.is_empty()).then_some(scopes);
-                mcp::oauth::perform_oauth_login_for_server(
+                mcp::oauth::begin_oauth_login_for_server_tool(
                     &name,
                     server,
-                    explicit_scopes,
+                    (!scopes.is_empty()).then_some(scopes),
                     config.mcp_oauth_callback_port,
                     config.mcp_oauth_callback_url.as_deref(),
                 )
                 .await
             }
             .await;
-            result.map(|()| {
-                changed = true;
-                message = Some(format!(
-                    "Stored OAuth credentials for MCP server '{name}'. Run /mcp reload to reconnect it."
-                ));
-            })
+
+            match begun {
+                Ok(login) => {
+                    // Replace any login already in flight so two clicks cannot
+                    // hold two callback listeners.
+                    if let Some((_, token)) = app.mcp_login_cancel.take() {
+                        token.cancel();
+                    }
+                    let token = tokio_util::sync::CancellationToken::new();
+                    let url = login.authorization_url().to_string();
+                    let cell = app.mcp_login_cell.clone();
+                    let task_token = token.clone();
+                    let task_name = name.clone();
+                    tokio::spawn(async move {
+                        let outcome = tokio::select! {
+                            biased;
+                            () = task_token.cancelled() => Err("cancelled".to_string()),
+                            result = login.finish() => result.map_err(|err| err.to_string()),
+                        };
+                        if let Ok(mut guard) = cell.lock() {
+                            *guard = Some((task_name, outcome));
+                        }
+                    });
+                    app.mcp_login_cancel = Some((name.clone(), token));
+                    message = Some(format!(
+                        "Authorizing '{name}' in your browser — Esc cancels. {url}"
+                    ));
+                    Ok(())
+                }
+                Err(err) => Err(err),
+            }
         }
         crate::tui::app::McpUiAction::Logout { name } => {
             let result = (|| {
@@ -677,7 +706,7 @@ pub(crate) async fn handle_mcp_ui_action(
             // #2068: keep the hotbar's MCP-tool actions in sync with the tools
             // that are actually loaded; the hotbar never connects on its own.
             app.hotbar_actions.replace_mcp_tools(Some(&snapshot));
-            open_mcp_manager_pager(app, &snapshot);
+            open_mcp_extensions(app);
         }
         Err(err) if retry_name.is_some() => add_mcp_message(
             app,
@@ -883,7 +912,6 @@ pub(crate) async fn handle_config_updated(
     config: &mut Config,
     task_manager: &SharedTaskManager,
     engine_handle: &mut EngineHandle,
-    web_config_session: &mut Option<WebConfigSession>,
     key: String,
     value: String,
     persist: bool,
@@ -920,17 +948,7 @@ pub(crate) async fn handle_config_updated(
     ) {
         app.force_next_full_repaint = true;
     }
-    if apply_command_result(
-        terminal,
-        app,
-        engine_handle,
-        task_manager,
-        config,
-        web_config_session,
-        result,
-    )
-    .await?
-    {
+    if apply_command_result(terminal, app, engine_handle, task_manager, config, result).await? {
         return Ok(true);
     }
 
@@ -956,7 +974,6 @@ async fn handle_theme_selection_updated(
     config: &mut Config,
     task_manager: &SharedTaskManager,
     engine_handle: &mut EngineHandle,
-    web_config_session: &mut Option<WebConfigSession>,
     theme: String,
     persist: bool,
 ) -> Result<bool> {
@@ -967,17 +984,7 @@ async fn handle_theme_selection_updated(
     // The theme owns the shell paint and must bypass ratatui's incremental
     // cell diff, including an Esc rollback.
     app.force_next_full_repaint = true;
-    if apply_command_result(
-        terminal,
-        app,
-        engine_handle,
-        task_manager,
-        config,
-        web_config_session,
-        result,
-    )
-    .await?
-    {
+    if apply_command_result(terminal, app, engine_handle, task_manager, config, result).await? {
         return Ok(true);
     }
     refresh_config_view_if_open(app, "theme");
@@ -991,7 +998,6 @@ pub(crate) async fn handle_view_events(
     config: &mut Config,
     task_manager: &SharedTaskManager,
     engine_handle: &mut EngineHandle,
-    web_config_session: &mut Option<WebConfigSession>,
     events: Vec<ViewEvent>,
 ) -> Result<bool> {
     for event in events {
@@ -1004,7 +1010,6 @@ pub(crate) async fn handle_view_events(
                         engine_handle,
                         task_manager,
                         config,
-                        &mut *web_config_session,
                         &command,
                     )
                     .await?
@@ -1290,7 +1295,6 @@ pub(crate) async fn handle_view_events(
                     config,
                     task_manager,
                     engine_handle,
-                    web_config_session,
                     key,
                     value,
                     persist,
@@ -1307,7 +1311,6 @@ pub(crate) async fn handle_view_events(
                     config,
                     task_manager,
                     engine_handle,
-                    web_config_session,
                     theme,
                     persist,
                 )
@@ -1391,9 +1394,6 @@ pub(crate) async fn handle_view_events(
                 // Fleet is selected.
                 open_fleet_setup_target(app, config, Some(&member_id));
             }
-            ViewEvent::FleetRosterOpenModelRequested { member_id } => {
-                open_fleet_model_target(app, config, &member_id);
-            }
             ViewEvent::FleetListOpenDetailRequested { name, scope } => {
                 if app.view_stack.top_kind() != Some(ModalKind::FleetDetail) {
                     if let Some(view) = crate::tui::views::fleet_detail::FleetDetailView::open(
@@ -1403,7 +1403,7 @@ pub(crate) async fn handle_view_events(
                     } else {
                         app.set_sticky_status(
                             format!(
-                                "Could not open Fleet `{name}` ({}) — the file may have moved or become unreadable.",
+                                "Could not open team `{name}` ({}) — the file may have moved or become unreadable.",
                                 scope.label()
                             ),
                             crate::tui::app::StatusToastLevel::Error,
@@ -1443,7 +1443,7 @@ pub(crate) async fn handle_view_events(
                 // mutated.
                 let Some(provider) = ApiProvider::parse(&provider_id) else {
                     app.set_sticky_status(
-                        format!("Fleet route activation failed: unknown provider `{provider_id}`"),
+                        format!("Team route activation failed: unknown provider `{provider_id}`"),
                         crate::tui::app::StatusToastLevel::Error,
                         None,
                     );
@@ -1462,7 +1462,7 @@ pub(crate) async fn handle_view_events(
                             .record_success(&scoped, provider, &validated.model);
                         app.push_status_toast(
                             format!(
-                                "{provider_label} route activated for Fleet: {}",
+                                "{provider_label} route activated for team: {}",
                                 validated.model
                             ),
                             crate::tui::app::StatusToastLevel::Success,
@@ -1530,7 +1530,7 @@ pub(crate) async fn handle_view_events(
                         Ok(dir) => dir,
                         Err(err) => {
                             app.set_sticky_status(
-                                format!("Fleet {} scope is unavailable: {err:#}", scope.label()),
+                                format!("Team {} scope is unavailable: {err:#}", scope.label()),
                                 StatusToastLevel::Error,
                                 None,
                             );
@@ -1608,26 +1608,26 @@ pub(crate) async fn handle_view_events(
                         let zh = app.ui_locale == crate::localization::Locale::ZhHans;
                         app.add_message(HistoryCell::System {
                             content: if zh {
-                                format!("已保存 Fleet 配置：{}", target.display())
+                                format!("已保存团队配置：{}", target.display())
                             } else {
                                 format!(
-                                    "Fleet {} profile saved: {}",
+                                    "Team {} profile saved: {}",
                                     scope.label(),
                                     target.display()
                                 )
                             },
                         });
                         app.status_message = Some(if zh {
-                            format!("已保存 Fleet 配置：{}", draft.file_name())
+                            format!("已保存团队配置：{}", draft.file_name())
                         } else if roster_refresh_failed {
                             format!(
-                                "Fleet {} profile saved, but the live roster could not refresh; restart before dispatching {}",
+                                "Team {} profile saved, but the live roster could not refresh; restart before dispatching {}",
                                 scope.label(),
                                 draft.id
                             )
                         } else {
                             format!(
-                                "Fleet {} profile saved: {}",
+                                "Team {} profile saved: {}",
                                 scope.label(),
                                 draft.file_name()
                             )
@@ -1636,9 +1636,9 @@ pub(crate) async fn handle_view_events(
                     Err(err) => {
                         app.status_message =
                             Some(if app.ui_locale == crate::localization::Locale::ZhHans {
-                                format!("无法保存 Fleet 配置：{err:#}")
+                                format!("无法保存团队配置：{err:#}")
                             } else {
-                                format!("Fleet profile could not be saved: {err:#}")
+                                format!("Team profile could not be saved: {err:#}")
                             });
                     }
                 }
@@ -1973,6 +1973,12 @@ pub(crate) async fn handle_view_events(
             ViewEvent::TopbarRoutePickerRequested => {
                 open_provider_picker(app, config, engine_handle).await;
             }
+            ViewEvent::TopbarModelPickerRequested => {
+                if app.view_stack.top_kind() != Some(ModalKind::ModelPicker) {
+                    app.view_stack
+                        .push(crate::tui::model_picker::ModelPickerView::new(app, config));
+                }
+            }
             ViewEvent::ProviderPickerDismissed {
                 catalog_view,
                 selected_provider_id,
@@ -2190,6 +2196,15 @@ pub(crate) async fn handle_view_events(
                     update_backtrack_overlay_selection(app, idx);
                 }
             }
+            // The launch card's resume confirmation was accepted. Hand it to
+            // the same pending-action path the card's own Enter uses, so the
+            // resume runs through one code path rather than two.
+            ViewEvent::LaunchResumeConfirmed { session_id } => {
+                app.pending_launch_action = Some(
+                    crate::tui::underwater::LaunchAction::ResumeSession(session_id),
+                );
+                app.needs_redraw = true;
+            }
             ViewEvent::BacktrackConfirm => {
                 if let Some(depth) = app.backtrack.confirm() {
                     apply_backtrack(app, depth);
@@ -2220,7 +2235,6 @@ pub(crate) async fn handle_view_events(
                     engine_handle,
                     task_manager,
                     config,
-                    &mut *web_config_session,
                     &command,
                 )
                 .await?
@@ -2262,7 +2276,6 @@ pub(crate) fn handle_view_events_boxed<'a>(
     config: &'a mut Config,
     task_manager: &'a SharedTaskManager,
     engine_handle: &'a mut EngineHandle,
-    web_config_session: &'a mut Option<WebConfigSession>,
     events: Vec<ViewEvent>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<bool>> + 'a>> {
     Box::pin(async move {
@@ -2279,7 +2292,6 @@ pub(crate) fn handle_view_events_boxed<'a>(
                         config,
                         task_manager,
                         engine_handle,
-                        web_config_session,
                         key,
                         value,
                         persist,
@@ -2296,7 +2308,6 @@ pub(crate) fn handle_view_events_boxed<'a>(
                         config,
                         task_manager,
                         engine_handle,
-                        web_config_session,
                         theme,
                         persist,
                     )
@@ -2312,7 +2323,6 @@ pub(crate) fn handle_view_events_boxed<'a>(
                         config,
                         task_manager,
                         engine_handle,
-                        web_config_session,
                         vec![other],
                     ))
                     .await?

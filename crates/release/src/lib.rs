@@ -42,7 +42,10 @@ pub const DEEPSEEK_RELEASE_BASE_URL_ENV: &str = "DEEPSEEK_RELEASE_BASE_URL";
 pub const CNB_MIRROR_ENV: &str = "CODEWHALE_USE_CNB_MIRROR";
 
 /// Environment variable that pins the update target version.
-pub const UPDATE_VERSION_ENV: &str = "DEEPSEEK_TUI_VERSION";
+pub const UPDATE_VERSION_ENV: &str = "CODEWHALE_VERSION";
+
+/// Pre-rebrand environment variable (alias for [`UPDATE_VERSION_ENV`]).
+pub const LEGACY_TUI_UPDATE_VERSION_ENV: &str = "DEEPSEEK_TUI_VERSION";
 
 /// Legacy environment variable (alias for [`UPDATE_VERSION_ENV`]).
 pub const LEGACY_UPDATE_VERSION_ENV: &str = "DEEPSEEK_VERSION";
@@ -212,13 +215,20 @@ pub fn cnb_release_base_url(version: &str) -> String {
 }
 
 /// Returns the pinned update version from environment variables, or `None`
-/// if neither `DEEPSEEK_TUI_VERSION` nor `DEEPSEEK_VERSION` is set.
+/// if `CODEWHALE_VERSION` and its two legacy aliases are unset or empty.
 pub fn update_version_from_env() -> Option<String> {
-    std::env::var(UPDATE_VERSION_ENV)
-        .ok()
-        .or_else(|| std::env::var(LEGACY_UPDATE_VERSION_ENV).ok())
-        .map(|value| value.trim().trim_start_matches('v').to_string())
-        .filter(|value| !value.is_empty())
+    [
+        UPDATE_VERSION_ENV,
+        LEGACY_TUI_UPDATE_VERSION_ENV,
+        LEGACY_UPDATE_VERSION_ENV,
+    ]
+    .into_iter()
+    .find_map(|name| {
+        std::env::var(name)
+            .ok()
+            .map(|value| value.trim().trim_start_matches('v').to_string())
+            .filter(|value| !value.is_empty())
+    })
 }
 
 /// Joins a mirror base URL with an asset filename to produce a full download URL.
@@ -442,6 +452,7 @@ mod tests {
         DEEPSEEK_RELEASE_BASE_URL_ENV,
         CNB_MIRROR_ENV,
         UPDATE_VERSION_ENV,
+        LEGACY_TUI_UPDATE_VERSION_ENV,
         LEGACY_UPDATE_VERSION_ENV,
     ];
 
@@ -686,6 +697,19 @@ mod tests {
         set_release_env(LEGACY_UPDATE_VERSION_ENV, "");
 
         assert_eq!(update_version_from_env(), None);
+    }
+
+    #[test]
+    fn canonical_version_pin_outranks_both_preserved_legacy_aliases() {
+        let _env = ReleaseEnvGuard::clear();
+        set_release_env("CODEWHALE_VERSION", "v0.9.11");
+        set_release_env("DEEPSEEK_TUI_VERSION", "v0.9.10");
+        set_release_env("DEEPSEEK_VERSION", "v0.9.9");
+        assert_eq!(update_version_from_env().as_deref(), Some("0.9.11"));
+        set_release_env("CODEWHALE_VERSION", " ");
+        assert_eq!(update_version_from_env().as_deref(), Some("0.9.10"));
+        set_release_env("DEEPSEEK_TUI_VERSION", " ");
+        assert_eq!(update_version_from_env().as_deref(), Some("0.9.9"));
     }
 
     #[test]

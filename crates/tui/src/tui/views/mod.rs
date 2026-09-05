@@ -30,6 +30,7 @@ use crate::tui::menu_style;
 use crate::tui::tideline::{SettingApplySemantics, SettingAuthority, SettingFact, UiSnapshot};
 use crate::tui::widgets::agent_card::AgentLifecycle;
 
+pub mod automations;
 pub mod extensions;
 pub mod fleet_detail;
 pub mod fleet_list;
@@ -77,6 +78,12 @@ pub enum ModalKind {
     /// Live workflow **run** dashboard (`/workflows`): active and retained
     /// runs from the journal, with host-side cancel.
     WorkflowsManager,
+    /// The scheduled-automation room (`/automation`): every automation the
+    /// person owns, with pause / resume / run / cancel / delete.
+    Automations,
+    /// "Resume this session?" over the launch card. Resuming replaces the
+    /// whole session context, so it asks first.
+    LaunchResumeConfirm,
 }
 
 /// Clear and paint a modal popup with an opaque surface.
@@ -774,8 +781,8 @@ pub enum ViewEvent {
         model: String,
         delta: isize,
     },
-    /// `⇧F` in the picker: add the row's exact route to the fleet (the
-    /// selected Fleet), or remove it when it is already there (design §10 F1).
+    /// `⇧F` in the picker: add the row's exact route to the team (the
+    /// selected saved team), or remove it when it is already there (design §10 F1).
     ModelPickerToggleFleet {
         provider: crate::config::ApiProvider,
         /// Exact named route for `Custom`; built-in providers leave this unset.
@@ -795,6 +802,9 @@ pub enum ViewEvent {
     /// surface. It carries no catalog, readiness, or selected-route payload:
     /// those facts remain owned by the provider picker and its apply path.
     TopbarRoutePickerRequested,
+    /// The info line's model field requested the normal `/model` surface.
+    /// Same rule as the route segment: an entry point carrying no catalog.
+    TopbarModelPickerRequested,
     /// Emitted by the `/provider` picker on Esc so the next open can restore
     /// the browsing context — view mode and highlighted row.
     ProviderPickerDismissed {
@@ -948,13 +958,6 @@ pub enum ViewEvent {
         /// identify which row the operator selected.
         member_id: String,
     },
-    /// Emitted by the `/fleet` roster `m` shortcut to open the selected
-    /// member's exact Fleet editor directly on its model picker.
-    FleetRosterOpenModelRequested {
-        /// Exact Fleet member id; roles are not unique and therefore cannot
-        /// identify which row the operator selected.
-        member_id: String,
-    },
     /// Open the live workers tab from the unified Fleet surface.
     FleetRosterOpenWorkersRequested,
 
@@ -1059,6 +1062,11 @@ pub enum ViewEvent {
     },
     /// Toggle owned-only vs compatible audit scan inside the skills manager.
     SkillsManagerToggleCompatible,
+    /// The launch card's resume confirmation was accepted. The host resumes
+    /// the named session through the same path the card's own Enter uses.
+    LaunchResumeConfirmed {
+        session_id: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -8227,6 +8235,78 @@ base_url = "https://api.xiaomimimo.com/v1"
         }
     }
 
+    /// Every field `Settings` persists to settings.toml is declared in
+    /// SETTINGS_SCHEMA — a row for editable values, a hidden def for picker
+    /// memory and one-way flags. A persisted field without a declaration has
+    /// no kind, no provenance layer, and no resolver home.
+    #[test]
+    fn every_persisted_settings_field_is_declared_in_the_schema() {
+        use crate::settings::PinnedModel;
+
+        // Options serialize as absent when None; force them present so the
+        // table below names every key settings.toml can hold.
+        let settings = Settings {
+            background_color: Some("#1a1b26".to_string()),
+            default_provider: Some("deepseek".to_string()),
+            default_model: Some("deepseek-v4-pro".to_string()),
+            reasoning_effort: Some("medium".to_string()),
+            permission_posture: Some("ask".to_string()),
+            sandbox_mode: Some("read-only".to_string()),
+            provider_models: Some(std::collections::HashMap::from([(
+                "deepseek".to_string(),
+                "deepseek-v4-pro".to_string(),
+            )])),
+            enabled_models: Some(std::collections::HashMap::from([(
+                "deepseek".to_string(),
+                vec!["deepseek-v4-pro".to_string()],
+            )])),
+            pinned_models: vec![PinnedModel {
+                provider: "deepseek".to_string(),
+                model: "deepseek-v4-pro".to_string(),
+                label: None,
+            }],
+            behavioral_tip_impressions: std::collections::BTreeMap::from([(
+                "probe".to_string(),
+                1u8,
+            )]),
+            footer_hint_uses: std::collections::BTreeMap::from([("probe".to_string(), 1u8)]),
+            ..Settings::default()
+        };
+        let table = toml::Value::try_from(&settings)
+            .expect("settings serialize")
+            .as_table()
+            .expect("settings are a table")
+            .clone();
+        // The probe is only trustworthy if it actually names the keys whose
+        // only declaration is hidden; a future `skip_serializing` would
+        // silently drop a key from this table instead of failing below.
+        for key in [
+            "tool_collapse_mode",
+            "max_input_history",
+            "default_provider",
+            "sandbox_mode",
+            "provider_models",
+            "enabled_models",
+            "pinned_models",
+            "feature_intro_shown",
+            "yolo_deprecation_shown",
+            "work_surface_bottom_migrated",
+            "behavioral_tip_impressions",
+            "footer_hint_uses",
+        ] {
+            assert!(
+                table.contains_key(key),
+                "probe settings undercovers settings.toml: `{key}` did not serialize"
+            );
+        }
+        for key in table.keys() {
+            assert!(
+                codewhale_config::setting(key).is_some(),
+                "settings.toml persists `{key}` with no SETTINGS_SCHEMA declaration"
+            );
+        }
+    }
+
     /// Every message key declared by the schema must resolve to a localized
     /// string in every shipped locale. `tr_key` returns the key itself when a
     /// pack is missing the entry, so this fails fast on a stale binding.
@@ -8322,7 +8402,7 @@ context_window = 262144
             .find(|row| row.key == "reasoning_effort")
             .expect("reasoning_effort row");
 
-        assert_eq!(row.value, "xhigh");
+        assert_eq!(row.value, "max");
     }
 
     #[test]

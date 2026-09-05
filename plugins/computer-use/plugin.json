@@ -1,1 +1,27 @@
-{"$schema": "https://agent-plugins.org/schemas/plugin.json", "author": {"name": "codewhale"}, "description": "See the screen, click, and type: local computer use over an MCP server plus the look-act-verify skill.", "extensions": {"net.codewhale": {"capabilities": {}, "commands": {"path": "commands"}, "when": {"binaries": ["python3"], "os": ["macos", "linux"]}}}, "keywords": ["computer-use", "screenshot", "automation"], "license": "MIT", "name": "computer-use", "version": "0.1.0"}
+{
+  "$schema": "https://agent-plugins.org/schemas/plugin.json",
+  "name": "computer-use",
+  "version": "0.1.0",
+  "description": "See the screen and operate it: accessibility-first control, screenshots, zoom, and screen recording on macOS, Windows, and Linux, plus registered remote computers over ssh and HarmonyOS devices over hdc.",
+  "author": { "name": "Codewhale" },
+  "license": "MIT",
+  "keywords": [
+    "computer-use",
+    "automation",
+    "screenshot",
+    "recording",
+    "accessibility",
+    "harmonyos"
+  ],
+  "extensions": {
+    "net.codewhale": {
+      "display_name": "Computer Use",
+      "commands": { "path": "commands" },
+      "skills": { "path": "skills" },
+      "when": {
+        "binaries": ["node"],
+        "os": ["macos", "linux", "windows"]
+      }
+    }
+  }
+}

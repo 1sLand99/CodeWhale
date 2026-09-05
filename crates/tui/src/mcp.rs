@@ -2478,6 +2478,37 @@ pub struct McpPool {
     /// flag `mcp_catalog_changed` on the failed result and the turn loop
     /// replaces the pool's catalog slice before the next model request.
     needs_auth_generation: u64,
+    /// Per-server cooldown after a failed connect, keyed by server name.
+    ///
+    /// The turn loop rebuilds the tool catalog on every user message, and
+    /// that used to re-attempt every server that was not ready — so twenty
+    /// configured servers with four dead ones paid four connect timeouts
+    /// before the first token, every single turn, forever. A failure now
+    /// buys a growing cooldown; the recorded diagnosis is replayed while it
+    /// holds, so a skipped server still reads as failing and never as
+    /// healthy. Explicit intent (`retry_connection`, `get_or_connect`, a
+    /// config reload) ignores the cooldown.
+    connect_backoff: HashMap<String, ConnectBackoff>,
+}
+
+/// One server's cooldown: when to try again, and what to say until then.
+struct ConnectBackoff {
+    consecutive_failures: u32,
+    retry_after: std::time::Instant,
+    last_error: String,
+}
+
+/// Cooldown after `failures` consecutive failed connects.
+///
+/// Doubling from 30s to a 10-minute ceiling: long enough that a wall of dead
+/// servers costs nothing per turn, short enough that a server coming back
+/// (a laptop rejoining a network, a local server restarted) is picked up
+/// within one coffee break without the user touching anything.
+fn connect_backoff_delay(failures: u32) -> std::time::Duration {
+    const BASE: std::time::Duration = std::time::Duration::from_secs(30);
+    const CAP: std::time::Duration = std::time::Duration::from_secs(600);
+    BASE.saturating_mul(1u32 << failures.saturating_sub(1).min(5))
+        .min(CAP)
 }
 
 type McpPendingConnect = (String, McpServerConfig);
@@ -2498,6 +2529,7 @@ impl McpPool {
             plugin_registry: None,
             config_hash,
             catalog_generation: AtomicU64::new(1),
+            connect_backoff: HashMap::new(),
             last_mtimes: Vec::new(),
             dynamic_servers: Arc::new(RwLock::new(HashMap::new())),
             needs_auth_servers: BTreeSet::new(),
@@ -2629,7 +2661,9 @@ impl McpPool {
     fn drop_all_connections(&mut self, reason: &str) {
         // Auth state is only known from a live connect attempt; once every
         // connection is dropped (config reload, source switch, shutdown) the
-        // next attempt re-derives it.
+        // next attempt re-derives it. A reload is explicit intent, so every
+        // cooldown lifts with it.
+        self.connect_backoff.clear();
         self.needs_auth_servers.clear();
         self.needs_auth_generation = self.needs_auth_generation.wrapping_add(1);
         if self.connections.is_empty() {
@@ -2844,6 +2878,10 @@ impl McpPool {
     /// remain owned by the explicit reload path; this operation only replaces
     /// the named transport.
     pub async fn retry_connection(&mut self, server_name: &str) -> Result<&mut McpConnection> {
+        // A person asked for this one by name. Clear the cooldown so the
+        // attempt happens now and, if it fails again, the ladder restarts
+        // from the short end rather than from wherever it had climbed to.
+        self.connect_backoff.remove(server_name);
         let plugin_source = self
             .connections
             .get(server_name)
@@ -2897,7 +2935,9 @@ impl McpPool {
 
     pub(crate) fn store_ready_connection(&mut self, name: String, mut connection: McpConnection) {
         connection.catalog_generation = self.catalog_generation.load(Ordering::SeqCst);
-        // A successful connect settles the auth question for this server.
+        // A successful connect settles the auth question for this server,
+        // and the cooldown with it.
+        self.connect_backoff.remove(&name);
         if self.needs_auth_servers.remove(&name) {
             self.needs_auth_generation = self.needs_auth_generation.wrapping_add(1);
         }
@@ -2911,6 +2951,18 @@ impl McpPool {
     /// failure replaces the verdict — the state is "the most recent connect
     /// failed auth-required", not "some connect once did".
     pub(crate) fn note_connect_failure(&mut self, name: &str, error: &anyhow::Error) {
+        let entry = self
+            .connect_backoff
+            .entry(name.to_string())
+            .or_insert(ConnectBackoff {
+                consecutive_failures: 0,
+                retry_after: std::time::Instant::now(),
+                last_error: String::new(),
+            });
+        entry.consecutive_failures = entry.consecutive_failures.saturating_add(1);
+        entry.retry_after =
+            std::time::Instant::now() + connect_backoff_delay(entry.consecutive_failures);
+        entry.last_error = format_mcp_error_for_display(error);
         let changed = if oauth::error_looks_auth_required(error) {
             self.needs_auth_servers.insert(name.to_string())
         } else {
@@ -2998,6 +3050,16 @@ impl McpPool {
                 .get(&name)
                 .is_some_and(McpConnection::is_ready)
             {
+                continue;
+            }
+            // Inside its cooldown a failed server costs nothing and still
+            // tells the truth: the recorded diagnosis is replayed so the row
+            // keeps reading `error`, rather than going quiet and looking
+            // healthy because nobody asked.
+            if let Some(backoff) = self.connect_backoff.get(&name)
+                && std::time::Instant::now() < backoff.retry_after
+            {
+                errors.push((name, anyhow::anyhow!(backoff.last_error.clone())));
                 continue;
             }
             self.drop_connection(&name, "reconnect");
@@ -3269,6 +3331,7 @@ impl McpPool {
         let login = oauth::begin_oauth_login_for_server_tool(
             server_name,
             &server,
+            None,
             self.oauth_callback_port,
             self.oauth_callback_url.as_deref(),
         )
@@ -4306,9 +4369,9 @@ impl McpServerSnapshot {
     /// over error-text sniffing so a needs-auth server always routes to
     /// `/mcp login <name>`.
     #[must_use]
-    pub fn recovery_kind(&self, oauth_capable: bool) -> McpRecoveryKind {
+    pub fn recovery_kind(&self, oauth_capable: bool) -> Option<McpRecoveryKind> {
         if self.enabled && !self.connected && self.auth_required {
-            return McpRecoveryKind::Reauth;
+            return Some(McpRecoveryKind::Reauth);
         }
         mcp_recovery_kind(
             self.enabled,
@@ -4406,47 +4469,30 @@ pub fn mcp_recovery_kind(
     connected: bool,
     error: Option<&str>,
     oauth_capable: bool,
-) -> McpRecoveryKind {
+) -> Option<McpRecoveryKind> {
     if !enabled {
-        return McpRecoveryKind::Enable;
+        return Some(McpRecoveryKind::Enable);
     }
     if let Some(error) = error {
         if oauth::error_text_looks_auth_required(error) {
-            return McpRecoveryKind::Reauth;
+            return Some(McpRecoveryKind::Reauth);
         }
-        return McpRecoveryKind::Diagnose;
+        return Some(McpRecoveryKind::Diagnose);
     }
     if !inspected {
-        return McpRecoveryKind::Connect;
+        return Some(McpRecoveryKind::Connect);
     }
     if connected {
-        return McpRecoveryKind::Diagnose;
+        // A server that is enabled, inspected, connected and erroring on
+        // nothing needs no recovery. It used to be labelled `diagnose`, so
+        // every healthy row advertised a repair it did not need — founder
+        // live-test: "even the ones that are connected say diagnose lol".
+        return None;
     }
     if oauth_capable {
-        return McpRecoveryKind::Reauth;
+        return Some(McpRecoveryKind::Reauth);
     }
-    McpRecoveryKind::Reconnect
-}
-
-/// Session-start / manager line: name the server, name the failure, one command.
-/// Matches the Codex shape (`The X MCP server requires OAuth reauthentication. Run …`
-/// / `MCP startup incomplete (failed: X)`).
-#[must_use]
-pub fn mcp_startup_warning(name: &str, kind: McpRecoveryKind, failed: bool) -> String {
-    let command = kind.slash_command(name);
-    match kind {
-        McpRecoveryKind::Reauth => {
-            format!("The {name} MCP server requires OAuth reauthentication. Run `{command}`.")
-        }
-        McpRecoveryKind::Enable => {
-            format!("The {name} MCP server is disabled. Run `{command}`.")
-        }
-        _ if failed => format!("MCP startup incomplete (failed: {name}). Run `{command}`."),
-        McpRecoveryKind::Connect => {
-            format!("The {name} MCP server is not connected yet. Run `{command}`.")
-        }
-        _ => format!("The {name} MCP server needs attention. Run `{command}`."),
-    }
+    Some(McpRecoveryKind::Reconnect)
 }
 
 pub fn load_config(path: &Path) -> Result<McpConfig> {

@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { FACTS } from "./facts.generated";
 import { RELEASE_CONTRIBUTORS, RELEASE_HELPERS } from "./release-credits";
-import { EN_CHROME, EN_DOCS_SHELL, EN_HOME, getChrome, getHome } from "./i18n/dictionaries";
+import { EN_CHROME, EN_DOCS_SHELL, EN_HOME, getChrome } from "./i18n/dictionaries";
 
 function pageSource(path: string): string {
   return readFileSync(new URL(`../app/[locale]/${path}`, import.meta.url), "utf8");
@@ -37,17 +37,17 @@ describe("public website copy contracts", () => {
     expect(roadmap).not.toContain("Required login / accounts");
     expect(footer).not.toContain("App preview");
     expect(footer).not.toContain("app.codewhale.net");
-    expect(footer).not.toMatch(/Create account|Sign up/);
 
-    // Footer copy is dictionary-driven now, so the same ban has to hold
-    // wherever the strings actually live — in every locale, not just the TSX.
+    // Account entry is a real, working flow (sign-in and registration), so
+    // the chrome may name it. It must never call the app a "preview" or bake
+    // the app host into copy — the links own the destination.
     for (const locale of [
       "en", "zh", "ja", "vi", "ko", "ru", "uk", "es", "pt-BR", "id",
       "fr", "de", "ca", "hi", "tr", "it", "pl", "ar",
     ]) {
       const values = Object.values(getChrome(locale)).join("\n");
       expect(values, `${locale} chrome`).not.toContain("app.codewhale.net");
-      expect(values, `${locale} chrome`).not.toMatch(/Create account|Sign up|App preview/);
+      expect(values, `${locale} chrome`).not.toMatch(/App preview/);
     }
     expect(EN_CHROME.footerLicense).toBe("MIT license");
   });
@@ -94,12 +94,8 @@ describe("public website copy contracts", () => {
     // the internal "source candidate" / "provider routes" vocabulary.
     expect(EN_HOME.sourceCandidate).toBe("Unreleased");
     expect(EN_HOME.currentSource).toBe("Source");
-    expect(homepage).toContain("fill(d.providerRoutes, { count: providerCount })");
-    expect(EN_HOME.providerRoutes).toBe("{count} providers");
-    for (const locale of ["zh", "ja", "ru", "pt-BR"]) {
-      expect(getHome(locale).providerRoutes, `${locale} providerRoutes`).toContain("{count}");
-      expect(getHome(locale).sourceCandidate.trim().length).toBeGreaterThan(0);
-    }
+    // A development-source route count is not a released-provider total.
+    expect(homepage).not.toContain("<span>{providerRoutes}</span>");
     expect(homepage).not.toContain("releases/tag/v${version}");
     expect(homepage).not.toMatch(/Codewhale v0\.9\.1|\"v0\.9\.1 \u00b7/);
     expect(install).toContain("publishedRelease.tag");

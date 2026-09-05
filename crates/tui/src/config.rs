@@ -47,6 +47,18 @@ pub(crate) use codewhale_config::{ConfigApiKeyValueKind, classify_config_api_key
 pub const DEFAULT_ZAI_PROVIDER_MAX_CONCURRENCY: usize = 3;
 pub const MAX_PROVIDER_REQUEST_CONCURRENCY: usize = 64;
 
+/// Default maximum number of automatic re-requests when a reasoning model
+/// returns only hidden thinking without any answer text or tool call.
+pub const DEFAULT_REASONING_ONLY_REPROMPTS: u32 = 2;
+
+/// Nudge sent with a reasoning-only re-request once a bare retry has already
+/// come back answerless. Overridable with `[reasoning_only] reprompt_message`.
+///
+/// It is never written to the session: it rides one outbound request and is
+/// discarded, so the transcript never gains a message the user did not send.
+pub const DEFAULT_REASONING_ONLY_REPROMPT_MESSAGE: &str =
+    "Continue: give your answer, or make the next tool call.";
+
 pub fn default_stop_words() -> Vec<String> {
     ["stop", "wait", "pause"]
         .into_iter()
@@ -101,10 +113,8 @@ pub enum ApiProvider {
     /// backend, not an OpenAI alias: thought signatures on tool calls are
     /// captured and replayed per Google's contract.
     Google,
-    /// Google Antigravity (`agy`). Consent-gated read-only import of the
-    /// official CLI's login, then a text-only cloud-code stream
-    /// (`/v1internal:streamGenerateContent`). Tools and non-text parts
-    /// fail closed.
+    /// Retired Antigravity identity retained only to deserialize and clear
+    /// legacy Codewhale configuration. It is never selectable or runnable.
     Antigravity,
     /// Jiangsu Telecom TokenHub — OpenAI-compatible AI gateway.
     Telecomjs,
@@ -151,6 +161,11 @@ pub(crate) struct ProviderIdentity {
     pub(crate) migrated_legacy_ollama_cloud_route: bool,
 }
 
+pub(crate) fn is_legacy_antigravity_identity(value: &str) -> bool {
+    codewhale_config::ProviderKind::parse_config_identity(value)
+        == Some(codewhale_config::ProviderKind::Antigravity)
+}
+
 impl ProviderIdentity {
     #[must_use]
     pub(crate) fn persisted_id(&self) -> Option<&str> {
@@ -176,6 +191,9 @@ impl ApiProvider {
     #[must_use]
     pub fn parse(value: &str) -> Option<Self> {
         let trimmed = value.trim();
+        if is_legacy_antigravity_identity(trimmed) {
+            return None;
+        }
         // ApiProvider-specific: "deepseek-cn" is a legacy variant here,
         // while ProviderKind treats it as a Deepseek alias.
         if trimmed.eq_ignore_ascii_case("deepseek-cn")
@@ -208,7 +226,10 @@ impl ApiProvider {
         {
             return Some(Self::MinimaxAnthropic);
         }
-        codewhale_config::ProviderKind::parse(value).map(Self::from_kind)
+        // Runtime selections must preserve the exact config-table identity,
+        // including Model Studio plan/dialect variants. Catalog alias collapse
+        // would return another provider's model and credential configuration.
+        codewhale_config::ProviderKind::parse_config_identity(value).map(Self::from_kind)
     }
 
     #[must_use]
@@ -1672,8 +1693,7 @@ pub fn model_completion_names_for_provider(provider: ApiProvider) -> Vec<&'stati
             "gemini-2.5-pro",
             "gemini-2.5-flash",
         ],
-        // The cloud-code wire protocol is not implemented; no model is
-        // advertised for the credential-import-only route.
+        // Legacy tombstone only; never advertise a runnable model.
         ApiProvider::Antigravity => Vec::new(),
         ApiProvider::Edenai => vec![DEFAULT_EDENAI_MODEL],
         ApiProvider::Concentrate => vec![DEFAULT_CONCENTRATE_MODEL],
@@ -2305,6 +2325,25 @@ pub struct GoalConfig {
     /// inside a provider turn.
     #[serde(default)]
     pub continuation_delay_seconds: Option<u64>,
+}
+
+/// Reasoning-only recovery controls (`[reasoning_only]` table in config.toml).
+/// When the model returns only hidden reasoning (thinking) without any answer
+/// text or tool call, the engine can re-request the answer automatically.
+#[derive(Debug, Clone, Deserialize, Default, PartialEq, Eq)]
+#[serde(default)]
+pub struct ReasoningOnlyConfig {
+    /// Maximum number of automatic re-requests when the model returns only
+    /// reasoning without any answer or tool call.
+    /// Defaults to 2. Set to 0 to disable automatic recovery.
+    pub max_reprompts: Option<u32>,
+    /// Nudge attached to a reasoning-only re-request after the first bare
+    /// retry has already come back answerless. Unset uses the built-in text.
+    ///
+    /// The nudge rides a single outbound request and is never added to the
+    /// session, so it does not persist, does not appear in the transcript or
+    /// exports, and is not re-sent on later turns.
+    pub reprompt_message: Option<String>,
 }
 
 /// One configurable footer item.
@@ -3177,6 +3216,12 @@ pub struct Config {
     /// `[goal] max_continuations`.
     #[serde(default)]
     pub goal: Option<GoalConfig>,
+
+    /// Reasoning-only recovery controls. When absent, the engine uses the
+    /// built-in default (2 retries, no custom message). Configure with
+    /// `[reasoning_only] max_reprompts` and/or `[reasoning_only] reprompt_message`.
+    #[serde(default)]
+    pub reasoning_only: Option<ReasoningOnlyConfig>,
 
     /// User-level memory (#489). Default behaviour is **opt-in**:
     /// loading + injection happens only when `[memory] enabled = true` or
@@ -4276,7 +4321,7 @@ impl Config {
             ApiProvider::Xai => (
                 codewhale_config::ProviderKind::Xai,
                 codewhale_config::ExternalCredentialSource::GrokCli,
-                crate::xai_oauth::auth_file_path(),
+                crate::oauth::grok_auth_file_path(),
             ),
             ApiProvider::Deepseek => (
                 codewhale_config::ProviderKind::Deepseek,
@@ -4867,6 +4912,13 @@ impl Config {
 
     /// Validate that critical config fields are present.
     pub fn validate(&self) -> Result<()> {
+        if self
+            .provider
+            .as_deref()
+            .is_some_and(is_legacy_antigravity_identity)
+        {
+            anyhow::bail!(codewhale_config::LEGACY_ANTIGRAVITY_TOMBSTONE_MESSAGE);
+        }
         if let Some(provider) = self.provider.as_deref()
             && ApiProvider::parse(provider).is_none()
             && self
@@ -5008,6 +5060,18 @@ impl Config {
                 .is_some()
         {
             return ApiProvider::Custom;
+        }
+        // The retired Antigravity selection is not selectable (`parse` rejects
+        // it) but it must still resolve to its own tombstone identity here:
+        // falling through to the base-URL sniff would silently run a legacy
+        // `provider = "antigravity"` config as DeepSeek and bypass every
+        // fail-closed tombstone branch in the client and credential resolver.
+        if self
+            .provider
+            .as_deref()
+            .is_some_and(is_legacy_antigravity_identity)
+        {
+            return ApiProvider::Antigravity;
         }
         if let Some(provider) = self.provider.as_deref().and_then(ApiProvider::parse) {
             if provider == ApiProvider::Ollama && self.selects_legacy_ollama_cloud_route() {
@@ -6675,6 +6739,9 @@ impl Config {
 
     fn deepseek_api_key_with_secret_store_mode(&self, read_only: bool) -> Result<String> {
         let provider = self.api_provider();
+        if provider == ApiProvider::Antigravity {
+            anyhow::bail!(codewhale_config::LEGACY_ANTIGRAVITY_TOMBSTONE_MESSAGE);
+        }
         let auth_mode = self.auth_mode_for_provider(provider);
         if auth_mode_disables_api_key(auth_mode.as_deref()) {
             return Ok(String::new());
@@ -6736,9 +6803,9 @@ impl Config {
             && self
                 .provider_config_for(provider)
                 .is_some_and(provider_config_uses_xai_oauth)
-            && crate::xai_oauth::credentials_present(self)
+            && crate::oauth::credentials_present(crate::oauth::OAuthProvider::Xai, self)
         {
-            return crate::xai_oauth::get_access_token(self);
+            return crate::oauth::get_xai_access_token(self);
         }
 
         // OpenAI Codex (ChatGPT) can read an existing Codex CLI OAuth login
@@ -6873,41 +6940,6 @@ impl Config {
             }
         }
 
-        // Official Antigravity (`agy`) login. `ANTIGRAVITY_API_KEY` config
-        // and env slots were already checked above; here the process's own
-        // `AGY_ADC_AUTH` wins over the consented `state.vscdb`, which is
-        // imported read-only from the one pinned path. The token is then
-        // used on the cloud-code stream; it is never logged.
-        if provider == ApiProvider::Antigravity && !custom_endpoint {
-            let grant = self
-                .external_credential_read_grant(
-                    provider,
-                    codewhale_config::ExternalCredentialSource::AgyCli,
-                    &codewhale_config::default_agy_credentials_path(),
-                )
-                .ok();
-            let process_env: std::collections::HashMap<String, String> = std::env::vars().collect();
-            match crate::agy_credentials::antigravity_credential_precedence(
-                None,
-                &process_env,
-                grant.as_ref(),
-            ) {
-                crate::agy_credentials::AntigravityCredential::ProcessEnv(token) => {
-                    return Ok(token);
-                }
-                crate::agy_credentials::AntigravityCredential::ExternalFile(token) => {
-                    return Ok(token);
-                }
-                other => {
-                    tracing::debug!(
-                        target: "config",
-                        source = other.source_label(),
-                        "antigravity credential plane did not yield a sendable token"
-                    );
-                }
-            }
-        }
-
         if !auth_mode_requires_api_key(auth_mode.as_deref())
             && (provider_route_is_keyless_self_hosted(provider, &self.deepseek_base_url())
                 || base_url_uses_local_host(&self.deepseek_base_url()))
@@ -6983,16 +7015,22 @@ impl Config {
             ApiProvider::OpencodeZen => {
                 anyhow::bail!("{}", missing_provider_api_key_message(provider)?)
             }
-            ApiProvider::OpenaiCodex => anyhow::bail!("{}", crate::oauth::missing_auth_message()),
+            ApiProvider::OpenaiCodex => anyhow::bail!(
+                "{}",
+                crate::oauth::missing_auth_message(crate::oauth::OAuthProvider::Chatgpt)
+            ),
             ApiProvider::Xai => {
                 // Prefer OAuth guidance when auth_mode requests it or Grok CLI
                 // tokens already exist; otherwise show both API-key and OAuth.
                 if self
                     .provider_config_for(provider)
                     .is_some_and(provider_config_uses_xai_oauth)
-                    || crate::xai_oauth::credentials_present(self)
+                    || crate::oauth::credentials_present(crate::oauth::OAuthProvider::Xai, self)
                 {
-                    anyhow::bail!("{}", crate::xai_oauth::missing_auth_message());
+                    anyhow::bail!(
+                        "{}",
+                        crate::oauth::missing_auth_message(crate::oauth::OAuthProvider::Xai)
+                    );
                 }
                 anyhow::bail!(
                     "xAI API key not found. Get a key: https://console.x.ai/\n\
@@ -7188,6 +7226,29 @@ impl Config {
             .and_then(|goal| goal.continuation_delay_seconds)
             .unwrap_or(0)
             .min(crate::goal_loop::MAX_GOAL_CONTINUATION_DELAY_SECONDS)
+    }
+
+    /// Maximum number of automatic re-requests when the model returns only
+    /// reasoning without any answer or tool call. Defaults to 2.
+    /// Set via `[reasoning_only] max_reprompts` in config.toml.
+    #[must_use]
+    pub fn reasoning_only_max_reprompts(&self) -> u32 {
+        self.reasoning_only
+            .as_ref()
+            .and_then(|cfg| cfg.max_reprompts)
+            .unwrap_or(DEFAULT_REASONING_ONLY_REPROMPTS)
+    }
+
+    /// Optional custom message sent to the model on each re-request when the
+    /// model returns only reasoning without any answer or tool call.
+    /// Set via `[reasoning_only] reprompt_message` in config.toml.
+    /// When unset, the built-in default is used.
+    #[must_use]
+    pub fn reasoning_only_reprompt_message(&self) -> &str {
+        self.reasoning_only
+            .as_ref()
+            .and_then(|cfg| cfg.reprompt_message.as_deref())
+            .unwrap_or(DEFAULT_REASONING_ONLY_REPROMPT_MESSAGE)
     }
 
     /// Resolve the explicit local-memory backend.
@@ -8052,7 +8113,7 @@ fn provider_env_base_url_override(provider: ApiProvider) -> Option<String> {
         ApiProvider::Xai => &["XAI_BASE_URL"],
         ApiProvider::Mistral => &["MISTRAL_BASE_URL"],
         ApiProvider::Google => &["GOOGLE_BASE_URL", "GEMINI_BASE_URL"],
-        ApiProvider::Antigravity => &["ANTIGRAVITY_BASE_URL"],
+        ApiProvider::Antigravity => &[],
         ApiProvider::Telecomjs => &["TELECOMJS_BASE_URL"],
         ApiProvider::Edenai => &["EDENAI_BASE_URL"],
         ApiProvider::Concentrate => &["CONCENTRATE_BASE_URL"],
@@ -8415,13 +8476,7 @@ fn apply_env_overrides_unlocked(config: &mut Config, policy: ConfigEnvironmentPo
                     .google
                     .base_url = Some(value);
             }
-            ApiProvider::Antigravity => {
-                config
-                    .providers
-                    .get_or_insert_with(ProvidersConfig::default)
-                    .antigravity
-                    .base_url = Some(value);
-            }
+            ApiProvider::Antigravity => {}
             ApiProvider::Telecomjs => {
                 config
                     .providers
@@ -10269,7 +10324,7 @@ fn provider_config_uses_xai_oauth(config: &ProviderConfig) -> bool {
     config
         .auth_mode
         .as_deref()
-        .is_some_and(crate::xai_oauth::auth_mode_uses_xai_oauth)
+        .is_some_and(crate::oauth::auth_mode_uses_xai_oauth)
 }
 
 /// Whether a base URL points at a loopback/unspecified host, i.e. a local
@@ -10582,6 +10637,7 @@ fn merge_config(base: Config, override_cfg: Config) -> Config {
         runtime_thread_inference_unrelated: override_cfg.runtime_thread_inference_unrelated
             || base.runtime_thread_inference_unrelated,
         mini_window: override_cfg.mini_window.or(base.mini_window),
+        reasoning_only: override_cfg.reasoning_only.or(base.reasoning_only),
         title: override_cfg.title.or(base.title),
     }
 }
@@ -11376,7 +11432,7 @@ pub fn active_provider_has_config_api_key(config: &Config) -> bool {
         // A native ChatGPT PKCE login is a Codewhale-owned credential and
         // stands on its own, before any external Codex CLI consent is
         // considered.
-        if crate::chatgpt_oauth::credentials_valid(config) {
+        if crate::oauth::credentials_valid(crate::oauth::OAuthProvider::Chatgpt, config) {
             return true;
         }
         // The persistent Codex login is the OAuth credential file, analogous to
@@ -11535,8 +11591,9 @@ impl Config {
                 && !self.provider_uses_custom_endpoint(ApiProvider::OpenaiCodex),
             "Codex OAuth credentials are only available on the official OpenAI Codex route"
         );
-        if crate::chatgpt_oauth::credentials_valid(self) {
-            let owned = crate::chatgpt_oauth::get_owned_credentials(self)?;
+        if crate::oauth::credentials_valid(crate::oauth::OAuthProvider::Chatgpt, self) {
+            let owned =
+                crate::oauth::get_owned_credentials(crate::oauth::OAuthProvider::Chatgpt, self)?;
             return Ok(crate::oauth::CodexCredentials {
                 access_token: owned.access_token,
                 account_id: owned.account_id,
@@ -12027,17 +12084,17 @@ fn validate_external_credential_before_consent(
             crate::oauth::get_credentials(&grant).map(|_| ())
         }
         codewhale_config::ExternalCredentialSource::GrokCli => {
-            crate::xai_oauth::validate_external_credentials(&grant)
+            crate::oauth::validate_grok_external_credentials(&grant)
         }
         codewhale_config::ExternalCredentialSource::DshCli => {
             crate::dsh_credentials::deepseek_api_key_from_grant(&grant)?
                 .map(|_| ())
                 .context("the DeepSeek Harness credentials file holds no DEEPSEEK_API_KEY")
         }
+        // Retired: the reader is gone, so a legacy consent record validates
+        // to nothing rather than resolving a route (PRD §4.4 PROD-002).
         codewhale_config::ExternalCredentialSource::AgyCli => {
-            crate::agy_credentials::antigravity_oauth_token_from_grant(&grant)?
-                .map(|_| ())
-                .context("the Antigravity credential store holds no OAuth token")
+            anyhow::bail!(codewhale_config::LEGACY_ANTIGRAVITY_TOMBSTONE_MESSAGE)
         }
         codewhale_config::ExternalCredentialSource::KimiCodeCli => anyhow::bail!(
             "Kimi CLI credentials are never imported; configure a Kimi API key instead"

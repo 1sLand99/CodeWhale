@@ -424,7 +424,7 @@ Anthropic providers, set `provider = "<id>"` or pass
 `ollama`, `ollama-cloud`, `huggingface`, `together`, `qianfan`, `openai-codex`,
 `anthropic`, `openmodel`, `zai`, `stepfun`, `minimax`, `deepinfra`,
 `sakana`, `longcat`, `opencode-go`, `opencode-zen`, `meta`, `xai`,
-`mistral`, `telecomjs`, `modelstudio-token-plan`, `google`, `antigravity`,
+`mistral`, `telecomjs`, `modelstudio-token-plan`, `google`,
 `edenai`, `concentrate`, and `custom` (a user-defined OpenAI-compatible endpoint via
 `[providers.<name>]`).
 For the provider-by-provider registry, including wire protocol, auth variables,
@@ -1073,7 +1073,9 @@ the `CODEWHALE_*` value wins.
 - `CODEWHALE_MEMORY` (`1|on|true|yes|y|enabled` turns user memory on)
 - `CODEWHALE_MEMORY_PATH`
 - `CODEWHALE_TELEMETRY` / `DEEPSEEK_TELEMETRY` (legacy alias) — anonymous usage
-  counting, on by default and disclosed on first interactive launch. Accepts `0|1|true|false|yes|no|on|off|enabled|
+  counting is on by default in the current 0.9.12 source, with a disclosure
+  naming Codewhale and PostHog and an easy durable opt-out. Prior explicit
+  declines remain off. Accepts `0|1|true|false|yes|no|on|off|enabled|
   disabled`. An explicit "off" is a **floor**: it beats `--telemetry true` and
   `telemetry = true` in config, and a value this list cannot read also resolves
   to off, because a typo in a kill switch must never resolve to "on". See
@@ -1767,7 +1769,7 @@ reasoning contract, and all four membership ids omit generic sampling fields.
 
 ### Core keys (used by the TUI/engine)
 
-- `provider` (string, optional): `deepseek` (default), `deepseek-anthropic`, `nvidia-nim`, `openai`, `atlascloud`, `wanjie-ark`, `volcengine`, `openrouter`, `xiaomi-mimo`, `novita`, `fireworks`, `siliconflow`, `arcee`, `siliconflow-CN`, `moonshot`, `sglang`, `vllm`, `ollama`, `ollama-cloud`, `huggingface`, `together`, `qianfan`, `openai-codex`, `anthropic`, `openmodel`, `zai`, `stepfun`, `minimax`, `deepinfra`, `sakana`, `longcat`, `opencode-go`, `meta`, `mistral`, `telecomjs`, `xai`, `orcarouter`, `modelstudio-token-plan`, `google`, `antigravity`, `edenai`, or `custom`. Legacy `deepseek-cn` configs are still accepted as an alias for `deepseek`; DeepSeek uses the same official host [`https://api.deepseek.com`](https://api-docs.deepseek.com/) worldwide. `deepseek-anthropic` targets DeepSeek's Anthropic Messages-compatible endpoint at `https://api.deepseek.com/anthropic` using `DEEPSEEK_API_KEY`; `nvidia-nim` targets NVIDIA's NIM-hosted DeepSeek endpoints through `https://integrate.api.nvidia.com/v1`; `openai` targets a generic OpenAI-compatible endpoint, defaulting to `https://api.openai.com/v1`; `atlascloud` targets AtlasCloud's OpenAI-compatible endpoint at `https://api.atlascloud.ai/v1`; `wanjie-ark` targets Wanjie Ark's OpenAI-compatible endpoint at `https://maas-openapi.wanjiedata.com/api/v1`; `volcengine` targets Volcengine Ark's OpenAI-compatible coding endpoint at `https://ark.cn-beijing.volces.com/api/coding/v3`; `openrouter` targets `https://openrouter.ai/api/v1`; `xiaomi-mimo` targets Xiaomi MiMo's OpenAI-compatible endpoint, using `https://token-plan-sgp.xiaomimimo.com/v1` by default for Token Plan keys (`tp-...`) and `https://api.xiaomimimo.com/v1` for pay-as-you-go keys. For Token Plan accounts outside the Singapore default, set `base_url` explicitly or use `mode = "token-plan-cn"` for China and `mode = "token-plan-ams"` for Europe/Amsterdam; `novita` targets `https://api.novita.ai/openai/v1`; `fireworks` targets `https://api.fireworks.ai/inference/v1`; `siliconflow` targets SiliconFlow, defaulting to `https://api.siliconflow.com/v1`; `arcee` targets Arcee AI's OpenAI-compatible endpoint at `https://api.arcee.ai/api/v1`; `siliconflow-CN` targets the SiliconFlow China regional endpoint through `[providers.siliconflow_cn]`; `moonshot` targets Moonshot/Kimi, defaulting to `https://api.moonshot.ai/v1`; `sglang` targets a self-hosted OpenAI-compatible endpoint, defaulting to `http://localhost:30000/v1`; `vllm` targets a self-hosted vLLM OpenAI-compatible endpoint, defaulting to `http://localhost:8000/v1`; `ollama` targets Ollama's OpenAI-compatible endpoint, defaulting to `http://localhost:11434/v1`; `huggingface` targets Hugging Face Inference Providers at `https://router.huggingface.co/v1`; `together` targets Together AI at `https://api.together.xyz/v1`; `qianfan` targets Baidu Qianfan at `https://api.baiduqianfan.ai/v1`; `openai-codex` targets ChatGPT/Codex OAuth; `anthropic` targets Claude's native Messages API; `openmodel` targets OpenModel's Anthropic-compatible Messages API at `https://api.openmodel.ai`; `zai` targets Z.ai at `https://api.z.ai/api/coding/paas/v4`; `stepfun` targets StepFun at `https://api.stepfun.ai/v1`; `minimax` targets MiniMax at `https://api.minimax.io/v1`; `deepinfra` targets DeepInfra at `https://api.deepinfra.com/v1/openai`; `sakana` targets Sakana AI Fugu at `https://api.sakana.ai/v1`; `longcat` targets Meituan LongCat at `https://api.longcat.chat/openai/v1`; `opencode-go` targets the subscription-backed OpenCode Go Chat Completions route at `https://opencode.ai/zen/go/v1`; `meta` targets Meta Model API; `mistral` targets Mistral AI's OpenAI-compatible endpoint at `https://api.mistral.ai/v1`; `telecomjs` targets TelecomJS TokenHub at `https://aigw.telecomjs.com/v1`; and `xai` targets xAI's API-key or OAuth route.
+- `provider` (string, optional): `deepseek` (default), `deepseek-anthropic`, `nvidia-nim`, `openai`, `atlascloud`, `wanjie-ark`, `volcengine`, `openrouter`, `xiaomi-mimo`, `novita`, `fireworks`, `siliconflow`, `arcee`, `siliconflow-CN`, `moonshot`, `sglang`, `vllm`, `ollama`, `ollama-cloud`, `huggingface`, `together`, `qianfan`, `openai-codex`, `anthropic`, `openmodel`, `zai`, `stepfun`, `minimax`, `deepinfra`, `sakana`, `longcat`, `opencode-go`, `meta`, `mistral`, `telecomjs`, `xai`, `orcarouter`, `modelstudio-token-plan`, `google`, `edenai`, or `custom`. Legacy `deepseek-cn` configs are still accepted as an alias for `deepseek`; DeepSeek uses the same official host [`https://api.deepseek.com`](https://api-docs.deepseek.com/) worldwide. `deepseek-anthropic` targets DeepSeek's Anthropic Messages-compatible endpoint at `https://api.deepseek.com/anthropic` using `DEEPSEEK_API_KEY`; `nvidia-nim` targets NVIDIA's NIM-hosted DeepSeek endpoints through `https://integrate.api.nvidia.com/v1`; `openai` targets a generic OpenAI-compatible endpoint, defaulting to `https://api.openai.com/v1`; `atlascloud` targets AtlasCloud's OpenAI-compatible endpoint at `https://api.atlascloud.ai/v1`; `wanjie-ark` targets Wanjie Ark's OpenAI-compatible endpoint at `https://maas-openapi.wanjiedata.com/api/v1`; `volcengine` targets Volcengine Ark's OpenAI-compatible coding endpoint at `https://ark.cn-beijing.volces.com/api/coding/v3`; `openrouter` targets `https://openrouter.ai/api/v1`; `xiaomi-mimo` targets Xiaomi MiMo's OpenAI-compatible endpoint, using `https://token-plan-sgp.xiaomimimo.com/v1` by default for Token Plan keys (`tp-...`) and `https://api.xiaomimimo.com/v1` for pay-as-you-go keys. For Token Plan accounts outside the Singapore default, set `base_url` explicitly or use `mode = "token-plan-cn"` for China and `mode = "token-plan-ams"` for Europe/Amsterdam; `novita` targets `https://api.novita.ai/openai/v1`; `fireworks` targets `https://api.fireworks.ai/inference/v1`; `siliconflow` targets SiliconFlow, defaulting to `https://api.siliconflow.com/v1`; `arcee` targets Arcee AI's OpenAI-compatible endpoint at `https://api.arcee.ai/api/v1`; `siliconflow-CN` targets the SiliconFlow China regional endpoint through `[providers.siliconflow_cn]`; `moonshot` targets Moonshot/Kimi, defaulting to `https://api.moonshot.ai/v1`; `sglang` targets a self-hosted OpenAI-compatible endpoint, defaulting to `http://localhost:30000/v1`; `vllm` targets a self-hosted vLLM OpenAI-compatible endpoint, defaulting to `http://localhost:8000/v1`; `ollama` targets Ollama's OpenAI-compatible endpoint, defaulting to `http://localhost:11434/v1`; `huggingface` targets Hugging Face Inference Providers at `https://router.huggingface.co/v1`; `together` targets Together AI at `https://api.together.xyz/v1`; `qianfan` targets Baidu Qianfan at `https://api.baiduqianfan.ai/v1`; `openai-codex` targets ChatGPT/Codex OAuth; `anthropic` targets Claude's native Messages API; `openmodel` targets OpenModel's Anthropic-compatible Messages API at `https://api.openmodel.ai`; `zai` targets Z.ai at `https://api.z.ai/api/coding/paas/v4`; `stepfun` targets StepFun at `https://api.stepfun.ai/v1`; `minimax` targets MiniMax at `https://api.minimax.io/v1`; `deepinfra` targets DeepInfra at `https://api.deepinfra.com/v1/openai`; `sakana` targets Sakana AI Fugu at `https://api.sakana.ai/v1`; `longcat` targets Meituan LongCat at `https://api.longcat.chat/openai/v1`; `opencode-go` targets the subscription-backed OpenCode Go Chat Completions route at `https://opencode.ai/zen/go/v1`; `meta` targets Meta Model API; `mistral` targets Mistral AI's OpenAI-compatible endpoint at `https://api.mistral.ai/v1`; `telecomjs` targets TelecomJS TokenHub at `https://aigw.telecomjs.com/v1`; and `xai` targets xAI's API-key or OAuth route.
 - `opencode-zen` (string provider value): selects the model-aware OpenCode Zen gateway through `[providers.opencode_zen]`. The default base URL is `https://opencode.ai/zen/v1`, the default model is `gpt-5.6`, and credentials come from `api_key`, `OPENCODE_ZEN_API_KEY`, or fallback `OPENCODE_API_KEY`—never ChatGPT/Codex OAuth. `OPENCODE_ZEN_BASE_URL` and `OPENCODE_ZEN_MODEL` are accepted. The selected model is resolved through the curated Zen catalog: GPT uses Responses, Claude/Qwen use Anthropic Messages, and the documented DeepSeek/MiniMax/GLM/Kimi/Grok/free rows use Chat Completions. Gemini and unknown models fail closed because Codewhale has no proven supported wire contract for them. See the exact current model groups in [`PROVIDERS.md`](PROVIDERS.md#opencode-zen-protocol-catalog).
 - `minimax-anthropic` (string provider value): selects MiniMax's Anthropic-compatible Messages route through `[providers.minimax_anthropic]`. The default Base URL is `https://api.minimax.io/anthropic`; set `https://api.minimaxi.com/anthropic` for China. Keep the `/anthropic` suffix because Codewhale appends `/v1/messages`. The route uses `MINIMAX_API_KEY` and defaults to `MiniMax-M3`; `MiniMax-M2.7` is also registered. Official M3 input modalities are text, image, and video, with adaptive or disabled thinking. M2.7 is text-only and always keeps thinking enabled.
 - `api_key` (string, required for hosted providers): must be non-empty for DeepSeek/hosted providers (or set the provider API key env var). Self-hosted SGLang, vLLM, and local `ollama` can omit it. `ollama-cloud` requires a key saved for that provider or supplied by `OLLAMA_CLOUD_API_KEY`, then `OLLAMA_API_KEY`.
@@ -1793,25 +1795,21 @@ reasoning contract, and all four membership ids omit generic sampling fields.
   `eval`) default to `concise` unless config/env/CLI overrides it.
   Override per process with `CODEWHALE_VERBOSITY` or the legacy
   `DEEPSEEK_VERBOSITY` alias.
-- `telemetry` (bool, optional): anonymous usage counting, **`true` by default**,
-  with a clear first-run disclosure. An explicit `false` here is the durable
-  *opt-out* — it deletes the random install id,
-  truncates every buffered event, and leaves a tombstone that every later run
-  re-asserts for as long as the key says `false`. It is also a floor: `--telemetry true` and
-  `CODEWHALE_TELEMETRY=1` both lose to it, and turning telemetry back on means
-  writing `true` here. Override per process with `CODEWHALE_TELEMETRY` (legacy
-  alias `DEEPSEEK_TELEMETRY`), where an explicit "off" is a hard floor that
-  beats both this key and `--telemetry true` — but is a *kill switch*, not an
-  opt-out: it stops the run and erases nothing, so a harness disabling
-  telemetry for one command never discards the machine owner's install id or
-  dry-run records. A repo-local `.codewhale/config.toml` cannot set it. The
-  resolved consent is visible with its source — `codewhale doctor` prints a
-  `telemetry=on (default)` row in the runtime-posture section, and
-  `codewhale config get telemetry` reports `on (default)`, `on (config)`, or
-  the environment's answer, so a machine that never opted in never reads
-  "unset" while its batches ship (#5441). Full
-  schema and red lines:
-  [`TELEMETRY.md`](TELEMETRY.md).
+- `telemetry` (bool, optional): anonymous usage counting, **`true` by default
+  in the current 0.9.12 source**. Notice version `5` names Codewhale and PostHog
+  and describes the opt-out policy; no acceptance is invented for a default
+  user. Existing explicit declines remain off. An explicit `false` here is the
+  durable *opt-out*: it deletes the random install id, truncates buffered and
+  dry-run events, and leaves a tombstone reasserted while the setting is false.
+  It is a floor: `--telemetry true` and `CODEWHALE_TELEMETRY=1` lose to it.
+  Use `/settings` or `codewhale config set telemetry true` to turn counting
+  back on explicitly for new sessions through the existing privacy transition. `CODEWHALE_TELEMETRY`
+  (legacy alias `DEEPSEEK_TELEMETRY`) and `--telemetry false` provide a run-scoped
+  kill switch that stops collection and delivery without erasing the owner's
+  state. A repo-local `.codewhale/config.toml` cannot set this preference.
+  `codewhale config telemetry` shows the disclosure; `codewhale config get
+  telemetry` reports preference and privacy status. Full schema and opt-out
+  behavior: [`TELEMETRY.md`](TELEMETRY.md).
 - `telemetry_endpoint` (string, optional): where batches are POSTed. Leaving it
   unset selects the shipped default,
   **`https://telemetry.codewhale.net/v1/telemetry`** — the first-party ingest
@@ -2321,6 +2319,39 @@ starts. Failed turns and policy/route failures never schedule another turn.
 Only the numeric cadence is stored in config; no prompt, credential, or secret
 is persisted for the loop.
 
+### Reasoning-only recovery (`[reasoning_only]`)
+
+When a reasoning model (thinking mode) finishes a response with only hidden
+reasoning and no answer text or tool call, the engine can automatically
+re-request the answer. Configure this behavior with the `[reasoning_only]`
+table:
+
+```toml
+[reasoning_only]
+# Maximum number of automatic re-requests. Default: 2.
+# Set to 0 to disable automatic recovery (fail immediately).
+max_reprompts = 10
+
+# Optional custom message sent to the model on each re-request.
+# When set, overrides the built-in default message.
+# When unset (or commented out), the engine uses:
+#   "So, what's up ? Keep running !"
+reprompt_message = "Allez, répond quelque chose !"
+```
+
+This only applies when the model returns a clean `stop` finish reason with
+only thinking content. An output-length stop (`length`/`max_tokens`) is never
+retried, and a persistently answerless model still fails honestly after the
+configured bound.
+
+To disable the reprompt message entirely (silent retry), set it to an empty
+string:
+
+```toml
+[reasoning_only]
+reprompt_message = ""
+```
+
 ### Notifications
 
 The TUI can emit a desktop notification (OSC 9 escape or plain BEL) when a turn **completes successfully** and took longer than a threshold, so you can tab away while a long task runs. Failed or cancelled turns are intentionally silent — the notification is a "your task is ready" cue, not a generic ping. Configuration lives under `[notifications]`:
@@ -2448,6 +2479,28 @@ needs Codewhale to ship a real `.app` bundle. Tracked in
 iTerm2, WezTerm, Ghostty, and kitty are matched first and use their own
 notification protocols, and `method = "osc9"` / `"bel"` / `"off"` opt out
 of the `osascript` path explicitly.
+
+## Automations in the terminal
+
+Open `/automation`, then choose **New automation** (`n`) or **Edit automation**
+(`e`). The form edits the name, multiline prompt, schedule, model, workspace,
+and enabled status. `Tab` moves between fields; `Enter` inserts a newline in
+the prompt. Schedule presets include daily, weekly, hourly, once, and a custom
+RRULE. Time fields accept `HH:MM`; their arrow controls change the time by
+15 minutes. Weekly day buttons and model search support mouse and keyboard.
+
+The next-run preview uses the scheduler's local time zone, shown with its UTC
+offset. An enabled automation can run after **Save** (`Ctrl+S`); a paused one
+has no scheduled next run. **Cancel** (`Esc`) discards the draft. Editing keeps
+existing permission settings, custom schedules, and additional workspace
+entries unless the corresponding supported field is explicitly changed.
+
+Choosing a concrete model pins both the model and its exact configured
+provider, including named custom routes. Later changes to the active provider
+do not move that automation's pin. The default-model choice and legacy
+definitions without a provider pin keep the runtime's existing default
+behavior. New automation records use schema v2 and tasks use v3 so older
+runtimes reject records whose provider pins they cannot preserve.
 
 ## Lifecycle Outbox (`[lifecycle_outbox]`)
 

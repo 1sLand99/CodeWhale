@@ -764,7 +764,7 @@ dependencies = [
 
 [[package]]
 name = "codewhale-agent"
-version = "0.9.11"
+version = "0.9.12"
 dependencies = [
  "codewhale-config",
  "serde",
@@ -772,7 +772,7 @@ dependencies = [
 
 [[package]]
 name = "codewhale-app-server"
-version = "0.9.11"
+version = "0.9.12"
 dependencies = [
  "anyhow",
  "axum",
@@ -802,11 +802,11 @@ dependencies = [
 
 [[package]]
 name = "codewhale-build-support"
-version = "0.9.11"
+version = "0.9.12"
 
 [[package]]
 name = "codewhale-cli"
-version = "0.9.11"
+version = "0.9.12"
 dependencies = [
  "anyhow",
  "chrono",
@@ -847,14 +847,14 @@ dependencies = [
 
 [[package]]
 name = "codewhale-command-contract"
-version = "0.9.11"
+version = "0.9.12"
 dependencies = [
  "codewhale-core",
 ]
 
 [[package]]
 name = "codewhale-config"
-version = "0.9.11"
+version = "0.9.12"
 dependencies = [
  "anyhow",
  "codewhale-execpolicy",
@@ -874,7 +874,7 @@ dependencies = [
 
 [[package]]
 name = "codewhale-core"
-version = "0.9.11"
+version = "0.9.12"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -899,7 +899,7 @@ dependencies = [
 
 [[package]]
 name = "codewhale-execpolicy"
-version = "0.9.11"
+version = "0.9.12"
 dependencies = [
  "anyhow",
  "codewhale-protocol",
@@ -908,7 +908,7 @@ dependencies = [
 
 [[package]]
 name = "codewhale-hooks"
-version = "0.9.11"
+version = "0.9.12"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -926,7 +926,7 @@ dependencies = [
 
 [[package]]
 name = "codewhale-lane"
-version = "0.9.11"
+version = "0.9.12"
 dependencies = [
  "anyhow",
  "chrono",
@@ -941,7 +941,7 @@ dependencies = [
 
 [[package]]
 name = "codewhale-mcp"
-version = "0.9.11"
+version = "0.9.12"
 dependencies = [
  "anyhow",
  "serde",
@@ -951,14 +951,14 @@ dependencies = [
 
 [[package]]
 name = "codewhale-paths"
-version = "0.9.11"
+version = "0.9.12"
 dependencies = [
  "dirs",
 ]
 
 [[package]]
 name = "codewhale-protocol"
-version = "0.9.11"
+version = "0.9.12"
 dependencies = [
  "chrono",
  "serde",
@@ -968,7 +968,7 @@ dependencies = [
 
 [[package]]
 name = "codewhale-release"
-version = "0.9.11"
+version = "0.9.12"
 dependencies = [
  "anyhow",
  "reqwest 0.13.4",
@@ -982,7 +982,7 @@ dependencies = [
 
 [[package]]
 name = "codewhale-secrets"
-version = "0.9.11"
+version = "0.9.12"
 dependencies = [
  "chrono",
  "codewhale-paths",
@@ -997,7 +997,7 @@ dependencies = [
 
 [[package]]
 name = "codewhale-state"
-version = "0.9.11"
+version = "0.9.12"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1012,7 +1012,7 @@ dependencies = [
 
 [[package]]
 name = "codewhale-telemetry"
-version = "0.9.11"
+version = "0.9.12"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1032,7 +1032,7 @@ dependencies = [
 
 [[package]]
 name = "codewhale-tools"
-version = "0.9.11"
+version = "0.9.12"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1046,7 +1046,7 @@ dependencies = [
 
 [[package]]
 name = "codewhale-tui"
-version = "0.9.11"
+version = "0.9.12"
 dependencies = [
  "ahash",
  "ansi-to-tui",
@@ -1107,7 +1107,6 @@ dependencies = [
  "rust-i18n",
  "rustls",
  "schemars",
- "schemaui",
  "semver",
  "serde",
  "serde_json",
@@ -1143,7 +1142,7 @@ dependencies = [
 
 [[package]]
 name = "codewhale-workflow"
-version = "0.9.11"
+version = "0.9.12"
 dependencies = [
  "serde",
  "serde_json",
@@ -1155,7 +1154,7 @@ dependencies = [
 
 [[package]]
 name = "codewhale-workflow-js"
-version = "0.9.11"
+version = "0.9.12"
 dependencies = [
  "async-trait",
  "jsonschema",
@@ -2638,25 +2637,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "include_dir"
-version = "0.7.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "923d117408f1e49d914f1a379a309cffe4f18c05cf4e3d12e613a15fc81bd0dd"
-dependencies = [
- "include_dir_macros",
-]
-
-[[package]]
-name = "include_dir_macros"
-version = "0.7.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7cab85a7ed0bd5f0e76d93846e0147172bed2e2d3f859bcc33a8d9699cad1a75"
-dependencies = [
- "proc-macro2",
- "quote",
-]
-
-[[package]]
 name = "indexmap"
 version = "2.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2664,8 +2644,6 @@ checksum = "d466e9454f08e4a911e14806c24e16fba1b4c121d1ea474396f396069cf949d9"
 dependencies = [
  "equivalent",
  "hashbrown 0.17.1",
- "serde",
- "serde_core",
 ]
 
 [[package]]
@@ -4746,29 +4724,6 @@ dependencies = [
  "quote",
  "serde_derive_internals",
  "syn 3.0.3",
-]
-
-[[package]]
-name = "schemaui"
-version = "0.12.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cfd31406aa5c4778587e7d7ed82bada4131fbf1e69d0212fda60d6a2c5f5b5e6"
-dependencies = [
- "anyhow",
- "axum",
- "crossterm",
- "include_dir",
- "indexmap",
- "jsonschema",
- "percent-encoding",
- "ratatui",
- "regex",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "tokio",
- "toml 1.1.4+spec-1.1.0",
- "unicode-width",
 ]
 
 [[package]]

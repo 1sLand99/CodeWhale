@@ -1,33 +1,28 @@
 import type { HomeDict } from "../types";
 
 /**
- * Simplified Chinese home copy — a native rewrite mirroring the current
- * English direction (the brand dives so you don't have to; bring your own
- * model; runs on your machine), not a translation of it. The hero leans on
- * the classical 「一入侯门深似海」 allusion per community feedback — clever
- * in a way machine translation never is. The seal* glyphs are shared
- * editorial marks; the keys exist so a locale can override them without
- * touching the page.
+ * Simplified Chinese home dictionary — native copy for the Tidal Folio landing page,
+ * in the current direction: your models, more capable together; agents
+ * and control on your own machine; availability stated per surface as it
+ * is today. Product vocabulary stays literal (Plan / Work / Operate, Ask /
+ * Auto-Review / Full Access, Codewhale, TUI, codewhale exec, Fleet).
  */
+
 export const home: HomeDict = {
-  metaTitle: "Codewhale — 一入码门深似海，它替你潜。",
+  metaTitle: "Codewhale — 你的模型，协作更强。",
   metaDescription:
-    "Codewhale 潜入深海，你不必亲自下潜——开源的终端编程智能体。模型自带，跑在你自己的机器上。Rust 编写，MIT 许可。",
-
-  kicker: "开源 · 自带模型 · 运行在你的终端",
-  heroTitleA: "一入码门深似海，",
-  heroTitleB: "Codewhale 替你潜。",
+    "Codewhale 是开源的智能体计算系统。把你已经在用的模型——托管、网关或本地——带进终端，让它们在你的机器上协同工作，由你掌控。Rust 编写，MIT 许可。",
+  kicker: "智能体计算，由你定规矩",
+  heroTitleA: "你的模型，",
+  heroTitleB: "协作更强。",
   heroIntro:
-    "{brand} 是一个跑在终端里的开源编程智能体。给它一个模型和一个任务。它会读你的代码、改文件、跑检查，活干完了或需要你拿主意时就停下来。模型随便用，也可以给每个角色各配一个。",
-  install: "安装",
-  docs: "文档",
-  copy: "复制",
-  copied: "已复制 ✓",
-
-  installEyebrow: "一行安装",
-  installRequirement: "需要 Node 18+，无需 Rust 工具链",
-  installOtherWays: "其他方式 →",
-
+    "{brand} 把编程智能体带进终端，用来读代码、改文件、跑检查。选择支持的模型，并设置会话的权限策略。开源，运行在你自己的机器上。",
+  getCodewhale: "获取 Codewhale",
+  exploreProduct: "了解产品",
+  shotPreview: "终端预览",
+  shotBuild: "v{version} 开发版本",
+  screenshotAlt:
+    "终端中的 Codewhale v0.9.12 开发版本：盲文点阵鲸鱼标志、尚无历史记录的新会话、消息输入框，以及显示 Full Access、Work 模式、两个计划任务、MCP 服务器连接中和 GLM-5.3 最高强度的状态栏",
   latestRelease: "最新发布 {tag}",
   releaseUnavailable: "发布状态暂不可用",
   currentSource: "源码",
@@ -35,71 +30,57 @@ export const home: HomeDict = {
   providerRoutes: "{count} 个提供商",
   publishedRelease: "已发布",
   figcaptionSourceCandidate: "未发布",
-
-  shotSession: "会话",
-  screenshotAlt: "Codewhale 终端会话，Operate 模式：鲸鱼、输入区与状态栏",
-  figcaption: "Codewhale 会话 · Operate 模式 · 权限：Ask",
-
-  proofHeading: "终端里的编程智能体。任意模型。本机运行。",
-  proofBody:
-    "用你手头已有的模型——托管、网关或本地都行。选一个模式：Plan、Work 或 Operate。再选它不问你就能做多少：Ask、Auto-Review 或 Full Access。",
-
-  sealDecides: "法",
-  decidesEyebrow: "它如何决策",
-  decidesHeading: "推理过程，原话呈现",
-  decidesLede:
-    "会话摘录。每一段都写明模型依据了哪条项目规则，以及接着做了什么。",
-
-  sealWorkflow: "行",
-  workflowHeading: "从任务到验证过的改动。",
-  workflow: [
-    ["检查", "读取仓库、项目说明与任务。"],
-    ["执行", "修改文件，你要求先问的地方会先问。"],
-    ["验证", "运行检查，核对结果。"],
-    ["报告", "说明改了什么、通过了什么。"],
+  chapterTerminal: "你的终端",
+  chapterTerminalTitle: "从熟悉的地方开始。",
+  gainHeading: "让你的模型把任务做完。",
+  gainLede: "先从一个模型开始。用 Fleet 保存成员配置；当任务适合分工时，再把部分工作委派给其他智能体。",
+  gain: [
+    ["你的模型", "使用支持的托管提供商、网关或本地模型服务。Fleet 保存可复用智能体角色的模型选择。"],
+    ["能干的智能体", "Plan、Work、Operate 三种模式；一支 fleet 为同一件事分工；文件、shell、网页和 MCP 工具；可保存、恢复、回滚的会话。"],
+    ["本机掌控", "Ask、Auto-Review 或 Full Access——它在问你之前能做多少，由你设定。本地运行，系统允许时启用沙箱，审计日志你随时能读。"],
   ],
-  receiptAria: "运行摘要示例",
-  receiptInspect: "仓库与项目说明",
-  receiptAct: "在你设定的权限内修改文件",
-  receiptReport: "检查通过 · 摘要已保存",
-
-  sealStart: "起",
-  startHeading: "第一次用？四步。",
-  startLede:
-    "安装 → 首次会话，无需密钥 → 接入提供商 → 配置 fleet。",
-  startGuideLink: "阅读新手指引 →",
-  startVocabularyLink: "查名词 →",
-
-  sealBoundaries: "界",
-  boundariesHeadingA: "你的模型。",
-  boundariesHeadingB: "你的边界。",
-  boundariesBody:
-    "模型、模式、以及它不问你能做多少，都由你来选。你不改，提供商和模型就不会变。预览功能会标注预览。",
-  hostedGatewayLocal: "托管、网关与本地模型",
-  planActOperateDesc: "从只读规划到自主执行",
-  askAutoReviewDesc: "它在问你之前能做多少",
-  tuiExecWebDesc: "交互式或脚本化",
-
-  sealSurfaces: "面",
+  chapterModels: "你的模型",
+  modelsHeading: "为你选择的模型留一个位置。",
+  modelsBody:
+    "连接支持的托管提供商、网关或本地模型服务。开始工作前，检查所选提供商与模型。本地服务是否需要 API 密钥，取决于它的配置。",
+  modelsFacts: [
+    ["托管", "你自己的 API 密钥，用 codewhale auth set 保存"],
+    ["网关", "一个端点接多个模型，提供商仍由你选"],
+    ["本地", "localhost 上的 vLLM、SGLang、Ollama——通常无需密钥"],
+  ],
+  modelsLink: "了解提供商选项",
+  startHeading: "四步开始第一个会话。",
+  startLede: "安装，无需密钥打开会话，接入提供商；一个模型不够时，再配置 fleet。",
+  startGuideLink: "阅读新手指引",
+  startVocabularyLink: "查名词",
+  chapterAccount: "现在能在哪里运行",
+  availabilityHeading: "已可用、开发中、暂不可用——如实说明。",
+  availabilityLede: "终端是已发布的产品。其余的按实际状态列出。",
+  availability: [
+    ["终端", "已发布", "优先使用 GitHub Releases 中适用于 Linux、macOS、Windows 的二进制；npm 和 Cargo 为其他安装方式。Android 上的 Termux 为预览。"],
+    ["网页应用", "开发预览", "账户页面与浏览器配对已在开发版本中实现。公开服务上的端到端远程控制尚未验证；已发布的任务执行入口是终端。"],
+    ["桌面端", "开发版本", "本地 macOS 开发构建已做过测试。尚无已发布的桌面应用可供下载。"],
+    ["云端计算机", "暂不可用", "在托管计算机上运行工作仍在开发中。等它真正可用时，本页会如实说明。"],
+  ],
+  availabilityNote: "终端不需要 Codewhale 账户。托管模型按你自己的提供商账户计费；创建 Codewhale 账户不会购买模型访问权限。",
+  accountLink: "创建账户",
   surfacesHeading: "活在哪里干，就在哪里用。",
   surfaces: [
     ["TUI", "交互式终端工作"],
     ["codewhale exec", "脚本与 CI"],
-    ["Web 客户端", "浏览器客户端，仅限本机"],
+    ["本地 Web 客户端", "本机界面；托管浏览器工作台仍在开发中"],
     ["运行时 API + MCP", "本地集成"],
     ["fleet", "多个智能体协作一件事"],
   ],
-  runtimeLink: "运行时界面与稳定程度 →",
-
-  installBandHeading: "从一条命令开始。",
+  runtimeLink: "运行时界面与稳定程度",
+  installBandHeading: "在 macOS 或 Linux 上安装。",
+  copy: "复制",
+  copied: "已复制 ✓",
   binaries: "预编译包",
   chinaMirrors: "中国镜像",
-  installGuideLink: "阅读安装指南 →",
-
-  sealCommunity: "众",
+  installGuideLink: "阅读安装指南",
   communityHeading: "公开构建",
-  communityBody:
-    "MIT 许可。贡献者的工作覆盖运行时、提供商、平台、文档与测试。",
+  communityBody: "MIT 许可。贡献者的工作覆盖运行时、提供商、平台、文档与测试。",
   communityLinksAria: "社区链接",
   contribute: "参与贡献",
 };

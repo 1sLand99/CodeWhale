@@ -83,7 +83,7 @@ impl PluginDiscoveryContext {
         Arc::new(Self {
             state_path: user_plugins_dir.join("state.json"),
             user_plugins_dir,
-            builtin_plugin_dirs: Arc::from([]),
+            builtin_plugin_dirs: super::builtin::materialized_dirs().into(),
             host_environment: Arc::new(HostEnvironment::capture()),
         })
     }

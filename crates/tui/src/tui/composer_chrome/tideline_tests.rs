@@ -6,10 +6,12 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use unicode_width::UnicodeWidthChar;
 
-use super::{
-    TIDELINE_COMPOSER_HEIGHT, TidelineComposer, render_tideline_composer,
-    tideline_composer_hitboxes,
-};
+/// The rounded enclosure's height. It used to live beside the launch
+/// dock's geometry; that dock is gone, and only these tests still need the
+/// number.
+const TIDELINE_COMPOSER_HEIGHT: u16 = 4;
+
+use super::{TidelineComposer, render_tideline_composer};
 use crate::palette::UI_THEME;
 use crate::tui::golden_harness::{BLOCKER_SIZES, assert_matches_golden, render_golden_text};
 
@@ -130,35 +132,6 @@ fn composer_ascii_safe_projects_to_ascii() {
         if ch != '\n' {
             assert_eq!(ch.width(), Some(1), "ascii-safe single-width: {ch:?}");
         }
-    }
-}
-
-#[test]
-fn composer_hitboxes_match_painted_cells() {
-    for (w, h) in BLOCKER_SIZES {
-        let area = Rect::new(0, h - TIDELINE_COMPOSER_HEIGHT, w, TIDELINE_COMPOSER_HEIGHT);
-        let composer = TidelineComposer::new(&UI_THEME, "draft").focused(true);
-        let mut buf = Buffer::empty(Rect::new(0, 0, w, h));
-        render_tideline_composer(area, &mut buf, &composer);
-        let hitboxes = tideline_composer_hitboxes(area);
-        assert_eq!(
-            hitboxes.border, area,
-            "focus hitbox must cover the full rounded shell at {w}x{h}"
-        );
-        let submit: String = (hitboxes.submit.x..hitboxes.submit.x + hitboxes.submit.width)
-            .map(|x| buf[(x, hitboxes.submit.y)].symbol().to_string())
-            .collect();
-        assert_eq!(
-            submit, "[↑]",
-            "submit rect covers the painted hitbox at {w}x{h}"
-        );
-        let border: String = (hitboxes.border.x..hitboxes.border.x + hitboxes.border.width)
-            .map(|x| buf[(x, hitboxes.border.y)].symbol().to_string())
-            .collect();
-        assert!(
-            border.contains('╭'),
-            "border rect covers the top rail at {w}x{h}"
-        );
     }
 }
 

@@ -38,9 +38,7 @@ use crate::llm_client::{
 };
 use crate::logging;
 use crate::models::Role;
-use crate::models::{
-    ContentBlock, Message, MessageRequest, MessageResponse, ServerToolUsage, SystemPrompt, Usage,
-};
+use crate::models::{ContentBlock, Message, MessageRequest, MessageResponse, SystemPrompt};
 
 /// Every provider request that can feed the interactive TUI's attached CWC run
 /// takes a shared permit at this lowest common dispatch seam. Runtime Chat holds
@@ -1668,6 +1666,24 @@ fn build_default_headers(
             HeaderValue::from_static("Codewhale"),
         );
     }
+    // OpenCode Go / OpenCode Zen gateways (https://opencode.ai/docs/go/)
+    // ask clients to send a stable `x-opencode-session` header so the
+    // service can optimize prompt caching and attribute traffic to a
+    // conversation. Generate one UUID v4 per process so every request a
+    // session makes to the gateway shares a single ID ("one stable ID per
+    // conversation"). A user-configured header of the same name wins: the
+    // extra-header loop below overwrites this value.
+    if matches!(
+        api_provider,
+        ApiProvider::OpencodeGo | ApiProvider::OpencodeZen
+    ) {
+        static OPENCODE_SESSION: OnceLock<String> = OnceLock::new();
+        let session = OPENCODE_SESSION.get_or_init(|| uuid::Uuid::new_v4().to_string());
+        headers.insert(
+            HeaderName::from_static("x-opencode-session"),
+            HeaderValue::from_str(session)?,
+        );
+    }
     for (name, value) in extra_headers {
         let name = name.trim();
         let value = value.trim();
@@ -2011,11 +2027,7 @@ impl DeepSeekClient {
         // adapter is what stops an unrepresentable role from being discovered
         // as an opaque provider 400 (Anthropic) or from vanishing silently
         // (the OpenAI-shaped dialects) depending on which adapter ran.
-        let outbound_dialect = if self.api_provider == crate::config::ApiProvider::Antigravity {
-            WireDialect::GoogleCloudCode
-        } else {
-            WireDialect::from_wire_format(self.wire_format)
-        };
+        let outbound_dialect = WireDialect::from_wire_format(self.wire_format);
         role_placement::reject_unsupported_roles(&request.messages, outbound_dialect)?;
         let clamp_output_cap = |mut request: MessageRequest, route_limits: Option<RouteLimits>| {
             let route_cap =
@@ -2031,21 +2043,6 @@ impl DeepSeekClient {
             }
             request
         };
-        if self.api_provider == crate::config::ApiProvider::Antigravity {
-            let request =
-                clamp_output_cap(self.prepare_model_bound_request(request), self.route_limits);
-            let body = cloud_code::build_generate_content_body(&request)?;
-            let url = cloud_code::stream_generate_content_url(&self.base_url);
-            return Ok(PreparedOutboundRequest::new(
-                WireDialect::GoogleCloudCode,
-                self.endpoint_identity(url, RouteShape::CloudCode),
-                request.model.clone(),
-                body,
-                request.reasoning_effort.clone(),
-                None,
-                CallerStreamMode::from_stream_flag(stream),
-            ));
-        }
         let (request, request_route_limits) =
             self.bind_request_to_protocol(self.prepare_model_bound_request(request))?;
         let mut request = clamp_output_cap(request, request_route_limits);
@@ -2057,7 +2054,7 @@ impl DeepSeekClient {
             }
         }
         let requested_effort = request.reasoning_effort.clone();
-        // Same value computed for the seam above; Antigravity already returned.
+        // Same value computed for the seam above.
         let dialect = outbound_dialect;
         // `stream` is the caller's entry point, not a wire fact: each dialect
         // decides for itself what the body's `stream` field says.
@@ -2373,7 +2370,7 @@ impl DeepSeekClient {
             let response = match prepared.dialect {
                 WireDialect::OpenAiResponses => self.handle_responses_message(&prepared).await?,
                 WireDialect::AnthropicMessages => self.handle_anthropic_message(&prepared).await?,
-                WireDialect::ChatCompletions | WireDialect::GoogleCloudCode => unreachable!(),
+                WireDialect::ChatCompletions => unreachable!(),
             };
             return translation_text_from_response(&response);
         }
@@ -2498,10 +2495,27 @@ impl DeepSeekClient {
             });
         }
 
-        let body = response
-            .text()
+        // Catalogs are untrusted remote data, retained locally by `models --update`.
+        const MAX_CATALOG_BYTES: usize = 8 * 1024 * 1024;
+        if response
+            .content_length()
+            .is_some_and(|size| size > MAX_CATALOG_BYTES as u64)
+        {
+            return Err(CatalogRefreshError::InvalidResponse);
+        }
+        let mut response = response;
+        let mut body = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
             .await
-            .map_err(|_| CatalogRefreshError::Network)?;
+            .map_err(|_| CatalogRefreshError::Network)?
+        {
+            if body.len().saturating_add(chunk.len()) > MAX_CATALOG_BYTES {
+                return Err(CatalogRefreshError::InvalidResponse);
+            }
+            body.extend_from_slice(&chunk);
+        }
+        let body = String::from_utf8(body).map_err(|_| CatalogRefreshError::InvalidResponse)?;
 
         let provider = self.catalog_provider_id();
         let fingerprint = base_url_fingerprint(&self.base_url);
@@ -2581,6 +2595,15 @@ impl DeepSeekClient {
                 .collect()
         };
 
+        if offerings.iter().any(|row| {
+            !crate::provider_lake::valid_catalog_model_id(&row.wire_model_id)
+                || self
+                    .model_bound_secret_values
+                    .iter()
+                    .any(|secret| !secret.is_empty() && row.wire_model_id.contains(secret))
+        }) {
+            return Err(CatalogRefreshError::InvalidResponse);
+        }
         Ok(ProviderCatalogDelta {
             provider,
             base_url_fingerprint: fingerprint,
@@ -3068,9 +3091,6 @@ impl DeepSeekClient {
             WireDialect::OpenAiResponses => isolated.handle_responses_message(&prepared).await,
             WireDialect::AnthropicMessages => isolated.handle_anthropic_message(&prepared).await,
             WireDialect::ChatCompletions => isolated.create_message_chat(&prepared, false).await,
-            WireDialect::GoogleCloudCode => anyhow::bail!(
-                "Antigravity cloud-code is stream-only; blocking create_message is not implemented"
-            ),
         }
     }
 }
@@ -3148,9 +3168,6 @@ impl LlmClient for DeepSeekClient {
             WireDialect::OpenAiResponses => self.handle_responses_message(&prepared).await,
             WireDialect::AnthropicMessages => self.handle_anthropic_message(&prepared).await,
             WireDialect::ChatCompletions => self.create_message_chat(&prepared, cacheable).await,
-            WireDialect::GoogleCloudCode => anyhow::bail!(
-                "Antigravity cloud-code is stream-only; blocking create_message is not implemented"
-            ),
         }
     }
 
@@ -3161,15 +3178,6 @@ impl LlmClient for DeepSeekClient {
         let inference = self.acquire_remote_control_inference_permit().await;
         let permit = self.acquire_provider_request_permit().await;
         let prepared = self.prepare_outbound_request(request, true)?;
-        if self.api_provider == crate::config::ApiProvider::Antigravity {
-            let stream = Self::hold_provider_request_permit_for_stream(
-                self.handle_cloud_code_stream(&prepared).await?,
-                permit,
-            );
-            return Ok(Self::hold_remote_control_inference_permit_for_stream(
-                stream, inference,
-            ));
-        }
         let projection_warning = (!prepared.omitted_tool_names.is_empty()).then(|| {
             let omitted_tool_count = prepared.omitted_tool_names.len();
             (
@@ -3184,9 +3192,6 @@ impl LlmClient for DeepSeekClient {
             WireDialect::OpenAiResponses => self.handle_responses_stream(&prepared).await?,
             WireDialect::AnthropicMessages => self.handle_anthropic_stream(&prepared).await?,
             WireDialect::ChatCompletions => self.handle_chat_completion_stream(prepared).await?,
-            WireDialect::GoogleCloudCode => {
-                unreachable!("Antigravity streams before dialect match")
-            }
         };
         let stream = match projection_warning {
             Some((provider, omitted_tool_names, omitted_tool_count)) => {
@@ -3924,88 +3929,6 @@ pub(super) fn apply_reasoning_effort(
     }
 }
 
-pub(super) fn saturating_u32(value: u64) -> u32 {
-    u32::try_from(value).unwrap_or(u32::MAX)
-}
-
-pub(super) fn parse_usage(usage: Option<&Value>) -> Usage {
-    let input_tokens = usage
-        .and_then(|u| u.get("input_tokens").or_else(|| u.get("prompt_tokens")))
-        .and_then(Value::as_u64)
-        .unwrap_or(0);
-    let mut output_tokens = usage
-        .and_then(|u| {
-            u.get("output_tokens")
-                .or_else(|| u.get("completion_tokens"))
-        })
-        .and_then(Value::as_u64)
-        .unwrap_or(0);
-    let total_tokens = usage
-        .and_then(|u| u.get("total_tokens"))
-        .and_then(Value::as_u64);
-    let reasoning_tokens_raw = usage
-        .and_then(|u| u.get("completion_tokens_details"))
-        .and_then(|details| details.get("reasoning_tokens"))
-        .and_then(Value::as_u64);
-    if output_tokens == 0
-        && let Some(reasoning_tokens) = reasoning_tokens_raw
-    {
-        output_tokens = reasoning_tokens;
-    } else if output_tokens == 0
-        && let Some(total_tokens) = total_tokens
-    {
-        output_tokens = total_tokens.saturating_sub(input_tokens);
-    }
-    let cached_tokens = usage
-        .and_then(|u| u.get("prompt_tokens_details"))
-        .and_then(|details| details.get("cached_tokens"))
-        .and_then(Value::as_u64);
-    let prompt_cache_hit_tokens = usage
-        .and_then(|u| u.get("prompt_cache_hit_tokens"))
-        .and_then(Value::as_u64)
-        .or(cached_tokens)
-        .map(saturating_u32);
-    let prompt_cache_miss_tokens = usage
-        .and_then(|u| u.get("prompt_cache_miss_tokens"))
-        .and_then(Value::as_u64)
-        .or_else(|| prompt_cache_hit_tokens.map(|hit| input_tokens.saturating_sub(u64::from(hit))))
-        .map(saturating_u32);
-    // Reasoning tokens are a *subset* of the completion count every provider
-    // bills, so they are never added to output. A payload claiming more
-    // reasoning than output contradicts that invariant, which makes the figure
-    // invalid telemetry rather than extra billable output: drop it instead of
-    // letting a bad number reach the cost surfaces (#4318).
-    let reasoning_tokens = reasoning_tokens_raw
-        .filter(|reasoning| *reasoning <= output_tokens)
-        .map(saturating_u32);
-
-    let server_tool_use = usage.and_then(|u| u.get("server_tool_use")).map(|server| {
-        let code_execution_requests = server
-            .get("code_execution_requests")
-            .and_then(Value::as_u64)
-            .map(saturating_u32);
-        let tool_search_requests = server
-            .get("tool_search_requests")
-            .and_then(Value::as_u64)
-            .map(saturating_u32);
-        ServerToolUsage {
-            code_execution_requests,
-            tool_search_requests,
-        }
-    });
-
-    Usage {
-        input_tokens: saturating_u32(input_tokens),
-        output_tokens: saturating_u32(output_tokens),
-        prompt_cache_hit_tokens,
-        prompt_cache_miss_tokens,
-        prompt_cache_write_tokens: None,
-        reasoning_tokens,
-        reasoning_replay_tokens: None,
-        server_tool_use,
-    }
-}
-
 impl DeepSeekClient {
     /// Call the DeepSeek `/beta/completions` FIM endpoint.
     pub async fn fim_completion(
@@ -4062,7 +3985,6 @@ impl DeepSeekClient {
 
 mod anthropic;
 mod chat;
-pub(crate) mod cloud_code;
 mod deepseek_effort;
 #[cfg(test)]
 mod ds4_tests;
@@ -4071,6 +3993,10 @@ mod provider_native_search;
 mod responses;
 mod role_placement;
 mod stream_entry;
+mod wire;
+
+// Retain the crate-visible accounting helpers at the existing client seam.
+pub(super) use wire::{parse_usage, saturating_u32};
 
 #[cfg(test)]
 pub(crate) fn anthropic_tool_result_content_for_test(
@@ -4091,121 +4017,6 @@ pub(crate) fn responses_tool_output_for_test(
 #[cfg(test)]
 pub(crate) fn chat_messages_for_test(messages: &[crate::models::Message]) -> Vec<Value> {
     chat::build_chat_messages(None, messages, "gpt-4o")
-}
-
-fn extract_sse_data_value(line: &str) -> Option<&str> {
-    line.strip_prefix("data:")
-        .map(|value| value.strip_prefix(' ').unwrap_or(value))
-}
-
-/// Genuine invalid UTF-8 in an SSE line (or an unterminated flush).
-///
-/// HTTP/2 DATA and other transports may split a multi-byte character across
-/// chunks. That is not this error: callers must buffer raw bytes until a
-/// complete line (or stream end) before decoding. This type is only returned
-/// when `str::from_utf8` rejects the assembled bytes. We never substitute
-/// U+FFFD — fail closed so garbled CJK cannot enter the transcript.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct InvalidSseUtf8 {
-    valid_up_to: usize,
-}
-
-impl std::fmt::Display for InvalidSseUtf8 {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "invalid UTF-8 in SSE stream at byte {}",
-            self.valid_up_to
-        )
-    }
-}
-
-impl std::error::Error for InvalidSseUtf8 {}
-
-/// Decode one assembled SSE line (or stream-end tail) with `str::from_utf8`.
-/// Does not substitute U+FFFD.
-fn decode_sse_line_bytes(bytes: &[u8]) -> Result<&str, InvalidSseUtf8> {
-    std::str::from_utf8(bytes).map_err(|err| InvalidSseUtf8 {
-        valid_up_to: err.valid_up_to(),
-    })
-}
-
-/// Take the next COMPLETE line (up to the first `\n`) off a raw byte buffer,
-/// draining it, and return it trimmed. Returns `Ok(None)` when no full line is
-/// buffered yet. Decoding only complete lines (never an arbitrary network-read
-/// boundary) means a multi-byte UTF-8 char — CJK, emoji, accented letter —
-/// split across two reads is never corrupted to U+FFFD, since the `\n`
-/// delimiter is ASCII and can never fall inside a multi-byte sequence.
-///
-/// Genuine invalid bytes fail closed (`Err(InvalidSseUtf8)`); we do not
-/// substitute U+FFFD.
-fn take_sse_line(buffer: &mut Vec<u8>) -> Result<Option<String>, InvalidSseUtf8> {
-    let Some(line_end) = buffer.iter().position(|&b| b == b'\n') else {
-        return Ok(None);
-    };
-    // Strip a preceding `\r` so CRLF-delimited SSE frames do not leave CR.
-    let mut end = line_end;
-    if end > 0 && buffer[end - 1] == b'\r' {
-        end -= 1;
-    }
-    let decoded = decode_sse_line_bytes(&buffer[..end]).map(|text| text.trim().to_string());
-    buffer.drain(..=line_end);
-    decoded.map(Some)
-}
-
-/// Decode the unterminated tail left in `buffer` at stream end.
-///
-/// Same fail-closed UTF-8 contract as [`take_sse_line`]. Empty / whitespace-only
-/// tails yield `Ok(None)`.
-fn flush_sse_line(buffer: &mut Vec<u8>) -> Result<Option<String>, InvalidSseUtf8> {
-    if buffer.is_empty() {
-        return Ok(None);
-    }
-    let mut end = buffer.len();
-    if buffer[end - 1] == b'\r' {
-        end -= 1;
-    }
-    let decoded = decode_sse_line_bytes(&buffer[..end]).map(|text| text.trim().to_string());
-    buffer.clear();
-    decoded.map(|line| (!line.is_empty()).then_some(line))
-}
-
-/// Next decoded SSE line. When `at_end` is false, wait for `\n`. When `at_end`
-/// is true, also flush an unterminated tail (stream closed).
-fn next_sse_line(buffer: &mut Vec<u8>, at_end: bool) -> Result<Option<String>, InvalidSseUtf8> {
-    match take_sse_line(buffer)? {
-        Some(line) => Ok(Some(line)),
-        None if at_end => flush_sse_line(buffer),
-        None => Ok(None),
-    }
-}
-
-/// Incremental raw-byte SSE line assembler for tests and the Chat Completions
-/// decoder. HTTP/2 DATA may split a multi-byte UTF-8 character across chunks;
-/// we never decode until a complete line or [`SseLineDecoder::finish`].
-#[cfg(test)]
-struct SseLineDecoder {
-    buffer: Vec<u8>,
-}
-
-#[cfg(test)]
-impl SseLineDecoder {
-    fn new() -> Self {
-        Self { buffer: Vec::new() }
-    }
-
-    fn push(&mut self, chunk: &[u8]) -> Result<Vec<String>, InvalidSseUtf8> {
-        self.buffer.extend_from_slice(chunk);
-        let mut lines = Vec::new();
-        while let Some(line) = take_sse_line(&mut self.buffer)? {
-            lines.push(line);
-        }
-        Ok(lines)
-    }
-
-    fn finish(mut self) -> Result<Option<String>, InvalidSseUtf8> {
-        flush_sse_line(&mut self.buffer)
-    }
 }
 
 pub(crate) use chat::{CacheWarmupKey, PromptInspection};
@@ -8044,6 +7855,86 @@ mod tests {
     }
 
     #[test]
+    fn opencode_go_and_zen_requests_carry_stable_session_header() {
+        for api_provider in [ApiProvider::OpencodeGo, ApiProvider::OpencodeZen] {
+            let headers = DeepSeekClient::default_headers_for_provider(
+                "configured-key",
+                &HashMap::new(),
+                api_provider,
+                "https://opencode.ai/zen/go/v1",
+            )
+            .expect("headers");
+            let session = headers
+                .get("x-opencode-session")
+                .expect("x-opencode-session must be present for OpenCode gateways")
+                .to_str()
+                .expect("session id must be valid utf-8");
+            assert!(!session.is_empty(), "session id must be non-empty");
+
+            // The gateway requires one stable ID per conversation: a second
+            // request from the same process must reuse the same value.
+            let headers2 = DeepSeekClient::default_headers_for_provider(
+                "configured-key",
+                &HashMap::new(),
+                api_provider,
+                "https://opencode.ai/zen/go/v1",
+            )
+            .expect("headers2");
+            assert_eq!(
+                headers2
+                    .get("x-opencode-session")
+                    .and_then(|value| value.to_str().ok()),
+                Some(session),
+                "session id must be stable within a process"
+            );
+        }
+    }
+
+    #[test]
+    fn user_configured_opencode_session_header_wins() {
+        let mut extra = HashMap::new();
+        extra.insert(
+            "x-opencode-session".to_string(),
+            "user-configured-id".to_string(),
+        );
+        let headers = DeepSeekClient::default_headers_for_provider(
+            "configured-key",
+            &extra,
+            ApiProvider::OpencodeGo,
+            "https://opencode.ai/zen/go/v1",
+        )
+        .expect("headers");
+        assert_eq!(
+            headers
+                .get("x-opencode-session")
+                .and_then(|value| value.to_str().ok()),
+            Some("user-configured-id"),
+            "a user-configured x-opencode-session must override the default"
+        );
+    }
+
+    #[test]
+    fn non_opencode_providers_do_not_carry_session_header() {
+        for api_provider in [
+            ApiProvider::Deepseek,
+            ApiProvider::Anthropic,
+            ApiProvider::Openai,
+        ] {
+            let headers = DeepSeekClient::default_headers_for_provider(
+                "configured-key",
+                &HashMap::new(),
+                api_provider,
+                "https://example.invalid/v1",
+            )
+            .expect("headers");
+            assert!(
+                headers.get("x-opencode-session").is_none(),
+                "non-OpenCode provider {api_provider:?} must not send the session header"
+            );
+        }
+    }
+
+    #[test]
     fn tokenhub_openai_compatible_route_uses_bearer_header() {
         let mut extra = HashMap::new();
         extra.insert("api-key".to_string(), "wrong".to_string());
@@ -10739,114 +10630,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_usage_scenario() {
-        // Scenario consolidation of: parse_usage_reads_deepseek_cache_and_reasoning_tokens, parse_usage_saturates_every_u64_token_field, parse_usage_counts_reasoning_tokens_when_completion_tokens_are_zero, parse_usage_derives_completion_tokens_from_total_tokens_when_needed, parse_usage_reads_v4_prompt_tokens_details_cached_tokens, parse_usage_infers_cache_miss_from_selected_hit_source
-        // from parse_usage_reads_deepseek_cache_and_reasoning_tokens
-        {
-            let usage = parse_usage(Some(&json!({
-                "prompt_tokens": 100,
-                "completion_tokens": 20,
-                "prompt_cache_hit_tokens": 70,
-                "prompt_cache_miss_tokens": 30,
-                "completion_tokens_details": {
-                    "reasoning_tokens": 12
-                }
-            })));
-
-            assert_eq!(usage.input_tokens, 100);
-            assert_eq!(usage.output_tokens, 20);
-            assert_eq!(usage.prompt_cache_hit_tokens, Some(70));
-            assert_eq!(usage.prompt_cache_miss_tokens, Some(30));
-            assert_eq!(usage.reasoning_tokens, Some(12));
-        }
-        // from parse_usage_saturates_every_u64_token_field
-        {
-            let usage = parse_usage(Some(&json!({
-                "input_tokens": u64::MAX,
-                "output_tokens": u64::MAX,
-                "prompt_cache_hit_tokens": u64::MAX,
-                "prompt_cache_miss_tokens": u64::MAX,
-                "completion_tokens_details": { "reasoning_tokens": u64::MAX },
-                "server_tool_use": {
-                    "code_execution_requests": u64::MAX,
-                    "tool_search_requests": u64::MAX
-                }
-            })));
-            assert_eq!(usage.input_tokens, u32::MAX);
-            assert_eq!(usage.output_tokens, u32::MAX);
-            assert_eq!(usage.prompt_cache_hit_tokens, Some(u32::MAX));
-            assert_eq!(usage.prompt_cache_miss_tokens, Some(u32::MAX));
-            assert_eq!(usage.reasoning_tokens, Some(u32::MAX));
-            let server = usage.server_tool_use.expect("server usage");
-            assert_eq!(server.code_execution_requests, Some(u32::MAX));
-            assert_eq!(server.tool_search_requests, Some(u32::MAX));
-        }
-        // from parse_usage_counts_reasoning_tokens_when_completion_tokens_are_zero
-        {
-            let usage = parse_usage(Some(&json!({
-                "prompt_tokens": 100,
-                "completion_tokens": 0,
-                "completion_tokens_details": {
-                    "reasoning_tokens": 12
-                }
-            })));
-
-            assert_eq!(usage.input_tokens, 100);
-            assert_eq!(usage.output_tokens, 12);
-            assert_eq!(usage.reasoning_tokens, Some(12));
-            assert!(
-                crate::pricing::calculate_turn_cost_from_usage("deepseek-v4-pro", &usage)
-                    .expect("DeepSeek V4 Pro pricing should apply")
-                    > 0.0
-            );
-        }
-        // from parse_usage_derives_completion_tokens_from_total_tokens_when_needed
-        {
-            let usage = parse_usage(Some(&json!({
-                "prompt_tokens": 100,
-                "total_tokens": 125,
-                "prompt_cache_hit_tokens": 70,
-                "prompt_cache_miss_tokens": 30
-            })));
-
-            assert_eq!(usage.input_tokens, 100);
-            assert_eq!(usage.output_tokens, 25);
-            assert_eq!(usage.prompt_cache_hit_tokens, Some(70));
-            assert_eq!(usage.prompt_cache_miss_tokens, Some(30));
-        }
-        // from parse_usage_reads_v4_prompt_tokens_details_cached_tokens
-        {
-            let usage = parse_usage(Some(&json!({
-                "prompt_tokens": 4000,
-                "completion_tokens": 20,
-                "prompt_tokens_details": {
-                    "cached_tokens": 3000
-                }
-            })));
-
-            assert_eq!(usage.input_tokens, 4000);
-            assert_eq!(usage.output_tokens, 20);
-            assert_eq!(usage.prompt_cache_hit_tokens, Some(3000));
-            assert_eq!(usage.prompt_cache_miss_tokens, Some(1000));
-        }
-        // from parse_usage_infers_cache_miss_from_selected_hit_source
-        {
-            let usage = parse_usage(Some(&json!({
-                "prompt_tokens": 4000,
-                "completion_tokens": 20,
-                "prompt_cache_hit_tokens": 3000,
-                "prompt_tokens_details": {
-                    "cached_tokens": 1000
-                }
-            })));
-
-            assert_eq!(usage.input_tokens, 4000);
-            assert_eq!(usage.prompt_cache_hit_tokens, Some(3000));
-            assert_eq!(usage.prompt_cache_miss_tokens, Some(1000));
-        }
-    }
-
-    #[test]
     fn client_route_envelope_freezes_saved_minimax_billing_mode_and_wire_model() {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let config = Config {
@@ -10878,120 +10661,6 @@ mod tests {
             crate::cost_status::RouteBillingMode::Metered
         );
         assert_eq!(route.dispatched_at.timestamp(), 1_234);
-    }
-
-    /// Real-shaped Chat-Completions usage payloads from the three providers most
-    /// likely to report reasoning tokens, carried end-to-end into pricing.
-    ///
-    /// Two invariants hold for every fixture: `reasoning_tokens <= output_tokens`,
-    /// and pricing never adds reasoning on top of output — dropping the reasoning
-    /// field entirely must not change the cost by a single cent.
-    #[test]
-    fn reasoning_parser_fixtures_never_exceed_or_add_to_billable_output() {
-        use crate::config::ApiProvider;
-        use crate::pricing::{calculate_turn_cost_estimate_for_provider, token_usage_for_pricing};
-
-        // (label, provider, model, payload)
-        let fixtures: [(&str, ApiProvider, &str, serde_json::Value); 3] = [
-            (
-                "moonshot",
-                ApiProvider::Moonshot,
-                "kimi-k2.7-code",
-                json!({
-                    "prompt_tokens": 30_000,
-                    "completion_tokens": 2_400,
-                    "total_tokens": 32_400,
-                    "prompt_tokens_details": { "cached_tokens": 24_000 },
-                    "completion_tokens_details": { "reasoning_tokens": 1_900 }
-                }),
-            ),
-            (
-                "minimax",
-                ApiProvider::Minimax,
-                "minimax-m3",
-                json!({
-                    "prompt_tokens": 12_000,
-                    "completion_tokens": 3_000,
-                    "total_tokens": 15_000,
-                    "prompt_tokens_details": { "cached_tokens": 4_000 },
-                    "completion_tokens_details": { "reasoning_tokens": 2_950 }
-                }),
-            ),
-            (
-                "openrouter",
-                ApiProvider::Openrouter,
-                "qwen/qwen3.7-plus",
-                json!({
-                    "prompt_tokens": 8_000,
-                    "completion_tokens": 1_500,
-                    "total_tokens": 9_500,
-                    "prompt_tokens_details": { "cached_tokens": 2_000 },
-                    "completion_tokens_details": { "reasoning_tokens": 1_500 }
-                }),
-            ),
-        ];
-
-        for (label, provider, model, payload) in fixtures {
-            let usage = parse_usage(Some(&payload));
-            let reasoning = usage.reasoning_tokens.expect("fixture reports reasoning");
-
-            // Invariant 1: reasoning is a subset of the billed completion count.
-            assert!(
-                reasoning <= usage.output_tokens,
-                "{label}: reasoning {reasoning} exceeds output {}",
-                usage.output_tokens
-            );
-            // Billable output is exactly the reported completion count.
-            let classes = token_usage_for_pricing(&usage);
-            assert_eq!(
-                classes.output,
-                u64::from(usage.output_tokens),
-                "{label}: reasoning leaked into billable output"
-            );
-
-            // Invariant 2: pricing does not add reasoning a second time. The same
-            // usage with the reasoning field removed must cost the same.
-            let without = crate::models::Usage {
-                reasoning_tokens: None,
-                ..usage.clone()
-            };
-            assert_eq!(
-                calculate_turn_cost_estimate_for_provider(provider, model, &usage),
-                calculate_turn_cost_estimate_for_provider(provider, model, &without),
-                "{label}: reasoning changed the price"
-            );
-        }
-    }
-
-    /// A payload claiming more reasoning than output contradicts the subset
-    /// invariant. That is broken telemetry, so the field is discarded — and it
-    /// must never become extra billable output.
-    #[test]
-    fn pathological_reasoning_above_output_is_rejected_not_billed() {
-        let usage = parse_usage(Some(&json!({
-            "prompt_tokens": 1_000,
-            "completion_tokens": 100,
-            "completion_tokens_details": { "reasoning_tokens": 5_000 }
-        })));
-
-        assert_eq!(usage.output_tokens, 100, "output stays as reported");
-        assert_eq!(
-            usage.reasoning_tokens, None,
-            "impossible reasoning telemetry is dropped rather than trusted"
-        );
-        let classes = crate::pricing::token_usage_for_pricing(&usage);
-        assert_eq!(classes.output, 100);
-
-        // `completion_tokens: 0` with reasoning present is the *legitimate*
-        // shape this filter must not break: providers that report only reasoning
-        // set output from it, keeping reasoning == output.
-        let zero_output = parse_usage(Some(&json!({
-            "prompt_tokens": 1_000,
-            "completion_tokens": 0,
-            "completion_tokens_details": { "reasoning_tokens": 12 }
-        })));
-        assert_eq!(zero_output.output_tokens, 12);
-        assert_eq!(zero_output.reasoning_tokens, Some(12));
     }
 
     #[test]
@@ -11442,164 +11111,6 @@ mod tests {
         );
     }
 
-    fn mid_char_split(text: &str, ch: char) -> usize {
-        let needle = ch.to_string();
-        let start = text
-            .as_bytes()
-            .windows(needle.len())
-            .position(|window| window == needle.as_bytes())
-            .unwrap_or_else(|| panic!("{ch:?} present in {text:?}"));
-        start + 1
-    }
-
-    #[test]
-    fn take_sse_scenario() {
-        // Scenario consolidation of: take_sse_line_preserves_multibyte_split_across_reads, take_sse_line_returns_none_without_newline, take_sse_line_reassembles_cjk_and_rejects_invalid_bytes, take_sse_line_rejects_invalid_bytes_without_replacement
-        // from take_sse_line_preserves_multibyte_split_across_reads
-        {
-            // "你好" streamed so the 3-byte '好' straddles a read boundary.
-            let full = "data: 你好\n";
-            let bytes = full.as_bytes();
-            let split = mid_char_split(full, '好');
-            let mut buffer: Vec<u8> = Vec::new();
-            // First read: no complete line yet.
-            buffer.extend_from_slice(&bytes[..split]);
-            assert_eq!(take_sse_line(&mut buffer).expect("valid prefix"), None);
-            // Second read completes the line; '好' must be intact, not U+FFFD.
-            buffer.extend_from_slice(&bytes[split..]);
-            let line = take_sse_line(&mut buffer)
-                .expect("valid utf-8")
-                .expect("a complete line");
-            assert_eq!(line, "data: 你好");
-            assert!(!line.contains('\u{FFFD}'), "multibyte char was corrupted");
-            assert_eq!(extract_sse_data_value(&line), Some("你好"));
-            // Buffer fully drained.
-            assert!(buffer.is_empty());
-        }
-        // from take_sse_line_returns_none_without_newline
-        {
-            let mut buffer = b"data: partial".to_vec();
-            assert_eq!(take_sse_line(&mut buffer).expect("valid utf-8"), None);
-            assert_eq!(buffer, b"data: partial");
-        }
-        // from take_sse_line_reassembles_cjk_and_rejects_invalid_bytes
-        {
-            let full = "data: 测试中文\n";
-            let split = mid_char_split(full, '试');
-            let mut buffer = full.as_bytes()[..split].to_vec();
-            assert_eq!(take_sse_line(&mut buffer).expect("valid prefix"), None);
-            buffer.extend_from_slice(&full.as_bytes()[split..]);
-            let line = take_sse_line(&mut buffer)
-                .expect("valid utf-8")
-                .expect("complete line");
-            assert_eq!(line, "data: 测试中文");
-            assert!(!line.contains('\u{FFFD}'));
-
-            let mut invalid = b"data: ok".to_vec();
-            invalid.push(0xFF);
-            invalid.push(b'\n');
-            let err = take_sse_line(&mut invalid).expect_err("invalid bytes must fail closed");
-            assert!(!err.to_string().contains('\u{FFFD}'));
-            assert_eq!(err.valid_up_to, 8);
-            assert!(
-                invalid.is_empty(),
-                "invalid line is consumed so retries cannot loop"
-            );
-        }
-        // from take_sse_line_rejects_invalid_bytes_without_replacement
-        {
-            let mut buffer = b"data: ok".to_vec();
-            buffer.push(0xFF);
-            buffer.extend_from_slice(b"\n");
-            let err = take_sse_line(&mut buffer).expect_err("0xFF is not UTF-8");
-            assert_eq!(err.valid_up_to, 8);
-            assert!(!err.to_string().contains('\u{FFFD}'));
-            assert!(buffer.is_empty(), "invalid line must be drained");
-        }
-    }
-
-    #[test]
-    fn flush_sse_scenario() {
-        // Scenario consolidation of: flush_sse_line_reassembles_cjk_and_rejects_invalid_bytes, flush_sse_line_preserves_unterminated_cjk, flush_sse_line_rejects_truncated_multibyte_sequence
-        // from flush_sse_line_reassembles_cjk_and_rejects_invalid_bytes
-        {
-            let text = "data: 你好世界";
-            let split = mid_char_split(text, '好');
-            let mut buffer = text.as_bytes()[..split].to_vec();
-            assert_eq!(take_sse_line(&mut buffer).expect("no newline yet"), None);
-            buffer.extend_from_slice(&text.as_bytes()[split..]);
-            let line = flush_sse_line(&mut buffer)
-                .expect("valid utf-8")
-                .expect("unterminated tail");
-            assert_eq!(line, "data: 你好世界");
-            assert!(!line.contains('\u{FFFD}'));
-            assert!(buffer.is_empty());
-            assert_eq!(flush_sse_line(&mut buffer).expect("empty"), None);
-
-            let mut invalid = vec![0x80, 0xBF];
-            let err = flush_sse_line(&mut invalid).expect_err("invalid flush must fail closed");
-            assert!(!err.to_string().contains('\u{FFFD}'));
-            assert_eq!(err.valid_up_to, 0);
-            assert!(invalid.is_empty());
-        }
-        // from flush_sse_line_preserves_unterminated_cjk
-        {
-            let mut buffer = "data: 你好".as_bytes().to_vec();
-            let line = flush_sse_line(&mut buffer)
-                .expect("valid utf-8")
-                .expect("residual line");
-            assert_eq!(line, "data: 你好");
-            assert!(!line.contains('\u{FFFD}'));
-            assert!(buffer.is_empty());
-        }
-        // from flush_sse_line_rejects_truncated_multibyte_sequence
-        {
-            let mut buffer = "data: ".as_bytes().to_vec();
-            buffer.extend_from_slice(&"好".as_bytes()[..2]);
-            let err = flush_sse_line(&mut buffer).expect_err("truncated UTF-8");
-            assert_eq!(err.valid_up_to, 6);
-            assert!(!err.to_string().contains('\u{FFFD}'));
-            assert!(buffer.is_empty());
-        }
-    }
-
-    #[test]
-    fn decode_sse_line_bytes_rejects_invalid_without_replacement() {
-        let ok = decode_sse_line_bytes("data: 你好".as_bytes()).expect("valid");
-        assert_eq!(ok, "data: 你好");
-        assert!(!ok.contains('\u{FFFD}'));
-
-        let err = decode_sse_line_bytes(&[0xFF]).expect_err("bare 0xFF is invalid");
-        assert!(!err.to_string().contains('\u{FFFD}'));
-        assert_eq!(err.valid_up_to, 0);
-    }
-
-    #[test]
-    fn extract_sse_scenario() {
-        // Scenario consolidation of: extract_sse_data_value_accepts_optional_space, extract_sse_data_value_handles_done_marker, extract_sse_data_value_rejects_non_data_lines
-        // from extract_sse_data_value_accepts_optional_space
-        {
-            assert_eq!(
-                extract_sse_data_value("data: {\"ok\":true}"),
-                Some("{\"ok\":true}")
-            );
-            assert_eq!(
-                extract_sse_data_value("data:{\"ok\":true}"),
-                Some("{\"ok\":true}")
-            );
-        }
-        // from extract_sse_data_value_handles_done_marker
-        {
-            assert_eq!(extract_sse_data_value("data: [DONE]"), Some("[DONE]"));
-            assert_eq!(extract_sse_data_value("data:[DONE]"), Some("[DONE]"));
-        }
-        // from extract_sse_data_value_rejects_non_data_lines
-        {
-            assert_eq!(extract_sse_data_value("event: message"), None);
-            assert_eq!(extract_sse_data_value(": heartbeat"), None);
-        }
-    }
-
     /// Build a DeepSeek config with an inline key/base URL plus the resolved
     /// runtime route for it. `RouteResolver` (reached through
     /// `resolve_runtime_route`) is the only producer of `ReadyRouteCandidate`,
@@ -11677,6 +11188,60 @@ mod tests {
             &config,
         )
         .expect("route cap test client")
+    }
+
+    #[test]
+    fn provider_regression_5820_ollama_config_reaches_the_wire_with_safe_output() {
+        let _lock = crate::test_support::lock_test_env();
+        let _canonical = crate::test_support::EnvVarGuard::remove("CODEWHALE_MAX_OUTPUT_TOKENS");
+        let _legacy = crate::test_support::EnvVarGuard::remove("DEEPSEEK_MAX_OUTPUT_TOKENS");
+        let config = Config {
+            provider: Some("ollama".to_string()),
+            providers: Some(ProvidersConfig {
+                ollama: ProviderConfig {
+                    model: Some("qwen2.5:7b".to_string()),
+                    context_window: Some(32_768),
+                    base_url: Some("http://127.0.0.1:11434".to_string()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let client = DeepSeekClient::new(&config).unwrap();
+        assert_eq!(
+            client
+                .route_limits()
+                .and_then(|limits| limits.context_tokens),
+            Some(32_768)
+        );
+        assert_eq!(client.effective_max_output_tokens("qwen2.5:7b"), 8_192);
+        let prepared = client
+            .prepare_outbound_request(
+                MessageRequest {
+                    model: "qwen2.5:7b".to_string(),
+                    messages: vec![Message {
+                        role: Role::User,
+                        content: vec![ContentBlock::Text {
+                            text: "hello".to_string(),
+                            cache_control: None,
+                        }],
+                    }],
+                    max_tokens: 64_000,
+                    system: None,
+                    tools: None,
+                    tool_choice: None,
+                    metadata: None,
+                    thinking: None,
+                    reasoning_effort: None,
+                    stream: Some(false),
+                    temperature: None,
+                    top_p: None,
+                },
+                false,
+            )
+            .unwrap();
+        assert_eq!(prepared.body["max_tokens"], 8_192);
     }
 
     #[test]

@@ -1087,6 +1087,8 @@ mod tests {
             status,
             prompt_summary: "Fix task list output".to_string(),
             model: "deepseek-v4-pro".to_string(),
+            model_provider: None,
+            model_provider_id: None,
             mode: "agent".to_string(),
             workspace: PathBuf::from("/tmp"),
             created_at: Utc::now(),

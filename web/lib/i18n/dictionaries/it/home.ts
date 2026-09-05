@@ -1,36 +1,28 @@
 import type { HomeDict } from "../types";
 
 /**
- * Italian home dictionary — la landing «giornale-oceano».
- *
- * Riscrittura nativa nella direzione inglese attuale: porta il tuo modello,
- * tutto avviene sulla tua macchina. Il vocabolario di prodotto resta
- * letterale come nel pack TUI: Plan / Work / Operate, Ask / Auto-Review /
- * Full Access, Codewhale, TUI, `codewhale exec`, Runtime API + MCP, fleet,
- * Node 18+, Rust, MIT.
- *
- * I sigilli di sezione (法, 行, …) sono glifi condivisi con l'edizione
- * inglese — marchi, non prosa.
+ * Italian home dictionary — native copy for the Tidal Folio landing page,
+ * in the current direction: your models, more capable together; agents
+ * and control on your own machine; availability stated per surface as it
+ * is today. Product vocabulary stays literal (Plan / Work / Operate, Ask /
+ * Auto-Review / Full Access, Codewhale, TUI, codewhale exec, Fleet).
  */
+
 export const home: HomeDict = {
-  metaTitle: "Codewhale — si tuffa negli abissi al posto tuo.",
+  metaTitle: "Codewhale — I tuoi modelli. Più capaci insieme.",
   metaDescription:
-    "Codewhale si tuffa negli abissi al posto tuo — un agente di coding open source per il terminale. Porta il tuo modello. Gira sulla tua macchina. Rust, MIT.",
-
-  kicker: "Open source · Porta il tuo modello · Nel tuo terminale",
-  heroTitleA: "Codewhale si tuffa negli abissi",
-  heroTitleB: "così non devi farlo tu.",
+    "Codewhale è un sistema di calcolo agentico open source. Porta i modelli che già usi — hosted, tramite gateway o locali — e mettili a lavorare insieme nel tuo terminale, sulla tua macchina, sotto il tuo controllo. Rust, MIT.",
+  kicker: "Calcolo agentico, alle tue condizioni",
+  heroTitleA: "I tuoi modelli.",
+  heroTitleB: "Più capaci insieme.",
   heroIntro:
-    "{brand} è un agente di coding open source per il tuo terminale. Dagli un modello e un compito: legge il tuo codice, modifica i file, esegue i suoi controlli e si ferma quando il lavoro è finito o quando serve te. Porta qualsiasi modello, o mescolali: fissa un modello diverso per ciascun ruolo.",
-  install: "Installa",
-  docs: "Documentazione",
-  copy: "Copia",
-  copied: "Copiato ✓",
-
-  installEyebrow: "installazione in una riga",
-  installRequirement: "serve Node 18+ — nessuna toolchain Rust",
-  installOtherWays: "altri modi →",
-
+    "{brand} riunisce i modelli che già usi in un solo terminale e li fa lavorare come un equipaggio — leggere il codice, modificare, eseguire i controlli — mentre tu decidi cosa può fare ciascuno. Open source, sulla tua macchina.",
+  getCodewhale: "Ottieni Codewhale",
+  exploreProduct: "Esplora il prodotto",
+  shotPreview: "Anteprima del terminale",
+  shotBuild: "build di sviluppo v{version}",
+  screenshotAlt:
+    "Build di sviluppo di Codewhale v0.9.12 in un terminale: il marchio della balena in braille, una nuova sessione senza cronologia, il compositore di messaggi e un piè di pagina che mostra Full Access, modalità Work, due attività pianificate, server MCP in connessione e il modello GLM-5.3 al massimo sforzo",
   latestRelease: "Ultima release {tag}",
   releaseUnavailable: "Stato delle release non disponibile",
   currentSource: "Sorgente",
@@ -38,53 +30,44 @@ export const home: HomeDict = {
   providerRoutes: "{count} provider",
   publishedRelease: "rilasciata",
   figcaptionSourceCandidate: "non rilasciata",
-
-  shotSession: "Sessione corrente",
-  screenshotAlt:
-    "Sessione corrente di Codewhale nel terminale: modalità Operate, la balena, il compositore e il piè di pagina",
-  figcaption: "Sessione corrente di Codewhale · modalità Operate · postura di permessi Ask",
-
-  proofHeading: "Una shell sottomarina. Qualsiasi modello. Sulla tua macchina.",
-  proofBody:
-    "Porta il modello che già usi — hosted, via gateway o locale. Plan / Work / Operate e le posture di permessi esplicite tengono l'immersione sotto il tuo controllo.",
-
-  sealDecides: "法",
-  decidesEyebrow: "Guarda come decide",
-  decidesHeading: "Regole che vedi nella traccia",
-  decidesLede:
-    "Stralci di sessioni reali: la gerarchia di regole del progetto è visibile nel ragionamento del modello, non è solo la promessa di una landing.",
-
-  sealWorkflow: "行",
-  workflowHeading: "Dal compito alla modifica verificata.",
-  workflow: [
-    ["Ispezionare", "Leggere il repository, le sue istruzioni e il compito."],
-    ["Agire", "Modificare i file entro confini di approvazione espliciti."],
-    ["Verificare", "Eseguire i controlli ed esaminare il risultato."],
-    ["Riferire", "Lasciare una ricevuta concisa e durevole."],
+  chapterTerminal: "Il tuo terminale",
+  chapterTerminalTitle: "Un posto familiare da cui iniziare.",
+  gainHeading: "Quello che ottieni non è un chatbot. È leva sui modelli che già paghi.",
+  gainLede:
+    "Una sessione può tenere più modelli insieme, ciascuno nel ruolo che gli hai dato, tutti al lavoro nello stesso repository con le stesse regole.",
+  gain: [
+    ["I tuoi modelli", "Chiavi hosted, un gateway o un runtime locale senza alcuna chiave. Fissa un modello diverso a ogni ruolo e mantieni il provider che hai scelto: un nome di modello non lo cambia mai al posto tuo."],
+    ["Agenti capaci", "Modalità Plan, Work e Operate; un fleet di sub-agenti per un solo lavoro; strumenti per file, shell, web e MCP; sessioni che si salvano, riprendono e tornano indietro."],
+    ["Controllo sulla tua macchina", "Ask, Auto-Review o Full Access: sei tu a stabilire quanto fa prima di chiedere. Gira in locale, in sandbox dove il sistema lo consente, con un registro di audit che puoi leggere."],
   ],
-  receiptAria: "Esempio di ricevuta di lavoro",
-  receiptInspect: "repository e istruzioni",
-  receiptAct: "modifiche con la postura di permessi scelta",
-  receiptReport: "controlli superati · ricevuta salvata",
-
-  sealStart: "起",
-  startHeading: "Nuovo su Codewhale? Quattro passi dall'inizio alla fine.",
+  chapterModels: "I tuoi modelli",
+  modelsHeading: "Porta quello che hai. Non cambiare nulla che tu non abbia scelto.",
+  modelsBody:
+    "Collega un provider ospitato supportato, un gateway o un server di modelli locale. Controlla provider e modello prima di iniziare. Anche un server locale può richiedere autenticazione.",
+  modelsFacts: [
+    ["Hosted", "La tua chiave API, salvata con codewhale auth set"],
+    ["Gateway", "Un endpoint per molti modelli, il provider lo scegli sempre tu"],
+    ["Locale", "vLLM, SGLang, Ollama su localhost — di solito senza chiave"],
+  ],
+  modelsLink: "Vedi tutti i provider",
+  startHeading: "Quattro passi fino alla prima sessione.",
   startLede:
-    "Installare → prima sessione senza chiavi → collegare un provider → configurare la tua fleet. I termini sono definiti nella pagina del vocabolario.",
-  startGuideLink: "Leggi la guida introduttiva →",
-  startVocabularyLink: "Vedi il vocabolario del prodotto →",
-
-  sealBoundaries: "界",
-  boundariesHeadingA: "Il tuo modello.",
-  boundariesHeadingB: "I tuoi confini.",
-  boundariesBody:
-    "Scegli esplicitamente modello, modalità di lavoro e postura di permessi. Un costo sconosciuto resta dichiarato sconosciuto, e le superfici in anteprima restano etichettate come tali.",
-  hostedGatewayLocal: "Modelli hosted, via gateway e locali",
-  planActOperateDesc: "Dalla pianificazione in sola lettura all'operazione autonoma",
-  askAutoReviewDesc: "Scegli la postura di permessi per il lavoro",
-  tuiExecWebDesc: "Superfici di runtime interattive e headless",
-
-  sealSurfaces: "面",
+    "Installa, apri una sessione senza chiave, collega un provider e poi configura un fleet quando un modello non basta.",
+  startGuideLink: "Leggi la guida introduttiva",
+  startVocabularyLink: "Vedi il vocabolario del prodotto",
+  chapterAccount: "Dove gira oggi",
+  availabilityHeading: "Disponibile ora, in sviluppo e non ancora — detto chiaramente.",
+  availabilityLede:
+    "Il terminale è il prodotto rilasciato. Tutto il resto è elencato nello stato in cui si trova davvero.",
+  availability: [
+    ["Terminale", "Rilasciato", "Binari di GitHub Releases per Linux, macOS e Windows; npm e Cargo sono alternative. Android su Termux è un’anteprima."],
+    ["App web", "Accesso e controllo remoto disponibili", "Accedi o crea un account, poi digita /rc in una sessione locale in corso per continuare proprio quella sessione dal browser. Il resto del banco di lavoro nel browser è ancora un’anteprima di sviluppo."],
+    ["Desktop", "Build di sviluppo", "Esistono build alfa per macOS, Linux e Windows. Non c’è ancora un’app desktop rilasciata."],
+    ["Computer cloud", "Non ancora disponibile", "Eseguire lavoro su un computer hosted è in sviluppo. Questa pagina lo dirà quando funzionerà."],
+  ],
+  availabilityNote:
+    "Il terminale non richiede un account. Un account non è mai di per sé un piano a pagamento, e nulla su questo sito può addebitarti qualcosa.",
+  accountLink: "Crea un account",
   surfacesHeading: "Usa il runtime dove avviene il lavoro.",
   surfaces: [
     ["TUI", "Lavoro interattivo nel terminale"],
@@ -93,14 +76,13 @@ export const home: HomeDict = {
     ["Runtime API + MCP", "Integrazioni locali"],
     ["fleet", "Lavoro multi-agente durevole"],
   ],
-  runtimeLink: "Vedi le superfici del runtime e le note di stabilità →",
-
+  runtimeLink: "Vedi le superfici del runtime e le note di stabilità",
   installBandHeading: "Inizia con un solo comando.",
+  copy: "Copia",
+  copied: "Copiato ✓",
   binaries: "Binari",
   chinaMirrors: "Mirror in Cina",
-  installGuideLink: "Leggi la guida d'installazione →",
-
-  sealCommunity: "众",
+  installGuideLink: "Leggi la guida d'installazione",
   communityHeading: "Costruito in pubblico",
   communityBody:
     "Con licenza MIT e plasmato da contributor su runtime, provider, piattaforme, documentazione e test.",

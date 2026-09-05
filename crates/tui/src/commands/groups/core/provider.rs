@@ -67,6 +67,12 @@ pub fn provider(app: &mut App, args: Option<&str>) -> CommandResult {
         };
     }
 
+    if crate::config::is_legacy_antigravity_identity(name) {
+        return CommandResult::error(
+            codewhale_config::LEGACY_ANTIGRAVITY_TOMBSTONE_MESSAGE.to_string(),
+        );
+    }
+
     let Some(target) = ApiProvider::parse(name) else {
         return CommandResult::error(format!(
             "Unknown provider '{name}'. Expected: {}.",
@@ -116,6 +122,9 @@ pub fn provider(app: &mut App, args: Option<&str>) -> CommandResult {
 }
 
 pub(in crate::commands) fn provider_setup_action_for_name(raw: &str) -> Result<AppAction, String> {
+    if crate::config::is_legacy_antigravity_identity(raw) {
+        return Err(codewhale_config::LEGACY_ANTIGRAVITY_TOMBSTONE_MESSAGE.to_string());
+    }
     if raw.eq_ignore_ascii_case("ds4") || raw.eq_ignore_ascii_case("dwarfstar") {
         return Ok(AppAction::OpenDs4Setup);
     }
@@ -261,6 +270,25 @@ mod tests {
         let result = provider(&mut app, None);
         assert!(result.message.is_none());
         assert_eq!(result.action, Some(AppAction::OpenProviderPicker));
+    }
+
+    #[test]
+    fn retired_antigravity_selectors_return_the_tombstone_without_an_action() {
+        let _guard = lock_test_env();
+        for identity in ["antigravity", "agy", "AGY"] {
+            let mut app = create_test_app();
+            let result = provider(&mut app, Some(identity));
+            assert!(result.is_error, "{identity}");
+            assert_eq!(result.action, None, "{identity}");
+            let message = result.message.expect("tombstone message");
+            assert!(message.contains("non-runnable"), "{identity}: {message}");
+            assert!(message.contains("GEMINI_API_KEY"), "{identity}: {message}");
+            assert_eq!(app.api_provider, crate::config::ApiProvider::Deepseek);
+
+            let setup = provider_setup_action_for_name(identity)
+                .expect_err("setup must not open for the tombstone");
+            assert!(setup.contains("provider `google`"), "{identity}: {setup}");
+        }
     }
 
     #[test]

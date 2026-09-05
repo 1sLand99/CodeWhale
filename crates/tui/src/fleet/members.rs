@@ -95,6 +95,8 @@ pub enum FleetModelChange {
 pub enum FleetModelError {
     /// Provider id or model id was blank.
     NeedsRoute,
+    /// No role was named. A member is a role; a bare model is not one.
+    NeedsRole { route: String },
     /// No fleet is selected, so there is nothing to remove from.
     NoSelection,
     /// The route is the fleet's operator route, which `/fleet save` changes.
@@ -117,6 +119,9 @@ impl FleetModelError {
     pub fn message(&self, locale: Locale) -> String {
         match self {
             Self::NeedsRoute => tr(locale, MessageId::FleetModelErrorNeedsRoute).into_owned(),
+            Self::NeedsRole { route } => {
+                tr(locale, MessageId::FleetModelErrorNeedsRole).replace("{route}", route)
+            }
             Self::NoSelection => tr(locale, MessageId::FleetModelErrorNoSelection).into_owned(),
             Self::OperatorRoute { route, fleet } => {
                 tr(locale, MessageId::FleetModelErrorOperatorRoute)
@@ -184,10 +189,7 @@ pub fn models_of(fleet: &FleetFile) -> Vec<FleetModel> {
         else {
             continue;
         };
-        // A member added without a role carries an id derived from the model
-        // and an empty role; it is a model in the fleet, not a role.
-        let role = (!member.role.trim().is_empty()).then_some(member.role.as_str());
-        push(provider, model, role);
+        push(provider, model, Some(member.role_label()));
     }
     models
 }
@@ -221,6 +223,15 @@ pub fn add_fleet_model(
     if provider.is_empty() || model.is_empty() {
         return Err(FleetModelError::NeedsRoute);
     }
+    // Role is primary (founder, 2026-09-03): a member is a role with a model
+    // and provider as its attributes. A bare model used to become a
+    // role-less member with a slug id, which is how the roster filled with
+    // `glm-52`, `model-a`, `legacy-saved-model` (0.9.12 defect #26).
+    if roles.iter().all(|role| role.trim().is_empty()) {
+        return Err(FleetModelError::NeedsRole {
+            route: format!("{provider}/{model}"),
+        });
+    }
     let target = selected_or_default(workspace)?;
     let SelectedOrDefault {
         mut fleet,
@@ -241,34 +252,21 @@ pub fn add_fleet_model(
         }
         Ok(())
     };
-    if roles.is_empty() && is_operator_route(&fleet, provider, model) {
-        select(needs_select)?;
-        return Ok(FleetModelChange::Unchanged {
-            fleet: fleet.name,
-            reason: UnchangedReason::OperatorRoute,
-        });
-    }
     let model_slug = slugify(model);
-    let wanted: Vec<Option<&str>> = if roles.is_empty() {
-        vec![None]
-    } else {
-        roles.iter().map(|r| Some(r.as_str())).collect()
-    };
     let mut added_any = false;
-    for role in wanted {
-        let already = fleet.members.iter().any(|m| {
-            member_pins(m, provider, model)
-                && role.is_none_or(|role| m.role.eq_ignore_ascii_case(role))
-        });
+    for role in &roles {
+        let already = fleet
+            .members
+            .iter()
+            .any(|m| member_pins(m, provider, model) && m.role.eq_ignore_ascii_case(role));
         if already {
             continue;
         }
-        let base = role.map_or_else(|| model_slug.clone(), slugify);
-        let id = unique_member_id(&fleet, &base, &model_slug);
+        let id = unique_member_id(&fleet, &slugify(role), &model_slug);
         fleet.members.push(FleetMember {
             id,
             display_name: None,
-            role: role.unwrap_or_default().to_string(),
+            role: role.to_string(),
             model: Some(model.to_string()),
             provider: Some(provider.to_string()),
             reasoning: None,
@@ -292,37 +290,6 @@ pub fn add_fleet_model(
         selected_fleet: needs_select,
         roles,
     })
-}
-
-/// Idempotently enroll a route the user selected or used (`/model`, config,
-/// a subagent run). Never prompts and never fails the caller: a store error is
-/// logged and swallowed. `auto` routes and blank ids are skipped.
-///
-/// Returns whether the fleet on disk changed, so a caller holding the engine
-/// handle can push the refreshed roster (`Op::SetFleetRoster`).
-pub fn auto_enroll_fleet_model(workspace: &Path, provider: &str, model: &str) -> bool {
-    let provider = provider.trim();
-    let model = model.trim();
-    if provider.is_empty()
-        || model.is_empty()
-        || provider.eq_ignore_ascii_case("auto")
-        || model.eq_ignore_ascii_case("auto")
-    {
-        return false;
-    }
-    match add_fleet_model(workspace, provider, model, &[]) {
-        Ok(FleetModelChange::Added { .. }) => true,
-        Ok(_) => false,
-        Err(error) => {
-            tracing::debug!(
-                provider,
-                model,
-                error = %error,
-                "could not auto-enroll model in the fleet"
-            );
-            false
-        }
-    }
 }
 
 /// Remove every member row pinning `provider/model` from the selected fleet.
@@ -368,12 +335,16 @@ pub fn remove_fleet_model(
     })
 }
 
+/// The role the picker's one-key toggle enrolls a model under. A member is
+/// a role; the picker has no role prompt, so it adds the general-purpose
+/// worker, and the Fleet editor is where the role is refined.
+pub const PICKER_TOGGLE_ROLE: &str = "general";
+
 /// Add when absent, remove when present — the picker's one-key toggle.
 ///
-/// Presence is decided by member rows, never by the projected role list: a
-/// role-less member row projects to no role at all, so `roles` cannot tell
-/// "operator only" from "operator plus a role-less row". Only the operator
-/// route with no member row of its own is left alone.
+/// Presence is decided by member rows: any member pinning the route counts,
+/// whatever its role. Only the operator route with no member row of its own
+/// is left alone. Adding enrolls the route as [`PICKER_TOGGLE_ROLE`].
 pub fn toggle_fleet_model(
     workspace: &Path,
     provider: &str,
@@ -381,8 +352,9 @@ pub fn toggle_fleet_model(
 ) -> Result<FleetModelChange, FleetModelError> {
     let provider = provider.trim();
     let model = model.trim();
+    let picker_role = [PICKER_TOGGLE_ROLE.to_string()];
     let Some(selected) = resolve_selected_fleet(workspace)? else {
-        return add_fleet_model(workspace, provider, model, &[]);
+        return add_fleet_model(workspace, provider, model, &picker_role);
     };
     let (fleet, _scope) = load_fleet_at(&selected.path)?;
     if fleet
@@ -398,7 +370,7 @@ pub fn toggle_fleet_model(
             reason: UnchangedReason::OperatorRoute,
         });
     }
-    add_fleet_model(workspace, provider, model, &[])
+    add_fleet_model(workspace, provider, model, &picker_role)
 }
 
 fn is_operator_route(fleet: &FleetFile, provider: &str, model: &str) -> bool {
@@ -625,28 +597,34 @@ mod tests {
         let (_temp, _home, workspace) = isolated_workspace();
 
         assert!(fleet_models(&workspace).expect("no selection").is_empty());
-        let change =
-            add_fleet_model(&workspace, "openrouter", "z-ai/glm-5.3-flash", &[]).expect("add");
+        let change = add_fleet_model(
+            &workspace,
+            "openrouter",
+            "z-ai/glm-5.3-flash",
+            &["general".to_string()],
+        )
+        .expect("add");
         assert_eq!(
             change,
             FleetModelChange::Added {
                 fleet: DEFAULT_FLEET_NAME.to_string(),
                 created_fleet: true,
                 selected_fleet: true,
-                roles: Vec::new(),
+                roles: vec!["general".to_string()],
             }
         );
         let receipt = change_receipt(Locale::En, "openrouter", "z-ai/glm-5.3-flash", &change);
         assert!(
-            receipt.contains("new personal fleet, now selected"),
+            receipt.contains("new personal team, now selected"),
             "{receipt}"
         );
         let models = fleet_models(&workspace).expect("fleet");
         assert_eq!(models.len(), 1);
         assert_eq!(models[0].model, "z-ai/glm-5.3-flash");
-        assert!(models[0].roles.is_empty());
+        assert_eq!(models[0].roles, ["general"]);
 
-        // A second add with a role attaches the role instead of duplicating.
+        // A second add with another role attaches the role instead of
+        // duplicating the model.
         add_fleet_model(
             &workspace,
             "openrouter",
@@ -656,12 +634,12 @@ mod tests {
         .expect("add role");
         let models = fleet_models(&workspace).expect("fleet");
         assert_eq!(models.len(), 1);
-        assert_eq!(models[0].roles, ["scout"]);
+        assert_eq!(models[0].roles, ["general", "scout"]);
 
         let change =
             toggle_fleet_model(&workspace, "openrouter", "z-ai/glm-5.3-flash").expect("toggle");
         assert!(
-            matches!(change, FleetModelChange::Removed { ref roles, .. } if roles == &["scout"])
+            matches!(change, FleetModelChange::Removed { ref roles, .. } if roles == &["general", "scout"])
         );
         assert!(fleet_models(&workspace).expect("fleet").is_empty());
 
@@ -671,25 +649,34 @@ mod tests {
             "{err:?}"
         );
         assert!(
-            err.message(Locale::En).contains("is not in the fleet"),
+            err.message(Locale::En).contains("is not on the team"),
             "{err}"
         );
     }
 
-    /// Review finding on #5815: a role-less member row projects to no role,
-    /// so an `all(== "operator")` test on the projected roles was vacuously
-    /// true and ⇧F could never remove the common role-less model.
+    /// The picker's ⇧F has no role prompt: it enrolls the route under the
+    /// general role, and a second press removes that row again.
     #[test]
-    fn toggle_removes_a_role_less_member_row() {
+    fn toggle_enrolls_under_the_picker_role_and_toggles_off() {
         let _lock = crate::test_support::lock_test_env();
         let (_temp, _home, workspace) = isolated_workspace();
-        add_fleet_model(&workspace, "openrouter", "z-ai/glm-5.3-flash", &[]).expect("add");
 
         let change =
-            toggle_fleet_model(&workspace, "openrouter", "z-ai/glm-5.3-flash").expect("toggle");
+            toggle_fleet_model(&workspace, "openrouter", "z-ai/glm-5.3-flash").expect("toggle on");
         assert!(
-            matches!(change, FleetModelChange::Removed { ref roles, .. } if roles.is_empty()),
-            "a role-less model must toggle off, got {change:?}"
+            matches!(change, FleetModelChange::Added { ref roles, .. } if roles == &[PICKER_TOGGLE_ROLE]),
+            "{change:?}"
+        );
+        let (on_disk, _) = selected_file(&workspace);
+        assert_eq!(on_disk.members.len(), 1);
+        assert_eq!(on_disk.members[0].role, PICKER_TOGGLE_ROLE);
+        assert_eq!(on_disk.members[0].id, PICKER_TOGGLE_ROLE);
+
+        let change =
+            toggle_fleet_model(&workspace, "openrouter", "z-ai/glm-5.3-flash").expect("toggle off");
+        assert!(
+            matches!(change, FleetModelChange::Removed { ref roles, .. } if roles == &[PICKER_TOGGLE_ROLE]),
+            "{change:?}"
         );
         let (on_disk, _) = selected_file(&workspace);
         assert!(on_disk.members.is_empty(), "{:?}", on_disk.members);
@@ -712,15 +699,20 @@ mod tests {
         assert!(matches!(err, FleetModelError::NeedsRoute), "{err:?}");
         assert!(resolve_selected_fleet(&workspace).expect("ok").is_none());
 
-        let change = add_fleet_model(&workspace, "openrouter", "deepseek/deepseek-v4-flash", &[])
-            .expect("add");
+        let change = add_fleet_model(
+            &workspace,
+            "openrouter",
+            "deepseek/deepseek-v4-flash",
+            &["reviewer".to_string()],
+        )
+        .expect("add");
         assert_eq!(
             change,
             FleetModelChange::Added {
                 fleet: DEFAULT_FLEET_NAME.to_string(),
                 created_fleet: false,
                 selected_fleet: true,
-                roles: Vec::new(),
+                roles: vec!["reviewer".to_string()],
             }
         );
         let receipt = change_receipt(
@@ -732,7 +724,7 @@ mod tests {
         assert!(receipt.ends_with("(now selected)"), "{receipt}");
         let (on_disk, _) = selected_file(&workspace);
         let ids: Vec<_> = on_disk.members.iter().map(|m| m.id.as_str()).collect();
-        assert_eq!(ids, ["scout", "deepseekdeepseek-v4-flash"]);
+        assert_eq!(ids, ["scout", "reviewer"]);
     }
 
     /// Review finding on #5815: requested roles are deduplicated and a
@@ -789,7 +781,13 @@ mod tests {
     fn fleet_models_reports_a_broken_selection_as_an_error() {
         let _lock = crate::test_support::lock_test_env();
         let (_temp, _home, workspace) = isolated_workspace();
-        add_fleet_model(&workspace, "openrouter", "z-ai/glm-5.3-flash", &[]).expect("add");
+        add_fleet_model(
+            &workspace,
+            "openrouter",
+            "z-ai/glm-5.3-flash",
+            &["scout".to_string()],
+        )
+        .expect("add");
         let (_, path) = selected_file(&workspace);
 
         std::fs::write(&path, "this is not = [toml").expect("corrupt");
@@ -807,25 +805,39 @@ mod tests {
     }
 
     #[test]
-    fn auto_enroll_is_idempotent_and_skips_auto_routes() {
+    fn a_bare_model_is_not_a_member_and_old_pins_are_purged_on_read() {
         let _lock = crate::test_support::lock_test_env();
         let (_temp, _home, workspace) = isolated_workspace();
 
-        assert!(auto_enroll_fleet_model(
-            &workspace,
-            "openrouter",
-            "z-ai/glm-5.3-flash"
-        ));
-        assert!(!auto_enroll_fleet_model(
-            &workspace,
-            "openrouter",
-            "z-ai/glm-5.3-flash"
-        ));
-        assert_eq!(fleet_models(&workspace).expect("fleet").len(), 1);
+        let err = add_fleet_model(&workspace, "openrouter", "z-ai/glm-5.3-flash", &[])
+            .expect_err("a model without a role is not a member");
+        assert!(matches!(err, FleetModelError::NeedsRole { .. }), "{err:?}");
 
-        remove_fleet_model(&workspace, "openrouter", "z-ai/glm-5.3-flash").expect("remove");
-        assert!(!auto_enroll_fleet_model(&workspace, "auto", "auto"));
-        assert!(fleet_models(&workspace).expect("fleet").is_empty());
+        // A 0.9.12 roster: role members plus model pins promoted to members.
+        let text = r#"
+schema = "fleet"
+schema_revision = 2
+name = "Default"
+
+[[members]]
+id = "scout"
+role = "scout"
+model = "deepseek-v4-flash"
+provider = "deepseek"
+
+[[members]]
+id = "glm-52"
+model = "GLM-5.2"
+provider = "zai"
+
+[[members]]
+id = "model-a"
+model = "model-a"
+provider = "custom-a"
+"#;
+        let fleet = FleetFile::parse(text).expect("parse");
+        let ids: Vec<&str> = fleet.members.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, vec!["scout"], "bare model pins are dropped on read");
     }
 
     #[test]
@@ -846,14 +858,12 @@ mod tests {
             }
         );
         let receipt = change_receipt(Locale::En, "openrouter", "z-ai/glm-5.3", &change);
-        assert!(receipt.contains("stays in the fleet"), "{receipt}");
+        assert!(receipt.contains("stays on the team"), "{receipt}");
         assert!(receipt.contains("current model"), "{receipt}");
-        // A role-less /fleet add of the same route is the same no-op.
-        let change = add_fleet_model(&workspace, "openrouter", "z-ai/glm-5.3", &[]).expect("add");
-        assert!(
-            matches!(change, FleetModelChange::Unchanged { .. }),
-            "{change:?}"
-        );
+        // A role-less /fleet add is refused: a member is a role.
+        let err = add_fleet_model(&workspace, "openrouter", "z-ai/glm-5.3", &[])
+            .expect_err("a model without a role");
+        assert!(matches!(err, FleetModelError::NeedsRole { .. }), "{err:?}");
         let (on_disk, _) = selected_file(&workspace);
         assert!(
             on_disk.members.is_empty(),

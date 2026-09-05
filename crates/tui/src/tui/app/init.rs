@@ -136,18 +136,6 @@ impl App {
                 None
             }
         });
-        let tui_prefs_warning = crate::settings::TuiPrefs::path().ok().and_then(|p| {
-            if p.exists() {
-                std::fs::read_to_string(&p).ok().and_then(|raw| {
-                    ::toml::from_str::<::toml::Value>(&raw)
-                        .err()
-                        .map(|e| format!("⚠ tui.toml is malformed — using defaults ({e})"))
-                })
-            } else {
-                None
-            }
-        });
-
         let mut provider = config.api_provider();
 
         // A startup route saved explicitly from `/model` is a user choice and
@@ -201,12 +189,20 @@ impl App {
             && effective_auth_config
                 .provider_config_for(ApiProvider::Xai)
                 .and_then(|entry| entry.auth_mode.as_deref())
-                .is_some_and(crate::xai_oauth::auth_mode_uses_xai_oauth)
-            && !crate::xai_oauth::credentials_present(&effective_auth_config);
+                .is_some_and(crate::oauth::auth_mode_uses_xai_oauth)
+            && !crate::oauth::credentials_present(
+                crate::oauth::OAuthProvider::Xai,
+                &effective_auth_config,
+            );
         let xai_dangling_repair_message = if xai_oauth_needs_reauth {
-            if crate::xai_oauth::owned_generation_is_dangling(&effective_auth_config) {
-                match crate::xai_oauth::clear_dangling_xai_oauth_generation(config_path.as_deref())
-                {
+            if crate::oauth::owned_generation_is_dangling(
+                crate::oauth::OAuthProvider::Xai,
+                &effective_auth_config,
+            ) {
+                match crate::oauth::clear_dangling_generation(
+                    crate::oauth::OAuthProvider::Xai,
+                    config_path.as_deref(),
+                ) {
                     Ok(()) => {
                         // Keep the in-memory route consistent with the repaired
                         // persisted file so the running app never reaches for
@@ -288,6 +284,13 @@ impl App {
         let show_tool_details = settings.show_tool_details;
         let inline_diff_mode = InlineDiffMode::parse(&settings.inline_diffs);
         let ui_locale = resolve_locale(&settings.locale);
+        // The dead `tui.toml` store was folded into settings.toml on load.
+        // Say so once, in the user's language, rather than letting a theme
+        // move under them unexplained.
+        let tui_prefs_migration_notice = settings
+            .tui_prefs_migration()
+            .map(|receipt| receipt.lines(ui_locale).join(" "))
+            .filter(|line| !line.is_empty());
         let cost_currency = match (settings.cost_currency.as_str(), ui_locale.tag()) {
             ("usd", "zh-Hans") => CostCurrency::Cny,
             _ => CostCurrency::from_setting(&settings.cost_currency).unwrap_or(CostCurrency::Usd),
@@ -775,7 +778,7 @@ impl App {
             // broken instead of silently losing all settings.
             status_message: xai_dangling_repair_message
                 .or(settings_parse_warning)
-                .or(tui_prefs_warning)
+                .or(tui_prefs_migration_notice)
                 .or(theme_warning),
             status_toasts: VecDeque::new(),
             update_available: None,
@@ -1046,6 +1049,8 @@ impl App {
             draft_gen: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             fleet_draft_cell: std::sync::Arc::new(std::sync::Mutex::new(None)),
             constitution_draft_cell: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            mcp_login_cell: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            mcp_login_cancel: None,
             prompt_suggestion_cell: std::sync::Arc::new(std::sync::Mutex::new(None)),
             balance_initiated: false,
             last_balance_fetch: None,
@@ -1061,6 +1066,7 @@ impl App {
             automation_panel: crate::tui::automation_panel::AutomationPanelState::default(),
             automation_scan: None,
             behavioral_tips: crate::tui::behavioral_tips::BehavioralTipState::default(),
+            footer_hint_uses: settings.footer_hint_uses.clone(),
             workflow_panel: None,
             session_started_at: chrono::Utc::now(),
             needs_redraw: true,

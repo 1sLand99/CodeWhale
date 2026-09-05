@@ -21,13 +21,11 @@ use rust_i18n::i18n;
 i18n!("locales", fallback = ["en"]);
 
 mod acp_server;
-mod agy_credentials;
 mod approval_log;
 mod artifacts;
 mod audit;
 mod auto_reasoning;
 mod automation_manager;
-mod chatgpt_oauth;
 mod child_env;
 mod client;
 pub mod cloud_dispatch;
@@ -40,14 +38,12 @@ mod composer_stash;
 pub mod computer_meter;
 mod config;
 mod config_persistence;
-mod config_ui;
 mod context_budget;
 mod context_report;
 mod continual_harness;
 mod core;
 mod cost_status;
 mod credentials;
-mod deepseek_theme;
 mod dependencies;
 pub mod dispatch_runner;
 mod doctor;
@@ -165,7 +161,6 @@ mod worker_profile;
 mod working_set;
 mod workspace_discovery;
 mod workspace_trust;
-mod xai_oauth;
 
 use crate::config::{Config, DEFAULT_TEXT_MODEL, MAX_SUBAGENTS, effective_home_dir};
 use crate::eval::{EvalHarness, EvalHarnessConfig, ScenarioStepKind};
@@ -317,7 +312,7 @@ enum Commands {
     Logout,
     /// Manage provider authentication flows.
     Auth(TuiAuthArgs),
-    /// List available models from the configured API endpoint
+    /// List cached models, or update catalogs for configured providers
     Models(ModelsArgs),
     /// Generate speech audio with Xiaomi MiMo TTS models
     #[command(visible_alias = "tts")]
@@ -1159,6 +1154,12 @@ struct ModelsArgs {
     /// Print models as pretty JSON
     #[arg(long, default_value_t = false)]
     json: bool,
+    /// Refresh catalogs for all configured providers (no inference requests)
+    #[arg(long, visible_alias = "refresh")]
+    update: bool,
+    /// Limit listing or refresh to this exact provider identity
+    #[arg(long, value_name = "ID")]
+    provider: Option<String>,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -2004,22 +2005,27 @@ fn arm_telemetry(cli: &Cli, command: Option<&Commands>) {
     );
 }
 
-/// Apply the choice made in the native TUI disclosure.
-///
-/// The in-memory setup state is authoritative for this process. In particular,
-/// a Disable choice reaches `decide` as an opt-out even when neither durable
-/// write landed, so the current launch cannot arm and any existing buffer is
-/// wiped whenever the telemetry home remains reachable.
-pub(crate) fn apply_tui_telemetry_decision(
-    pending: &crate::telemetry_notice::PendingTelemetryNotice,
-    setup: &codewhale_config::SetupState,
-) {
-    arm_telemetry_with_setup(
-        pending.config_path.clone(),
-        codewhale_telemetry::Surface::Tui,
-        pending.session_source,
-        Some(setup),
-    );
+/// Compatibility command to explicitly enable usage under the current policy.
+/// This optional choice never arms the current process.
+pub fn accept_telemetry_notice(config_path: Option<PathBuf>, version: u32) -> Result<String> {
+    if version != codewhale_telemetry::NOTICE_VERSION {
+        anyhow::bail!(
+            "read `codewhale config telemetry`, then explicitly accept current notice version {}",
+            codewhale_config::TELEMETRY_NOTICE_VERSION
+        );
+    }
+    set_telemetry_preference(config_path, true)
+}
+
+/// Set the durable usage preference through the same transition as Settings.
+/// Enabling affects the next launch; disabling immediately erases queued usage.
+pub fn set_telemetry_preference(config_path: Option<PathBuf>, enabled: bool) -> Result<String> {
+    let applied = crate::telemetry_notice::apply_persistent_preference(config_path, enabled);
+    let message = applied.message(crate::localization::Locale::En);
+    if applied.is_error() {
+        anyhow::bail!("{message}");
+    }
+    Ok(message)
 }
 
 /// Close the armed session and flush, bounded.
@@ -2043,8 +2049,11 @@ async fn finish_telemetry(outcome: &Result<()>, surface: codewhale_telemetry::Su
     }
     codewhale_telemetry::record(telemetry_session_end());
     if surface == codewhale_telemetry::Surface::Cli {
-        let _ =
+        let persistence =
             codewhale_telemetry::persist_local_blocking(codewhale_telemetry::CLI_PERSIST_TIMEOUT);
+        logging::info(format!(
+            "telemetry local persistence outcome={persistence:?}"
+        ));
         return;
     }
     // `shutdown_blocking` parks a thread waiting on the writer, so it goes to
@@ -2088,11 +2097,9 @@ async fn run_async_main_inner(
     // ahead of it collects nothing.
     spawn_signal_cleanup_task();
 
-    // A due interactive disclosure belongs to the first native TUI frame. In
-    // that one case arming is deferred until its decision event; every other
-    // surface keeps the ordinary pre-dispatch predicate. This is what lets an
-    // immediate Disable choice stop this very session without printing or
-    // blocking on a shell questionnaire first.
+    // A due interactive disclosure belongs to the native TUI. Presentation
+    // does not gate the default-on policy; unreadable privacy state does.
+    // Settings can disable this session and erase its pending aggregates.
     let surface = telemetry_surface(command.as_ref());
     let telemetry_notice_plan = if surface == codewhale_telemetry::Surface::Tui {
         crate::telemetry_notice::plan_if_due(
@@ -3968,7 +3975,7 @@ fn resolve_credential_diagnostic(config: &Config) -> CredentialDiagnostic {
         && provider == crate::config::ApiProvider::Xai
         && auth_mode
             .as_deref()
-            .is_some_and(crate::xai_oauth::auth_mode_uses_xai_oauth)
+            .is_some_and(crate::oauth::auth_mode_uses_xai_oauth)
     {
         return config
             .external_credential_consent_status(provider)
@@ -4327,6 +4334,17 @@ fn doctor_should_probe_api(
     probes.should_probe_api(local)
 }
 
+/// Providers whose credential *presence* `codewhale doctor` reports.
+///
+/// The retired Antigravity identity is a non-runnable tombstone kept only so
+/// legacy tables deserialize and clear; doctor never advertises it as a slot.
+fn doctor_api_key_providers() -> impl Iterator<Item = crate::config::ApiProvider> {
+    crate::config::ApiProvider::all()
+        .iter()
+        .copied()
+        .filter(|provider| *provider != crate::config::ApiProvider::Antigravity)
+}
+
 /// Doctor must never turn credential inspection into a refresh/write path.
 /// OAuth connectivity is exercised by an ordinary user request instead;
 /// doctor limits itself to non-mutating readiness inspection.
@@ -4341,7 +4359,7 @@ fn doctor_should_probe_auth(config: &Config) -> bool {
     if provider == crate::config::ApiProvider::Xai
         && auth_mode
             .as_deref()
-            .is_some_and(crate::xai_oauth::auth_mode_uses_xai_oauth)
+            .is_some_and(crate::oauth::auth_mode_uses_xai_oauth)
     {
         return false;
     }
@@ -4498,7 +4516,7 @@ async fn run_doctor(
     // Per-provider state: env + config file only (no values printed).
     // Keep doctor/status prompt-free and credential-value-free even for
     // unsigned rebuilt binaries.
-    for provider in crate::config::ApiProvider::all().iter().copied() {
+    for provider in doctor_api_key_providers() {
         let slot = provider.as_str();
         let provider_config = config.provider_config_for(provider);
         let config_declared = provider_config.is_some_and(|entry| {
@@ -6290,12 +6308,18 @@ fn doctor_control_socket_posture_line(config: &Config) -> String {
 
 /// Resolved telemetry consent and where it came from (#5441).
 ///
-/// Telemetry ships ON by default, and no posture surface reported that — a
-/// user who never opted in saw nothing saying "telemetry: on (default)".
-/// Truth change only: the resolution itself is [`codewhale_config`]'s.
+/// Report the durable opt-out and environment preference without arming or
+/// touching telemetry state. Notice presentation is not a permission gate.
 fn doctor_runtime_telemetry(config: &Config) -> (bool, &'static str) {
     let (on, source) = codewhale_config::resolved_telemetry_consent(config.telemetry);
-    (on, source.as_str())
+    if !on {
+        return (false, source.as_str());
+    }
+    match codewhale_telemetry::load_setup_state_for_decision() {
+        Some(state) if state.telemetry_opted_out() => (false, "recorded_opt_out"),
+        Some(_) => (true, source.as_str()),
+        None => (false, "privacy_state_unreadable"),
+    }
 }
 
 fn doctor_operate_fleet_report_json(config: &Config, workspace: &Path) -> serde_json::Value {
@@ -7543,35 +7567,7 @@ fn run_features_command(config: &Config, command: FeaturesCli) -> Result<()> {
 }
 
 async fn run_models(config: &Config, args: ModelsArgs) -> Result<()> {
-    use crate::client::DeepSeekClient;
-
-    let client = DeepSeekClient::new(config)?;
-    let mut models = client.list_models().await?;
-    models.sort_by(|a, b| a.id.cmp(&b.id));
-
-    if args.json {
-        println!("{}", serde_json::to_string_pretty(&models)?);
-        return Ok(());
-    }
-
-    if models.is_empty() {
-        println!("No models returned by the API.");
-        return Ok(());
-    }
-
-    let default_model = config.default_model();
-
-    println!("Available models (default: {default_model})");
-    for model in models {
-        let marker = if model.id == default_model { "*" } else { " " };
-        if let Some(owner) = model.owned_by {
-            println!("{marker} {} ({owner})", model.id);
-        } else {
-            println!("{marker} {}", model.id);
-        }
-    }
-
-    Ok(())
+    crate::provider_lake::run_models(config, args.update, args.provider.as_deref(), args.json).await
 }
 
 async fn run_speech(config: &Config, args: SpeechArgs) -> Result<()> {
@@ -8142,8 +8138,8 @@ fn run_logout() -> Result<()> {
 }
 
 async fn run_xai_device_auth(config_path: Option<&Path>) -> Result<()> {
-    let pending = xai_oauth::device_code_login().await?;
-    let activation = xai_oauth::activate_device_login(pending, config_path, None)?;
+    let pending = crate::oauth::login(crate::oauth::OAuthProvider::Xai).await?;
+    let activation = crate::oauth::activate_login(pending, config_path, None)?;
     println!(
         "xAI OAuth is ready; activated {} via {}",
         codewhale_config::quote_os_path(&activation.auth_path),
@@ -8153,8 +8149,8 @@ async fn run_xai_device_auth(config_path: Option<&Path>) -> Result<()> {
 }
 
 async fn run_chatgpt_pkce_auth(config_path: Option<&Path>) -> Result<()> {
-    let pending = chatgpt_oauth::pkce_login().await?;
-    let activation = chatgpt_oauth::activate_pkce_login(pending, config_path, None)?;
+    let pending = crate::oauth::login(crate::oauth::OAuthProvider::Chatgpt).await?;
+    let activation = crate::oauth::activate_login(pending, config_path, None)?;
     println!(
         "ChatGPT OAuth is ready; activated {} via {}",
         codewhale_config::quote_os_path(&activation.auth_path),
@@ -8164,7 +8160,7 @@ async fn run_chatgpt_pkce_auth(config_path: Option<&Path>) -> Result<()> {
 }
 
 fn run_chatgpt_pkce_revoke(config_path: Option<&Path>) -> Result<()> {
-    chatgpt_oauth::revoke_owned_login(config_path, None)?;
+    crate::oauth::revoke_owned_login(crate::oauth::OAuthProvider::Chatgpt, config_path, None)?;
     println!("Revoked Codewhale-owned ChatGPT tokens. Codex CLI consent is unchanged.");
     Ok(())
 }
@@ -13525,9 +13521,8 @@ mod doctor_setup_state_tests {
         );
     }
 
-    /// #5441: telemetry ships ON by default, and the runtime-posture doctor
-    /// section must say so — with the source that decided it — instead of
-    /// staying silent about the one default users never opted into.
+    /// Doctor must distinguish a configured preference from current processor
+    /// consent, and accurately report the default-off posture.
     #[test]
     fn doctor_reports_resolved_telemetry_with_its_source() {
         let _guard = crate::test_support::lock_test_env();
@@ -13552,6 +13547,23 @@ mod doctor_setup_state_tests {
         let report = doctor_setup_report_json(&config, &workspace);
         assert_eq!(report["runtime_posture"]["telemetry"]["value"], true);
         assert_eq!(report["runtime_posture"]["telemetry"]["source"], "default");
+
+        let configured_on = Config {
+            telemetry: Some(true),
+            ..Config::default()
+        };
+        assert_eq!(doctor_runtime_telemetry(&configured_on), (true, "config"));
+        let mut accepted = codewhale_config::SetupState::default();
+        accepted.record_telemetry_notice("3", true);
+        accepted.save().expect("old acceptance");
+        assert_eq!(doctor_runtime_telemetry(&configured_on), (true, "config"));
+        accepted.record_telemetry_notice(codewhale_config::TELEMETRY_NOTICE_VERSION, true);
+        accepted.save().expect("current acceptance");
+        assert_eq!(doctor_runtime_telemetry(&configured_on), (true, "config"));
+        {
+            let _env_on = crate::test_support::EnvVarGuard::set("CODEWHALE_TELEMETRY", "true");
+            assert_eq!(doctor_runtime_telemetry(&Config::default()), (true, "env"));
+        }
 
         // A persisted opt-out is reported as the config file's decision.
         let config = Config {

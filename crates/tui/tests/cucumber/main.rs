@@ -12,6 +12,8 @@ mod qa_harness;
 
 #[cfg(all(unix, feature = "long-running-tests"))]
 mod active_composer_pointer_pty;
+#[cfg(all(unix, feature = "long-running-tests"))]
+mod automations_editor_pty;
 mod core_session_command_extraction;
 mod directory_listing_acceptance;
 mod epic_acceptance_harness;
@@ -20,3 +22,5 @@ mod plugin_e2e_acceptance;
 #[cfg(all(unix, feature = "long-running-tests"))]
 mod screen_mode_inline_pty;
 mod tool_lifecycle_acceptance;
+#[cfg(all(unix, feature = "long-running-tests"))]
+mod work_bar_keys_pty;

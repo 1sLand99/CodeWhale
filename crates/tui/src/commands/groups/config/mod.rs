@@ -50,7 +50,7 @@ static CONFIG_INFO: CommandInfo = CommandInfo {
 static IMPORT_CLAUDE_INFO: CommandInfo = CommandInfo {
     name: "import-claude",
     aliases: &["import_claude"],
-    usage: "/import-claude",
+    usage: "/import-claude [--apply]",
     description_id: MessageId::CmdImportClaudeDescription,
 };
 static PERMISSIONS_INFO: CommandInfo = CommandInfo {

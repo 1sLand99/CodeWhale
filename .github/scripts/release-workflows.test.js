@@ -3,6 +3,7 @@
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
+const vm = require("node:vm");
 
 const repoRoot = path.resolve(__dirname, "..", "..");
 const {
@@ -58,6 +59,60 @@ assert.match(
   /name: Linux test location \(CNB\)/,
   "the non-PR CNB fallback must be named explicitly",
 );
+
+const npmSmokeJob = ci.match(/^  npm-wrapper-smoke:\n([\s\S]*?)(?=^  \S)/m)?.[1];
+assert.ok(npmSmokeJob, "CI must retain the required npm-wrapper job");
+assert.match(
+  namedStep(npmSmokeJob, "Build wrapper binaries"),
+  /run: cargo build --release --locked -p codewhale-cli -p codewhale-tui/,
+);
+assert.match(
+  namedStep(npmSmokeJob, "Smoke wrapper install and delegated entrypoints"),
+  /run: node scripts\/release\/npm-wrapper-smoke\.js/,
+);
+const npmSmokeSteps = npmSmokeJob.split(/(?=^      - )/m).slice(1);
+// Exercise the workflow's actual Boolean guards. A successful location echo
+// must never substitute for the build/install smoke on a heavy pull request.
+const npmSmokeCases = [
+  // name, event, heavy, OS, trusted, cache success, execute, Linux deps, CNB
+  ["own PR", "pull_request", true, "ubuntu-latest", true, true, true, true, false],
+  ["fork PR", "pull_request", true, "ubuntu-latest", false, true, true, true, false],
+  ["PR cache failure", "pull_request", true, "ubuntu-latest", false, false, true, true, false],
+  ["light PR", "pull_request", false, "ubuntu-latest", true, true, false, false, false],
+  ["manual Ubuntu", "workflow_dispatch", true, "ubuntu-latest", true, true, true, true, false],
+  ["main Ubuntu", "push", true, "ubuntu-latest", true, true, false, false, true],
+  ["main macOS", "push", true, "macos-latest", true, true, true, false, false],
+  ["main Windows", "push", true, "windows-latest", true, true, true, false, false],
+  ["light main", "push", false, "ubuntu-latest", true, true, false, false, false],
+  ["schedule", "schedule", true, "ubuntu-latest", true, true, false, false, false],
+];
+for (const [label, event, heavy, os, trusted, cache, execute, linuxDeps, cnb] of npmSmokeCases) {
+  const context = {
+    needs: { changes: { outputs: { heavy: String(heavy), trusted: String(trusted) } } },
+    github: { event_name: event },
+    matrix: { os },
+    steps: { sccache: { outcome: cache ? "success" : "failure" } },
+  };
+  const jobGuard = npmSmokeJob.match(/^    if: (.+)$/m)?.[1];
+  assert.ok(jobGuard, "the wrapper job must retain its event guard");
+  const jobEnabled = vm.runInNewContext(jobGuard, context);
+  for (const step of npmSmokeSteps) {
+    const name = step.match(/^      - (?:name|uses): (.+)$/m)?.[1];
+    const guard = step.match(/^        if: (.+)$/m)?.[1];
+    assert.ok(name && guard, "every wrapper step must have an explicit guard");
+    let expected = execute;
+    if (name === "Skip npm wrapper smoke for light change") expected = !heavy;
+    else if (name === "Install Linux system dependencies") expected = linuxDeps;
+    else if (name === "Linux smoke location") expected = cnb;
+    else if (name === "Enable sccache" || name === "sccache stats") expected = execute && cache;
+    assert.equal(
+      Boolean(jobEnabled && vm.runInNewContext(guard, context)),
+      expected,
+      `${label}: ${name} must ${expected ? "execute" : "stay skipped"}`,
+    );
+  }
+}
+console.log(`Wrapper CI guards OK: ${npmSmokeCases.length} event cases, ${npmSmokeSteps.length} steps each.`);
 
 assert.match(ci, /^  workflow_dispatch:\n    inputs:\n      expected_sha:/m);
 const manualForceBlock = ci.match(
@@ -501,10 +556,18 @@ assert.equal(
   2,
   "both glibc recovery branches must name codewhale-cli",
 );
+// The archive installer never overwrites an existing command: it validates the
+// retired TUI path against the consolidated bytes and leaves upgrades to
+// `codewhale update`, which migrates `codewhale-tui` beside the canonical pair.
 assert.match(
   archiveInstaller,
-  /legacy_tui="\$BIN_DIR\/codewhale-tui"[\s\S]*install_binary "\$SCRIPT_DIR\/codewhale" "\$legacy_tui"/,
-  "archive upgrades must refresh the retired TUI path from consolidated bytes",
+  /legacy_tui="\$BIN_DIR\/codewhale-tui"[\s\S]*check_destination "\$SCRIPT_DIR\/codewhale" "\$legacy_tui"/,
+  "archive installs must validate the retired TUI path against consolidated bytes",
+);
+assert.doesNotMatch(
+  archiveInstaller,
+  /install_binary "\$SCRIPT_DIR\/codewhale" "\$legacy_tui"/,
+  "archive installs must not overwrite an existing retired TUI command",
 );
 assert.doesNotMatch(
   cliDispatcher,

@@ -30,6 +30,13 @@ export const chrome: ChromeDict = {
   navCommunitySecondary: "Community",
   navContributeSecondary: "Contribute",
 
+  navProduct: "उत्पाद",
+  navModels: "मॉडल",
+  navPricing: "मूल्य",
+  navProductSecondary: "Product",
+  navModelsSecondary: "Models",
+  navPricingSecondary: "Pricing",
+
   skipToContent: "मुख्य सामग्री पर जाएँ",
 
   navPrimaryAria: "मुख्य नेविगेशन",
@@ -73,7 +80,7 @@ export const chrome: ChromeDict = {
   themeTitle: "दस्तावेज़ीकरण थीम · ऑटो / लाइट / डार्क",
 
   footerTagline:
-    "गहराई में Codewhale उतरता है, आपको नहीं उतरना पड़ता — ओपन सोर्स रनटाइम के लिए दस्तावेज़, सोर्स और समुदाय।",
+    "आपके मॉडल। साथ मिलकर और सक्षम। ओपन-सोर्स रनटाइम के दस्तावेज़, सोर्स और समुदाय।",
   footerProduct: "उत्पाद",
   footerProject: "प्रोजेक्ट",
   footerDocs: "दस्तावेज़ीकरण",

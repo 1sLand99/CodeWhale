@@ -250,10 +250,66 @@ pub(crate) fn dispatch_tab_key(
     let prior_model = app.model.clone();
     let prior_mode = app.mode;
     app.cycle_mode();
+    app.note_footer_hint_used(crate::tui::footer_hints::MODE_CYCLE);
     TabDispatch::ModeCycled {
         prior_mode,
         prior_model,
     }
+}
+
+/// Whether a mouse event is a wheel/trackpad scroll in any direction.
+fn is_scroll_event(mouse: &crossterm::event::MouseEvent) -> bool {
+    matches!(
+        mouse.kind,
+        crossterm::event::MouseEventKind::ScrollUp
+            | crossterm::event::MouseEventKind::ScrollDown
+            | crossterm::event::MouseEventKind::ScrollLeft
+            | crossterm::event::MouseEventKind::ScrollRight
+    )
+}
+
+/// Bound on how many scroll events one gesture may fold into a single frame,
+/// so a stuck wheel cannot starve the draw.
+const MAX_COALESCED_SCROLLS: usize = 64;
+
+/// Apply every queued scroll event of the current gesture except the last,
+/// and return that last one for the caller to handle normally.
+///
+/// A trackpad emits a burst of scroll events. Handling them one per loop
+/// iteration meant one frame each, and the frame limiter then spaced those
+/// frames out, so the scroll arrived as a slow crawl long after the fingers
+/// stopped. Resize events have been coalesced this way since #65; scroll
+/// never was. The scroll handlers only accumulate into
+/// `viewport.pending_scroll_delta`, so folding the burst in costs one cheap
+/// call each and exactly one draw for the whole gesture.
+///
+/// A non-scroll event ends the burst and is pushed back unread.
+pub(crate) fn coalesce_scroll_burst(
+    app: &mut App,
+    first: crossterm::event::MouseEvent,
+    input: &TerminalInputPump,
+    pending: &mut VecDeque<Event>,
+) -> std::io::Result<crossterm::event::MouseEvent> {
+    if !is_scroll_event(&first) {
+        return Ok(first);
+    }
+    let mut latest = first;
+    for _ in 0..MAX_COALESCED_SCROLLS {
+        let Some(next_evt) = try_next_terminal_event(input, pending)? else {
+            break;
+        };
+        match next_evt {
+            Event::Mouse(next) if is_scroll_event(&next) => {
+                let _ = handle_mouse_event(app, latest);
+                latest = next;
+            }
+            other => {
+                pending.push_back(other);
+                break;
+            }
+        }
+    }
+    Ok(latest)
 }
 
 /// Run the interactive TUI event loop.
@@ -495,26 +551,6 @@ pub async fn run_tui(
     );
     crate::startup_trace::mark("app_constructed");
     sync_config_provider_from_app(config, &app);
-    if !app.auto_model {
-        let saved_provider_model = config
-            .provider_config_for(app.api_provider)
-            .and_then(|provider| provider.model.as_deref());
-        if let Ok(resolution) = crate::route_runtime::resolve_route_candidate_with_context_metadata(
-            app.api_provider,
-            Some(&app.model),
-            saved_provider_model,
-            Some(config.deepseek_base_url()),
-            app.active_context_window_override,
-            None,
-        ) {
-            let resolved_model = resolution.candidate.wire_model_id().as_str().to_string();
-            app.fleet_roster_stale |= crate::fleet::members::auto_enroll_fleet_model(
-                &app.workspace,
-                app.provider_identity_for_persistence(),
-                &resolved_model,
-            );
-        }
-    }
     surface_prompt_override_notices(&mut app);
 
     if options.resume_session_id.is_none() && !app.launch.visible {
@@ -847,6 +883,12 @@ pub async fn run_tui(
         });
     }
 
+    // Keep the final session/turn receipts ahead of runtime teardown. A failed
+    // observability sink must not prevent the user's session from shutting down.
+    if let Err(error) = app.lifecycle_outbox.flush(Duration::from_secs(2)).await {
+        tracing::warn!(target: "lifecycle_outbox", %error, "TUI lifecycle outbox did not drain before exit");
+    }
+
     // Flush the persistence actor, collect the durability report (write
     // failures are surfaced, not discarded), then shut down gracefully.
     //
@@ -937,23 +979,6 @@ pub async fn run_tui(
     result
 }
 
-/// Commit the already-rendered inline disclosure and then arm from the exact
-/// applied setup state. A concurrent opt-out or failed persistence replaces
-/// the optimistic one-line receipt with the truthful existing localized
-/// result and remains retry-safe on the next launch.
-fn apply_telemetry_after_disclosure_draw(
-    app: &mut App,
-    pending: crate::telemetry_notice::PendingTelemetryNotice,
-) {
-    let applied = crate::telemetry_notice::apply_decision(&pending, true);
-    if applied.status_message_id != MessageId::TelemetryNoticeReceiptEnabled {
-        let receipt = app.tr(applied.status_message_id);
-        app.push_status_toast(receipt.into_owned(), StatusToastLevel::Info, Some(12_000));
-        app.needs_redraw = true;
-    }
-    crate::apply_tui_telemetry_decision(&pending, &applied.setup_state);
-}
-
 /// Submit the pre-session composer's message as the first message of a new
 /// session.
 ///
@@ -977,7 +1002,6 @@ async fn dispatch_launch_composer_submit(
     engine_handle: &mut EngineHandle,
     task_manager: &SharedTaskManager,
     config: &mut Config,
-    web_config_session: &mut Option<WebConfigSession>,
     chord: ComposerSubmitChord,
 ) -> Result<bool> {
     let action = app.decide_composer_submit(chord);
@@ -989,17 +1013,7 @@ async fn dispatch_launch_composer_submit(
         return Ok(false);
     }
     let result = begin_launch_session(app, None);
-    if apply_command_result(
-        terminal,
-        app,
-        engine_handle,
-        task_manager,
-        config,
-        web_config_session,
-        result,
-    )
-    .await?
-    {
+    if apply_command_result(terminal, app, engine_handle, task_manager, config, result).await? {
         return Ok(true);
     }
     // The transition is applied; only now consume the draft it carries.
@@ -1018,16 +1032,7 @@ async fn dispatch_launch_composer_submit(
         app.add_message(HistoryCell::User {
             content: input.clone(),
         });
-        if execute_command_input(
-            terminal,
-            app,
-            engine_handle,
-            task_manager,
-            config,
-            web_config_session,
-            &input,
-        )
-        .await?
+        if execute_command_input(terminal, app, engine_handle, task_manager, config, &input).await?
         {
             return Ok(true);
         }
@@ -1052,7 +1057,6 @@ async fn dispatch_session_composer_submit(
     engine_handle: &mut EngineHandle,
     task_manager: &SharedTaskManager,
     config: &mut Config,
-    web_config_session: &mut Option<WebConfigSession>,
     chord: ComposerSubmitChord,
 ) -> Result<bool> {
     let action = app.decide_composer_submit(chord);
@@ -1063,16 +1067,7 @@ async fn dispatch_session_composer_submit(
     if !app.composer_enter_would_submit() {
         return Ok(false);
     }
-    submit_decided_composer_input(
-        terminal,
-        app,
-        engine_handle,
-        task_manager,
-        config,
-        web_config_session,
-        action,
-    )
-    .await
+    submit_decided_composer_input(terminal, app, engine_handle, task_manager, config, action).await
 }
 
 /// Shared tail of a decided composer submit: slash-menu selection, draft
@@ -1090,7 +1085,6 @@ async fn submit_decided_composer_input(
     engine_handle: &mut EngineHandle,
     task_manager: &SharedTaskManager,
     config: &mut Config,
-    web_config_session: &mut Option<WebConfigSession>,
     action: ComposerSubmitAction,
 ) -> Result<bool> {
     // #573: when the user typed a slash-command prefix that the popup is
@@ -1131,16 +1125,7 @@ async fn submit_decided_composer_input(
         app.add_message(HistoryCell::User {
             content: input.clone(),
         });
-        if execute_command_input(
-            terminal,
-            app,
-            engine_handle,
-            task_manager,
-            config,
-            web_config_session,
-            &input,
-        )
-        .await?
+        if execute_command_input(terminal, app, engine_handle, task_manager, config, &input).await?
         {
             return Ok(true);
         }
@@ -1222,7 +1207,6 @@ pub(crate) async fn run_event_loop(
             .as_ref()
             .is_some_and(|socket| socket.enabled),
     );
-    let mut web_config_session: Option<WebConfigSession> = None;
     let mut prev_input_snapshot = String::new();
     let mut terminal_paused_at: Option<Instant> = None;
     let mut force_terminal_repaint = false;
@@ -1240,14 +1224,6 @@ pub(crate) async fn run_event_loop(
         .checked_sub(TERMINAL_INPUT_RECOVERY_COOLDOWN)
         .unwrap_or_else(Instant::now);
     let mut last_recovery_snapshot_at: Option<Instant> = None;
-    // Disclosure is queued in the chosen locale, rendered once as a normal
-    // non-blocking receipt, and only then allowed to arm telemetry. Keeping
-    // the applied state separate makes the draw itself the privacy boundary:
-    // a failed draw exits without arming.
-    let mut telemetry_waiting_for_disclosure_draw: Option<
-        crate::telemetry_notice::PendingTelemetryNotice,
-    > = None;
-
     // Fire-and-forget version check — runs once per session in the
     // background. On success, a short status toast advertises the update
     // without replacing the user's configured footer/status-line chips.
@@ -1287,14 +1263,11 @@ pub(crate) async fn run_event_loop(
     let mut pending_subagent_list_refresh = false;
 
     loop {
-        if telemetry_waiting_for_disclosure_draw.is_none()
-            && app.onboarding == OnboardingState::None
-            && let Some(pending) = pending_telemetry_notice.take()
-        {
-            let receipt = app.tr(MessageId::TelemetryNoticeReceiptEnabled);
+        if app.onboarding == OnboardingState::None && pending_telemetry_notice.take().is_some() {
+            let receipt = app.tr(MessageId::TelemetryNoticeDefaultOn);
             app.push_status_toast(receipt.into_owned(), StatusToastLevel::Info, Some(12_000));
             app.needs_redraw = true;
-            telemetry_waiting_for_disclosure_draw = Some(pending);
+            crate::telemetry_notice::record_presented();
         }
 
         // A manual compaction deferred by a full engine mailbox retries here
@@ -1370,10 +1343,6 @@ pub(crate) async fn run_event_loop(
             app.add_message(HistoryCell::System {
                 content: notice.notice_block(install),
             });
-        }
-
-        if !drain_web_config_events(&mut web_config_session, app, config, &engine_handle).await {
-            web_config_session = None;
         }
 
         // Non-blocking startup-default writes (mode / thinking) report their
@@ -1540,6 +1509,32 @@ pub(crate) async fn run_event_loop(
             && draft_gen == app.current_draft_gen()
         {
             deliver_constitution_draft_result(app, model_label, draft_locale, outcome);
+        }
+
+        // Poll the MCP OAuth login cell (same background pattern).
+        let mcp_login_delivery = app
+            .mcp_login_cell
+            .try_lock()
+            .ok()
+            .and_then(|mut guard| guard.take());
+        if let Some((server, outcome)) = mcp_login_delivery {
+            if app
+                .mcp_login_cancel
+                .as_ref()
+                .is_some_and(|(pending, _)| *pending == server)
+            {
+                app.mcp_login_cancel = None;
+            }
+            app.status_message = Some(match outcome {
+                Ok(()) => format!(
+                    "Stored OAuth credentials for MCP server '{server}'. Run /mcp reload to reconnect it."
+                ),
+                Err(error) if error == "cancelled" => {
+                    format!("Cancelled the OAuth login for MCP server '{server}'.")
+                }
+                Err(error) => format!("OAuth login for MCP server '{server}' failed: {error}"),
+            });
+            app.needs_redraw = true;
         }
 
         // #1830/#2317: service any already-arrived terminal keys before a
@@ -3794,7 +3789,6 @@ pub(crate) async fn run_event_loop(
                     config,
                     &task_manager,
                     &mut engine_handle,
-                    &mut web_config_session,
                     events,
                 )
                 .await?
@@ -3874,6 +3868,15 @@ pub(crate) async fn run_event_loop(
                 started.elapsed()
                     < Duration::from_millis(crate::tui::ocean::COMPLETION_SETTLE_MS as u64)
             });
+        // The launch screen has no transcript widget to drive the ambient
+        // clock, so it asks for frames itself: while the mark surfaces or
+        // the card dissolves, and while the underwater field is alive
+        // (settling on the same idle grace as the transcript's empty water).
+        let launch_motion = crate::tui::underwater::launch_motion_active(
+            app,
+            underwater_surface_obscured,
+            ambient_settled,
+        );
         let status_motion = should_tick_status_animation(
             app,
             has_running_agents,
@@ -3884,10 +3887,13 @@ pub(crate) async fn run_event_loop(
         let animation_interval_ms = animation_interval_ms(
             app,
             status_motion,
-            underwater_ambient_motion || underwater_completion_motion,
+            underwater_ambient_motion || underwater_completion_motion || launch_motion,
         );
         let motion_policy = app.motion_policy();
-        if (status_motion || underwater_ambient_motion || underwater_completion_motion)
+        if (status_motion
+            || underwater_ambient_motion
+            || underwater_completion_motion
+            || launch_motion)
             && last_status_frame.elapsed() >= Duration::from_millis(animation_interval_ms)
         {
             let translation_animated = streaming_thinking::animate_pending_translation(
@@ -4067,9 +4073,6 @@ pub(crate) async fn run_event_loop(
         }
         if app.needs_redraw && draw_wait.is_none() {
             draw_app_frame_inner(terminal, app, config, force_terminal_repaint)?;
-            if let Some(pending) = telemetry_waiting_for_disclosure_draw.take() {
-                apply_telemetry_after_disclosure_draw(app, pending);
-            }
             force_terminal_repaint = false;
             frame_rate_limiter.mark_emitted(Instant::now());
             app.needs_redraw = false;
@@ -4092,9 +4095,6 @@ pub(crate) async fn run_event_loop(
         }
         if let Some(until_anim) = frame_requester.due_in(now) {
             poll_timeout = poll_timeout.min(until_anim);
-        }
-        if web_config_session.is_some() {
-            poll_timeout = poll_timeout.min(Duration::from_millis(WEB_CONFIG_POLL_MS));
         }
         // While the quit-confirmation prompt is armed, ensure we wake up to
         // expire it on time even if no input event arrives.
@@ -4287,9 +4287,6 @@ pub(crate) async fn run_event_loop(
                     backend.set_terminal_size(new_size);
                 }
                 draw_app_frame_inner(terminal, app, config, true)?;
-                if let Some(pending) = telemetry_waiting_for_disclosure_draw.take() {
-                    apply_telemetry_after_disclosure_draw(app, pending);
-                }
                 {
                     let backend = terminal.backend_mut();
                     backend.clear_forced_size();
@@ -4306,6 +4303,13 @@ pub(crate) async fn run_event_loop(
                 if should_drop_loading_mouse_motion(app, mouse) {
                     continue;
                 }
+                // Fold the rest of this wheel gesture into one frame.
+                let mouse = coalesce_scroll_burst(
+                    app,
+                    mouse,
+                    &terminal_input,
+                    &mut pending_terminal_events,
+                )?;
                 let events = handle_mouse_event(app, mouse);
                 if handle_view_events_boxed(
                     terminal,
@@ -4313,7 +4317,6 @@ pub(crate) async fn run_event_loop(
                     config,
                     &task_manager,
                     &mut engine_handle,
-                    &mut web_config_session,
                     events,
                 )
                 .await?
@@ -4334,7 +4337,6 @@ pub(crate) async fn run_event_loop(
                                 &mut engine_handle,
                                 &task_manager,
                                 config,
-                                &mut web_config_session,
                                 result,
                             )
                             .await?
@@ -4350,7 +4352,6 @@ pub(crate) async fn run_event_loop(
                                 &mut engine_handle,
                                 &task_manager,
                                 config,
-                                &mut web_config_session,
                                 result,
                             )
                             .await?
@@ -4368,22 +4369,6 @@ pub(crate) async fn run_event_loop(
                         crate::tui::underwater::LaunchAction::Help => {
                             toggle_help_view(app);
                         }
-                        crate::tui::underwater::LaunchAction::SendComposer => {
-                            // Mouse send: same path as the keyboard submit.
-                            if dispatch_launch_composer_submit(
-                                terminal,
-                                app,
-                                &mut engine_handle,
-                                &task_manager,
-                                config,
-                                &mut web_config_session,
-                                ComposerSubmitChord::Enter,
-                            )
-                            .await?
-                            {
-                                return Ok(());
-                            }
-                        }
                     }
                     app.needs_redraw = true;
                 }
@@ -4394,7 +4379,6 @@ pub(crate) async fn run_event_loop(
                         &mut engine_handle,
                         &task_manager,
                         config,
-                        &mut web_config_session,
                         chord,
                     )
                     .await?
@@ -4415,7 +4399,6 @@ pub(crate) async fn run_event_loop(
                                 &mut engine_handle,
                                 &task_manager,
                                 config,
-                                &mut web_config_session,
                                 commands::CommandResult::action(action),
                             )
                             .await?
@@ -4502,7 +4485,6 @@ pub(crate) async fn run_event_loop(
                                 &mut engine_handle,
                                 &task_manager,
                                 config,
-                                &mut web_config_session,
                                 &command,
                             )
                             .await?
@@ -4552,10 +4534,12 @@ pub(crate) async fn run_event_loop(
                 }
                 Some(ShellBindingId::PermissionCycle) => {
                     cycle_permission_posture(app, config, &engine_handle).await;
+                    app.note_footer_hint_used(crate::tui::footer_hints::PERMISSION_CYCLE);
                     continue;
                 }
                 Some(ShellBindingId::ViewCycle) => {
                     crate::tui::work_surface::cycle_view(app, true);
+                    app.note_footer_hint_used(crate::tui::footer_hints::DOCK_OPEN);
                     continue;
                 }
                 Some(ShellBindingId::ViewCycleBack) => {
@@ -4608,7 +4592,6 @@ pub(crate) async fn run_event_loop(
                         config,
                         &task_manager,
                         &mut engine_handle,
-                        &mut web_config_session,
                         events,
                     )
                     .await?
@@ -4753,7 +4736,6 @@ pub(crate) async fn run_event_loop(
                     config,
                     &task_manager,
                     &mut engine_handle,
-                    &mut web_config_session,
                     vec![ViewEvent::TopbarRoutePickerRequested],
                 )
                 .await?
@@ -4777,7 +4759,6 @@ pub(crate) async fn run_event_loop(
                         config,
                         &task_manager,
                         &mut engine_handle,
-                        &mut web_config_session,
                         events,
                     )
                     .await?
@@ -4858,7 +4839,6 @@ pub(crate) async fn run_event_loop(
                                 &mut engine_handle,
                                 &task_manager,
                                 config,
-                                &mut web_config_session,
                                 chord,
                             )
                             .await?
@@ -4911,7 +4891,6 @@ pub(crate) async fn run_event_loop(
                                 &mut engine_handle,
                                 &task_manager,
                                 config,
-                                &mut web_config_session,
                                 result,
                             )
                             .await?
@@ -4927,7 +4906,6 @@ pub(crate) async fn run_event_loop(
                                 &mut engine_handle,
                                 &task_manager,
                                 config,
-                                &mut web_config_session,
                                 result,
                             )
                             .await?
@@ -4944,11 +4922,9 @@ pub(crate) async fn run_event_loop(
                         }
                         crate::tui::underwater::LaunchAction::Help => {
                             toggle_help_view(app);
-                        }
-                        // `handle_launch_key` never yields this; the mouse send
-                        // path above is the only producer. The arm keeps the
-                        // match exhaustive.
-                        crate::tui::underwater::LaunchAction::SendComposer => {}
+                        } // `handle_launch_key` never yields this; the mouse send
+                          // path above is the only producer. The arm keeps the
+                          // match exhaustive.
                     }
                     app.needs_redraw = true;
                     continue;
@@ -5097,7 +5073,6 @@ pub(crate) async fn run_event_loop(
                     config,
                     &task_manager,
                     &mut engine_handle,
-                    &mut web_config_session,
                     events,
                 )
                 .await?
@@ -5120,7 +5095,6 @@ pub(crate) async fn run_event_loop(
                                 &mut engine_handle,
                                 &task_manager,
                                 config,
-                                &mut web_config_session,
                                 commands::CommandResult::action(action),
                             )
                             .await?
@@ -5268,6 +5242,7 @@ pub(crate) async fn run_event_loop(
                     },
                 )
                 .await;
+                app.note_footer_hint_used(crate::tui::footer_hints::ENTER_AGAIN);
                 continue;
             }
             if matches!(portable_submit_chord, Some(ComposerSubmitChord::Enter))
@@ -5285,6 +5260,7 @@ pub(crate) async fn run_event_loop(
                 &key,
                 slash_menu_open || mention_menu_open,
             ) {
+                app.note_footer_hint_used(crate::tui::footer_hints::AGENT_ARROWS);
                 match shortcut {
                     crate::tui::agent_focus::AgentShellShortcut::FocusAgents => {
                         if !crate::tui::work_surface::enter_agents(app) {
@@ -5506,6 +5482,19 @@ pub(crate) async fn run_event_loop(
                     let _ = engine_handle.send(Op::Shutdown).await;
                     return Ok(());
                 }
+                // A pending MCP OAuth login owns Esc first: the notice that
+                // starts it promises "Esc cancels", and abandoning a login
+                // opened by a misclick must not depend on what else is focused.
+                KeyCode::Esc if app.mcp_login_cancel.is_some() => {
+                    if let Some((server, token)) = app.mcp_login_cancel.take() {
+                        token.cancel();
+                        app.status_message = Some(format!(
+                            "Cancelled the OAuth login for MCP server '{server}'."
+                        ));
+                        app.needs_redraw = true;
+                    }
+                    continue;
+                }
                 // Agent focus: Esc on an empty composer returns to the main
                 // conversation before any other Esc meaning applies.
                 KeyCode::Esc
@@ -5561,6 +5550,7 @@ pub(crate) async fn run_event_loop(
                         }
                         EscapeAction::CancelRequest => {
                             app.backtrack.reset();
+                            app.note_footer_hint_used(crate::tui::footer_hints::ESC_INTERRUPT);
                             if escape_cancel_request(
                                 app,
                                 &engine_handle,
@@ -5808,7 +5798,6 @@ pub(crate) async fn run_event_loop(
                                 &mut engine_handle,
                                 &task_manager,
                                 config,
-                                &mut web_config_session,
                                 &input,
                             )
                             .await?
@@ -5843,7 +5832,6 @@ pub(crate) async fn run_event_loop(
                         &mut engine_handle,
                         &task_manager,
                         config,
-                        &mut web_config_session,
                         action,
                     )
                     .await?
@@ -6099,7 +6087,6 @@ pub(crate) async fn run_event_loop(
                         &mut engine_handle,
                         &task_manager,
                         config,
-                        &mut web_config_session,
                         "/update install",
                     )
                     .await?
@@ -6342,7 +6329,7 @@ pub(crate) async fn run_xai_device_login_from_tui(
         app.use_mouse_capture,
         app.use_bracketed_paste,
     )?;
-    let login_result = crate::xai_oauth::device_code_login().await;
+    let login_result = crate::oauth::login(crate::oauth::OAuthProvider::Xai).await;
     resume_terminal(
         terminal,
         app.use_alt_screen(),
@@ -6387,7 +6374,7 @@ pub(crate) async fn run_chatgpt_pkce_login_from_tui(
         app.use_mouse_capture,
         app.use_bracketed_paste,
     )?;
-    let login_result = crate::chatgpt_oauth::pkce_login().await;
+    let login_result = crate::oauth::login(crate::oauth::OAuthProvider::Chatgpt).await;
     resume_terminal(
         terminal,
         app.use_alt_screen(),

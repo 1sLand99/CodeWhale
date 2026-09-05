@@ -157,6 +157,31 @@ pub struct FleetMember {
     pub requires: Vec<String>,
 }
 
+impl FleetMember {
+    /// The role this member fills: `role`, or `id` when the document left
+    /// the role field off (the id *is* the role identity).
+    #[must_use]
+    pub fn role_label(&self) -> &str {
+        let role = self.role.trim();
+        if role.is_empty() {
+            self.id.trim()
+        } else {
+            role
+        }
+    }
+
+    /// A row that was a model pin promoted to a member: no role, and an id
+    /// that is just the model's slug. Such rows are not members.
+    #[must_use]
+    pub fn is_bare_model_pin(&self) -> bool {
+        self.role.trim().is_empty()
+            && self
+                .model
+                .as_deref()
+                .is_some_and(|model| self.id.trim().starts_with(slugify(model).as_str()))
+    }
+}
+
 /// The saved named Fleet document (compatibility `schema = "fleet"`, revision 2).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -302,8 +327,13 @@ impl FleetFile {
 
     /// Parse a v2 fleet document from TOML text.
     pub fn parse(text: &str) -> Result<Self, FleetStoreError> {
-        let fleet: Self = toml::from_str(text)
+        let mut fleet: Self = toml::from_str(text)
             .map_err(|e| FleetStoreError::Invalid(format!("invalid fleet TOML: {e}")))?;
+        // Compat (0.9.12): every model the user ever selected was enrolled
+        // as a role-less member with a slug id. Roles are the members; drop
+        // those rows on read so the roster reads as roles again. The next
+        // save writes the clean document.
+        fleet.members.retain(|member| !member.is_bare_model_pin());
         fleet.validate()?;
         Ok(fleet)
     }

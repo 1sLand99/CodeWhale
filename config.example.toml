@@ -196,6 +196,16 @@ memory_path = "~/.codewhale/memory.md"
 [speech]
 # output_dir = "./speech"
 
+# ─────────────────────────────────────────────────────────────────────────────────
+# Reasoning-only recovery
+# ─────────────────────────────────────────────────────────────────────────────────
+# When a reasoning model returns only hidden thinking without any answer text
+# or tool call, the engine can re-request the answer automatically.
+# Set max_reprompts = 0 to disable automatic recovery entirely.
+# [reasoning_only]
+# max_reprompts = 2
+# reprompt_message = "So, what's up ? Keep running !"
+
 # Native tool catalog controls (#2076). By default only the core tool surface
 # is loaded into the model context; less common native tools are discoverable
 # through ToolSearch and loaded on first use.
@@ -821,6 +831,16 @@ max_subagents = 10 # optional (default 64, clamped to 1-128)
 # api_key = "YOUR_MISTRAL_API_KEY"
 # base_url = "https://api.mistral.ai/v1"
 # model = "mistral-code-latest"            # or mistral-medium-latest, mistral-small-latest, mistral-large-latest
+
+# Google Gemini — Google AI Studio (https://aistudio.google.com/apikey)
+# OpenAI-compatible Chat Completions route on the official Gemini endpoint;
+# this is the supported Gemini path (see docs/PROVIDERS.md).
+# Provider aliases: google, gemini, google-gemini, ai-studio
+# Env var aliases: GEMINI_API_KEY, GOOGLE_API_KEY, GEMINI_BASE_URL, GOOGLE_BASE_URL
+[providers.google]
+# api_key = "YOUR_GEMINI_API_KEY"
+# base_url = "https://generativelanguage.googleapis.com/v1beta/openai/"
+# model = "gemini-3.1-pro-preview"
 
 # ─────────────────────────────────────────────────────────────────────────────────
 # Alibaba Cloud Model Studio — Token Plan

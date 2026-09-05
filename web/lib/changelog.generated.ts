@@ -25,19 +25,33 @@ export const CHANGELOG: ChangelogRelease[] = [
     "version": "Unreleased",
     "date": null,
     "unreleased": true,
-    "compareUrl": "https://github.com/Hmbown/CodeWhale/compare/v0.9.11...HEAD",
+    "compareUrl": "https://github.com/Hmbown/CodeWhale/compare/v0.9.12...HEAD",
+    "sections": []
+  },
+  {
+    "version": "0.9.12",
+    "date": "2026-09-04",
+    "unreleased": false,
+    "compareUrl": "https://github.com/Hmbown/CodeWhale/compare/v0.9.11...v0.9.12",
     "sections": [
       {
         "heading": "Added",
         "items": [
-          "Alibaba Model Studio joins the data-driven provider table as an openai-compatible descriptor: international compatible-mode endpoint, DASHSCOPE_API_KEY credential, live /v1/models discovery. Qwen 3.8 Flash and Qwen 3.8 Max arrive through the catalog authority — never a hard-coded id."
+          "Computer use ships with the binary. The computer-use plugin — 38 tools across macOS, Windows, Linux and HarmonyOS, accessibility-first observation with pixel fallback, screenshots, zoom, screen recording, and registered remote computers over ssh and hdc — is embedded in Codewhale and written to $CODEWHALE_HOME/builtin-plugins on first run, so every install channel carries it. It lists as builtin · not-reviewed and stays disabled until you review and enable it: shipping it is…",
+          "Alibaba Model Studio joins the data-driven provider table as an openai-compatible descriptor: international compatible-mode endpoint, DASHSCOPE_API_KEY credential, live /v1/models discovery. Qwen 3.8 Flash and Qwen 3.8 Max arrive through the catalog authority — never a hard-coded id.",
+          "Concentrate: first-class opt-in BYOK Responses gateway with live models discovery and typed SSE streaming (#5725).",
+          "Cloud dispatch: remote runner offloads coding agent tasks to isolated cloud sandboxes with machine token auth and structured job tracking (#5701, #5712).",
+          "Per-session control socket: config-gated [control_socket] table binds <sessions-dir>/<session-id>/control.sock per running session, exposing message, interrupt, relaunch, and status JSON-RPC verbs (#5533, #5831)."
         ],
-        "itemCount": 1
+        "itemCount": 5
       },
       {
         "heading": "Changed",
         "items": [
+          "Anonymous usage counting is on by default. The 0.9.11 release asked first; 0.9.12 counts the same aggregate version/platform, session, feature and error totals unless you turn it off, and says so once at first launch (policy notice version 5, schema 3, notice_version replacing consent_version). Every recorded opt-out stays off: a durable telemetry = false, a decline recorded under the old opt-in notice, unreadable privacy state, and the CODEWHALE_TELEMETRY=0 / --telemetry…",
           "The launch screen is our own card take: a thin top line ⑂ branch path; a centred bordered card with the whale mark, Codewhale + version, one announcement line only when it is true (the no-model warning, or MCP news), and the menu New worktree / Resume session / Changelog / Quit with their real chords right-aligned. Enter runs the highlighted entry, Up/Down move it, and typing goes straight to the composer. The card dissolves on the first keystroke or command (≤240 ms,…",
+          "The work surface sits under the composer by default, keeping history readable and leaving the stage unencumbered (#5809).",
+          "Skills command shapes: FEAT-022 command shapes and retained-host validation (#5825, #5829).",
           "After the card dissolves, the working screen shows ⑂ branch path with ⋮ MCP n/m on the right, the transcript starts with the ◆ session_start receipt (naming the configured session-start hooks), and the composer's bottom rule carries model (effort) · permission — the route's one launch reading. The posture bar and metrics line appear only once a session exists.",
           "Vocabulary: fleet is the public term and Pod is retired from copy — roster, setup, detail, worker-runtime and managed-API messages now say Fleet (/fleet canonical, /pod alias). The workflow wire accepts the canonical role spellings (general/explore/planner/reviewer/implement/ test/advisor) with the pre-rename ones kept as load-time aliases, and serializes canonical names.",
           "The Operate mode-picker hint is shortened to fit 80 columns.",
@@ -45,24 +59,39 @@ export const CHANGELOG: ChangelogRelease[] = [
           "Local Ollama: the header names a model only when the local catalog can serve it, and says unknown until it knows. The startup mark, web and app icon carry the new side-view prompt-eye whale (#5795).",
           "One focus owner: Tab and Shift+Tab work regardless of what is in the composer; Alt shortcuts survive mid-draft; Ctrl+Tab no longer cycles the mode by accident (#5798).",
           "Tool cells carry their own state: a running, failed or warned tool reads as such in the transcript itself, with per-entry rail dots and family-coloured glyphs (#5799).",
-          "Web: docs hub with task search, shared empty/loading/error states, an offline-to-back-online banner, /changelog in every locale, and real 404s with correct metadata (#5743).",
-          "Web: the app's colours come from one file generated from the TUI whale palette; re-typing a colour by hand fails web CI (#5797).",
-          "Web: a one-way ceiling on isZh branching outside the i18n spine — the count may only go down (#5805).",
-          "An internal agent handoff doc was removed from the public tree and .playwright-mcp/ is now ignored (#5800)."
+          "Web: docs hub with task search, shared empty/loading/error states, an offline-to-back-online banner, /changelog in every locale, and real 404s with correct metadata (#5743)."
         ],
-        "itemCount": 23
+        "itemCount": 26
+      },
+      {
+        "heading": "Contributors",
+        "items": [
+          "hexin (@h3c-hexin) — provider-native web search across four routes (#5682, #5683, #5685, #5687), authoritative edit-last-turn boundaries (#5621), Kimi Code k3-256k (#5622), post-compaction input-token reporting (#5623), and preserving the scheduled model selection in automations (#5650).",
+          "秋月凉梦 (@qiuYliangM) — co-authored the edit-last-turn boundary fix (#5621), Kimi Code k3-256k support (#5622), and post-compaction input-token reporting (#5623).",
+          "Isabel Wu (@wuisabel-gif) — live session token totals (#5624), persisted context-pressure warnings (#5629), discoverable Fleet roster editing (#5604), the capability-gated cursor accent (#5599), and /copy for the latest completed response (#5692).",
+          "Paulo Aboim Pinto (@aboimpinto) — Windows verbatim-path operands preserved through POSIX word splitting (#5610), the plugins group moved onto the command shapes (#5657), FEAT-022 skills command shapes with retained-host validation (#5825), and FEAT-020 plugin command shapes re-landed on main (#5865).",
+          "Alex Musichen (@musichen) — a stable DeepSeek heading in the configured-view model picker, keeping every official catalog model for the active provider visible (#5689).",
+          "@gaord — the GET /v1/fleet/profiles runtime API endpoint, reusing the FleetManager validation path (#5688).",
+          "Sh1Zuku (@SparkofSpike) — corrected English documentation inaccuracies and the first zh_hans translations for the Tier-2 docs (#5613).",
+          "@M-Maciej — goal continuation cadence (#5591) and the per-session control socket (#5533, #5831).",
+          "Serephus (@serephus) — nixpkgs update (#5669).",
+          "@whp233 — wire = responses|anthropic for openai-compatible custom routes and opencode-zen muse-spark (#5716, landed as #5719).",
+          "Gabriel Degret (@Gabriel-Degret) — found the reasoning-only retry gap and built the first fix; landed as the [reasoning_only] retry ceiling with a request-scoped nudge (#5867).",
+          "@huangxianzhan — the x-opencode-session header for OpenCode Go and Zen gateways (#5868)."
+        ],
+        "itemCount": 22
       },
       {
         "heading": "Added",
         "items": [
-          "Native ChatGPT sign-in for the openai-codex route: codewhale auth chatgpt opens a browser PKCE flow and stores refreshable tokens in Codewhale-owned credentials — no Codex CLI install required. /auth chatgpt-revoke clears them off the event loop (#5784).",
+          "Native ChatGPT sign-in for the openai-codex route: codewhale auth chatgpt opens a browser PKCE flow and stores refreshable tokens in Codewhale-owned credentials — no Codex CLI install required. /auth chatgpt-revoke clears them off the event loop (#5784, #5778).",
           "MCP servers and plugins can be connected self-serve from the session: a unified auth flow with rotation-safe token handling, a spoken authorization URL, and catalog refresh when stored credentials stop working (#5747).",
           "/operate reads match the landed CWC OperateRecord contract: fetching an absent record returns a truthful not-found view instead of a fabricated operation, and an empty evidence path is rejected rather than resolving to the workspace directory (#5703).",
           "TUI: scheduled automations project into the top strip (⏱ N scheduled · M running, compact ⏱ N·M) with typed HistoryCell::Automation receipts when a run this session watched settle. /automation acknowledges failures. The merged footer does not carry the work fact (#5748).",
           "The app-server can listen on a unix domain socket and advertise a daemon/attach handshake, so a local client can attach to an already-running engine instead of spawning its own. The socket is created with owner-only permissions and stale sockets are reclaimed on start. Non-unix hosts return a typed unsupported-platform refusal; the Windows named-pipe endpoint is named but not yet implemented (#5749).",
           "The engine's internal Op/Event types and the wire protocol's Op/ EventMsg now carry a compile-enforced twin for every variant: adding an engine variant without a protocol counterpart fails the build instead of drifting silently. Internal durability work — no user-visible surface change yet (#5751).",
           "Machine tokens: with CODEWHALE_API_KEY set, the CLI authenticates as the Codewhale account with no local session file and no browser — the CI authentication path, with a typed token shape and redaction (#5721).",
-          "Compaction publishes a structured survival contract for session-tree journal entry types (crates/tui/src/compaction/SURVIVAL_CONTRACT.md) and fails closed when the last user round, tool results, /anchor text, or checkpoint receipt would vanish (#4394).",
+          "Compaction publishes a structured survival contract for session-tree journal entry types (crates/tui/src/compaction/SURVIVAL_CONTRACT.md) and fails closed when the last user round, tool results, /anchor text, or checkpoint receipt would vanish (#4394, #5782).",
           "Internal: codewhale-config gains RouteAuthoritySnapshot, one immutable authority that owns a compiled provider catalog together with the route resolver projected from it, so a picker, a readiness view, and an execution path can no longer resolve against different catalog snapshots without a type-level signal. Resolution still goes through the sole resolver; the returned receipt distinguishes an exact catalog row, a custom-endpoint route whose provider facts are deliberately…",
           "Computer session records now count only time a provider actually accepted the session as active, at per-second granularity. Idle, queued, stopped, and teardown time are excluded, and a session whose allocation does not match a standard profile is refused rather than recorded approximately. Covered by hermetic fixtures; no live provider call and no deploy (#5781).",
           "Website: the public site moves to the Tideline deep-ocean design language (dark by default with an opt-in light documentation sheet, palette grounded in the TUI's WHALE_* tokens) and the new whale brand mark across the favicon, app icons, web manifest, nav wordmark, and social card (#5573).",
@@ -413,64 +442,6 @@ export const CHANGELOG: ChangelogRelease[] = [
           "Isabel Wu (@wuisabel-gif) — background verifier test isolated from rustup and $HOME (#5423, slice of #5056)."
         ],
         "itemCount": 7
-      }
-    ]
-  },
-  {
-    "version": "0.9.7",
-    "date": "2026-08-12",
-    "unreleased": false,
-    "compareUrl": "https://github.com/Hmbown/CodeWhale/compare/v0.9.6...v0.9.7",
-    "sections": [
-      {
-        "heading": "Added",
-        "items": [
-          "Grok 4.6 is the direct xAI default, with the grok alias moving onto it and grok-4.5 still explicitly selectable. Its 500K context, text/image input, tool and structured-output support, low/medium/high/xhigh reasoning efforts (default high), and server-side web search all come from the Models.dev-shaped catalog rather than model-specific code. reasoning_effort reaches the wire only on the exact first-party https://api.x.ai/v1 route, and the usage-aware 200K-token pricing…",
-          "OrcaRouter is a first-class named provider: ORCAROUTER_API_KEY, default base URL https://api.orcarouter.ai/v1, deepseek/deepseek-v4-pro default, orcarouter/auto routing, CLI --provider selector, and TUI picker entries (#5321)."
-        ],
-        "itemCount": 2
-      },
-      {
-        "heading": "Changed",
-        "items": [
-          "Reasoning-effort normalization and the model picker read a model's published reasoning_options list from the catalog instead of collapsing every route to the historic Low/Medium ladder. Any catalog row that publishes an effort list keeps its own vocabulary.",
-          "Docs record DeepSeek's live DeepSeek-V4-Pro-0813 backend label while the callable API ID stays deepseek-v4-pro. No aliases are remapped and no deepseek-v4-pro[1m] selector is sent."
-        ],
-        "itemCount": 2
-      },
-      {
-        "heading": "Fixed",
-        "items": [
-          "Auto-Review once again executes proven read/build/test shell commands and bounded workspace writes without opening an approval modal. Explicit policy blocks, unknown tools, publish operations, secret actions, MCP mutations, and shell commands requiring approval still fail closed (#5323; reported by USTHzhanglu and root-caused by Lstarsky0).",
-          "Copying a user or assistant message takes its canonical content instead of reserialized transcript lines, keeping role glyphs, continuation rails, and visual wrapping out of the clipboard while preserving authored Unicode, Markdown, and hard line breaks. Tool and Thinking cells stay on the existing full-transcript path (#5319).",
-          "load_session no longer runs crash recovery on every read. Snapshot reads go through a side-effect-free load_session_snapshot and recovery is explicit via recover_session_for_resume, so an embedding host inspecting a durable session while a tool is still running no longer gets a spurious crash repair (#5320)."
-        ],
-        "itemCount": 3
-      },
-      {
-        "heading": "Security",
-        "items": [
-          "lru moves to 0.18 to clear RUSTSEC-2026-0253, where LruCache::pop() was not panic-safe and could leave dangling list pointers. The ratatui-core =0.1.0 pin that transitively forced lru ^0.16 is lifted, so ColorCompatBackend now answers get_cursor_position() from tracked cursor state — the upstream-recommended workaround for the startup CPR race (ratatui/ratatui#2483, ratatui/ratatui#2640) that the pin originally worked around. ratatui itself stays pinned at =0.30.0, so the…"
-        ],
-        "itemCount": 1
-      },
-      {
-        "heading": "Known issues",
-        "items": [
-          "The integration test exec_persistent_service::failed_exec_kills_pending_service_and_exits_nonzero is a confirmed flake under parallel load (\"service pid file never appeared\"). It passes in isolation and is unrelated to any v0.9.7 change."
-        ],
-        "itemCount": 1
-      },
-      {
-        "heading": "Contributors",
-        "items": [
-          "XhesicaFrost (@XhesicaFrost) — canonical message copy (#5319).",
-          "h3c-hexin (@h3c-hexin) — session snapshot and crash-recovery split (#5320).",
-          "XiaoHuo888-hue (@XiaoHuo888-hue) — OrcaRouter provider registration (#5321).",
-          "USTHzhanglu (@USTHzhanglu) — Auto-Review regression report and Windows evidence (#5323).",
-          "Lstarsky0 (@Lstarsky0) — Auto-Review regression root-cause analysis (#5323)."
-        ],
-        "itemCount": 5
       }
     ]
   }

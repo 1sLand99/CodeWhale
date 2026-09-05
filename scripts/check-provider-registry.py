@@ -30,9 +30,20 @@ TUI_CONFIG_RS = ROOT / "crates" / "tui" / "src" / "config.rs"
 TUI_CONFIG_MODELS_RS = ROOT / "crates" / "tui" / "src" / "config" / "models.rs"
 AGENT_RS = ROOT / "crates" / "agent" / "src" / "lib.rs"
 PROVIDERS_MD = ROOT / "docs" / "PROVIDERS.md"
+CONFIGURATION_MD = ROOT / "docs" / "CONFIGURATION.md"
+WEB_FACTS_LIB = ROOT / "web" / "scripts" / "facts-lib.mjs"
+WEB_FACTS_DRIFT = ROOT / "web" / "lib" / "facts-drift.ts"
+WEB_FACTS_GENERATED = ROOT / "web" / "lib" / "facts.generated.ts"
+README_MD = ROOT / "README.md"
+CONFIG_EXAMPLE_TOML = ROOT / "config.example.toml"
+TUI_PROVIDER_READINESS_RS = ROOT / "crates" / "tui" / "src" / "provider_readiness.rs"
+TUI_LIB_RS = ROOT / "crates" / "tui" / "src" / "lib.rs"
 
 
 API_PROVIDER_ONLY_IDS = {"deepseek-cn"}
+LEGACY_PROVIDER_TOMBSTONE_IDS = {"antigravity"}
+LEGACY_PROVIDER_TOMBSTONE_TABLES = {"antigravity"}
+LEGACY_PROVIDER_SELECTION_IDS = {"antigravity", "agy"}
 
 # `custom` is the dynamic OpenAI-compatible meta-provider (#1519): a single
 # catch-all `[providers.custom]` table that backs arbitrary user-defined
@@ -144,7 +155,23 @@ def provider_kind_ids(config_rs: str) -> dict[str, str]:
     )
     ids: dict[str, str] = {variant: provider_id for variant, provider_id in pairs}
     # Providers with non-fixed wire policy or custom auth behavior use manual
-    # impls rather than the provider!() macro.
+    # impls rather than the provider!() macro. Discover them by shape rather
+    # than by name: a hand-maintained roster here goes stale the first time
+    # someone adds a provider, which is exactly how this guard first failed
+    # (it had never heard of `concentrate`).
+    for variant_name, id_literal in re.findall(
+        r'impl\s+Provider\s+for\s+(\w+)\s*\{.*?fn\s+id\s*\([^)]*\)[^{]*\{\s*"([^"]+)"',
+        provider_rs,
+        flags=re.DOTALL,
+    ):
+        # `Custom` is a meta provider, not a shipped vendor row: it is
+        # handled by META_PROVIDER_TABLES and must stay out of the canonical
+        # id set, or the shipped-row and TOML-table checks contradict.
+        if variant_name == "Custom":
+            continue
+        ids.setdefault(variant_name, id_literal)
+    # Kept as an explicit floor: if the shape scan ever stops matching one of
+    # these, the guard should fail loudly rather than silently cover less.
     for variant_name, id_literal in [
         ("Deepseek", "deepseek"),
         ("DeepseekAnthropic", "deepseek-anthropic"),
@@ -160,9 +187,6 @@ def provider_kind_ids(config_rs: str) -> dict[str, str]:
         ("ModelstudioTokenPlanAnthropic", "modelstudio-token-plan-anthropic"),
         ("ModelstudioCodingPlan", "modelstudio-coding-plan"),
         ("ModelstudioCodingPlanAnthropic", "modelstudio-coding-plan-anthropic"),
-        # Concentrate is a fixed-Responses gateway; provider!() cannot express a
-        # non-Chat wire policy, so it is a hand-written impl too.
-        ("Concentrate", "concentrate"),
     ]:
         match = re.search(
             rf'impl\s+Provider\s+for\s+{variant_name}.*?fn\s+id.*?\"({id_literal})\"',
@@ -170,9 +194,32 @@ def provider_kind_ids(config_rs: str) -> dict[str, str]:
         )
         if match:
             ids[variant_name] = match.group(1)
+        elif variant_name not in ids:
+            raise ValueError(
+                f"expected a hand-written `impl Provider for {variant_name}` "
+                f"with id {id_literal!r}; the guard's floor is stale"
+            )
     if not ids:
         raise ValueError("provider!() invocations returned no providers")
     return ids
+
+
+def provider_kind_catalog_ids(
+    provider_kind_rs: str, variant_to_id: dict[str, str]
+) -> set[str]:
+    catalog = re.search(
+        r"pub const ALL:\s*\[Self;\s*\d+\]\s*=\s*\[(.*?)\];",
+        provider_kind_rs,
+        flags=re.DOTALL,
+    )
+    if catalog is None:
+        raise ValueError("crates/config/src/provider_kind.rs: missing ProviderKind::ALL")
+    variants = set(re.findall(r"Self::(\w+)", catalog.group(1)))
+    catalog_variant_to_id = {**variant_to_id, "Custom": "custom"}
+    missing = variants - set(catalog_variant_to_id)
+    if missing:
+        raise ValueError(f"ProviderKind::ALL uses unknown variants: {sorted(missing)}")
+    return {catalog_variant_to_id[variant] for variant in variants}
 
 
 def api_provider_ids(tui_config_rs: str) -> dict[str, str]:
@@ -210,6 +257,268 @@ def shipped_provider_tables(providers_md: str) -> set[str]:
     return set(re.findall(r"\|\s*`\[providers\.([a-z0-9_]+)\]`\s*\|", table))
 
 
+def documented_selectable_provider_ids(providers_md: str) -> set[str]:
+    marker = require_index(providers_md, "in that order:", "docs/PROVIDERS.md")
+    start = require_index(providers_md, "\n\n", "provider selection list", marker) + 2
+    end = require_index(providers_md, "\n\n", "provider selection list", start)
+    return set(re.findall(r"`([^`]+)`", providers_md[start:end]))
+
+
+def report_provider_kind_selector_contract(provider_kind_rs: str) -> list[str]:
+    start = require_index(
+        provider_kind_rs,
+        "pub fn parse(value: &str) -> Option<Self>",
+        "ProviderKind::parse",
+    )
+    end = require_index(
+        provider_kind_rs, "pub fn parse_config_identity", "ProviderKind::parse", start
+    )
+    selector = provider_kind_rs[start:end]
+    if "Self::ALL" not in selector and "Self::all()" not in selector:
+        return [
+            "ProviderKind::parse must gate registry aliases through the selectable "
+            "ProviderKind::ALL catalog"
+        ]
+    return []
+
+
+def report_tui_catalog_contract(tui_config_rs: str) -> list[str]:
+    start = require_index(
+        tui_config_rs, "pub fn catalog() -> &'static [Self]", "ApiProvider::catalog"
+    )
+    end = require_index(
+        tui_config_rs, "pub fn catalog_identity", "ApiProvider::catalog", start
+    )
+    catalog = tui_config_rs[start:end]
+    errors: list[str] = []
+    if (
+        "codewhale_config::ProviderKind::ALL" not in catalog
+        or "Antigravity" in catalog
+    ):
+        errors.append(
+            "ApiProvider::catalog must derive from ProviderKind::ALL without "
+            "legacy Antigravity"
+        )
+
+    impl_start = require_index(tui_config_rs, "impl ApiProvider", "ApiProvider impl")
+    parse_start = require_index(
+        tui_config_rs,
+        "pub fn parse(value: &str) -> Option<Self>",
+        "ApiProvider::parse",
+        impl_start,
+    )
+    parse_end = require_index(
+        tui_config_rs, "pub fn as_str", "ApiProvider::parse", parse_start
+    )
+    selector = tui_config_rs[parse_start:parse_end]
+    if (
+        "is_legacy_antigravity_identity(trimmed)" not in selector
+        or "return None" not in selector
+    ):
+        errors.append(
+            "ApiProvider::parse must reject both retired Antigravity config identities"
+        )
+    return errors
+
+
+def report_tombstone_runtime_contract(
+    provider_kind_rs: str, tui_provider_readiness_rs: str, tui_lib_rs: str
+) -> list[str]:
+    """The tombstone must resolve under every legacy spelling and never read
+    as a credentialed or advertised slot on a running-product surface."""
+
+    errors: list[str] = []
+    start = require_index(
+        provider_kind_rs,
+        "pub fn parse_config_identity(value: &str) -> Option<Self>",
+        "ProviderKind::parse_config_identity",
+    )
+    end = require_index(
+        provider_kind_rs, "pub fn is_siliconflow", "ProviderKind::parse_config_identity", start
+    )
+    config_identity = provider_kind_rs[start:end]
+    if "parse_retired_alias" not in config_identity:
+        errors.append(
+            "ProviderKind::parse_config_identity must resolve retired registry aliases "
+            "(`agy`) so every selection surface can name the tombstone"
+        )
+
+    if (
+        "provider == ApiProvider::Antigravity || provider.kind().is_none()"
+        not in tui_provider_readiness_rs
+    ):
+        errors.append(
+            "provider_readiness::credential_state_for_provider must classify "
+            "ApiProvider::Antigravity as CredentialState::Legacy"
+        )
+
+    if "for provider in doctor_api_key_providers()" not in tui_lib_rs or (
+        "*provider != crate::config::ApiProvider::Antigravity" not in tui_lib_rs
+    ):
+        errors.append(
+            "`codewhale doctor` API Keys rows must iterate doctor_api_key_providers() "
+            "with the retired Antigravity slot filtered out"
+        )
+    return errors
+
+
+def report_antigravity_public_contract(
+    providers_md: str,
+    configuration_md: str,
+    web_facts_lib: str,
+    web_facts_drift: str,
+    web_facts_generated: str,
+    readme_md: str,
+    config_example_toml: str,
+) -> list[str]:
+    """Keep the retired provider as one safe, non-runnable docs tombstone."""
+
+    errors: list[str] = []
+    heading = "### Legacy Antigravity tombstone"
+    heading_count = providers_md.count(heading)
+    if heading_count != 1:
+        errors.append(
+            "docs/PROVIDERS.md must contain exactly one legacy Antigravity tombstone "
+            f"heading (found {heading_count})"
+        )
+        tombstone = ""
+        outside_tombstone = providers_md
+    else:
+        start = providers_md.index(heading)
+        next_heading = re.search(r"\n#{1,3} ", providers_md[start + len(heading) :])
+        end = (
+            len(providers_md)
+            if next_heading is None
+            else start + len(heading) + next_heading.start()
+        )
+        tombstone = providers_md[start:end]
+        outside_tombstone = providers_md[:start] + providers_md[end:]
+
+    normalized_tombstone = " ".join(tombstone.split())
+    required_tombstone_copy = [
+        "not a Codewhale provider",
+        "cannot be selected or run",
+        "non-runnable migration tombstone",
+        "`codewhale auth clear --provider antigravity`",
+        "Codewhale-owned legacy configuration and consent metadata",
+        "does not sign out of, revoke, read, or otherwise alter any official Google or Antigravity session",
+        "supported `google` provider",
+        "`GEMINI_API_KEY`",
+    ]
+    missing_tombstone_copy = [
+        required
+        for required in required_tombstone_copy
+        if required not in normalized_tombstone
+    ]
+    if missing_tombstone_copy:
+        errors.append(
+            "legacy Antigravity tombstone is missing required safety or migration copy "
+            f"({len(missing_tombstone_copy)} checks failed)"
+        )
+    clear_command = "`codewhale auth clear --provider antigravity`"
+    legacy_provider_forms = [
+        match.lower()
+        for match in re.findall(
+            r"--provider\s+(antigravity|agy)\b", providers_md, flags=re.IGNORECASE
+        )
+    ]
+    if providers_md.count(clear_command) != 1 or legacy_provider_forms != [
+        "antigravity"
+    ]:
+        errors.append(
+            "docs/PROVIDERS.md must contain the Codewhale-owned Antigravity "
+            "clear command as its only --provider antigravity/agy form"
+        )
+    setup_guidance = re.search(
+        r"\bagy\b|\boauth\b|\blog(?:in|\s+in)\b|\bsign\s+in\b|"
+        r"\bimport\b|\bexternal-consent\b|/provider\s+(?:antigravity|agy)\b|"
+        r"CODEWHALE_PROVIDER\s*=\s*(?:antigravity|agy)\b",
+        tombstone,
+        flags=re.IGNORECASE,
+    )
+    if setup_guidance:
+        errors.append(
+            "legacy Antigravity tombstone contains login, OAuth import, consent, "
+            "or provider-selection guidance"
+        )
+
+    if re.search(r"\b(?:antigravity|agy)\b", outside_tombstone, flags=re.IGNORECASE):
+        errors.append(
+            "docs/PROVIDERS.md mentions Antigravity/agy outside its legacy tombstone"
+        )
+    if re.search(r"\b(?:antigravity|agy)\b", configuration_md, flags=re.IGNORECASE):
+        errors.append("docs/CONFIGURATION.md advertises retired Antigravity state")
+    if re.search(r"\b(?:antigravity|agy)\b", readme_md, flags=re.IGNORECASE):
+        errors.append("README.md advertises retired Antigravity state")
+    if re.search(r"\b(?:antigravity|agy)\b", config_example_toml, flags=re.IGNORECASE):
+        errors.append("config.example.toml advertises retired Antigravity state")
+    if "[providers.google]" not in config_example_toml or not re.search(
+        r"GEMINI_API_KEY", config_example_toml
+    ):
+        errors.append(
+            "config.example.toml must document the supported `google` Gemini route "
+            "with GEMINI_API_KEY"
+        )
+
+    forbidden_markers = {
+        "Antigravity API-key environment guidance": "ANTIGRAVITY_API_KEY",
+        "Antigravity ADC environment guidance": "AGY_ADC_AUTH",
+        "Antigravity base-URL environment guidance": "ANTIGRAVITY_BASE_URL",
+        "Antigravity model environment guidance": "ANTIGRAVITY_MODEL",
+        "private cloud-code endpoint guidance": "cloudcode-pa",
+        "private cloud-code protocol guidance": "cloud-code",
+        "official CLI credential-store guidance": "state.vscdb",
+        "official CLI OAuth-state guidance": "antigravityUnifiedStateSync",
+        "runnable legacy provider selection": 'provider = "antigravity"',
+        "runnable legacy provider table": "[providers.antigravity]",
+    }
+    public_sources = {
+        "docs/PROVIDERS.md": providers_md,
+        "docs/CONFIGURATION.md": configuration_md,
+        "web/scripts/facts-lib.mjs": web_facts_lib,
+        "web/lib/facts-drift.ts": web_facts_drift,
+        "web/lib/facts.generated.ts": web_facts_generated,
+        "README.md": readme_md,
+        "config.example.toml": config_example_toml,
+    }
+    for context, source in public_sources.items():
+        for description, marker in forbidden_markers.items():
+            if marker.lower() in source.lower():
+                errors.append(f"{context} contains forbidden {description}")
+
+    for context, source, exclusion_name, exclusion_filter in [
+        (
+            "web/scripts/facts-lib.mjs",
+            web_facts_lib,
+            "EXCLUDED_PROVIDERS",
+            ".filter((v) => !EXCLUDED_PROVIDERS.has(v))",
+        ),
+        (
+            "web/lib/facts-drift.ts",
+            web_facts_drift,
+            "EXCLUDED",
+            ".filter((v) => !EXCLUDED.has(v))",
+        ),
+    ]:
+        exclusion_decl = re.search(
+            rf"const\s+{exclusion_name}\s*=\s*new Set\(\[[^\]]*\"Antigravity\"",
+            source,
+        )
+        if exclusion_decl is None or exclusion_filter not in source:
+            errors.append(f"{context} does not explicitly exclude legacy Antigravity")
+        if re.search(r"^\s*Antigravity\s*:", source, flags=re.MULTILINE):
+            errors.append(f"{context} maps legacy Antigravity to public provider facts")
+        if re.search(r"\bagy\b", source, flags=re.IGNORECASE):
+            errors.append(f"{context} exposes the legacy agy alias")
+
+    if re.search(
+        r"\b(?:antigravity|agy)\b", web_facts_generated, flags=re.IGNORECASE
+    ):
+        errors.append("web/lib/facts.generated.ts exposes legacy Antigravity/agy")
+
+    return errors
+
+
 def static_registry_provider_rows(providers_md: str) -> set[str]:
     table = markdown_section(providers_md, "## Static Model Registry")
     return set(re.findall(r"^\|\s*`([^`]+)`\s*\|", table, flags=re.MULTILINE))
@@ -232,7 +541,9 @@ def default_strings(tui_config_rs: str) -> set[str]:
         r'const\s+(DEFAULT_[A-Z0-9_]+(?:MODEL|BASE_URL)):\s*&str\s*=\s*"([^"]+)"',
         sources,
     ):
-        if name == "DEFAULT_DEEPSEEKCN_BASE_URL":
+        if name == "DEFAULT_DEEPSEEKCN_BASE_URL" or name.startswith(
+            "DEFAULT_ANTIGRAVITY_"
+        ):
             continue
         defaults.add(value)
     if not defaults:
@@ -371,26 +682,66 @@ def provider_table_name(provider_id: str) -> str:
 def main() -> int:
     try:
         config_rs = read(CONFIG_RS)
+        provider_kind_rs = read(PROVIDER_KIND_RS)
         tui_config_rs = read(TUI_CONFIG_RS)
         agent_rs = read(AGENT_RS)
         providers_md = read(PROVIDERS_MD)
+        configuration_md = read(CONFIGURATION_MD)
+        web_facts_lib = read(WEB_FACTS_LIB)
+        web_facts_drift = read(WEB_FACTS_DRIFT)
+        web_facts_generated = read(WEB_FACTS_GENERATED)
+        readme_md = read(README_MD)
+        config_example_toml = read(CONFIG_EXAMPLE_TOML)
+        tui_provider_readiness_rs = read(TUI_PROVIDER_READINESS_RS)
+        tui_lib_rs = read(TUI_LIB_RS)
 
         variant_to_id = provider_kind_ids(config_rs)
         canonical_ids = set(variant_to_id.values())
+        selectable_provider_ids = provider_kind_catalog_ids(
+            provider_kind_rs, variant_to_id
+        )
         live_api_provider_ids = set(api_provider_ids(tui_config_rs).values())
-        expected_tables = {provider_table_name(provider_id) for provider_id in canonical_ids}
+        public_provider_ids = canonical_ids - LEGACY_PROVIDER_TOMBSTONE_IDS
+        expected_tables = {
+            provider_table_name(provider_id) for provider_id in public_provider_ids
+        }
+        runtime_tables = expected_tables | LEGACY_PROVIDER_TOMBSTONE_TABLES
 
         errors: list[str] = []
         errors += report_provider_enum_drift(canonical_ids, live_api_provider_ids)
+        errors += report_provider_kind_selector_contract(provider_kind_rs)
+        errors += report_tui_catalog_contract(tui_config_rs)
+        errors += report_tombstone_runtime_contract(
+            provider_kind_rs, tui_provider_readiness_rs, tui_lib_rs
+        )
+        errors += report_set(
+            "legacy provider identities in ProviderKind::ALL",
+            set(),
+            selectable_provider_ids & LEGACY_PROVIDER_SELECTION_IDS,
+        )
+        errors += report_set(
+            "documented selectable provider IDs",
+            selectable_provider_ids,
+            documented_selectable_provider_ids(providers_md),
+        )
         errors += report_huggingface_coverage(config_rs, tui_config_rs, providers_md)
+        errors += report_antigravity_public_contract(
+            providers_md,
+            configuration_md,
+            web_facts_lib,
+            web_facts_drift,
+            web_facts_generated,
+            readme_md,
+            config_example_toml,
+        )
         errors += report_set(
             "shipped provider rows",
-            canonical_ids,
+            public_provider_ids,
             shipped_provider_rows(providers_md),
         )
         errors += report_set(
             "provider TOML tables",
-            expected_tables,
+            runtime_tables,
             provider_tables(config_rs) - META_PROVIDER_TABLES,
         )
         errors += report_set(

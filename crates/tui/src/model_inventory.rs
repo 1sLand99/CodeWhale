@@ -480,7 +480,7 @@ fn provider_uses_oauth_cli(config: &Config, provider: ApiProvider) -> bool {
         ApiProvider::Xai => config
             .provider_config_for(provider)
             .and_then(|entry| entry.auth_mode.as_deref())
-            .is_some_and(crate::xai_oauth::auth_mode_uses_xai_oauth),
+            .is_some_and(crate::oauth::auth_mode_uses_xai_oauth),
         _ => false,
     }
 }

@@ -48,6 +48,7 @@ use crate::models::{
 
 use super::prepared::WireDialect;
 use super::role_placement::{RolePlacement, role_placement};
+use super::wire::{extract_sse_data_value, flush_sse_line, take_sse_line};
 use super::{
     DeepSeekClient, ERROR_BODY_MAX_BYTES, SSE_BACKPRESSURE_HIGH_WATERMARK,
     SSE_BACKPRESSURE_SLEEP_MS, SSE_MAX_LINES_PER_CHUNK, acquire_stream_buffer,
@@ -89,10 +90,7 @@ fn apply_openai_reasoning_effort(
     let is_openai_reasoning =
         provider == ApiProvider::Openai && model_is_openai_reasoning_family(model);
     let is_muse_spark = provider == ApiProvider::Meta
-        && matches!(
-            model_lower.as_str(),
-            "muse-spark-1.1" | "muse-spark-1.2" | "muse-spark-1.2-contributor"
-        );
+        && (model_lower == "muse-spark" || model_lower.starts_with("muse-spark-"));
     if !is_openai_reasoning && !is_muse_spark {
         return;
     }
@@ -1445,7 +1443,7 @@ impl DeepSeekClient {
                 // U+FFFD; genuine invalid bytes fail closed.
                 let mut lines_processed = 0usize;
                 loop {
-                    let line = match super::take_sse_line(&mut byte_buf) {
+                    let line = match take_sse_line(&mut byte_buf) {
                         Ok(Some(line)) => line,
                         Ok(None) => break,
                         Err(err) => {
@@ -1502,7 +1500,7 @@ impl DeepSeekClient {
                         continue;
                     }
 
-                    if let Some(data) = super::extract_sse_data_value(&line) {
+                    if let Some(data) = extract_sse_data_value(&line) {
                         // The SSE spec joins multiple `data:` fields within one
                         // event with '\n'; concatenating with no separator would
                         // yield `{…}{…}` and fail JSON parsing, silently dropping
@@ -1536,9 +1534,9 @@ impl DeepSeekClient {
             // Skipped after `[DONE]`, whose frame was already processed, and
             // after a fail-closed UTF-8 error.
             if !saw_done && !decode_failed {
-                match super::flush_sse_line(&mut byte_buf) {
+                match flush_sse_line(&mut byte_buf) {
                     Ok(Some(line)) => {
-                        if let Some(data) = super::extract_sse_data_value(&line) {
+                        if let Some(data) = extract_sse_data_value(&line) {
                             if !line_buf.is_empty() {
                                 line_buf.push('\n');
                             }
@@ -5862,6 +5860,42 @@ mod alias_thinking_detection_tests {
         assert_eq!(body["max_tokens"], json!(8192));
         assert!(body.get("max_completion_tokens").is_none());
         assert_eq!(body["reasoning_effort"], json!("xhigh"));
+    }
+
+    #[test]
+    fn provider_regression_5853_muse_family_preserves_reasoning_effort() {
+        for model in [
+            "muse-spark-1.2",
+            "muse-spark-1.3",
+            "muse-spark-1.3-contributor",
+            " MUSE-SPARK-1.3 ",
+        ] {
+            for (effort, wire) in [
+                ("low", "low"),
+                ("medium", "medium"),
+                ("high", "high"),
+                ("xhigh", "xhigh"),
+                ("max", "xhigh"),
+                ("ultra", "xhigh"),
+            ] {
+                let mut body = json!({"model": model});
+                apply_openai_reasoning_effort(&mut body, ApiProvider::Meta, model, Some(effort));
+                assert_eq!(body["reasoning_effort"], wire, "{model}, effort={effort}");
+            }
+        }
+        for (provider, model, effort) in [
+            (ApiProvider::Openai, "muse-spark-1.3", Some("high")),
+            (ApiProvider::Meta, "muse-glimmer-fixture", Some("high")),
+            (ApiProvider::Meta, "muse-sparks-fixture", Some("high")),
+            (ApiProvider::Meta, "muse-spark-1.3", None),
+        ] {
+            let mut body = json!({"model": model});
+            apply_openai_reasoning_effort(&mut body, provider, model, effort);
+            assert!(
+                body.get("reasoning_effort").is_none(),
+                "{provider:?}, {model}"
+            );
+        }
     }
 
     #[test]

@@ -14,6 +14,7 @@ pub mod provider;
 mod provider_defaults;
 mod provider_kind;
 pub mod provider_templates;
+pub mod resolve;
 pub mod route;
 pub mod settings_schema;
 pub mod setup_state;
@@ -83,9 +84,8 @@ pub use codewhale_secrets::Secrets;
 pub use external_credentials::{
     EXTERNAL_CREDENTIAL_CONSENT_VERSION, EXTERNAL_CREDENTIAL_READ_ONLY_SEMANTICS,
     ExternalCredentialAccess, ExternalCredentialConsentStatus, ExternalCredentialConsentToml,
-    ExternalCredentialReadGrant, ExternalCredentialSource, default_agy_credentials_path,
-    default_dsh_credentials_path, external_credential_consent_status, quote_os_path,
-    resolve_external_credential_path,
+    ExternalCredentialReadGrant, ExternalCredentialSource, default_dsh_credentials_path,
+    external_credential_consent_status, quote_os_path, resolve_external_credential_path,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -95,6 +95,7 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
 pub const CONFIG_FILE_NAME: &str = "config.toml";
 pub const PERMISSIONS_FILE_NAME: &str = "permissions.toml";
+pub const LEGACY_ANTIGRAVITY_TOMBSTONE_MESSAGE: &str = "Antigravity is a retired, non-runnable legacy provider. Clear Codewhale-owned legacy state with `codewhale auth clear --provider antigravity`; this does not alter Google or Antigravity sessions. For Gemini use provider `google` with `GEMINI_API_KEY`.";
 
 /// Secret-store routing metadata; never credential material.
 pub const API_KEYRING_SENTINEL: &str = "__KEYRING__";
@@ -447,8 +448,8 @@ pub struct ProvidersToml {
         alias = "gemini"
     )]
     pub google: ProviderConfigToml,
-    /// Google Antigravity (`agy`) — consent-gated credential import only;
-    /// sends fail closed until the cloud-code wire protocol exists.
+    /// Retired Antigravity configuration. This table exists only so old
+    /// Codewhale-owned state can deserialize and be cleared safely.
     #[serde(
         default,
         skip_serializing_if = "ProviderConfigToml::is_empty",
@@ -659,6 +660,7 @@ impl ProvidersToml {
             && ProviderKind::all()
                 .iter()
                 .all(|provider| self.for_provider(*provider).is_empty())
+            && self.antigravity.is_empty()
     }
 
     #[must_use]
@@ -1039,6 +1041,9 @@ fn set_provider_config_value(
     field: ProviderConfigField,
     value: &str,
 ) -> Result<()> {
+    if provider == ProviderKind::Antigravity {
+        bail!(LEGACY_ANTIGRAVITY_TOMBSTONE_MESSAGE);
+    }
     match field {
         ProviderConfigField::ApiKey => {
             let value = value.to_string();
@@ -2882,10 +2887,9 @@ impl ConfigToml {
         }
 
         if key == "telemetry" {
-            // #5441: telemetry resolves ON by default, so an unset file key
-            // must not read "key not found" (or as a bare file value) on a
-            // machine whose batches ship. Show the resolved consent with its
-            // source — a truth change, not a behaviour change.
+            // Report the resolved configuration preference even when the key is
+            // absent. The telemetry owner also preserves recorded opt-outs
+            // and fails closed when existing privacy state is unreadable.
             let (on, source) = resolved_telemetry_consent(self.telemetry);
             return Some(format!(
                 "{} ({})",
@@ -2938,6 +2942,11 @@ impl ConfigToml {
     }
 
     pub fn set_value(&mut self, key: &str, value: &str) -> Result<()> {
+        if parse_custom_provider_config_key(key).is_some_and(|(provider_id, _)| {
+            ProviderKind::parse_config_identity(provider_id) == Some(ProviderKind::Antigravity)
+        }) {
+            bail!(LEGACY_ANTIGRAVITY_TOMBSTONE_MESSAGE);
+        }
         if let Some((provider, field)) = parse_provider_config_key(key) {
             return set_provider_config_value(self, provider, field, value);
         }
@@ -2948,6 +2957,9 @@ impl ConfigToml {
         match key {
             "provider" => {
                 if let Some(provider) = ProviderKind::parse_config_identity(value) {
+                    if provider == ProviderKind::Antigravity {
+                        bail!(LEGACY_ANTIGRAVITY_TOMBSTONE_MESSAGE);
+                    }
                     self.provider = provider;
                     self.selected_provider_id = None;
                 } else {
@@ -3396,10 +3408,10 @@ impl ConfigToml {
             .clone()
             .or_else(|| env.log_level.clone())
             .or_else(|| self.log_level.clone());
-        // Telemetry consent resolves once, in the shared core behind
-        // [`resolved_telemetry_consent`], so the runtime and the
-        // doctor/config provenance surfaces cannot disagree about what is
-        // shipping (#5441). The comments that matter live there: the
+        // The telemetry preference resolves once in the shared core behind
+        // [`resolved_telemetry_consent`]. The telemetry owner also checks old
+        // durable declines and unreadable privacy state. The
+        // comments that matter live there: the
         // environment/file/default chain, and why every kill switch is a
         // floor (`telemetry = false` persisted in the file is the *persistent*
         // off switch; an explicit env "off", an unreadable env value, or a
@@ -3515,8 +3527,8 @@ fn merge_project_provider_config(target: &mut ProviderConfigToml, source: &Provi
 /// Where an enabled session's batches go when nobody has said otherwise.
 ///
 /// The first-party ingest service — a Cloudflare Worker that appends to Workers
-/// Analytics Engine and stores nothing else. See `docs/TELEMETRY.md` for what a
-/// batch contains and `telemetry-ingest/` for the handler.
+/// Analytics Engine, with an optional disclosed PostHog sink. See
+/// `docs/TELEMETRY.md` for what a batch contains and `telemetry-ingest/` for the handler.
 ///
 /// This is a *default*, not a floor, and it changes nothing about permission:
 /// `CODEWHALE_TELEMETRY=0`, `telemetry = false`, and a recorded decline all
@@ -3582,7 +3594,7 @@ pub enum TelemetrySource {
     Env,
     /// `telemetry = …` written to the config file.
     Config,
-    /// Nobody said anything; the shipped default (`on`) applies silently.
+    /// Nobody said anything; the shipped preference is on.
     Default,
 }
 
@@ -3617,7 +3629,7 @@ fn read_telemetry_env() -> (Option<bool>, bool) {
         Ok(value) => (Some(value), false),
         Err(_) => {
             tracing::warn!(
-                "Invalid CODEWHALE_TELEMETRY/DEEPSEEK_TELEMETRY value '{raw}'; expected one of \
+                "Invalid CODEWHALE_TELEMETRY/DEEPSEEK_TELEMETRY value; expected one of \
                  1/0, true/false, yes/no, on/off, enabled/disabled. Telemetry is forced off."
             );
             (None, true)
@@ -3634,7 +3646,8 @@ fn read_telemetry_env() -> (Option<bool>, bool) {
 /// unreadable one, or a dispatcher floor), then the file, then the shipped
 /// default of `on`; a persisted `telemetry = false` is a floor no later
 /// term can climb over. The runtime resolver calls this directly, so the
-/// surfaces and the shipped batches can never disagree.
+/// preference surfaces agree. The telemetry owner also checks historical
+/// durable declines and fails closed on unreadable privacy state.
 #[must_use]
 pub fn resolved_telemetry_consent(file_telemetry: Option<bool>) -> (bool, TelemetrySource) {
     let (env_telemetry, env_invalid) = read_telemetry_env();
@@ -5445,6 +5458,73 @@ pub fn scrub_plaintext_api_keys_from_config_backup(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Remove only retired Antigravity state from Codewhale's one-time config
+/// backup. This never resolves, reads, writes, or revokes any external Google
+/// or Antigravity session; it edits only the checked sibling `.bak` file owned
+/// by Codewhale.
+pub fn scrub_legacy_antigravity_from_config_backup(path: &Path) -> Result<()> {
+    let backup = checked_config_backup_path(path)?;
+    if !backup.exists() {
+        return Ok(());
+    }
+
+    let raw = read_checked_toml_file(&backup, "config backup")?;
+    let scrubbed = config_toml_without_legacy_antigravity(&raw).with_context(|| {
+        format!(
+            "failed to clear retired provider state from config backup {}",
+            backup.display()
+        )
+    })?;
+    if scrubbed != raw {
+        persistence::atomic_write(&backup, scrubbed.as_bytes()).with_context(|| {
+            format!(
+                "failed to write retired-provider-free config backup {}",
+                backup.display()
+            )
+        })?;
+    }
+    Ok(())
+}
+
+fn config_toml_without_legacy_antigravity(raw: &str) -> Result<String> {
+    let mut document = raw.parse::<toml_edit::DocumentMut>().map_err(|_| {
+        anyhow::anyhow!(
+            "failed to parse config TOML while clearing retired provider state; file contents were omitted"
+        )
+    })?;
+    let root = document.as_table_mut();
+
+    if root
+        .get("provider")
+        .and_then(toml_edit::Item::as_str)
+        .is_some_and(is_legacy_antigravity_name)
+    {
+        root.remove("provider");
+    }
+    if let Some(fallbacks) = root
+        .get_mut("fallback_providers")
+        .and_then(toml_edit::Item::as_array_mut)
+    {
+        fallbacks.retain(|value| !value.as_str().is_some_and(is_legacy_antigravity_name));
+        if fallbacks.is_empty() {
+            root.remove("fallback_providers");
+        }
+    }
+    if let Some(providers) = root
+        .get_mut("providers")
+        .and_then(toml_edit::Item::as_table_like_mut)
+    {
+        providers.remove("antigravity");
+        providers.remove("agy");
+    }
+
+    Ok(document.to_string())
+}
+
+fn is_legacy_antigravity_name(value: &str) -> bool {
+    value.eq_ignore_ascii_case("antigravity") || value.eq_ignore_ascii_case("agy")
+}
+
 fn write_one_time_config_backup(path: &Path) -> Result<()> {
     let backup = checked_config_backup_path(path)?;
     if backup.exists() {
@@ -6615,6 +6695,32 @@ fn redact_toml_value_for_display(key: &str, value: &toml::Value) -> String {
     redact_toml_value_for_display_inner(key, false, value).to_string()
 }
 
+impl ConfigToml {
+    /// Redacted TOML rendering of the effective config for `config dump`.
+    /// Structure is preserved; strings under sensitive key names (api_key,
+    /// token, secret, … — see `is_sensitive_config_key`, nested tables
+    /// inherit sensitivity from their ancestors) are redacted. Redaction is
+    /// name-based: an unrecognized key holding a secret-looking value would
+    /// pass through, so pasting dump output still deserves a glance.
+    #[must_use]
+    pub fn redacted_toml_value(&self) -> toml::Value {
+        let value =
+            toml::Value::try_from(self).expect("ConfigToml derives Serialize, so this holds");
+        match value {
+            toml::Value::Table(table) => toml::Value::Table(
+                table
+                    .into_iter()
+                    .map(|(key, value)| {
+                        let redacted = redact_toml_value_for_display_inner(&key, false, &value);
+                        (key, redacted)
+                    })
+                    .collect(),
+            ),
+            other => other,
+        }
+    }
+}
+
 fn toml_value_as_u64(value: &toml::Value) -> Option<u64> {
     match value {
         toml::Value::Integer(value) => u64::try_from(*value).ok(),
@@ -6890,8 +6996,6 @@ struct EnvRuntimeOverrides {
     mistral_model: Option<String>,
     google_base_url: Option<String>,
     google_model: Option<String>,
-    antigravity_base_url: Option<String>,
-    antigravity_model: Option<String>,
     telecomjs_base_url: Option<String>,
     telecomjs_model: Option<String>,
     edenai_base_url: Option<String>,
@@ -7216,12 +7320,6 @@ impl EnvRuntimeOverrides {
             xai_model: std::env::var("XAI_MODEL")
                 .ok()
                 .filter(|v| !v.trim().is_empty()),
-            antigravity_base_url: std::env::var("ANTIGRAVITY_BASE_URL")
-                .ok()
-                .filter(|v| !v.trim().is_empty()),
-            antigravity_model: std::env::var("ANTIGRAVITY_MODEL")
-                .ok()
-                .filter(|v| !v.trim().is_empty()),
             google_base_url: std::env::var("GOOGLE_BASE_URL")
                 .ok()
                 .filter(|v| !v.trim().is_empty())
@@ -7341,7 +7439,7 @@ impl EnvRuntimeOverrides {
             ProviderKind::Xai => self.xai_base_url.clone(),
             ProviderKind::Mistral => self.mistral_base_url.clone(),
             ProviderKind::Google => self.google_base_url.clone(),
-            ProviderKind::Antigravity => self.antigravity_base_url.clone(),
+            ProviderKind::Antigravity => None,
             ProviderKind::Telecomjs => self.telecomjs_base_url.clone(),
             ProviderKind::Edenai => self.edenai_base_url.clone(),
             ProviderKind::Concentrate => self.concentrate_base_url.clone(),
@@ -7389,7 +7487,7 @@ impl EnvRuntimeOverrides {
             ProviderKind::Xai => self.xai_model.clone(),
             ProviderKind::Mistral => self.mistral_model.clone(),
             ProviderKind::Google => self.google_model.clone(),
-            ProviderKind::Antigravity => self.antigravity_model.clone(),
+            ProviderKind::Antigravity => None,
             ProviderKind::Telecomjs => self.telecomjs_model.clone(),
             ProviderKind::Edenai => self.edenai_model.clone(),
             ProviderKind::Concentrate => self.concentrate_model.clone(),

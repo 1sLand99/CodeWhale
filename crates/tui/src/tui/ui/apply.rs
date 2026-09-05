@@ -166,11 +166,19 @@ pub(crate) fn apply_engine_error_to_app(
     let severity = envelope.severity;
     let turn_was_in_progress =
         app.is_loading || matches!(app.runtime_turn_status.as_deref(), Some("in_progress"));
+    // A recoverable error can precede tool decisions in the same turn. Keep
+    // routing those events until TurnComplete; marking the UI idle here drops
+    // ApprovalRequired and leaves the engine waiting for an invisible decision.
+    // An idle or locally cancelled turn must never be reactivated by an error.
+    let turn_remains_active =
+        recoverable && turn_was_in_progress && !app.suppress_stream_events_until_turn_complete;
     streaming_thinking::finalize_current(app);
     if turn_was_in_progress {
         app.finalize_streaming_assistant_as_interrupted();
         app.finalize_active_cell_as_interrupted();
-        app.runtime_turn_status = Some("failed".to_string());
+        if !turn_remains_active {
+            app.runtime_turn_status = Some("failed".to_string());
+        }
     }
     app.streaming_state.reset();
     app.streaming_message_index = None;
@@ -195,8 +203,10 @@ pub(crate) fn apply_engine_error_to_app(
         message: message.clone(),
         severity,
     });
-    app.is_loading = false;
-    app.dispatch_started_at = None;
+    app.is_loading = turn_remains_active;
+    if !turn_remains_active {
+        app.dispatch_started_at = None;
+    }
     app.turn_error_posted = true;
     if matches!(
         envelope.category,
@@ -779,11 +789,6 @@ pub(crate) async fn apply_model_picker_choice(
         }
         if !model_is_auto {
             apply_picker_effort_choice(app, engine_handle, effort, previous_effort).await;
-            app.fleet_roster_stale |= crate::fleet::members::auto_enroll_fleet_model(
-                &app.workspace,
-                app.provider_identity_for_persistence(),
-                &app.model,
-            );
             if save_as_startup_default {
                 app.status_message = Some(app.save_live_route_as_startup_default());
             }
@@ -879,13 +884,6 @@ pub(crate) async fn apply_model_picker_choice(
     // writes a startup default.
     let route_provider = app.provider_identity_for_persistence().to_string();
     app.note_session_route_change(&route_provider, &resolved_model);
-    if !model_is_auto {
-        app.fleet_roster_stale |= crate::fleet::members::auto_enroll_fleet_model(
-            &app.workspace,
-            &route_provider,
-            &resolved_model,
-        );
-    }
 
     if model_changed {
         apply_model_and_compaction_update(
@@ -1155,9 +1153,6 @@ pub(crate) async fn apply_command_result(
     engine_handle: &mut EngineHandle,
     task_manager: &SharedTaskManager,
     config: &mut Config,
-    #[cfg_attr(not(feature = "web"), allow(unused_variables))] web_config_session: &mut Option<
-        WebConfigSession,
-    >,
     result: commands::CommandResult,
 ) -> Result<bool> {
     // These two actions await participant inference inline on the UI event
@@ -1254,6 +1249,12 @@ pub(crate) async fn apply_command_result(
                     content: success_message.clone(),
                 });
                 app.status_message = Some(success_message);
+                // A loaded session is the working screen. The launch card's
+                // recent rows reach here through `/resume`-shaped dispatch;
+                // leaving the launch stage visible over the restored
+                // transcript is what made those rows read as dead (#4).
+                app.launch.visible = false;
+                app.launch.status = None;
             }
             AppAction::SyncSession {
                 session_id,
@@ -1778,73 +1779,6 @@ pub(crate) async fn apply_command_result(
             AppAction::SetAdvisorEnabled { enabled } => {
                 let _ = engine_handle.send(Op::SetAdvisorEnabled { enabled }).await;
             }
-            AppAction::OpenConfigEditor(mode) => match mode {
-                ConfigUiMode::Native => {
-                    if app.view_stack.top_kind() != Some(ModalKind::Config) {
-                        app.view_stack.push(ConfigView::new_for_app(app));
-                    }
-                }
-                ConfigUiMode::Tui => {
-                    pause_terminal(
-                        terminal,
-                        app.use_alt_screen(),
-                        app.use_mouse_capture,
-                        app.use_bracketed_paste,
-                    )?;
-                    let editor_result = config_ui::run_tui_editor(app, config)
-                        .and_then(|doc| config_ui::apply_document(doc, app, config, true));
-                    resume_terminal(
-                        terminal,
-                        app.use_alt_screen(),
-                        app.use_mouse_capture,
-                        app.use_bracketed_paste,
-                        app.synchronized_output_enabled,
-                    )?;
-                    match editor_result {
-                        Ok(outcome) => {
-                            if outcome.requires_engine_sync {
-                                apply_model_and_compaction_update(
-                                    engine_handle,
-                                    app.compaction_config(),
-                                    app.mode,
-                                    app.active_route_limits,
-                                )
-                                .await;
-                            }
-                            app.add_message(HistoryCell::System {
-                                content: outcome.final_message.clone(),
-                            });
-                            app.status_message = Some(outcome.final_message);
-                        }
-                        Err(err) => {
-                            app.add_message(HistoryCell::System {
-                                content: format!("Config UI failed: {err}"),
-                            });
-                        }
-                    }
-                }
-                ConfigUiMode::Web => {
-                    #[cfg(feature = "web")]
-                    {
-                        let session = config_ui::start_web_editor(app, config).await?;
-                        let url = format!("http://{}", session.addr);
-                        let open_err = config_ui::open_browser(&url).err();
-                        if let Some(err) = open_err {
-                            app.add_message(HistoryCell::System {
-                                content: format!("Failed to open browser automatically: {err}"),
-                            });
-                        }
-                        app.status_message = Some(format!("web ui listen on: {url}"));
-                        *web_config_session = Some(session);
-                    }
-                    #[cfg(not(feature = "web"))]
-                    {
-                        app.add_message(HistoryCell::System {
-                            content: "This build does not include the web config UI.".to_string(),
-                        });
-                    }
-                }
-            },
             AppAction::OpenConfigView => {
                 if app.view_stack.top_kind() != Some(ModalKind::Config) {
                     app.view_stack.push(ConfigView::new_for_app(app));
@@ -1961,6 +1895,9 @@ pub(crate) async fn apply_command_result(
                         );
                     }
                 }
+            }
+            AppAction::EditProjectHooks => {
+                edit_project_hooks_from_tui(terminal, app, config);
             }
             AppAction::StartXaiDeviceLogin => {
                 let _switched =
@@ -2204,6 +2141,8 @@ pub(crate) async fn apply_command_result(
                 let request = NewTaskRequest {
                     prompt: prompt.clone(),
                     model: Some(app.model.clone()),
+                    model_provider: Some(app.api_provider.as_str().to_string()),
+                    model_provider_id: Some(app.provider_identity_for_persistence().to_string()),
                     workspace: Some(app.workspace.clone()),
                     mode: Some(task_mode_label(app.mode).to_string()),
                     allow_shell: Some(app.allow_shell),
@@ -2292,7 +2231,8 @@ pub(crate) async fn apply_command_result(
                 refresh_active_task_panel(app, task_manager).await;
             }
             AppAction::Automation(action) => {
-                crate::tui::automation_routing::handle_action(app, action, task_manager).await;
+                crate::tui::automation_routing::handle_action(app, config, action, task_manager)
+                    .await;
             }
             AppAction::ShellJob(action) => {
                 handle_shell_job_action(app, action);
@@ -2390,6 +2330,94 @@ pub(crate) async fn apply_command_result(
     }
 
     Ok(false)
+}
+
+/// Open this workspace's `.codewhale/hooks.toml` in `$EDITOR`.
+///
+/// The Hooks screen could only ever be read: it listed what was configured
+/// and offered no way to configure anything. Rather than grow a second
+/// authority over hook definitions inside the TUI, this hands the file to the
+/// editor the user already has, seeds it with a commented template the first
+/// time, and reloads the hook set on return so the screen reflects the edit
+/// immediately.
+fn edit_project_hooks_from_tui(terminal: &mut AppTerminal, app: &mut App, config: &Config) {
+    let dir = app.workspace.join(".codewhale");
+    let path = dir.join("hooks.toml");
+    if !path.exists()
+        && let Err(error) = std::fs::create_dir_all(&dir)
+            .and_then(|()| std::fs::write(&path, crate::hooks::PROJECT_HOOKS_TEMPLATE))
+    {
+        app.push_status_toast(
+            format!("Could not create {}: {error}", path.display()),
+            StatusToastLevel::Warning,
+            Some(8_000),
+        );
+        return;
+    }
+
+    let outcome = crate::tui::external_editor::spawn_editor_for_path(
+        terminal,
+        app.use_alt_screen(),
+        app.use_mouse_capture,
+        app.use_bracketed_paste,
+        &path,
+    );
+    app.needs_redraw = true;
+
+    match outcome {
+        Ok(crate::tui::external_editor::EditorOutcome::Edited(_)) => {
+            app.hooks = app.hooks.rebind(
+                crate::hooks::HooksConfig::load_with_project_and_plugins(
+                    config.hooks_config(),
+                    &app.workspace,
+                    Some(app.plugin_registry.as_ref()),
+                ),
+                app.workspace.clone(),
+            );
+            app.runtime_services.hook_executor = Some(std::sync::Arc::new(app.hooks.clone()));
+            let reloaded = app.hooks.config();
+            let mut content = format!(
+                "Reloaded hooks from {} — {} configured.",
+                path.display(),
+                reloaded.hooks.len()
+            );
+            // Project hooks are executable repository configuration; an
+            // untrusted workspace parses them and then ignores them, which is
+            // a silent no-op unless it is said out loud.
+            if !crate::hooks::workspace_allows_project_hooks(&app.workspace) {
+                content.push_str(
+                    " This workspace is not trusted, so project hooks are read but not run \
+                     (`/trust` to allow them).",
+                );
+            }
+            if !reloaded.problems.is_empty() {
+                content.push_str(&format!(
+                    " {} entr{} rejected — see the Hooks screen.",
+                    reloaded.problems.len(),
+                    if reloaded.problems.len() == 1 {
+                        "y"
+                    } else {
+                        "ies"
+                    }
+                ));
+            }
+            app.add_message(HistoryCell::System { content });
+        }
+        Ok(crate::tui::external_editor::EditorOutcome::Unchanged) => {
+            app.push_status_toast(
+                "Hooks unchanged.".to_string(),
+                StatusToastLevel::Info,
+                Some(4_000),
+            );
+        }
+        Ok(crate::tui::external_editor::EditorOutcome::Cancelled) | Err(_) => {
+            app.push_status_toast(
+                format!("Editor did not save {}", path.display()),
+                StatusToastLevel::Warning,
+                Some(6_000),
+            );
+        }
+    }
 }
 
 pub(crate) fn apply_workspace_runtime_state(app: &mut App, config: &Config, workspace: PathBuf) {
@@ -3148,18 +3176,16 @@ pub(crate) async fn apply_provider_picker_setup_confirmed(
     switched
 }
 
-pub(crate) async fn apply_codewhale_owned_xai_login(
+async fn apply_codewhale_owned_login(
     app: &mut App,
     engine_handle: &mut EngineHandle,
     config: &mut Config,
-    pending: crate::xai_oauth::PendingXaiDeviceLogin,
+    provider: ApiProvider,
+    pending: crate::oauth::PendingOAuthLogin,
     status_prefix: &str,
+    login_kind: &str,
 ) -> bool {
-    match crate::xai_oauth::activate_device_login(
-        pending,
-        app.config_path.as_deref(),
-        Some(&mut *config),
-    ) {
+    match crate::oauth::activate_login(pending, app.config_path.as_deref(), Some(&mut *config)) {
         Ok(activation) => {
             app.status_message = Some(format!(
                 "{status_prefix}; activated {} via {}",
@@ -3171,49 +3197,53 @@ pub(crate) async fn apply_codewhale_owned_xai_login(
         Err(err) => {
             app.add_message(HistoryCell::System {
                 content: format!(
-                    "Failed to finalize {} device login: {err:#}\nProvider unchanged.",
-                    ApiProvider::Xai.as_str()
+                    "Failed to finalize {} {login_kind}: {err:#}\nProvider unchanged.",
+                    provider.as_str()
                 ),
             });
             return false;
         }
     }
 
-    switch_provider(app, engine_handle, config, ApiProvider::Xai, None).await
+    switch_provider(app, engine_handle, config, provider, None).await
+}
+
+pub(crate) async fn apply_codewhale_owned_xai_login(
+    app: &mut App,
+    engine_handle: &mut EngineHandle,
+    config: &mut Config,
+    pending: crate::oauth::PendingOAuthLogin,
+    status_prefix: &str,
+) -> bool {
+    apply_codewhale_owned_login(
+        app,
+        engine_handle,
+        config,
+        ApiProvider::Xai,
+        pending,
+        status_prefix,
+        "device login",
+    )
+    .await
 }
 
 pub(crate) async fn apply_codewhale_owned_chatgpt_login(
     app: &mut App,
     engine_handle: &mut EngineHandle,
     config: &mut Config,
-    pending: crate::chatgpt_oauth::PendingChatgptPkceLogin,
+    pending: crate::oauth::PendingOAuthLogin,
     status_prefix: &str,
 ) -> bool {
-    match crate::chatgpt_oauth::activate_pkce_login(
+    apply_codewhale_owned_login(
+        app,
+        engine_handle,
+        config,
+        ApiProvider::OpenaiCodex,
         pending,
-        app.config_path.as_deref(),
-        Some(&mut *config),
-    ) {
-        Ok(activation) => {
-            app.status_message = Some(format!(
-                "{status_prefix}; activated {} via {}",
-                codewhale_config::quote_os_path(&activation.auth_path),
-                codewhale_config::quote_os_path(&activation.config_path)
-            ));
-            app.api_key_env_only = false;
-        }
-        Err(err) => {
-            app.add_message(HistoryCell::System {
-                content: format!(
-                    "Failed to finalize {} ChatGPT sign-in: {err:#}\nProvider unchanged.",
-                    ApiProvider::OpenaiCodex.as_str()
-                ),
-            });
-            return false;
-        }
-    }
-
-    switch_provider(app, engine_handle, config, ApiProvider::OpenaiCodex, None).await
+        status_prefix,
+        "ChatGPT sign-in",
+    )
+    .await
 }
 
 /// `/auth chatgpt-revoke`. The remote revoke is one blocking HTTP round trip
@@ -3223,7 +3253,11 @@ pub(crate) async fn apply_codewhale_owned_chatgpt_login(
 pub(crate) async fn run_chatgpt_revoke_from_tui(app: &mut App, config: &mut Config) {
     let config_path = app.config_path.clone();
     let outcome = tokio::task::spawn_blocking(move || {
-        crate::chatgpt_oauth::revoke_owned_login(config_path.as_deref(), None)
+        crate::oauth::revoke_owned_login(
+            crate::oauth::OAuthProvider::Chatgpt,
+            config_path.as_deref(),
+            None,
+        )
     })
     .await
     .map_err(|err| anyhow::anyhow!("ChatGPT revoke task was lost: {err}"))

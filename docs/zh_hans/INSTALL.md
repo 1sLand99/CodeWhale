@@ -1,14 +1,14 @@
 # 安装 Codewhale
 
-> 本文翻译自英文版 [INSTALL.md](../INSTALL.md)，与英文修订 `1563ce351`（2026-08-18）同步。
+> 本文依据英文版 [INSTALL.md](../INSTALL.md)。GitHub 优先安装与更新说明于 2026-09-04 更新；其余平台说明沿用现有译文。
 
 本文涵盖所有受支持的安装方式，以及最常见的"没装上"失败场景，包括 **Linux ARM64** 和其他不太常见的平台。
 
 如果你只想看精简的版本，请看[主 README](../../README.md#install) 或[简体中文 README](../../README.zh-CN.md#安装)。
 
-本分支描述的是 **v0.9.11 源码候选版**。使用 `latest` 的安装命令会解析到最新已发布的包或 GitHub Release，这可能落后于源码候选版。候选版只有在对应的包、标签、校验和与发布资源齐备之后，才算正式发布的安装。
+本分支描述的是 **v0.9.12 源码候选版**。使用 `latest` 的安装命令会解析到最新已发布的包或 GitHub Release，这可能落后于源码候选版。候选版只有在对应的包、标签、校验和与发布资源齐备之后，才算正式发布的安装。
 
-在 macOS 和 Linux 上，网站安装器是最短的安装/更新路径：
+推荐使用官方 GitHub Releases。在 macOS 和 Linux 上首次安装：
 
 ```bash
 curl -fsSL https://codewhale.net/install.sh | sh
@@ -16,34 +16,64 @@ curl -fsSL https://codewhale.net/install.sh | sh
 
 它会下载匹配的 `codewhale` 和 `codew` 发布二进制，对照 `codewhale-artifacts-sha256.txt` 校验，默认安装到 `~/.local/bin`，并暴露 `codew` 便捷命令。
 
+已有的直接安装使用 `codewhale update --check` 和 `codewhale update`。更新器先使用
+GitHub；受支持的 Linux x64 平台仅在 GitHub 校验清单失败或无法覆盖该平台后才尝试 CNB。
+每次清单请求最多 10 秒、最多三次尝试。`CODEWHALE_VERSION` 指定镜像版本；
+`DEEPSEEK_TUI_VERSION` 和 `DEEPSEEK_VERSION` 仍作为兼容别名。
+镜像和显式版本也不能绕过版本检查：例如源码 v0.9.12
+不会被已发布的 v0.9.11 覆盖。
+
+npm 和 Cargo 是次要打包方式。安装器不使用自动 sudo，也不覆盖不同的已有文件或符号链接；
+包管理器继续管理自己的可执行文件。更新器会保留指向当前二进制的符号链接，并拒绝覆盖
+内容不同的同目录命令。遇到旧版分离的 dispatcher/TUI 或多个安装时，选择新的空目录：
+
+```bash
+mkdir -p "$HOME/.local"
+codewhale_install_dir="$(mktemp -d "$HOME/.local/codewhale-release.XXXXXX")"
+curl -fsSL https://codewhale.net/install.sh | CODEWHALE_INSTALL_DIR="$codewhale_install_dir" sh
+"$codewhale_install_dir/codewhale" --version
+export PATH="$codewhale_install_dir:$PATH"
+hash -r
+command -v codewhale codew
+```
+
+验证路径和版本后，将所选目录放到 shell 配置的 PATH 最前面。今后使用该目录中
+`codewhale` 的完整路径运行 `update`。Windows 使用官方 GitHub Release 安装器或压缩包，
+并通过 `Get-Command codewhale, codew -All` 检查路径。完整迁移说明见
+[英文安装指南](../INSTALL.md#recommended-official-github-releases)。
+
 ---
 
 ## 1. 支持平台
 
-已发布的 Codewhale 版本会为受支持的平台/架构组合提供配套的 `codewhale` 和 `codew` 预编译二进制。下表是 v0.9.11 候选版的预期矩阵；Android/Termux 为预览状态，等待真机 QA。Linux ARM64 自 v0.8.8 起可用。Linux RISC-V 预编译暂时暂停，因为锁定的 `rquickjs-sys` 依赖没有提供 `riscv64gc-unknown-linux-gnu` 绑定。
+2026-09-04 检查的[最新稳定版 v0.9.11](https://github.com/Hmbown/CodeWhale/releases/tag/v0.9.11)
+包含 Linux、macOS、Windows 的 x64/arm64 资源及 Android arm64 资源。
+资源存在不等于真机验收；下表的包管理器支持和静态构建说明仍属于 v0.9.12 源码候选版。
 
-| 平台 | 架构 | npm install | `cargo install` | GitHub 发布资源 |
-| ------------ | ------------ | :---------: | :-------------: | ----------------------------------------------------- |
-| Linux | x64 (x86_64) | ✅ | ✅ | `codewhale-linux-x64`, `codew-linux-x64` |
-| Linux | arm64 | ✅ | ✅ | `codewhale-linux-arm64`, `codew-linux-arm64` |
-| Android / Termux | arm64 (aarch64) | ⚠️⁴ 预览版 | ⚠️⁴ 预览版 | `codewhale-android-arm64.tar.gz` 发布时的预览压缩包 |
-| Linux | riscv64 | ❌¹ | ❌³ | 暂时不支持，待上游绑定落地 |
-| macOS | x64 | ✅ | ✅ | `codewhale-macos-x64`, `codew-macos-x64` |
-| macOS | arm64 (M 系列) | ✅ | ✅ | `codewhale-macos-arm64`, `codew-macos-arm64` |
-| Windows | x64 | ✅ | ✅ | `codewhale-windows-x64.exe`, `codew-windows-x64.exe` |
-| Windows | arm64 | ✅ | ✅ | `codewhale-windows-arm64.exe`, `codew-windows-arm64.exe` |
-| Linux x64 或 arm64 上的 musl（Alpine） | 原生架构 | ✅（静态） | ✅ | 匹配的静态 Linux 资源 |
-| 其他 Linux（其他架构上的 musl） | — | ❌¹ | ✅² | 从源码构建 |
-| FreeBSD 14+ / OpenBSD | x64, arm64 | ❌ | ✅² | `cargo install codewhale-cli --locked`（无预编译；见 § FreeBSD） |
+已发布的 Codewhale 版本会为受支持的平台/架构组合提供配套的 `codewhale` 和 `codew` 预编译二进制。下表是 v0.9.12 候选版的预期矩阵；Android/Termux 为预览状态，等待真机 QA。Linux ARM64 自 v0.8.8 起可用。Linux RISC-V 预编译暂时暂停，因为锁定的 `rquickjs-sys` 依赖没有提供 `riscv64gc-unknown-linux-gnu` 绑定。
+
+| 平台 | 架构 | GitHub 发布资源 | npm install | `cargo install` |
+| ------------ | ------------ | ----------------------------------------------------- | :---------: | :-------------: |
+| Linux | x64 (x86_64) | `codewhale-linux-x64`, `codew-linux-x64` | ✅ | ✅ |
+| Linux | arm64 | `codewhale-linux-arm64`, `codew-linux-arm64` | ✅ | ✅ |
+| Android / Termux | arm64 (aarch64) | `codewhale-android-arm64.tar.gz`（v0.9.11 已发布；真机支持仍为预览） | ⚠️⁴ 预览版 | ⚠️⁴ 预览版 |
+| Linux | riscv64 | 暂时不支持，待上游绑定落地 | ❌¹ | ❌³ |
+| macOS | x64 | `codewhale-macos-x64`, `codew-macos-x64` | ✅ | ✅ |
+| macOS | arm64 (M 系列) | `codewhale-macos-arm64`, `codew-macos-arm64` | ✅ | ✅ |
+| Windows | x64 | `codewhale-windows-x64.exe`, `codew-windows-x64.exe` | ✅ | ✅ |
+| Windows | arm64 | `codewhale-windows-arm64.exe`, `codew-windows-arm64.exe` | ✅ | ✅ |
+| Linux x64 或 arm64 上的 musl（Alpine） | 原生架构 | 匹配的静态 Linux 资源 | ✅（静态） | ✅ |
+| 其他 Linux（其他架构上的 musl） | — | 从源码构建 | ❌¹ | ✅² |
+| FreeBSD 14+ / OpenBSD | x64, arm64 | `cargo install codewhale-cli --locked`（无预编译；见 § FreeBSD） | ❌ | ✅² |
 
 ¹ npm 包会以明确错误退出，并引导你到这里。
 ² 前提是你的工具链能编译较新的 Rust workspace；见下文[从源码构建](#7-从源码构建)。
 ³ RISC-V 源码构建目前需要上游 `rquickjs-sys` 的 RISC-V 绑定，或启用 bindgen 的依赖构建。
-⁴ v0.9.11 源码候选版的 npm 包装器能识别 Android arm64，并解析匹配的 `codewhale` 和 `codew` Android 资源。npm 安装仅对 GitHub Release 已发布的、匹配的包版本有效。在 #4236 和 #4242 跟踪的真机编译、启动、审批、文件工具与更新检查完成之前，Android/Termux 路径仍为预览。
+⁴ v0.9.12 源码候选版的 npm 包装器能识别 Android arm64，并解析匹配的 `codewhale` 和 `codew` Android 资源。npm 安装仅对 GitHub Release 已发布的、匹配的包版本有效。在 #4236 和 #4242 跟踪的真机编译、启动、审批、文件工具与更新检查完成之前，Android/Termux 路径仍为预览。
 
 Android / Termux 与 Linux arm64 不是同一个目标。不要在 Termux 里安装 Linux 的 `codewhale-linux-arm64` 压缩包；当某个发布版或候选版发布了 Termux 专用的 Android 压缩包时请使用它，或在 Termux 内从源码构建。
 
-Linux 的 **x64 和 arm64** v0.9.11 候选版资源是**静态 musl 构建**。x64 发布路径自 v0.8.65 起使用 musl；v0.9.6 将同样的构建与静态启动检查扩展到 arm64。这些二进制没有 glibc 依赖，可在匹配的架构上跨 Ubuntu、Debian、RHEL/CentOS 和 Alpine/musl 运行。SQLite 通过 `rusqlite` 内置，因此无需单独的 `libsqlite3` 运行时包。
+Linux 的 **x64 和 arm64** v0.9.12 候选版资源是**静态 musl 构建**。x64 发布路径自 v0.8.65 起使用 musl；v0.9.6 将同样的构建与静态启动检查扩展到 arm64。这些二进制没有 glibc 依赖，可在匹配的架构上跨 Ubuntu、Debian、RHEL/CentOS 和 Alpine/musl 运行。SQLite 通过 `rusqlite` 内置，因此无需单独的 `libsqlite3` 运行时包。
 
 ### Linux ARM64 可移植性
 
@@ -54,7 +84,7 @@ Ubuntu 22.04 自带 glibc 2.35，因此，那些较老的 arm64 二进制可能�
 version `GLIBC_2.39' not found
 ```
 
-npm 包装器、`codewhale update` 和 Unix 压缩包安装器对较旧版本仍保留 GNU 二进制预检查。v0.9.11 arm64 候选版改用 `aarch64-unknown-linux-musl`，因此没有 `GLIBC_*` 最低要求。如果你要在较旧的 arm64 发行版上安装早期版本，请使用：
+npm 包装器、`codewhale update` 和 Unix 压缩包安装器对较旧版本仍保留 GNU 二进制预检查。v0.9.12 arm64 候选版改用 `aarch64-unknown-linux-musl`，因此没有 `GLIBC_*` 最低要求。如果你要在较旧的 arm64 发行版上安装早期版本，请使用：
 
 ```bash
 cargo install codewhale-cli --locked   # 安装 codewhale
@@ -156,7 +186,7 @@ sha256sum -c codewhale-artifacts-sha256.txt --ignore-missing
 
 ## 3. 通过 npm 安装
 
-npm 是推荐的安装方式（Node 18+；包装器适用于 v0.8.56 及更高版本）。它安装的是 注册表（registry） 上最新发布的版本，而不是未发布的源码候选版。
+npm 是次要安装方式（Node 18+；包装器适用于 v0.8.56 及更高版本）。它安装的是 注册表（registry） 上最新发布的版本，而不是未发布的源码候选版。
 
 ```bash
 npm install -g codewhale
@@ -510,7 +540,7 @@ codewhale --version
 
 命令默认安装到 `~/.cargo/bin/`；请确保该目录在你的 `PATH` 上。
 
-### FreeBSD 14+（解决 #1097）
+### FreeBSD 14+ 源码构建替代方案（#1097）
 
 FreeBSD 没有预编译的 GitHub Release 资源——`npm install -g codewhale` 会故意失败，提示 `Unsupported platform: freebsd` 并指向 Cargo。从源码安装：
 
@@ -675,27 +705,20 @@ codewhale completion elvish >> ~/.config/elvish/rc.elv
 
 ### `Unsupported architecture: arm64 on platform linux`
 
-你处于 v0.8.8 之前的版本，该版本不发布 Linux ARM64 二进制。要么升级（`npm i -g codewhale@latest`），要么按[第 4 节](#4-通过-cargo-安装任何-tier-1-rust-目标)使用 `cargo install`。
+你处于 v0.8.8 之前的版本，该版本不发布 Linux ARM64 二进制。请按本文开头的说明，
+使用官方 GitHub 安装器安装到新的空目录；没有兼容预编译资源时，可按
+[第 4 节](#4-通过-cargo-安装任何-tier-1-rust-目标)使用受支持的 Cargo 源码构建路径。
 
 ### 升级旧安装后出现 `MISSING_COMPANION_BINARY`
 
-当前的单二进制在进程内运行 TUI，不需要配套可执行文件。该错误标识的是过时的 v0.9.5 之前调度器；请用当前的 npm 包或 Cargo 二进制替换该安装，而不是下载额外的运行时：
-
-```bash
-npm install -g codewhale
-# 或
-cargo install codewhale-cli --locked --force
-```
+当前的单二进制在进程内运行 TUI，不需要配套可执行文件。该错误标识的是过时的
+v0.9.5 之前调度器。请按本文开头的 GitHub 迁移说明安装到新的空目录，再验证选中的
+`codewhale` 和 `codew` 路径。无需下载另一个单独的运行时。
 
 ### `codewhale update` 报告 `no asset found for platform codewhale-linux-aarch64`
 
-这是 v0.8.7 中的 [#503](https://github.com/Hmbown/CodeWhale/issues/503)——自更新器使用了 Rust 的 `aarch64`/`x86_64` 架构名，而不是发布工件的 `arm64`/`x64`。v0.8.8 之前的临时方案：
-
-```bash
-npm i -g codewhale@latest
-# 或
-cargo install codewhale-cli --locked
-```
+旧版更新器使用的 Rust 架构名与发布资源名不一致。请按本文开头的说明，使用官方
+GitHub 安装器安装到新的空目录，再通过新安装命令的完整路径启动。
 
 ### 中国大陆 npm 下载慢或超时
 
@@ -705,7 +728,13 @@ cargo install codewhale-cli --locked
 
 ### 中国大陆 无法从 GitHub 使用 `codewhale update`
 
-`codewhale update` 通常会联系 GitHub Releases 获取元数据和二进制资源。在 GitHub 被屏蔽或不稳定的网络上，改用 CNB 源镜像，并从 release 标签安装 `codewhale-cli` 包。Cargo 会安装 `codewhale` 命令：
+`codewhale update` 优先使用 GitHub Releases。在受支持的 Linux x64 平台上，
+GitHub 校验清单失败后可回退到配套的 CNB 清单和二进制。如果 GitHub 元数据也无法访问，
+请显式选择已发布的 CNB 版本
+（`CODEWHALE_USE_CNB_MIRROR=1 CODEWHALE_VERSION=X.Y.Z codewhale update`），
+或使用下方的二进制镜像设置。已有的较新构建会被保留。
+
+通过 Cargo 从 CNB 源码镜像构建是次要选项，会安装由 Cargo 管理的 `codewhale` 命令：
 
 要查看最新 release 而不下载或替换二进制，运行 `codewhale update --check`。
 

@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:e421b94e9f7e -->
+<!-- source: README.md sha256:dcbd5aa09403 -->
 # Codewhale
 
 Codewhale adalah agen pemrograman sumber terbuka untuk terminal Anda, dibuat dengan Rust dan dikembangkan secara terbuka bersama orang-orang yang menggunakannya.
@@ -14,10 +14,14 @@ Codewhale adalah agen pemrograman sumber terbuka untuk terminal Anda, dibuat den
 
 ## Instalasi
 
+Untuk instalasi baru di macOS atau Linux, gunakan rilis resmi GitHub:
+
 ```bash
-npm install -g codewhale
-codewhale
+curl -fsSL https://codewhale.net/install.sh | sh
+"$HOME/.local/bin/codewhale"
 ```
+
+Di Windows, unduh installer atau arsip yang sesuai dari [GitHub Releases](https://github.com/Hmbown/CodeWhale/releases/latest). Untuk instalasi biner langsung yang sudah ada, jalankan `codewhale update`, atau `codewhale update --check` untuk memeriksa tanpa memasang. Updater menampilkan jalur executable dan mempertahankan build yang lebih baru. npm dan Cargo adalah pilihan sekunder; lihat [panduan instalasi](docs/INSTALL.md) untuk migrasi dari pengelola paket dan pengaturan PATH.
 
 Saat pertama dijalankan, Codewhale membantu Anda menghubungkan penyedia atau tetap bekerja secara luring. Codewhale juga mendukung Cargo, Docker, Nix, Scoop, arsip siap pakai, Android/Termux, dan mirror CNB. Lihat [panduan instalasi](docs/INSTALL.md).
 

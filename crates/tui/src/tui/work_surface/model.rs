@@ -78,8 +78,8 @@ pub enum RailPanel {
 impl RailPanel {
     /// Cycle order — also the tab order in the dock strip.
     pub const ORDER: [RailPanel; 8] = [
-        Self::Agents,
         Self::Tasks,
+        Self::Agents,
         Self::Background,
         Self::Files,
         Self::Notepad,
@@ -89,9 +89,10 @@ impl RailPanel {
     ];
 
     /// Views the dock opens on its own when they have content and the user
-    /// has not picked one: live agents first, then the to-do list, then
-    /// background work. The others open only when cycled to.
-    pub const AUTO_ORDER: [RailPanel; 3] = [Self::Agents, Self::Tasks, Self::Background];
+    /// has not picked one: the to-do list first, then live agents, then
+    /// background work (founder, 2026-09-03: "To-do and Agents as the first
+    /// two, opening on To-do"). The others open only when cycled to.
+    pub const AUTO_ORDER: [RailPanel; 3] = [Self::Tasks, Self::Agents, Self::Background];
 
     #[must_use]
     pub fn next(self) -> Self {
@@ -123,6 +124,7 @@ impl RailPanel {
     pub fn parse(value: &str) -> Self {
         match value.trim().to_ascii_lowercase().as_str() {
             "agents" | "subagents" | "sub-agents" => Self::Agents,
+            "tasks" | "todo" | "todos" => Self::Tasks,
             "background" | "shells" | "jobs" => Self::Background,
             "files" | "changes" => Self::Files,
             "notepad" | "notes" => Self::Notepad,
@@ -147,11 +149,24 @@ impl RailPanel {
         }
     }
 
-    /// Tab label. Lowercase on purpose: the dock's grammar is lowercase
-    /// nouns, like the tool rows' lowercase verbs (design §2.11).
+    /// Tab label. CAPS on purpose (founder ruling 2026-09-03): the tabs are
+    /// the dock's primary navigation and lowercase nouns read as status
+    /// text beside them. The plan-step list reads TODO, not TASKS — the
+    /// Background panel already holds running tasks, so TASKS collides
+    /// with it. `as_setting()` stays lowercase — it is the persisted
+    /// value, never a label.
     #[must_use]
     pub const fn title(self) -> &'static str {
-        self.as_setting()
+        match self {
+            Self::Agents => "AGENTS",
+            Self::Tasks => "TODO",
+            Self::Background => "BACKGROUND",
+            Self::Files => "FILES",
+            Self::Notepad => "NOTEPAD",
+            Self::Context => "CONTEXT",
+            Self::Git => "GIT",
+            Self::Price => "PRICE",
+        }
     }
 }
 
@@ -509,7 +524,9 @@ impl WorkSurfaceState {
         let selectable = rows.iter().filter(|row| row.selectable).collect::<Vec<_>>();
         if selectable.is_empty() {
             self.selected = None;
-            self.focused = false;
+            // An explicitly opened empty panel still owns its tabs and Esc.
+            // Preserve that focus; ordinary typing can still release it.
+            self.focused &= self.explicit_view;
             self.scroll_offset = 0;
             return;
         }
@@ -722,10 +739,37 @@ pub(crate) fn resolve_view(app: &mut App) {
     }
 }
 
+/// How much work the auto-opening views hold between them: live agents,
+/// to-dos, and running background work. The dismissed dock re-opens when
+/// this grows, whichever view the new work lands in.
+pub(crate) fn auto_work_rows(app: &mut App) -> usize {
+    let agents = live_agent_row_count(app);
+    let tasks = visible_rows_for(app, RailPanel::Tasks)
+        .iter()
+        .filter(|row| row.id.0.starts_with("graph:"))
+        .count();
+    let background = if background_has_live_work(app) {
+        visible_rows_for(app, RailPanel::Background).len()
+    } else {
+        0
+    };
+    agents + tasks + background
+}
+
 fn view_has_work(app: &mut App, panel: RailPanel) -> bool {
     match panel {
         RailPanel::Agents => live_agent_row_count(app) > 0,
-        RailPanel::Tasks | RailPanel::Background => !visible_rows_for(app, panel).is_empty(),
+        // To-dos are the plan steps. A side rail also folds a summary of
+        // running work into this view; that summary is not a reason to
+        // open on TODO when the workers themselves live one tab over.
+        RailPanel::Tasks => visible_rows_for(app, panel)
+            .iter()
+            .any(|row| row.id.0.starts_with("graph:")),
+        // Scheduled automations that are not running are a fact about the
+        // account, not work in this session: they must not open the dock
+        // before the first prompt (0.9.12 defect #10). Live shells, durable
+        // tasks, and a running automation are work.
+        RailPanel::Background => background_has_live_work(app),
         RailPanel::Files
         | RailPanel::Notepad
         | RailPanel::Context
@@ -740,6 +784,14 @@ pub(super) fn live_agent_row_count(app: &mut App) -> usize {
         .iter()
         .filter(|row| row.id.0.starts_with("worker:") && !agent_row_is_strip_settled(row))
         .count()
+}
+
+/// Whether the background view holds anything actually running: a live
+/// shell, a durable task, or an automation run in flight.
+pub(super) fn background_has_live_work(app: &mut App) -> bool {
+    app.automation_panel.live_runs > 0
+        || !shell_work_rows(app).is_empty()
+        || !durable_task_rows(app).is_empty()
 }
 
 /// The background view: live shells, other durable background tasks, and

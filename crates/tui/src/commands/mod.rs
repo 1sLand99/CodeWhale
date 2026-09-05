@@ -1692,7 +1692,15 @@ mod tests {
             }
             let (mut app, tmpdir, _guard) = create_isolated_test_app();
             let invocation = invocation_for(command.name, command.name, tmpdir.path());
+            // Breadcrumb for a terminated run: the last line names the handler
+            // that never returned.
+            eprintln!("dispatch smoke: {invocation}");
+            let started = std::time::Instant::now();
             let result = execute(&invocation, &mut app);
+            eprintln!(
+                "dispatch smoke: {invocation} returned in {:?}",
+                started.elapsed()
+            );
             if let Some(msg) = &result.message {
                 assert!(
                     !msg.contains("Unknown command"),
@@ -1714,7 +1722,13 @@ mod tests {
             for alias in command.aliases {
                 let (mut app, tmpdir, _guard) = create_isolated_test_app();
                 let invocation = invocation_for(command.name, alias, tmpdir.path());
+                eprintln!("dispatch smoke: {invocation}");
+                let started = std::time::Instant::now();
                 let result = execute(&invocation, &mut app);
+                eprintln!(
+                    "dispatch smoke: {invocation} returned in {:?}",
+                    started.elapsed()
+                );
                 if let Some(msg) = &result.message {
                     assert!(
                         !msg.contains("Unknown command"),
@@ -1981,6 +1995,8 @@ mod tests {
             // FEAT-019 memory group.
             "note",
             "memory",
+            // FEAT-020 plugins group.
+            "plugin",
             // FEAT-022 skills group.
             "skills",
             "skill",
@@ -2498,5 +2514,124 @@ mod tests {
         assert!(parts.skills.is_some());
         // Missing-facet safety through the public seam is covered by the
         // handler-level tests; here we assert the envelope carries both.
+    }
+
+    // ---------------------------------------------------------------------
+    // FEAT-020 plugins group public dispatch (Phase 6)
+    // ---------------------------------------------------------------------
+
+    /// App with an isolated temp workspace and a discovered plugin bundle.
+    fn plugin_test_app(tmpdir: &tempfile::TempDir) -> App {
+        // Write a minimal plugin bundle so the registry discovers real data.
+        let bundle = tmpdir.path().join(".codewhale/plugins/demo");
+        std::fs::create_dir_all(bundle.join("skills/hello")).unwrap();
+        std::fs::write(
+            bundle.join("plugin.toml"),
+            "schema_version = 1\n[plugin]\nname = \"demo\"\nversion = \"1.0.0\"\ndescription = \"Import spreadsheet data safely\"\n[skills]\npath = \"skills\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            bundle.join("skills/hello/SKILL.md"),
+            "---\nname: hello\ndescription: hello\n---\nbody\n",
+        )
+        .unwrap();
+        let options = TuiOptions {
+            ..crate::test_support::test_tui_options(tmpdir.path())
+        };
+        let mut app = App::new(options, &Config::default());
+        let discovery = crate::plugins::PluginDiscoveryContext::capture_pre_dotenv();
+        app.plugin_registry = discovery.registry_for_workspace(tmpdir.path());
+        app
+    }
+
+    #[test]
+    fn feat020_plugin_entry_is_registered_with_exact_capabilities() {
+        let name = "plugin";
+        assert!(
+            registry().has_contextual_handler(name),
+            "/{name} must register through the portable bridge"
+        );
+        let handler = registry()
+            .get(name)
+            .expect("entry")
+            .contextual_handler()
+            .expect("contextual handler");
+        let codewhale_command_contract::handler::CommandHandler::Contextual {
+            capabilities, ..
+        } = handler
+        else {
+            panic!("/{name} must be contextual");
+        };
+        let expected = codewhale_command_contract::handler::CommandCapabilities::WORKSPACE
+            .union(codewhale_command_contract::handler::CommandCapabilities::PRESENTATION)
+            .union(codewhale_command_contract::handler::CommandCapabilities::PLUGIN);
+        assert_eq!(capabilities, expected, "/{name} exact capability set");
+        // Undeclared facets stay absent.
+        assert!(
+            !capabilities.contains(codewhale_command_contract::handler::CommandCapabilities::MEDIA)
+        );
+        assert!(
+            !capabilities
+                .contains(codewhale_command_contract::handler::CommandCapabilities::MEMORY)
+        );
+        assert!(
+            !capabilities
+                .contains(codewhale_command_contract::handler::CommandCapabilities::SKILLS)
+        );
+        assert!(
+            !capabilities
+                .contains(codewhale_command_contract::handler::CommandCapabilities::PROJECT)
+        );
+        assert!(
+            !capabilities
+                .contains(codewhale_command_contract::handler::CommandCapabilities::SKILL_GROUP)
+        );
+    }
+
+    #[test]
+    fn feat020_plugin_dispatches_through_public_seam() {
+        let tmpdir = tempfile::TempDir::new().unwrap();
+        let mut app = plugin_test_app(&tmpdir);
+
+        // Bare action opens the extensions view (no panic).
+        let bare = execute("/plugin", &mut app);
+        assert!(bare.action.is_some(), "{bare:?}");
+
+        // List reaches the real adapter through the public seam.
+        let list = execute("/plugin list", &mut app);
+        assert!(!list.is_error, "{list:?}");
+        let msg = list.message.expect("list message");
+        assert!(msg.contains("demo"), "{msg}");
+
+        // Metadata bridges to the TUI localization id.
+        let info = registry().get_info("plugin").expect("plugin info");
+        assert_eq!(
+            info.description_id,
+            crate::localization::MessageId::CmdPluginDescription
+        );
+    }
+
+    #[test]
+    fn feat020_public_dispatch_never_panics_on_plugin_commands() {
+        let tmpdir = tempfile::TempDir::new().unwrap();
+        let mut app = plugin_test_app(&tmpdir);
+        for command in [
+            "/plugin",
+            "/plugin ",
+            "/plugin list",
+            "/plugin show nope",
+            "/plugin validate",
+            "/plugin tools",
+            "/plugin marketplace",
+            "/plugin import kimi",
+            "/plugin suggest",
+        ] {
+            let result = execute(command, &mut app);
+            // Every path returns a result; none may panic.
+            assert!(
+                result.message.is_some() || result.action.is_some(),
+                "{command}: {result:?}"
+            );
+        }
     }
 }

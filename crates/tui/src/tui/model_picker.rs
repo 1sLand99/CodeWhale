@@ -36,9 +36,7 @@ use crate::model_profile::{
 use crate::model_registry;
 use crate::models_dev_live::{self, ModelsDevFreshness};
 use crate::palette;
-use crate::provider_lake::{
-    all_catalog_models_for_provider, catalog_offering_for_model, configured_providers,
-};
+use crate::provider_lake::{catalog_offering_for_model, configured_providers};
 use crate::settings::PinnedModel;
 use crate::tui::app::{App, ReasoningEffort};
 use crate::tui::menu_style;
@@ -667,46 +665,53 @@ impl ModelPickerView {
                 });
     }
 
+    /// Both panes rotate rather than stop at the ends. Thinking is four to six
+    /// rows, so a hard stop at the bottom reads as a dead key rather than as a
+    /// boundary; the model list wraps for the same reason.
     fn move_up(&mut self) -> bool {
         match self.focus {
             Pane::Model => {
-                if self.selected_model_idx > 0 {
-                    self.selected_model_idx -= 1;
-                    self.select_effort_for_current_model();
-                    return true;
+                let count = self.model_row_count();
+                if count == 0 {
+                    return false;
                 }
+                self.selected_model_idx = wrapping_prev(self.selected_model_idx, count);
+                self.select_effort_for_current_model();
+                true
             }
             Pane::Effort => {
-                if self.selected_effort_idx > 0 {
-                    self.selected_effort_idx -= 1;
-                    self.selected_effort_request = self.resolved_effort();
-                    return true;
+                let count = self.current_efforts().len();
+                if count == 0 {
+                    return false;
                 }
+                self.selected_effort_idx = wrapping_prev(self.selected_effort_idx, count);
+                self.selected_effort_request = self.resolved_effort();
+                true
             }
         }
-        false
     }
 
     fn move_down(&mut self) -> bool {
         match self.focus {
             Pane::Model => {
-                let max = self.model_row_count().saturating_sub(1);
-                if self.selected_model_idx < max {
-                    self.selected_model_idx += 1;
-                    self.select_effort_for_current_model();
-                    return true;
+                let count = self.model_row_count();
+                if count == 0 {
+                    return false;
                 }
+                self.selected_model_idx = wrapping_next(self.selected_model_idx, count);
+                self.select_effort_for_current_model();
+                true
             }
             Pane::Effort => {
-                let max = self.current_efforts().len().saturating_sub(1);
-                if self.selected_effort_idx < max {
-                    self.selected_effort_idx += 1;
-                    self.selected_effort_request = self.resolved_effort();
-                    return true;
+                let count = self.current_efforts().len();
+                if count == 0 {
+                    return false;
                 }
+                self.selected_effort_idx = wrapping_next(self.selected_effort_idx, count);
+                self.selected_effort_request = self.resolved_effort();
+                true
             }
         }
-        false
     }
 
     fn toggle_focus(&mut self) {
@@ -1329,7 +1334,11 @@ fn picker_model_rows_for_app(app: &App, config: &Config) -> Vec<ModelPickerRow> 
         let mut model_ids = if provider == ApiProvider::OpenaiCodex {
             codex_roster.model_ids()
         } else {
-            provider_catalog_model_ids(provider)
+            provider_catalog_model_ids(
+                provider,
+                &config.provider_identity_for(provider),
+                &config.base_url_for_route(provider),
+            )
         };
         if let Some(model) = app
             .provider_models
@@ -1597,11 +1606,15 @@ fn push_configured_provider_model(
     }
 }
 
-fn provider_catalog_model_ids(provider: ApiProvider) -> Vec<String> {
+fn provider_catalog_model_ids(
+    provider: ApiProvider,
+    identity: &str,
+    base_url: &str,
+) -> Vec<String> {
     let mut models = Vec::new();
-    for id in all_catalog_models_for_provider(provider) {
-        // The catalog describes the built-in provider route. A custom route's
-        // endpoint-owned current/configured model is appended separately.
+    for id in crate::provider_lake::catalog_models_for_route(provider, identity, base_url) {
+        // Cached IDs belong to this exact endpoint. The configured/current
+        // model is appended separately so users can still select saved IDs.
         push_model_id(&mut models, picker_visible_model_id(provider, &id, false));
     }
     models
@@ -1612,7 +1625,11 @@ fn provider_scoped_model_ids_for_app(app: &App, include_current_model: bool) -> 
     // separate custom/current-model row.
     let mut models = Vec::new();
     push_model_id(&mut models, "auto");
-    for id in provider_catalog_model_ids(app.api_provider) {
+    for id in provider_catalog_model_ids(
+        app.api_provider,
+        app.provider_identity_for_persistence(),
+        &app.active_route_base_url,
+    ) {
         push_model_id(&mut models, &id);
     }
 
@@ -1991,7 +2008,20 @@ fn sort_model_rows_for_view(
             .unwrap_or(usize::MAX)
     };
     match view {
-        ModelListView::Configured | ModelListView::Catalog => rows.sort_by_key(|row| pin_rank(row)),
+        // Pins first, then one contiguous block per provider+family with the
+        // newest model at its head. Sorting by pin rank alone left families
+        // interleaved — `glm` and `DeepSeek` each drew two headers, and the
+        // older member of a family (GLM-5.2) stranded at the bottom of the
+        // list well below its newer sibling.
+        ModelListView::Configured | ModelListView::Catalog => rows.sort_by(|left, right| {
+            pin_rank(left)
+                .cmp(&pin_rank(right))
+                .then_with(|| row_group_key(left).cmp(&row_group_key(right)))
+                .then_with(|| {
+                    model_version_key(right.id.as_str()).cmp(&model_version_key(left.id.as_str()))
+                })
+                .then_with(|| left.id.cmp(&right.id))
+        }),
         ModelListView::Recent => rows.sort_by(|left, right| {
             offering_fetched_at(right)
                 .cmp(&offering_fetched_at(left))
@@ -2022,6 +2052,53 @@ fn sort_model_rows_for_view(
                 .then_with(|| left.id.cmp(&right.id))
         }),
     }
+}
+
+/// Stable grouping key so a provider's families render as one contiguous
+/// block each, which is what the family-header logic already assumes when it
+/// only compares against the previous row.
+fn row_group_key(row: &ModelPickerRow) -> (String, String) {
+    let provider = row_provider_identity(row)
+        .map(str::to_ascii_lowercase)
+        .or_else(|| {
+            row.provider
+                .map(|provider| provider.as_str().to_ascii_lowercase())
+        })
+        .unwrap_or_default();
+    let family = row
+        .provider
+        .and_then(|provider| catalog_family_for(provider, &row.id))
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    (provider, family)
+}
+
+/// Version ordinal for "newest first" inside a family.
+///
+/// Model ids carry their version as dotted or dashed numbers (`GLM-5.3`,
+/// `deepseek-v4-pro`, `gpt-5.6-terra`), so the comparison is on the numeric
+/// components in order, not on the string — otherwise `GLM-5.10` would sort
+/// below `GLM-5.2`. Ids with no digits compare equal and fall through to the
+/// alphabetical tiebreak.
+fn model_version_key(id: &str) -> Vec<u32> {
+    let mut parts = Vec::new();
+    let mut current: Option<u32> = None;
+    for ch in id.chars() {
+        if let Some(digit) = ch.to_digit(10) {
+            current = Some(
+                current
+                    .unwrap_or(0)
+                    .saturating_mul(10)
+                    .saturating_add(digit),
+            );
+        } else if let Some(value) = current.take() {
+            parts.push(value);
+        }
+    }
+    if let Some(value) = current {
+        parts.push(value);
+    }
+    parts
 }
 
 fn row_provider_identity(row: &ModelPickerRow) -> Option<&str> {
@@ -2846,13 +2923,7 @@ impl ModelPickerView {
                     ReasoningEffort::High => "deeper reasoning".to_string(),
                     ReasoningEffort::XHigh => "extra-high reasoning".to_string(),
                     ReasoningEffort::Ultra => "ultra reasoning".to_string(),
-                    ReasoningEffort::Max => {
-                        if effort_provider == ApiProvider::OpenaiCodex {
-                            "extra-high reasoning".to_string()
-                        } else {
-                            "maximum reasoning".to_string()
-                        }
-                    }
+                    ReasoningEffort::Max => "maximum reasoning".to_string(),
                 };
                 PaneRow::effort(label, hint)
             })
@@ -2871,6 +2942,22 @@ impl ModelPickerView {
     }
 }
 
+/// Previous index in a list that rotates: 0 wraps to the last row.
+/// `count` must be non-zero.
+fn wrapping_prev(index: usize, count: usize) -> usize {
+    if index == 0 {
+        count - 1
+    } else {
+        (index - 1).min(count - 1)
+    }
+}
+
+/// Next index in a list that rotates: the last row wraps to 0.
+/// `count` must be non-zero.
+fn wrapping_next(index: usize, count: usize) -> usize {
+    if index + 1 >= count { 0 } else { index + 1 }
+}
+
 pub(crate) fn picker_efforts_for_route(
     provider: ApiProvider,
     base_url: &str,
@@ -2887,7 +2974,13 @@ pub(crate) fn picker_efforts_for_route(
         return KIMI_CODE_K3_PICKER_EFFORTS.to_vec();
     }
     if provider == ApiProvider::OpenaiCodex {
-        return CODEX_PICKER_EFFORTS.to_vec();
+        // The OAuth roster publishes a per-model ladder, and the models differ:
+        // gpt-5.6-sol/terra go up to `ultra`, gpt-5.6-luna stops at `max`, and
+        // gpt-5.5 and older stop at `xhigh`. Returning one static list for the
+        // whole provider offered tiers a model does not have and hid tiers it
+        // does. Fall back to the static ladder only when the roster is missing
+        // or published no levels for this model.
+        return codex_picker_efforts(wire_model).unwrap_or_else(|| CODEX_PICKER_EFFORTS.to_vec());
     }
     if let Some(catalog_efforts) = catalog_picker_efforts(provider, wire_model) {
         return catalog_efforts;
@@ -2899,6 +2992,24 @@ pub(crate) fn picker_efforts_for_route(
         return DEEPSEEK_PICKER_EFFORTS.to_vec();
     }
     DEFAULT_PICKER_EFFORTS.to_vec()
+}
+
+/// Thinking tiers for one Codex model, taken from the OAuth roster's
+/// `supported_reasoning_levels`. `None` when the roster does not describe the
+/// model, so the caller keeps the static Codex ladder rather than inventing
+/// tiers.
+fn codex_picker_efforts(wire_model: &str) -> Option<Vec<ReasoningEffort>> {
+    let roster = crate::codex_model_cache::model_roster();
+    let metadata = roster.metadata_for(wire_model)?;
+    let mut efforts = Vec::new();
+    for raw in &metadata.efforts {
+        if let Some(effort) = catalog_effort_value(raw)
+            && !efforts.contains(&effort)
+        {
+            efforts.push(effort);
+        }
+    }
+    (!efforts.is_empty()).then_some(efforts)
 }
 
 /// Build thinking-tier rows from Models.dev `reasoning_options` when present.

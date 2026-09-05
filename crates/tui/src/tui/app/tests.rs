@@ -311,7 +311,7 @@ fn test_trust_mode_follows_yolo_on_startup() {
 }
 
 #[test]
-fn reasoning_effort_display_label_uses_codex_xhigh() {
+fn reasoning_effort_display_label_keeps_codex_top_tiers_distinct() {
     assert_eq!(
         ReasoningEffort::Off.display_label_for_provider(ApiProvider::OpenaiCodex),
         "low"
@@ -320,9 +320,19 @@ fn reasoning_effort_display_label_uses_codex_xhigh() {
         ReasoningEffort::Medium.display_label_for_provider(ApiProvider::OpenaiCodex),
         "medium"
     );
+    // The roster publishes xhigh, max and ultra as separate rungs, so the
+    // label must not collapse them onto the old ceiling.
+    assert_eq!(
+        ReasoningEffort::XHigh.display_label_for_provider(ApiProvider::OpenaiCodex),
+        "xhigh"
+    );
     assert_eq!(
         ReasoningEffort::Max.display_label_for_provider(ApiProvider::OpenaiCodex),
-        "xhigh"
+        "max"
+    );
+    assert_eq!(
+        ReasoningEffort::Ultra.display_label_for_provider(ApiProvider::OpenaiCodex),
+        "ultra"
     );
     assert_eq!(
         ReasoningEffort::Max.display_label_for_provider(ApiProvider::Deepseek),
@@ -337,12 +347,12 @@ fn reasoning_effort_display_label_uses_codex_xhigh() {
     app.api_provider = ApiProvider::OpenaiCodex;
     app.reasoning_effort = ReasoningEffort::Max;
     app.auto_model = false;
-    assert_eq!(app.reasoning_effort_display_label(), "xhigh");
+    assert_eq!(app.reasoning_effort_display_label(), "max");
 
     app.reasoning_effort = ReasoningEffort::Auto;
     app.last_effective_reasoning_effort =
         Some(EffectiveReasoningEffort::Tier(ReasoningEffort::Max));
-    assert_eq!(app.reasoning_effort_display_label(), "auto: xhigh");
+    assert_eq!(app.reasoning_effort_display_label(), "auto: max");
 }
 
 #[test]
@@ -1190,9 +1200,19 @@ fn reasoning_effort_scenario() {
             ReasoningEffort::Auto.normalize_for_provider(ApiProvider::OpenaiCodex),
             ReasoningEffort::Medium
         );
+        // Codex sends the rung the operator picked: the roster offers xhigh,
+        // max and ultra as separate efforts per model.
+        assert_eq!(
+            ReasoningEffort::XHigh.api_value_for_provider(ApiProvider::OpenaiCodex),
+            Some("xhigh")
+        );
         assert_eq!(
             ReasoningEffort::Max.api_value_for_provider(ApiProvider::OpenaiCodex),
-            Some("xhigh")
+            Some("max")
+        );
+        assert_eq!(
+            ReasoningEffort::Ultra.api_value_for_provider(ApiProvider::OpenaiCodex),
+            Some("ultra")
         );
         assert_eq!(
             ReasoningEffort::Off.api_value_for_provider(ApiProvider::OpenaiCodex),
@@ -1687,7 +1707,9 @@ fn app_new_normalizes_saved_codex_reasoning_effort() {
     for (raw, expected, display) in [
         ("off", ReasoningEffort::Low, "low"),
         ("auto", ReasoningEffort::Medium, "medium"),
-        ("max", ReasoningEffort::Max, "xhigh"),
+        ("max", ReasoningEffort::Max, "max"),
+        ("xhigh", ReasoningEffort::XHigh, "xhigh"),
+        ("ultra", ReasoningEffort::Ultra, "ultra"),
     ] {
         std::fs::write(
             tmp.path().join("settings.toml"),
@@ -6239,7 +6261,7 @@ fn status_classifier_does_not_paint_negated_success_green() {
     assert_ne!(level, StatusToastLevel::Success);
 
     // Genuine successes still classify green.
-    let (level, _, _) = App::classify_status_text("Fleet profile saved: reviewer.toml");
+    let (level, _, _) = App::classify_status_text("Team profile saved: reviewer.toml");
     assert_eq!(level, StatusToastLevel::Success);
 
     // Both cancel spellings classify as Warning.

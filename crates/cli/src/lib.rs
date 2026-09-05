@@ -36,8 +36,18 @@ use codewhale_telemetry::{
     TelemetryDecision, TurnWall,
 };
 
+fn is_antigravity_legacy_selector(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "antigravity" | "agy"
+    )
+}
+
 /// Catalog-backed `--provider` parser. Replaces the closed 47-arm `ProviderArg` enum.
 fn parse_catalog_route(value: &str) -> std::result::Result<ProviderKind, String> {
+    if is_antigravity_legacy_selector(value) {
+        return Err(codewhale_config::LEGACY_ANTIGRAVITY_TOMBSTONE_MESSAGE.to_string());
+    }
     parse_route_kind(value).ok_or_else(|| {
         format!(
             "unknown route '{value}'; expected a catalog route id (see `codewhale providers export --json`)"
@@ -46,7 +56,17 @@ fn parse_catalog_route(value: &str) -> std::result::Result<ProviderKind, String>
 }
 
 fn builtin_provider_arg(value: &str) -> Option<ProviderKind> {
-    parse_route_kind(value)
+    parse_route_kind(value).filter(|provider| *provider != ProviderKind::Antigravity)
+}
+
+/// The legacy tombstone is accepted only by the local Codewhale-state clear
+/// command. Every selectable/auth-consuming parser continues through
+/// [`parse_catalog_route`], which rejects it.
+fn parse_auth_clear_provider(value: &str) -> std::result::Result<ProviderKind, String> {
+    if is_antigravity_legacy_selector(value) {
+        return Ok(ProviderKind::Antigravity);
+    }
+    parse_catalog_route(value)
 }
 
 fn parse_provider_identifier(value: &str) -> std::result::Result<String, String> {
@@ -98,8 +118,8 @@ struct Cli {
     #[arg(
         long,
         value_name = "BOOL",
-        help = "Control anonymous usage counting for this run (default on; \
-                CODEWHALE_TELEMETRY=0 always wins)"
+        help = "Control aggregate usage counting (default on; Codewhale + PostHog; \
+                durable off: config set telemetry false; CODEWHALE_TELEMETRY=0 always wins)"
     )]
     telemetry: Option<bool>,
     #[arg(long)]
@@ -119,6 +139,9 @@ struct Cli {
     no_mouse_capture: bool,
     #[arg(long = "skip-onboarding")]
     skip_onboarding: bool,
+    /// Start a fresh session without automatic resume or crash recovery.
+    #[arg(long)]
+    fresh: bool,
     /// Skip loading project-level config, including the workspace-specific
     /// `[workspace]`/`[projects]` overlay from user config. Must appear before
     /// the subcommand; it is applied before subcommand dispatch.
@@ -147,6 +170,11 @@ struct Cli {
     session_id: Option<String>,
     #[arg(short = 'p', long = "prompt", value_name = "PROMPT")]
     prompt_flag: Option<String>,
+    /// Per-run config override (`KEY=VALUE`), repeatable. Applied in memory
+    /// after load and never saved — `config set` persists instead. Long-only:
+    /// short `-c` is already `--continue`.
+    #[arg(long = "set", value_name = "KEY=VALUE")]
+    overrides: Vec<String>,
     #[arg(
         value_name = "PROMPT",
         trailing_var_arg = true,
@@ -163,7 +191,10 @@ enum Commands {
     Run(RunArgs),
     /// Run Codewhale diagnostics.
     Doctor(TuiPassthroughArgs),
-    /// List live models from the selected provider.
+    /// List cached models; use --update to refresh configured provider catalogs.
+    #[command(
+        after_help = "Examples:\n  codewhale models --update\n  codewhale models --update --provider openai\n  codewhale models --provider openai-codex --json\n\n--update (alias: --refresh) refreshes configured provider catalogs. --provider ID limits the scope."
+    )]
     Models(TuiPassthroughArgs),
     /// Generate speech audio with Xiaomi MiMo TTS models.
     #[command(visible_alias = "tts")]
@@ -371,7 +402,10 @@ The command prints the completion script to stdout; redirect it to a path your s
     },
     /// Print a usage rollup from the audit log and session store.
     Metrics(MetricsArgs),
-    /// Check for and apply updates to the `codewhale` binary.
+    /// Update this release binary from GitHub (package-managed installs get migration instructions).
+    #[command(
+        after_help = "GitHub Releases is the default source. Supported mirrors are explicit overrides or manifest-failure fallbacks. Checksums are required; older releases never replace a newer build.\n\nThe command prints the executable it will update. If you have multiple installs, run the intended binary by its full path.\n\nNew macOS/Linux install: curl -fsSL https://codewhale.net/install.sh | sh\nInstallation and PATH help: https://github.com/Hmbown/CodeWhale/blob/main/docs/INSTALL.md"
+    )]
     Update(UpdateArgs),
     /// Export the route catalog (`providers export --json`).
     Providers(ProvidersArgs),
@@ -479,6 +513,9 @@ fn top_level_provider_override(
     let Some(provider) = provider else {
         return Ok(None);
     };
+    if is_antigravity_legacy_selector(provider) {
+        bail!(codewhale_config::LEGACY_ANTIGRAVITY_TOMBSTONE_MESSAGE);
+    }
     if let Some(provider) = builtin_provider_arg(provider) {
         return Ok(Some(provider));
     }
@@ -1538,7 +1575,7 @@ enum AuthCommand {
     },
     /// Delete a provider's key from config and secret-store storage.
     Clear {
-        #[arg(long, value_parser = parse_catalog_route)]
+        #[arg(long, value_parser = parse_auth_clear_provider)]
         provider: ProviderKind,
     },
     /// List all known providers with their runtime-effective auth state,
@@ -1577,8 +1614,23 @@ enum ConfigCommand {
     Unset {
         key: String,
     },
+    /// Review aggregate usage counting by Codewhale and PostHog (default on).
+    Telemetry {
+        /// Optional compatibility form: enable future sessions under this policy version.
+        #[arg(long, value_name = "VERSION")]
+        accept_notice: Option<u32>,
+    },
     List,
     Path,
+    /// Open the config file in `$VISUAL`/`$EDITOR` (else `vi`).
+    Edit,
+    /// Check the loaded config: unknown keys, empty secrets, malformed
+    /// URLs. Read-only; prints warnings, fails on errors, never prints a
+    /// credential.
+    Doctor,
+    /// Print the effective config (including `--set` overlays) as TOML with
+    /// secrets redacted by key name.
+    Dump,
     /// Import a portable config bundle from a file, HTTPS URL, or stdin (-).
     Import(config_bundles::ImportArgs),
     /// Export a portable, secret-free config bundle.
@@ -1891,6 +1943,10 @@ fn run() -> Result<()> {
              use the subcommand's own flag (for example `codewhale exec --session-id <id>`)."
         );
     }
+    // Per-run `--set KEY=VALUE` overlays: validated and applied in memory,
+    // never saved. Mutating config subcommands refuse them below rather than
+    // letting a per-run value leak into the file.
+    apply_per_run_overrides(&mut store, &cli.overrides)?;
 
     match command {
         Some(Commands::Run(args)) => {
@@ -1903,7 +1959,8 @@ fn run() -> Result<()> {
             run_tui_in_process(&cli, &resolved_runtime, tui_args("doctor", args))
         }
         Some(Commands::Models(args)) => {
-            let resolved_runtime = resolve_runtime_for_dispatch(&mut store, &runtime_overrides);
+            let resolved_runtime =
+                resolve_runtime_for_diagnostic_dispatch(&store, &runtime_overrides);
             run_tui_in_process(&cli, &resolved_runtime, tui_args("models", args))
         }
         Some(Commands::Speech(args)) => {
@@ -2102,7 +2159,12 @@ fn run() -> Result<()> {
                 Some(store.path().to_path_buf()),
                 Surface::Cli,
             );
-            let outcome = run_config_command(&mut store, args.command, project_bundle_scope);
+            let outcome = run_config_command(
+                &mut store,
+                args.command,
+                project_bundle_scope,
+                &cli.overrides,
+            );
             finish_cli_telemetry(session, &outcome);
             outcome
         }
@@ -2632,6 +2694,9 @@ fn clear_auth_provider(
     secrets: &Secrets,
     provider: ProviderKind,
 ) -> Result<()> {
+    if provider == ProviderKind::Antigravity {
+        return clear_legacy_antigravity_config(store, secrets);
+    }
     let slot = provider_slot(provider);
     let original_config = store.config.clone();
     clear_provider_api_key_from_config(store, provider);
@@ -2651,6 +2716,72 @@ fn clear_auth_provider(
     } else {
         println!("cleared API key for {slot} from config and secret store");
     }
+    Ok(())
+}
+
+/// Remove only Codewhale-owned state for the retired Antigravity route.
+///
+/// This deliberately operates on the already-loaded Codewhale config and its
+/// own secret slot. It never resolves an external credential path, reads an
+/// environment credential, or invokes a Google/Antigravity logout or revoke
+/// flow.
+fn clear_legacy_antigravity_config(store: &mut ConfigStore, secrets: &Secrets) -> Result<()> {
+    let provider = ProviderKind::Antigravity;
+    let slot = provider_slot(provider);
+    let original_config = store.config.clone();
+    let prior_secret = secrets.get(slot).map_err(|error| {
+        anyhow!(
+            "could not snapshot the Codewhale-owned legacy {slot} secret slot before clearing it: {error}; config was not changed"
+        )
+    })?;
+
+    store.config.providers.antigravity = Default::default();
+    store
+        .config
+        .fallback_providers
+        .retain(|fallback| *fallback != provider);
+    if store.config.provider == provider {
+        store.config.provider = ProviderKind::default();
+        store.config.selected_provider_id = None;
+    }
+
+    if let Err(error) = secrets.delete(slot) {
+        store.config = original_config;
+        return Err(anyhow!(
+            "could not clear the Codewhale-owned legacy {slot} secret slot: {error}; config was not changed"
+        ));
+    }
+
+    if let Err(error) = store.save() {
+        store.config = original_config;
+        if let Some(previous) = prior_secret {
+            let current = secrets.get(slot).map_err(|rollback| {
+                anyhow!(
+                    "{error}; additionally could not verify rollback of the Codewhale-owned legacy {slot} secret slot: {rollback}"
+                )
+            })?;
+            match current {
+                None => secrets.set(slot, &previous).map_err(|rollback| {
+                    anyhow!(
+                        "{error}; additionally failed to restore the Codewhale-owned legacy {slot} secret slot: {rollback}"
+                    )
+                })?,
+                Some(current) if current == previous => {}
+                Some(_) => {
+                    return Err(anyhow!(
+                        "{error}; additionally the Codewhale-owned legacy {slot} secret slot changed concurrently and was not overwritten during rollback"
+                    ));
+                }
+            }
+        }
+        return Err(error);
+    }
+
+    codewhale_config::scrub_plaintext_api_keys_from_config_backup(store.path())?;
+    codewhale_config::scrub_legacy_antigravity_from_config_backup(store.path())?;
+    println!(
+        "cleared Codewhale-owned legacy Antigravity config, consent, selection, fallback entries, and secret-store slot; Google and Antigravity sessions were not read, revoked, or changed. For Gemini, configure provider google and set GEMINI_API_KEY"
+    );
     Ok(())
 }
 
@@ -2736,10 +2867,6 @@ fn external_credential_target(
         ProviderKind::Deepseek | ProviderKind::DeepseekAnthropic => (
             codewhale_config::ExternalCredentialSource::DshCli,
             codewhale_config::default_dsh_credentials_path(),
-        ),
-        ProviderKind::Antigravity => (
-            codewhale_config::ExternalCredentialSource::AgyCli,
-            codewhale_config::default_agy_credentials_path(),
         ),
         ProviderKind::Moonshot => bail!(
             "Kimi is API-key-only in Codewhale. Create a key at https://platform.kimi.ai/console/api-keys; Kimi CLI OAuth import is unsupported."
@@ -4389,6 +4516,7 @@ fn run_config_command(
     store: &mut ConfigStore,
     command: ConfigCommand,
     project_bundle_scope: bool,
+    per_run_overrides: &[String],
 ) -> Result<()> {
     if project_bundle_scope && !codewhale_config::config_path_is_workspace_scoped(store.path()) {
         bail!(
@@ -4396,19 +4524,77 @@ fn run_config_command(
             store.path().display()
         );
     }
+    // A per-run overlay must never leak into the file: commands that write
+    // the store refuse it outright instead of saving a merged document.
+    if !per_run_overrides.is_empty()
+        && matches!(
+            command,
+            ConfigCommand::Set { .. }
+                | ConfigCommand::Unset { .. }
+                | ConfigCommand::Import(_)
+                | ConfigCommand::Telemetry {
+                    accept_notice: Some(_)
+                }
+        )
+    {
+        bail!(
+            "--set is per-run and never saved; it cannot be combined with `config set`, \
+             `config unset`, or `config import`. Drop --set, or use a read command."
+        );
+    }
     match command {
         ConfigCommand::Get { key } => {
             if let Some(value) = store.config.get_display_value(&key) {
-                println!("{value}");
+                if key == "telemetry" {
+                    println!(
+                        "Usage reporting: {}",
+                        telemetry_preference_status(store.config.telemetry)
+                    );
+                    println!("Details: codewhale config telemetry");
+                } else {
+                    println!("{value}");
+                }
                 return Ok(());
             }
             bail!("key not found: {key}");
         }
         ConfigCommand::Set { key, value } => {
-            clear_recorded_telemetry_opt_out_if_reenabled(&key, &value)?;
             store.config.set_value(&key, &value)?;
-            store.save()?;
-            println!("set {key}");
+            if key == "telemetry" {
+                let enabled = store
+                    .config
+                    .telemetry
+                    .context("telemetry must be true or false")?;
+                let receipt = codewhale_tui::set_telemetry_preference(
+                    Some(store.path().to_path_buf()),
+                    enabled,
+                )?;
+                println!("{receipt}");
+                if enabled {
+                    println!("{}", telemetry::notice::STARTUP_DISCLOSURE);
+                }
+            } else {
+                store.save()?;
+                println!("set {key}");
+            }
+            Ok(())
+        }
+        ConfigCommand::Telemetry { accept_notice } => {
+            println!("{}\n", telemetry::notice::NOTICE_BODY);
+            if let Some(version) = accept_notice {
+                let receipt = codewhale_tui::accept_telemetry_notice(
+                    Some(store.path().to_path_buf()),
+                    version,
+                )?;
+                println!("{receipt}");
+            } else {
+                println!(
+                    "Usage reporting: {}",
+                    telemetry_preference_status(store.config.telemetry)
+                );
+                println!("To enable: codewhale config set telemetry true");
+                println!("To opt out: codewhale config set telemetry false");
+            }
             Ok(())
         }
         ConfigCommand::Unset { key } => {
@@ -4435,6 +4621,36 @@ fn run_config_command(
             println!("{}", store.path().display());
             Ok(())
         }
+        ConfigCommand::Edit => {
+            let path = store.path().to_path_buf();
+            println!("{}", path.display());
+            let editor = std::env::var("VISUAL")
+                .or_else(|_| std::env::var("EDITOR"))
+                .unwrap_or_else(|_| "vi".to_string());
+            let status = Command::new(&editor)
+                .arg(&path)
+                .status()
+                .with_context(|| format!("failed to launch editor {editor:?}"))?;
+            if !status.success() {
+                bail!("editor {editor:?} exited with {status}");
+            }
+            Ok(())
+        }
+        ConfigCommand::Doctor => run_config_doctor(store),
+        ConfigCommand::Dump => {
+            if !per_run_overrides.is_empty() {
+                println!(
+                    "# {} per-run --set override(s), not saved",
+                    per_run_overrides.len()
+                );
+            }
+            println!("# {}", store.path().display());
+            print!(
+                "{}",
+                toml::to_string_pretty(&store.config.redacted_toml_value())?
+            );
+            Ok(())
+        }
         ConfigCommand::Import(args) => {
             let workspace = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
             config_bundles::run_import(&args, store, &workspace)
@@ -4443,24 +4659,100 @@ fn run_config_command(
     }
 }
 
-/// An explicit `telemetry = true` re-enables a machine that previously declined
-/// the notice. Fresh machines keep the notice owed, so the disclosure still
-/// appears on their first interactive launch.
-fn clear_recorded_telemetry_opt_out_if_reenabled(key: &str, value: &str) -> Result<()> {
-    let turning_on = matches!(
-        value.trim().to_ascii_lowercase().as_str(),
-        "1" | "true" | "yes" | "on" | "enabled"
-    );
-    if key != "telemetry" || !turning_on {
-        return Ok(());
-    }
-    if let Some(mut state) = SetupState::load()?
-        && state.telemetry_opted_out()
-    {
-        state.record_telemetry_notice(codewhale_config::TELEMETRY_NOTICE_VERSION, true);
-        state.save()?;
+/// Apply per-run `--set KEY=VALUE` overlays to the loaded store in memory.
+/// Nothing is saved; callers that persist must refuse overrides first
+/// (see `run_config_command`).
+fn apply_per_run_overrides(store: &mut ConfigStore, specs: &[String]) -> Result<()> {
+    for spec in specs {
+        let (key, value) = spec
+            .split_once('=')
+            .with_context(|| format!("invalid --set {spec:?}: expected KEY=VALUE"))?;
+        store
+            .config
+            .set_value(key.trim(), value)
+            .with_context(|| format!("invalid --set {spec:?}"))?;
     }
     Ok(())
+}
+
+/// Read-only config check. Unknown keys warn (the loader preserves them,
+/// never applies them); empty secrets and non-HTTP endpoints fail. Never
+/// prints a credential — presence and shape only.
+fn run_config_doctor(store: &ConfigStore) -> Result<()> {
+    println!("# {}", store.path().display());
+    let mut warnings = 0;
+    let mut errors: Vec<String> = Vec::new();
+
+    let mut unknown: Vec<&String> = store.config.extras.keys().collect();
+    unknown.sort();
+    for key in unknown {
+        println!("warning: unrecognized key `{key}` (preserved, never applied)");
+        warnings += 1;
+    }
+
+    let mut secrets: Vec<(String, Option<String>)> =
+        vec![("api_key".to_string(), store.config.api_key.clone())];
+    let mut endpoints: Vec<(String, Option<String>)> =
+        vec![("base_url".to_string(), store.config.base_url.clone())];
+    for provider in ProviderKind::ALL {
+        let table = store.config.providers.for_provider(provider);
+        secrets.push((format!("{provider:?}.api_key"), table.api_key.clone()));
+        endpoints.push((format!("{provider:?}.base_url"), table.base_url.clone()));
+    }
+    for (name, secret) in secrets {
+        if secret
+            .as_deref()
+            .is_some_and(|value| value.trim().is_empty())
+        {
+            errors.push(format!("`{name}` is set but empty"));
+        }
+    }
+    for (name, endpoint) in endpoints {
+        if let Some(url) = endpoint.as_deref()
+            && !url.starts_with("http://")
+            && !url.starts_with("https://")
+        {
+            errors.push(format!("`{name}` is not an http(s) URL: {url}"));
+        }
+    }
+
+    if !errors.is_empty() {
+        for error in &errors {
+            println!("error: {error}");
+        }
+        bail!(
+            "doctor: {} error(s), {warnings} warning(s): {}",
+            errors.len(),
+            errors.join("; ")
+        );
+    }
+    if warnings == 0 {
+        println!("doctor: clean");
+    } else {
+        println!("doctor: {warnings} warning(s)");
+    }
+    Ok(())
+}
+
+fn telemetry_preference_status(preference: Option<bool>) -> &'static str {
+    let (enabled, source) = codewhale_config::resolved_telemetry_consent(preference);
+    if !enabled {
+        return match source {
+            codewhale_config::TelemetrySource::Env => "Off (environment or run kill switch)",
+            _ => "Off (saved preference)",
+        };
+    }
+    match telemetry::load_setup_state_for_decision() {
+        Some(state) if state.telemetry_opted_out() => "Off (saved opt-out)",
+        None => "Off (privacy state unreadable)",
+        Some(_) => match source {
+            codewhale_config::TelemetrySource::Default => "On (default)",
+            codewhale_config::TelemetrySource::Env | codewhale_config::TelemetrySource::Cli => {
+                "On (environment or run preference)"
+            }
+            codewhale_config::TelemetrySource::Config => "On (saved preference)",
+        },
+    }
 }
 
 fn model_command_provider_hint(
@@ -5054,6 +5346,9 @@ fn tui_argv(cli: &Cli, passthrough: Vec<String>) -> Vec<String> {
     if cli.skip_onboarding {
         args.push("--skip-onboarding".to_string());
     }
+    if cli.fresh {
+        args.push("--fresh".to_string());
+    }
     if cli.no_project_config {
         args.push("--no-project-config".to_string());
     }
@@ -5617,6 +5912,122 @@ mod tests {
                 command: ConfigCommand::Path
             }))
         ));
+        assert!(matches!(
+            parse_ok(&["codewhale", "config", "edit"]).command,
+            Some(Commands::Config(ConfigArgs {
+                command: ConfigCommand::Edit
+            }))
+        ));
+        assert!(matches!(
+            parse_ok(&["codewhale", "config", "doctor"]).command,
+            Some(Commands::Config(ConfigArgs {
+                command: ConfigCommand::Doctor
+            }))
+        ));
+        assert!(matches!(
+            parse_ok(&["codewhale", "config", "dump"]).command,
+            Some(Commands::Config(ConfigArgs {
+                command: ConfigCommand::Dump
+            }))
+        ));
+    }
+
+    #[test]
+    fn parses_repeatable_global_set_overrides() {
+        let cli = parse_ok(&[
+            "codewhale",
+            "--set",
+            "verbosity=concise",
+            "--set",
+            "model=deepseek-v4-flash",
+            "config",
+            "get",
+            "verbosity",
+        ]);
+        assert_eq!(
+            cli.overrides,
+            vec![
+                "verbosity=concise".to_string(),
+                "model=deepseek-v4-flash".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn config_doctor_is_clean_on_minimal_config() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("config.toml");
+        write_config_fixture(&path, "verbosity = \"concise\"\n");
+        let store = ConfigStore::load(Some(path)).expect("load fixture");
+        run_config_doctor(&store).expect("clean doctor");
+    }
+
+    #[test]
+    fn config_doctor_warns_on_unknown_keys_but_passes() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("config.toml");
+        write_config_fixture(&path, "zzz_unknown = 1\n");
+        let store = ConfigStore::load(Some(path)).expect("load fixture");
+        assert!(!store.config.extras.is_empty());
+        run_config_doctor(&store).expect("unknown keys warn, not fail");
+    }
+
+    #[test]
+    fn config_doctor_fails_on_empty_secret_and_bad_url() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("config.toml");
+        write_config_fixture(&path, "api_key = \"\"\nbase_url = \"gopher://x\"\n");
+        let store = ConfigStore::load(Some(path)).expect("load fixture");
+        let error = run_config_doctor(&store).expect_err("doctor must fail");
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("api_key") && message.contains("empty"),
+            "{message}"
+        );
+        assert!(
+            message.contains("base_url") && message.contains("http"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn per_run_overrides_apply_in_memory_and_never_save() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("config.toml");
+        write_config_fixture(&path, "verbosity = \"normal\"\n");
+        let mut store = ConfigStore::load(Some(path.clone())).expect("load fixture");
+        apply_per_run_overrides(&mut store, &["verbosity=concise".to_string()])
+            .expect("overlay applies");
+        assert_eq!(store.config.verbosity.as_deref(), Some("concise"));
+        let error = apply_per_run_overrides(&mut store, &["no-equals-here".to_string()])
+            .expect_err("missing = must fail");
+        assert!(format!("{error:#}").contains("KEY=VALUE"));
+        // Nothing was saved: a reload sees the file, not the overlay.
+        let reloaded = ConfigStore::load(Some(path)).expect("reload");
+        assert_eq!(reloaded.config.verbosity.as_deref(), Some("normal"));
+    }
+
+    #[test]
+    fn mutating_config_commands_refuse_per_run_overrides() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("config.toml");
+        write_config_fixture(&path, "verbosity = \"normal\"\n");
+        let mut store = ConfigStore::load(Some(path)).expect("load fixture");
+        let overrides = vec!["verbosity=concise".to_string()];
+        let error = run_config_command(
+            &mut store,
+            ConfigCommand::Set {
+                key: "verbosity".to_string(),
+                value: "concise".to_string(),
+            },
+            false,
+            &overrides,
+        )
+        .expect_err("set with --set must refuse");
+        assert!(format!("{error:#}").contains("--set"), "{error:#}");
+        // Reads still work under an overlay.
+        run_config_command(&mut store, ConfigCommand::List, false, &overrides)
+            .expect("list with --set");
     }
 
     fn config_dispatch_from(
@@ -5716,7 +6127,7 @@ verbosity = "project-imported"
         assert_eq!(selected_path.as_deref(), Some(project_path.as_path()));
 
         let mut store = ConfigStore::load(selected_path).expect("load selected project config");
-        run_config_command(&mut store, command, project_bundle_scope)
+        run_config_command(&mut store, command, project_bundle_scope, &[])
             .expect("import project bundle");
         let project = ConfigStore::load(Some(project_path.clone())).expect("reload project");
         let global = ConfigStore::load(Some(global_path.clone())).expect("reload global");
@@ -5742,7 +6153,7 @@ verbosity = "project-imported"
         assert_eq!(selected_path.as_deref(), Some(global_path.as_path()));
         let mut explicit_store =
             ConfigStore::load(selected_path).expect("load explicit global config");
-        let error = run_config_command(&mut explicit_store, command, project_bundle_scope)
+        let error = run_config_command(&mut explicit_store, command, project_bundle_scope, &[])
             .expect_err("project import must reject an explicit non-workspace config");
         assert!(
             error
@@ -5781,7 +6192,7 @@ verbosity = "project-imported"
         assert_eq!(selected_path.as_deref(), Some(project_path.as_path()));
 
         let mut store = ConfigStore::load(selected_path).expect("load selected project config");
-        run_config_command(&mut store, command, project_bundle_scope)
+        run_config_command(&mut store, command, project_bundle_scope, &[])
             .expect("export project bundle");
         let body = std::fs::read_to_string(&output_path).expect("read portable export");
         let bundle = config_bundles::parse_bundle_str(&body, "portable.toml")
@@ -5814,7 +6225,7 @@ verbosity = "project-imported"
         assert_eq!(selected_path.as_deref(), Some(global_path.as_path()));
         let mut explicit_store =
             ConfigStore::load(selected_path).expect("load explicit global config");
-        let error = run_config_command(&mut explicit_store, command, project_bundle_scope)
+        let error = run_config_command(&mut explicit_store, command, project_bundle_scope, &[])
             .expect_err("project export must reject an explicit non-workspace config");
         assert!(
             error
@@ -6641,9 +7052,73 @@ verbosity = "project-imported"
     }
 
     #[test]
-    fn antigravity_provider_aliases_parse_as_builtin() {
+    fn antigravity_provider_aliases_are_clear_only_and_never_raw_custom() {
         for alias in ["antigravity", "agy"] {
-            assert_eq!(builtin_provider_arg(alias), Some(ProviderKind::Antigravity));
+            assert_eq!(builtin_provider_arg(alias), None, "{alias}");
+            assert_eq!(
+                parse_auth_clear_provider(alias),
+                Ok(ProviderKind::Antigravity),
+                "{alias}"
+            );
+            let error = parse_catalog_route(alias).expect_err("legacy route is not selectable");
+            assert!(error.contains("non-runnable legacy provider"), "{error}");
+            assert!(error.contains("--provider antigravity"), "{error}");
+            assert!(error.contains("google"), "{error}");
+            assert!(error.contains("GEMINI_API_KEY"), "{error}");
+
+            let clear = parse_ok(&["codewhale", "auth", "clear", "--provider", alias]);
+            assert!(matches!(
+                clear.command,
+                Some(Commands::Auth(AuthArgs {
+                    command: AuthCommand::Clear {
+                        provider: ProviderKind::Antigravity,
+                    }
+                }))
+            ));
+
+            for argv in [
+                vec!["codewhale", "auth", "set", "--provider", alias],
+                vec!["codewhale", "auth", "get", "--provider", alias],
+                vec!["codewhale", "auth", "print-api-key", "--provider", alias],
+                vec!["codewhale", "auth", "status", "--provider", alias],
+                vec!["codewhale", "auth", "external-revoke", "--provider", alias],
+                vec![
+                    "codewhale",
+                    "auth",
+                    "external-consent",
+                    "--provider",
+                    alias,
+                    "--mode",
+                    "read-only",
+                    "--yes",
+                ],
+                vec!["codewhale", "model", "list", "--provider", alias],
+                vec!["codewhale", "model", "resolve", "--provider", alias],
+            ] {
+                let error = Cli::try_parse_from(argv)
+                    .expect_err("legacy Antigravity route must be rejected outside auth clear");
+                assert_eq!(error.kind(), ErrorKind::ValueValidation);
+                assert!(
+                    error.to_string().contains("non-runnable legacy provider"),
+                    "{error}"
+                );
+            }
+
+            for command in [
+                Commands::Exec(TuiPassthroughArgs {
+                    args: vec!["Reply OK".into()],
+                }),
+                Commands::Fleet(TuiPassthroughArgs {
+                    args: vec!["status".into()],
+                }),
+            ] {
+                let error = top_level_provider_override(Some(alias), Some(&command))
+                    .expect_err("legacy alias must not fall through as a raw custom provider");
+                assert!(
+                    error.to_string().contains("non-runnable legacy provider"),
+                    "{error}"
+                );
+            }
         }
     }
 
@@ -7752,6 +8227,201 @@ verbosity = "project-imported"
         assert_eq!(inner.get("deepseek").unwrap(), None);
 
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn antigravity_clear_removes_only_codewhale_owned_legacy_state() {
+        use codewhale_secrets::{InMemoryKeyringStore, KeyringStore};
+        use std::sync::Arc;
+
+        let dir = tempfile::TempDir::new().expect("isolated legacy fixture");
+        let config_path = dir.path().join("config.toml");
+        let external_session_path = dir.path().join("external-antigravity-session.db");
+        let external_session = b"external session bytes must remain unchanged";
+        std::fs::write(&external_session_path, external_session)
+            .expect("write external session trap");
+
+        let mut store = ConfigStore::load(Some(config_path.clone())).expect("load empty config");
+        store.config.provider = ProviderKind::Antigravity;
+        store.config.fallback_providers = vec![ProviderKind::Antigravity, ProviderKind::Google];
+        {
+            let legacy = &mut store.config.providers.antigravity;
+            legacy.api_key = Some("legacy-codewhale-fixture-key".to_string());
+            legacy.base_url = Some("https://legacy.invalid/v1".to_string());
+            legacy.model = Some("legacy-fixture-model".to_string());
+            legacy.context_window = Some(1234);
+            legacy.mode = Some("legacy-fixture-mode".to_string());
+            legacy.wire = Some("legacy-fixture-wire".to_string());
+            legacy.auth_mode = Some("oauth".to_string());
+            legacy.insecure_skip_tls_verify = Some(true);
+            legacy
+                .http_headers
+                .insert("X-Legacy-Fixture".to_string(), "fixture".to_string());
+            legacy.path_suffix = Some("legacy-fixture-path".to_string());
+            legacy.external_credentials =
+                Some(codewhale_config::ExternalCredentialConsentToml::read_only(
+                    ProviderKind::Antigravity,
+                    codewhale_config::ExternalCredentialSource::AgyCli,
+                    external_session_path.clone(),
+                ));
+            legacy.extras.insert(
+                "legacy_fixture_extra".to_string(),
+                toml::Value::String("remove-me".to_string()),
+            );
+        }
+        store.config.providers.google.api_key = Some("google-fixture-key".to_string());
+        store.config.providers.google.base_url = Some("https://google.example/v1".to_string());
+        store.config.providers.google.model = Some("google-fixture-model".to_string());
+        store.save().expect("save legacy fixture");
+
+        // Released configs accepted the short `[providers.agy]` table alias.
+        // Exercise that on-disk spelling as well as the clear command's alias.
+        let canonical = std::fs::read_to_string(&config_path).expect("read canonical fixture");
+        let alias = canonical.replace("[providers.antigravity", "[providers.agy");
+        std::fs::write(&config_path, alias).expect("write legacy alias fixture");
+        let mut store = ConfigStore::load(Some(config_path.clone())).expect("reload alias fixture");
+
+        let inner = Arc::new(InMemoryKeyringStore::new());
+        inner
+            .set("antigravity", "legacy-codewhale-secret-slot")
+            .expect("seed Codewhale-owned legacy secret slot");
+        let secrets = Secrets::new(inner.clone());
+
+        run_auth_command_with_secrets(
+            &mut store,
+            AuthCommand::Clear {
+                provider: ProviderKind::Antigravity,
+            },
+            &secrets,
+        )
+        .expect("legacy clear should succeed");
+
+        assert_eq!(store.config.provider, ProviderKind::default());
+        assert_eq!(store.config.fallback_providers, vec![ProviderKind::Google]);
+        assert!(store.config.providers.antigravity.is_empty());
+        assert_eq!(inner.get("antigravity").unwrap(), None);
+        assert_eq!(
+            store.config.providers.google.api_key.as_deref(),
+            Some("google-fixture-key")
+        );
+        assert_eq!(
+            store.config.providers.google.base_url.as_deref(),
+            Some("https://google.example/v1")
+        );
+        assert_eq!(
+            store.config.providers.google.model.as_deref(),
+            Some("google-fixture-model")
+        );
+        assert_eq!(
+            std::fs::read(&external_session_path).expect("external session trap still exists"),
+            external_session
+        );
+
+        let raw = std::fs::read_to_string(&config_path).expect("read cleared config");
+        assert!(!raw.contains("[providers.antigravity"), "{raw}");
+        assert!(!raw.contains("[providers.agy"), "{raw}");
+        assert!(!raw.contains("legacy_fixture_extra"), "{raw}");
+        assert!(raw.contains("[providers.google]"), "{raw}");
+
+        let backup_path = config_path.with_file_name(format!(
+            "{}.bak",
+            config_path
+                .file_name()
+                .expect("config fixture has a file name")
+                .to_string_lossy()
+        ));
+        let backup = std::fs::read_to_string(backup_path).expect("read cleared config backup");
+        assert!(!backup.contains("[providers.antigravity"), "{backup}");
+        assert!(!backup.contains("[providers.agy"), "{backup}");
+        assert!(!backup.contains("legacy_fixture_extra"), "{backup}");
+        assert!(
+            !backup.contains(&external_session_path.to_string_lossy().to_string()),
+            "{backup}"
+        );
+        assert!(
+            backup.contains("base_url = \"https://google.example/v1\""),
+            "{backup}"
+        );
+        assert!(
+            backup.contains("model = \"google-fixture-model\""),
+            "{backup}"
+        );
+
+        let reloaded = ConfigStore::load(Some(config_path)).expect("reload cleared config");
+        assert_eq!(reloaded.config.provider, ProviderKind::default());
+        assert!(reloaded.config.providers.antigravity.is_empty());
+        assert_eq!(
+            reloaded.config.providers.google.api_key.as_deref(),
+            Some("google-fixture-key")
+        );
+    }
+
+    #[test]
+    fn antigravity_clear_restores_codewhale_secret_when_config_write_fails() {
+        use codewhale_secrets::{InMemoryKeyringStore, KeyringStore};
+        use std::sync::Arc;
+
+        let dir = tempfile::TempDir::new().expect("isolated rollback fixture");
+        let config_path = dir.path().join("config.toml");
+        let external_session_path = dir.path().join("external-session.db");
+        let external_session = b"external session rollback trap";
+        std::fs::write(&external_session_path, external_session)
+            .expect("write external session trap");
+        let mut store = ConfigStore::load(Some(config_path.clone())).expect("load absent config");
+        store.config.provider = ProviderKind::Antigravity;
+        store.config.fallback_providers = vec![ProviderKind::Antigravity];
+        store.config.providers.antigravity.api_key = Some("legacy-config-fixture".to_string());
+        store.config.providers.antigravity.external_credentials =
+            Some(codewhale_config::ExternalCredentialConsentToml::read_only(
+                ProviderKind::Antigravity,
+                codewhale_config::ExternalCredentialSource::AgyCli,
+                external_session_path.clone(),
+            ));
+        std::fs::create_dir(&config_path).expect("make config target unwritable as a file");
+
+        let inner = Arc::new(InMemoryKeyringStore::new());
+        inner
+            .set("antigravity", "legacy-secret-fixture")
+            .expect("seed Codewhale-owned legacy slot");
+        let secrets = Secrets::new(inner.clone());
+
+        run_auth_command_with_secrets(
+            &mut store,
+            AuthCommand::Clear {
+                provider: ProviderKind::Antigravity,
+            },
+            &secrets,
+        )
+        .expect_err("config failure must fail the clear transaction");
+
+        assert_eq!(store.config.provider, ProviderKind::Antigravity);
+        assert_eq!(
+            store.config.fallback_providers,
+            vec![ProviderKind::Antigravity]
+        );
+        assert_eq!(
+            store.config.providers.antigravity.api_key.as_deref(),
+            Some("legacy-config-fixture")
+        );
+        assert!(
+            store
+                .config
+                .providers
+                .antigravity
+                .external_credentials
+                .is_some()
+        );
+        assert_eq!(
+            inner
+                .get("antigravity")
+                .expect("read restored slot")
+                .as_deref(),
+            Some("legacy-secret-fixture")
+        );
+        assert_eq!(
+            std::fs::read(external_session_path).expect("external session trap still exists"),
+            external_session
+        );
     }
 
     #[test]
@@ -9374,7 +10044,10 @@ verbosity = "project-imported"
             .collect();
         // Full registry keeps legacy dialect/plan kinds; ALL is the catalog surface.
         assert_eq!(registry_kinds.len(), 48);
-        assert_eq!(ProviderKind::ALL.len(), 43);
+        // The tombstone stays in the registry (old config must still parse
+        // and clear) and left the catalog surface when it stopped being
+        // selectable.
+        assert_eq!(ProviderKind::ALL.len(), 42);
         for kind in ProviderKind::ALL {
             assert!(
                 registry_kinds.contains(&kind),
@@ -9436,6 +10109,112 @@ verbosity = "project-imported"
                 && telemetry_line.contains("wins"),
             "the help string must document the always-winning opt-out: {telemetry_line}"
         );
+        let help = help_for(&["codewhale", "config", "telemetry", "--help"]);
+        assert!(help.contains("PostHog"));
+        assert!(help.contains("--accept-notice"));
+    }
+
+    #[test]
+    fn cli_telemetry_acceptance_is_versioned_and_reuses_settings_persistence() {
+        let _lock = env_lock();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("CODEWHALE_HOME", temp.path().to_str().unwrap());
+        let path = temp.path().join("config.toml");
+        write_config_fixture(&path, "telemetry = false\nverbosity = \"concise\"\n");
+        let mut state = SetupState::default();
+        state.record_telemetry_notice("3", false);
+        state.save().expect("seed decline");
+        let mut store = ConfigStore::load(Some(path.clone())).expect("load config");
+
+        // An explicit enable command clears a historical decline through Settings.
+        run_config_command(
+            &mut store,
+            ConfigCommand::Set {
+                key: "telemetry".into(),
+                value: "true".into(),
+            },
+            false,
+            &[],
+        )
+        .expect("save configuration preference");
+        assert!(!SetupState::load().unwrap().unwrap().telemetry_opted_out());
+        assert_eq!(
+            telemetry_preference_status(Some(true)),
+            "On (saved preference)"
+        );
+        let before = std::fs::read(SetupState::path().unwrap()).unwrap();
+        run_config_command(
+            &mut store,
+            ConfigCommand::Telemetry {
+                accept_notice: None,
+            },
+            false,
+            &[],
+        )
+        .expect("read notice");
+        assert!(
+            run_config_command(
+                &mut store,
+                ConfigCommand::Telemetry {
+                    accept_notice: Some(3)
+                },
+                false,
+                &[]
+            )
+            .is_err()
+        );
+        assert_eq!(std::fs::read(SetupState::path().unwrap()).unwrap(), before);
+
+        run_config_command(
+            &mut store,
+            ConfigCommand::Telemetry {
+                accept_notice: Some(telemetry::NOTICE_VERSION),
+            },
+            false,
+            &[],
+        )
+        .expect("accept current processor notice");
+        assert_eq!(
+            telemetry_preference_status(Some(true)),
+            "On (saved preference)"
+        );
+        let saved = ConfigStore::load(Some(path)).unwrap();
+        assert_eq!(saved.config.telemetry, Some(true));
+        assert_eq!(saved.config.verbosity.as_deref(), Some("concise"));
+        assert!(
+            !temp.path().join("telemetry").exists(),
+            "acceptance never arms this process"
+        );
+    }
+
+    #[test]
+    fn cli_telemetry_acceptance_refuses_overlays_and_corrupt_privacy_records() {
+        let _lock = env_lock();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("CODEWHALE_HOME", temp.path().to_str().unwrap());
+        let path = temp.path().join("config.toml");
+        write_config_fixture(&path, "telemetry = false\n");
+        std::fs::write(SetupState::path().unwrap(), "not-json").unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let mut store = ConfigStore::load(Some(path.clone())).unwrap();
+        for overrides in [vec![], vec!["telemetry=true".to_string()]] {
+            assert!(
+                run_config_command(
+                    &mut store,
+                    ConfigCommand::Telemetry {
+                        accept_notice: Some(telemetry::NOTICE_VERSION),
+                    },
+                    false,
+                    &overrides
+                )
+                .is_err()
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+            assert_eq!(
+                std::fs::read_to_string(SetupState::path().unwrap()).unwrap(),
+                "not-json"
+            );
+        }
     }
 
     #[test]
@@ -9510,6 +10289,77 @@ verbosity = "project-imported"
         assert_eq!(
             root_tui_passthrough(&cli).unwrap(),
             vec!["--prompt".to_string(), "Reply with exactly OK.".to_string()]
+        );
+    }
+
+    #[test]
+    fn root_fresh_and_mouse_flags_forward_as_separate_tui_arguments() {
+        for flags in [
+            ["--fresh", "--mouse-capture"],
+            ["--mouse-capture", "--fresh"],
+        ] {
+            let cli = parse_ok(&[
+                "codewhale",
+                "--workspace",
+                "workspace with spaces",
+                "--no-project-config",
+                flags[0],
+                flags[1],
+            ]);
+            assert_eq!(
+                tui_argv(&cli, root_tui_passthrough(&cli).unwrap()),
+                [
+                    "codewhale",
+                    "--workspace",
+                    "workspace with spaces",
+                    "--mouse-capture",
+                    "--fresh",
+                    "--no-project-config",
+                ],
+                "{flags:?} must remain launch flags, not a joined prompt"
+            );
+        }
+    }
+
+    #[test]
+    fn root_fresh_preserves_quoted_prompt_whitespace_and_split_tail() {
+        let cli = parse_ok(&[
+            "codewhale",
+            "--fresh",
+            "--mouse-capture",
+            "--prompt",
+            "Keep  two spaces\nand a tab\there",
+            "then",
+            "explain them",
+        ]);
+        assert_eq!(
+            tui_argv(&cli, root_tui_passthrough(&cli).unwrap()),
+            [
+                "codewhale",
+                "--mouse-capture",
+                "--fresh",
+                "--prompt",
+                "Keep  two spaces\nand a tab\there then explain them",
+            ]
+        );
+    }
+
+    #[test]
+    fn root_prompt_tail_does_not_reinterpret_literal_launch_flags() {
+        let cli = parse_ok(&[
+            "codewhale",
+            "Explain",
+            "--fresh",
+            "--mouse-capture",
+            "as literal flags",
+        ]);
+        assert_eq!(
+            tui_argv(&cli, root_tui_passthrough(&cli).unwrap()),
+            [
+                "codewhale",
+                "--prompt",
+                "Explain --fresh --mouse-capture as literal flags",
+            ]
         );
     }
 
@@ -9676,6 +10526,7 @@ verbosity = "project-imported"
             "--mouse-capture",
             "--no-mouse-capture",
             "--skip-onboarding",
+            "--fresh",
             "--continue",
             "--prompt",
         ] {

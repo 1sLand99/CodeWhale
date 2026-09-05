@@ -18,7 +18,7 @@
  * "Plan · Work · Operate", "Ask · Auto-Review · Full Access",
  * "TUI · exec · web · API", "Codewhale", "GitHub", "Issues",
  * `npm install -g codewhale`, `cargo test --locked`, `codewhale exec`,
- * package-manager proper nouns, mirror names, and `/codewhale-tui.webp`.
+ * package-manager proper nouns, mirror names, and `/codewhale-tui.png`.
  */
 
 export interface ChromeDict {
@@ -46,6 +46,18 @@ export interface ChromeDict {
   navFaqSecondary: string;
   navCommunitySecondary: string;
   navContributeSecondary: string;
+
+  /**
+   * The primary strip: Product / Models / Pricing / Docs. The older six
+   * (Start, Install, FAQ, Community, Contribute) stay in the dictionary for
+   * the compact sheet's second group and the footer.
+   */
+  navProduct: string;
+  navModels: string;
+  navPricing: string;
+  navProductSecondary: string;
+  navModelsSecondary: string;
+  navPricingSecondary: string;
 
   /**
    * Skip-to-content link rendered before the nav in app/[locale]/layout.tsx.
@@ -185,14 +197,12 @@ export interface ChromeDict {
 export interface HomeDict {
   /**
    * `<title>` and meta description for the locale home route, consumed by
-   * `generateMetadata` in app/[locale]/layout.tsx. These were the last
-   * inline EN/ZH pair on the required slice; per-locale metadata is the
-   * whole point of routing a locale, so it lives in the dictionary.
+   * `generateMetadata` in app/[locale]/layout.tsx.
    */
   metaTitle: string;
   metaDescription: string;
 
-  /** Hero pill, e.g. "Open source · Any model · Runs in your terminal". */
+  /** The plate's rubric above the title, e.g. "Agentic computing, on your terms". */
   kicker: string;
   heroTitleA: string;
   heroTitleB: string;
@@ -202,92 +212,75 @@ export interface HomeDict {
    * instead of concatenating fragments around it.
    */
   heroIntro: string;
-  install: string;
-  docs: string;
-  copy: string;
-  copied: string;
+  /** Primary action → /install, e.g. "Get Codewhale". */
+  getCodewhale: string;
+  /** Secondary action → /product, e.g. "Explore the product". */
+  exploreProduct: string;
 
-  /** Eyebrow above the one-line install block, e.g. "one-line install". */
-  installEyebrow: string;
-  /** Install prerequisite line, e.g. "needs Node 18+ — no Rust toolchain". */
-  installRequirement: string;
-  /** Link to the other install methods, e.g. "other ways →". */
-  installOtherWays: string;
+  /** Screenshot caption, first item of the dot chain, e.g. "Terminal preview". */
+  shotPreview: string;
+  /** Screenshot caption, build item with a `{version}` token. */
+  shotBuild: string;
+  /** Screenshot alt text for /codewhale-tui.png — describes the capture as it is. */
+  screenshotAlt: string;
 
   /** "Latest release {tag}" */
   latestRelease: string;
   releaseUnavailable: string;
-  /** "Current source" / "Source candidate" — prepended to `v{version}:`. */
+  /** "Source" / "Unreleased" — prepended to `v{version}`. */
   currentSource: string;
   sourceCandidate: string;
-  /** "{count} provider routes" */
+  /** "{count} providers" */
   providerRoutes: string;
-  /** "published release" / "source candidate" — the source-state label. */
+  /** "released" / "unreleased" — the machine-readable source-state label. */
   publishedRelease: string;
   figcaptionSourceCandidate: string;
 
-  /** Screenshot toolbar label, e.g. "Current session". */
-  shotSession: string;
-  /** Screenshot alt text for /codewhale-tui.webp. */
-  screenshotAlt: string;
-  /** Screenshot figcaption. */
-  figcaption: string;
+  /** The running head on the water beside the capture. */
+  chapterTerminal: string;
+  chapterTerminalTitle: string;
 
-  proofHeading: string;
-  proofBody: string;
+  /** What a person gains: heading, lede, and three [title, body] columns. */
+  gainHeading: string;
+  gainLede: string;
+  gain: [string, string][];
 
-  /** Section seal glyph for the "see how it decides" band. */
-  sealDecides: string;
-  decidesEyebrow: string;
-  decidesHeading: string;
-  decidesLede: string;
+  /** Models chapter. */
+  chapterModels: string;
+  modelsHeading: string;
+  modelsBody: string;
+  /** Three [route kind, description] rows. */
+  modelsFacts: [string, string][];
+  modelsLink: string;
 
-  /** Section seal glyph for the workflow band. */
-  sealWorkflow: string;
-  workflowHeading: string;
-  /** Four [title, description] steps. */
-  workflow: [string, string][];
-  receiptAria: string;
-  /**
-   * Right-hand column of the example receipt. The verbs (inspect / act /
-   * verify / report), `$ codewhale exec …`, and `cargo test --locked` stay
-   * code-owned literals in the JSX per docs/VOICE.md.
-   */
-  receiptInspect: string;
-  receiptAct: string;
-  receiptReport: string;
-
-  /** Section seal glyph for the getting-started band. */
-  sealStart: string;
   startHeading: string;
   startLede: string;
   startGuideLink: string;
   startVocabularyLink: string;
 
-  /** Section seal glyph for the boundaries band. */
-  sealBoundaries: string;
-  boundariesHeadingA: string;
-  boundariesHeadingB: string;
-  boundariesBody: string;
-  hostedGatewayLocal: string;
-  planActOperateDesc: string;
-  askAutoReviewDesc: string;
-  tuiExecWebDesc: string;
+  /**
+   * Availability chapter: four [surface, status, detail] rows stating what
+   * is released, what is a development build, and what is not available.
+   */
+  chapterAccount: string;
+  availabilityHeading: string;
+  availabilityLede: string;
+  availability: [string, string, string][];
+  availabilityNote: string;
+  accountLink: string;
 
-  /** Section seal glyph for the surfaces band. */
-  sealSurfaces: string;
   surfacesHeading: string;
   /** Five [name, description] surfaces. */
   surfaces: [string, string][];
   runtimeLink: string;
 
   installBandHeading: string;
+  copy: string;
+  copied: string;
   binaries: string;
   chinaMirrors: string;
   installGuideLink: string;
 
-  /** Section seal glyph for the community band. */
-  sealCommunity: string;
   communityHeading: string;
   communityBody: string;
   communityLinksAria: string;
@@ -765,6 +758,10 @@ export interface DocsWebDict {
   authLead: string;
   localTitle: string;
   localLead: string;
+  /** Remote control of a running local session from the signed-in web app. */
+  remoteTitle: string;
+  remoteLead: string;
+  remoteBody: string;
   troubleshootingTitle: string;
   troubleshootingLead: string;
   sourceNote: string;

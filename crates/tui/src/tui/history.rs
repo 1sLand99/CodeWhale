@@ -8,7 +8,6 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
-use crate::deepseek_theme::active_theme;
 use crate::localization::Locale;
 use crate::models::{ContentBlock, Message};
 use crate::palette;
@@ -213,6 +212,16 @@ pub struct TranscriptRenderOptions {
     /// `[transcript] prose_measure` so the main cache and the full-screen
     /// overlay agree on the same effective width.
     pub(crate) prose_measure: Option<u16>,
+    /// This cell is a durable Work receipt that a later one has replaced.
+    ///
+    /// `todo_write` writes the whole list every time, so a long session grew a
+    /// stack of full checklist cards that could only be cleared by `/clear` or
+    /// `/new` — both of which also drop `api_messages` and the compaction
+    /// summary, so tidying the view cost the conversation (#5871). A
+    /// superseded snapshot collapses to its summary line in the live
+    /// transcript; the full card stays in the transcript overlay and in the
+    /// tool detail record, because the receipt that the tool ran is evidence.
+    pub(crate) superseded_work_receipt: bool,
     /// Extra raw reasoning body rows available to the newest transcript cell.
     /// The transcript cache derives this from genuinely unused viewport rows;
     /// non-layout-aware renderers and historical cells retain the compact
@@ -227,6 +236,7 @@ pub struct TranscriptRenderOptions {
 impl Default for TranscriptRenderOptions {
     fn default() -> Self {
         Self {
+            superseded_work_receipt: false,
             locale: Locale::En,
             show_thinking: true,
             thinking_highlight: true,
@@ -480,6 +490,20 @@ impl HistoryCell {
                         Style::default().fg(palette::TEXT_MUTED).italic(),
                     ));
                 }
+                lines
+            }
+            HistoryCell::Tool(cell) if options.superseded_work_receipt => {
+                // A durable Work receipt a later one replaced keeps its header
+                // — the progress reading — and drops the body (#5871). The full
+                // card stays in the transcript overlay and the detail record,
+                // so the evidence that the tool ran is not rewritten away.
+                let mut lines =
+                    cell.lines_with_motion_and_locale(width, options.low_motion, options.locale);
+                lines.truncate(1);
+                lines.push(details_affordance_line(
+                    &crate::tui::key_shortcuts::tool_details_shortcut_action_hint("details"),
+                    Style::default().fg(palette::TEXT_MUTED).italic(),
+                ));
                 lines
             }
             HistoryCell::Tool(cell) => {
@@ -2751,32 +2775,82 @@ fn render_card_detail_line_single(
     Line::from(spans)
 }
 
+// Tool-card ink. The transcript paints tool cards with the dark whale tokens
+// regardless of the selected theme, as every other cell in this file does by
+// reading the same `palette` constants directly.
+
 fn tool_title_style() -> Style {
-    active_theme().tool_title_style()
+    Style::default()
+        .fg(palette::TEXT_SOFT)
+        .add_modifier(Modifier::BOLD)
 }
 
+/// Right-side status text ("running", "done", "issue"). Reads as the glyph it
+/// sits beside, not as the rail.
 fn tool_status_style(
     status: ToolStatus,
     family: crate::tui::widgets::tool_card::ToolFamily,
 ) -> Style {
-    active_theme().tool_status_style(status, family)
+    Style::default().fg(tool_glyph_color(status, family))
 }
 
+/// Detail label style ("command:", "time:", step markers).
 fn tool_detail_label_style() -> Style {
-    active_theme().tool_label_style()
+    Style::default().fg(palette::TEXT_DIM)
 }
 
-/// Card border ink — OMP's border rule. See [`Theme::tool_rail_color`].
+/// Colour of a tool cell's **rail** — the card border.
+///
+/// This is OMP's `output-block.ts` rule verbatim: a block takes a state and
+/// its border colour follows it. In-flight takes the action accent, a settled
+/// success recedes into muted text so finished work stops competing for the
+/// eye, and only warning and failure keep a loud colour. `Hydrated` is a
+/// stalled "tool loaded — retry required", not live work, so it takes the hint
+/// colour instead of borrowing the running accent and reading as in-flight.
+///
+/// Deliberately *not* the same function as [`tool_glyph_color`]: the border
+/// reports lifecycle, the glyph reports identity. They agree wherever it
+/// matters — running, warning and failure are the same ink in both, so the two
+/// can never disagree about trouble.
 fn tool_rail_color(status: ToolStatus) -> Color {
-    active_theme().tool_rail_color(status)
+    match status {
+        ToolStatus::Running => palette::WHALE_ACTION,
+        ToolStatus::Success => palette::TEXT_MUTED,
+        ToolStatus::Hydrated => palette::TEXT_DIM,
+        ToolStatus::Warning => palette::WHALE_HUMAN,
+        ToolStatus::Failed => palette::WHALE_ERROR,
+    }
 }
 
-/// Status-glyph ink — the mockup's reading. See [`Theme::tool_glyph_color`].
+/// Colour of a tool cell's **status glyph** and the state word beside it.
+///
+/// Follows the accepted mockup (`tideline-mockups/tideline-01`) rather than
+/// the border rule: a finished verify row keeps its green `✓`, and a finished
+/// read or search keeps the family accent that identifies it — the blue
+/// magnifier in that mockup. A settled card therefore still says *what it was*
+/// even while its border has receded to muted.
+///
+/// Everything that needs attention reads identically to the rail.
 fn tool_glyph_color(
     status: ToolStatus,
     family: crate::tui::widgets::tool_card::ToolFamily,
 ) -> Color {
-    active_theme().tool_glyph_color(status, family)
+    use crate::tui::widgets::tool_card::ToolFamily;
+    match status {
+        ToolStatus::Running => palette::WHALE_ACTION,
+        // Verified work earns Working Green; every other family keeps the
+        // action accent it wore while running, which is what makes a
+        // completed `read` row still read as a read.
+        ToolStatus::Success => match family {
+            ToolFamily::Verify => palette::STATUS_SUCCESS,
+            _ => palette::WHALE_ACTION,
+        },
+        // A hydrated cell has not succeeded at anything yet, so it never
+        // borrows the verified or family accent.
+        ToolStatus::Hydrated => palette::TEXT_DIM,
+        ToolStatus::Warning => palette::WHALE_HUMAN,
+        ToolStatus::Failed => palette::WHALE_ERROR,
+    }
 }
 
 fn tool_status_label(status: ToolStatus) -> &'static str {
@@ -2838,8 +2912,9 @@ fn count_output_lines(output: &str) -> usize {
     }
 }
 
+/// Default value style for tool detail rows.
 fn tool_value_style() -> Style {
-    active_theme().tool_value_style()
+    Style::default().fg(palette::TEXT_MUTED)
 }
 
 /// Parse `path:line` patterns from `text` and open the file at the given line

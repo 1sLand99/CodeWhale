@@ -1,35 +1,28 @@
 import type { HomeDict } from "../types";
 
 /**
- * Turkish home dictionary — «gazete-okyanus» açılış sayfası.
- *
- * Güncel İngilizce yönünde özgün yeniden yazım: modelini kendin getir,
- * her şey senin makinende olur. Ürün sözlüğü TUI paketiyle aynı kalır:
- * Plan / Work / Operate, Ask / Auto-Review / Full Access, Codewhale, TUI,
- * `codewhale exec`, Runtime API + MCP, fleet, Node 18+, Rust, MIT.
- *
- * Bölüm mühürleri (法, 行, …) İngilizce baskıyla paylaşılan gliflerdir —
- * işaretlerdir, düzyazı değil.
+ * Turkish home dictionary — native copy for the Tidal Folio landing page,
+ * in the current direction: your models, more capable together; agents
+ * and control on your own machine; availability stated per surface as it
+ * is today. Product vocabulary stays literal (Plan / Work / Operate, Ask /
+ * Auto-Review / Full Access, Codewhale, TUI, codewhale exec, Fleet).
  */
+
 export const home: HomeDict = {
-  metaTitle: "Codewhale — derinlere dalar, sen dalmak zorunda kalmazsın.",
+  metaTitle: "Codewhale — Senin modellerin. Birlikte daha yetenekli.",
   metaDescription:
-    "Codewhale derinlere dalar, sen dalmak zorunda kalmazsın — terminal için açık kaynak kodlama ajanı. Modelini kendin getir. Senin makineninde çalışır. Rust, MIT.",
-
-  kicker: "Açık kaynak · Modelini kendin getir · Terminalinde çalışır",
-  heroTitleA: "Codewhale derinlere dalar,",
-  heroTitleB: "sen dalmak zorunda kalmazsın.",
+    "Codewhale açık kaynaklı bir ajan tabanlı bilişim sistemidir. Zaten kullandığın modelleri —barındırılan, gateway üzerinden ya da yerel— terminaline getir ve senin makinende, senin denetiminde birlikte çalışmalarını sağla. Rust, MIT.",
+  kicker: "Ajan tabanlı bilişim, senin şartlarınla",
+  heroTitleA: "Senin modellerin.",
+  heroTitleB: "Birlikte daha yetenekli.",
   heroIntro:
-    "{brand}, terminalin için açık kaynaklı bir kodlama ajanıdır. Ona bir model ve bir görev ver — kodunu okur, dosyaları düzenler, kendi denetimlerini çalıştırır ve iş bitince ya da sana ihtiyaç duyduğunda durur. İstediğin modeli getir ya da modelleri karıştır: her role ayrı bir model sabitle.",
-  install: "Kur",
-  docs: "Belgeler",
-  copy: "Kopyala",
-  copied: "Kopyalandı ✓",
-
-  installEyebrow: "tek satır kurulum",
-  installRequirement: "Node 18+ gerekir — Rust araç zinciri gerekmez",
-  installOtherWays: "diğer yollar →",
-
+    "{brand} zaten kullandığın modelleri tek bir terminalde toplar ve bir mürettebat gibi çalıştırır — kodunu okur, dosyaları düzenler, kontrolleri çalıştırır — her birinin neye izinli olduğuna ise sen karar verirsin. Açık kaynak, senin makinende.",
+  getCodewhale: "Codewhale'i edin",
+  exploreProduct: "Ürünü keşfet",
+  shotPreview: "Terminal önizlemesi",
+  shotBuild: "v{version} geliştirme derlemesi",
+  screenshotAlt:
+    "Terminalde Codewhale v0.9.12 geliştirme derlemesi: braille noktalarından balina işareti, geçmişi olmayan yeni bir oturum, mesaj yazma alanı ve Full Access, Work modu, iki zamanlanmış görev, bağlanan MCP sunucuları ile en yüksek çabada GLM-5.3 modelini gösteren alt bilgi",
   latestRelease: "En yeni sürüm {tag}",
   releaseUnavailable: "Sürüm durumu kullanılamıyor",
   currentSource: "Kaynak",
@@ -37,53 +30,45 @@ export const home: HomeDict = {
   providerRoutes: "{count} sağlayıcı",
   publishedRelease: "yayımlandı",
   figcaptionSourceCandidate: "yayımlanmadı",
-
-  shotSession: "Geçerli oturum",
-  screenshotAlt:
-    "Operate modu, balina, besteci ve alt bilgisi görünen geçerli Codewhale terminal oturumu",
-  figcaption: "Geçerli Codewhale oturumu · Operate modu · Ask izin duruşu",
-
-  proofHeading: "Bir su altı terminal kabuğu. İstediğin model. Senin makinen.",
-  proofBody:
-    "Zaten kullandığın modeli getir — barındırılan, ağ geçidi üzerinden ya da yerel. Plan / Work / Operate ve açık izin duruşları dalışı senin denetiminde tutar.",
-
-  sealDecides: "法",
-  decidesEyebrow: "Nasıl karar verdiğini gör",
-  decidesHeading: "İzinde izleyebildiğin kurallar",
-  decidesLede:
-    "Gerçek oturum kesitleri — sıralı proje kuralları modelin muakemesinde görünür; yalnızca açılış sayfası iddiası değil.",
-
-  sealWorkflow: "行",
-  workflowHeading: "Görevden doğrulanmış değişikliğe.",
-  workflow: [
-    ["İncele", "Depoyu, talimatlarını ve görevi oku."],
-    ["Eyle", "Dosyaları açık onay sınırları içinde düzenle."],
-    ["Doğrula", "Denetimleri çalıştır, sonucu incele."],
-    ["Raporla", "Öz ve kalıcı bir makbuz bırak."],
+  chapterTerminal: "Senin terminalin",
+  chapterTerminalTitle: "Başlamak için tanıdık bir yer.",
+  gainHeading:
+    "Elde ettiğin bir sohbet botu değil. Zaten ödediğin modeller üzerinde kaldıraç.",
+  gainLede:
+    "Tek bir oturum aynı anda birden çok modeli tutabilir; her biri verdiğin rolde, hepsi aynı depoda, aynı kurallarla çalışır.",
+  gain: [
+    ["Senin modellerin", "Barındırılan anahtarlar, bir gateway ya da hiç anahtar gerektirmeyen yerel bir runtime. Her role ayrı bir model sabitle ve seçtiğin sağlayıcıyı koru — bir model adı sağlayıcıyı senin yerine asla değiştirmez."],
+    ["Yetenekli ajanlar", "Plan, Work ve Operate modları; tek bir iş için alt ajanlardan oluşan bir fleet; dosya, kabuk, web ve MCP araçları; kaydedilen, sürdürülen ve geri alınan oturumlar."],
+    ["Makinende denetim", "Ask, Auto-Review ya da Full Access — sormadan önce ne kadar yapacağını sen belirlersin. Yerelde çalışır, işletim sisteminin izin verdiği yerde sandbox içinde, okuyabileceğin bir denetim günlüğüyle."],
   ],
-  receiptAria: "Örnek iş makbuzu",
-  receiptInspect: "depo ve talimatlar",
-  receiptAct: "seçili izin duruşuyla düzenleme",
-  receiptReport: "denetimler geçti · makbuz kaydedildi",
-
-  sealStart: "起",
-  startHeading: "Codewhale’a yeni misin? Baştan sona dört adım.",
+  chapterModels: "Senin modellerin",
+  modelsHeading: "Elindekini getir. Seçmediğin hiçbir şeyi değiştirme.",
+  modelsBody:
+    "Desteklenen bir barındırılan sağlayıcıya, ağ geçidine veya yerel model sunucusuna bağlanın. Başlamadan önce sağlayıcıyı ve modeli kontrol edin. Yerel sunucular da kimlik doğrulaması gerektirebilir.",
+  modelsFacts: [
+    ["Barındırılan", "codewhale auth set ile kaydedilen kendi API anahtarın"],
+    ["Gateway", "Birçok model için tek uç nokta, sağlayıcıyı yine sen seçersin"],
+    ["Yerel", "localhost üzerinde vLLM, SGLang, Ollama — genellikle anahtarsız"],
+  ],
+  modelsLink: "Tüm sağlayıcıları gör",
+  startHeading: "İlk oturuma dört adım.",
   startLede:
-    "Kur → anahtarsız ilk oturum → bir sağlayıcı bağla → fleet’ini kur. Terimler sözlük sayfasında tanımlı.",
-  startGuideLink: "Başlangıç kılavuzunu oku →",
-  startVocabularyLink: "Ürün sözlüğünü gör →",
-
-  sealBoundaries: "界",
-  boundariesHeadingA: "Senin modelin.",
-  boundariesHeadingB: "Senin sınırların.",
-  boundariesBody:
-    "Modeli, çalışma modunu ve izin duruşunu açıkça seç. Bilinmeyen maliyet bilinmiyor olarak kalır; önizleme yüzeyleri de böyle etiketlenir.",
-  hostedGatewayLocal: "Barındırılan, ağ geçidi ve yerel modeller",
-  planActOperateDesc: "Salt okunur planlamadan otonom işletmeye",
-  askAutoReviewDesc: "İş için izin duruşunu seç",
-  tuiExecWebDesc: "Etkileşimli ve arayüzsüz çalışma zamanı yüzeyleri",
-
-  sealSurfaces: "面",
+    "Kur, anahtarsız bir oturum aç, bir sağlayıcı bağla; tek model yetmediğinde bir fleet kur.",
+  startGuideLink: "Başlangıç kılavuzunu oku",
+  startVocabularyLink: "Ürün sözlüğünü gör",
+  chapterAccount: "Bugün nerede çalışıyor",
+  availabilityHeading: "Şu an kullanılabilir, geliştirmede ve henüz değil — açıkça söylenmiş.",
+  availabilityLede:
+    "Terminal yayınlanmış üründür. Geri kalan her şey gerçekte bulunduğu durumla listelenir.",
+  availability: [
+    ["Terminal", "Yayınlandı", "Linux, macOS ve Windows için GitHub Releases ikili dosyaları; npm ve Cargo alternatiflerdir. Termux üzerinde Android önizlemedir."],
+    ["Web uygulaması", "Giriş ve uzaktan kontrol kullanılabilir", "Giriş yap ya da hesap oluştur, sonra çalışan yerel bir oturumda /rc yazarak tam o oturuma tarayıcıdan devam et. Tarayıcıdaki çalışma tezgâhının geri kalanı geliştirme önizlemesidir."],
+    ["Masaüstü", "Geliştirme derlemesi", "macOS, Linux ve Windows için alfa derlemeleri var. Henüz yayınlanmış bir masaüstü uygulaması yok."],
+    ["Bulut bilgisayarlar", "Henüz kullanılamıyor", "Barındırılan bir bilgisayarda iş çalıştırmak geliştirme aşamasında. Çalıştığında bu sayfa bunu söyleyecek."],
+  ],
+  availabilityNote:
+    "Terminal için hesap gerekmez. Bir hesap tek başına asla ücretli bir plan değildir ve bu sitedeki hiçbir şey senden ücret alamaz.",
+  accountLink: "Hesap oluştur",
   surfacesHeading: "Çalışma zamanını işin olduğu yerde kullan.",
   surfaces: [
     ["TUI", "Terminalde etkileşimli iş"],
@@ -92,14 +77,13 @@ export const home: HomeDict = {
     ["Runtime API + MCP", "Yerel entegrasyonlar"],
     ["fleet", "Kalıcı çok ajanlı iş"],
   ],
-  runtimeLink: "Çalışma zamanı yüzeylerini ve kararlılık notlarını gör →",
-
+  runtimeLink: "Çalışma zamanı yüzeylerini ve kararlılık notlarını gör",
   installBandHeading: "Tek komutla başla.",
+  copy: "Kopyala",
+  copied: "Kopyalandı ✓",
   binaries: "İkililer",
   chinaMirrors: "Çin yansıları",
-  installGuideLink: "Kurulum kılavuzunu oku →",
-
-  sealCommunity: "众",
+  installGuideLink: "Kurulum kılavuzunu oku",
   communityHeading: "Açıkça, halk önünde inşa edildi",
   communityBody:
     "MIT lisanslı; çalışma zamanları, sağlayıcılar, platformlar, belgelendirme ve testler katkısıyla şekillendi.",

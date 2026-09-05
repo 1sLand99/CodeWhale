@@ -30,6 +30,13 @@ export const chrome: ChromeDict = {
   navCommunitySecondary: "Community",
   navContributeSecondary: "Contribute",
 
+  navProduct: "Produk",
+  navModels: "Model",
+  navPricing: "Harga",
+  navProductSecondary: "Product",
+  navModelsSecondary: "Models",
+  navPricingSecondary: "Pricing",
+
   skipToContent: "Lewati ke konten utama",
 
 
@@ -74,7 +81,7 @@ export const chrome: ChromeDict = {
   themeTitle: "Tema dokumentasi · otomatis / terang / gelap",
 
   footerTagline:
-    "Codewhale menyelam ke laut dalam, jadi Anda tidak perlu — dokumentasi, kode sumber, dan komunitas untuk runtime sumber terbuka.",
+    "Model Anda. Lebih mampu bersama. Dokumentasi, sumber, dan komunitas untuk runtime sumber terbuka.",
   footerProduct: "Produk",
   footerProject: "Proyek",
   footerDocs: "Dokumentasi",

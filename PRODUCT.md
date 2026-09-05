@@ -37,8 +37,12 @@ no hosted runtime to sell.
 
 ## Operating Context
 
-- Install: `npm install -g codewhale` (Node 18+, no Rust toolchain); source
-  builds via cargo. Facts (version, provider count, tool count, license) are
+- Install: official GitHub Releases first. New macOS/Linux installs use
+  `curl -fsSL https://codewhale.net/install.sh | sh`; Windows uses the matching
+  GitHub installer/archive. Existing direct installs use `codewhale update`.
+  npm and Cargo are secondary packaging routes; migration and PATH handling
+  follow `docs/INSTALL.md`. `latest` selects a published release, not the source
+  candidate. Facts (version, provider count, tool count, license) are
   derived from the repository by `npm run prebuild` into
   `web/lib/facts.generated.ts` and must never be hand-edited.
 - Docs pages mirror `docs/*.md` in the repository; `npm run check:docs`
@@ -57,10 +61,12 @@ no hosted runtime to sell.
   compatibility identifiers (GitHub org/repo, package scopes).
 - Provider and model names are first-class and neutral; never rank providers
   in copy.
-- The 0.9.12 shell is not yet released: there are no real screenshots or
-  video of it. `web/lib/media-manifest.ts` marks such media `pending`; the
-  site must not ship mockups as screenshots. The one real screenshot on hand is
-  `web/public/codewhale-tui.webp` (0.9.11).
+- The 0.9.12 shell is not yet released. `web/lib/media-manifest.ts` marks
+  session video `pending`; the site must not ship mockups as screenshots. The
+  one real screenshot on hand is `web/public/codewhale-tui.png` — the
+  founder's 2026-09-04 capture of the v0.9.12 development build (new session,
+  braille C-curl whale, Work mode, Full Access). It is captioned as a
+  development build, never as a release.
 - `/context-window` does not exist on the current base; do not document it.
 - Subagent role identifiers are those the code accepts (`general`, `explore`,
   `planner`, `reviewer`, `implement`, `test`, `advisor`, `custom`); the older
@@ -85,9 +91,9 @@ no hosted runtime to sell.
 ## Evidence on Hand
 
 - Real: GitHub stars (live), release version and changelog (generated),
-  provider/tool counts (generated), the 0.9.11 TUI screenshot.
+  provider/tool counts (generated), the v0.9.12 development-build screenshot.
 - Absent, do not fabricate: testimonials, customer logos, benchmarks,
-  pricing, 0.9.12 TUI media.
+  pricing, session video, or media of a published 0.9.12 release.
 
 ## Product Principles
 

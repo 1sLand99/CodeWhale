@@ -191,9 +191,12 @@ pub enum ProviderKind {
         alias = "alibaba-coding-plan-anthropic"
     )]
     ModelstudioCodingPlanAnthropic,
-    /// Google Antigravity (`agy` CLI) — consent-gated read-only credential
-    /// import only; the cloud-code wire protocol is not implemented and
-    /// requests fail closed with an actionable message.
+    /// Legacy Antigravity configuration identity.
+    ///
+    /// Kept only so existing configuration can be read and cleared. It is not
+    /// a selectable or runnable provider; Gemini users should use [`Google`].
+    ///
+    /// [`Google`]: Self::Google
     #[serde(alias = "agy")]
     Antigravity,
     /// Google — Gemini OpenAI-compatible endpoint. Its own backend, not an
@@ -247,7 +250,7 @@ impl ProviderKind {
     /// stay on the enum for serde and `provider_for_kind`, but they are not
     /// first-class catalog rows. Plan is `mode` / base_url; dialect is
     /// `wire = openai|anthropic` on the primary provider config.
-    pub const ALL: [Self; 43] = [
+    pub const ALL: [Self; 42] = [
         Self::Deepseek,
         Self::NvidiaNim,
         Self::Openai,
@@ -287,7 +290,6 @@ impl ProviderKind {
         Self::Telecomjs,
         Self::ModelstudioTokenPlan,
         Self::Google,
-        Self::Antigravity,
         Self::Edenai,
         Self::Concentrate,
         Self::Custom,
@@ -315,13 +317,14 @@ impl ProviderKind {
     #[must_use]
     pub fn parse(value: &str) -> Option<Self> {
         let trimmed = value.trim();
-        provider::all_providers()
-            .iter()
-            .find(|p| {
-                trimmed.eq_ignore_ascii_case(p.id())
-                    || p.aliases().iter().any(|a| trimmed.eq_ignore_ascii_case(a))
-            })
-            .map(|p| p.kind())
+        // Gated through `ALL`, not the full registry: the registry still holds
+        // retired tombstones so old config deserializes, and a selection
+        // surface must never be able to resolve one back into a route.
+        Self::all().iter().copied().find(|kind| {
+            let p = kind.provider();
+            trimmed.eq_ignore_ascii_case(p.id())
+                || p.aliases().iter().any(|a| trimmed.eq_ignore_ascii_case(a))
+        })
     }
 
     /// Parse a provider identifier for **config-table identity** — the kind
@@ -353,6 +356,23 @@ impl ProviderKind {
             })
             .map(|p| p.kind())
             .or_else(|| Self::parse(trimmed))
+            .or_else(|| Self::parse_retired_alias(trimmed))
+    }
+
+    /// Alias lookup restricted to registry entries that are *not* in the
+    /// selectable catalog. Catalog aliases are handled by [`parse`](Self::parse)
+    /// and always take precedence.
+    ///
+    /// Retired kinds still need to answer to their aliases here so a selection
+    /// surface can *name* the tombstone and refuse it, instead of failing to
+    /// recognize `agy` and minting a fresh `[providers.agy]` table that serde
+    /// would fold straight back onto the legacy one.
+    fn parse_retired_alias(trimmed: &str) -> Option<Self> {
+        provider::all_providers()
+            .iter()
+            .filter(|p| !Self::all().contains(&p.kind()))
+            .find(|p| p.aliases().iter().any(|a| trimmed.eq_ignore_ascii_case(a)))
+            .map(|p| p.kind())
     }
 
     #[must_use]

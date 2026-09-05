@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:e421b94e9f7e -->
+<!-- source: README.md sha256:dcbd5aa09403 -->
 # Codewhale
 
 Codewhale은 Rust로 만든 터미널용 오픈 소스 코딩 에이전트로, 사용자들과 함께 공개적으로 개선해 나갑니다.
@@ -14,10 +14,14 @@ Codewhale은 Rust로 만든 터미널용 오픈 소스 코딩 에이전트로, �
 
 ## 설치
 
+macOS 또는 Linux에 새로 설치할 때는 공식 GitHub 릴리스를 사용하세요.
+
 ```bash
-npm install -g codewhale
-codewhale
+curl -fsSL https://codewhale.net/install.sh | sh
+"$HOME/.local/bin/codewhale"
 ```
+
+Windows에서는 [GitHub Releases](https://github.com/Hmbown/CodeWhale/releases/latest)에서 맞는 설치 프로그램이나 아카이브를 받으세요. 기존 직접 설치는 `codewhale update`로 업데이트하고, 확인만 하려면 `codewhale update --check`를 사용하세요. 업데이트 도구는 실행 파일 경로를 표시하며 더 최신인 빌드는 유지합니다. npm과 Cargo는 보조 패키지 설치 방법입니다. 패키지 관리자 설치에서 이전하거나 PATH를 설정하려면 [설치 안내서](docs/INSTALL.md)를 참조하세요.
 
 처음 실행하면 공급자 연결 과정을 안내하며, 오프라인 상태로 계속 사용할 수도 있습니다. Codewhale은 Cargo, Docker, Nix, Scoop, 사전 빌드 아카이브, Android/Termux, CNB 미러도 지원합니다. [설치 안내서](docs/INSTALL.md)를 참조하세요.
 

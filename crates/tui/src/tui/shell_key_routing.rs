@@ -186,11 +186,12 @@ pub const SHELL_BINDINGS: &[ShellBinding] = &[
         id: ShellBindingId::ModeCycle,
         catalog_chord: "Tab",
         footer_chord: "Tab",
-        // Tab is the session's mode cycle. The composer's own completions
-        // get the key first, but *having typed* never disables it. The
-        // launch screen is excluded: there Tab moves focus between the
-        // startup menu and the pre-session composer.
-        focus: FocusScope::SessionShell,
+        // Tab is the shell's mode cycle. The composer's own completions
+        // get the key first, but *having typed* never disables it. Live on
+        // the launch screen too: the card's rows are arrowed, the composer
+        // is always focused, so Tab had no focus left to move and read as
+        // dead (0.9.12 defect #5).
+        focus: FocusScope::AnyShell,
     },
     ShellBinding {
         id: ShellBindingId::PermissionCycle,
@@ -209,13 +210,14 @@ pub const SHELL_BINDINGS: &[ShellBinding] = &[
         // (Ctrl+F is), tmux, iTerm2, Terminal.app, or Windows Terminal.
         catalog_chord: "Ctrl+Tab / Ctrl+]",
         footer_chord: "Ctrl+]",
-        focus: FocusScope::SessionShell,
+        // The launch card advertises this same work-bar control.
+        focus: FocusScope::AnyShell,
     },
     ShellBinding {
         id: ShellBindingId::ViewCycleBack,
         catalog_chord: "Ctrl+Shift+Tab",
         footer_chord: "Ctrl+Shift+Tab",
-        focus: FocusScope::SessionShell,
+        focus: FocusScope::AnyShell,
     },
 ];
 
@@ -226,17 +228,27 @@ pub const SHELL_BINDINGS: &[ShellBinding] = &[
 /// advertising a key that does nothing for many users. Not `?` either — bare
 /// `?` is composer text in every focus state, and help only answers to
 /// `Alt+?`, which stays unadvertised until it is proven in real terminals
-/// (TUI-DOG-003). `Ctrl+/` is the chord [`is_help_shortcut`] accepts
-/// unconditionally, together with its legacy `Ctrl+7` / `Ctrl+_` encodings,
-/// so it is the one hint chrome can print honestly.
-pub const HELP_CHROME_CHORD: &str = "Ctrl+/";
+/// (TUI-DOG-003). `Ctrl+/` remains accepted, together with its legacy
+/// `Ctrl+7` / `Ctrl+_` encodings, but it is no longer what chrome advertises:
+/// how a terminal encodes Ctrl+/ varies enough that the printed hint was a
+/// promise the product could not keep on the founder's own machine. `/help`
+/// is a slash command — it reaches the same view through the composer, it
+/// works in every terminal, and typing `/` already reveals it.
+pub const HELP_CHROME_CHORD: &str = "/help";
 
-/// The info line's single right-hand key hint, e.g. `Ctrl+/ help`.
+/// The info line's single right-hand key hint.
+///
+/// A slash command names itself, so it prints bare (`/help`); a key chord
+/// still needs the word (`Ctrl+/ help`).
 #[must_use]
 pub fn info_help_hint(locale: crate::localization::Locale) -> String {
+    let chord = binding(ShellBindingId::Help).footer_chord;
+    if chord.starts_with('/') {
+        return chord.to_string();
+    }
     format!(
         "{} {}",
-        binding(ShellBindingId::Help).footer_chord,
+        chord,
         crate::localization::tr(locale, crate::localization::MessageId::InfoLineHelp)
     )
 }
@@ -374,7 +386,8 @@ pub fn is_permission_cycle_shortcut(key: &KeyEvent) -> bool {
 }
 
 /// Ctrl+Tab (kitty protocol: `Tab` + CONTROL) or Ctrl+] cycles the bottom
-/// dock view forward. AltGr chords stay text (#4723).
+/// dock view forward. Legacy terminals send Ctrl+] as ASCII 0x1d, which
+/// crossterm decodes as Ctrl+5. AltGr chords stay text (#4723).
 #[must_use]
 pub fn is_view_cycle_shortcut(key: &KeyEvent) -> bool {
     if crate::tui::widgets::key_hint::is_altgr(key.modifiers) {
@@ -384,7 +397,7 @@ pub fn is_view_cycle_shortcut(key: &KeyEvent) -> bool {
         && !key
             .modifiers
             .intersects(KeyModifiers::ALT | KeyModifiers::SUPER | KeyModifiers::SHIFT);
-    ctrl_only && matches!(key.code, KeyCode::Tab | KeyCode::Char(']'))
+    ctrl_only && matches!(key.code, KeyCode::Tab | KeyCode::Char(']' | '5'))
 }
 
 /// Ctrl+Shift+Tab (kitty protocol: `BackTab` or `Tab` with CONTROL|SHIFT)
@@ -461,6 +474,34 @@ mod tests {
     }
 
     #[test]
+    fn work_bar_accepts_legacy_and_enhanced_keys_on_launch() {
+        for code in [KeyCode::Tab, KeyCode::Char(']'), KeyCode::Char('5')] {
+            let key = KeyEvent::new(code, KeyModifiers::CONTROL);
+            assert_eq!(route(Focus::Launch, &key), Some(ShellBindingId::ViewCycle));
+            assert_eq!(route(Focus::Onboarding, &key), None);
+            assert_eq!(route(Focus::Modal(ModalKind::Pager), &key), None);
+        }
+        for modifiers in [
+            KeyModifiers::NONE,
+            KeyModifiers::ALT,
+            KeyModifiers::CONTROL | KeyModifiers::ALT,
+        ] {
+            assert!(!is_view_cycle_shortcut(&KeyEvent::new(
+                KeyCode::Char('5'),
+                modifiers
+            )));
+        }
+        let backwards = KeyEvent::new(
+            KeyCode::BackTab,
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        );
+        assert_eq!(
+            route(Focus::Launch, &backwards),
+            Some(ShellBindingId::ViewCycleBack)
+        );
+    }
+
+    #[test]
     fn bare_v_is_never_a_shortcut_in_any_state() {
         // TUI-DOG-002: bare `v` always types `v`; there is no focus state in
         // which it opens details, so the matcher takes no focus argument.
@@ -488,9 +529,15 @@ mod tests {
     fn chrome_never_advertises_a_key_terminals_eat() {
         // F1 stays in the catalog (it works where delivered) but no chrome
         // hint may print it; the help hint is derived from the binding.
-        assert_eq!(binding(ShellBindingId::Help).footer_chord, "Ctrl+/");
+        // Ctrl+/ is still accepted, but chrome advertises the route that
+        // works in every terminal.
+        assert_eq!(binding(ShellBindingId::Help).footer_chord, "/help");
         let hint = info_help_hint(crate::localization::Locale::En);
-        assert!(hint.starts_with("Ctrl+/ "), "{hint}");
+        assert_eq!(hint, "/help", "a slash command names itself");
+        assert!(
+            is_help_shortcut(&KeyEvent::new(KeyCode::Char('/'), KeyModifiers::CONTROL)),
+            "Ctrl+/ must keep working for the terminals that deliver it"
+        );
         for binding in SHELL_BINDINGS {
             assert!(!binding.footer_chord.contains("F1"), "{:?}", binding.id);
             assert!(!binding.footer_chord.contains("Alt+?"), "{:?}", binding.id);
@@ -652,8 +699,8 @@ mod tests {
             route(Focus::Composer, &shift_tab),
             Some(ShellBindingId::PermissionCycle)
         );
-        // Tab moves focus on the launch stage; the posture control still works.
-        assert_eq!(route(Focus::Launch, &tab), None);
+        // Both shell controls are live on the launch stage as well.
+        assert_eq!(route(Focus::Launch, &tab), Some(ShellBindingId::ModeCycle));
         assert_eq!(
             route(Focus::Launch, &shift_tab),
             Some(ShellBindingId::PermissionCycle)

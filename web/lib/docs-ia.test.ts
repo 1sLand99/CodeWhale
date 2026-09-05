@@ -21,6 +21,7 @@ import {
   footerProductLinks,
   footerProjectLinks,
   navLinks as buildNavLinks,
+  secondaryNavLinks as buildSecondaryNavLinks,
 } from "./i18n/links";
 import { SITE_URL } from "./page-meta";
 
@@ -90,9 +91,9 @@ describe("sitemap and hreflang preservation", () => {
 
   it("keeps sitemap and hreflang output aligned with real translation coverage", () => {
     // 18 home locales + 10 guide locales + (en, zh) for every other route
-    // (including /changelog, whose body dictionary ships en/zh only).
-    expect(sitemapEntries).toHaveLength(96);
-    for (const path of ["/pricing", "/signin", "/signup", "/legal/terms", "/legal/privacy"]) {
+    // (including /product and /changelog, whose bodies ship en/zh only).
+    expect(sitemapEntries).toHaveLength(98);
+    for (const path of ["/product", "/pricing", "/signin", "/signup", "/legal/terms", "/legal/privacy"]) {
       expect(
         sitemapEntries.some((entry) => entry.url === `${SITE_URL}/en${path}`),
         path,
@@ -133,7 +134,7 @@ describe("sitemap and hreflang preservation", () => {
     }
     const entry = webText("components/public-account-entry.tsx");
     expect(entry).toContain("CANONICAL_MARK_SRC");
-    expect(entry).toContain("Install locally");
+    expect(entry).toContain("installLocally");
     expect(webText("app/[locale]/signin/page.tsx")).toContain('kind="sign-in"');
     expect(webText("app/[locale]/signup/page.tsx")).toContain('kind="sign-up"');
     expect(nav).toContain("APP_LOGIN_URL");
@@ -147,12 +148,12 @@ describe("navigation parity and accessibility", () => {
     // wiring rather than duplicating the arrays.
     expect(nav).toContain("<NavLinks links={links} primaryAria={chrome.navPrimaryAria} />");
     expect(nav).toContain("links={links}");
-    expect(mobileMenu).toContain("links.map");
+    expect(mobileMenu).toContain("[...links, ...moreLinks].map");
     expect(navLinks).toContain("links.map");
     // One generator feeds both surfaces — no per-locale hardcoded arrays.
     expect(nav).toContain("navLinks(locale, chrome)");
     expect(nav).not.toMatch(/const (EN|ZH)_LINKS/);
-    // The six-link desktop strip does not replace the compact menu until xl;
+    // The primary strip does not replace the compact menu until xl;
     // translated labels are wider than English and used to push real controls
     // beyond the clipped viewport at md widths.
     // Wrapping is the escape valve for a translated strip that outgrows the
@@ -189,16 +190,23 @@ describe("navigation parity and accessibility", () => {
     const reference = buildNavLinks("en", getChrome("en")).map((l) =>
       l.href.replace(/^\/en\//, ""),
     );
-    expect(reference.length).toBeGreaterThanOrEqual(4);
-    expect(reference).toContain("docs/guide");
-    expect(reference).toContain("faq");
+    expect(reference).toEqual(["product", "models", "pricing", "docs"]);
+    const moreReference = buildSecondaryNavLinks("en", getChrome("en")).map((l) =>
+      l.href.replace(/^\/en\//, ""),
+    );
+    expect(moreReference).toEqual(["docs/guide", "install", "faq", "community", "contribute"]);
     for (const locale of locales) {
       const links = buildNavLinks(locale, getChrome(locale));
       expect(
         links.map((l) => l.href.replace(new RegExp(`^/${locale}/`), "")),
         `${locale} nav routes`,
       ).toEqual(reference);
-      for (const link of links) {
+      const more = buildSecondaryNavLinks(locale, getChrome(locale));
+      expect(
+        more.map((l) => l.href.replace(new RegExp(`^/${locale}/`), "")),
+        `${locale} secondary nav routes`,
+      ).toEqual(moreReference);
+      for (const link of [...links, ...more]) {
         expect(link.href.startsWith(`/${locale}/`), `${locale} ${link.href}`).toBe(true);
         expect(link.label.trim().length, `${locale} empty nav label`).toBeGreaterThan(0);
       }
@@ -209,6 +217,7 @@ describe("navigation parity and accessibility", () => {
     const reference = footerProductLinks("en", getChrome("en")).map((l) =>
       l.href.replace(/^\/en\//, ""),
     );
+    expect(reference).toContain("product");
     expect(reference).toContain("docs/guide");
     expect(reference).toContain("faq");
     for (const locale of locales) {
@@ -257,7 +266,10 @@ describe("navigation parity and accessibility", () => {
     // prefix test both surfaces used marked two links `aria-current="page"`
     // on the guide route — and drew the nav underline under both.
     for (const locale of locales) {
-      const links = buildNavLinks(locale, getChrome(locale));
+      const links = [
+        ...buildNavLinks(locale, getChrome(locale)),
+        ...buildSecondaryNavLinks(locale, getChrome(locale)),
+      ];
       const guide = `/${locale}/docs/guide`;
       const naive = links.filter(
         (l) => guide === l.href || guide.startsWith(`${l.href}/`),
@@ -274,7 +286,7 @@ describe("navigation parity and accessibility", () => {
     // Both surfaces resolve the current page through the shared helper
     // rather than repeating the prefix test that collided.
     expect(navLinks).toContain("currentNavHref(links, pathname)");
-    expect(mobileMenu).toContain("currentNavHref(links, pathname)");
+    expect(mobileMenu).toContain("currentNavHref([...links, ...moreLinks], pathname)");
     expect(navLinks).not.toContain("pathname.startsWith(");
     expect(mobileMenu).not.toContain("pathname.startsWith(");
   });
@@ -351,8 +363,8 @@ describe("homepage integration", () => {
     // (plain "Unreleased", per docs/design/WEB_VOICE.md).
     expect(homepage).toContain("d.sourceCandidate");
     expect(getHome("en").sourceCandidate).toBe("Unreleased");
-    expect(homepage).toContain('src="/codewhale-tui.webp"');
-    for (const label of ["Plan", "Act", "Operate", "Ask", "Auto-Review", "Full Access"]) {
+    expect(homepage).toContain('src="/codewhale-tui.png"');
+    for (const label of ["Plan", "Work", "Operate", "Ask", "Auto-Review", "Full Access"]) {
       expect(homepage).toContain(label);
     }
   });

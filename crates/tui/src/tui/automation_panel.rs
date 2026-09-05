@@ -316,6 +316,8 @@ mod tests {
             rrule: "FREQ=DAILY".to_string(),
             cwds: Vec::new(),
             model: None,
+            model_provider: None,
+            model_provider_id: None,
             mode: None,
             allow_shell: None,
             trust_mode: None,

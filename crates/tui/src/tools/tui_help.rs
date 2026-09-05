@@ -209,6 +209,8 @@ fn builtin_entry(info: &'static commands::traits::CommandInfo, locale: Locale) -
 fn all_commands(locale: Locale, workspace: &Path) -> Vec<CommandEntry> {
     let mut entries: Vec<CommandEntry> = commands::command_infos()
         .into_iter()
+        // Unlisted commands still run when typed; help does not teach them.
+        .filter(|info| !info.is_unlisted())
         .map(|info| builtin_entry(info, locale))
         .collect();
     entries.extend(user_commands(workspace));

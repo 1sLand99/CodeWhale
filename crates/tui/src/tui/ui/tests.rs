@@ -17,7 +17,6 @@ use crate::config::{
     ApiProvider, Config, DEFAULT_OPENROUTER_MODEL, DEFAULT_TEXT_MODEL, DEFAULT_ZAI_MODEL,
     ProviderConfig, ProvidersConfig,
 };
-use crate::config_ui::{self, WebConfigSession, WebConfigSessionEvent};
 use crate::core::engine::mock_engine_handle;
 use crate::tui::active_cell::ActiveCell;
 use crate::tui::app::{ReasoningEffort, ToolDetailRecord};
@@ -37,6 +36,7 @@ use crate::tui::shell_key_routing::{
     Focus, SHELL_BINDINGS, ShellBindingId, is_permission_cycle_shortcut,
 };
 use crate::tui::ui_text::truncate_line_to_width;
+use crate::tui::views::ConfigView;
 use crate::tui::views::{HelpView, ModalView, ViewAction};
 use crate::working_set::Workspace;
 use crossterm::event::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
@@ -692,6 +692,32 @@ fn no_shell_binding_changes_meaning_once_the_composer_has_text() {
         assert_eq!(shell_binding_for_key(&focus_test_app(), &key), None);
         assert_eq!(shell_binding_for_key(&typed, &key), None);
     }
+}
+
+#[test]
+fn tab_cycles_the_mode_on_the_launch_screen() {
+    // Founder live-test: "from here tab needs to work". The launch screen's
+    // composer is focused from first paint and the card's rows are arrowed,
+    // so Tab has no focus left to move — it is the shell's mode cycle there,
+    // exactly as in a live session.
+    let mut app = focus_test_app();
+    app.prompt_suggestion = None;
+    app.launch.visible = true;
+    assert_eq!(app.focus(), crate::tui::shell_key_routing::Focus::Launch);
+    let before = app.mode;
+
+    let dispatch = dispatch_tab_key(
+        &mut app,
+        &KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+        &[],
+        &[],
+    );
+
+    assert!(
+        matches!(dispatch, TabDispatch::ModeCycled { .. }),
+        "Tab on the launch screen dispatched {dispatch:?}"
+    );
+    assert_ne!(app.mode, before, "the mode must actually change");
 }
 
 #[test]
@@ -7145,38 +7171,19 @@ fn apply_loaded_session_updates_current_workspace_display() {
     assert!(result.action.is_none());
 }
 
-#[tokio::test]
-async fn drain_web_config_events_applies_draft_without_closing_session() {
-    let mut app = create_test_app();
-    let mut config = Config::default();
-    let engine = mock_engine_handle();
-    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-    let doc = config_ui::build_document(&app, &config).expect("document");
-    tx.send(WebConfigSessionEvent::Draft(doc))
-        .expect("send draft");
-    let mut session = Some(WebConfigSession::for_test(rx));
-
-    let keep = drain_web_config_events(&mut session, &mut app, &mut config, &engine.handle).await;
-
-    assert!(keep);
-    assert!(session.is_some());
-}
-
-#[tokio::test]
-async fn drain_web_config_events_closes_session_after_commit() {
-    let _config_env = ConfigPathEnvGuard::new();
-    let mut app = create_test_app();
-    let mut config = Config::default();
-    let engine = mock_engine_handle();
-    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-    let doc = config_ui::build_document(&app, &config).expect("document");
-    tx.send(WebConfigSessionEvent::Committed(doc))
-        .expect("send commit");
-    let mut session = Some(WebConfigSession::for_test(rx));
-
-    let keep = drain_web_config_events(&mut session, &mut app, &mut config, &engine.handle).await;
-
-    assert!(!keep);
+#[test]
+fn config_view_is_the_only_settings_surface() {
+    // The schemaui TUI/web editors are gone: the canonical ConfigView owns
+    // settings edits. It opens, takes a filter keystroke, and keeps it.
+    let app = create_test_app();
+    let mut view = ConfigView::new_for_app(&app);
+    for ch in "theme".chars() {
+        let _ = view.handle_key(KeyEvent::new(
+            crossterm::event::KeyCode::Char(ch),
+            crossterm::event::KeyModifiers::NONE,
+        ));
+    }
+    assert_eq!(view.filter_query(), "theme");
 }
 
 #[test]
@@ -7301,6 +7308,8 @@ fn shell_live_output_update_matches_exact_task_id_only() {
             linked_task_id: None,
             owner_agent_id: None,
             owner_agent_name: None,
+            origin_tool_call_id: None,
+            origin_turn_id: None,
             owner_session_id: "session-test".to_string(),
         },
     );
@@ -7324,6 +7333,8 @@ fn shell_live_output_update_matches_exact_task_id_only() {
             linked_task_id: None,
             owner_agent_id: None,
             owner_agent_name: None,
+            origin_tool_call_id: None,
+            origin_turn_id: None,
             owner_session_id: "session-test".to_string(),
         },
     );
@@ -7388,6 +7399,8 @@ fn shell_live_output_update_marks_stale_running_job_static() {
             linked_task_id: None,
             owner_agent_id: None,
             owner_agent_name: None,
+            origin_tool_call_id: None,
+            origin_turn_id: None,
             owner_session_id: "session-test".to_string(),
         },
     );
@@ -7466,6 +7479,8 @@ fn shell_live_output_update_finalizes_background_exec_output() {
             linked_task_id: None,
             owner_agent_id: None,
             owner_agent_name: None,
+            origin_tool_call_id: None,
+            origin_turn_id: None,
             owner_session_id: "session-test".to_string(),
         },
     );
@@ -7551,6 +7566,8 @@ fn shell_live_output_update_skips_finalized_exec_cell() {
             linked_task_id: None,
             owner_agent_id: None,
             owner_agent_name: None,
+            origin_tool_call_id: None,
+            origin_turn_id: None,
             owner_session_id: "session-test".to_string(),
         },
     );
@@ -8185,8 +8202,11 @@ async fn successful_native_xai_oauth_activation_completes_onboarding() {
     app.trust_mode = true;
     let mut engine = mock_engine_handle();
     let mut config = Config::default();
-    let pending =
-        crate::xai_oauth::pending_device_login_for_test("fixture-access", "fixture-refresh");
+    let pending = crate::oauth::pending_login_for_test(
+        crate::oauth::OAuthProvider::Xai,
+        "fixture-access",
+        "fixture-refresh",
+    );
 
     let switched = apply_codewhale_owned_xai_login(
         &mut app,
@@ -8234,7 +8254,11 @@ async fn failed_native_xai_oauth_activation_stays_in_onboarding_recovery() {
     app.onboarding_needs_api_key = true;
     let mut engine = mock_engine_handle();
     let mut config = Config::default();
-    let pending = crate::xai_oauth::pending_device_login_for_test("", "fixture-refresh");
+    let pending = crate::oauth::pending_login_for_test(
+        crate::oauth::OAuthProvider::Xai,
+        "",
+        "fixture-refresh",
+    );
 
     let switched = apply_codewhale_owned_xai_login(
         &mut app,
@@ -14181,18 +14205,22 @@ fn visible_slash_menu_entries_respects_hide_flag() {
 }
 
 #[test]
-fn visible_slash_menu_starts_with_six_tasks_and_keeps_long_tail_searchable() {
+fn visible_slash_menu_starts_with_six_tasks_and_still_lists_the_rest() {
     let mut app = create_test_app();
     app.input = "/".to_string();
 
     let entries = visible_slash_menu_entries(&app, SLASH_MENU_LIMIT);
+    let names: Vec<&str> = entries.iter().map(|entry| entry.name.as_str()).collect();
     assert_eq!(
-        entries
-            .iter()
-            .map(|entry| entry.name.as_str())
-            .collect::<Vec<_>>(),
-        ["/help", "/setup", "/model", "/settings", "/resume", "/rc"]
+        names.iter().take(6).copied().collect::<Vec<_>>(),
+        ["/help", "/setup", "/model", "/settings", "/resume", "/rc"],
+        "the six tasks still lead"
     );
+    // The rest follow rather than being withheld: the popup scrolls around
+    // the selection, so arrowing down reaches every command.
+    assert!(names.len() > 6, "the long tail is listed: {names:?}");
+    assert!(names.contains(&"/mcp"));
+    // Retired and internal spellings stay out regardless.
     assert!(!entries.iter().any(|entry| entry.name == "/set"));
     assert!(!entries.iter().any(|entry| entry.name == "/codewhale"));
 
@@ -20899,6 +20927,10 @@ fn recoverable_engine_error_does_not_enter_offline_mode() {
         "recoverable error must keep the session online so the user can retry"
     );
     assert!(!app.is_loading);
+    assert!(app.runtime_turn_status.is_none());
+    assert!(ignore_stale_stream_event_while_idle(
+        &stream_drop_approval_event()
+    ));
     assert!(app.turn_error_posted, "turn_error_posted must be set");
     assert!(
         app.status_message.is_none(),
@@ -21299,29 +21331,82 @@ async fn provider_switch_rollback_corrects_setup_receipt_when_persistence_fails(
     assert!(!provider_model_result.contains("kimi-key"));
 }
 
+fn stream_drop_approval_event() -> EngineEvent {
+    EngineEvent::ApprovalRequired {
+        id: "stream-drop-tool".to_string(),
+        tool_name: "bash".to_string(),
+        description: "Fixture workspace counter".to_string(),
+        input: serde_json::json!({"command": "printf once >> counter.txt"}),
+        approval_key: "stream-drop-key".to_string(),
+        approval_grouping_key: "stream-drop-group".to_string(),
+        intent_summary: None,
+        approval_force_prompt: false,
+    }
+}
+
 #[test]
-fn stream_error_marks_active_turn_failed_without_waiting_for_turn_complete() {
-    use crate::error_taxonomy::ErrorEnvelope;
+fn recoverable_stream_error_keeps_active_turn_for_pending_approval() {
+    use crate::core::authority::ApprovalRequestDisposition;
+    use crate::error_taxonomy::{ErrorCategory, ErrorEnvelope, ErrorSeverity};
 
     let mut app = create_test_app();
     app.is_loading = true;
     app.runtime_turn_id = Some("turn_decode_error".to_string());
     app.runtime_turn_status = Some("in_progress".to_string());
+    let dispatch_started_at = Instant::now();
+    app.dispatch_started_at = Some(dispatch_started_at);
     handle_tool_call_started(
         &mut app,
         "tool-running",
-        "exec_shell",
-        &serde_json::json!({"command": "cargo test --workspace"}),
+        "bash",
+        &serde_json::json!({"command": "printf once >> counter.txt"}),
     );
     assert!(app.active_cell.is_some(), "precondition: live tool cell");
 
     apply_engine_error_to_app(
         &mut app,
-        ErrorEnvelope::classify("chunk decode error".to_string(), true),
+        ErrorEnvelope::new(
+            ErrorCategory::Network,
+            ErrorSeverity::Warning,
+            true,
+            "fixture_stream_drop",
+            "opaque fixture message",
+        ),
     );
 
-    assert!(!app.is_loading);
-    assert_eq!(app.runtime_turn_status.as_deref(), Some("failed"));
+    assert!(app.is_loading, "the engine still owns the pending decision");
+    assert_eq!(app.runtime_turn_status.as_deref(), Some("in_progress"));
+    assert_eq!(app.dispatch_started_at, Some(dispatch_started_at));
+    assert!(!app.suppress_stream_events_until_turn_complete);
+    assert!(
+        app.is_loading || !ignore_stale_stream_event_while_idle(&stream_drop_approval_event()),
+        "the event loop must deliver the pending approval after the error"
+    );
+    // Delivery must preserve the user's existing permission posture. In
+    // particular, Never must reach its denial instead of waiting invisibly.
+    for (posture, expected) in [
+        (ApprovalMode::Suggest, ApprovalRequestDisposition::Prompt),
+        (
+            ApprovalMode::Never,
+            ApprovalRequestDisposition::AutoDenyNeverPosture,
+        ),
+        (
+            ApprovalMode::Auto,
+            ApprovalRequestDisposition::AutoDenyAutoReview,
+        ),
+    ] {
+        app.approval_mode = posture;
+        assert_eq!(
+            resolve_ui_approval_disposition(
+                &app,
+                "bash",
+                "stream-drop-group",
+                "stream-drop-key",
+                false,
+            ),
+            expected,
+        );
+    }
     assert!(
         app.active_cell.is_none(),
         "stream error should flush live cells so no row stays visually running"
@@ -21331,11 +21416,34 @@ fn stream_error_marks_active_turn_failed_without_waiting_for_turn_complete() {
             matches!(
                 cell,
                 crate::tui::history::HistoryCell::Error { message, .. }
-                    if message.contains("chunk decode error")
+                    if message == "opaque fixture message"
             )
         }),
         "stream decode error should remain visible in transcript"
     );
+}
+
+#[test]
+fn recoverable_stream_error_after_local_cancel_keeps_approval_suppressed() {
+    let mut app = create_test_app();
+    app.is_loading = true;
+    app.runtime_turn_status = Some("in_progress".to_string());
+    mark_active_turn_cancelled_locally(&mut app);
+
+    apply_engine_error_to_app(
+        &mut app,
+        crate::error_taxonomy::StreamError::Stall { timeout_secs: 60 }.into_envelope(),
+    );
+
+    assert!(!app.is_loading);
+    assert!(app.runtime_turn_status.is_none());
+    assert!(app.suppress_stream_events_until_turn_complete);
+    assert!(suppress_engine_event_after_local_cancel(
+        &stream_drop_approval_event()
+    ));
+    assert!(ignore_stale_stream_event_while_idle(
+        &stream_drop_approval_event()
+    ));
 }
 
 /// Hard failures (auth, billing, malformed request) DO need to flip offline
@@ -21346,6 +21454,9 @@ fn non_recoverable_engine_error_enters_offline_mode() {
     use crate::error_taxonomy::ErrorEnvelope;
     let mut app = create_test_app();
     assert!(!app.offline_mode);
+    app.is_loading = true;
+    app.runtime_turn_status = Some("in_progress".to_string());
+    app.dispatch_started_at = Some(Instant::now());
 
     apply_engine_error_to_app(
         &mut app,
@@ -21357,6 +21468,8 @@ fn non_recoverable_engine_error_enters_offline_mode() {
         "non-recoverable error must enter offline mode"
     );
     assert!(!app.is_loading);
+    assert_eq!(app.runtime_turn_status.as_deref(), Some("failed"));
+    assert!(app.dispatch_started_at.is_none());
     assert!(app.turn_error_posted, "turn_error_posted must be set");
     assert!(
         app.status_message.is_none(),
@@ -22583,6 +22696,8 @@ mod work_sidebar_projection_tests {
             status,
             prompt_summary: format!("task {id}"),
             model: "deepseek-v4-flash".to_string(),
+            model_provider: None,
+            model_provider_id: None,
             mode: "agent".to_string(),
             workspace: std::path::PathBuf::from("/tmp"),
             created_at,
@@ -24666,4 +24781,73 @@ fn sixel_reconciler_emits_moves_and_clears() {
     );
     assert_eq!(app.launch.sixel_emitted, None);
     crate::tui::mark::set_sixel_supported_for_tests(false);
+}
+
+/// A wheel gesture is one frame, not one frame per tick.
+///
+/// Founder live-test: "the mouse scrolling is still laggy af". Rendering was
+/// never the cost — a frame with a 400-message transcript measures ~2.2ms.
+/// The cost was structural: a trackpad emits a burst of scroll events and the
+/// loop handled one per iteration, drawing each time, with the frame limiter
+/// spacing those draws out. Resize events have been folded this way since #65.
+#[test]
+fn a_scroll_burst_is_folded_into_one_frame() {
+    let mut app = create_test_app();
+    app.launch.visible = false;
+    app.viewport.last_transcript_area = Some(Rect::new(0, 0, 80, 20));
+    app.viewport.pending_scroll_delta = 0;
+
+    let scroll = |kind| {
+        Event::Mouse(crossterm::event::MouseEvent {
+            kind,
+            column: 10,
+            row: 5,
+            modifiers: KeyModifiers::NONE,
+        })
+    };
+    let (tx, rx) = std::sync::mpsc::channel();
+    // Nine more ticks behind the one already in hand, then a key press that
+    // must end the burst and survive unread.
+    for _ in 0..9 {
+        tx.send(TerminalInputMessage::Event(scroll(
+            crossterm::event::MouseEventKind::ScrollDown,
+        )))
+        .expect("send scroll");
+    }
+    tx.send(TerminalInputMessage::Event(Event::Key(KeyEvent::new(
+        KeyCode::Char('x'),
+        KeyModifiers::NONE,
+    ))))
+    .expect("send key");
+    let input = TerminalInputPump {
+        rx,
+        stop: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        paused: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        paused_ack: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        handle: None,
+        last_alive_at: std::cell::Cell::new(Instant::now()),
+    };
+    let mut pending = VecDeque::new();
+
+    let first = crossterm::event::MouseEvent {
+        kind: crossterm::event::MouseEventKind::ScrollDown,
+        column: 10,
+        row: 5,
+        modifiers: KeyModifiers::NONE,
+    };
+    let last = super::event_loop::coalesce_scroll_burst(&mut app, first, &input, &mut pending)
+        .expect("coalesce");
+    assert!(
+        matches!(last.kind, crossterm::event::MouseEventKind::ScrollDown),
+        "the final tick of the burst is returned for normal handling"
+    );
+
+    // Nine ticks were applied inside the burst; the tenth is `last`, which
+    // the caller handles. The accumulated delta is what one draw will spend.
+    let folded = app.viewport.pending_scroll_delta;
+    assert_ne!(folded, 0, "the burst accumulated a scroll delta");
+
+    // The key press ended the burst and is still queued, unread.
+    assert_eq!(pending.len(), 1, "the non-scroll event was pushed back");
+    assert!(matches!(pending.front(), Some(Event::Key(_))));
 }

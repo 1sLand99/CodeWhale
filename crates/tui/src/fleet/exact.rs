@@ -2540,7 +2540,8 @@ call_reasoning = "low"
         }
 
         // Codex is the case a bare tier label gets wrong in both directions:
-        // it has no `off`, and its top tier is spelled `xhigh`.
+        // it has no `off`, and its ladder now spells three separate top rungs
+        // (`xhigh`, `max`, `ultra`) that the roster publishes per model.
         let codex = |tier| {
             route_reasoning_setting(
                 ApiProvider::OpenaiCodex,
@@ -2549,7 +2550,7 @@ call_reasoning = "low"
                 tier,
             )
         };
-        assert_eq!(codex(ReasoningTier::Max), "xhigh");
+        assert_eq!(codex(ReasoningTier::Max), "max");
         assert_eq!(codex(ReasoningTier::Low), "low");
         assert_ne!(
             codex(ReasoningTier::Off),

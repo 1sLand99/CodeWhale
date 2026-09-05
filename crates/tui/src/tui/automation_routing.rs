@@ -17,6 +17,7 @@ use crate::tui::history::{AutomationCell, AutomationCellKind, HistoryCell};
 
 pub(super) async fn handle_action(
     app: &mut App,
+    config: &crate::config::Config,
     action: AutomationAction,
     task_manager: &SharedTaskManager,
 ) {
@@ -33,6 +34,21 @@ pub(super) async fn handle_action(
     };
 
     let cell = match action {
+        AutomationAction::Open { focus } => {
+            // The room, not a receipt: the one place to see, pause, run,
+            // cancel, and delete automations (0.9.12 defect #14).
+            if app.view_stack.top_kind() == Some(crate::tui::views::ModalKind::Automations) {
+                app.view_stack.pop();
+            }
+            app.view_stack
+                .push(crate::tui::views::automations::AutomationsView::new(
+                    app,
+                    config,
+                    focus.as_deref(),
+                ));
+            app.needs_redraw = true;
+            return;
+        }
         AutomationAction::List => HistoryCell::System {
             content: list(locale, &automations).await,
         },
@@ -299,6 +315,21 @@ fn format_detail(
             &display_text(mode),
         ));
     }
+    if let Some(model) = record.model.as_deref() {
+        let route = record
+            .model_provider_id
+            .as_ref()
+            .or(record.model_provider.as_ref())
+            .map_or_else(
+                || model.to_string(),
+                |provider| format!("{provider} / {model}"),
+            );
+        lines.push(field(
+            locale,
+            MessageId::SetupCardModelLabel,
+            &display_text(&route),
+        ));
+    }
     if let Some(allow_shell) = record.allow_shell {
         lines.push(field(
             locale,
@@ -519,6 +550,8 @@ mod tests {
             rrule: "FREQ=DAILY".to_string(),
             cwds: Vec::new(),
             model: None,
+            model_provider: None,
+            model_provider_id: None,
             mode: None,
             allow_shell: None,
             trust_mode: None,
@@ -534,7 +567,7 @@ mod tests {
 
     #[test]
     fn list_explains_empty_state_and_operator_controls() {
-        assert!(format_list(Locale::En, &[]).contains("`automation` tool to create one"));
+        assert!(format_list(Locale::En, &[]).contains("Choose New automation"));
         let text = format_list(Locale::En, &[record(AutomationStatus::Paused)]);
         assert!(text.contains("auto_1  [paused]  Nightly checks"));
         assert!(text.contains("next: -"));
@@ -690,6 +723,8 @@ mod tests {
                 rrule: "FREQ=HOURLY;INTERVAL=1".to_string(),
                 cwds: Vec::new(),
                 model: None,
+                model_provider: None,
+                model_provider_id: None,
                 mode: None,
                 allow_shell: None,
                 trust_mode: None,
@@ -737,6 +772,8 @@ mod tests {
                 rrule: "FREQ=HOURLY;INTERVAL=1".to_string(),
                 cwds: Vec::new(),
                 model: None,
+                model_provider: None,
+                model_provider_id: None,
                 mode: None,
                 allow_shell: None,
                 trust_mode: None,

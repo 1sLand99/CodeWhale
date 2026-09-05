@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:e421b94e9f7e -->
+<!-- source: README.md sha256:dcbd5aa09403 -->
 # Codewhale
 
 Codewhale आपके टर्मिनल के लिए Rust में बना एक ओपन सोर्स कोडिंग एजेंट है, जिसे इसके उपयोगकर्ताओं के साथ सार्वजनिक रूप से बेहतर बनाया जाता है।
@@ -14,10 +14,14 @@ Codewhale आपके टर्मिनल के लिए Rust में ब
 
 ## इंस्टॉल करें
 
+macOS या Linux पर नए इंस्टॉलेशन के लिए आधिकारिक GitHub रिलीज़ इस्तेमाल करें:
+
 ```bash
-npm install -g codewhale
-codewhale
+curl -fsSL https://codewhale.net/install.sh | sh
+"$HOME/.local/bin/codewhale"
 ```
+
+Windows पर [GitHub Releases](https://github.com/Hmbown/CodeWhale/releases/latest) से उपयुक्त इंस्टॉलर या आर्काइव डाउनलोड करें। मौजूदा सीधे इंस्टॉलेशन को अपडेट करने के लिए `codewhale update` चलाएँ; केवल जाँच के लिए `codewhale update --check` इस्तेमाल करें। अपडेटर executable का पथ दिखाता है और नए बिल्ड सुरक्षित रखता है। npm और Cargo वैकल्पिक पैकेजिंग तरीके हैं। पैकेज मैनेजर वाले इंस्टॉलेशन से माइग्रेशन और PATH के लिए [इंस्टॉलेशन गाइड](docs/INSTALL.md) देखें।
 
 पहली बार चलाने पर Codewhale आपको किसी प्रोवाइडर से जुड़ने या ऑफ़लाइन बने रहने में मदद करता है। यह Cargo, Docker, Nix, Scoop, पहले से बने आर्काइव, Android/Termux और CNB मिरर का भी समर्थन करता है। [इंस्टॉलेशन गाइड](docs/INSTALL.md) देखें।
 

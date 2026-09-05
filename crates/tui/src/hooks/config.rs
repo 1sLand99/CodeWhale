@@ -377,6 +377,30 @@ pub struct HooksConfig {
     pub problems: Vec<HookConfigProblem>,
 }
 
+/// Seed for a workspace's `.codewhale/hooks.toml` when it does not exist yet.
+///
+/// Entirely commented out: creating the file must never change behaviour, and
+/// an empty file that teaches the schema beats an empty file that does not.
+/// The event list here is the one `/hooks events` prints.
+pub const PROJECT_HOOKS_TEMPLATE: &str = r#"# Codewhale project hooks.
+#
+# Hooks are executable repository configuration: they run only after this
+# workspace has been trusted (`/trust`). Global hooks live in the `[hooks]`
+# table of your own config.toml; the entries here are appended after those.
+#
+# Run `/hooks events` in Codewhale for the full event list with descriptions.
+#
+# Uncomment to try one:
+#
+# [[hooks]]
+# name = "format on write"
+# event = "post_tool_use"
+# command = "cargo fmt --all"
+# timeout_secs = 30
+# background = true
+# continue_on_error = true
+"#;
+
 fn default_enabled() -> bool {
     true
 }
@@ -689,7 +713,7 @@ fn load_plugin_hook_component(
     Ok(merged)
 }
 
-fn workspace_allows_project_hooks(workspace: &Path) -> bool {
+pub fn workspace_allows_project_hooks(workspace: &Path) -> bool {
     crate::config::is_workspace_trusted(workspace)
 }
 
@@ -1397,5 +1421,22 @@ condition = { type = "exit_code", code = 1 }
             .expect_err("oversized project hook config must be rejected");
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
         assert!(error.to_string().contains("1 MiB"));
+    }
+
+    /// The seeded project hooks file must be inert: creating it can never
+    /// change behaviour, only teach the schema.
+    #[test]
+    fn project_hooks_template_parses_and_configures_nothing() {
+        let parsed: HooksConfig =
+            toml::from_str(PROJECT_HOOKS_TEMPLATE).expect("the seeded template must be valid TOML");
+        assert!(
+            parsed.hooks.is_empty(),
+            "a freshly created hooks file must define no hooks"
+        );
+        assert!(parsed.problems.is_empty());
+        assert!(
+            PROJECT_HOOKS_TEMPLATE.contains("/hooks events"),
+            "the template must point at the event list rather than restate it"
+        );
     }
 }

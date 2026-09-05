@@ -215,7 +215,7 @@ pub const UNDERWATER_UI_THEME: UiTheme = UiTheme {
 };
 
 /// The underwater-retro theme: the flat phosphor-teal look of the legacy
-/// deepsea era (the old `deepseek_theme` token days) as a selectable theme.
+/// deepsea era as a selectable theme.
 /// Same ink and accent roles as underwater so text contrast is identical;
 /// the ground is flat near-black blue with no ombre paint, so the ocean ramp
 /// leaves it alone.

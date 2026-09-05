@@ -54,27 +54,62 @@ pub(crate) fn route_identity_fields(
     app: &App,
     tier: ShellTier,
     budget: usize,
-) -> Option<Vec<String>> {
+) -> Option<Vec<RouteIdentityField>> {
     let (provider, model) = app.effective_route_identity_display();
     let effort = app.reasoning_effort_display_label();
     if model.is_empty() {
         return None;
     }
-    let mut candidates: Vec<Vec<String>> = Vec::new();
+    let field = |kind, text: String| RouteIdentityField { kind, text };
+    let mut candidates: Vec<Vec<RouteIdentityField>> = Vec::new();
     if tier != ShellTier::Compact && !provider.is_empty() && !effort.is_empty() {
         // The smallest shell never repeats the provider: model and effort are
         // the two facts that change what comes back.
-        candidates.push(vec![provider, model.clone(), effort.clone()]);
+        candidates.push(vec![
+            field(RouteFieldKind::Provider, provider),
+            field(RouteFieldKind::Model, model.clone()),
+            field(RouteFieldKind::Effort, effort.clone()),
+        ]);
     }
     if !effort.is_empty() {
-        candidates.push(vec![model.clone(), effort]);
+        candidates.push(vec![
+            field(RouteFieldKind::Model, model.clone()),
+            field(RouteFieldKind::Effort, effort),
+        ]);
     }
-    candidates.push(vec![model]);
+    candidates.push(vec![field(RouteFieldKind::Model, model)]);
     candidates.into_iter().find(|fields| {
-        let width = fields.iter().map(|field| field.width()).sum::<usize>()
+        let width = fields.iter().map(|field| field.text.width()).sum::<usize>()
             + fields.len().saturating_sub(1) * ITEM_SEPARATOR_WIDTH;
         width <= budget
     })
+}
+
+/// Which route fact a rendered field is. The info line needs this to send a
+/// click to the surface that owns the fact the user pointed at: the provider
+/// name to `/provider`, the model and its effort tier to `/model`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RouteFieldKind {
+    Provider,
+    Model,
+    Effort,
+}
+
+/// One rendered route field: what it says, and what it is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RouteIdentityField {
+    pub kind: RouteFieldKind,
+    pub text: String,
+}
+
+/// The info line's route budget: the row's width less the brand lockup,
+/// meter, and clock floor, never below 24.
+///
+/// One owner. The rule used to be written out at the call site in
+/// `ui/frame.rs` and copied again into two tests with a comment pointing
+/// back at the original, which is how a shed rule drifts.
+pub(crate) fn info_route_budget(width: u16) -> usize {
+    usize::from(width).saturating_sub(60).max(24)
 }
 
 /// Split a notice at its joints, coarsest first.
@@ -396,14 +431,18 @@ mod tests {
 
         // The info line's own budget rule (ui/frame.rs): width minus the brand
         // lockup, meter, and clock floor, never below 24.
-        let info_budget = |width: u16| (usize::from(width)).saturating_sub(60).max(24);
         let fields = |width: u16| {
-            route_identity_fields(&app, ShellTier::for_chrome_width(width), info_budget(width))
+            route_identity_fields(
+                &app,
+                ShellTier::for_chrome_width(width),
+                info_route_budget(width),
+            )
         };
 
         let wide = fields(140).expect("wide budget keeps the route");
         assert!(
-            wide.iter().any(|f| f.contains("DeepSeek")) && wide.iter().any(|f| f == model),
+            wide.iter().any(|f| f.text.contains("DeepSeek"))
+                && wide.iter().any(|f| f.text == model),
             "{wide:?}"
         );
 
@@ -413,13 +452,13 @@ mod tests {
             let shed = fields(width).unwrap_or_default();
             for field in &shed {
                 assert!(
-                    !field.contains('…'),
+                    !field.text.contains('…'),
                     "{width} dangled a clipped field: {shed:?}"
                 );
             }
-            if shed.iter().any(|f| f.contains("deepseek-v4-flash-p")) {
+            if shed.iter().any(|f| f.text.contains("deepseek-v4-flash-p")) {
                 assert!(
-                    shed.iter().any(|f| f == model),
+                    shed.iter().any(|f| f.text == model),
                     "{width} clipped the model name: {shed:?}"
                 );
             }
@@ -441,26 +480,33 @@ mod tests {
         );
         app.model = model.to_string();
 
-        let info_budget = |width: u16| (usize::from(width)).saturating_sub(60).max(24);
         for width in [30u16, 40, 50, 60, 70, 80, 160] {
-            let shed =
-                route_identity_fields(&app, ShellTier::for_chrome_width(width), info_budget(width))
-                    .unwrap_or_default();
+            let shed = route_identity_fields(
+                &app,
+                ShellTier::for_chrome_width(width),
+                info_route_budget(width),
+            )
+            .unwrap_or_default();
             for field in &shed {
                 assert!(
-                    !field.contains('…'),
+                    !field.text.contains('…'),
                     "{width} dangled a clipped field: {shed:?}"
                 );
             }
-            if shed.iter().any(|f| f.contains("deepseek-v4-flash-vision")) {
+            if shed
+                .iter()
+                .any(|f| f.text.contains("deepseek-v4-flash-vision"))
+            {
                 assert!(
-                    shed.iter().any(|f| f == model),
+                    shed.iter().any(|f| f.text == model),
                     "{width} clipped the model name: {shed:?}"
                 );
             }
             assert!(
-                !shed.iter().any(|f| f.contains("acme-research-gateway-eu-c")
-                    && f != "acme-research-gateway-eu-central"),
+                !shed
+                    .iter()
+                    .any(|f| f.text.contains("acme-research-gateway-eu-c")
+                        && f.text != "acme-research-gateway-eu-central"),
                 "{width} clipped the provider name: {shed:?}"
             );
         }
@@ -641,6 +687,8 @@ struct PostureItem {
     bold: bool,
     /// Painted after `, ` rather than ` · `: the counts are one group.
     joined: bool,
+    /// Which of `footer.counts` this item is, when it is one.
+    count_index: Option<usize>,
 }
 
 /// Shed ladder for the left run, most expendable first: the hint, the
@@ -662,6 +710,7 @@ fn posture_items(footer: &TidelineFooter<'_>, shed: u8) -> Vec<PostureItem> {
         ink: footer.permission_chip.1,
         bold: true,
         joined: false,
+        count_index: None,
     }];
     if let Some((mode, ink)) = footer.mode_chip.filter(|_| shed < 4) {
         items.push(PostureItem {
@@ -669,6 +718,7 @@ fn posture_items(footer: &TidelineFooter<'_>, shed: u8) -> Vec<PostureItem> {
             ink,
             bold: true,
             joined: false,
+            count_index: None,
         });
     }
     if shed < 2 {
@@ -678,6 +728,7 @@ fn posture_items(footer: &TidelineFooter<'_>, shed: u8) -> Vec<PostureItem> {
                 ink: *ink,
                 bold: false,
                 joined: index > 0,
+                count_index: Some(index),
             });
         }
     }
@@ -689,6 +740,7 @@ fn posture_items(footer: &TidelineFooter<'_>, shed: u8) -> Vec<PostureItem> {
             ink,
             bold: false,
             joined: false,
+            count_index: None,
         });
     }
     items
@@ -721,9 +773,17 @@ fn left_run_width(mark: &str, items: &[PostureItem]) -> usize {
 /// shed from the right until the run fits beside the pinned right slot.
 /// Right: the notice or remote-control state, clause-shed by the caller and
 /// truncated here as the last resort; it never covers the permission chip.
-pub fn render_tideline_footer(area: Rect, buf: &mut Buffer, footer: &TidelineFooter<'_>) {
+/// Paint the posture bar. Returns the painted rect of each live count, by
+/// its index into `footer.counts`, so the caller can make the counts the
+/// bottom-of-screen affordance that opens the matching dock view.
+pub fn render_tideline_footer(
+    area: Rect,
+    buf: &mut Buffer,
+    footer: &TidelineFooter<'_>,
+) -> Vec<(usize, Rect)> {
+    let mut count_rects = Vec::new();
     if area.width < 8 || area.height < 1 {
-        return;
+        return count_rects;
     }
     let theme = footer.theme;
     let width = usize::from(area.width);
@@ -775,7 +835,16 @@ pub fn render_tideline_footer(area: Rect, buf: &mut Buffer, footer: &TidelineFoo
         if item.bold {
             style = style.add_modifier(Modifier::BOLD);
         }
-        tput(buf, x as u16, area.y, &clip(x, &item.text), style);
+        let text = clip(x, &item.text);
+        tput(buf, x as u16, area.y, &text, style);
+        if let Some(count_index) = item.count_index
+            && !text.is_empty()
+        {
+            count_rects.push((
+                count_index,
+                Rect::new(x as u16, area.y, text.width() as u16, 1),
+            ));
+        }
         x += item.text.width();
     }
 
@@ -785,6 +854,7 @@ pub fn render_tideline_footer(area: Rect, buf: &mut Buffer, footer: &TidelineFoo
         let sx = (usize::from(area.x) + width).saturating_sub(text.width());
         tput(buf, sx as u16, area.y, &text, tchrome(theme, ink));
     }
+    count_rects
 }
 
 fn truncate_owned(text: &str, width: usize) -> String {
@@ -809,6 +879,9 @@ pub(crate) struct TidelineFooterFacts {
     pub mode_chip: Option<(String, crate::palette::ChromeInk)>,
     pub mode_key: Option<&'static str>,
     pub counts: Vec<(String, ChromeInk)>,
+    /// The dock view each entry of `counts` opens when clicked — same
+    /// length, same order.
+    pub count_panels: Vec<crate::tui::work_surface::RailPanel>,
     pub hint: Option<(String, crate::palette::ChromeInk)>,
     pub context_percent: u8,
     pub right: Option<(String, crate::palette::ChromeInk)>,
@@ -850,20 +923,34 @@ pub(crate) fn context_percent_from_app(app: &App) -> u8 {
 /// The live counts: running sub-agents, live shells, background tasks, and
 /// scheduled automation. Each count is zero-suppressed — the bar never
 /// grows furniture for work that is not happening.
-fn live_counts(app: &App, tier: ShellTier) -> Vec<(String, ChromeInk)> {
+fn live_counts(
+    app: &App,
+    tier: ShellTier,
+) -> (
+    Vec<(String, ChromeInk)>,
+    Vec<crate::tui::work_surface::RailPanel>,
+) {
     use crate::tui::background_indicator::{PendingItemKind, pending_work_from_app};
+    use crate::tui::work_surface::RailPanel;
     let mut counts = Vec::new();
+    let mut panels = Vec::new();
     let agents = crate::tui::subagent_routing::running_agent_count(app);
     match agents {
         0 => {}
-        1 => counts.push((
-            tr(app.ui_locale, MessageId::FooterAgentSingular).into_owned(),
-            ChromeInk::Active,
-        )),
-        n => counts.push((
-            tr(app.ui_locale, MessageId::FooterAgentsPlural).replace("{count}", &n.to_string()),
-            ChromeInk::Active,
-        )),
+        1 => {
+            counts.push((
+                tr(app.ui_locale, MessageId::FooterAgentSingular).into_owned(),
+                ChromeInk::Active,
+            ));
+            panels.push(RailPanel::Agents);
+        }
+        n => {
+            counts.push((
+                tr(app.ui_locale, MessageId::FooterAgentsPlural).replace("{count}", &n.to_string()),
+                ChromeInk::Active,
+            ));
+            panels.push(RailPanel::Agents);
+        }
     }
     let shells = app
         .task_panel
@@ -875,6 +962,7 @@ fn live_counts(app: &App, tier: ShellTier) -> Vec<(String, ChromeInk)> {
             format!("{shells} {}", PendingItemKind::Shell.plural_noun(shells)),
             ChromeInk::Active,
         ));
+        panels.push(RailPanel::Background);
     }
     let tasks = pending_work_from_app(app).count(PendingItemKind::Task);
     if tasks > 0 {
@@ -882,6 +970,7 @@ fn live_counts(app: &App, tier: ShellTier) -> Vec<(String, ChromeInk)> {
             format!("{tasks} {}", PendingItemKind::Task.plural_noun(tasks)),
             ChromeInk::Active,
         ));
+        panels.push(RailPanel::Background);
     }
     // Scheduled automation: the `AutomationPanelState` projection stays the
     // single owner; Compact keeps the abbreviated count (chrome sheds
@@ -893,8 +982,40 @@ fn live_counts(app: &App, tier: ShellTier) -> Vec<(String, ChromeInk)> {
     };
     if let Some(automation) = automation {
         counts.push((automation, app.automation_panel.activity_ink()));
+        panels.push(RailPanel::Background);
     }
-    counts
+    // With nothing live there is still one bottom affordance that opens the
+    // dock (founder, 2026-09-03: the bar opens when used, or when you click
+    // something at the bottom to ask for it). The word is the dock's own
+    // TODO view title; it disappears while the dock is up.
+    //
+    // It reads at `MetadataValue`, not `MetadataDim`: `TEXT_DIM` is aliased to
+    // `TEXT_HINT` in every theme but Solarized, so a dim affordance paints the
+    // exact grey as the separators around it and the one clickable word in an
+    // idle footer disappears into punctuation. Live counts already carry
+    // `Active`; this is the idle case earning the same "you can click this".
+    if counts.is_empty() && app.work_surface.last_area.is_none() {
+        // The word alone did not say it was an affordance, let alone which
+        // key opened it — founder live-test: "what do we press at the bottom
+        // to get the workbar to show up?". It carries its chord until the
+        // binding has been used, exactly like the permission and mode chips.
+        let label = RailPanel::Tasks.title().to_ascii_lowercase();
+        let chord = crate::tui::shell_key_routing::binding(
+            crate::tui::shell_key_routing::ShellBindingId::ViewCycle,
+        )
+        .footer_chord;
+        let label = if crate::tui::footer_hints::retired(
+            &app.footer_hint_uses,
+            crate::tui::footer_hints::DOCK_OPEN,
+        ) {
+            label
+        } else {
+            format!("{label} ({chord})")
+        };
+        counts.push((label, ChromeInk::MetadataValue));
+        panels.push(RailPanel::Tasks);
+    }
+    (counts, panels)
 }
 
 /// Build the posture bar's facts from live `App` state. `width` is the
@@ -913,8 +1034,7 @@ pub(crate) fn tideline_footer_from_app(app: &mut App, width: u16) -> TidelineFoo
         .unwrap_or_else(|| (String::new(), ChromeInk::PermissionAsk));
     let mode_chip = mode_chip.map(|(text, ink)| (text.into_owned(), ink));
     // Cycle keys come from the binding table and only when that binding is
-    // live for the current focus — the launch stage's Tab moves focus, so
-    // the mode chip there carries no key.
+    // live for the current focus.
     let live_chord = |id: ShellBindingId| -> Option<&'static str> {
         let binding = binding(id);
         binding.focus.admits(focus).then_some(binding.footer_chord)
@@ -922,27 +1042,35 @@ pub(crate) fn tideline_footer_from_app(app: &mut App, width: u16) -> TidelineFoo
 
     // The one hint that applies now: the double-tap send-now window while a
     // turn is running, else the interrupt affordance, else the arrow keys
-    // the empty composer lends to the agent roster.
+    // the empty composer lends to the agent roster. Each hint retires once
+    // its binding has been used enough times (`footer_hints::retired`): a
+    // taught binding renders the bare state, never more chrome.
     let hint = if app.double_tap_window_open() {
         Some((
             tr(app.ui_locale, MessageId::PostureHintEnterAgain)
                 .replace("{enter}", "Enter")
                 .replace("{steer}", "Ctrl+Enter"),
             ChromeInk::MetadataHint,
+            crate::tui::footer_hints::ENTER_AGAIN,
         ))
     } else if matches!(phase, ShellPhase::Working | ShellPhase::Verifying) {
         Some((
             tr(app.ui_locale, MessageId::FooterHintEscInterrupt).into_owned(),
             ChromeInk::MetadataHint,
+            crate::tui::footer_hints::ESC_INTERRUPT,
         ))
     } else if crate::tui::agent_focus::shell_shortcuts_available(app, false) {
         Some((
             crate::tui::agent_focus::footer_agent_hints(app),
             ChromeInk::MetadataHint,
+            crate::tui::footer_hints::AGENT_ARROWS,
         ))
     } else {
         None
     };
+    let hint = hint
+        .filter(|(_, _, key)| !crate::tui::footer_hints::retired(&app.footer_hint_uses, key))
+        .map(|(text, ink, _)| (text, ink));
 
     // The right slot: the live status toast if one is owed, else the compact
     // MCP or plugin boot chip, else the remote-control state when it is on.
@@ -963,12 +1091,24 @@ pub(crate) fn tideline_footer_from_app(app: &mut App, width: u16) -> TidelineFoo
                 .map(|word| (format!("/rc {word}"), ChromeInk::Info))
         });
 
+    let (counts, count_panels) = live_counts(app, tier);
     TidelineFooterFacts {
         permission_chip,
-        permission_key: live_chord(ShellBindingId::PermissionCycle),
+        permission_key: live_chord(ShellBindingId::PermissionCycle).filter(|_| {
+            !crate::tui::footer_hints::retired(
+                &app.footer_hint_uses,
+                crate::tui::footer_hints::PERMISSION_CYCLE,
+            )
+        }),
         mode_chip,
-        mode_key: live_chord(ShellBindingId::ModeCycle),
-        counts: live_counts(app, tier),
+        mode_key: live_chord(ShellBindingId::ModeCycle).filter(|_| {
+            !crate::tui::footer_hints::retired(
+                &app.footer_hint_uses,
+                crate::tui::footer_hints::MODE_CYCLE,
+            )
+        }),
+        counts,
+        count_panels,
         hint,
         context_percent: context_percent_from_app(app),
         right,

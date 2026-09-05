@@ -45,7 +45,9 @@ notes, and relevant issue/PR comments.
   accent (#5599), and `/copy` for the latest completed response (#5692)
 - **[Paulo Aboim Pinto / aboimpinto](https://github.com/aboimpinto)** —
   preserved Windows verbatim-path operands through POSIX word splitting
-  (#5610) and moved the plugins group onto the command shapes (#5657)
+  (#5610), moved the plugins group onto the command shapes (#5657), built
+  FEAT-022 skills command shapes with retained-host validation (#5825), and
+  re-landed FEAT-020 plugin command shapes on main (#5865)
 - **[Alex Musichen / musichen](https://github.com/musichen)** — fixed the
   configured-view DeepSeek model picker so it shows a stable DeepSeek heading
   and keeps every official catalog model for the active provider visible
@@ -56,10 +58,48 @@ notes, and relevant issue/PR comments.
   English documentation inaccuracies and contributed the first zh_hans
   translations for the Tier-2 docs (#5613)
 - **[M-Maciej](https://github.com/M-Maciej)** — goal continuation cadence fix
-  (#5591)
+  (#5591) and the per-session control socket (#5533, #5831)
 - **[Serephus / serephus](https://github.com/serephus)** — nixpkgs update
   (#5669)
+- **[秋月凉梦 / qiuYliangM](https://github.com/qiuYliangM)** — co-authored the
+  authoritative edit-last-turn boundaries (#5621), Kimi Code k3-256k support
+  (#5622), and post-compaction input-token reporting (#5623)
+- **[whp233](https://github.com/whp233)** — `wire = responses|anthropic` for
+  openai-compatible custom routes and opencode-zen muse-spark (#5716, landed
+  as #5719)
+- **[Gabriel Degret / Gabriel-Degret](https://github.com/Gabriel-Degret)** —
+  found the reasoning-only retry gap and built the first fix; landed as the
+  `[reasoning_only]` retry ceiling with a request-scoped nudge (#5867)
+- **[huangxianzhan](https://github.com/huangxianzhan)** — the
+  `x-opencode-session` header for OpenCode Go and Zen gateways (#5868)
+- **[zhuowp](https://github.com/zhuowp)** — task origin preserved in job
+  snapshots (#5869)
+- **[AdityaG / AdityaVG13](https://github.com/AdityaVG13)** — a ten-commit
+  performance pass across the TUI and config: zero-copy LaTeX streaming,
+  single-pass token accounting, memoized provider resolution, once-per-process
+  models.dev catalog parsing (interactive boot -70%), adaptive shell-completion
+  poll cadence, and diagnostic worker caps
+- **[Nightt / nightt5879](https://github.com/nightt5879)** — isolated remote
+  recovery lease generations (#5790)
+- **[yiheng-kkk](https://github.com/yiheng-kkk)** — replaced stale todo
+  transcript snapshots so a rewritten todo list renders its current tasks
+  (#5871, #5873)
+- **[Lfanxing](https://github.com/Lfanxing)** — Moonshot routes degrade
+  incompatible tool definitions per request instead of failing the turn
+- **[WissssleyL / Lstarsky0](https://github.com/Lstarsky0)** — moved
+  `docs/subagents` and `docs/mcp` onto the dictionary spine (#5337), with the
+  metaTitle probe that keeps them there
 
+**Reports and reproductions**
+
+- **[slowly247](https://github.com/slowly247)** — reported the Ollama input
+  budget collapsing to 1,024 tokens on 32K local models (#5820)
+- **[ronohara](https://github.com/ronohara)** — reported the engine stopping
+  after recoverable network errors and reproduced the discarded approval (#5769)
+- **[Lujc0523](https://github.com/Lujc0523)** — asked for ACP session mode and
+  model configuration (#5863)
+- **[senka9h](https://github.com/senka9h)** — reported the missing ACP
+  `session/list` and `session/load` methods (#5864)
 </details>
 
 <details>

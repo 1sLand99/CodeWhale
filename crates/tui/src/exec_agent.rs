@@ -298,6 +298,12 @@ pub(crate) async fn run_exec_agent(
         goal_status: crate::tools::goal::GoalStatus::Active,
         goal_max_continuations: execution_config.goal_max_continuations(),
         goal_continuation_delay_seconds: execution_config.goal_continuation_delay_seconds(),
+        reasoning_only_max_reprompts: execution_config.reasoning_only_max_reprompts(),
+        reasoning_only_reprompt_message: Some(
+            execution_config
+                .reasoning_only_reprompt_message()
+                .to_string(),
+        ),
         allowed_tools: allowed_tools.clone(),
         disallowed_tools: disallowed_tools.clone(),
         max_tool_calls,
@@ -1069,6 +1075,13 @@ pub(crate) async fn run_exec_agent(
         if output_format == ExecOutputFormat::StreamJson {
             emit_exec_stream_event(&ExecStreamEvent::Error { error })?;
         }
+    }
+
+    // Drain the terminal receipt before either returning or taking the explicit
+    // retryable-failure process exit below. Outbox failures cannot change the
+    // authoritative turn outcome.
+    if let Err(error) = lifecycle_outbox.flush(Duration::from_secs(2)).await {
+        tracing::warn!(target: "lifecycle_outbox", %error, "exec lifecycle outbox did not drain before exit");
     }
 
     if json_output {

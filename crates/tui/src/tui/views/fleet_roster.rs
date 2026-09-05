@@ -267,24 +267,23 @@ impl FleetRosterView {
         }
     }
 
+    /// One navigation grammar (grokbuild): arrows move, Enter acts, Tab
+    /// moves across the header tabs, Esc closes. `f` is the one named
+    /// destination this room has that is not a tab. Detail scrolling
+    /// (PgUp/PgDn) works but is not advertised — the pane is short now.
     fn footer_hints(&self) -> Vec<ActionHint> {
         let edit_label = if self.selected_fleet.is_some() {
-            "edit Fleet"
+            "edit"
         } else {
-            "setup profile"
+            "setup"
         };
-        let mut hints = vec![
-            ActionHint::new("↑/↓", "move"),
-            ActionHint::new("s/Enter", edit_label),
-            ActionHint::new("f", "saved Fleets"),
-            ActionHint::new("w", tr(self.locale, MessageId::FleetRosterWorkers)),
-            ActionHint::new("PgUp/PgDn", "scroll detail"),
+        vec![
+            ActionHint::new("↑↓", "move"),
+            ActionHint::new("Enter", edit_label),
+            ActionHint::new("Tab", tr(self.locale, MessageId::FleetRosterWorkers)),
+            ActionHint::new("f", "saved teams"),
             ActionHint::new("Esc", "close"),
-        ];
-        if self.selected_fleet.is_some() && !self.operator_selected() {
-            hints.insert(2, ActionHint::new("m", "model"));
-        }
-        hints
+        ]
     }
 }
 
@@ -311,16 +310,8 @@ impl ModalView for FleetRosterView {
                 self.move_down();
                 ViewAction::None
             }
-            KeyCode::Enter | KeyCode::Char('s') => self.activate_selected(),
-            KeyCode::Char('m') if self.selected_fleet.is_some() => {
-                let Some(member) = self.selected_member() else {
-                    return ViewAction::None;
-                };
-                ViewAction::EmitAndClose(ViewEvent::FleetRosterOpenModelRequested {
-                    member_id: member.id.clone(),
-                })
-            }
-            KeyCode::Char('w') => {
+            KeyCode::Enter => self.activate_selected(),
+            KeyCode::Tab | KeyCode::BackTab | KeyCode::Char('w') => {
                 ViewAction::EmitAndClose(ViewEvent::FleetRosterOpenWorkersRequested)
             }
             KeyCode::Char('f') => {
@@ -456,11 +447,11 @@ impl FleetRosterView {
     /// Scope-explicit selected Fleet line. Paths stay out — receipts name them.
     fn selected_fleet_line(&self) -> String {
         if let Some(error) = &self.load_error {
-            return format!("Fleet selection error — {error}");
+            return format!("Team selection error — {error}");
         }
         match &self.selected_fleet {
-            Some(sel) => format!("Fleet `{}` · {}", sel.name, sel.scope.long_label()),
-            None => "No Fleet selected — built-in team".to_string(),
+            Some(sel) => format!("Team `{}` · {}", sel.name, sel.scope.long_label()),
+            None => "No team selected — built-in team".to_string(),
         }
     }
 
@@ -731,10 +722,15 @@ fn operator_detail_lines(operator: &OperatorInfo) -> Vec<Line<'static>> {
         "Role",
         "Coordinator — this session's model leads the Fleet".to_string(),
     );
-    detail_field(&mut lines, "Saved for", "this session only".to_string());
+    // Model, provider, and reasoning are one route: one line, same shape
+    // as a member's.
+    let mut route = format!("{} · {}", operator.model, operator.provider);
+    if !operator.reasoning.trim().is_empty() {
+        route.push_str(" · ");
+        route.push_str(&operator.reasoning);
+    }
+    detail_field(&mut lines, "Model", route);
     detail_field(&mut lines, "Access", "full session access".to_string());
-    detail_field(&mut lines, "Provider", operator.provider.clone());
-    detail_field(&mut lines, "Model", operator.model.clone());
     // Session-route capability badges (#5038). Use the exact route key rather
     // than the display label so built-in routes get provider-scoped catalog
     // facts; custom routes still fall back conservatively to registry facts.
@@ -744,7 +740,6 @@ fn operator_detail_lines(operator: &OperatorInfo) -> Vec<Line<'static>> {
     ) {
         detail_field(&mut lines, "Capabilities", badges.summary());
     }
-    detail_field(&mut lines, "Reasoning", operator.reasoning.clone());
     detail_field(
         &mut lines,
         "Description",
@@ -753,6 +748,10 @@ fn operator_detail_lines(operator: &OperatorInfo) -> Vec<Line<'static>> {
          persist with /fleet save."
             .to_string(),
     );
+    lines.push(Line::from(Span::styled(
+        "saved for this session only",
+        Style::default().fg(palette::TEXT_MUTED),
+    )));
     lines
 }
 
@@ -863,27 +862,20 @@ fn member_detail_lines_with_session(
 ) -> Vec<Line<'static>> {
     let mut lines: Vec<Line> = Vec::new();
 
-    let name = match member.display_name.as_deref().map(str::trim) {
-        Some(display_name) if !display_name.is_empty() && display_name != member.id => {
-            format!("{display_name} ({})", member.id)
-        }
-        _ => member.id.clone(),
+    // Role is the member's primary identity; the id/display name only
+    // appears when it says something the role does not.
+    let role = member.profile.role.name.trim().to_string();
+    let display_name = member
+        .display_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty() && !name.eq_ignore_ascii_case(&member.id));
+    let role_line = match display_name {
+        Some(name) => format!("{role} — {name} ({})", member.id),
+        None if member.id.trim().eq_ignore_ascii_case(&role) => role.clone(),
+        None => format!("{role} ({})", member.id),
     };
-    detail_field(&mut lines, "Member", name);
-    detail_field(
-        &mut lines,
-        "Role",
-        member.profile.role.name.trim().to_string(),
-    );
-    detail_field(
-        &mut lines,
-        "Saved for",
-        match member.origin {
-            ProfileOrigin::BuiltIn => "all projects (built-in team)".to_string(),
-            ProfileOrigin::Workspace => "this project".to_string(),
-            _ => format!("{} · {}", member.origin, member.source.display()),
-        },
-    );
+    detail_field(&mut lines, "Role", role_line);
     // #5098: every layer found for this id, with the winner named. The
     // Origin field still shows the effective copy; this list is the full
     // stack so a personal/config edit is visible when project wins.
@@ -900,30 +892,29 @@ fn member_detail_lines_with_session(
             body,
         );
     }
-    // Slot is internal dispatch vocabulary and duplicates Role — never shown.
-    detail_field(&mut lines, "Access", member_access_summary(member));
-    if let Some(provider) = member
+    // Model and provider are attributes of the role: one line, together.
+    let model = match (
+        member.profile.model.as_deref(),
+        crate::fleet::identity::friendly_model_name(member),
+    ) {
+        (Some(model), Some(name)) if !name.eq_ignore_ascii_case(model.trim()) => {
+            format!("{name} ({})", model.trim())
+        }
+        _ => member_routing_with_session(member, session_model),
+    };
+    let route = match member
         .profile
         .provider
         .as_deref()
         .map(str::trim)
         .filter(|provider| !provider.is_empty())
     {
-        detail_field(&mut lines, "Provider", provider.to_string());
-    }
-    detail_field(
-        &mut lines,
-        "Model",
-        match (
-            member.profile.model.as_deref(),
-            crate::fleet::identity::friendly_model_name(member),
-        ) {
-            (Some(model), Some(name)) if !name.eq_ignore_ascii_case(model.trim()) => {
-                format!("{name} ({})", model.trim())
-            }
-            _ => member_routing_with_session(member, session_model),
-        },
-    );
+        Some(provider) => format!("{model} · {provider}"),
+        None => model,
+    };
+    detail_field(&mut lines, "Model", route);
+    // Slot is internal dispatch vocabulary and duplicates Role — never shown.
+    detail_field(&mut lines, "Access", member_access_summary(member));
 
     // Capability badges for a pinned model, from the shared Fleet resolver
     // (#5038). Unknown models omit the field rather than fabricating facts.
@@ -953,10 +944,12 @@ fn member_detail_lines_with_session(
         detail_field(&mut lines, "Delegation", bounds.join(" · "));
     }
 
-    detail_field(
-        &mut lines,
-        "Instructions",
-        if member.profile.role.instructions.is_some() {
+    // Only a real overlay earns a field; "none" is the default and says
+    // nothing.
+    if member.profile.role.instructions.is_some() {
+        detail_field(
+            &mut lines,
+            "Instructions",
             match member.origin {
                 ProfileOrigin::Workspace => {
                     format!("custom overlay ({})", member.source.display())
@@ -965,11 +958,9 @@ fn member_detail_lines_with_session(
                     format!("personal overlay ({})", member.source.display())
                 }
                 _ => "custom overlay".to_string(),
-            }
-        } else {
-            "none (role posture only)".to_string()
-        },
-    );
+            },
+        );
+    }
 
     if let Some(description) = member
         .description
@@ -979,6 +970,16 @@ fn member_detail_lines_with_session(
     {
         detail_field(&mut lines, "Description", description.to_string());
     }
+
+    // Where the member is saved, last and muted: provenance, not identity.
+    lines.push(Line::from(Span::styled(
+        match member.origin {
+            ProfileOrigin::BuiltIn => "saved for all projects (built-in team)".to_string(),
+            ProfileOrigin::Workspace => "saved for this project".to_string(),
+            _ => format!("saved: {} · {}", member.origin, member.source.display()),
+        },
+        Style::default().fg(palette::TEXT_MUTED),
+    )));
 
     lines
 }

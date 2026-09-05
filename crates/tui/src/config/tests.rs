@@ -116,6 +116,110 @@ fn api_provider_metadata_helpers_follow_config_provider_metadata() {
 }
 
 #[test]
+fn retired_antigravity_is_not_selectable_but_has_an_actionable_tombstone() {
+    for identity in ["antigravity", "agy"] {
+        assert_eq!(ApiProvider::parse(identity), None, "{identity}");
+    }
+    assert!(!ApiProvider::catalog().contains(&ApiProvider::Antigravity));
+    assert!(!ApiProvider::sorted_for_display().contains(&ApiProvider::Antigravity));
+
+    for identity in ["antigravity", "agy"] {
+        assert!(is_legacy_antigravity_identity(identity), "{identity}");
+        let config = Config {
+            provider: Some(identity.to_string()),
+            ..Config::default()
+        };
+        let error = config
+            .validate()
+            .expect_err("a persisted legacy selection must fail before runtime setup")
+            .to_string();
+        assert!(error.contains("non-runnable"), "{identity}: {error}");
+        assert!(
+            error.contains("auth clear --provider antigravity"),
+            "{identity}: {error}"
+        );
+        assert!(error.contains("provider `google`"), "{identity}: {error}");
+        assert!(error.contains("GEMINI_API_KEY"), "{identity}: {error}");
+    }
+}
+
+#[test]
+fn retired_antigravity_env_selection_is_refused_with_the_tombstone() {
+    let _guard = lock_test_env();
+    let _deepseek_provider = EnvVarGuard::remove("DEEPSEEK_PROVIDER");
+    for identity in ["antigravity", "agy"] {
+        let _provider = EnvVarGuard::set("CODEWHALE_PROVIDER", identity);
+        let mut config = Config::default();
+        apply_env_overrides(&mut config, ConfigEnvironmentPolicy::Runtime);
+        let error = config
+            .validate()
+            .expect_err("CODEWHALE_PROVIDER must not select the tombstone")
+            .to_string();
+        assert!(error.contains("non-runnable"), "{identity}: {error}");
+        assert!(error.contains("GEMINI_API_KEY"), "{identity}: {error}");
+    }
+}
+
+#[test]
+fn retired_antigravity_credentials_are_never_read_and_no_client_is_built() {
+    let _guard = lock_test_env();
+    // The retired private credential plane: neither variable is consulted.
+    let _api_key = EnvVarGuard::set("ANTIGRAVITY_API_KEY", "must-never-be-read");
+    let _adc = EnvVarGuard::set("AGY_ADC_AUTH", "must-never-be-read");
+    assert!(ApiProvider::Antigravity.env_vars().is_empty());
+    assert!(
+        ApiProvider::Antigravity.kind().is_some(),
+        "tombstone keeps a kind so it can deserialize"
+    );
+
+    // A persisted legacy selection resolves to its own tombstone identity
+    // instead of falling through to the DeepSeek default, so every
+    // fail-closed branch keyed on `api_provider()` is actually reachable.
+    for identity in ["antigravity", "agy"] {
+        let config = Config {
+            provider: Some(identity.to_string()),
+            ..Config::default()
+        };
+        assert_eq!(
+            config.api_provider(),
+            ApiProvider::Antigravity,
+            "{identity}"
+        );
+    }
+
+    let mut config = Config {
+        provider: Some("antigravity".to_string()),
+        ..Config::default()
+    };
+    let providers = config.providers.get_or_insert_with(Default::default);
+    providers.antigravity.api_key = Some("legacy-literal-left-behind".to_string());
+
+    // A leftover key in the legacy table is not a credential: readiness
+    // reports the tombstone as legacy, so `/model` never lists it.
+    assert_eq!(
+        crate::provider_readiness::credential_state_for_provider(&config, ApiProvider::Antigravity),
+        crate::provider_readiness::CredentialState::Legacy
+    );
+    let inventory = crate::model_inventory::ModelInventory::from_config(&config);
+    assert!(
+        inventory
+            .candidates
+            .iter()
+            .all(|candidate| candidate.provider != ApiProvider::Antigravity),
+        "the tombstone must not surface as a model candidate"
+    );
+
+    // No transport can be constructed for the tombstone; the refusal happens
+    // before any network or credential I/O.
+    let error = crate::client::DeepSeekClient::new(&config)
+        .err()
+        .expect("constructing a client for the tombstone must fail")
+        .to_string();
+    assert!(error.contains("non-runnable"), "{error}");
+    assert!(error.contains("GEMINI_API_KEY"), "{error}");
+}
+
+#[test]
 fn every_api_provider_variant_resolves_base_url_without_panicking() {
     // Guard against the historical `.expect("ApiProvider variant missing
     // ProviderKind metadata")` in `default_base_url()`: a provider variant
@@ -252,6 +356,62 @@ continuation_delay_seconds = 999999999
     assert_eq!(
         config.goal_continuation_delay_seconds(),
         crate::goal_loop::MAX_GOAL_CONTINUATION_DELAY_SECONDS
+    );
+
+    Ok(())
+}
+
+#[test]
+fn reasoning_only_config_loads_from_table() -> Result<()> {
+    // Absent table → built-in defaults.
+    let config: Config = toml::from_str("")?;
+    assert_eq!(
+        config.reasoning_only_max_reprompts(),
+        crate::config::DEFAULT_REASONING_ONLY_REPROMPTS
+    );
+    assert_eq!(
+        config.reasoning_only_reprompt_message(),
+        crate::config::DEFAULT_REASONING_ONLY_REPROMPT_MESSAGE
+    );
+
+    // Explicit max_reprompts override.
+    let config: Config = toml::from_str(
+        r#"
+[reasoning_only]
+max_reprompts = 10
+"#,
+    )?;
+    assert_eq!(config.reasoning_only_max_reprompts(), 10);
+    assert_eq!(
+        config.reasoning_only_reprompt_message(),
+        crate::config::DEFAULT_REASONING_ONLY_REPROMPT_MESSAGE
+    );
+
+    // Explicit reprompt_message override.
+    let config: Config = toml::from_str(
+        r#"
+[reasoning_only]
+max_reprompts = 5
+reprompt_message = "tu n'as rien a dire"
+"#,
+    )?;
+    assert_eq!(config.reasoning_only_max_reprompts(), 5);
+    assert_eq!(
+        config.reasoning_only_reprompt_message(),
+        "tu n'as rien a dire"
+    );
+
+    // 0 = disable automatic recovery.
+    let config: Config = toml::from_str(
+        r#"
+[reasoning_only]
+max_reprompts = 0
+"#,
+    )?;
+    assert_eq!(config.reasoning_only_max_reprompts(), 0);
+    assert_eq!(
+        config.reasoning_only_reprompt_message(),
+        crate::config::DEFAULT_REASONING_ONLY_REPROMPT_MESSAGE
     );
 
     Ok(())
@@ -10382,7 +10542,7 @@ fn xai_invalid_owned_generation_blocks_external_and_uses_api_key_fallback() -> R
 
     crate::external_credentials::reset_side_effect_trap();
     assert!(
-        !crate::xai_oauth::credentials_present(&config),
+        !crate::oauth::credentials_present(crate::oauth::OAuthProvider::Xai, &config),
         "an invalid owned generation pointer must not resolve external OAuth"
     );
     assert_eq!(config.deepseek_api_key()?, "fake-xai-cfg-key");

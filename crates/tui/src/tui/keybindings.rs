@@ -31,6 +31,7 @@ pub enum KeybindingSection {
     Modes,
     Sessions,
     Clipboard,
+    Pointer,
     Help,
 }
 
@@ -44,6 +45,7 @@ impl KeybindingSection {
             Self::Modes => MessageId::HelpSectionModes,
             Self::Sessions => MessageId::HelpSectionSessions,
             Self::Clipboard => MessageId::HelpSectionClipboard,
+            Self::Pointer => MessageId::HelpSectionPointer,
             Self::Help => MessageId::HelpSectionHelp,
         };
         tr(locale, id)
@@ -59,7 +61,8 @@ impl KeybindingSection {
             Self::Modes => 3,
             Self::Sessions => 4,
             Self::Clipboard => 5,
-            Self::Help => 6,
+            Self::Pointer => 6,
+            Self::Help => 7,
         }
     }
 }
@@ -184,7 +187,11 @@ pub const KEYBINDINGS: &[KeybindingEntry] = &[
         section: KeybindingSection::Editing,
     },
     KeybindingEntry {
-        chord: "Ctrl+J / Alt+Enter / Shift+Enter",
+        // Ctrl+J leads because it is a plain control byte every terminal
+        // sends. Shift+Enter only arrives where the kitty keyboard protocol
+        // is live — see `composer_ui::terminal_can_report_shift_enter` — so
+        // it is listed last rather than taught first.
+        chord: "Ctrl+J / Alt+Enter / Shift+Enter (enhanced terminals)",
         description_id: crate::localization::MessageId::KbInsertNewline,
         section: KeybindingSection::Editing,
     },
@@ -357,22 +364,55 @@ pub const KEYBINDINGS: &[KeybindingEntry] = &[
         section: KeybindingSection::Clipboard,
     },
     KeybindingEntry {
-        chord: "Right click",
-        description_id: crate::localization::MessageId::KbContextMenu,
-        section: KeybindingSection::Clipboard,
-    },
-    KeybindingEntry {
         chord: "@path",
         description_id: crate::localization::MessageId::KbAttachPath,
         section: KeybindingSection::Clipboard,
     },
+    // --- Pointer ---
+    // The mouse is a first-class input here: every one of these is wired in
+    // `tui/mouse_ui.rs`. A pointer that does nothing where a user expects it
+    // to act reads as a broken app, so what responds is documented.
+    KeybindingEntry {
+        chord: "Wheel up / down",
+        description_id: crate::localization::MessageId::KbPointerScroll,
+        section: KeybindingSection::Pointer,
+    },
+    KeybindingEntry {
+        chord: "Click",
+        description_id: crate::localization::MessageId::KbPointerClick,
+        section: KeybindingSection::Pointer,
+    },
+    KeybindingEntry {
+        chord: "Drag",
+        description_id: crate::localization::MessageId::KbPointerDrag,
+        section: KeybindingSection::Pointer,
+    },
+    KeybindingEntry {
+        chord: "Right click",
+        description_id: crate::localization::MessageId::KbContextMenu,
+        section: KeybindingSection::Pointer,
+    },
     // --- Help ---
     KeybindingEntry {
-        // F1 is primary (with /help); Ctrl+/ is the secondary fallback.
-        // Alt+? stays an unadvertised handler (TUI-DOG-003).
-        chord: "F1 / Ctrl+/",
+        // `/help` leads because it is the one route that works in every
+        // terminal. F1 is eaten by tmux and several emulators, and how a
+        // terminal encodes Ctrl+/ varies; both still open help where they
+        // arrive. Alt+? stays an unadvertised handler (TUI-DOG-003).
+        chord: "/help / F1 / Ctrl+/",
         description_id: crate::localization::MessageId::KbHelpOverlay,
         section: KeybindingSection::Help,
+    },
+    KeybindingEntry {
+        // The work dock was reachable but never listed here, so the only way
+        // to learn the chord was the footer's one-time hint.
+        chord: "Ctrl+Tab / Ctrl+]",
+        description_id: crate::localization::MessageId::KbCycleWorkDock,
+        section: KeybindingSection::Navigation,
+    },
+    KeybindingEntry {
+        chord: "Ctrl+Shift+Tab",
+        description_id: crate::localization::MessageId::KbCycleWorkDockBack,
+        section: KeybindingSection::Navigation,
     },
 ];
 
@@ -434,7 +474,7 @@ mod tests {
 
         assert_eq!(
             chord_for(crate::localization::MessageId::KbInsertNewline),
-            "Ctrl+J / Alt+Enter / Shift+Enter"
+            "Ctrl+J / Alt+Enter / Shift+Enter (enhanced terminals)"
         );
         assert!(
             KEYBINDINGS
@@ -543,11 +583,20 @@ mod tests {
             "F3 / /provider"
         );
         assert_eq!(binding(ShellBindingId::Help).catalog_chord, "F1 / Ctrl+/");
+        // Every advertised binding, not a hand-picked four: the two that were
+        // not covered had already drifted (the view-cycle chord read
+        // "Ctrl+] / Ctrl+Tab" here and "Ctrl+Tab / Ctrl+]" at the source),
+        // which is exactly the rot this module's doc comment warns about.
         for id in [
             ShellBindingId::ToolDetails,
             ShellBindingId::ContextInspector,
             ShellBindingId::ProviderRoute,
             ShellBindingId::Help,
+            ShellBindingId::Settings,
+            ShellBindingId::ModeCycle,
+            ShellBindingId::PermissionCycle,
+            ShellBindingId::ViewCycle,
+            ShellBindingId::ViewCycleBack,
         ] {
             let chord = binding(id).catalog_chord;
             assert!(
@@ -778,7 +827,7 @@ mod tests {
         );
         assert_eq!(
             entry_for(crate::localization::MessageId::KbInsertNewline).chord,
-            "Ctrl+J / Alt+Enter / Shift+Enter"
+            "Ctrl+J / Alt+Enter / Shift+Enter (enhanced terminals)"
         );
 
         let newline_copy = crate::localization::tr(

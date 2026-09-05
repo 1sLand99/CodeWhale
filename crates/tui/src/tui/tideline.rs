@@ -168,6 +168,10 @@ impl InteractionTargetId {
     /// id only: the provider picker remains the owner of route catalog and
     /// readiness facts.
     pub const HEADER_ROUTE: Self = Self("header.route");
+    /// The model name and effort tier inside the info line's route segment.
+    pub const HEADER_MODEL: Self = Self("header.model");
+    /// A live count in the posture bar; opens the dock view it counts.
+    pub const FOOTER_COUNT: Self = Self("footer.count");
     pub const DOCK_TAB_AGENTS: Self = Self("dock.tab.agents");
     pub const DOCK_TAB_TASKS: Self = Self("dock.tab.tasks");
     pub const DOCK_TAB_BACKGROUND: Self = Self("dock.tab.background");
@@ -186,6 +190,9 @@ pub enum InteractionAction {
     /// Open the existing provider/route picker without making this chrome
     /// target another source of catalog or runtime authority.
     OpenProviderPicker,
+    /// Open the existing `/model` picker. Same discipline as the provider
+    /// entry: an entry point, never a second catalog.
+    OpenModelPicker,
     ShowDockPanel(crate::tui::work_surface::RailPanel),
     DismissDock,
 }

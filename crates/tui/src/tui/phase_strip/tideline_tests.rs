@@ -222,3 +222,160 @@ fn posture_bar_degenerate_sizes_do_not_panic() {
         let _ = draw(w, h, &fixture.widget(&UI_THEME));
     }
 }
+
+// ---------------------------------------------------------------------------
+// Footer-hint retirement: each hint shows at 0 and 1 uses, and is gone at 2.
+// These drive `tideline_footer_from_app` with a live session `App`, so the
+// gating between the use counts and the facts is covered, not just the
+// predicate in `footer_hints`.
+// ---------------------------------------------------------------------------
+
+use super::tideline_footer_from_app;
+use crate::tui::app::{App, OnboardingState};
+use crate::tui::footer_hints::{
+    AGENT_ARROWS, ENTER_AGAIN, ESC_INTERRUPT, MODE_CYCLE, PERMISSION_CYCLE,
+};
+
+fn session_app() -> App {
+    let mut app = crate::test_support::test_app_with_options(
+        crate::test_support::test_tui_options(std::path::PathBuf::from(".")),
+    );
+    app.onboarding = OnboardingState::None;
+    app.launch.visible = false;
+    app
+}
+
+fn set_uses(app: &mut App, key: &str, uses: u8) {
+    if uses == 0 {
+        app.footer_hint_uses.remove(key);
+    } else {
+        app.footer_hint_uses.insert(key.to_string(), uses);
+    }
+}
+
+/// The cycle chords print while their bindings are fresh, and the chips go
+/// bare — never away — once each binding has been used twice.
+#[test]
+fn cycle_keys_show_at_zero_and_one_use_and_go_bare_at_two() {
+    let mut app = session_app();
+    let facts = tideline_footer_from_app(&mut app, 120);
+    assert_eq!(facts.permission_key, Some("Shift+Tab"));
+    assert_eq!(facts.mode_key, Some("Tab"));
+
+    for key in [PERMISSION_CYCLE, MODE_CYCLE] {
+        set_uses(&mut app, key, 1);
+    }
+    let facts = tideline_footer_from_app(&mut app, 120);
+    assert_eq!(facts.permission_key, Some("Shift+Tab"));
+    assert_eq!(facts.mode_key, Some("Tab"));
+
+    set_uses(&mut app, PERMISSION_CYCLE, 2);
+    let facts = tideline_footer_from_app(&mut app, 120);
+    assert_eq!(facts.permission_key, None);
+    assert_eq!(
+        facts.mode_key,
+        Some("Tab"),
+        "the mode key retires on its own count"
+    );
+
+    set_uses(&mut app, MODE_CYCLE, 2);
+    let facts = tideline_footer_from_app(&mut app, 120);
+    assert_eq!(facts.permission_key, None);
+    assert_eq!(facts.mode_key, None);
+    assert!(
+        !facts.permission_chip.0.is_empty(),
+        "the permission chip never retires with its key"
+    );
+    assert!(
+        facts.mode_chip.is_some(),
+        "the mode chip never retires with its key"
+    );
+}
+
+/// A running turn advertises the interrupt affordance until Esc has been
+/// used to interrupt twice.
+#[test]
+fn interrupt_hint_shows_at_zero_and_one_use_and_clears_at_two() {
+    let mut app = session_app();
+    app.is_loading = true;
+    let facts = tideline_footer_from_app(&mut app, 120);
+    let (text, _) = facts.hint.as_ref().expect("a running turn names Esc");
+    assert!(text.contains("Esc"), "{text}");
+
+    set_uses(&mut app, ESC_INTERRUPT, 1);
+    assert!(tideline_footer_from_app(&mut app, 120).hint.is_some());
+
+    set_uses(&mut app, ESC_INTERRUPT, 2);
+    assert!(tideline_footer_from_app(&mut app, 120).hint.is_none());
+}
+
+/// The open double-tap window advertises the second Enter until that steer
+/// has fired twice.
+#[test]
+fn enter_again_hint_shows_at_zero_and_one_use_and_clears_at_two() {
+    let mut app = session_app();
+    app.is_loading = true;
+    app.arm_double_tap_window();
+    let facts = tideline_footer_from_app(&mut app, 120);
+    let (text, _) = facts
+        .hint
+        .as_ref()
+        .expect("an open double-tap window names Enter");
+    assert!(text.contains("Enter"), "{text}");
+
+    set_uses(&mut app, ENTER_AGAIN, 1);
+    assert!(tideline_footer_from_app(&mut app, 120).hint.is_some());
+
+    set_uses(&mut app, ENTER_AGAIN, 2);
+    assert!(tideline_footer_from_app(&mut app, 120).hint.is_none());
+}
+
+fn completed_subagent(id: &str) -> crate::tools::subagent::SubAgentResult {
+    crate::tools::subagent::SubAgentResult {
+        name: id.to_string(),
+        agent_id: id.to_string(),
+        context_mode: "fresh".to_string(),
+        fork_context: false,
+        workspace: None,
+        git_branch: None,
+        agent_type: crate::tools::subagent::FleetRole::Worker,
+        assignment: crate::tools::subagent::SubAgentAssignment {
+            objective: format!("objective-{id}"),
+            role: Some("worker".to_string()),
+        },
+        model: String::new(),
+        nickname: None,
+        status: crate::tools::subagent::SubAgentStatus::Completed,
+        worker_status: None,
+        runtime_permissions: None,
+        parent_run_id: None,
+        spawn_depth: 0,
+        child_route: None,
+        result: None,
+        steps_taken: 0,
+        checkpoint: None,
+        needs_input: None,
+        duration_ms: 0,
+        started_at: None,
+        from_prior_session: false,
+    }
+}
+
+/// The empty composer lends its arrows to the roster until those shortcuts
+/// have been used twice. The roster entry is a finished agent: live progress
+/// would put the phase back to Working, where the interrupt hint outranks.
+#[test]
+fn agent_arrow_hints_show_at_zero_and_one_use_and_clear_at_two() {
+    let mut app = session_app();
+    app.subagent_cache.push(completed_subagent("agent-a"));
+    assert!(
+        tideline_footer_from_app(&mut app, 120).hint.is_some(),
+        "the empty composer lends its arrows to the roster"
+    );
+
+    set_uses(&mut app, AGENT_ARROWS, 1);
+    assert!(tideline_footer_from_app(&mut app, 120).hint.is_some());
+
+    set_uses(&mut app, AGENT_ARROWS, 2);
+    assert!(tideline_footer_from_app(&mut app, 120).hint.is_none());
+}

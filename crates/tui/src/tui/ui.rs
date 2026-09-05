@@ -57,7 +57,6 @@ use crate::config::{
     UpdateConfig, persist_external_credential_consent_for_at,
     revoke_external_credential_consent_for_at,
 };
-use crate::config_ui::{self, ConfigUiMode, WebConfigSession, WebConfigSessionEvent};
 use crate::core::engine::{EngineConfig, EngineHandle, spawn_engine};
 use crate::core::events::Event as EngineEvent;
 use crate::core::ops::{Op, ProviderRuntimeStatus, USER_SHELL_TOOL_ID_PREFIX, UserInputProvenance};
@@ -96,7 +95,7 @@ use crate::tui::format_helpers;
 use crate::tui::hotbar::actions::HotbarDispatch;
 use crate::tui::key_shortcuts;
 use crate::tui::live_transcript::LiveTranscriptOverlay;
-use crate::tui::mcp_routing::{add_mcp_message, open_mcp_manager_pager};
+use crate::tui::mcp_routing::{add_mcp_message, open_mcp_extensions};
 use crate::tui::mouse_ui::*;
 use crate::tui::notifications;
 use crate::tui::onboarding;
@@ -191,7 +190,6 @@ const CONTEXT_SUGGEST_COMPACT_THRESHOLD_PERCENT: f64 = 60.0;
 const UI_IDLE_POLL_MS: u64 = 48;
 const UI_ACTIVE_POLL_MS: u64 = 24;
 const SUBAGENT_HOOK_PREVIEW_LIMIT: usize = 2_048;
-const WEB_CONFIG_POLL_MS: u64 = 16;
 const DISPATCH_WATCHDOG_TIMEOUT: Duration = Duration::from_secs(30);
 /// Minimum wall-clock time a turn may stay in `"in_progress"` before the UI
 /// assumes the engine stalled (e.g. sub-agent hang, lost completion event,
@@ -776,7 +774,7 @@ fn open_fleet_setup_target(app: &mut App, config: &Config, member_id: Option<&st
                 app, config, &name, scope, member_id,
             ) else {
                 app.set_sticky_status(
-                    "Selected Fleet is invalid or unreadable; open /fleet fleets to repair or clear the selection. Legacy profiles were not opened."
+                    "Selected team is invalid or unreadable; open /fleet teams to repair or clear the selection. Legacy profiles were not opened."
                         .to_string(),
                     StatusToastLevel::Error,
                     None,
@@ -786,7 +784,7 @@ fn open_fleet_setup_target(app: &mut App, config: &Config, member_id: Option<&st
             let fleet_name = crate::safe_label::SafeLabel::phrase(&name);
             app.view_stack.push(view);
             app.status_message = Some(format!(
-                "Editing selected Fleet `{fleet_name}` ({}) — legacy profiles will not be changed.",
+                "Editing selected team `{fleet_name}` ({}) — legacy profiles will not be changed.",
                 scope.label()
             ));
         }
@@ -806,43 +804,6 @@ fn open_fleet_setup_target(app: &mut App, config: &Config, member_id: Option<&st
         Err(message) => {
             app.set_sticky_status(message, StatusToastLevel::Error, None);
         }
-    }
-}
-
-fn open_fleet_model_target(app: &mut App, config: &Config, member_id: &str) {
-    use crate::tui::views::fleet_setup::{FleetSetupEditTarget, resolve_fleet_setup_edit_target};
-
-    match resolve_fleet_setup_edit_target(&app.workspace) {
-        Ok(FleetSetupEditTarget::SelectedFleet { name, scope }) => {
-            if app.view_stack.top_kind() == Some(ModalKind::FleetDetail) {
-                return;
-            }
-            let Some(mut view) = crate::tui::views::fleet_detail::FleetDetailView::open_for_member(
-                app,
-                config,
-                &name,
-                scope,
-                Some(member_id),
-            ) else {
-                app.set_sticky_status(
-                    "Selected Fleet is invalid or unreadable; open /fleet fleets to repair or clear the selection."
-                        .to_string(),
-                    StatusToastLevel::Error,
-                    None,
-                );
-                return;
-            };
-            view.open_model_picker();
-            app.view_stack.push(view);
-            let fleet_name = crate::safe_label::SafeLabel::phrase(&name);
-            app.status_message = Some(format!(
-                "Editing member `{member_id}` in Fleet `{fleet_name}` — choose a model route.",
-            ));
-        }
-        Ok(FleetSetupEditTarget::LegacyProfiles) => {
-            open_fleet_setup_target(app, config, Some(member_id));
-        }
-        Err(message) => app.set_sticky_status(message, StatusToastLevel::Error, None),
     }
 }
 
@@ -923,7 +884,6 @@ async fn execute_command_input(
     engine_handle: &mut EngineHandle,
     task_manager: &SharedTaskManager,
     config: &mut Config,
-    web_config_session: &mut Option<WebConfigSession>,
     input: &str,
 ) -> Result<bool> {
     let _ = app.note_manual_command_for_tip(input);
@@ -953,16 +913,7 @@ async fn execute_command_input(
         clear_active_provider_api_key_from_memory(app, config);
         app.api_key_env_only = crate::config::active_provider_uses_env_only_api_key(config);
     }
-    apply_command_result(
-        terminal,
-        app,
-        engine_handle,
-        task_manager,
-        config,
-        web_config_session,
-        result,
-    )
-    .await
+    apply_command_result(terminal, app, engine_handle, task_manager, config, result).await
 }
 
 #[derive(Debug, Clone)]

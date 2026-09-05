@@ -1065,6 +1065,53 @@ pub const SETTINGS_SCHEMA: &[SettingDef] = &[
             "ConfigHintFeatureExecPolicy",
         ),
     ),
+    // ── persisted field names without a row ─────────────────────────────
+    // Every field `Settings` serializes to settings.toml has a declaration;
+    // these have `ui: None` because their value is owned elsewhere:
+    // route pickers, `/set` aliases with their own canonical row, or
+    // internal one-way flags. Declaration order is render order, and hidden
+    // entries render nothing, so they live together at the end.
+    //
+    // Canonical names behind a `/set` alias row: `set()` accepts both
+    // spellings, the row carries the alias.
+    def("tool_collapse_mode", SettingKind::String, "compact", None),
+    def("max_input_history", SettingKind::Int, "100", None),
+    // Written by the route pickers, not by a settings row (the provider /
+    // model rows persist to config.toml via `set_config_value`).
+    def("default_provider", SettingKind::String, "", None),
+    // Trust posture with a `/set` entry point but no row; surfaced where
+    // sandboxing acts, not as a settings sentence.
+    def("sandbox_mode", SettingKind::String, "", None),
+    // Route memory written by the pickers: per-provider defaults, enabled
+    // chooser sets, and pinned routes. Structured values no row could edit.
+    def("provider_models", SettingKind::String, "", None),
+    def("enabled_models", SettingKind::String, "", None),
+    def("pinned_models", SettingKind::String, "", None),
+    // One-way internal flags: shown an intro, shown a deprecation, counted
+    // tip impressions. Read back to suppress repeats, never edited.
+    def(
+        "feature_intro_shown",
+        SettingKind::Bool(ON_OFF),
+        "false",
+        None,
+    ),
+    def(
+        "yolo_deprecation_shown",
+        SettingKind::Bool(ON_OFF),
+        "false",
+        None,
+    ),
+    // Round 3 work-bar placement migration ran once (`top` → `bottom`).
+    def(
+        "work_surface_bottom_migrated",
+        SettingKind::Bool(ON_OFF),
+        "false",
+        None,
+    ),
+    def("behavioral_tip_impressions", SettingKind::String, "", None),
+    // Footer key-hint use counts: a hint retires to its bare state once its
+    // binding has been used enough times. Written by the footer, never edited.
+    def("footer_hint_uses", SettingKind::String, "", None),
 ];
 
 /// The declaration for `key`, if the shell knows it.

@@ -16,8 +16,8 @@ export async function generateMetadata({ params }: { params: Promise<{ locale: s
     locale,
     title: isZh ? "安装 · Codewhale" : "Install · Codewhale",
     description: isZh
-      ? "一行 curl -fsSL https://codewhale.net/install.sh | sh 安装或更新 Codewhale，也支持 npm、Cargo、GitHub Releases、CNB 镜像、Homebrew、预编译二进制、Docker 和源码编译。"
-      : "Install or update Codewhale with curl -fsSL https://codewhale.net/install.sh | sh, or via npm, cargo, GitHub Releases, the CNB mirror, Homebrew, prebuilt binaries, Docker, or from source.",
+      ? "一行 curl -fsSL https://codewhale.net/install.sh | sh 安装或更新 Codewhale，也支持 GitHub Releases 二进制、npm、Cargo、CNB 镜像、Homebrew、预编译二进制、Docker 和源码编译。"
+      : "Install or update Codewhale with curl -fsSL https://codewhale.net/install.sh | sh, or via GitHub release binaries, npm, Cargo, the CNB mirror, Homebrew, prebuilt binaries, Docker, or from source.",
   });
 }
 
@@ -121,7 +121,7 @@ codewhale doctor`;
               默认安装到 <code className="inline">~/.local/bin</code>，并提供{" "}
               <code className="inline">codewhale</code> 和 <code className="inline">codew</code>
               两个命令名；两者运行同一个编译后的 runtime。先审阅脚本可运行{" "}
-              <code className="inline">{SHELL_INSPECT}</code>。下方「其他安装方式」列出 npm、Cargo、GitHub Releases、
+              <code className="inline">{SHELL_INSPECT}</code>。下方「其他安装方式」列出 GitHub Releases 二进制、npm、Cargo、
               CNB、国内镜像、Homebrew、预编译二进制和 Docker。
             </>
           ) : (
@@ -132,7 +132,7 @@ codewhale doctor`;
               two names for the same compiled runtime. To inspect it first, run{" "}
               <code className="inline">{SHELL_INSPECT}</code>. See{" "}
               <a href="#other-ways" className="body-link">Other ways to install</a> below for
-              npm, cargo, GitHub Releases, CNB, Homebrew, prebuilt binaries, Docker, or mainland
+              GitHub release binaries, npm, Cargo, CNB, Homebrew, prebuilt binaries, Docker, or mainland
               China mirrors.
             </>
           )}
@@ -389,6 +389,7 @@ codewhale doctor`;
               ) : (
                 <a
                   href="https://github.com/Hmbown/CodeWhale/releases/latest"
+                  data-usage="download"
                   className="body-link"
                 >
                   {isZh ? "查看最新 GitHub 发布" : "Check the latest GitHub release"}

@@ -25,7 +25,9 @@ use crate::utils::spawn_supervised;
 
 /// Current automation record schema. `pub(crate)` so the Operate keepalive
 /// can build a fixed-id record directly (no create/delete id swap).
-pub(crate) const CURRENT_AUTOMATION_SCHEMA_VERSION: u32 = 1;
+// v2 pins provider identity. Older runtimes must reject a pinned definition
+// instead of silently sending its model through their current provider.
+pub(crate) const CURRENT_AUTOMATION_SCHEMA_VERSION: u32 = 2;
 const CURRENT_RUN_SCHEMA_VERSION: u32 = 1;
 const CURRENT_TRIGGER_SCHEMA_VERSION: u32 = 1;
 const DEFAULT_AUTOMATION_MODE: &str = "agent";
@@ -153,6 +155,11 @@ pub struct AutomationRecord {
     pub cwds: Vec<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Exact provider provenance for a pinned model; absent on legacy records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_provider_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -233,6 +240,10 @@ pub struct CreateAutomationRequest {
     #[serde(default)]
     pub model: Option<String>,
     #[serde(default)]
+    pub model_provider: Option<String>,
+    #[serde(default)]
+    pub model_provider_id: Option<String>,
+    #[serde(default)]
     pub mode: Option<String>,
     #[serde(default)]
     pub allow_shell: Option<bool>,
@@ -253,6 +264,8 @@ pub struct UpdateAutomationRequest {
     pub rrule: Option<String>,
     pub cwds: Option<Vec<PathBuf>>,
     pub model: Option<String>,
+    pub model_provider: Option<String>,
+    pub model_provider_id: Option<String>,
     pub mode: Option<String>,
     pub allow_shell: Option<bool>,
     pub trust_mode: Option<bool>,
@@ -409,7 +422,7 @@ impl AutomationSchedule {
         }
     }
 
-    fn next_after_with_anchor(
+    pub(crate) fn next_after_with_anchor(
         &self,
         after: DateTime<Utc>,
         anchor_reference: DateTime<Utc>,
@@ -978,6 +991,8 @@ impl AutomationManager {
             rrule: req.rrule.trim().to_ascii_uppercase(),
             cwds: req.cwds,
             model: normalize_optional_string(req.model),
+            model_provider: normalize_optional_string(req.model_provider),
+            model_provider_id: normalize_optional_string(req.model_provider_id),
             mode: normalize_optional_string(req.mode),
             allow_shell: req.allow_shell,
             trust_mode: req.trust_mode,
@@ -1011,6 +1026,18 @@ impl AutomationManager {
     }
 
     pub fn save_automation(&self, record: &AutomationRecord) -> Result<()> {
+        if record.model_provider.is_some() || record.model_provider_id.is_some() {
+            if record
+                .model
+                .as_deref()
+                .is_none_or(|model| model.trim().is_empty())
+            {
+                bail!("A pinned automation provider requires an explicit model");
+            }
+            let mut record = record.clone();
+            record.schema_version = record.schema_version.max(CURRENT_AUTOMATION_SCHEMA_VERSION);
+            return write_json_atomic(&self.automation_path(&record.id)?, &record);
+        }
         write_json_atomic(&self.automation_path(&record.id)?, record)
     }
 
@@ -1047,6 +1074,7 @@ impl AutomationManager {
         req: UpdateAutomationRequest,
     ) -> Result<AutomationRecord> {
         let mut existing = self.get_automation(id)?;
+        let schedule_changed = req.rrule.is_some() || req.status.is_some();
 
         if let Some(name) = req.name {
             if name.trim().is_empty() {
@@ -1064,17 +1092,18 @@ impl AutomationManager {
             let normalized = rrule.trim().to_ascii_uppercase();
             AutomationSchedule::parse_rrule(&normalized)?;
             existing.rrule = normalized;
-            if matches!(existing.status, AutomationStatus::Active) {
-                let schedule = AutomationSchedule::parse_rrule(&existing.rrule)?;
-                existing.next_run_at =
-                    Some(schedule.next_after_with_anchor(Utc::now(), existing.created_at)?);
-            }
         }
         if let Some(cwds) = req.cwds {
             existing.cwds = cwds;
         }
         if let Some(model) = req.model {
             existing.model = normalize_optional_string(Some(model));
+        }
+        if let Some(provider) = req.model_provider {
+            existing.model_provider = normalize_optional_string(Some(provider));
+        }
+        if let Some(provider_id) = req.model_provider_id {
+            existing.model_provider_id = normalize_optional_string(Some(provider_id));
         }
         if let Some(mode) = req.mode {
             existing.mode = normalize_optional_string(Some(mode));
@@ -1093,13 +1122,21 @@ impl AutomationManager {
         }
         if let Some(status) = req.status {
             existing.status = status;
-            if matches!(status, AutomationStatus::Paused) {
+        }
+        // Evaluate the final status once: editing a schedule and pausing it is
+        // one atomic update, and must not first schedule an active run.
+        if schedule_changed {
+            if matches!(existing.status, AutomationStatus::Paused) {
                 existing.next_run_at = None;
             } else {
                 let schedule = AutomationSchedule::parse_rrule(&existing.rrule)?;
                 existing.next_run_at =
                     Some(schedule.next_after_with_anchor(Utc::now(), existing.created_at)?);
             }
+        }
+
+        if existing.model_provider.is_some() || existing.model_provider_id.is_some() {
+            existing.schema_version = CURRENT_AUTOMATION_SCHEMA_VERSION;
         }
 
         existing.updated_at = Utc::now();
@@ -1561,6 +1598,8 @@ async fn enqueue_run_task(
     let new_task = NewTaskRequest {
         prompt: automation.prompt.clone(),
         model: automation.model.clone(),
+        model_provider: automation.model_provider.clone(),
+        model_provider_id: automation.model_provider_id.clone(),
         workspace,
         mode: Some(automation.task_mode()),
         allow_shell: Some(automation.task_allow_shell()),
@@ -1692,6 +1731,8 @@ async fn fire_due_triggers_shared(
         let new_task = NewTaskRequest {
             prompt: trigger.message.clone(),
             model: None,
+            model_provider: None,
+            model_provider_id: None,
             workspace,
             mode: Some("agent".to_string()),
             allow_shell: Some(false),
@@ -2155,6 +2196,8 @@ mod tests {
             rrule: "FREQ=HOURLY;INTERVAL=1".to_string(),
             cwds: Vec::new(),
             model: None,
+            model_provider: None,
+            model_provider_id: None,
             mode: mode.map(ToString::to_string),
             allow_shell,
             trust_mode,
@@ -2553,6 +2596,8 @@ mod tests {
                 rrule: "FREQ=HOURLY;INTERVAL=1".to_string(),
                 cwds: Vec::new(),
                 model: Some("  scheduled-model  ".to_string()),
+                model_provider: None,
+                model_provider_id: None,
                 mode: None,
                 allow_shell: None,
                 trust_mode: None,
@@ -2595,6 +2640,8 @@ mod tests {
                 rrule: "FREQ=HOURLY;INTERVAL=1".to_string(),
                 cwds: Vec::new(),
                 model: None,
+                model_provider: None,
+                model_provider_id: None,
                 mode: None,
                 allow_shell: None,
                 trust_mode: None,
@@ -2739,6 +2786,94 @@ mod tests {
         assert!(explicit_task.auto_approve);
 
         task_manager.shutdown();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn automation_provider_pin_survives_active_route_change_and_legacy_inherits() -> Result<()>
+    {
+        let _env = crate::test_support::lock_test_env();
+        let root = tempfile::tempdir()?;
+        let mut config: crate::config::Config = toml::from_str(
+            r#"
+provider = "first"
+[providers.first]
+kind = "openai-compatible"
+base_url = "http://127.0.0.1:9/first/v1"
+api_key = "fixture-first"
+model = "private-model"
+[providers.second]
+kind = "openai-compatible"
+base_url = "http://127.0.0.1:9/second/v1"
+api_key = "fixture-second"
+model = "private-model"
+"#,
+        )?;
+        let automations = AutomationManager::open(root.path().join("schedules"))?;
+        let mut record = automation_record_with_settings(None, None, None, None);
+        record.schema_version = 1;
+        record.model = Some("private-model".to_string());
+        record.model_provider = Some("custom".to_string());
+        record.model_provider_id = Some("first".to_string());
+        automations.save_automation(&record)?;
+        let record = automations.get_automation(&record.id)?;
+        assert_eq!(
+            record.schema_version, 2,
+            "a pin cannot be ignored by an older reader"
+        );
+
+        let runtime = crate::runtime_threads::RuntimeThreadManager::open(
+            config.clone(),
+            root.path().to_path_buf(),
+            crate::runtime_threads::RuntimeThreadManagerConfig::from_task_data_dir(
+                root.path().join("runtime"),
+            ),
+        )?;
+        config.provider = Some("second".to_string());
+        runtime.reload_config(config).await?;
+        let tasks = TaskManager::start_with_executor(
+            automation_task_config(root.path().join("tasks")),
+            std::sync::Arc::new(AutomationNoopExecutor),
+        )
+        .await?;
+        let mut run = queued_run_for(&record);
+        enqueue_run_task(&record, &mut run, &tasks).await;
+        let task = tasks
+            .get_task(run.task_id.as_deref().expect("task id"))
+            .await?;
+        let task: crate::task_manager::TaskRecord =
+            serde_json::from_slice(&serde_json::to_vec(&task)?)?;
+        assert_eq!(task.schema_version, 3);
+        let thread = runtime
+            .create_thread(ExecutionTask::from(&task).thread_request())
+            .await?;
+        assert_eq!(thread.model, "private-model");
+        assert_eq!(thread.model_provider.as_deref(), Some("custom"));
+        assert_eq!(thread.model_provider_id.as_deref(), Some("first"));
+
+        let mut legacy = serde_json::to_value(&record)?;
+        let object = legacy.as_object_mut().unwrap();
+        object.remove("model_provider");
+        object.remove("model_provider_id");
+        object.insert("schema_version".to_string(), serde_json::json!(1));
+        let legacy: AutomationRecord = serde_json::from_value(legacy)?;
+        assert_eq!(legacy.model_provider, None);
+        let mut run = queued_run_for(&legacy);
+        enqueue_run_task(&legacy, &mut run, &tasks).await;
+        let task = tasks
+            .get_task(run.task_id.as_deref().expect("legacy task id"))
+            .await?;
+        let mut value = serde_json::to_value(&task)?;
+        value.as_object_mut().unwrap().remove("model_provider");
+        value.as_object_mut().unwrap().remove("model_provider_id");
+        value["schema_version"] = serde_json::json!(2);
+        let task: crate::task_manager::TaskRecord = serde_json::from_value(value)?;
+        let thread = runtime
+            .create_thread(ExecutionTask::from(&task).thread_request())
+            .await?;
+        assert_eq!(thread.model_provider_id.as_deref(), Some("second"));
+        assert_eq!(thread.model, "private-model");
+        tasks.shutdown();
         Ok(())
     }
 
@@ -3078,6 +3213,8 @@ mod tests {
                 rrule: "FREQ=HOURLY;INTERVAL=1".to_string(),
                 cwds: Vec::new(),
                 model: None,
+                model_provider: None,
+                model_provider_id: None,
                 mode: None,
                 allow_shell: None,
                 trust_mode: None,

@@ -177,7 +177,7 @@ fn infoline_is_model_context_and_metrics_only() {
         work.starts_with("deepseek-v4 · ctx 61% · $0.42 · ttft 400ms · 38 tok/s · ↓ 1.2K  "),
         "{work:?}"
     );
-    assert!(work.trim_end().ends_with("Ctrl+/ help"), "{work:?}");
+    assert!(work.trim_end().ends_with("/help"), "{work:?}");
 }
 
 /// Declared shed order: `tok/s`, `ttft`, `↓ tokens`, the help hint, then
@@ -235,20 +235,23 @@ fn infoline_context_takes_the_error_token_at_eighty() {
     }
 }
 
-/// The hint must name a chord that actually opens help in this shell. `F1`
-/// is eaten by tmux and several emulators, and bare `?` is composer text.
+/// The hint must name a route that actually opens help in this shell. `F1`
+/// is eaten by tmux and several emulators, bare `?` is composer text, and how
+/// a terminal encodes `Ctrl+/` varies enough that printing it was a promise
+/// the product could not keep. `/help` reaches the same view through the
+/// composer in every terminal.
 #[test]
-fn infoline_help_hint_names_a_chord_that_opens_help() {
+fn infoline_help_hint_names_a_route_that_opens_help() {
     let hint = help_hint();
-    assert!(hint.ends_with(" help"), "{hint}");
+    assert_eq!(hint, "/help", "a slash command names itself: {hint}");
     assert!(!hint.contains("F1"), "terminals eat F1: {hint}");
     assert!(!hint.starts_with('?'), "bare ? is composer text: {hint}");
-    let chord = hint.split_whitespace().next().unwrap();
+    // The chord stays accepted for the terminals that do deliver it; it is
+    // only no longer what chrome promises.
     let key = crossterm::event::KeyEvent::new(
         crossterm::event::KeyCode::Char('/'),
         crossterm::event::KeyModifiers::CONTROL,
     );
-    assert_eq!(chord, "Ctrl+/");
     assert!(crate::tui::shell_key_routing::is_help_shortcut(&key));
     let row = render_row(&UI_THEME, 120, &work_segments());
     assert!(row.trim_end().ends_with(&hint), "pinned right: {row:?}");

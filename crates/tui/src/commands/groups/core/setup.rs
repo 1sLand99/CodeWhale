@@ -1,4 +1,4 @@
-//! `/setup` command. `/setup fleet` opens the saved-fleet readiness step.
+//! `/setup` command. `/setup fleet` opens the fleet readiness step.
 
 use crate::commands::traits::{CommandInfo, RegisterCommand};
 #[cfg(test)]
@@ -91,7 +91,7 @@ impl RegisterCommand for SetupCmd {
                 })
             }
             Some(other) => CommandResult::error(format!(
-                "Unknown /setup target '{other}'. Try `/setup fleet` to configure saved Fleets, or \
+                "Unknown /setup target '{other}'. Try `/setup fleet` to configure saved teams, or \
                  `/setup` to open the full setup wizard."
             )),
         }

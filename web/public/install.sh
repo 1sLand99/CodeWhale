@@ -7,22 +7,23 @@ release_base="${CODEWHALE_RELEASE_BASE_URL:-${DEEPSEEK_TUI_RELEASE_BASE_URL:-}}"
 
 usage() {
   cat <<'USAGE'
-Codewhale installer for macOS and Linux.
+Codewhale GitHub release installer for new macOS and Linux installations.
+For an existing direct install, run its codewhale update command.
 
 Usage:
   curl -fsSL https://codewhale.net/install.sh | sh
 
 Environment:
   CODEWHALE_INSTALL_DIR    Install directory. Default: $HOME/.local/bin
-  CODEWHALE_VERSION        Release tag to install, for example v0.9.0. Default: latest
+  CODEWHALE_VERSION        Release tag for a fresh directory. Default: latest
   CODEWHALE_RELEASE_BASE_URL
                            Custom release asset base URL ending in /download
   CODEWHALE_SKIP_GLIBC_CHECK=1
                            Skip Linux arm64 glibc compatibility preflight
 
 Examples:
-  curl -fsSL https://codewhale.net/install.sh | CODEWHALE_INSTALL_DIR=/usr/local/bin sh
-  curl -fsSL https://codewhale.net/install.sh | CODEWHALE_VERSION=v0.9.0 sh
+  curl -fsSL https://codewhale.net/install.sh | CODEWHALE_INSTALL_DIR="$HOME/.local/codewhale/bin" sh
+  curl -fsSL https://codewhale.net/install.sh | CODEWHALE_VERSION=vX.Y.Z sh
 USAGE
 }
 
@@ -185,10 +186,14 @@ detect_platform() {
   os="$(uname -s)"
   arch="$(uname -m)"
 
+  if [ -n "${TERMUX_VERSION:-}" ] || [ "$(uname -o 2>/dev/null || true)" = "Android" ]; then
+    fail "Android/Termux needs the Android arm64 preview archive, not a Linux binary. See https://github.com/Hmbown/CodeWhale/blob/main/docs/INSTALL.md"
+  fi
+
   case "$os" in
     Darwin) platform="macos" ;;
     Linux) platform="linux" ;;
-    *) fail "unsupported OS: $os. Use npm, Cargo, or the GitHub Releases page." ;;
+    *) fail "unsupported OS: $os. Use the matching asset at https://github.com/Hmbown/CodeWhale/releases/latest; npm and Cargo are secondary options." ;;
   esac
 
   case "$arch" in
@@ -235,66 +240,102 @@ if command -v xattr >/dev/null 2>&1; then
   xattr -d com.apple.quarantine "$tmpdir/codewhale" "$tmpdir/codew" 2>/dev/null || true
 fi
 
-sudo_cmd=""
-if [ -d "$install_dir" ]; then
-  if [ ! -w "$install_dir" ] ||
-    { [ -e "$install_dir/codewhale" ] && [ ! -w "$install_dir/codewhale" ]; } ||
-    { [ -e "$install_dir/codew" ] && [ ! -w "$install_dir/codew" ]; }; then
-    need_cmd sudo
-    sudo_cmd="sudo"
-  fi
-else
-  if ! mkdir -p "$install_dir" 2>/dev/null; then
-    need_cmd sudo
-    sudo mkdir -p "$install_dir"
-    sudo_cmd="sudo"
-  fi
-fi
-
-legacy_tui="$install_dir/codewhale-tui"
-refresh_legacy_tui=0
-# v0.9.4's website installer placed a regular codewhale-tui binary beside
-# codewhale. A clean v0.9.5 install exposes only codewhale + codew, but an
-# upgrade must not leave that installer-owned path running stale v0.9.4 code.
-# Refresh the existing compatibility command from the already verified
-# consolidated bytes. Do not create it for new installs or replace a symlink.
-if [ -f "$legacy_tui" ] && [ ! -L "$legacy_tui" ]; then
-  refresh_legacy_tui=1
-fi
-
-stage_cli="$install_dir/.codewhale.$$"
-stage_shim="$install_dir/.codew.$$"
-stage_legacy_tui="$install_dir/.codewhale-tui.$$"
-trap 'rm -rf "$tmpdir"; rm -f "$stage_cli" "$stage_shim" "$stage_legacy_tui" 2>/dev/null || true' EXIT INT TERM
-
-$sudo_cmd cp "$tmpdir/codewhale" "$stage_cli"
-$sudo_cmd cp "$tmpdir/codew" "$stage_shim"
-$sudo_cmd chmod 755 "$stage_cli" "$stage_shim"
-if [ "$refresh_legacy_tui" -eq 1 ]; then
-  $sudo_cmd cp "$tmpdir/codewhale" "$stage_legacy_tui"
-  $sudo_cmd chmod 755 "$stage_legacy_tui"
-fi
-$sudo_cmd mv "$stage_cli" "$install_dir/codewhale"
-$sudo_cmd mv "$stage_shim" "$install_dir/codew"
-if [ "$refresh_legacy_tui" -eq 1 ]; then
-  $sudo_cmd mv "$stage_legacy_tui" "$legacy_tui"
-  say "Refreshed legacy compatibility command: $legacy_tui"
-fi
-
-say "Installed:"
-"$install_dir/codewhale" --version || true
-"$install_dir/codew" --version || true
-if [ "$refresh_legacy_tui" -eq 1 ]; then
-  "$legacy_tui" --version || true
-fi
-
-case ":$PATH:" in
-  *":$install_dir:"*) ;;
-  *)
-    say ""
-    say "Add $install_dir to PATH to run codewhale from any terminal."
+# Resolve the real directory before applying managed-prefix checks. Never use
+# sudo or allow an install directory symlink to obscure which files will change.
+case "$install_dir" in
+  /*) ;;
+  *) fail "CODEWHALE_INSTALL_DIR must be an absolute path" ;;
+esac
+[ ! -L "$install_dir" ] || fail "install directory is a symlink: $install_dir; choose a fresh user directory"
+mkdir -p "$install_dir" || fail "cannot create $install_dir; choose a writable user directory (no sudo is used)"
+install_dir="$(cd -P "$install_dir" && pwd)"
+case "$install_dir/" in
+  /bin/*|/sbin/*|/usr/bin/*|/usr/sbin/*|/nix/store/*|/gnu/store/*|*/node_modules/*|*/Cellar/*|*/.linuxbrew/*|*/linuxbrew/*|*/.cargo/bin/*)
+    fail "refusing managed/system directory $install_dir; use a fresh user directory"
     ;;
 esac
+[ -w "$install_dir" ] || fail "$install_dir is not writable; choose a user directory (no sudo is used)"
+
+check_destination() {
+  destination="$1"
+  source="$2"
+  destination_exists=0
+  if [ -e "$destination" ] || [ -L "$destination" ]; then
+    if [ ! -L "$destination" ] && [ -f "$destination" ] && [ -x "$destination" ] && cmp -s "$source" "$destination"; then
+      destination_exists=1
+      return
+    fi
+    cat >&2 <<EOF
+codewhale install: refusing to replace existing $destination.
+It may be a newer build, another installation, or a symlink. No existing file was changed.
+For an existing direct Codewhale install, run its full path with 'update'.
+To migrate safely from a package manager or mixed installation, create a fresh directory:
+  mkdir -p "\$HOME/.local"
+  codewhale_install_dir="\$(mktemp -d "\$HOME/.local/codewhale-release.XXXXXX")"
+  curl -fsSL https://codewhale.net/install.sh | CODEWHALE_INSTALL_DIR="\$codewhale_install_dir" sh
+  "\$codewhale_install_dir/codewhale" --version
+  export PATH="\$codewhale_install_dir:\$PATH"
+  hash -r
+  command -v codewhale codew
+EOF
+    exit 1
+  fi
+}
+
+# Check every command before publishing any of them. Existing identical release
+# files are an idempotent install; anything different uses the canonical updater.
+check_destination "$install_dir/codewhale" "$tmpdir/codewhale"
+check_destination "$install_dir/codew" "$tmpdir/codew"
+legacy_tui="$install_dir/codewhale-tui"
+if [ -e "$legacy_tui" ] || [ -L "$legacy_tui" ]; then
+  check_destination "$legacy_tui" "$tmpdir/codewhale"
+fi
+
+stage=""
+stage_dir=""
+trap 'rm -rf "$tmpdir"; if [ -n "$stage" ]; then rm -f "$stage"; fi; if [ -n "$stage_dir" ]; then rmdir "$stage_dir"; fi' EXIT INT TERM
+install_binary() {
+  source="$1"
+  destination="$2"
+  # Recheck immediately before publication. Never replace a file another
+  # process created since preflight: linking the staged inode is no-clobber.
+  check_destination "$destination" "$source"
+  if [ "$destination_exists" -eq 1 ]; then
+    say "Already installed: $destination"
+    return
+  fi
+  stage_dir="$(mktemp -d "$install_dir/.codewhale-install.XXXXXX")"
+  stage="$stage_dir/$(basename "$destination")"
+  cp "$source" "$stage"
+  chmod 755 "$stage"
+  # Pass the intended parent as the directory operand. Passing destination
+  # itself would make ln treat a raced-in directory/symlink as a container.
+  ln "$stage" "$install_dir/" || fail "destination appeared during install: $destination; it was not replaced"
+  [ ! -L "$destination" ] && [ -f "$destination" ] && cmp -s "$stage" "$destination" || fail "installed path changed during publication: $destination"
+  rm -f "$stage"
+  rmdir "$stage_dir"
+  stage=""
+  stage_dir=""
+}
+
+install_binary "$tmpdir/codewhale" "$install_dir/codewhale"
+install_binary "$tmpdir/codew" "$install_dir/codew"
+
+say "Installed checksummed release commands:"
+say "  $install_dir/codewhale"
+say "  $install_dir/codew"
 
 say ""
-say "Run: codew (or codewhale)"
+say "Use this installation: \"$install_dir/codewhale\""
+say "Future updates: \"$install_dir/codewhale\" update"
+for command_name in codewhale codew; do
+  resolved="$(command -v "$command_name" 2>/dev/null || true)"
+  if [ "$resolved" != "$install_dir/$command_name" ]; then
+    say "PATH selects ${resolved:-no $command_name command}; this install is $install_dir/$command_name"
+  fi
+done
+say "To use this directory in the current shell, then verify the commands:"
+say "  export PATH=\"$install_dir:\$PATH\""
+say "  hash -r"
+say "  command -v codewhale codew"
+say "Keep the directory first in your shell profile after verifying it."

@@ -1401,6 +1401,28 @@ async fn omitted_runtime_models_use_the_active_provider_default() -> Result<()> 
             return Ok(());
         };
 
+        // A provider pin cannot borrow the active provider's default model.
+        // It must reach the same explicit-model guard as direct task creation.
+        for pin in [
+            json!({"model_provider": "openai"}),
+            json!({"model_provider_id": "other-route"}),
+        ] {
+            let mut request = pin;
+            request["prompt"] = json!("reject missing pinned model");
+            let rejected = crate::tls::reqwest_client()
+                .post(format!("http://{addr}/v1/tasks"))
+                .json(&request)
+                .send()
+                .await?;
+            assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+            assert!(
+                rejected
+                    .text()
+                    .await?
+                    .contains("pinned task provider requires an explicit model")
+            );
+        }
+
         let created: serde_json::Value = crate::tls::reqwest_client()
             .post(format!("http://{addr}/v1/tasks"))
             .json(&json!({ "prompt": format!("{label} omitted model") }))
@@ -7548,6 +7570,91 @@ async fn get_provider_models(
         .json()
         .await
         .expect("GET /v1/providers/{id}/models should return valid JSON")
+}
+
+#[tokio::test]
+async fn provider_catalog_and_switch_preserve_each_listed_route_identity() -> Result<()> {
+    let _lock = lock_test_env();
+    let root = tempfile::tempdir()?;
+    let _home = EnvVarGuard::set("CODEWHALE_HOME", root.path().join("home"));
+    let variants = [
+        ("modelstudio-token-plan", "token-chat-only"),
+        ("modelstudio-token-plan-anthropic", "token-anthropic-only"),
+        ("modelstudio-coding-plan", "coding-chat-only"),
+        ("modelstudio-coding-plan-anthropic", "coding-anthropic-only"),
+    ];
+    let config_file = root.path().join("config.toml");
+    let mut config = String::from(
+        "provider = \"deepseek\"\napi_key = \"runtime-api-test-key\"\nbase_url = \"http://127.0.0.1:1/v1\"\ntelemetry = false\n",
+    );
+    for (provider, model) in variants {
+        config.push_str(&format!(
+            "\n[providers.{provider}]\nbase_url = \"http://127.0.0.1:1/v1\"\nmodel = \"{model}\"\n"
+        ));
+    }
+    fs::write(&config_file, config)?;
+    let Some((addr, _runtime_threads, handle)) =
+        spawn_test_server_with_config_path(config_file.clone()).await?
+    else {
+        return Ok(());
+    };
+    let client = crate::tls::reqwest_client();
+    let providers = get_providers(&client, &addr).await;
+    let catalog = providers["providers"].as_array().expect("provider list");
+    assert!(!catalog.is_empty());
+    for provider in catalog {
+        if provider["has_model_catalog"] == true {
+            let id = provider["id"].as_str().expect("provider id");
+            let models = get_provider_models(&client, &addr, id).await;
+            assert_eq!(models["provider"], id, "catalog identity for {id}");
+        }
+    }
+
+    for (provider, model) in variants {
+        assert!(catalog.iter().any(|entry| entry["id"] == provider));
+        let models = get_provider_models(&client, &addr, provider).await;
+        let model_ids: Vec<_> = models["models"]
+            .as_array()
+            .expect("models array")
+            .iter()
+            .map(|entry| entry["id"].as_str().expect("model id"))
+            .collect();
+        assert_eq!(
+            model_ids,
+            vec![model],
+            "route-specific model for {provider}"
+        );
+
+        let switched: serde_json::Value = client
+            .post(format!("http://{addr}/v1/providers/{provider}/switch"))
+            .json(&json!({}))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        assert_eq!(switched["provider"], provider);
+        assert_eq!(switched["model"], model);
+        assert_eq!(switched["persisted"], true);
+        let saved: toml::Value = toml::from_str(&fs::read_to_string(&config_file)?)?;
+        assert_eq!(saved["provider"].as_str(), Some(provider));
+        for (identity, expected_model) in variants {
+            assert_eq!(
+                saved["providers"][identity]["model"].as_str(),
+                Some(expected_model)
+            );
+        }
+    }
+    for invalid in ["deepseek-cn", "antigravity", "not-a-provider"] {
+        let response = client
+            .get(format!("http://{addr}/v1/providers/{invalid}/models"))
+            .send()
+            .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+    handle.abort();
+    let _ = handle.await;
+    Ok(())
 }
 
 #[tokio::test]

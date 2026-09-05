@@ -1,4 +1,6 @@
 import Link from "next/link";
+import { ACCOUNT_ENTRY_COPY } from "@/lib/content/account-entry";
+import { pickText } from "@/lib/i18n/dictionaries";
 import {
   CANONICAL_MARK_SRC,
   publicAuthAppDestination,
@@ -12,11 +14,10 @@ export function PublicAccountEntry({
   locale: string;
   kind: Exclude<PublicAuthKind, "callback">;
 }) {
-  const isZh = locale === "zh";
   const creating = kind === "sign-up";
+  const copy = creating ? ACCOUNT_ENTRY_COPY.signUp : ACCOUNT_ENTRY_COPY.signIn;
   const appHref = publicAuthAppDestination(kind, locale);
-  const otherKind = creating ? "sign-in" : "sign-up";
-  const otherHref = `/${locale}/${otherKind === "sign-in" ? "signin" : "signup"}`;
+  const otherHref = `/${locale}/${creating ? "signin" : "signup"}`;
 
   return (
     <div className="portal-home">
@@ -31,39 +32,21 @@ export function PublicAccountEntry({
             width={64}
             height={64}
           />
-          <p className="legal-doc-kicker">
-            {creating
-              ? isZh ? "创建账户" : "Create account"
-              : isZh ? "登录" : "Sign in"}
-          </p>
-          <h1>
-            {creating
-              ? isZh ? "用一个账户同步工作。" : "Create a Codewhale account."
-              : isZh ? "登录 Codewhale 账户。" : "Sign in to Codewhale."}
-          </h1>
-          <p className="portal-lede">
-            {isZh
-              ? "账户用于同步、云代理和恢复。本机开源命令行不需要账户——安装后即可在本地使用。"
-              : "An account is for sync, cloud agents, and recovery. The open-source CLI still works locally without one — install it and continue on your machine."}
-          </p>
+          <p className="legal-doc-kicker">{pickText(copy.kicker, locale)}</p>
+          <h1>{pickText(copy.title, locale)}</h1>
+          <p className="portal-lede">{pickText(ACCOUNT_ENTRY_COPY.lede, locale)}</p>
           <div className="portal-actions">
-            <a className="portal-button portal-button-primary" href={appHref}>
-              {creating
-                ? isZh ? "创建账户 →" : "Create account →"
-                : isZh ? "登录 →" : "Sign in →"}
+            <a className="portal-button portal-button-primary" href={appHref} data-usage={creating ? "signup" : "login"}>
+              {pickText(copy.action, locale)}
             </a>
             <Link className="portal-button portal-button-secondary" href={`/${locale}/install`}>
-              {isZh ? "本机安装" : "Install locally"}
+              {pickText(ACCOUNT_ENTRY_COPY.installLocally, locale)}
             </Link>
           </div>
           <p className="portal-meta">
-            {creating
-              ? isZh ? "已有账户？" : "Already have an account?"
-              : isZh ? "还没有账户？" : "Need an account?"}{" "}
-            <Link href={otherHref}>
-              {creating
-                ? isZh ? "去登录" : "Sign in"
-                : isZh ? "创建账户" : "Create account"}
+            {pickText(copy.switchPrompt, locale)}{" "}
+            <Link href={otherHref} className="body-link">
+              {pickText(copy.switchLabel, locale)}
             </Link>
           </p>
         </div>

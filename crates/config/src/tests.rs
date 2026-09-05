@@ -2194,6 +2194,27 @@ fn list_values_fully_redacts_short_api_key() {
 }
 
 #[test]
+fn redacted_toml_value_keeps_shape_but_not_secret_bytes() {
+    let mut config = ConfigToml {
+        api_key: Some("sk-deepseek-secret-value".to_string()),
+        model: Some("deepseek-v4-pro".to_string()),
+        ..ConfigToml::default()
+    };
+    config.providers.openrouter.api_key = Some("openrouter-secret-value".to_string());
+
+    let value = config.redacted_toml_value();
+    let table = value.as_table().expect("dump renders a table");
+    let api_key = table
+        .get("api_key")
+        .and_then(toml::Value::as_str)
+        .expect("api_key keeps its slot");
+    assert!(!api_key.contains("secret"), "{api_key}");
+    let rendered = toml::to_string_pretty(&value).expect("dump serializes");
+    assert!(!rendered.contains("secret-value"), "{rendered}");
+    assert!(rendered.contains("deepseek-v4-pro"), "{rendered}");
+}
+
+#[test]
 fn get_display_value_redacts_sensitive_keys() {
     let mut config = ConfigToml {
         api_key: Some("sk-deepseek-secret".to_string()),
@@ -5227,8 +5248,15 @@ fn provider_metadata_registry_covers_every_provider_kind_once() {
     let providers = provider::all_providers();
     // Full registry keeps legacy dialect/plan kinds for provider_for_kind.
     assert_eq!(providers.len(), 48);
-    // Catalog surface is one identity per vendor (no dual-wire / plan rows).
-    assert_eq!(ProviderKind::ALL.len(), 43);
+    // Catalog surface is one identity per vendor (no dual-wire / plan rows),
+    // and never a retired tombstone: Antigravity stays in the full registry
+    // so old config parses and can be cleared, but it left `ALL` when it
+    // stopped being selectable (PRD §4.4 PROD-002).
+    assert_eq!(ProviderKind::ALL.len(), 42);
+    assert!(
+        !ProviderKind::ALL.contains(&ProviderKind::Antigravity),
+        "a tombstone must never be offered as a selectable provider"
+    );
     assert!(ProviderKind::ALL.len() < providers.len());
 
     let mut ids = std::collections::BTreeSet::new();
@@ -8939,8 +8967,7 @@ fn an_unconfigured_endpoint_resolves_to_the_shipped_default() {
         "an unconfigured endpoint must resolve to the shipped default"
     );
 
-    // …and the product default is anonymous usage counting on unless one of
-    // the documented kill switches says otherwise.
+    // The shipped usage preference is on without an acceptance prerequisite.
     assert!(resolved.telemetry);
     assert!(!resolved.telemetry_explicit_off);
 }
@@ -9211,4 +9238,71 @@ fn telemetry_notice_fields_round_trip_and_stay_absent_when_unanswered() {
         serde_json::from_str(r#"{"schema_version":1}"#).expect("legacy record loads");
     assert_eq!(legacy.telemetry_notice_decided_for, None);
     assert!(!legacy.telemetry_opt_in);
+}
+
+#[test]
+fn telemetry_disclosure_records_presentation_without_acceptance_or_erasing_old_declines() {
+    for version in [None, Some("1"), Some("4")] {
+        for enabled in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("setup_state.json");
+            let mut state = SetupState {
+                constitution_preview_version: 12,
+                ..Default::default()
+            };
+            if let Some(version) = version {
+                state.record_telemetry_notice(version, enabled);
+            }
+            state.save_to(&path).unwrap();
+            SetupState::update_telemetry_at(&path, |latest| {
+                latest.record_telemetry_notice_shown(TELEMETRY_NOTICE_VERSION);
+            })
+            .unwrap();
+            let shown = SetupState::load_from(&path).unwrap();
+            assert!(!shown.needs_telemetry_notice(TELEMETRY_NOTICE_VERSION));
+            assert!(!shown.telemetry_accepted(TELEMETRY_NOTICE_VERSION));
+            assert!(!shown.telemetry_declined(TELEMETRY_NOTICE_VERSION));
+            assert_eq!(shown.telemetry_opted_out(), version.is_some() && !enabled);
+            assert_eq!(
+                shown.telemetry_notice_decided_for,
+                state.telemetry_notice_decided_for
+            );
+            assert_eq!(shown.telemetry_opt_in, state.telemetry_opt_in);
+            assert_eq!(shown.constitution_preview_version, 12);
+        }
+    }
+}
+
+#[test]
+fn telemetry_metadata_update_refuses_corrupt_or_busy_state_and_reloads_the_saved_decline() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("setup_state.json");
+    std::fs::write(&path, "not-json").unwrap();
+    assert!(SetupState::update_telemetry_at(&path, |_| {}).is_err());
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "not-json");
+    SetupState::default().save_to(&path).unwrap();
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path.with_extension("telemetry.lock"))
+        .unwrap();
+    let mut lock = fd_lock::RwLock::new(file);
+    let guard = lock.write().unwrap();
+    assert!(
+        SetupState::update_telemetry_at(&path, |state| {
+            state.record_telemetry_notice_shown(TELEMETRY_NOTICE_VERSION);
+        })
+        .is_err(),
+        "display bookkeeping must never block startup"
+    );
+    drop(guard);
+    SetupState::update_telemetry_at(&path, |state| {
+        state.record_telemetry_notice("4", false);
+    })
+    .unwrap();
+    SetupState::update_telemetry_at(&path, |state| {
+        state.record_telemetry_notice_shown(TELEMETRY_NOTICE_VERSION);
+    })
+    .unwrap();
+    assert!(SetupState::load_from(&path).unwrap().telemetry_opted_out());
 }

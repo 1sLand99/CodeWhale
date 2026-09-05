@@ -34,8 +34,8 @@ export const DOC_TASKS: DocTask[] = [
     id: "install",
     label: { en: "Install on macOS, Linux, or Windows", zh: "在 macOS、Linux 或 Windows 上安装" },
     description: {
-      en: "One npm command, or Cargo, Homebrew, Docker, prebuilt archives, and China mirrors.",
-      zh: "一条 npm 命令，或 Cargo、Homebrew、Docker、预编译包与中国镜像。",
+      en: "Start with GitHub release binaries; npm, Cargo, Homebrew, Docker, and China mirrors are alternatives.",
+      zh: "优先使用 GitHub Releases 二进制；npm、Cargo、Homebrew、Docker 与中国镜像为其他安装方式。",
     },
     href: "/install",
     topicId: "install",

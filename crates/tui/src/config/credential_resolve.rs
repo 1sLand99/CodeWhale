@@ -20,9 +20,9 @@
 //! 2. An explicit `--api-key` on the active, non-OAuth provider.
 //! 3. `[providers.<name>] api_key_env` — a credential the route *names*.
 //! 4. An ambient provider environment variable (official endpoints only).
-//! 5. Provider-owned login state: an explicitly consented external CLI
-//!    credential file (Codex, DeepSeek Harness, Antigravity) or CodeWhale's own
-//!    xAI OAuth storage.
+//! 5. Provider-owned login state: an explicitly consented supported external
+//!    CLI credential file (Codex or DeepSeek Harness) or CodeWhale's own xAI
+//!    OAuth storage.
 //! 6. A keyless self-hosted / loopback route.
 //! 7. `[providers.<name>] api_key` in the config file.
 //! 8. CodeWhale's durable secret store.
@@ -137,7 +137,7 @@ pub(crate) fn resolve_credential_source_with(
         return CredentialResolution::missing(probed);
     }
     if provider == ApiProvider::OpenaiCodex && !config.provider_uses_custom_endpoint(provider) {
-        if crate::chatgpt_oauth::credentials_present(config) {
+        if crate::oauth::credentials_present(crate::oauth::OAuthProvider::Chatgpt, config) {
             return CredentialResolution::found(CredentialSource::OAuth {
                 flow: "ChatGPT".to_string(),
             });
@@ -165,7 +165,7 @@ pub(crate) fn resolve_credential_source_with(
     }
     if provider == ApiProvider::Xai
         && !config.provider_uses_custom_endpoint(provider)
-        && crate::xai_oauth::credentials_present(config)
+        && crate::oauth::credentials_present(crate::oauth::OAuthProvider::Xai, config)
     {
         // xAI supports both API keys and OAuth. A Grok-compatible token file is
         // sufficient, but its absence must fall through to the ordinary API-key
@@ -173,24 +173,6 @@ pub(crate) fn resolve_credential_source_with(
         return CredentialResolution::found(CredentialSource::OAuth {
             flow: "xAI".to_string(),
         });
-    }
-    if provider == ApiProvider::Antigravity && !config.provider_uses_custom_endpoint(provider) {
-        match resolve_external_grant(
-            config,
-            provider,
-            codewhale_config::ExternalCredentialSource::AgyCli,
-            "Antigravity CLI",
-            "codewhale auth external-consent --provider antigravity --mode read-only",
-            |grant| {
-                crate::agy_credentials::antigravity_oauth_token_from_grant(grant)
-                    .ok()
-                    .flatten()
-                    .is_some()
-            },
-        ) {
-            Ok(source) => return CredentialResolution::found(source),
-            Err(probe) => probed.push(probe),
-        }
     }
     if matches!(
         provider,
@@ -616,74 +598,6 @@ mod tests {
             crate::external_credentials::complete_side_effect_trap_counts(),
             (2, 0, 0, 0, 0),
             "has_api_key_for re-resolves through the same consented read; still no write/refresh/network"
-        );
-    }
-
-    /// #5772: a persisted Antigravity consent record authorizes reading the
-    /// exact pinned file, and nothing more. A file that holds no usable OAuth
-    /// token resolves as missing, the consented read leaves the file
-    /// byte-identical, and no write, refresh, or network side effect occurs.
-    #[test]
-    fn antigravity_consent_read_validates_without_resolving_a_route() {
-        let _lock = lock_test_env();
-        let temp = tempfile::tempdir().expect("external fixture");
-        let agy_path = temp
-            .path()
-            .canonicalize()
-            .expect("canonical temp root")
-            .join("state.vscdb");
-        std::fs::write(&agy_path, "invalid-agy-credential-bytes").expect("fixture");
-        let home = temp.path().join("home");
-        let _home = EnvVarGuard::set("HOME", &home);
-        let _codewhale_home = EnvVarGuard::set("CODEWHALE_HOME", home.join("codewhale"));
-        let _agy_key = EnvVarGuard::remove("ANTIGRAVITY_API_KEY");
-        let _cli_key = EnvVarGuard::remove("CODEWHALE_CLI_API_KEY");
-        let config = Config {
-            provider: Some("antigravity".to_string()),
-            providers: Some(ProvidersConfig {
-                antigravity: ProviderConfig {
-                    auth_mode: Some("oauth".to_string()),
-                    external_credentials: Some(
-                        codewhale_config::ExternalCredentialConsentToml::read_only(
-                            codewhale_config::ProviderKind::Antigravity,
-                            codewhale_config::ExternalCredentialSource::AgyCli,
-                            agy_path.clone(),
-                        ),
-                    ),
-                    ..ProviderConfig::default()
-                },
-                ..ProvidersConfig::default()
-            }),
-            ..Config::default()
-        };
-
-        crate::external_credentials::reset_side_effect_trap();
-        let resolution = resolve_credential_source(&config, ApiProvider::Antigravity);
-        assert!(
-            !resolution.is_present(),
-            "an unusable consented AGY file must resolve as missing: {:?}",
-            resolution.source
-        );
-        assert!(!has_api_key_for(&config, ApiProvider::Antigravity));
-        assert!(
-            resolution
-                .checked_places()
-                .contains("consented, but no usable credential in that file"),
-            "the probe names the consented-read outcome: {}",
-            resolution.checked_places()
-        );
-        // The AGY adapter secure-opens the file directly (SQLite header
-        // probe) rather than through `read_to_string`, so the trap observes
-        // only that no bounded read, write, refresh, or network call ran;
-        // the byte-identical fixture below is the read-only evidence.
-        assert_eq!(
-            crate::external_credentials::complete_side_effect_trap_counts(),
-            (0, 0, 0, 0, 0),
-            "read-only consent never writes, refreshes, or reaches the network"
-        );
-        assert_eq!(
-            std::fs::read_to_string(&agy_path).expect("AGY fixture unchanged"),
-            "invalid-agy-credential-bytes"
         );
     }
 }

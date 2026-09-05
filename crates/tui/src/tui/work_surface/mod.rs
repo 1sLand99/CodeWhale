@@ -778,6 +778,21 @@ mod tests {
         );
     }
 
+    /// A chosen panel remains usable when only one content row fits.
+    #[test]
+    fn compact_explicit_view_keeps_content_ahead_of_goal_chrome() {
+        let mut app = app();
+        app.goal.objective = Some("ship the release".to_string());
+        super::select_dock_panel(&mut app, super::RailPanel::Agents);
+        let text = render_text(&mut app, 40, 3);
+        assert!(text.contains("no agents have run this session"), "{text:?}");
+        assert!(app.work_surface.focused);
+        assert!(
+            super::handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)).is_some()
+        );
+        assert!(!app.work_surface.explicit_view);
+    }
+
     /// Top titles only when a live goal is set — never the panel name.
     #[test]
     fn top_title_is_goal_only_never_panel_chrome() {
@@ -2609,7 +2624,7 @@ mod tests {
     }
 
     #[test]
-    fn clicking_tasks_tab_switches_active_panel() {
+    fn clicking_agents_tab_switches_active_panel() {
         let mut app = app();
         add_todos(&mut app, 1);
         app.subagent_cache.push(cached_worker(
@@ -2620,17 +2635,17 @@ mod tests {
             SubAgentStatus::Running,
         ));
         let _ = render_text(&mut app, 80, 8);
-        // A running worker opened the agents view on its own.
-        assert_eq!(app.work_surface.panel, super::RailPanel::Agents);
+        // The to-do list opened first; the running worker is one tab over.
+        assert_eq!(app.work_surface.panel, super::RailPanel::Tasks);
         let tab_area = app
             .work_surface
             .dock_tabs
             .iter()
             .find(|hitbox| {
-                hitbox.target == super::model::DockTabTarget::Panel(super::RailPanel::Tasks)
+                hitbox.target == super::model::DockTabTarget::Panel(super::RailPanel::Agents)
             })
             .map(|hitbox| hitbox.area)
-            .expect("Tasks tab");
+            .expect("Agents tab");
 
         let down = super::handle_mouse(
             &mut app,
@@ -2652,7 +2667,7 @@ mod tests {
             },
         );
         assert!(up.consumed);
-        assert_eq!(app.work_surface.panel, super::RailPanel::Tasks);
+        assert_eq!(app.work_surface.panel, super::RailPanel::Agents);
         assert!(app.work_surface.explicit_view);
         assert!(!app.work_surface.dismissed);
     }
@@ -2743,13 +2758,13 @@ mod tests {
             .next()
             .expect("dock tab row");
 
-        assert!(first_row.contains("tasks"), "{first_row:?}");
-        assert!(first_row.contains("agents"), "{first_row:?}");
-        assert!(!first_row.contains("tasks 3"), "{first_row:?}");
-        assert!(!first_row.contains("agents 1"), "{first_row:?}");
-        assert!(first_row.contains("context"), "{first_row:?}");
+        assert!(first_row.contains("TODO"), "{first_row:?}");
+        assert!(first_row.contains("AGENTS"), "{first_row:?}");
+        assert!(!first_row.contains("TODO 3"), "{first_row:?}");
+        assert!(!first_row.contains("AGENTS 1"), "{first_row:?}");
+        assert!(first_row.contains("CONTEXT"), "{first_row:?}");
         // Shed from the right: price goes before any work view.
-        assert!(!first_row.contains("price"), "{first_row:?}");
+        assert!(!first_row.contains("PRICE"), "{first_row:?}");
     }
 
     #[test]
@@ -3236,23 +3251,23 @@ mod tests {
                 super::model::TOP_HEIGHT_MIN,
                 "{width}x{terminal_height} must seat the readable compact surface"
             );
-            // A running worker opens the agents view: goal title + the
-            // named agent. The to-do receipt lives one view over.
+            // The to-do list opens first: goal title + the progress
+            // receipt. The named agent lives one view over.
             let rendered = render_text(&mut app, width, height);
             assert!(
                 rendered.contains("ship the release"),
                 "{width}x{terminal_height}: {rendered}"
             );
             assert!(
-                rendered.contains("Harbor"),
+                rendered.contains("3 left"),
                 "{width}x{terminal_height}: {rendered}"
             );
-            super::interaction::select_dock_panel(&mut app, super::RailPanel::Tasks);
+            super::interaction::select_dock_panel(&mut app, super::RailPanel::Agents);
             let height = super::height(&mut app, width, terminal_height, budget);
-            let tasks = render_text(&mut app, width, height);
+            let agents = render_text(&mut app, width, height);
             assert!(
-                tasks.contains("3 left"),
-                "{width}x{terminal_height}: {tasks}"
+                agents.contains("Harbor"),
+                "{width}x{terminal_height}: {agents}"
             );
             app.work_surface.explicit_view = false;
             let height = super::height(&mut app, width, terminal_height, budget);
@@ -3381,9 +3396,10 @@ mod tests {
     }
 
     /// Opening the sub-agent register must not hide the to-do list — both
-    /// durable surfaces stay visible together (owner report, 0.9.6).
+    /// durable surfaces stay visible together (owner report, 0.9.6). The
+    /// dock opens on TODO; AGENTS is the next tab (founder, 2026-09-03).
     #[test]
-    fn agents_and_tasks_are_separate_views_and_the_dock_opens_on_agents() {
+    fn agents_and_tasks_are_separate_views_and_the_dock_opens_on_todo() {
         let mut app = app();
         app.current_session_id = Some(SESSION.to_string());
         app.subagent_cache.push(cached_worker(
@@ -3395,9 +3411,20 @@ mod tests {
         ));
         add_todos(&mut app, 2);
 
-        // The auto rule: agents while a worker runs.
+        // The auto rule: the to-do list first, and only to-dos in it.
         super::model::resolve_view(&mut app);
+        assert_eq!(app.work_surface.panel, super::RailPanel::Tasks);
+        let ids: Vec<String> = super::model::visible_rows_for_panel(&mut app)
+            .iter()
+            .map(|row| row.id.0.clone())
+            .collect();
+        assert!(ids.iter().any(|id| id.starts_with("graph:")), "{ids:?}");
+        assert!(!ids.iter().any(|id| id.starts_with("worker:")), "{ids:?}");
+
+        // One key forward: the agents view, the roster only.
+        super::cycle_view(&mut app, true);
         assert_eq!(app.work_surface.panel, super::RailPanel::Agents);
+        assert!(app.work_surface.explicit_view);
         let ids: Vec<String> = super::model::visible_rows_for_panel(&mut app)
             .iter()
             .map(|row| row.id.0.clone())
@@ -3408,20 +3435,9 @@ mod tests {
             "the agents view is the roster, not the to-do list: {ids:?}"
         );
 
-        // One key forward: the tasks view, and only to-dos in it.
-        super::cycle_view(&mut app, true);
-        assert_eq!(app.work_surface.panel, super::RailPanel::Tasks);
-        assert!(app.work_surface.explicit_view);
-        let ids: Vec<String> = super::model::visible_rows_for_panel(&mut app)
-            .iter()
-            .map(|row| row.id.0.clone())
-            .collect();
-        assert!(ids.iter().any(|id| id.starts_with("graph:")), "{ids:?}");
-        assert!(!ids.iter().any(|id| id.starts_with("worker:")), "{ids:?}");
-
         // Back, and Esc hands the choice back to the auto rule.
         super::cycle_view(&mut app, false);
-        assert_eq!(app.work_surface.panel, super::RailPanel::Agents);
+        assert_eq!(app.work_surface.panel, super::RailPanel::Tasks);
         let _ = render_text(&mut app, 80, 8);
         assert!(app.work_surface.focused);
         let handled = super::handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
@@ -3446,7 +3462,7 @@ mod tests {
             );
         }
         let mut expected = super::RailPanel::ORDER.to_vec();
-        expected.rotate_left(2); // the fixture starts on tasks
+        expected.rotate_left(1); // the fixture starts on tasks, the first tab
         assert_eq!(seen, expected);
         // An empty explicit view names itself instead of going blank.
         super::interaction::select_dock_panel(&mut app, super::RailPanel::Files);

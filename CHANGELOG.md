@@ -7,15 +7,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.12] - 2026-09-04
+
+Codewhale v0.9.12 puts computer use in the binary, opens two new routes —
+Alibaba Model Studio through the data-driven provider table and Concentrate
+as an opt-in BYOK Responses gateway — and adds cloud dispatch plus a
+config-gated per-session control socket. The shell is the other half of the
+release: a new launch card, the work surface docked under the composer, one
+focus owner for Tab, tool cells that carry their own state, and `fleet` as
+the public word for the live collective. The complete item-level change
+record is retained below the categorized release highlights.
+
 ### Added
 
+- Computer use ships with the binary. The `computer-use` plugin — 38 tools
+  across macOS, Windows, Linux and HarmonyOS, accessibility-first observation
+  with pixel fallback, screenshots, zoom, screen recording, and registered
+  remote computers over ssh and hdc — is embedded in Codewhale and written to
+  `$CODEWHALE_HOME/builtin-plugins` on first run, so every install channel
+  carries it. It lists as `builtin · not-reviewed` and stays disabled until
+  you review and enable it: shipping it is not consenting to it. The
+  stdlib-Python computer-use server it replaces is gone.
 - Alibaba Model Studio joins the data-driven provider table as an
   `openai-compatible` descriptor: international compatible-mode endpoint,
   `DASHSCOPE_API_KEY` credential, live `/v1/models` discovery. Qwen 3.8
   Flash and Qwen 3.8 Max arrive through the catalog authority — never a
   hard-coded id.
+- Concentrate: first-class opt-in BYOK Responses gateway with live models
+  discovery and typed SSE streaming (#5725).
+- Cloud dispatch: remote runner offloads coding agent tasks to isolated
+  cloud sandboxes with machine token auth and structured job tracking
+  (#5701, #5712).
+- Per-session control socket: config-gated `[control_socket]` table binds
+  `<sessions-dir>/<session-id>/control.sock` per running session, exposing
+  message, interrupt, relaunch, and status JSON-RPC verbs (#5533, #5831).
 
 ### Changed
+
+- **Anonymous usage counting is on by default.** The 0.9.11 release asked
+  first; 0.9.12 counts the same aggregate version/platform, session, feature
+  and error totals unless you turn it off, and says so once at first launch
+  (policy notice version 5, schema 3, `notice_version` replacing
+  `consent_version`). Every recorded opt-out stays off: a durable
+  `telemetry = false`, a decline recorded under the old opt-in notice,
+  unreadable privacy state, and the `CODEWHALE_TELEMETRY=0` / `--telemetry
+  false` kill switches. Showing the disclosure records only that it was
+  shown, never an acceptance. `codewhale config set telemetry false` turns
+  it off and wipes queued counts; `codewhale config set telemetry true`
+  deliberately re-enables it. Nothing new is collected: no conversations,
+  code, prompts, files, names, model content, credentials, or IP.
 
 - The launch screen is our own card take: a thin top line
   `⑂ branch  path`; a centred bordered card with the whale mark,
@@ -24,7 +64,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   session / Changelog / Quit with their real chords right-aligned. Enter
   runs the highlighted entry, Up/Down move it, and typing goes straight to
   the composer. The card dissolves on the first keystroke or command
-  (≤240 ms, instant under reduced motion).
+  (≤240 ms, instant under reduced motion) (#5826, #5801, #5815, #5286).
+- The work surface sits under the composer by default, keeping history
+  readable and leaving the stage unencumbered (#5809).
+- Skills command shapes: FEAT-022 command shapes and retained-host
+  validation (#5825, #5829).
 - After the card dissolves, the working screen shows `⑂ branch  path` with
   `⋮ MCP n/m` on the right, the transcript starts with the
   `◆ session_start` receipt (naming the configured session-start hooks),
@@ -101,12 +145,83 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - TUI/CLI: Pod is the public roster surface. User-facing Fleet wording
   moves to Pod; durable receipt keys stay compatible (#5776).
 
+### Contributors
+
+- **hexin ([@h3c-hexin](https://github.com/h3c-hexin))** — provider-native web
+  search across four routes (#5682, #5683, #5685, #5687), authoritative
+  edit-last-turn boundaries (#5621), Kimi Code k3-256k (#5622),
+  post-compaction input-token reporting (#5623), and preserving the scheduled
+  model selection in automations (#5650).
+- **秋月凉梦 ([@qiuYliangM](https://github.com/qiuYliangM))** — co-authored the
+  edit-last-turn boundary fix (#5621), Kimi Code k3-256k support (#5622), and
+  post-compaction input-token reporting (#5623).
+- **Isabel Wu ([@wuisabel-gif](https://github.com/wuisabel-gif))** — live
+  session token totals (#5624), persisted context-pressure warnings (#5629),
+  discoverable Fleet roster editing (#5604), the capability-gated cursor
+  accent (#5599), and `/copy` for the latest completed response (#5692).
+- **Paulo Aboim Pinto ([@aboimpinto](https://github.com/aboimpinto))** —
+  Windows verbatim-path operands preserved through POSIX word splitting
+  (#5610), the plugins group moved onto the command shapes (#5657), FEAT-022
+  skills command shapes with retained-host validation (#5825), and FEAT-020
+  plugin command shapes re-landed on main (#5865).
+- **Alex Musichen ([@musichen](https://github.com/musichen))** — a stable
+  DeepSeek heading in the configured-view model picker, keeping every official
+  catalog model for the active provider visible (#5689).
+- **[@gaord](https://github.com/gaord)** — the `GET /v1/fleet/profiles`
+  runtime API endpoint, reusing the FleetManager validation path (#5688).
+- **Sh1Zuku ([@SparkofSpike](https://github.com/SparkofSpike))** — corrected
+  English documentation inaccuracies and the first zh_hans translations for
+  the Tier-2 docs (#5613).
+- **[@M-Maciej](https://github.com/M-Maciej)** — goal continuation cadence
+  (#5591) and the per-session control socket (#5533, #5831).
+- **Serephus ([@serephus](https://github.com/serephus))** — nixpkgs update
+  (#5669).
+- **[@whp233](https://github.com/whp233)** — `wire = responses|anthropic` for
+  openai-compatible custom routes and opencode-zen muse-spark (#5716, landed
+  as #5719).
+- **Gabriel Degret ([@Gabriel-Degret](https://github.com/Gabriel-Degret))** —
+  found the reasoning-only retry gap and built the first fix; landed as the
+  `[reasoning_only]` retry ceiling with a request-scoped nudge (#5867).
+- **[@huangxianzhan](https://github.com/huangxianzhan)** — the
+  `x-opencode-session` header for OpenCode Go and Zen gateways (#5868).
+- **[@zhuowp](https://github.com/zhuowp)** — task origin preserved in job
+  snapshots (#5869).
+- **AdityaG ([@AdityaVG13](https://github.com/AdityaVG13))** — a ten-commit
+  performance pass: a zero-copy LaTeX fast path for streaming render,
+  single-pass token accounting on the per-turn pressure paths, memoized
+  provider resolution in the catalog cutline, parsing the bundled and
+  on-disk models.dev catalogs once per process (interactive boot -70%),
+  adaptive poll cadence for foreground shell completion, and worker caps
+  across the read-only diagnostic family.
+- **Nightt ([@nightt5879](https://github.com/nightt5879))** — isolated remote
+  recovery lease generations (#5790).
+- **[@yiheng-kkk](https://github.com/yiheng-kkk)** — replaced stale todo
+  transcript snapshots so a rewritten todo list renders its current tasks
+  (#5871, #5873).
+- **[@Lfanxing](https://github.com/Lfanxing)** — Moonshot routes now degrade
+  incompatible tool definitions per request instead of failing the turn.
+- **WissssleyL ([@Lstarsky0](https://github.com/Lstarsky0))** — moved
+  `docs/subagents` and `docs/mcp` onto the dictionary spine (#5337), with the
+  metaTitle probe that keeps them there.
+
+Reports and reproductions that shaped this release:
+
+- **[@slowly247](https://github.com/slowly247)** — reported the Ollama input
+  budget collapsing to 1,024 tokens on 32K local models (#5820).
+- **[@ronohara](https://github.com/ronohara)** — reported the engine stopping
+  after recoverable network errors, with the reproduction that pinned the
+  discarded approval (#5769).
+- **[@Lujc0523](https://github.com/Lujc0523)** — asked for ACP session
+  configuration of mode and model (#5863).
+- **[@senka9h](https://github.com/senka9h)** — reported that `serve --acp`
+  lacked `session/list` and `session/load` (#5864).
+
 ### Added
 
 - Native ChatGPT sign-in for the `openai-codex` route: `codewhale auth
   chatgpt` opens a browser PKCE flow and stores refreshable tokens in
   Codewhale-owned credentials — no Codex CLI install required.
-  `/auth chatgpt-revoke` clears them off the event loop (#5784).
+  `/auth chatgpt-revoke` clears them off the event loop (#5784, #5778).
 - MCP servers and plugins can be connected self-serve from the session: a
   unified auth flow with rotation-safe token handling, a spoken authorization
   URL, and catalog refresh when stored credentials stop working (#5747).
@@ -136,7 +251,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Compaction publishes a structured survival contract for session-tree
   journal entry types (`crates/tui/src/compaction/SURVIVAL_CONTRACT.md`) and
   fails closed when the last user round, tool results, `/anchor` text, or
-  checkpoint receipt would vanish (#4394).
+  checkpoint receipt would vanish (#4394, #5782).
 - Internal: `codewhale-config` gains `RouteAuthoritySnapshot`, one immutable
   authority that owns a compiled provider catalog together with the route
   resolver projected from it, so a picker, a readiness view, and an execution
@@ -7801,7 +7916,8 @@ overflow report and `/theme` picker edge-wrapping patch in #1814.
 
 Older releases (v0.8.39 and earlier) are archived in [docs/CHANGELOG_ARCHIVE.md](docs/CHANGELOG_ARCHIVE.md).
 
-[Unreleased]: https://github.com/Hmbown/CodeWhale/compare/v0.9.11...HEAD
+[Unreleased]: https://github.com/Hmbown/CodeWhale/compare/v0.9.12...HEAD
+[0.9.12]: https://github.com/Hmbown/CodeWhale/compare/v0.9.11...v0.9.12
 [0.9.11]: https://github.com/Hmbown/CodeWhale/compare/v0.9.10...v0.9.11
 [0.9.10]: https://github.com/Hmbown/CodeWhale/compare/v0.9.9...v0.9.10
 [0.9.9]: https://github.com/Hmbown/CodeWhale/compare/v0.9.8...v0.9.9

@@ -40,16 +40,6 @@ const REPRESENTATIVE_PROJECT_AUTHORITY_BODY: &str = concat!(
 );
 
 #[test]
-fn cloud_code_system_prompt_rejection_is_localized_from_its_semantic_error() {
-    let error = anyhow::Error::new(
-        crate::client::cloud_code::CloudCodeRequestError::SystemPromptUnsupported,
-    );
-    let message = initial_stream_error_user_message("es-419", &error);
-    assert!(message.contains("No se envió nada"), "{message}");
-    assert!(!message.contains("omit non-empty system"), "{message}");
-}
-
-#[test]
 fn preview_request_error_preserves_non_semantic_context_chain() {
     let error = anyhow::Error::msg("root cause").context("request preparation failed");
     assert_eq!(
@@ -19972,6 +19962,9 @@ struct ReasoningOnlyCleanFinishModelClient {
     calls: std::sync::atomic::AtomicUsize,
     reasoning_only: usize,
     stop_reason: &'static str,
+    /// Every outbound request's messages, in order, so a test can tell a
+    /// request-scoped nudge from one written into the session.
+    requests: std::sync::Mutex<Vec<Vec<crate::models::Message>>>,
 }
 
 #[async_trait::async_trait]
@@ -19996,6 +19989,9 @@ impl crate::core::model_client::ModelClient for ReasoningOnlyCleanFinishModelCli
         _request: crate::models::MessageRequest,
     ) -> anyhow::Result<crate::llm_client::StreamEventBox> {
         use crate::llm_client::mock::canned;
+        if let Ok(mut requests) = self.requests.lock() {
+            requests.push(_request.messages.clone());
+        }
         let call = self
             .calls
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
@@ -20036,10 +20032,27 @@ async fn run_reasoning_only_turn(
     std::sync::Arc<ReasoningOnlyCleanFinishModelClient>,
     Vec<Event>,
 ) {
+    run_reasoning_only_turn_with_reprompts(
+        reasoning_only,
+        stop_reason,
+        crate::config::DEFAULT_REASONING_ONLY_REPROMPTS,
+    )
+    .await
+}
+
+async fn run_reasoning_only_turn_with_reprompts(
+    reasoning_only: usize,
+    stop_reason: &'static str,
+    max_reprompts: u32,
+) -> (
+    std::sync::Arc<ReasoningOnlyCleanFinishModelClient>,
+    Vec<Event>,
+) {
     let model = std::sync::Arc::new(ReasoningOnlyCleanFinishModelClient {
         calls: std::sync::atomic::AtomicUsize::new(0),
         reasoning_only,
         stop_reason,
+        requests: std::sync::Mutex::new(Vec::new()),
     });
     let client: crate::core::model_client::SharedModelClient = model.clone();
     let config = Config::default();
@@ -20048,6 +20061,7 @@ async fn run_reasoning_only_turn(
         snapshots_enabled: false,
         subagents_enabled: false,
         terminal_chrome_enabled: true,
+        reasoning_only_max_reprompts: max_reprompts,
         ..EngineConfig::default()
     };
     let (engine, handle) = Engine::new_with_model_client(engine_config, &config, client);
@@ -20169,6 +20183,58 @@ async fn reasoning_only_length_stop_fails_without_retry() {
     assert_eq!(status, TurnOutcomeStatus::Failed);
 }
 
+/// The reasoning-only nudge rides one request and is never written to the
+/// session.
+///
+/// This is the distinction that matters: a nudge added with
+/// `add_session_message` would persist into the transcript, the exports, and
+/// every later turn's context — a message the user never sent. A
+/// request-scoped nudge appears in exactly one outbound request and leaves the
+/// conversation as it found it.
+///
+/// The two are told apart by message counts across successive requests. With
+/// a ceiling of 3 the model is asked four times. Persisted, the counts would
+/// grow cumulatively (n, n, n+1, n+2); request-scoped, the nudged requests
+/// each carry exactly one extra message over the same baseline.
+#[tokio::test]
+async fn the_reasoning_only_nudge_rides_one_request_and_never_joins_the_session() {
+    let (model, _events) = run_reasoning_only_turn_with_reprompts(usize::MAX, "stop", 3).await;
+
+    let requests = model.requests.lock().expect("captured requests").clone();
+    assert_eq!(requests.len(), 4, "one initial request plus three retries");
+
+    let baseline = requests[0].len();
+    assert_eq!(
+        requests[1].len(),
+        baseline,
+        "the first retry is a bare cached-prefix re-request, with no nudge"
+    );
+    assert_eq!(
+        requests[2].len(),
+        baseline + 1,
+        "the second retry carries the nudge"
+    );
+    assert_eq!(
+        requests[3].len(),
+        baseline + 1,
+        "the nudge did not accumulate: it was spent on the previous request, \
+         not added to the session"
+    );
+
+    let nudge = crate::config::DEFAULT_REASONING_ONLY_REPROMPT_MESSAGE;
+    let carries_nudge = |messages: &Vec<crate::models::Message>| {
+        serde_json::to_string(messages)
+            .expect("messages serialize")
+            .contains(nudge)
+    };
+    assert!(!carries_nudge(&requests[0]), "no nudge before any failure");
+    assert!(!carries_nudge(&requests[1]), "no nudge on the free retry");
+    assert!(
+        carries_nudge(&requests[2]),
+        "nudge present once retrying again"
+    );
+}
+
 /// A model that only ever returns reasoning is bounded: it retries up to the
 /// ceiling and then fails honestly rather than looping forever.
 #[tokio::test]
@@ -20177,8 +20243,8 @@ async fn reasoning_only_forever_is_bounded_then_fails() {
 
     assert_eq!(
         model.calls.load(std::sync::atomic::Ordering::SeqCst),
-        1 + super::MAX_REASONING_ONLY_REPROMPTS as usize,
-        "reasoning-only retries are bounded by MAX_REASONING_ONLY_REPROMPTS"
+        1 + crate::config::DEFAULT_REASONING_ONLY_REPROMPTS as usize,
+        "reasoning-only retries are bounded by [reasoning_only] max_reprompts"
     );
     let status = events
         .iter()

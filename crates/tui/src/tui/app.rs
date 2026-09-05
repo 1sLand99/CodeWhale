@@ -19,7 +19,6 @@ use crate::compaction::CompactionConfig;
 use crate::config::{
     ApiProvider, ApprovalPolicyControl, Config, DEFAULT_TEXT_MODEL, has_api_key, has_api_key_for,
 };
-use crate::config_ui::ConfigUiMode;
 use crate::core::authority::{ModeSessionPrefs, base_policy_for_mode};
 use crate::core::events::TurnRoute;
 use crate::hooks::{HookContext, HookEvent, HookExecutor, HookResult};
@@ -582,13 +581,6 @@ pub struct LaunchState {
     /// paint. The composer itself is the session `App`'s own
     /// `ComposerState` — this flag only decides where keystrokes go.
     pub composer_focus: bool,
-    /// Composer input-row hitbox from the most recent launch render (the
-    /// docked strip below the option strip). A click here focuses the
-    /// composer, exactly like the Tab key.
-    pub composer_area: Option<Rect>,
-    /// Send-glyph hitbox inside the composer row. A click here submits the
-    /// composed message through the normal dispatch path.
-    pub send_area: Option<Rect>,
     /// Clickable rects for the card's rows from the most recent launch
     /// render, in the same order as
     /// [`crate::tui::underwater::launch_card_rows`].
@@ -663,10 +655,15 @@ impl LaunchState {
     #[must_use]
     pub fn new(visible: bool, workspace: &std::path::Path) -> Self {
         let (recent, total_workspace_sessions) = load_launch_recent(workspace);
-        // The launch card's migration notice is only painted when it is true:
-        // Claude Code leaves its sessions under `~/.claude/projects`. One
-        // stat at construction, never on the render path.
-        let claude_code_detected = std::env::var_os("HOME")
+        // The migration notice answers a question you have exactly once:
+        // "I have Claude Code, what comes over?". It used to key on
+        // `~/.claude/projects` alone, so anyone who keeps Claude Code
+        // installed saw it on every single launch forever. It now retires as
+        // soon as `/import-claude` has been run — that command always writes
+        // its report, so the report is the durable receipt that the question
+        // has been answered. Two stats at construction, never on the render
+        // path.
+        let has_claude_code = std::env::var_os("HOME")
             .as_ref()
             .map(|home| {
                 std::path::Path::new(home)
@@ -675,6 +672,14 @@ impl LaunchState {
                     .is_dir()
             })
             .unwrap_or(false);
+        let import_already_reviewed = codewhale_config::codewhale_home()
+            .map(|home| {
+                home.join("imports")
+                    .join("claude-import-report.md")
+                    .exists()
+            })
+            .unwrap_or(false);
+        let claude_code_detected = has_claude_code && !import_already_reviewed;
         Self {
             visible,
             status: None,
@@ -682,8 +687,6 @@ impl LaunchState {
             recent,
             total_workspace_sessions,
             composer_focus: true,
-            composer_area: None,
-            send_area: None,
             row_hitboxes: Vec::new(),
             hovered_row: None,
             menu_selected: None,
@@ -2211,6 +2214,17 @@ pub struct App {
             )>,
         >,
     >,
+    /// Shared cell for async MCP OAuth login delivery.
+    ///
+    /// The browser callback wait is up to five minutes. Awaiting it inside the
+    /// action handler parked the whole event loop: no input, no redraw, and no
+    /// way to back out of a login started by a misclick. The login runs on the
+    /// background pattern instead, and `mcp_login_cancel` is what Esc trips.
+    #[allow(clippy::type_complexity)]
+    pub mcp_login_cell: std::sync::Arc<std::sync::Mutex<Option<(String, Result<(), String>)>>>,
+    /// Cancels the in-flight MCP OAuth login, if any, and names the server it
+    /// belongs to so the footer/notice can say what Esc would abandon.
+    pub mcp_login_cancel: Option<(String, tokio_util::sync::CancellationToken)>,
     /// Shared cell for async prompt suggestion delivery from background task.
     pub prompt_suggestion_cell: std::sync::Arc<std::sync::Mutex<Option<(u64, String)>>>,
     /// Tracks whether the initial balance fetch has been attempted for this session.
@@ -2255,6 +2269,11 @@ pub struct App {
         Option<tokio::task::JoinHandle<crate::tui::automation_panel::AutomationScan>>,
     /// Session-local quieting and command detectors for event-driven tips.
     pub behavioral_tips: crate::tui::behavioral_tips::BehavioralTipState,
+    /// Footer-hint use counts, hydrated from `Settings` at startup and
+    /// bumped by `App::note_footer_hint_used`. The posture bar reads this
+    /// every frame, so the counts live here rather than behind a
+    /// settings-file read.
+    pub footer_hint_uses: std::collections::BTreeMap<String, u8>,
     /// Unified Workflow activity surface (#4121). Lives above the composer so
     /// phase/row progress does not flood the chat transcript. Preserved after
     /// completion until the next `RunStarted` replaces it.
@@ -2505,8 +2524,8 @@ impl App {
         match choice {
             RouteSaveChoice::UpdateFleet => {
                 let Some((name, scope)) = pending.fleet.clone() else {
-                    return "Nothing to update — no Fleet is selected. Use /fleet save-as to \
-                             save this route as a new Fleet."
+                    return "Nothing to update — no team is selected. Use /fleet save-as to \
+                             save this route as a new team."
                         .to_string();
                 };
                 match crate::fleet::store::load_fleet_in_scope(&name, scope, &self.workspace) {
@@ -2518,15 +2537,15 @@ impl App {
                         });
                         match save_fleet(&fleet, scope, &self.workspace) {
                             Ok(path) => format!(
-                                "Fleet `{}` now runs on {route} — wrote {}",
+                                "Team `{}` now runs on {route} — wrote {}",
                                 fleet.name,
                                 path.display()
                             ),
-                            Err(err) => format!("Fleet update failed: {err}"),
+                            Err(err) => format!("Team update failed: {err}"),
                         }
                     }
                     Err(err) => format!(
-                        "Fleet update failed: {err} — the saved Fleet may have moved. Use \
+                        "Team update failed: {err} — the saved team may have moved. Use \
                          /fleet save-as to persist the route."
                     ),
                 }
@@ -2543,7 +2562,7 @@ impl App {
                     display.clone(),
                     Some("Saved from a session route choice.".to_string()),
                 ) else {
-                    return "Could not create the Fleet.".to_string();
+                    return "Could not create the team.".to_string();
                 };
                 fleet.operator = Some(FleetOperator {
                     provider: pending.provider_identity.clone(),
@@ -2568,7 +2587,7 @@ impl App {
                             Err(err) => format!(" — selection failed: {err}"),
                         };
                         format!(
-                            "Saved route {route} as new Fleet `{}` — wrote {}{selected_note}",
+                            "Saved route {route} as new team `{}` — wrote {}{selected_note}",
                             display,
                             path.display()
                         )
@@ -5291,6 +5310,7 @@ impl App {
 
     pub fn transcript_render_options(&self) -> TranscriptRenderOptions {
         TranscriptRenderOptions {
+            superseded_work_receipt: false,
             locale: self.ui_locale,
             show_thinking: self.show_thinking,
             thinking_highlight: self.thinking_highlight,

@@ -571,6 +571,9 @@ pub(crate) fn handle_mouse_event(app: &mut App, mouse: MouseEvent) -> Vec<ViewEv
                 InteractionAction::OpenProviderPicker => {
                     vec![ViewEvent::TopbarRoutePickerRequested]
                 }
+                InteractionAction::OpenModelPicker => {
+                    vec![ViewEvent::TopbarModelPickerRequested]
+                }
                 InteractionAction::ShowDockPanel(_) | InteractionAction::DismissDock => {
                     unreachable!("dock targets defer to the strip")
                 }
@@ -578,51 +581,52 @@ pub(crate) fn handle_mouse_event(app: &mut App, mouse: MouseEvent) -> Vec<ViewEv
         }
     }
 
-    // The launch surface owns the whole frame until a session is chosen.
-    // Consume every mouse event here so wheel input cannot leak into the
-    // transcript or composer behind the launch header. Clicks land on the
-    // card's rows or the composer's send glyph; anything else keeps focus
-    // where it already is.
-    if app.launch.visible {
+    // The launch card is content on the ordinary screen, not a surface that
+    // owns the frame. It used to consume every mouse event and return, which
+    // was right when it *was* a separate surface and became a bug the moment
+    // it stopped being one: scrolling, the real composer, the work surface
+    // and every other target were unreachable while it was up, and the
+    // send-glyph branch pointed at a `send_area` the deleted launch composer
+    // used to set. So the card takes its own rows and lets everything else
+    // fall through to the handlers that own it.
+    if app.launch.visible && !app.launch.row_hitboxes.is_empty() {
+        let hit = app
+            .launch
+            .row_hitboxes
+            .iter()
+            .position(|(_, area)| mouse_hits_rect(mouse, Some(*area)));
         match mouse.kind {
             MouseEventKind::Moved => {
-                // Hover paints the shared selected-row treatment through
-                // the same row hitboxes clicks use.
-                let hovered = app
-                    .launch
-                    .row_hitboxes
-                    .iter()
-                    .position(|(_, area)| mouse_hits_rect(mouse, Some(*area)));
-                if hovered != app.launch.hovered_row {
-                    app.launch.hovered_row = hovered;
+                if hit != app.launch.hovered_row {
+                    app.launch.hovered_row = hit;
                     app.needs_redraw = true;
                 }
             }
             MouseEventKind::Down(MouseButton::Left) => {
-                let send_hit = app
-                    .launch
-                    .send_area
-                    .is_some_and(|area| mouse_hits_rect(mouse, Some(area)));
-                if send_hit && !app.input.trim().is_empty() {
-                    // Same submit path as the composer's Enter key.
-                    app.pending_launch_action =
-                        Some(crate::tui::underwater::LaunchAction::SendComposer);
-                } else if let Some(id) = app
-                    .launch
-                    .row_hitboxes
-                    .iter()
-                    .find(|(_, area)| mouse_hits_rect(mouse, Some(*area)))
-                    .map(|(id, _)| id.clone())
-                {
-                    // Same actions the keyboard's Enter runs.
-                    app.pending_launch_action =
-                        Some(crate::tui::underwater::launch_row_click_action(&id));
+                if let Some(index) = hit {
+                    let id = app.launch.row_hitboxes[index].0.clone();
+                    match &id {
+                        // Resuming replaces the whole session context —
+                        // founder live-test: "you just click it and boom
+                        // you're there ... you don't realize it's happening".
+                        // It asks first. New session and See all stay one
+                        // click, because neither discards anything.
+                        crate::tui::app::LaunchRowId::Recent(session_id) => {
+                            app.launch.menu_selected = Some(index);
+                            crate::tui::underwater::open_launch_resume_confirm(app, session_id);
+                        }
+                        _ => {
+                            app.launch.status = None;
+                            app.pending_launch_action =
+                                Some(crate::tui::underwater::launch_row_click_action(&id));
+                        }
+                    }
+                    app.needs_redraw = true;
+                    return Vec::new();
                 }
             }
             _ => {}
         }
-        app.needs_redraw = true;
-        return Vec::new();
     }
 
     // Ocean work surface owns its rect, scrolling, focus, and row actions.
@@ -633,6 +637,21 @@ pub(crate) fn handle_mouse_event(app: &mut App, mouse: MouseEvent) -> Vec<ViewEv
         return apply_sidebar_row_action(app, action);
     }
     if work_surface.consumed {
+        return Vec::new();
+    }
+    // The posture bar's live counts open the dock view they count. The
+    // strip's own tabs were consumed above; anything left carrying a dock
+    // action is a footer chip.
+    if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+        && let Some(InteractionAction::ShowDockPanel(panel)) = app
+            .viewport
+            .interaction_targets
+            .target_at(mouse.column, mouse.row)
+            .and_then(|target| target.mouse_action)
+    {
+        crate::tui::work_surface::select_dock_panel(app, panel);
+        // Clicking the affordance teaches it just as well as the chord does.
+        app.note_footer_hint_used(crate::tui::footer_hints::DOCK_OPEN);
         return Vec::new();
     }
 
@@ -1942,6 +1961,113 @@ mod tests {
     }
 
     #[test]
+    fn the_launch_card_does_not_swallow_the_rest_of_the_screen() {
+        // Founder live-test: "the clickability and the mouse pointing thing
+        // isn't working". While the opening screen was a separate surface it
+        // was right for it to consume every mouse event and return; the
+        // moment it became content on the ordinary screen that gate made
+        // scrolling, the composer and the work surface unreachable. A click
+        // that misses the card's rows must fall through.
+        let mut app = create_test_app();
+        app.launch.visible = true;
+        app.launch.row_hitboxes = vec![(
+            crate::tui::app::LaunchRowId::NewSession,
+            Rect::new(2, 5, 30, 1),
+        )];
+        app.viewport.last_transcript_area = Some(Rect::new(0, 0, 80, 20));
+        app.viewport.pending_scroll_delta = 0;
+
+        // A wheel tick on the launch screen still scrolls.
+        handle_mouse_event(
+            &mut app,
+            MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: 10,
+                row: 10,
+                modifiers: KeyModifiers::NONE,
+            },
+        );
+        assert_ne!(
+            app.viewport.pending_scroll_delta, 0,
+            "the wheel must reach the transcript on the opening screen"
+        );
+
+        // A click away from the card's rows starts no launch action.
+        app.pending_launch_action = None;
+        handle_mouse_event(&mut app, left_click(60, 15));
+        assert_eq!(
+            app.pending_launch_action, None,
+            "a click off the card must not be read as a card action"
+        );
+
+        // A click on a row still runs it.
+        handle_mouse_event(&mut app, left_click(4, 5));
+        assert_eq!(
+            app.pending_launch_action,
+            Some(crate::tui::underwater::LaunchAction::NewSession),
+            "the card's own rows still work"
+        );
+    }
+
+    #[test]
+    fn clicking_a_recent_row_opens_the_resume_confirmation_popup() {
+        // Founder live-test: "you just click it and boom you're there ... you
+        // don't realize it's happening", then, on the first fix: "the
+        // resuming confirmation needs to be a popup not something in the
+        // composer that's even more confusing". Resuming replaces the whole
+        // session context, so the click opens a popup that names the session
+        // and asks; nothing resumes until that is confirmed.
+        let mut app = create_test_app();
+        app.launch.visible = true;
+        app.launch.recent = vec![crate::tui::app::LaunchRecentSession {
+            id: "sess-1".to_string(),
+            title: "refactor the parser".to_string(),
+            updated_at: chrono::Utc::now(),
+            message_count: 12,
+        }];
+        app.launch.row_hitboxes = vec![(
+            crate::tui::app::LaunchRowId::Recent("sess-1".to_string()),
+            Rect::new(2, 5, 30, 1),
+        )];
+        app.pending_launch_action = None;
+
+        handle_mouse_event(&mut app, left_click(4, 5));
+        assert_eq!(
+            app.pending_launch_action, None,
+            "the click must not resume anything on its own"
+        );
+        assert_eq!(
+            app.view_stack.top_kind(),
+            Some(crate::tui::views::ModalKind::LaunchResumeConfirm),
+            "it opens the confirmation popup instead"
+        );
+        assert!(
+            app.launch.status.is_none(),
+            "and nothing is written over the composer dock"
+        );
+    }
+
+    #[test]
+    fn a_new_session_row_still_takes_one_click() {
+        // Only resuming discards context, so New session keeps its single
+        // click; adding a confirm step there would be friction for nothing.
+        let mut app = create_test_app();
+        app.launch.visible = true;
+        app.launch.row_hitboxes = vec![(
+            crate::tui::app::LaunchRowId::NewSession,
+            Rect::new(2, 5, 30, 1),
+        )];
+        app.pending_launch_action = None;
+
+        handle_mouse_event(&mut app, left_click(4, 5));
+        assert_eq!(
+            app.pending_launch_action,
+            Some(crate::tui::underwater::LaunchAction::NewSession),
+            "New session runs on the first click"
+        );
+    }
+
+    #[test]
     fn idle_pointer_enter_and_leave_request_hover_redraws() {
         let _guard = crate::tui::hover_layer::HOVER_TEST_LOCK.lock().unwrap();
         crate::tui::hover_layer::clear_pointer();
@@ -2046,90 +2172,6 @@ mod tests {
             },
         ));
         assert_eq!(app.slash_menu_selected, 0);
-    }
-
-    #[test]
-    fn send_click_matches_the_keyboard_submit_and_focus_never_leaves_the_composer() {
-        let mut app = create_test_app();
-        app.launch.visible = true;
-        let stage = Rect::new(0, 1, 80, 22); // the frame's stage slot at 80x24
-        let startup = crate::tui::underwater::tideline_startup_from_app(&app);
-        let mut hitboxes = crate::tui::underwater::tideline_startup_hitboxes(stage);
-        hitboxes.rows = crate::tui::underwater::tideline_startup_row_hitboxes(stage, &startup);
-        crate::tui::underwater::apply_launch_hitboxes(&hitboxes, &mut app.launch);
-        let composer = app.launch.composer_area.expect("composer hitbox");
-        let send = app.launch.send_area.expect("send hitbox");
-        assert!(app.launch.composer_focus, "focused from first paint");
-
-        // Clicking the composer is a no-op: it already holds focus.
-        handle_mouse_event(&mut app, left_click(composer.x + 4, composer.y));
-        assert!(app.launch.composer_focus);
-        assert_eq!(app.pending_launch_action, None);
-
-        // Clicking the send glyph produces the same action the event loop
-        // consumes for the composer's Enter key, from the same input state.
-        app.input = "ship it".to_string();
-        handle_mouse_event(&mut app, left_click(send.x, send.y));
-        assert_eq!(
-            app.pending_launch_action.take(),
-            Some(crate::tui::underwater::LaunchAction::SendComposer)
-        );
-        assert_eq!(app.input, "ship it");
-        assert!(app.launch.composer_focus);
-
-        // Nothing to send: the send glyph does nothing.
-        app.input.clear();
-        handle_mouse_event(&mut app, left_click(send.x, send.y));
-        assert_eq!(app.pending_launch_action, None);
-        assert!(app.launch.composer_focus);
-
-        // Clicking the header, or wheeling, never takes focus away — there
-        // is nowhere else for it to go.
-        handle_mouse_event(&mut app, left_click(3, 2));
-        assert!(app.launch.composer_focus);
-        handle_mouse_event(
-            &mut app,
-            MouseEvent {
-                kind: MouseEventKind::ScrollDown,
-                column: composer.x + 4,
-                row: composer.y,
-                modifiers: KeyModifiers::NONE,
-            },
-        );
-        assert!(app.launch.composer_focus);
-        assert_eq!(app.pending_launch_action, None);
-    }
-
-    #[test]
-    fn launch_row_hover_and_click_run_the_keyboard_actions() {
-        let mut app = create_test_app();
-        app.launch.visible = true;
-        let stage = Rect::new(0, 1, 80, 22); // the frame's stage slot at 80x24
-        let startup = crate::tui::underwater::tideline_startup_from_app(&app);
-        let mut hitboxes = crate::tui::underwater::tideline_startup_hitboxes(stage);
-        hitboxes.rows = crate::tui::underwater::tideline_startup_row_hitboxes(stage, &startup);
-        crate::tui::underwater::apply_launch_hitboxes(&hitboxes, &mut app.launch);
-        assert!(
-            !app.launch.row_hitboxes.is_empty(),
-            "the card always lists a first row"
-        );
-        let (first_id, first_rect) = app.launch.row_hitboxes[0].clone();
-
-        // Hover highlights the row and repaints; moving away clears it.
-        app.needs_redraw = false;
-        handle_mouse_event(&mut app, mouse_move(first_rect.x + 1, first_rect.y));
-        assert_eq!(app.launch.hovered_row, Some(0));
-        assert!(app.needs_redraw, "hovering a row must repaint");
-        handle_mouse_event(&mut app, mouse_move(0, 0));
-        assert_eq!(app.launch.hovered_row, None);
-
-        // Clicking a row queues the same action the keyboard's Enter runs.
-        handle_mouse_event(&mut app, left_click(first_rect.x + 1, first_rect.y));
-        assert_eq!(
-            app.pending_launch_action.take(),
-            Some(crate::tui::underwater::launch_row_click_action(&first_id))
-        );
-        assert!(app.launch.composer_focus);
     }
 
     #[test]

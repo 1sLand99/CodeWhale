@@ -24,6 +24,7 @@ function repoText(path: string): string {
 
 const matrix = JSON.parse(repoText("docs/public-surface-facts.json")) as {
   product: { terminology: Record<string, string> };
+  install: { recommended: string };
   control: { modes: string[]; permissionPostures: string[] };
 };
 
@@ -125,9 +126,9 @@ describe("shared getting-started path", () => {
 
   it("describes the first session truthfully: keyless launch, provider for replies", () => {
     const first = GETTING_STARTED_STEPS.find((s) => s.id === "first-session")!;
-    expect(first.body.en).toContain("without any API key");
-    expect(first.body.en).toContain("Plan mode");
-    expect(first.body.en).toMatch(/Model replies need a provider/);
+    expect(first.body.en).toMatch(/without an API key/);
+    expect(first.body.en).toContain("Plan blocks file mutation and shell execution");
+    expect(first.body.en).toMatch(/model replies need a configured provider/);
     // The keyless-launch claim must stay backed by documented runtime
     // behavior. Assert the meaning docs/GUIDE.md owes this step -- a first
     // launch that asks only for the decisions still needed, and a provider
@@ -148,7 +149,8 @@ describe("shared getting-started path", () => {
     // leading with the Fleet noun; see its naming/compatibility section.
     const fleetDoc = repoText("docs/FLEET.md");
     const install = GETTING_STARTED_STEPS.find((s) => s.id === "install")!;
-    expect(install.commands).toContain("npm install -g codewhale");
+    expect(install.commands[0]).toBe(matrix.install.recommended);
+    expect(repoText("docs/INSTALL.md")).toContain(install.commands[0]);
     expect(guide).toContain("codewhale doctor");
     const provider = GETTING_STARTED_STEPS.find((s) => s.id === "connect-provider")!;
     expect(provider.commands).toContain("codewhale auth set --provider deepseek");

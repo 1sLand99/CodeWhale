@@ -12,12 +12,18 @@
     "navFaqSecondary": "FAQ",
     "navCommunitySecondary": "Community",
     "navContributeSecondary": "Contribute",
+    "navProduct": "产品",
+    "navModels": "模型",
+    "navPricing": "价格",
+    "navProductSecondary": "Product",
+    "navModelsSecondary": "Models",
+    "navPricingSecondary": "Pricing",
     "skipToContent": "跳转到主要内容",
     "navPrimaryAria": "主导航",
     "navHomeAria": "Codewhale 首页",
     "installCta": "安装 →",
     "authSignIn": "登录",
-    "authRegister": "注册",
+    "authRegister": "创建账户",
     "authGroupAria": "账户",
     "wordmarkSeal": "深",
     "wordmarkTag": "任意模型，本机运行",
@@ -43,7 +49,7 @@
     "themeDark": "深色",
     "themeAria": "文档主题：{mode}（点击切换）",
     "themeTitle": "文档主题 · 自动 / 浅色 / 深色",
-    "footerTagline": "Codewhale 潜入深海，你不必亲自下潜——开源运行时的文档、源码与社区。",
+    "footerTagline": "你的模型，协作更强。开源运行时的文档、源码与社区。",
     "footerProduct": "产品",
     "footerProject": "项目",
     "footerDocs": "文档",
@@ -68,19 +74,17 @@
     "partialBadge": "(部分)"
   },
   "home": {
-    "metaTitle": "Codewhale — 一入码门深似海，它替你潜。",
-    "metaDescription": "Codewhale 潜入深海，你不必亲自下潜——开源的终端编程智能体。模型自带，跑在你自己的机器上。Rust 编写，MIT 许可。",
-    "kicker": "开源 · 自带模型 · 运行在你的终端",
-    "heroTitleA": "一入码门深似海，",
-    "heroTitleB": "Codewhale 替你潜。",
-    "heroIntro": "{brand} 是一个跑在终端里的开源编程智能体。给它一个模型和一个任务。它会读你的代码、改文件、跑检查，活干完了或需要你拿主意时就停下来。模型随便用，也可以给每个角色各配一个。",
-    "install": "安装",
-    "docs": "文档",
-    "copy": "复制",
-    "copied": "已复制 ✓",
-    "installEyebrow": "一行安装",
-    "installRequirement": "需要 Node 18+，无需 Rust 工具链",
-    "installOtherWays": "其他方式 →",
+    "metaTitle": "Codewhale — 你的模型，协作更强。",
+    "metaDescription": "Codewhale 是开源的智能体计算系统。把你已经在用的模型——托管、网关或本地——带进终端，让它们在你的机器上协同工作，由你掌控。Rust 编写，MIT 许可。",
+    "kicker": "智能体计算，由你定规矩",
+    "heroTitleA": "你的模型，",
+    "heroTitleB": "协作更强。",
+    "heroIntro": "{brand} 把编程智能体带进终端，用来读代码、改文件、跑检查。选择支持的模型，并设置会话的权限策略。开源，运行在你自己的机器上。",
+    "getCodewhale": "获取 Codewhale",
+    "exploreProduct": "了解产品",
+    "shotPreview": "终端预览",
+    "shotBuild": "v{version} 开发版本",
+    "screenshotAlt": "终端中的 Codewhale v0.9.12 开发版本：盲文点阵鲸鱼标志、尚无历史记录的新会话、消息输入框，以及显示 Full Access、Work 模式、两个计划任务、MCP 服务器连接中和 GLM-5.3 最高强度的状态栏",
     "latestRelease": "最新发布 {tag}",
     "releaseUnavailable": "发布状态暂不可用",
     "currentSource": "源码",
@@ -88,53 +92,73 @@
     "providerRoutes": "{count} 个提供商",
     "publishedRelease": "已发布",
     "figcaptionSourceCandidate": "未发布",
-    "shotSession": "会话",
-    "screenshotAlt": "Codewhale 终端会话，Operate 模式：鲸鱼、输入区与状态栏",
-    "figcaption": "Codewhale 会话 · Operate 模式 · 权限：Ask",
-    "proofHeading": "终端里的编程智能体。任意模型。本机运行。",
-    "proofBody": "用你手头已有的模型——托管、网关或本地都行。选一个模式：Plan、Work 或 Operate。再选它不问你就能做多少：Ask、Auto-Review 或 Full Access。",
-    "sealDecides": "法",
-    "decidesEyebrow": "它如何决策",
-    "decidesHeading": "推理过程，原话呈现",
-    "decidesLede": "会话摘录。每一段都写明模型依据了哪条项目规则，以及接着做了什么。",
-    "sealWorkflow": "行",
-    "workflowHeading": "从任务到验证过的改动。",
-    "workflow": [
+    "chapterTerminal": "你的终端",
+    "chapterTerminalTitle": "从熟悉的地方开始。",
+    "gainHeading": "让你的模型把任务做完。",
+    "gainLede": "先从一个模型开始。用 Fleet 保存成员配置；当任务适合分工时，再把部分工作委派给其他智能体。",
+    "gain": [
       [
-        "检查",
-        "读取仓库、项目说明与任务。"
+        "你的模型",
+        "使用支持的托管提供商、网关或本地模型服务。Fleet 保存可复用智能体角色的模型选择。"
       ],
       [
-        "执行",
-        "修改文件，你要求先问的地方会先问。"
+        "能干的智能体",
+        "Plan、Work、Operate 三种模式；一支 fleet 为同一件事分工；文件、shell、网页和 MCP 工具；可保存、恢复、回滚的会话。"
       ],
       [
-        "验证",
-        "运行检查，核对结果。"
-      ],
-      [
-        "报告",
-        "说明改了什么、通过了什么。"
+        "本机掌控",
+        "Ask、Auto-Review 或 Full Access——它在问你之前能做多少，由你设定。本地运行，系统允许时启用沙箱，审计日志你随时能读。"
       ]
     ],
-    "receiptAria": "运行摘要示例",
-    "receiptInspect": "仓库与项目说明",
-    "receiptAct": "在你设定的权限内修改文件",
-    "receiptReport": "检查通过 · 摘要已保存",
-    "sealStart": "起",
-    "startHeading": "第一次用？四步。",
-    "startLede": "安装 → 首次会话，无需密钥 → 接入提供商 → 配置 fleet。",
-    "startGuideLink": "阅读新手指引 →",
-    "startVocabularyLink": "查名词 →",
-    "sealBoundaries": "界",
-    "boundariesHeadingA": "你的模型。",
-    "boundariesHeadingB": "你的边界。",
-    "boundariesBody": "模型、模式、以及它不问你能做多少，都由你来选。你不改，提供商和模型就不会变。预览功能会标注预览。",
-    "hostedGatewayLocal": "托管、网关与本地模型",
-    "planActOperateDesc": "从只读规划到自主执行",
-    "askAutoReviewDesc": "它在问你之前能做多少",
-    "tuiExecWebDesc": "交互式或脚本化",
-    "sealSurfaces": "面",
+    "chapterModels": "你的模型",
+    "modelsHeading": "为你选择的模型留一个位置。",
+    "modelsBody": "连接支持的托管提供商、网关或本地模型服务。开始工作前，检查所选提供商与模型。本地服务是否需要 API 密钥，取决于它的配置。",
+    "modelsFacts": [
+      [
+        "托管",
+        "你自己的 API 密钥，用 codewhale auth set 保存"
+      ],
+      [
+        "网关",
+        "一个端点接多个模型，提供商仍由你选"
+      ],
+      [
+        "本地",
+        "localhost 上的 vLLM、SGLang、Ollama——通常无需密钥"
+      ]
+    ],
+    "modelsLink": "了解提供商选项",
+    "startHeading": "四步开始第一个会话。",
+    "startLede": "安装，无需密钥打开会话，接入提供商；一个模型不够时，再配置 fleet。",
+    "startGuideLink": "阅读新手指引",
+    "startVocabularyLink": "查名词",
+    "chapterAccount": "现在能在哪里运行",
+    "availabilityHeading": "已可用、开发中、暂不可用——如实说明。",
+    "availabilityLede": "终端是已发布的产品。其余的按实际状态列出。",
+    "availability": [
+      [
+        "终端",
+        "已发布",
+        "优先使用 GitHub Releases 中适用于 Linux、macOS、Windows 的二进制；npm 和 Cargo 为其他安装方式。Android 上的 Termux 为预览。"
+      ],
+      [
+        "网页应用",
+        "开发预览",
+        "账户页面与浏览器配对已在开发版本中实现。公开服务上的端到端远程控制尚未验证；已发布的任务执行入口是终端。"
+      ],
+      [
+        "桌面端",
+        "开发版本",
+        "本地 macOS 开发构建已做过测试。尚无已发布的桌面应用可供下载。"
+      ],
+      [
+        "云端计算机",
+        "暂不可用",
+        "在托管计算机上运行工作仍在开发中。等它真正可用时，本页会如实说明。"
+      ]
+    ],
+    "availabilityNote": "终端不需要 Codewhale 账户。托管模型按你自己的提供商账户计费；创建 Codewhale 账户不会购买模型访问权限。",
+    "accountLink": "创建账户",
     "surfacesHeading": "活在哪里干，就在哪里用。",
     "surfaces": [
       [
@@ -146,8 +170,8 @@
         "脚本与 CI"
       ],
       [
-        "Web 客户端",
-        "浏览器客户端，仅限本机"
+        "本地 Web 客户端",
+        "本机界面；托管浏览器工作台仍在开发中"
       ],
       [
         "运行时 API + MCP",
@@ -158,12 +182,13 @@
         "多个智能体协作一件事"
       ]
     ],
-    "runtimeLink": "运行时界面与稳定程度 →",
-    "installBandHeading": "从一条命令开始。",
+    "runtimeLink": "运行时界面与稳定程度",
+    "installBandHeading": "在 macOS 或 Linux 上安装。",
+    "copy": "复制",
+    "copied": "已复制 ✓",
     "binaries": "预编译包",
     "chinaMirrors": "中国镜像",
-    "installGuideLink": "阅读安装指南 →",
-    "sealCommunity": "众",
+    "installGuideLink": "阅读安装指南",
     "communityHeading": "公开构建",
     "communityBody": "MIT 许可。贡献者的工作覆盖运行时、提供商、平台、文档与测试。",
     "communityLinksAria": "社区链接",
@@ -333,7 +358,7 @@
     "runLead": "Runtime 的 fleet 运行投影存放在工作区的 .codewhale/fleet.jsonl 台账中，worker 日志在 .codewhale/fleet/ 下。codewhale fleet resume <run-id> 会让 Runtime 重放台账并调和过期租约；该操作幂等，可在管理进程退出、笔记本睡眠或运行时重启后安全执行。",
     "statusLead": "TUI 命令 {fleetStatusTui} 与 shell 命令 {fleetStatusShell} 读取同一份持久 fleet 台账。若要查看仅附着于当前交互会话的子 Agent，请使用 {fleetWorkers}（或 {subagents}）。",
     "profilesTitle": "已保存 fleet、角色与 /fleet setup",
-    "profilesLead": "{fleetSaved} 打开已命名保存 fleet 的选择器；裸 /fleet 打开当前所选 fleet 的成员花名册。/fleet setup 打开渐进式向导来编写可复用的花名册成员：依次选择语义角色、模型（继承或具体已配置路由）和思考档位，再核对准确的身份与路由后保存。档案可写在项目级（.codewhale/agents/<role>.toml）或个人级（$CODEWHALE_HOME/agents/<role>.toml）；同 ID 的项目档案优先。Runtime 另行负责信任、文件系统/网络范围、密钥、审批、沙箱和工具，因此档案存储范围不会扩大执行权限。",
+    "profilesLead": "{fleetSaved} 打开已命名保存 fleet 的选择器；裸 /fleet 打开当前所选 fleet 的成员花名册。在 v0.9.11 中，/fleet setup 编辑当前选中的命名 fleet。未选中命名 fleet 时，它打开角色档案设置：选择角色与模型、按需调整思考设置，然后核对并保存。档案可写在项目级（.codewhale/agents/<role>.toml）或个人级（$CODEWHALE_HOME/agents/<role>.toml）；同 ID 的项目档案优先。Runtime 另行负责信任、文件系统/网络范围、密钥、审批、沙箱和工具，因此档案存储范围不会扩大执行权限。",
     "workflowTitle": "Workflow 编排",
     "workflowLead": "普通多 Agent 工作不需要 Workflow：在 Operate 里直接发消息，需要并行、隔离或长时间工作时让 Codewhale 优先委派后台 worker 即可。只有当工作需要有序阶段、门禁、共享预算、回放或确定性汇总时才用 Workflow。Workflow 脚本只负责协调：它选择 fleet 成员，但没有自己的文件系统或 shell；Runtime 在实时权限策略下启动真正的 worker。脚本使用编译专用的声明式 JS 子集，降低到类型化 WorkflowSpec 后由 Rust 校验与执行；import、fetch、process、eval、async/await 会被拒绝。",
     "workflowLimits": "默认校验边界：每次 Workflow 运行最多 1,000 个 worker Agent、Workflow IR 结构嵌套深度不超过 5、循环必须声明 max_iterations、动态 expand 节点必须声明 max_children 和模板。Runtime 的子委派是独立执行预算：默认 3 层，可选择启用的硬上限为 8 层。这些是数量与结构上限，而非并发要求：Runtime 每个运行最多接纳 16 个存活 worker，其余排队。省略 max_steps 或设为 0 都保持无界；只有正值才增加模型轮次上限。",
@@ -532,6 +557,9 @@
     "authLead": "启动 URL 携带的是一个随机、短寿命、一次性的引导凭证——绝不是运行时 bearer 令牌。一次回环请求把它换成 HttpOnly、SameSite=Strict、进程本地的会话 Cookie，并立即使该凭证失效。重用、过期、畸形或非回环的引导尝试都会失败关闭。运行时令牌不会出现在渲染的 HTML、浏览器存储、URL 查询或片段、或浏览器启动参数中。携带 Cookie 的状态变更请求还必须出示精确的本地 web 源；跨源浏览器请求会被拒绝。",
     "localTitle": "本地就是本地",
     "localLead": "{webCommand} 只接受 {portFlag}——没有 {hostFlag}，也没有关闭认证的选项。不要把它当公开网站，也不要通过路由器转发、公开反向代理或隧道暴露它的端口。单独的 {mobileCommand} 和 {httpFlag} 模式有不同的部署与认证约定，操作它们（尤其是选择非回环绑定）之前请阅读运行时 API 文档。",
+    "remoteTitle": "从网页应用远程控制",
+    "remoteLead": "现已可用。要在已登录的 Codewhale 网页应用中继续正在运行的本地会话，请在该会话里输入 /rc，或用 codewhale rc 启动，然后在浏览器中批准一次性代码。租约有效期间，浏览器接管新的提示与审批，终端保持为可读的安全界面；两端都仍可中断。",
+    "remoteBody": "连接后，横幅和一条文字稿说明会显示实时会话链接。/rc open 在浏览器中打开它，/rc link 打印它，/rc status 显示会话归属，/rc stop 把会话交还给终端。连接中断时，本地输入会保持锁定，直到最后一个网页租约过期，因此两个控制端永远不会争抢。从同一终端登记的每个文件夹共享一个稳定的设备 ID，所以网页应用按机器而不是按会话列出计算机。这与上面的本机浏览器客户端不同：/rc 把本地会话与你的账户配对；codewhale web 只是提供一个不需要账户的本地页面。",
     "troubleshootingTitle": "常见问题",
     "troubleshootingLead": "端口 7878 被占用时用 --port 换一个。浏览器无法打开时命令会报错退出，而不会留下可重用的引导凭证；检查系统默认浏览器设置后重新启动。页面能打开但 provider 不可用时，查 codewhale doctor 和 /provider——web 命令不配置也不迁移 provider 凭据。会话过期后重启 codewhale web 以签发新的进程本地会话；重用旧的引导 URL 本来就会失败。",
     "sourceNote": "来源文档：docs/WEB.md · 更新时请同步修改 docs-map.ts。"
@@ -723,14 +751,14 @@
     ],
     "sandboxNote": "仓库中还有一个 seccomp 模块和一份未来的 Windows 辅助程序契约。两者都没有接入子命令启动，所以 Codewhale 不会宣传它们：只存在于源码中的沙箱代码不能证明某条命令受到了限制。",
     "telemetryTitle": "遥测，精确到每一项",
-    "telemetryLead": "匿名使用计数默认开启，由一次不阻塞的首次运行提示告知，可以立即并永久关闭。",
+    "telemetryLead": "Codewhale 0.9.12 默认统计匿名使用量，并在首次启动时告知你；已发布的 0.9.11 版本会先询问。关闭是会被后续版本保留的选择，在早先的自愿开启政策下记录的关闭也始终有效。显示告知绝不会代你记录任何同意；处理方为 Codewhale 和 PostHog。",
     "telemetry": [
       [
         "永远不收集",
         "对话、代码、prompt、文件、文件/仓库/分支名、模型内容、凭据，以及任何逐轮或逐工具的时间线。"
       ],
       [
-        "会发送",
+        "开启时发送",
         "版本与平台类别、会话时长与结果、功能与错误计数、封闭枚举，以及一个每 90 天轮换的随机安装 id。"
       ],
       [
@@ -738,8 +766,12 @@
         "{endpoint}——第一方 Cloudflare Worker，源码在仓库的 telemetry-ingest/ 目录下。"
       ],
       [
-        "存储",
-        "没有 IP、国家或地理位置列——这是结构上的，不是一个设置。不写日志。保留期固定为三个月。"
+        "第一方存储",
+        "没有 IP、国家或地理位置列。不记录请求日志。保留期固定为三个月。"
+      ],
+      [
+        "PostHog",
+        "可选转发需要运营方单独配置，并验证出口不会转发客户端 IP。PostHog 保留期由项目另行设置；源码支持不代表该处理方已启用。"
       ],
       [
         "自己审计",

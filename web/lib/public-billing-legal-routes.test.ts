@@ -26,7 +26,7 @@ describe("marketing pricing and legal routes", () => {
       "/en/legal/terms",
       "/en/legal/privacy",
     ]);
-    expect(LEGAL_UPDATED).toBe("July 23, 2026");
+    expect(LEGAL_UPDATED).toBe("September 4, 2026");
     expect(TERMS_SECTIONS.some((s) => s.title === "Plans and charges")).toBe(true);
     expect(PRIVACY_SECTIONS.some((s) => s.title === "Retention and deletion")).toBe(true);
   });

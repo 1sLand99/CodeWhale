@@ -50,31 +50,18 @@ struct StreamOutcome {
     stream_error: Option<String>,
 }
 
-fn localized_request_preparation_error(locale_tag: &str, error: &anyhow::Error) -> Option<String> {
-    if matches!(
-        error.downcast_ref::<crate::client::cloud_code::CloudCodeRequestError>(),
-        Some(crate::client::cloud_code::CloudCodeRequestError::SystemPromptUnsupported)
-    ) {
-        return Some(
-            crate::localization::tr(
-                crate::localization::resolve_locale(locale_tag),
-                crate::localization::MessageId::CloudCodeSystemPromptUnsupported,
-            )
-            .into_owned(),
-        );
-    }
-    None
-}
-
-pub(super) fn initial_stream_error_user_message(locale_tag: &str, error: &anyhow::Error) -> String {
-    localized_request_preparation_error(locale_tag, error).unwrap_or_else(|| error.to_string())
+pub(super) fn initial_stream_error_user_message(
+    _locale_tag: &str,
+    error: &anyhow::Error,
+) -> String {
+    error.to_string()
 }
 
 pub(super) fn preview_request_error_user_message(
-    locale_tag: &str,
+    _locale_tag: &str,
     error: &anyhow::Error,
 ) -> String {
-    localized_request_preparation_error(locale_tag, error).unwrap_or_else(|| format!("{error:#}"))
+    format!("{error:#}")
 }
 
 fn approval_intent_summary(text: &str) -> Option<String> {
@@ -694,6 +681,15 @@ impl Engine {
         // transient; re-request a bounded number of times (the prefix is
         // cached, so each retry is cheap) before surfacing a hard failure.
         let mut reasoning_only_reprompts: u32 = 0;
+        // Nudge for the *next* request only. A reasoning-only reply persists
+        // nothing (a bare Thinking block is not sendable), so the first retry
+        // is an exact cached-prefix re-request. If that comes back answerless
+        // too, an identical third attempt would only reproduce it, so the
+        // retry after that carries a nudge — attached to one outbound request
+        // and dropped, never added to the session. Writing it to the session
+        // would put a message the user never sent into the transcript, the
+        // exports, and every later turn's context.
+        let mut reasoning_only_nudge: Option<Message> = None;
         // A normally ending turn gets one explicit chance to join its owned
         // children. If the model ends again while they are still live, the
         // outer terminal barrier parks them as resumable Interrupted work.
@@ -1311,7 +1307,15 @@ impl Engine {
 
             let mut request = prepare_primary_turn_request(PrimaryTurnRequest {
                 model: self.session.model.clone(),
-                messages: self.messages_with_turn_metadata(),
+                messages: {
+                    let mut messages = self.messages_with_turn_metadata();
+                    // `take` is what keeps this request-scoped: the nudge is
+                    // spent here and never reaches `self.session.messages`.
+                    if let Some(nudge) = reasoning_only_nudge.take() {
+                        messages.push(nudge);
+                    }
+                    messages
+                },
                 max_tokens: effective_max_output_tokens_for_route(
                     self.api_provider,
                     &self.session.model,
@@ -2324,7 +2328,7 @@ impl Engine {
                         false,
                     )
                     && !stop_reason_is_output_limit(stop_reason.as_deref())
-                    && reasoning_only_reprompts < MAX_REASONING_ONLY_REPROMPTS
+                    && reasoning_only_reprompts < self.config.reasoning_only_max_reprompts
                 {
                     // Reasoning-only, clean stop: recover instead of dead-ending
                     // the turn. Nothing was persisted for this response (a bare
@@ -2334,13 +2338,40 @@ impl Engine {
                     // because retrying would only reproduce it.
                     reasoning_only_reprompts += 1;
                     let attempt = reasoning_only_reprompts;
+                    let max_reprompts = self.config.reasoning_only_max_reprompts;
+                    // Attempt 1 is the free one: the prefix is cached and a
+                    // clean stop here is usually transient. From attempt 2 on,
+                    // an identical request has already failed once, so carry
+                    // the nudge rather than reproduce the same answerless reply.
+                    let nudged = attempt > 1;
+                    if nudged {
+                        let text = self
+                            .config
+                            .reasoning_only_reprompt_message
+                            .clone()
+                            .unwrap_or_else(|| {
+                                crate::config::DEFAULT_REASONING_ONLY_REPROMPT_MESSAGE.to_string()
+                            });
+                        if !text.trim().is_empty() {
+                            reasoning_only_nudge =
+                                Some(self.runtime_text_message_with_turn_metadata(
+                                    text,
+                                    UserInputProvenance::Runtime,
+                                ));
+                        }
+                    }
+                    let how = if nudged {
+                        "re-requesting the answer with a nudge"
+                    } else {
+                        "re-requesting the answer"
+                    };
                     crate::logging::warn(format!(
-                        "Model returned only reasoning with no answer or tool call (attempt {attempt}/{MAX_REASONING_ONLY_REPROMPTS}); re-requesting the answer"
+                        "Model returned only reasoning with no answer or tool call (attempt {attempt}/{max_reprompts}); {how}"
                     ));
                     let _ = self
                         .tx_event
                         .send(Event::status(format!(
-                            "Model returned only reasoning; re-requesting the answer ({attempt}/{MAX_REASONING_ONLY_REPROMPTS})"
+                            "Model returned only reasoning; {how} ({attempt}/{max_reprompts})"
                         )))
                         .await;
                     turn_error = None;
@@ -2436,6 +2467,7 @@ impl Engine {
             let outcomes = self
                 .execute_planned_tools(
                     plans,
+                    &turn.id,
                     &current_text_visible,
                     &tool_catalog,
                     &mut active_tool_names,
@@ -3165,6 +3197,7 @@ impl Engine {
     async fn execute_planned_tools(
         &mut self,
         plans: Vec<ToolExecutionPlan>,
+        origin_turn_id: &str,
         current_text_visible: &str,
         tool_catalog: &[crate::models::Tool],
         active_tool_names: &mut std::collections::HashSet<String>,
@@ -3313,7 +3346,9 @@ impl Engine {
                 continue;
             }
 
-            let batch_tool_context = self.live_tool_context(tool_registry);
+            let batch_tool_context = self
+                .live_tool_context(tool_registry)
+                .map(|context| context.with_origin_turn_id(origin_turn_id));
 
             if parallel_allowed {
                 let parallel_plan_receipts: Vec<_> = plans
@@ -3371,7 +3406,8 @@ impl Engine {
                     let started_at = Instant::now();
                     let shell_permits = shell_permits.clone();
                     let workspace = self.session.workspace.clone();
-                    let context_override = batch_tool_context.clone();
+                    let context_override =
+                        tool_context_for_call(batch_tool_context.clone(), &plan.id);
                     let cancel_token = self.cancel_token.clone();
 
                     tool_tasks.push(async move {
@@ -3553,7 +3589,7 @@ impl Engine {
                                 tool_input.clone(),
                                 tool_registry,
                                 tool_exec_lock.clone(),
-                                batch_tool_context.clone(),
+                                tool_context_for_call(batch_tool_context.clone(), &tool_id),
                             ) => match result {
                                 Ok(rich) => (
                                     ToolExecutionOutcome::from_legacy(Ok(rich.result)),
@@ -3871,7 +3907,10 @@ impl Engine {
                                     self.session.workspace.clone(),
                                     tool_registry,
                                     mcp_pool.clone(),
-                                    context_override.or_else(|| batch_tool_context.clone()),
+                                    tool_context_for_call(
+                                        context_override.or_else(|| batch_tool_context.clone()),
+                                        &tool_id,
+                                    ),
                                 ) => (result, false),
                             }
                         };
@@ -4988,6 +5027,13 @@ impl Engine {
     }
 }
 
+fn tool_context_for_call(
+    context: Option<crate::tools::ToolContext>,
+    tool_call_id: &str,
+) -> Option<crate::tools::ToolContext> {
+    context.map(|context| context.with_origin_tool_call_id(tool_call_id))
+}
+
 pub(super) fn shell_completion_status_text(
     events: &[crate::tools::shell::ShellCompletionEvent],
     timing: &str,
@@ -5699,12 +5745,6 @@ fn resolve_tool_definition<'a>(
 /// point the turn truly ends; emitting it earlier (at the persist site) would
 /// show a spurious terminal error immediately before the turn resumed for a
 /// steer or a sub-agent completion.
-/// Ceiling on reasoning-only auto re-requests within a single turn. A reasoning
-/// model that answers with only hidden reasoning is recovered up to this many
-/// times before the turn fails honestly; the prefix is cached, so each retry is
-/// cheap, and the bound keeps a persistently-answerless model from looping.
-pub(super) const MAX_REASONING_ONLY_REPROMPTS: u32 = 2;
-
 /// Whether a provider stop reason names an output-length cap. Re-requesting
 /// after one only reproduces it, so those fail honestly (the user needs a
 /// larger max-tokens or a shorter turn) rather than retry.
@@ -5833,6 +5873,18 @@ mod tests {
     use std::path::PathBuf;
     use std::time::Duration;
     use tempfile::tempdir;
+
+    #[test]
+    fn tool_context_for_call_preserves_turn_and_sets_call_origin() {
+        let context = crate::tools::ToolContext::new(".").with_origin_turn_id("turn-origin");
+
+        let context = tool_context_for_call(Some(context), "tool-origin")
+            .expect("tool context remains available");
+
+        assert_eq!(context.origin_turn_id.as_deref(), Some("turn-origin"));
+        assert_eq!(context.origin_tool_call_id.as_deref(), Some("tool-origin"));
+        assert!(tool_context_for_call(None, "tool-origin").is_none());
+    }
 
     #[tokio::test]
     async fn child_owned_background_completion_is_not_delivered_to_parent() {
@@ -6048,6 +6100,8 @@ mod tests {
                 linked_task_id: Some("task_1".to_string()),
                 owner_agent_id: Some("agent_verifier".to_string()),
                 owner_agent_name: Some("verifier".to_string()),
+                origin_tool_call_id: Some("tool_abc".to_string()),
+                origin_turn_id: Some("turn_abc".to_string()),
                 owner_session_id: "session-test".to_string(),
             }],
             "",
@@ -6072,6 +6126,8 @@ mod tests {
                 linked_task_id: Some("task_1".to_string()),
                 owner_agent_id: Some("agent_verifier".to_string()),
                 owner_agent_name: Some("verifier".to_string()),
+                origin_tool_call_id: Some("tool_abc".to_string()),
+                origin_turn_id: Some("turn_abc".to_string()),
                 owner_session_id: "session-test".to_string(),
             },
         ]);
@@ -6089,6 +6145,8 @@ mod tests {
         assert!(text.contains("art_shell_abc"));
         assert!(text.contains("cargo test -p codewhale-tui"));
         assert!(text.contains("test failed"));
+        assert!(text.contains(r#""origin_tool_call_id":"tool_abc""#));
+        assert!(text.contains(r#""origin_turn_id":"turn_abc""#));
     }
 
     #[test]

@@ -9,6 +9,9 @@ import {
   REPO_URL,
 } from "@/lib/i18n/links";
 import { SITE_CONTACT_EMAIL, SITE_SECURITY_EMAIL } from "@/lib/page-meta";
+import { Strata } from "./strata";
+import { USAGE_COUNTING_COPY } from "@/lib/content/usage-counting";
+import { pickText } from "@/lib/i18n/dictionaries";
 
 /**
  * Site footer. One dictionary path for every routed locale — the previous
@@ -25,6 +28,12 @@ export function Footer({ locale = "en" }: { locale?: Locale }) {
 
   return (
     <footer className="site-footer">
+      {/* The waterline: every page still on paper descends here into the
+          seabed. The homepage is already under water by now, and the
+          stylesheet hides this band behind its ocean column. */}
+      <div className="site-footer-waterline" aria-hidden="true">
+        <Strata variant="band" />
+      </div>
       <div className="site-footer-main">
         <div className="site-footer-brand">
           <Link href={homeHref} className="site-wordmark site-wordmark-footer">
@@ -59,6 +68,7 @@ export function Footer({ locale = "en" }: { locale?: Locale }) {
           <a href="https://npmmirror.com/package/codewhale">npmmirror</a>
           <a href={`mailto:${SITE_CONTACT_EMAIL}`}>{SITE_CONTACT_EMAIL}</a>
           <a href={`mailto:${SITE_SECURITY_EMAIL}`}>{chrome.footerSecurity}</a>
+          <Link href={`/${locale}/legal/privacy#usage-counting`}>{pickText(USAGE_COUNTING_COPY.footerLink, locale)}</Link>
         </div>
         <span>© {new Date().getFullYear()} Codewhale</span>
       </div>

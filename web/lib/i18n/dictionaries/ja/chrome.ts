@@ -31,6 +31,13 @@ export const chrome: ChromeDict = {
   navCommunitySecondary: "Community",
   navContributeSecondary: "Contribute",
 
+  navProduct: "製品",
+  navModels: "モデル",
+  navPricing: "料金",
+  navProductSecondary: "Product",
+  navModelsSecondary: "Models",
+  navPricingSecondary: "Pricing",
+
   skipToContent: "メインコンテンツへスキップ",
 
 
@@ -75,7 +82,7 @@ export const chrome: ChromeDict = {
   themeTitle: "ドキュメントのテーマ · 自動 / ライト / ダーク",
 
   footerTagline:
-    "深く潜るのはこちら。あなたは潜らなくていい — オープンソースランタイムのドキュメント、ソース、コミュニティ。",
+    "あなたのモデルを、いっしょに、より強く。オープンソース・ランタイムのドキュメント、ソース、コミュニティ。",
   footerProduct: "製品",
   footerProject: "プロジェクト",
   footerDocs: "ドキュメント",

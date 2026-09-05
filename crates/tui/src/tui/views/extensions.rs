@@ -152,6 +152,7 @@ impl PluginProduct {
         ExtensionItem {
             id: self.id,
             label: self.name,
+            tone: ExtensionTone::Idle,
             description: self.description,
             state: self.maturity,
             detail: localize(
@@ -168,12 +169,46 @@ impl PluginProduct {
     }
 }
 
+/// What a row's state *means*, independent of the words it uses to say it.
+///
+/// Every row on this screen used to paint in one colour, so twenty servers,
+/// four of them broken, read as one undifferentiated wall — "incredibly
+/// boring, plain, and hard on the eyes because of the sameness". The tone is
+/// typed rather than sniffed out of the localized state string, because a
+/// screen that only colours correctly in English is not coloured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ExtensionTone {
+    /// Working: connected, enabled, active.
+    Ready,
+    /// Wants a person: auth required, disconnected, not yet reviewed.
+    Attention,
+    /// Broken: an error or a rejected entry.
+    Failure,
+    /// Deliberately off, or simply not configured.
+    #[default]
+    Idle,
+}
+
+impl ExtensionTone {
+    fn ink(self) -> crate::palette::ChromeInk {
+        use crate::palette::ChromeInk;
+        match self {
+            Self::Ready => ChromeInk::Outcome,
+            Self::Attention => ChromeInk::Attention,
+            Self::Failure => ChromeInk::Failure,
+            Self::Idle => ChromeInk::Metadata,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExtensionItem {
     pub id: String,
     pub label: String,
     pub description: String,
     pub state: String,
+    /// Semantic reading of `state`, resolved through the theme's ink grammar.
+    pub tone: ExtensionTone,
     pub detail: String,
     pub action: Option<ExtensionAction>,
 }
@@ -278,6 +313,27 @@ impl ExtensionsSnapshot {
         }
 
         for item in &mut group.items {
+            // The first-party row is not an MCP recommendation: the plugin is
+            // already in the binary, so the row asks the registry what it
+            // wants — trust it, enable it, or open it — through the same
+            // ladder the Plugins tab uses.
+            if item.id == "codewhale-computer-use" {
+                item.action = match app
+                    .plugin_registry
+                    .list()
+                    .into_iter()
+                    .find(|plugin| plugin.name() == "computer-use")
+                {
+                    Some(plugin) => {
+                        item.state = localized_plugin_state(app.ui_locale, plugin.state_label());
+                        Some(plugin_row_action(app.ui_locale, plugin))
+                    }
+                    None => Some(ExtensionAction::Status {
+                        label: tr(app.ui_locale, MessageId::PickerActionUnavailable).into_owned(),
+                    }),
+                };
+                continue;
+            }
             let recommendation = match item.id.as_str() {
                 "playwright-browser" => Some(("playwright", "playwright")),
                 "chrome-devtools" => Some(("chrome-devtools", "chrome-devtools")),
@@ -334,6 +390,31 @@ impl ExtensionsSnapshot {
 /// manifests produced by the packaging lane remain the installation authority.
 fn reviewed_product_catalog(locale: Locale) -> Vec<PluginProduct> {
     vec![
+        // Codewhale's own, and the reason this row exists: someone browsing
+        // the marketplace for computer use saw Cua and Browser Use and not
+        // the plugin that already ships inside the binary.
+        PluginProduct {
+            id: "codewhale-computer-use".into(),
+            name: "Computer Use".into(),
+            description: tr(
+                locale,
+                MessageId::ExtensionsProductCodewhaleComputerUseDescription,
+            )
+            .into_owned(),
+            publisher: "Codewhale".into(),
+            source_reference: "plugins/computer-use".into(),
+            components: vec![
+                PluginProductComponent {
+                    kind: PluginProductComponentKind::Mcp,
+                    name: "Computer Use MCP".into(),
+                },
+                PluginProductComponent {
+                    kind: PluginProductComponentKind::Skills,
+                    name: "Computer Use Skill".into(),
+                },
+            ],
+            maturity: tr(locale, MessageId::ExtensionsStateFirstParty).into_owned(),
+        },
         PluginProduct {
             id: "playwright-browser".into(),
             name: "Playwright Browser".into(),
@@ -423,6 +504,11 @@ fn hooks_model(app: &App, locale: Locale) -> ExtensionsTabModel {
         .enumerate()
         .map(|(index, hook)| ExtensionItem {
             id: format!("hook-{index}"),
+            tone: if config.enabled {
+                ExtensionTone::Ready
+            } else {
+                ExtensionTone::Idle
+            },
             label: hook.name.clone().unwrap_or_else(|| {
                 localize(
                     locale,
@@ -449,7 +535,10 @@ fn hooks_model(app: &App, locale: Locale) -> ExtensionsTabModel {
                     ),
                 ],
             ),
-            action: None,
+            action: Some(ExtensionAction::Command {
+                label: tr(locale, MessageId::ExtensionsActionEdit).into_owned(),
+                command: "/hooks edit".into(),
+            }),
         })
         .collect::<Vec<_>>();
     let problems = config
@@ -458,6 +547,11 @@ fn hooks_model(app: &App, locale: Locale) -> ExtensionsTabModel {
         .enumerate()
         .map(|(index, problem)| ExtensionItem {
             id: format!("hook-problem-{index}"),
+            tone: if problem.rejected {
+                ExtensionTone::Failure
+            } else {
+                ExtensionTone::Attention
+            },
             label: problem.name.clone().unwrap_or_else(|| {
                 tr(locale, MessageId::ExtensionsHooksConfiguration).into_owned()
             }),
@@ -469,7 +563,10 @@ fn hooks_model(app: &App, locale: Locale) -> ExtensionsTabModel {
             }
             .into_owned(),
             detail: problem.summary(),
-            action: None,
+            action: Some(ExtensionAction::Command {
+                label: tr(locale, MessageId::ExtensionsActionEdit).into_owned(),
+                command: "/hooks edit".into(),
+            }),
         })
         .collect::<Vec<_>>();
     let mut groups = Vec::new();
@@ -485,6 +582,27 @@ fn hooks_model(app: &App, locale: Locale) -> ExtensionsTabModel {
             id: "problems".into(),
             label: tr(locale, MessageId::ExtensionsGroupProblems).into_owned(),
             items: problems,
+        });
+    }
+    // A screen with nothing on it and nothing to press is where "need to be
+    // able to add hooks!" comes from. The row that teaches the file is the
+    // row that opens it.
+    if groups.is_empty() {
+        groups.push(ExtensionGroup {
+            id: "start".into(),
+            label: tr(locale, MessageId::ExtensionsGroupConfigured).into_owned(),
+            items: vec![ExtensionItem {
+                id: "hooks-add".into(),
+                tone: ExtensionTone::Idle,
+                label: tr(locale, MessageId::ExtensionsHooksAddLabel).into_owned(),
+                description: tr(locale, MessageId::ExtensionsHooksAddDescription).into_owned(),
+                state: tr(locale, MessageId::ExtensionsStateAvailable).into_owned(),
+                detail: ".codewhale/hooks.toml".into(),
+                action: Some(ExtensionAction::Command {
+                    label: tr(locale, MessageId::ExtensionsActionEdit).into_owned(),
+                    command: "/hooks edit".into(),
+                }),
+            }],
         });
     }
     ExtensionsTabModel {
@@ -631,6 +749,61 @@ fn localized_skill_root(locale: Locale, kind: crate::skills::roots::SkillRootKin
     }
 }
 
+/// The one action a plugin row offers, wherever that row is drawn.
+///
+/// The Plugins tab and the marketplace's first-party row both need "what does
+/// this plugin want from me right now?", and a second copy of the ladder is
+/// how the marketplace ends up offering `Enable` for something already active.
+fn plugin_row_action(
+    locale: Locale,
+    plugin: &crate::plugins::types::LoadedPlugin,
+) -> ExtensionAction {
+    let has_error_diagnostics = plugin
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.level == crate::plugins::types::PluginDiagnosticLevel::Error);
+    if has_error_diagnostics {
+        ExtensionAction::Command {
+            label: tr(locale, MessageId::ExtensionsActionDiagnose).into_owned(),
+            command: format!("/plugin validate {}", plugin.name()),
+        }
+    } else if plugin.active() {
+        ExtensionAction::Command {
+            label: tr(locale, MessageId::LaunchHintOpen).into_owned(),
+            command: format!("/plugin show {}", plugin.name()),
+        }
+    } else if plugin.trusted() && !plugin.enabled {
+        ExtensionAction::Command {
+            label: tr(locale, MessageId::ExtensionsActionEnable).into_owned(),
+            command: format!("/plugin enable {}", plugin.name()),
+        }
+    } else {
+        ExtensionAction::Command {
+            label: tr(locale, MessageId::AutomationActionInspect).into_owned(),
+            command: format!("/plugin trust {}", plugin.name()),
+        }
+    }
+}
+
+/// How a plugin row reads, using the same ladder as [`plugin_row_action`].
+fn plugin_row_tone(plugin: &crate::plugins::types::LoadedPlugin) -> ExtensionTone {
+    let has_error_diagnostics = plugin
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.level == crate::plugins::types::PluginDiagnosticLevel::Error);
+    if has_error_diagnostics {
+        ExtensionTone::Failure
+    } else if plugin.active() {
+        ExtensionTone::Ready
+    } else if plugin.trusted() {
+        // Trusted and deliberately disabled: off, not wrong.
+        ExtensionTone::Idle
+    } else {
+        // Untrusted is not broken either; it is waiting on a person.
+        ExtensionTone::Attention
+    }
+}
+
 fn plugins_model(app: &App, locale: Locale) -> ExtensionsTabModel {
     let mut by_scope = [Vec::new(), Vec::new(), Vec::new()];
     for plugin in app.plugin_registry.list() {
@@ -640,32 +813,10 @@ fn plugins_model(app: &App, locale: Locale) -> ExtensionsTabModel {
             crate::plugins::types::PluginScope::Workspace => 2,
         };
         let diagnostic_count = plugin.diagnostics.len();
-        let has_error_diagnostics = plugin.diagnostics.iter().any(|diagnostic| {
-            diagnostic.level == crate::plugins::types::PluginDiagnosticLevel::Error
-        });
-        let action = if has_error_diagnostics {
-            ExtensionAction::Command {
-                label: tr(locale, MessageId::ExtensionsActionDiagnose).into_owned(),
-                command: format!("/plugin validate {}", plugin.name()),
-            }
-        } else if plugin.active() {
-            ExtensionAction::Command {
-                label: tr(locale, MessageId::LaunchHintOpen).into_owned(),
-                command: format!("/plugin show {}", plugin.name()),
-            }
-        } else if plugin.trusted() && !plugin.enabled {
-            ExtensionAction::Command {
-                label: tr(locale, MessageId::ExtensionsActionEnable).into_owned(),
-                command: format!("/plugin enable {}", plugin.name()),
-            }
-        } else {
-            ExtensionAction::Command {
-                label: tr(locale, MessageId::AutomationActionInspect).into_owned(),
-                command: format!("/plugin trust {}", plugin.name()),
-            }
-        };
+        let action = plugin_row_action(locale, plugin);
         by_scope[scope].push(ExtensionItem {
             id: plugin.id.as_str().to_string(),
+            tone: plugin_row_tone(plugin),
             label: plugin.name().to_string(),
             description: plugin
                 .manifest
@@ -724,6 +875,7 @@ fn plugins_model(app: &App, locale: Locale) -> ExtensionsTabModel {
         .enumerate()
         .map(|(index, diagnostic)| ExtensionItem {
             id: format!("plugin-diagnostic-{index}"),
+            tone: ExtensionTone::Failure,
             label: diagnostic.code.to_string(),
             description: diagnostic.message.clone(),
             state: if diagnostic.level == crate::plugins::types::PluginDiagnosticLevel::Error {
@@ -790,6 +942,7 @@ fn marketplace_model(app: &App, locale: Locale) -> ExtensionsTabModel {
                     .iter()
                     .map(|candidate| ExtensionItem {
                         id: candidate.id.as_str().to_string(),
+                        tone: ExtensionTone::Attention,
                         label: candidate
                             .display_name
                             .clone()
@@ -874,6 +1027,7 @@ fn skills_model(app: &App, locale: Locale) -> ExtensionsTabModel {
         let position = groups.iter().position(|group| group.id == group_id);
         let item = ExtensionItem {
             id: format!("{}:{}", group_id, skill.id.canonical_name),
+            tone: ExtensionTone::Ready,
             label: skill.name,
             description: skill.description.unwrap_or_default(),
             state: match skill.parser {
@@ -885,7 +1039,18 @@ fn skills_model(app: &App, locale: Locale) -> ExtensionsTabModel {
             }
             .into_owned(),
             detail: skill.safe_display_path,
-            action: None,
+            // Enter opens the skills manager, which is where install, update,
+            // remove and trust already live (`views/skills_manager.rs`, 1,000
+            // lines, driving `skills::mutation::SkillMutationRequest`). This
+            // tab used to dead-end on `action: None` — founder live-test:
+            // "skills - no way to delete them or edit or anything either" —
+            // even though the manager it needed was one command away. Routing
+            // rather than reimplementing: the mutation authority stays in one
+            // place.
+            action: Some(ExtensionAction::Command {
+                label: tr(locale, MessageId::ExtensionsActionManage).into_owned(),
+                command: "/skills".into(),
+            }),
         };
         if let Some(position) = position {
             groups[position].items.push(item);
@@ -960,30 +1125,48 @@ fn mcp_model(app: &App, locale: Locale) -> ExtensionsTabModel {
                 Some(server) => server.recovery_kind(oauth_capable),
                 None => crate::mcp::mcp_recovery_kind(enabled, false, false, None, oauth_capable),
             };
-            let action = if initializing {
-                ExtensionAction::Status {
+            let action = match (initializing, recovery) {
+                // Still connecting: the state is the whole story.
+                (true, _) => ExtensionAction::Status {
                     label: state.clone(),
+                },
+                // Healthy. A row that needs nothing offers nothing — the
+                // actionable rows are the ones worth finding in a list of 20.
+                (false, None) => ExtensionAction::Status {
+                    label: state.clone(),
+                },
+                (false, Some(recovery))
+                    if crate::mcp::mcp_name_is_command_safe(&name)
+                        || matches!(
+                            recovery,
+                            crate::mcp::McpRecoveryKind::Connect
+                                | crate::mcp::McpRecoveryKind::Reconnect
+                                | crate::mcp::McpRecoveryKind::Diagnose
+                        ) =>
+                {
+                    ExtensionAction::Command {
+                        label: tr(locale, recovery.label_key()).into_owned(),
+                        command: recovery.slash_command(&name),
+                    }
                 }
-            } else if crate::mcp::mcp_name_is_command_safe(&name)
-                || matches!(
-                    recovery,
-                    crate::mcp::McpRecoveryKind::Connect
-                        | crate::mcp::McpRecoveryKind::Reconnect
-                        | crate::mcp::McpRecoveryKind::Diagnose
-                )
-            {
-                ExtensionAction::Command {
-                    label: tr(locale, recovery.label_key()).into_owned(),
-                    command: recovery.slash_command(&name),
-                }
-            } else {
-                ExtensionAction::Command {
+                (false, Some(_)) => ExtensionAction::Command {
                     label: tr(locale, MessageId::ExtensionsActionDiagnose).into_owned(),
                     command: "/mcp validate".into(),
-                }
+                },
             };
             ExtensionItem {
                 id: name.clone(),
+                tone: match (enabled, initializing, recovery) {
+                    (false, ..) => ExtensionTone::Idle,
+                    (true, true, _) => ExtensionTone::Attention,
+                    (true, false, None) => ExtensionTone::Ready,
+                    // A server that reports an error is broken; one that only
+                    // wants a login or a reconnect is waiting on a person.
+                    (true, false, Some(crate::mcp::McpRecoveryKind::Diagnose)) => {
+                        ExtensionTone::Failure
+                    }
+                    (true, false, Some(_)) => ExtensionTone::Attention,
+                },
                 label: name,
                 description: observed.map_or_else(String::new, |server| {
                     localize(
@@ -1019,15 +1202,31 @@ fn mcp_model(app: &App, locale: Locale) -> ExtensionsTabModel {
             }
         })
         .collect();
+    // Everything that needs a human leads. With twenty servers configured, the
+    // four that failed or want re-auth were impossible to pick out of a flat
+    // alphabetical list — founder live-test on the same screen. A server is
+    // "attention" exactly when it carries a recovery command; a healthy one
+    // renders its state and sorts below.
+    let (attention, healthy): (Vec<_>, Vec<_>) = items
+        .into_iter()
+        .partition(|item| item.action.as_ref().is_some_and(|a| a.command().is_some()));
+    let mut groups = Vec::new();
+    if !attention.is_empty() {
+        groups.push(ExtensionGroup {
+            id: "attention".into(),
+            label: tr(locale, MessageId::ExtensionsGroupNeedsAttention).into_owned(),
+            items: attention,
+        });
+    }
+    if !healthy.is_empty() {
+        groups.push(ExtensionGroup {
+            id: "servers".into(),
+            label: tr(locale, MessageId::ExtensionsGroupServers).into_owned(),
+            items: healthy,
+        });
+    }
     ExtensionsTabModel {
-        groups: (!items.is_empty())
-            .then(|| ExtensionGroup {
-                id: "servers".into(),
-                label: tr(locale, MessageId::ExtensionsGroupServers).into_owned(),
-                items,
-            })
-            .into_iter()
-            .collect(),
+        groups,
         problem: (configured.is_none() && app.mcp_configured_count > total).then(|| {
             localize(
                 locale,
@@ -1043,24 +1242,6 @@ enum ExtensionsFocus {
     Tabs,
     Search,
     List,
-}
-
-impl ExtensionsFocus {
-    const fn next(self) -> Self {
-        match self {
-            Self::Tabs => Self::Search,
-            Self::Search => Self::List,
-            Self::List => Self::Tabs,
-        }
-    }
-
-    const fn previous(self) -> Self {
-        match self {
-            Self::Tabs => Self::List,
-            Self::Search => Self::Tabs,
-            Self::List => Self::Search,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1087,13 +1268,19 @@ pub struct ExtensionsView {
     selected: [usize; 5],
     scroll: [usize; 5],
     folded_groups: BTreeSet<String>,
+    /// The live theme, captured at open so row ink resolves through the same
+    /// grammar the rest of the chrome uses instead of raw palette constants.
+    theme: crate::palette::UiTheme,
     hits: RefCell<HitAreas>,
 }
 
 impl ExtensionsView {
     #[must_use]
     pub fn new(app: &App, tab: ExtensionsTab) -> Self {
-        Self::from_snapshot_with_locale(ExtensionsSnapshot::from_app(app), tab, app.ui_locale)
+        let mut view =
+            Self::from_snapshot_with_locale(ExtensionsSnapshot::from_app(app), tab, app.ui_locale);
+        view.theme = app.ui_theme;
+        view
     }
 
     fn from_snapshot_with_locale(
@@ -1110,6 +1297,7 @@ impl ExtensionsView {
             selected: [0; 5],
             scroll: [0; 5],
             folded_groups: BTreeSet::new(),
+            theme: crate::palette::UI_THEME,
             hits: RefCell::new(HitAreas::default()),
         }
     }
@@ -1245,12 +1433,18 @@ impl ModalView for ExtensionsView {
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> ViewAction {
+        // One navigation grammar (grokbuild, the stated authority): Tab and
+        // Shift+Tab / BackTab move across the tab bar, always — even during
+        // a search, which keeps its query on the new tab. `/` searches, Esc
+        // backs out, ↑↓ move, Enter acts. Tab never cycles focus.
+        if key.code == KeyCode::BackTab
+            || (key.code == KeyCode::Tab && key.modifiers.contains(KeyModifiers::SHIFT))
+        {
+            self.set_tab(self.active_tab.previous());
+            return ViewAction::None;
+        }
         if key.code == KeyCode::Tab {
-            self.focus = if key.modifiers.contains(KeyModifiers::SHIFT) {
-                self.focus.previous()
-            } else {
-                self.focus.next()
-            };
+            self.set_tab(self.active_tab.next());
             return ViewAction::None;
         }
         if self.focus == ExtensionsFocus::Search {
@@ -1286,19 +1480,13 @@ impl ModalView for ExtensionsView {
                 self.focus = ExtensionsFocus::Search;
                 ViewAction::None
             }
-            KeyCode::Left if self.focus == ExtensionsFocus::Tabs => {
+            // Left/Right and `[`/`]` are the same move for hands that reach
+            // for them; the advertised chord is Tab.
+            KeyCode::Left | KeyCode::Char('[') | KeyCode::Char('h') => {
                 self.set_tab(self.active_tab.previous());
                 ViewAction::None
             }
-            KeyCode::Right if self.focus == ExtensionsFocus::Tabs => {
-                self.set_tab(self.active_tab.next());
-                ViewAction::None
-            }
-            KeyCode::Char('[') => {
-                self.set_tab(self.active_tab.previous());
-                ViewAction::None
-            }
-            KeyCode::Char(']') => {
+            KeyCode::Right | KeyCode::Char(']') | KeyCode::Char('l') => {
                 self.set_tab(self.active_tab.next());
                 ViewAction::None
             }
@@ -1472,33 +1660,52 @@ impl ModalView for ExtensionsView {
             } else {
                 Style::default().fg(palette::TEXT_PRIMARY)
             };
-            let text = match entry {
+            // Rows are built as (text, optional ink) pairs. The ink is what
+            // stops every row on the screen from reading the same: the action
+            // chip is an invitation, the state is a verdict, the description
+            // is background. A selected row keeps one style — a highlight the
+            // eye can follow beats four colours fighting a fill.
+            let mut parts: Vec<(String, Option<crate::palette::ChromeInk>)> = Vec::new();
+            match entry {
                 VisibleEntry::Group(group) => {
                     let folded = self.folded_groups.contains(&self.fold_key(group));
-                    format!(
-                        "{} {} ({})",
-                        if folded { "▸" } else { "▾" },
-                        group.label,
-                        group.items.len()
-                    )
+                    parts.push((
+                        format!(
+                            "{} {} ({})",
+                            if folded { "▸" } else { "▾" },
+                            group.label,
+                            group.items.len()
+                        ),
+                        None,
+                    ));
                 }
                 VisibleEntry::Item(_, item) => {
-                    let action = item
-                        .action
-                        .as_ref()
-                        .map(|action| format!("[{}] ", action.label()))
-                        .unwrap_or_default();
+                    parts.push(("  ".into(), None));
+                    if let Some(action) = item.action.as_ref() {
+                        parts.push((
+                            format!("[{}] ", action.label()),
+                            Some(match action {
+                                ExtensionAction::Command { .. } => {
+                                    crate::palette::ChromeInk::Identity
+                                }
+                                ExtensionAction::Status { .. } => item.tone.ink(),
+                            }),
+                        ));
+                    }
+                    parts.push((item.label.clone(), None));
+                    parts.push((format!(" [{}]", item.state), Some(item.tone.ink())));
                     if spacious && !item.description.is_empty() {
-                        format!(
-                            "  {action}{} [{}] — {}",
-                            item.label, item.state, item.description
-                        )
-                    } else {
-                        format!("  {action}{} [{}]", item.label, item.state)
+                        parts.push((
+                            format!(" — {}", item.description),
+                            Some(crate::palette::ChromeInk::MetadataHint),
+                        ));
                     }
                 }
-                VisibleEntry::Problem(problem) => format!("! {problem}"),
-                VisibleEntry::Empty => {
+                VisibleEntry::Problem(problem) => parts.push((
+                    format!("! {problem}"),
+                    Some(crate::palette::ChromeInk::Failure),
+                )),
+                VisibleEntry::Empty => parts.push((
                     if self.query.is_empty() {
                         tr(self.locale, MessageId::ExtensionsNoItems).into_owned()
                     } else {
@@ -1507,14 +1714,34 @@ impl ModalView for ExtensionsView {
                             MessageId::ExtensionsNoMatches,
                             &[("query", &self.query)],
                         )
-                    }
-                }
+                    },
+                    Some(crate::palette::ChromeInk::MetadataHint),
+                )),
+            }
+
+            // Truncate across the whole row, not per span, so the width bound
+            // is the one the flat row always had.
+            let joined = parts
+                .iter()
+                .map(|(text, _)| text.as_str())
+                .collect::<String>();
+            let clipped = truncate_view_text(&joined, usize::from(row_area.width));
+            let spans = if is_selected || clipped.len() != joined.len() {
+                vec![Span::styled(clipped, style)]
+            } else {
+                parts
+                    .into_iter()
+                    .filter(|(text, _)| !text.is_empty())
+                    .map(|(text, ink)| {
+                        let span_style = match ink {
+                            Some(ink) => Style::default().fg(ink.color(&self.theme)),
+                            None => style,
+                        };
+                        Span::styled(text, span_style)
+                    })
+                    .collect()
             };
-            Paragraph::new(Line::from(Span::styled(
-                truncate_view_text(&text, usize::from(row_area.width)),
-                style,
-            )))
-            .render(row_area, buf);
+            Paragraph::new(Line::from(spans)).render(row_area, buf);
             hits.rows.push((row_area, entry_index));
         }
 
@@ -1525,7 +1752,7 @@ impl ModalView for ExtensionsView {
         )))
         .render(rows[3], buf);
         let compact_hints = [
-            super::ActionHint::new("Tab", tr(self.locale, MessageId::ExtensionsActionFocus)),
+            super::ActionHint::new("Tab", tr(self.locale, MessageId::ExtensionsActionTabs)),
             super::ActionHint::new("/", tr(self.locale, MessageId::SessionsActionSearch)),
             super::ActionHint::new("Esc", tr(self.locale, MessageId::SessionsActionClose)),
         ];
@@ -1540,8 +1767,7 @@ impl ModalView for ExtensionsView {
             _ => tr(self.locale, MessageId::ExtensionsActionFold).into_owned(),
         };
         let full_hints = [
-            super::ActionHint::new("Tab", tr(self.locale, MessageId::ExtensionsActionFocus)),
-            super::ActionHint::new("[ ]", tr(self.locale, MessageId::ExtensionsActionTabs)),
+            super::ActionHint::new("Tab", tr(self.locale, MessageId::ExtensionsActionTabs)),
             super::ActionHint::new("↑↓", tr(self.locale, MessageId::LaunchHintMove)),
             super::ActionHint::new("Enter", enter_label),
             super::ActionHint::new("/", tr(self.locale, MessageId::SessionsActionSearch)),
@@ -1572,17 +1798,88 @@ mod tests {
     #[test]
     fn mcp_item_action_for_stale_oauth_is_login() {
         let recovery =
-            crate::mcp::mcp_recovery_kind(true, true, false, Some("401 Unauthorized"), true);
+            crate::mcp::mcp_recovery_kind(true, true, false, Some("401 Unauthorized"), true)
+                .expect("stale oauth needs recovery");
         assert_eq!(recovery, McpRecoveryKind::Reauth);
         assert_eq!(recovery.slash_command("github"), "/mcp login github");
         assert_eq!(tr(Locale::En, recovery.label_key()).as_ref(), "re-auth");
     }
 
     #[test]
+    fn a_healthy_server_offers_no_recovery_action() {
+        // Founder live-test: "even the ones that are connected say diagnose
+        // lol". Enabled, inspected, connected and erroring on nothing is not
+        // a state anything repairs.
+        assert_eq!(
+            crate::mcp::mcp_recovery_kind(true, true, true, None, false),
+            None
+        );
+    }
+
+    #[test]
     fn mcp_item_action_for_disconnected_server_is_reconnect() {
-        let recovery = crate::mcp::mcp_recovery_kind(true, true, false, None, false);
+        let recovery = crate::mcp::mcp_recovery_kind(true, true, false, None, false)
+            .expect("a disconnected server needs recovery");
         assert_eq!(recovery, McpRecoveryKind::Reconnect);
         assert_eq!(recovery.slash_command("playwright"), "/mcp reload");
         assert_eq!(tr(Locale::En, recovery.label_key()).as_ref(), "reconnect");
+    }
+
+    /// Four distinct tones, four distinct inks, and none of them read out of
+    /// a localized string — a screen that only colours correctly in English
+    /// is not coloured.
+    #[test]
+    fn every_tone_paints_a_distinct_ink() {
+        use crate::palette::ChromeInk;
+        let theme = crate::palette::ThemeId::Whale.ui_theme();
+        let inks: Vec<ChromeInk> = [
+            ExtensionTone::Ready,
+            ExtensionTone::Attention,
+            ExtensionTone::Failure,
+            ExtensionTone::Idle,
+        ]
+        .into_iter()
+        .map(ExtensionTone::ink)
+        .collect();
+        let colors: std::collections::BTreeSet<String> = inks
+            .iter()
+            .map(|ink| format!("{:?}", ink.color(&theme)))
+            .collect();
+        assert_eq!(
+            colors.len(),
+            4,
+            "each tone must be visually separable: {inks:?}"
+        );
+        assert_eq!(ExtensionTone::default(), ExtensionTone::Idle);
+    }
+
+    /// The grokbuild grammar: Tab / Shift+Tab move across the tab bar, even
+    /// mid-search, and the query rides along to the new tab.
+    #[test]
+    fn tab_switches_tabs_and_keeps_the_search_query() {
+        use crate::tui::views::ModalView;
+        let mut view = ExtensionsView::from_snapshot_with_locale(
+            ExtensionsSnapshot::default(),
+            ExtensionsTab::Plugins,
+            Locale::En,
+        );
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        view.handle_key(key(KeyCode::Char('/')));
+        view.handle_key(key(KeyCode::Char('g')));
+        assert_eq!(view.focus, ExtensionsFocus::Search);
+
+        view.handle_key(key(KeyCode::Tab));
+        assert_eq!(view.active_tab, ExtensionsTab::Marketplace);
+        assert_eq!(view.query, "g", "the query carries over to the new tab");
+
+        view.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT));
+        assert_eq!(view.active_tab, ExtensionsTab::Plugins);
+        view.handle_key(key(KeyCode::BackTab));
+        assert_eq!(view.active_tab, ExtensionsTab::Hooks);
+
+        // Wraps: the last tab's next is the first.
+        view.set_tab(ExtensionsTab::Mcp);
+        view.handle_key(key(KeyCode::Tab));
+        assert_eq!(view.active_tab, ExtensionsTab::Hooks);
     }
 }

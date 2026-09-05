@@ -54,9 +54,6 @@ pub enum LaunchAction {
     /// The see-all overflow: open the full session picker.
     BrowseSessions,
     Help,
-    /// Submit the composed pre-session message: begin the launch session,
-    /// then hand the text to the normal composer dispatch path.
-    SendComposer,
 }
 
 /// Translate a launch key into one product action. Reached only through
@@ -184,6 +181,40 @@ pub fn launch_row_click_action(id: &crate::tui::app::LaunchRowId) -> LaunchActio
     }
 }
 
+/// Ask before resuming: open the confirmation popup for `session_id`.
+///
+/// Both the card's Enter and a click on a recent row route here. Resuming
+/// replaces the whole session context, and the popup is where that is said —
+/// an arming line over the composer read as chrome rather than as a question.
+pub fn open_launch_resume_confirm(app: &mut App, session_id: &str) {
+    if app.view_stack.top_kind() == Some(crate::tui::views::ModalKind::LaunchResumeConfirm) {
+        return;
+    }
+    let entry = app
+        .launch
+        .recent
+        .iter()
+        .find(|entry| entry.id == session_id);
+    let title = entry
+        .map(|entry| entry.title.clone())
+        .unwrap_or_else(|| session_id.to_string());
+    let detail = entry
+        .map(|entry| {
+            let when =
+                crate::tui::session_picker::format_relative_time(&entry.updated_at, app.ui_locale);
+            format!("{when} · {} msgs", entry.message_count)
+        })
+        .unwrap_or_default();
+    app.view_stack.push(
+        crate::tui::launch_resume_confirm::LaunchResumeConfirmView::new(
+            session_id.to_string(),
+            title,
+            detail,
+            app.ui_locale,
+        ),
+    );
+    app.needs_redraw = true;
+}
 /// Run the card's highlighted row. Enter on the card is the list's runner;
 /// an untouched list runs nothing.
 pub fn run_launch_card_row(rows: &[LaunchCardRow], menu_selected: Option<usize>) -> LaunchAction {
@@ -925,476 +956,6 @@ fn truncate_to_width(text: &str, width: usize) -> String {
     result
 }
 
-fn render_launch_content_line(
-    area: Rect,
-    buf: &mut Buffer,
-    y: u16,
-    inset: u16,
-    spans: Vec<Span<'static>>,
-) {
-    if y >= area.height {
-        return;
-    }
-    let inset = inset.min(area.width / 2);
-    Paragraph::new(Line::from(spans)).render(
-        Rect {
-            x: area.x.saturating_add(inset),
-            y: area.y.saturating_add(y),
-            width: area.width.saturating_sub(inset.saturating_mul(2)),
-            height: 1,
-        },
-        buf,
-    );
-}
-
-/// Where the pre-session composer strip docks inside the startup stage.
-///
-/// The dock owns the stage spacer's bottom rows (spec §5b: composer
-/// `Length(4)` incl. border, below the option strip and above the merged
-/// footer). At its full size, the shared rounded shell uses the two interior
-/// rows for input and localized submit guidance. Compact terminals retain the
-/// one-line projection rather than claiming borders they cannot render.
-/// Rows are stage-relative; `None` when the stage cannot fit even the input
-/// row.
-fn launch_composer_rows(stage: Rect) -> Option<(u16, u16)> {
-    let dock = startup_layout(stage).dock;
-    let input_y = if dock.height >= crate::tui::composer_chrome::TIDELINE_COMPOSER_HEIGHT {
-        dock.y.saturating_sub(stage.y).saturating_add(1)
-    } else {
-        dock.y.saturating_sub(stage.y)
-    };
-    (dock.height >= 1).then_some((input_y, input_y.saturating_add(1)))
-}
-
-fn launch_compact_composer_rows(stage: Rect) -> Option<(u16, u16)> {
-    let dock = startup_layout(stage).dock;
-    let input_y = dock.y.saturating_sub(stage.y);
-    (dock.height >= 1).then_some((input_y, input_y.saturating_add(1)))
-}
-
-/// The line the caret sits on in a multi-line composer buffer, plus the
-/// caret's column within that line. The launch strip projects one row, so a
-/// Shift+Enter newline is truthfully shown as the line being edited.
-fn launch_cursor_line(text: &str, caret: usize) -> (&str, usize) {
-    let mut consumed = 0usize;
-    for line in text.split('\n') {
-        let len = line.chars().count();
-        if caret <= consumed + len {
-            return (line, caret - consumed);
-        }
-        consumed += len + 1;
-    }
-    ("", 0)
-}
-
-/// Visible `(before_caret, after_caret)` text for the caret's line so the
-/// single-row projection keeps the caret on screen while editing.
-fn launch_caret_window(line: &str, caret_col: usize, budget: usize) -> (String, String) {
-    let chars: Vec<char> = line.chars().collect();
-    let caret_col = caret_col.min(chars.len());
-    // The budget is display columns, not characters: CJK and emoji occupy
-    // two cells, and a character-count slice let a wide draft push the caret
-    // past the clip end (review finding 4 — the caret vanished on
-    // CJK/emoji-heavy lines because the downstream truncation cuts from the
-    // end). Accumulate backward from the caret by rendered width so the
-    // caret always lands inside the budget, then fill forward with whatever
-    // width remains.
-    let before_budget = budget.saturating_sub(1);
-    let mut before = String::new();
-    let mut before_width = 0usize;
-    for &ch in chars[..caret_col].iter().rev() {
-        let ch_width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
-        if before_width.saturating_add(ch_width) > before_budget {
-            break;
-        }
-        before_width += ch_width;
-        before.insert(0, ch);
-    }
-    let after_budget = budget.saturating_sub(before_width + 1);
-    let mut after = String::new();
-    let mut after_width = 0usize;
-    for &ch in chars[caret_col..].iter() {
-        let ch_width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
-        if after_width.saturating_add(ch_width) > after_budget {
-            break;
-        }
-        after_width += ch_width;
-        after.push(ch);
-    }
-    (before, after)
-}
-
-/// Same caret convention as the worktree name prompt on this screen: a
-/// static block that low_motion renders as an underscore.
-fn launch_cursor_glyph(low_motion: bool) -> &'static str {
-    if low_motion { "_" } else { "▌" }
-}
-
-/// Paint the active completion popup for the launch composer (#5698 review
-/// finding 2: the menus existed — the conversation composer match drove
-/// them — but the launch screen returned before `ComposerWidget`, so typing
-/// `/mo` showed nothing). A compact list directly above the input row; the
-/// same entries, the same selected-row convention, and the same mention-
-/// before-slash precedence as the session popup inside `ComposerWidget`.
-pub fn render_launch_completion_popup(
-    area: Rect,
-    buf: &mut Buffer,
-    app: &App,
-    input_y: u16,
-    slash_menu_entries: &[crate::tui::widgets::SlashMenuEntry],
-    mention_menu_entries: &[String],
-) {
-    if !app.launch.composer_focus {
-        return;
-    }
-    // Rows are (marker, label, description) rendered as one inset line.
-    let rows: Vec<(bool, String, String)> = if !mention_menu_entries.is_empty() {
-        let selected = app
-            .mention_menu_selected
-            .min(mention_menu_entries.len().saturating_sub(1));
-        mention_menu_entries
-            .iter()
-            .enumerate()
-            .map(|(i, entry)| (i == selected, format!("@{entry}"), String::new()))
-            .collect()
-    } else if !slash_menu_entries.is_empty() {
-        let selected = app
-            .slash_menu_selected
-            .min(slash_menu_entries.len().saturating_sub(1));
-        slash_menu_entries
-            .iter()
-            .enumerate()
-            .map(|(i, e)| {
-                let label = if let Some(ref hint) = e.alias_hint {
-                    format!("{} or /{}", e.name, hint)
-                } else {
-                    e.name.clone()
-                };
-                (i == selected, label, e.description.clone())
-            })
-            .collect()
-    } else {
-        return;
-    };
-
-    // Popup rows stack upward from the composer input row; never past the
-    // header rule, and never more than eight.
-    let max_rows = (input_y.saturating_sub(2) as usize).min(8);
-    if max_rows == 0 {
-        return;
-    }
-    // Show the tail around the selection like the session popup scrolls.
-    let total = rows.len();
-    let selected_idx = rows.iter().position(|(sel, _, _)| *sel).unwrap_or(0);
-    let top = if total <= max_rows {
-        0
-    } else {
-        let half = max_rows / 2;
-        if selected_idx <= half {
-            0
-        } else if selected_idx + half >= total {
-            total - max_rows
-        } else {
-            selected_idx - half
-        }
-    };
-    for (offset, (is_selected, label, description)) in rows
-        .iter()
-        .enumerate()
-        .skip(top)
-        .take(max_rows)
-        .map(|(_, row)| row.clone())
-        .enumerate()
-    {
-        let y = input_y - 1 - offset as u16;
-        let style = if is_selected {
-            crate::tui::menu_style::selected_row_bg_style().fg(crate::palette::SELECTION_TEXT)
-        } else {
-            Style::default().fg(app.ui_theme.text_muted)
-        };
-        let marker = crate::tui::glyphs::selection_marker(is_selected);
-        let mut line = format!("{marker} {label}");
-        if !description.is_empty() {
-            let used = line.width();
-            let budget = usize::from(area.width)
-                .saturating_sub(4)
-                .saturating_sub(used + 2);
-            if budget > 1 {
-                line.push_str("  ");
-                line.push_str(&truncate_to_width(description.as_str(), budget));
-            }
-        }
-        render_launch_content_line(
-            area,
-            buf,
-            y,
-            2,
-            vec![Span::styled(
-                truncate_to_width(&line, usize::from(area.width).saturating_sub(4)),
-                style,
-            )],
-        );
-    }
-}
-
-/// The pre-session composer's display projection — everything the docked
-/// strip paints, injected so the startup stage stays a deterministic
-/// widget for golden buffers (the everything-injectable law
-/// `TidelineStartup` follows). Built from `App` by
-/// [`LaunchComposerDisplay::from_app`]; the row painting itself is
-/// `render_launch_composer` — #5698's docked strip, reused line-for-line
-/// and re-docked below the option strip.
-#[derive(Debug, Clone)]
-pub struct LaunchComposerDisplay<'a> {
-    /// Whether the composer holds keyboard focus (`launch.composer_focus`).
-    pub focused: bool,
-    /// The session composer's own draft (`composer_display_input`).
-    pub input: &'a str,
-    /// The caret position inside `input` (`composer_display_cursor`).
-    pub caret: usize,
-    /// Low-motion mode renders the caret as an underscore.
-    pub low_motion: bool,
-    /// The empty composer's placeholder.
-    pub placeholder: std::borrow::Cow<'a, str>,
-    /// The composer's hint line (Enter / Shift+Enter / Esc). The stage's
-    /// transient status line paints over it while the worktree prompt has
-    /// the keyboard.
-    pub hint: std::borrow::Cow<'a, str>,
-    /// Mirrors the shared composer preference. The default Tideline startup
-    /// surface uses the rounded enclosure; an explicit compact opt-out keeps
-    /// the legacy one-line projection only where the setting asks for it.
-    pub enclosed: bool,
-}
-
-impl Default for LaunchComposerDisplay<'_> {
-    fn default() -> Self {
-        Self {
-            focused: false,
-            input: "",
-            caret: 0,
-            low_motion: false,
-            placeholder: Cow::Borrowed(""),
-            hint: Cow::Borrowed(""),
-            enclosed: true,
-        }
-    }
-}
-
-impl<'a> LaunchComposerDisplay<'a> {
-    /// Project the session's own composer state — the single input
-    /// authority; the launch dock only re-frames it.
-    #[must_use]
-    pub fn from_app(app: &'a App) -> Self {
-        Self {
-            focused: app.launch.composer_focus,
-            input: app.composer_display_input(),
-            caret: app.composer_display_cursor(),
-            low_motion: app.low_motion,
-            placeholder: tr(app.ui_locale, MessageId::ComposerPlaceholder),
-            hint: tr(app.ui_locale, MessageId::LaunchComposerHint),
-            enclosed: app.composer_border,
-        }
-    }
-}
-
-/// Draw the docked pre-session composer strip: the session's own
-/// `ComposerState` projected as one bottom-docked row — prompt glyph,
-/// caret line or placeholder, and a send glyph — with its hint line
-/// beneath. This is the same composer state the conversation view edits,
-/// not a second input system; only the geometry is the startup stage's
-/// dock.
-#[allow(clippy::too_many_arguments)] // pre-existing baseline signature; FEAT-022 gate repair
-fn render_launch_composer(
-    area: Rect,
-    buf: &mut Buffer,
-    theme: &UiTheme,
-    display: &LaunchComposerDisplay<'_>,
-    input_y: u16,
-    hint_y: u16,
-    panel_area: Option<Rect>,
-    status_line: Option<&str>,
-    ascii_safe: bool,
-    bottom_rule: Option<&str>,
-) {
-    let focused = display.focused;
-    if let Some(panel_area) = panel_area {
-        crate::tui::composer_chrome::render_tideline_composer_shell(
-            panel_area, buf, theme, focused, ascii_safe,
-        );
-        // The launch rule: `model (effort) · permission` trailing right on
-        // the bottom border — the route's one reading while the card is up.
-        if let Some(rule) = bottom_rule
-            && panel_area.height >= 4
-        {
-            let rule = truncate_to_width(rule, usize::from(panel_area.width.saturating_sub(4)));
-            let rule_w = rule.width() as u16;
-            let rule_x = panel_area
-                .right()
-                .saturating_sub(1)
-                .saturating_sub(rule_w)
-                .max(panel_area.x + 1);
-            set_span(
-                buf,
-                rule_x,
-                panel_area.y + panel_area.height - 1,
-                &Span::styled(rule, chrome(theme, ChromeInk::Metadata)),
-            );
-        }
-        let geometry = crate::tui::composer_chrome::tideline_composer_geometry(panel_area);
-        let content_width = usize::from(geometry.content.width);
-        if content_width == 0 {
-            return;
-        }
-        let text_budget = content_width.saturating_sub(2);
-        let prompt_style = if focused {
-            theme.accent_primary
-        } else {
-            theme.text_hint
-        };
-        let input = display.input;
-        let caret = launch_cursor_glyph(display.low_motion);
-        let body = if input.is_empty() {
-            if focused {
-                caret.to_string()
-            } else {
-                display.placeholder.to_string()
-            }
-        } else if focused {
-            let (line, col) = launch_cursor_line(input, display.caret);
-            let (before, after) = launch_caret_window(line, col, text_budget);
-            format!("{before}{caret}{after}")
-        } else {
-            let (line, _) = launch_cursor_line(input, display.caret);
-            line.to_string()
-        };
-        let body_style = if focused {
-            theme.text_body
-        } else if input.is_empty() {
-            theme.text_hint
-        } else {
-            theme.text_muted
-        };
-        Paragraph::new(Line::from(vec![
-            Span::styled("❯", Style::default().fg(prompt_style)),
-            Span::raw(" "),
-            Span::styled(
-                truncate_to_width(&body, text_budget),
-                Style::default().fg(body_style),
-            ),
-        ]))
-        .render(
-            Rect {
-                x: geometry.content.x,
-                y: geometry.content.y,
-                width: content_width as u16,
-                height: 1,
-            },
-            buf,
-        );
-
-        let hint = status_line
-            .map(Cow::Borrowed)
-            .unwrap_or_else(|| display.hint.clone());
-        if geometry.content.height >= 2 {
-            Paragraph::new(Line::from(Span::styled(
-                truncate_to_width(hint.as_ref(), content_width),
-                Style::default().fg(if status_line.is_some() {
-                    theme.text_body
-                } else if focused {
-                    theme.text_hint
-                } else {
-                    theme.text_dim
-                }),
-            )))
-            .render(
-                Rect {
-                    x: geometry.content.x,
-                    y: geometry.content.y.saturating_add(1),
-                    width: content_width as u16,
-                    height: 1,
-                },
-                buf,
-            );
-        }
-        return;
-    }
-
-    let content_width = usize::from(area.width).saturating_sub(4);
-    if content_width == 0 {
-        return;
-    }
-    // Inside the row: prompt glyph + space up front, the send affordance's
-    // last two columns, and the input between them.
-    let text_budget = content_width.saturating_sub(4);
-    let prompt_style = if focused {
-        theme.accent_primary
-    } else {
-        theme.text_hint
-    };
-    let mut spans = vec![
-        Span::styled("❯", Style::default().fg(prompt_style)),
-        Span::raw(" "),
-    ];
-
-    let input = display.input;
-    let caret = launch_cursor_glyph(display.low_motion);
-    let body = if input.is_empty() {
-        if focused {
-            caret.to_string()
-        } else {
-            display.placeholder.to_string()
-        }
-    } else if focused {
-        let (line, col) = launch_cursor_line(input, display.caret);
-        let (before, after) = launch_caret_window(line, col, text_budget);
-        format!("{before}{caret}{after}")
-    } else {
-        let (line, _) = launch_cursor_line(input, display.caret);
-        line.to_string()
-    };
-    let body_style = if focused {
-        theme.text_body
-    } else if input.is_empty() {
-        theme.text_hint
-    } else {
-        theme.text_muted
-    };
-    let body = truncate_to_width(&body, text_budget);
-    let body_width = body.width();
-    spans.push(Span::styled(body, Style::default().fg(body_style)));
-
-    let send_style = if input.trim().is_empty() {
-        theme.text_hint
-    } else {
-        theme.accent_action
-    };
-    spans.push(Span::raw(
-        " ".repeat(text_budget.saturating_sub(body_width)),
-    ));
-    spans.push(Span::styled(" ↑", Style::default().fg(send_style)));
-    render_launch_content_line(area, buf, input_y, 2, spans);
-
-    // In the dock's compact tiers the hint row is the shared prompt row —
-    // the stage's transient status line paints over it after — so the row
-    // only has to exist inside the stage.
-    if hint_y < area.height {
-        let hint = display.hint.clone();
-        render_launch_content_line(
-            area,
-            buf,
-            hint_y,
-            2,
-            vec![Span::styled(
-                truncate_to_width(hint.as_ref(), content_width),
-                Style::default().fg(if focused {
-                    theme.text_hint
-                } else {
-                    theme.text_dim
-                }),
-            )],
-        );
-    }
-}
 #[allow(dead_code)] // classic header/band renderer: superseded by the Tideline shell
 // (topbar + merged footer, spec §3, 2026-08-29); deletion is its own slice.
 fn compact_tokens(tokens: i64) -> String {
@@ -1922,9 +1483,38 @@ fn empty_state_caption(
     shorten_workspace(workspace, 1)
 }
 
+/// The launch card as the idle transcript's own content, plus where its
+/// clickable rows landed.
+///
+/// The opening screen used to be a second surface: its own layout, its own
+/// composer widget, its own input authority. Founder ruling: "we don't have
+/// to have a different look for the opening screen ... we can make it an
+/// asset that exists there instead". So it is drawn as the empty state of the
+/// ordinary transcript — the ocean, the water and the chrome underneath it are
+/// the ones every other screen already uses, and the composer below it is the
+/// real one.
+pub struct LaunchEmptyState {
+    pub lines: Vec<Line<'static>>,
+    /// Clickable rows as `(id, row index within `lines`)`. The caller turns
+    /// these into rects against the painted area, so hitboxes and glyphs
+    /// cannot drift apart.
+    pub rows: Vec<(crate::tui::app::LaunchRowId, usize)>,
+}
+
+/// Left indent for the whole block. Small: this is a top-left anchor, not a
+/// centred hero.
+const LAUNCH_BLOCK_INDENT: usize = 2;
+/// Column gap between the mark and the text beside it.
+const LAUNCH_MARK_GAP: usize = 3;
+
 pub fn empty_state_lines(app: &App, area: Rect) -> Vec<Line<'static>> {
     if area.width == 0 || area.height == 0 {
         return Vec::new();
+    }
+    // The opening screen is this screen: the launch card is the idle
+    // transcript's own content, not a second surface painted over it.
+    if app.launch.visible {
+        return launch_empty_state(app, area).lines;
     }
     let width = usize::from(area.width);
     let mut lines = vec![Line::from(""); usize::from(area.height / 4)];
@@ -1980,780 +1570,163 @@ pub fn empty_state_lines(app: &App, area: Rect) -> Vec<Line<'static>> {
     lines
 }
 
-#[cfg(test)]
-mod launch_contract_tests {
-    use super::{
-        LaunchAction, LaunchRecentEntry, handle_launch_key, launch_card_rows,
-        launch_row_click_action, run_launch_card_row,
+pub fn launch_empty_state(app: &App, area: Rect) -> LaunchEmptyState {
+    let width = usize::from(area.width);
+    let theme = &app.ui_theme;
+    let locale = app.ui_locale;
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut rows: Vec<(crate::tui::app::LaunchRowId, usize)> = Vec::new();
+
+    // The mark rides beside the text rather than above it, so the block reads
+    // as one top-left unit. It sheds a rung at a time, then out entirely,
+    // before any row of text is given up. ASCII-safe terminals get no mark.
+    let mark_rung = if crate::tui::color_compat::ascii_safe_enabled() {
+        None
+    } else if width >= 64 && area.height >= 10 {
+        Some(MarkSize::Large)
+    } else if width >= 44 && area.height >= 7 {
+        Some(MarkSize::Small)
+    } else if width >= 32 && area.height >= 5 {
+        Some(MarkSize::Tiny)
+    } else {
+        None
     };
-    use crate::localization::Locale;
-    use crate::tui::app::{LaunchRowId, LaunchState};
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-
-    fn launch_state() -> LaunchState {
-        LaunchState {
-            visible: true,
-            status: None,
-            workspace: std::env::temp_dir(),
-            recent: Vec::new(),
-            total_workspace_sessions: 0,
-            composer_focus: true,
-            composer_area: None,
-            send_area: None,
-            row_hitboxes: Vec::new(),
-            hovered_row: None,
-            menu_selected: None,
-            dissolve_started_ms: None,
-            claude_code_detected: false,
-            sixel_cell_px: None,
-            sixel_terminal_bg: None,
-            sixel_mark_area: None,
-            sixel_emitted: None,
-        }
-    }
-
-    fn recent_entry(id: &str) -> LaunchRecentEntry {
-        LaunchRecentEntry {
-            id: id.to_string(),
-            title: format!("title {id}"),
-            detail: "2h ago · 4 msgs".to_string(),
-        }
-    }
-
-    #[test]
-    fn only_f1_survives_as_a_launch_key() {
-        // The old ctrl+n/r/l/q menu chords are gone: those keys belong to
-        // the composer authority now, so the launch key handler yields
-        // nothing for them.
-        let key = |code, mods| KeyEvent::new(code, mods);
-        let ctrl = KeyModifiers::CONTROL;
-        let none = KeyModifiers::NONE;
-        let mut launch = launch_state();
-        assert_eq!(
-            handle_launch_key(&mut launch, key(KeyCode::F(1), none), Locale::En),
-            LaunchAction::Help
-        );
-        assert!(launch.composer_focus, "F1 leaves the composer focused");
-        for code in [
-            KeyCode::Char('n'),
-            KeyCode::Char('r'),
-            KeyCode::Char('l'),
-            KeyCode::Char('q'),
-            KeyCode::Char('p'),
-            KeyCode::Char('w'),
-            KeyCode::Enter,
-            KeyCode::Down,
-        ] {
-            for mods in [none, ctrl] {
-                let mut launch = launch_state();
-                assert_eq!(
-                    handle_launch_key(&mut launch, key(code, mods), Locale::En),
-                    LaunchAction::None,
-                    "{code:?} with {mods:?} is not a launch action"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn card_rows_run_new_resume_and_see_all() {
-        let rows = launch_card_rows(
-            Locale::En,
-            &[recent_entry("abc"), recent_entry("def")],
-            true,
-        );
-        // New session, two recents, then the see-all overflow.
-        assert_eq!(rows.len(), 4);
-        assert!(rows[0].prominent);
-        assert_eq!(run_launch_card_row(&rows, None), LaunchAction::None);
-        assert_eq!(
-            run_launch_card_row(&rows, Some(0)),
-            LaunchAction::NewSession
-        );
-        assert_eq!(
-            run_launch_card_row(&rows, Some(1)),
-            LaunchAction::ResumeSession("abc".to_string())
-        );
-        assert_eq!(
-            run_launch_card_row(&rows, Some(2)),
-            LaunchAction::ResumeSession("def".to_string())
-        );
-        assert_eq!(
-            run_launch_card_row(&rows, Some(3)),
-            LaunchAction::BrowseSessions
-        );
-        assert_eq!(run_launch_card_row(&rows, Some(99)), LaunchAction::None);
-        // Clicks run the same actions as the keyboard's Enter.
-        assert_eq!(
-            launch_row_click_action(&LaunchRowId::NewSession),
-            LaunchAction::NewSession
-        );
-        assert_eq!(
-            launch_row_click_action(&LaunchRowId::Recent("abc".to_string())),
-            LaunchAction::ResumeSession("abc".to_string())
-        );
-        assert_eq!(
-            launch_row_click_action(&LaunchRowId::SeeAll),
-            LaunchAction::BrowseSessions
-        );
-    }
-
-    #[test]
-    fn card_rows_omit_the_overflow_when_nothing_sits_behind() {
-        let rows = launch_card_rows(Locale::En, &[], false);
-        assert_eq!(rows.len(), 1, "only the new-session entry");
-        assert!(rows[0].prominent);
-        assert_eq!(
-            run_launch_card_row(&rows, Some(0)),
-            LaunchAction::NewSession
-        );
-    }
-}
-
-#[cfg(test)]
-mod launch_composer_tests {
-    use super::{
-        LaunchAction, LaunchComposerKey, apply_launch_hitboxes, handle_launch_composer_key,
-        handle_launch_key, launch_composer_rows, launch_rows_for_app,
-        render_launch_completion_popup, render_tideline_startup, run_launch_card_row,
-        tideline_startup_from_app, tideline_startup_hitboxes,
+    let (mark_rows, mark_width): (Vec<&'static str>, usize) = match mark_rung {
+        None => (Vec::new(), 0),
+        Some(rung) => (rung.rows().to_vec(), usize::from(rung.cells().0)),
     };
-    use crate::localization::{Locale, MessageId, tr};
-    use crate::tui::app::App;
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-    use ratatui::buffer::Buffer;
-    use ratatui::layout::Rect;
+    let text_indent = LAUNCH_BLOCK_INDENT
+        + if mark_width == 0 {
+            0
+        } else {
+            mark_width + LAUNCH_MARK_GAP
+        };
+    let text_width = width.saturating_sub(text_indent).max(8);
 
-    /// The four supported TERMINAL sizes from the Tideline responsiveness
-    /// contract, exercised by every test in this module. The startup stage
-    /// is the terminal minus the topbar and the merged footer (two rows).
-    const LAUNCH_SIZES: [(u16, u16); 4] = [(40, 12), (60, 16), (80, 24), (140, 40)];
+    let (entries, has_more) = launch_recent_entries(app);
+    let card_rows = launch_card_rows(locale, &entries, has_more);
 
-    fn launch_app() -> App {
-        let mut app = crate::test_support::test_app_with_options(
-            crate::test_support::test_tui_options(std::env::temp_dir()),
+    // The text column, in order. `None` is a blank row.
+    let mut text: Vec<Option<Line<'static>>> = Vec::new();
+    text.push(Some(Line::from(vec![
+        Span::styled(
+            "codewhale ".to_string(),
+            Style::default().fg(theme.accent_primary).bold(),
+        ),
+        Span::styled(
+            format!("v{}", env!("CODEWHALE_BUILD_VERSION")),
+            Style::default().fg(theme.text_muted),
+        ),
+    ])));
+    // What to press, on the one screen where it has not been learned yet.
+    text.push(Some(Line::from(Span::styled(
+        truncate_to_width(
+            &tr(locale, MessageId::LaunchHelpLine).replace(
+                "{dock}",
+                crate::tui::shell_key_routing::binding(
+                    crate::tui::shell_key_routing::ShellBindingId::ViewCycle,
+                )
+                .footer_chord,
+            ),
+            text_width,
+        ),
+        Style::default().fg(theme.text_hint),
+    ))));
+    // The migration notice, while there is still a question to answer. It
+    // retires for good once `/import-claude` has been run.
+    if app.launch.claude_code_detected {
+        text.push(Some(Line::from(Span::styled(
+            truncate_to_width(&tr(locale, MessageId::LaunchNoticeClaude), text_width),
+            Style::default().fg(theme.text_muted),
+        ))));
+    }
+    text.push(None);
+
+    for row in &card_rows {
+        let style = if row.prominent {
+            Style::default().fg(theme.accent_action).bold()
+        } else {
+            Style::default().fg(theme.text_soft)
+        };
+        let label = truncate_to_width(
+            &row.label,
+            text_width.saturating_sub(row.detail.width() + 2),
         );
-        app.onboarding = crate::tui::app::OnboardingState::None;
-        app.low_motion = false;
-        app.launch.visible = true;
-        app
-    }
-
-    /// The frame's stage slot for one terminal size (spec §5b: topbar 1,
-    /// stage Min(1), footer 1) — the rect `render_tideline_startup` owns.
-    fn stage_for(width: u16, height: u16) -> Rect {
-        Rect::new(0, 1, width, height.saturating_sub(2))
-    }
-
-    /// Render the launch surface's stage exactly as `frame.rs` does: the
-    /// projected startup widget (header, state line, docked composer), with
-    /// the hitboxes applied as the frame applies them.
-    fn render(app: &App, width: u16, height: u16) -> (Buffer, Rect) {
-        let area = stage_for(width, height);
-        let mut buf = Buffer::empty(area);
-        let startup = tideline_startup_from_app(app);
-        render_tideline_startup(area, &mut buf, &startup);
-        let mut hitboxes = tideline_startup_hitboxes(area);
-        hitboxes.rows = super::tideline_startup_row_hitboxes(area, &startup);
-        let mut launch = app.launch.clone();
-        apply_launch_hitboxes(&hitboxes, &mut launch);
-        (buf, area)
-    }
-
-    fn recent_fixture(id: &str, title: &str) -> super::LaunchRecentEntry {
-        super::LaunchRecentEntry {
-            id: id.to_string(),
-            title: title.to_string(),
-            detail: "2h ago · 4 msgs".to_string(),
+        let pad = text_width
+            .saturating_sub(label.width())
+            .saturating_sub(row.detail.width());
+        let mut spans = vec![Span::styled(label, style)];
+        if !row.detail.is_empty() {
+            spans.push(Span::styled(" ".repeat(pad), Style::default()));
+            spans.push(Span::styled(
+                row.detail.clone(),
+                Style::default().fg(theme.text_dim),
+            ));
         }
-    }
-
-    #[test]
-    fn caret_window_budgets_by_display_width_so_wide_drafts_keep_the_caret() {
-        use unicode_width::UnicodeWidthStr;
-        // 12 CJK characters = 24 display cells against a 9-column budget:
-        // a character-count slice kept 8 CHARACTERS (16 cells) and pushed
-        // the caret past the clip end (review finding 4).
-        let line = "你好世界你好世界你好世界";
-        let (before, after) = super::launch_caret_window(line, line.chars().count(), 9);
-        assert!(
-            before.width() <= 8,
-            "before must fit its cell budget: {} cells",
-            before.width()
-        );
-        assert!(before.width() + 1 + after.width() <= 9);
-        assert!(
-            !before.is_empty(),
-            "the window keeps the widest tail that fits"
-        );
-        // ASCII behavior is unchanged: the trailing characters, nothing wider.
-        let (ascii_before, ascii_after) = super::launch_caret_window("hello world", 11, 6);
-        assert_eq!(ascii_before, "world");
-        assert_eq!(ascii_after, "");
-    }
-
-    #[test]
-    fn context_meter_hitbox_yields_to_the_posture_floor() {
-        let mut app = launch_app();
-        app.session.last_prompt_tokens = Some(1_000);
-        // Wide header: the meter owns its right-edge columns.
-        let wide = super::header_hitboxes(Rect::new(0, 0, 120, 1), &app);
-        assert_eq!(wide.len(), 1, "wide header registers the meter hitbox");
-        // Compact header: the posture lockup is the guaranteed floor and is
-        // never truncated, so at narrow widths it can run into the meter's
-        // columns — the hitbox must not claim cells the posture paints
-        // (review finding 5).
-        let narrow = super::header_hitboxes(Rect::new(0, 0, 16, 1), &app);
-        assert!(
-            narrow.is_empty(),
-            "compact header must not claim overlapped cells"
-        );
-    }
-
-    #[test]
-    fn enter_applies_a_visible_slash_completion_instead_of_sending_the_prefix() {
-        // #5698 review finding 1: the launch composer classified Enter as
-        // Submit without consulting the completion menus, so `/mo` + Enter
-        // sent the literal text instead of running `/model`.
-        let mut app = launch_app();
-        app.input = "/mo".to_string();
-        app.cursor_position = app.input.chars().count();
-        let entries = crate::tui::slash_menu::visible_slash_menu_entries(&app, 1);
-        assert!(
-            !entries.is_empty(),
-            "precondition: /mo must match at least one command"
-        );
-        let verdict =
-            handle_launch_composer_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert_eq!(verdict, LaunchComposerKey::Submit);
-        let completed = app.input.clone();
-        assert!(
-            completed.starts_with('/')
-                && completed != "/mo"
-                && entries.iter().any(|e| {
-                    e.name == completed.trim_end() || completed.starts_with(&format!("{}/", e.name))
-                }),
-            "Enter must apply the highlighted completion (matched {:?}), input now: {completed:?}",
-            entries.first().map(|e| e.name.clone())
-        );
-    }
-
-    #[test]
-    fn completion_popup_paints_above_the_launch_composer() {
-        // #5698 review finding 2: the menus were invisible on launch — the
-        // frame returned before the ComposerWidget popup path ran. The
-        // stage dock keeps that fix: the popup paints above the docked
-        // input row, inside the stage.
-        let app = launch_app();
-        let area = stage_for(80, 24);
-        let (input_y, _) = launch_composer_rows(area).unwrap();
-        let entries = vec![crate::tui::widgets::SlashMenuEntry {
-            name: "/model".to_string(),
-            description: "Pick the model".to_string(),
-            is_skill: false,
-            alias_hint: None,
-        }];
-        let mut buf = Buffer::empty(area);
-        let startup = tideline_startup_from_app(&app);
-        render_tideline_startup(area, &mut buf, &startup);
-        render_launch_completion_popup(area, &mut buf, &app, input_y, &entries, &[]);
-        let popup_row = (area.y..area.y + input_y)
-            .rev()
-            .map(|y| {
-                (area.x..area.x + area.width)
-                    .map(|x| buf[(x, y)].symbol().to_string())
-                    .collect::<String>()
-            })
-            .find(|line| line.contains("/model"))
-            .expect("the completion menu must be visible above the composer");
-        assert!(
-            popup_row.contains("▸") || popup_row.contains('>') || popup_row.contains('*'),
-            "the selected entry carries a selection marker: {popup_row:?}"
-        );
-    }
-
-    /// Row `y` of `area` as text — `y` is area-relative.
-    fn row_text(buf: &Buffer, area: Rect, y: u16) -> String {
-        (area.x..area.x + area.width)
-            .map(|x| buf[(x, area.y + y)].symbol().to_string())
-            .collect()
-    }
-
-    /// Cell columns `from..to` of row `y` (area-relative, byte-safe against
-    /// wide glyphs).
-    fn row_cells(buf: &Buffer, area: Rect, y: u16, from: u16, to: u16) -> String {
-        (from..to.min(area.x + area.width))
-            .map(|x| buf[(x, area.y + y)].symbol().to_string())
-            .collect()
-    }
-
-    #[test]
-    fn card_lists_new_session_over_recent_work() {
-        let app = launch_app();
-        let area = stage_for(100, 30);
-        let mut startup = tideline_startup_from_app(&app);
-        startup.recent = vec![
-            recent_fixture("abc", "Fix login flow"),
-            recent_fixture("def", "Plan export"),
-        ];
-        startup.has_more_recent = true;
-        let mut buf = Buffer::empty(area);
-        render_tideline_startup(area, &mut buf, &startup);
-        let text = (0..area.height)
-            .map(|y| row_text(&buf, area, y))
-            .collect::<Vec<_>>()
-            .join("\n");
-        for fact in [
-            "codewhale",
-            "New session",
-            "Recent",
-            "Fix login flow",
-            "Plan export",
-            "2h ago",
-            "See all sessions",
-        ] {
-            assert!(text.contains(fact), "missing {fact:?} in:\n{text}");
-        }
-        // The prominent entry leads; the old menu is gone entirely.
-        assert!(
-            text.find("New session").unwrap() < text.find("Fix login flow").unwrap(),
-            "new session leads the list:\n{text}"
-        );
-        for gone in [
-            "New worktree",
-            "Resume session",
-            "Changelog",
-            "Quit",
-            "ctrl+n",
-            "ctrl+r",
-            "ctrl+l",
-            "ctrl+q",
-        ] {
-            assert!(!text.contains(gone), "{gone:?} is back:\n{text}");
-        }
-    }
-
-    #[test]
-    fn empty_workspace_points_at_the_composer() {
-        let app = launch_app();
-        let area = stage_for(100, 30);
-        let mut startup = tideline_startup_from_app(&app);
-        startup.recent = Vec::new();
-        startup.has_more_recent = false;
-        let mut buf = Buffer::empty(area);
-        render_tideline_startup(area, &mut buf, &startup);
-        let text = (0..area.height)
-            .map(|y| row_text(&buf, area, y))
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(text.contains("New session"), "the entry survives:\n{text}");
-        assert!(
-            text.contains("No recent sessions"),
-            "empty workspaces say so:\n{text}"
-        );
-        assert!(
-            !text.contains("See all sessions"),
-            "no overflow without sessions:\n{text}"
-        );
-    }
-
-    #[test]
-    fn row_hitboxes_match_painted_cells_and_hover_highlights() {
-        use crate::tui::app::LaunchRowId;
-        let app = launch_app();
-        let area = stage_for(100, 30);
-        let mut startup = tideline_startup_from_app(&app);
-        startup.recent = vec![recent_fixture("abc", "Fix login flow")];
-        startup.has_more_recent = true;
-        let mut buf = Buffer::empty(area);
-        render_tideline_startup(area, &mut buf, &startup);
-        let rows = super::tideline_startup_row_hitboxes(area, &startup);
-        assert_eq!(
-            rows.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>(),
-            vec![
-                LaunchRowId::NewSession,
-                LaunchRowId::Recent("abc".to_string()),
-                LaunchRowId::SeeAll,
-            ]
-        );
-        for (_, rect) in &rows {
-            let painted: String = (rect.x..rect.x + rect.width)
-                .map(|x| buf[(x, rect.y)].symbol().to_string())
-                .collect();
-            assert!(!painted.trim().is_empty(), "row hitbox covers empty cells");
-        }
-        // Hover paints the shared selection band on exactly the hovered
-        // row — the visible response every clickable element owes.
-        startup.hovered = Some(1);
-        let mut buf = Buffer::empty(area);
-        render_tideline_startup(area, &mut buf, &startup);
-        for (index, (_, rect)) in rows.iter().enumerate() {
-            let banded = (rect.x..rect.x + rect.width)
-                .filter(|x| buf[(*x, rect.y)].bg == crate::palette::SELECTION_BG)
-                .count();
-            if index == 1 {
-                assert!(banded > 0, "the hovered row carries the selection band");
+        rows.push((row.id.clone(), text.len()));
+        text.push(Some(Line::from(spans)));
+        if matches!(row.id, crate::tui::app::LaunchRowId::NewSession) {
+            // The `Recent` heading sits above the first recent row; with no
+            // recent work at all the note says so, rather than leaving a gap
+            // that reads as a failure to load.
+            let heading = if entries.is_empty() {
+                MessageId::LaunchNoRecentSessions
             } else {
-                assert_eq!(banded, 0, "only the hovered row highlights");
-            }
-        }
-        // Keyboard selection paints the same band.
-        startup.hovered = None;
-        startup.menu_selected = Some(0);
-        let mut buf = Buffer::empty(area);
-        render_tideline_startup(area, &mut buf, &startup);
-        let (_, first) = &rows[0];
-        assert!(
-            (first.x..first.x + first.width)
-                .any(|x| buf[(x, first.y)].bg == crate::palette::SELECTION_BG),
-            "keyboard selection paints the same band as hover"
-        );
-    }
-
-    #[test]
-    fn composer_docks_focused_at_every_supported_size() {
-        for (width, height) in LAUNCH_SIZES {
-            let mut app = launch_app();
-            let stage = stage_for(width, height);
-            let hitboxes = tideline_startup_hitboxes(stage);
-            apply_launch_hitboxes(&hitboxes, &mut app.launch);
-            let (input_y, hint_y) =
-                launch_composer_rows(stage).expect("composer must fit at a supported size");
-
-            let (buf, area) = render(&app, width, height);
-            let input_row = row_text(&buf, area, input_y);
-            assert!(
-                input_row.contains('❯'),
-                "{width}x{height}: composer row lacks its prompt anchor: {input_row:?}"
-            );
-            assert!(
-                input_row.contains('▌'),
-                "{width}x{height}: the composer is focused from first paint: {input_row:?}"
-            );
-            assert!(
-                !row_text(&buf, area, hint_y).contains("Tab to type"),
-                "{width}x{height}: nothing to tab into; the composer already has focus"
-            );
-            // Hitboxes mirror the rendered row, and send sits at its end.
-            let composer = app.launch.composer_area.expect("composer hitbox");
-            let send = app.launch.send_area.expect("send hitbox");
-            assert!(
-                composer.y <= area.y + input_y && area.y + input_y < composer.bottom(),
-                "{width}x{height}: input row must live inside the focus surface"
-            );
-            assert!(
-                composer.y <= send.y && send.y < composer.bottom(),
-                "{width}x{height}: send target must live inside the focus surface"
-            );
-            assert!(send.right() <= composer.right());
-            let expected_send = if send.width == 3 { "[↑]" } else { " ↑" };
-            assert_eq!(
-                row_cells(&buf, area, send.y - area.y, send.x, send.right()),
-                expected_send,
-                "{width}x{height}: send hitbox must cover the rendered send glyph"
-            );
-            assert!(
-                input_y < hint_y && hint_y <= area.height,
-                "{width}x{height}: composer rows must stack inside the stage"
-            );
+                MessageId::LaunchRecentHeading
+            };
+            text.push(Some(Line::from(Span::styled(
+                truncate_to_width(&tr(locale, heading), text_width),
+                Style::default().fg(theme.text_muted),
+            ))));
         }
     }
 
-    #[test]
-    fn the_top_line_never_collides_with_the_composer_dock() {
-        // The top line (`⑂ branch  path`) owns row 0; the dock owns the
-        // bottom rows. At the 40x12 floor the stage is ten rows: the top
-        // line, the centred card, and the dock's four.
-        for (width, height) in LAUNCH_SIZES {
-            let app = launch_app();
-            let (buf, area) = render(&app, width, height);
-            let (input_y, _) = launch_composer_rows(area).unwrap();
-            assert!(input_y >= 2, "{width}x{height}: dock below the top line");
-            assert!(
-                !row_text(&buf, area, 0).trim().is_empty(),
-                "{width}x{height}: the top line paints the branch/path: {:?}",
-                row_text(&buf, area, 0)
-            );
+    // The whale still surfaces. It rises by ink rather than by position: at 0
+    // it is exactly the water behind it and eases to full over
+    // `MARK_SURFACE_MS` — the same motion the separate launch stage had before
+    // this screen became the ordinary one. Reduced motion gets the endpoint.
+    let rise = if app.motion_policy().allows_decorative() && !app.low_motion {
+        crate::tui::mark::surface_progress(app.ambient_clock_ms, MARK_SURFACE_MS)
+    } else {
+        1.0
+    };
+    let ink_color = crate::tui::mark::lerp_color(theme.surface_bg, theme.accent_primary, rise);
+
+    // Compose: the mark column on the left, the text column beside it. The
+    // block is as tall as whichever column is taller.
+    let block_rows = mark_rows.len().max(text.len());
+    let mut row_offsets: Vec<usize> = Vec::with_capacity(block_rows);
+    for row in 0..block_rows {
+        let mut spans = vec![Span::styled(
+            " ".repeat(LAUNCH_BLOCK_INDENT),
+            Style::default(),
+        )];
+        if mark_width > 0 {
+            let ink = mark_rows.get(row).copied().unwrap_or("");
+            let pad = mark_width.saturating_sub(ink.width());
+            spans.push(Span::styled(
+                ink.to_string(),
+                Style::default().fg(ink_color),
+            ));
+            spans.push(Span::styled(
+                " ".repeat(pad + LAUNCH_MARK_GAP),
+                Style::default(),
+            ));
         }
-    }
-
-    /// Mirror of the event loop's fall-through: an admitted editing key is
-    /// answered by the conversation composer authority — the router never
-    /// performs the edit itself, so the test performs exactly the shared
-    /// call the conversation match makes.
-    fn type_char(app: &mut App, ch: char) {
-        assert_eq!(
-            handle_launch_composer_key(app, KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)),
-            LaunchComposerKey::ComposerAuthority
-        );
-        app.insert_char(ch);
-    }
-
-    #[test]
-    fn editing_keys_are_omitted_to_the_composer_authority_not_reimplemented() {
-        let mut app = launch_app();
-        assert!(app.launch.composer_focus, "focused from first paint");
-
-        // Text and caret keys are only admitted here; the shared App edit
-        // methods the conversation match calls produce the edit.
-        type_char(&mut app, 'h');
-        type_char(&mut app, 'i');
-        assert_eq!(app.input, "hi");
-        assert_eq!(
-            handle_launch_composer_key(
-                &mut app,
-                KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)
-            ),
-            LaunchComposerKey::ComposerAuthority
-        );
-        app.delete_char();
-        assert_eq!(app.input, "h");
-
-        // The old startup shortcut letters are ordinary text now…
-        type_char(&mut app, 'p');
-        assert_eq!(app.input, "hp");
-
-        // …and word motion is composer-owned too: Alt+B moves a whole word
-        // back through the exact shared helper the conversation composer
-        // uses.
-        for ch in " one two".chars() {
-            type_char(&mut app, ch);
+        if let Some(Some(line)) = text.get(row) {
+            spans.extend(line.spans.iter().cloned());
         }
-        assert_eq!(app.input, "hp one two");
-        assert_eq!(app.cursor_position, 10);
-        let alt_b = KeyEvent::new(KeyCode::Char('b'), KeyModifiers::ALT);
-        assert_eq!(
-            handle_launch_composer_key(&mut app, alt_b),
-            LaunchComposerKey::ComposerAuthority
-        );
-        assert!(crate::tui::composer_ui::handle_composer_alt_word_motion_key(&mut app, alt_b));
-        assert_eq!(
-            app.cursor_position, 7,
-            "Alt+B must move a word back inside the focused composer"
-        );
-
-        // Esc, Tab and the arrows have no launch meaning: nothing to blur to.
-        for code in [KeyCode::Esc, KeyCode::Tab, KeyCode::Up, KeyCode::Down] {
-            assert_eq!(
-                handle_launch_composer_key(&mut app, KeyEvent::new(code, KeyModifiers::NONE)),
-                LaunchComposerKey::ComposerAuthority,
-                "{code:?} belongs to the composer"
-            );
-            assert!(app.launch.composer_focus);
-        }
-
-        // …while F1 help stays launch-owned.
-        assert_eq!(
-            handle_launch_composer_key(&mut app, KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE)),
-            LaunchComposerKey::MenuChord
-        );
-        assert!(app.launch.composer_focus);
-        assert_eq!(
-            handle_launch_key(
-                &mut app.launch,
-                KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE),
-                Locale::En,
-            ),
-            LaunchAction::Help
-        );
-        // The old ctrl+n/r/l/q menu chords are composer keys now: the
-        // admission guard omits them to the composer authority.
-        for code in [
-            KeyCode::Char('n'),
-            KeyCode::Char('r'),
-            KeyCode::Char('l'),
-            KeyCode::Char('q'),
-        ] {
-            assert_eq!(
-                handle_launch_composer_key(&mut app, KeyEvent::new(code, KeyModifiers::CONTROL)),
-                LaunchComposerKey::ComposerAuthority,
-                "{code:?} belongs to the composer now"
-            );
-        }
+        row_offsets.push(lines.len());
+        lines.push(Line::from(spans));
     }
 
-    #[test]
-    fn composer_enter_probe_mirrors_the_real_enter_without_mutating() {
-        let mut app = launch_app();
-        assert!(
-            !app.composer_enter_would_submit(),
-            "an empty composer must not submit"
-        );
+    // Re-point the hitboxes at the composed rows.
+    let rows = rows
+        .into_iter()
+        .filter_map(|(id, text_row)| row_offsets.get(text_row).map(|y| (id, *y)))
+        .collect();
 
-        app.input = "  ".to_string();
-        assert!(
-            !app.composer_enter_would_submit(),
-            "a whitespace-only draft is not a submit"
-        );
-
-        app.input = "ship it".to_string();
-        app.cursor_position = 7;
-        assert!(app.composer_enter_would_submit());
-        assert_eq!(app.input, "ship it", "the probe must not consume the draft");
-        assert!(app.launch.composer_focus);
-    }
-
-    #[test]
-    fn enter_submits_through_the_real_composer_path() {
-        let mut app = launch_app();
-        for ch in "hello world".chars() {
-            type_char(&mut app, ch);
-        }
-        assert_eq!(app.input, "hello world");
-        assert_eq!(
-            handle_launch_composer_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
-            LaunchComposerKey::Submit
-        );
-        // The event loop feeds this exact call into the normal dispatch
-        // path after the launch session begins; the composer owns the text.
-        assert_eq!(app.handle_composer_enter().as_deref(), Some("hello world"));
-        assert!(app.input.is_empty());
-
-        // Enter on an empty composer with an untouched list runs nothing:
-        // no row is pre-selected, so a reflexive Enter at launch cannot
-        // start or resume a session by accident (founder live-test,
-        // 2026-09-02).
-        let mut empty = launch_app();
-        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
-        assert_eq!(empty.launch.menu_selected, None);
-        assert_eq!(
-            handle_launch_composer_key(&mut empty, enter),
-            LaunchComposerKey::Consumed
-        );
-        assert_eq!(
-            run_launch_card_row(&launch_rows_for_app(&empty), empty.launch.menu_selected),
-            LaunchAction::None
-        );
-        assert!(empty.launch.composer_focus);
-        // Once the user has arrowed onto a row, Enter runs it: row 0 is
-        // the prominent new-session entry.
-        assert_eq!(
-            handle_launch_composer_key(
-                &mut empty,
-                KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)
-            ),
-            LaunchComposerKey::MenuNavigate(1)
-        );
-        empty.launch.menu_selected = Some(0);
-        assert_eq!(
-            handle_launch_composer_key(&mut empty, enter),
-            LaunchComposerKey::MenuRun
-        );
-        assert_eq!(
-            run_launch_card_row(&launch_rows_for_app(&empty), empty.launch.menu_selected),
-            LaunchAction::NewSession
-        );
-        // Esc unhighlights the list instead of reaching the composer.
-        assert_eq!(
-            handle_launch_composer_key(&mut empty, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
-            LaunchComposerKey::Consumed
-        );
-        assert_eq!(empty.launch.menu_selected, None);
-        // Once the card has dissolved, empty-composer Enter is consumed:
-        // there is no row to run and nothing to send.
-        empty.launch.dissolve_started_ms = Some(0);
-        assert_eq!(
-            handle_launch_composer_key(&mut empty, enter),
-            LaunchComposerKey::Consumed
-        );
-        // And Esc on the empty composer brings the card back.
-        assert_eq!(
-            handle_launch_composer_key(&mut empty, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
-            LaunchComposerKey::Consumed
-        );
-        assert_eq!(empty.launch.dissolve_started_ms, None);
-    }
-
-    #[test]
-    fn highlighted_new_session_row_runs_a_fresh_session() {
-        // Row 0 is always the prominent new-session entry.
-        let app = launch_app();
-        let rows = launch_rows_for_app(&app);
-        assert!(!rows.is_empty(), "the card always lists a first row");
-        assert_eq!(
-            run_launch_card_row(&rows, Some(0)),
-            LaunchAction::NewSession
-        );
-        // Esc with a highlighted row unhighlights instead of dissolving:
-        // the card is still up.
-        let mut app = app;
-        app.launch.menu_selected = Some(0);
-        assert_eq!(
-            handle_launch_composer_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
-            LaunchComposerKey::Consumed
-        );
-        assert_eq!(app.launch.menu_selected, None);
-        assert!(
-            app.launch.dissolve_started_ms.is_none(),
-            "the card is still up"
-        );
-    }
-
-    #[test]
-    fn shift_enter_keeps_a_real_newline_in_the_composer_state() {
-        let mut app = launch_app();
-        type_char(&mut app, 'a');
-        type_char(&mut app, 'b');
-        // Shift+Enter is a newline chord, not a submit: the router omits it
-        // to the composer authority, whose newline arm owns the insertion.
-        assert_eq!(
-            handle_launch_composer_key(
-                &mut app,
-                KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT)
-            ),
-            LaunchComposerKey::ComposerAuthority
-        );
-        assert!(crate::tui::composer_ui::is_composer_newline_key(
-            KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT),
-            app.composer_multiline_mode
-        ));
-        app.insert_char('\n');
-        type_char(&mut app, 'c');
-        assert_eq!(app.input, "ab\nc");
-
-        // The single-row projection truthfully shows the caret's line.
-        let (buf, area) = render(&app, 80, 24);
-        let (input_y, _) = launch_composer_rows(stage_for(80, 24)).unwrap();
-        assert!(
-            row_text(&buf, area, input_y).contains("c▌"),
-            "composer row must show the caret's line, not the first line"
-        );
-    }
-
-    #[test]
-    fn floor_keeps_a_usable_composer_row_and_the_next_tier_keeps_its_hint() {
-        // The 40x12 floor's stage is 10 rows: the dock sheds to its input
-        // row and the composer never disappears (the data — caret, draft —
-        // survives; only the hint surface sheds, and it returns one tier up).
-        let mut app = launch_app();
-        let stage = stage_for(40, 12);
-        let hitboxes = tideline_startup_hitboxes(stage);
-        apply_launch_hitboxes(&hitboxes, &mut app.launch);
-        assert!(app.launch.composer_area.is_some() && app.launch.send_area.is_some());
-        let (buf, area) = render(&app, 40, 12);
-        let (input_y, hint_y) = launch_composer_rows(stage).unwrap();
-        let input_row = row_text(&buf, area, input_y);
-        assert!(
-            input_row.contains('❯') && input_row.contains('▌'),
-            "focused floor composer keeps its anchors and caret: {input_row:?}"
-        );
-        assert!(hint_y <= area.height);
-
-        // One tier up (a 22-row terminal, stage 20) the hint row explains
-        // Enter/Esc — the focused composer's hint, since it is always focused.
-        let (buf, area) = render(&app, 80, 22);
-        let (_, hint_y) = launch_composer_rows(stage_for(80, 22)).unwrap();
-        let hint_row = row_text(&buf, area, hint_y);
-        assert!(
-            hint_row.contains(
-                &tr(Locale::En, MessageId::LaunchComposerHint)
-                    .chars()
-                    .take(20)
-                    .collect::<String>()
-            ),
-            "focused dock must carry the composer hint: {hint_row:?}"
-        );
-    }
+    LaunchEmptyState { lines, rows }
 }
 
 #[cfg(test)]
@@ -3069,1270 +2042,27 @@ mod header_tests {
 // projects `App`), proven against golden buffers `startup_{w}x{h}`.
 // ---------------------------------------------------------------------------
 
-use crate::palette::UiTheme;
-
 /// How long the hero mark takes to surface, then it holds still forever.
 const MARK_SURFACE_MS: u128 = 640;
-/// Left margin before the mark and the header block.
-const HEADER_MARGIN: u16 = 1;
-/// One space between the mark and the header lines.
-const HEADER_GUTTER: u16 = 1;
-/// The header block: wordmark + version, route, workspace.
-const HEADER_ROWS: u16 = 3;
-/// Stages narrower than this paint the tiny mark so the header keeps columns.
-const TINY_MARK_BELOW_WIDTH: u16 = 40;
-/// Route facts are shed by `route_identity_fields` against this budget and
-/// then truncated to the stage, so a long model name never clips a provider.
-const ROUTE_BUDGET: usize = 60;
 
-/// Which mark the stage paints. Decided by the caller from the terminal
-/// (`kitty_graphics_supported`, `sixel_graphics_supported`,
-/// `ascii_safe_enabled`), never in here.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MarkTier {
-    /// Kitty graphics placeholders over the transmitted PNG.
-    Image,
-    /// A blank block the event loop draws the sixel raster over after the
-    /// frame. Same block size as [`MarkTier::Image`]; same PNG.
-    Sixel,
-    /// The braille rows.
-    Braille,
-    /// ASCII-safe: no mark, the wordmark line stands alone.
-    None,
-}
-
-/// MCP facts: the working screen's `⋮ MCP n/m` chip and the card's
-/// sign-in news. Only painted when there is something true to say.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct McpFacts {
-    pub connected: usize,
-    pub needs_sign_in: usize,
-    /// Enabled servers total — the `m` in `n/m`.
-    pub enabled: usize,
-}
-
-impl McpFacts {
-    /// Count the servers the manager snapshot reports connected and those
-    /// waiting on a sign-in. Disabled servers are nobody's business here.
-    #[must_use]
-    pub fn from_snapshot(snapshot: &crate::mcp::McpManagerSnapshot) -> Self {
-        let enabled = snapshot.servers.iter().filter(|server| server.enabled);
-        let (connected, needs_sign_in, total) = enabled.fold((0, 0, 0), |acc, server| {
-            (
-                acc.0 + usize::from(server.connected),
-                acc.1 + usize::from(server.auth_required && !server.connected),
-                acc.2 + 1,
-            )
-        });
-        Self {
-            connected,
-            needs_sign_in,
-            enabled: total,
-        }
-    }
-
-    fn has_news(self) -> bool {
-        self.connected > 0 || self.needs_sign_in > 0
-    }
-}
-
-/// What the caller owes the startup stage. Everything injectable so renders
-/// stay deterministic for golden buffers.
-pub struct TidelineStartup<'a> {
-    pub theme: &'a UiTheme,
-    pub locale: Locale,
-    /// The build version, painted dim after the wordmark.
-    pub version: &'a str,
-    /// The route line — the info line's own `route_identity_fields`, joined.
-    /// `None` is "no model connected": line 2 says `not connected` and the
-    /// state line says how to fix it.
-    pub route: Option<String>,
-    /// The workspace line: `owner/repo · branch` when the shell observes an
-    /// origin slug, else the workspace path.
-    pub workspace: String,
-    pub mcp: Option<McpFacts>,
-    /// The launch surface's one transient line — the worktree-name prompt or
-    /// a launch status message — painted over the composer dock's last row.
-    pub status_line: Option<String>,
-    /// The docked pre-session composer's display projection.
-    pub composer: LaunchComposerDisplay<'a>,
-    /// ASCII-safe / NO_COLOR mode: every glyph through `ascii_fallback`.
-    pub ascii_safe: bool,
-    pub mark: MarkTier,
-    /// How far the mark has surfaced, in `[0,1]`. Injected rather than read
-    /// from a clock in here so golden buffers stay deterministic and so the
-    /// reduced-motion path is the *same* drawing at its endpoint. Callers
-    /// pass `1.0` for a settled mark.
-    pub surface_progress: f32,
-    /// How far the launch card has dissolved, `[0.0 intact ..= 1.0 gone]`.
-    /// Injected for the same determinism as `surface_progress`.
-    pub card_dissolve: f32,
-    /// Recent work for the card's recent-work list, most recent first.
-    pub recent: Vec<LaunchRecentEntry>,
-    /// More workspace sessions sit behind `recent`: the card paints the
-    /// see-all overflow row.
-    pub has_more_recent: bool,
-    /// The card row's highlighted entry, if the user has arrowed onto one.
-    pub menu_selected: Option<usize>,
-    /// The card row under the pointer, if any (index into the rows
-    /// [`launch_card_rows`] yields for this stage).
-    pub hovered: Option<usize>,
-    /// The one migration notice above the composer, only when true.
-    pub notice: Option<String>,
-    /// `model (effort) · permission` — the composer bottom rule's trailing
-    /// text while the card is up. The route's one launch reading.
-    pub composer_rule: Option<String>,
-    /// The branch for the top line, when the shell observes one.
-    pub branch: Option<String>,
-    /// Session-start hooks configured, for the working screen's receipt
-    /// row. Zero paints the receipt without a hooks count.
-    pub session_hooks: usize,
-}
-
-impl<'a> TidelineStartup<'a> {
-    #[must_use]
-    pub fn new(theme: &'a UiTheme, route: Option<String>, workspace: String) -> Self {
-        Self {
-            theme,
-            locale: Locale::En,
-            version: env!("CODEWHALE_BUILD_VERSION"),
-            route,
-            workspace,
-            mcp: None,
-            status_line: None,
-            composer: LaunchComposerDisplay::default(),
-            ascii_safe: false,
-            mark: MarkTier::Braille,
-            surface_progress: 1.0,
-            card_dissolve: 0.0,
-            recent: Vec::new(),
-            has_more_recent: false,
-            menu_selected: None,
-            hovered: None,
-            notice: None,
-            composer_rule: None,
-            branch: None,
-            session_hooks: 0,
-        }
-    }
-
-    /// Set the configured session-start hook count for the receipt row.
-    #[must_use]
-    pub fn session_hooks(mut self, hooks: usize) -> Self {
-        self.session_hooks = hooks;
-        self
-    }
-
-    /// Set the card's dissolve progress (`0.0` intact → `1.0` gone).
-    #[must_use]
-    pub fn card_dissolve(mut self, progress: f32) -> Self {
-        self.card_dissolve = progress.clamp(0.0, 1.0);
-        self
-    }
-
-    /// Set the card's recent-work list and whether more sessions sit
-    /// behind it (the see-all overflow row).
-    #[must_use]
-    pub fn recent(mut self, recent: Vec<LaunchRecentEntry>, has_more: bool) -> Self {
-        self.recent = recent;
-        self.has_more_recent = has_more;
-        self
-    }
-
-    /// Set the card row's highlighted entry.
-    #[must_use]
-    pub fn menu_selected(mut self, selected: Option<usize>) -> Self {
-        self.menu_selected = selected;
-        self
-    }
-
-    /// Set the card row under the pointer.
-    #[must_use]
-    pub fn hovered(mut self, hovered: Option<usize>) -> Self {
-        self.hovered = hovered;
-        self
-    }
-
-    /// Set the migration notice line above the composer.
-    #[must_use]
-    pub fn notice(mut self, notice: Option<String>) -> Self {
-        self.notice = notice;
-        self
-    }
-
-    /// Set the composer bottom rule's trailing text.
-    #[must_use]
-    pub fn composer_rule(mut self, rule: Option<String>) -> Self {
-        self.composer_rule = rule;
-        self
-    }
-
-    /// Set the observed git branch for the top line.
-    #[must_use]
-    pub fn branch(mut self, branch: Option<String>) -> Self {
-        self.branch = branch;
-        self
-    }
-
-    /// Set the mark's surface progress (`0.0` submerged → `1.0` settled).
-    #[must_use]
-    pub fn surface_progress(mut self, progress: f32) -> Self {
-        self.surface_progress = progress.clamp(0.0, 1.0);
-        self
-    }
-
-    #[must_use]
-    pub fn mcp(mut self, mcp: Option<McpFacts>) -> Self {
-        self.mcp = mcp;
-        self
-    }
-
-    #[must_use]
-    pub fn mark(mut self, mark: MarkTier) -> Self {
-        self.mark = mark;
-        self
-    }
-
-    #[must_use]
-    pub fn status_line(mut self, line: Option<String>) -> Self {
-        self.status_line = line;
-        self
-    }
-
-    #[must_use]
-    pub fn locale(mut self, locale: Locale) -> Self {
-        self.locale = locale;
-        self
-    }
-
-    #[must_use]
-    pub fn composer(mut self, composer: LaunchComposerDisplay<'a>) -> Self {
-        self.composer = composer;
-        self
-    }
-
-    #[must_use]
-    pub fn ascii_safe(mut self, ascii_safe: bool) -> Self {
-        self.ascii_safe = ascii_safe;
-        if ascii_safe {
-            self.mark = MarkTier::None;
-        }
-        self
-    }
-
-    fn sym(&self, glyph: &str) -> String {
-        if !self.ascii_safe {
-            return glyph.to_string();
-        }
-        if let Some(fb) = crate::tui::glyphs::ascii_fallback(glyph) {
-            return fb.to_string();
-        }
-        glyph
-            .chars()
-            .map(|c| {
-                crate::tui::glyphs::ascii_fallback(&c.to_string())
-                    .map(str::to_string)
-                    .unwrap_or_else(|| c.to_string())
-            })
-            .collect()
-    }
-
-    /// The card's announcement line, if there is anything true to say:
-    /// the missing-model warning, else MCP news.
-    fn state_line(&self) -> Option<(String, ChromeInk)> {
-        if self.route.is_none() {
-            return Some((
-                format!(
-                    "{} {} · {}",
-                    self.sym("⚠"),
-                    tr(self.locale, MessageId::LaunchNoModelConnected),
-                    tr(self.locale, MessageId::LaunchRunCommand).replace("{command}", "/provider"),
-                ),
-                ChromeInk::Attention,
-            ));
-        }
-        let mcp = self.mcp.filter(|mcp| mcp.has_news())?;
-        let mut parts = Vec::new();
-        if mcp.connected > 0 {
-            parts.push(count_phrase(
-                self.locale,
-                mcp.connected,
-                MessageId::LaunchMcpConnectedOne,
-                MessageId::LaunchMcpConnectedMany,
-            ));
-        }
-        if mcp.needs_sign_in > 0 {
-            parts.push(count_phrase(
-                self.locale,
-                mcp.needs_sign_in,
-                MessageId::LaunchMcpNeedsSignInOne,
-                MessageId::LaunchMcpNeedsSignInMany,
-            ));
-            parts.push(tr(self.locale, MessageId::LaunchRunCommand).replace("{command}", "/mcp"));
-        }
-        Some((
-            format!("{} {}", self.sym("●"), parts.join(" · ")),
-            ChromeInk::MetadataValue,
-        ))
-    }
-}
-
-fn count_phrase(locale: Locale, count: usize, one: MessageId, many: MessageId) -> String {
-    if count == 1 {
-        tr(locale, one).into_owned()
-    } else {
-        tr(locale, many).replace("{count}", &count.to_string())
-    }
-}
-
-fn chrome(theme: &UiTheme, ink: ChromeInk) -> Style {
-    chrome_style(theme, ink)
-}
-
-fn set_span(buf: &mut Buffer, x: u16, y: u16, span: &Span<'_>) {
-    if let Ok(clamped) = span.content.width().try_into() {
-        buf.set_span(x, y, span, clamped);
-    }
-}
-
-/// The stage's row budget: the header block owns the top, the composer dock
-/// the bottom rows (at most four — `[input, hint, rule, prompt]`; the prompt
-/// row is the stage's transient status line). Render and hitboxes must
-/// agree, so the arithmetic lives here.
-struct StartupLayout {
-    header: Rect,
-    dock: Rect,
-}
-
-fn startup_layout(stage: Rect) -> StartupLayout {
-    let dock_h = stage.height.saturating_sub(HEADER_ROWS).min(4);
-    let dock = Rect {
-        y: stage.y + stage.height - dock_h,
-        height: dock_h,
-        ..stage
-    };
-    let header = Rect {
-        height: stage.height - dock_h,
-        ..stage
-    };
-    StartupLayout { header, dock }
-}
-
-/// One content row inside the launch card below the title/announcement.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LaunchCardPlanRow {
-    /// Non-interactive `Recent` section heading — no hitbox.
-    Heading,
-    /// Non-interactive empty-workspace note — no hitbox.
-    Note,
-    /// Interactive row by index into [`launch_card_rows`].
-    Interactive(usize),
-}
-
-/// The launch card's laid-out geometry: the card rect plus the absolute y
-/// of each content row below the title/announcement.
-struct LaunchCardPlan {
-    card: Rect,
-    announcement: bool,
-    rows: Vec<(u16, LaunchCardPlanRow)>,
-}
-
-/// The mark rung the card would like on this stage, before knowing whether
-/// the interior can hold it. Width alone picks Small vs Tiny for braille;
-/// the bitmap tiers have one size.
-fn launch_mark_rung(stage: Rect, tier: MarkTier) -> (MarkTier, MarkSize) {
-    let margin = (stage.width / 10).clamp(2, 12);
-    let card_w = stage.width.saturating_sub(margin.saturating_mul(2));
-    let rung = if card_w < TINY_MARK_BELOW_WIDTH {
-        MarkSize::Tiny
-    } else {
-        MarkSize::Small
-    };
-    (tier, rung)
-}
-
-/// Step the mark down until it fits `interior_h` rows: bitmap → braille
-/// Small → braille Tiny → none. Each step keeps the whale on the card at
-/// the largest size the stage allows.
-fn step_mark_to_fit(tier: MarkTier, rung: MarkSize, interior_h: u16) -> (MarkTier, MarkSize) {
-    let mut tier = tier;
-    let mut rung = rung;
-    loop {
-        let rows = match tier {
-            MarkTier::Image | MarkTier::Sixel => crate::tui::mark::MARK_IMAGE_ROWS,
-            MarkTier::Braille => rung.cells().1,
-            MarkTier::None => return (tier, rung),
-        };
-        if interior_h >= rows {
-            return (tier, rung);
-        }
-        match (tier, rung) {
-            (MarkTier::Image | MarkTier::Sixel, _) => tier = MarkTier::Braille,
-            (MarkTier::Braille, MarkSize::Small) => rung = MarkSize::Tiny,
-            (MarkTier::Braille, MarkSize::Tiny) => tier = MarkTier::None,
-            (MarkTier::None, _) => return (tier, rung),
-        }
-    }
-}
-
-/// Lay out the launch card: title, one announcement line when true, then
-/// the new-session entry, the `Recent` heading over the recents, the
-/// see-all overflow, and the empty note when there is no recent work.
-/// Pure geometry shared by the painter and
-/// [`tideline_startup_row_hitboxes`], so rects match painted cells
-/// wherever both run on the same stage.
-/// What the launch card has to place: counted once by the caller so the
-/// painter and the hitbox pass hand the plan the same inputs.
-#[derive(Debug, Clone, Copy)]
-struct LaunchCardContent {
-    notice_rows: u16,
-    announcement: bool,
-    interactive: usize,
-    has_recents: bool,
-    empty_note: bool,
-    mark_rows: u16,
-}
-
-impl LaunchCardContent {
-    fn for_startup(startup: &TidelineStartup<'_>, stage: Rect, interactive: usize) -> Self {
-        let (mark_tier, braille_rung) = launch_mark_rung(stage, startup.mark);
-        let mark_rows = match mark_tier {
-            MarkTier::Image | MarkTier::Sixel => crate::tui::mark::MARK_IMAGE_ROWS,
-            MarkTier::Braille => braille_rung.cells().1,
-            MarkTier::None => 0,
-        };
-        Self {
-            notice_rows: u16::from(startup.notice.is_some()),
-            announcement: startup.state_line().is_some(),
-            interactive,
-            has_recents: !startup.recent.is_empty(),
-            empty_note: startup.recent.is_empty() && !startup.has_more_recent,
-            mark_rows,
-        }
-    }
-}
-
-fn launch_card_plan(
-    stage: Rect,
-    layout: &StartupLayout,
-    content: LaunchCardContent,
-) -> Option<LaunchCardPlan> {
-    let LaunchCardContent {
-        notice_rows,
-        announcement,
-        interactive,
-        has_recents,
-        empty_note,
-        mark_rows,
-    } = content;
-    let margin = (stage.width / 10).clamp(2, 12);
-    let card_w = stage.width.saturating_sub(margin.saturating_mul(2));
-    // Vertically centred between the top line (and the notice row it keeps
-    // clear) and the composer dock.
-    let available = layout
-        .dock
-        .y
-        .saturating_sub(stage.y)
-        .saturating_sub(1 + notice_rows);
-    if card_w < 20 {
-        return None;
-    }
-    // The card sheds rather than clips: recents and the overflow from the
-    // bottom, then the heading/note, then the announcement; the title and
-    // the new-session entry hold last. A stage too small even for those
-    // keeps only the composer.
-    let mut plan_rows: Vec<LaunchCardPlanRow> = vec![LaunchCardPlanRow::Interactive(0)];
-    if has_recents {
-        plan_rows.push(LaunchCardPlanRow::Heading);
-        for index in 1..interactive {
-            plan_rows.push(LaunchCardPlanRow::Interactive(index));
-        }
-    } else if interactive > 1 {
-        // No recents: every row past the new-session entry is the see-all
-        // overflow.
-        for index in 1..interactive {
-            plan_rows.push(LaunchCardPlanRow::Interactive(index));
-        }
-    }
-    if empty_note {
-        plan_rows.push(LaunchCardPlanRow::Note);
-    }
-    let mut show_announcement = announcement;
-    let mut content_rows = 1 + u16::from(show_announcement) + plan_rows.len() as u16;
-    while available < content_rows + 2 {
-        if plan_rows
-            .last()
-            .is_some_and(|last| *last != LaunchCardPlanRow::Interactive(0))
-        {
-            plan_rows.pop();
-            content_rows -= 1;
-            continue;
-        }
-        if show_announcement {
-            show_announcement = false;
-            content_rows -= 1;
-        } else {
-            return None;
-        }
-    }
-    // The mark is part of the card, not a decoration that fits when it
-    // happens to: reserve its rows whenever the stage can spare them, so a
-    // two-row card (title + new session) still carries the whale. Text rows
-    // keep their top-aligned positions inside the taller interior.
-    let interior_rows = if available >= mark_rows + 2 {
-        content_rows.max(mark_rows)
-    } else {
-        content_rows
-    };
-    let card_h = interior_rows + 2;
-    let card = Rect {
-        x: stage.x + margin,
-        y: stage.y + 1 + notice_rows + (available - card_h) / 2,
-        width: card_w,
-        height: card_h,
-    };
-    let mut rows = Vec::with_capacity(plan_rows.len());
-    let mut y = card.y + 1 + u16::from(show_announcement);
-    for kind in plan_rows {
-        y += 1;
-        rows.push((y, kind));
-    }
-    Some(LaunchCardPlan {
-        card,
-        announcement: show_announcement,
-        rows,
-    })
-}
-
-/// Mix a style's ink toward the surface colour by `fade` — the card
-/// dissolve's whole motion, one bounded lerp.
-fn faded(style: Style, theme: &UiTheme, fade: f32) -> Style {
-    if fade <= 0.0 {
-        return style;
-    }
-    match style.fg {
-        Some(fg) => {
-            let mixed = crate::tui::mark::lerp_color(fg, theme.surface_bg, fade);
-            Style {
-                fg: Some(mixed),
-                ..style
-            }
-        }
-        None => style,
-    }
-}
-
-/// Paint the stage's top line: `⑂ branch  path` left, dim; when the working
-/// screen is up, `⋮ MCP n/m` right (MCP status has no other owner).
-fn render_launch_top_line(
-    area: Rect,
-    buf: &mut Buffer,
-    startup: &TidelineStartup<'_>,
-    card_gone: bool,
-) {
-    if area.height == 0 {
-        return;
-    }
-    let theme = startup.theme;
-    let branch_w = startup
-        .branch
-        .as_deref()
-        .map_or(0, |b| b.width() + usize::from(!b.is_empty()) * 2);
-    let prefix_w = startup.sym("⑂").width() + usize::from(!startup.sym("⑂").is_empty()) + branch_w;
-    let right_w = card_gone
-        .then(|| startup.mcp.filter(|mcp| mcp.enabled > 0))
-        .flatten()
-        .map_or(0, |_| "⋮ MCP 99/99".width() + 2);
-    let budget = usize::from(area.width)
-        .saturating_sub(right_w)
-        .saturating_sub(prefix_w);
-    let workspace = [2usize, 1]
-        .into_iter()
-        .map(|keep| shorten_workspace(&startup.workspace, keep))
-        .fold(startup.workspace.clone(), |chosen, shorter| {
-            if chosen.width() > budget {
-                shorter
-            } else {
-                chosen
-            }
-        });
-    let mut left = startup.sym("⑂");
-    match startup.branch.as_deref().filter(|b| !b.is_empty()) {
-        Some(branch) => {
-            left.push(' ');
-            left.push_str(branch);
-            left.push_str("  ");
-        }
-        None => left.push(' '),
-    }
-    left.push_str(&workspace);
-    let right = card_gone
-        .then(|| startup.mcp.filter(|mcp| mcp.enabled > 0))
-        .flatten()
-        .map(|mcp| {
-            (
-                format!("{} MCP {}/{}", startup.sym("⋮"), mcp.connected, mcp.enabled),
-                chrome(theme, ChromeInk::Metadata),
-            )
-        });
-    let left_budget = usize::from(area.width).saturating_sub(right_w);
-    set_span(
-        buf,
-        area.x,
-        area.y,
-        &Span::styled(
-            truncate_to_width(&left, left_budget),
-            chrome(theme, ChromeInk::MetadataDim),
-        ),
-    );
-    if let Some((text, style)) = right {
-        let x = area.right().saturating_sub(text.width() as u16).max(area.x);
-        set_span(buf, x, area.y, &Span::styled(text, style));
-    }
-}
-
-/// Paint the centred launch card: the mark at left, `Codewhale` + version,
-/// one announcement line only when true, then the prominent new-session
-/// entry over the recent-work list (PRD 4.1). The dissolve fades every ink
-/// toward the surface colour; at progress 1.0 the caller stops painting
-/// the card entirely. Returns the sixel tier's reserved block (stage
-/// coordinates), or a zero-width rect when no sixel block was reserved.
-fn render_launch_card(
-    stage: Rect,
-    buf: &mut Buffer,
-    startup: &TidelineStartup<'_>,
-    layout: &StartupLayout,
-) -> Rect {
-    let theme = startup.theme;
-    let fade = startup.card_dissolve;
-    let rows = launch_card_rows(startup.locale, &startup.recent, startup.has_more_recent);
-    let announcement = startup.state_line();
-    let (mark_tier, braille_rung) = launch_mark_rung(stage, startup.mark);
-    let Some(plan) = launch_card_plan(
-        stage,
-        layout,
-        LaunchCardContent::for_startup(startup, stage, rows.len()),
-    ) else {
-        return Rect::new(0, 0, 0, 0);
-    };
-    let card = plan.card;
-    let card_w = card.width;
-
-    let border = faded(chrome(theme, ChromeInk::MetadataDim), theme, fade);
-    let top = startup.sym(&{
-        let mut text = String::from("╭");
-        text.push_str(&"─".repeat(usize::from(card_w.saturating_sub(2))));
-        text.push('╮');
-        text
-    });
-    set_span(buf, card.x, card.y, &Span::styled(top, border));
-    let bar = startup.sym("│");
-    for row in 1..card.height.saturating_sub(1) {
-        set_span(
-            buf,
-            card.x,
-            card.y + row,
-            &Span::styled(bar.clone(), border),
-        );
-        set_span(
-            buf,
-            card.right().saturating_sub(1),
-            card.y + row,
-            &Span::styled(bar.clone(), border),
-        );
-    }
-    let bottom = startup.sym(&{
-        let mut text = String::from("╰");
-        text.push_str(&"─".repeat(usize::from(card_w.saturating_sub(2))));
-        text.push('╯');
-        text
-    });
-    set_span(
-        buf,
-        card.x,
-        card.y + card.height.saturating_sub(1),
-        &Span::styled(bottom, border),
-    );
-
-    // The mark: the card's left column, vertically centred in the interior.
-    // Only the sixel tier reports a block; every other tier leaves this
-    // zero-width so the event loop emits nothing.
-    let mut sixel_reserve = Rect::new(0, 0, 0, 0);
-    let interior_h = card.height.saturating_sub(2);
-    // The plan reserved rows for this rung; if the stage could not spare
-    // them, step down (Image/Sixel → braille Small → Tiny) before giving
-    // the mark up. No-mark is the last resort, never the first.
-    let (mark_tier, braille_rung) = step_mark_to_fit(mark_tier, braille_rung, interior_h);
-    let (mark_cols, mark_rows) = match mark_tier {
-        MarkTier::Image | MarkTier::Sixel => (
-            crate::tui::mark::MARK_IMAGE_COLS,
-            crate::tui::mark::MARK_IMAGE_ROWS,
-        ),
-        MarkTier::Braille => braille_rung.cells(),
-        MarkTier::None => (0, 0),
-    };
-    let mark_fits = mark_tier != MarkTier::None && card_w >= 30 && interior_h >= mark_rows;
-    let text_x = if mark_fits {
-        let mark_area = Rect {
-            x: card.x + 2,
-            y: card.y + 1 + (interior_h - mark_rows) / 2,
-            width: mark_cols,
-            height: mark_rows,
-        };
-        match mark_tier {
-            MarkTier::Image => {
-                crate::tui::mark::render_kitty_placeholders(
-                    mark_area,
-                    buf,
-                    startup.surface_progress,
-                );
-            }
-            MarkTier::Sixel => {
-                // Binary visibility, no surfacing: the raster is either
-                // there (settled, like reduced motion) or gone. Once the
-                // card starts dissolving the block stays unreserved so the
-                // event loop clears the image instead of stranding it over
-                // the working screen.
-                if fade <= 0.0 {
-                    sixel_reserve = crate::tui::mark::render_sixel_reserve(mark_area, buf);
-                }
-            }
-            MarkTier::Braille => {
-                crate::tui::mark::render_mark(
-                    mark_area,
-                    buf,
-                    braille_rung,
-                    crate::tui::mark::lerp_color(
-                        theme.surface_bg,
-                        theme.accent_action,
-                        startup.surface_progress,
-                    ),
-                    theme.surface_bg,
-                    startup.surface_progress,
-                );
-            }
-            MarkTier::None => {}
-        }
-        mark_area.x + mark_cols + HEADER_GUTTER
-    } else {
-        card.x + 2
-    };
-
-    let interior_w = usize::from(card.right().saturating_sub(1).saturating_sub(text_x));
-    let fit = |text: &str| truncate_to_width(text, interior_w);
-    let mut row = card.y + 1;
-
-    // Title: the wordmark bold, the version dim.
-    set_span(
-        buf,
-        text_x,
-        row,
-        &Span::styled(
-            fit("codewhale"),
-            faded(
-                Style::default()
-                    .fg(theme.accent_action)
-                    .add_modifier(Modifier::BOLD),
-                theme,
-                fade,
-            ),
-        ),
-    );
-    let version = format!("v{}", startup.version);
-    let version_x = text_x + "codewhale".width() as u16 + 1;
-    if usize::from(version_x) + version.width() <= interior_w {
-        set_span(
-            buf,
-            version_x,
-            row,
-            &Span::styled(
-                version,
-                faded(chrome(theme, ChromeInk::MetadataHint), theme, fade),
-            ),
-        );
-    }
-    row += 1;
-
-    // The announcement: the one blocking fact or piece of news, only true
-    // (and only when the plan kept it).
-    if plan.announcement
-        && let Some((line, ink)) = announcement
-    {
-        set_span(
-            buf,
-            text_x,
-            row,
-            &Span::styled(fit(&line), faded(chrome(theme, ink), theme, fade)),
-        );
-        row += 1;
-    }
-    debug_assert_eq!(
-        row,
-        plan.rows.first().map_or(row, |(y, _)| *y),
-        "title/announcement rows must land on the plan"
-    );
-
-    // The rows: ↑/↓ highlight, Enter runs the highlighted row, hover
-    // paints the same shared selected-row treatment as the keyboard, and
-    // recent details sit right-aligned where the chords used to be.
-    // Nothing is highlighted until the user arrows or hovers.
-    let right_edge = card.right().saturating_sub(2);
-    for (y, kind) in &plan.rows {
-        match kind {
-            LaunchCardPlanRow::Heading => {
-                set_span(
-                    buf,
-                    text_x,
-                    *y,
-                    &Span::styled(
-                        fit(&tr(startup.locale, MessageId::LaunchRecentHeading)),
-                        faded(chrome(theme, ChromeInk::MetadataDim), theme, fade),
-                    ),
-                );
-            }
-            LaunchCardPlanRow::Note => {
-                set_span(
-                    buf,
-                    text_x,
-                    *y,
-                    &Span::styled(
-                        fit(&tr(startup.locale, MessageId::LaunchNoRecentSessions)),
-                        faded(chrome(theme, ChromeInk::Metadata), theme, fade),
-                    ),
-                );
-            }
-            LaunchCardPlanRow::Interactive(index) => {
-                let Some(entry) = rows.get(*index) else {
-                    continue;
-                };
-                let active =
-                    startup.menu_selected == Some(*index) || startup.hovered == Some(*index);
-                let marker = startup.sym(crate::tui::glyphs::selection_marker(active));
-                let marker_w = marker.width() as u16;
-                // The selected/hovered band runs the row's full interior in
-                // the shared selection treatment (the pickers' convention);
-                // the prominent new-session entry reads bold accent until
-                // then.
-                let row_style = if active {
-                    faded(crate::tui::menu_style::selected_row_style(), theme, fade)
-                } else if entry.prominent {
-                    faded(
-                        Style::default()
-                            .fg(theme.accent_action)
-                            .add_modifier(Modifier::BOLD),
-                        theme,
-                        fade,
-                    )
-                } else {
-                    faded(chrome(theme, ChromeInk::Metadata), theme, fade)
-                };
-                if active {
-                    let fill = crate::tui::menu_style::selected_row_bg_style();
-                    let mut x = card.x + 1;
-                    while x < card.right().saturating_sub(1) {
-                        let cell = &mut buf[(x, *y)];
-                        if let Some(bg) = faded(fill, theme, fade).bg {
-                            cell.set_bg(bg);
-                        }
-                        x += 1;
-                    }
-                }
-                set_span(buf, text_x, *y, &Span::styled(marker.clone(), row_style));
-                set_span(
-                    buf,
-                    text_x + marker_w + 1,
-                    *y,
-                    &Span::styled(fit(&entry.label), row_style),
-                );
-                if !entry.detail.is_empty() {
-                    let detail_x = right_edge.saturating_sub(entry.detail.width() as u16);
-                    let label_end = text_x + marker_w + 1 + entry.label.width() as u16 + 1;
-                    if detail_x > label_end {
-                        set_span(
-                            buf,
-                            detail_x,
-                            *y,
-                            &Span::styled(entry.detail.clone(), row_style),
-                        );
-                    }
-                }
-            }
-        }
-    }
-    sixel_reserve
-}
-
-/// Paint the startup stage: top line, the launch card (or the working
-/// screen once dissolved), then the docked composer. Deterministic; every
-/// fact is injected. Returns the sixel tier's reserved block (stage
-/// coordinates), or a zero-width rect when no sixel block was reserved.
-pub fn render_tideline_startup(
-    stage: Rect,
-    buf: &mut Buffer,
-    startup: &TidelineStartup<'_>,
-) -> Rect {
-    if stage.width < 8 || stage.height < 5 {
-        return Rect::new(0, 0, 0, 0);
-    }
-    let theme = startup.theme;
-    let layout = startup_layout(stage);
-
-    // The top line: ⑂ branch  path, one dim row the terminal owns above the
-    // stage. The working screen (card gone) gains the `⋮ MCP n/m` chip right.
-    let card_gone = startup.card_dissolve >= 1.0;
-    render_launch_top_line(layout.header, buf, startup, card_gone);
-
-    // The sixel block reserved by this paint, if any. The card is its only
-    // source; the working screen and the composer never reserve.
-    let mut sixel_reserve = Rect::new(0, 0, 0, 0);
-    if card_gone {
-        // The working screen's first transcript receipt, only when the
-        // session fact is true.
-        let receipt = if startup.session_hooks > 0 {
-            format!(
-                "{} session_start {} {}",
-                startup.sym("◆"),
-                startup.sym("·"),
-                tr(startup.locale, MessageId::ReceiptSessionHooks)
-                    .replace("{count}", &startup.session_hooks.to_string()),
-            )
-        } else {
-            format!("{} session_start", startup.sym("◆"))
-        };
-        set_span(
-            buf,
-            layout.header.x + HEADER_MARGIN,
-            layout.header.y + 2,
-            &Span::styled(receipt, chrome(theme, ChromeInk::Metadata)),
-        );
-    } else {
-        sixel_reserve = render_launch_card(stage, buf, startup, &layout);
-    }
-
-    // The docked pre-session composer is the same rounded Tideline shell
-    // used by the work surface whenever the full four-row dock fits. Its
-    // shell owns both the visible `[↑]` affordance and the matching
-    // geometry; the launch renderer owns only localized input/hint content.
-    // Tiny terminals retain the compact strip rather than drawing fake
-    // corners with no interior cells.
-    let enclosed = startup.composer.enclosed
-        && layout.dock.height >= crate::tui::composer_chrome::TIDELINE_COMPOSER_HEIGHT
-        && layout.dock.width >= 6;
-    let composer_rows = if enclosed {
-        launch_composer_rows(stage)
-    } else {
-        launch_compact_composer_rows(stage)
-    };
-    // The one migration notice above the composer, only when true.
-    if !card_gone
-        && let Some(notice) = startup.notice.as_deref()
-        && layout.dock.y > stage.y
-    {
-        let x = stage.x + HEADER_MARGIN + 1;
-        set_span(
-            buf,
-            x,
-            layout.dock.y.saturating_sub(1),
-            &Span::styled(
-                truncate_to_width(
-                    notice,
-                    usize::from(stage.width.saturating_sub(HEADER_MARGIN * 2 + 2)),
-                ),
-                chrome(theme, ChromeInk::MetadataDim),
-            ),
-        );
-    }
-    if let Some((input_row, hint_row)) = composer_rows {
-        render_launch_composer(
-            stage,
-            buf,
-            theme,
-            &startup.composer,
-            input_row,
-            hint_row,
-            enclosed.then_some(layout.dock),
-            startup.status_line.as_deref(),
-            startup.ascii_safe,
-            (!card_gone)
-                .then_some(startup.composer_rule.as_deref())
-                .flatten(),
-        );
-        if !enclosed && let Some(line) = startup.status_line.as_deref() {
-            let y = if layout.dock.height == 1 {
-                input_row
-            } else {
-                layout
-                    .dock
-                    .bottom()
-                    .saturating_sub(1)
-                    .saturating_sub(stage.y)
-            };
-            set_span(
-                buf,
-                stage.x + 2,
-                stage.y + y,
-                &Span::styled(
-                    truncate_to_width(line, usize::from(stage.width.saturating_sub(4))),
-                    chrome(theme, ChromeInk::Metadata),
-                ),
-            );
-        }
-    }
-    sixel_reserve
-}
-
-/// Recorded interactive hitboxes for the startup stage: the docked
-/// composer's focus, input and send targets, plus the launch card's
-/// clickable rows. The header is deliberately non-interactive and has no
-/// hitbox.
-#[derive(Debug, Clone, Default)]
-pub struct TidelineStartupHitboxes {
-    /// The docked composer focus surface (a click here is a no-op that keeps
-    /// focus where it already is).
-    pub composer: Option<Rect>,
-    /// The actual text-input row; completion menus anchor directly above it.
-    pub input: Option<Rect>,
-    /// The send glyph inside the composer row (click submits).
-    pub send: Option<Rect>,
-    /// The card's clickable rows in [`launch_card_rows`] order.
-    pub rows: Vec<(crate::tui::app::LaunchRowId, Rect)>,
-}
-
-/// Clickable rects for the startup card's rows: the same
-/// [`launch_card_plan`] geometry the painter uses, so rects match painted
-/// cells wherever both run on the same stage.
+/// Whether the launch screen wants animation frames right now: the mark is
+/// still surfacing, the card is dissolving, or the underwater field is
+/// alive and not yet settled. Nothing here paints; the event loop reads it
+/// to schedule redraws, and each redraw advances the ambient clock.
 #[must_use]
-pub fn tideline_startup_row_hitboxes(
-    stage: Rect,
-    startup: &TidelineStartup<'_>,
-) -> Vec<(crate::tui::app::LaunchRowId, Rect)> {
-    let rows = launch_card_rows(startup.locale, &startup.recent, startup.has_more_recent);
-    let layout = startup_layout(stage);
-    let Some(plan) = launch_card_plan(
-        stage,
-        &layout,
-        LaunchCardContent::for_startup(startup, stage, rows.len()),
-    ) else {
-        return Vec::new();
-    };
-    plan.rows
-        .iter()
-        .filter_map(|(y, kind)| match kind {
-            LaunchCardPlanRow::Interactive(index) => rows.get(*index).map(|row| {
-                (
-                    row.id.clone(),
-                    Rect {
-                        x: plan.card.x + 1,
-                        y: *y,
-                        width: plan.card.width.saturating_sub(2),
-                        height: 1,
-                    },
-                )
-            }),
-            LaunchCardPlanRow::Heading | LaunchCardPlanRow::Note => None,
-        })
-        .collect()
-}
-
-/// Compute the startup hitboxes for one render area. Pure geometry through
-/// the same `startup_layout` the renderer uses, so rects match painted
-/// cells wherever both run on the same stage.
-#[must_use]
-pub fn tideline_startup_hitboxes(stage: Rect) -> TidelineStartupHitboxes {
-    tideline_startup_hitboxes_with_composer(stage, true)
-}
-
-/// Same geometry as [`tideline_startup_hitboxes`], respecting the explicit
-/// compact-composer preference used by the current `App` projection.
-#[must_use]
-pub fn tideline_startup_hitboxes_with_composer(
-    stage: Rect,
-    enclosed: bool,
-) -> TidelineStartupHitboxes {
-    let mut out = TidelineStartupHitboxes::default();
-    if stage.width < 8 || stage.height < 5 {
-        return out;
-    }
-    let layout = startup_layout(stage);
-    // The four-row dock reuses the exact rounded shell geometry, including
-    // the visible three-cell `[↑]` submit rect. Compact terminals preserve
-    // the older one-line target because they cannot host an enclosed shell.
-    if layout.dock.height >= 1 {
-        let use_enclosed = enclosed
-            && layout.dock.height >= crate::tui::composer_chrome::TIDELINE_COMPOSER_HEIGHT
-            && layout.dock.width >= 6;
-        if use_enclosed {
-            let geometry = crate::tui::composer_chrome::tideline_composer_geometry(layout.dock);
-            let hitboxes = crate::tui::composer_chrome::tideline_composer_hitboxes(layout.dock);
-            out.composer = Some(hitboxes.border);
-            out.input = Some(Rect {
-                x: geometry.content.x,
-                y: geometry.content.y,
-                width: geometry.content.width,
-                height: 1,
-            });
-            out.send = Some(hitboxes.submit);
-        } else {
-            let input = Rect {
-                x: stage.x.saturating_add(2),
-                y: layout.dock.y,
-                width: stage.width.saturating_sub(4),
-                height: 1,
-            };
-            out.composer = Some(input);
-            out.input = Some(input);
-            out.send = Some(Rect {
-                x: stage.x.saturating_add(stage.width.saturating_sub(4)),
-                y: layout.dock.y,
-                width: 2.min(stage.width),
-                height: 1,
-            });
-        }
-    }
-    out
-}
-
-/// Project live `App` state onto the startup stage's inputs: the route the
-/// info line reports, the workspace the git probe observed, the MCP
-/// snapshot, the composer, and the launch-relative ambient clock.
-#[must_use]
-pub fn tideline_startup_from_app(app: &App) -> TidelineStartup<'_> {
-    let ascii_safe = crate::tui::color_compat::ascii_safe_enabled();
-    // The route facts are the info line's own, already shed to a budget;
-    // the renderer truncates to the stage on top of that.
-    let route = (!app.onboarding_needs_api_key)
-        .then(|| crate::tui::phase_strip::route_identity_fields(app, ShellTier::Wide, ROUTE_BUDGET))
-        .flatten()
-        .map(|fields| fields.join(FIELD_JOIN));
-    // Repository and branch come from the one cached `git_status` snapshot —
-    // the render path never probes.
-    let git = crate::tui::git_status::cached_status();
-    let git_matches_workspace = git.probed_workspace.as_deref() == Some(app.workspace.as_path());
-    let workspace = match git.remote_slug.as_deref().filter(|_| git_matches_workspace) {
-        Some(slug) if !slug.is_empty() => match git.branch.as_deref() {
-            Some(branch) if !branch.is_empty() => format!("{slug}{FIELD_JOIN}{branch}"),
-            _ => slug.to_string(),
-        },
-        _ => app.workspace.display().to_string(),
-    };
-    let mark = if ascii_safe {
-        MarkTier::None
-    } else if crate::tui::mark::kitty_graphics_supported() {
-        MarkTier::Image
-    } else if app.use_alt_screen()
-        && app.launch.sixel_cell_px.is_some()
-        && crate::tui::mark::sixel_graphics_supported()
-        && crate::tui::mark::sixel_field_bg(&app.ui_theme, app.launch.sixel_terminal_bg).is_some()
+pub fn launch_motion_active(app: &App, obscured: bool, ambient_settled: bool) -> bool {
+    if !app.launch.visible
+        || obscured
+        || app.onboarding != OnboardingState::None
+        || !app.view_stack.is_empty()
+        || !app.motion_policy().allows_decorative()
     {
-        // Sixel last: cursor-addressed pixels need the alternate screen
-        // (inline viewports have no stable CUP origin), a measured cell
-        // size, and an RGB field to composite the raster's corners onto.
-        // Anything missing keeps the braille tier.
-        MarkTier::Sixel
-    } else {
-        MarkTier::Braille
-    };
-    // The composer's launch rule: `model (effort) · permission` — the one
-    // place the route and the posture show while the card is up — plus the
-    // filesystem scope whenever it says something the permission word does
-    // not (PRD 4.1: the recommended route carries its visible trust and
-    // billing boundary; the provider identity in the route line is the
-    // billing owner, the permission + scope is the trust boundary).
-    let (_, model) = app.effective_route_identity_display();
-    let permission = permission_label(app);
-    let scope = filesystem_scope_notice(app).map(|scope| scope.into_owned());
-    let mut rule = if model.is_empty() {
-        format!(
-            "{} · {}",
-            tr(app.ui_locale, MessageId::InfoLineNotConnected),
-            permission
-        )
-    } else {
-        let effort = app.reasoning_effort_display_label();
-        if effort.is_empty() {
-            format!("{model} · {permission}")
-        } else {
-            format!("{model} ({effort}) · {permission}")
-        }
-    };
-    if let Some(scope) = scope {
-        rule.push_str(" · ");
-        rule.push_str(&scope);
+        return false;
     }
-    let composer_rule = Some(rule);
-    // Recent work is projected from the launch state's loaded list — the
-    // render path never touches disk.
-    let (recent, has_more) = launch_recent_entries(app);
-    let branch = git_matches_workspace
-        .then(|| git.branch.clone())
-        .flatten()
-        .filter(|branch| !branch.is_empty());
-    let session_hooks = if app.hooks.config().enabled {
-        app.hooks
-            .config()
-            .hooks
-            .iter()
-            .filter(|hook| hook.event == crate::hooks::HookEvent::SessionStart)
-            .count()
-    } else {
-        0
-    };
-    let dissolve_motion = app.motion_policy().allows_decorative() && !app.low_motion;
-    TidelineStartup::new(&app.ui_theme, route, workspace)
-        .locale(app.ui_locale)
-        .mcp(app.mcp_snapshot.as_ref().map(McpFacts::from_snapshot))
-        .ascii_safe(ascii_safe)
-        .mark(mark)
-        .composer(LaunchComposerDisplay::from_app(app))
-        // The transient line over the dock: the latest launch status (a
-        // resume failure leaves the card up and says why here).
-        .status_line(app.launch.status.clone())
-        .recent(recent, has_more)
-        .menu_selected(app.launch.menu_selected)
-        .hovered(app.launch.hovered_row)
-        .notice(
-            app.launch
-                .claude_code_detected
-                .then(|| tr(app.ui_locale, MessageId::LaunchNoticeClaude).into_owned()),
-        )
-        .composer_rule(composer_rule)
-        .branch(branch)
-        .session_hooks(session_hooks)
-        .card_dissolve(
-            app.launch
-                .card_dissolve_progress(app.ambient_clock_ms, dissolve_motion),
-        )
-        // The app opens on this screen, so the ambient clock is already
-        // launch-relative. Reduced motion asks for the settled mark, which is
-        // the same drawing at its endpoint.
-        .surface_progress(if app.motion_policy().allows_decorative() {
-            crate::tui::mark::surface_progress(app.ambient_clock_ms, MARK_SURFACE_MS)
-        } else {
-            1.0
-        })
+    let now = app.ambient_clock_ms;
+    let surfacing = crate::tui::mark::surface_progress(now, MARK_SURFACE_MS) < 1.0;
+    let dissolve = app.launch.card_dissolve_progress(now, true);
+    let dissolving = dissolve > 0.0 && dissolve < 1.0;
+    let water_alive = app.theme_id == crate::palette::ThemeId::Underwater && !ambient_settled;
+    surfacing || dissolving || water_alive
 }
-
-/// Store the startup stage's clickable rects into the launch state. Call
-/// after the stage is painted, with the hitboxes computed for the same
-/// stage rect: the docked composer's input and send rects land in
-/// `composer_area`/`send_area`, and the card's clickable rows land in
-/// `row_hitboxes` (hover and click share them).
-pub fn apply_launch_hitboxes(
-    hitboxes: &TidelineStartupHitboxes,
-    launch: &mut crate::tui::app::LaunchState,
-) {
-    launch.composer_area = hitboxes.composer;
-    launch.send_area = hitboxes.send;
-    launch.row_hitboxes = hitboxes.rows.clone();
-    // Hover must match a painted cell, so a shed row clears it; the
-    // keyboard selection is intentionally kept (Enter still runs it).
-    if launch
-        .hovered_row
-        .is_some_and(|hovered| hovered >= launch.row_hitboxes.len())
-    {
-        launch.hovered_row = None;
-    }
-}
-
-#[cfg(test)]
-mod tideline_tests;

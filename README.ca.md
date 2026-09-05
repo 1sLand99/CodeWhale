@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:e421b94e9f7e -->
+<!-- source: README.md sha256:dcbd5aa09403 -->
 # Codewhale
 
 Codewhale és un agent de programació de codi obert per al terminal, desenvolupat amb Rust i millorat públicament amb les persones que l’utilitzen.
@@ -14,10 +14,14 @@ Codewhale és un agent de programació de codi obert per al terminal, desenvolup
 
 ## Instal·lació
 
+Per a una instal·lació nova a macOS o Linux, fes servir la versió oficial de GitHub:
+
 ```bash
-npm install -g codewhale
-codewhale
+curl -fsSL https://codewhale.net/install.sh | sh
+"$HOME/.local/bin/codewhale"
 ```
+
+A Windows, descarrega l’instal·lador o l’arxiu corresponent de [GitHub Releases](https://github.com/Hmbown/CodeWhale/releases/latest). Per actualitzar una instal·lació directa existent, executa `codewhale update`, o `codewhale update --check` només per comprovar-la. L’actualitzador mostra el camí de l’executable i conserva les compilacions més noves. npm i Cargo són opcions secundàries; consulta la [guia d’instal·lació](docs/INSTALL.md) per migrar una instal·lació gestionada per paquets i configurar PATH.
 
 En la primera execució, Codewhale t’ajuda a connectar un proveïdor o a continuar sense connexió. També admet Cargo, Docker, Nix, Scoop, arxius precompilats, Android/Termux i un mirall CNB. Consulta la [guia d’instal·lació](docs/INSTALL.md).
 

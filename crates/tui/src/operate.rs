@@ -1146,6 +1146,8 @@ pub fn upsert_keepalive(
             rrule: OPERATE_KEEPALIVE_RRULE.to_string(),
             cwds: Vec::new(),
             model: Some(OPERATE_LEAD_MODEL.to_string()),
+            model_provider: None,
+            model_provider_id: None,
             mode: Some("operate".to_string()),
             allow_shell: Some(true),
             trust_mode: Some(false),

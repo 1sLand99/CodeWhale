@@ -82,13 +82,22 @@ pub(crate) fn info_segments(app: &App, width: u16) -> Vec<InfoSegment> {
     } else {
         // The context reading and the metrics claim the rest of the row;
         // the route sheds its own qualifiers first.
-        let budget = (usize::from(width)).saturating_sub(60).max(24);
+        let budget = crate::tui::phase_strip::info_route_budget(width);
         let fields = crate::tui::phase_strip::route_identity_fields(app, tier, budget)
-            .unwrap_or_else(|| vec![model]);
+            .unwrap_or_else(|| {
+                vec![crate::tui::phase_strip::RouteIdentityField {
+                    kind: crate::tui::phase_strip::RouteFieldKind::Model,
+                    text: model,
+                }]
+            });
         segments.push(InfoSegment::new(
             InfoSegmentId::Model,
             "",
-            fields.join(" · "),
+            fields
+                .iter()
+                .map(|field| field.text.as_str())
+                .collect::<Vec<_>>()
+                .join(ROUTE_FIELD_JOIN),
             ChromeInk::Identity,
         ));
     }
@@ -195,7 +204,71 @@ pub(crate) fn info_segments(app: &App, width: u16) -> Vec<InfoSegment> {
 #[derive(Debug, Clone, Copy, Default)]
 struct InfoLineInteractionHitboxes {
     context: Option<Rect>,
+    /// The provider name inside the route segment, when the row is wide
+    /// enough to render one.
     route: Option<Rect>,
+    /// The model name and its effort tier — one span, because they are
+    /// always adjacent and `/model` owns both.
+    model: Option<Rect>,
+}
+
+/// Separator between rendered route fields. Three columns wide, matching
+/// `phase_strip::ITEM_SEPARATOR_WIDTH`, which is what the shed budget counts.
+const ROUTE_FIELD_JOIN: &str = " · ";
+
+/// Split the route segment's rect back into its fields.
+///
+/// The segment renders as `provider · model · effort`; a click on the
+/// provider belongs to `/provider` and a click on the model or its effort
+/// tier belongs to `/model`. Widths come from the same field texts the
+/// segment was built from, so the split cannot disagree with what is on
+/// screen. Returns `(provider, model-and-effort)`.
+fn split_route_hitbox(
+    fields: &[crate::tui::phase_strip::RouteIdentityField],
+    area: Rect,
+) -> (Option<Rect>, Option<Rect>) {
+    use crate::tui::phase_strip::RouteFieldKind;
+    use unicode_width::UnicodeWidthStr as _;
+
+    let join = ROUTE_FIELD_JOIN.width();
+    let right = usize::from(area.right());
+    let mut x = usize::from(area.x);
+    let mut provider = None;
+    let mut model: Option<Rect> = None;
+    for (index, field) in fields.iter().enumerate() {
+        if index > 0 {
+            x += join;
+        }
+        let end = (x + field.text.width()).min(right);
+        if x >= end {
+            break;
+        }
+        let rect = Rect {
+            x: x as u16,
+            y: area.y,
+            width: (end - x) as u16,
+            height: 1,
+        };
+        match field.kind {
+            RouteFieldKind::Provider => provider = Some(rect),
+            // Model and effort are adjacent and share a destination, so the
+            // span grows rather than replacing — a two-target registration
+            // for one idea just gives the pointer a seam to fall into.
+            RouteFieldKind::Model | RouteFieldKind::Effort => {
+                model = Some(match model {
+                    Some(prev) => Rect {
+                        x: prev.x,
+                        y: prev.y,
+                        width: rect.right().saturating_sub(prev.x),
+                        height: 1,
+                    },
+                    None => rect,
+                });
+            }
+        }
+        x = end;
+    }
+    (provider, model)
 }
 
 /// Render the info line into its one row and record its segment
@@ -229,12 +302,28 @@ fn render_info_row(f: &mut Frame, app: &mut App, area: Rect) -> InfoLineInteract
         .ascii_safe(crate::tui::color_compat::ascii_safe_enabled())
         .hovered(hovered);
     let hitboxes = infoline_hitboxes(&info, area);
+    let route_area = hitboxes
+        .iter()
+        .find(|hitbox| hitbox.id == InfoSegmentId::Model)
+        .map(|hitbox| hitbox.area);
+    // Same pure call `info_segments` made, with the same budget owner, so the
+    // split lines up with the text that was just measured.
+    let route_fields = crate::tui::phase_strip::route_identity_fields(
+        app,
+        crate::tui::underwater::ShellTier::for_chrome_width(area.width),
+        crate::tui::phase_strip::info_route_budget(area.width),
+    );
+    let (provider_area, model_area) = match (route_area, route_fields.as_deref()) {
+        (Some(area), Some(fields)) => split_route_hitbox(fields, area),
+        // No configured model: the segment says so and is not a route control.
+        // No drawn segment: nothing to point at either way.
+        (area, None) => (None, area),
+        (None, Some(_)) => (None, None),
+    };
     let interaction_hitboxes = InfoLineInteractionHitboxes {
         context: crate::tui::infoline::context_meter_hitbox(&info, area),
-        route: hitboxes
-            .iter()
-            .find(|hitbox| hitbox.id == InfoSegmentId::Model)
-            .map(|hitbox| hitbox.area),
+        route: provider_area,
+        model: model_area,
     };
     // Keep the row's quiet background under the widget itself.
     let buf = f.buffer_mut();
@@ -244,6 +333,65 @@ fn render_info_row(f: &mut Frame, app: &mut App, area: Rect) -> InfoLineInteract
     ratatui::widgets::Widget::render(info, area, buf);
     app.viewport.last_infoline_hitboxes = hitboxes;
     interaction_hitboxes
+}
+
+/// Register the chrome that already answers a click, so it also answers the
+/// pointer.
+///
+/// "What responds to the pointer going over it right now across the entire
+/// app" — the honest answer had been: links, truncated text, and the info
+/// line. The jump-to-latest button, the plugin call-to-action, and the
+/// workflow panel all handled clicks in `mouse_ui` and lit up for nothing,
+/// which teaches a person that pointing at things does not work here.
+///
+/// This runs after the frame body has recorded its rects and before hover is
+/// resolved, so it stays one list rather than a `register_rect` scattered
+/// through every widget that happens to remember.
+fn register_clickable_chrome_for_hover(app: &App) {
+    use crate::localization::MessageId;
+    let targets: [(Option<Rect>, MessageId); 4] = [
+        (
+            app.viewport.jump_to_latest_button_area,
+            MessageId::KbJumpTopBottom,
+        ),
+        (
+            app.viewport.last_plugin_cta_review_area,
+            MessageId::PluginCtaReview,
+        ),
+        (
+            app.viewport.last_plugin_cta_dismiss_area,
+            MessageId::KbCloseMenu,
+        ),
+        (
+            app.viewport.last_workflow_panel_area,
+            MessageId::CmdWorkflowDescription,
+        ),
+    ];
+    for (area, label) in targets {
+        let Some(area) = area else { continue };
+        crate::tui::hover_layer::register_rect(
+            crate::tui::hover_hit::HoverTargetKind::Link,
+            area,
+            crate::localization::tr(app.ui_locale, label).into_owned(),
+            false,
+        );
+    }
+
+    // The composer's `[↑]` submit control. It registers only when a click
+    // there would actually send: an affordance that lights up and then does
+    // nothing is the same defect as one that acts without lighting up.
+    if let Some(composer) = app.viewport.last_composer_area
+        && let Some(submit) = crate::tui::widgets::active_composer_submit_rect(app, composer)
+        && app.composer_enter_would_submit()
+    {
+        crate::tui::hover_layer::register_rect(
+            crate::tui::hover_hit::HoverTargetKind::Link,
+            submit,
+            crate::localization::tr(app.ui_locale, crate::localization::MessageId::KbSendDraft)
+                .into_owned(),
+            false,
+        );
+    }
 }
 
 /// Register the info line's drawn controls as one typed input surface.
@@ -278,6 +426,18 @@ fn register_info_interaction_targets(app: &mut App, hitboxes: InfoLineInteractio
                 inspect_detail: crate::tui::tideline::InspectDetail::Route,
             });
     }
+    if let Some(hitbox) = hitboxes.model {
+        app.viewport
+            .interaction_targets
+            .register(crate::tui::tideline::InteractionTarget {
+                id: crate::tui::tideline::InteractionTargetId::HEADER_MODEL,
+                area: hitbox,
+                focus: crate::tui::tideline::InteractionFocus::Direct,
+                keyboard_action: Some(crate::tui::tideline::InteractionAction::OpenModelPicker),
+                mouse_action: Some(crate::tui::tideline::InteractionAction::OpenModelPicker),
+                inspect_detail: crate::tui::tideline::InspectDetail::Route,
+            });
+    }
 
     for target in app.viewport.interaction_targets.iter() {
         let label = match target.mouse_action {
@@ -303,6 +463,15 @@ fn register_info_interaction_targets(app: &mut App, hitboxes: InfoLineInteractio
                     crate::localization::MessageId::CmdProviderDescription,
                 ),
             ),
+            // `/model` is a command name, not prose, so it stays verbatim in
+            // every locale; only the description is translated.
+            Some(crate::tui::tideline::InteractionAction::OpenModelPicker) => format!(
+                "/model · {}",
+                crate::localization::tr(
+                    app.ui_locale,
+                    crate::localization::MessageId::CmdModelDescription,
+                ),
+            ),
             Some(crate::tui::tideline::InteractionAction::ShowDockPanel(panel)) => {
                 panel.title().to_string()
             }
@@ -318,6 +487,33 @@ fn register_info_interaction_targets(app: &mut App, hitboxes: InfoLineInteractio
             label,
             false,
         );
+    }
+}
+
+/// The posture bar's live counts are the bottom-of-screen way into the
+/// dock: each one opens the view it counts (agents → AGENTS, shells / tasks
+/// / automations → BACKGROUND, the idle `todo` word → TODO). Same
+/// `ShowDockPanel` action the strip's own tabs use.
+fn register_footer_count_targets(
+    app: &mut App,
+    facts: &crate::tui::phase_strip::TidelineFooterFacts,
+    count_rects: &[(usize, Rect)],
+) {
+    for (index, area) in count_rects {
+        let Some(panel) = facts.count_panels.get(*index).copied() else {
+            continue;
+        };
+        let action = crate::tui::tideline::InteractionAction::ShowDockPanel(panel);
+        app.viewport
+            .interaction_targets
+            .register(crate::tui::tideline::InteractionTarget {
+                id: crate::tui::tideline::InteractionTargetId::FOOTER_COUNT,
+                area: *area,
+                focus: crate::tui::tideline::InteractionFocus::Direct,
+                keyboard_action: Some(action),
+                mouse_action: Some(action),
+                inspect_detail: crate::tui::tideline::InspectDetail::Route,
+            });
     }
 }
 
@@ -611,6 +807,8 @@ pub(crate) fn build_engine_config(app: &App, config: &Config) -> EngineConfig {
         goal_status: app.goal.status,
         goal_max_continuations: config.goal_max_continuations(),
         goal_continuation_delay_seconds: config.goal_continuation_delay_seconds(),
+        reasoning_only_max_reprompts: config.reasoning_only_max_reprompts(),
+        reasoning_only_reprompt_message: Some(config.reasoning_only_reprompt_message().to_string()),
         locale_tag: app.ui_locale.tag().to_string(),
         workshop: {
             crate::tools::large_output_router::WorkshopConfig::install_active(
@@ -1038,113 +1236,13 @@ pub(crate) fn render(f: &mut Frame, app: &mut App, _config: &Config) -> Option<(
         return None;
     }
 
-    if app.launch.visible {
-        // The launch screen lives inside the session shell frame (spec
-        // §5b): the Tideline startup stage as the body, then the posture row
-        // and the info line beneath it — the same chrome every post-session
-        // screen wears, so opening Codewhale and working in it are one
-        // design. Nothing paints above the stage; the launch header is the
-        // stage's own. The pre-session composer docks in the stage's bottom
-        // rows; completion entries are computed here — the same way the
-        // session path below computes them for ComposerWidget — so the
-        // stage can paint its popup (#5698 review finding 2); the mention
-        // walker needs &mut App, rendering does not.
-        let launch_slash_menu_entries = visible_slash_menu_entries(app, SLASH_MENU_LIMIT);
-        let launch_mention_menu_entries =
-            crate::tui::file_mention::visible_mention_menu_entries(app, app.mention_menu_limit);
-        // The posture bar and the metrics line appear only once a session
-        // exists: while the launch card is up the stage owns every row.
-        let card_up = {
-            let motion = app.motion_policy().allows_decorative() && !app.low_motion;
-            app.launch
-                .card_dissolve_progress(app.ambient_clock_ms, motion)
-                < 1.0
-        };
-        let areas = if card_up {
-            Layout::default()
-                .direction(Direction::Vertical)
-                .flex(ratatui::layout::Flex::Start)
-                .constraints([Constraint::Min(1)])
-                .split(size)
-        } else {
-            Layout::default()
-                .direction(Direction::Vertical)
-                .flex(ratatui::layout::Flex::Start)
-                .constraints([
-                    Constraint::Min(1),    // stage: Tideline startup
-                    Constraint::Length(1), // posture row (merged footer, slots 6+8)
-                    Constraint::Length(1), // info line
-                ])
-                .split(size)
-        };
-        let stage_area = areas[0];
-        let footer_area = areas.get(1).copied().unwrap_or_default();
-        let info_area = areas.get(2).copied().unwrap_or_default();
-        let startup = crate::tui::underwater::tideline_startup_from_app(app);
-        let mut hitboxes = if startup.composer.enclosed {
-            crate::tui::underwater::tideline_startup_hitboxes(stage_area)
-        } else {
-            crate::tui::underwater::tideline_startup_hitboxes_with_composer(stage_area, false)
-        };
-        // The card's clickable rows share the painter's plan geometry, so
-        // hover and click rects match painted cells.
-        hitboxes.rows = crate::tui::underwater::tideline_startup_row_hitboxes(stage_area, &startup);
-        let sixel_area =
-            crate::tui::underwater::render_tideline_startup(stage_area, f.buffer_mut(), &startup);
-        app.launch.sixel_mark_area = if sixel_area.width > 0 {
-            Some(sixel_area)
-        } else {
-            None
-        };
-        // The completion popup paints above the docked composer's input row,
-        // over the stage rows it needs — the same caller-computed entries
-        // the session popup rides.
-        if let Some(input_row) = hitboxes
-            .input
-            .map(|area| area.y.saturating_sub(stage_area.y))
-        {
-            crate::tui::underwater::render_launch_completion_popup(
-                stage_area,
-                f.buffer_mut(),
-                app,
-                input_row,
-                &launch_slash_menu_entries,
-                &launch_mention_menu_entries,
-            );
-        }
-        crate::tui::underwater::apply_launch_hitboxes(&hitboxes, &mut app.launch);
-        // The merged footer is the screen's last row on every screen.
-        if footer_area.height > 0 {
-            let facts = crate::tui::phase_strip::tideline_footer_from_app(app, footer_area.width);
-            let footer = facts.widget(
-                &app.ui_theme,
-                crate::tui::color_compat::ascii_safe_enabled(),
-            );
-            let buf = f.buffer_mut();
-            Block::default()
-                .style(Style::default().bg(app.ui_theme.footer_bg))
-                .render(footer_area, buf);
-            crate::tui::phase_strip::render_tideline_footer(footer_area, buf, &footer);
-        }
-        // The info line is the screen's last row, under the posture row. At
-        // a height with no row for it, the stale rects must go too, or a
-        // model/context click could route against cells nothing paints.
-        let mut info_interactions = InfoLineInteractionHitboxes::default();
-        if info_area.height > 0 {
-            info_interactions = render_info_row(f, app, info_area);
-        } else {
-            app.viewport.last_infoline_hitboxes.clear();
-        }
-        register_info_interaction_targets(app, info_interactions);
-        if !app.view_stack.is_empty() {
-            if app.view_stack.top_kind() == Some(ModalKind::Approval) {
-                app.viewport.last_approval_area = app.view_stack.top_occupied_region(size);
-            }
-            let buf = f.buffer_mut();
-            app.view_stack.render(size, buf);
-        }
-        return None;
-    }
+    // The opening screen is no longer a separate surface. Founder ruling:
+    // "we don't have to have a different look for the opening screen ... we
+    // can make it an asset that exists there instead". The launch card is now
+    // the idle transcript's own empty state (`underwater::launch_empty_state`),
+    // so the composer below it is the real one, the footer and info line are
+    // the ones every other screen wears, and Tab means what it means
+    // everywhere else — there is no second input authority left to arbitrate.
 
     // Mini-window mode: when the host terminal window is pinned into its
     // small always-on-top form, hide the shell chrome and keep only what the
@@ -1399,6 +1497,22 @@ pub(crate) fn render(f: &mut Frame, app: &mut App, _config: &Config) -> Option<(
             let buf = f.buffer_mut();
             chat_widget.render(chat_area, buf);
         }
+        // The launch card's rows are clickable where they painted. The row
+        // offsets come from the same builder that produced the lines, so a
+        // hitbox cannot describe a row the transcript did not draw.
+        if app.launch.visible {
+            let rows = crate::tui::underwater::launch_empty_state(app, chat_area).rows;
+            app.launch.row_hitboxes = rows
+                .into_iter()
+                .filter_map(|(id, row)| {
+                    let y = chat_area.y.checked_add(u16::try_from(row).ok()?)?;
+                    (y < chat_area.y.saturating_add(chat_area.height))
+                        .then_some((id, Rect::new(chat_area.x, y, chat_area.width, 1)))
+                })
+                .collect();
+        } else if !app.launch.row_hitboxes.is_empty() {
+            app.launch.row_hitboxes.clear();
+        }
     }
 
     // Workflow panel between chat and pending-input preview (#4121).
@@ -1515,7 +1629,8 @@ pub(crate) fn render(f: &mut Frame, app: &mut App, _config: &Config) -> Option<(
         Block::default()
             .style(Style::default().bg(app.ui_theme.footer_bg))
             .render(area, buf);
-        crate::tui::phase_strip::render_tideline_footer(area, buf, &footer);
+        let count_rects = crate::tui::phase_strip::render_tideline_footer(area, buf, &footer);
+        register_footer_count_targets(app, &facts, &count_rects);
     }
 
     // The metrics line sits directly under the posture bar: model · ctx ·
@@ -1573,6 +1688,7 @@ pub(crate) fn render(f: &mut Frame, app: &mut App, _config: &Config) -> Option<(
             );
         }
     }
+    register_clickable_chrome_for_hover(app);
     crate::tui::hover_layer::apply_resolved_effects(
         f.buffer_mut(),
         app.effective_low_motion_for_status(),
@@ -1917,6 +2033,67 @@ mod tests {
     use super::{register_info_interaction_targets, render_info_row, short_title_truncate};
     use ratatui::{Terminal, backend::TestBackend};
 
+    /// Chrome that answers a click must also answer the pointer, or the app
+    /// teaches people that pointing at things does not work here.
+    #[test]
+    fn clickable_chrome_registers_a_hover_target() {
+        let _guard = crate::tui::hover_layer::HOVER_TEST_LOCK.lock().unwrap();
+        crate::tui::hover_layer::begin_frame();
+        let mut app =
+            crate::test_support::test_app_with_options(crate::test_support::test_tui_options("."));
+        let button = ratatui::layout::Rect::new(70, 10, 3, 3);
+        app.viewport.jump_to_latest_button_area = Some(button);
+
+        super::register_clickable_chrome_for_hover(&app);
+
+        let registered = crate::tui::hover_layer::registered_targets();
+        assert!(
+            registered.iter().any(|hit| hit.area == button),
+            "the jump-to-latest button handles a click in mouse_ui and must \
+             light up under the pointer; registered: {registered:?}"
+        );
+    }
+
+    /// The composer's `[↑]` answered clicks and showed nothing under the
+    /// pointer — the last of the clickable-but-dark controls. It lights up
+    /// only when a click there would actually send.
+    #[test]
+    fn composer_send_target_lights_up_only_when_it_would_send() {
+        let _guard = crate::tui::hover_layer::HOVER_TEST_LOCK.lock().unwrap();
+        let mut app =
+            crate::test_support::test_app_with_options(crate::test_support::test_tui_options("."));
+        app.launch.visible = false;
+        app.composer_border = true;
+        let area = ratatui::layout::Rect::new(0, 20, 80, 4);
+        app.viewport.last_composer_area = Some(area);
+        app.viewport.last_composer_content = Some(ratatui::layout::Rect::new(1, 21, 73, 2));
+        let submit = crate::tui::widgets::active_composer_submit_rect(&app, area)
+            .expect("enclosed composer submit");
+
+        // Empty draft: the click path refuses, so the pointer must not promise.
+        app.input.clear();
+        app.cursor_position = 0;
+        crate::tui::hover_layer::begin_frame();
+        super::register_clickable_chrome_for_hover(&app);
+        assert!(
+            !crate::tui::hover_layer::registered_targets()
+                .iter()
+                .any(|hit| hit.area == submit),
+            "an inert send target must not advertise itself"
+        );
+
+        app.input = "ship it".to_string();
+        app.cursor_position = app.input.chars().count();
+        crate::tui::hover_layer::begin_frame();
+        super::register_clickable_chrome_for_hover(&app);
+        assert!(
+            crate::tui::hover_layer::registered_targets()
+                .iter()
+                .any(|hit| hit.area == submit),
+            "a live send target must light up under the pointer"
+        );
+    }
+
     #[test]
     fn infoline_route_segment_registers_interaction_target() {
         let mut app =
@@ -1938,23 +2115,44 @@ mod tests {
             .iter()
             .find(|hitbox| hitbox.id == crate::tui::infoline::InfoSegmentId::Model)
             .expect("a wide info line should paint its model segment");
-        let target = app
-            .viewport
-            .interaction_targets
-            .iter()
-            .find(|target| target.id == crate::tui::tideline::InteractionTargetId::HEADER_ROUTE)
-            .expect("painted route segment should have a typed target");
+        let target_for = |id| {
+            app.viewport
+                .interaction_targets
+                .iter()
+                .find(|target| target.id == id)
+                .cloned()
+                .unwrap_or_else(|| panic!("painted route segment should register {id:?}"))
+        };
+        // The segment reads `provider · model · effort`. Pointing at the
+        // provider is a different request from pointing at the model, so the
+        // one target became two: the whole span used to open `/provider` no
+        // matter which name was under the pointer.
+        let provider = target_for(crate::tui::tideline::InteractionTargetId::HEADER_ROUTE);
+        let model = target_for(crate::tui::tideline::InteractionTargetId::HEADER_MODEL);
 
-        assert_eq!(target.area, segment.area);
+        assert_eq!(provider.area.x, segment.area.x);
+        assert!(
+            provider.area.right() < model.area.x,
+            "provider {:?} and model {:?} must not overlap",
+            provider.area,
+            model.area
+        );
+        assert_eq!(model.area.right(), segment.area.right());
         assert_eq!(
-            target.keyboard_action,
+            provider.keyboard_action,
             Some(crate::tui::tideline::InteractionAction::OpenProviderPicker)
         );
-        assert_eq!(target.mouse_action, target.keyboard_action);
         assert_eq!(
-            target.inspect_detail,
-            crate::tui::tideline::InspectDetail::Route
+            model.keyboard_action,
+            Some(crate::tui::tideline::InteractionAction::OpenModelPicker)
         );
+        for target in [&provider, &model] {
+            assert_eq!(target.mouse_action, target.keyboard_action);
+            assert_eq!(
+                target.inspect_detail,
+                crate::tui::tideline::InspectDetail::Route
+            );
+        }
     }
 
     /// "Where did the github info go?" — the workspace segment names the
