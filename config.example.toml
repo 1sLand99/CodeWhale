@@ -206,6 +206,33 @@ memory_path = "~/.codewhale/memory.md"
 # max_reprompts = 2
 # reprompt_message = "So, what's up ? Keep running !"
 
+# ───────────────────────────────────────────────────────────────────────────
+# Model-bound key redaction ([redaction])
+# ───────────────────────────────────────────────────────────────────────────
+# Codewhale masks credential-looking values in tool output before it reaches
+# the model (the "model boundary"), so a file that contains a configured API
+# key, a bare provider token, or a credential-shaped opaque string never leaks
+# those bytes to the model. Leave this enabled unless the model must read and
+# edit files that contain real credentials.
+#
+# Disabling is a security decision, so it is never a plain flag:
+#   * Set model_bound = "disabled" here, restart Codewhale, and the startup
+#     gate asks twice - a first confirmation, then a red "are you really
+#     sure?" stage. Only the second confirmation takes effect, and it applies
+#     on later launches while model_bound stays "disabled".
+#   * Going back to "enabled" - or rewriting config.toml after the
+#     confirmation - invalidates it: requesting "disabled" again always
+#     asks for a fresh confirmation.
+#   * Until a confirmation exists - including in non-interactive/headless
+#     runs, which never confirm anything - masking stays on regardless of
+#     this key. Choosing "keep masking on" on the gate leaves the key
+#     untouched, so the next launch asks again.
+#   * The value is forgiving: false/"off" mean "disabled"; true/"on" mean
+#     "enabled".
+# [redaction]
+# model_bound = "enabled"    # mask keys before they reach the model (default)
+# model_bound = "disabled"   # request the opt-out (restart + confirm required)
+
 # Native tool catalog controls (#2076). By default only the core tool surface
 # is loaded into the model context; less common native tools are discoverable
 # through ToolSearch and loaded on first use.

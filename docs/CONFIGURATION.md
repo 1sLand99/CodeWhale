@@ -2902,3 +2902,62 @@ emits one compact `status` notice per turn so the user can see why their
 visible text shrank. Treat any change that re-enables text-based tool
 execution as a regression; the protocol-recovery tests in
 `crates/tui/tests/integration/protocol_recovery.rs` lock the contract.
+
+## Model-bound redaction (`[redaction] model_bound`)
+
+Codewhale masks credential-looking values in tool output **before it is sent
+to an upstream model** — the "model boundary". A file read by a tool can
+contain a configured API key, a bare provider token, or a credential-shaped
+opaque string, and the model must not see those bytes. This backstop is
+separate from the display/export scrubbers: it decides what the model itself
+can quote back, and it is deliberately conservative (`CredentialShaped`
+policy, see `crates/config/src/persistence.rs`), so ordinary code and config
+stay byte-exact while keys, JWTs, bearer tokens, PEM blocks, and long opaque
+runs are masked.
+
+Turning that masking **off** is a security decision, so it is not a plain
+boolean:
+
+```toml
+[redaction]
+model_bound = "disabled"   # "enabled" (default) | "disabled"
+```
+
+Setting `"disabled"` only records a *request*. It takes effect only when all
+of these are true:
+
+1. You restart the interactive TUI.
+2. The startup gate appears and you press `1`/`Y` on its first stage
+   ("confirm and disable"). This only advances to a second, final-confirmation
+   stage - the gate repeats the red warning and asks "are you really sure?".
+3. On that second stage you press `1`/`Y` again. The gate is rendered with the
+   same explicit-key discipline as workspace trust - `Enter` never confirms by
+   reflex, and `2`/`U` on the second stage steps back.
+4. Only that second confirmation persists a receipt to
+   `~/.codewhale/redaction-state.json` (next to `config.toml`) and rebuilds
+   the engine with masking off for the rest of this launch and future ones.
+
+The receipt is bound to the config it was made against and is valid only
+while that config still requests `"disabled"`. Setting `model_bound` back
+to `"enabled"` - or rewriting `config.toml` in any way after the
+confirmation - invalidates it, so requesting `"disabled"` again later
+always asks for a fresh confirmation.
+
+Until a confirmation exists, the effective mode is always `"enabled"`:
+
+- Choosing `2`/`U` ("keep masking on") leaves the config field untouched, so
+  the next launch asks again. Edit the field back to `"enabled"` to stop being
+  asked.
+- Non-interactive entry points (`codewhale exec`, hooks, automations, headless
+  agents) never confirm anything and never apply an unconfirmed request.
+- Routing/classification summaries and durable goal-state text keep their own
+  always-on redaction regardless of this switch; the opt-out exists so the
+  model can quote file bytes for exact edits, not to relax stored state.
+
+The config value itself is forgiving: `true`/`false`, `"on"`/`"off"`, and
+`"enabled"`/`"disabled"` (any casing) all parse, with `false`/`"off"` meaning
+`"disabled"`.
+
+A confirmed opt-out still sends your configured API keys to the provider you
+are already talking to. Only use it when the model must read and edit files
+that contain real credentials.

@@ -3335,6 +3335,14 @@ pub struct Config {
     #[serde(default)]
     pub vision_model: Option<VisionModelConfig>,
 
+    /// Model-bound credential redaction policy (`[redaction]`). When absent,
+    /// masking is enabled — the shipped security default. A `"disabled"`
+    /// request only takes effect after a TUI restart and an explicit
+    /// confirmation on the startup gate; see
+    /// [`codewhale_config::redaction`].
+    #[serde(default)]
+    pub redaction: Option<codewhale_config::redaction::RedactionToml>,
+
     /// Sibling `permissions.toml` ask-rules compiled for runtime checks.
     ///
     /// This is deliberately not part of `config.toml`; it is loaded from the
@@ -7876,6 +7884,18 @@ impl Config {
         self.workflow.clone().unwrap_or_default()
     }
 
+    /// The requested model-bound masking mode (`[redaction] model_bound`),
+    /// defaulting to enabled. This is the user's *request*; the effective mode
+    /// also depends on the startup-gate confirmation receipt, see
+    /// [`codewhale_config::redaction::effective_masking`].
+    #[must_use]
+    pub fn model_bound_redaction(&self) -> codewhale_config::redaction::ModelBoundMasking {
+        self.redaction
+            .as_ref()
+            .map(codewhale_config::redaction::RedactionToml::model_bound_masking)
+            .unwrap_or_default()
+    }
+
     /// Return the configured DeepSeek reasoning-effort tier, if any.
     #[must_use]
     pub fn reasoning_effort(&self) -> Option<&str> {
@@ -10665,6 +10685,7 @@ fn merge_config(base: Config, override_cfg: Config) -> Config {
         base_url: override_cfg.base_url.or(base.base_url),
         http_headers: override_cfg.http_headers.or(base.http_headers),
         default_text_model: override_cfg.default_text_model.or(base.default_text_model),
+        redaction: override_cfg.redaction.or(base.redaction),
         auth_mode: override_cfg.auth_mode.or(base.auth_mode),
         reasoning_effort: override_cfg.reasoning_effort.or(base.reasoning_effort),
         reasoning_effort_inferred_from_legacy_alias: override_cfg

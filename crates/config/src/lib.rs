@@ -14,6 +14,7 @@ pub mod provider;
 mod provider_defaults;
 mod provider_kind;
 pub mod provider_templates;
+pub mod redaction;
 pub mod resolve;
 pub mod route;
 pub mod settings_schema;
@@ -912,8 +913,27 @@ pub struct ConfigToml {
     /// [`WorkflowConfigToml::default`].
     #[serde(default)]
     pub workflow: Option<WorkflowConfigToml>,
+    /// Model-bound credential redaction policy (`[redaction]`). When absent,
+    /// masking is enabled — the shipped security default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redaction: Option<crate::redaction::RedactionToml>,
     #[serde(flatten)]
     pub extras: BTreeMap<String, toml::Value>,
+}
+
+impl ConfigToml {
+    /// The requested model-bound masking mode, defaulting to enabled.
+    ///
+    /// The request only takes effect once the interactive TUI has recorded a
+    /// confirmation on its startup gate; see
+    /// [`crate::redaction::effective_masking`].
+    #[must_use]
+    pub fn redaction_model_bound_masking(&self) -> crate::redaction::ModelBoundMasking {
+        self.redaction
+            .as_ref()
+            .map(crate::redaction::RedactionToml::model_bound_masking)
+            .unwrap_or_default()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
