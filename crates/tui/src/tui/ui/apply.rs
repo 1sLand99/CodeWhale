@@ -166,11 +166,19 @@ pub(crate) fn apply_engine_error_to_app(
     let severity = envelope.severity;
     let turn_was_in_progress =
         app.is_loading || matches!(app.runtime_turn_status.as_deref(), Some("in_progress"));
+    // A recoverable error can precede tool decisions in the same turn. Keep
+    // routing those events until TurnComplete; marking the UI idle here drops
+    // ApprovalRequired and leaves the engine waiting for an invisible decision.
+    // An idle or locally cancelled turn must never be reactivated by an error.
+    let turn_remains_active =
+        recoverable && turn_was_in_progress && !app.suppress_stream_events_until_turn_complete;
     streaming_thinking::finalize_current(app);
     if turn_was_in_progress {
         app.finalize_streaming_assistant_as_interrupted();
         app.finalize_active_cell_as_interrupted();
-        app.runtime_turn_status = Some("failed".to_string());
+        if !turn_remains_active {
+            app.runtime_turn_status = Some("failed".to_string());
+        }
     }
     app.streaming_state.reset();
     app.streaming_message_index = None;
@@ -195,8 +203,10 @@ pub(crate) fn apply_engine_error_to_app(
         message: message.clone(),
         severity,
     });
-    app.is_loading = false;
-    app.dispatch_started_at = None;
+    app.is_loading = turn_remains_active;
+    if !turn_remains_active {
+        app.dispatch_started_at = None;
+    }
     app.turn_error_posted = true;
     if matches!(
         envelope.category,
