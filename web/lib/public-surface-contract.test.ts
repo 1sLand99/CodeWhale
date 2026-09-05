@@ -496,14 +496,17 @@ done
 
     expect(matrix.trust.hostedProviderBoundary).toContain("selected hosted provider");
     expect(matrix.trust.localInference).toContain("loopback local-model route");
-    // The source candidate requires current processor consent. Disclosure
-    // alone is not acceptance, and existing opt-outs remain authoritative.
-    expect(matrix.trust.telemetry).toContain(`${matrix.sourceCandidate.version} source`);
-    expect(matrix.trust.telemetry).toContain("off by default");
-    expect(matrix.trust.telemetry).toContain("requires explicit consent to notice version 4");
+    // The source candidate counts by default and says so. Disclosure alone
+    // is never acceptance, every opt-out stays authoritative, and the
+    // published release's earlier opt-in behavior is named, not blurred.
+    expect(matrix.trust.telemetry).toContain(`Codewhale ${matrix.sourceCandidate.version} counts anonymous usage by default`);
+    expect(matrix.trust.telemetry).toContain("discloses it at first launch");
+    expect(matrix.trust.telemetry).toContain("policy notice version 5");
     expect(matrix.trust.telemetry).toContain("Codewhale and PostHog");
-    expect(matrix.trust.telemetry).toContain("clear first-run disclosure");
-    expect(matrix.trust.telemetry).toContain("durable opt-out");
+    expect(matrix.trust.telemetry).toContain(`published ${matrix.latestPublishedRelease.version} release asked first`);
+    expect(matrix.trust.telemetry).toContain("never records any acceptance");
+    expect(matrix.trust.telemetry).toContain("opt-out recorded under the earlier opt-in policy stays off");
+    expect(matrix.trust.telemetry).not.toContain("requires explicit consent");
     expect(matrix.trust.telemetry).toContain("does not collect conversations");
     expect(matrix.trust.telemetry).toContain("per-turn/per-tool timelines");
     // The destination is now named, and named exactly — a trust claim that says
@@ -581,7 +584,7 @@ done
     const websiteImage = bytes(matrix.screenshot.website);
 
     expect(imageDimensions(websiteImage)).toEqual([2760, 1494]);
-    expect(imageDimensions(readmeImage)).toEqual([1136, 698]);
+    expect(imageDimensions(readmeImage)).toEqual([1136, 615]);
     expect(statSync(new URL(matrix.screenshot.readme, root)).size).toBeLessThan(500_000);
     expect(statSync(new URL(matrix.screenshot.website, root)).size).toBeLessThan(500_000);
     expect(matrix.screenshot.terminal).toBe("unrecorded");

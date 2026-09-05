@@ -2,22 +2,25 @@ import { existsSync, readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { handleProductTelemetry, ingestUrl, CANONICAL_INGEST_URL } from "../../app/api/product-telemetry/route";
 import {
-  CONSENT_STORAGE_KEY,
-  CONSENT_VERSION,
   COUNTERS_STORAGE_KEY,
   INSTALL_ID_ROTATION_MS,
   INSTALL_STORAGE_KEY,
+  NOTICE_VERSION,
+  PREFERENCE_STORAGE_KEY,
+  SCHEMA_VERSION,
   buildEnvelope,
   createUsageRecorder,
   emptyCounters,
-  readConsent,
+  readUsagePreference,
   resolveInstallId,
+  usageCountingEnabled,
+  usagePreferenceRecord,
   validateEnvelope,
   type StorageLike,
 } from "./product-usage";
 
 /** The backend's golden browser fixture, when the ingest checkout carries it. */
-const GOLDEN_PATH = new URL("../../../telemetry-ingest/test/golden/browser-v2.json", import.meta.url);
+const GOLDEN_PATH = new URL("../../../telemetry-ingest/test/golden/browser-v3.json", import.meta.url);
 
 const UUID = "82b77c4f-4cce-4c74-8e17-8a38ba0581ee";
 const NOW = Date.parse("2026-09-04T20:00:00Z");
@@ -62,6 +65,10 @@ describe("product usage envelope", () => {
     counters.page_view = 1;
     const envelope = buildEnvelope({ counters, installId: UUID, appVersion: "0.9.12", surface: "website", now: NOW });
     expect(validateEnvelope(envelope)).toEqual({ ok: true, envelope });
+    expect(SCHEMA_VERSION).toBe(3);
+    expect(NOTICE_VERSION).toBe(5);
+    expect(envelope.notice_version).toBe(5);
+    expect(envelope).not.toHaveProperty("consent_version");
     expect(envelope.sent_at).toBe("2026-09-04T20:00:00Z");
     if (existsSync(GOLDEN_PATH)) {
       const golden = JSON.parse(readFileSync(GOLDEN_PATH, "utf8"));
@@ -75,7 +82,10 @@ describe("product usage envelope", () => {
     expect(validateEnvelope({ ...base, referrer: "x" }).ok).toBe(false);
     expect(validateEnvelope({ ...base, git_sha: "abc" }).ok).toBe(false);
     expect(validateEnvelope({ ...base, surface: "tui" }).ok).toBe(false);
-    expect(validateEnvelope({ ...base, consent_version: 3 }).ok).toBe(false);
+    expect(validateEnvelope({ ...base, notice_version: 4 }).ok).toBe(false);
+    expect(validateEnvelope({ ...base, schema_version: 2 }).ok).toBe(false);
+    // The retired consent field never rides along with the policy version.
+    expect(validateEnvelope({ ...base, consent_version: 4 }).ok).toBe(false);
     expect(validateEnvelope({ ...base, install_id: "not-a-uuid" }).ok).toBe(false);
     expect(validateEnvelope({ ...base, events: [] }).ok).toBe(false);
     const extraCounter = structuredClone(base) as unknown as { events: [{ counters: Record<string, number> }] };
@@ -89,32 +99,29 @@ describe("product usage envelope", () => {
   });
 });
 
-describe("consent", () => {
-  it("fails closed on missing, unreadable, declined, and older decisions", () => {
-    expect(readConsent(null)).toBe("undecided");
-    expect(readConsent("{not json")).toBe("undecided");
-    expect(readConsent(JSON.stringify({ version: 3, granted: true }))).toBe("undecided");
-    expect(readConsent(JSON.stringify({ version: CONSENT_VERSION, granted: false }))).toBe("declined");
-    expect(readConsent(JSON.stringify({ version: CONSENT_VERSION, granted: true }))).toBe("granted");
+describe("usage preference", () => {
+  it("is on by default, keeps every recorded opt-out, and fails closed on unreadable state", () => {
+    expect(readUsagePreference(null)).toBe("default");
+    expect(readUsagePreference(undefined)).toBe("default");
+    expect(readUsagePreference("")).toBe("default");
+    expect(usageCountingEnabled("default")).toBe(true);
+    // Unreadable stored state is never replaced with the default.
+    expect(readUsagePreference("{not json")).toBe("off");
+    expect(readUsagePreference(JSON.stringify({ version: 4 }))).toBe("off");
+    expect(readUsagePreference(JSON.stringify({ version: 4, granted: "yes" }))).toBe("off");
+    // An opt-out recorded under the old opt-in policy is still an opt-out.
+    expect(readUsagePreference(JSON.stringify({ version: 4, granted: false }))).toBe("off");
+    expect(readUsagePreference(JSON.stringify({ version: 3, granted: false }))).toBe("off");
+    expect(readUsagePreference(JSON.stringify({ version: 4, granted: true }))).toBe("on");
+    expect(readUsagePreference(usagePreferenceRecord(false, NOW))).toBe("off");
+    expect(readUsagePreference(usagePreferenceRecord(true, NOW))).toBe("on");
+    expect(JSON.parse(usagePreferenceRecord(false, NOW))).toEqual({ version: NOTICE_VERSION, granted: false, decidedAt: "2026-09-04T20:00:00Z" });
   });
 
-  it("counts nothing and stores nothing without consent", () => {
+  it("counts by default without writing any preference record", async () => {
     const storage = memoryStorage();
     const { recorder, timers, sent } = recorderWith(storage);
-    recorder.record("page_view");
-    recorder.record("install_copy");
-    expect(recorder.pending()).toEqual(emptyCounters());
-    expect(storage.data.has(COUNTERS_STORAGE_KEY)).toBe(false);
-    expect(storage.data.has(INSTALL_STORAGE_KEY)).toBe(false);
-    expect(timers).toHaveLength(0);
-    expect(sent).toHaveLength(0);
-  });
-
-  it("delivers one aggregate after consent and discards it after the attempt", async () => {
-    const storage = memoryStorage();
-    const { recorder, timers, sent } = recorderWith(storage);
-    recorder.grant();
-    expect(recorder.consent()).toBe("granted");
+    expect(recorder.preference()).toBe("default");
     recorder.record("page_view");
     recorder.record("page_view");
     recorder.record("docs_view");
@@ -127,38 +134,63 @@ describe("consent", () => {
     expect(body.events[0].counters.page_view).toBe(2);
     expect(body.events[0].counters.docs_view).toBe(1);
     expect(body.install_id).toBe(UUID);
+    // Discarded after the attempt; nothing was recorded as an acceptance.
     expect(recorder.pending()).toEqual(emptyCounters());
     expect(storage.data.has(COUNTERS_STORAGE_KEY)).toBe(false);
+    expect(storage.data.has(PREFERENCE_STORAGE_KEY)).toBe(false);
   });
 
-  it("clears queued counts and identity on opt-out and cancels pending delivery", async () => {
+  it("counts nothing and stores nothing after an opt-out, including one recorded under the old policy", () => {
+    for (const seed of [
+      { [PREFERENCE_STORAGE_KEY]: JSON.stringify({ version: 4, granted: false }) },
+      { [PREFERENCE_STORAGE_KEY]: usagePreferenceRecord(false, NOW) },
+      { [PREFERENCE_STORAGE_KEY]: "{corrupt" },
+    ]) {
+      const storage = memoryStorage({ ...seed, [COUNTERS_STORAGE_KEY]: JSON.stringify({ page_view: 9 }), [INSTALL_STORAGE_KEY]: "stale" });
+      const { recorder, timers, sent } = recorderWith(storage);
+      expect(recorder.preference()).toBe("off");
+      recorder.record("page_view");
+      recorder.record("install_copy");
+      expect(recorder.pending()).toEqual(emptyCounters());
+      expect(storage.data.has(COUNTERS_STORAGE_KEY)).toBe(false);
+      expect(storage.data.has(INSTALL_STORAGE_KEY)).toBe(false);
+      expect(timers).toHaveLength(0);
+      expect(sent).toHaveLength(0);
+    }
+  });
+
+  it("clears queued counts and identity on opt-out, cancels pending delivery, and re-enables only deliberately", async () => {
     const storage = memoryStorage();
     const { recorder, timers, sent } = recorderWith(storage);
-    recorder.grant();
     recorder.record("page_view");
     await recorder.flush();
     expect(sent).toHaveLength(1);
     expect(storage.data.has(INSTALL_STORAGE_KEY)).toBe(true);
     recorder.record("download");
     expect(timers).toHaveLength(2);
-    recorder.decline();
-    expect(recorder.consent()).toBe("declined");
+    recorder.disable();
+    expect(recorder.preference()).toBe("off");
     expect(recorder.pending()).toEqual(emptyCounters());
     expect(storage.data.has(INSTALL_STORAGE_KEY)).toBe(false);
     expect(storage.data.has(COUNTERS_STORAGE_KEY)).toBe(false);
     timers[1]();
     await Promise.resolve();
     expect(sent).toHaveLength(1);
-  });
-
-  it("honours another tab's revocation through sync()", () => {
-    const storage = memoryStorage();
-    const { recorder } = recorderWith(storage);
-    recorder.grant();
+    recorder.record("page_view");
+    expect(recorder.pending()).toEqual(emptyCounters());
+    recorder.enable();
+    expect(recorder.preference()).toBe("on");
     recorder.record("page_view");
     expect(recorder.pending().page_view).toBe(1);
-    // Another tab declines: the shared storage changes underneath us.
-    storage.setItem(CONSENT_STORAGE_KEY, JSON.stringify({ version: CONSENT_VERSION, granted: false }));
+  });
+
+  it("honours another tab's opt-out through sync()", () => {
+    const storage = memoryStorage();
+    const { recorder } = recorderWith(storage);
+    recorder.record("page_view");
+    expect(recorder.pending().page_view).toBe(1);
+    // Another tab turns it off: the shared storage changes underneath us.
+    storage.setItem(PREFERENCE_STORAGE_KEY, usagePreferenceRecord(false, NOW));
     recorder.sync();
     expect(recorder.pending()).toEqual(emptyCounters());
     expect(storage.data.has(COUNTERS_STORAGE_KEY)).toBe(false);

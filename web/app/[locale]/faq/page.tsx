@@ -228,10 +228,11 @@ codewhale --provider openrouter --model deepseek/deepseek-v4-pro
     a: (
       <>
         The Codewhale runtime, workspace state, and audit log stay on your machine.
-        The 0.9.12 source keeps anonymous usage counting off by default and requires
-        explicit acceptance of notice version 4, which names Codewhale and PostHog.
-        The first-run notice never grants consent, and every durable opt-out remains
-        effective. Consenting sessions post aggregate session, feature, and error counts
+        Codewhale 0.9.12 counts anonymous usage by default and says so at first launch
+        (the published 0.9.11 release asked first). Turning it off is a saved choice that
+        later versions keep, and an opt-out recorded under the earlier opt-in policy stays
+        off; showing the notice never records any acceptance on your behalf. While on, a
+        session posts aggregate session, feature, and error counts
         and closed enums to the first-party endpoint{" "}
         <code className="inline">https://telemetry.codewhale.net/v1/telemetry</code>,
         a Cloudflare Worker whose full source is in the repo under{" "}
@@ -596,8 +597,8 @@ codewhale --provider openrouter --model deepseek/deepseek-v4-pro
     q: "我的代码安全吗？Codewhale 使用什么沙箱机制？",
     a: (
       <>
-        Codewhale 运行时、工作区状态与审计日志保留在你的机器上。0.9.12 源码中的匿名使用计数默认关闭，采集要求明确接受列明 Codewhale 和 PostHog 的第 4 版告知。
-        首次运行的提示不代表同意，已有的持久关闭选项始终有效。同意采集的会话只会把聚合的会话、功能与错误计数以及封闭枚举 POST 到第一方端点{" "}
+        Codewhale 运行时、工作区状态与审计日志保留在你的机器上。Codewhale 0.9.12 默认统计匿名使用量，并在首次启动时告知你（已发布的 0.9.11 版本会先询问）。
+        关闭是会被后续版本保留的选择，在早先的自愿开启政策下记录的关闭也始终有效；显示告知绝不会代你记录任何同意。开启时，会话只会把聚合的会话、功能与错误计数以及封闭枚举 POST 到第一方端点{" "}
         <code className="inline">https://telemetry.codewhale.net/v1/telemetry</code>，
         那是一个 Cloudflare Worker，完整源码就在仓库的 <code className="inline">telemetry-ingest/</code> 目录里。
         它的存储中没有 IP、国家或地理位置列，不记录请求日志，保留期固定为三个月。

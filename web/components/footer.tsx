@@ -10,8 +10,7 @@ import {
 } from "@/lib/i18n/links";
 import { SITE_CONTACT_EMAIL, SITE_SECURITY_EMAIL } from "@/lib/page-meta";
 import { Strata } from "./strata";
-import { UsageDataLink } from "./usage-consent";
-import { USAGE_CONSENT_COPY } from "@/lib/content/usage-consent";
+import { USAGE_COUNTING_COPY } from "@/lib/content/usage-counting";
 import { pickText } from "@/lib/i18n/dictionaries";
 
 /**
@@ -69,7 +68,7 @@ export function Footer({ locale = "en" }: { locale?: Locale }) {
           <a href="https://npmmirror.com/package/codewhale">npmmirror</a>
           <a href={`mailto:${SITE_CONTACT_EMAIL}`}>{SITE_CONTACT_EMAIL}</a>
           <a href={`mailto:${SITE_SECURITY_EMAIL}`}>{chrome.footerSecurity}</a>
-          <UsageDataLink label={pickText(USAGE_CONSENT_COPY.footerLink, locale)} />
+          <Link href={`/${locale}/legal/privacy#usage-counting`}>{pickText(USAGE_COUNTING_COPY.footerLink, locale)}</Link>
         </div>
         <span>© {new Date().getFullYear()} Codewhale</span>
       </div>

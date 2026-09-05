@@ -38,10 +38,10 @@ export const docsTrust: DocsTrustDict = {
     "The repository also contains a seccomp module and a future Windows helper contract. Neither is wired into child-command launch, so Codewhale does not advertise them: source-only sandbox code is not evidence that a command was restricted.",
   telemetryTitle: "Telemetry, exactly",
   telemetryLead:
-    "The 0.9.12 source keeps anonymous usage counting off by default. Collection requires explicit acceptance of notice version 4, which names Codewhale and PostHog. Showing the first-run notice never grants consent, and every durable opt-out remains effective.",
+    "Codewhale 0.9.12 counts anonymous usage by default and tells you so at first launch; the published 0.9.11 release asked first. Turning it off is a saved choice that later versions keep, and an opt-out recorded under the earlier opt-in policy stays off. Showing the notice never records any acceptance on your behalf; Codewhale and PostHog are named as the processors.",
   telemetry: [
     ["Never collected", "Conversations, code, prompts, files, file/repo/branch names, model content, credentials, or any per-turn or per-tool timeline."],
-    ["Sent with consent", "Version and platform classes, session duration and outcome, feature and error counters, closed enums, and a random install id that rotates every 90 days."],
+    ["Sent while on", "Version and platform classes, session duration and outcome, feature and error counters, closed enums, and a random install id that rotates every 90 days."],
     ["Endpoint", "{endpoint} — a first-party Cloudflare Worker whose source is in the repository under telemetry-ingest/."],
     ["First-party storage", "No IP, country, or geo column. No request logs. Retention is a fixed three months."],
     ["PostHog", "Optional forwarding requires separate operator configuration and verified IP-safe egress. PostHog retention is a separate project setting; source support does not mean the processor is active."],
