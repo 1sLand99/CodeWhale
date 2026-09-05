@@ -2043,8 +2043,11 @@ async fn finish_telemetry(outcome: &Result<()>, surface: codewhale_telemetry::Su
     }
     codewhale_telemetry::record(telemetry_session_end());
     if surface == codewhale_telemetry::Surface::Cli {
-        let _ =
+        let persistence =
             codewhale_telemetry::persist_local_blocking(codewhale_telemetry::CLI_PERSIST_TIMEOUT);
+        logging::info(format!(
+            "telemetry local persistence outcome={persistence:?}"
+        ));
         return;
     }
     // `shutdown_blocking` parks a thread waiting on the writer, so it goes to
