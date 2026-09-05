@@ -268,10 +268,10 @@ A reproducible headless launch uses only existing generic surfaces:
   contains only the task servers the harness supplies
   (`{"mcpServers":{"task-tools":{"url":""}}}`; the `mcpServers` alias and
   URL-based Streamable HTTP / SSE transports already exist);
-- `CODEWHALE_MEMORY=false` and `CODEWHALE_TELEMETRY=false`. Anonymous usage
-  counting is on by default, so every sealed harness sets the run-scoped kill
-  switch explicitly. It also protects a home the caller reuses, whose ordinary
-  sessions send aggregate counts to a live endpoint
+- `CODEWHALE_MEMORY=false` and `CODEWHALE_TELEMETRY=false`. The 0.9.12 source
+  requires explicit current consent before counting. Every sealed harness
+  still sets the run-scoped kill switch to protect a reused home whose owner
+  has accepted collection. Those ordinary sessions send aggregate counts to a live endpoint
   (`https://telemetry.codewhale.net/v1/telemetry`, the shipped default) rather
   than to a local file. It is a hard floor — an explicit "off" in the
   environment beats `--telemetry true` and `telemetry = true` in config. Set

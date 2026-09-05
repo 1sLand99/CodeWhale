@@ -38,12 +38,13 @@ export const docsTrust: DocsTrustDict = {
     "The repository also contains a seccomp module and a future Windows helper contract. Neither is wired into child-command launch, so Codewhale does not advertise them: source-only sandbox code is not evidence that a command was restricted.",
   telemetryTitle: "Telemetry, exactly",
   telemetryLead:
-    "Anonymous usage counting is on by default, announced once by a non-blocking first-run notice, and can be turned off immediately and durably.",
+    "The 0.9.12 source keeps anonymous usage counting off by default. Collection requires explicit acceptance of notice version 4, which names Codewhale and PostHog. Showing the first-run notice never grants consent, and every durable opt-out remains effective.",
   telemetry: [
     ["Never collected", "Conversations, code, prompts, files, file/repo/branch names, model content, credentials, or any per-turn or per-tool timeline."],
-    ["Sent", "Version and platform classes, session duration and outcome, feature and error counters, closed enums, and a random install id that rotates every 90 days."],
+    ["Sent with consent", "Version and platform classes, session duration and outcome, feature and error counters, closed enums, and a random install id that rotates every 90 days."],
     ["Endpoint", "{endpoint} — a first-party Cloudflare Worker whose source is in the repository under telemetry-ingest/."],
-    ["Storage", "No IP, country, or geo column — structurally, not as a setting. Nothing is logged. Retention is a fixed three months."],
+    ["First-party storage", "No IP, country, or geo column. No request logs. Retention is a fixed three months."],
+    ["PostHog", "Optional forwarding requires separate operator configuration and verified IP-safe egress. PostHog retention is a separate project setting; source support does not mean the processor is active."],
     ["Audit it yourself", "Set {dryRun}: batches are appended to {dryRunFile} on your machine, byte for byte what the server would have received, and no HTTP client is constructed."],
     ["Turn it off", "{configOff} or {envOff}."],
   ],
