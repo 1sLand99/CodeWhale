@@ -226,7 +226,10 @@ impl ApiProvider {
         {
             return Some(Self::MinimaxAnthropic);
         }
-        codewhale_config::ProviderKind::parse(value).map(Self::from_kind)
+        // Runtime selections must preserve the exact config-table identity,
+        // including Model Studio plan/dialect variants. Catalog alias collapse
+        // would return another provider's model and credential configuration.
+        codewhale_config::ProviderKind::parse_config_identity(value).map(Self::from_kind)
     }
 
     #[must_use]
