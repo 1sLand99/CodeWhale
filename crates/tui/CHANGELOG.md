@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- A Fleet task that selects a roster member with `worker.agent_profile` now
+  runs with that member's posture. The launch-time resolver only consulted the
+  resolved member when the legacy `worker.role` label was absent, so a task
+  labelled `manager` that selected `member:reviewer` ran as a write-capable
+  manager instead of a reviewer and was never leased. The member's canonical
+  slot now wins whenever one resolved; the label remains the posture only when
+  no member resolved at all. To keep the fix from widening authority in the
+  mirror case (a read-only label on a write-capable member), a spec whose
+  `worker.role` names a different posture than the selected member's role is
+  rejected at run creation with a message naming both postures; casing and
+  legacy aliases of the member's own role are still accepted (#5945, thanks
+  @gaord).
+
 ### Changed
 
 - `/statusline` drives the bottom chrome again. Since the 0.9.12 shell
