@@ -1499,6 +1499,7 @@ impl FleetManager {
                         exit_code: None,
                         tail_payloads: Vec::new(),
                         reported_route: None,
+                        session_id: None,
                         requires_reported_route: false,
                     };
                     let _ = self.record_task_outcome(&task, terminal)?;
@@ -1547,6 +1548,7 @@ impl FleetManager {
                         exit_code: None,
                         tail_payloads: Vec::new(),
                         reported_route: None,
+                        session_id: None,
                         requires_reported_route: false,
                     };
                     let _ = self.record_task_outcome(&task, terminal)?;
@@ -1666,6 +1668,7 @@ impl FleetManager {
             exit_code,
             tail_payloads,
             reported_route,
+            session_id,
             requires_reported_route,
         } = terminal;
         let (receipt_result, failure_kind, exit_code) = task_receipt_outcome(&payload, exit_code);
@@ -1715,6 +1718,10 @@ impl FleetManager {
             (None, false) => self.resolve_task_route(&task.task_spec),
         };
         let effective_permissions = self.resolve_task_effective_permissions(task);
+        let summary = match &payload {
+            FleetWorkerEventPayload::Completed { summary, .. } => summary.clone(),
+            _ => None,
+        };
         let verification_input = FleetTaskVerificationInput {
             run_id: task.entry.run_id.clone(),
             task_id: task.entry.task_id.clone(),
@@ -1722,6 +1729,8 @@ impl FleetManager {
             attempt: task.entry.attempts,
             exit_code,
             artifacts,
+            summary,
+            session_id,
             resolved_route,
             effective_permissions,
         };
@@ -1742,6 +1751,7 @@ impl FleetManager {
                 artifacts: verification_input.artifacts,
                 score: None,
                 resolved_route: verification_input.resolved_route,
+                session_id: verification_input.session_id,
                 effective_permissions: verification_input.effective_permissions,
             }
         };
@@ -1801,6 +1811,7 @@ impl FleetManager {
             artifacts,
             score: None,
             resolved_route: self.resolve_task_route(&task.task_spec),
+            session_id: None,
             effective_permissions: self.resolve_task_effective_permissions(task),
         };
         let payload = FleetWorkerEventPayload::Cancelled {
@@ -3405,6 +3416,7 @@ mod tests {
                     artifacts: Vec::new(),
                     score: None,
                     resolved_route: None,
+                    session_id: None,
                     effective_permissions: None,
                 })
                 .unwrap();

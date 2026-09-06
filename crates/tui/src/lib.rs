@@ -11479,7 +11479,13 @@ enum ExecStreamEvent {
         event: serde_json::Value,
     },
     #[serde(rename = "session_capture")]
-    SessionCapture { content: String },
+    SessionCapture {
+        /// Redacted fingerprint for logs/forensics; never the recoverable id.
+        content: String,
+        /// The real saved-session id a caller can resolve via
+        /// `GET /v1/sessions/{id}` to read the worker's full transcript.
+        session_id: String,
+    },
     #[serde(rename = "service_released")]
     #[cfg(unix)]
     ServiceReleased {
@@ -17044,6 +17050,7 @@ api_key = "test-only-key"
             (
                 ExecStreamEvent::SessionCapture {
                     content: "x".to_string(),
+                    session_id: "session-x".to_string(),
                 },
                 "session_capture",
             ),
@@ -17212,13 +17219,16 @@ api_key = "test-only-key"
 
         let capture = ExecStreamEvent::SessionCapture {
             content: exec_stream_session_ref(raw_session_id),
+            session_id: raw_session_id.to_string(),
         };
         let capture_json = serde_json::to_string(&capture).expect("serializes");
-        assert!(!capture_json.contains(raw_session_id));
         let parsed_capture: serde_json::Value =
             serde_json::from_str(&capture_json).expect("valid json");
         assert_eq!(parsed_capture["type"], "session_capture");
+        // The log fingerprint stays redacted; the recoverable id is a distinct
+        // field so a caller can resolve the saved session without the log path.
         assert_ne!(parsed_capture["content"], raw_session_id);
+        assert_eq!(parsed_capture["session_id"], raw_session_id);
     }
 
     #[test]

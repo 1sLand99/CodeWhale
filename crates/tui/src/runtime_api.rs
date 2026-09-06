@@ -2688,6 +2688,7 @@ fn fleet_receipt_json(receipt: &codewhale_protocol::fleet::FleetReceipt) -> Valu
         "retry_eligible": retry_eligible,
         "score": score_json,
         "artifacts": receipt.artifacts.iter().map(fleet_artifact_json).collect::<Vec<_>>(),
+        "session_id": receipt.session_id.clone(),
         "evidence_available": evidence_available,
     })
 }

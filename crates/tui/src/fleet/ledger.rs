@@ -2763,6 +2763,7 @@ mod tests {
                     notes: Some("verifier note contained super-secret".to_string()),
                 }),
                 resolved_route: None,
+                session_id: None,
                 effective_permissions: None,
             })
             .unwrap();
@@ -3542,6 +3543,7 @@ mod tests {
             artifacts: Vec::new(),
             score: None,
             resolved_route: None,
+            session_id: None,
             effective_permissions: None,
         };
         assert!(
@@ -3825,6 +3827,7 @@ mod tests {
                 artifacts: vec![],
                 score: None,
                 resolved_route: None,
+                session_id: None,
                 effective_permissions: None,
             })
             .unwrap();
@@ -3940,6 +3943,7 @@ mod tests {
                     artifacts: Vec::new(),
                     score: None,
                     resolved_route: None,
+                    session_id: None,
                     effective_permissions: None,
                 },
             )
@@ -4186,6 +4190,7 @@ mod tests {
             artifacts: vec![],
             score: None,
             resolved_route: None,
+            session_id: None,
             effective_permissions: None,
         };
         ledger.record_receipt(receipt.clone()).unwrap();

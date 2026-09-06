@@ -547,6 +547,15 @@ struct WorkerStream {
     terminal_route: TerminalRouteEvidence,
     /// When this worker process was started, for per-task wall-clock limits (R5).
     started_at: std::time::Instant,
+    /// Accumulated assistant text from `content` stream events. This is the
+    /// task's visible deliverable for report/summary work that produces no file
+    /// artifact; surfaced as `Completed.summary` so receipts stop reporting
+    /// "no verifiable output" for a worker that wrote a full report.
+    answer: String,
+    /// Saved exec session id reported by the worker's `session_capture` event.
+    /// Resolving it via `GET /v1/sessions/{id}` yields the full transcript
+    /// (the worker's final assistant reply).
+    session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -585,6 +594,8 @@ impl TerminalRouteEvidence {
 
 fn observe_worker_stream_line(
     terminal_route: &mut TerminalRouteEvidence,
+    answer: &mut String,
+    session_id: &mut Option<String>,
     line: &[u8],
 ) -> Option<FleetWorkerEventPayload> {
     let Ok(line) = std::str::from_utf8(line) else {
@@ -596,7 +607,48 @@ fn observe_worker_stream_line(
     };
     let line = line.trim_end();
     terminal_route.observe(parse_exec_terminal_route(line));
+    // Accumulate the worker's visible assistant text so report/summary tasks
+    // (no scorer, no file artifact) still surface their deliverable as
+    // `Completed.summary` instead of "no verifiable output". Also capture the
+    // saved exec session id so a caller can resolve the full transcript.
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(line) {
+        match value.get("type").and_then(serde_json::Value::as_str) {
+            Some("content") => {
+                if let Some(content) = value.get("content").and_then(serde_json::Value::as_str) {
+                    answer.push_str(content);
+                }
+            }
+            Some("session_capture") => {
+                if let Some(id) = value.get("session_id").and_then(serde_json::Value::as_str)
+                    && !id.trim().is_empty()
+                {
+                    *session_id = Some(id.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
     map_exec_stream_line(line)
+}
+
+const MAX_WORKER_SUMMARY_CHARS: usize = 4_000;
+
+/// Bound and redact the worker's accumulated answer before surfacing it as
+/// `Completed.summary`. The summary is a status surface (receipt notes, event
+/// labels, runtime API payloads), not the forensic worker log — the full text
+/// already lives in the worker's stream-json file.
+fn bounded_worker_summary(answer: &str) -> String {
+    let redacted = codewhale_config::persistence::redact_secrets(answer);
+    let mut chars = redacted.chars();
+    let preview = chars
+        .by_ref()
+        .take(MAX_WORKER_SUMMARY_CHARS)
+        .collect::<String>();
+    if chars.next().is_some() {
+        format!("{preview}...")
+    } else {
+        preview
+    }
 }
 
 enum WorkerStreamHost {
@@ -618,6 +670,9 @@ pub struct FleetWorkerTerminalEvent {
     /// Non-terminal payloads discovered by the mandatory post-exit drain.
     pub tail_payloads: Vec<FleetWorkerEventPayload>,
     pub reported_route: Option<FleetWorkerReportedRoute>,
+    /// Saved exec session id reported by the worker's `session_capture` event,
+    /// when one was persisted on completion.
+    pub session_id: Option<String>,
     /// A real headless exec process must report its actual route. Callers use
     /// this bit to distinguish a missing/invalid report (fail closed) from
     /// pre-launch or simulated paths that only have declared route intent.
@@ -710,6 +765,8 @@ impl FleetExecutor {
                 terminal: false,
                 terminal_route: TerminalRouteEvidence::default(),
                 started_at: std::time::Instant::now(),
+                answer: String::new(),
+                session_id: None,
             },
         );
         Ok(handle)
@@ -802,7 +859,12 @@ impl FleetExecutor {
             stream.pending.extend_from_slice(&buf);
             while let Some(idx) = stream.pending.iter().position(|byte| *byte == b'\n') {
                 let line: Vec<u8> = stream.pending.drain(..=idx).collect();
-                if let Some(event) = observe_worker_stream_line(&mut stream.terminal_route, &line) {
+                if let Some(event) = observe_worker_stream_line(
+                    &mut stream.terminal_route,
+                    &mut stream.answer,
+                    &mut stream.session_id,
+                    &line,
+                ) {
                     events.push(event);
                 }
             }
@@ -834,7 +896,7 @@ impl FleetExecutor {
                 .get_mut(key)
                 .and_then(|adapter| adapter.read_status(worker_id).ok())?,
         };
-        let terminal = match status.state {
+        let mut terminal = match status.state {
             super::host::FleetHostWorkerState::Running
             | super::host::FleetHostWorkerState::Draining
             | super::host::FleetHostWorkerState::Unknown => return None,
@@ -854,14 +916,35 @@ impl FleetExecutor {
         if let Some(stream) = self.streams.get_mut(worker_id) {
             let trailing_line = std::mem::take(&mut stream.pending);
             if trailing_line.iter().any(|byte| !byte.is_ascii_whitespace())
-                && let Some(payload) =
-                    observe_worker_stream_line(&mut stream.terminal_route, &trailing_line)
+                && let Some(payload) = observe_worker_stream_line(
+                    &mut stream.terminal_route,
+                    &mut stream.answer,
+                    &mut stream.session_id,
+                    &trailing_line,
+                )
             {
                 tail_payloads.push(payload);
             }
         }
-        if let Some(stream) = self.streams.get_mut(worker_id) {
-            stream.terminal = true;
+        let answer = self
+            .streams
+            .get_mut(worker_id)
+            .map(|stream| {
+                stream.terminal = true;
+                std::mem::take(&mut stream.answer)
+            })
+            .unwrap_or_default();
+        let session_id = self
+            .streams
+            .get_mut(worker_id)
+            .and_then(|stream| stream.session_id.take());
+        // Attach the accumulated visible answer to a successful completion so
+        // report/summary tasks (no scorer, no file artifact) surface their
+        // deliverable instead of "no verifiable output".
+        if !answer.trim().is_empty()
+            && let FleetWorkerEventPayload::Completed { summary, .. } = &mut terminal
+        {
+            *summary = Some(bounded_worker_summary(&answer));
         }
         Some(FleetWorkerTerminalEvent {
             payload: terminal,
@@ -871,6 +954,7 @@ impl FleetExecutor {
                 .streams
                 .get(worker_id)
                 .and_then(|stream| stream.terminal_route.reported_route().cloned()),
+            session_id,
             requires_reported_route: true,
         })
     }
@@ -992,6 +1076,8 @@ mod tests {
                 terminal: false,
                 terminal_route: TerminalRouteEvidence::default(),
                 started_at: std::time::Instant::now(),
+                answer: String::new(),
+                session_id: None,
             },
         );
     }
@@ -1720,6 +1806,69 @@ mod tests {
             "expected a terminal Completed event, got {events:?}"
         );
         assert!(exec.all_terminal());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn completed_worker_surfaces_accumulated_content_as_summary() {
+        // Report/summary tasks produce their deliverable as streamed text, not
+        // a file artifact. The executor must accumulate `content` events and
+        // attach them to the terminal `Completed.summary` so a receipt can show
+        // the actual result instead of "no verifiable output".
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut exec = FleetExecutor::new(tmp.path());
+        let script = r#"printf '%s\n' '{"type":"content","content":"part one "}' '{"type":"content","content":"part two"}' '{"type":"done"}'"#;
+        let command = FleetWorkerCommand::new("sh", vec!["-c".to_string(), script.to_string()]);
+        exec.start_worker("w1", command, None).unwrap();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let terminal = loop {
+            exec.drain_events("w1");
+            if let Some(term) = exec.poll_terminal("w1") {
+                break term;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "worker did not terminate in time"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+
+        match terminal {
+            FleetWorkerEventPayload::Completed { summary, .. } => {
+                assert_eq!(summary.as_deref(), Some("part one part two"));
+            }
+            other => panic!("expected Completed, got {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn completed_worker_surfaces_session_capture_id_for_full_transcript() {
+        // The worker persists its full transcript as a saved session and
+        // reports the recoverable id via `session_capture`. The executor must
+        // capture that id on the terminal event so a caller can resolve the
+        // final assistant reply through `GET /v1/sessions/{id}`.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut exec = FleetExecutor::new(tmp.path());
+        let script = r#"printf '%s\n' '{"type":"session_capture","content":"<redacted:log-only>","session_id":"session-abc"}' '{"type":"done"}'"#;
+        let command = FleetWorkerCommand::new("sh", vec!["-c".to_string(), script.to_string()]);
+        exec.start_worker("w-session", command, None).unwrap();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let terminal = loop {
+            exec.drain_events("w-session");
+            if let Some(term) = exec.poll_terminal_with_status("w-session") {
+                break term;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "worker did not terminate in time"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+
+        assert_eq!(terminal.session_id.as_deref(), Some("session-abc"));
     }
 
     #[cfg(unix)]

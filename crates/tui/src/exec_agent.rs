@@ -937,6 +937,7 @@ pub(crate) async fn run_exec_agent(
                     if let Some(id) = saved_session_id.as_ref() {
                         emit_exec_stream_event(&ExecStreamEvent::SessionCapture {
                             content: exec_stream_session_ref(id),
+                            session_id: id.clone(),
                         })?;
                     }
                     // Resolved output ceiling and its provenance, surfaced so a

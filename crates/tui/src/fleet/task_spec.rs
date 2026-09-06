@@ -86,6 +86,13 @@ pub struct FleetTaskVerificationInput {
     pub attempt: u32,
     pub exit_code: Option<i32>,
     pub artifacts: Vec<FleetArtifactRef>,
+    /// Accumulated visible assistant text from the worker stream. Report/summary
+    /// tasks with no scorer and no file artifact surface this as their
+    /// deliverable instead of "no verifiable output".
+    pub summary: Option<String>,
+    /// Saved exec session id holding the worker's full transcript, when the
+    /// worker persisted one on completion.
+    pub session_id: Option<String>,
     /// Resolved-route snapshot to persist on the receipt (#3154).
     pub resolved_route: Option<FleetResolvedRoute>,
     /// Effective worker authority snapshot to persist on the receipt (#3211).
@@ -330,10 +337,27 @@ pub fn verify_task_result(
             "manual scorer configured",
             "manual verification is required to finalize this receipt",
         ),
-        None if !has_verifiable_artifact(input) => partial(
-            "no scorer configured and no verifiable artifacts recorded",
-            "worker exited successfully but produced no verifiable output",
-        ),
+        None if !has_verifiable_artifact(input) => {
+            match input
+                .summary
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                Some(summary) => partial(
+                    "no scorer configured; worker produced a summary deliverable",
+                    format!(
+                        "worker produced {} characters of deliverable: {}",
+                        summary.chars().count(),
+                        bounded_receipt_excerpt(summary),
+                    ),
+                ),
+                None => partial(
+                    "no scorer configured and no verifiable artifacts recorded",
+                    "worker exited successfully but produced no verifiable output",
+                ),
+            }
+        }
         None => partial(
             "no scorer configured",
             "task has artifacts but no deterministic scorer",
@@ -392,6 +416,7 @@ pub fn prepare_verification_receipt(
         artifacts,
         score: Some(verification.score),
         resolved_route: input.resolved_route.clone(),
+        session_id: input.session_id.clone(),
         effective_permissions: input.effective_permissions.clone(),
     };
     Ok(receipt)
@@ -610,6 +635,26 @@ fn has_verifiable_artifact(input: &FleetTaskVerificationInput) -> bool {
             FleetArtifactKind::Log | FleetArtifactKind::Receipt
         )
     })
+}
+
+/// Bound and redact the worker's visible deliverable for a receipt note.
+/// Receipts are status surfaces, not the forensic worker log, so a bounded,
+/// whitespace-normalized, secret-redacted excerpt is enough to show the user
+/// what a report/summary task actually produced.
+fn bounded_receipt_excerpt(value: &str) -> String {
+    const MAX_RECEIPT_EXCERPT_CHARS: usize = 600;
+    let redacted = codewhale_config::persistence::redact_secrets(value);
+    let normalized = redacted.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut chars = normalized.chars();
+    let preview = chars
+        .by_ref()
+        .take(MAX_RECEIPT_EXCERPT_CHARS)
+        .collect::<String>();
+    if chars.next().is_some() {
+        format!("{preview}...")
+    } else {
+        preview
+    }
 }
 
 #[derive(Debug)]
@@ -978,6 +1023,8 @@ mod tests {
             attempt: 1,
             exit_code: Some(0),
             artifacts: vec![],
+            summary: None,
+            session_id: None,
             resolved_route: None,
             effective_permissions: None,
         };
@@ -1066,6 +1113,37 @@ mod tests {
     }
 
     #[test]
+    fn unscored_worker_surfaces_summary_deliverable_instead_of_no_output() {
+        let tmp = TempDir::new().unwrap();
+        let input = FleetTaskVerificationInput {
+            run_id: FleetRunId::from("run-1"),
+            task_id: "task-a".to_string(),
+            worker_id: "worker-1".to_string(),
+            attempt: 1,
+            exit_code: Some(0),
+            artifacts: vec![],
+            summary: Some("The Changelog review is complete".to_string()),
+            session_id: None,
+            resolved_route: None,
+            effective_permissions: None,
+        };
+        let verification = verify_task_result(tmp.path(), &task("unscored", None), &input);
+        assert_eq!(verification.result, FleetTaskResult::Partial);
+        let notes = verification
+            .score
+            .notes
+            .as_deref()
+            .unwrap_or_default()
+            .to_string();
+        assert!(
+            notes.contains("worker produced 32 characters of deliverable"),
+            "unexpected notes: {notes}"
+        );
+        assert!(notes.contains("Changelog review is complete"));
+        assert!(!notes.contains("no verifiable output"));
+    }
+
+    #[test]
     fn fleet_task_spec_receipt_records_artifacts_scores_and_failure_kind() {
         let tmp = TempDir::new().unwrap();
         let ledger = FleetLedger::open(tmp.path()).unwrap();
@@ -1087,6 +1165,8 @@ mod tests {
             attempt: 3,
             exit_code: Some(1),
             artifacts: vec![log],
+            summary: None,
+            session_id: None,
             resolved_route: None,
             effective_permissions: Some(FleetEffectivePermissions {
                 write: false,
@@ -1146,6 +1226,8 @@ mod tests {
             attempt: 1,
             exit_code: Some(1),
             artifacts: Vec::new(),
+            summary: None,
+            session_id: None,
             resolved_route: None,
             effective_permissions: None,
         };
