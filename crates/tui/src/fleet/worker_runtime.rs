@@ -1004,36 +1004,36 @@ fn effective_fleet_role_with_source(
     worker_profile: Option<&FleetTaskWorkerProfile>,
     agent_profile: Option<&AgentProfile>,
 ) -> (Option<String>, Option<&'static str>) {
-    // When legacy `worker.role` deterministically selected a roster member,
-    // use that member's semantic role as the runtime posture. A display name,
-    // model label, or route selector must never become a posture string.
-    if worker_profile
-        .and_then(|worker| worker.agent_profile.as_deref())
-        .and_then(non_empty_trimmed)
-        .is_none()
-        && let Some(profile) = agent_profile
-    {
+    // A resolved roster member is authoritative for the runtime posture: its
+    // canonical slot (reviewer/builder/...) defines shell/write/network
+    // authority. The resolved `AgentProfile` always carries a canonical
+    // `role.name` — a display name, model label, or route selector is already
+    // collapsed onto the member during profile resolution, never surfaced as a
+    // raw posture string here.
+    //
+    // Preferring the member over legacy `worker.role` is what makes a task
+    // whose role label is "manager" but whose agent_profile selects
+    // `member:reviewer` actually run with reviewer authority. Previously the
+    // first branch required `worker.agent_profile` to be empty, so a present
+    // agent_profile fell through to `worker.role` and silently discarded the
+    // member's slot (fleet-e12f3160: task stayed a manager-coordinator and was
+    // never leased).
+    if let Some(profile) = agent_profile {
         return (
             Some(canonical_public_role_name(&profile.profile.role.name)),
             Some("agent_profile.role"),
         );
     }
+    // No member resolved (no agent_profile selector, no frozen snapshot, and
+    // worker.role was not a deterministic member selector). Keep the legacy
+    // role label so existing v1 tasks retain their historical posture.
     worker_profile
         .and_then(|worker| worker.role.as_deref())
         .map(str::trim)
         .filter(|role| !role.is_empty())
         .map(canonical_public_role_name)
         .map(|role| (Some(role), Some("task.role")))
-        .unwrap_or_else(|| {
-            agent_profile
-                .map(|profile| {
-                    (
-                        Some(canonical_public_role_name(&profile.profile.role.name)),
-                        Some("agent_profile.role"),
-                    )
-                })
-                .unwrap_or((None, None))
-        })
+        .unwrap_or((None, None))
 }
 
 fn effective_fleet_loadout(
@@ -1927,6 +1927,63 @@ mod tests {
         assert_eq!(
             fleet_role_to_agent_type(Some("operator")),
             FleetRole::Worker
+        );
+    }
+
+    #[test]
+    fn agent_profile_member_slot_overrides_legacy_role_label() {
+        // Regression (fleet-e12f3160): a task whose legacy role label is
+        // "manager" but whose agent_profile selects `member:reviewer` must run
+        // with reviewer authority, not fall through to the "manager" label and
+        // get stuck as a write-capable worker that never leases.
+        let reviewer = agent_profile(
+            "reviewer",
+            "reviewer",
+            None,
+            codewhale_config::FleetLoadout::Inherit,
+        );
+        let task = fleet_task(
+            "conflict",
+            Some(worker_profile(
+                Some("member:reviewer"),
+                Some("manager"),
+                None,
+                None,
+                None,
+                vec!["read_file"],
+            )),
+        );
+        let worker = FleetWorkerSpec {
+            id: "worker-1".to_string(),
+            name: "Worker".to_string(),
+            host: FleetHostSpec::Local,
+            trust_level: None,
+            labels: Default::default(),
+            capabilities: vec![],
+            max_concurrent_tasks: None,
+        };
+        let spec = fleet_task_to_worker_spec_with_profiles(
+            "worker-1",
+            "run-1",
+            &task,
+            &worker,
+            "auto",
+            Path::new("/tmp"),
+            Path::new("/tmp"),
+            &[reviewer],
+            None,
+        )
+        .expect("member selector resolves to the reviewer roster profile");
+
+        assert_eq!(
+            spec.role.as_deref(),
+            Some("reviewer"),
+            "the selected member's slot must win over the legacy role label"
+        );
+        assert_eq!(
+            spec.agent_type,
+            FleetRole::Reviewer,
+            "reviewer authority must not be silently widened to a write-capable worker"
         );
     }
 
