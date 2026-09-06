@@ -29,6 +29,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   label as a child that asked a question. Parked work sorts below live and
   answerable work and no longer inflates the `blocked` chip; the receipts
   roster and the wire `state` gain `parked` (#5906, #5921).
+- The bottom chrome no longer prints facts it cannot stand behind. A route
+  that cannot prove its effective reasoning tier — typically a custom
+  OpenAI-compatible gateway with no endpoint receipt — states no effort
+  field in the metrics line rather than the placeholder
+  `high→effective unavailable`; `/status` still tells the full story. The
+  cost segment is omitted only where the route itself cannot be priced
+  (`cost: unknown` stays on metered routes that merely lack a reading this
+  session, per #5578) (#5950).
 
 - `codewhale account keys set|remove|list` no longer carry a hardcoded
   eight-provider list. Provider ids come from the control plane's public
@@ -138,6 +146,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   per-World session container before each command — full tree first, then
   only changes and deletions — so remote builds and tests run on the files
   just edited locally and their outputs persist across commands.
+- `[tui].posture_bar` and `[tui].metrics_line` size the two rows under the
+  composer: `full` (the default), `compact`, or `hidden`, also settable at
+  runtime with `/config posture_bar compact`. `compact` is the row after its
+  first shed rungs — the posture bar keeps its permission and mode chips and
+  the cap warning but drops the clocks, counts and hint; the metrics line
+  keeps the route, context reading, cost and balance but drops the telemetry
+  and the help hint — and `hidden` gives the row back to the transcript.
+  Composition stays in `tui.status_items`; these presets only decide how
+  much of a row paints, reusing the rows' existing shed ladders rather than
+  a second renderer (#5950).
 
 ## [0.9.12] - 2026-09-03
 

@@ -238,6 +238,17 @@ The keys `status`, `agents`, `reasoning_replay`, `prefix_stability`,
 they drove nothing. Old configuration files still load — the retired keys are
 ignored with a warning in the log.
 
+`status_items` composes the rows; two size presets decide how much of each
+row paints. `[tui].posture_bar` and `[tui].metrics_line` each take `full`
+(the default), `compact`, or `hidden`, also settable at runtime with
+`/config posture_bar compact`. `compact` is the row after its first shed
+rungs: the posture bar keeps its permission and mode chips — and the cap
+warning, which is advice, not decoration — and drops the clocks, counts and
+hint; the metrics line keeps the route, the context reading, the cost and
+the balance, and drops the telemetry and the help hint. `hidden` gives the
+row back to the transcript. A small tmux pane can hide both rows without
+touching what `/statusline` composes.
+
 `session_metrics` (on by default) paints the latency pair on the metrics
 line: `ttft 1.5s` — the mean time to first streamed token — and `120 tok/s`,
 provider-reported output tokens over streamed seconds. Both come from the

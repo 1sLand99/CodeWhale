@@ -942,6 +942,52 @@ webhook_token = "secret-token"
     assert!(absent.base.lifecycle_outbox.is_none());
 }
 
+/// `tui.posture_bar` / `tui.metrics_line` (#5950): absent means full — an
+/// older `config.toml` keeps loading unchanged — and each key takes one of
+/// the three presets.
+#[test]
+fn tui_config_parses_bottom_chrome_row_presets() {
+    let raw = r#"
+[tui]
+posture_bar = "compact"
+metrics_line = "hidden"
+"#;
+    let parsed: ConfigFile = toml::from_str(raw).expect("parse row presets");
+    let tui = parsed.base.tui.expect("tui table");
+    assert_eq!(tui.posture_bar, Some(ChromeRowPreset::Compact));
+    assert_eq!(tui.metrics_line, Some(ChromeRowPreset::Hidden));
+
+    let absent: ConfigFile = toml::from_str("[tui]\nmouse_capture = true\n").expect("old file");
+    let tui = absent.base.tui.expect("tui table");
+    assert_eq!(tui.posture_bar, None);
+    assert_eq!(tui.metrics_line, None);
+    assert_eq!(
+        tui.posture_bar.unwrap_or_default(),
+        ChromeRowPreset::Full,
+        "absent means the full row"
+    );
+
+    let bad: Result<ConfigFile, _> = toml::from_str("[tui]\nposture_bar = \"tiny\"\n");
+    assert!(
+        bad.is_err(),
+        "a preset this build does not know is refused, not guessed"
+    );
+
+    for (setting, preset) in [
+        ("full", ChromeRowPreset::Full),
+        ("compact", ChromeRowPreset::Compact),
+        ("hidden", ChromeRowPreset::Hidden),
+    ] {
+        assert_eq!(ChromeRowPreset::from_setting(setting), Some(preset));
+        assert_eq!(
+            ChromeRowPreset::from_setting(&setting.to_uppercase()),
+            Some(preset)
+        );
+        assert_eq!(preset.as_setting(), setting);
+    }
+    assert_eq!(ChromeRowPreset::from_setting("tiny"), None);
+}
+
 #[test]
 fn tui_config_parses_control_socket_table() {
     let raw = r#"

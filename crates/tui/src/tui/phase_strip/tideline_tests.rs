@@ -209,6 +209,50 @@ fn posture_bar_sheds_the_clocks_then_the_hint_counts_and_posture_chips() {
     }
 }
 
+/// `tui.posture_bar = "compact"` (#5950) starts the ladder past the clocks,
+/// the hint and the counts at any width: the row states its posture — the
+/// permission and mode chips, and the cap warning when it is owed — and
+/// nothing live. Width still sheds from there, and the right slot is
+/// untouched.
+#[test]
+fn compact_posture_bar_states_posture_and_nothing_live() {
+    let mut fixture = working();
+    fixture.right = Some(("/rc connected", ChromeInk::Info));
+    let wide = draw(160, 3, &fixture.widget(&UI_THEME).compact(true));
+    for kept in ["▶▶ ask (Shift+Tab)", "· work (Tab)", "/rc connected"] {
+        assert!(wide.contains(kept), "compact keeps {kept}: {wide}");
+    }
+    for gone in [
+        "working 1m 15s",
+        "worked 41m 12s",
+        "2 agents",
+        "Esc to interrupt",
+    ] {
+        assert!(!wide.contains(gone), "compact drops {gone}: {wide}");
+    }
+    // The full row at the same width is the row the user had before.
+    assert!(draw(160, 3, &fixture.widget(&UI_THEME)).contains("working 1m 15s"));
+
+    // The cap warning is not a hint: a compact row still says what to do
+    // about a full context.
+    fixture.context_percent = 85;
+    let capped = draw(160, 3, &fixture.widget(&UI_THEME).compact(true));
+    assert!(capped.contains("surface soon"), "{capped}");
+    assert!(!capped.contains("Esc to interrupt"), "{capped}");
+
+    for w in 8..=160u16 {
+        let text = draw(w, 3, &fixture.widget(&UI_THEME).compact(true));
+        assert!(
+            text.contains("ask"),
+            "{w}: the permission chip never sheds: {text}"
+        );
+        assert!(
+            !text.contains("working") && !text.contains("agents"),
+            "{w}: nothing live in a compact row: {text}"
+        );
+    }
+}
+
 /// Permission outranks mode when only one posture chip fits: the longest
 /// mode word must never displace `full access`.
 #[test]

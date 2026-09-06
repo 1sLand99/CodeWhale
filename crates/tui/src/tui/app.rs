@@ -2038,6 +2038,16 @@ pub struct App {
     /// items that painted nothing were retired in #5950 rather than left as
     /// toggles that lie.
     pub status_items: Vec<crate::config::StatusItem>,
+    /// How much of the posture bar to paint (`tui.posture_bar`, #5950):
+    /// full, compact, or hidden. Sourced from `config.toml` at startup and
+    /// mutated live by `/config posture_bar`. `hidden` gives the row to the
+    /// transcript; `compact` starts the bar's shed ladder past the clocks,
+    /// counts and hints. `status_items` composes the row; this sizes it.
+    pub posture_bar: crate::config::ChromeRowPreset,
+    /// The same setting for the metrics line (`tui.metrics_line`, #5950).
+    /// `compact` keeps the route, context, cost and balance and drops the
+    /// telemetry and the help hint.
+    pub metrics_line: crate::config::ChromeRowPreset,
     /// Optional header items enabled from `tui.header_items` in `config.toml`
     /// at startup. Built-in header content remains independent of this list.
     /// Unread since the classic header was superseded by the Tideline info
@@ -6217,6 +6227,21 @@ impl App {
         let requested = self.reasoning_effort;
         let effective = self.effective_reasoning_effort_for_active_route(requested);
         Self::reasoning_effort_resolution_label(requested, effective, self.api_provider)
+    }
+
+    /// The effort label the metrics line's route segment may state: the
+    /// resolution label when the route can prove an effective tier (or an
+    /// enabled-but-untiered toggle), `None` when it cannot (#5950). A custom
+    /// OpenAI-compatible route with no endpoint receipt is the usual `None`;
+    /// printing `high→effective unavailable` there was a placeholder that
+    /// could never resolve, so the row omits the field instead. `/status`
+    /// and the effort cycle message still state the unavailable case in
+    /// full via [`Self::reasoning_effort_display_label`].
+    #[must_use]
+    pub(crate) fn provable_reasoning_effort_label(&self) -> Option<String> {
+        (self.effective_reasoning_effort_for_active_route(self.reasoning_effort)
+            != EffectiveReasoningEffort::Unavailable)
+            .then(|| self.reasoning_effort_display_label())
     }
 
     /// Return the concrete provider/model route whose current prompt may be

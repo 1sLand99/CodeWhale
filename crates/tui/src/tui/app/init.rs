@@ -983,6 +983,16 @@ impl App {
                 .as_ref()
                 .and_then(|tui| tui.status_items.clone())
                 .unwrap_or_else(crate::config::StatusItem::default_footer),
+            posture_bar: config
+                .tui
+                .as_ref()
+                .and_then(|tui| tui.posture_bar)
+                .unwrap_or_default(),
+            metrics_line: config
+                .tui
+                .as_ref()
+                .and_then(|tui| tui.metrics_line)
+                .unwrap_or_default(),
             // Prose wrap cap (`[transcript] prose_measure`, #5436). Resolved
             // once here so every render pass — main cache and full-screen
             // overlay — shares one effective width; `None` = full width.

@@ -176,6 +176,8 @@ JSON 把凭据的 `source`（来源）与字面的 `availability`（可用性）
 
 `status`、`agents`、`reasoning_replay`、`prefix_stability`、`git_branch`、`last_tool_elapsed` 和 `rate_limit` 这些键在 0.9.13 中已退役：它们不驱动任何东西。旧的配置文件仍可加载——已退役的键会被忽略并在日志中给出警告。
 
+`status_items` 负责组合这两行；另有两个尺寸预设决定每行绘制多少。`[tui].posture_bar` 和 `[tui].metrics_line` 各接受 `full`（默认）、`compact` 或 `hidden`，也可以在运行时用 `/config posture_bar compact` 设置。`compact` 是该行走完最初几级舍弃阶梯后的样子：姿态栏保留权限与模式片区——以及属于建议而非装饰的容量警示——并舍弃时钟、计数和提示；指标行保留路由、上下文读数、成本和余额，并舍弃遥测与帮助提示。`hidden` 把该行交还给转录区。狭小的 tmux 面板可以隐藏两行而不动 `/statusline` 的组合。
+
 `session_metrics`（默认开启）在指标行上绘制这一对延迟读数：`ttft 1.5s`（到首个流式 token 的平均时间）和 `120 tok/s`（提供商报告的输出 token 除以流式秒数）。两者来自 `/status` 完整打印的同一批累加器（turns、steps、LLM 与工具墙钟时间、缓存命中、输入）；提供商或运行时证据尚未到达的数字会被省略而不是估算。在窄行上，这一对会先于成本和上下文读数被舍弃，而不是截断某个数字。
 
 转录区（对话记录）就是审计轨迹。当 Codewhale 读文件、跑命令或改代码时，动作会出现在那里。如果某条命令失败，把可见的失败输出作为你下一条指令的一部分，而不是从头再来。

@@ -54,7 +54,11 @@ pub(crate) fn route_identity_fields(
     budget: usize,
 ) -> Option<Vec<RouteIdentityField>> {
     let (provider, model) = app.effective_route_identity_display();
-    let effort = app.reasoning_effort_display_label();
+    // A route that cannot prove its effective tier states no effort field
+    // rather than `high→effective unavailable` (#5950): a placeholder that
+    // can never resolve is noise, not a reading. First-party routes keep
+    // their tier, `auto: tier` and `req→eff` labels.
+    let effort = app.provable_reasoning_effort_label().unwrap_or_default();
     if model.is_empty() {
         return None;
     }
@@ -586,6 +590,11 @@ pub struct TidelineFooter<'a> {
     /// the remote-control state.
     pub right: Option<(&'a str, crate::palette::ChromeInk)>,
     pub ascii_safe: bool,
+    /// `tui.posture_bar = "compact"` (#5950): start the shed ladder at
+    /// [`COMPACT_SHED`] instead of rung 0, so the row states its posture —
+    /// the permission and mode chips, and the cap warning when it is owed —
+    /// and nothing live. Width sheds the rest exactly as it always did.
+    pub compact: bool,
 }
 
 impl<'a> TidelineFooter<'a> {
@@ -607,6 +616,7 @@ impl<'a> TidelineFooter<'a> {
             context_percent: 0,
             right: None,
             ascii_safe: false,
+            compact: false,
         }
     }
 
@@ -668,6 +678,18 @@ impl<'a> TidelineFooter<'a> {
     pub fn ascii_safe(mut self, ascii_safe: bool) -> Self {
         self.ascii_safe = ascii_safe;
         self
+    }
+
+    #[must_use]
+    pub fn compact(mut self, compact: bool) -> Self {
+        self.compact = compact;
+        self
+    }
+
+    /// The rung the shed ladder starts from: 0 for a full row, past the
+    /// clocks, hint and counts for a compact one.
+    fn first_shed_rung(&self) -> u8 {
+        if self.compact { COMPACT_SHED } else { 0 }
     }
 
     fn sym(&self, glyph: &str) -> String {
@@ -754,6 +776,11 @@ const SHED_MODE: u8 = 7;
 const SHED_PERMISSION_KEY: u8 = 8;
 /// The most-shed rung: everything gone but the permission chip.
 const MAX_SHED: u8 = SHED_PERMISSION_KEY;
+/// Where a compact posture bar (`tui.posture_bar = "compact"`, #5950)
+/// starts on the ladder: the clocks, the hint and the counts are gone
+/// before width is consulted; the cap warning, the mode chip and the
+/// permission chip — the row's posture — stay and shed only by width.
+const COMPACT_SHED: u8 = SHED_COUNTS;
 
 fn posture_items(footer: &TidelineFooter<'_>, shed: u8) -> Vec<PostureItem> {
     let chip = |text: &str, key: Option<&str>| -> String {
@@ -890,7 +917,7 @@ pub fn render_tideline_footer(
         .map(|(text, _)| text.width() + 1)
         .unwrap_or(0);
     let left_budget = width.saturating_sub(right_width);
-    let items = (0..=MAX_SHED)
+    let items = (footer.first_shed_rung()..=MAX_SHED)
         .map(|shed| posture_items(footer, shed))
         .find(|items| left_run_width(&mark, items) <= left_budget)
         .unwrap_or_else(|| posture_items(footer, MAX_SHED));
