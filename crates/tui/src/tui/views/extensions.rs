@@ -1202,31 +1202,8 @@ fn mcp_model(app: &App, locale: Locale) -> ExtensionsTabModel {
             }
         })
         .collect();
-    // Everything that needs a human leads. With twenty servers configured, the
-    // four that failed or want re-auth were impossible to pick out of a flat
-    // alphabetical list — founder live-test on the same screen. A server is
-    // "attention" exactly when it carries a recovery command; a healthy one
-    // renders its state and sorts below.
-    let (attention, healthy): (Vec<_>, Vec<_>) = items
-        .into_iter()
-        .partition(|item| item.action.as_ref().is_some_and(|a| a.command().is_some()));
-    let mut groups = Vec::new();
-    if !attention.is_empty() {
-        groups.push(ExtensionGroup {
-            id: "attention".into(),
-            label: tr(locale, MessageId::ExtensionsGroupNeedsAttention).into_owned(),
-            items: attention,
-        });
-    }
-    if !healthy.is_empty() {
-        groups.push(ExtensionGroup {
-            id: "servers".into(),
-            label: tr(locale, MessageId::ExtensionsGroupServers).into_owned(),
-            items: healthy,
-        });
-    }
     ExtensionsTabModel {
-        groups,
+        groups: mcp_groups(locale, items),
         problem: (configured.is_none() && app.mcp_configured_count > total).then(|| {
             localize(
                 locale,
@@ -1235,6 +1212,54 @@ fn mcp_model(app: &App, locale: Locale) -> ExtensionsTabModel {
             )
         }),
     }
+}
+
+/// Group id of the `/mcp` rows whose one action is a login.
+const MCP_LOGIN_GROUP_ID: &str = "login";
+
+/// Whether a row's one action is the login flow.
+fn mcp_item_needs_login(item: &ExtensionItem) -> bool {
+    item.action
+        .as_ref()
+        .and_then(ExtensionAction::command)
+        .is_some_and(|command| command.starts_with("/mcp login "))
+}
+
+/// Order the `/mcp` rows by what a person has to do about them. Everything
+/// that needs a human leads: with twenty servers configured, the four that
+/// failed or want re-auth were impossible to pick out of a flat alphabetical
+/// list — founder live-test on the same screen. Within that, the servers
+/// that only need a login come first, as their own group, because "failed"
+/// is the wrong word for an expired login and the fix is one key (#5926):
+/// Enter on the row runs `/mcp login <server>`. Real failures follow with
+/// their reason in the detail line; a healthy server renders its state and
+/// sorts below.
+fn mcp_groups(locale: Locale, items: Vec<ExtensionItem>) -> Vec<ExtensionGroup> {
+    let (login, rest): (Vec<_>, Vec<_>) = items.into_iter().partition(mcp_item_needs_login);
+    let (attention, healthy): (Vec<_>, Vec<_>) = rest
+        .into_iter()
+        .partition(|item| item.action.as_ref().is_some_and(|a| a.command().is_some()));
+    [
+        (
+            MCP_LOGIN_GROUP_ID,
+            MessageId::ExtensionsGroupNeedsLogin,
+            login,
+        ),
+        (
+            "attention",
+            MessageId::ExtensionsGroupNeedsAttention,
+            attention,
+        ),
+        ("servers", MessageId::ExtensionsGroupServers, healthy),
+    ]
+    .into_iter()
+    .filter(|(_, _, items)| !items.is_empty())
+    .map(|(id, label, items)| ExtensionGroup {
+        id: id.into(),
+        label: tr(locale, label).into_owned(),
+        items,
+    })
+    .collect()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1288,7 +1313,7 @@ impl ExtensionsView {
         tab: ExtensionsTab,
         locale: Locale,
     ) -> Self {
-        Self {
+        let mut view = Self {
             snapshot,
             locale,
             active_tab: tab,
@@ -1299,7 +1324,20 @@ impl ExtensionsView {
             folded_groups: BTreeSet::new(),
             theme: crate::palette::UI_THEME,
             hits: RefCell::new(HitAreas::default()),
+        };
+        // `/mcp` opens on the first server that needs a login, not on that
+        // group's heading, so the one key the screen advertises — Enter —
+        // runs the login flow straight away (#5926).
+        if view
+            .snapshot
+            .tab(tab)
+            .groups
+            .first()
+            .is_some_and(|group| group.id == MCP_LOGIN_GROUP_ID)
+        {
+            view.selected[tab.index()] = 1;
         }
+        view
     }
 
     fn fold_key(&self, group: &ExtensionGroup) -> String {
@@ -1881,5 +1919,125 @@ mod tests {
         view.set_tab(ExtensionsTab::Mcp);
         view.handle_key(key(KeyCode::Tab));
         assert_eq!(view.active_tab, ExtensionsTab::Hooks);
+    }
+
+    fn mcp_row(name: &str, state: &str, detail: &str, action: ExtensionAction) -> ExtensionItem {
+        ExtensionItem {
+            id: name.into(),
+            label: name.into(),
+            description: String::new(),
+            state: state.into(),
+            tone: ExtensionTone::Attention,
+            detail: detail.into(),
+            action: Some(action),
+        }
+    }
+
+    fn login_row(name: &str) -> ExtensionItem {
+        mcp_row(
+            name,
+            &crate::tui::session_boot::mcp_auth_required_state_label(),
+            "401 Unauthorized: the session is no longer accepted",
+            ExtensionAction::Command {
+                label: "re-auth".into(),
+                command: McpRecoveryKind::Reauth.slash_command(name),
+            },
+        )
+    }
+
+    /// The founder's receipt (#5926): seven OAuth servers whose login
+    /// expired and one that really failed. The expired logins lead in their
+    /// own group with the login command on the row; the real failure keeps
+    /// its reason; the connected server sorts last.
+    #[test]
+    fn mcp_rows_list_expired_logins_first_then_failures_with_their_reason() {
+        let rows = vec![
+            mcp_row(
+                "alpha",
+                "connected",
+                "3 tools",
+                ExtensionAction::Status {
+                    label: "connected".into(),
+                },
+            ),
+            mcp_row(
+                "supabase",
+                "error",
+                "OAuth token refresh failed: Failed to parse server response",
+                ExtensionAction::Command {
+                    label: "diagnose".into(),
+                    command: McpRecoveryKind::Diagnose.slash_command("supabase"),
+                },
+            ),
+            login_row("slack"),
+            login_row("stripe"),
+        ];
+        let groups = mcp_groups(Locale::En, rows);
+        let shape: Vec<(&str, Vec<&str>)> = groups
+            .iter()
+            .map(|group| {
+                (
+                    group.id.as_str(),
+                    group.items.iter().map(|item| item.label.as_str()).collect(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            shape,
+            vec![
+                ("login", vec!["slack", "stripe"]),
+                ("attention", vec!["supabase"]),
+                ("servers", vec!["alpha"]),
+            ]
+        );
+        assert_eq!(groups[0].label, "Needs login");
+        assert_eq!(groups[1].label, "Needs attention");
+        let slack = &groups[0].items[0];
+        assert_eq!(
+            slack.action.as_ref().and_then(ExtensionAction::command),
+            Some("/mcp login slack")
+        );
+        assert!(!slack.state.contains("failed"), "{}", slack.state);
+        assert_eq!(
+            groups[1].items[0].detail,
+            "OAuth token refresh failed: Failed to parse server response"
+        );
+    }
+
+    /// Opening `/mcp` lands on the first server that needs a login, so Enter
+    /// is the login key, not a fold of the group heading. A tab without a
+    /// login group keeps the heading-first default.
+    #[test]
+    fn mcp_tab_opens_on_the_first_login_row() {
+        let mut snapshot = ExtensionsSnapshot::default();
+        snapshot.tabs[ExtensionsTab::Mcp.index()] = ExtensionsTabModel {
+            groups: mcp_groups(Locale::En, vec![login_row("slack"), login_row("stripe")]),
+            problem: None,
+        };
+        let view = ExtensionsView::from_snapshot_with_locale(
+            snapshot.clone(),
+            ExtensionsTab::Mcp,
+            Locale::En,
+        );
+        assert_eq!(view.selected[ExtensionsTab::Mcp.index()], 1);
+        let entries = view.visible_entries();
+        match entries[1] {
+            VisibleEntry::Item(group, item) => {
+                assert_eq!(group.id, MCP_LOGIN_GROUP_ID);
+                assert_eq!(item.label, "slack");
+                assert_eq!(
+                    item.action.as_ref().and_then(ExtensionAction::command),
+                    Some("/mcp login slack")
+                );
+            }
+            other => panic!("expected the first login row, got {other:?}"),
+        }
+
+        let plain = ExtensionsView::from_snapshot_with_locale(
+            ExtensionsSnapshot::default(),
+            ExtensionsTab::Mcp,
+            Locale::En,
+        );
+        assert_eq!(plain.selected[ExtensionsTab::Mcp.index()], 0);
     }
 }

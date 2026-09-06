@@ -24,6 +24,7 @@
   "ExtensionsGroupRecommended": "おすすめ",
   "ExtensionsGroupServers": "サーバー",
   "ExtensionsGroupNeedsAttention": "要対応",
+  "ExtensionsGroupNeedsLogin": "ログインが必要",
   "ExtensionsGroupStatus": "{count} 件 · Enter で折りたたみ",
   "ExtensionsGroupUser": "ユーザー",
   "ExtensionsGroupWorkspace": "ワークスペース",

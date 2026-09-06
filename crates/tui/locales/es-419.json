@@ -24,6 +24,7 @@
   "ExtensionsGroupRecommended": "Recomendado",
   "ExtensionsGroupServers": "Servidores",
   "ExtensionsGroupNeedsAttention": "Necesita atención",
+  "ExtensionsGroupNeedsLogin": "Requiere inicio de sesión",
   "ExtensionsGroupStatus": "{count} elementos · Enter pliega",
   "ExtensionsGroupUser": "Usuario",
   "ExtensionsGroupWorkspace": "Espacio de trabajo",
