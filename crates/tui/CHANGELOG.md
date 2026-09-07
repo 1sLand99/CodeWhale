@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `allow_insecure_http = true` under a `[providers.<name>]` table works
+  again. 0.9.12 tightened plain-HTTP base URL handling in a way that
+  silently dropped the per-provider key, leaving the process-wide env
+  var as the only opt-in — LAN llama.cpp and internal-gateway users
+  had to export `CODEWHALE_ALLOW_INSECURE_HTTP=1` to connect at all.
+  The key is honored again (parsed, settable and unsettable through
+  `codewhale config set providers.<name>.allow_insecure_http`, and
+  listed in the custom-provider field hint), it stays distinct from
+  `insecure_skip_tls_verify`, and the refusal message now leads with
+  the config key. Loopback hosts remain auto-allowed and telemetry
+  endpoint validation deliberately still consults neither switch
+  (#5991, thanks @Gabriel-Degret).
 - A Fleet task that selects a roster member with `worker.agent_profile` now
   runs with that member's posture. The launch-time resolver only consulted the
   resolved member when the legacy `worker.role` label was absent, so a task
