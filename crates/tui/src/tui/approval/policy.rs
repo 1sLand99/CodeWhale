@@ -120,6 +120,7 @@ pub fn get_tool_category(name: &str) -> ToolCategory {
             | "git_log"
             | "git_show"
             | "git_blame"
+            | "git_commit_plan"
             | "project"
             | "diagnostics"
     ) || name.starts_with("read_")
@@ -386,6 +387,7 @@ mod tests {
             ("Git", "log", ToolCategory::Safe, RiskLevel::Benign),
             ("Git", "show", ToolCategory::Safe, RiskLevel::Benign),
             ("Git", "blame", ToolCategory::Safe, RiskLevel::Benign),
+            ("Git", "commit_plan", ToolCategory::Safe, RiskLevel::Benign),
             (
                 "Run",
                 "tests",

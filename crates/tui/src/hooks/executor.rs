@@ -2517,7 +2517,7 @@ fn tool_category_for(tool_name: &str, tool_args: Option<&str>) -> &'static str {
         "Git" | "git" => match action.as_deref() {
             // Every shipped Git action is read-only today; classify by action
             // anyway so adding a mutating one cannot silently inherit `safe`.
-            Some("status" | "diff" | "log" | "show" | "blame") => "safe",
+            Some("status" | "diff" | "log" | "show" | "blame" | "commit_plan") => "safe",
             _ => "other",
         },
         // `Run` executes test/verifier commands — closer to shell than safe.
@@ -5832,6 +5832,10 @@ command = "echo project"
         assert_eq!(tool_category_for("apply_patch", None), "file_write");
         assert_eq!(
             tool_category_for("Git", Some(r#"{"action":"log"}"#)),
+            "safe"
+        );
+        assert_eq!(
+            tool_category_for("Git", Some(r#"{"action":"commit_plan"}"#)),
             "safe"
         );
         assert_eq!(tool_category_for("web.run", None), "other");
