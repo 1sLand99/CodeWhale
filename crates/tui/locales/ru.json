@@ -24,6 +24,7 @@
   "ExtensionsGroupRecommended": "Рекомендуемые",
   "ExtensionsGroupServers": "Серверы",
   "ExtensionsGroupNeedsAttention": "Требует внимания",
+  "ExtensionsGroupNeedsLogin": "Требуется вход",
   "ExtensionsGroupStatus": "Элементов: {count} · Enter сворачивает",
   "ExtensionsGroupUser": "Пользователь",
   "ExtensionsGroupWorkspace": "Рабочая область",

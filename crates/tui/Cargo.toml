@@ -14,6 +14,11 @@ workspace = true
 [features]
 default = []
 long-running-tests = []
+# Opt-in global-allocator swap (#5872): build on rusty_alloc (the pure-Rust
+# mimalloc v2.4.5 remake — no C compiler, no build script) instead of the
+# default mimalloc. Off by default; the default build is unchanged.
+# Build with: cargo build -p codewhale-tui --features rusty-alloc
+rusty-alloc = ["dep:rusty_alloc-api"]
 
 [lib]
 name = "codewhale_tui"
@@ -104,6 +109,7 @@ semver.workspace = true
 rust-i18n = "4.1.0"
 shell-words = "1.1.1"
 mimalloc.workspace = true
+rusty_alloc-api = { workspace = true, optional = true }
 
 [build-dependencies]
 codewhale-build-support = { path = "../build-support", version = "0.9.12" }

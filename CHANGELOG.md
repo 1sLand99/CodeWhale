@@ -30,7 +30,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   answerable work and no longer inflates the `blocked` chip; the receipts
   roster and the wire `state` gain `parked` (#5906, #5921).
 
-
 - `codewhale account keys set|remove|list` no longer carry a hardcoded
   eight-provider list. Provider ids come from the control plane's public
   catalog (`GET /api/model-providers`), are validated locally against
@@ -38,6 +37,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   every catalog provider with its label and stored-key state. `--from-local`
   maps a catalog row onto the local runtime provider through the catalog's own
   `runtimeProvider` field, so a newly supported provider needs no CLI release.
+
+- `/mcp` lists the servers that need a login first, as their own
+  `Needs login` group above `Needs attention`, and opens with the cursor
+  already on the first such row so the Enter the screen advertises runs
+  `/mcp login <server>` straight away; translated in all 15 packs. A
+  snapshot test pins the footer shape the chip landed with (`MCP · N
+  connected · N ◆ auth required · N failed`) so an expired login never
+  regresses into the failed count (#5926).
 
 ### Fixed
 
@@ -54,8 +61,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   whose own record is unreadable or unwritable is reported as terminal, so its
   task fails at once instead of idling out (#5931).
 
+- An MCP token refresh that fails to parse the provider's answer keeps the
+  endpoint's receipt — status line, content type, and a 200-byte excerpt
+  with every credential-shaped value (`access_token`, `refresh_token`,
+  `client_secret`, `id_token`, bearer schemes) masked before the cut —
+  instead of rmcp's bare `Failed to parse server response`, so a provider
+  outage answering an HTML 502 reads differently from a parser defect, and
+  the login remedy stays named (#5926; remedy wording landed in #5959).
+
 ### Added
 
+- The `rusty-alloc` cargo feature on `codewhale-tui` and `codewhale-cli`
+  opts the binaries into the `rusty_alloc` global allocator (the mimalloc
+  v2.4.5 architecture remade in pure Rust — no C compiler or build script
+  on that path) instead of the default mimalloc. It is off by default and
+  the default build is unchanged; build with
+  `cargo build -p codewhale-tui --features rusty-alloc` (#5872).
 - The `/theme` picker now discovers valid user-authored `custom:<name>`
   overlays, previews their colors, highlights the active overlay, and preserves
   it when the picker is opened and committed without navigation (#5901).
@@ -573,6 +594,14 @@ Reports and reproductions that shaped this release:
 
 ### Fixed
 
+- Read-only Fleet workers no longer send `"action": {"enum": null}` in their
+  projected `bash` schema. The read-only projection probed the action enum
+  with a mutating index, which auto-vivified the key on schemas that have no
+  action property, and strict OpenAI-compatible validators then rejected the
+  whole request (`null is not of type "array"`). The probe is non-mutating
+  now, in both the read-only projection and the `Run` arm next to it, and a
+  regression test walks the whole projected catalog for nulls
+  (#5944, thanks @gaord).
 - Fast typing no longer corrupts the composer. The paste-burst heuristic ran
   on every session until a real bracketed paste arrived, holding, buffering,
   retro-grabbing, and absorbing Enter on timing guesses; it is now

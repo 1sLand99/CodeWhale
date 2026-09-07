@@ -24,6 +24,7 @@
   "ExtensionsGroupRecommended": "Рекомендовані",
   "ExtensionsGroupServers": "Сервери",
   "ExtensionsGroupNeedsAttention": "Потребує уваги",
+  "ExtensionsGroupNeedsLogin": "Потрібен вхід",
   "ExtensionsGroupStatus": "Елементів: {count} · Enter згортає",
   "ExtensionsGroupUser": "Користувач",
   "ExtensionsGroupWorkspace": "Робочий простір",

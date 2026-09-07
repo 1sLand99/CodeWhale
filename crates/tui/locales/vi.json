@@ -24,6 +24,7 @@
   "ExtensionsGroupRecommended": "Đề xuất",
   "ExtensionsGroupServers": "Máy chủ",
   "ExtensionsGroupNeedsAttention": "Cần chú ý",
+  "ExtensionsGroupNeedsLogin": "Cần đăng nhập",
   "ExtensionsGroupStatus": "{count} mục · Enter để thu gọn",
   "ExtensionsGroupUser": "Người dùng",
   "ExtensionsGroupWorkspace": "Không gian làm việc",

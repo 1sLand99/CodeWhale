@@ -24,6 +24,7 @@
   "ExtensionsGroupRecommended": "Recommended",
   "ExtensionsGroupServers": "Servers",
   "ExtensionsGroupNeedsAttention": "Needs attention",
+  "ExtensionsGroupNeedsLogin": "Needs login",
   "ExtensionsGroupStatus": "{count} items · Enter folds",
   "ExtensionsGroupUser": "User",
   "ExtensionsGroupWorkspace": "Workspace",
