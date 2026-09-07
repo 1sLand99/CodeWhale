@@ -354,6 +354,11 @@ pub struct GoalState {
     advisories: Vec<GoalAdvisoryNote>,
     last_gap_fingerprint: Option<String>,
     repeated_gap_count: u32,
+    /// The continuation pass the repeated-gap counter last advanced on.
+    /// The bound is "equivalent gaps on consecutive PASSES", so a verifier
+    /// reporting the same gap several times inside one turn must not trip it
+    /// before any continuation has happened.
+    last_gap_pass: Option<u32>,
 }
 
 impl GoalState {
@@ -402,6 +407,7 @@ impl GoalState {
                     self.advisories.clear();
                     self.last_gap_fingerprint = None;
                     self.repeated_gap_count = 0;
+                    self.last_gap_pass = None;
                 } else if self.token_budget != token_budget {
                     self.token_budget = token_budget;
                 }
@@ -413,6 +419,7 @@ impl GoalState {
                     self.completion_verification = None;
                     self.last_gap_fingerprint = None;
                     self.repeated_gap_count = 0;
+                    self.last_gap_pass = None;
                 }
 
                 if changed || status_changed || self.status.is_none() {
@@ -458,6 +465,7 @@ impl GoalState {
         self.advisories.clear();
         self.last_gap_fingerprint = None;
         self.repeated_gap_count = 0;
+        self.last_gap_pass = None;
         Ok(())
     }
 
@@ -503,6 +511,7 @@ impl GoalState {
             advisories: Vec::new(),
             last_gap_fingerprint: None,
             repeated_gap_count: 0,
+            last_gap_pass: None,
         }
     }
 
@@ -572,11 +581,21 @@ impl GoalState {
 
         let fingerprint = gap_fingerprint(&verification.gaps)
             .ok_or("Critical not-achieved verification requires at least one concrete gap.")?;
-        self.repeated_gap_count = if self.last_gap_fingerprint.as_deref() == Some(&fingerprint) {
-            self.repeated_gap_count.saturating_add(1)
-        } else {
+        // Advance at most once per continuation pass. `record_not_achieved`
+        // runs per `update_goal` tool call, so counting calls would let a
+        // verifier that reports one gap three times in a single turn pause the
+        // goal before a single continuation had been spent — stopping valid
+        // work rather than a stall.
+        let same_gap = self.last_gap_fingerprint.as_deref() == Some(&fingerprint);
+        let already_counted_this_pass = self.last_gap_pass == Some(self.continuation_count);
+        self.repeated_gap_count = if !same_gap {
             1
+        } else if already_counted_this_pass {
+            self.repeated_gap_count
+        } else {
+            self.repeated_gap_count.saturating_add(1)
         };
+        self.last_gap_pass = Some(self.continuation_count);
         self.last_gap_fingerprint = Some(fingerprint);
 
         // The stall bound the continuation prompt promises. Pausing *is* the
@@ -1753,6 +1772,9 @@ mod tests {
                 &["first gap"],
             ))
             .expect("first critical review");
+        // Two reports of one gap only count twice when they land on separate
+        // continuation passes; several inside one turn are one pass.
+        state.record_continuation();
         state
             .record_not_achieved(not_achieved_review(
                 GoalReviewRole::Critical,
@@ -1806,6 +1828,10 @@ mod tests {
                 snapshot.is_active(),
                 "pass {pass} is under the bound and must keep working",
             );
+            // The bound counts continuation PASSES, so each iteration has to
+            // actually be one. Without this the loop would be several reports
+            // inside a single turn, which deliberately no longer advances it.
+            state.record_continuation();
         }
 
         // Reordered and re-cased wording is the same gap set, so restating the
@@ -1837,6 +1863,37 @@ mod tests {
             ))
             .expect_err("a paused goal takes no further verifier progress");
         assert!(err.contains("active goal"));
+    }
+
+    #[test]
+    fn repeating_one_gap_inside_a_single_turn_does_not_trip_the_stall_bound() {
+        // `record_not_achieved` runs per `update_goal` tool call. Counting
+        // calls rather than passes meant a verifier that restated the same gap
+        // three times in ONE turn paused the goal before a single continuation
+        // had been spent — stopping valid work and calling it a stall.
+        let mut state = GoalState::default();
+        state
+            .create("one turn, several reports".to_string(), None)
+            .expect("create goal");
+
+        for _ in 0..(crate::goal_loop::MAX_REPEATED_GAP_PASSES + 2) {
+            state
+                .record_not_achieved(not_achieved_review(
+                    GoalReviewRole::Critical,
+                    &["provider copy still wrong"],
+                ))
+                .expect("repeated reports inside one turn are recorded");
+        }
+
+        let snapshot = state.snapshot();
+        assert_eq!(
+            snapshot.repeated_gap_count, 1,
+            "many reports in one turn are still one pass",
+        );
+        assert!(
+            snapshot.is_active(),
+            "no continuation was spent, so there is no stall to pause on",
+        );
     }
 
     #[tokio::test]
