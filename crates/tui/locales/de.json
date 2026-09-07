@@ -24,6 +24,7 @@
   "ExtensionsGroupRecommended": "Empfohlen",
   "ExtensionsGroupServers": "Server",
   "ExtensionsGroupNeedsAttention": "Braucht Aufmerksamkeit",
+  "ExtensionsGroupNeedsLogin": "Anmeldung nötig",
   "ExtensionsGroupStatus": "{count} Einträge · Enter klappt ein",
   "ExtensionsGroupUser": "Benutzer",
   "ExtensionsGroupWorkspace": "Arbeitsbereich",

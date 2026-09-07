@@ -24,6 +24,7 @@
   "ExtensionsGroupRecommended": "Disarankan",
   "ExtensionsGroupServers": "Server",
   "ExtensionsGroupNeedsAttention": "Perlu perhatian",
+  "ExtensionsGroupNeedsLogin": "Perlu masuk",
   "ExtensionsGroupStatus": "{count} item · Enter untuk melipat",
   "ExtensionsGroupUser": "Pengguna",
   "ExtensionsGroupWorkspace": "Ruang kerja",

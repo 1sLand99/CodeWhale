@@ -24,6 +24,7 @@
   "ExtensionsGroupRecommended": "推荐",
   "ExtensionsGroupServers": "服务器",
   "ExtensionsGroupNeedsAttention": "需要处理",
+  "ExtensionsGroupNeedsLogin": "需要登录",
   "ExtensionsGroupStatus": "{count} 项 · 按 Enter 折叠",
   "ExtensionsGroupUser": "用户",
   "ExtensionsGroupWorkspace": "工作区",
