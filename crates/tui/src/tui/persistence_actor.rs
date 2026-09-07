@@ -496,7 +496,12 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let sessions_dir = tmp.path().join("sessions");
         let manager = SessionManager::new(sessions_dir.clone()).expect("manager");
-        let queue_path = sessions_dir.join("checkpoints").join("offline_queue.json");
+        // The queue is keyed per session now (#5715-adjacent data-loss fix):
+        // two concurrent instances used to share one global file and the loser
+        // lost its unsent text. The request below carries session-A.
+        let queue_path = sessions_dir
+            .join("checkpoints")
+            .join("session-A.offline_queue.json");
         let (handle, task) = spawn_persistence_actor(manager);
 
         let state = OfflineQueueState {
