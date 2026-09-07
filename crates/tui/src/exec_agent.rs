@@ -955,6 +955,12 @@ pub(crate) async fn run_exec_agent(
                             &latest_model,
                         )
                         .as_str();
+                    // The deliverable is the final assistant reply of the
+                    // session, not the cumulative stream output: a
+                    // multi-step turn streams pre-tool commentary first,
+                    // and that commentary is not part of the answer.
+                    let final_answer = exec_stream_final_answer_text(&latest_messages)
+                        .unwrap_or_else(|| summary.output.trim().to_string());
                     emit_exec_stream_event(&ExecStreamEvent::Metadata {
                         meta: Box::new(ExecStreamMeta {
                             receipt_kind: "terminal",
@@ -989,9 +995,9 @@ pub(crate) async fn run_exec_agent(
                                 &latest_messages,
                                 latest_system_prompt.as_ref(),
                             ),
-                            visible_final_answer_chars: summary.output.chars().count(),
+                            visible_final_answer_chars: final_answer.chars().count(),
                             visible_final_answer_excerpt: exec_stream_final_answer_excerpt(
-                                &summary.output,
+                                &final_answer,
                             ),
                             resume_command: saved_session_id
                                 .as_deref()

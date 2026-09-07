@@ -12236,6 +12236,30 @@ fn exec_stream_resume_hint(session_id: &str) -> String {
 /// length so a consumer can tell a bounded excerpt from a short answer.
 const EXEC_STREAM_FINAL_ANSWER_EXCERPT_CHARS: usize = 4_000;
 
+/// The final visible assistant reply for the terminal receipt: the text
+/// blocks of the last assistant-like message in the persisted session.
+/// `ExecSummary::output` accumulates every stream delta of the run,
+/// including pre-tool commentary from earlier steps of a multi-step
+/// turn, so the cumulative output is only a fallback when the session
+/// carries no assistant text at all.
+fn exec_stream_final_answer_text(messages: &[Message]) -> Option<String> {
+    let text = messages
+        .iter()
+        .rev()
+        .find(|message| message.role.is_assistant_like())?
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string();
+    (!text.is_empty()).then_some(text)
+}
+
 /// Bound and secret-redact the visible final answer once, at the emitter, so
 /// every downstream consumer reads the same excerpt.
 fn exec_stream_final_answer_excerpt(output: &str) -> String {
@@ -17292,6 +17316,70 @@ api_key = "test-only-key"
         assert!(excerpt.ends_with("..."));
         let leaked = exec_stream_final_answer_excerpt("token: sk-ant-must-not-leak-1234567890");
         assert!(!leaked.contains("sk-ant-must-not-leak"), "{leaked}");
+    }
+
+    #[test]
+    fn exec_stream_final_answer_text_is_the_last_assistant_reply() {
+        // Multi-step turn: pre-tool commentary, a tool result, then a
+        // distinct final answer. The receipt must carry only the final
+        // reply, not the cumulative stream output.
+        let messages = vec![
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: "write the report".to_string(),
+                    cache_control: None,
+                }],
+            },
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::Text {
+                    text: "let me check the workspace first".to_string(),
+                    cache_control: None,
+                }],
+            },
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "call-1".to_string(),
+                    content: "listed files".to_string(),
+                    is_error: Some(false),
+                    content_blocks: None,
+                }],
+            },
+            Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::thinking("final reasoning"),
+                    ContentBlock::Text {
+                        text: "the final report".to_string(),
+                        cache_control: None,
+                    },
+                ],
+            },
+        ];
+        assert_eq!(
+            exec_stream_final_answer_text(&messages),
+            Some("the final report".to_string())
+        );
+    }
+
+    #[test]
+    fn exec_stream_final_answer_text_requires_assistant_text() {
+        assert_eq!(exec_stream_final_answer_text(&[]), None);
+        let user_only = vec![Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: "prompt".to_string(),
+                cache_control: None,
+            }],
+        }];
+        assert_eq!(exec_stream_final_answer_text(&user_only), None);
+        let textless_assistant = vec![Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::thinking("reasoning only")],
+        }];
+        assert_eq!(exec_stream_final_answer_text(&textless_assistant), None);
     }
 
     #[test]
