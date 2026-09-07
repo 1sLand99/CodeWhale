@@ -806,12 +806,11 @@ fn esm_entry_has_module_siblings(
     })
 }
 
-#[cfg(target_os = "macos")]
 fn is_node_command(command: &str) -> bool {
     Path::new(command)
         .file_name()
         .and_then(|name| name.to_str())
-        .is_some_and(|name| matches!(name, "node" | "nodejs"))
+        .is_some_and(|name| matches!(name, "node" | "nodejs" | "node.exe" | "nodejs.exe"))
 }
 
 /// Rewrite a Node launch so a reviewed `.mjs` entrypoint keeps ESM semantics

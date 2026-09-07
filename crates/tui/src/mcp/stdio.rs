@@ -160,8 +160,13 @@ impl StdioTransport {
             );
         }
 
-        let mut child = cmd.spawn().with_context(|| {
-            if config.reviewed_plugin.is_some() {
+        let mut child = cmd.spawn().map_err(|error| {
+            let message = if error.kind() == std::io::ErrorKind::NotFound
+                && super::is_node_command(command)
+                && launch_cwd.is_none_or(|directory| directory.is_dir())
+            {
+                format!("MCP server {server_name} could not start because Node.js was not found. Install Node.js from https://nodejs.org/ and restart Codewhale with node on PATH. Built-in Computer Use requires Node.js 20 or newer.")
+            } else if config.reviewed_plugin.is_some() {
                 format!(
                     "MCP stdio spawn failed (transport=stdio server={server_name} reviewed-plugin argv_count={} env_count={})",
                     config.args.len(),
@@ -173,7 +178,8 @@ impl StdioTransport {
                     "MCP stdio spawn failed (transport=stdio server={server_name} cmd={command:?} args={:?} env_keys={env_keys:?})",
                     config.args,
                 )
-            }
+            };
+            anyhow::Error::new(error).context(message)
         })?;
 
         let stdin = child.stdin.take().context("Failed to get MCP stdin")?;
@@ -352,14 +358,24 @@ impl McpTransport for StdioTransport {
     }
 }
 
-/// Drop fallback (#420): if `shutdown` was never called explicitly, still
-/// fire SIGTERM before tokio's `kill_on_drop` sends SIGKILL. The two
-/// signals arrive back-to-back so well-behaved servers at least see the
-/// SIGTERM first; misbehaving ones get SIGKILL'd anyway.
+/// Session changes can drop a pool without explicitly awaiting shutdown.
+/// Keep the owned child alive for the same bounded cleanup as explicit
+/// shutdown, so servers can release input and recording resources. Runtime
+/// teardown still drops the cleanup future and invokes `kill_on_drop`.
 impl Drop for StdioTransport {
     fn drop(&mut self) {
         if let Some(watch) = self.authority_cancel_watch.take() {
             watch.abort();
+        }
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            let child = Arc::clone(&self.child);
+            let reviewed_launch = self._reviewed_launch.take();
+            runtime.spawn(async move {
+                let _reviewed_launch = reviewed_launch;
+                let mut child = child.lock().await;
+                terminate_child(&mut child).await;
+            });
+            return;
         }
         if let Ok(mut child) = self.child.try_lock()
             && !child.try_wait().is_ok_and(|status| status.is_some())

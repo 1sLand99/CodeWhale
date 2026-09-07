@@ -339,3 +339,7 @@ say "  export PATH=\"$install_dir:\$PATH\""
 say "  hash -r"
 say "  command -v codewhale codew"
 say "Keep the directory first in your shell profile after verifying it."
+if ! command -v node >/dev/null 2>&1; then
+  say "Computer Use is included and needs Node.js 20 or newer on PATH."
+  say "Install Node.js from https://nodejs.org/, then restart Codewhale to enable Computer Use."
+fi

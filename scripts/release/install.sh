@@ -179,3 +179,7 @@ echo "  export PATH=\"$BIN_DIR:\$PATH\""
 echo "  hash -r"
 echo "  command -v codewhale codew"
 echo "Keep the directory first in your shell profile after verifying it."
+if ! command -v node >/dev/null 2>&1; then
+    echo "Computer Use is included and needs Node.js 20 or newer on PATH."
+    echo "Install Node.js from https://nodejs.org/, then restart Codewhale to enable Computer Use."
+fi
