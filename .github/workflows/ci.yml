@@ -276,6 +276,8 @@ jobs:
         # `tsc` ever running in CI. `npm test` compiles first (tsc -p ./), so
         # this is the type-check gate for the extension too.
         run: npm test
+      - name: Package VS Code extension
+        run: npm run package
 
   safety-gate:
     name: Safety gate
