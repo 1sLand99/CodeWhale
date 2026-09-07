@@ -7,19 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
+### Fixed
 
-- Fleet workers now surface their deliverable. The terminal `codewhale exec`
-  `metadata` receipt carries `visible_final_answer_excerpt`, a bounded,
-  secret-redacted excerpt of the final assistant reply next to the real
-  `visible_final_answer_chars` count; the Runtime executor attaches it to
-  `Completed.summary` and, for a task with no scorer and no file artifact,
-  to the receipt notes instead of "no verifiable output" — a worker that
-  fails after writing most of a report keeps the text too. `session_capture`
-  now carries the raw `saved_session_id` (the `metadata` receipt stays
-  fingerprint-only), `FleetReceipt.saved_session_id` persists it, and the
-  runtime API exposes it so a client can resolve the worker's full final
-  reply via `GET /v1/sessions/{id}` (#5946, thanks @gaord).
+- A Fleet task that selects a roster member with `worker.agent_profile` now
+  runs with that member's posture. The launch-time resolver only consulted the
+  resolved member when the legacy `worker.role` label was absent, so a task
+  labelled `manager` that selected `member:reviewer` ran as a write-capable
+  manager instead of a reviewer and was never leased. The member's canonical
+  slot now wins whenever one resolved; the label remains the posture only when
+  no member resolved at all. To keep the fix from widening authority in the
+  mirror case (a read-only label on a write-capable member), a spec whose
+  `worker.role` names a different posture than the selected member's role is
+  rejected at run creation with a message naming both postures; casing and
+  legacy aliases of the member's own role are still accepted (#5945, thanks
+  @gaord).
 
 ### Changed
 
@@ -62,9 +63,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Five of the load-flaky tests tracked in #5929 no longer depend on shared
+  state or live local daemons. Background-hook capture tests wait for the
+  capture file to hold bytes instead of merely existing (the shell's `>`
+  redirection creates the file empty before `cat` writes, which read as
+  `valid JSON: EOF` under load); the session-picker acceptance test drives
+  the real picker over a private store instead of a process-global
+  `CODEWHALE_HOME` redirect that concurrent tests could observe mid-flight;
+  the DeepSeek-Anthropic translate test holds the test env barrier so its
+  request-time and assertion-time `max_tokens` reads cannot straddle another
+  test's `CODEWHALE_MAX_OUTPUT_TOKENS` override; the unit-test binary no
+  longer probes a real local Ollama daemon (`127.0.0.1:11434`) from the
+  fire-and-forget provider catalog refresh, whose merged tags could flip
+  another test's live-snapshot assertions; and the tmux clipboard test's
+  attach/OSC 52 wait bounds tolerate a fully loaded machine (3s -> 30s)
+  without changing what they verify (#5929).
 - The posture bar states how long the session has been working and how long
-  the current turn has run, distinguishing actively working from waiting on a
-  tool, a sub-agent or the operator; the 0.9.12 shell had dropped the overall
+  the current turn has run, distinguishing actively working from waiting on
+  a tool, a sub-agent or the operator; the 0.9.12 shell had dropped the overall
   working-time indicator from the place a glancing user checks (#5914).
 
 - An MCP token refresh that fails to parse the provider's answer keeps the
@@ -152,6 +168,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   per-World session container before each command — full tree first, then
   only changes and deletions — so remote builds and tests run on the files
   just edited locally and their outputs persist across commands.
+- `Git` grows a `commit_plan` action: a propose-only planner that splits the
+  working tree into ordered atomic commits (#3999). It groups whole files —
+  lock files ride with their manifest, tests ride with the source they name —
+  orders the groups so a commit that defines a symbol lands before the commit
+  that uses it, and refuses the whole plan when that dependency graph has a
+  cycle. It reads `git diff HEAD` plus the untracked-file list and writes
+  nothing: no `git add -N`, no `git apply --cached`, no `git commit`, so
+  staging and committing stay with the ordinary `git add` / `git commit` shell
+  path where the approval gate already applies. Thanks
+  [@goransh-walia](https://github.com/goransh-walia) for the original
+  implementation (PR #5870, fixes #3999).
 
 ## [0.9.12] - 2026-09-03
 
