@@ -90,6 +90,7 @@ pub mod phase_strip;
 pub(crate) mod plugin_suggestions;
 pub mod prompt_suggestion;
 pub mod provider_picker;
+pub mod redaction_gate;
 pub mod scrolling;
 pub mod selection;
 pub mod session_boot;

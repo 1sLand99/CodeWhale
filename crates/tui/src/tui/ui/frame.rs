@@ -1280,6 +1280,14 @@ pub(crate) fn render(f: &mut Frame, app: &mut App, _config: &Config) -> Option<(
     // the ones every other screen wears, and Tab means what it means
     // everywhere else — there is no second input authority left to arbitrate.
 
+    // The `[redaction] model_bound` opt-out gate owns the first screen too:
+    // it must be answered before any session starts, and it renders above the
+    // launch surface.
+    if app.redaction_gate {
+        crate::tui::redaction_gate::render(f, size, app);
+        return None;
+    }
+
     // Mini-window mode: when the host terminal window is pinned into its
     // small always-on-top form, hide the shell chrome and keep only what the
     // user opted to keep (`[mini_window]` in config.toml, or mutated live by

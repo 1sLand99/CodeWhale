@@ -1921,6 +1921,15 @@ pub struct App {
     pub theme_name: String,
     // Onboarding
     pub onboarding: OnboardingState,
+    /// True while the startup gate for `[redaction] model_bound = "disabled"`
+    /// owns the screen. The gate renders above every other surface and must
+    /// be answered (confirm / keep / quit) before any session starts; see
+    /// `tui::redaction_gate`.
+    pub redaction_gate: bool,
+    /// True while the gate shows its second, final-confirmation stage: the
+    /// user already pressed 1/Y on the first stage and must confirm once more
+    /// before the opt-out actually takes effect.
+    pub redaction_gate_confirming: bool,
     pub onboarding_needs_api_key: bool,
     pub onboarding_provider: ApiProvider,
     pub onboarding_workspace_trust_gate: bool,
