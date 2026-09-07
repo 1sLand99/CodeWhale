@@ -2681,7 +2681,6 @@ impl DeepSeekClient {
         #[cfg(test)]
         {
             let _ = config;
-            return;
         }
         #[cfg(not(test))]
         {
