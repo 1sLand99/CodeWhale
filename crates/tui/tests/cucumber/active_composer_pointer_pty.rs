@@ -98,12 +98,17 @@ fn run_pointer_submit_case(rows: u16, cols: u16) {
         &format!("{size}: offline explore ready"),
     );
     tui.send(keys::key::enter()).expect("leave onboarding");
-    wait_or_panic(
-        &mut tui,
-        "New session",
+    // PTY reads can split a redraw: the launch header arrives before the
+    // composer, with onboarding rows still on screen (Buildkite #1861/#1867).
+    // Wait for the input surface as well as the header before asserting it.
+    tui.wait_for(
+        |frame| {
+            let text = frame.text();
+            text.contains("New session") && text.contains('❯') && !text.contains("You're ready.")
+        },
         STARTUP_WAIT,
-        &format!("{size}: show the launch card"),
-    );
+    )
+    .unwrap_or_else(|error| panic!("{size}: show the launch card and composer: {error}"));
     tui.pump();
     assert_startup_contract(tui.frame(), rows, cols, &size);
     // Typing goes straight to the composer; Enter sends the first message
