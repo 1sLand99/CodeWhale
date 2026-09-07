@@ -48,6 +48,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The `rusty-alloc` cargo feature on `codewhale-tui` and `codewhale-cli`
+  opts the binaries into the `rusty_alloc` global allocator (the mimalloc
+  v2.4.5 architecture remade in pure Rust — no C compiler or build script
+  on that path) instead of the default mimalloc. It is off by default and
+  the default build is unchanged; build with
+  `cargo build -p codewhale-tui --features rusty-alloc` (#5872).
 - The `/theme` picker now discovers valid user-authored `custom:<name>`
   overlays, previews their colors, highlights the active overlay, and preserves
   it when the picker is opened and committed without navigation (#5901).

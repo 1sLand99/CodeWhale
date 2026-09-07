@@ -47,6 +47,7 @@ export const CHANGELOG: ChangelogRelease[] = [
       {
         "heading": "Added",
         "items": [
+          "The rusty-alloc cargo feature on codewhale-tui and codewhale-cli opts the binaries into the rusty_alloc global allocator (the mimalloc v2.4.5 architecture remade in pure Rust — no C compiler or build script on that path) instead of the default mimalloc. It is off by default and the default build is unchanged; build with cargo build -p codewhale-tui --features rusty-alloc (#5872).",
           "The /theme picker now discovers valid user-authored custom:<name> overlays, previews their colors, highlights the active overlay, and preserves it when the picker is opened and committed without navigation (#5901).",
           "Compaction has two standing knobs next to [context] in config.toml: [compaction] summary_instructions (appended to the summarizer prompt on every manual and automatic pass; /compact <focus> still composes after it) and [compaction] retained_user_message_tokens (default 20 000, clamped 2 000..=200 000) for the verbatim user-message budget. Both are absent by default and absent means the pre-existing behavior. The /compact receipt names the effective budget and whether…",
           "[tools] user_input_max_questions (default 6, 1..=10) and [tools] user_input_max_options (default 4, 2..=10) replace the hard-coded request_user_input limits; the validator, the tool schema and its description read one value, spawned children inherit the parent's ceilings, and a rejected payload names the ceiling it hit and the key to raise (#5949).",
@@ -57,10 +58,9 @@ export const CHANGELOG: ChangelogRelease[] = [
           "codewhale account api-keys create --scope now accepts models:infer alongside account:read and agent:run, and an omitted --scope sends all three explicitly. --use saves the new secret as this machine's local codewhale provider credential in the same secret store codewhale auth uses; nothing is uploaded.",
           "sandbox_backend = \"shannon\": shell commands run as signed ShannonNet capability invocations (cap://sandbox/exec) on a worker that may live on another tailnet node. Codewhale opens a Task World per session for its durable codewhale Agent and every command leaves a receipt in shannon trace. New keys sandbox_shannon_home and sandbox_shannon_capability; tool metadata now reports the actual external backend kind instead of always opensandbox.",
           "/shannon [world|trace|children] inspects the session's ShannonNet World: agent, projected capabilities, children, and receipts.",
-          "ShannonNet sub-agents get compiled context: the session's native-memory hits are imported with provenance and the child's projected World decides what it sees (confidential notes never cross); the session World is checkpointed and closed when the backend drops.",
-          "Sub-agents under delegated authority: with the ShannonNet backend the agent tool spawns a child identity with a World projected from the session World, the child's shell commands are signed as that child, and a join receipt is recorded when it finishes. SandboxBackend::for_child / child_joined default to sharing the parent backend for other backends."
+          "ShannonNet sub-agents get compiled context: the session's native-memory hits are imported with provenance and the child's projected World decides what it sees (confidential notes never cross); the session World is checkpointed and closed when the backend drops."
         ],
-        "itemCount": 13
+        "itemCount": 14
       }
     ]
   },
