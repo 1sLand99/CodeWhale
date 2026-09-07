@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Pasting multiline text is one paste again. 0.9.12 gated the
+  paste-burst heuristic off whenever bracketed paste was *requested*, but
+  a terminal can accept `EnableBracketedPaste` and still deliver a paste
+  as individual keystrokes — on those terminals (observed on Windows 11)
+  every pasted line was submitted as its own message. The heuristic is
+  again armed whenever `tui.paste_burst_detection` is on, and the
+  existing `bracketed_paste_seen` guard still disarms it for the rest of
+  the session once a real `Event::Paste` arrives, so fast typing on
+  terminals with working bracketed paste is unaffected (#5981, thanks
+  @nsfoxer).
 - `allow_insecure_http = true` under a `[providers.<name>]` table works
   again. 0.9.12 tightened plain-HTTP base URL handling in a way that
   silently dropped the per-provider key, leaving the process-wide env
