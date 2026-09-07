@@ -2041,8 +2041,9 @@ impl FleetSlot {
             "summarizer" | "reducer" => Self::Summarizer,
             "general" | "" => Self::General,
             // Removed slots (e.g. the old "tool-heavy") and unknown names parse
-            // as Custom, which dispatches on the General surface — identical to
-            // the behavior the removed variants had.
+            // as Custom. Note the runtime side no longer treats an undeclared
+            // role as write-capable: it fails closed to the read-only `explore`
+            // posture (#5575), so this is narrower than the removed variants.
             other => Self::Custom(other.to_string()),
         }
     }

@@ -622,19 +622,25 @@ pub async fn run_tui(
         app.status_message = Some(notice);
     }
 
-    if let Ok(manager) = SessionManager::default_location() {
-        match manager.load_offline_queue_state() {
+    // The parked offline queue is keyed per session, so this reads back only
+    // *this* session's own unsent text: a fresh session has none, and a
+    // concurrent instance's queue is a different file that nothing here can
+    // reach. A session that is not being resumed has nothing parked yet.
+    let mut restored_offline_queue = false;
+    if let Some(session_id) = app.current_session_id.clone()
+        && let Ok(manager) = SessionManager::default_location()
+    {
+        match manager.load_offline_queue_state(&session_id) {
             Ok(Some(state)) => {
-                if restore_matching_offline_queue_state(&mut app, state) {
-                    if app.status_message.is_none() && app.queued_message_count() > 0 {
-                        app.status_message = Some(format!(
-                            "Restored {} queued message(s) from previous session — ↑ to edit, Ctrl+X to discard",
-                            app.queued_message_count()
-                        ));
-                    }
-                } else {
-                    // Session mismatch - clear the stale queue
-                    let _ = manager.clear_offline_queue_state();
+                restored_offline_queue = restore_matching_offline_queue_state(&mut app, state);
+                if restored_offline_queue
+                    && app.status_message.is_none()
+                    && app.queued_message_count() > 0
+                {
+                    app.status_message = Some(format!(
+                        "Restored {} queued message(s) from previous session — ↑ to edit, Ctrl+X to discard",
+                        app.queued_message_count()
+                    ));
                 }
             }
             Ok(None) => {}
@@ -789,6 +795,14 @@ pub async fn run_tui(
             persistence_actor::init_actor(handle.clone());
             (handle, task)
         });
+
+    // Re-park the queue restored above, now that the actor exists. Its clear
+    // request carries no session id, so the actor learns which session owns
+    // the parked file from a save — without this, draining a restored queue
+    // to empty would leave the file behind and resend it on the next boot.
+    if restored_offline_queue {
+        persist_offline_queue_state(&app);
+    }
 
     // Returning users recovering a missing key open the picker immediately so
     // recovery cannot silently replace a persisted route. First-run users
