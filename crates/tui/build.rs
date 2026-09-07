@@ -20,6 +20,10 @@ fn build_computer_use_helper(manifest_dir: &std::path::Path) {
         "cargo:rerun-if-changed={}",
         source.with_file_name("darwin-recording.h").display()
     );
+    println!(
+        "cargo:rerun-if-changed={}",
+        source.with_file_name("darwin-ocr.h").display()
+    );
     println!("cargo:rerun-if-env-changed=CODEWHALE_CU_SIGN_IDENTITY");
     let arch = match std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() {
         Ok("aarch64") => "arm64",
@@ -46,6 +50,8 @@ fn build_computer_use_helper(manifest_dir: &std::path::Path) {
             "AVFoundation",
             "-framework",
             "CoreMedia",
+            "-framework",
+            "Vision",
         ])
         .arg(&source)
         .arg("-o")

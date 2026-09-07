@@ -116,13 +116,14 @@ export const TOOLS = [
   },
   {
     name: "get_app_state",
-    description: "Observe an application once: returns a bounded accessibility/UIA/uitest element tree with stable indices. Elements are the primary action targets; request screenshots only when accessibility cannot express the target.",
+    description: "Read an application's text, controls, actions and layout without requiring vision. The default summary keeps app content and top-level menus; full adds nested menus and tree structure. Act using observed state_id/index targets and refresh after UI changes. Missing labels or values are unknown, not an invitation to guess; request a screenshot only when useful.",
     inputSchema: {
       type: "object",
       properties: {
         app_ref: { type: "object", properties: { pid: { type: "integer" }, name: { type: "string" }, bundle_id: { type: "string" } }, additionalProperties: false },
         window_id: { type: "integer", description: "Zero-based window index within the app" },
-        detail: { enum: ["compact", "full"] },
+        detail: { enum: ["summary", "compact", "full"], default: "summary", description: "Summary is the concise default; full includes nested menus and internal tree structure. Compact is a compatibility alias for summary." },
+        include_ocr: { type: "boolean", default: false, description: "On macOS, also recognize visible text locally from the selected app window. Requires Screen Recording permission. Returns text, confidence and raster coordinate targets for UI that accessibility cannot read; no vision model is required." },
         computer: computerParam,
       },
       additionalProperties: false,

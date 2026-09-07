@@ -112,6 +112,10 @@ test("out-of-process coordinate actions keep the raster refusals", async () => {
 test("element targets travel as a center for pointer tools and an AX path for semantic ones", async () => {
   const state = await tool("get_app_state", {});
   assert.equal(state.ok, true);
+  assert.equal(state.detail, "summary");
+  assert.ok(state.elements.every(e => !("path" in e) && !("windowIndex" in e)));
+  assert.ok(!state.elements.some(e => e.label === "Save"));
+  assert.equal(state.elements.find(e => e.index === 8).value, "Fixture text");
   const target = { type: "element", state_id: state.state_id, index: 1 };
 
   const click = await tool("left_click", { target });
@@ -124,4 +128,18 @@ test("element targets travel as a center for pointer tools and an AX path for se
   const semantic = calls().filter((c) => c.method === "perform_action").at(-1);
   assert.deepEqual(semantic.args.target.path, [0, 1], "semantic actions address the element, not a point");
   assert.equal(semantic.args.target.windowIndex, 0);
+
+  const full = await tool("get_app_state", { detail: "full" });
+  assert.equal(full.elements.length, 9);
+  assert.deepEqual(full.elements.find(e => e.label === "Save").path, [0, 0, 0]);
+});
+
+test("out-of-process OCR observation binds the raster that its text targets use", async () => {
+  const state = await tool("get_app_state", { include_ocr: true });
+  assert.equal(state.ocr.status, "ok");
+  const clicked = await tool("left_click", { target: state.ocr.blocks[0].target });
+  assert.equal(clicked.ok, true);
+  const target = calls().filter(c => c.method === "left_click").at(-1).args.target;
+  assert.deepEqual({ x: target.x, y: target.y }, { x: 140, y: 70 });
+  assert.equal((await tool("left_click", { target: { type: "coordinate", x: 400, y: 0 } })).error.code, "target_outside_raster");
 });

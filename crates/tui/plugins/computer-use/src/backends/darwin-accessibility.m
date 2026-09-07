@@ -7,6 +7,7 @@
 #include <sys/file.h>
 #include <sys/stat.h>
 #import "darwin-recording.h"
+#import "darwin-ocr.h"
 
 static volatile sig_atomic_t cuCancelled = 0;
 static BOOL cuOwnerPipe = NO;
@@ -102,6 +103,10 @@ static void cuWaitForLease(void) {
 }
 
 static id attr(AXUIElementRef el, NSString *name) {
+#ifdef CU_TEST
+  // The observation fixture exercises the real walker without reading a GUI.
+  if([(__bridge id)el isKindOfClass:NSDictionary.class]) return ((__bridge NSDictionary *)el)[name];
+#endif
   CFTypeRef out = NULL;
   AXError e = AXUIElementCopyAttributeValue(el, (__bridge CFStringRef)name, &out);
   return e == kAXErrorSuccess ? CFBridgingRelease(out) : nil;
@@ -126,11 +131,15 @@ static NSDictionary *info(AXUIElementRef el, NSInteger index, NSInteger win, NSA
   id p=geometry(attr(el,@"AXPosition"),NO), s=geometry(attr(el,@"AXSize"),YES);
   if(p) d[@"position"]=p; if(s) d[@"size"]=s;
   CFArrayRef actions=NULL;
+#ifdef CU_TEST
+  if([(__bridge id)el isKindOfClass:NSDictionary.class]) d[@"actions"]=attr(el,@"actions")?:@[];
+  else
+#endif
   if(AXUIElementCopyActionNames(el,&actions)==kAXErrorSuccess) d[@"actions"]=CFBridgingRelease(actions);
   else d[@"actions"]=@[];
   return d;
 }
-static void walk(AXUIElementRef el, NSInteger win, NSArray *path, NSInteger depth, NSInteger limit, NSInteger max, NSMutableArray *out, BOOL *truncated) {
+static void walk(AXUIElementRef el, NSInteger win, NSArray *path, NSInteger depth, NSInteger limit, NSInteger max, BOOL depthIsTruncation, NSMutableArray *out, BOOL *truncated) {
   // Breadth first keeps a long file listing from hiding its dialog buttons.
   NSMutableArray *queue=[NSMutableArray arrayWithObject:@{@"el":(__bridge id)el,@"path":path,@"depth":@(depth)}];
   for(NSUInteger cursor=0;cursor<queue.count;cursor++) {
@@ -141,18 +150,53 @@ static void walk(AXUIElementRef el, NSInteger win, NSArray *path, NSInteger dept
     NSInteger currentDepth=[item[@"depth"] integerValue];
     [out addObject:info(current,out.count,win,currentPath)];
     NSArray *kids=attr(current,@"AXChildren");
-    if(currentDepth>=limit){ if(kids.count) *truncated=YES; continue; }
+    if(currentDepth>=limit){ if(kids.count && depthIsTruncation) *truncated=YES; continue; }
     for(NSUInteger i=0;i<kids.count;i++) {
       if(queue.count-cursor>=(NSUInteger)max){ *truncated=YES; break; }
       [queue addObject:@{@"el":kids[i],@"path":[currentPath arrayByAddingObject:@(i)],@"depth":@(currentDepth+1)}];
     }
   }
 }
+static NSArray *observeElements(AXUIElementRef app, NSArray *ws, NSDictionary *args, BOOL listWindows, BOOL *truncated) {
+  NSMutableArray *out=[NSMutableArray array];
+  BOOL full=[args[@"detail"] isEqual:@"full"];
+  NSInteger limit=full?16:10, max=full?800:400;
+  if(!listWindows && !args[@"window_id"]) {
+    // Open popup menus remain useful. Hidden menu-bar descendants belong in
+    // the full view; summary reserves their budget for the app's actual UI.
+    NSInteger menuMax=max/4;
+    NSArray *children=attr(app,@"AXChildren");
+    for(NSUInteger i=0;i<children.count;i++) {
+      NSString *role=attr((__bridge AXUIElementRef)children[i],@"AXRole");
+      if([role isEqual:@"AXMenu"]) walk((__bridge AXUIElementRef)children[i],-2,@[@(i)],0,limit,menuMax/2,YES,out,truncated);
+    }
+    id menu=attr(app,@"AXMenuBar");
+    if(menu) walk((__bridge AXUIElementRef)menu,-1,@[],0,full?limit:1,menuMax,full,out,truncated);
+  }
+  for(NSUInteger i=0;i<ws.count;i++) {
+    if(args[@"window_id"] && i!=[args[@"window_id"] unsignedIntegerValue]) continue;
+    if(listWindows){ NSMutableDictionary *d=[info((__bridge AXUIElementRef)ws[i],i,i,@[]) mutableCopy]; d[@"title"]=d[@"label"]?:@""; [out addObject:d]; }
+    else walk((__bridge AXUIElementRef)ws[i],i,@[],0,limit,max,YES,out,truncated);
+  }
+  return out;
+}
 static BOOL cuFrame(AXUIElementRef el, CGRect *out) {
   NSDictionary *p=geometry(attr(el,@"AXPosition"),NO), *z=geometry(attr(el,@"AXSize"),YES);
   if(!p || !z) return NO;
   *out=CGRectMake([p[@"x"] doubleValue],[p[@"y"] doubleValue],[z[@"w"] doubleValue],[z[@"h"] doubleValue]);
   return YES;
+}
+static NSDictionary *capturableWindow(NSArray *windows, pid_t pid, NSString *name, CGRect preferred) {
+  NSDictionary *matched=nil;
+  for(NSDictionary *w in windows) {
+    if([w[(__bridge NSString *)kCGWindowOwnerPID] intValue]!=pid || [w[(__bridge NSString *)kCGWindowLayer] intValue]!=0) continue;
+    CGRect b; if(!CGRectMakeWithDictionaryRepresentation((__bridge CFDictionaryRef)w[(__bridge NSString *)kCGWindowBounds],&b) || b.size.width<1 || b.size.height<1) continue;
+    if(fabs(b.origin.x-preferred.origin.x)>1 || fabs(b.origin.y-preferred.origin.y)>1 || fabs(b.size.width-preferred.size.width)>1 || fabs(b.size.height-preferred.size.height)>1) continue;
+    if(matched) @throw [NSException exceptionWithName:@"window" reason:@"the selected window is ambiguous; observe the app windows again" userInfo:nil];
+    matched=@{@"window_id":w[(__bridge NSString *)kCGWindowNumber],@"name":name?:@"App",@"points":@{@"x":@(b.origin.x),@"y":@(b.origin.y),@"w":@(b.size.width),@"h":@(b.size.height)}};
+  }
+  if(!matched) @throw [NSException exceptionWithName:@"window" reason:@"the selected app window is not capturable; observe the app windows again" userInfo:nil];
+  return matched;
 }
 static BOOL cuPressable(AXUIElementRef el) {
   CFArrayRef names=NULL;
@@ -246,9 +290,20 @@ static id execute(NSDictionary *p) {
     return cuPostKey(args,[args[@"input_app_ref"][@"pid"] intValue]);
   }
   cuCheckCancelled();
-  if([tool isEqual:@"input_capabilities"]) return @{@"input_lease":@1,@"owner_pipe":@YES,@"record_owner_pipe":@1};
+  if([tool isEqual:@"input_capabilities"]) return @{@"input_lease":@1,@"owner_pipe":@YES,@"record_owner_pipe":@1,@"window_ocr":@1};
   if([tool isEqual:@"record"]) return cuRecord(args);
+  if([tool isEqual:@"recognize_text"]) return cuRecognizeText(args[@"file"]);
 #ifdef CU_TEST
+  if([tool isEqual:@"inspect_window_match"]) {
+    NSDictionary *b=args[@"bounds"];
+    CGRect bounds=CGRectMake([b[@"x"] doubleValue],[b[@"y"] doubleValue],[b[@"w"] doubleValue],[b[@"h"] doubleValue]);
+    return capturableWindow(args[@"windows"],[args[@"pid"] intValue],@"Fixture",bounds);
+  }
+  if([tool isEqual:@"inspect_observation"]) {
+    BOOL truncated=NO;
+    NSArray *elements=observeElements((__bridge AXUIElementRef)args[@"app"],args[@"windows"]?:@[],args,NO,&truncated);
+    return @{@"elements":elements,@"truncated":@(truncated)};
+  }
   if([tool isEqual:@"test_input_lease"]) {
     cuTestLockDir=args[@"lock_dir"]; cuLockInput();
     cuTestReleaseFile=args[@"release_file"];
@@ -288,16 +343,14 @@ static id execute(NSDictionary *p) {
     if(!a) @throw [NSException exceptionWithName:@"app" reason:@"application not found" userInfo:nil];
     AXUIElementRef ax=AXUIElementCreateApplication(a.processIdentifier);
     NSArray *axWindows=attr(ax,@"AXWindows");
-    NSDictionary *preferred=axWindows.count?geometry(attr((__bridge AXUIElementRef)axWindows[0],@"AXPosition"),NO):nil;
+    NSInteger index=[args[@"window_id"] integerValue];
+    CGRect preferred;
+    BOOL integerIndex=!args[@"window_id"] || ([args[@"window_id"] isKindOfClass:NSNumber.class] && [args[@"window_id"] doubleValue]==index);
+    BOOL valid=integerIndex && index>=0 && index<axWindows.count && cuFrame((__bridge AXUIElementRef)axWindows[index],&preferred);
     CFRelease(ax);
+    if(!valid) @throw [NSException exceptionWithName:@"window" reason:@"the selected app window has no accessibility geometry; call list_windows for a valid window index" userInfo:nil];
     NSArray *windows=CFBridgingRelease(CGWindowListCopyWindowInfo(kCGWindowListOptionAll,kCGNullWindowID));
-    for(NSDictionary *w in windows) {
-      if([w[(__bridge NSString *)kCGWindowOwnerPID] intValue]!=a.processIdentifier || [w[(__bridge NSString *)kCGWindowLayer] intValue]!=0) continue;
-      CGRect b; if(!CGRectMakeWithDictionaryRepresentation((__bridge CFDictionaryRef)w[(__bridge NSString *)kCGWindowBounds],&b) || b.size.width<1 || b.size.height<1) continue;
-      if(preferred && (fabs(b.origin.x-[preferred[@"x"] doubleValue])>1 || fabs(b.origin.y-[preferred[@"y"] doubleValue])>1)) continue;
-      return @{@"window_id":w[(__bridge NSString *)kCGWindowNumber],@"name":a.localizedName?:@"App",@"points":@{@"x":@(b.origin.x),@"y":@(b.origin.y),@"w":@(b.size.width),@"h":@(b.size.height)}};
-    }
-    @throw [NSException exceptionWithName:@"window" reason:@"application has no capturable window" userInfo:nil];
+    return capturableWindow(windows,a.processIdentifier,a.localizedName,preferred);
   }
   // Which application owns the point a pointer event would land on. A global
   // pointer event goes to whatever is on top, so this is what stops a click
@@ -551,24 +604,8 @@ static id execute(NSDictionary *p) {
     NSArray *ws=attr(app,@"AXWindows")?:@[];
     NSDictionary *identity=@{@"found":@YES,@"name":a.localizedName?:@"",@"pid":@(a.processIdentifier),@"bundle_id":a.bundleIdentifier?:@"",@"frontmost":@(a.active)};
     if([tool isEqual:@"get_app_state"] || [tool isEqual:@"list_windows"]) {
-      NSMutableArray *out=[NSMutableArray array]; BOOL truncated=NO;
-      NSInteger limit=[args[@"detail"] isEqual:@"full"]?16:10, max=[args[@"detail"] isEqual:@"full"]?800:400;
-      if([tool isEqual:@"get_app_state"] && !args[@"window_id"]) {
-        // Reserve menu visibility before a dense window fills the shared budget.
-        NSInteger menuMax=max/4;
-        NSArray *children=attr(app,@"AXChildren");
-        for(NSUInteger i=0;i<children.count;i++) {
-          NSString *role=attr((__bridge AXUIElementRef)children[i],@"AXRole");
-          if([role isEqual:@"AXMenu"]) walk((__bridge AXUIElementRef)children[i],-2,@[@(i)],0,limit,menuMax/2,out,&truncated);
-        }
-        id menu=attr(app,@"AXMenuBar");
-        if(menu) walk((__bridge AXUIElementRef)menu,-1,@[],0,limit,menuMax,out,&truncated);
-      }
-      for(NSUInteger i=0;i<ws.count;i++) {
-        if(args[@"window_id"] && i!=[args[@"window_id"] unsignedIntegerValue]) continue;
-        if([tool isEqual:@"list_windows"]){ NSMutableDictionary *d=[info((__bridge AXUIElementRef)ws[i],i,i,@[]) mutableCopy]; d[@"title"]=d[@"label"]?:@""; [out addObject:d]; }
-        else walk((__bridge AXUIElementRef)ws[i],i,@[],0,limit,max,out,&truncated);
-      }
+      BOOL truncated=NO;
+      NSArray *out=observeElements(app,ws,args,[tool isEqual:@"list_windows"],&truncated);
       NSMutableDictionary *d=[identity mutableCopy]; d[[tool isEqual:@"list_windows"]?@"windows":@"elements"]=out; d[@"truncated"]=@(truncated); return d;
     }
     if([tool isEqual:@"resolve_element"]) {

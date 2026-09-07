@@ -174,6 +174,23 @@ function rememberState(computer, app_ref, result) {
   return id;
 }
 
+function observeState(computer, app_ref, result, detail) {
+  // Cache the complete backend records before making the model-facing view.
+  // Public indices still address those records, including their private AX
+  // paths; a compact response must never weaken live target revalidation.
+  const state_id = rememberState(computer, app_ref, result);
+  const full = detail === "full";
+  const elements = full ? result.elements : (result.elements ?? [])
+    .filter((el) => el.windowIndex !== -1 || !Array.isArray(el.path) || el.path.length <= 1)
+    .map(({ path, windowIndex, ...el }) => el);
+  return {
+    ...result, state_id, elements, detail: full ? "full" : "summary",
+    note: "Target observed elements with {type:'element', state_id, index}; observe again after UI changes. " +
+      (full ? "" : "Summary keeps app content and top-level menus; use detail:'full' for nested menus and tree structure. ") +
+      "Missing labels or values are unknown; do not guess their contents.",
+  };
+}
+
 // ---------- tool dispatch ----------
 async function callTool(params) {
   const name = params.name;
@@ -316,8 +333,7 @@ async function callTool(params) {
       }
       if (backendMethod === "zoom") bindZoomRaster(computer, zoomParent, args.region, ex.filesLocal ? data?.file ?? data?.path : null);
       if (name === "get_app_state") {
-        data.state_id = rememberState(computer, wireArgs.app_ref, data);
-        data.note = "Element targets are {type:'element', state_id, index}. State goes stale when the UI changes; observe again.";
+        data = observeState(computer, wireArgs.app_ref, data, args.detail);
       }
       if (backendMethod === "probe") Object.assign(data, { via: ex.kind, app: ex.app ?? null });
     } else {
@@ -339,14 +355,21 @@ async function callTool(params) {
       if (name === "screenshot") bindRaster(computer, data);
       if (backendMethod === "zoom") bindZoomRaster(computer, zoomParent, args.region, data?.file ?? data?.path);
       if (name === "get_app_state") {
-        const stateId = rememberState(computer, prepared.app_ref, data);
-        data.state_id = stateId;
-        data.note = "Element targets are {type:'element', state_id, index}. State goes stale when the UI changes; observe again.";
+        data = observeState(computer, prepared.app_ref, data, args.detail);
       }
       if (backendMethod === "probe" && computer.transport === "local") {
         // Direct mode: permissions belong to whatever hosts this server. Say so.
         Object.assign(data, { via: "direct", app: null, appHint: ex?.appReason ?? null });
       }
+    }
+
+    if (name === "get_app_state" && args.include_ocr) {
+      data.ocr ??= { status: "unavailable", reason: "Text recognition is not available on this backend", blocks: [] };
+      if (data.ocr.raster) {
+        const localFile = typeof ex?.remote !== "function" || ex.filesLocal;
+        bindRaster(computer, localFile ? data.ocr.raster : { ...data.ocr.raster, file: null, path: null });
+      }
+      data.ocr.note = "Recognized text may be imperfect. These coordinate targets belong to this captured image, not to accessibility elements; observe again after the UI changes.";
     }
 
     const content = [{ type: "text", text: JSON.stringify(receipt(computer, { ok: true, tool: name, switched, ...(sink.reacquired ? { target_reacquired: true } : {}), ...data })) }];
@@ -382,7 +405,10 @@ async function prepareArgs(computer, name, args, resolve, sink) {
   }
   if (name === "get_app_state") {
     out.app_ref = out.app_ref ?? null;
-    if (out.window_id != null) out.window_id = Number(out.window_id);
+    if (out.detail != null && !["summary", "compact", "full"].includes(out.detail)) throw new ServerError("bad_args", "detail must be summary or full (compact is an alias for summary)");
+    out.detail = out.detail === "full" ? "full" : "summary";
+    if (out.include_ocr != null && typeof out.include_ocr !== "boolean") throw new ServerError("bad_args", "include_ocr must be true or false");
+    if (out.window_id != null && (!Number.isSafeInteger(out.window_id) || out.window_id < 0)) throw new ServerError("bad_args", "window_id must be a non-negative window index from list_windows");
   }
   return out;
 }

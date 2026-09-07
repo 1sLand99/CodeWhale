@@ -34,13 +34,25 @@ Observe once, act once, then verify.
    copied character-for-character — including case, spaces, punctuation, and
    suffixes such as `app` or `.exe`. Do not translate, localize, normalize,
    shorten, or retry with guesses.
-3. `get_app_state` returns a bounded accessibility tree (macOS AX / Windows
-   UIA / Linux AT-SPI / HarmonyOS uitest) with element indices and a
-   `state_id`. Start here, without a screenshot.
+3. `get_app_state` defaults to a text-first summary (macOS AX / Windows
+   UIA / Linux AT-SPI / HarmonyOS uitest) with controls, values, actions,
+   layout, element indices and a `state_id`. Start here without a screenshot,
+   whether or not the model supports vision. Use `detail:"full"` for nested
+   menus and tree structure; `compact` remains a summary alias. Missing labels
+   or values mean unknown content, not something to guess.
 4. If the tree contains the target, act on the element: `perform_action`
    (AXPress/Invoke/click…), `set_value` for editable fields, element click.
    The element path is background-safe on macOS and UIA platforms.
-5. Only when accessibility cannot express the target: `screenshot` (optionally
+5. When accessibility cannot read visible text, macOS supports
+   `get_app_state({app_ref, include_ocr:true})`. This explicitly captures the
+   selected app window and recognizes text locally, without a vision model or
+   remote service. Check `ocr.status`; recognized blocks include confidence,
+   pixel bounds and ready-to-use coordinate targets. OCR text is not a control
+   role or an advertised action. Verify uncertain text and observe again after
+   changes. Other platforms return an explicit unavailable status while keeping
+   their accessibility state usable. A text-only model must not infer unlabeled
+   icons, charts or other graphical meaning from OCR or a screenshot file path.
+   With vision, when accessibility cannot express the target: `screenshot` (optionally
    `zoom` for small targets) and act with a coordinate target. Coordinates are
    pixels **in the latest returned raster** for that computer; the server maps
    them to screen points. After a new screenshot, old pixels are stale.

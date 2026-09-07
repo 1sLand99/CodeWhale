@@ -35,10 +35,40 @@ function leaseExecutor(run) {
   }};
 }
 
+test('native summary keeps text and top-level menus without spending the UI budget on hidden menu trees', {skip:process.platform!=='darwin'}, t=>{
+  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'cu-native-observation-'));t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
+  const binary=path.join(dir,'native');
+  const build=spawnSync('clang',['-DCU_TEST=1','-fobjc-arc','-Os','-framework','Cocoa','-framework','ApplicationServices','-framework','ScreenCaptureKit','-framework','AVFoundation','-framework','CoreMedia','-framework','Vision','src/backends/darwin-accessibility.m','-o',binary],{encoding:'utf8'});
+  assert.equal(build.status,0,build.stderr);
+  const node=(role,label,children=[])=>({AXRole:role,AXTitle:label,AXChildren:children,actions:['AXPress']});
+  const app={AXMenuBar:node('AXMenuBar','Menu bar',[node('AXMenuBarItem','File',[node('AXMenu','File menu',Array.from({length:150},(_,i)=>node('AXMenuItem',`Command ${i}`)))])]),AXChildren:[node('AXMenu','Popup',[node('AXMenuItem','Choose')])]};
+  const windows=[node('AXWindow','Fixture',Array.from({length:350},(_,i)=>({...node('AXTextField',`Field ${i}`),AXValue:`Value ${i}`,AXFocused:i===349})))];
+  const observe=(detail)=>{
+    const r=spawnSync(binary,[JSON.stringify({tool:'inspect_observation',args:{app,windows,detail}})],{encoding:'utf8'});
+    assert.equal(r.status,0,r.stderr);return JSON.parse(r.stdout);
+  };
+  for(const detail of [undefined,'summary','compact']) {
+    const state=observe(detail);
+    assert.equal(state.truncated,false,'intentional menu summarization is not a truncated observation');
+    assert.equal(state.elements.length,355);
+    assert.ok(state.elements.some(e=>e.label==='File'));
+    assert.ok(state.elements.some(e=>e.label==='Choose'),'open popup actions remain observable');
+    assert.ok(!state.elements.some(e=>e.label==='Command 0'));
+    const field=state.elements.find(e=>e.label==='Field 349');
+    assert.equal(field.value,'Value 349');assert.equal(field.focused,true);
+    assert.deepEqual(field.path,[349]);assert.equal(field.windowIndex,0);
+  }
+  const full=observe('full');
+  assert.equal(full.truncated,false);
+  assert.equal(full.elements.find(e=>e.label==='Command 149').windowIndex,-1);
+  assert.deepEqual(full.elements.find(e=>e.label==='Command 149').path,[0,0,149]);
+  assert.ok(full.elements.some(e=>e.label==='Field 349'));
+});
+
 test('native Unicode encoding round-trips through the actual CoreGraphics event', {skip:process.platform!=='darwin'}, t=>{
   const dir=fs.mkdtempSync(path.join(os.tmpdir(),'cu-native-test-'));t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
   const binary=path.join(dir,'native');
-  const build=spawnSync('clang',['-DCU_TEST=1','-fobjc-arc','-Os','-framework','Cocoa','-framework','ApplicationServices','-framework','ScreenCaptureKit','-framework','AVFoundation','-framework','CoreMedia','src/backends/darwin-accessibility.m','-o',binary],{encoding:'utf8'});
+  const build=spawnSync('clang',['-DCU_TEST=1','-fobjc-arc','-Os','-framework','Cocoa','-framework','ApplicationServices','-framework','ScreenCaptureKit','-framework','AVFoundation','-framework','CoreMedia','-framework','Vision','src/backends/darwin-accessibility.m','-o',binary],{encoding:'utf8'});
   assert.equal(build.status,0,build.stderr);
   for(const text of ['Hello 世界 🐋','quote " slash \\ newline\n','e\u0301 👨‍👩‍👧‍👦']){
     const r=spawnSync(binary,[JSON.stringify({tool:'inspect_text_event',args:{text}})],{encoding:'utf8'});
@@ -47,10 +77,27 @@ test('native Unicode encoding round-trips through the actual CoreGraphics event'
   }
 });
 
+test('native window matching refuses another process, mismatched geometry and ambiguous captures', {skip:process.platform!=='darwin'}, t=>{
+  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'cu-native-window-'));t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
+  const binary=path.join(dir,'native');
+  const build=spawnSync('clang',['-DCU_TEST=1','-fobjc-arc','-Os','-framework','Cocoa','-framework','ApplicationServices','-framework','ScreenCaptureKit','-framework','AVFoundation','-framework','CoreMedia','-framework','Vision','src/backends/darwin-accessibility.m','-o',binary],{encoding:'utf8'});
+  assert.equal(build.status,0,build.stderr);
+  const selected={kCGWindowOwnerPID:123,kCGWindowLayer:0,kCGWindowNumber:42,kCGWindowBounds:{X:10,Y:20,Width:400,Height:300}};
+  const query=windows=>spawnSync(binary,[JSON.stringify({tool:'inspect_window_match',args:{pid:123,bounds:{x:10,y:20,w:400,h:300},windows}})],{encoding:'utf8'});
+  const wrongProcess={...selected,kCGWindowOwnerPID:999,kCGWindowNumber:43};
+  const wrongSize={...selected,kCGWindowNumber:44,kCGWindowBounds:{...selected.kCGWindowBounds,Width:800}};
+  const found=query([wrongProcess,wrongSize,selected]);
+  assert.equal(found.status,0,found.stderr);assert.equal(JSON.parse(found.stdout).window_id,42);
+  const missing=query([wrongProcess,wrongSize]);
+  assert.equal(missing.status,1);assert.match(missing.stderr,/selected app window is not capturable/);
+  const ambiguous=query([selected,{...selected,kCGWindowNumber:45}]);
+  assert.equal(ambiguous.status,1);assert.match(ambiguous.stderr,/selected window is ambiguous/);
+});
+
 test('native owner pipe survives forced MCP exit, releases promptly and excludes competing input', {skip:process.platform!=='darwin'}, async t=>{
   const dir=fs.mkdtempSync(path.join(os.tmpdir(),'cu-native-owner-')); t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
   const binary=path.join(dir,'native');
-  const build=spawnSync('clang',['-DCU_TEST=1','-fobjc-arc','-Os','-framework','Cocoa','-framework','ApplicationServices','-framework','ScreenCaptureKit','-framework','AVFoundation','-framework','CoreMedia','src/backends/darwin-accessibility.m','-o',binary],{encoding:'utf8'});
+  const build=spawnSync('clang',['-DCU_TEST=1','-fobjc-arc','-Os','-framework','Cocoa','-framework','ApplicationServices','-framework','ScreenCaptureKit','-framework','AVFoundation','-framework','CoreMedia','-framework','Vision','src/backends/darwin-accessibility.m','-o',binary],{encoding:'utf8'});
   assert.equal(build.status,0,build.stderr);
   for(const workMs of [0,5000]) {
   const releaseFile=path.join(dir,`released-${workMs}`);
@@ -338,7 +385,7 @@ test('native hit_test fails closed without a bound application', { skip: process
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cu-hit-native-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const binary = path.join(dir, 'native');
-  const build = spawnSync('clang', ['-DCU_TEST=1', '-fobjc-arc', '-Os', '-framework', 'Cocoa', '-framework', 'ApplicationServices', '-framework', 'ScreenCaptureKit', '-framework', 'AVFoundation', '-framework', 'CoreMedia', 'src/backends/darwin-accessibility.m', '-o', binary], { encoding: 'utf8' });
+  const build = spawnSync('clang', ['-DCU_TEST=1', '-fobjc-arc', '-Os', '-framework', 'Cocoa', '-framework', 'ApplicationServices', '-framework', 'ScreenCaptureKit', '-framework', 'AVFoundation', '-framework', 'CoreMedia', '-framework', 'Vision', 'src/backends/darwin-accessibility.m', '-o', binary], { encoding: 'utf8' });
   assert.equal(build.status, 0, build.stderr);
   const r = spawnSync(binary, [JSON.stringify({ tool: 'hit_test', args: { x: 1, y: 1, perform: true } })], { encoding: 'utf8' });
   assert.equal(r.status, 1);

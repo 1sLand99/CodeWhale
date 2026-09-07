@@ -46,6 +46,11 @@ Select an application before sending input. Prefer accessibility actions and
 background selection; requests that need foreground input report that fact.
 Screenshots and zoom return actual image content to compatible vision models.
 Preview and recording are explicit opt-ins.
+Application observations return a concise default summary; request full detail
+when needed. Text-only models can use element roles, values and advertised
+actions. On macOS, optional local OCR enriches the selected window observation
+with text and raster bounds; it requires Screen Recording permission and does
+not invent accessibility elements or actions.
 The Engine permits one inline image up to 5 MiB per tool result; use a scoped
 capture or zoom when a larger image receives an omission receipt.
 

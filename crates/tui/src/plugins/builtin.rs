@@ -83,6 +83,7 @@ const COMPUTER_USE_FILES: &[(&str, &[u8])] = &[
     bundle_file!("src/backends/darwin.mjs"),
     bundle_file!("src/backends/darwin-accessibility.m"),
     bundle_file!("src/backends/darwin-recording.h"),
+    bundle_file!("src/backends/darwin-ocr.h"),
     bundle_file!("src/backends/harmonyos.mjs"),
     bundle_file!("src/backends/linux.mjs"),
     bundle_file!("src/backends/win32.mjs"),

@@ -52,13 +52,13 @@ export function create({ exec }) {
     }
     if (!helper || !fs.existsSync(helper)) {
       const source = fileURLToPath(new URL("./darwin-accessibility.m", import.meta.url));
-      const hash = crypto.createHash("sha256").update(fs.readFileSync(source)).update(fs.readFileSync(new URL("./darwin-recording.h", import.meta.url))).digest("hex").slice(0, 16);
+      const hash = crypto.createHash("sha256").update(fs.readFileSync(source)).update(fs.readFileSync(new URL("./darwin-recording.h", import.meta.url))).update(fs.readFileSync(new URL("./darwin-ocr.h", import.meta.url))).digest("hex").slice(0, 16);
       const dir = path.join(os.homedir(), ".codewhale-cu", "bin");
       fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
       helper = path.join(dir, `accessibility-${hash}`);
       if (!fs.existsSync(helper)) {
         const tmp = `${helper}-${process.pid}`;
-        const r = await runL("clang", ["-fobjc-arc", "-Os", "-framework", "Cocoa", "-framework", "ApplicationServices", "-framework", "ScreenCaptureKit", "-framework", "AVFoundation", "-framework", "CoreMedia", source, "-o", tmp], { timeoutMs: 60_000 });
+        const r = await runL("clang", ["-fobjc-arc", "-Os", "-framework", "Cocoa", "-framework", "ApplicationServices", "-framework", "ScreenCaptureKit", "-framework", "AVFoundation", "-framework", "CoreMedia", "-framework", "Vision", source, "-o", tmp], { timeoutMs: 60_000 });
         if (r.code !== 0) throw new ExecError(`native accessibility helper needs a built app or Xcode Command Line Tools: ${r.stderr}`, r);
         fs.renameSync(tmp, helper);
       }
@@ -223,14 +223,14 @@ export function create({ exec }) {
     return process.env.CODEWHALE_CU_RECORDINGS_DIR || path.join(os.homedir(), ".codewhale-cu", "recordings");
   }
 
-  async function screenshot({ display, region, app_ref, path: outPath } = {}) {
+  async function screenshot({ display, region, app_ref, window_id, path: outPath } = {}) {
     const dir = recordingsDir();
     fs.mkdirSync(dir, { recursive: true });
     const file = outPath || path.join(dir, `shot-${new Date().toISOString().replace(/[:.]/g, "-")}-${crypto.randomBytes(3).toString("hex")}.png`);
     if (!/\.png$/.test(file)) throw new ExecError("screenshot path must end in .png");
     const args = ["-x", "-t", "png"];
     const disp = display ?? state.activeDisplay;
-    const window = app_ref ? await native("window_info", { app_ref }) : null;
+    const window = app_ref ? await native("window_info", { app_ref, window_id }) : null;
     if (window && region) throw new ExecError("choose app_ref or region, not both");
     if (window) args.push("-o", "-l", String(window.window_id));
     else if (disp && disp !== "all") args.push("-D", String(disp));
@@ -489,9 +489,31 @@ export function create({ exec }) {
     list_apps: listApps,
     list_windows: listWindows,
     open_application: openApplication,
-    get_app_state: async ({ app_ref, detail, depth, window_id }) => {
+    get_app_state: async ({ app_ref, detail, depth, window_id, include_ocr = false }) => {
       const t = await native("get_app_state", { app_ref, detail, window_id });
       if (!t.found) throw new ExecError("application not found — call list_apps for exact names/pids");
+      if (include_ocr) {
+        // Resolve once through AX, then capture only that exact application's
+        // selected window. A changing foreground cannot redirect this image.
+        let raster;
+        try {
+          if (!Number.isSafeInteger(t.pid) || t.pid <= 0) throw new ExecError("The observed application did not provide an exact process identity for OCR");
+          if ((await native("input_capabilities"))?.window_ocr !== 1) throw new ExecError("The native helper needs an update for selected-window text recognition");
+          raster = await screenshot({ app_ref: { pid: t.pid, ...(t.bundle_id ? { bundle_id: t.bundle_id } : {}) }, window_id });
+          const ocr = await native("recognize_text", { file: raster.file });
+          if (ocr?.status === "ok" && ocr.pixels?.w === raster.pixels.w && ocr.pixels?.h === raster.pixels.h && Array.isArray(ocr.blocks)) {
+            t.ocr = { ...ocr, raster, blocks: ocr.blocks.map(block => ({ ...block, target: {
+              type: "coordinate", x: Math.floor(block.bounds.x + block.bounds.w / 2), y: Math.floor(block.bounds.y + block.bounds.h / 2),
+            } })) };
+          } else {
+            t.ocr = { status: "unavailable", engine: "apple_vision", reason: ocr?.reason ?? "The native OCR helper needs an update or returned mismatched image dimensions", blocks: [], raster };
+          }
+        } catch (error) {
+          throwIfAborted();
+          if (error.code === "cancelled") throw error;
+          t.ocr = { status: "unavailable", engine: "apple_vision", reason: error.message, blocks: [], ...(raster ? { raster } : {}) };
+        }
+      }
       return t;
     },
     resolve_element: async ({ app_ref, windowIndex, path: pathArr } = {}) => {
