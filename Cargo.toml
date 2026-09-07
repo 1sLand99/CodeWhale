@@ -76,6 +76,12 @@ tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 uuid = { version = "1.11", features = ["v4"] }
 mimalloc = { version = "0.1", default-features = false }
+# Off-by-default alternative to mimalloc behind the `rusty-alloc` feature in
+# codewhale-tui / codewhale-cli (#5872): the pure-Rust mimalloc v2.4.5
+# remake — no C compiler, no build script on that path. `rusty_alloc-api` is
+# the crate's documented surface; it pulls the `rusty_alloc` core transitively
+# at the same version.
+rusty_alloc-api = "1.1.6"
 
 # The everyday `--release` gate (AGENTS.md pre-push build): optimized but
 # fast to produce. Shipping artifacts use `--profile dist` below — fat LTO on

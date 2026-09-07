@@ -4449,6 +4449,74 @@ fn failed_mcp_is_a_footer_chip_not_multiline_chat_boot_output() {
     assert!(!rendered.contains("/mcp retry alpha"), "{rendered}");
 }
 
+/// The founder's receipt (#5926): of the eight servers the footer called
+/// "failed", seven only needed a login. Rendered, the footer summary now
+/// keeps the three states apart — connected, ◆ auth required, failed — so
+/// an expired login never reads as a broken server.
+#[test]
+fn footer_summary_separates_connected_need_login_and_failed() {
+    fn server(
+        name: &str,
+        connected: bool,
+        auth_required: bool,
+        error: Option<&str>,
+    ) -> crate::mcp::McpServerSnapshot {
+        crate::mcp::McpServerSnapshot {
+            name: name.to_string(),
+            enabled: true,
+            required: false,
+            auth_required,
+            transport: "streamable_http".to_string(),
+            command_or_url: format!("https://{name}.example/mcp"),
+            connect_timeout: 5,
+            execute_timeout: 5,
+            read_timeout: 5,
+            connected,
+            error: error.map(str::to_string),
+            capability_metadata: crate::mcp::McpServerCapabilityMetadata::NotObserved,
+            tools: Vec::new(),
+            resources: Vec::new(),
+            prompts: Vec::new(),
+        }
+    }
+
+    let mut app = create_test_app();
+    app.onboarding_workspace_trust_gate = false;
+    app.onboarding = OnboardingState::None;
+    app.launch.visible = false;
+    app.mcp_snapshot = Some(crate::mcp::McpManagerSnapshot {
+        config_path: PathBuf::from("mcp.json"),
+        config_exists: true,
+        reload_required: false,
+        servers: vec![
+            server("alpha", true, false, None),
+            server(
+                "slack",
+                false,
+                true,
+                Some("401 Unauthorized: the session is no longer accepted"),
+            ),
+            server(
+                "supabase",
+                false,
+                false,
+                Some("OAuth token refresh failed: Failed to parse server response"),
+            ),
+        ],
+    });
+    let rendered = render_underwater_test_app(&mut app, 100, 30);
+
+    let expected = format!(
+        "MCP · 1 connected · 1 {} · 1 failed",
+        crate::tui::session_boot::mcp_auth_required_state_label()
+    );
+    assert!(
+        rendered.contains(&expected),
+        "expected {expected:?} in:\n{rendered}"
+    );
+    assert!(!rendered.contains("2 failed"), "{rendered}");
+}
+
 #[test]
 fn bottom_placement_draws_the_work_strip_under_the_composer() {
     // Round 3 (2026-09-01): the bar's information lives under the composer.

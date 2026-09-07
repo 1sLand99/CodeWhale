@@ -10,6 +10,13 @@ description = "Agentic terminal facade for open-source and open-weight coding mo
 [lints]
 workspace = true
 
+[features]
+# Opt-in global-allocator swap (#5872): build on rusty_alloc (the pure-Rust
+# mimalloc v2.4.5 remake — no C compiler, no build script) instead of the
+# default mimalloc. Off by default; the default build is unchanged.
+# Build with: cargo build -p codewhale-cli --features rusty-alloc
+rusty-alloc = ["dep:rusty_alloc-api"]
+
 [[bin]]
 name = "codewhale"
 path = "src/main.rs"
@@ -42,6 +49,7 @@ rustls.workspace = true
 semver.workspace = true
 tokio.workspace = true
 mimalloc.workspace = true
+rusty_alloc-api = { workspace = true, optional = true }
 sha2.workspace = true
 tempfile.workspace = true
 tracing.workspace = true
