@@ -368,6 +368,51 @@ pub(super) fn replace_runtime_mcp_tools(
 }
 
 impl Engine {
+    /// A connection completed during inference must be discoverable in this
+    /// turn, without widening its command policy or making every MCP tool eager.
+    pub(super) async fn refresh_boot_mcp_catalog(
+        &mut self,
+        policy: &ToolSurfacePolicy,
+        catalog: &mut Vec<Tool>,
+        active: &mut std::collections::HashSet<String>,
+    ) {
+        if !self.mcp_boot_in_flight {
+            return;
+        }
+        self.drain_mcp_boot_updates().await;
+        let Some(pool) = self.mcp_pool.as_ref() else {
+            return;
+        };
+        let (mut universe, mut refreshed) = {
+            let pool = pool.lock().await;
+            (pool.model_tool_names(), pool.to_api_tools())
+        };
+        // A config/authority change during handshake can remove a server;
+        // its previous names must also leave this turn's catalog.
+        universe.extend(
+            catalog
+                .iter()
+                .filter(|tool| McpPool::is_mcp_tool(&tool.name))
+                .map(|tool| tool.name.clone()),
+        );
+        refreshed
+            .retain(|tool| policy.passes_allow_list(&tool.name) && !policy.denies_tool(&tool.name));
+        let before = catalog.clone();
+        replace_runtime_mcp_tools(
+            catalog,
+            active,
+            &universe,
+            refreshed,
+            self.current_mode,
+            &self.config.tools_always_load,
+            self.turn_tool_surface_budget
+                .unwrap_or(crate::model_profile::ToolSurfaceBudget::Standard),
+        );
+        if *catalog != before {
+            self.session.pending_prefix_change_reason = Some("mcp-session-boot".to_string());
+        }
+    }
+
     pub(super) fn drain_shell_completion_events(
         &self,
     ) -> Vec<crate::tools::shell::ShellCompletionEvent> {
@@ -733,6 +778,8 @@ impl Engine {
                 let _ = self.tx_event.send(Event::status("Request cancelled")).await;
                 return (TurnOutcomeStatus::Interrupted, None);
             }
+            self.refresh_boot_mcp_catalog(&tool_policy, &mut tool_catalog, &mut active_tool_names)
+                .await;
 
             // R1: the cumulative per-turn wall-clock budget. Checked at the
             // provider-request boundary so a turn that runs out of time stops
@@ -2466,6 +2513,10 @@ impl Engine {
                 None
             };
 
+            // Tool discovery may be the first action after a model request
+            // that overlapped MCP startup. Search the ready catalog now.
+            self.refresh_boot_mcp_catalog(&tool_policy, &mut tool_catalog, &mut active_tool_names)
+                .await;
             let PlannedToolCalls {
                 plans,
                 hook_contexts,
