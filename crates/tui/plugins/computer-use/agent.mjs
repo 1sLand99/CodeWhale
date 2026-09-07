@@ -19,4 +19,8 @@ try {
   reply({ ok: false, error: { code: "bad_payload", message: "payload is not base64 JSON" } });
 }
 
+if (["left_mouse_down", "recordingStart"].includes(req?.tool)) {
+  reply({ ok: false, error: { code: "persistent_session_required", message: "This operation needs a persistent computer session; the SSH agent exits after each request. Use a complete drag gesture or the local helper instead." } });
+}
+
 reply(await handle(req, { computerId: "remote" }));

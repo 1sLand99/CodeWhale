@@ -2,13 +2,12 @@
 // travels as a base64 -EncodedCommand, so tool arguments never become shell
 // syntax. Screenshots + UIA accessibility come from .NET; raw pointer and
 // keyboard events come from user32 P/Invoke (SendInput/mouse_event).
-// Recording uses ffmpeg gdigrab when ffmpeg is on PATH.
+// Recording stays unavailable until its native process has session-owned cleanup.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
-import { spawn } from "node:child_process";
-import { run, runOk, ExecError, tryJson } from "../exec.mjs";
+import { run, ExecError, tryJson, withSignal, throwIfAborted } from "../exec.mjs";
 
 const USER32 = `
 using System;
@@ -68,7 +67,14 @@ export function create(opts = {}) {
   const injectedRun = opts.exec && typeof opts.exec.run === "function" ? opts.exec.run : null;
   const runner = injectedRun ?? run;
 
+  function requireInputOwner() {
+    if (opts.exec?.persistentInputOwner !== true) throw Object.assign(new ExecError(
+      "This held-input gesture requires a connected Codewhale Computer Use desktop helper so a disconnected client cannot leave keys or buttons pressed. Start the helper and reconnect before retrying."
+    ), { code: "input_owner_required" });
+  }
+
   async function ps(script, o = {}) {
+    throwIfAborted();
     const encoded = Buffer.from(script, "utf16le").toString("base64");
     return runner("powershell.exe", ["-NoProfile", "-NonInteractive", "-EncodedCommand", encoded], {
       timeoutMs: o.timeoutMs ?? 25_000,
@@ -79,6 +85,7 @@ export function create(opts = {}) {
   /** ps() but truthful: timeout, nonzero exit, and spawn failure all throw. */
   async function psOk(script, o = {}) {
     const r = await ps(script, o);
+    if (r.aborted) throw Object.assign(new ExecError("computer request cancelled", r), { code: "cancelled" });
     if (r.timedOut) throw new ExecError(`powershell timed out after ${o.timeoutMs ?? 25_000}ms`, r);
     if (r.code !== 0) throw new ExecError(`powershell.exe exited ${r.code}: ${(r.stderr || r.stdout).trim().slice(0, 300)}`, r);
     return r;
@@ -93,7 +100,30 @@ export function create(opts = {}) {
   }
 
   let lastRaster = null;
-  let recording = null; // {id, pid, file, startedAt, mode}
+  const heldButtons = new Set();
+  const heldKeys = new Set();
+
+  async function releaseInput({ buttons = [...heldButtons], keys = [...heldKeys] } = {}) {
+    buttons = buttons.filter((button) => heldButtons.has(button));
+    keys = keys.filter((key) => heldKeys.has(key));
+    if (!buttons.length && !keys.length) return;
+    const releases = [
+      ...buttons.map((button) => `[User32]::mouse_event([User32]::${button}UP, 0, 0, 0, [UIntPtr]::Zero);`),
+      ...keys.reverse().map((vk) => `[void][User32]::SendInput(1, @([User32]::KeyInput(${vk}, 0, 2)), [System.Runtime.InteropServices.Marshal]::SizeOf([type][User32+INPUT]));`),
+    ];
+    await withSignal(null, () => withUser32(releases.join("\n"), { timeoutMs: 2_000 }));
+    for (const button of buttons) heldButtons.delete(button);
+    for (const key of keys) heldKeys.delete(key);
+  }
+
+  function keyChord(text) {
+    const parts = String(text).split("+").map((part) => part.trim().toLowerCase());
+    const key = parts.pop();
+    const mods = parts.map((part) => MODVK[part]);
+    const vk = VK[key] ?? MODVK[key] ?? (key.length === 1 ? key.toUpperCase().charCodeAt(0) : null);
+    if (vk == null || mods.some((mod) => mod == null)) throw new ExecError(`unknown key combination "${text}"`);
+    return { key, vk, mods: [...new Set(mods)] };
+  }
 
   /** Self-contained User32 invocation: prelude + script, fails truthfully. */
   async function withUser32(script, opts) {
@@ -102,15 +132,14 @@ export function create(opts = {}) {
 
   return {
     platform: "win32",
+    releaseInput,
     probe: async () => {
-      let ffmpeg = true;
-      try { await runOk("ffmpeg", ["-version"], { timeoutMs: 10_000 }); } catch { ffmpeg = false; }
       const psOk = await ps("Write-Output 'ok'").then((r) => r.code === 0).catch(() => false);
       return {
         platform: "win32",
         powershell: psOk,
-        capabilities: { screenshot: psOk, accessibility_tree: psOk, clipboard: psOk, recording: ffmpeg, raw_input: psOk },
-        note: "Recording needs ffmpeg (gdigrab) on PATH. UIA accessibility works without extra installs.",
+        capabilities: { screenshot: psOk, accessibility_tree: psOk, clipboard: psOk, recording: false, raw_input: psOk, held_input: psOk && opts.exec?.persistentInputOwner === true },
+        note: "Recording is unavailable until session-owned cleanup is implemented; use screenshots. UIA accessibility works without extra installs. Held keys, held buttons and drag require a connected Computer Use desktop helper.",
       };
     },
     list_displays: async () => {
@@ -264,6 +293,10 @@ Write-Output '{"ok": true}';`;
       return { action_sent: true, at: { x: target.x, y: target.y } };
     },
     left_click_drag: async ({ from_target: from, to }) => {
+      requireInputOwner();
+      throwIfAborted();
+      heldButtons.add("LEFT");
+      try {
       await withUser32(`[User32]::SetCursorPos(${Math.round(from.x)}, ${Math.round(from.y)}) | Out-Null;
 Start-Sleep -Milliseconds 80;
 [User32]::mouse_event([User32]::LEFTDOWN, 0, 0, 0, [UIntPtr]::Zero);
@@ -272,17 +305,24 @@ Start-Sleep -Milliseconds 80;
 Start-Sleep -Milliseconds 80;
 [User32]::mouse_event([User32]::LEFTUP, 0, 0, 0, [UIntPtr]::Zero);
 Write-Output '{"ok": true}';`, { timeoutMs: 20_000 });
+      heldButtons.delete("LEFT");
       return { action_sent: true, from, to };
+      } finally { await releaseInput({ buttons: ["LEFT"], keys: [] }); }
     },
     left_mouse_down: async ({ target }) => {
+      requireInputOwner();
       // Ternary must select ONLY the optional move prefix; the LEFTDOWN press
       // always runs, so a targeted press both moves and presses.
       const move = target ? `[User32]::SetCursorPos(${Math.round(target.x)}, ${Math.round(target.y)}) | Out-Null;\n` : "";
-      await withUser32(`${move}[User32]::mouse_event([User32]::LEFTDOWN, 0, 0, 0, [UIntPtr]::Zero); Write-Output '{"ok": true}'`);
+      throwIfAborted();
+      heldButtons.add("LEFT");
+      try { await withUser32(`${move}[User32]::mouse_event([User32]::LEFTDOWN, 0, 0, 0, [UIntPtr]::Zero); Write-Output '{"ok": true}'`); }
+      catch (err) { await releaseInput({ buttons: ["LEFT"], keys: [] }); throw err; }
       return { action_sent: true };
     },
     left_mouse_up: async () => {
-      await withUser32(`[User32]::mouse_event([User32]::LEFTUP, 0, 0, 0, [UIntPtr]::Zero); Write-Output '{"ok": true}'`);
+      if (!heldButtons.has("LEFT")) throw Object.assign(new ExecError("no agent pointer press to release"), { code: "input_not_held" });
+      await releaseInput({ buttons: ["LEFT"], keys: [] });
       return { action_sent: true };
     },
     scroll: async ({ target, direction = "down", amount = 3 }) => {
@@ -325,13 +365,10 @@ Write-Output ('{"ok": true, "chars": ' + $text.Length + '}');`;
       return { action_sent: true, chars: text.length, strategy: "unicode-sendinput" };
     },
     key: async ({ text, repeat = 1 }) => {
-      const parts = String(text).split("+").map((s) => s.trim().toLowerCase());
-      const mods = parts.filter((p) => MODVK[p] != null).map((p) => MODVK[p]);
-      const key = parts.find((p) => MODVK[p] == null);
-      if (!key) throw new ExecError(`no key in "${text}"`);
-      let vk = VK[key];
-      if (vk == null && key.length === 1) vk = key.toUpperCase().charCodeAt(0);
-      if (vk == null) throw new ExecError(`unknown key "${key}"`);
+      const { key, vk, mods } = keyChord(text);
+      throwIfAborted();
+      for (const code of [...mods, vk]) heldKeys.add(code);
+      try {
       const n = Math.max(1, Math.min(100, repeat));
       await withUser32(`$ins = New-Object 'User32+INPUT[]' 0;
 $add = { param($i) };
@@ -342,19 +379,26 @@ ${[...mods].reverse().map((m) => `$seq += [User32]::KeyInput(${m}, 0, 2);`).join
 $arr = $seq.ToArray();
 [void][User32]::SendInput($arr.Length, $arr, [System.Runtime.InteropServices.Marshal]::SizeOf([type][User32+INPUT]));
 Write-Output '{"ok": true}';`);
+      for (const code of [...mods, vk]) heldKeys.delete(code);
       return { action_sent: true, key, repeat: n };
+      } finally { await releaseInput({ buttons: [], keys: [...mods, vk] }); }
     },
     hold_key: async ({ text, duration }) => {
-      const parts = String(text).split("+").map((s) => s.trim().toLowerCase());
-      const key = parts.find((p) => MODVK[p] == null && VK[p] == null ? p.length === 1 : (VK[p] != null || p.length === 1));
-      const vk = VK[key] ?? (key.length === 1 ? key.toUpperCase().charCodeAt(0) : null);
-      if (vk == null) throw new ExecError(`unknown key "${text}"`);
+      requireInputOwner();
+      const { key, vk, mods } = keyChord(text);
       const d = Math.max(0.05, Math.min(30, Number(duration) || 1));
-      await withUser32(`[void][User32]::SendInput(1, @([User32]::KeyInput(${vk}, 0, 0)), [System.Runtime.InteropServices.Marshal]::SizeOf([type][User32+INPUT]));
+      const keys = [...mods, vk];
+      throwIfAborted();
+      for (const code of keys) heldKeys.add(code);
+      const event = (code, flags) => `[void][User32]::SendInput(1, @([User32]::KeyInput(${code}, 0, ${flags})), [System.Runtime.InteropServices.Marshal]::SizeOf([type][User32+INPUT]));`;
+      try {
+        await withUser32(`${keys.map((code) => event(code, 0)).join("\n")}
 Start-Sleep -Milliseconds ${Math.round(d * 1000)};
-[void][User32]::SendInput(1, @([User32]::KeyInput(${vk}, 0, 2)), [System.Runtime.InteropServices.Marshal]::SizeOf([type][User32+INPUT]));
+${[...keys].reverse().map((code) => event(code, 2)).join("\n")}
 Write-Output '{"ok": true}';`, { timeoutMs: Math.max(10_000, d * 1000 + 8000) });
-      return { action_sent: true, key, heldSec: d };
+        for (const code of keys) heldKeys.delete(code);
+        return { action_sent: true, key, heldSec: d };
+      } finally { await releaseInput({ buttons: [], keys }); }
     },
     set_value: async ({ target, value }) => {
       // UIA ValuePattern via a re-walk to target.path from the desktop root.
@@ -432,39 +476,11 @@ $p = New-Object User32+POINT;
 Write-Output ('{"x": ' + $p.X + ', "y": ' + $p.Y + '}');`);
       return { x: j.x, y: j.y };
     },
-    recordingStart: async ({ fps = 15, region } = {}) => {
-      let ffmpegOk = true;
-      try { await runOk("ffmpeg", ["-version"], { timeoutMs: 10_000 }); } catch { ffmpegOk = false; }
-      if (!ffmpegOk) throw new ExecError("recording on Windows needs ffmpeg (gdigrab) on PATH — install ffmpeg and retry");
-      const dir = recordingsDir();
-      fs.mkdirSync(dir, { recursive: true });
-      const id = crypto.randomBytes(4).toString("hex");
-      const file = path.join(dir, `rec-${id}.mp4`);
-      const args = ["-y", "-loglevel", "error", "-f", "gdigrab", "-framerate", String(fps)];
-      if (region) args.push("-offset_x", String(Math.round(region[0])), "-offset_y", String(Math.round(region[1])), "-video_size", `${Math.round(region[2])}x${Math.round(region[3])}`);
-      args.push("-i", "desktop", "-c:v", "libx264", "-pix_fmt", "yuv420p", file);
-      const child = spawn("ffmpeg", args, { stdio: "ignore", detached: true });
-      child.unref();
-      await new Promise((r) => setTimeout(r, 800));
-      try { process.kill(child.pid, 0); } catch { throw new ExecError("ffmpeg gdigrab exited immediately"); }
-      recording = { id, pid: child.pid, file, startedAt: new Date().toISOString(), mode: "gdigrab" };
-      return { id, pid: child.pid, file, mode: "gdigrab", fps };
+    recordingStart: async () => {
+      throw Object.assign(new ExecError("Recording is unavailable on this platform until the recorder has session-owned cleanup. Use screenshots instead."), { code: "owned_recording_unavailable" });
     },
-    recordingStop: async ({ id }) => {
-      if (!recording || recording.id !== id) throw new ExecError(`unknown recording "${id}"`);
-      try { process.kill(recording.pid, "SIGINT"); } catch {}
-      await new Promise((r) => setTimeout(r, 1500));
-      const bytes = fs.existsSync(recording.file) ? fs.statSync(recording.file).size : 0;
-      const out = { id, file: recording.file, bytes, mode: recording.mode, startedAt: recording.startedAt, stoppedAt: new Date().toISOString() };
-      recording = null;
-      return out;
-    },
-    recordingStatus: ({ id }) => {
-      if (!recording || recording.id !== id) return { id, running: false };
-      let alive = true;
-      try { process.kill(recording.pid, 0); } catch { alive = false; }
-      return { id, running: alive, file: recording.file, bytes: fs.existsSync(recording.file) ? fs.statSync(recording.file).size : 0, mode: recording.mode };
-    },
+    recordingStop: async ({ id }) => { throw new ExecError(`unknown recording "${id}"`); },
+    recordingStatus: ({ id }) => ({ id, running: false }),
     recordingList: async () => {
       const dir = recordingsDir();
       const out = fs.existsSync(dir)
@@ -473,7 +489,7 @@ Write-Output ('{"x": ' + $p.X + ', "y": ' + $p.Y + '}');`);
             return { file: path.join(dir, f), bytes: st.size, modifiedAt: st.mtime.toISOString() };
           }).sort((a, b) => b.modifiedAt.localeCompare(a.modifiedAt)).slice(0, 50)
         : [];
-      return { dir, recordings: out, running: recording ? [recording.id] : [] };
+      return { dir, recordings: out, running: [] };
     },
   };
 
@@ -482,11 +498,17 @@ Write-Output ('{"x": ' + $p.X + ', "y": ' + $p.Y + '}');`);
     const flags = button === 1 ? "RIGHTDOWN, RIGHTUP" : button === 2 ? "MIDDLEDOWN, MIDDLEUP" : "LEFTDOWN, LEFTUP";
     const seq = [];
     for (let i = 0; i < clicks; i++) seq.push(`[User32]::mouse_event([User32]::${flags.split(",")[0].trim()}, 0, 0, 0, [UIntPtr]::Zero); Start-Sleep -Milliseconds 40; [User32]::mouse_event([User32]::${flags.split(",")[1].trim()}, 0, 0, 0, [UIntPtr]::Zero); Start-Sleep -Milliseconds 60;`);
+    const held = button === 1 ? "RIGHT" : button === 2 ? "MIDDLE" : "LEFT";
+    throwIfAborted();
+    heldButtons.add(held);
+    try {
     await withUser32(`[User32]::SetCursorPos(${Math.round(x)}, ${Math.round(y)}) | Out-Null;
 Start-Sleep -Milliseconds 60;
 ${seq.join("\n")}
 Write-Output '{"ok": true}';`, { timeoutMs: 20_000 });
+    heldButtons.delete(held);
     return { action_sent: true, at: { x: Number(x), y: Number(y) }, button, clicks };
+    } finally { await releaseInput({ buttons: [held], keys: [] }); }
   }
 }
 

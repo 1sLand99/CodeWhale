@@ -27,8 +27,8 @@ Observe once, act once, then verify.
    permissions and missing tools per platform, and never pops dialogs. Its
    `via` field says who holds the permissions: `"app"` means the Codewhale
    Computer Use desktop app is doing the work (grants belong to it);
-   `"direct"` means this server process is, and `appHint` says how to
-   install the app so grants stop depending on the host terminal.
+   `"direct"` means the hosting app or terminal is. Follow the actual
+   `appHint`: bundled Codewhale builds already carry their native helper.
 2. `list_apps` shows running apps only. If the user names an app that is
    absent, call `open_application` once with the original user-provided name,
    copied character-for-character — including case, spaces, punctuation, and
@@ -44,6 +44,9 @@ Observe once, act once, then verify.
    `zoom` for small targets) and act with a coordinate target. Coordinates are
    pixels **in the latest returned raster** for that computer; the server maps
    them to screen points. After a new screenshot, old pixels are stale.
+   If the host reports an omitted or oversized image, capture a smaller app
+   window/region or zoom, then use that returned raster. Do not guess from a
+   file path or reuse coordinates from an image the model never received.
 6. Verify with a fresh observation or a task oracle before claiming success.
    `action_sent: true` means it may already have happened — never replay.
 
@@ -81,6 +84,13 @@ Observe once, act once, then verify.
     and `foreground_taken`. Read it, and tell the user when a step took their
     foreground. Pass `strategy: "a11y"` when the task must not disturb them —
     it fails closed rather than falling back.
+  - For a dialog or toolkit that needs foreground keyboard delivery, select
+    `open_application(activate:true)` explicitly. Receipts say
+    `keyboard_delivery: "foreground-guarded"`; typing fails if another app
+    takes focus. Never keep reactivating after the user takes control. Return
+    to `activate:false` when the foreground-only step ends.
+  - Menus appear in `get_app_state`. Use the advertised action (often
+    `AXPress` to open a menu, then `AXPick` on its item), then observe again.
   - A pointer gesture is refused when another application's window covers the
     point; it names the owner. Raise the window you meant with
     `open_application(activate:true)`, observe again, and retry — do not move
@@ -106,8 +116,9 @@ Observe once, act once, then verify.
 `recording_start` → work → `recording_stop` returns the finalized file path.
 macOS uses ScreenCaptureKit inside the signed helper — no system recorder UI
 and no desktop dimming overlay (a receipt warning about Screen Recording
-permission means the user must grant it once). Linux uses x11grab/wf-recorder,
-Windows ffmpeg gdigrab, HarmonyOS snapshot-series (no native CLI recorder —
+permission means the user must grant it once). Linux and Windows recording is
+unavailable pending session-owned cleanup; use screenshots. HarmonyOS uses
+snapshot-series (no native CLI recorder —
 the receipt says so). `recording_status` / `recording_list` report bytes and
 paths. Screenshots land in the same directory.
 

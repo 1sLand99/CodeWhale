@@ -170,7 +170,7 @@ export const TOOLS = [
       properties: {
         name: { type: "string" }, bundle_id: { type: "string" }, url: { type: "string" },
         pid: { type: "integer", description: "Bind to this exact process. Use when two processes share a bundle id (list_apps shows both); it takes precedence over name and bundle_id and never launches anything." },
-        activate: { type: "boolean", description: "Bring to foreground; defaults to false. Keep false for background work unless the user requests foreground interaction." },
+        activate: { type: "boolean", description: "Bring to foreground; defaults to false. On macOS true also selects foreground keyboard delivery for system dialogs, guarded against another app taking focus. Keep false for background work." },
         computer: computerParam,
       },
       additionalProperties: false,
@@ -254,7 +254,7 @@ export const TOOLS = [
   // ---- recording ----
   {
     name: "recording_start",
-    description: "Start screen recording on a computer (mp4/mov). Darwin: ScreenCaptureKit via the signed helper (timed or until recording_stop; honors region, no recorder overlay). Linux: x11grab/wf-recorder. Windows: ffmpeg gdigrab. HarmonyOS: snapshot-series muxed with ffmpeg.",
+    description: "Start screen recording on a computer (mp4/mov). Darwin: ScreenCaptureKit via the native helper (timed or until recording_stop; honors region, no recorder overlay, stops on session exit). Linux and Windows: unavailable pending session-owned recorder cleanup; use screenshots. HarmonyOS: snapshot-series muxed with ffmpeg.",
     inputSchema: {
       type: "object",
       properties: {
