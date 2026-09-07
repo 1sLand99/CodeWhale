@@ -37,6 +37,7 @@ pub(crate) const CANONICAL_ACTION_ALIASES: &[(&str, &str, &str)] = &[
     ("Git", "log", "git_log"),
     ("Git", "show", "git_show"),
     ("Git", "blame", "git_blame"),
+    ("Git", "commit_plan", "git_commit_plan"),
     ("Run", "tests", "run_tests"),
     ("Run", "verifiers", "run_verifiers"),
     ("Web", "search", "web_search"),
