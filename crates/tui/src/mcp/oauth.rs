@@ -7,11 +7,12 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use oauth2::TokenResponse;
 use reqwest::Url;
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
 use rmcp::transport::AuthorizationManager;
 use rmcp::transport::AuthorizationSession;
 use rmcp::transport::auth::{
-    AuthError, AuthorizationRequest, OAuthClientConfig, OAuthState, OAuthTokenResponse,
+    AuthError, AuthorizationRequest, OAuthClientConfig, OAuthHttpClient, OAuthHttpClientError,
+    OAuthHttpClientFuture, OAuthHttpRequest, OAuthState, OAuthTokenResponse,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -52,14 +53,291 @@ impl std::fmt::Display for McpAuthStatus {
 /// other failure (a token endpoint answering something the client could
 /// not parse, a transport error) names the same remedy in words, because
 /// the operator otherwise sees only the provider's parse error (#5926).
-fn refresh_failure_context(server_name: &str, names_remedy: bool) -> String {
+/// When the token endpoint did answer, its receipt (status line,
+/// content-type, masked excerpt) rides along so a provider outage — an HTML
+/// 502 page — reads differently from a parser defect on JSON it should
+/// have accepted.
+fn refresh_failure_context(
+    server_name: &str,
+    names_remedy: bool,
+    receipt: Option<&TokenEndpointReceipt>,
+) -> String {
     if names_remedy {
+        let answered =
+            receipt.map_or_else(String::new, |receipt| format!(" (it answered {receipt})"));
         format!(
-            "refreshing MCP OAuth token for server {server_name}: the token endpoint did not answer the way the client expects; \
+            "refreshing MCP OAuth token for server {server_name}: the token endpoint did not answer the way the client expects{answered}; \
              if this persists, run `codewhale mcp login {server_name}` (or `/mcp login {server_name}`) to re-authorize"
         )
     } else {
         format!("refreshing MCP OAuth token for server {server_name}")
+    }
+}
+
+/// Longest excerpt of a token-endpoint body a refresh failure keeps.
+const TOKEN_RECEIPT_EXCERPT_BYTES: usize = 200;
+
+/// rmcp's own cap on an OAuth response body, mirrored so the recording
+/// client refuses the same oversized answers the stock one does.
+const MAX_OAUTH_HTTP_RESPONSE_BODY_BYTES: usize = 1024 * 1024;
+
+/// Response fields whose values are credentials. Their values are masked
+/// before any body excerpt is kept; the field names themselves are not
+/// secrets and stay so the operator can see which fields the answer had.
+const OAUTH_SECRET_FIELDS: &[&str] = &[
+    "access_token",
+    "refresh_token",
+    "client_secret",
+    "id_token",
+    "authorization",
+];
+
+/// What the token endpoint actually answered. rmcp collapses an
+/// unparseable answer to `Failed to parse server response` and drops the
+/// body; this is the receipt it drops, with every credential-shaped value
+/// masked and the body cut to its first [`TOKEN_RECEIPT_EXCERPT_BYTES`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TokenEndpointReceipt {
+    status: u16,
+    reason: Option<&'static str>,
+    content_type: Option<String>,
+    excerpt: String,
+}
+
+impl TokenEndpointReceipt {
+    fn from_response(status: reqwest::StatusCode, headers: &HeaderMap, body: &[u8]) -> Self {
+        let content_type = headers
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        Self {
+            status: status.as_u16(),
+            reason: status.canonical_reason(),
+            content_type,
+            excerpt: token_response_excerpt(body),
+        }
+    }
+}
+
+impl std::fmt::Display for TokenEndpointReceipt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "HTTP {}", self.status)?;
+        if let Some(reason) = self.reason {
+            write!(f, " {reason}")?;
+        }
+        match self.content_type.as_deref() {
+            Some(content_type) => write!(f, " ({content_type})")?,
+            None => f.write_str(" (no content-type)")?,
+        }
+        if self.excerpt.is_empty() {
+            f.write_str(" with an empty body")
+        } else {
+            write!(f, ": {}", self.excerpt)
+        }
+    }
+}
+
+/// Masked, whitespace-collapsed, byte-capped excerpt of a token-endpoint
+/// body. Masking runs before the cut so a truncated credential never leaks
+/// its prefix.
+fn token_response_excerpt(body: &[u8]) -> String {
+    let masked = mask_oauth_secrets(&String::from_utf8_lossy(body));
+    let collapsed = masked.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.len() <= TOKEN_RECEIPT_EXCERPT_BYTES {
+        return collapsed;
+    }
+    let mut end = TOKEN_RECEIPT_EXCERPT_BYTES;
+    while !collapsed.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &collapsed[..end])
+}
+
+fn is_word_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
+/// Replace every credential-shaped value in `text` with `***`: JSON
+/// members (`"access_token": "…"`), form/query pairs (`refresh_token=…`),
+/// and bearer schemes (`Bearer …`). Field names, separators and everything
+/// else survive so the shape of the answer stays readable.
+pub(crate) fn mask_oauth_secrets(text: &str) -> String {
+    let lower = text.to_ascii_lowercase();
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut index = 0;
+    while index < text.len() {
+        let at_word_start = index == 0 || !is_word_byte(bytes[index - 1]);
+        if at_word_start
+            && let Some((value_start, value_end)) = secret_value_span(text, &lower, index)
+        {
+            out.push_str(&text[index..value_start]);
+            out.push_str("***");
+            index = value_end;
+            continue;
+        }
+        let ch = text[index..]
+            .chars()
+            .next()
+            .expect("index sits on a char boundary");
+        out.push(ch);
+        index += ch.len_utf8();
+    }
+    out
+}
+
+/// The byte span of the secret value that starts at `start`, if a secret
+/// field or bearer scheme begins there. Every scan step consumes ASCII
+/// bytes only, so both ends land on char boundaries.
+fn secret_value_span(text: &str, lower: &str, start: usize) -> Option<(usize, usize)> {
+    let bytes = text.as_bytes();
+    let skip_spaces = |mut cursor: usize| {
+        while bytes
+            .get(cursor)
+            .is_some_and(|byte| *byte == b' ' || *byte == b'\t')
+        {
+            cursor += 1;
+        }
+        cursor
+    };
+    let unquoted_end = |mut cursor: usize| {
+        while bytes.get(cursor).is_some_and(|byte| {
+            !matches!(byte, b'&' | b',' | b';' | b'}' | b'"' | b'\'') && !byte.is_ascii_whitespace()
+        }) {
+            cursor += 1;
+        }
+        cursor
+    };
+    if lower[start..].starts_with("bearer ") {
+        let value_start = skip_spaces(start + "bearer".len());
+        let value_end = unquoted_end(value_start);
+        return (value_end > value_start).then_some((value_start, value_end));
+    }
+    for field in OAUTH_SECRET_FIELDS {
+        if !lower[start..].starts_with(field) {
+            continue;
+        }
+        let mut cursor = start + field.len();
+        if bytes.get(cursor).is_some_and(|byte| is_word_byte(*byte)) {
+            continue;
+        }
+        if bytes.get(cursor) == Some(&b'"') {
+            cursor += 1;
+        }
+        cursor = skip_spaces(cursor);
+        match bytes.get(cursor) {
+            Some(b':' | b'=') => cursor += 1,
+            _ => continue,
+        }
+        cursor = skip_spaces(cursor);
+        if bytes.get(cursor) == Some(&b'"') {
+            let value_start = cursor + 1;
+            let mut value_end = value_start;
+            while let Some(byte) = bytes.get(value_end) {
+                match byte {
+                    b'\\' => value_end += 2,
+                    b'"' => break,
+                    _ => value_end += 1,
+                }
+            }
+            return Some((value_start, value_end.min(text.len())));
+        }
+        // An unquoted `Authorization: Bearer <token>` carries its scheme in
+        // front of the credential; the whole value is the secret.
+        let value_start = cursor;
+        let mut value_end = unquoted_end(cursor);
+        if matches!(lower[value_start..value_end].as_ref(), "bearer" | "basic")
+            && bytes.get(value_end) == Some(&b' ')
+        {
+            value_end = unquoted_end(skip_spaces(value_end));
+        }
+        return Some((value_start, value_end));
+    }
+    None
+}
+
+/// The OAuth HTTP client behind a stored-credential runtime. It executes
+/// exactly what rmcp's stock reqwest client would — one caller-configured
+/// client for every operation, redirects followed, body capped — and keeps
+/// the receipt of the latest token-endpoint answer (every token request is
+/// a POST; discovery is GET) so a failed refresh can say what came back.
+pub(crate) struct RecordingOAuthHttpClient {
+    client: reqwest::Client,
+    last_token_response: std::sync::Mutex<Option<TokenEndpointReceipt>>,
+}
+
+impl RecordingOAuthHttpClient {
+    fn new(default_headers: &HeaderMap) -> Result<Self> {
+        let client = apply_default_headers(crate::tls::reqwest_client_builder(), default_headers)
+            .build()
+            .context("building MCP OAuth metadata client")?;
+        Ok(Self {
+            client,
+            last_token_response: std::sync::Mutex::new(None),
+        })
+    }
+
+    fn take_token_endpoint_receipt(&self) -> Option<TokenEndpointReceipt> {
+        self.last_token_response
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+    }
+}
+
+impl OAuthHttpClient for RecordingOAuthHttpClient {
+    fn execute(&self, request: OAuthHttpRequest) -> OAuthHttpClientFuture<'_> {
+        Box::pin(async move {
+            let OAuthHttpRequest {
+                request, timeout, ..
+            } = request;
+            let is_token_request = request.method() == reqwest::Method::POST;
+            let mut request = reqwest::Request::try_from(request)
+                .map_err(|error| Box::new(error) as OAuthHttpClientError)?;
+            if let Some(timeout) = timeout {
+                *request.timeout_mut() = Some(timeout);
+            }
+            let mut response = self
+                .client
+                .execute(request)
+                .await
+                .map_err(|error| Box::new(error) as OAuthHttpClientError)?;
+            let status = response.status();
+            let version = response.version();
+            let headers = response.headers().clone();
+            let mut body = Vec::new();
+            while let Some(chunk) = response
+                .chunk()
+                .await
+                .map_err(|error| Box::new(error) as OAuthHttpClientError)?
+            {
+                if chunk.len() > MAX_OAUTH_HTTP_RESPONSE_BODY_BYTES - body.len() {
+                    return Err(anyhow!(
+                        "OAuth HTTP response body exceeds {MAX_OAUTH_HTTP_RESPONSE_BODY_BYTES} bytes"
+                    )
+                    .into());
+                }
+                body.extend_from_slice(&chunk);
+            }
+            if is_token_request {
+                *self
+                    .last_token_response
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                    Some(TokenEndpointReceipt::from_response(status, &headers, &body));
+            }
+            let mut builder = oauth2::http::Response::builder()
+                .status(status)
+                .version(version);
+            for (name, value) in &headers {
+                builder = builder.header(name, value);
+            }
+            builder
+                .body(body)
+                .map_err(|error| Box::new(error) as OAuthHttpClientError)
+        })
     }
 }
 
@@ -206,9 +484,10 @@ struct McpOAuthRuntimeInner {
     /// though the rejected grant is never replayed. `None` while a
     /// credential is held.
     rejection: Mutex<Option<String>>,
-    /// Default headers the runtime was built with, retained so an adopted
-    /// on-disk rotation can rebuild the manager with identical HTTP shape.
-    default_headers: HeaderMap,
+    /// The HTTP client the runtime was built with, shared with the manager
+    /// so an adopted on-disk rotation rebuilds it with identical HTTP shape
+    /// and a failed refresh can read the token endpoint's receipt.
+    http_client: Arc<RecordingOAuthHttpClient>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -266,12 +545,10 @@ impl std::error::Error for OAuthProviderError {}
 async fn manager_from_stored_tokens(
     url: &str,
     tokens: &StoredMcpOAuthTokens,
-    default_headers: &HeaderMap,
+    http_client: &Arc<RecordingOAuthHttpClient>,
 ) -> Result<AuthorizationManager> {
-    let client = apply_default_headers(crate::tls::reqwest_client_builder(), default_headers)
-        .build()
-        .context("building MCP OAuth metadata client")?;
-    let mut state = OAuthState::new(url.to_string(), Some(client)).await?;
+    let client = Arc::clone(http_client) as Arc<dyn OAuthHttpClient>;
+    let mut state = OAuthState::new_with_oauth_http_client(url.to_string(), client).await?;
     state
         .set_credentials(&tokens.client_id, tokens.token_response.0.clone())
         .await
@@ -313,7 +590,8 @@ impl McpOAuthRuntime {
         default_headers: HeaderMap,
     ) -> Result<Self> {
         refresh_expires_in_from_timestamp(&mut tokens);
-        let manager = manager_from_stored_tokens(url, &tokens, &default_headers).await?;
+        let http_client = Arc::new(RecordingOAuthHttpClient::new(&default_headers)?);
+        let manager = manager_from_stored_tokens(url, &tokens, &http_client).await?;
 
         Ok(Self {
             inner: Arc::new(McpOAuthRuntimeInner {
@@ -322,7 +600,7 @@ impl McpOAuthRuntime {
                 manager: Arc::new(Mutex::new(manager)),
                 last_tokens: Mutex::new(Some(tokens)),
                 rejection: Mutex::new(None),
-                default_headers,
+                http_client,
             }),
         })
     }
@@ -410,6 +688,8 @@ impl McpOAuthRuntime {
                 return Ok(());
             }
         }
+        // Only this refresh's answer may explain this refresh's failure.
+        self.inner.http_client.take_token_endpoint_receipt();
         let mut err = match self.try_refresh_and_persist().await {
             Ok(()) => return Ok(()),
             Err(err) => err,
@@ -448,7 +728,9 @@ impl McpOAuthRuntime {
         }
         let server_name = self.inner.server_name.clone();
         let names_remedy = !error_looks_auth_required(&err);
-        Err(err).with_context(|| refresh_failure_context(&server_name, names_remedy))
+        let receipt = self.inner.http_client.take_token_endpoint_receipt();
+        Err(err)
+            .with_context(|| refresh_failure_context(&server_name, names_remedy, receipt.as_ref()))
     }
 
     async fn try_refresh_and_persist(&self) -> Result<()> {
@@ -477,8 +759,7 @@ impl McpOAuthRuntime {
             return Ok(false);
         }
         let manager =
-            manager_from_stored_tokens(&self.inner.url, &stored, &self.inner.default_headers)
-                .await?;
+            manager_from_stored_tokens(&self.inner.url, &stored, &self.inner.http_client).await?;
         *self.inner.manager.lock().await = manager;
         *self.inner.last_tokens.lock().await = Some(stored);
         *self.inner.rejection.lock().await = None;
@@ -506,12 +787,9 @@ impl McpOAuthRuntime {
                     server = %self.inner.server_name,
                     "MCP OAuth credential was rotated by another process; keeping the on-disk winner"
                 );
-                let manager = manager_from_stored_tokens(
-                    &self.inner.url,
-                    &stored,
-                    &self.inner.default_headers,
-                )
-                .await?;
+                let manager =
+                    manager_from_stored_tokens(&self.inner.url, &stored, &self.inner.http_client)
+                        .await?;
                 *self.inner.manager.lock().await = manager;
                 *self.inner.last_tokens.lock().await = Some(stored);
                 *self.inner.rejection.lock().await = None;
@@ -1630,14 +1908,102 @@ impl McpServerConfig {
 mod tests {
     #[test]
     fn a_refresh_parse_failure_names_the_login_remedy_and_the_server() {
-        let text = super::refresh_failure_context("supabase", true);
+        let text = super::refresh_failure_context("supabase", true, None);
         assert!(text.contains("server supabase"));
         assert!(text.contains("codewhale mcp login supabase"), "{text}");
         assert!(text.contains("/mcp login supabase"), "{text}");
+        assert!(!text.contains("it answered"), "{text}");
         // An auth-required failure keeps the plain context: the typed state
         // and the login tool already carry the remedy.
-        let plain = super::refresh_failure_context("supabase", false);
+        let plain = super::refresh_failure_context("supabase", false, None);
         assert_eq!(plain, "refreshing MCP OAuth token for server supabase");
+    }
+
+    #[test]
+    fn a_refresh_parse_failure_keeps_the_token_endpoints_receipt() {
+        // The supabase receipt (#5926): rmcp said only "Failed to parse
+        // server response". With the status line and a masked excerpt the
+        // operator can tell a provider's HTML 502 from our parser.
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            CONTENT_TYPE,
+            HeaderValue::from_static("text/html; charset=utf-8"),
+        );
+        let receipt = TokenEndpointReceipt::from_response(
+            reqwest::StatusCode::BAD_GATEWAY,
+            &headers,
+            b"<html>\n  <body>502 Bad Gateway</body>\n</html>",
+        );
+        let text = super::refresh_failure_context("supabase", true, Some(&receipt));
+        assert!(
+            text.contains(
+                "it answered HTTP 502 Bad Gateway (text/html; charset=utf-8): <html> <body>502 Bad Gateway</body> </html>"
+            ),
+            "{text}"
+        );
+        assert!(text.contains("codewhale mcp login supabase"), "{text}");
+    }
+
+    #[test]
+    fn a_token_receipt_masks_credentials_before_it_cuts_the_body() {
+        let secret = "sk-live-0123456789abcdef";
+        let long_tail = "x".repeat(400);
+        let body = format!(
+            "{{\"token_type\":\"Bearer\",\"access_token\":\"{secret}\",\"refresh_token\": \"{secret}-r\",\"id_token\":\"{secret}-id\",\"expires_in\":\"soon\",\"note\":\"{long_tail}\"}}"
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        let receipt =
+            TokenEndpointReceipt::from_response(reqwest::StatusCode::OK, &headers, body.as_bytes());
+        let text = receipt.to_string();
+        assert!(!text.contains(secret), "{text}");
+        assert!(text.contains("\"access_token\":\"***\""), "{text}");
+        assert!(text.contains("\"refresh_token\": \"***\""), "{text}");
+        assert!(text.contains("\"id_token\":\"***\""), "{text}");
+        // Non-secret members survive so the shape of the answer is readable.
+        assert!(text.contains("\"expires_in\":\"soon\""), "{text}");
+        assert!(text.contains("\"token_type\":\"Bearer\""), "{text}");
+        assert!(text.ends_with('…'), "{text}");
+        assert!(receipt.excerpt.len() <= TOKEN_RECEIPT_EXCERPT_BYTES + '…'.len_utf8());
+    }
+
+    #[test]
+    fn oauth_secret_masking_covers_form_pairs_bearer_schemes_and_case() {
+        assert_eq!(
+            mask_oauth_secrets("client_secret=abc123&grant_type=refresh_token&refresh_token=zzz"),
+            "client_secret=***&grant_type=refresh_token&refresh_token=***"
+        );
+        assert_eq!(
+            mask_oauth_secrets("Authorization: Bearer eyJhbGciOi.payload.sig, retry"),
+            "Authorization: ***, retry"
+        );
+        assert_eq!(
+            mask_oauth_secrets("{\"Access_Token\": \"quoted \\\" inside\", \"scope\": \"read\"}"),
+            "{\"Access_Token\": \"***\", \"scope\": \"read\"}"
+        );
+        // A field name that merely contains a secret name is not a secret.
+        assert_eq!(
+            mask_oauth_secrets("{\"error_code\":\"invalid_request\",\"my_access_token_count\":3}"),
+            "{\"error_code\":\"invalid_request\",\"my_access_token_count\":3}"
+        );
+        // Multi-byte text around a secret stays intact.
+        assert_eq!(
+            mask_oauth_secrets("トークン access_token=秘密 終わり"),
+            "トークン access_token=*** 終わり"
+        );
+    }
+
+    #[test]
+    fn a_token_receipt_names_an_empty_body_and_a_missing_content_type() {
+        let receipt = TokenEndpointReceipt::from_response(
+            reqwest::StatusCode::SERVICE_UNAVAILABLE,
+            &HeaderMap::new(),
+            b"",
+        );
+        assert_eq!(
+            receipt.to_string(),
+            "HTTP 503 Service Unavailable (no content-type) with an empty body"
+        );
     }
 
     use super::*;

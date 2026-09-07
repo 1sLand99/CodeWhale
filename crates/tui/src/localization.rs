@@ -483,6 +483,7 @@ pub enum MessageId {
     ExtensionsGroupRecommended,
     ExtensionsGroupServers,
     ExtensionsGroupNeedsAttention,
+    ExtensionsGroupNeedsLogin,
     ExtensionsGroupStatus,
     ExtensionsGroupUser,
     ExtensionsGroupWorkspace,
@@ -2665,6 +2666,7 @@ pub const ALL_MESSAGE_IDS: &[MessageId] = &[
     MessageId::ExtensionsGroupRecommended,
     MessageId::ExtensionsGroupServers,
     MessageId::ExtensionsGroupNeedsAttention,
+    MessageId::ExtensionsGroupNeedsLogin,
     MessageId::ExtensionsGroupStatus,
     MessageId::ExtensionsGroupUser,
     MessageId::ExtensionsGroupWorkspace,
@@ -5835,7 +5837,7 @@ mod tests {
             .filter(|key| key.starts_with("Extensions"))
             .cloned()
             .collect::<Vec<_>>();
-        assert_eq!(keys.len(), 93, "the complete extensions locale set changed");
+        assert_eq!(keys.len(), 94, "the complete extensions locale set changed");
 
         let prose_keys = [
             "ExtensionsMarketplaceUnavailable",

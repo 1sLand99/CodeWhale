@@ -44,7 +44,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   answerable work and no longer inflates the `blocked` chip; the receipts
   roster and the wire `state` gain `parked` (#5906, #5921).
 
-
 - `codewhale account keys set|remove|list` no longer carry a hardcoded
   eight-provider list. Provider ids come from the control plane's public
   catalog (`GET /api/model-providers`), are validated locally against
@@ -53,6 +52,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   maps a catalog row onto the local runtime provider through the catalog's own
   `runtimeProvider` field, so a newly supported provider needs no CLI release.
 
+- `/mcp` lists the servers that need a login first, as their own
+  `Needs login` group above `Needs attention`, and opens with the cursor
+  already on the first such row so the Enter the screen advertises runs
+  `/mcp login <server>` straight away; translated in all 15 packs. A
+  snapshot test pins the footer shape the chip landed with (`MCP · N
+  connected · N ◆ auth required · N failed`) so an expired login never
+  regresses into the failed count (#5926).
+
 ### Fixed
 
 - The posture bar states how long the session has been working and how long
@@ -60,8 +67,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tool, a sub-agent or the operator; the 0.9.12 shell had dropped the overall
   working-time indicator from the place a glancing user checks (#5914).
 
+- An MCP token refresh that fails to parse the provider's answer keeps the
+  endpoint's receipt — status line, content type, and a 200-byte excerpt
+  with every credential-shaped value (`access_token`, `refresh_token`,
+  `client_secret`, `id_token`, bearer schemes) masked before the cut —
+  instead of rmcp's bare `Failed to parse server response`, so a provider
+  outage answering an HTML 502 reads differently from a parser defect, and
+  the login remedy stays named (#5926; remedy wording landed in #5959).
+
 ### Added
 
+- The `rusty-alloc` cargo feature on `codewhale-tui` and `codewhale-cli`
+  opts the binaries into the `rusty_alloc` global allocator (the mimalloc
+  v2.4.5 architecture remade in pure Rust — no C compiler or build script
+  on that path) instead of the default mimalloc. It is off by default and
+  the default build is unchanged; build with
+  `cargo build -p codewhale-tui --features rusty-alloc` (#5872).
 - The `/theme` picker now discovers valid user-authored `custom:<name>`
   overlays, previews their colors, highlights the active overlay, and preserves
   it when the picker is opened and committed without navigation (#5901).

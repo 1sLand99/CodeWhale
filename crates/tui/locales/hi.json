@@ -24,6 +24,7 @@
   "ExtensionsGroupRecommended": "अनुशंसित",
   "ExtensionsGroupServers": "सर्वर",
   "ExtensionsGroupNeedsAttention": "ध्यान चाहिए",
+  "ExtensionsGroupNeedsLogin": "लॉगिन आवश्यक",
   "ExtensionsGroupStatus": "{count} आइटम · समेटने के लिए Enter",
   "ExtensionsGroupUser": "उपयोगकर्ता",
   "ExtensionsGroupWorkspace": "कार्यस्थान",

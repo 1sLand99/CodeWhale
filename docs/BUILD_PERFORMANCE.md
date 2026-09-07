@@ -33,7 +33,9 @@ Structural facts behind those numbers:
   no default features). `cargo tree -d` shows only routine duplicates
   (`toml` 0.8/1.1, `thiserror` 1/2, `strum` 0.27/0.28, `syn` 2/3,
   `sha2` 0.10/0.11) that come from third-party crates, not from workspace
-  choices.
+  choices. The global allocator is mimalloc by default; the off-by-default
+  `rusty-alloc` cargo feature on `codewhale-tui`/`codewhale-cli` swaps it for
+  the pure-Rust `rusty_alloc` remake (no C toolchain on that path, #5872).
 - `[profile.dev] debug = "line-tables-only"` is already set (#5246) and
   Cargo already uses `split-debuginfo = unpacked` on macOS.
 - `target/debug` grows past 50 GB only through accumulation across

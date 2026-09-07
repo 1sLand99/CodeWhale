@@ -24,6 +24,7 @@
   "ExtensionsGroupRecommended": "Recomanat",
   "ExtensionsGroupServers": "Servidors",
   "ExtensionsGroupNeedsAttention": "Necessita atenció",
+  "ExtensionsGroupNeedsLogin": "Cal iniciar sessió",
   "ExtensionsGroupStatus": "{count} elements · Enter plega",
   "ExtensionsGroupUser": "Usuari",
   "ExtensionsGroupWorkspace": "Espai de treball",
