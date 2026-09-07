@@ -26,6 +26,7 @@ use codewhale_protocol::fleet::{FleetHostSpec, FleetTaskSpec, FleetWorkerEventPa
 
 use super::host::{FleetHostAdapter, FleetWorkerCommand};
 use super::profile::AgentProfile;
+use super::task_spec::FleetWorkerFinalAnswer;
 use super::worker_runtime::{
     fleet_task_prompt, fleet_task_prompt_with_profiles, fleet_worker_launch_reasoning_effort,
     fleet_worker_launch_route,
@@ -364,6 +365,12 @@ fn build_worker_exec_command_from_prompt(
 /// `{"type": "...", ...}` (see `ExecStreamEvent` in `main.rs`).
 pub fn map_exec_stream_line(line: &str) -> Option<FleetWorkerEventPayload> {
     let value: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
+    map_exec_stream_value(&value)
+}
+
+/// [`map_exec_stream_line`] on an already-parsed line, so the incremental
+/// stream reader parses each frame exactly once.
+fn map_exec_stream_value(value: &serde_json::Value) -> Option<FleetWorkerEventPayload> {
     match value.get("type").and_then(serde_json::Value::as_str)? {
         "tool_use" => {
             let tool = value
@@ -431,23 +438,50 @@ enum ParsedTerminalRoute {
     Invalid,
 }
 
+/// The `meta` object of a terminal exec receipt, or `None` for every other
+/// stream line.
+fn exec_terminal_meta(
+    value: &serde_json::Value,
+) -> Option<&serde_json::Map<String, serde_json::Value>> {
+    if value.get("type").and_then(serde_json::Value::as_str) != Some("metadata") {
+        return None;
+    }
+    let meta = value.get("meta").and_then(serde_json::Value::as_object)?;
+    (meta.get("receipt_kind").and_then(serde_json::Value::as_str) == Some("terminal"))
+        .then_some(meta)
+}
+
+/// The worker's visible final answer from a terminal exec receipt: the
+/// emitter already bounded and redacted `visible_final_answer_excerpt`, and
+/// `visible_final_answer_chars` is the real pre-truncation length.
+fn parse_exec_terminal_final_answer(value: &serde_json::Value) -> Option<FleetWorkerFinalAnswer> {
+    let meta = exec_terminal_meta(value)?;
+    let excerpt = meta
+        .get("visible_final_answer_excerpt")
+        .and_then(serde_json::Value::as_str)?
+        .trim();
+    if excerpt.is_empty() {
+        return None;
+    }
+    let chars = meta
+        .get("visible_final_answer_chars")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|chars| usize::try_from(chars).ok())
+        .unwrap_or_else(|| excerpt.chars().count());
+    Some(FleetWorkerFinalAnswer {
+        excerpt: excerpt.to_string(),
+        chars,
+    })
+}
+
 /// Parse one allowlisted, secret-free route identity from terminal exec
 /// metadata. Once a line declares itself as a terminal receipt, malformed
 /// route fields are distinct from ordinary non-terminal stream noise so a
 /// prior valid record cannot survive contradictory evidence.
-fn parse_exec_terminal_route(line: &str) -> ParsedTerminalRoute {
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+fn parse_exec_terminal_route(value: &serde_json::Value) -> ParsedTerminalRoute {
+    let Some(meta) = exec_terminal_meta(value) else {
         return ParsedTerminalRoute::NotTerminal;
     };
-    if value.get("type").and_then(serde_json::Value::as_str) != Some("metadata") {
-        return ParsedTerminalRoute::NotTerminal;
-    }
-    let Some(meta) = value.get("meta").and_then(serde_json::Value::as_object) else {
-        return ParsedTerminalRoute::NotTerminal;
-    };
-    if meta.get("receipt_kind").and_then(serde_json::Value::as_str) != Some("terminal") {
-        return ParsedTerminalRoute::NotTerminal;
-    }
 
     let route = (|| {
         let provider = meta.get("provider")?.as_str()?.trim();
@@ -481,7 +515,8 @@ fn parse_exec_terminal_route(line: &str) -> ParsedTerminalRoute {
 
 #[cfg(test)]
 fn map_exec_terminal_route(line: &str) -> Option<FleetWorkerReportedRoute> {
-    match parse_exec_terminal_route(line) {
+    let value: serde_json::Value = serde_json::from_str(line).ok()?;
+    match parse_exec_terminal_route(&value) {
         ParsedTerminalRoute::Valid(route) => Some(route),
         ParsedTerminalRoute::NotTerminal | ParsedTerminalRoute::Invalid => None,
     }
@@ -547,15 +582,48 @@ struct WorkerStream {
     terminal_route: TerminalRouteEvidence,
     /// When this worker process was started, for per-task wall-clock limits (R5).
     started_at: std::time::Instant,
-    /// Accumulated assistant text from `content` stream events. This is the
-    /// task's visible deliverable for report/summary work that produces no file
-    /// artifact; surfaced as `Completed.summary` so receipts stop reporting
-    /// "no verifiable output" for a worker that wrote a full report.
-    answer: String,
+    /// The worker's visible final answer from its terminal exec receipt. This
+    /// is the task's deliverable for report/summary work that produces no
+    /// file artifact; surfaced as `Completed.summary` and in the receipt note
+    /// so receipts stop reporting "no verifiable output" for a worker that
+    /// wrote a full report. Bounded by the emitter, so nothing accumulates
+    /// here.
+    final_answer: Option<FleetWorkerFinalAnswer>,
     /// Saved exec session id reported by the worker's `session_capture` event.
     /// Resolving it via `GET /v1/sessions/{id}` yields the full transcript
     /// (the worker's final assistant reply).
-    session_id: Option<String>,
+    saved_session_id: Option<String>,
+}
+
+impl WorkerStream {
+    /// Observe one raw stream-json frame: record route evidence, the final
+    /// answer, and the saved-session id, and map it to a ledger payload. The
+    /// frame is parsed exactly once.
+    fn observe_line(&mut self, line: &[u8]) -> Option<FleetWorkerEventPayload> {
+        let Ok(line) = std::str::from_utf8(line) else {
+            // stream-json is a UTF-8 contract. Never accept a lossy-decoded route
+            // receipt: replacement characters could turn corrupt provider/model
+            // bytes into apparently valid provenance.
+            self.terminal_route.observe(ParsedTerminalRoute::Invalid);
+            return None;
+        };
+        let value: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
+        self.terminal_route
+            .observe(parse_exec_terminal_route(&value));
+        if let Some(answer) = parse_exec_terminal_final_answer(&value) {
+            self.final_answer = Some(answer);
+        }
+        if value.get("type").and_then(serde_json::Value::as_str) == Some("session_capture")
+            && let Some(id) = value
+                .get("saved_session_id")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+        {
+            self.saved_session_id = Some(id.to_string());
+        }
+        map_exec_stream_value(&value)
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -592,65 +660,6 @@ impl TerminalRouteEvidence {
     }
 }
 
-fn observe_worker_stream_line(
-    terminal_route: &mut TerminalRouteEvidence,
-    answer: &mut String,
-    session_id: &mut Option<String>,
-    line: &[u8],
-) -> Option<FleetWorkerEventPayload> {
-    let Ok(line) = std::str::from_utf8(line) else {
-        // stream-json is a UTF-8 contract. Never accept a lossy-decoded route
-        // receipt: replacement characters could turn corrupt provider/model
-        // bytes into apparently valid provenance.
-        terminal_route.observe(ParsedTerminalRoute::Invalid);
-        return None;
-    };
-    let line = line.trim_end();
-    terminal_route.observe(parse_exec_terminal_route(line));
-    // Accumulate the worker's visible assistant text so report/summary tasks
-    // (no scorer, no file artifact) still surface their deliverable as
-    // `Completed.summary` instead of "no verifiable output". Also capture the
-    // saved exec session id so a caller can resolve the full transcript.
-    if let Ok(value) = serde_json::from_str::<serde_json::Value>(line) {
-        match value.get("type").and_then(serde_json::Value::as_str) {
-            Some("content") => {
-                if let Some(content) = value.get("content").and_then(serde_json::Value::as_str) {
-                    answer.push_str(content);
-                }
-            }
-            Some("session_capture") => {
-                if let Some(id) = value.get("session_id").and_then(serde_json::Value::as_str)
-                    && !id.trim().is_empty()
-                {
-                    *session_id = Some(id.to_string());
-                }
-            }
-            _ => {}
-        }
-    }
-    map_exec_stream_line(line)
-}
-
-const MAX_WORKER_SUMMARY_CHARS: usize = 4_000;
-
-/// Bound and redact the worker's accumulated answer before surfacing it as
-/// `Completed.summary`. The summary is a status surface (receipt notes, event
-/// labels, runtime API payloads), not the forensic worker log — the full text
-/// already lives in the worker's stream-json file.
-fn bounded_worker_summary(answer: &str) -> String {
-    let redacted = codewhale_config::persistence::redact_secrets(answer);
-    let mut chars = redacted.chars();
-    let preview = chars
-        .by_ref()
-        .take(MAX_WORKER_SUMMARY_CHARS)
-        .collect::<String>();
-    if chars.next().is_some() {
-        format!("{preview}...")
-    } else {
-        preview
-    }
-}
-
 enum WorkerStreamHost {
     Local,
     Ssh(String),
@@ -670,9 +679,13 @@ pub struct FleetWorkerTerminalEvent {
     /// Non-terminal payloads discovered by the mandatory post-exit drain.
     pub tail_payloads: Vec<FleetWorkerEventPayload>,
     pub reported_route: Option<FleetWorkerReportedRoute>,
+    /// The worker's visible final answer from its terminal exec receipt,
+    /// whatever the outcome: a worker that fails after writing most of a
+    /// report keeps the text on its receipt.
+    pub final_answer: Option<FleetWorkerFinalAnswer>,
     /// Saved exec session id reported by the worker's `session_capture` event,
     /// when one was persisted on completion.
-    pub session_id: Option<String>,
+    pub saved_session_id: Option<String>,
     /// A real headless exec process must report its actual route. Callers use
     /// this bit to distinguish a missing/invalid report (fail closed) from
     /// pre-launch or simulated paths that only have declared route intent.
@@ -765,8 +778,8 @@ impl FleetExecutor {
                 terminal: false,
                 terminal_route: TerminalRouteEvidence::default(),
                 started_at: std::time::Instant::now(),
-                answer: String::new(),
-                session_id: None,
+                final_answer: None,
+                saved_session_id: None,
             },
         );
         Ok(handle)
@@ -859,12 +872,7 @@ impl FleetExecutor {
             stream.pending.extend_from_slice(&buf);
             while let Some(idx) = stream.pending.iter().position(|byte| *byte == b'\n') {
                 let line: Vec<u8> = stream.pending.drain(..=idx).collect();
-                if let Some(event) = observe_worker_stream_line(
-                    &mut stream.terminal_route,
-                    &mut stream.answer,
-                    &mut stream.session_id,
-                    &line,
-                ) {
+                if let Some(event) = stream.observe_line(&line) {
                     events.push(event);
                 }
             }
@@ -913,48 +921,31 @@ impl FleetExecutor {
         // between the scheduler's ordinary drain and this status poll cannot
         // be lost when the worker is forgotten.
         let mut tail_payloads = self.drain_events(worker_id);
-        if let Some(stream) = self.streams.get_mut(worker_id) {
-            let trailing_line = std::mem::take(&mut stream.pending);
-            if trailing_line.iter().any(|byte| !byte.is_ascii_whitespace())
-                && let Some(payload) = observe_worker_stream_line(
-                    &mut stream.terminal_route,
-                    &mut stream.answer,
-                    &mut stream.session_id,
-                    &trailing_line,
-                )
-            {
-                tail_payloads.push(payload);
-            }
-        }
-        let answer = self
-            .streams
-            .get_mut(worker_id)
-            .map(|stream| {
-                stream.terminal = true;
-                std::mem::take(&mut stream.answer)
-            })
-            .unwrap_or_default();
-        let session_id = self
-            .streams
-            .get_mut(worker_id)
-            .and_then(|stream| stream.session_id.take());
-        // Attach the accumulated visible answer to a successful completion so
-        // report/summary tasks (no scorer, no file artifact) surface their
-        // deliverable instead of "no verifiable output".
-        if !answer.trim().is_empty()
-            && let FleetWorkerEventPayload::Completed { summary, .. } = &mut terminal
+        let stream = self.streams.get_mut(worker_id)?;
+        let trailing_line = std::mem::take(&mut stream.pending);
+        if trailing_line.iter().any(|byte| !byte.is_ascii_whitespace())
+            && let Some(payload) = stream.observe_line(&trailing_line)
         {
-            *summary = Some(bounded_worker_summary(&answer));
+            tail_payloads.push(payload);
+        }
+        stream.terminal = true;
+        let final_answer = stream.final_answer.take();
+        // Surface the visible final answer on a successful completion so
+        // report/summary tasks (no scorer, no file artifact) show their
+        // deliverable instead of "no verifiable output". `Failed` has no
+        // summary slot; the receipt keeps the text via `final_answer`.
+        if let (Some(answer), FleetWorkerEventPayload::Completed { summary, .. }) =
+            (final_answer.as_ref(), &mut terminal)
+        {
+            *summary = Some(answer.excerpt.clone());
         }
         Some(FleetWorkerTerminalEvent {
             payload: terminal,
             exit_code: status.exit_code,
             tail_payloads,
-            reported_route: self
-                .streams
-                .get(worker_id)
-                .and_then(|stream| stream.terminal_route.reported_route().cloned()),
-            session_id,
+            reported_route: stream.terminal_route.reported_route().cloned(),
+            final_answer,
+            saved_session_id: stream.saved_session_id.take(),
             requires_reported_route: true,
         })
     }
@@ -1076,8 +1067,8 @@ mod tests {
                 terminal: false,
                 terminal_route: TerminalRouteEvidence::default(),
                 started_at: std::time::Instant::now(),
-                answer: String::new(),
-                session_id: None,
+                final_answer: None,
+                saved_session_id: None,
             },
         );
     }
@@ -1719,7 +1710,8 @@ mod tests {
         let observe = |lines: &[&str]| {
             let mut evidence = TerminalRouteEvidence::default();
             for line in lines {
-                evidence.observe(parse_exec_terminal_route(line));
+                let value: serde_json::Value = serde_json::from_str(line).unwrap();
+                evidence.observe(parse_exec_terminal_route(&value));
             }
             evidence.reported_route().cloned()
         };
@@ -1809,22 +1801,16 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[test]
-    fn completed_worker_surfaces_accumulated_content_as_summary() {
-        // Report/summary tasks produce their deliverable as streamed text, not
-        // a file artifact. The executor must accumulate `content` events and
-        // attach them to the terminal `Completed.summary` so a receipt can show
-        // the actual result instead of "no verifiable output".
+    fn run_worker_to_terminal(script: &str, worker_id: &str) -> FleetWorkerTerminalEvent {
         let tmp = tempfile::TempDir::new().unwrap();
         let mut exec = FleetExecutor::new(tmp.path());
-        let script = r#"printf '%s\n' '{"type":"content","content":"part one "}' '{"type":"content","content":"part two"}' '{"type":"done"}'"#;
         let command = FleetWorkerCommand::new("sh", vec!["-c".to_string(), script.to_string()]);
-        exec.start_worker("w1", command, None).unwrap();
+        exec.start_worker(worker_id, command, None).unwrap();
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        let terminal = loop {
-            exec.drain_events("w1");
-            if let Some(term) = exec.poll_terminal("w1") {
+        loop {
+            exec.drain_events(worker_id);
+            if let Some(term) = exec.poll_terminal_with_status(worker_id) {
                 break term;
             }
             assert!(
@@ -1832,43 +1818,96 @@ mod tests {
                 "worker did not terminate in time"
             );
             std::thread::sleep(std::time::Duration::from_millis(20));
-        };
+        }
+    }
 
-        match terminal {
+    #[cfg(unix)]
+    #[test]
+    fn completed_worker_surfaces_terminal_final_answer_as_summary() {
+        // Report/summary tasks produce their deliverable as the final
+        // assistant reply, not a file artifact. The exec side emits a bounded
+        // excerpt plus the real length on its terminal receipt; the executor
+        // reads that (never the streamed `content` deltas, which are the run
+        // thinking out loud) and attaches it to `Completed.summary` and the
+        // terminal event so a receipt can show the actual result.
+        let script = r#"printf '%s\n' '{"type":"content","content":"let me look first"}' '{"type":"metadata","meta":{"receipt_kind":"terminal","provider":"custom","provider_id":"remote-x","model":"worker-model","visible_final_answer_chars":9000,"visible_final_answer_excerpt":"the report..."}}' '{"type":"done"}'"#;
+        let terminal = run_worker_to_terminal(script, "w1");
+
+        match &terminal.payload {
             FleetWorkerEventPayload::Completed { summary, .. } => {
-                assert_eq!(summary.as_deref(), Some("part one part two"));
+                assert_eq!(summary.as_deref(), Some("the report..."));
             }
             other => panic!("expected Completed, got {other:?}"),
         }
+        assert_eq!(
+            terminal.final_answer,
+            Some(FleetWorkerFinalAnswer {
+                excerpt: "the report...".to_string(),
+                chars: 9000,
+            })
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_worker_keeps_terminal_final_answer_on_terminal_event() {
+        // A worker that fails after writing most of a report still reports
+        // its visible answer on the terminal receipt; the executor keeps it
+        // on the terminal event so the receipt can retain the text.
+        let script = r#"printf '%s\n' '{"type":"error","error":"boom"}' '{"type":"metadata","meta":{"receipt_kind":"terminal","provider":"custom","provider_id":"remote-x","model":"worker-model","visible_final_answer_chars":12,"visible_final_answer_excerpt":"partial text"}}'; exit 1"#;
+        let terminal = run_worker_to_terminal(script, "w-failed");
+
+        assert!(
+            matches!(terminal.payload, FleetWorkerEventPayload::Failed { .. }),
+            "{:?}",
+            terminal.payload
+        );
+        assert_eq!(
+            terminal
+                .final_answer
+                .as_ref()
+                .map(|answer| answer.excerpt.as_str()),
+            Some("partial text")
+        );
     }
 
     #[cfg(unix)]
     #[test]
     fn completed_worker_surfaces_session_capture_id_for_full_transcript() {
         // The worker persists its full transcript as a saved session and
-        // reports the recoverable id via `session_capture`. The executor must
-        // capture that id on the terminal event so a caller can resolve the
-        // final assistant reply through `GET /v1/sessions/{id}`.
-        let tmp = tempfile::TempDir::new().unwrap();
-        let mut exec = FleetExecutor::new(tmp.path());
-        let script = r#"printf '%s\n' '{"type":"session_capture","content":"<redacted:log-only>","session_id":"session-abc"}' '{"type":"done"}'"#;
-        let command = FleetWorkerCommand::new("sh", vec!["-c".to_string(), script.to_string()]);
-        exec.start_worker("w-session", command, None).unwrap();
+        // reports the recoverable id via `session_capture.saved_session_id`.
+        // The executor must capture that id on the terminal event so a caller
+        // can resolve the final assistant reply through `GET /v1/sessions/{id}`.
+        let script = r#"printf '%s\n' '{"type":"session_capture","content":"<redacted:log-only>","saved_session_id":"session-abc"}' '{"type":"done"}'"#;
+        let terminal = run_worker_to_terminal(script, "w-session");
 
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        let terminal = loop {
-            exec.drain_events("w-session");
-            if let Some(term) = exec.poll_terminal_with_status("w-session") {
-                break term;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "worker did not terminate in time"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        };
+        assert_eq!(terminal.saved_session_id.as_deref(), Some("session-abc"));
+        assert!(terminal.final_answer.is_none());
+    }
 
-        assert_eq!(terminal.session_id.as_deref(), Some("session-abc"));
+    #[test]
+    fn terminal_final_answer_ignores_empty_and_nonterminal_receipts() {
+        let parse =
+            |line: &str| parse_exec_terminal_final_answer(&serde_json::from_str(line).unwrap());
+        assert!(parse(r#"{"type":"content","content":"streamed"}"#).is_none());
+        assert!(
+            parse(r#"{"type":"metadata","meta":{"receipt_kind":"turn","visible_final_answer_excerpt":"x"}}"#)
+                .is_none()
+        );
+        assert!(
+            parse(r#"{"type":"metadata","meta":{"receipt_kind":"terminal","visible_final_answer_excerpt":"   "}}"#)
+                .is_none()
+        );
+        // A receipt without the count falls back to the excerpt length.
+        assert_eq!(
+            parse(
+                r#"{"type":"metadata","meta":{"receipt_kind":"terminal","visible_final_answer_excerpt":"héllo"}}"#
+            ),
+            Some(FleetWorkerFinalAnswer {
+                excerpt: "héllo".to_string(),
+                chars: 5,
+            })
+        );
     }
 
     #[cfg(unix)]

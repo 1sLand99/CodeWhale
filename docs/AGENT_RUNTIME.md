@@ -153,6 +153,35 @@ run/phase/task/gate receipt while a Workflow is in flight and is retained as a
 typed `WorkflowEvent` in the Runtime execution ledger; the enclosing Runtime
 worker still owns the terminal `done` or `error`. One vocabulary, two surfaces.
 
+`session_capture` is emitted once, when the exec run persisted its transcript
+as a saved session, and carries the recoverable id in exactly one place:
+
+```json
+{"type": "session_capture", "schema": "codewhale.exec-stream", "schema_version": 1,
+ "content": "<redacted:…>", "saved_session_id": "01J…"}
+```
+
+- `saved_session_id` is the raw saved-session id. The Runtime executor
+  captures it onto the task's `FleetReceipt.saved_session_id` (also exposed by
+  the runtime API's receipt payload), so a client can resolve the worker's full
+  final reply via `GET /v1/sessions/{id}` instead of re-reading the worker log.
+- `content` is the same redacted fingerprint the terminal `metadata.session_id`
+  carries, so a captured `metadata` receipt stays safe to log on its own and
+  the two events can still be correlated. `metadata.resume_command` therefore
+  names this field (`codewhale exec --resume <session_capture.saved_session_id>`)
+  rather than carrying the id itself.
+
+The terminal `metadata` receipt also carries the worker's visible final answer:
+`visible_final_answer_chars` is the real character count of the final
+assistant reply, and `visible_final_answer_excerpt` is a bounded (4,000
+characters, `...` when cut), secret-redacted excerpt of it, omitted when the
+run produced no visible answer. The Runtime executor reads the excerpt from
+this receipt — never from the streamed `content` deltas, which are the run
+thinking out loud — and attaches it to `Completed.summary` and, for a task
+with no scorer and no file artifact, to the receipt notes as the task's
+deliverable. Lifecycle event labels and worker inspection summaries show a
+short excerpt; the event `payload` and the receipt keep the full excerpt.
+
 `turn_usage` is the per-model-call usage receipt, emitted once per model
 request (turn-step) when the provider reported usage for that call:
 

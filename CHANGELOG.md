@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Fleet workers now surface their deliverable. The terminal `codewhale exec`
+  `metadata` receipt carries `visible_final_answer_excerpt`, a bounded,
+  secret-redacted excerpt of the final assistant reply next to the real
+  `visible_final_answer_chars` count; the Runtime executor attaches it to
+  `Completed.summary` and, for a task with no scorer and no file artifact,
+  to the receipt notes instead of "no verifiable output" — a worker that
+  fails after writing most of a report keeps the text too. `session_capture`
+  now carries the raw `saved_session_id` (the `metadata` receipt stays
+  fingerprint-only), `FleetReceipt.saved_session_id` persists it, and the
+  runtime API exposes it so a client can resolve the worker's full final
+  reply via `GET /v1/sessions/{id}` (#5946, thanks @gaord).
+
 ### Changed
 
 - `/statusline` drives the bottom chrome again. Since the 0.9.12 shell

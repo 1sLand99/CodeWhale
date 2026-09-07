@@ -77,6 +77,28 @@ impl FleetTaskSpecFile {
     }
 }
 
+/// The worker's visible final answer as carried by the terminal exec
+/// `metadata` receipt: `excerpt` is already bounded and secret-redacted by the
+/// emitter (`visible_final_answer_excerpt`), `chars` is the real
+/// pre-truncation length (`visible_final_answer_chars`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FleetWorkerFinalAnswer {
+    pub excerpt: String,
+    pub chars: usize,
+}
+
+impl FleetWorkerFinalAnswer {
+    /// The receipt note for a task whose only deliverable is its answer text.
+    /// The excerpt is used verbatim: it was bounded and redacted once at the
+    /// emitter, and the ledger redacts receipt notes again on write.
+    pub fn receipt_note(&self) -> String {
+        format!(
+            "worker produced {} characters of deliverable: {}",
+            self.chars, self.excerpt
+        )
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct FleetTaskVerificationInput {
     pub run_id: FleetRunId,
@@ -86,13 +108,13 @@ pub struct FleetTaskVerificationInput {
     pub attempt: u32,
     pub exit_code: Option<i32>,
     pub artifacts: Vec<FleetArtifactRef>,
-    /// Accumulated visible assistant text from the worker stream. Report/summary
-    /// tasks with no scorer and no file artifact surface this as their
-    /// deliverable instead of "no verifiable output".
-    pub summary: Option<String>,
+    /// The worker's visible final answer, as reported by its terminal exec
+    /// receipt. Report/summary tasks with no scorer and no file artifact
+    /// surface this as their deliverable instead of "no verifiable output".
+    pub final_answer: Option<FleetWorkerFinalAnswer>,
     /// Saved exec session id holding the worker's full transcript, when the
     /// worker persisted one on completion.
-    pub session_id: Option<String>,
+    pub saved_session_id: Option<String>,
     /// Resolved-route snapshot to persist on the receipt (#3154).
     pub resolved_route: Option<FleetResolvedRoute>,
     /// Effective worker authority snapshot to persist on the receipt (#3211).
@@ -337,27 +359,20 @@ pub fn verify_task_result(
             "manual scorer configured",
             "manual verification is required to finalize this receipt",
         ),
-        None if !has_verifiable_artifact(input) => {
-            match input
-                .summary
-                .as_deref()
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-            {
-                Some(summary) => partial(
-                    "no scorer configured; worker produced a summary deliverable",
-                    format!(
-                        "worker produced {} characters of deliverable: {}",
-                        summary.chars().count(),
-                        bounded_receipt_excerpt(summary),
-                    ),
-                ),
-                None => partial(
-                    "no scorer configured and no verifiable artifacts recorded",
-                    "worker exited successfully but produced no verifiable output",
-                ),
-            }
-        }
+        None if !has_verifiable_artifact(input) => match input
+            .final_answer
+            .as_ref()
+            .filter(|answer| !answer.excerpt.trim().is_empty())
+        {
+            Some(answer) => partial(
+                "no scorer configured; worker produced a summary deliverable",
+                answer.receipt_note(),
+            ),
+            None => partial(
+                "no scorer configured and no verifiable artifacts recorded",
+                "worker exited successfully but produced no verifiable output",
+            ),
+        },
         None => partial(
             "no scorer configured",
             "task has artifacts but no deterministic scorer",
@@ -416,7 +431,7 @@ pub fn prepare_verification_receipt(
         artifacts,
         score: Some(verification.score),
         resolved_route: input.resolved_route.clone(),
-        session_id: input.session_id.clone(),
+        saved_session_id: input.saved_session_id.clone(),
         effective_permissions: input.effective_permissions.clone(),
     };
     Ok(receipt)
@@ -635,26 +650,6 @@ fn has_verifiable_artifact(input: &FleetTaskVerificationInput) -> bool {
             FleetArtifactKind::Log | FleetArtifactKind::Receipt
         )
     })
-}
-
-/// Bound and redact the worker's visible deliverable for a receipt note.
-/// Receipts are status surfaces, not the forensic worker log, so a bounded,
-/// whitespace-normalized, secret-redacted excerpt is enough to show the user
-/// what a report/summary task actually produced.
-fn bounded_receipt_excerpt(value: &str) -> String {
-    const MAX_RECEIPT_EXCERPT_CHARS: usize = 600;
-    let redacted = codewhale_config::persistence::redact_secrets(value);
-    let normalized = redacted.split_whitespace().collect::<Vec<_>>().join(" ");
-    let mut chars = normalized.chars();
-    let preview = chars
-        .by_ref()
-        .take(MAX_RECEIPT_EXCERPT_CHARS)
-        .collect::<String>();
-    if chars.next().is_some() {
-        format!("{preview}...")
-    } else {
-        preview
-    }
 }
 
 #[derive(Debug)]
@@ -1023,8 +1018,8 @@ mod tests {
             attempt: 1,
             exit_code: Some(0),
             artifacts: vec![],
-            summary: None,
-            session_id: None,
+            final_answer: None,
+            saved_session_id: None,
             resolved_route: None,
             effective_permissions: None,
         };
@@ -1122,8 +1117,11 @@ mod tests {
             attempt: 1,
             exit_code: Some(0),
             artifacts: vec![],
-            summary: Some("The Changelog review is complete".to_string()),
-            session_id: None,
+            final_answer: Some(FleetWorkerFinalAnswer {
+                excerpt: "The Changelog review is complete".to_string(),
+                chars: 32,
+            }),
+            saved_session_id: None,
             resolved_route: None,
             effective_permissions: None,
         };
@@ -1165,8 +1163,8 @@ mod tests {
             attempt: 3,
             exit_code: Some(1),
             artifacts: vec![log],
-            summary: None,
-            session_id: None,
+            final_answer: None,
+            saved_session_id: None,
             resolved_route: None,
             effective_permissions: Some(FleetEffectivePermissions {
                 write: false,
@@ -1226,8 +1224,8 @@ mod tests {
             attempt: 1,
             exit_code: Some(1),
             artifacts: Vec::new(),
-            summary: None,
-            session_id: None,
+            final_answer: None,
+            saved_session_id: None,
             resolved_route: None,
             effective_permissions: None,
         };

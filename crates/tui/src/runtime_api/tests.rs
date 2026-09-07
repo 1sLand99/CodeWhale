@@ -9567,7 +9567,7 @@ fn fleet_receipt_json_pass_result_has_no_failure_fields() {
         artifacts: Vec::new(),
         score: None,
         resolved_route: None,
-        session_id: None,
+        saved_session_id: None,
         effective_permissions: None,
     };
     let value = fleet_receipt_json(&receipt);
@@ -9601,7 +9601,7 @@ fn fleet_receipt_json_verifier_failure_is_not_retry_eligible() {
         artifacts: Vec::new(),
         score: None,
         resolved_route: None,
-        session_id: None,
+        saved_session_id: None,
         effective_permissions: None,
     };
     let value = fleet_receipt_json(&receipt);
@@ -9633,7 +9633,7 @@ fn fleet_receipt_json_transport_failure_is_retry_eligible() {
         artifacts: Vec::new(),
         score: None,
         resolved_route: None,
-        session_id: None,
+        saved_session_id: None,
         effective_permissions: None,
     };
     let value = fleet_receipt_json(&receipt);
@@ -9669,7 +9669,7 @@ fn fleet_receipt_json_receipt_artifact_sets_evidence_available() {
             notes: Some("all checks pass".to_string()),
         }),
         resolved_route: None,
-        session_id: None,
+        saved_session_id: None,
         effective_permissions: None,
     };
     let value = fleet_receipt_json(&receipt);
@@ -9746,8 +9746,8 @@ async fn fleet_receipt_api_list_and_get_round_trip() -> Result<()> {
         attempt: 1,
         exit_code: Some(0),
         artifacts: Vec::new(),
-        summary: None,
-        session_id: None,
+        final_answer: None,
+        saved_session_id: None,
         resolved_route: None,
         effective_permissions: None,
     };

@@ -75,6 +75,18 @@ worker 在 `spawn_depth = 0` 运行，并且可以在满足 `spawn_depth + 1 ≤
 
 fleet 账本持久化的是 worker 自身的事件流，而不是另一套模拟的分类法。`codewhale exec --output-format stream-json` 会发出 `{"type": "content" | "tool_use" | "tool_result" | "sandbox_denied" | "workflow_event" | "session_capture" | "turn_usage" | "metadata" | "done" | "error"}` 行，它们映射到 fleet 账本的 `FleetWorkerEventPayload`（`RunningTool`、`WorkflowEvent`、`Running`、`Completed`、`Failed` 等）。`workflow_event` 在 Workflow 飞行期间携带类型化的 run/phase/task/gate 回执，并作为类型化的 `WorkflowEvent` 保留在 Fleet 账本中；外层 worker 仍然拥有终态 `done` 或 `error`。一套词汇，两个表面。
 
+`session_capture` 在 exec 运行把自己的对话记录持久化为已保存会话时发出一次，并且只在这一个地方携带可恢复的 id：
+
+```json
+{"type": "session_capture", "schema": "codewhale.exec-stream", "schema_version": 1,
+ "content": "<redacted:…>", "saved_session_id": "01J…"}
+```
+
+- `saved_session_id` 是原始的已保存会话 id。Runtime 执行器会把它记录到任务的 `FleetReceipt.saved_session_id`（runtime API 的回执载荷也会暴露它），这样客户端可以通过 `GET /v1/sessions/{id}` 获取 worker 的完整最终回复，而不必重新读取 worker 日志。
+- `content` 是与终态 `metadata.session_id` 相同的脱敏指纹，因此单独截获的 `metadata` 回执仍然可以安全写入日志，两个事件之间也仍可关联。相应地，`metadata.resume_command` 指向该字段（`codewhale exec --resume <session_capture.saved_session_id>`），而不是自己携带 id。
+
+终态 `metadata` 回执还携带 worker 可见的最终回答：`visible_final_answer_chars` 是最终助手回复的真实字符数，`visible_final_answer_excerpt` 是它的有界（4,000 字符，截断时以 `...` 结尾）、已脱敏的摘录；运行没有产生可见回答时省略该字段。Runtime 执行器从这个回执读取摘录——绝不从流式 `content` 增量读取，那是运行过程中的"边想边说"——并把它附加到 `Completed.summary`；对于没有评分器也没有文件工件的任务，还会作为任务的交付物写入回执备注。生命周期事件标签和 worker 检视摘要只显示短摘录；事件 `payload` 和回执保留完整摘录。
+
 `turn_usage` 是每次模型调用的用量回执，当 provider 为该调用报告了用量时，每个模型请求（turn 步骤）发出一次：
 
 ```json

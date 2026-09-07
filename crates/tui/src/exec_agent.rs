@@ -937,7 +937,7 @@ pub(crate) async fn run_exec_agent(
                     if let Some(id) = saved_session_id.as_ref() {
                         emit_exec_stream_event(&ExecStreamEvent::SessionCapture {
                             content: exec_stream_session_ref(id),
-                            session_id: id.clone(),
+                            saved_session_id: id.clone(),
                         })?;
                     }
                     // Resolved output ceiling and its provenance, surfaced so a
@@ -990,6 +990,9 @@ pub(crate) async fn run_exec_agent(
                                 latest_system_prompt.as_ref(),
                             ),
                             visible_final_answer_chars: summary.output.chars().count(),
+                            visible_final_answer_excerpt: exec_stream_final_answer_excerpt(
+                                &summary.output,
+                            ),
                             resume_command: saved_session_id
                                 .as_deref()
                                 .map(exec_stream_resume_hint)

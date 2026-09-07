@@ -2688,7 +2688,7 @@ fn fleet_receipt_json(receipt: &codewhale_protocol::fleet::FleetReceipt) -> Valu
         "retry_eligible": retry_eligible,
         "score": score_json,
         "artifacts": receipt.artifacts.iter().map(fleet_artifact_json).collect::<Vec<_>>(),
-        "session_id": receipt.session_id.clone(),
+        "saved_session_id": receipt.saved_session_id.clone(),
         "evidence_available": evidence_available,
     })
 }
@@ -2739,6 +2739,9 @@ fn artifact_kind_label(kind: &FleetArtifactKind) -> String {
     }
 }
 
+/// Bound on the `Completed.summary` excerpt inside a lifecycle event label.
+const FLEET_EVENT_LABEL_SUMMARY_CHARS: usize = 160;
+
 fn fleet_event_label(payload: &FleetWorkerEventPayload) -> String {
     match payload {
         FleetWorkerEventPayload::Queued => "queued".to_string(),
@@ -2769,7 +2772,15 @@ fn fleet_event_label(payload: &FleetWorkerEventPayload) -> String {
         FleetWorkerEventPayload::Artifact(artifact) => {
             format!("artifact kind={}", artifact_kind_label(&artifact.kind))
         }
-        FleetWorkerEventPayload::Completed { exit_code, summary } => match (exit_code, summary) {
+        // `summary` may carry the worker's bounded final-answer excerpt (up
+        // to a few thousand chars); the label is a one-line status surface,
+        // so it gets a short excerpt while `payload` keeps the full text.
+        FleetWorkerEventPayload::Completed { exit_code, summary } => match (
+            exit_code,
+            summary
+                .as_deref()
+                .map(|summary| truncate_text(summary, FLEET_EVENT_LABEL_SUMMARY_CHARS)),
+        ) {
             (Some(code), Some(summary)) => format!("completed exit_code={code} {summary}"),
             (Some(code), None) => format!("completed exit_code={code}"),
             (None, Some(summary)) => format!("completed {summary}"),

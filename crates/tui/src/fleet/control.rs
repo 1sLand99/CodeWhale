@@ -753,7 +753,7 @@ mod tests {
                 model_source: None,
                 source: "resolver".to_string(),
             }),
-            session_id: None,
+            saved_session_id: None,
             effective_permissions: None,
         }
     }

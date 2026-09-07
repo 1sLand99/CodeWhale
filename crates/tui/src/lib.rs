@@ -11378,7 +11378,13 @@ struct ExecStreamMeta {
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_catalog_sha256: Option<String>,
     input_analysis: ExecStreamInputAnalysis,
+    /// Real character count of the visible final answer, before any bound.
     visible_final_answer_chars: usize,
+    /// Bounded, secret-redacted excerpt of the visible final answer (see
+    /// [`exec_stream_final_answer_excerpt`]). Omitted when the run produced
+    /// no visible answer.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    visible_final_answer_excerpt: String,
     session_id: String,
     resume_command: String,
     workspace: String,
@@ -11480,11 +11486,15 @@ enum ExecStreamEvent {
     },
     #[serde(rename = "session_capture")]
     SessionCapture {
-        /// Redacted fingerprint for logs/forensics; never the recoverable id.
+        /// Redacted fingerprint for logs/forensics, the same value the
+        /// terminal `metadata.session_id` carries; never the recoverable id.
         content: String,
         /// The real saved-session id a caller can resolve via
-        /// `GET /v1/sessions/{id}` to read the worker's full transcript.
-        session_id: String,
+        /// `GET /v1/sessions/{id}` to read the worker's full transcript. This
+        /// is the only place the exec stream carries the raw id: `metadata`
+        /// stays fingerprint-only so a captured terminal receipt is safe to
+        /// log on its own.
+        saved_session_id: String,
     },
     #[serde(rename = "service_released")]
     #[cfg(unix)]
@@ -11793,6 +11803,7 @@ async fn run_workflow_tool_command_inner(
             tool_catalog_sha256: None,
             input_analysis: ExecStreamInputAnalysis::default(),
             visible_final_answer_chars: result.content.chars().count(),
+            visible_final_answer_excerpt: exec_stream_final_answer_excerpt(&result.content),
             session_id: String::new(),
             resume_command: String::new(),
             workspace: workspace.display().to_string(),
@@ -12207,11 +12218,37 @@ fn exec_stream_session_ref(session_id: &str) -> String {
     crate::utils::redacted_identifier_for_log(session_id)
 }
 
+/// Resume hint for the terminal `metadata` receipt. `metadata` carries only
+/// the session fingerprint, so the hint names the `session_capture` field
+/// that holds the recoverable id instead of pretending to redact one.
 fn exec_stream_resume_hint(session_id: &str) -> String {
     if session_id.trim().is_empty() {
         String::new()
     } else {
-        "codewhale exec --resume <redacted-session-id>".to_string()
+        "codewhale exec --resume <session_capture.saved_session_id>".to_string()
+    }
+}
+
+/// Character bound for `metadata.visible_final_answer_excerpt`. The excerpt
+/// is a status surface (fleet receipts, event labels, runtime API payloads),
+/// not the transcript: the full answer lives in the saved session and the
+/// worker's stream-json log, and `visible_final_answer_chars` carries the real
+/// length so a consumer can tell a bounded excerpt from a short answer.
+const EXEC_STREAM_FINAL_ANSWER_EXCERPT_CHARS: usize = 4_000;
+
+/// Bound and secret-redact the visible final answer once, at the emitter, so
+/// every downstream consumer reads the same excerpt.
+fn exec_stream_final_answer_excerpt(output: &str) -> String {
+    let redacted = codewhale_config::persistence::redact_secrets(output.trim());
+    let mut chars = redacted.chars();
+    let excerpt: String = chars
+        .by_ref()
+        .take(EXEC_STREAM_FINAL_ANSWER_EXCERPT_CHARS)
+        .collect();
+    if chars.next().is_some() {
+        format!("{excerpt}...")
+    } else {
+        excerpt
     }
 }
 
@@ -17050,7 +17087,7 @@ api_key = "test-only-key"
             (
                 ExecStreamEvent::SessionCapture {
                     content: "x".to_string(),
-                    session_id: "session-x".to_string(),
+                    saved_session_id: "session-x".to_string(),
                 },
                 "session_capture",
             ),
@@ -17186,6 +17223,7 @@ api_key = "test-only-key"
                 tool_catalog_sha256: Some("sha256:tools".to_string()),
                 input_analysis: ExecStreamInputAnalysis::default(),
                 visible_final_answer_chars: 17,
+                visible_final_answer_excerpt: "the visible reply".to_string(),
                 session_id: exec_stream_session_ref(raw_session_id),
                 resume_command: exec_stream_resume_hint(raw_session_id),
                 workspace: "/tmp/work".to_string(),
@@ -17211,24 +17249,49 @@ api_key = "test-only-key"
         );
         assert_eq!(
             parsed["meta"]["resume_command"],
-            "codewhale exec --resume <redacted-session-id>"
+            "codewhale exec --resume <session_capture.saved_session_id>"
         );
         assert_eq!(parsed["meta"]["workspace"], "/tmp/work");
         assert_eq!(parsed["meta"]["message_count"], 4);
         assert_eq!(parsed["meta"]["visible_final_answer_chars"], 17);
+        assert_eq!(
+            parsed["meta"]["visible_final_answer_excerpt"],
+            "the visible reply"
+        );
 
+        // Contract (#5946): the raw saved-session id is carried by exactly one
+        // field, `session_capture.saved_session_id`. The `metadata` receipt
+        // above stays fingerprint-only, and the capture's own `content` keeps
+        // the same fingerprint so both surfaces can be correlated in a log.
         let capture = ExecStreamEvent::SessionCapture {
             content: exec_stream_session_ref(raw_session_id),
-            session_id: raw_session_id.to_string(),
+            saved_session_id: raw_session_id.to_string(),
         };
         let capture_json = serde_json::to_string(&capture).expect("serializes");
         let parsed_capture: serde_json::Value =
             serde_json::from_str(&capture_json).expect("valid json");
         assert_eq!(parsed_capture["type"], "session_capture");
-        // The log fingerprint stays redacted; the recoverable id is a distinct
-        // field so a caller can resolve the saved session without the log path.
+        assert_eq!(parsed_capture["content"], parsed["meta"]["session_id"]);
         assert_ne!(parsed_capture["content"], raw_session_id);
-        assert_eq!(parsed_capture["session_id"], raw_session_id);
+        assert_eq!(parsed_capture["saved_session_id"], raw_session_id);
+        assert!(parsed_capture.get("session_id").is_none(), "{capture_json}");
+    }
+
+    #[test]
+    fn exec_stream_final_answer_excerpt_is_bounded_and_redacted() {
+        assert_eq!(
+            exec_stream_final_answer_excerpt("  short reply \n"),
+            "short reply"
+        );
+        let long = "x".repeat(EXEC_STREAM_FINAL_ANSWER_EXCERPT_CHARS + 5);
+        let excerpt = exec_stream_final_answer_excerpt(&long);
+        assert_eq!(
+            excerpt.chars().count(),
+            EXEC_STREAM_FINAL_ANSWER_EXCERPT_CHARS + 3
+        );
+        assert!(excerpt.ends_with("..."));
+        let leaked = exec_stream_final_answer_excerpt("token: sk-ant-must-not-leak-1234567890");
+        assert!(!leaked.contains("sk-ant-must-not-leak"), "{leaked}");
     }
 
     #[test]

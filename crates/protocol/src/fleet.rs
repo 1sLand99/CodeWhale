@@ -1127,10 +1127,11 @@ pub struct FleetReceipt {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolved_route: Option<FleetResolvedRoute>,
     /// Saved exec session id holding the worker's full transcript, when the
-    /// worker persisted one on completion. Callers resolve the final assistant
-    /// reply via `GET /v1/sessions/{id}`.
+    /// worker persisted one on completion (the exec stream's
+    /// `session_capture.saved_session_id`). Callers resolve the final
+    /// assistant reply via `GET /v1/sessions/{id}`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_id: Option<String>,
+    pub saved_session_id: Option<String>,
     /// Effective worker authority for this task (#3211).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effective_permissions: Option<FleetEffectivePermissions>,
@@ -1498,7 +1499,7 @@ mod tests {
                 notes: None,
             }),
             resolved_route: None,
-            session_id: None,
+            saved_session_id: None,
             effective_permissions: None,
         };
         let json = serde_json::to_string(&receipt).unwrap();
@@ -1527,7 +1528,7 @@ mod tests {
                 notes: Some("manual verification required".to_string()),
             }),
             resolved_route: None,
-            session_id: None,
+            saved_session_id: None,
             effective_permissions: None,
         };
 
@@ -1696,7 +1697,7 @@ mod tests {
                 model_source: Some("task.model".to_string()),
                 source: "resolver".to_string(),
             }),
-            session_id: None,
+            saved_session_id: None,
             effective_permissions: Some(FleetEffectivePermissions {
                 write: true,
                 network: true,
