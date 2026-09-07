@@ -85,9 +85,9 @@ export const CHANGELOG: ChangelogRelease[] = [
           "/fleet presents its prioritized core (members, setup, teams, workers, help); every other verb stays dispatchable and is documented under explicit groups in /fleet help. The roster no longer shows the untouched built-in general alias next to worker (#5888).",
           "codewhale provider: account-backed model access over the provider keys a customer connected to their Codewhale account. One base URL (https://api.codewhale.net/v1, overridable with CODEWHALE_API_BASE; HTTPS required except on loopback), one cwc_key_… account API key with the models:infer scope (CODEWHALE_API_KEY), and a per-model wire chosen from the account's authenticated GET /v1/models: ids are provider/model and each row states chat-completions (/v1/chat/completions) or…",
           "codewhale account api-keys create --scope now accepts models:infer alongside account:read and agent:run, and an omitted --scope sends all three explicitly. --use saves the new secret as this machine's local codewhale provider credential in the same secret store codewhale auth uses; nothing is uploaded.",
-          "sandbox_backend = \"shannon\": shell commands run as signed ShannonNet capability invocations (cap://sandbox/exec) on a worker that may live on another tailnet node. Codewhale opens a Task World per session for its durable codewhale Agent and every command leaves a receipt in shannon trace. New keys sandbox_shannon_home and sandbox_shannon_capability; tool metadata now reports the actual external backend kind instead of always opensandbox."
+          "Git grows a commit_plan action: a propose-only planner that splits the working tree into ordered atomic commits (#3999). It groups whole files — lock files ride with their manifest, tests ride with the source they name — orders the groups so a commit that defines a symbol lands before the commit that uses it, and refuses the whole plan when that dependency graph has a cycle. It reads git diff HEAD plus the untracked-file list and writes nothing: no git add -N, no git apply…"
         ],
-        "itemCount": 17
+        "itemCount": 12
       },
       {
         "heading": "Contributors",

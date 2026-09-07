@@ -237,29 +237,6 @@ with an accessibility-first pointer.
   three explicitly. `--use` saves the new secret as this machine's local
   `codewhale` provider credential in the same secret store `codewhale auth`
   uses; nothing is uploaded.
-- `sandbox_backend = "shannon"`: shell commands run as signed ShannonNet
-  capability invocations (`cap://sandbox/exec`) on a worker that may live on
-  another tailnet node. Codewhale opens a Task World per session for its
-  durable `codewhale` Agent and every command leaves a receipt in
-  `shannon trace`. New keys `sandbox_shannon_home` and
-  `sandbox_shannon_capability`; tool metadata now reports the actual
-  external backend kind instead of always `opensandbox`.
-- `/shannon [world|trace|children]` inspects the session's ShannonNet
-  World: agent, projected capabilities, children, and receipts.
-- ShannonNet sub-agents get compiled context: the session's native-memory
-  hits are imported with provenance and the child's projected World decides
-  what it sees (confidential notes never cross); the session World is
-  checkpointed and closed when the backend drops.
-- Sub-agents under delegated authority: with the ShannonNet backend the
-  `agent` tool spawns a child identity with a World projected from the
-  session World, the child's shell commands are signed as that child, and a
-  join receipt is recorded when it finishes. `SandboxBackend::for_child` /
-  `child_joined` default to sharing the parent backend for other backends.
-- Workspace sync for the ShannonNet backend (`sandbox_shannon_sync`, default
-  on): the session's non-ignored files are shipped into the worker's
-  per-World session container before each command — full tree first, then
-  only changes and deletions — so remote builds and tests run on the files
-  just edited locally and their outputs persist across commands.
 - `Git` grows a `commit_plan` action: a propose-only planner that splits the
   working tree into ordered atomic commits (#3999). It groups whole files —
   lock files ride with their manifest, tests ride with the source they name —
