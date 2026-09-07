@@ -1,66 +1,36 @@
 import * as vscode from "vscode";
+import { checkConnection, listSnapshots, type ApiConfig, type ConnectionInfo } from "./api";
+import { ChatView } from "./chat";
 import {
-  checkRuntime,
-  listSnapshots,
-  listThreadSummaries,
   openCodeWhaleTerminal,
   readRuntimeConfig,
   runtimeBaseUrl,
   startRuntimeTerminal,
   type RuntimeState,
 } from "./runtime";
+import { promptForToken, resolveToken } from "./secrets";
 import { RuntimeStatusView } from "./status";
 
 export function activate(context: vscode.ExtensionContext): void {
   const output = vscode.window.createOutputChannel("CodeWhale");
   const status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
   const statusView = new RuntimeStatusView();
+  const apiConfig = async (): Promise<ApiConfig> => {
+    const config = readRuntimeConfig();
+    const token = config.token ?? (await resolveToken(context));
+    return { baseUrl: runtimeBaseUrl(config), token };
+  };
+  const chatView = new ChatView(context, apiConfig, output);
   let autoRefreshTimer: ReturnType<typeof setInterval> | undefined;
   let autoRefreshInFlight = false;
+  let lastConnectionKind: ConnectionInfo["kind"] | undefined;
 
   status.command = "codewhale.checkRuntime";
   context.subscriptions.push(output, status);
   context.subscriptions.push(
+    vscode.window.registerWebviewViewProvider(ChatView.viewType, chatView),
     vscode.window.registerWebviewViewProvider(RuntimeStatusView.viewType, statusView),
   );
-
-  const refreshAgentView = async (): Promise<void> => {
-    const config = readRuntimeConfig();
-    const threads = await listThreadSummaries(config);
-    statusView.updateThreads(threads, "Showing recent runtime threads.");
-    output.appendLine(`Loaded ${threads.length} runtime thread summaries.`);
-  };
-
-  const refreshSnapshots = async (): Promise<void> => {
-    const config = readRuntimeConfig();
-    const snapshots = await listSnapshots(config);
-    statusView.updateSnapshots(snapshots, "Showing recent restore points.");
-    output.appendLine(`Loaded ${snapshots.length} runtime restore points.`);
-  };
-
-  const refreshAgentViewDetails = async (showWarning: boolean): Promise<void> => {
-    try {
-      await refreshAgentView();
-    } catch (error: unknown) {
-      const detail = error instanceof Error ? error.message : String(error);
-      statusView.updateThreads([], "Runtime thread summaries unavailable.");
-      output.appendLine(`Runtime thread summaries unavailable: ${detail}`);
-      if (showWarning) {
-        void vscode.window.showWarningMessage(detail);
-      }
-    }
-
-    try {
-      await refreshSnapshots();
-    } catch (error: unknown) {
-      const detail = error instanceof Error ? error.message : String(error);
-      statusView.updateSnapshots([], detail);
-      output.appendLine(`Runtime restore points unavailable: ${detail}`);
-      if (showWarning) {
-        void vscode.window.showWarningMessage(detail);
-      }
-    }
-  };
 
   const updateStatus = (text: string, tooltip: string): void => {
     status.text = text;
@@ -73,17 +43,34 @@ export function activate(context: vscode.ExtensionContext): void {
     logResult: boolean,
   ): Promise<RuntimeState> => {
     const config = readRuntimeConfig();
+    const baseUrl = runtimeBaseUrl(config);
     if (showSpinner) {
       updateStatus("$(sync~spin) CodeWhale", "Checking CodeWhale runtime...");
     }
 
-    const state = await checkRuntime(config);
-    statusView.update(state);
+    let connection: ConnectionInfo;
+    try {
+      connection = await checkConnection(await apiConfig());
+    } catch (error: unknown) {
+      const detail = error instanceof Error ? error.message : String(error);
+      connection = { kind: "error", detail };
+    }
+    const state: RuntimeState = { ...connection, baseUrl };
 
-    switch (state.kind) {
+    statusView.update(state);
+    chatView.setConnection(connection);
+
+    const becameConnected =
+      connection.kind === "connected" && lastConnectionKind !== "connected";
+    lastConnectionKind = connection.kind;
+
+    switch (connection.kind) {
       case "connected":
         updateStatus("$(check) CodeWhale", state.detail);
-        await refreshAgentViewDetails(false);
+        await chatView.refreshThreads();
+        if (becameConnected) {
+          await chatView.resyncAfterConnection();
+        }
         break;
       case "auth-required":
         updateStatus("$(lock) CodeWhale", state.detail);
@@ -108,7 +95,6 @@ export function activate(context: vscode.ExtensionContext): void {
     if (autoRefreshInFlight) {
       return;
     }
-
     autoRefreshInFlight = true;
     try {
       await checkAndRefreshRuntime(false, false);
@@ -122,17 +108,15 @@ export function activate(context: vscode.ExtensionContext): void {
       clearInterval(autoRefreshTimer);
       autoRefreshTimer = undefined;
     }
-
     const intervalSeconds = readRuntimeConfig().agentViewRefreshIntervalSeconds;
     if (intervalSeconds === 0) {
-      output.appendLine("Agent View auto-refresh is disabled.");
+      output.appendLine("Auto-refresh is disabled.");
       return;
     }
-
     autoRefreshTimer = setInterval(() => {
       void runAutoRefresh();
     }, intervalSeconds * 1000);
-    output.appendLine(`Agent View auto-refresh scheduled every ${intervalSeconds}s.`);
+    output.appendLine(`Runtime auto-refresh scheduled every ${intervalSeconds}s.`);
   };
 
   updateStatus("$(terminal) CodeWhale", "Check CodeWhale runtime");
@@ -144,21 +128,24 @@ export function activate(context: vscode.ExtensionContext): void {
       }
     }),
     vscode.workspace.onDidChangeConfiguration((event) => {
-      if (event.affectsConfiguration("codewhale.agentViewRefreshIntervalSeconds")) {
+      if (
+        event.affectsConfiguration("codewhale.agentViewRefreshIntervalSeconds") ||
+        event.affectsConfiguration("codewhale.runtimeHost") ||
+        event.affectsConfiguration("codewhale.runtimePort") ||
+        event.affectsConfiguration("codewhale.runtimeToken")
+      ) {
+        lastConnectionKind = undefined;
         scheduleAutoRefresh();
+        void checkAndRefreshRuntime(false, true);
       }
     }),
   );
 
   context.subscriptions.push(
     vscode.commands.registerCommand("codewhale.openTerminal", () => {
-      const config = readRuntimeConfig();
-      openCodeWhaleTerminal(config);
-      output.appendLine(`Opened CodeWhale terminal using ${config.commandPath}.`);
+      openCodeWhaleTerminal(readRuntimeConfig());
+      output.appendLine(`Opened CodeWhale terminal using ${readRuntimeConfig().commandPath}.`);
     }),
-  );
-
-  context.subscriptions.push(
     vscode.commands.registerCommand("codewhale.startRuntime", () => {
       const config = readRuntimeConfig();
       startRuntimeTerminal(config);
@@ -167,24 +154,16 @@ export function activate(context: vscode.ExtensionContext): void {
       output.appendLine(`Started CodeWhale runtime terminal at ${baseUrl}.`);
       void vscode.window.showInformationMessage(`CodeWhale runtime starting at ${baseUrl}`);
     }),
-  );
-
-  context.subscriptions.push(
     vscode.commands.registerCommand("codewhale.checkRuntime", async () => {
       return await checkAndRefreshRuntime(true, true);
     }),
-  );
-
-  context.subscriptions.push(
     vscode.commands.registerCommand("codewhale.refreshAgentView", async () => {
-      await refreshAgentViewDetails(true);
+      await chatView.refreshThreads();
     }),
-  );
-
-  context.subscriptions.push(
     vscode.commands.registerCommand("codewhale.refreshSnapshots", async () => {
       try {
-        await refreshSnapshots();
+        const snapshots = await listSnapshots(await apiConfig());
+        statusView.updateSnapshots(snapshots, "Showing recent restore points.");
       } catch (error: unknown) {
         const detail = error instanceof Error ? error.message : String(error);
         statusView.updateSnapshots([], detail);
@@ -192,15 +171,23 @@ export function activate(context: vscode.ExtensionContext): void {
         void vscode.window.showWarningMessage(detail);
       }
     }),
-  );
-
-  context.subscriptions.push(
     vscode.commands.registerCommand("codewhale.openRuntimeDocs", () => {
       void vscode.env.openExternal(
-        vscode.Uri.parse(
-          "https://github.com/Hmbown/CodeWhale/blob/main/docs/RUNTIME_API.md",
-        ),
+        vscode.Uri.parse("https://github.com/Hmbown/CodeWhale/blob/main/docs/RUNTIME_API.md"),
       );
+    }),
+    vscode.commands.registerCommand("codewhale.ask", async () => {
+      await chatView.askWithSelection();
+    }),
+    vscode.commands.registerCommand("codewhale.newChat", async () => {
+      await chatView.reveal();
+      await chatView.newThread();
+    }),
+    vscode.commands.registerCommand("codewhale.setRuntimeToken", async () => {
+      const token = await promptForToken(context);
+      if (token !== undefined) {
+        await checkAndRefreshRuntime(true, true);
+      }
     }),
   );
 
