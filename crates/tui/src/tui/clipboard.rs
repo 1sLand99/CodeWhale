@@ -1186,7 +1186,12 @@ exit 42
             }
         });
 
-        let attach_deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        // Load-tolerant bounds, not the contract under test: on a machine
+        // running a full parallel suite, tmux server startup and OSC 52
+        // forwarding can both exceed a tight 3s wall clock (#5929). The test
+        // still verifies the *content* of what reaches the attached client;
+        // only how long it is willing to wait for a loaded machine changed.
+        let attach_deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         loop {
             let clients = Command::new("tmux")
                 .args(["-L", server.0.as_str(), "list-clients"])
@@ -1214,7 +1219,7 @@ exit 42
             format!("\x1b]52;;{encoded}\x1b\\").into_bytes(),
             format!("\x1b]52;c;{encoded}\x1b\\").into_bytes(),
         ];
-        let receipt_deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        let receipt_deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         let mut attached_output = Vec::new();
         let receipt_received = loop {
             if expected_receipts.iter().any(|receipt| {
