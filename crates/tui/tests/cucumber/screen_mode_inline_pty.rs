@@ -80,7 +80,23 @@ fn inline_start_never_takes_the_alternate_screen_and_screen_commands_switch_it()
         tui.diagnostics()
     );
 
-    // Claim 2: `/fullscreen` takes the alternate screen in-process.
+    // Claim 2: `/fullscreen` takes the alternate screen in-process. In
+    // Explore Offline the first prompt is parked by the offline queue
+    // ("Queued #1 … Enter send now"), and while a queued draft is held the
+    // composer answers to the queue — a follow-up command's Enter would
+    // send the draft instead of executing the command. Drop the queue
+    // first, exactly the way the footer tells a human to.
+    if tui.frame().contains("Queued #1") {
+        tui.send(keys::key::text("/queue drop 1"))
+            .expect("type /queue drop 1");
+        tui.send(keys::key::enter()).expect("submit /queue drop 1");
+        wait_or_panic(
+            &mut tui,
+            "Dropped queued message",
+            Duration::from_secs(20),
+            "queue drop receipt",
+        );
+    }
     tui.send(keys::key::ctrl('u')).expect("clear seeded input");
     tui.send(keys::key::text("/fullscreen"))
         .expect("type /fullscreen");
