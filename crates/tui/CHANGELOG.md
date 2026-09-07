@@ -41,9 +41,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Five of the load-flaky tests tracked in #5929 no longer depend on shared
+  state or live local daemons. Background-hook capture tests wait for the
+  capture file to hold bytes instead of merely existing (the shell's `>`
+  redirection creates the file empty before `cat` writes, which read as
+  `valid JSON: EOF` under load); the session-picker acceptance test drives
+  the real picker over a private store instead of a process-global
+  `CODEWHALE_HOME` redirect that concurrent tests could observe mid-flight;
+  the DeepSeek-Anthropic translate test holds the test env barrier so its
+  request-time and assertion-time `max_tokens` reads cannot straddle another
+  test's `CODEWHALE_MAX_OUTPUT_TOKENS` override; the unit-test binary no
+  longer probes a real local Ollama daemon (`127.0.0.1:11434`) from the
+  fire-and-forget provider catalog refresh, whose merged tags could flip
+  another test's live-snapshot assertions; and the tmux clipboard test's
+  attach/OSC 52 wait bounds tolerate a fully loaded machine (3s -> 30s)
+  without changing what they verify (#5929).
 - The posture bar states how long the session has been working and how long
-  the current turn has run, distinguishing actively working from waiting on a
-  tool, a sub-agent or the operator; the 0.9.12 shell had dropped the overall
+  the current turn has run, distinguishing actively working from waiting on
+  a tool, a sub-agent or the operator; the 0.9.12 shell had dropped the overall
   working-time indicator from the place a glancing user checks (#5914).
 
 ### Added

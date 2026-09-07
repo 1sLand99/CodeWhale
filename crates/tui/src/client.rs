@@ -2669,52 +2669,69 @@ impl DeepSeekClient {
     /// native `GET /api/tags`. The refresh is non-fatal: on failure,
     /// existing/bundled rows remain available.
     pub fn spawn_active_provider_catalog_refresh(config: &Config) {
-        let provider = config.api_provider();
-        // Only refresh for providers that serve their own model list and are
-        // not already covered by the Models.dev catalog.
-        if !matches!(
-            provider,
-            ApiProvider::Telecomjs
-                | ApiProvider::Edenai
-                | ApiProvider::Concentrate
-                | ApiProvider::Codewhale
-                | ApiProvider::Ollama
-        ) {
+        // Never probe a real provider endpoint from the unit-test binary
+        // (#5929). The spawned task merges whatever a live local daemon (for
+        // Ollama, `127.0.0.1:11434`) answers with into the process-wide
+        // provider lake, unsynchronized with `provider_lake::lock_live_snapshot`
+        // — a developer machine running Ollama can therefore change another
+        // test's catalog assertions mid-flight. Catalog refresh behavior is
+        // covered against stubbed endpoints (`fetch_catalog_delta_*`,
+        // `refresh_catalog_cache_*`); the fire-and-forget spawn adds no
+        // coverage that would justify a live probe.
+        #[cfg(test)]
+        {
+            let _ = config;
             return;
         }
-
-        let client = match DeepSeekClient::new(config) {
-            Ok(client) => client,
-            Err(err) => {
-                tracing::debug!(
-                    target: "provider_catalog",
-                    error = %err,
-                    "skipping provider catalog refresh: client creation failed"
-                );
+        #[cfg(not(test))]
+        {
+            let provider = config.api_provider();
+            // Only refresh for providers that serve their own model list and are
+            // not already covered by the Models.dev catalog.
+            if !matches!(
+                provider,
+                ApiProvider::Telecomjs
+                    | ApiProvider::Edenai
+                    | ApiProvider::Concentrate
+                    | ApiProvider::Codewhale
+                    | ApiProvider::Ollama
+            ) {
                 return;
             }
-        };
 
-        tokio::spawn(async move {
-            match client.fetch_catalog_delta().await {
-                Ok(delta) => {
-                    let count = delta.offerings.len();
-                    crate::provider_lake::merge_live_offerings(delta.offerings);
-                    tracing::debug!(
-                        target: "provider_catalog",
-                        offering_count = count,
-                        "provider catalog refresh merged {count} offerings into provider lake"
-                    );
-                }
+            let client = match DeepSeekClient::new(config) {
+                Ok(client) => client,
                 Err(err) => {
                     tracing::debug!(
                         target: "provider_catalog",
-                        error = ?err,
-                        "provider catalog refresh failed; keeping existing rows"
+                        error = %err,
+                        "skipping provider catalog refresh: client creation failed"
                     );
+                    return;
                 }
-            }
-        });
+            };
+
+            tokio::spawn(async move {
+                match client.fetch_catalog_delta().await {
+                    Ok(delta) => {
+                        let count = delta.offerings.len();
+                        crate::provider_lake::merge_live_offerings(delta.offerings);
+                        tracing::debug!(
+                            target: "provider_catalog",
+                            offering_count = count,
+                            "provider catalog refresh merged {count} offerings into provider lake"
+                        );
+                    }
+                    Err(err) => {
+                        tracing::debug!(
+                            target: "provider_catalog",
+                            error = ?err,
+                            "provider catalog refresh failed; keeping existing rows"
+                        );
+                    }
+                }
+            });
+        }
     }
 
     /// Generate speech with Xiaomi MiMo TTS models.
@@ -8312,6 +8329,14 @@ mod tests {
 
     #[tokio::test]
     async fn deepseek_anthropic_translate_uses_messages_endpoint() {
+        // `translate` resolves `max_tokens` when building the request and this
+        // test recomputes the same route allowance when asserting. That value
+        // reads `CODEWHALE_MAX_OUTPUT_TOKENS`/`DEEPSEEK_MAX_OUTPUT_TOKENS` from
+        // the process environment, so a concurrent test that redirects either
+        // variable between the two reads flips one side and fails the
+        // assertion (#5929). Hold the test env barrier for the whole request
+        // so both reads observe one stable environment.
+        let _env_lock = crate::test_support::lock_test_env();
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v1/messages"))
