@@ -36,6 +36,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The built-in Computer Use plugin bundle is refreshed to the standalone
+  plugin's 0.2.0 runtime (vendored from `Hmbown/codewhale-cu-plugin` @
+  `906b433`): the native macOS accessibility backend with an
+  a11y-first pointer strategy (covered points are refused, previews are
+  drawn), the permission-owning desktop-app socket transport, remote
+  computers over ssh and HarmonyOS HDC with contained temp handling,
+  truthful win32 PowerShell failure reporting, and the shared
+  allow-listed request handler for the app socket and ssh agent. The
+  embed list gained the five new runtime files, and a consistency test
+  now pins the embed list to the vendored tree so the bundle cannot rot
+  silently again. Because the bundle's content hash changes, Computer
+  Use deactivates and asks for a fresh review after upgrading — that is
+  the designed fail-closed path for a desktop-driving plugin. The
+  desktop app itself stays an opt-in install from the plugin
+  distribution; the bundled server runs direct mode and says how to get
+  the app.
 - `/statusline` drives the bottom chrome again. Since the 0.9.12 shell
   redesign the posture bar and the metrics line were built independently of
   `tui.status_items`, so every toggle in the picker except the balance fetch
