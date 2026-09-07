@@ -18727,6 +18727,27 @@ fn final_tool_scenario() {
             json!({"raw_arguments": "{not json"})
         );
     }
+    // A `write` whose stream was cut at its output limit, right after a
+    // complete string value. `arg_repair` CAN make this parse by appending
+    // one `}`, and before the repair ladder reported provenance that guess
+    // was dispatched — writing a file containing only "first line" while the
+    // model was still mid-argument. It must now take the malformed path, so
+    // the model is told to re-issue instead.
+    {
+        let state = tool_state(json!({}), r#"{"path": "notes.md", "content": "first line""#);
+        assert_eq!(
+            final_tool_input(&state),
+            json!({"raw_arguments": r#"{"path": "notes.md", "content": "first line""#}),
+            "a truncated write must not be dispatched as a completed argument"
+        );
+    }
+    // The guard must not fire on arguments that were merely sloppy: a
+    // trailing comma is structurally complete and still has to dispatch, or
+    // every DeepSeek chunk-boundary repair would start failing tool calls.
+    {
+        let state = tool_state(json!({}), r#"{"command": "ls -la",}"#);
+        assert_eq!(final_tool_input(&state), json!({"command": "ls -la"}));
+    }
 }
 
 // === #103 transparent stream-retry policy =====================================

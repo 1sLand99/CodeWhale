@@ -4710,12 +4710,17 @@ impl Engine {
                                     tool_state.name, partial_json, tool_state.input_buffer
                                 ));
                             }
-                            if let Some(value) = parse_tool_input(&tool_state.input_buffer) {
-                                tool_state.input = value.clone();
+                            // Mid-stream mirror of a partial buffer. The
+                            // argument text is *expected* to be incomplete
+                            // here, so `structure_synthesized` is ignored on
+                            // purpose; ContentBlockStop below is where an
+                            // unfinished argument becomes an error.
+                            if let Some(parsed) = parse_tool_input(&tool_state.input_buffer) {
+                                tool_state.input = parsed.value.clone();
                                 if crate::logging::is_verbose() {
                                     crate::logging::info(format!(
                                         "Tool '{}' input parsed: {:?}",
-                                        tool_state.name, value
+                                        tool_state.name, parsed.value
                                     ));
                                 }
                             }
@@ -4765,8 +4770,10 @@ impl Engine {
                             tool_state.name, tool_state.input_buffer, tool_state.input
                         ));
                         if !tool_state.input_buffer.trim().is_empty() {
-                            if let Some(value) = parse_tool_input(&tool_state.input_buffer) {
-                                tool_state.input = value;
+                            let final_parse = parse_tool_input(&tool_state.input_buffer)
+                                .filter(|parsed| !parsed.structure_synthesized);
+                            if let Some(parsed) = final_parse {
+                                tool_state.input = parsed.value;
                                 crate::logging::info(format!(
                                     "Tool '{}' final input: {:?}",
                                     tool_state.name, tool_state.input
