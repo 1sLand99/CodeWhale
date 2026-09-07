@@ -1811,6 +1811,20 @@ pub struct TuiConfig {
     /// in `~/.deepseek/config.toml`.
     #[serde(default, deserialize_with = "deser_status_items")]
     pub status_items: Option<Vec<StatusItem>>,
+    /// How much of the posture bar — the first row under the composer — to
+    /// paint: `full` (default), `compact`, or `hidden`. `hidden` gives the
+    /// row back to the transcript; `compact` keeps the row and starts its
+    /// shed ladder past the clocks, counts and hints (#5950).
+    ///
+    /// `status_items` still composes what is *in* the row; this only decides
+    /// the row's size. Absent from an older `config.toml` means `full`.
+    #[serde(default)]
+    pub posture_bar: Option<ChromeRowPreset>,
+    /// The same three settings for the metrics line under the posture bar.
+    /// `compact` keeps the route, the context reading, the cost and the
+    /// balance and drops the telemetry and the help hint (#5950).
+    #[serde(default)]
+    pub metrics_line: Option<ChromeRowPreset>,
     /// Ordered list of optional header items the user wants visible.
     ///
     /// `None` (the field missing from `config.toml`) preserves the built-in
@@ -1858,6 +1872,52 @@ pub struct TuiConfig {
     /// `true` only when mouse capture is off; otherwise `false`.
     #[serde(default)]
     pub composer_arrows_scroll: Option<bool>,
+}
+
+/// How much of one bottom-chrome row to paint (#5950). One value for each
+/// of the two rows under the composer — [`TuiConfig::posture_bar`] and
+/// [`TuiConfig::metrics_line`] — so a small tmux pane can give one or both
+/// rows back to the transcript without touching `status_items`.
+///
+/// `compact` is not a second renderer: it starts the row's existing shed
+/// ladder at a fixed rung and lets width shed the rest, so what it keeps is
+/// exactly what a narrow row keeps.
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ChromeRowPreset {
+    /// Every fact the row owns, shed only by width.
+    #[default]
+    Full,
+    /// The row's shed ladder started past its most expendable rungs.
+    Compact,
+    /// No row: the transcript takes the line.
+    Hidden,
+}
+
+impl ChromeRowPreset {
+    /// Every setting value, in the order `/config` names them.
+    pub const SETTINGS: [&'static str; 3] = ["full", "compact", "hidden"];
+
+    /// Stable name used in `config.toml` and `/config`.
+    #[must_use]
+    pub const fn as_setting(self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::Compact => "compact",
+            Self::Hidden => "hidden",
+        }
+    }
+
+    /// Reverse of [`Self::as_setting`]; `None` for anything else.
+    #[must_use]
+    pub fn from_setting(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "full" => Some(Self::Full),
+            "compact" => Some(Self::Compact),
+            "hidden" => Some(Self::Hidden),
+            _ => None,
+        }
+    }
 }
 
 /// High-level notification trigger override. See

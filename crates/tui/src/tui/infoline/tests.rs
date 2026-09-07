@@ -212,6 +212,70 @@ fn infoline_sheds_rate_then_ttft_then_tokens_then_help_then_cost() {
     }
 }
 
+/// `tui.metrics_line = "compact"` (#5950) is the row after its first shed
+/// rungs, at any width: the telemetry (`tok/s`, `ttft`, `↓ tokens`) and
+/// the help hint are gone before width is consulted, the route, the
+/// context reading and the cost stay, and the hitboxes follow the same
+/// pass so a click still lands on what painted.
+#[test]
+fn infoline_compact_drops_the_telemetry_and_help_before_width_does() {
+    let segments = work_segments();
+    let hint = help_hint();
+    let compact_row = |width: u16| -> (String, Vec<InfoSegmentId>) {
+        let backend = TestBackend::new(width, 1);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        let mut ids = Vec::new();
+        terminal
+            .draw(|frame| {
+                let info = InfoLine::new(&UI_THEME, &hint, &segments).compact(true);
+                ids = infoline_hitboxes(&info, frame.area())
+                    .into_iter()
+                    .map(|hitbox| hitbox.id)
+                    .collect();
+                use ratatui::widgets::Widget;
+                Widget::render(info, frame.area(), frame.buffer_mut());
+            })
+            .expect("draw");
+        let row = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol().to_string())
+            .collect::<String>();
+        (row, ids)
+    };
+    let (wide, ids) = compact_row(160);
+    assert_eq!(
+        wide.trim_end(),
+        "deepseek-v4 · ctx 61% · $0.42",
+        "compact keeps the route, the reading and the price: {wide:?}"
+    );
+    assert_eq!(
+        ids,
+        vec![
+            InfoSegmentId::Model,
+            InfoSegmentId::Context,
+            InfoSegmentId::Cost
+        ]
+    );
+    for w in 24..=180u16 {
+        let (row, _) = compact_row(w);
+        for gone in ["tok/s", "ttft", "1.2K", "help"] {
+            assert!(
+                !row.contains(gone),
+                "{w}: compact never paints {gone}: {row:?}"
+            );
+        }
+        assert!(
+            row.contains("deepseek-v4") && row.contains("ctx 61%"),
+            "{w}: the floor still never sheds: {row:?}"
+        );
+    }
+    // The full row at the same width is the row the user had before.
+    assert!(render_row(&UI_THEME, 160, &segments).contains("tok/s"));
+}
+
 /// At the 80% cap the context reading takes the error token — the caller
 /// picks the ink, and the row paints it on both the label and the value.
 #[test]

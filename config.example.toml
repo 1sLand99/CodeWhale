@@ -1153,6 +1153,17 @@ osc8_links = true            # emit OSC 8 escapes around URLs (Cmd+click in iTer
 # git_branch, last_tool_elapsed, rate_limit — they drove nothing. Old files
 # keep loading; the retired keys are ignored.
 # status_items = ["mode", "model", "context_percent", "cost", "tokens"]
+# Size presets for the two rows themselves (#5950) — composition stays in
+# status_items; these only decide how much of a row paints:
+# posture_bar = "full"          # full | compact | hidden (default full)
+#                               # compact keeps the posture chips (and the cap
+#                               # warning) and drops the clocks, counts and hint;
+#                               # hidden gives the row to the transcript.
+# metrics_line = "full"         # full | compact | hidden (default full)
+#                               # compact keeps the route, context reading, cost
+#                               # and balance and drops the telemetry and the
+#                               # help hint; hidden gives the row to the transcript.
+#                               # Also settable at runtime: /config posture_bar compact
 # notification_condition = "unfocused" # unfocused | always | never
 #                                    "unfocused" = notify only after this terminal has been
 #                                    in the background for two seconds (default);

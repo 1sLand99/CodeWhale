@@ -322,6 +322,8 @@ fn show_single_setting(app: &App, key: &str) -> CommandResult {
             app.active_context_window_source.display_label(),
         )),
         "stream_chunk_timeout_secs" => Some(app.stream_chunk_timeout_secs.to_string()),
+        "posture_bar" => Some(app.posture_bar.as_setting().to_string()),
+        "metrics_line" => Some(app.metrics_line.as_setting().to_string()),
         "locale" | "language" => Some(locale_display(app.ui_locale).to_string()),
         "theme" | "ui_theme" => Some(
             if app
@@ -866,6 +868,20 @@ fn config_editability_audit(app: &App) -> CommandResult {
             "runtime+persisted",
             "/config stream_chunk_timeout_secs <0|1..3600> --save",
             "Writes [tui].stream_chunk_timeout_secs and updates the running stream timeout.",
+        ),
+        (
+            "posture_bar",
+            app.posture_bar.as_setting().to_string(),
+            "runtime+persisted",
+            "/config posture_bar <full|compact|hidden> --save",
+            "Writes [tui].posture_bar; hidden gives the row to the transcript, compact keeps the posture chips only.",
+        ),
+        (
+            "metrics_line",
+            app.metrics_line.as_setting().to_string(),
+            "runtime+persisted",
+            "/config metrics_line <full|compact|hidden> --save",
+            "Writes [tui].metrics_line; hidden gives the row to the transcript, compact drops the telemetry and help hint.",
         ),
         (
             "subagents.enabled",
@@ -2363,6 +2379,40 @@ pub fn set_config_value(app: &mut App, key: &str, value: &str, persist: bool) ->
             return CommandResult::error(
                 "provider_url must be saved with --save; client base URL is loaded from config on startup. Restart and re-open your session after saving.",
             );
+        }
+        // The two bottom-chrome rows' size presets (`tui.posture_bar`,
+        // `tui.metrics_line`, #5950). Live on the next frame; `--save`
+        // writes the `[tui]` key. `/statusline` composes what is in a row;
+        // this only decides whether and how much of it paints.
+        row_key @ ("posture_bar" | "metrics_line") => {
+            let Some(preset) = crate::config::ChromeRowPreset::from_setting(value) else {
+                return CommandResult::error(format!(
+                    "{row_key} must be one of: {}",
+                    crate::config::ChromeRowPreset::SETTINGS.join(", ")
+                ));
+            };
+            if row_key == "posture_bar" {
+                app.posture_bar = preset;
+            } else {
+                app.metrics_line = preset;
+            }
+            app.needs_redraw = true;
+            let value = preset.as_setting();
+            if persist {
+                return match persist_table_string_key(
+                    app.config_path.as_deref(),
+                    "tui",
+                    row_key,
+                    value,
+                ) {
+                    Ok(path) => CommandResult::message(format!(
+                        "{row_key} = {value} (saved to {})",
+                        path.display()
+                    )),
+                    Err(err) => CommandResult::error(format!("Failed to save: {err}")),
+                };
+            }
+            return CommandResult::message(format!("{row_key} = {value} (session only)"));
         }
         "stream_chunk_timeout_secs" => {
             let raw = match value.trim().parse::<u64>() {
@@ -4820,6 +4870,68 @@ context_window = 262144
             result.action,
             Some(AppAction::UpdateStreamChunkTimeout(120))
         ));
+    }
+
+    /// The bottom-chrome row presets (#5950) apply on the next frame and
+    /// `--save` writes the `[tui]` key; an unknown preset names the three.
+    #[test]
+    fn config_command_row_presets_apply_live_and_persist_to_tui_table() {
+        use crate::config::ChromeRowPreset;
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let temp_root = env::temp_dir().join(format!(
+            "codewhale-tui-row-presets-test-{}-{}",
+            std::process::id(),
+            nanos
+        ));
+        fs::create_dir_all(&temp_root).unwrap();
+        let _guard = EnvGuard::new(&temp_root);
+        let config_path = temp_root.join("custom-config.toml");
+        let mut app = create_test_app();
+        app.config_path = Some(config_path.clone());
+        assert_eq!(app.posture_bar, ChromeRowPreset::Full);
+        assert_eq!(app.metrics_line, ChromeRowPreset::Full);
+
+        let live = config_command(&mut app, Some("posture_bar compact"));
+        assert!(!live.is_error, "{live:?}");
+        assert_eq!(app.posture_bar, ChromeRowPreset::Compact);
+        assert_eq!(
+            live.message.as_deref(),
+            Some("posture_bar = compact (session only)")
+        );
+        assert_eq!(
+            config_command(&mut app, Some("posture_bar"))
+                .message
+                .as_deref(),
+            Some("posture_bar = compact")
+        );
+
+        let saved = config_command(&mut app, Some("metrics_line HIDDEN --save"));
+        assert!(!saved.is_error, "{saved:?}");
+        assert_eq!(app.metrics_line, ChromeRowPreset::Hidden);
+        let body = fs::read_to_string(&config_path).unwrap();
+        assert!(body.contains("[tui]"), "{body}");
+        assert!(body.contains("metrics_line = \"hidden\""), "{body}");
+        assert!(
+            !body.contains("posture_bar"),
+            "session-only value must not be saved: {body}"
+        );
+
+        let bad = config_command(&mut app, Some("metrics_line tiny"));
+        assert!(bad.is_error);
+        assert!(
+            bad.message
+                .as_deref()
+                .is_some_and(|m| m.contains("metrics_line must be one of: full, compact, hidden")),
+            "{bad:?}"
+        );
+        assert_eq!(
+            app.metrics_line,
+            ChromeRowPreset::Hidden,
+            "a bad value changes nothing"
+        );
     }
 
     #[test]

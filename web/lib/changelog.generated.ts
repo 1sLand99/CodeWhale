@@ -37,6 +37,7 @@ export const CHANGELOG: ChangelogRelease[] = [
       {
         "heading": "Fixed",
         "items": [
+          "Bottom-chrome effort is omitted when the route cannot prove an effective tier; /status retains the full explanation. Cost remains visible when known, and cost: unknown remains on metered routes lacking a reading (#5950).",
           "Pasting multiline text is one paste again. 0.9.12 gated the paste-burst heuristic off whenever bracketed paste was *requested*, but a terminal can accept EnableBracketedPaste and still deliver a paste as individual keystrokes — on those terminals (observed on Windows 11) every pasted line was submitted as its own message. The heuristic is again armed whenever tui.paste_burst_detection is on, and the existing bracketed_paste_seen guard still disarms it for the rest of the…",
           "serve --acp no longer breaks strict JetBrains clients: the initialize response advertised sessionCapabilities.list as a boolean and carried an undefined nested load capability; it now sends {\"list\": {}} with no load key, per the ACP schema (#5969, reported by @Lujc0523).",
           "Concurrent Codewhale instances no longer destroy each other's queued, unsent text. The offline input queue was one global file that boot cleared on session-id mismatch, so a second instance deleted the first's parked messages. Queues are now keyed per session (mirroring per-session checkpoints), an existing global file is adopted by its owning session rather than discarded, and the adoption race between two instances of the same session tolerates the loser's cleanup.",
@@ -46,7 +47,7 @@ export const CHANGELOG: ChangelogRelease[] = [
           "allow_insecure_http = true under a [providers.<name>] table works again. 0.9.12 tightened plain-HTTP base URL handling in a way that silently dropped the per-provider key, leaving the process-wide env var as the only opt-in — LAN llama.cpp and internal-gateway users had to export CODEWHALE_ALLOW_INSECURE_HTTP=1 to connect at all. The key is honored again (parsed, settable and unsettable through codewhale config set providers.<name>.allow_insecure_http, and listed in the…",
           "A Fleet task that selects a roster member with worker.agent_profile now runs with that member's posture. The launch-time resolver only consulted the resolved member when the legacy worker.role label was absent, so a task labelled manager that selected member:reviewer ran as a write-capable manager instead of a reviewer and was never leased. The member's canonical slot now wins whenever one resolved; the label remains the posture only when no member resolved at all. To keep…"
         ],
-        "itemCount": 8
+        "itemCount": 9
       },
       {
         "heading": "Changed",
@@ -73,6 +74,8 @@ export const CHANGELOG: ChangelogRelease[] = [
       {
         "heading": "Added",
         "items": [
+          "[tui].posture_bar and [tui].metrics_line accept full, compact, or hidden, also available through /config. Compact preserves the existing rows' essential fields; hidden returns their space to the transcript (#5973).",
+          "Optional model-bound tool-output redaction opt-out, with two explicit startup confirmations and a receipt bound to the readable config contents and modification time. Unconfirmed requests keep masking enabled; routing and stored goal summaries remain redacted (#5982, thanks @SparkofSpike).",
           "The rusty-alloc cargo feature on codewhale-tui and codewhale-cli opts the binaries into the rusty_alloc global allocator (the mimalloc v2.4.5 architecture remade in pure Rust — no C compiler or build script on that path) instead of the default mimalloc. It is off by default and the default build is unchanged; build with cargo build -p codewhale-tui --features rusty-alloc (#5872).",
           "The /theme picker now discovers valid user-authored custom:<name> overlays, previews their colors, highlights the active overlay, and preserves it when the picker is opened and committed without navigation (#5901).",
           "Compaction has two standing knobs next to [context] in config.toml: [compaction] summary_instructions (appended to the summarizer prompt on every manual and automatic pass; /compact <focus> still composes after it) and [compaction] retained_user_message_tokens (default 20 000, clamped 2 000..=200 000) for the verbatim user-message budget. Both are absent by default and absent means the pre-existing behavior. The /compact receipt names the effective budget and whether…",
@@ -82,11 +85,9 @@ export const CHANGELOG: ChangelogRelease[] = [
           "/fleet presents its prioritized core (members, setup, teams, workers, help); every other verb stays dispatchable and is documented under explicit groups in /fleet help. The roster no longer shows the untouched built-in general alias next to worker (#5888).",
           "codewhale provider: account-backed model access over the provider keys a customer connected to their Codewhale account. One base URL (https://api.codewhale.net/v1, overridable with CODEWHALE_API_BASE; HTTPS required except on loopback), one cwc_key_… account API key with the models:infer scope (CODEWHALE_API_KEY), and a per-model wire chosen from the account's authenticated GET /v1/models: ids are provider/model and each row states chat-completions (/v1/chat/completions) or…",
           "codewhale account api-keys create --scope now accepts models:infer alongside account:read and agent:run, and an omitted --scope sends all three explicitly. --use saves the new secret as this machine's local codewhale provider credential in the same secret store codewhale auth uses; nothing is uploaded.",
-          "sandbox_backend = \"shannon\": shell commands run as signed ShannonNet capability invocations (cap://sandbox/exec) on a worker that may live on another tailnet node. Codewhale opens a Task World per session for its durable codewhale Agent and every command leaves a receipt in shannon trace. New keys sandbox_shannon_home and sandbox_shannon_capability; tool metadata now reports the actual external backend kind instead of always opensandbox.",
-          "/shannon [world|trace|children] inspects the session's ShannonNet World: agent, projected capabilities, children, and receipts.",
-          "ShannonNet sub-agents get compiled context: the session's native-memory hits are imported with provenance and the child's projected World decides what it sees (confidential notes never cross); the session World is checkpointed and closed when the backend drops."
+          "sandbox_backend = \"shannon\": shell commands run as signed ShannonNet capability invocations (cap://sandbox/exec) on a worker that may live on another tailnet node. Codewhale opens a Task World per session for its durable codewhale Agent and every command leaves a receipt in shannon trace. New keys sandbox_shannon_home and sandbox_shannon_capability; tool metadata now reports the actual external backend kind instead of always opensandbox."
         ],
-        "itemCount": 15
+        "itemCount": 17
       },
       {
         "heading": "Contributors",

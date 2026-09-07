@@ -14,16 +14,27 @@ pub(crate) fn info_context_percent(app: &App) -> u8 {
     crate::tui::phase_strip::context_percent_from_app(app)
 }
 
-/// The session cost as the one price string every surface prints
-/// (SHELL-DESIGN-20260901 §2.11 item 5): the metrics line, the roster's
-/// right column, the price widget and the turn summary all read this. Empty
-/// until the session has a priced or counted turn.
+/// The session cost as the metrics line prints it — the same price string
+/// `/cost`, the roster's right column and the price widget print
+/// (SHELL-DESIGN-20260901 §2.11 item 5). Empty until the session has a
+/// priced or counted turn.
+///
+/// `cost: unknown` (#5578) stays wherever a price *could* exist and this
+/// session simply lacks one — a metered route whose model has no price
+/// table, a legacy session with unrecorded coverage, turns the pricer could
+/// not cover. It is omitted only when the route itself cannot be priced at
+/// all ([`BillingPresentation::Unknown`]: a custom OpenAI-compatible
+/// endpoint with no pay mode, an unclassified gateway), where the words
+/// would be permanent noise rather than a reading (#5950).
+///
+/// [`BillingPresentation::Unknown`]: crate::route_billing::BillingPresentation::Unknown
 pub(crate) fn session_cost_label(app: &App) -> String {
+    use crate::route_billing::{BillingPresentation, UsageChip};
     let usage_chip = app.cumulative_usage_chip();
     match &usage_chip {
-        crate::route_billing::UsageChip::Money(amount) => Some(amount.clone()),
-        crate::route_billing::UsageChip::PricedSubtotal { .. }
-        | crate::route_billing::UsageChip::Unknown => {
+        UsageChip::Money(amount) => Some(amount.clone()),
+        UsageChip::Unknown if app.billing_presentation == BillingPresentation::Unknown => None,
+        UsageChip::PricedSubtotal { .. } | UsageChip::Unknown => {
             crate::route_billing::format_usage_chip(&usage_chip)
         }
         _ => None,
@@ -335,7 +346,8 @@ fn render_info_row(f: &mut Frame, app: &mut App, area: Rect) -> InfoLineInteract
     let help_hint = crate::tui::shell_key_routing::info_help_hint(app.ui_locale);
     let info = InfoLine::new(&app.ui_theme, &help_hint, &segments)
         .ascii_safe(crate::tui::color_compat::ascii_safe_enabled())
-        .hovered(hovered);
+        .hovered(hovered)
+        .compact(app.metrics_line == crate::config::ChromeRowPreset::Compact);
     let hitboxes = infoline_hitboxes(&info, area);
     let route_area = hitboxes
         .iter()
@@ -1299,7 +1311,10 @@ pub(crate) fn render(f: &mut Frame, app: &mut App, _config: &Config) -> Option<(
     // it to the bottom (SHELL-DESIGN-20260901 §2.0) so scrolling up reads as
     // intentional. `keep_header` still governs it in mini mode — the row it
     // names moved, not the preference.
-    let info_height = if mini && !mini_cfg.keep_header {
+    // `tui.metrics_line = "hidden"` gives the row to the transcript (#5950).
+    let info_height = if (mini && !mini_cfg.keep_header)
+        || app.metrics_line == crate::config::ChromeRowPreset::Hidden
+    {
         0
     } else {
         info_row_height_for(size.height)
@@ -1313,7 +1328,10 @@ pub(crate) fn render(f: &mut Frame, app: &mut App, _config: &Config) -> Option<(
     // 6+8 collapsed; §5b `Constraint::Length(1)`): phase·cost·posture on the
     // left, depth·keys on the right. It hides with the rest of the footer
     // chrome in mini mode, never with the composer.
-    let footer_height = if mini && !mini_cfg.keep_footer {
+    // `tui.posture_bar = "hidden"` likewise (#5950).
+    let footer_height = if (mini && !mini_cfg.keep_footer)
+        || app.posture_bar == crate::config::ChromeRowPreset::Hidden
+    {
         0
     } else {
         crate::tui::phase_strip::height()
@@ -1665,10 +1683,12 @@ pub(crate) fn render(f: &mut Frame, app: &mut App, _config: &Config) -> Option<(
     if footer_height > 0 {
         let area = body_chunks[footer_slot];
         let facts = crate::tui::phase_strip::tideline_footer_from_app(app, area.width);
-        let footer = facts.widget(
-            &app.ui_theme,
-            crate::tui::color_compat::ascii_safe_enabled(),
-        );
+        let footer = facts
+            .widget(
+                &app.ui_theme,
+                crate::tui::color_compat::ascii_safe_enabled(),
+            )
+            .compact(app.posture_bar == crate::config::ChromeRowPreset::Compact);
         let buf = f.buffer_mut();
         Block::default()
             .style(Style::default().bg(app.ui_theme.footer_bg))
@@ -2383,6 +2403,109 @@ mod tests {
             row.contains("deepseek"),
             "and must take nothing else with it: {row:?}"
         );
+    }
+
+    /// A custom OpenAI-compatible route without an endpoint receipt cannot
+    /// prove its effective tier. The route segment used to print
+    /// `high→effective unavailable` — a placeholder that could never resolve
+    /// (#5950). It now states no effort field at all, while a first-party
+    /// route keeps its tier label.
+    #[test]
+    fn unprovable_effort_states_no_field_instead_of_a_placeholder() {
+        use crate::tui::phase_strip::{RouteFieldKind, route_identity_fields};
+        use crate::tui::underwater::ShellTier;
+
+        let mut app = app_with_context_percent(10);
+        app.set_provider_identity(crate::config::ApiProvider::Custom, "my-gateway");
+        app.auto_model = false;
+        app.active_route_base_url = "https://gateway.example/v1".to_string();
+        app.model = "vendor-model-x".to_string();
+        app.reasoning_effort = crate::tui::app::ReasoningEffort::High;
+        assert_eq!(
+            app.reasoning_effort_display_label(),
+            "high→effective unavailable",
+            "the full label still tells /status the truth"
+        );
+        assert_eq!(app.provable_reasoning_effort_label(), None);
+        let fields = route_identity_fields(&app, ShellTier::Wide, 200).expect("route fields");
+        assert!(
+            fields
+                .iter()
+                .all(|field| field.kind != RouteFieldKind::Effort),
+            "no effort field on an unprovable route: {fields:?}"
+        );
+        let row = metrics_row(&app, 200);
+        assert!(row.contains("vendor-model-x"), "{row:?}");
+        assert!(!row.contains("unavailable"), "{row:?}");
+        assert!(!row.contains("high"), "{row:?}");
+
+        // First-party routes are unchanged: the tier label stays.
+        let app = app_with_context_percent(10);
+        let label = app
+            .provable_reasoning_effort_label()
+            .expect("a first-party route proves its tier");
+        assert_eq!(label, app.reasoning_effort_display_label());
+        let fields = route_identity_fields(&app, ShellTier::Wide, 200).expect("route fields");
+        assert!(
+            fields
+                .iter()
+                .any(|field| field.kind == RouteFieldKind::Effort && field.text == label),
+            "{fields:?}"
+        );
+    }
+
+    /// `cost: unknown` (#5578) stays wherever a price could exist — a
+    /// metered route whose coverage this session lacks — and is omitted
+    /// only where nothing about the route can be priced (#5950).
+    #[test]
+    fn cost_is_omitted_only_where_the_route_cannot_be_priced() {
+        use crate::route_billing::BillingPresentation;
+        let mut app = app_with_context_percent(10);
+        app.session.cost_coverage_unknown_legacy = true;
+
+        app.billing_presentation = BillingPresentation::Metered;
+        assert!(matches!(
+            app.cumulative_usage_chip(),
+            crate::route_billing::UsageChip::Unknown
+        ));
+        assert_eq!(super::session_cost_label(&app), "cost: unknown");
+        let row = metrics_row(&app, 200);
+        assert!(
+            row.contains("cost: unknown"),
+            "a priceable route keeps the honesty: {row:?}"
+        );
+
+        app.billing_presentation = BillingPresentation::Unknown;
+        assert!(matches!(
+            app.cumulative_usage_chip(),
+            crate::route_billing::UsageChip::Unknown
+        ));
+        assert_eq!(super::session_cost_label(&app), "");
+        let ids: Vec<InfoSegmentId> = super::info_segments(&app, 200)
+            .iter()
+            .map(|segment| segment.id)
+            .collect();
+        assert!(!ids.contains(&InfoSegmentId::Cost), "{ids:?}");
+        let row = metrics_row(&app, 200);
+        assert!(
+            !row.contains("cost"),
+            "an unpriceable route states no price: {row:?}"
+        );
+        assert!(row.contains("ctx 10%"), "and nothing else moves: {row:?}");
+
+        // A real price on an otherwise unclassified route still prints.
+        app.session.cost_coverage_unknown_legacy = false;
+        app.session.cost_priced_turns = 1;
+        app.session.session_cost = 0.42;
+        assert!(
+            matches!(
+                app.cumulative_usage_chip(),
+                crate::route_billing::UsageChip::Money(_)
+            ),
+            "{:?}",
+            app.cumulative_usage_chip()
+        );
+        assert!(!super::session_cost_label(&app).is_empty());
     }
 
     /// Every remaining status item owns a segment, and an empty list leaves

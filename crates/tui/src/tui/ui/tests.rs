@@ -7751,6 +7751,8 @@ fn terminal_probe_timeout_uses_tui_config_and_clamps() {
             stream_max_content_mb: None,
             stream_max_duration_secs: None,
             status_items: None,
+            posture_bar: None,
+            metrics_line: None,
             header_items: None,
             osc8_links: None,
             notification_condition: None,

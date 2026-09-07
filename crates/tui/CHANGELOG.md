@@ -17,6 +17,10 @@ with an accessibility-first pointer.
 
 ### Fixed
 
+- Bottom-chrome effort is omitted when the route cannot prove an effective
+  tier; `/status` retains the full explanation. Cost remains visible when
+  known, and `cost: unknown` remains on metered routes lacking a reading (#5950).
+
 - Pasting multiline text is one paste again. 0.9.12 gated the
   paste-burst heuristic off whenever bracketed paste was *requested*, but
   a terminal can accept `EnableBracketedPaste` and still deliver a paste
@@ -172,6 +176,14 @@ with an accessibility-first pointer.
   the login remedy stays named (#5926; remedy wording landed in #5959).
 
 ### Added
+
+- `[tui].posture_bar` and `[tui].metrics_line` accept `full`, `compact`, or
+  `hidden`, also available through `/config`. Compact preserves the existing
+  rows' essential fields; hidden returns their space to the transcript (#5973).
+- Optional model-bound tool-output redaction opt-out, with two explicit startup
+  confirmations and a receipt bound to the readable config contents and
+  modification time. Unconfirmed requests keep masking enabled; routing and
+  stored goal summaries remain redacted (#5982, thanks @SparkofSpike).
 
 - The `rusty-alloc` cargo feature on `codewhale-tui` and `codewhale-cli`
   opts the binaries into the `rusty_alloc` global allocator (the mimalloc
