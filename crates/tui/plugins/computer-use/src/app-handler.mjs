@@ -69,6 +69,17 @@ export function closeSession(sessionId, computerId = "local") {
   return releaseSessionInput(sessionId, computerId, { close: true });
 }
 
+/**
+ * A freshly granted session owner supersedes a closed-session tombstone:
+ * without this, a daemon that re-leases a session id (the old owner socket
+ * died with the previous daemon) would keep aborting every request on it.
+ * In-flight requests from the dead owner stay aborted; the tombstone is the
+ * only thing removed.
+ */
+export function reopenSession(sessionId, computerId = "local") {
+  sessions.delete(`${computerId}:${sessionId}`);
+}
+
 export function closeAllSessions() {
   return Promise.allSettled([...sessions.keys()].map((key) => {
     const colon = key.indexOf(":");

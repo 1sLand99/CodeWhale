@@ -82,6 +82,9 @@ export function appRequest(request, options) { return requestConnection(request,
 // A live socket is the session owner, independent of short-lived cancellable
 // request sockets. The OS closes it even if the MCP process is killed; no PID
 // lookup or reuse-prone process identity is needed to release held input.
+// When the socket dies without close_session (an app update replaces the
+// daemon and every socket it owned), the dead lease is dropped so the next
+// request re-opens one instead of failing forever.
 const sessionLeases = new Map();
 export function openAppSession(sessionId) {
   if (!sessionLeases.has(sessionId)) {
@@ -90,12 +93,17 @@ export function openAppSession(sessionId) {
         socket.destroy();
         throw Object.assign(new ExecError(reply?.error?.message ?? "Computer session lease was refused"), { code: reply?.error?.code ?? "app_session_closed" });
       }
-      const lease = { token: reply.leaseToken, socket, closed: socket.destroyed };
-      socket.once("close", () => { lease.closed = true; });
+      const lease = { token: reply.leaseToken, socket, closed: socket.destroyed, deliberate: false };
+      socket.once("close", () => {
+        lease.closed = true;
+        if (sessionLeases.get(sessionId) === pending && !lease.deliberate) sessionLeases.delete(sessionId);
+      });
       // Library clients need not keep Node alive solely for an idle lease.
       socket.unref();
       return lease;
     });
+    // A refused or unreachable open is retried on the next request, not cached.
+    pending.catch(() => { if (sessionLeases.get(sessionId) === pending) sessionLeases.delete(sessionId); });
     sessionLeases.set(sessionId, pending);
   }
   return sessionLeases.get(sessionId);
@@ -103,10 +111,16 @@ export function openAppSession(sessionId) {
 
 export async function appSessionRequest(request, options = {}) {
   throwIfAborted(options.signal === undefined ? currentSignal() : options.signal);
-  const lease = await openAppSession(request.sessionId);
-  if (lease.closed) throw Object.assign(new ExecError("Computer session owner disconnected; restart this MCP session"), { code: "app_session_closed" });
+  let lease = await openAppSession(request.sessionId);
+  if (lease.closed) {
+    if (lease.deliberate) throw Object.assign(new ExecError("Computer session was closed; start a new session to continue"), { code: "app_session_closed" });
+    // The fresh lease is on a daemon that holds no input for this session,
+    // so nothing the old lease held can replay across the reconnect.
+    lease = await openAppSession(request.sessionId);
+    if (lease.closed) throw Object.assign(new ExecError("Computer session lease could not be re-established with the helper; retry the request"), { code: "app_session_closed" });
+  }
   try { return await appRequest({ ...request, leaseToken: lease.token }, options); }
-  finally { if (request.tool === "close_session") lease.socket.destroy(); }
+  finally { if (request.tool === "close_session") { lease.deliberate = true; lease.socket.destroy(); } }
 }
 
 /** App identity if it is running, else null. Cheap: one connect. */

@@ -391,3 +391,46 @@ test('native hit_test fails closed without a bound application', { skip: process
   assert.equal(r.status, 1);
   assert.match(r.stderr, /open_application first/);
 });
+
+test('native type verifies delivery against the focused control and fails closed on a non-text focus', { skip: process.platform !== 'darwin' }, (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cu-type-native-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const binary = path.join(dir, 'native');
+  const build = spawnSync('clang', ['-DCU_TEST=1', '-fobjc-arc', '-Os', '-framework', 'Cocoa', '-framework', 'ApplicationServices', '-framework', 'ScreenCaptureKit', '-framework', 'AVFoundation', '-framework', 'CoreMedia', '-framework', 'Vision', 'src/backends/darwin-accessibility.m', '-o', binary], { encoding: 'utf8' });
+  assert.equal(build.status, 0, build.stderr);
+  const type = (args) => spawnSync(binary, [JSON.stringify({ tool: 'inspect_type', args })], { encoding: 'utf8' });
+
+  let r = type({ text: 'world', focused: { AXRole: 'AXTextField', AXValue: 'Hello ', after: 'Hello world' } });
+  assert.equal(r.status, 0, r.stderr);
+  let receipt = JSON.parse(r.stdout);
+  assert.equal(receipt.action_sent, true);
+  assert.equal(receipt.chars, 5);
+  assert.equal(receipt.strategy, 'unicode-events');
+  assert.equal(receipt.verified, true, 'suffix match confirms delivery');
+  assert.equal(receipt.focused_role, 'AXTextField');
+  assert.ok(!('verification_required' in receipt));
+
+  r = type({ text: 'their', focused: { AXRole: 'AXTextArea', AXValue: 'I love ', after: 'I love thier' } });
+  assert.equal(JSON.parse(r.stdout).verified, true, 'the length check survives an autocorrect transform');
+
+  r = type({ text: 'x', focused: { AXRole: 'AXButton', AXTitle: 'Save' } });
+  assert.equal(r.status, 1, 'a clearly non-text focus refuses before any event is posted');
+  assert.match(r.stderr, /focused element is a AXButton, not a text control/);
+
+  for (const focused of [null, { AXRole: 'AXWebArea' }, { AXRole: 'AXSecureTextField' }, { AXRole: 'AXTextField', AXValue: 'abc' }]) {
+    r = type({ text: 'hi', focused });
+    assert.equal(r.status, 0, r.stderr);
+    receipt = JSON.parse(r.stdout);
+    assert.equal(receipt.action_sent, true, 'unverifiable readbacks still report dispatch');
+    assert.equal(receipt.verified, false);
+    assert.equal(receipt.verification_required, 'screenshot');
+  }
+  assert.equal(JSON.parse(type({ text: 'hi', focused: null }).stdout).focused_role, null);
+});
+
+test('macOS type passes the native verification receipt through untouched', async (t) => {
+  const nativeReceipt = { action_sent: true, chars: 5, strategy: 'unicode-events', keyboard_delivery: 'process', verified: false, focused_role: null, verification_required: 'screenshot' };
+  const { backend } = stubBackend(t, (r) => (r.tool === 'type' ? nativeReceipt : null));
+  await backend.open_application({ name: 'TextEdit' });
+  assert.deepEqual(await backend.type({ text: 'hello' }), nativeReceipt);
+});

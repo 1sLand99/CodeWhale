@@ -61,6 +61,10 @@ Observe once, act once, then verify.
    file path or reuse coordinates from an image the model never received.
 6. Verify with a fresh observation or a task oracle before claiming success.
    `action_sent: true` means it may already have happened — never replay.
+   On macOS `type` also reports `verified`: `false` (with
+   `verification_required: "screenshot"`) means the focused control's value
+   did not reflect the text, so confirm with a screenshot before relying on
+   the input.
 
 ## Choosing targets
 

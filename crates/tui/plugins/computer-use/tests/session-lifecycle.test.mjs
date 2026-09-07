@@ -108,7 +108,8 @@ test("helper accepts actions only while their original socket owner is alive", a
   lease.socket.destroy();
   await until(() => calls().some((item) => item.method === "release_input" && item.appName === "Lease owner"));
   assert.equal((await appRequest({ tool: "type", sessionId, leaseToken: lease.token, args: { text: "stale lease" } })).error.code, "session_owner_required");
-  await assert.rejects(appSessionRequest({ tool: "probe", sessionId }), (err) => err.code === "app_session_closed");
+  assert.equal((await appSessionRequest({ tool: "probe", sessionId })).ok, true, "a dropped owner socket re-leases transparently instead of bricking the session");
+  assert.equal((await appSessionRequest({ tool: "get_app_state", sessionId, args: { app_ref: { name: "Re-leased owner" } } })).data.name, "Re-leased owner");
   assert.ok(!calls().some((item) => item.appName === "Spoofed owner" || item.text === "stale lease"));
 });
 
@@ -227,6 +228,23 @@ test("MCP forced exit cancels its active child before delayed input can post", a
   await until(() => calls().some((item) => item.method === "child_released" && item.instance === instance));
   await until(() => calls().some((item) => item.method === "release_input" && item.appName === "Killed active host"));
   assert.ok(!calls().some((item) => item.method === "late_input"));
+});
+
+test("an app update re-leases live sessions transparently; an absent app still fails without bricking", async () => {
+  const sessionId = "upgrade-survivor";
+  assert.equal((await appSessionRequest({ tool: "get_app_state", sessionId, args: { app_ref: { name: "Survivor" } } })).ok, true);
+  const exit = new Promise((resolve) => daemon.once("exit", resolve));
+  daemon.kill("SIGTERM");
+  await exit;
+  // Mid-update the app is genuinely absent: the request fails, and that
+  // failure is not cached against the session.
+  await assert.rejects(appSessionRequest({ tool: "probe", sessionId }), (err) => err.code === "app_unavailable");
+  daemon = spawn(process.execPath, [path.join(ROOT, "app/daemon.mjs")], { env, stdio: ["ignore", "ignore", "pipe"] });
+  daemon.stderr.on("data", (data) => { daemonErrors += data; });
+  await until(async () => !!(await hello({ timeoutMs: 100 })), 5000).catch((err) => { throw new Error(`${err.message}\n${daemonErrors}`); });
+  const reply = await appSessionRequest({ tool: "get_app_state", sessionId, args: { app_ref: { name: "Survivor again" } } });
+  assert.equal(reply.ok, true, JSON.stringify(reply));
+  assert.equal(reply.data.name, "Survivor again", "the same session id works on the replacement daemon without a host reload");
 });
 
 test("MCP EOF releases a completed mouse-down and helper shutdown aborts active children", async () => {

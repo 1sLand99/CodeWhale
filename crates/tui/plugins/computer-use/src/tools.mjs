@@ -220,7 +220,7 @@ export const TOOLS = [
   },
   // ---- text & keyboard ----
   {
-    name: "type", description: "Type text into the focused control (unicode). Focus the field first (click/element action).",
+    name: "type", description: "Type text into the focused control (unicode). Focus the field first (click/element action). On macOS the receipt carries `verified:true` only when the focused control's value actually reflects the typed text; on `verified:false` the text may have gone nowhere — confirm with a screenshot before relying on it.",
     inputSchema: { type: "object", required: ["text"], properties: { text: { type: "string" }, computer: computerParam }, additionalProperties: false },
   },
   {

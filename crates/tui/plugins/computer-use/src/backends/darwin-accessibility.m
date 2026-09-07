@@ -266,6 +266,73 @@ static CGEventRef textEvent(NSString *text, BOOL down) {
   CGEventRef event=CGEventCreateKeyboardEvent(NULL,0,down);
   CGEventKeyboardSetUnicodeString(event,text.length,chars); free(chars); return event;
 }
+static BOOL cuTextRole(NSString *role) {
+  return [@[@"AXTextField",@"AXTextArea",@"AXComboBox",@"AXSearchField",@"AXSecureTextField",@"AXWebArea"] containsObject:role];
+}
+// NSString lengths are UTF-16 unit counts on both sides, so emoji compare
+// consistently. The length check survives autocorrect/IME transforms that
+// defeat the suffix check, as long as the character count is preserved.
+static BOOL cuTypeVerified(NSString *before, NSString *after, NSString *text) {
+  return after && ([after hasSuffix:text] || (before && after.length==before.length+text.length));
+}
+static id cuFocusedElement(pid_t pid) {
+  AXUIElementRef appEl=AXUIElementCreateApplication(pid);
+  AXUIElementSetMessagingTimeout(appEl,2.0);
+  id focused=attr(appEl,@"AXFocusedUIElement");
+  CFRelease(appEl);
+  return focused;
+}
+/**
+ * Type into whatever holds focus in the bound app, then prove it landed.
+ * Dispatch succeeding is not delivery (a process with no text receiver drops
+ * the events silently), so the receipt reports `verified` from the focused
+ * control's own value. Failure to verify is reported, not thrown — the events
+ * already went out. The one throw is before any event is posted: a focused
+ * element that is clearly not a text control.
+ */
+static NSDictionary *cuType(NSDictionary *args, NSRunningApplication *inputApp, id focused, BOOL simulated) {
+  NSString *text=args[@"text"];
+  if(![text isKindOfClass:NSString.class]) @throw [NSException exceptionWithName:@"text" reason:@"text must be a string" userInfo:nil];
+  NSString *role=focused?attr((__bridge AXUIElementRef)focused,@"AXRole"):nil;
+  BOOL secure=[role isEqual:@"AXSecureTextField"];
+  NSString *before=nil;
+  // A secure field's value is never read; it verifies as unverifiable.
+  if(focused && !secure) { id v=attr((__bridge AXUIElementRef)focused,@"AXValue"); if([v isKindOfClass:NSString.class]) before=v; }
+  // Fail closed only on strong evidence: something holds focus and it is
+  // clearly not text. No focused element at all still receives the events —
+  // some apps take process-directed keys without reporting AX focus.
+  if(focused && !cuTextRole(role) && !before)
+    @throw [NSException exceptionWithName:@"focus" reason:[NSString stringWithFormat:@"focused element is a %@, not a text control — click or focus a text field first",role?:@"unknown element"] userInfo:nil];
+  // One grapheme per event, the way a keyboard delivers them. Batching
+  // several into one CGEventKeyboardSetUnicodeString is faster but Electron
+  // apps coalesce the pending payload and keep only the final batch, so a
+  // typed string silently arrives truncated to its tail.
+  for(NSUInteger i=0;i<text.length && !cuCancelled;) {
+    if([args[@"foreground_input"] boolValue]) cuRequireForeground(inputApp);
+    cuCheckCancelled();
+    NSRange range=[text rangeOfComposedCharacterSequencesForRange:NSMakeRange(i,1)];
+    NSString *chunk=[text substringWithRange:range];
+    if(!simulated) for(int down=1;down>=0;down--){ CGEventRef event=textEvent(chunk,down); if([args[@"foreground_input"] boolValue]) CGEventPost(kCGHIDEventTap,event); else CGEventPostToPid(inputApp.processIdentifier,event); CFRelease(event); }
+    i=NSMaxRange(range); usleep(10000);
+  }
+  if(cuCancelled) @throw [NSException exceptionWithName:@"cancelled" reason:@"computer request cancelled" userInfo:nil];
+  NSString *after=nil;
+  if(focused && !secure) {
+#ifdef CU_TEST
+    if(simulated) { NSString *s=((NSMutableDictionary *)focused)[@"after"]; if(s) ((NSMutableDictionary *)focused)[@"AXValue"]=s; }
+    else
+#endif
+    usleep(80000);
+    id v=attr((__bridge AXUIElementRef)focused,@"AXValue");
+    if([v isKindOfClass:NSString.class]) after=v;
+  }
+  BOOL verified=cuTypeVerified(before,after,text);
+  NSMutableDictionary *receipt=[@{@"action_sent":@YES,@"chars":@(text.length),@"strategy":@"unicode-events",
+                                  @"keyboard_delivery":[args[@"foreground_input"] boolValue]?@"foreground-guarded":@"process",
+                                  @"verified":@(verified),@"focused_role":role?:[NSNull null]} mutableCopy];
+  if(!verified) receipt[@"verification_required"]=@"screenshot";
+  return receipt;
+}
 static id execute(NSDictionary *p) {
   NSString *tool=p[@"tool"]; NSDictionary *args=p[@"args"]?:@{};
   cuOwnerPipe=[args[@"owner_pipe"] boolValue];
@@ -317,6 +384,13 @@ static id execute(NSDictionary *p) {
     CGEventRef event=textEvent(args[@"text"],YES); UniChar chars[4096]; UniCharCount length=0;
     CGEventKeyboardGetUnicodeString(event,4096,&length,chars); CGEventFlags flags=CGEventGetFlags(event); CFRelease(event);
     return @{@"text":[NSString stringWithCharacters:chars length:length],@"flags":@(flags)};
+  }
+  // Drives the real typing logic against a fixture focused element instead of
+  // a live app: `after` is the value the element reports once the text lands,
+  // which a fixture omits to model an app that swallows the events.
+  if([tool isEqual:@"inspect_type"]) {
+    id fixture=args[@"focused"];
+    return cuType(args, nil, [fixture isKindOfClass:NSDictionary.class]?[fixture mutableCopy]:nil, YES);
   }
 #endif
   if([tool isEqual:@"permissions"]) return @{@"trusted":@(AXIsProcessTrusted())};
@@ -396,24 +470,7 @@ static id execute(NSDictionary *p) {
   }
   if(mutates) { cuCheckCancelled(); cuLockInput(); }
   if(!AXIsProcessTrusted()) @throw [NSException exceptionWithName:@"permission" reason:@"Accessibility permission is missing for Codewhale Computer Use (or the direct host)." userInfo:nil];
-  if([tool isEqual:@"type"]) {
-    NSString *text=args[@"text"];
-    if(![text isKindOfClass:NSString.class]) @throw [NSException exceptionWithName:@"text" reason:@"text must be a string" userInfo:nil];
-    // One grapheme per event, the way a keyboard delivers them. Batching
-    // several into one CGEventKeyboardSetUnicodeString is faster but Electron
-    // apps coalesce the pending payload and keep only the final batch, so a
-    // typed string silently arrives truncated to its tail.
-    for(NSUInteger i=0;i<text.length && !cuCancelled;) {
-      if([args[@"foreground_input"] boolValue]) cuRequireForeground(inputApp);
-      cuCheckCancelled();
-      NSRange range=[text rangeOfComposedCharacterSequencesForRange:NSMakeRange(i,1)];
-      NSString *chunk=[text substringWithRange:range];
-      for(int down=1;down>=0;down--){ CGEventRef event=textEvent(chunk,down); if([args[@"foreground_input"] boolValue]) CGEventPost(kCGHIDEventTap,event); else CGEventPostToPid(inputApp.processIdentifier,event); CFRelease(event); }
-      i=NSMaxRange(range); usleep(10000);
-    }
-    if(cuCancelled) @throw [NSException exceptionWithName:@"cancelled" reason:@"computer request cancelled" userInfo:nil];
-    return @{@"action_sent":@YES,@"chars":@(text.length),@"strategy":@"unicode-events",@"keyboard_delivery":[args[@"foreground_input"] boolValue]?@"foreground-guarded":@"process"};
-  }
+  if([tool isEqual:@"type"]) return cuType(args, inputApp, cuFocusedElement(inputApp.processIdentifier), NO);
   if([tool isEqual:@"key_event"]) {
     if([args[@"foreground_input"] boolValue] && [args[@"down"] boolValue]) cuRequireForeground(inputApp);
     cuCheckCancelled();

@@ -16,7 +16,7 @@
 import fs from "node:fs";
 import net from "node:net";
 import crypto from "node:crypto";
-import { handle, closeSession, closeAllSessions, releaseSessionInput, ALLOWED } from "../src/app-handler.mjs";
+import { handle, closeSession, closeAllSessions, releaseSessionInput, reopenSession, ALLOWED } from "../src/app-handler.mjs";
 import { APP_ID, APP_NAME, APP_VERSION, socketPath, runInfoPath, writeRegistration, defaultLaunch, hello } from "../src/app-socket.mjs";
 import { stateDir } from "../src/registry.mjs";
 
@@ -80,6 +80,7 @@ async function serve(conn) {
             ownedSession = req.sessionId;
             const leaseToken = crypto.randomUUID();
             leases.set(ownedSession, { socket: conn, token: leaseToken });
+            reopenSession(ownedSession);
             reply = { ok: true, leaseToken };
           }
         } else if (!leases.has(req.sessionId) || leases.get(req.sessionId).token !== req.leaseToken) {
