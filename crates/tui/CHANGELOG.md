@@ -94,6 +94,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the current turn has run, distinguishing actively working from waiting on
   a tool, a sub-agent or the operator; the 0.9.12 shell had dropped the overall
   working-time indicator from the place a glancing user checks (#5914).
+- A background runtime turn whose own store record could not be read, parsed
+  or written (`Failed to read turn …`, `Failed to read item …`) was only a log
+  line. The runtime now publishes a `runtime.store_failure` event naming the
+  file, the root cause and the next action (move the file aside, or check free
+  space and permissions); the TUI shows it as a warning toast and a transcript
+  line, the task timeline records it, and the runtime API streams it. A turn
+  whose own record is unreadable or unwritable is reported as terminal, so its
+  task fails at once instead of idling out (#5931).
 
 - An MCP token refresh that fails to parse the provider's answer keeps the
   endpoint's receipt — status line, content type, and a 200-byte excerpt
