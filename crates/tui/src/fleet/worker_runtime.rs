@@ -135,7 +135,9 @@ pub fn validate_task_agent_profiles(
 /// exact routes. The durable task stores the selected member's canonical id and
 /// the identity/route inputs used for launch. Legacy `worker.role` remains a
 /// posture when it does not name exactly one member; explicit
-/// `worker.agent_profile` selectors fail closed when unknown or ambiguous.
+/// `worker.agent_profile` selectors fail closed when unknown or ambiguous, and
+/// when the task's `worker.role` names a posture other than the selected
+/// member's role.
 pub(crate) fn freeze_fleet_task_members(
     tasks: &mut [FleetTaskSpec],
     agent_profiles: &[AgentProfile],
@@ -209,6 +211,28 @@ pub(crate) fn freeze_fleet_task_members(
         if let Some(profile) = selected {
             validate_selected_member_model(task, profile)?;
             let snapshot = FrozenFleetMember::from_profile(profile);
+            // A task carries exactly one posture. When an explicit member
+            // selector is present, `worker.role` may only restate that
+            // member's role (any casing or legacy alias); naming a different
+            // posture is an authoring error, not a tie to arbitrate later.
+            // Failing closed here is what keeps the launch-time resolver
+            // honest: a read-only label can never widen to a member's write
+            // authority, and a member's read-only slot can never be widened by
+            // a write-capable label (#5945).
+            if explicit_selector.is_some()
+                && let Some(label) = legacy_role_selector.as_deref()
+            {
+                let label = canonical_public_role_name(label);
+                if label != snapshot.role {
+                    bail!(
+                        "Fleet task {} selects member {:?} whose role is {:?}, but worker.role names a different posture {:?}; a task has one posture — drop worker.role or select a member with that role",
+                        task.id,
+                        profile.id,
+                        snapshot.role,
+                        label
+                    );
+                }
+            }
             task.metadata.insert(
                 FROZEN_FLEET_MEMBER_METADATA_KEY.to_string(),
                 serde_json::to_value(&snapshot)?,
@@ -1004,36 +1028,43 @@ fn effective_fleet_role_with_source(
     worker_profile: Option<&FleetTaskWorkerProfile>,
     agent_profile: Option<&AgentProfile>,
 ) -> (Option<String>, Option<&'static str>) {
-    // When legacy `worker.role` deterministically selected a roster member,
-    // use that member's semantic role as the runtime posture. A display name,
-    // model label, or route selector must never become a posture string.
-    if worker_profile
-        .and_then(|worker| worker.agent_profile.as_deref())
-        .and_then(non_empty_trimmed)
-        .is_none()
-        && let Some(profile) = agent_profile
-    {
+    // A resolved roster member is authoritative for the runtime posture: its
+    // canonical slot (reviewer/builder/...) defines shell/write/network
+    // authority. The resolved `AgentProfile` always carries a canonical
+    // `role.name` — a display name, model label, or route selector is already
+    // collapsed onto the member during profile resolution, never surfaced as a
+    // raw posture string here.
+    //
+    // Preferring the member over legacy `worker.role` is what makes a task
+    // whose role label is "manager" but whose agent_profile selects
+    // `member:reviewer` actually run with reviewer authority. Previously the
+    // first branch required `worker.agent_profile` to be empty, so a present
+    // agent_profile fell through to `worker.role` and silently discarded the
+    // member's slot (fleet-e12f3160: task stayed a manager-coordinator and was
+    // never leased).
+    //
+    // This is not where a conflict gets arbitrated. `freeze_fleet_task_members`
+    // rejects a spec whose `worker.role` names a posture other than the
+    // selected member's role before the task is persisted, so by the time a
+    // member reaches this function its role and the task label agree (#5945).
+    if let Some(profile) = agent_profile {
         return (
             Some(canonical_public_role_name(&profile.profile.role.name)),
             Some("agent_profile.role"),
         );
     }
+    // No member resolved (no agent_profile selector, no frozen snapshot, and
+    // worker.role was not a deterministic member selector). Keep the legacy
+    // role label so existing v1 tasks retain their historical posture. A
+    // receipt whose `role_source` reads "task.role" therefore means exactly
+    // that: no roster member was resolved for the task at all.
     worker_profile
         .and_then(|worker| worker.role.as_deref())
         .map(str::trim)
         .filter(|role| !role.is_empty())
         .map(canonical_public_role_name)
         .map(|role| (Some(role), Some("task.role")))
-        .unwrap_or_else(|| {
-            agent_profile
-                .map(|profile| {
-                    (
-                        Some(canonical_public_role_name(&profile.profile.role.name)),
-                        Some("agent_profile.role"),
-                    )
-                })
-                .unwrap_or((None, None))
-        })
+        .unwrap_or((None, None))
 }
 
 fn effective_fleet_loadout(
@@ -1927,6 +1958,177 @@ mod tests {
         assert_eq!(
             fleet_role_to_agent_type(Some("operator")),
             FleetRole::Worker
+        );
+    }
+
+    #[test]
+    fn agent_profile_member_slot_overrides_legacy_role_label() {
+        // Regression (fleet-e12f3160): a task whose legacy role label is
+        // "manager" but whose agent_profile selects `member:reviewer` must run
+        // with reviewer authority, not fall through to the "manager" label and
+        // get stuck as a write-capable worker that never leases.
+        let reviewer = agent_profile(
+            "reviewer",
+            "reviewer",
+            None,
+            codewhale_config::FleetLoadout::Inherit,
+        );
+        let task = fleet_task(
+            "conflict",
+            Some(worker_profile(
+                Some("member:reviewer"),
+                Some("manager"),
+                None,
+                None,
+                None,
+                vec!["read_file"],
+            )),
+        );
+        let worker = FleetWorkerSpec {
+            id: "worker-1".to_string(),
+            name: "Worker".to_string(),
+            host: FleetHostSpec::Local,
+            trust_level: None,
+            labels: Default::default(),
+            capabilities: vec![],
+            max_concurrent_tasks: None,
+        };
+        let spec = fleet_task_to_worker_spec_with_profiles(
+            "worker-1",
+            "run-1",
+            &task,
+            &worker,
+            "auto",
+            Path::new("/tmp"),
+            Path::new("/tmp"),
+            &[reviewer],
+            None,
+        )
+        .expect("member selector resolves to the reviewer roster profile");
+
+        assert_eq!(
+            spec.role.as_deref(),
+            Some("reviewer"),
+            "the selected member's slot must win over the legacy role label"
+        );
+        assert_eq!(
+            spec.agent_type,
+            FleetRole::Reviewer,
+            "reviewer authority must not be silently widened to a write-capable worker"
+        );
+    }
+
+    #[test]
+    fn legacy_role_label_never_widens_into_a_member_write_slot() {
+        // Mirror of the regression above (#5945 review): member `alice` sits
+        // in the write-capable `implement` slot while the task's legacy label
+        // says `reviewer`. Letting the member win unconditionally would turn a
+        // read-only task into a write-capable one; letting the label win would
+        // re-open the original bug. Neither is a posture — the spec is
+        // rejected before anything is persisted.
+        let alice = agent_profile(
+            "alice",
+            "implement",
+            None,
+            codewhale_config::FleetLoadout::Inherit,
+        );
+        let mut task = fleet_task(
+            "mirror-conflict",
+            Some(worker_profile(
+                Some("member:alice"),
+                Some("reviewer"),
+                None,
+                None,
+                None,
+                vec!["read_file"],
+            )),
+        );
+
+        let error = freeze_fleet_task_members(std::slice::from_mut(&mut task), &[alice], false)
+            .expect_err("a read-only label must not become a write-capable member slot");
+        assert!(error.to_string().contains("\"implement\""), "{error:#}");
+        assert!(error.to_string().contains("\"reviewer\""), "{error:#}");
+        assert!(
+            !task.metadata.contains_key(FROZEN_FLEET_MEMBER_METADATA_KEY),
+            "a rejected spec must not persist a member snapshot"
+        );
+        assert_eq!(
+            task.worker.as_ref().unwrap().role.as_deref(),
+            Some("reviewer"),
+            "the rejected task keeps its authored label untouched"
+        );
+    }
+
+    #[test]
+    fn conflicting_member_and_role_label_is_rejected_at_freeze_naming_both_postures() {
+        // The original fleet-e12f3160 spec: `member:reviewer` plus a
+        // `manager` label. It is an authoring error, and the message must name
+        // both postures so the author can see which one to drop.
+        let reviewer = agent_profile(
+            "reviewer",
+            "reviewer",
+            None,
+            codewhale_config::FleetLoadout::Inherit,
+        );
+        let mut task = fleet_task(
+            "conflict",
+            Some(worker_profile(
+                Some("member:reviewer"),
+                Some("manager"),
+                None,
+                None,
+                None,
+                vec!["read_file"],
+            )),
+        );
+
+        let error = freeze_fleet_task_members(std::slice::from_mut(&mut task), &[reviewer], true)
+            .expect_err("a task cannot carry two postures");
+        let message = error.to_string();
+        assert!(message.contains("selects member \"reviewer\""), "{error:#}");
+        assert!(message.contains("whose role is \"reviewer\""), "{error:#}");
+        assert!(
+            message.contains("worker.role names a different posture \"manager\""),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn role_label_alias_of_the_selected_member_role_is_not_a_conflict() {
+        // Casing and legacy aliases are spelling, not posture: `Code-Review`
+        // canonicalizes to `reviewer`, which is exactly the member's role.
+        let reviewer = agent_profile(
+            "reviewer",
+            "reviewer",
+            None,
+            codewhale_config::FleetLoadout::Inherit,
+        );
+        let mut task = fleet_task(
+            "alias",
+            Some(worker_profile(
+                Some("member:reviewer"),
+                Some("Code-Review"),
+                None,
+                None,
+                None,
+                vec!["read_file"],
+            )),
+        );
+
+        let profiles = [reviewer];
+        freeze_fleet_task_members(std::slice::from_mut(&mut task), &profiles, true)
+            .expect("an alias of the member's own role must freeze cleanly");
+        let worker = task.worker.as_ref().unwrap();
+        assert_eq!(worker.agent_profile.as_deref(), Some("member:reviewer"));
+        assert_eq!(worker.role.as_deref(), Some("reviewer"));
+        assert!(task.metadata.contains_key(FROZEN_FLEET_MEMBER_METADATA_KEY));
+
+        let resolved = resolve_task_agent_profile(&task, &profiles)
+            .unwrap()
+            .expect("frozen member");
+        assert_eq!(
+            effective_fleet_role_with_source(task.worker.as_ref(), Some(&resolved)),
+            (Some("reviewer".to_string()), Some("agent_profile.role"))
         );
     }
 

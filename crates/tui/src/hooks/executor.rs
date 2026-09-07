@@ -2517,7 +2517,7 @@ fn tool_category_for(tool_name: &str, tool_args: Option<&str>) -> &'static str {
         "Git" | "git" => match action.as_deref() {
             // Every shipped Git action is read-only today; classify by action
             // anyway so adding a mutating one cannot silently inherit `safe`.
-            Some("status" | "diff" | "log" | "show" | "blame") => "safe",
+            Some("status" | "diff" | "log" | "show" | "blame" | "commit_plan") => "safe",
             _ => "other",
         },
         // `Run` executes test/verifier commands — closer to shell than safe.
@@ -4638,14 +4638,7 @@ command = "echo project"
         // Background hooks cannot steer.
         assert_eq!(outcome, MessageSubmitOutcome::unchanged());
 
-        // Give the submitted child time to land.
-        for _ in 0..50 {
-            if out.exists() {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        }
-        let raw = std::fs::read_to_string(&out).expect("background hook wrote no stdin payload");
+        let raw = wait_for_captured_output(&out);
         let payload: serde_json::Value = serde_json::from_str(raw.trim()).expect("valid JSON");
         assert_eq!(payload["event"], "message_submit");
         assert_eq!(payload["text"], "hello world");
@@ -4686,14 +4679,34 @@ command = "echo project"
         assert_eq!(results.len(), 1);
         assert!(results[0].background);
 
-        for _ in 0..50 {
-            if out.exists() {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        }
-        let captured = std::fs::read_to_string(&out).expect("background hook wrote no env");
+        let captured = wait_for_captured_output(&out);
         assert_eq!(captured.trim(), "sess_test|agent|exec_shell");
+    }
+
+    /// Wait for a background hook's capture file to hold real bytes.
+    ///
+    /// The capture scripts redirect with `> out`, so the shell creates the
+    /// file — empty — before `cat`/`printf` writes the payload. Polling for
+    /// existence alone can win that race under load and read an empty capture,
+    /// which surfaced in CI as `valid JSON: EOF while parsing a value` (#5929).
+    /// Both captures are single small writes, so waiting for non-empty bytes
+    /// means the write has landed without weakening what the tests assert.
+    #[cfg(unix)]
+    fn wait_for_captured_output(path: &std::path::Path) -> String {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Ok(raw) = std::fs::read_to_string(path)
+                && !raw.trim().is_empty()
+            {
+                return raw;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "background hook wrote no output to {}",
+                path.display()
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
     }
 
     #[test]
@@ -5819,6 +5832,10 @@ command = "echo project"
         assert_eq!(tool_category_for("apply_patch", None), "file_write");
         assert_eq!(
             tool_category_for("Git", Some(r#"{"action":"log"}"#)),
+            "safe"
+        );
+        assert_eq!(
+            tool_category_for("Git", Some(r#"{"action":"commit_plan"}"#)),
             "safe"
         );
         assert_eq!(tool_category_for("web.run", None), "other");

@@ -1,14 +1,16 @@
 //! Canonical action-based wrapper for git inspection tools.
 //!
 //! The model sees one tool: `Git` with an `action` parameter
-//! (status | diff | log | show | blame). The per-action legacy execution
-//! aliases were removed in v0.9.3.
+//! (status | diff | log | show | blame | commit_plan). The per-action legacy
+//! execution aliases were removed in v0.9.3. `commit_plan` (#3999) is the
+//! propose-only atomic-commit planner: it returns a split plan and writes
+//! nothing, so the family stays read-only end to end.
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use super::canonical_action::required_action;
-use super::git::{GitDiffTool, GitStatusTool};
+use super::git::{GitCommitPlanTool, GitDiffTool, GitStatusTool};
 use super::git_history::{GitBlameTool, GitLogTool, GitShowTool};
 use super::spec::{
     ApprovalRequirement, ToolCapability, ToolContext, ToolError, ToolResult, ToolSpec,
@@ -27,7 +29,8 @@ impl GitTool {
         }
     }
 
-    const ACTIONS: &'static [&'static str] = &["status", "diff", "log", "show", "blame"];
+    const ACTIONS: &'static [&'static str] =
+        &["status", "diff", "log", "show", "blame", "commit_plan"];
 
     fn required_action(&self, input: &Value) -> Result<String, ToolError> {
         if let Some(forced) = self.forced_action {
@@ -60,7 +63,7 @@ impl ToolSpec for GitTool {
     }
 
     fn description(&self) -> &'static str {
-        "Inspect repository state and history with status, diff, log, show, or blame. All actions are read-only and parallel-safe."
+        "Inspect repository state and history with status, diff, log, show, or blame; commit_plan proposes an ordered atomic-commit split of the working tree. All actions are read-only and parallel-safe."
     }
 
     fn input_schema(&self) -> Value {
@@ -69,8 +72,8 @@ impl ToolSpec for GitTool {
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["status", "diff", "log", "show", "blame"],
-                    "description": "Action to perform"
+                    "enum": ["status", "diff", "log", "show", "blame", "commit_plan"],
+                    "description": "Action to perform. commit_plan returns a proposed split of the working tree into dependency-ordered commits (rejecting cycles) and writes nothing; land each group with git add/commit."
                 },
                 "path": {
                     "type": "string",
@@ -159,6 +162,7 @@ impl ToolSpec for GitTool {
             "log" => GitLogTool.execute(input, context).await,
             "show" => GitShowTool.execute(input, context).await,
             "blame" => GitBlameTool.execute(input, context).await,
+            "commit_plan" => GitCommitPlanTool.execute(input, context).await,
             other => Err(ToolError::invalid_input(format!(
                 "Unknown Git action \"{other}\"; nothing was run. Pass one of: {}.",
                 Self::ACTIONS.join(", ")
@@ -196,9 +200,20 @@ mod tests {
         let message = err(json!({"action": "commit"})).await;
         assert!(message.contains("commit"), "{message}");
         assert!(
-            message.contains("status, diff, log, show, blame"),
+            message.contains("status, diff, log, show, blame, commit_plan"),
             "{message}"
         );
+    }
+
+    /// `commit_plan` proposes and never writes, so the envelope must class it
+    /// with the other read-only Git actions rather than as a mutation (#3999).
+    #[test]
+    fn commit_plan_is_bounded_read_only_for_the_envelope() {
+        use crate::tools::execution_envelope::{CallClass, classify_call};
+        let tool = GitTool::new("Git");
+        let input = json!({"action": "commit_plan"});
+        assert!(tool.is_read_only_for(&input));
+        assert_eq!(classify_call("Git", &input, &tool), CallClass::Bounded);
     }
 
     #[test]

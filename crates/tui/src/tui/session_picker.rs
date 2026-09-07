@@ -90,7 +90,30 @@ impl SessionPickerView {
         let sessions = SessionManager::default_location()
             .and_then(|manager| manager.list_sessions())
             .unwrap_or_default();
+        Self::from_session_list(workspace, locale, sessions)
+    }
 
+    /// Construct a picker scoped to `workspace` over an explicit session list.
+    ///
+    /// Test seam for acceptance coverage (#5929): production always resolves
+    /// the store via [`Self::new`], but redirecting `CODEWHALE_HOME` to point
+    /// that resolution at a temp directory is process-global state — a
+    /// concurrent test that resolves the store without the env barrier can
+    /// observe the redirect mid-test and write sessions into it, so the two
+    /// listings under comparison drift apart. Handing the picker the list from
+    /// a private store removes the shared-state window without touching what
+    /// the picker does with the list.
+    #[cfg(test)]
+    pub fn new_with_sessions(
+        workspace: &Path,
+        locale: Locale,
+        sessions: Vec<SessionMetadata>,
+    ) -> Self {
+        Self::from_session_list(workspace, locale, sessions)
+    }
+
+    /// Shared constructor: everything except where the session list came from.
+    fn from_session_list(workspace: &Path, locale: Locale, sessions: Vec<SessionMetadata>) -> Self {
         let mut view = Self {
             sessions,
             filtered: Vec::new(),
