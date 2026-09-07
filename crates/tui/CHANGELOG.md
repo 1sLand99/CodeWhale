@@ -117,6 +117,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   per-World session container before each command — full tree first, then
   only changes and deletions — so remote builds and tests run on the files
   just edited locally and their outputs persist across commands.
+- `Git` grows a `commit_plan` action: a propose-only planner that splits the
+  working tree into ordered atomic commits (#3999). It groups whole files —
+  lock files ride with their manifest, tests ride with the source they name —
+  orders the groups so a commit that defines a symbol lands before the commit
+  that uses it, and refuses the whole plan when that dependency graph has a
+  cycle. It reads `git diff HEAD` plus the untracked-file list and writes
+  nothing: no `git add -N`, no `git apply --cached`, no `git commit`, so
+  staging and committing stay with the ordinary `git add` / `git commit` shell
+  path where the approval gate already applies. Thanks
+  [@goransh-walia](https://github.com/goransh-walia) for the original
+  implementation (PR #5870, fixes #3999).
 
 ## [0.9.12] - 2026-09-03
 
