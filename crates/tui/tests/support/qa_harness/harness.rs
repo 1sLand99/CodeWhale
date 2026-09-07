@@ -172,6 +172,21 @@ impl Harness {
         self.pty.write_bytes(&super::paste::unbracketed(text))
     }
 
+    /// Type a line of plain text and submit it the way a human does: text,
+    /// a beat of idle, then Enter. A single PTY write delivers all the
+    /// characters with zero inter-key gaps, which the paste-burst heuristic
+    /// correctly classifies as a paste — and an Enter inside its suppression
+    /// window is absorbed as a pasted newline, so the line never submits.
+    /// Sleeping past the window (120ms after the last keystroke; see
+    /// `tui::paste_burst::PASTE_ENTER_SUPPRESS_WINDOW`) models the human
+    /// pause every scripted driver has to honor. Slash commands don't need
+    /// this (Enter flushes buffered command text); plain prompts do.
+    pub fn type_line(&mut self, text: &str) -> Result<()> {
+        self.pty.write_bytes(&super::keys::key::text(text))?;
+        std::thread::sleep(Duration::from_millis(250));
+        self.pty.write_bytes(&super::keys::key::enter())
+    }
+
     /// Pull whatever the child has written since last call into the frame
     /// parser. Returns `true` if any new bytes arrived.
     pub fn pump(&mut self) -> bool {
