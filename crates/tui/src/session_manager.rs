@@ -1582,7 +1582,16 @@ impl SessionManager {
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         fs::create_dir_all(self.checkpoints_dir())?;
         write_atomic(path, content.as_bytes())?;
-        fs::remove_file(&legacy)?;
+        match fs::remove_file(&legacy) {
+            Ok(()) => {}
+            // A second instance of the same session can win the adoption
+            // race: both read the legacy file, both write this session's
+            // per-session copy, and the twin's remove already retired the
+            // legacy one. The queue is durably adopted either way, so a
+            // vanished legacy file is success here, not a boot error.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
         Ok(Some(state))
     }
 
