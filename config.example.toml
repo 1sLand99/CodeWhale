@@ -1234,6 +1234,21 @@ max_delay = 60.0
 exponential_base = 2.0
 
 # ─────────────────────────────────────────────────────────────────────────────────
+# Goal loop (`[goal]`) — operate-mode persistent goals
+# ─────────────────────────────────────────────────────────────────────────────────
+# Operate-mode goals run to their completion gate with no default token, time,
+# or continuation ceiling. Token/time budgets, when supplied, are telemetry
+# only and do not stop a goal. The keys below are the opt-in circuit breakers.
+# [goal]
+# Optional safety backstop on automatic goal continuation passes.
+# Default: 0 (unlimited). Set a positive value to opt into a ceiling.
+# max_continuations = 100
+# Optional cancellable quiet period between successful turns, useful for
+# coordinator goals that poll on a cadence instead of keeping one provider
+# turn open. Default: 0 (continue immediately). Cap: 86400 (24h).
+# continuation_delay_seconds = 300
+
+# ─────────────────────────────────────────────────────────────────────────────────
 # Context Compaction
 # ─────────────────────────────────────────────────────────────────────────────────
 # Auto-compaction is a saved UI setting edited with `/config` (`auto_compact`).
