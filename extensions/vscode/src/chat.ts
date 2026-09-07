@@ -1,4 +1,5 @@
 import * as crypto from "node:crypto";
+import * as path from "node:path";
 import * as vscode from "vscode";
 import {
   answerUserInput,
@@ -29,7 +30,12 @@ import {
   collectSelectionContext,
   type ContextChip,
 } from "./context";
-import { renderMarkdown } from "./markdown";
+import {
+  isInsideRoot,
+  projectItem,
+  statusForEvent,
+  type ItemView,
+} from "./transcript";
 
 /**
  * Sidebar chat view: one active Codewhale thread at a time, streaming over
@@ -38,22 +44,6 @@ import { renderMarkdown } from "./markdown";
  * renders what it is told and posts intent back.
  */
 
-interface ItemView {
-  id: string;
-  kind: string;
-  status?: string;
-  turnId?: string;
-  summary: string;
-  detail?: string;
-  metadata?: Record<string, unknown>;
-  /** Rendered markdown for completed agent messages. */
-  html?: string;
-  codeBlocks?: string[];
-  /** In-progress agent text (plain, re-rendered on completion). */
-  streamText?: string;
-  rev: number;
-}
-
 interface SyncMessage {
   type: "sync";
   connection?: ConnectionInfo;
@@ -61,16 +51,32 @@ interface SyncMessage {
   activeThreadId?: string;
   model?: string;
   streaming: boolean;
+  /** Interrupt asked for, turn not ended yet: keep Stop/Steer on screen. */
+  interrupting: boolean;
   chips: ContextChip[];
   approvals: PendingApproval[];
   inputs: PendingUserInput[];
   items: ItemView[];
 }
 
-type OutboundMessage = SyncMessage | { type: "delta"; itemId: string; text: string } | { type: "focusComposer" };
+type OutboundMessage =
+  | SyncMessage
+  | { type: "delta"; itemId: string; text: string }
+  | { type: "focusComposer" }
+  /** Tells the composer whether the send was accepted; it only clears on `ok`. */
+  | { type: "composerResult"; ok: boolean };
 
 export class ChatView implements vscode.WebviewViewProvider {
   public static readonly viewType = "codewhale.chat";
+  /** The secondary-sidebar twin. The same instance serves both ids. */
+  public static readonly secondaryViewType = "codewhale.chatSecondary";
+
+  /**
+   * Which of the two view ids actually resolved. Only one is ever visible —
+   * the manifest gates them on `codewhale.noSecondarySidebar` — so `reveal()`
+   * must focus the one this host chose, not a hardcoded id.
+   */
+  private resolvedViewType: string = ChatView.viewType;
 
   private view?: vscode.WebviewView;
   private webviewReady = false;
@@ -85,6 +91,13 @@ export class ChatView implements vscode.WebviewViewProvider {
   private stream?: EventStream;
   private lastSeq = 0;
   private streamingTurnId?: string;
+  private interruptRequested = false;
+  /**
+   * The in-flight send. Its `operationKey` is reused when the same prompt is
+   * retried after a timeout so the runtime dedupes instead of starting a
+   * second turn.
+   */
+  private pendingSend?: { threadId: string; prompt: string; operationKey: string };
   private reconnectAttempt = 0;
   private reconnectTimer?: ReturnType<typeof setTimeout>;
   private chips: ContextChip[] = [];
@@ -97,6 +110,10 @@ export class ChatView implements vscode.WebviewViewProvider {
 
   resolveWebviewView(view: vscode.WebviewView): void {
     this.view = view;
+    // Remember which id resolved so reveal() focuses the container this host
+    // actually shows. viewType is readonly on WebviewView and is one of the
+    // two ids registered in extension.ts.
+    this.resolvedViewType = view.viewType || ChatView.viewType;
     view.webview.options = { enableScripts: true };
     view.onDidDispose(() => {
       this.closeStream();
@@ -111,7 +128,7 @@ export class ChatView implements vscode.WebviewViewProvider {
 
   /** Show the chat sidebar and put focus in the composer. */
   async reveal(): Promise<void> {
-    await vscode.commands.executeCommand(`${ChatView.viewType}.focus`);
+    await vscode.commands.executeCommand(`${this.resolvedViewType}.focus`);
   }
 
   /** Connection updates pushed from the extension host. */
@@ -176,6 +193,7 @@ export class ChatView implements vscode.WebviewViewProvider {
   async selectThread(threadId: string): Promise<void> {
     this.closeStream();
     this.streamingTurnId = undefined;
+    this.interruptRequested = false;
     this.items.clear();
     this.itemOrder = [];
     this.activeThreadId = threadId;
@@ -278,27 +296,42 @@ export class ChatView implements vscode.WebviewViewProvider {
   private async sendPrompt(text: string): Promise<void> {
     const prompt = text.trim();
     if (!prompt) {
+      this.post({ type: "composerResult", ok: false });
       return;
     }
     if (!this.activeThreadId) {
       await this.newThread();
       if (!this.activeThreadId) {
+        this.post({ type: "composerResult", ok: false });
         return;
       }
     }
     const threadId = this.activeThreadId;
     const assembled = assemblePrompt(prompt, this.chips);
-    this.chips = [];
+    // A resend of the same pending prompt must carry the same operation key,
+    // or a timeout-then-retry lands as two turns.
+    const operationKey =
+      this.pendingSend && this.pendingSend.threadId === threadId && this.pendingSend.prompt === assembled
+        ? this.pendingSend.operationKey
+        : crypto.randomUUID();
+    this.pendingSend = { threadId, prompt: assembled, operationKey };
     try {
       const result = await startTurn(await this.configProvider(), threadId, {
         prompt: assembled,
-        operationKey: crypto.randomUUID(),
+        operationKey,
       });
+      // Accepted: only now is it safe to drop the composer text and chips.
+      this.pendingSend = undefined;
+      this.chips = [];
       this.streamingTurnId = result.turn.id;
+      this.interruptRequested = false;
       this.addLocalUserMessage(prompt);
+      this.post({ type: "composerResult", ok: true });
       void this.openStream(threadId, this.lastSeq);
       this.postSync();
     } catch (error) {
+      // Keep `pendingSend` so the retry reuses the key, and give the text back.
+      this.post({ type: "composerResult", ok: false });
       this.handleError("Send failed", error);
     }
   }
@@ -372,17 +405,49 @@ export class ChatView implements vscode.WebviewViewProvider {
     void vscode.window.showTextDocument(editor.document);
   }
 
-  private async openFileAtPath(path: string): Promise<void> {
-    if (!path) {
+  /**
+   * Open a path that came from an item's tool metadata. That value is
+   * model-influenced, so it is treated as untrusted: workspace-relative
+   * resolution is preferred, `..` escapes are refused outright, and anything
+   * outside the workspace needs an explicit confirmation from the user.
+   */
+  private async openFileAtPath(raw: string): Promise<void> {
+    const candidate = raw.trim();
+    if (!candidate || /[\u0000-\u001f\u007f]/.test(candidate)) {
       return;
     }
-    const candidates = [
-      vscode.Uri.file(path),
-      ...(vscode.workspace.workspaceFolders ?? []).map((folder) =>
-        vscode.Uri.joinPath(folder.uri, path),
-      ),
-    ];
-    for (const uri of candidates) {
+    const folders = vscode.workspace.workspaceFolders ?? [];
+    const targets: vscode.Uri[] = [];
+
+    if (path.isAbsolute(candidate)) {
+      const resolved = path.resolve(candidate);
+      const inWorkspace = folders.some((folder) => isInsideRoot(folder.uri.fsPath, resolved));
+      if (!inWorkspace) {
+        const choice = await vscode.window.showWarningMessage(
+          `Open a file outside this workspace?\n\n${resolved}`,
+          { modal: true },
+          "Open File",
+        );
+        if (choice !== "Open File") {
+          return;
+        }
+      }
+      targets.push(vscode.Uri.file(resolved));
+    } else {
+      for (const folder of folders) {
+        // joinPath keeps the folder's scheme (remote/virtual workspaces); the
+        // containment check runs on the resolved filesystem path.
+        if (isInsideRoot(folder.uri.fsPath, candidate)) {
+          targets.push(vscode.Uri.joinPath(folder.uri, candidate));
+        }
+      }
+      if (targets.length === 0) {
+        void vscode.window.showWarningMessage(`Refused to open a path outside the workspace: ${candidate}`);
+        return;
+      }
+    }
+
+    for (const uri of targets) {
       try {
         await vscode.workspace.fs.stat(uri);
         await vscode.window.showTextDocument(uri, { preview: true });
@@ -391,7 +456,7 @@ export class ChatView implements vscode.WebviewViewProvider {
         // try the next candidate
       }
     }
-    void vscode.window.showInformationMessage(`File not found: ${path}`);
+    void vscode.window.showInformationMessage(`File not found: ${candidate}`);
   }
 
   // ---- SSE event ingestion ----
@@ -429,7 +494,8 @@ export class ChatView implements vscode.WebviewViewProvider {
       case "item.started":
       case "item.completed":
       case "item.failed":
-      case "item.interrupted": {
+      case "item.interrupted":
+      case "item.canceled": {
         const payloadItem = readPayloadItem(event.payload);
         const itemId = event.itemId ?? payloadItem?.id;
         if (!itemId) {
@@ -513,10 +579,22 @@ export class ChatView implements vscode.WebviewViewProvider {
         }
         break;
       }
-      case "turn.completed":
       case "turn.interrupt_requested": {
+        // The turn is still running until it reports an end state; keep the
+        // Stop/Steer controls on screen instead of hiding them here.
+        if (event.turnId && event.turnId === this.streamingTurnId) {
+          this.interruptRequested = true;
+          this.postSync();
+        }
+        break;
+      }
+      case "turn.completed":
+      case "turn.failed":
+      case "turn.interrupted":
+      case "turn.ended": {
         if (event.turnId && event.turnId === this.streamingTurnId) {
           this.streamingTurnId = undefined;
+          this.interruptRequested = false;
           this.postSync();
           this.scheduleThreadListRefresh();
         }
@@ -536,12 +614,19 @@ export class ChatView implements vscode.WebviewViewProvider {
       this.postSync();
       return;
     }
+    // The stream is dead; drop it, or the `!this.stream` guard below never
+    // passes and the reconnect silently never happens.
+    this.stream?.close();
+    this.stream = undefined;
     const attempt = ++this.reconnectAttempt;
     const delay = Math.min(1000 * attempt, 5000);
     this.output.appendLine(`Event stream for ${threadId} dropped (${error.message}); retrying in ${delay}ms`);
     this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = undefined;
       if (this.activeThreadId === threadId && !this.stream) {
-        this.openStream(threadId, this.lastSeq);
+        void this.openStream(threadId, this.lastSeq).catch((error) =>
+          this.logError("Stream reconnect failed", error),
+        );
       }
     }, delay);
   }
@@ -549,45 +634,7 @@ export class ChatView implements vscode.WebviewViewProvider {
   /** Fill the item projection from a thread-detail snapshot or SSE event. */
   private ingestItem(item: ItemRecord, event?: string): void {
     const existing = this.items.get(item.id);
-    const isTerminal = event === "item.completed" || item.status === "completed";
-    const streamText = existing?.streamText;
-    let view: ItemView;
-    if (item.kind === "agent_message" && !isTerminal) {
-      view = {
-        id: item.id,
-        kind: item.kind,
-        status: item.status,
-        turnId: item.turnId ?? existing?.turnId,
-        summary: item.summary || streamText || "",
-        streamText: item.summary || streamText || "",
-        rev: (existing?.rev ?? 0) + 1,
-      };
-    } else if (item.kind === "agent_message" && isTerminal) {
-      const finalText = item.summary || streamText || "";
-      const rendered = renderMarkdown(finalText);
-      view = {
-        id: item.id,
-        kind: item.kind,
-        status: item.status,
-        turnId: item.turnId ?? existing?.turnId,
-        summary: finalText,
-        html: rendered.html,
-        codeBlocks: rendered.codeBlocks,
-        rev: (existing?.rev ?? 0) + 1,
-      };
-    } else {
-      view = {
-        id: item.id,
-        kind: item.kind,
-        status: item.status,
-        turnId: item.turnId ?? existing?.turnId,
-        summary: item.summary || existing?.summary || "",
-        detail: item.detail ?? existing?.detail,
-        metadata: item.metadata ?? existing?.metadata,
-        rev: (existing?.rev ?? 0) + 1,
-      };
-    }
-    this.items.set(item.id, view);
+    this.items.set(item.id, projectItem(item, existing, event));
     if (!existing) {
       this.itemOrder.push(item.id);
     }
@@ -628,6 +675,7 @@ export class ChatView implements vscode.WebviewViewProvider {
       activeThreadId: this.activeThreadId,
       model: this.activeDetail?.thread.model ?? this.threads.find((t) => t.id === this.activeThreadId)?.model,
       streaming: this.streamingTurnId !== undefined,
+      interrupting: this.interruptRequested,
       chips: this.chips,
       approvals: this.activeDetail?.pendingApprovals ?? [],
       inputs: this.activeDetail?.pendingUserInputs ?? [],
@@ -675,36 +723,43 @@ export class ChatView implements vscode.WebviewViewProvider {
 </head>
 <body>
   <header id="conn">
-    <span id="conn-dot" class="dot offline"></span>
-    <span id="conn-label">Checking runtime…</span>
+    <span id="conn-dot" class="dot offline" aria-hidden="true"></span>
+    <span id="conn-label" role="status" aria-live="polite">Checking runtime…</span>
     <span class="spacer"></span>
-    <button id="btn-new" class="icon" title="New thread">＋ New</button>
+    <button id="btn-new" class="icon" title="New thread" aria-label="New thread">＋ New</button>
   </header>
-  <div id="conn-actions" class="hidden">
+  <div id="conn-actions" class="hidden" role="group" aria-label="Runtime connection actions">
     <button id="btn-start">Start Local Runtime</button>
     <button id="btn-token">Set Runtime Token</button>
     <button id="btn-terminal">Open Terminal</button>
   </div>
   <details id="threads-box">
     <summary>Threads <span id="threads-count"></span></summary>
-    <div id="threads"></div>
+    <div id="threads" role="group" aria-label="Threads"></div>
   </details>
-  <main id="transcript"></main>
-  <div id="attention"></div>
-  <div id="chips"></div>
-  <div id="steer-box" class="hidden">
-    <input id="steer-input" type="text" placeholder="Steer the running turn…" />
+  <main id="transcript" role="log" aria-live="polite" aria-relevant="additions text"
+        aria-label="Conversation transcript" tabindex="0"></main>
+  <div id="attention" role="region" aria-live="assertive" aria-label="Needs your attention"></div>
+  <div id="chips" role="list" aria-label="Attached context"></div>
+  <div id="steer-box" class="hidden" role="group" aria-label="Running turn controls">
+    <label class="sr-only" for="steer-input">Steer the running turn</label>
+    <input id="steer-input" type="text" placeholder="Steer the running turn…"
+           aria-label="Steer the running turn" />
     <button id="btn-steer">Steer</button>
     <button id="btn-interrupt" class="danger">Stop</button>
   </div>
   <footer id="composer">
-    <div class="attach-row">
-      <button id="btn-chip-selection" title="Attach current selection">＋ Selection</button>
-      <button id="btn-chip-file" title="Attach active file">＋ File</button>
-      <button id="btn-chip-diagnostics" title="Attach problems">＋ Problems</button>
-      <span id="model-label" class="model"></span>
+    <div class="attach-row" role="group" aria-label="Attach editor context">
+      <button id="btn-chip-selection" title="Attach current selection" aria-label="Attach current selection">＋ Selection</button>
+      <button id="btn-chip-file" title="Attach active file" aria-label="Attach active file">＋ File</button>
+      <button id="btn-chip-diagnostics" title="Attach problems" aria-label="Attach problems from the active file">＋ Problems</button>
+      <span id="model-label" class="model" role="status" aria-live="polite"></span>
     </div>
-    <textarea id="prompt" rows="3" placeholder="Ask Codewhale… (Enter to send, Shift+Enter for newline)"></textarea>
+    <label class="sr-only" for="prompt">Message Codewhale</label>
+    <textarea id="prompt" rows="3" aria-label="Message Codewhale"
+              aria-describedby="prompt-hint"
+              placeholder="Ask Codewhale… (Enter to send, Shift+Enter for newline)"></textarea>
+    <span id="prompt-hint" class="sr-only">Press Enter to send, Shift plus Enter for a new line.</span>
   </footer>
   <script nonce="${nonce}">
     ${chatScript()}
@@ -712,19 +767,6 @@ export class ChatView implements vscode.WebviewViewProvider {
 </body>
 </html>`;
   }
-}
-
-function statusForEvent(event: string): string {
-  if (event === "item.completed") {
-    return "completed";
-  }
-  if (event === "item.failed") {
-    return "failed";
-  }
-  if (event === "item.interrupted") {
-    return "interrupted";
-  }
-  return "in_progress";
 }
 
 function readPayloadItem(payload: unknown): Partial<ItemRecord> | undefined {
@@ -871,6 +913,18 @@ function chatStyles(): string {
     button.primary { background: var(--vscode-button-background); }
     button.danger { background: var(--vscode-errorForeground); color: var(--vscode-editor-background); }
     button:hover { filter: brightness(1.1); }
+    button[aria-disabled="true"] { opacity: 0.6; cursor: default; }
+    /* Keyboard focus must be visible everywhere it can land. */
+    :focus-visible { outline: 2px solid var(--vscode-focusBorder, #0078d4); outline-offset: 1px; border-radius: 3px; }
+    button:focus-visible, summary:focus-visible, [tabindex]:focus-visible, .thread:focus-visible, .chip button:focus-visible {
+      outline: 2px solid var(--vscode-focusBorder, #0078d4); outline-offset: 1px; }
+    input[type="text"]:focus-visible, input[type="checkbox"]:focus-visible, textarea:focus-visible {
+      outline: 2px solid var(--vscode-focusBorder, #0078d4); outline-offset: -1px;
+      border-color: var(--vscode-focusBorder, #0078d4); }
+    /* Some hosts still report only :focus for the textarea; keep it obvious. */
+    textarea:focus, input[type="text"]:focus { border-color: var(--vscode-focusBorder, #0078d4); }
+    .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden;
+               clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; border: 0; }
     input[type="text"], textarea { width: 100%; box-sizing: border-box; color: var(--vscode-input-foreground);
       background: var(--vscode-input-background); border: 1px solid var(--vscode-input-border, transparent); border-radius: 3px;
       padding: 6px 8px; font-family: inherit; font-size: inherit; resize: vertical; }
@@ -936,6 +990,7 @@ function chatStyles(): string {
     .attach-row { display: flex; gap: 4px; margin-bottom: 4px; align-items: center; }
     .attach-row button { font-size: 10px; padding: 1px 6px; }
     .model { margin-left: auto; color: var(--vscode-descriptionForeground); font-size: 10px; }
+    main:focus-visible { outline: 2px solid var(--vscode-focusBorder, #0078d4); outline-offset: -2px; }
     #transcript .empty { color: var(--vscode-descriptionForeground); text-align: center; margin-top: 30px; line-height: 1.6; }
   `;
 }
@@ -963,7 +1018,10 @@ function chatScript(): string {
     document.getElementById("btn-chip-selection").addEventListener("click", () => vscode.postMessage({ command: "addChip", kind: "selection" }));
     document.getElementById("btn-chip-file").addEventListener("click", () => vscode.postMessage({ command: "addChip", kind: "file" }));
     document.getElementById("btn-chip-diagnostics").addEventListener("click", () => vscode.postMessage({ command: "addChip", kind: "diagnostics" }));
-    document.getElementById("btn-interrupt").addEventListener("click", () => vscode.postMessage({ command: "interrupt" }));
+    document.getElementById("btn-interrupt").addEventListener("click", (e) => {
+      if (e.currentTarget.getAttribute("aria-disabled") === "true") { return; }
+      vscode.postMessage({ command: "interrupt" });
+    });
     document.getElementById("btn-steer").addEventListener("click", sendSteer);
     document.getElementById("steer-input").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); sendSteer(); } });
 
@@ -975,11 +1033,26 @@ function chatScript(): string {
       }
     });
 
+    let sending = false;
+    let sentText = "";
     function sendPrompt() {
       const text = promptBox.value.trim();
-      if (!text) { return; }
-      promptBox.value = "";
+      if (!text || sending) { return; }
+      sentText = promptBox.value;
+      // Do NOT clear here: the turn can still be refused and the text is the
+      // user's. It is cleared only when the extension confirms acceptance.
+      sending = true;
+      promptBox.setAttribute("aria-busy", "true");
       vscode.postMessage({ command: "sendPrompt", text });
+    }
+
+    function composerResult(ok) {
+      sending = false;
+      promptBox.removeAttribute("aria-busy");
+      // Only clear what was actually sent: the user may have kept typing.
+      if (ok && promptBox.value === sentText) { promptBox.value = ""; }
+      sentText = "";
+      promptBox.focus();
     }
     function sendSteer() {
       const box = document.getElementById("steer-input");
@@ -994,6 +1067,7 @@ function chatScript(): string {
       if (msg.type === "sync") { renderSync(msg); }
       else if (msg.type === "delta") { appendDelta(msg.itemId, msg.text); }
       else if (msg.type === "focusComposer") { promptBox.focus(); }
+      else if (msg.type === "composerResult") { composerResult(msg.ok === true); }
     });
     vscode.postMessage({ command: "ready" });
 
@@ -1004,8 +1078,13 @@ function chatScript(): string {
       renderChips(msg.chips || []);
       renderAttention(msg);
       renderItems(msg.items || []);
-      document.getElementById("steer-box").classList.toggle("hidden", !msg.streaming);
-      document.getElementById("btn-interrupt").classList.toggle("hidden", !msg.streaming);
+      const running = !!msg.streaming;
+      document.getElementById("steer-box").classList.toggle("hidden", !running);
+      const stop = document.getElementById("btn-interrupt");
+      stop.classList.toggle("hidden", !running);
+      stop.textContent = msg.interrupting ? "Stopping…" : "Stop";
+      stop.setAttribute("aria-label", msg.interrupting ? "Stopping the current turn" : "Stop the current turn");
+      stop.setAttribute("aria-disabled", msg.interrupting ? "true" : "false");
       document.getElementById("model-label").textContent = msg.model ? msg.model : "";
     }
 
@@ -1030,6 +1109,9 @@ function chatScript(): string {
       for (const thread of threads) {
         const el = document.createElement("div");
         el.className = "thread" + (thread.id === msg.activeThreadId ? " active" : "");
+        el.setAttribute("role", "button");
+        el.tabIndex = 0;
+        if (thread.id === msg.activeThreadId) { el.setAttribute("aria-current", "true"); }
         const title = document.createElement("div");
         title.className = "thread-title";
         title.textContent = thread.title || "New Thread";
@@ -1038,7 +1120,12 @@ function chatScript(): string {
         meta.textContent = [thread.model, thread.branch, thread.latestTurnStatus].filter(Boolean).join(" · ");
         el.appendChild(title);
         el.appendChild(meta);
-        el.addEventListener("click", () => vscode.postMessage({ command: "selectThread", id: thread.id }));
+        const open = () => vscode.postMessage({ command: "selectThread", id: thread.id });
+        el.setAttribute("aria-label", "Thread: " + (thread.title || "New Thread"));
+        el.addEventListener("click", open);
+        el.addEventListener("keydown", (e) => {
+          if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); }
+        });
         threadsList.appendChild(el);
       }
     }
@@ -1048,11 +1135,13 @@ function chatScript(): string {
       for (const chip of chips) {
         const el = document.createElement("span");
         el.className = "chip";
+        el.setAttribute("role", "listitem");
         const text = document.createElement("span");
         text.textContent = chip.label + (chip.detail ? " (" + chip.detail + ")" : "");
         const remove = document.createElement("button");
         remove.textContent = "×";
         remove.title = "Remove";
+        remove.setAttribute("aria-label", "Remove context " + chip.label);
         remove.addEventListener("click", () => vscode.postMessage({ command: "removeChip", id: chip.id }));
         el.appendChild(text);
         el.appendChild(remove);
@@ -1073,6 +1162,8 @@ function chatScript(): string {
     function approvalCard(approval) {
       const card = document.createElement("div");
       card.className = "card";
+      card.setAttribute("role", "group");
+      card.setAttribute("aria-label", "Approval request for " + approval.toolName);
       const title = document.createElement("div");
       title.className = "title";
       title.textContent = "Approval: " + approval.toolName;
@@ -1089,9 +1180,11 @@ function chatScript(): string {
       const allow = document.createElement("button");
       allow.className = "primary";
       allow.textContent = "Allow";
+      allow.setAttribute("aria-label", "Allow " + approval.toolName);
       allow.addEventListener("click", () => vscode.postMessage({ command: "decideApproval", id: approval.id, decision: "allow", remember: rememberBox.checked }));
       const deny = document.createElement("button");
       deny.textContent = "Deny";
+      deny.setAttribute("aria-label", "Deny " + approval.toolName);
       deny.addEventListener("click", () => vscode.postMessage({ command: "decideApproval", id: approval.id, decision: "deny", remember: rememberBox.checked }));
       row.appendChild(allow); row.appendChild(deny); row.appendChild(remember);
       card.appendChild(title); card.appendChild(desc); card.appendChild(row);
@@ -1101,6 +1194,8 @@ function chatScript(): string {
     function userInputCard(threadId, input) {
       const card = document.createElement("div");
       card.className = "card";
+      card.setAttribute("role", "group");
+      card.setAttribute("aria-label", "Codewhale needs an answer");
       for (const question of input.questions || []) {
         const title = document.createElement("div");
         title.className = "title";
@@ -1122,9 +1217,13 @@ function chatScript(): string {
             btn.appendChild(desc);
           }
           if (question.multiSelect) {
+            btn.setAttribute("role", "checkbox");
+            btn.setAttribute("aria-checked", "false");
             btn.addEventListener("click", () => {
-              if (selected.has(option.label)) { selected.delete(option.label); btn.style.opacity = ""; }
-              else { selected.add(option.label); btn.style.opacity = "0.6"; }
+              const on = !selected.has(option.label);
+              if (on) { selected.add(option.label); btn.style.opacity = "0.6"; }
+              else { selected.delete(option.label); btn.style.opacity = ""; }
+              btn.setAttribute("aria-checked", on ? "true" : "false");
             });
           } else {
             btn.addEventListener("click", () => answer(option.label));
@@ -1147,6 +1246,7 @@ function chatScript(): string {
           const box = document.createElement("input");
           box.type = "text";
           box.placeholder = "Other…";
+          box.setAttribute("aria-label", "Other answer for: " + question.question);
           const send = document.createElement("button");
           send.textContent = "Send";
           send.addEventListener("click", () => { if (box.value.trim()) { answer(box.value.trim()); } });
@@ -1203,6 +1303,7 @@ function chatScript(): string {
         }
         const bubble = document.createElement("div");
         bubble.className = "bubble streaming";
+        bubble.setAttribute("aria-busy", "true");
         bubble.textContent = view.streamText || "";
         streamBufs.set(view.id, bubble);
         return wrap("agent", "Codewhale", bubble, view);
@@ -1219,6 +1320,8 @@ function chatScript(): string {
     function wrap(kind, who, body, view) {
       const msg = document.createElement("div");
       msg.className = "msg " + kind;
+      msg.setAttribute("role", "group");
+      msg.setAttribute("aria-label", who || kind.replace(/_/g, " "));
       if (view) { msg.dataset.rev = String(view.rev); }
       if (who) {
         const whoEl = document.createElement("div");
@@ -1246,15 +1349,16 @@ function chatScript(): string {
       const body = document.createElement("pre");
       body.textContent = view.detail || view.summary || "";
       details.appendChild(body);
-      if (view.kind === "file_change") {
+      // view.filePath is parsed extension-side (metadata.tool_input included)
+      // and validated again before anything is opened.
+      if (view.filePath) {
         const open = document.createElement("button");
         open.textContent = "Open file";
+        open.setAttribute("aria-label", "Open file " + view.filePath);
+        open.title = view.filePath;
         open.style.margin = "4px 8px";
-        const path = view.metadata && (view.metadata.path || view.metadata.file || view.metadata.file_path);
-        if (path) {
-          open.addEventListener("click", () => vscode.postMessage({ command: "openFile", path: String(path) }));
-          details.appendChild(open);
-        }
+        open.addEventListener("click", () => vscode.postMessage({ command: "openFile", path: view.filePath }));
+        details.appendChild(open);
       }
       return details;
     }

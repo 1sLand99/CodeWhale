@@ -1,29 +1,61 @@
 import * as vscode from "vscode";
 
 const SECRET_KEY = "codewhale.runtimeToken";
+const SETTING_KEY = "runtimeToken";
+
+let warnedAboutWorkspaceToken = false;
+
+/** Trim a setting value that arrived as `unknown` from a trust boundary. */
+function nonEmptyString(value: unknown): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
 
 /**
- * Resolve the runtime bearer token: SecretStorage first, then the legacy
- * `codewhale.runtimeToken` setting. The setting is kept for compatibility
- * but SecretStorage is where new tokens go, so tokens stop living in
- * plaintext settings.json / workspace dotfiles.
+ * Resolve the runtime bearer token. SecretStorage is authoritative; the legacy
+ * `codewhale.runtimeToken` setting is a one-way migration source only, which is
+ * what `package.json`'s deprecation message and `README.md` promise.
+ *
+ * Only a *user-level* value is migrated. A workspace- or folder-scoped value is
+ * attacker-controlled input: `codewhale.runtimeHost` is workspace-settable too,
+ * so a repo-local `.vscode/settings.json` that supplied both would make merely
+ * opening the repository ship a bearer token to a host of its choosing. Such a
+ * value is ignored, never adopted.
  */
 export async function resolveToken(context: vscode.ExtensionContext): Promise<string | undefined> {
-  const stored = await context.secrets.get(SECRET_KEY);
-  if (stored && stored.trim().length > 0) {
-    return stored.trim();
+  const stored = nonEmptyString(await context.secrets.get(SECRET_KEY));
+  if (stored) {
+    return stored;
   }
-  const setting = vscode.workspace
-    .getConfiguration("codewhale")
-    .get<string>("runtimeToken", "")
-    .trim();
-  if (setting) {
-    // Migrate a settings-based token into secret storage so it can be
-    // removed from the (possibly synced) settings file.
-    await context.secrets.store(SECRET_KEY, setting);
-    return setting;
+
+  const config = vscode.workspace.getConfiguration("codewhale");
+  const inspected = config.inspect<string>(SETTING_KEY);
+  const userToken = nonEmptyString(inspected?.globalValue);
+  if (!userToken) {
+    const workspaceToken =
+      nonEmptyString(inspected?.workspaceValue) ??
+      nonEmptyString(inspected?.workspaceFolderValue);
+    if (workspaceToken && !warnedAboutWorkspaceToken) {
+      warnedAboutWorkspaceToken = true;
+      void vscode.window.showWarningMessage(
+        "Ignoring codewhale.runtimeToken from workspace settings: a workspace cannot supply the runtime bearer token. Use CodeWhale: Set Runtime Token.",
+      );
+    }
+    return undefined;
   }
-  return undefined;
+
+  await context.secrets.store(SECRET_KEY, userToken);
+  // One-way migration: drop the plaintext copy so it stops riding Settings Sync.
+  try {
+    await config.update(SETTING_KEY, undefined, vscode.ConfigurationTarget.Global);
+  } catch {
+    // A read-only settings.json must not cost the user a working token; the
+    // secret is already stored, so keep going and leave the plaintext behind.
+  }
+  return userToken;
 }
 
 export async function storeToken(context: vscode.ExtensionContext, token: string): Promise<void> {

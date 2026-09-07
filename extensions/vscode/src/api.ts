@@ -131,7 +131,7 @@ export async function checkConnection(config: ApiConfig): Promise<ConnectionInfo
   if (health.statusCode === 401) {
     return { kind: "auth-required", detail: "Runtime requires a token." };
   }
-  if (health.statusCode !== 200) {
+  if (!isOk(health.statusCode)) {
     return { kind: "error", detail: `Health check returned HTTP ${health.statusCode}.` };
   }
 
@@ -166,12 +166,7 @@ export async function listThreadSummaries(config: ApiConfig, limit = 20): Promis
     config,
     { timeoutMs: READ_TIMEOUT_MS },
   );
-  if (response.statusCode === 401) {
-    throw new ApiError("Thread summaries require the runtime token.", 401);
-  }
-  if (response.statusCode !== 200) {
-    throw new ApiError(`Thread summary returned HTTP ${response.statusCode}.`, response.statusCode);
-  }
+  ensureOk(response, "Thread summaries");
   return readThreadSummaries(response.body);
 }
 
@@ -181,9 +176,7 @@ export async function getThreadDetail(config: ApiConfig, threadId: string): Prom
     config,
     { timeoutMs: READ_TIMEOUT_MS },
   );
-  if (response.statusCode !== 200) {
-    throw new ApiError(`Thread detail returned HTTP ${response.statusCode}.`, response.statusCode);
-  }
+  ensureOk(response, "Thread detail");
   return readThreadDetail(response.body);
 }
 
@@ -196,9 +189,7 @@ export async function createThread(
     body: JSON.stringify(body),
     timeoutMs: MUTATE_TIMEOUT_MS,
   });
-  if (response.statusCode !== 200 && response.statusCode !== 201) {
-    throw new ApiError(`Create thread returned HTTP ${response.statusCode}.`, response.statusCode);
-  }
+  ensureOk(response, "Create thread");
   return readThread(response.body);
 }
 
@@ -221,13 +212,7 @@ export async function startTurn(
     config,
     { method: "POST", body: JSON.stringify(wire), timeoutMs: MUTATE_TIMEOUT_MS },
   );
-  if (response.statusCode !== 200 && response.statusCode !== 202) {
-    throw new ApiError(
-      `Start turn returned HTTP ${response.statusCode}.`,
-      response.statusCode,
-      readErrorDetail(response.body),
-    );
-  }
+  ensureOk(response, "Start turn");
   const record = readBody(response.body);
   return {
     thread: readThread(record.thread),
@@ -246,24 +231,31 @@ export async function steerTurn(
     config,
     { method: "POST", body: JSON.stringify({ prompt }), timeoutMs: MUTATE_TIMEOUT_MS },
   );
-  if (response.statusCode !== 200 && response.statusCode !== 202) {
-    throw new ApiError(`Steer returned HTTP ${response.statusCode}.`, response.statusCode);
-  }
+  ensureOk(response, "Steer");
 }
+
+/**
+ * Outcome of an interrupt. The runtime answers 409 when the turn is not
+ * running — that is "nothing to stop", not a failure, so it is reported as a
+ * value instead of thrown.
+ */
+export type InterruptResult = "interrupted" | "not-running";
 
 export async function interruptTurn(
   config: ApiConfig,
   threadId: string,
   turnId: string,
-): Promise<void> {
+): Promise<InterruptResult> {
   const response = await requestJson(
     `${config.baseUrl}/v1/threads/${encodeURIComponent(threadId)}/turns/${encodeURIComponent(turnId)}/interrupt`,
     config,
     { method: "POST", timeoutMs: MUTATE_TIMEOUT_MS },
   );
-  if (response.statusCode !== 200 && response.statusCode !== 202) {
-    throw new ApiError(`Interrupt returned HTTP ${response.statusCode}.`, response.statusCode);
+  if (response.statusCode === 409) {
+    return "not-running";
   }
+  ensureOk(response, "Interrupt");
+  return "interrupted";
 }
 
 export async function resolveApproval(
@@ -281,9 +273,7 @@ export async function resolveApproval(
       timeoutMs: MUTATE_TIMEOUT_MS,
     },
   );
-  if (response.statusCode !== 200 && response.statusCode !== 202) {
-    throw new ApiError(`Approval returned HTTP ${response.statusCode}.`, response.statusCode);
-  }
+  ensureOk(response, "Approval");
 }
 
 export async function answerUserInput(
@@ -297,9 +287,7 @@ export async function answerUserInput(
     config,
     { method: "POST", body: JSON.stringify({ answers }), timeoutMs: MUTATE_TIMEOUT_MS },
   );
-  if (response.statusCode !== 200 && response.statusCode !== 202) {
-    throw new ApiError(`User input returned HTTP ${response.statusCode}.`, response.statusCode);
-  }
+  ensureOk(response, "User input");
 }
 
 export async function listSnapshots(config: ApiConfig, limit = 8): Promise<SnapshotEntry[]> {
@@ -308,9 +296,7 @@ export async function listSnapshots(config: ApiConfig, limit = 8): Promise<Snaps
     config,
     { timeoutMs: READ_TIMEOUT_MS },
   );
-  if (response.statusCode !== 200) {
-    throw new ApiError(`Restore points returned HTTP ${response.statusCode}.`, response.statusCode);
-  }
+  ensureOk(response, "Restore points");
   return readSnapshots(response.body);
 }
 
@@ -342,14 +328,9 @@ export function openEventStream(
       },
     },
     (response) => {
-      if (response.statusCode !== 200) {
+      if (!isOk(response.statusCode ?? 0)) {
         response.resume();
-        stream.onError(
-          new ApiError(
-            `Event stream returned HTTP ${response.statusCode}.`,
-            response.statusCode ?? 0,
-          ),
-        );
+        stream.onError(apiError(response.statusCode ?? 0, undefined, "Event stream"));
         return;
       }
       response.setEncoding("utf8");
@@ -393,9 +374,54 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * HTTP 409 from the runtime: the request was well-formed but the resource is
+ * already in a state that refuses it — most often "thread already has an
+ * active turn". Callers catch this to say "a turn is already running" instead
+ * of reporting a generic failure.
+ */
+export class ConflictError extends ApiError {
+  constructor(message: string, detail?: string) {
+    super(message, 409, detail);
+    this.name = "ConflictError";
+  }
+}
+
 interface RequestResult {
   statusCode: number;
   body: unknown;
+}
+
+/**
+ * Success is the whole 2xx range, mirroring `response.ok` in the embedded web
+ * client (`crates/tui/src/runtime_web/app.mjs:873`). The runtime answers 201
+ * CREATED for `POST /v1/threads/{id}/turns`, so an equality check against a
+ * hand-picked list of codes rejects every real send.
+ */
+function isOk(statusCode: number): boolean {
+  return statusCode >= 200 && statusCode < 300;
+}
+
+/** Build the typed error for a non-2xx status, surfacing the runtime's own message. */
+function apiError(statusCode: number, body: unknown, label: string): ApiError {
+  const detail = readErrorDetail(body);
+  if (statusCode === 0) {
+    return new ApiError(`${label} could not reach the runtime.`, 0, detail);
+  }
+  if (statusCode === 401) {
+    return new ApiError(`${label} requires the runtime token.`, 401, detail);
+  }
+  if (statusCode === 409) {
+    return new ConflictError(`${label} conflicts with the runtime's current state.`, detail);
+  }
+  return new ApiError(`${label} returned HTTP ${statusCode}.`, statusCode, detail);
+}
+
+/** Throw unless the runtime answered 2xx. Every route's status check runs through here. */
+function ensureOk(response: RequestResult, label: string): void {
+  if (!isOk(response.statusCode)) {
+    throw apiError(response.statusCode, response.body, label);
+  }
 }
 
 async function requestJson(

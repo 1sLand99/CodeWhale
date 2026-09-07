@@ -14,7 +14,6 @@ export interface RuntimeConfig {
   commandPath: string;
   host: string;
   port: number;
-  token?: string;
   agentViewRefreshIntervalSeconds: number;
 }
 
@@ -23,13 +22,13 @@ export function readRuntimeConfig(): RuntimeConfig {
   const commandPath = config.get<string>("commandPath", "codewhale").trim() || "codewhale";
   const host = config.get<string>("runtimeHost", "127.0.0.1").trim() || "127.0.0.1";
   const port = config.get<number>("runtimePort", 7878);
-  const token = config.get<string>("runtimeToken", "").trim();
   const interval = config.get<number>("agentViewRefreshIntervalSeconds", 15);
+  // The bearer token is deliberately absent here: it resolves through
+  // `secrets.ts`, where SecretStorage wins over the deprecated setting.
   return {
     commandPath,
     host,
     port,
-    token: token.length > 0 ? token : undefined,
     agentViewRefreshIntervalSeconds: clampRefreshInterval(interval),
   };
 }
@@ -38,8 +37,20 @@ export function runtimeBaseUrl(config: RuntimeConfig): string {
   return `http://${config.host}:${config.port}`;
 }
 
-export function startRuntimeTerminal(config: RuntimeConfig): vscode.Terminal {
-  const terminal = vscode.window.createTerminal("CodeWhale Runtime");
+/**
+ * Start `codewhale serve` in a visible terminal.
+ *
+ * The bearer token never enters argv: a sent command line lands in the terminal
+ * buffer, the shell history file, and every local `ps`. The runtime accepts
+ * `CODEWHALE_RUNTIME_TOKEN` as the fallback for `--auth-token`
+ * (`crates/tui/src/lib.rs:1325-1327`), so it travels in the terminal's
+ * environment instead.
+ */
+export function startRuntimeTerminal(config: RuntimeConfig, token?: string): vscode.Terminal {
+  const terminal = vscode.window.createTerminal({
+    name: "CodeWhale Runtime",
+    env: token ? { CODEWHALE_RUNTIME_TOKEN: token } : undefined,
+  });
   const args = [
     "serve",
     "--http",
@@ -48,9 +59,6 @@ export function startRuntimeTerminal(config: RuntimeConfig): vscode.Terminal {
     "--port",
     String(config.port),
   ];
-  if (config.token) {
-    args.push("--auth-token", shellQuote(config.token));
-  }
   terminal.sendText(`${shellQuote(config.commandPath)} ${args.join(" ")}`);
   terminal.show();
   return terminal;

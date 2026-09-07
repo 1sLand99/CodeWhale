@@ -6,6 +6,7 @@ import {
   answerUserInput,
   ApiError,
   checkConnection,
+  ConflictError,
   getThreadDetail,
   interruptTurn,
   listThreadSummaries,
@@ -117,13 +118,42 @@ describe("api client", () => {
             response.end("{}");
             return;
           }
-          response.writeHead(202, { "Content-Type": "application/json" });
+          // The real contract: `start_thread_turn` answers 201 CREATED
+          // (crates/tui/src/runtime_api.rs:4613-4631).
+          response.writeHead(201, { "Content-Type": "application/json" });
           response.end(
             JSON.stringify({
               thread: { id: "thr_1" },
               turn: { id: "turn_2", status: "queued" },
             }),
           );
+          return;
+        }
+        // Every 2xx is a success, so pin the edges of the range as well.
+        const rangeMatch = /^\/v1\/threads\/thr_(200|201|202)\/turns$/.exec(request.url ?? "");
+        if (rangeMatch && request.method === "POST") {
+          response.writeHead(Number(rangeMatch[1]), { "Content-Type": "application/json" });
+          response.end(
+            JSON.stringify({
+              thread: { id: `thr_${rangeMatch[1]}` },
+              turn: { id: "turn_range", status: "queued" },
+            }),
+          );
+          return;
+        }
+        if (request.url === "/v1/threads/thr_500/turns") {
+          response.writeHead(500, { "Content-Type": "application/json" });
+          response.end(JSON.stringify({ error: { code: "internal", message: "engine exploded" } }));
+          return;
+        }
+        if (request.url === "/v1/threads/thr_401/turns") {
+          response.writeHead(401, { "Content-Type": "application/json" });
+          response.end(JSON.stringify({ error: { message: "missing bearer token" } }));
+          return;
+        }
+        if (request.url === "/v1/threads/thr_1/turns/turn_idle/interrupt") {
+          response.writeHead(409, { "Content-Type": "application/json" });
+          response.end(JSON.stringify({ error: { message: "No active turn for thread 'thr_1'" } }));
           return;
         }
         if (request.url === "/v1/threads/thr_1/turns/turn_2/steer") {
@@ -201,7 +231,7 @@ describe("api client", () => {
     assert.equal(detail.pendingUserInputs[0].questions[0].allowFreeText, true);
   });
 
-  it("starts a turn with an idempotency key and accepts 202", async () => {
+  it("starts a turn with an idempotency key and accepts the runtime's 201", async () => {
     const result = await startTurn(config(), "thr_1", {
       prompt: "do the thing",
       operationKey: "op-123",
@@ -211,12 +241,49 @@ describe("api client", () => {
     assert.equal(result.turn.id, "turn_2");
   });
 
+  it("accepts every 2xx, not a hand-picked list of codes", async () => {
+    for (const status of ["200", "201", "202"]) {
+      const result = await startTurn(config(), `thr_${status}`, { prompt: "x", operationKey: "k" });
+      assert.equal(result.turn.id, "turn_range", `HTTP ${status} should be a success`);
+    }
+  });
+
+  it("surfaces the runtime's message on a 5xx", async () => {
+    await assert.rejects(
+      startTurn(config(), "thr_500", { prompt: "x", operationKey: "k" }),
+      (error: unknown) => {
+        assert.ok(error instanceof ApiError);
+        assert.equal((error as ApiError).statusCode, 500);
+        assert.ok((error as ApiError).message.includes("engine exploded"));
+        return true;
+      },
+    );
+  });
+
+  it("signals auth-required on a mutating 401", async () => {
+    await assert.rejects(
+      startTurn(config(), "thr_401", { prompt: "x", operationKey: "k" }),
+      (error: unknown) => {
+        assert.ok(error instanceof ApiError);
+        assert.equal((error as ApiError).statusCode, 401);
+        assert.ok((error as ApiError).message.includes("requires the runtime token"));
+        return true;
+      },
+    );
+  });
+
   it("steers and interrupts", async () => {
     await steerTurn(config(), "thr_1", "turn_2", "focus on tests");
     assert.ok(seen.path?.includes("/steer"));
     assert.ok(seen.body?.includes("focus on tests"));
-    await interruptTurn(config(), "thr_1", "turn_2");
+    const result = await interruptTurn(config(), "thr_1", "turn_2");
     assert.ok(seen.path?.endsWith("/interrupt"));
+    assert.equal(result, "interrupted");
+  });
+
+  it("treats a 409 interrupt as nothing to stop, not a failure", async () => {
+    const result = await interruptTurn(config(), "thr_1", "turn_idle");
+    assert.equal(result, "not-running");
   });
 
   it("resolves approvals and answers user input", async () => {
@@ -228,12 +295,16 @@ describe("api client", () => {
     assert.ok(seen.body?.includes("Fast"));
   });
 
-  it("surfaces 409 with server detail on conflict", async () => {
+  it("surfaces 409 as a typed conflict with server detail", async () => {
     const failing: ApiConfig = { baseUrl };
     const promise = startTurn(failing, "thr_conflict", { prompt: "x", operationKey: "k" });
     await assert.rejects(promise, (error: unknown) => {
       assert.ok(error instanceof ApiError);
+      // A conflict is its own signal so callers can say "a turn is already
+      // running" rather than reporting a generic HTTP failure.
+      assert.ok(error instanceof ConflictError);
       assert.equal((error as ApiError).statusCode, 409);
+      assert.equal((error as ApiError).detail, "key reuse");
       assert.ok((error as ApiError).message.includes("key reuse"));
       return true;
     });

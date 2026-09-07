@@ -17,7 +17,10 @@ export function activate(context: vscode.ExtensionContext): void {
   const statusView = new RuntimeStatusView();
   const apiConfig = async (): Promise<ApiConfig> => {
     const config = readRuntimeConfig();
-    const token = config.token ?? (await resolveToken(context));
+    // SecretStorage is the only token source; `resolveToken` treats the
+    // deprecated `codewhale.runtimeToken` setting as a migration source and
+    // ignores a workspace-scoped one outright.
+    const token = await resolveToken(context);
     return { baseUrl: runtimeBaseUrl(config), token };
   };
   const chatView = new ChatView(context, apiConfig, output);
@@ -27,8 +30,26 @@ export function activate(context: vscode.ExtensionContext): void {
 
   status.command = "codewhale.checkRuntime";
   context.subscriptions.push(output, status);
+  // The chat lives in the secondary (right) sidebar on hosts that support it,
+  // and falls back to the activity bar on older ones. The manifest gates both
+  // containers on `codewhale.noSecondarySidebar`, so this key MUST be set at
+  // activation — an unset key is falsy, which would hide the activity-bar
+  // container AND leave the secondary panel unserved. Threshold matches the
+  // shipping Codex extension, which gates at runtime rather than via engines.
+  const [vsMajor = 0, vsMinor = 0] = vscode.version
+    .split(".")
+    .map((part) => Number.parseInt(part, 10) || 0);
+  const supportsSecondarySidebar = vsMajor > 1 || (vsMajor === 1 && vsMinor >= 106);
+  void vscode.commands.executeCommand(
+    "setContext",
+    "codewhale.noSecondarySidebar",
+    !supportsSecondarySidebar,
+  );
+
+  // One ChatView instance serves both ids; only the gated one ever resolves.
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(ChatView.viewType, chatView),
+    vscode.window.registerWebviewViewProvider(ChatView.secondaryViewType, chatView),
     vscode.window.registerWebviewViewProvider(RuntimeStatusView.viewType, statusView),
   );
 
@@ -146,10 +167,28 @@ export function activate(context: vscode.ExtensionContext): void {
       openCodeWhaleTerminal(readRuntimeConfig());
       output.appendLine(`Opened CodeWhale terminal using ${readRuntimeConfig().commandPath}.`);
     }),
-    vscode.commands.registerCommand("codewhale.startRuntime", () => {
+    vscode.commands.registerCommand("codewhale.startRuntime", async () => {
       const config = readRuntimeConfig();
-      startRuntimeTerminal(config);
       const baseUrl = runtimeBaseUrl(config);
+      const token = await resolveToken(context);
+
+      // Anything that answers on this address is already bound to the port; a
+      // second `serve` would only fail noisily, so report instead of starting.
+      let bound: ConnectionInfo | undefined;
+      try {
+        bound = await checkConnection({ baseUrl, token });
+      } catch {
+        bound = undefined;
+      }
+      if (bound && bound.kind !== "offline") {
+        const detail = `A runtime is already listening at ${baseUrl}: ${bound.detail}`;
+        output.appendLine(detail);
+        void vscode.window.showInformationMessage(detail);
+        await checkAndRefreshRuntime(false, false);
+        return;
+      }
+
+      startRuntimeTerminal(config, token);
       updateStatus("$(sync~spin) CodeWhale", `Runtime terminal started for ${baseUrl}`);
       output.appendLine(`Started CodeWhale runtime terminal at ${baseUrl}.`);
       void vscode.window.showInformationMessage(`CodeWhale runtime starting at ${baseUrl}`);
