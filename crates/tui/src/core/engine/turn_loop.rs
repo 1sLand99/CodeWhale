@@ -2828,7 +2828,7 @@ impl Engine {
 
             // #3027: deny wins over allow — check the deny-list first so a
             // tool present in both lists is still blocked.
-            if blocked_error.is_none() && tool_policy.denies_tool(&tool_name) {
+            if blocked_error.is_none() && tool_policy.denies_call(&tool_name, &tool_input) {
                 blocked_error = Some(if McpPool::is_mcp_tool(&tool_name) {
                     ToolError::not_available(format!("Unknown MCP tool name: {tool_name}"))
                 } else {
@@ -2931,6 +2931,14 @@ impl Engine {
                     }
                     Err(error) => blocked_error = Some(error),
                 }
+            }
+
+            // A before hook may change the action or verification arguments.
+            // Recheck the same deny boundary on the exact prepared input.
+            if blocked_error.is_none() && tool_policy.denies_call(&tool_name, &tool_input) {
+                blocked_error = Some(ToolError::permission_denied(format!(
+                    "Tool '{tool_name}' or its execution dependency is in the disallowed-tools list"
+                )));
             }
 
             if let Some(prepared) = prepared_policy {

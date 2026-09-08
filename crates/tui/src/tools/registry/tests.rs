@@ -17,6 +17,97 @@ use super::{
     mcp_result_to_bounded_rich_tool_result, mcp_tool_adapter_for_test,
 };
 
+#[tokio::test]
+async fn shell_denial_reaches_registry_and_direct_delegation_sinks() {
+    use crate::tools::run_tool::RunTool;
+    use crate::tools::tasks::{TaskShellStartTool, TasksTool};
+    use crate::tools::terminal_session::{TerminalResetTool, TerminalRunTool, TerminalSendTool};
+    use crate::tools::test_runner::RunTestsTool;
+    use crate::tools::verifier::RunVerifiersTool;
+    let tmp = tempdir().unwrap();
+    let mut context = ToolContext::new(tmp.path());
+    context.auto_approve = true;
+    context.disallowed_tools = vec!["Bash".into()];
+    let command = "printf forbidden > denial-canary.txt";
+    let cases: Vec<(Arc<dyn ToolSpec>, Value)> = vec![
+        (Arc::new(BashTool::new("Bash")), json!({"command":command})),
+        (
+            Arc::new(BashTool::alias("exec_interact", "interact")),
+            json!({"task_id":"missing", "stdin":command, "action":"wait"}),
+        ),
+        (Arc::new(TaskShellStartTool), json!({"command":command})),
+        (
+            Arc::new(TasksTool::new("tasks")),
+            json!({"action":"gate_run", "gate":"custom", "command":command}),
+        ),
+        (
+            Arc::new(TasksTool::alias("task_gate_run", "gate_run")),
+            json!({"action":"list", "gate":"custom", "command":command}),
+        ),
+        (Arc::new(TerminalRunTool), json!({"command":command})),
+        (
+            Arc::new(TerminalSendTool),
+            json!({"session":"missing", "text":command}),
+        ),
+        (Arc::new(TerminalResetTool), json!({"session":"missing"})),
+        (
+            Arc::new(RunTool::new("Run")),
+            json!({"action":"verifiers", "commands":[{"program":"sh", "args":["-c", command]}]}),
+        ),
+        (
+            Arc::new(RunTestsTool),
+            json!({"args":"--config build.rustc=malicious"}),
+        ),
+        (
+            Arc::new(RunVerifiersTool),
+            json!({"commands":[{"program":"sh", "args":["-c",command]}]}),
+        ),
+    ];
+    for (tool, input) in cases {
+        let mut registry = ToolRegistry::new(context.clone());
+        registry.register(tool.clone());
+        for result in [
+            registry.execute_full(tool.name(), input.clone()).await,
+            tool.execute(input, &context).await,
+        ] {
+            let error = result.expect_err(tool.name());
+            assert!(
+                error.to_string().contains("disallowed-tools"),
+                "{}: {error}",
+                tool.name()
+            );
+            assert!(!tmp.path().join("denial-canary.txt").exists());
+        }
+    }
+}
+
+#[test]
+fn shell_denial_keeps_the_existing_bounded_child_read_only_exception() {
+    use crate::core::engine::tool_catalog::enforce_tool_denial;
+    use crate::worker_profile::ShellPolicy;
+    let tmp = tempdir().unwrap();
+    let mut context = ToolContext::new(tmp.path()).with_shell_policy(ShellPolicy::ReadOnly);
+    context.disallowed_tools = vec!["Bash".into()];
+    assert!(enforce_tool_denial(&context, "bash", &json!({"command":"pwd"})).is_err());
+    context = context.with_owner_agent("fixture-child", "fixture");
+    assert!(enforce_tool_denial(&context, "bash", &json!({"command":"pwd"})).is_ok());
+    for (name, input) in [
+        ("Bash", json!({"command":"pwd"})),
+        ("bash", json!({"command":"printf bad > denied"})),
+        ("bash", json!({"command":"pwd", "background":true})),
+        ("task_shell_start", json!({"command":"pwd"})),
+        (
+            "terminal/send",
+            json!({"session":"existing", "text":"pwd\n"}),
+        ),
+    ] {
+        assert!(
+            enforce_tool_denial(&context, name, &input).is_err(),
+            "{name}: {input}"
+        );
+    }
+}
+
 #[test]
 fn mcp_iserror_result_maps_to_tool_error_preserving_text() {
     // #5123-class: MCP servers report tool failure via isError on an

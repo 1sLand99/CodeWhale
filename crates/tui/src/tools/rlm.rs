@@ -125,10 +125,11 @@ impl RlmTool {
         }
     }
 
-    /// Mirror of the legacy per-tool approval contract: only `rlm_eval`
-    /// required approval (it is the non-bypassable code-eval surface, #3866).
+    /// Without concrete input, open may fetch a URL. Input-specific approval
+    /// below keeps local/inline reads automatic and inherits fetch_url's
+    /// outbound-payload approval for URL sources.
     fn action_requires_approval(action: &str) -> bool {
-        action == "eval"
+        matches!(action, "eval" | "open")
     }
 
     /// Mirror of the legacy per-tool read-only contract (capability-derived):
@@ -145,6 +146,7 @@ impl RlmTool {
                 ToolCapability::ReadOnly,
                 ToolCapability::Network,
                 ToolCapability::ExecutesCode,
+                ToolCapability::RequiresApproval,
             ],
             "eval" => vec![
                 ToolCapability::Network,
@@ -299,6 +301,10 @@ impl ToolSpec for RlmTool {
 
     fn approval_requirement_for(&self, input: &Value) -> ApprovalRequirement {
         match self.resolve_action(input) {
+            Ok("open") if rlm_open_source_field(input, "url").is_some() => {
+                FetchUrlTool.approval_requirement_for(&json!({"url": input["url"]}))
+            }
+            Ok("open") => ApprovalRequirement::Auto,
             Ok(action) if Self::action_requires_approval(action) => ApprovalRequirement::Required,
             Ok(_) => ApprovalRequirement::Auto,
             Err(_) => self.approval_requirement(),
@@ -444,6 +450,7 @@ impl RlmTool {
         input: &Value,
         context: &ToolContext,
     ) -> Result<ToolResult, ToolError> {
+        crate::core::engine::tool_catalog::enforce_tool_denial(context, "rlm_eval", input)?;
         let name = required_non_empty_str(input, "name")?;
         let code = required_non_empty_str(input, "code").map_err(|_| {
             ToolError::invalid_input(
@@ -788,6 +795,7 @@ async fn load_source(
     let url = rlm_open_source_field(input, "url")
         .map(str::trim)
         .ok_or_else(|| ToolError::invalid_input("rlm_open: missing source"))?;
+    crate::core::engine::tool_catalog::enforce_tool_denial(context, "fetch_url", input)?;
     let result = FetchUrlTool
         .execute(json!({"url": url, "format": "raw"}), context)
         .await?;
@@ -1014,7 +1022,7 @@ mod tests {
                 .contains(&ToolCapability::RequiresApproval)
         );
 
-        // Approval routing on the canonical tool: only eval requires it.
+        // Evaluation requires approval; concrete open inputs are classified below.
         let canonical = RlmTool::new("rlm", None);
         assert_eq!(
             canonical.approval_requirement_for(&json!({"action": "eval"})),
@@ -1031,16 +1039,50 @@ mod tests {
     }
 
     #[test]
+    fn rlm_open_requires_outbound_approval_but_keeps_local_reads_automatic() {
+        for tool in [
+            RlmTool::new("rlm", None),
+            RlmTool::alias("rlm_open", "open", None),
+        ] {
+            assert_eq!(tool.approval_requirement(), ApprovalRequirement::Required);
+            for source in [
+                json!({"url": "https://example.com/document"}),
+                json!({"url": " https://example.com/document ", "content": ""}),
+            ] {
+                let mut input = source;
+                input["action"] = json!("open");
+                assert_eq!(
+                    tool.approval_requirement_for(&input),
+                    ApprovalRequirement::Required
+                );
+            }
+            for source in [
+                json!({"content": "local fixture"}),
+                json!({"file_path": "fixture.txt"}),
+                json!({"session_object": "fixture-object"}),
+                json!({"content": "local fixture", "url": "  "}),
+            ] {
+                let mut input = source;
+                input["action"] = json!("open");
+                assert_eq!(
+                    tool.approval_requirement_for(&input),
+                    ApprovalRequirement::Auto
+                );
+            }
+        }
+    }
+
+    #[test]
     fn read_only_and_parallel_flags_match_legacy_contract() {
         // Legacy: session_objects was parallel-friendly read-only; open carried
-        // ExecutesCode (not read-only) with Auto approval; eval required approval.
+        // ExecutesCode (not read-only). Open now classifies the concrete source.
         let session_objects = RlmTool::alias("rlm_session_objects", "session_objects", None);
         assert!(session_objects.supports_parallel());
         assert!(session_objects.is_read_only_for(&json!({})));
 
         let open = RlmTool::alias("rlm_open", "open", None);
         assert!(!open.is_read_only_for(&json!({})));
-        assert_eq!(open.approval_requirement(), ApprovalRequirement::Auto);
+        assert_eq!(open.approval_requirement(), ApprovalRequirement::Required);
 
         let canonical = RlmTool::new("rlm", None);
         assert!(canonical.supports_parallel_for(&json!({"action": "session_objects"})));

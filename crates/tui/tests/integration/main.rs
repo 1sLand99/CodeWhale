@@ -107,6 +107,7 @@ mod lifecycle_outbox_exec;
 mod palette_audit;
 mod protocol_recovery;
 mod reasoning_content_replayed_after_tool_call;
+mod shell_denial_acceptance;
 mod skill_cli;
 mod telemetry_contract;
 mod verifiers_harness_contract;

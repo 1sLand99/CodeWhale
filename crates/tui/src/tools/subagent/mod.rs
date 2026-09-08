@@ -35,7 +35,7 @@ use crate::config::MAX_SUBAGENTS;
 use crate::core::engine::tool_catalog::{
     TOOL_SEARCH_NAME, active_tools_for_request, apply_native_tool_deferral,
     ensure_advanced_tooling, execute_tool_search_with_cache, initial_active_tools,
-    is_tool_search_tool, remove_evicted_cache_activations, tool_matches_any_rule,
+    is_tool_search_tool, remove_evicted_cache_activations, tool_denied,
     touch_cached_tool_after_execution,
 };
 use crate::core::events::{AgentProgressEventMeta, Event};
@@ -8948,7 +8948,8 @@ impl ToolSpec for AgentTool {
             .and_then(Value::as_bool)
             .unwrap_or(false);
         let (snapshot, _spawn_metadata) =
-            spawn_subagent_from_input(input, self.manager.clone(), self.runtime.clone()).await?;
+            spawn_subagent_from_input(input, self.manager.clone(), self.runtime.clone(), false)
+                .await?;
         let worker_record = {
             let manager = self.manager.read().await;
             manager.get_worker_record_for_session(&context.state_namespace, &snapshot.agent_id)
@@ -9437,10 +9438,17 @@ async fn spawn_subagent_from_input(
     input: Value,
     manager: SharedSubAgentManager,
     mut runtime: SubAgentRuntime,
+    verified_posture_denials: bool,
 ) -> Result<(SubAgentResult, WorkflowTaskSpawnMetadata), ToolError> {
     apply_session_spawn_defaults(&mut runtime);
     refresh_spawn_route_sources(&mut runtime);
     let mut spawn_request = parse_spawn_request(&input)?;
+    if !verified_posture_denials {
+        // Keep caller restrictions in the inherited context before adding
+        // structural role sentinels to the worker profile. A read-only role
+        // exception must never erase an explicit ancestor/operator denial.
+        merge_spawn_disallowed_tools(&mut runtime.context.disallowed_tools, &spawn_request);
+    }
     let requested_route = RequestedChildRoute {
         requested_type: spawn_request.agent_type.as_str().to_string(),
         requested_profile: spawn_request.profile.clone(),
@@ -9942,7 +9950,13 @@ pub(crate) async fn spawn_workflow_task(
     // Suggest-level file edits for write-capable roles. Shell / network / MCP
     // still require parent auto-approve (or fail closed).
     runtime.accept_edits = true;
-    let (result, mut metadata) = spawn_subagent_from_input(input, manager, runtime).await?;
+    let (result, mut metadata) = spawn_subagent_from_input(
+        input,
+        manager,
+        runtime,
+        identity.fleet_authority_fingerprint.is_some(),
+    )
+    .await?;
     // Prefer the identity values the driver stamped; fall back to task options.
     let workflow_task_label = identity
         .workflow_task_label
@@ -14688,7 +14702,11 @@ impl SubAgentToolRegistry {
         // than it owns, and read-only inspection roles (Scout, Reviewer) are
         // narrowed to the hardened read-only classifier even when the parent
         // has a full shell.
-        let parent_shell = ShellPolicy::from_legacy_allow_shell(runtime.allow_shell);
+        let parent_shell = if tool_denied(Some(&runtime.context.disallowed_tools), "bash") {
+            ShellPolicy::None
+        } else {
+            ShellPolicy::from_legacy_allow_shell(runtime.allow_shell)
+        };
         let mut child_shell = runtime.worker_profile.shell.min_with(parent_shell);
         if crate::fleet::role::role_requires_read_only_shell(&agent_type)
             && child_shell.allows_shell()
@@ -15350,7 +15368,7 @@ impl SubAgentToolRegistry {
         // The shared matcher canonicalizes legacy/lowercase spellings before
         // applying exact or prefix rules. For example `exec_shell*` denies
         // `bash`, and `write_file*` denies `write`, in roots and children alike.
-        tool_matches_any_rule(&self.disallowed_tools, name)
+        tool_denied(Some(&self.disallowed_tools), name)
     }
 
     /// Whether this child may surface and dispatch the canonical lowercase

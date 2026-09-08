@@ -359,6 +359,11 @@ impl ToolSpec for TasksTool {
     }
 
     async fn execute(&self, input: Value, context: &ToolContext) -> Result<ToolResult, ToolError> {
+        crate::core::engine::tool_catalog::enforce_tool_denial(
+            context,
+            self.name(),
+            &json!({"action": self.resolve_action(&input)?}),
+        )?;
         match self.resolve_action(&input)? {
             "create" => self.execute_create(&input, context).await,
             "list" => self.execute_list(&input, context).await,
@@ -609,6 +614,12 @@ impl TasksTool {
         input: &Value,
         context: &ToolContext,
     ) -> Result<ToolResult, ToolError> {
+        crate::core::engine::tool_catalog::enforce_tool_denial(context, "task_gate_run", input)?;
+        if context.shell_policy != crate::worker_profile::ShellPolicy::Full {
+            return Err(ToolError::permission_denied(
+                "Gate commands require full shell permission.",
+            ));
+        }
         let gate = required_str(input, "gate")?.to_string();
         let command = required_str(input, "command")?.to_string();
         let timeout_ms = optional_u64(input, "timeout_ms", DEFAULT_GATE_TIMEOUT_MS)?
@@ -910,6 +921,7 @@ impl ToolSpec for TaskShellStartTool {
     }
 
     async fn execute(&self, input: Value, context: &ToolContext) -> Result<ToolResult, ToolError> {
+        crate::core::engine::tool_catalog::enforce_tool_denial(context, self.name(), &input)?;
         let mut shell_input = json!({
             "command": required_str(&input, "command")?,
             "background": true,
@@ -969,6 +981,7 @@ impl ToolSpec for TaskShellWaitTool {
     }
 
     async fn execute(&self, input: Value, context: &ToolContext) -> Result<ToolResult, ToolError> {
+        crate::core::engine::tool_catalog::enforce_tool_denial(context, self.name(), &input)?;
         let shell_input = task_shell_wait_input(input.clone());
         let result = BashTool::alias("exec_shell_wait", "wait")
             .execute(shell_input, context)

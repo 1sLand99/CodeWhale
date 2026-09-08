@@ -546,6 +546,7 @@ fn enforce_tool_authority(
     tool: &dyn ToolSpec,
     context: &ToolContext,
 ) -> Result<(), ToolError> {
+    crate::core::engine::tool_catalog::enforce_tool_denial(context, name, input)?;
     let Some(authority) = context.tool_authority.as_ref() else {
         return Ok(());
     };

@@ -10854,6 +10854,7 @@ async fn rate_limit_pause_blocks_subagent_spawn() {
         json!({"prompt": "inspect the retry gate"}),
         Arc::clone(&manager),
         runtime,
+        false,
     )
     .await
     .expect_err("active provider rate-limit pause must refuse new sub-agent work");
@@ -18858,6 +18859,39 @@ fn read_only_with_shell_registry() -> (tempfile::TempDir, SubAgentToolRegistry) 
         Arc::new(Mutex::new(PlanState::default())),
     );
     (tmp, registry)
+}
+
+#[test]
+fn shell_denial_from_parent_is_not_a_read_only_role_exception() {
+    for role in [FleetRole::Scout, FleetRole::Reviewer, FleetRole::Planner] {
+        for explicit_rule in [None, Some("Bash"), Some("exec_shell*")] {
+            let tmp = tempdir().unwrap();
+            let mut runtime =
+                stub_runtime().with_agent_tool_surface_options(enabled_agent_surface_options());
+            runtime.context = ToolContext::new(tmp.path());
+            runtime.allow_shell = true;
+            runtime.worker_profile = WorkerRuntimeProfile::for_role(role.clone());
+            runtime.worker_profile.denied_tools = vec!["Bash".into()];
+            if let Some(rule) = explicit_rule {
+                runtime.context.disallowed_tools = vec![rule.into()];
+            }
+            let registry = SubAgentToolRegistry::new(
+                runtime,
+                role.clone(),
+                None,
+                Arc::new(Mutex::new(TodoList::new())),
+                Arc::new(Mutex::new(PlanState::default())),
+            );
+            assert_eq!(
+                registry.allows_bounded_readonly_bash("bash"),
+                explicit_rule.is_none()
+            );
+            if explicit_rule.is_some() {
+                assert_eq!(registry.runtime_profile.shell, ShellPolicy::None);
+                assert!(!registry.is_tool_allowed("bash"));
+            }
+        }
+    }
 }
 
 /// Adversarial payloads — raw mutation, deletion, network reach, and scheduled

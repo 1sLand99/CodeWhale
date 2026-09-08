@@ -4753,6 +4753,20 @@ impl ToolSpec for BashTool {
             Some(forced) => forced,
             None => optional_str(&input, "action")?.unwrap_or("run"),
         };
+        let mut policy_input = input.clone();
+        if let Some(object) = policy_input.as_object_mut() {
+            object.insert("action".into(), json!(action));
+        }
+        crate::core::engine::tool_catalog::enforce_tool_denial(
+            context,
+            self.name(),
+            &policy_input,
+        )?;
+        if action == "interact" && context.shell_policy != ShellPolicy::Full {
+            return Err(ToolError::permission_denied(
+                "Sending shell input requires full shell permission.",
+            ));
+        }
         match action {
             "wait" => return self.execute_wait(&input, context).await,
             "interact" => return self.execute_interact(&input, context).await,

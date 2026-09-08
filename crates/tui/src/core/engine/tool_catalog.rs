@@ -513,6 +513,27 @@ impl ToolSurfacePolicy {
             !tool_denied(disallowed_tools.as_deref(), &tool.name)
                 && tool_allowed(allowed_tools.as_deref(), &tool.name)
         });
+        for tool in &mut catalog {
+            if let Some(actions) = tool
+                .input_schema
+                .pointer_mut("/properties/action/enum")
+                .and_then(Value::as_array_mut)
+            {
+                actions.retain(|action| {
+                    !tool_call_denied(
+                        disallowed_tools.as_deref(),
+                        &tool.name,
+                        &json!({"action": action}),
+                    )
+                });
+            }
+        }
+        catalog.retain(|tool| {
+            tool.input_schema
+                .pointer("/properties/action/enum")
+                .and_then(Value::as_array)
+                .is_none_or(|actions| !actions.is_empty())
+        });
         let questions_allowed =
             super::super::authority::permission_posture_allows_questions(approval_mode);
         if !questions_allowed {
@@ -551,6 +572,10 @@ impl ToolSurfacePolicy {
         tool_denied(self.disallowed_tools.as_deref(), name)
     }
 
+    pub(super) fn denies_call(&self, name: &str, input: &Value) -> bool {
+        tool_call_denied(self.disallowed_tools.as_deref(), name, input)
+    }
+
     pub(super) fn allows_questions(&self) -> bool {
         self.questions_allowed
     }
@@ -563,8 +588,79 @@ pub(super) fn tool_allowed(allowed_tools: Option<&[String]>, tool_name: &str) ->
     tool_matches_any_rule(allowed_tools, tool_name)
 }
 
-pub(super) fn tool_denied(disallowed_tools: Option<&[String]>, tool_name: &str) -> bool {
-    disallowed_tools.is_some_and(|rules| tool_matches_any_rule(rules, tool_name))
+pub(crate) fn tool_denied(disallowed_tools: Option<&[String]>, tool_name: &str) -> bool {
+    disallowed_tools.is_some_and(|rules| {
+        tool_matches_any_rule(rules, tool_name)
+            || (requires_raw_shell(tool_name) && tool_matches_any_rule(rules, "Bash"))
+    })
+}
+
+/// Execution dependencies narrow denials only. Treating these as symmetric
+/// aliases would also grant task/terminal execution to an allowlist of Bash.
+fn requires_raw_shell(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "bash"
+            | "exec_shell"
+            | "exec_shell_interact"
+            | "exec_interact"
+            | "task_shell_start"
+            | "task_gate_run"
+            // These owners start a fresh execution and currently cannot
+            // transport this command's deny ceiling. Fail closed until they
+            // can preserve it; inspection and cancellation stay available.
+            | "task_create"
+            | "automation_create"
+            | "automation_update"
+            | "automation_resume"
+            | "automation_run"
+            | "terminal/run"
+            | "terminal/send"
+            | "terminal/reset"
+            | "code_execution"
+            | "js_execution"
+            | "rlm_eval"
+    )
+}
+
+pub(crate) fn tool_call_denied(rules: Option<&[String]>, name: &str, input: &Value) -> bool {
+    use crate::tools::canonical_action::canonical_action_alias;
+    use crate::tools::execution_envelope::{VerificationBound, classify_verification};
+
+    let action = canonical_action_alias(name, input);
+    tool_denied(rules, name)
+        || tool_denied(rules, action)
+        || (action == "rlm_open"
+            && input
+                .get("url")
+                .and_then(Value::as_str)
+                .is_some_and(|url| !url.trim().is_empty())
+            && tool_denied(rules, "fetch_url"))
+        || (matches!(
+            classify_verification(action, input),
+            Some(VerificationBound::Unbounded)
+        ) && rules.is_some_and(|rules| tool_matches_any_rule(rules, "Bash")))
+}
+
+/// Repeat the command ceiling at native dispatch and direct delegation sinks.
+/// The existing child evidence exception is limited to the canonical lowercase
+/// tool, a child-owned context, and the same strict read-only grammar enforced
+/// by Bash itself. It never admits a session, stdin, or background command.
+pub(crate) fn enforce_tool_denial(
+    context: &crate::tools::spec::ToolContext,
+    name: &str,
+    input: &Value,
+) -> Result<(), ToolError> {
+    let bounded_child_read = name == "bash"
+        && context.owner_agent_id.is_some()
+        && context.shell_policy == crate::worker_profile::ShellPolicy::ReadOnly
+        && crate::tools::shell::agent_readonly_bash_input(input);
+    if !bounded_child_read && tool_call_denied(Some(&context.disallowed_tools), name, input) {
+        return Err(ToolError::permission_denied(format!(
+            "Tool '{name}' or its execution dependency is in the disallowed-tools list"
+        )));
+    }
+    Ok(())
 }
 
 pub(crate) fn tool_matches_any_rule(rules: &[String], tool_name: &str) -> bool {

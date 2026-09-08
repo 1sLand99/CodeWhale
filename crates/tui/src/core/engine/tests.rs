@@ -4721,6 +4721,137 @@ fn catalog_tool(name: &str) -> Tool {
     }
 }
 
+#[test]
+fn shell_denial_filters_search_catalog_without_expanding_allow_grants() {
+    let raw_names = [
+        "bash",
+        "Bash",
+        "exec_shell",
+        "task_shell_start",
+        "task_gate_run",
+        "terminal/run",
+        "terminal/send",
+        "terminal/reset",
+        "exec_shell_interact",
+        "exec_interact",
+        "code_execution",
+        "js_execution",
+        "rlm_eval",
+    ];
+    for rule in ["Bash", "eXeC_sHeLl", "baSH*", "exec_shell*"] {
+        let surface = policy_for_catalog(
+            raw_names.into_iter().map(catalog_tool).collect(),
+            None,
+            Some(vec![rule.into()]),
+            crate::tui::approval::ApprovalMode::Suggest,
+        );
+        for name in raw_names {
+            assert!(surface.denies_call(name, &json!({})), "{rule}: {name}");
+            assert!(
+                surface.catalog.iter().all(|tool| tool.name != name),
+                "{rule}: {name}"
+            );
+        }
+    }
+    let allowed = policy_for_catalog(
+        raw_names.into_iter().map(catalog_tool).collect(),
+        Some(vec!["Bash".into()]),
+        None,
+        crate::tui::approval::ApprovalMode::Suggest,
+    );
+    for name in raw_names.into_iter().skip(3) {
+        assert!(
+            !allowed.passes_allow_list(name),
+            "Bash must not grant {name}"
+        );
+    }
+}
+
+#[test]
+fn shell_denial_preserves_task_reads_and_bounded_verification_actions() {
+    let mut tasks = catalog_tool("tasks");
+    tasks.input_schema =
+        json!({"type":"object", "properties":{"action":{"enum":["list", "read", "gate_run"]}}});
+    let surface = policy_for_catalog(
+        vec![
+            tasks,
+            catalog_tool("Run"),
+            catalog_tool("task_shell_wait"),
+            catalog_tool("terminal/cancel"),
+        ],
+        None,
+        Some(vec!["Bash".into()]),
+        crate::tui::approval::ApprovalMode::Suggest,
+    );
+    let tasks = surface
+        .catalog
+        .iter()
+        .find(|tool| tool.name == "tasks")
+        .unwrap();
+    assert_eq!(
+        tasks.input_schema["properties"]["action"]["enum"],
+        json!(["list", "read"])
+    );
+    assert!(!surface.denies_call("tasks", &json!({"action":"list"})));
+    assert!(surface.denies_call("tasks", &json!({"action":"gate_run"})));
+    assert!(!surface.denies_call("task_shell_wait", &json!({})));
+    assert!(!surface.denies_call("terminal/cancel", &json!({})));
+    assert!(!surface.denies_call(
+        "Run",
+        &json!({"action":"tests", "args":"-p fixture selected_test"})
+    ));
+    assert!(!surface.denies_call("Run", &json!({"action":"verifiers", "commands":[]})));
+    assert!(surface.denies_call(
+        "Run",
+        &json!({"action":"tests", "args":"--config build.rustc=malicious"})
+    ));
+    assert!(surface.denies_call(
+        "Run",
+        &json!({"action":"verifiers", "commands":[{"program":"sh"}]})
+    ));
+}
+
+#[test]
+fn shell_denial_applies_to_new_durable_execution_without_hiding_management() {
+    use super::tool_catalog::tool_call_denied;
+    let rules = vec!["Bash".to_string()];
+    for (family, actions) in [
+        ("tasks", vec!["create", "gate_run"]),
+        ("automation", vec!["create", "update", "resume", "run"]),
+    ] {
+        for action in actions {
+            assert!(
+                tool_call_denied(Some(&rules), family, &json!({"action": action})),
+                "{family}/{action}"
+            );
+        }
+    }
+    for (family, actions) in [
+        ("tasks", vec!["list", "read", "cancel"]),
+        ("automation", vec!["list", "read", "pause", "delete"]),
+    ] {
+        for action in actions {
+            assert!(
+                !tool_call_denied(Some(&rules), family, &json!({"action": action})),
+                "{family}/{action}"
+            );
+        }
+    }
+    let fetch_rules = vec!["fetch_url".to_string()];
+    for family in ["rlm", "rlm_open"] {
+        assert!(tool_call_denied(
+            Some(&fetch_rules),
+            family,
+            &json!({"action":"open", "url":"https://example.com/document"})
+        ));
+        assert!(!tool_call_denied(
+            Some(&fetch_rules),
+            family,
+            &json!({"action":"open", "content":"local fixture"})
+        ));
+    }
+}
+
 fn policy_for_catalog(
     catalog: Vec<Tool>,
     allowed_tools: Option<Vec<String>>,

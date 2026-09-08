@@ -324,6 +324,7 @@ impl ToolSpec for RunVerifiersTool {
     }
 
     async fn execute(&self, input: Value, context: &ToolContext) -> Result<ToolResult, ToolError> {
+        crate::core::engine::tool_catalog::enforce_tool_denial(context, self.name(), &input)?;
         let input: RunVerifiersInput = serde_json::from_value(input)
             .map_err(|err| ToolError::invalid_input(err.to_string()))?;
         let profile = VerifierProfile::parse(input.profile.as_str())?;
