@@ -2095,8 +2095,8 @@ impl TaskManager {
                 break (TaskExecutionResult::from_reason(reason, None), true);
             }
             if Instant::now() >= next_event_retry {
-                if let Some(event) = blocked_event.take() {
-                    if self
+                if let Some(event) = blocked_event.take()
+                    && self
                         .process_execution_event(
                             &task_id,
                             event.clone(),
@@ -2106,10 +2106,9 @@ impl TaskManager {
                         )
                         .await
                         .is_err()
-                    {
-                        blocked_event = Some(event);
-                        cancel.cancel();
-                    }
+                {
+                    blocked_event = Some(event);
+                    cancel.cancel();
                 }
                 next_event_retry = Instant::now() + STORE_REFRESH_INTERVAL;
             }
@@ -2174,14 +2173,13 @@ impl TaskManager {
                             break (guard.preserve_timeout_reason(exec_result), false);
                         }
                         maybe_event = event_rx.recv(), if blocked_event.is_none() => {
-                            if let Some(event) = maybe_event {
-                                if self.process_execution_event(
+                            if let Some(event) = maybe_event
+                                && self.process_execution_event(
                                     &task_id, event.clone(), &mut guard,
                                     &mut accumulated_result_text, &mut dirty,
                                 ).await.is_err() {
-                                    blocked_event = Some(event);
-                                    cancel.cancel();
-                                }
+                                blocked_event = Some(event);
+                                cancel.cancel();
                             }
                         }
                         _ = self.cancel_token.cancelled(), if !self.cancel_token.is_cancelled() => {

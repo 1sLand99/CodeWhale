@@ -13291,16 +13291,15 @@ fn resolve_spawn_profile(
         .as_deref()
         .map(str::trim)
         .filter(|model| !model.is_empty() && !model.eq_ignore_ascii_case("auto"))
+        && request.model_strength_explicit
     {
-        if request.model_strength_explicit {
-            return Err(ToolError::invalid_input(format!(
-                "Fleet profile '{}' pins model '{pinned}'; model_strength cannot change an exact saved route.",
-                member.id
-            )));
-        }
-        // Compare any task selector only after the exact provider is bound, so
-        // a qualified selector can prove it names this same provider/model pair.
+        return Err(ToolError::invalid_input(format!(
+            "Fleet profile '{}' pins model '{pinned}'; model_strength cannot change an exact saved route.",
+            member.id
+        )));
     }
+    // Compare any task selector only after the exact provider is bound, so
+    // a qualified selector can prove it names this same provider/model pair.
     request.agent_type = role;
     request.profile = Some(member.id.clone());
     request.assignment.role = Some(member.profile.role.name.clone());

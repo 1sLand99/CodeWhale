@@ -773,7 +773,7 @@ enum ReviewSource {
         label: String,
         diff: String,
         pr: PullRequestRef,
-        view: super::review_pr::GhPullRequest,
+        view: Box<super::review_pr::GhPullRequest>,
     },
 }
 
@@ -944,7 +944,7 @@ async fn gh_pr_source(pr: PullRequestRef, workspace: &Path) -> Result<ReviewSour
             label: pr.label(),
             diff,
             pr,
-            view,
+            view: Box::new(view),
         })
     })
     .await
@@ -1196,7 +1196,7 @@ mod tests {
                 repo: "repo".into(),
                 number: "6002".into(),
             },
-            view: super::super::review_pr::GhPullRequest::default(),
+            view: Box::default(),
         };
         assert!(super::super::review_pr::ensure_input_fits(&diff, DEFAULT_MAX_CHARS).is_err());
         super::super::review_pr::ensure_input_fits(&diff, diff.len()).unwrap();

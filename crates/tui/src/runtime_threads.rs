@@ -4639,14 +4639,13 @@ impl RuntimeThreadManager {
         };
         let mut failure = None;
         for (thread_id, turn_id) in active_turns {
-            if let Err(error) = self.interrupt_turn(&thread_id, &turn_id).await {
-                if !self
+            if let Err(error) = self.interrupt_turn(&thread_id, &turn_id).await
+                && !self
                     .store
                     .load_turn(&turn_id)
                     .is_ok_and(|turn| turn.status != RuntimeTurnStatus::InProgress)
-                {
-                    failure = Some(anyhow!("Runtime turn interruption failed: {error}"));
-                }
+            {
+                failure = Some(anyhow!("Runtime turn interruption failed: {error}"));
             }
         }
         let workers = self.engine_workers.lock().clone();
@@ -9346,7 +9345,7 @@ impl RuntimeThreadManager {
             };
             // The reserved send has no await/failure point. From here the
             // engine and durable record agree even if the API caller drops.
-            let _sender = permit.send(prompt.clone());
+            permit.send(prompt.clone());
             touch_lru(&mut active.lru, thread_id);
             self.spawn_steer_receipts(turn, item, prompt)
         };
