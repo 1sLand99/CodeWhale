@@ -3720,6 +3720,21 @@ async fn turn_operation_lookup_is_authenticated_read_only_and_survives_restart()
         "GET must not dispatch an Engine operation"
     );
 
+    for event in [
+        EngineEvent::TurnStarted {
+            turn_id: "lookup-fixture-engine-turn".into(),
+            created_at: chrono::Utc::now(),
+            route: None,
+        },
+        EngineEvent::MessageStarted { index: 0 },
+        EngineEvent::MessageDelta {
+            index: 0,
+            content: "lookup fixture completed".into(),
+        },
+        EngineEvent::MessageComplete { index: 0 },
+    ] {
+        engine.tx_event.send(event).await?;
+    }
     engine
         .tx_event
         .send(EngineEvent::TurnComplete {
@@ -6532,7 +6547,7 @@ async fn mobile_page_is_available_only_when_enabled() -> Result<()> {
     let root = tmp.path().to_path_buf();
     let sessions_dir = root.join("sessions");
     let Some((addr, runtime_threads, handle)) = spawn_test_server_with_root_token_and_mobile(
-        root.clone(),
+        root.join("disabled"),
         sessions_dir.clone(),
         None,
         false,
@@ -6548,8 +6563,13 @@ async fn mobile_page_is_available_only_when_enabled() -> Result<()> {
     let _ = handle.await;
     drop(runtime_threads);
 
-    let Some((addr, _runtime_threads, handle)) =
-        spawn_test_server_with_root_token_and_mobile(root, sessions_dir, None, true).await?
+    let Some((addr, _runtime_threads, handle)) = spawn_test_server_with_root_token_and_mobile(
+        root.join("enabled"),
+        sessions_dir,
+        None,
+        true,
+    )
+    .await?
     else {
         return Ok(());
     };

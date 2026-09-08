@@ -10,6 +10,7 @@ use uuid::Uuid;
 mod recovery {
     use super::*;
     use crate::core::engine::Engine;
+    use crate::image_attach::tests::runtime_image_fixture;
     use crate::llm_client::mock::{MockLlmClient, canned};
 
     fn config() -> Config {
@@ -70,8 +71,12 @@ mod recovery {
         let thread = manager
             .create_thread(CreateThreadRequest::default())
             .await?;
+        let image_url = format!(
+            "data:image/png;base64,{}",
+            runtime_image_fixture(17).data_base64
+        );
         let old: Vec<Message> = serde_json::from_value(json!([
-            {"role":"user","content":[{"type":"text","text":"OLD"},{"type":"image_url","image_url":{"url":"data:image/png;base64,AA=="}}]},
+            {"role":"user","content":[{"type":"text","text":"OLD"},{"type":"image_url","image_url":{"url":image_url}}]},
             {"role":"assistant","content":[{"type":"thinking","thinking":"prior reasoning","signature":"fixture-signed-thinking"},{"type":"tool_use","id":"fixture-call","name":"read_file","input":{"path":"fixture.txt"},"thought_signature":"fixture-tool-signature"}]},
             {"role":"user","content":[{"type":"tool_result","tool_use_id":"fixture-call","content":"old result"}]},
             {"role":"assistant","content":[{"type":"text","text":"OLD ANSWER"}]}
@@ -172,8 +177,12 @@ mod recovery {
         let thread = manager
             .create_thread(CreateThreadRequest::default())
             .await?;
+        let image_url = format!(
+            "data:image/png;base64,{}",
+            runtime_image_fixture(33).data_base64
+        );
         let messages: Vec<Message> = serde_json::from_value(json!([
-            {"role":"user","content":[{"type":"text","text":"keep"},{"type":"image_url","image_url":{"url":"data:image/png;base64,AA=="}}]},
+            {"role":"user","content":[{"type":"text","text":"keep"},{"type":"image_url","image_url":{"url":image_url}}]},
             {"role":"assistant","content":[{"type":"thinking","thinking":"kept reasoning","signature":"kept signature"},{"type":"text","text":"kept answer"}]},
             {"role":"user","content":[{"type":"text","text":"drop"}]},
             {"role":"assistant","content":[{"type":"text","text":"dropped answer"}]}
@@ -15027,7 +15036,7 @@ mod runtime_image_inputs {
         );
         assert_eq!(
             manager.get_thread(&thread.id).await?.schema_version,
-            IMAGE_RUNTIME_SCHEMA_VERSION
+            turn.schema_version
         );
         handle.send(Op::Shutdown).await?;
         tokio::time::timeout(Duration::from_secs(10), run).await??;
