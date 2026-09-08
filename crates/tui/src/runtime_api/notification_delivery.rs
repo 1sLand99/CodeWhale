@@ -43,11 +43,6 @@ pub(super) async fn prepare(
     Path(id): Path<String>,
     Json(request): Json<PrepareRequest>,
 ) -> Result<Json<PreparedNotification>, ApiError> {
-    let detail = state
-        .runtime_threads
-        .get_thread_detail(&id)
-        .await
-        .map_err(map_thread_err)?;
     let Some(previous) = request.seq.checked_sub(1) else {
         return Err(ApiError::bad_request(
             "notification sequence must be positive",
@@ -79,6 +74,13 @@ pub(super) async fn prepare(
         .find(|locale| locale.tag().eq_ignore_ascii_case(&request.locale))
         .or_else(|| matches!(request.locale.as_str(), "zh" | "zh-CN").then_some(Locale::ZhHans))
         .ok_or_else(|| ApiError::bad_request("unsupported notification locale"))?;
+    // Replay can wait on disk while the same turn's request settles. Validate
+    // the selected record against a fresh snapshot, with no later await.
+    let detail = state
+        .runtime_threads
+        .get_thread_detail(&id)
+        .await
+        .map_err(map_thread_err)?;
     let config = state.config.read().clone();
     Ok(Json(prepare_record(
         &config,
@@ -188,9 +190,6 @@ fn prepare_payload(
         } else {
             Duration::ZERO
         };
-    sound_policy::reconfigure(sound_policy::EventSoundPolicy::from_config(
-        &notification_config,
-    ));
     let mut sound = "off";
     // Capture the shared policy's intended sinks. Neither closure performs IO;
     // the response says prepared, never dispatched/delivered. The native host
@@ -204,7 +203,14 @@ fn prepare_payload(
         notifications::NotificationGate::from_config(&notification_config),
         attention,
         &mut std::io::sink(),
-        &mut |kind, bell| sound_policy::decide(kind, sound_policy::epoch_millis_now(), bell),
+        &mut |kind, bell| {
+            sound_policy::decide_configured(
+                &notification_config,
+                kind,
+                sound_policy::epoch_millis_now(),
+                bell,
+            )
+        },
         &mut |cue, _| {
             sound = match cue {
                 sound_policy::SoundCue::Beep => "beep",

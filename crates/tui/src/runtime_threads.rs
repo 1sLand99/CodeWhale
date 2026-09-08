@@ -3892,6 +3892,8 @@ pub struct RuntimeThreadManager {
     recovery_flush: Arc<Mutex<()>>,
     #[cfg(test)]
     snapshot_test_hook: Arc<parking_lot::Mutex<Option<mpsc::UnboundedSender<SnapshotTestPoint>>>>,
+    #[cfg(test)]
+    replay_test_hook: Arc<parking_lot::Mutex<Option<mpsc::UnboundedSender<ReplayTestPoint>>>>,
 }
 
 #[derive(Debug)]
@@ -3998,6 +4000,12 @@ impl Drop for RuntimeProcessOwnerLock {
 pub(crate) struct SnapshotTestPoint {
     pub thread_id: String,
     pub latest_seq: u64,
+    pub resume: oneshot::Sender<()>,
+}
+
+#[cfg(test)]
+pub(crate) struct ReplayTestPoint {
+    pub thread_id: String,
     pub resume: oneshot::Sender<()>,
 }
 
@@ -4384,6 +4392,8 @@ impl RuntimeThreadManager {
             recovery_flush: Arc::new(Mutex::new(())),
             #[cfg(test)]
             snapshot_test_hook: Arc::new(parking_lot::Mutex::new(None)),
+            #[cfg(test)]
+            replay_test_hook: Arc::new(parking_lot::Mutex::new(None)),
         };
         manager.recover_interrupted_state()?;
         Ok(manager)
@@ -6287,6 +6297,11 @@ impl RuntimeThreadManager {
     #[cfg(test)]
     pub(crate) fn set_snapshot_test_hook(&self, hook: mpsc::UnboundedSender<SnapshotTestPoint>) {
         *self.snapshot_test_hook.lock() = Some(hook);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_replay_test_hook(&self, hook: mpsc::UnboundedSender<ReplayTestPoint>) {
+        *self.replay_test_hook.lock() = Some(hook);
     }
 
     pub async fn create_thread(&self, req: CreateThreadRequest) -> Result<ThreadRecord> {
@@ -8991,6 +9006,20 @@ impl RuntimeThreadManager {
     ) -> Result<RuntimeEventReplay> {
         if tail_limit.is_some_and(|limit| limit > MAX_RUNTIME_EVENT_REPLAY_TAIL) {
             bail!("Runtime event replay_limit cannot exceed {MAX_RUNTIME_EVENT_REPLAY_TAIL}");
+        }
+        #[cfg(test)]
+        let replay_test_hook = { self.replay_test_hook.lock().take() };
+        #[cfg(test)]
+        if let Some(hook) = replay_test_hook {
+            let (resume, wait_for_resume) = oneshot::channel();
+            hook.send(ReplayTestPoint {
+                thread_id: thread_id.to_string(),
+                resume,
+            })
+            .map_err(|_| anyhow!("replay test hook closed"))?;
+            wait_for_resume
+                .await
+                .map_err(|_| anyhow!("replay test hook dropped resume"))?;
         }
         let (base_tx, base_rx) = oneshot::channel();
         let (batch_tx, batches) = mpsc::channel(2);

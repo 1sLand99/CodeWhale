@@ -12384,3 +12384,146 @@ async fn native_notification_preparation_authenticates_current_events_and_reuses
     handle.abort();
     Ok(())
 }
+
+#[tokio::test]
+async fn native_notification_replay_rechecks_requests_settled_during_the_read() -> Result<()> {
+    let _env = lock_test_env();
+    let temp = tempfile::tempdir()?;
+    let _home = EnvVarGuard::set("CODEWHALE_HOME", temp.path().join("home"));
+    let _runtime = EnvVarGuard::set("CODEWHALE_RUNTIME_DIR", temp.path().join("runtime-store"));
+    let _backend = EnvVarGuard::set("CODEWHALE_SECRET_BACKEND", "file");
+    let _proxy = EnvVarGuard::set("NO_PROXY", "*");
+    let path = temp.path().join("config.toml");
+    fs::write(
+        &path,
+        "[notifications]\nmethod = 'auto'\ncondition = 'always'\nsound = 'off'\n",
+    )?;
+    let (addr, manager, handle) = spawn_test_server_with_root_token_mobile_workspace_and_overrides(
+        temp.path().join("runtime"),
+        temp.path().join("sessions"),
+        Some("notification-race-fixture-token".into()),
+        false,
+        temp.path().to_path_buf(),
+        TestServerOverrides {
+            config_path: Some(path),
+            ..Default::default()
+        },
+    )
+    .await?
+    .expect("loopback Runtime must be available");
+    let client = crate::tls::reqwest_client();
+    let token = "notification-race-fixture-token";
+    client
+        .post(format!("http://{addr}/v1/config/reload"))
+        .bearer_auth(token)
+        .send()
+        .await?
+        .error_for_status()?;
+
+    let mut after_settlement = Vec::new();
+    for event_name in ["approval.required", "user_input.required"] {
+        let mut thread = manager
+            .create_thread(CreateThreadRequest::default())
+            .await?;
+        thread.latest_turn_id = Some("test-turn".into());
+        manager.test_store().save_thread(&thread)?;
+        let turn: crate::runtime_threads::TurnRecord = serde_json::from_value(json!({
+            "id": "test-turn", "thread_id": thread.id, "status": "in_progress",
+            "input_summary": "silent settlement fixture", "created_at": Utc::now()
+        }))?;
+        manager.test_store().save_turn(&turn)?;
+        let mock = crate::core::engine::mock_engine_handle();
+        manager
+            .install_test_engine(&thread.id, mock.handle.clone())
+            .await?;
+        let approval = if event_name == "approval.required" {
+            Some(manager.register_pending_approval_for_thread_for_test(&thread.id, "request"))
+        } else {
+            manager.register_pending_user_input_for_thread_for_test(&thread.id, "request");
+            None
+        };
+        let event = manager
+            .emit_event_for_test(
+                &thread.id,
+                Some(&turn.id),
+                event_name,
+                json!({"id": "request"}),
+            )
+            .await?;
+        let endpoint = format!(
+            "http://{addr}/v1/threads/{}/notifications/prepare",
+            thread.id
+        );
+        let request =
+            json!({"seq": event.seq, "focused": false, "unfocused_for_ms": 2500, "locale": "en"});
+        let baseline: Value = client
+            .post(&endpoint)
+            .bearer_auth(token)
+            .json(&request)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        assert_eq!(baseline["status"], "prepared", "{event_name}");
+
+        let (hook_tx, mut hook_rx) = mpsc::unbounded_channel();
+        manager.set_replay_test_hook(hook_tx);
+        let pending_request = tokio::spawn(async move {
+            crate::tls::reqwest_client()
+                .post(endpoint)
+                .bearer_auth(token)
+                .json(&request)
+                .send()
+                .await
+        });
+        let point = tokio::time::timeout(ci_scaled(Duration::from_secs(2)), hook_rx.recv())
+            .await
+            .context("notification preparation did not reach the held durable read")?
+            .context("replay hook closed")?;
+        assert_eq!(point.thread_id, thread.id);
+        if let Some(approval) = approval {
+            assert!(manager.deliver_external_approval(
+                "request",
+                ExternalApprovalDecision::Allow { remember: false },
+            ));
+            assert_eq!(
+                approval.await?,
+                ExternalApprovalDecision::Allow { remember: false }
+            );
+        } else {
+            assert!(manager.cancel_user_input(&thread.id, "request").await?);
+        }
+        let settled = manager.get_thread_detail(&thread.id).await?;
+        assert!(settled.pending_approvals.is_empty());
+        assert!(settled.pending_user_inputs.is_empty());
+        assert_eq!(
+            settled.turns[0].status,
+            crate::runtime_threads::RuntimeTurnStatus::InProgress,
+            "settlement must happen within the same active turn"
+        );
+        point
+            .resume
+            .send(())
+            .map_err(|_| anyhow::anyhow!("replay dropped its resume signal"))?;
+        let result: Value =
+            tokio::time::timeout(ci_scaled(Duration::from_secs(2)), pending_request)
+                .await???
+                .error_for_status()?
+                .json()
+                .await?;
+        after_settlement.push((event_name, result));
+        drop(mock);
+    }
+    handle.abort();
+    assert!(
+        after_settlement.iter().all(|(_, result)| {
+            result["status"] != "prepared"
+                && result.get("headline").is_none()
+                && result.get("body").is_none()
+                && result["sound"] == "off"
+        }),
+        "requests settled during replay must stay silent: {after_settlement:?}"
+    );
+    Ok(())
+}
