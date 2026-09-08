@@ -90,32 +90,32 @@ Observe once, act once, then verify.
   - **Keyboard and element actions are quiet.** `type`, `key`, `set_value`,
     `select_text` and `perform_action` reach the bound process without moving
     the pointer or changing the foreground. Prefer them.
-  - **Pointer actions may not be.** macOS cannot deliver pointer or scroll
-    events to a chosen process, so `left_click` resolves the coordinate through
-    the accessibility tree first and presses the element it finds
-    (`strategy: "a11y"` in the receipt — quiet). With nothing pressable there,
-    and for double/triple/right/middle click, drag, hover and scroll, it falls
-    back to a real pointer gesture: the cursor moves (and is restored) and the
-    app comes forward. The receipt says `strategy: "event"`, `pointer_moved`
-    and `foreground_taken`. Read it, and tell the user when a step took their
-    foreground. Pass `strategy: "a11y"` when the task must not disturb them —
-    it fails closed rather than falling back.
-  - For a dialog or toolkit that needs foreground keyboard delivery, select
-    `open_application(activate:true)` explicitly. Receipts say
-    `keyboard_delivery: "foreground-guarded"`; typing fails if another app
-    takes focus. Never keep reactivating after the user takes control. Return
-    to `activate:false` when the foreground-only step ends.
+  - **Background mode never takes the shared pointer.** A coordinate
+    `left_click` first tries the bound application's accessibility press.
+    Without one, or for raw double/triple/right/middle click, drag, hover or
+    scroll, it fails with `shared_pointer_required` before moving the cursor.
+    Use another advertised accessibility action or a separate computer.
+  - Shared-desktop gestures and foreground keyboard delivery require explicit
+    user authorization for exclusive desktop use, followed by
+    `open_application(activate:true)`. Do not select it merely to work around a
+    background refusal. Receipts identify `input_scope: "shared-desktop"`;
+    pointer gestures use the physical cursor, even if it is restored afterward.
+    Keys are `foreground-guarded` and stop when another app takes focus. Never
+    keep reactivating after the user takes control; return to `activate:false`
+    when the shared-desktop step ends.
   - Menus appear in `get_app_state`. Use the advertised action (often
     `AXPress` to open a menu, then `AXPick` on its item), then observe again.
   - A pointer gesture is refused when another application's window covers the
-    point; it names the owner. Raise the window you meant with
-    `open_application(activate:true)`, observe again, and retry — do not move
-    or close the reported window.
+    point; it names the owner. Observe again and use the selected control's
+    accessibility action, or wait for authorized exclusive desktop use. Do not
+    move or close the reported window.
   - An accessibility press refuses to cross a modal sheet
     (`window_blocked_by_modal_sheet`): deal with the sheet first.
   Use app-scoped screenshots (`app_ref`) to avoid capturing unrelated windows.
-  Do not activate an app or enable `preview` unless the user asks to watch or
-  interact with it. If you enabled a preview, disable it when finished.
+  Watching the preview does not authorize shared-desktop control. Enable it
+  only when the user asks to watch; disable it when finished. The preview is a
+  local app view, not an isolated desktop. Process-directed actions still
+  change the target app: do not work in an app the user is actively editing.
   Close only disposable documents created by your task; never quit a user app.
 - Windows/Linux: raw input is foreground by nature; UIA/AT-SPI element actions
   are the precise path.

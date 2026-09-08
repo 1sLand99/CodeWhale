@@ -19,6 +19,7 @@ static CGPoint cuLeasePoint;
 #ifdef CU_TEST
 static NSString *cuTestLockDir = nil;
 static NSString *cuTestReleaseFile = nil;
+static CGEventFlags cuTestInheritedTextFlags = 0;
 #endif
 static void cuCancel(int signum) { cuCancelled = 1; }
 static void cuCheckCancelled(void) {
@@ -281,6 +282,12 @@ static NSRunningApplication *resolve(NSDictionary *ref) {
 static CGEventRef textEvent(NSString *text, BOOL down) {
   UniChar *chars=calloc(text.length,sizeof(UniChar)); [text getCharacters:chars range:NSMakeRange(0,text.length)];
   CGEventRef event=CGEventCreateKeyboardEvent(NULL,0,down);
+#ifdef CU_TEST
+  // Simulate physical modifier state without posting a system key event.
+  CGEventSetFlags(event,cuTestInheritedTextFlags);
+#endif
+  // Literal text must not inherit the user's held Command/Control/Option/Shift.
+  CGEventSetFlags(event,0);
   CGEventKeyboardSetUnicodeString(event,text.length,chars); free(chars); return event;
 }
 static BOOL cuTextRole(NSString *role) {
@@ -352,6 +359,8 @@ static NSDictionary *cuType(NSDictionary *args, NSRunningApplication *inputApp, 
 }
 static id execute(NSDictionary *p) {
   NSString *tool=p[@"tool"]; NSDictionary *args=p[@"args"]?:@{};
+  if([tool isEqual:@"pointer_sequence"] && ![args[@"foreground_input"] boolValue])
+    @throw [NSException exceptionWithName:@"shared_pointer_required" reason:@"shared macOS pointer input is unavailable in background mode; use an accessibility action or a separate computer" userInfo:nil];
   cuOwnerPipe=[args[@"owner_pipe"] boolValue];
   BOOL mutates=[@[@"type",@"key_event",@"mouse_event",@"scroll",@"pointer_sequence",@"release_input",@"set_value",@"select_text",@"perform_action"] containsObject:tool]
     || ([tool isEqual:@"hit_test"] && [args[@"perform"] boolValue])
@@ -402,6 +411,7 @@ static id execute(NSDictionary *p) {
     return @{@"action_sent":@YES};
   }
   if([tool isEqual:@"inspect_text_event"]) {
+    cuTestInheritedTextFlags=[args[@"inherited_flags"] unsignedLongLongValue];
     CGEventRef event=textEvent(args[@"text"],YES); UniChar chars[4096]; UniCharCount length=0;
     CGEventKeyboardGetUnicodeString(event,4096,&length,chars); CGEventFlags flags=CGEventGetFlags(event); CFRelease(event);
     return @{@"text":[NSString stringWithCharacters:chars length:length],@"flags":@(flags)};
@@ -503,12 +513,12 @@ static id execute(NSDictionary *p) {
     CGPoint p=CGPointMake([args[@"x"] doubleValue],[args[@"y"] doubleValue]);
     CGEventRef event=CGEventCreateMouseEvent(NULL,[args[@"type"] unsignedIntValue],p,[args[@"button"] unsignedIntValue]);
     CGEventSetIntegerValueField(event,kCGMouseEventClickState,[args[@"clickState"] longLongValue]);
-    // A pointer event posted to a process carries no window, and AppKit drops
-    // what it cannot route. Naming the window under the point is what lets a
-    // background application receive it without the pointer ever moving.
+    // Address the window as well as the process using public event fields.
+    // Dispatch is not delivery: a toolkit may still discard these events.
+    // This primitive needs effect readback before a caller can rely on it.
     if([args[@"windowNumber"] longLongValue]>0) {
-      CGEventSetIntegerValueField(event,91,[args[@"windowNumber"] longLongValue]);
-      CGEventSetIntegerValueField(event,92,[args[@"windowNumber"] longLongValue]);
+      CGEventSetIntegerValueField(event,kCGMouseEventWindowUnderMousePointer,[args[@"windowNumber"] longLongValue]);
+      CGEventSetIntegerValueField(event,kCGMouseEventWindowUnderMousePointerThatCanHandleThisEvent,[args[@"windowNumber"] longLongValue]);
     }
     cuCheckCancelled();
     CGEventPostToPid(inputApp.processIdentifier,event); CFRelease(event); return @{@"action_sent":@YES};
@@ -583,12 +593,11 @@ static id execute(NSDictionary *p) {
   /**
    * One pointer gesture, posted to the window server.
    *
-   * macOS delivers keyboard events to a process but silently drops pointer and
-   * scroll events posted the same way (measured on CGEventPostToPid with both
-   * event sources and on CGEventPostToPSN), so a pointer gesture that has no
-   * accessibility equivalent has to travel through the shared event tap. That
-   * moves the real cursor, so the whole gesture runs in one call and the
-   * pointer is put back where the user left it.
+   * The tested AppKit fixture dropped process-directed mouse/scroll events.
+   * This qualified raw path therefore uses the shared event tap, requiring
+   * explicit foreground control. It moves the real cursor, so the gesture
+   * runs in one call and restores its starting position when requested.
+   * Restoration does not make concurrent desktop use safe.
    */
   if([tool isEqual:@"pointer_sequence"]) {
     CGEventRef probe=CGEventCreate(NULL); CGPoint home=CGEventGetLocation(probe); CFRelease(probe);

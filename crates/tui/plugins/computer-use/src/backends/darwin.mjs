@@ -67,6 +67,7 @@ export function create({ exec }) {
   }
 
   async function native(tool, args = {}) {
+    if (tool === "pointer_sequence") requireSharedPointer();
     const helper = await nativeHelper();
     const r = await runL(helper, [JSON.stringify({ tool, args: { ...args, input_app_ref: state.inputApp, foreground_input: state.foregroundInput, owner_pipe: true } })], { timeoutMs: 20_000, ownerPipe: true });
     if (r.aborted || r.timedOut || r.code !== 0) {
@@ -86,6 +87,7 @@ export function create({ exec }) {
   }
 
   async function nativeLease(tool, args) {
+    if (tool === "pointer_sequence") requireSharedPointer();
     if (!exec.runInputLease) throw new ExecError("This executor cannot safely own held input; update Computer Use");
     if ((await native("input_capabilities"))?.input_lease !== 1) throw new ExecError("The native helper needs an update for disconnect-safe held input");
     const helper = await nativeHelper();
@@ -101,18 +103,18 @@ export function create({ exec }) {
     if (r.code !== 0) throw new ExecError(`background preview capture failed: ${r.stderr}`);
     fs.renameSync(temp, file);
     const p = state.pointer;
-    await native("preview_notify", { enabled: true, show, title: `Codewhale · ${win.name}`, x: p ? (p.x-win.points.x)/win.points.w : -1, y: p ? (p.y-win.points.y)/win.points.h : -1 });
+    await native("preview_notify", { enabled: true, show, title: `Codewhale · ${win.name} · ${state.foregroundInput ? "Shared desktop control" : "Background app control"}`, x: p ? (p.x-win.points.x)/win.points.w : -1, y: p ? (p.y-win.points.y)/win.points.h : -1 });
     return { enabled: true, file, app: state.inputApp, pointer: p };
   }
 
   // ---------- pointer input ----------
-  // macOS delivers keyboard events to a chosen process, but not pointer or
-  // scroll events: those are dropped unless they go through the shared event
-  // tap, which moves the user's real cursor. So the pointer path is:
+  // Our qualified raw pointer path uses the shared event tap, which moves
+  // the user's real cursor. Process/window-directed mouse delivery has not
+  // passed the independent fixture. So the pointer path is:
   //   1. accessibility action on the element under the point (quiet, exact),
-  //   2. otherwise a global gesture that is refused unless the bound
-  //      application owns the window under the point, and that puts the
-  //      cursor back where it was.
+  //   2. otherwise refuse in background mode. Explicit foreground control
+  //      permits a global gesture only when the bound application owns the
+  //      window under the point. Restoring the cursor is not isolation.
   // Every receipt says which of the two happened.
   function mouseName(button) { return { left: "left", right: "right", middle: "middle" }[button] ?? "left"; }
 
@@ -121,6 +123,10 @@ export function create({ exec }) {
   }
 
   function buttonCode(button) { return button === "middle" ? 2 : button === "right" ? 1 : 0; }
+
+  function requireSharedPointer() {
+    if (!state.foregroundInput) throw Object.assign(new ExecError("This action needs the shared macOS pointer and was not sent in background mode. Use an accessibility action or a separate computer; foreground control requires exclusive desktop use authorized by the user."), { code: "shared_pointer_required" });
+  }
 
   /** Refuse a global gesture whose landing point belongs to another application. */
   async function assertOwnsPoint(x, y) {
@@ -145,6 +151,7 @@ export function create({ exec }) {
   }
 
   async function gesture(steps, { restore = true, guard = null } = {}) {
+    requireSharedPointer();
     if (guard) await assertOwnsPoint(guard.x, guard.y);
     const r = await native("pointer_sequence", { steps, restore });
     const last = [...steps].reverse().find((s) => s.x != null);
@@ -439,7 +446,7 @@ export function create({ exec }) {
     // identity unmatchable.
     state.inputApp = { pid: p.pid, ...(p.bundle_id ? { bundle_id: p.bundle_id } : {}) };
     state.foregroundInput = !!activate;
-    return { launched: true, activate, keyboard_delivery: activate ? "foreground-guarded" : "process", url: urlArg ?? null, resolved: p?.found ? { name: p.name, pid: p.pid, bundle_id: p.bundle_id, frontmost: p.frontmost } : null };
+    return { launched: true, activate, keyboard_delivery: activate ? "foreground-guarded" : "process", input_scope: activate ? "shared-desktop" : "application", shared_pointer: !!activate, isolated_desktop: false, url: urlArg ?? null, resolved: p?.found ? { name: p.name, pid: p.pid, bundle_id: p.bundle_id, frontmost: p.frontmost } : null };
   }
 
   // ---------- clipboard / cursor / waits ----------
@@ -473,7 +480,7 @@ export function create({ exec }) {
     } catch { perms.screen_capture = "failed"; }
     caps.screenshot = perms.screen_capture === "ok";
     caps.recording = caps.screenshot;
-    return { platform: "darwin", capabilities: caps, permissions: perms, note: "macOS does not expose Screen-Recording TCC state to CLI; a black/empty screenshot means Screen Recording permission is missing. Raw input is bound to the process selected by open_application (activate:false by default). It does not require bringing that app forward. App-specific focus behavior still requires verification." };
+    return { platform: "darwin", capabilities: caps, permissions: perms, note: "macOS does not expose Screen-Recording TCC state to CLI; a black/empty screenshot means Screen Recording permission is missing. Background mode (open_application activate:false) uses process-bound keyboard events and accessibility actions; shared pointer gestures are refused. Foreground control (activate:true) uses the shared desktop and requires exclusive use. Neither mode is an isolated desktop. App-specific behavior still requires verification." };
   }
 
   return {
@@ -552,6 +559,7 @@ export function create({ exec }) {
     middle_click: ({ target }) => pointerClick("middle", target.x, target.y, 1),
     mouse_move: async ({ target }) => {
       assertInScreen(target.x, target.y);
+      requireSharedPointer();
       if (state.pointerLease) {
         try {
           const r = await state.pointerLease.send({ point: target });
@@ -565,6 +573,7 @@ export function create({ exec }) {
     },
     left_mouse_down: async ({ target }) => {
       assertInScreen(target.x, target.y);
+      requireSharedPointer();
       if (state.pointerLease) throw new ExecError("this session already holds the left pointer button; release it first");
       await assertOwnsPoint(target.x, target.y);
       state.pointerLease = await nativeLease("pointer_sequence", { steps: [

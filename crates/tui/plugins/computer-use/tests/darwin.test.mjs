@@ -81,8 +81,16 @@ test('native Unicode encoding round-trips through the actual CoreGraphics event'
   for(const text of ['Hello 世界 🐋','quote " slash \\ newline\n','e\u0301 👨‍👩‍👧‍👦']){
     const r=spawnSync(binary,[JSON.stringify({tool:'inspect_text_event',args:{text}})],{encoding:'utf8'});
     assert.equal(r.status,0,r.stderr);assert.equal(JSON.parse(r.stdout).text,text);
-    t.diagnostic(`Constructed literal Unicode event flags: ${JSON.parse(r.stdout).flags}`);
+    assert.equal(JSON.parse(r.stdout).flags,0,'literal text carries no physical modifiers');
+    for (const inherited_flags of [1<<17,1<<18,1<<19,1<<20,(1<<17)|(1<<20)]) {
+      const inherited=spawnSync(binary,[JSON.stringify({tool:'inspect_text_event',args:{text,inherited_flags}})],{encoding:'utf8'});
+      assert.equal(inherited.status,0,inherited.stderr);
+      assert.deepEqual(JSON.parse(inherited.stdout),{text,flags:0});
+    }
   }
+  const pointer=spawnSync(binary,[JSON.stringify({tool:'pointer_sequence',args:{foreground_input:false,steps:[]}})],{encoding:'utf8'});
+  assert.equal(pointer.status,1);
+  assert.match(pointer.stderr,/shared macOS pointer input is unavailable in background mode/);
 });
 
 test('native window matching refuses another process, mismatched geometry and ambiguous captures', {skip:process.platform!=='darwin'}, t=>{
@@ -164,6 +172,7 @@ test('macOS background binding avoids reopen and releases at the agent pointer, 
   await backend.open_application({name:'TextEdit'});
   assert.equal(calls[0].args.activate,false);
   await assert.rejects(backend.left_mouse_up({}),/no agent pointer/);
+  await backend.open_application({name:'TextEdit',activate:true});
   await backend.left_mouse_down({target:{x:100,y:200}});
   await backend.mouse_move({target:{x:140,y:250}});
   await backend.left_mouse_up({});
@@ -202,6 +211,41 @@ const PRESSABLE = { found: true, element: { role: 'AXButton', label: 'Tab B', ac
 const NOT_PRESSABLE = { found: false, reason: 'no_pressable_element' };
 const FILES_TARGET = { type:'element', app_ref:{pid:321,bundle_id:'test.app'}, windowIndex:0, path:[0,4,2],
   role:'AXMenuItem', label:'Files', x:1607, y:692 };
+
+test('macOS background control never escalates an unavailable semantic action to shared pointer input', async t => {
+  const {backend,calls}=stubBackend(t,r=>r.tool==='hit_test'?NOT_PRESSABLE:null);
+  const binding=await backend.open_application({name:'Fixture'});
+  assert.equal(binding.input_scope,'application');
+  assert.equal(binding.shared_pointer,false);
+  assert.equal(binding.isolated_desktop,false);
+  const target={x:70,y:80};
+  for(const [tool,args] of [
+    ['left_click',{target}], ['left_click',{target,strategy:'event'}],
+    ['double_click',{target}], ['triple_click',{target}], ['right_click',{target}],
+    ['middle_click',{target}], ['mouse_move',{target}], ['left_mouse_down',{target}],
+    ['left_click_drag',{from_target:target,to:{x:90,y:100}}], ['scroll',{target}],
+  ]) await assert.rejects(backend[tool](args),error=>error.code==='shared_pointer_required');
+  assert.ok(!calls.some(r=>['pointer_sequence','release_input','window_at_point'].includes(r.tool)));
+  await backend.type({text:'Background typing'});
+  assert.equal(calls.at(-1).tool,'type');
+  assert.equal(calls.at(-1).args.foreground_input,false);
+});
+
+test('macOS returning to background stops held-pointer movement while preserving its release', async t => {
+  const {backend,calls}=stubBackend(t,()=>null);
+  const binding=await backend.open_application({name:'Fixture',activate:true});
+  assert.equal(binding.input_scope,'shared-desktop');
+  assert.equal(binding.shared_pointer,true);
+  assert.equal(binding.isolated_desktop,false);
+  await backend.left_mouse_down({target:{x:70,y:80}});
+  await backend.open_application({name:'Fixture',activate:false});
+  const before=calls.length;
+  await assert.rejects(backend.mouse_move({target:{x:90,y:100}}),error=>error.code==='shared_pointer_required');
+  assert.equal(calls.length,before);
+  await backend.releaseInput();
+  assert.equal(calls.at(-1).tool,'release_input');
+  assert.equal(calls.at(-1).args.foreground_input,true);
+});
 
 test('macOS element click preserves the observed path despite an oversized frame center', async t => {
   const {backend,calls}=stubBackend(t,r=>r.tool==='input_capabilities'?{input_lease:1,element_identity:1}:r.tool==='hit_test'?PRESSABLE:null);
@@ -249,7 +293,7 @@ test('macOS element clicks refuse missing identity, another bound app and an old
 test('macOS explicit event selection remains usable and retains the app ownership guard', async t => {
   let covered=false;
   const {backend,calls}=stubBackend(t,r=>r.tool==='window_at_point'&&covered?{found:true,owner_pid:999,owner_name:'Mail'}:null);
-  await backend.open_application({name:'Fixture'});
+  await backend.open_application({name:'Fixture',activate:true});
   assert.equal((await backend.left_click({target:FILES_TARGET,strategy:'event'})).strategy,'event');
   const seq=calls.find(r=>r.tool==='pointer_sequence');
   assert.deepEqual([seq.args.steps[1].x,seq.args.steps[1].y],[1607,692]);
@@ -261,7 +305,7 @@ test('macOS explicit event selection remains usable and retains the app ownershi
 
 test('macOS refuses an old native helper before any held input is dispatched', async t => {
   const {backend,calls}=stubBackend(t,request=>request.tool==='input_capabilities'?{input_lease:0}:null);
-  await backend.open_application({name:'Fixture'});
+  await backend.open_application({name:'Fixture',activate:true});
   await assert.rejects(backend.key({text:'cmd+n'}),/helper needs an update/);
   await assert.rejects(backend.left_mouse_down({target:{x:70,y:80}}),/helper needs an update/);
   assert.ok(!calls.some(request=>['key_event','pointer_sequence','release_input'].includes(request.tool)));
@@ -291,7 +335,7 @@ test('macOS cancellation releases a held key without replaying it', async t => {
 
 test('macOS session cleanup releases only its owned mouse press once', async t => {
   const { backend, calls } = stubBackend(t, () => null);
-  await backend.open_application({name:'Fixture'});
+  await backend.open_application({name:'Fixture',activate:true});
   await backend.releaseInput();
   assert.ok(!calls.some(r=>r.tool==='release_input'));
   await backend.left_mouse_down({target:{x:70,y:80}});
@@ -344,7 +388,7 @@ for (const failure of ['aborted','timedOut']) test(`macOS ${failure} after child
 test('macOS refused mouse-down cannot acquire release ownership', async t => {
   const { backend, calls } = stubBackend(t, request => request.tool==='window_at_point'
     ? {found:true,owner_pid:999,owner_name:'Mail'} : null);
-  await backend.open_application({name:'Fixture'});
+  await backend.open_application({name:'Fixture',activate:true});
   await assert.rejects(backend.left_mouse_down({target:{x:70,y:80}}), /owned by Mail/);
   await backend.releaseInput();
   assert.ok(!calls.some(r=>['pointer_sequence','release_input'].includes(r.tool)));
@@ -353,7 +397,7 @@ test('macOS refused mouse-down cannot acquire release ownership', async t => {
 test('macOS cancellation during the ownership probe cannot acquire release ownership', async t => {
   const { backend, calls } = stubBackend(t, request => request.tool==='window_at_point'
     ? {nativeResult:{code:null,spawned:true,aborted:true,stdout:'',stderr:''}} : null);
-  await backend.open_application({name:'Fixture'});
+  await backend.open_application({name:'Fixture',activate:true});
   await assert.rejects(backend.left_mouse_down({target:{x:70,y:80}}), /cancelled/);
   await backend.releaseInput();
   assert.ok(!calls.some(r=>['pointer_sequence','release_input'].includes(r.tool)));
@@ -362,7 +406,7 @@ test('macOS cancellation during the ownership probe cannot acquire release owner
 test('macOS a single mouse-down ownership guard precedes the dispatch and ambiguous cleanup', async t => {
   const { backend, calls } = stubBackend(t, request => request.tool==='pointer_sequence'
     ? {nativeResult:{code:null,spawned:true,aborted:true,stdout:'',stderr:''}} : null);
-  await backend.open_application({name:'Fixture'});
+  await backend.open_application({name:'Fixture',activate:true});
   await assert.rejects(backend.left_mouse_down({target:{x:70,y:80}}), /cancelled/);
   assert.equal(calls.filter(r=>r.tool==='window_at_point').length,1);
   await backend.releaseInput();
@@ -386,7 +430,7 @@ test('macOS coordinate left_click prefers the accessibility element under the po
 
 test('macOS coordinate left_click falls back to a guarded global gesture when no element is pressable', async (t) => {
   const { backend, calls } = stubBackend(t, (r) => (r.tool === 'hit_test' ? NOT_PRESSABLE : null));
-  await backend.open_application({ name: 'TextEdit' });
+  await backend.open_application({ name: 'TextEdit', activate:true });
   const receipt = await backend.left_click({ target: { x: 40, y: 90 } });
   assert.equal(receipt.strategy, 'event');
   assert.equal(receipt.pointer_moved, true, 'the receipt admits the real cursor moved');
@@ -403,14 +447,14 @@ test('macOS coordinate left_click falls back to a guarded global gesture when no
 test('macOS refuses a global gesture whose landing point belongs to another application', async (t) => {
   const { backend, calls } = stubBackend(t, (r) => (r.tool === 'hit_test' ? NOT_PRESSABLE
     : r.tool === 'window_at_point' ? { found: true, owner_pid: 999, owner_name: 'Mail', window_id: 4, layer: 0 } : null));
-  await backend.open_application({ name: 'TextEdit' });
+  await backend.open_application({ name: 'TextEdit', activate:true });
   await assert.rejects(backend.left_click({ target: { x: 40, y: 90 } }), /covered by a window owned by Mail/);
   assert.ok(!calls.some((c) => c.tool === 'pointer_sequence'), 'nothing is posted into the other application');
 });
 
 test('macOS left_click strategies: event skips the tree, a11y fails closed, other clicks stay pointer-driven', async (t) => {
   const { backend, calls } = stubBackend(t, (r) => (r.tool === 'hit_test' ? NOT_PRESSABLE : null));
-  await backend.open_application({ name: 'TextEdit' });
+  await backend.open_application({ name: 'TextEdit', activate:true });
 
   const forced = await backend.left_click({ target: { x: 10, y: 20 }, strategy: 'event' });
   assert.equal(forced.strategy, 'event');
@@ -429,7 +473,7 @@ test('macOS left_click strategies: event skips the tree, a11y fails closed, othe
 
 test('macOS drag and scroll travel as one gesture that puts the pointer back', async (t) => {
   const { backend, calls } = stubBackend(t, () => null);
-  await backend.open_application({ name: 'TextEdit' });
+  await backend.open_application({ name: 'TextEdit', activate:true });
 
   const drag = await backend.left_click_drag({ from_target: { x: 10, y: 10 }, to: { x: 110, y: 10 } });
   assert.equal(drag.pointer_moved, true);
