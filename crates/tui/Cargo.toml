@@ -58,6 +58,7 @@ encoding_rs.workspace = true
 fd-lock = "4.0.4"
 dirs.workspace = true
 futures-util = "0.3.31"
+hyper-util = { version = "=0.1.20", features = ["client-proxy"] }
 oauth2 = "5"
 # No ratatui-core pin: ColorCompatBackend answers `get_cursor_position()`
 # from tracked state (ratatui#2640's recommended workaround), so the CPR query
@@ -112,6 +113,7 @@ mimalloc.workspace = true
 rusty_alloc-api = { workspace = true, optional = true }
 
 [build-dependencies]
+rust-i18n-support = { version = "=4.2.1", features = ["codegen"] }
 codewhale-build-support = { path = "../build-support", version = "0.9.13" }
 
 [dev-dependencies]

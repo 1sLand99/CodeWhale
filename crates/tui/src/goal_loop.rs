@@ -32,6 +32,13 @@ use std::time::Duration;
 /// with `[goal] max_continuations`; `0` keeps the default unlimited behavior.
 pub const DEFAULT_MAX_GOAL_CONTINUATIONS: u32 = 0;
 
+/// Default per-engine-turn step allowance while a goal is active (#5994).
+/// Deliberate maintainer policy, not a measured number: five times the
+/// ordinary interactive allowance (200), so intentional goal work has room
+/// while every provider turn stays finite. The count of continuation passes
+/// remains governed separately (`[goal] max_continuations`).
+pub const DEFAULT_GOAL_MAX_STEPS: u32 = 1_000;
+
 /// How many consecutive critical `not_achieved` reviews naming the *same*
 /// normalized gap set a goal may accumulate before it pauses itself with
 /// `GoalPauseReason::NoProgress`.

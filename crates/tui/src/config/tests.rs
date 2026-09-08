@@ -942,6 +942,52 @@ webhook_token = "secret-token"
     assert!(absent.base.lifecycle_outbox.is_none());
 }
 
+/// `tui.posture_bar` / `tui.metrics_line` (#5950): absent means full — an
+/// older `config.toml` keeps loading unchanged — and each key takes one of
+/// the three presets.
+#[test]
+fn tui_config_parses_bottom_chrome_row_presets() {
+    let raw = r#"
+[tui]
+posture_bar = "compact"
+metrics_line = "hidden"
+"#;
+    let parsed: ConfigFile = toml::from_str(raw).expect("parse row presets");
+    let tui = parsed.base.tui.expect("tui table");
+    assert_eq!(tui.posture_bar, Some(ChromeRowPreset::Compact));
+    assert_eq!(tui.metrics_line, Some(ChromeRowPreset::Hidden));
+
+    let absent: ConfigFile = toml::from_str("[tui]\nmouse_capture = true\n").expect("old file");
+    let tui = absent.base.tui.expect("tui table");
+    assert_eq!(tui.posture_bar, None);
+    assert_eq!(tui.metrics_line, None);
+    assert_eq!(
+        tui.posture_bar.unwrap_or_default(),
+        ChromeRowPreset::Full,
+        "absent means the full row"
+    );
+
+    let bad: Result<ConfigFile, _> = toml::from_str("[tui]\nposture_bar = \"tiny\"\n");
+    assert!(
+        bad.is_err(),
+        "a preset this build does not know is refused, not guessed"
+    );
+
+    for (setting, preset) in [
+        ("full", ChromeRowPreset::Full),
+        ("compact", ChromeRowPreset::Compact),
+        ("hidden", ChromeRowPreset::Hidden),
+    ] {
+        assert_eq!(ChromeRowPreset::from_setting(setting), Some(preset));
+        assert_eq!(
+            ChromeRowPreset::from_setting(&setting.to_uppercase()),
+            Some(preset)
+        );
+        assert_eq!(preset.as_setting(), setting);
+    }
+    assert_eq!(ChromeRowPreset::from_setting("tiny"), None);
+}
+
 #[test]
 fn tui_config_parses_control_socket_table() {
     let raw = r#"
@@ -1429,6 +1475,90 @@ fn user_input_limits_read_from_tools_table_and_clamp() {
     let clamped = clamped.base.user_input_limits();
     assert_eq!(clamped.max_questions, 10);
     assert_eq!(clamped.max_options, 2);
+}
+
+#[test]
+fn goal_max_steps_resolves_default_zero_and_clamps() {
+    let parsed: ConfigFile = toml::from_str("").expect("empty config");
+    assert_eq!(
+        parsed.base.goal_max_steps(),
+        crate::goal_loop::DEFAULT_GOAL_MAX_STEPS
+    );
+
+    // An explicit 0 is the goal default (1,000), never unlimited.
+    let parsed: ConfigFile = toml::from_str(
+        r#"
+        [goal]
+        max_steps = 0
+        "#,
+    )
+    .expect("goal config");
+    assert_eq!(
+        parsed.base.goal_max_steps(),
+        crate::goal_loop::DEFAULT_GOAL_MAX_STEPS
+    );
+
+    let parsed: ConfigFile = toml::from_str(
+        r#"
+        [goal]
+        max_steps = 50
+        "#,
+    )
+    .expect("goal config");
+    assert_eq!(parsed.base.goal_max_steps(), 50);
+
+    let parsed: ConfigFile = toml::from_str(
+        r#"
+        [goal]
+        max_steps = 500000
+        "#,
+    )
+    .expect("goal config");
+    assert_eq!(parsed.base.goal_max_steps(), 100_000);
+}
+
+#[test]
+fn user_input_timeout_defaults_disabled_and_clamps() {
+    let parsed: ConfigFile = toml::from_str("").expect("empty config");
+    assert_eq!(parsed.base.user_input_timeout(), None);
+
+    let parsed: ConfigFile = toml::from_str(
+        r#"
+        [tools]
+        user_input_timeout_seconds = 900
+        "#,
+    )
+    .expect("tools config");
+    assert_eq!(
+        parsed.base.user_input_timeout(),
+        Some(std::time::Duration::from_secs(900))
+    );
+
+    // An explicit 0 is the documented "wait forever" value, preserved as
+    // zero rather than defaulted or clamped away.
+    let parsed: ConfigFile = toml::from_str(
+        r#"
+        [tools]
+        user_input_timeout_seconds = 0
+        "#,
+    )
+    .expect("tools config");
+    assert_eq!(
+        parsed.base.user_input_timeout(),
+        Some(std::time::Duration::ZERO)
+    );
+
+    let parsed: ConfigFile = toml::from_str(
+        r#"
+        [tools]
+        user_input_timeout_seconds = 999999
+        "#,
+    )
+    .expect("tools config");
+    assert_eq!(
+        parsed.base.user_input_timeout(),
+        Some(std::time::Duration::from_secs(86_400))
+    );
 }
 
 #[test]

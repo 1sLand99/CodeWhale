@@ -627,6 +627,7 @@ fn policy_tool_aliases(name: &str) -> &'static [&'static str] {
             "edit_file",
         ],
         "bash" | "exec_shell" => &["bash", "exec_shell"],
+        "mcp_read_resource" | "read_mcp_resource" => &["mcp_read_resource", "read_mcp_resource"],
         _ => &[],
     }
 }

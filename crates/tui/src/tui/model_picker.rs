@@ -8,7 +8,7 @@
 //! On apply we emit a [`ViewEvent::ModelPickerApplied`] with the resolved
 //! model id and effort tier.
 
-use std::cell::RefCell;
+use std::cell::{Ref, RefCell};
 use std::collections::BTreeMap;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
@@ -228,6 +228,58 @@ pub struct ModelPickerView {
     /// UI locale captured from the app at construction (#4057 wave 2).
     locale: Locale,
     pinned_models: Vec<PinnedModel>,
+    // Navigation only changes selection. Catalog projections are rebuilt when
+    // the query, view, sort, pins or readiness/catalog snapshot changes.
+    projection: RefCell<Option<ModelPickerProjection>>,
+    sort: Option<ModelSort>,
+    column_hitboxes: RefCell<Vec<(Rect, ModelSortColumn)>>,
+    pane_hitboxes: RefCell<Vec<(Rect, Pane)>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ModelSortColumn {
+    Model,
+    Provider,
+    Context,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ModelSort {
+    column: ModelSortColumn,
+    descending: bool,
+}
+
+struct ModelPickerProjection {
+    query: String,
+    view: ModelListView,
+    sort: Option<ModelSort>,
+    indices: Vec<usize>,
+    rows: Vec<PaneRow>,
+    custom: Option<(String, ApiProvider)>,
+}
+
+struct VisibleModelRows<'a> {
+    catalog: &'a [ModelPickerRow],
+    indices: Ref<'a, [usize]>,
+}
+
+impl<'a> VisibleModelRows<'a> {
+    fn len(&self) -> usize {
+        self.indices.len()
+    }
+    fn get(&self, index: usize) -> Option<&'a ModelPickerRow> {
+        self.indices.get(index).map(|index| &self.catalog[*index])
+    }
+    fn iter(&self) -> impl ExactSizeIterator<Item = &'a ModelPickerRow> + '_ {
+        self.indices.iter().map(|index| &self.catalog[*index])
+    }
+}
+
+impl std::ops::Index<usize> for VisibleModelRows<'_> {
+    type Output = ModelPickerRow;
+    fn index(&self, index: usize) -> &Self::Output {
+        &self.catalog[self.indices[index]]
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -308,7 +360,12 @@ impl ModelPickerView {
         // made the cursor land on a different row (or look unselected) after
         // a pin reordered the list.
         let pins = picker_pins_for_app(app);
-        sort_model_rows_for_view(&mut default_visible_rows, ModelListView::Configured, &pins);
+        sort_model_rows_for_view(
+            &mut default_visible_rows,
+            |row| *row,
+            ModelListView::Configured,
+            &pins,
+        );
         let mut selected_model_idx = default_visible_rows.iter().position(|row| {
             row.id == initial_model
                 && (row.provider.is_none() || row.provider == Some(app.api_provider))
@@ -371,6 +428,10 @@ impl ModelPickerView {
             last_mouse_selected: None,
             locale: app.ui_locale,
             pinned_models: pins,
+            projection: RefCell::new(None),
+            sort: None,
+            column_hitboxes: RefCell::new(Vec::new()),
+            pane_hitboxes: RefCell::new(Vec::new()),
         };
         view.restore_memory(app.model_picker_memory.as_ref());
         view
@@ -404,76 +465,148 @@ impl ModelPickerView {
         self.clamp_model_selection();
     }
 
-    fn visible_model_rows(&self) -> Vec<&ModelPickerRow> {
+    fn ensure_projection(&self) {
+        if self.projection.borrow().as_ref().is_some_and(|cached| {
+            cached.query == self.query && cached.view == self.view && cached.sort == self.sort
+        }) {
+            return;
+        }
         let query = self.query.trim();
-        let mut rows: Vec<&ModelPickerRow> = self
+        let mut indices: Vec<usize> = self
             .model_rows
             .iter()
-            .filter(|row| {
-                if query.is_empty() {
-                    // Empty query: view scope only (Configured stays conservative).
+            .enumerate()
+            .filter_map(|(index, row)| {
+                let visible = if query.is_empty() {
                     model_row_visible_in_view(row, self.view, self.initial_provider)
                 } else {
-                    // Typed filter searches the full lake so cross-provider
-                    // routes remain discoverable without leaving Configured.
                     model_row_matches_query(row, query, self.initial_provider)
-                }
+                };
+                visible.then_some(index)
             })
             .collect();
-        if query.is_empty() {
-            sort_model_rows_for_view(&mut rows, self.view, &self.pinned_models);
+        if let Some(sort) = self.sort {
+            sort_model_indices(&mut indices, &self.model_rows, sort);
+        } else if query.is_empty() {
+            sort_model_rows_for_view(
+                &mut indices,
+                |index| &self.model_rows[*index],
+                self.view,
+                &self.pinned_models,
+            );
         } else {
-            // Rank typed results (#4639): rows whose provider matches the
-            // query first (provider drill-down), then exact/prefix id
-            // matches, then the active provider's rows, then alphabetical —
-            // so a provider-heavy catalog (e.g. OpenRouter) surfaces the
-            // intended route in the first few rows, not raw catalog order.
             let query_lower = query.to_ascii_lowercase();
-            let initial_provider = self.initial_provider;
-            rows.sort_by(|a, b| {
-                let rank = |row: &ModelPickerRow| {
-                    let provider_matches = row.provider.is_some_and(|provider| {
-                        row.provider_identity.as_deref().is_some_and(|identity| {
-                            identity.to_ascii_lowercase().contains(&query_lower)
-                        }) || provider
-                            .as_str()
+            indices.sort_by_cached_key(|index| {
+                let row = &self.model_rows[*index];
+                let provider_matches = row.provider.is_some_and(|provider| {
+                    row.provider_identity.as_deref().is_some_and(|identity| {
+                        identity.to_ascii_lowercase().contains(&query_lower)
+                    }) || provider
+                        .as_str()
+                        .to_ascii_lowercase()
+                        .contains(&query_lower)
+                        || provider
+                            .display_name()
                             .to_ascii_lowercase()
                             .contains(&query_lower)
-                            || provider
-                                .display_name()
-                                .to_ascii_lowercase()
-                                .contains(&query_lower)
-                    });
-                    let id = row.id.to_ascii_lowercase();
-                    let id_rank = if id == query_lower {
-                        0
-                    } else if id.starts_with(&query_lower) {
-                        1
-                    } else {
-                        2
-                    };
-                    let provider_rank =
-                        if row.provider.is_none() || row.provider == Some(initial_provider) {
-                            0
-                        } else {
-                            1
-                        };
-                    (
-                        if provider_matches { 0 } else { 1 },
-                        id_rank,
-                        provider_rank,
-                        id,
-                    )
+                });
+                let id = row.id.to_ascii_lowercase();
+                let id_rank = if id == query_lower {
+                    0
+                } else if id.starts_with(&query_lower) {
+                    1
+                } else {
+                    2
                 };
-                rank(a).cmp(&rank(b))
+                (
+                    usize::from(!provider_matches),
+                    id_rank,
+                    usize::from(
+                        row.provider.is_some() && row.provider != Some(self.initial_provider),
+                    ),
+                    id,
+                )
             });
         }
-        rows
+        let visible: Vec<_> = indices
+            .iter()
+            .map(|index| &self.model_rows[*index])
+            .collect();
+        let route_labels = route_labels_for_rows(&visible);
+        let grouped = self.sort.is_none()
+            && query.is_empty()
+            && matches!(
+                self.view,
+                ModelListView::Configured | ModelListView::Catalog
+            );
+        let mut rows: Vec<_> = visible
+            .iter()
+            .map(|row| PaneRow {
+                primary: row.id.clone(),
+                route: row
+                    .provider
+                    .map(|provider| {
+                        route_labels
+                            .get(provider.as_str())
+                            .cloned()
+                            .unwrap_or_else(|| provider.display_name().to_string())
+                    })
+                    .unwrap_or_default(),
+                meta: if row.provider.is_none() {
+                    vec![row.hint.clone()]
+                } else {
+                    model_row_meta_chips(row)
+                },
+                family: grouped
+                    .then(|| {
+                        row.provider
+                            .and_then(|provider| catalog_family_for(provider, &row.id))
+                    })
+                    .flatten(),
+                active: row.id == self.initial_model
+                    && (row.provider.is_none() || row.provider == Some(self.initial_provider)),
+                locked: !row.selectable,
+            })
+            .collect();
+        let custom = self.custom_model_row_for_visible(&visible);
+        if let Some((model, provider)) = custom.as_ref() {
+            rows.push(PaneRow {
+                primary: model.clone(),
+                route: provider.display_name().to_string(),
+                meta: vec![
+                    if query.is_empty() {
+                        "current (custom)"
+                    } else {
+                        "custom route"
+                    }
+                    .to_string(),
+                ],
+                ..PaneRow::default()
+            });
+        }
+        *self.projection.borrow_mut() = Some(ModelPickerProjection {
+            query: self.query.clone(),
+            view: self.view,
+            sort: self.sort,
+            indices,
+            rows,
+            custom,
+        });
+    }
+
+    fn visible_model_rows(&self) -> VisibleModelRows<'_> {
+        self.ensure_projection();
+        VisibleModelRows {
+            catalog: &self.model_rows,
+            indices: Ref::map(self.projection.borrow(), |projection| {
+                projection.as_ref().unwrap().indices.as_slice()
+            }),
+        }
     }
 
     fn model_row_count(&self) -> usize {
-        let rows = self.visible_model_rows();
-        rows.len() + usize::from(self.custom_model_row_for_visible(&rows).is_some())
+        self.ensure_projection();
+        self.projection.borrow().as_ref().unwrap().rows.len()
     }
 
     /// Resolve the currently highlighted row to a model id.
@@ -567,8 +700,8 @@ impl ModelPickerView {
     }
 
     fn custom_model_row(&self) -> Option<(String, ApiProvider)> {
-        let rows = self.visible_model_rows();
-        self.custom_model_row_for_visible(&rows)
+        self.ensure_projection();
+        self.projection.borrow().as_ref().unwrap().custom.clone()
     }
 
     fn custom_model_row_for_visible(
@@ -748,16 +881,133 @@ impl ModelPickerView {
         }
     }
 
+    fn set_sort(&mut self, sort: Option<ModelSort>) {
+        let selected = self
+            .visible_model_rows()
+            .indices
+            .get(self.selected_model_idx)
+            .copied();
+        let was_custom = selected.is_none() && self.custom_model_row().is_some();
+        self.sort = sort;
+        self.last_mouse_selected = None;
+        self.ensure_projection();
+        if let Some(selected) = selected {
+            let position = self
+                .visible_model_rows()
+                .indices
+                .iter()
+                .position(|index| *index == selected);
+            if let Some(position) = position {
+                self.selected_model_idx = position;
+            }
+        } else if was_custom {
+            let visible_len = self.visible_model_rows().len();
+            self.selected_model_idx = visible_len;
+        }
+        self.clamp_model_selection();
+        self.select_effort_for_current_model();
+    }
+
+    fn sort_column(&mut self, column: ModelSortColumn) {
+        let descending = self
+            .sort
+            .is_some_and(|sort| sort.column == column && !sort.descending);
+        self.set_sort(Some(ModelSort { column, descending }));
+    }
+
+    fn cycle_sort(&mut self) {
+        use ModelSortColumn::{Context, Model, Provider};
+        let next = match self.sort {
+            None => Some(ModelSort {
+                column: Model,
+                descending: false,
+            }),
+            Some(ModelSort {
+                column,
+                descending: false,
+            }) => Some(ModelSort {
+                column,
+                descending: true,
+            }),
+            Some(ModelSort {
+                column: Model,
+                descending: true,
+            }) => Some(ModelSort {
+                column: Provider,
+                descending: false,
+            }),
+            Some(ModelSort {
+                column: Provider,
+                descending: true,
+            }) => Some(ModelSort {
+                column: Context,
+                descending: false,
+            }),
+            Some(ModelSort {
+                column: Context,
+                descending: true,
+            }) => None,
+        };
+        self.set_sort(next);
+    }
+
+    fn render_sort_columns(&self, area: Rect, buf: &mut Buffer, columns: ModelRowColumns) {
+        let label = |name: &str, column| match self.sort.filter(|sort| sort.column == column) {
+            Some(sort) => format!("{name} {}", if sort.descending { "↓" } else { "↑" }),
+            None => name.to_string(),
+        };
+        let row = PaneRow {
+            primary: label("Model", ModelSortColumn::Model),
+            route: label("Provider", ModelSortColumn::Provider),
+            meta: vec![label("Context", ModelSortColumn::Context)],
+            ..PaneRow::default()
+        };
+        let style = Style::default().fg(palette::TEXT_MUTED).bold();
+        Paragraph::new(Line::from(picker_row_spans(
+            &row,
+            " ",
+            usize::from(area.width),
+            columns,
+            style,
+            style,
+        )))
+        .render(area, buf);
+        let fitted = columns.resolve(usize::from(area.width));
+        let mut x = usize::from(area.x) + ROW_PREFIX_WIDTH;
+        let right = usize::from(area.right());
+        for (width, column) in [
+            (fitted.primary, ModelSortColumn::Model),
+            (fitted.route, ModelSortColumn::Provider),
+            (fitted.meta, ModelSortColumn::Context),
+        ] {
+            if width > 0 {
+                if x < right {
+                    self.column_hitboxes.borrow_mut().push((
+                        Rect::new(x as u16, area.y, width.min(right - x) as u16, 1),
+                        column,
+                    ));
+                }
+                x += width + COLUMN_GAP;
+            }
+        }
+    }
+
     fn render_pane(
         &self,
         area: Rect,
         buf: &mut Buffer,
         title: &str,
-        rows: Vec<PaneRow>,
+        rows: &[PaneRow],
         state: PaneRenderState,
     ) {
-        let visible_height = usize::from(area.height.saturating_sub(1));
-        let (start, end) = visible_row_window(state.selected, rows.len(), visible_height);
+        self.pane_hitboxes.borrow_mut().push((area, state.pane));
+        let header_height = if state.pane == Pane::Model && area.height >= 3 {
+            2
+        } else {
+            1
+        };
+        let visible_height = usize::from(area.height.saturating_sub(header_height));
+        let (start, end) = pane_row_window(state.selected, rows, visible_height);
         let title = if rows.len() > visible_height && visible_height > 0 {
             if start + 1 == end {
                 // A scrollable pane whose visible window spans exactly one row
@@ -792,15 +1042,22 @@ impl ModelPickerView {
         ]))
         .render(title_area, buf);
         let inner = Rect {
-            y: area.y.saturating_add(1),
-            height: area.height.saturating_sub(1),
+            y: area.y.saturating_add(header_height),
+            height: area.height.saturating_sub(header_height),
             ..area
         };
 
         // Column widths are measured over the rows actually on screen, so the
         // route column lands at one predictable offset for the whole page
         // instead of drifting with whatever long id happens to be scrolled in.
-        let columns = ModelRowColumns::for_page(&rows[start.min(rows.len())..end.min(rows.len())]);
+        let mut columns =
+            ModelRowColumns::for_page(&rows[start.min(rows.len())..end.min(rows.len())]);
+        if header_height == 2 {
+            columns.primary = columns.primary.max(7);
+            columns.route = columns.route.max(10);
+            columns.meta = columns.meta.max(9);
+            self.render_sort_columns(Rect::new(area.x, area.y + 1, area.width, 1), buf, columns);
+        }
 
         let mut lines = Vec::with_capacity(end.saturating_sub(start));
         let pane_height = usize::from(inner.height);
@@ -814,11 +1071,7 @@ impl ModelPickerView {
             let is_selected = idx == state.selected;
             // Non-selectable rows are dimmed with a lock glyph so they never
             // look choosable. Selection still highlights, but stays muted.
-            let locked = state.pane == Pane::Model
-                && self
-                    .visible_model_rows()
-                    .get(idx)
-                    .is_some_and(|row| !row.selectable);
+            let locked = row.locked;
             // Marker precedence: a locked route first (it is the reason Enter
             // will not work), then the keyboard cursor, then the route this
             // session is already on. `CURRENT` is the charter's "current human
@@ -853,19 +1106,11 @@ impl ModelPickerView {
             // drawn when the catalog states a family and it differs from the
             // previous visible row's (families sort contiguously). Unknown
             // families draw nothing.
-            if let Some(family) = row.family.as_deref() {
-                let prev_family = rows
-                    .get(idx.wrapping_sub(1))
-                    .and_then(|prev| prev.family.as_deref());
-                let prev_provider = rows
-                    .get(idx.wrapping_sub(1))
-                    .map(|prev| prev.route.as_str());
-                if prev_family != Some(family) || prev_provider != Some(row.route.as_str()) {
-                    lines.push(Line::from(Span::styled(
-                        format!("  ─ {family}"),
-                        Style::default().fg(palette::TEXT_DIM),
-                    )));
-                }
+            if family_header_before(rows, idx) && pane_height > 1 {
+                lines.push(Line::from(Span::styled(
+                    format!("  ─ {}", row.family.as_deref().unwrap_or_default()),
+                    Style::default().fg(palette::TEXT_DIM),
+                )));
             }
             // The hitbox points at the row's own line (after any family
             // header), so mouse/scan targets and keyboard targets agree.
@@ -908,17 +1153,40 @@ impl ModelPickerView {
     }
 }
 
-fn visible_row_window(selected: usize, total: usize, viewport_height: usize) -> (usize, usize) {
-    if total == 0 || viewport_height == 0 {
+fn family_header_before(rows: &[PaneRow], index: usize) -> bool {
+    let row = &rows[index];
+    row.family.as_deref().is_some_and(|family| {
+        rows.get(index.wrapping_sub(1)).is_none_or(|previous| {
+            previous.family.as_deref() != Some(family) || previous.route != row.route
+        })
+    })
+}
+
+fn pane_row_window(selected: usize, rows: &[PaneRow], height: usize) -> (usize, usize) {
+    if rows.is_empty() || height == 0 {
         return (0, 0);
     }
-
-    let visible = viewport_height.min(total);
-    let mut start = selected.saturating_sub(visible / 2);
-    if start + visible > total {
-        start = total.saturating_sub(visible);
+    let selected = selected.min(rows.len() - 1);
+    let cost = |index| 1 + usize::from(height > 1 && family_header_before(rows, index));
+    // Keep the selection near the middle, counting actual painted lines.
+    let mut start = selected;
+    let mut above = 0;
+    while start > 0 && above + cost(start - 1) <= height.saturating_sub(cost(selected)) / 2 {
+        start -= 1;
+        above += cost(start);
     }
-    (start, start + visible)
+    let mut end = start;
+    let mut used = 0;
+    while end < rows.len() && used + cost(end) <= height {
+        used += cost(end);
+        end += 1;
+    }
+    // Fill the space above when we reach the end of the list.
+    while start > 0 && used + cost(start - 1) <= height {
+        start -= 1;
+        used += cost(start);
+    }
+    (start, end)
 }
 
 /// Widest Thinking row plus its marker: `max  (extra-high reasoning)`.
@@ -975,6 +1243,7 @@ struct PaneRow {
     family: Option<String>,
     /// The route this session is already on.
     active: bool,
+    locked: bool,
 }
 
 impl PaneRow {
@@ -989,11 +1258,16 @@ impl PaneRow {
             },
             family: None,
             active: false,
+            locked: false,
         }
     }
 
     fn meta_width(&self) -> usize {
-        unicode_width::UnicodeWidthStr::width(self.meta.join(" · ").as_str())
+        self.meta
+            .iter()
+            .map(|chip| unicode_width::UnicodeWidthStr::width(chip.as_str()))
+            .sum::<usize>()
+            + self.meta.len().saturating_sub(1) * 3
     }
 }
 
@@ -1992,11 +2266,13 @@ fn model_row_visible_by_default(row: &ModelPickerRow, active_provider: ApiProvid
     row.provider.is_none() || row.provider == Some(active_provider) || row.enabled
 }
 
-fn sort_model_rows_for_view(
-    rows: &mut [&ModelPickerRow],
+fn sort_model_rows_for_view<'a, T>(
+    rows: &mut [T],
+    model_row: impl Fn(&T) -> &'a ModelPickerRow,
     view: ModelListView,
     pins: &[PinnedModel],
 ) {
+    use std::cmp::Reverse;
     let pin_rank = |row: &ModelPickerRow| {
         row_provider_identity(row)
             .and_then(|provider| {
@@ -2008,50 +2284,112 @@ fn sort_model_rows_for_view(
             .unwrap_or(usize::MAX)
     };
     match view {
-        // Pins first, then one contiguous block per provider+family with the
-        // newest model at its head. Sorting by pin rank alone left families
-        // interleaved — `glm` and `DeepSeek` each drew two headers, and the
-        // older member of a family (GLM-5.2) stranded at the bottom of the
-        // list well below its newer sibling.
-        ModelListView::Configured | ModelListView::Catalog => rows.sort_by(|left, right| {
-            pin_rank(left)
-                .cmp(&pin_rank(right))
-                .then_with(|| row_group_key(left).cmp(&row_group_key(right)))
-                .then_with(|| {
-                    model_version_key(right.id.as_str()).cmp(&model_version_key(left.id.as_str()))
+        ModelListView::Configured | ModelListView::Catalog => rows.sort_by_cached_key(|item| {
+            let row = model_row(item);
+            (
+                pin_rank(row),
+                row_group_key(row),
+                Reverse(model_version_key(&row.id)),
+                row.id.clone(),
+            )
+        }),
+        ModelListView::Recent => rows.sort_by_cached_key(|item| {
+            let row = model_row(item);
+            (Reverse(offering_fetched_at(row)), row.id.clone())
+        }),
+        ModelListView::Coding => rows.sort_by_cached_key(|item| {
+            let row = model_row(item);
+            (Reverse(coding_score(row)), row.id.clone())
+        }),
+        ModelListView::Cheap => {
+            // Catalog lookup/pricing parsing happens once per row. Unknown
+            // prices stay last; f64 retains its existing partial-order behavior.
+            let prices: BTreeMap<_, _> = rows
+                .iter()
+                .map(|item| {
+                    let row = model_row(item);
+                    (
+                        (
+                            row_provider_identity(row).unwrap_or_default().to_string(),
+                            row.id.clone(),
+                        ),
+                        input_price_per_million(row),
+                    )
                 })
+                .collect();
+            rows.sort_by(|left, right| {
+                let left = model_row(left);
+                let right = model_row(right);
+                let price = |row: &ModelPickerRow| {
+                    prices[&(
+                        row_provider_identity(row).unwrap_or_default().to_string(),
+                        row.id.clone(),
+                    )]
+                };
+                match (price(left), price(right)) {
+                    (Some(l), Some(r)) => l.partial_cmp(&r).unwrap_or(std::cmp::Ordering::Equal),
+                    (Some(_), None) => std::cmp::Ordering::Less,
+                    (None, Some(_)) => std::cmp::Ordering::Greater,
+                    (None, None) => std::cmp::Ordering::Equal,
+                }
                 .then_with(|| left.id.cmp(&right.id))
-        }),
-        ModelListView::Recent => rows.sort_by(|left, right| {
-            offering_fetched_at(right)
-                .cmp(&offering_fetched_at(left))
-                .then_with(|| left.id.cmp(&right.id))
-        }),
-        ModelListView::Coding => rows.sort_by(|left, right| {
-            coding_score(right)
-                .cmp(&coding_score(left))
-                .then_with(|| left.id.cmp(&right.id))
-        }),
-        ModelListView::Cheap => rows.sort_by(|left, right| {
-            match (
-                input_price_per_million(left),
-                input_price_per_million(right),
-            ) {
-                (Some(l), Some(r)) => l
-                    .partial_cmp(&r)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-                    .then_with(|| left.id.cmp(&right.id)),
-                (Some(_), None) => std::cmp::Ordering::Less,
-                (None, Some(_)) => std::cmp::Ordering::Greater,
-                (None, None) => left.id.cmp(&right.id),
-            }
-        }),
-        ModelListView::LongContext => rows.sort_by(|left, right| {
-            context_tokens(right)
-                .cmp(&context_tokens(left))
-                .then_with(|| left.id.cmp(&right.id))
+            });
+        }
+        ModelListView::LongContext => rows.sort_by_cached_key(|item| {
+            let row = model_row(item);
+            (Reverse(context_tokens(row)), row.id.clone())
         }),
     }
+}
+
+fn sort_model_indices(indices: &mut [usize], rows: &[ModelPickerRow], sort: ModelSort) {
+    // Precompute owned text once, keeping navigation independent of catalog size.
+    let keys: BTreeMap<_, _> = indices
+        .iter()
+        .map(|index| {
+            let row = &rows[*index];
+            (
+                *index,
+                (
+                    row.id.to_ascii_lowercase(),
+                    row_provider_identity(row)
+                        .unwrap_or_default()
+                        .to_ascii_lowercase(),
+                ),
+            )
+        })
+        .collect();
+    indices.sort_by(|left, right| {
+        let a = &rows[*left];
+        let b = &rows[*right];
+        let order = match sort.column {
+            ModelSortColumn::Model => keys[left].0.cmp(&keys[right].0),
+            ModelSortColumn::Provider => keys[left].1.cmp(&keys[right].1),
+            ModelSortColumn::Context => a.metadata.context_window.cmp(&b.metadata.context_window),
+        };
+        let order = if sort.descending {
+            order.reverse()
+        } else {
+            order
+        };
+        // Auto remains reachable at the top; missing context stays last in
+        // either direction rather than pretending to be a zero-sized model.
+        a.provider
+            .is_some()
+            .cmp(&b.provider.is_some())
+            .then_with(|| {
+                if sort.column == ModelSortColumn::Context {
+                    a.metadata
+                        .context_window
+                        .is_none()
+                        .cmp(&b.metadata.context_window.is_none())
+                } else {
+                    std::cmp::Ordering::Equal
+                }
+            })
+            .then(order)
+            .then_with(|| keys[left].cmp(&keys[right]))
+    });
 }
 
 /// Stable grouping key so a provider's families render as one contiguous
@@ -2476,25 +2814,28 @@ impl ModelPickerView {
         self.route_config = config.clone();
         self.pinned_models = picker_pins_for_app(app);
         self.model_rows = picker_model_rows_for_app(app, config);
+        *self.projection.get_mut() = None;
+        self.last_mouse_selected = None;
         self.configured_providers = configured_providers(config, app.api_provider)
             .into_iter()
             .filter(|provider| *provider != app.api_provider)
             .collect();
         // Re-anchor to the same exact provider/model after pin sorting changes;
         // preserving only the numeric index can select a different model.
-        if let Some((provider, model)) = selected
-            && let Some(position) = self.visible_model_rows().iter().position(|row| {
+        let reanchored = selected.and_then(|(provider, model)| {
+            self.visible_model_rows().iter().position(|row| {
                 row.id.eq_ignore_ascii_case(&model)
                     && row_provider_identity(row).map(str::to_owned) == provider
             })
-        {
+        });
+        if let Some(position) = reanchored {
             self.selected_model_idx = position;
             return;
         }
         // Keep selection stable when the row still exists.
-        let rows = self.visible_model_rows();
-        if self.selected_model_idx >= rows.len() + usize::from(self.show_custom_model_row) {
-            self.selected_model_idx = rows.len().saturating_sub(1);
+        let visible_len = self.visible_model_rows().len();
+        if self.selected_model_idx >= visible_len + usize::from(self.show_custom_model_row) {
+            self.selected_model_idx = visible_len.saturating_sub(1);
         }
     }
 }
@@ -2527,7 +2868,12 @@ impl ModalView for ModelPickerView {
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> ViewAction {
+        self.last_mouse_selected = None;
         match key.code {
+            KeyCode::Char('s' | 'S') if key.modifiers == KeyModifiers::CONTROL => {
+                self.cycle_sort();
+                ViewAction::None
+            }
             // Esc carries the browsing context out so the next open can
             // restore it (#4109 picker memory).
             KeyCode::Esc => ViewAction::EmitAndClose(ViewEvent::ModelPickerDismissed {
@@ -2684,17 +3030,40 @@ impl ModalView for ModelPickerView {
 
     fn handle_mouse(&mut self, mouse: MouseEvent) -> ViewAction {
         match mouse.kind {
-            MouseEventKind::ScrollUp => {
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
                 self.last_mouse_selected = None;
-                self.move_up();
-                ViewAction::None
-            }
-            MouseEventKind::ScrollDown => {
-                self.last_mouse_selected = None;
-                self.move_down();
+                let pane = self.pane_hitboxes.borrow().iter().find_map(|(rect, pane)| {
+                    rect.contains(ratatui::layout::Position::new(mouse.column, mouse.row))
+                        .then_some(*pane)
+                });
+                let Some(pane) = pane else {
+                    return ViewAction::None;
+                };
+                self.focus = pane;
+                if mouse.kind == MouseEventKind::ScrollUp {
+                    self.move_up();
+                } else {
+                    self.move_down();
+                }
                 ViewAction::None
             }
             MouseEventKind::Down(MouseButton::Left) => {
+                let column = self
+                    .column_hitboxes
+                    .borrow()
+                    .iter()
+                    .find_map(|(rect, column)| {
+                        rect.contains(ratatui::layout::Position::new(mouse.column, mouse.row))
+                            .then_some(*column)
+                    });
+                if let Some(column) = column {
+                    // Sorting acts on the Model pane, so the header click
+                    // moves focus there too — otherwise the next keystroke or
+                    // wheel event edits the pane that previously had focus.
+                    self.focus = Pane::Model;
+                    self.sort_column(column);
+                    return ViewAction::None;
+                }
                 let clicked = self
                     .row_hitboxes
                     .borrow()
@@ -2745,6 +3114,8 @@ impl ModalView for ModelPickerView {
 impl ModelPickerView {
     fn render_route(&self, area: Rect, buf: &mut Buffer) {
         self.row_hitboxes.borrow_mut().clear();
+        self.column_hitboxes.borrow_mut().clear();
+        self.pane_hitboxes.borrow_mut().clear();
         let inner = render_underwater_surface(
             area,
             buf,
@@ -2771,6 +3142,7 @@ impl ModelPickerView {
                 tr(self.locale, MessageId::PickerActionSetStartupDefault),
             ),
             ActionHint::new("⇧A", view_action),
+            ActionHint::new("Ctrl+S", tr(self.locale, MessageId::SessionsActionSort)),
         ];
         // Keep compact route modals focused on the core browse/apply actions;
         // wider shells have room to disclose the pin action too.
@@ -2842,50 +3214,9 @@ impl ModelPickerView {
 
         let layout = widen_model_pane(ListDetailLayout::split(shell[1], 24));
 
-        let visible = self.visible_model_rows();
-        let route_labels = route_labels_for_rows(&visible);
-        let mut model_rows: Vec<PaneRow> = visible
-            .iter()
-            .map(|row| {
-                let active = row.id == self.initial_model
-                    && (row.provider.is_none() || row.provider == Some(self.initial_provider));
-                match row.provider {
-                    // `auto` is not a catalog offering; it keeps its explanatory
-                    // prose, which now has the whole row to be truncated into
-                    // instead of being dropped for not fitting.
-                    None => PaneRow {
-                        primary: row.id.clone(),
-                        route: String::new(),
-                        meta: vec![row.hint.clone()],
-                        family: None,
-                        active,
-                    },
-                    Some(provider) => PaneRow {
-                        primary: row.id.clone(),
-                        route: route_labels
-                            .get(provider.as_str())
-                            .cloned()
-                            .unwrap_or_else(|| provider.display_name().to_string()),
-                        meta: model_row_meta_chips(row),
-                        family: catalog_family_for(provider, &row.id),
-                        active,
-                    },
-                }
-            })
-            .collect();
-        if let Some((model, provider)) = self.custom_model_row() {
-            model_rows.push(PaneRow {
-                primary: model,
-                family: None,
-                route: provider.display_name().to_string(),
-                meta: vec![if self.query.trim().is_empty() {
-                    "current (custom)".to_string()
-                } else {
-                    "custom route".to_string()
-                }],
-                active: false,
-            });
-        }
+        self.ensure_projection();
+        let projection = self.projection.borrow();
+        let model_rows = &projection.as_ref().unwrap().rows;
         let model_title = if self.query.trim().is_empty() {
             format!("Model · {}", self.view.title_label())
         } else {
@@ -2932,7 +3263,7 @@ impl ModelPickerView {
             layout.detail,
             buf,
             "Thinking",
-            effort_rows,
+            &effort_rows,
             PaneRenderState {
                 pane: Pane::Effort,
                 selected: selected_effort_idx,
@@ -3175,6 +3506,10 @@ mod tests {
             last_mouse_selected: None,
             locale: Locale::En,
             pinned_models: Vec::new(),
+            projection: RefCell::new(None),
+            sort: None,
+            column_hitboxes: RefCell::new(Vec::new()),
+            pane_hitboxes: RefCell::new(Vec::new()),
         }
     }
 
@@ -3301,5 +3636,273 @@ mod tests {
         assert!(text.contains("⇧A"), "missing shifted view hint: {text}");
         assert!(text.contains("⇧P"), "missing shifted pin hint: {text}");
         assert!(text.contains("⇧F"), "missing shifted fleet hint: {text}");
+    }
+
+    #[test]
+    fn full_catalog_navigation_sort_refresh_and_mouse_stay_coherent() {
+        const PROBE: &str = "CODEWHALE_PICKER_CATALOG_PROBE";
+        if std::env::var_os(PROBE).is_none() {
+            let fixture = tempfile::tempdir().expect("picker fixture");
+            let home = fixture.path().join("home");
+            let workspace = fixture.path().join("workspace");
+            std::fs::create_dir_all(&home).unwrap();
+            std::fs::create_dir_all(&workspace).unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "tui::model_picker::tests::full_catalog_navigation_sort_refresh_and_mouse_stay_coherent", "--nocapture", "--test-threads=1"])
+                .env_clear()
+                .env(PROBE, "1")
+                .env("HOME", &home)
+                .env("USERPROFILE", &home)
+                .env("XDG_CONFIG_HOME", home.join("config"))
+                .env("XDG_CACHE_HOME", home.join("cache"))
+                .env("XDG_DATA_HOME", home.join("data"))
+                .env("CODEWHALE_HOME", home.join(".codewhale"))
+                .env("CODEWHALE_DISABLE_MODELS_DEV_FETCH", "1")
+                .env("CODEWHALE_NO_UPDATE_CHECK", "1")
+                .env("CODEWHALE_TELEMETRY", "0")
+                .current_dir(&workspace)
+                .output().expect("isolated picker test");
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+            return;
+        }
+        let config = Config::default();
+        let mut app = App::new(
+            crate::test_support::test_tui_options(std::env::current_dir().unwrap()),
+            &config,
+        );
+        let mut picker = ModelPickerView::new(&app, &config);
+        picker.handle_key(KeyEvent::new(KeyCode::Char('A'), KeyModifiers::SHIFT));
+        let count = picker.model_row_count();
+        assert!(count >= 200, "use the actual full catalog: {count} rows");
+        let projection_storage = || {
+            let projection = picker.projection.borrow();
+            let projection = projection.as_ref().unwrap();
+            (projection.indices.as_ptr(), projection.rows.as_ptr())
+        };
+        let initial_storage = projection_storage();
+        let started = std::time::Instant::now();
+        for _ in 0..30 {
+            picker.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+            render_text(&picker, 150, 42);
+            let projection = picker.projection.borrow();
+            let projection = projection.as_ref().unwrap();
+            assert_eq!(
+                (projection.indices.as_ptr(), projection.rows.as_ptr()),
+                initial_storage,
+                "navigation must not rebuild the full catalog or formatted rows"
+            );
+        }
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "30 navigation+render iterations over {count} catalog rows must stay fast"
+        );
+
+        // Every catalog entry must remain visible when highlighted, even when
+        // adjacent providers each require a separate family heading.
+        for (width, height) in [(80, 24), (100, 30), (150, 42)] {
+            for selected in 0..count {
+                picker.selected_model_idx = selected;
+                render_text(&picker, width, height);
+                let panes = picker.pane_hitboxes.borrow();
+                let area = panes
+                    .iter()
+                    .find(|(_, pane)| *pane == Pane::Model)
+                    .unwrap()
+                    .0;
+                let hitboxes = picker.row_hitboxes.borrow();
+                assert!(
+                    hitboxes
+                        .iter()
+                        .any(|(_, pane, index)| *pane == Pane::Model && *index == selected),
+                    "selected row {selected} disappeared at {width}x{height}"
+                );
+                for (rect, pane, _) in hitboxes.iter().filter(|(_, pane, _)| *pane == Pane::Model) {
+                    assert_eq!(*pane, Pane::Model);
+                    assert!(rect.y >= area.y && rect.bottom() <= area.bottom());
+                }
+            }
+        }
+
+        picker.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+        render_text(&picker, 150, 42);
+        let (effort_rect, _, _) = *picker
+            .row_hitboxes
+            .borrow()
+            .iter()
+            .find(|(_, pane, index)| *pane == Pane::Effort && *index == 1)
+            .unwrap();
+        picker.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: effort_rect.x + 1,
+            row: effort_rect.y,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert_eq!(picker.focus, Pane::Effort);
+        let before = picker.selected_model_idx;
+        let requested_effort = picker.selected_effort_request;
+        let model_area = picker
+            .pane_hitboxes
+            .borrow()
+            .iter()
+            .find(|(_, pane)| *pane == Pane::Model)
+            .unwrap()
+            .0;
+        picker.handle_mouse(MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: model_area.x + 1,
+            row: model_area.y + 3,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert_eq!(picker.focus, Pane::Model);
+        assert_eq!(picker.selected_model_idx, wrapping_next(before, count));
+        assert_eq!(picker.selected_effort_request, requested_effort);
+
+        // Actual header hitboxes sort in both directions without changing the
+        // selected provider/model; missing context is never treated as zero.
+        let selected = (picker.resolved_provider(), picker.resolved_model());
+        for column in [
+            ModelSortColumn::Model,
+            ModelSortColumn::Provider,
+            ModelSortColumn::Context,
+        ] {
+            for descending in [false, true] {
+                render_text(&picker, 150, 42);
+                let rect = picker
+                    .column_hitboxes
+                    .borrow()
+                    .iter()
+                    .find(|(_, target)| *target == column)
+                    .unwrap()
+                    .0;
+                picker.handle_mouse(MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column: rect.x,
+                    row: rect.y,
+                    modifiers: KeyModifiers::NONE,
+                });
+                assert_eq!(picker.sort, Some(ModelSort { column, descending }));
+                assert_eq!(
+                    picker.focus,
+                    Pane::Model,
+                    "header click must focus the Model pane"
+                );
+                assert_eq!(
+                    (picker.resolved_provider(), picker.resolved_model()),
+                    selected
+                );
+                let visible = picker.visible_model_rows();
+                let rows: Vec<_> = visible
+                    .iter()
+                    .filter(|row| row.provider.is_some())
+                    .collect();
+                if column == ModelSortColumn::Context {
+                    let mut unknown = false;
+                    let mut previous = None;
+                    for row in rows {
+                        match row.metadata.context_window {
+                            None => unknown = true,
+                            Some(context) => {
+                                assert!(!unknown, "unknown context must stay last");
+                                if let Some(previous) = previous {
+                                    assert!(if descending {
+                                        previous >= context
+                                    } else {
+                                        previous <= context
+                                    });
+                                }
+                                previous = Some(context);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        picker.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        assert_eq!(picker.sort, None, "cycle returns to default view/pin order");
+        picker.update_query("openrouter".to_string());
+        assert!(
+            picker
+                .visible_model_rows()
+                .iter()
+                .all(|row| row.provider == Some(ApiProvider::Openrouter))
+        );
+        assert_eq!(
+            picker.projection.borrow().as_ref().unwrap().query,
+            "openrouter"
+        );
+        picker.update_query(String::new());
+        assert_eq!(picker.model_row_count(), count);
+        let selected = (picker.resolved_provider(), picker.resolved_model());
+        app.pinned_models.push(PinnedModel {
+            provider: "openrouter".into(),
+            model: "z-ai/glm-5.3-flash".into(),
+            label: None,
+        });
+        picker.re_resolve_from_app(&app, &config);
+        assert_eq!(picker.visible_model_rows()[0].id, "z-ai/glm-5.3-flash");
+        assert_eq!(
+            (picker.resolved_provider(), picker.resolved_model()),
+            selected
+        );
+
+        // A real catalog/readiness refresh replaces cached presentation facts.
+        let mut offering =
+            catalog_offering_for_model(ApiProvider::Deepseek, "deepseek-v4-pro").unwrap();
+        offering.limit.as_mut().unwrap().context = Some(777_000);
+        crate::provider_lake::set_live_snapshot(
+            codewhale_config::catalog::CatalogSnapshot {
+                offerings: vec![offering],
+            },
+            crate::provider_lake::LiveSource::ModelsDev,
+        );
+        picker.re_resolve_from_app(&app, &config);
+        let visible = picker.visible_model_rows();
+        let row = visible
+            .iter()
+            .find(|row| row.provider == Some(ApiProvider::Deepseek) && row.id == "deepseek-v4-pro")
+            .unwrap();
+        assert_eq!(row.metadata.context_window, Some(777_000));
+        let index = visible
+            .iter()
+            .position(|row| {
+                row.provider == Some(ApiProvider::Deepseek) && row.id == "deepseek-v4-pro"
+            })
+            .unwrap();
+        assert!(
+            picker.projection.borrow().as_ref().unwrap().rows[index]
+                .meta
+                .contains(&format_picker_context_window(777_000))
+        );
+    }
+
+    #[test]
+    fn family_heading_viewport_reserves_the_selected_row_before_hitboxes() {
+        let rows: Vec<_> = (0..32)
+            .map(|index| PaneRow {
+                primary: format!("model-{index}"),
+                route: format!("provider-{index}"),
+                family: Some(format!("family-{index}")),
+                ..PaneRow::default()
+            })
+            .collect();
+        for height in 1..12 {
+            for selected in 0..rows.len() {
+                let (start, end) = pane_row_window(selected, &rows, height);
+                assert!(
+                    start <= selected && selected < end,
+                    "{start}..{end} omits {selected} at height {height}"
+                );
+                let lines: usize = (start..end)
+                    .map(|index| 1 + usize::from(height > 1 && family_header_before(&rows, index)))
+                    .sum();
+                assert!(lines <= height);
+            }
+        }
     }
 }

@@ -18,6 +18,27 @@ use super::{
 };
 
 impl EngineHandle {
+    /// Called only while Runtime holds the idle turn admission claim. The
+    /// following SendMessage refreshes the existing prompt/config projection.
+    pub(crate) fn restore_runtime_goal(
+        &self,
+        goal: Option<&codewhale_protocol::ThreadGoal>,
+    ) -> Result<()> {
+        let mut state = self
+            .goal_state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("goal state lock poisoned"))?;
+        let current = state.snapshot();
+        if current.goal_id.as_deref() != goal.map(|goal| goal.goal_id.as_str()) {
+            *state = goal.map_or_else(crate::tools::goal::GoalState::default, |goal| {
+                crate::tools::goal::GoalState::from_snapshot(
+                    &crate::tools::goal::GoalSnapshot::from_thread_goal(goal),
+                )
+            });
+        }
+        Ok(())
+    }
+
     /// True when the caller must preflight a concrete provider client before
     /// committing UI/runtime turn state. Test and embedding handles with an
     /// injected model client return false because that client owns model I/O.

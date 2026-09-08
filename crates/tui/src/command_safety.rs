@@ -561,8 +561,8 @@ fn readonly_tokens_admitted(trimmed: &str) -> bool {
 ///
 /// - pipelines `a | b`, where **every** segment must itself be an admitted
 ///   read-only command (an empty segment — including `||` — rejects);
-/// - glob `*` arguments, expanded by the shell only against workspace paths
-///   the operand gate already confines;
+/// - literal `*` arguments (for tools such as `find -name '*.rs'`); shell
+///   expansion is never allowed to introduce operands after validation;
 /// - `git -C <dir> <subcommand>` and `git --no-pager <subcommand>`, whose
 ///   remainder re-enters the existing per-subcommand option tables;
 /// - `find` without any mutating primary (`-delete`, `-exec`, `-execdir`,
@@ -839,6 +839,16 @@ fn is_agent_readonly_find(tokens: &[String]) -> bool {
 fn is_agent_readonly_sed(tokens: &[String]) -> bool {
     if tokens.len() < 3 || tokens[1] != "-n" {
         return false;
+    }
+    // sed accepts options after its first script and file operands. A later
+    // -e/-f can execute another script; -i can turn a print into a write.
+    let mut operands_only = false;
+    for token in &tokens[3..] {
+        if !operands_only && token == "--" {
+            operands_only = true;
+        } else if !operands_only && token.starts_with('-') && token != "-" {
+            return false;
+        }
     }
     // Numeric line-range print scripts only: `10p`, `1,5p`, `p`. Script
     // verbs that write or execute (`w`, `r`, `e`, `s///w`) cannot appear in
@@ -2195,6 +2205,46 @@ mod tests {
                 is_agent_readonly_shell_command(command),
                 "{command} should remain an output-free read-only text filter"
             );
+        }
+    }
+
+    #[test]
+    fn agent_readonly_sed_checks_every_argument() {
+        for option in [
+            "-i",
+            "-i.bak",
+            "--in-place",
+            "--in-place=.bak",
+            "-e",
+            "-e1e",
+            "--expression",
+            "--expression=1e",
+            "-f",
+            "-fscript",
+            "--file",
+            "--file=script",
+            "--expr=1e",
+        ] {
+            for suffix in [format!("{option} file"), format!("file {option}")] {
+                assert!(
+                    !is_agent_readonly_shell_command(&format!("sed -n 1p {suffix}")),
+                    "{suffix}"
+                );
+                assert!(
+                    !is_agent_readonly_shell_command(&format!("sed -n 1p {suffix} | cat")),
+                    "{suffix}"
+                );
+            }
+        }
+        for command in [
+            "sed -n p file",
+            "sed -n P file",
+            "sed -n 10p file",
+            "sed -n 1,5p file",
+            "sed -n 1p -",
+            "sed -n 1p -- -script",
+        ] {
+            assert!(is_agent_readonly_shell_command(command), "{command}");
         }
     }
 

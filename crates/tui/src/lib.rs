@@ -18,7 +18,8 @@ use wait_timeout::ChildExt;
 use crate::dependencies::ExternalTool;
 
 use rust_i18n::i18n;
-i18n!("locales", fallback = ["en"]);
+include!(concat!(env!("OUT_DIR"), "/i18n_init.rs"));
+mod localization_backend;
 
 mod acp_server;
 mod approval_log;
@@ -1033,7 +1034,7 @@ struct SetupArgs {
     /// Print a compact, read-only status report (no network calls)
     #[arg(long, default_value_t = false, conflicts_with_all = ["mcp", "skills", "tools", "plugins", "all", "local", "clean"])]
     status: bool,
-    /// Remove regenerable session checkpoints (latest + offline_queue)
+    /// Remove crash checkpoints while preserving unsent offline input
     #[arg(long, default_value_t = false, conflicts_with_all = ["mcp", "skills", "tools", "plugins", "all", "local", "status"])]
     clean: bool,
 }
@@ -3471,6 +3472,8 @@ fn mcp_template_json() -> Result<String> {
             oauth: None,
             oauth_resource: None,
             reviewed_plugin: None,
+            runtime_added: false,
+            allow_private_network: false,
         },
     );
     serde_json::to_string_pretty(&cfg)
@@ -3710,17 +3713,19 @@ struct CleanPlan {
 }
 
 fn collect_clean_targets(checkpoints_dir: &Path) -> CleanPlan {
-    // Every `*.json` file in the checkpoints directory is checkpoint state:
-    // per-session crash checkpoints (`<session_id>.json`), the legacy
-    // single-slot checkpoint (`latest.json`), and the per-session offline
-    // input queue (`<session_id>.offline_queue.json`, plus any leftover
-    // pre-migration `offline_queue.json`). Non-JSON files and subdirectories
-    // are left alone.
+    // Unsent input is not regenerable. Preserve legacy and per-session queue
+    // files by name even if their contents are malformed or from a newer
+    // schema; cleanup must not erase drafts it cannot currently decode.
     let mut targets: Vec<PathBuf> = std::fs::read_dir(checkpoints_dir)
         .map(|entries| {
             entries
                 .filter_map(|entry| entry.ok().map(|e| e.path()))
                 .filter(|p| p.is_file() && p.extension().is_some_and(|ext| ext == "json"))
+                .filter(|p| {
+                    p.file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| !crate::session_manager::is_offline_queue_file(name))
+                })
                 .collect()
         })
         .unwrap_or_default();
@@ -9401,6 +9406,9 @@ async fn run_mcp_command(
     plugins: &crate::plugins::PluginRegistry,
 ) -> Result<()> {
     let config_path = config.mcp_config_path();
+    let network_policy = config.network.clone().map(|network| {
+        crate::network_policy::NetworkPolicyDecider::with_default_audit(network.into_runtime())
+    });
     match command {
         McpCommand::Init { force } => {
             let status = init_mcp_config(&config_path, force)?;
@@ -9442,7 +9450,12 @@ async fn run_mcp_command(
                 } else {
                     "disabled"
                 };
-                let auth_status = crate::mcp::oauth::auth_status_for_server(&name, &server).await;
+                let auth_status = crate::mcp::oauth::auth_status_for_server(
+                    &name,
+                    &server,
+                    network_policy.as_ref(),
+                )
+                .await;
                 let auth = if auth_status == crate::mcp::oauth::McpAuthStatus::Unsupported {
                     String::new()
                 } else {
@@ -9597,6 +9610,8 @@ async fn run_mcp_command(
                 }),
                 oauth_resource,
                 reviewed_plugin: None,
+                runtime_added: false,
+                allow_private_network: false,
             };
             let can_suggest_oauth = added_server.url.is_some()
                 && added_server.bearer_token_env_var.is_none()
@@ -9613,7 +9628,7 @@ async fn run_mcp_command(
             save_mcp_config(&config_path, &cfg)?;
             println!("Added MCP server '{name}' in {}", config_path.display());
             if can_suggest_oauth
-                && crate::mcp::oauth::oauth_login_support(&added_server)
+                && crate::mcp::oauth::oauth_login_support(&added_server, network_policy.as_ref())
                     .await
                     .is_ok_and(|support| support.is_some())
             {
@@ -9640,6 +9655,7 @@ async fn run_mcp_command(
                 explicit_scopes,
                 config.mcp_oauth_callback_port,
                 config.mcp_oauth_callback_url.as_deref(),
+                network_policy.as_ref(),
             )
             .await?;
             println!("Stored OAuth credentials for MCP server '{name}'.");
@@ -9756,6 +9772,8 @@ async fn run_mcp_command(
                     oauth: None,
                     oauth_resource: None,
                     reviewed_plugin: None,
+                    runtime_added: false,
+                    allow_private_network: false,
                 },
             );
             save_mcp_config(&config_path, &cfg)?;
@@ -11948,7 +11966,7 @@ async fn build_direct_workflow_tool(
         .search
         .as_ref()
         .and_then(|search| search.base_url.clone());
-    if let Some(backend) = crate::sandbox::backend::create_backend(config, workspace)? {
+    if let Some(backend) = crate::sandbox::backend::create_backend(config)? {
         context = context.with_sandbox_backend(Arc::from(backend));
     }
 
@@ -17373,6 +17391,8 @@ api_key = "test-only-key"
                 stream_max_content_mb: None,
                 stream_max_duration_secs: None,
                 status_items: None,
+                posture_bar: None,
+                metrics_line: None,
                 osc8_links: None,
                 composer_arrows_scroll: None,
                 notification_condition: None,
@@ -17472,6 +17492,8 @@ api_key = "test-only-key"
                 stream_max_content_mb: None,
                 stream_max_duration_secs: None,
                 status_items: None,
+                posture_bar: None,
+                metrics_line: None,
                 osc8_links: None,
                 composer_arrows_scroll: None,
                 notification_condition: None,
@@ -17509,6 +17531,8 @@ api_key = "test-only-key"
                 stream_max_content_mb: None,
                 stream_max_duration_secs: None,
                 status_items: None,
+                posture_bar: None,
+                metrics_line: None,
                 osc8_links: None,
                 composer_arrows_scroll: None,
                 notification_condition: None,
@@ -17600,6 +17624,8 @@ api_key = "test-only-key"
                 stream_max_content_mb: None,
                 stream_max_duration_secs: None,
                 status_items: None,
+                posture_bar: None,
+                metrics_line: None,
                 osc8_links: None,
                 composer_arrows_scroll: None,
                 notification_condition: None,
@@ -18352,6 +18378,8 @@ mod doctor_mcp_tests {
             oauth: None,
             oauth_resource: None,
             reviewed_plugin: None,
+            runtime_added: false,
+            allow_private_network: false,
         }
     }
 
@@ -18702,11 +18730,16 @@ mod setup_helper_tests {
     }
 
     #[test]
-    fn collect_clean_targets_finds_all_checkpoint_json_files() {
+    fn collect_clean_targets_preserves_offline_queues() {
         let tmp = TempDir::new().unwrap();
         let dir = tmp.path();
         std::fs::write(dir.join("latest.json"), "{}").unwrap();
         std::fs::write(dir.join("offline_queue.json"), "[]").unwrap();
+        std::fs::write(
+            dir.join("session.offline_queue.json"),
+            "invalid but valuable draft",
+        )
+        .unwrap();
         // Per-session crash checkpoint files are clean targets too.
         std::fs::write(dir.join("some-session-id.json"), "{}").unwrap();
         // Non-JSON files and subdirectories are left alone.
@@ -18714,10 +18747,11 @@ mod setup_helper_tests {
         std::fs::create_dir_all(dir.join("subdir")).unwrap();
 
         let plan = collect_clean_targets(dir);
-        assert_eq!(plan.targets.len(), 3);
+        assert_eq!(plan.targets.len(), 2);
         assert!(plan.targets.iter().any(|p| p.ends_with("latest.json")));
         assert!(
-            plan.targets
+            !plan
+                .targets
                 .iter()
                 .any(|p| p.ends_with("offline_queue.json"))
         );
@@ -18740,9 +18774,9 @@ mod setup_helper_tests {
 
         let plan = collect_clean_targets(dir);
         let removed = execute_clean_plan(&plan).unwrap();
-        assert_eq!(removed.len(), 2);
+        assert_eq!(removed.len(), 1);
         assert!(!latest.exists());
-        assert!(!queue.exists());
+        assert_eq!(std::fs::read(&queue).unwrap(), b"[]");
     }
 
     #[test]
@@ -18756,14 +18790,30 @@ mod setup_helper_tests {
     }
 
     #[test]
-    fn run_setup_clean_force_removes_files() {
+    fn run_setup_clean_force_preserves_legacy_and_undecodable_drafts() {
         let tmp = TempDir::new().unwrap();
         let dir = tmp.path();
         std::fs::write(dir.join("latest.json"), "{}").unwrap();
         std::fs::write(dir.join("offline_queue.json"), "[]").unwrap();
+        let queued = [
+            (
+                "future.offline_queue.json",
+                "{\"schema_version\":999,\"draft\":\"keep me\"}",
+            ),
+            ("broken.offline_queue.json", "incomplete draft bytes"),
+        ];
+        for (name, bytes) in queued {
+            std::fs::write(dir.join(name), bytes).unwrap();
+        }
         run_setup_clean(dir, true).unwrap();
         assert!(!dir.join("latest.json").exists());
-        assert!(!dir.join("offline_queue.json").exists());
+        assert_eq!(
+            std::fs::read(dir.join("offline_queue.json")).unwrap(),
+            b"[]"
+        );
+        for (name, bytes) in queued {
+            assert_eq!(std::fs::read_to_string(dir.join(name)).unwrap(), bytes);
+        }
     }
 
     #[test]

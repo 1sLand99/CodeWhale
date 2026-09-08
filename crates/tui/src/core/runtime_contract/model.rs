@@ -51,6 +51,10 @@ pub trait ModelClient: Send + Sync {
         )
     }
     async fn create_message(&self, request: MessageRequest) -> Result<MessageResponse>;
+    /// Fresh authorization evidence; cache-owning adapters must bypass it.
+    async fn create_message_uncached(&self, request: MessageRequest) -> Result<MessageResponse> {
+        self.create_message(request).await
+    }
     async fn create_message_stream(&self, request: MessageRequest) -> Result<StreamEventBox>;
     async fn health_check(&self) -> Result<bool>;
 }
@@ -95,6 +99,10 @@ where
 
     async fn create_message(&self, request: MessageRequest) -> Result<MessageResponse> {
         LlmClient::create_message(self, request).await
+    }
+
+    async fn create_message_uncached(&self, request: MessageRequest) -> Result<MessageResponse> {
+        LlmClient::create_message_uncached(self, request).await
     }
 
     async fn create_message_stream(&self, request: MessageRequest) -> Result<StreamEventBox> {

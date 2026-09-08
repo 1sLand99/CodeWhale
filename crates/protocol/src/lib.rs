@@ -133,6 +133,90 @@ pub struct ThreadGoal {
     pub continuation_count: i64,
     pub created_at: i64,
     pub updated_at: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_gap_fingerprint: Option<String>,
+    #[serde(default)]
+    pub repeated_gap_count: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_gap_pass: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pause_reason: Option<GoalPauseReason>,
+}
+
+/// Why an unfinished goal is paused. Shared by every durable host projection.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GoalPauseReason {
+    User,
+    Backoff,
+    NoProgress,
+    UsageLimit,
+    BudgetLimit,
+}
+
+impl GoalPauseReason {
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Backoff => "run limit",
+            Self::NoProgress => "no progress",
+            Self::UsageLimit => "usage limit",
+            Self::BudgetLimit => "budget limit",
+        }
+    }
+}
+
+/// Validate the compact stall history without retaining verifier prose.
+/// Legacy records with the entire history absent start with an empty window.
+pub const MAX_REPEATED_GAP_COUNT: u32 = 3;
+
+pub fn validate_goal_stall_state(
+    fingerprint: Option<&str>,
+    count: u32,
+    pass: Option<u32>,
+    continuation_count: u32,
+) -> Result<(), &'static str> {
+    match (fingerprint, count, pass) {
+        (None, 0, None) => Ok(()),
+        (Some(digest), 1..=MAX_REPEATED_GAP_COUNT, Some(pass))
+            if digest.len() == 64
+                && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+                && pass <= continuation_count
+                && count <= pass.saturating_add(1) =>
+        {
+            Ok(())
+        }
+        _ => Err("invalid persisted goal stall history"),
+    }
+}
+
+impl ThreadGoal {
+    pub fn validate_stall_state(&self) -> Result<(), &'static str> {
+        validate_goal_stall_state(
+            self.last_gap_fingerprint.as_deref(),
+            self.repeated_gap_count,
+            self.last_gap_pass,
+            u32::try_from(self.continuation_count.max(0)).unwrap_or(u32::MAX),
+        )
+    }
+
+    /// Restore a durably impossible record as paused. The engine pauses
+    /// NoProgress in the same locked mutation that fills the stall window, so
+    /// a persisted record that is still Active at the ceiling is corrupt
+    /// (e.g. a crash between the counter write and the pause). Returns true
+    /// when the record was healed.
+    pub fn normalize_restored_stall_state(&mut self) -> bool {
+        if matches!(self.status, ThreadGoalStatus::Active)
+            && self.repeated_gap_count >= MAX_REPEATED_GAP_COUNT
+        {
+            self.status = ThreadGoalStatus::Paused;
+            self.pause_reason = Some(GoalPauseReason::NoProgress);
+            true
+        } else {
+            false
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

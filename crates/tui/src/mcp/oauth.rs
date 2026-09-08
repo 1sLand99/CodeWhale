@@ -1,3 +1,5 @@
+use super::http_client::McpHttpClient;
+use crate::network_policy::NetworkPolicyDecider;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -12,7 +14,8 @@ use rmcp::transport::AuthorizationManager;
 use rmcp::transport::AuthorizationSession;
 use rmcp::transport::auth::{
     AuthError, AuthorizationRequest, OAuthClientConfig, OAuthHttpClient, OAuthHttpClientError,
-    OAuthHttpClientFuture, OAuthHttpRequest, OAuthState, OAuthTokenResponse,
+    OAuthHttpClientFuture, OAuthHttpRedirectPolicy, OAuthHttpRequest, OAuthState,
+    OAuthTokenResponse,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -258,25 +261,21 @@ fn secret_value_span(text: &str, lower: &str, start: usize) -> Option<(usize, us
     None
 }
 
-/// The OAuth HTTP client behind a stored-credential runtime. It executes
-/// exactly what rmcp's stock reqwest client would — one caller-configured
-/// client for every operation, redirects followed, body capped — and keeps
+/// Shared guarded HTTP client for discovery, login and stored credentials.
+/// It honors each OAuth operation's redirect policy, caps response bodies and keeps
 /// the receipt of the latest token-endpoint answer (every token request is
 /// a POST; discovery is GET) so a failed refresh can say what came back.
 pub(crate) struct RecordingOAuthHttpClient {
-    client: reqwest::Client,
+    client: McpHttpClient,
     last_token_response: std::sync::Mutex<Option<TokenEndpointReceipt>>,
 }
 
 impl RecordingOAuthHttpClient {
-    fn new(default_headers: &HeaderMap) -> Result<Self> {
-        let client = apply_default_headers(crate::tls::reqwest_client_builder(), default_headers)
-            .build()
-            .context("building MCP OAuth metadata client")?;
-        Ok(Self {
+    fn new(client: McpHttpClient) -> Self {
+        Self {
             client,
             last_token_response: std::sync::Mutex::new(None),
-        })
+        }
     }
 
     fn take_token_endpoint_receipt(&self) -> Option<TokenEndpointReceipt> {
@@ -291,7 +290,10 @@ impl OAuthHttpClient for RecordingOAuthHttpClient {
     fn execute(&self, request: OAuthHttpRequest) -> OAuthHttpClientFuture<'_> {
         Box::pin(async move {
             let OAuthHttpRequest {
-                request, timeout, ..
+                request,
+                timeout,
+                redirect_policy,
+                ..
             } = request;
             let is_token_request = request.method() == reqwest::Method::POST;
             let mut request = reqwest::Request::try_from(request)
@@ -301,9 +303,12 @@ impl OAuthHttpClient for RecordingOAuthHttpClient {
             }
             let mut response = self
                 .client
-                .execute(request)
+                .execute(
+                    request,
+                    matches!(redirect_policy, OAuthHttpRedirectPolicy::Follow),
+                )
                 .await
-                .map_err(|error| Box::new(error) as OAuthHttpClientError)?;
+                .map_err(|error| -> OAuthHttpClientError { error.into() })?;
             let status = response.status();
             let version = response.version();
             let headers = response.headers().clone();
@@ -561,10 +566,27 @@ async fn manager_from_stored_tokens(
 }
 
 impl McpOAuthRuntime {
-    pub async fn from_server_config(
+    #[cfg(test)]
+    pub(super) async fn from_server_config(
         server_name: &str,
         server: &McpServerConfig,
         default_headers: HeaderMap,
+    ) -> Result<Option<Self>> {
+        if server.reviewed_plugin.is_some() || server_has_manual_authorization(server) {
+            return Ok(None);
+        }
+        let Some(url) = server.url.as_deref() else {
+            return Ok(None);
+        };
+        let client = oauth_http_client(server, url, None)?;
+        Self::from_server_config_with_client(server_name, server, default_headers, client).await
+    }
+
+    pub(super) async fn from_server_config_with_client(
+        server_name: &str,
+        server: &McpServerConfig,
+        default_headers: HeaderMap,
+        client: McpHttpClient,
     ) -> Result<Option<Self>> {
         if server.reviewed_plugin.is_some() {
             return Ok(None);
@@ -578,19 +600,24 @@ impl McpOAuthRuntime {
         let Some(tokens) = load_oauth_tokens(server_name, url)? else {
             return Ok(None);
         };
-        Self::from_stored_tokens(server_name, url, tokens, default_headers)
-            .await
-            .map(Some)
+        Self::from_stored_tokens(
+            server_name,
+            url,
+            tokens,
+            client.with_default_headers(default_headers),
+        )
+        .await
+        .map(Some)
     }
 
     async fn from_stored_tokens(
         server_name: &str,
         url: &str,
         mut tokens: StoredMcpOAuthTokens,
-        default_headers: HeaderMap,
+        client: McpHttpClient,
     ) -> Result<Self> {
         refresh_expires_in_from_timestamp(&mut tokens);
-        let http_client = Arc::new(RecordingOAuthHttpClient::new(&default_headers)?);
+        let http_client = Arc::new(RecordingOAuthHttpClient::new(client));
         let manager = manager_from_stored_tokens(url, &tokens, &http_client).await?;
 
         Ok(Self {
@@ -844,7 +871,11 @@ impl McpOAuthRuntime {
     }
 }
 
-pub async fn auth_status_for_server(name: &str, server: &McpServerConfig) -> McpAuthStatus {
+pub async fn auth_status_for_server(
+    name: &str,
+    server: &McpServerConfig,
+    network_policy: Option<&NetworkPolicyDecider>,
+) -> McpAuthStatus {
     if server.reviewed_plugin.is_some() || !server.is_enabled() || server.url.is_none() {
         return McpAuthStatus::Unsupported;
     }
@@ -870,7 +901,7 @@ pub async fn auth_status_for_server(name: &str, server: &McpServerConfig) -> Mcp
             return McpAuthStatus::Unsupported;
         }
     };
-    match discover_streamable_http_oauth_with_headers(url, headers).await {
+    match discover_streamable_http_oauth_for_server(server, url, headers, network_policy).await {
         Ok(Some(_)) => McpAuthStatus::NotLoggedIn,
         Ok(None) => McpAuthStatus::Unsupported,
         Err(err) => {
@@ -880,7 +911,10 @@ pub async fn auth_status_for_server(name: &str, server: &McpServerConfig) -> Mcp
     }
 }
 
-pub async fn oauth_login_support(server: &McpServerConfig) -> Result<Option<McpOAuthDiscovery>> {
+pub async fn oauth_login_support(
+    server: &McpServerConfig,
+    network_policy: Option<&NetworkPolicyDecider>,
+) -> Result<Option<McpOAuthDiscovery>> {
     if server.reviewed_plugin.is_some() {
         return Ok(None);
     }
@@ -890,29 +924,54 @@ pub async fn oauth_login_support(server: &McpServerConfig) -> Result<Option<McpO
     if server_has_manual_authorization(server) {
         return Ok(None);
     }
-    discover_streamable_http_oauth(url, server.headers.clone(), server.env_headers.clone()).await
+    let headers = build_default_headers(&server.headers, &server.env_headers)?;
+    discover_streamable_http_oauth_for_server(server, url, headers, network_policy).await
 }
 
-pub async fn discover_streamable_http_oauth(
+fn oauth_http_client(
+    server: &McpServerConfig,
     url: &str,
-    http_headers: HashMap<String, String>,
-    env_headers: HashMap<String, String>,
-) -> Result<Option<McpOAuthDiscovery>> {
-    let headers = build_default_headers(&http_headers, &env_headers)?;
-    discover_streamable_http_oauth_with_headers(url, headers).await
+    network_policy: Option<&NetworkPolicyDecider>,
+) -> Result<McpHttpClient> {
+    let timeouts = super::McpTimeouts::default();
+    McpHttpClient::new(
+        url,
+        server.runtime_added,
+        server.reviewed_plugin.is_some(),
+        server.allow_private_network,
+        network_policy,
+        Duration::from_secs(server.effective_connect_timeout(&timeouts)),
+        Duration::from_secs(server.effective_read_timeout(&timeouts)),
+    )
 }
 
-async fn discover_streamable_http_oauth_with_headers(
+fn oauth_login_client(
+    server: &McpServerConfig,
+    url: &str,
+    network_policy: Option<&NetworkPolicyDecider>,
+) -> Result<McpHttpClient> {
+    let headers = build_default_headers(&server.headers, &server.env_headers)?;
+    Ok(oauth_http_client(server, url, network_policy)?.with_default_headers(headers))
+}
+
+async fn discover_streamable_http_oauth_for_server(
+    server: &McpServerConfig,
     url: &str,
     default_headers: HeaderMap,
+    network_policy: Option<&NetworkPolicyDecider>,
 ) -> Result<Option<McpOAuthDiscovery>> {
-    let client = apply_default_headers(crate::tls::reqwest_client_builder(), &default_headers)
-        .timeout(Duration::from_secs(5))
-        .build()
-        .context("building MCP OAuth discovery client")?;
-    let mut manager = AuthorizationManager::new(url).await?;
-    manager.with_client(client)?;
-    match manager.resolve_metadata().await {
+    let client =
+        oauth_http_client(server, url, network_policy)?.with_default_headers(default_headers);
+    discover_streamable_http_oauth_with_client(url, client).await
+}
+
+async fn discover_streamable_http_oauth_with_client(
+    url: &str,
+    client: McpHttpClient,
+) -> Result<Option<McpOAuthDiscovery>> {
+    let client = Arc::new(RecordingOAuthHttpClient::new(client));
+    let manager = AuthorizationManager::new_with_oauth_http_client(url, client).await?;
+    match tokio::time::timeout(Duration::from_secs(5), manager.resolve_metadata()).await? {
         Ok(resolution) => Ok(Some(McpOAuthDiscovery {
             scopes_supported: normalize_scopes(resolution.metadata.scopes_supported),
         })),
@@ -958,6 +1017,7 @@ pub async fn perform_oauth_login_for_server(
     explicit_scopes: Option<Vec<String>>,
     callback_port: Option<u16>,
     callback_url: Option<&str>,
+    network_policy: Option<&NetworkPolicyDecider>,
 ) -> Result<()> {
     perform_oauth_login_for_server_with_cancel(
         name,
@@ -966,6 +1026,7 @@ pub async fn perform_oauth_login_for_server(
         callback_port,
         callback_url,
         CancellationToken::new(),
+        network_policy,
     )
     .await
 }
@@ -982,6 +1043,7 @@ pub async fn perform_oauth_login_for_server_with_cancel(
     callback_port: Option<u16>,
     callback_url: Option<&str>,
     cancellation_token: CancellationToken,
+    network_policy: Option<&NetworkPolicyDecider>,
 ) -> Result<()> {
     if server.reviewed_plugin.is_some() {
         bail!(
@@ -996,6 +1058,7 @@ pub async fn perform_oauth_login_for_server_with_cancel(
             explicit_scopes,
             callback_port,
             callback_url,
+            network_policy,
         ),
     )
     .await
@@ -1019,6 +1082,7 @@ async fn resolve_oauth_login(
     name: &str,
     server: &McpServerConfig,
     explicit_scopes: Option<Vec<String>>,
+    network_policy: Option<&NetworkPolicyDecider>,
 ) -> Result<(String, ResolvedMcpOAuthScopes)> {
     let Some(url) = server.url.as_deref() else {
         bail!("OAuth login is only supported for URL-based MCP servers");
@@ -1028,7 +1092,7 @@ async fn resolve_oauth_login(
     }
 
     let discovery = if explicit_scopes.is_none() && server.scopes.is_empty() {
-        oauth_login_support(server).await?
+        oauth_login_support(server, network_policy).await?
     } else {
         None
     };
@@ -1046,14 +1110,15 @@ async fn perform_oauth_login_for_server_inner(
     explicit_scopes: Option<Vec<String>>,
     callback_port: Option<u16>,
     callback_url: Option<&str>,
+    network_policy: Option<&NetworkPolicyDecider>,
 ) -> Result<()> {
-    let (url, resolved_scopes) = resolve_oauth_login(name, server, explicit_scopes).await?;
+    let (url, resolved_scopes) =
+        resolve_oauth_login(name, server, explicit_scopes, network_policy).await?;
 
     match perform_oauth_login(
         name,
         &url,
-        server.headers.clone(),
-        server.env_headers.clone(),
+        oauth_login_client(server, &url, network_policy)?,
         &resolved_scopes.scopes,
         server.oauth_client_id(),
         server.oauth_resource.as_deref(),
@@ -1071,8 +1136,7 @@ async fn perform_oauth_login_for_server_inner(
             perform_oauth_login(
                 name,
                 &url,
-                server.headers.clone(),
-                server.env_headers.clone(),
+                oauth_login_client(server, &url, network_policy)?,
                 &[],
                 server.oauth_client_id(),
                 server.oauth_resource.as_deref(),
@@ -1089,8 +1153,7 @@ async fn perform_oauth_login_for_server_inner(
 async fn perform_oauth_login(
     server_name: &str,
     server_url: &str,
-    http_headers: HashMap<String, String>,
-    env_headers: HashMap<String, String>,
+    client: McpHttpClient,
     scopes: &[String],
     oauth_client_id: Option<&str>,
     oauth_resource: Option<&str>,
@@ -1100,8 +1163,7 @@ async fn perform_oauth_login(
     OauthLoginFlow::new(
         server_name,
         server_url,
-        http_headers,
-        env_headers,
+        client,
         scopes,
         oauth_client_id,
         oauth_resource,
@@ -1134,6 +1196,7 @@ pub struct McpOAuthToolLogin {
     server_name: String,
     server: McpServerConfig,
     scopes_source: McpOAuthScopesSource,
+    network_policy: Option<NetworkPolicyDecider>,
     flow: OauthLoginFlow,
     open_browser: bool,
 }
@@ -1168,8 +1231,7 @@ impl McpOAuthToolLogin {
                 OauthLoginFlow::new(
                     &self.server_name,
                     url,
-                    server.headers.clone(),
-                    server.env_headers.clone(),
+                    oauth_login_client(server, url, self.network_policy.as_ref())?,
                     &[],
                     server.oauth_client_id(),
                     server.oauth_resource.as_deref(),
@@ -1196,18 +1258,19 @@ pub async fn begin_oauth_login_for_server_tool(
     explicit_scopes: Option<Vec<String>>,
     callback_port: Option<u16>,
     callback_url: Option<&str>,
+    network_policy: Option<&NetworkPolicyDecider>,
 ) -> Result<McpOAuthToolLogin> {
     if server.reviewed_plugin.is_some() {
         bail!(
             "OAuth is disabled for plugin-contributed MCP servers; use a reviewed environment-backed header or bearer token"
         );
     }
-    let (url, resolved_scopes) = resolve_oauth_login(name, server, explicit_scopes).await?;
+    let (url, resolved_scopes) =
+        resolve_oauth_login(name, server, explicit_scopes, network_policy).await?;
     let flow = OauthLoginFlow::new(
         name,
         &url,
-        server.headers.clone(),
-        server.env_headers.clone(),
+        oauth_login_client(server, &url, network_policy)?,
         &resolved_scopes.scopes,
         server.oauth_client_id(),
         server.oauth_resource.as_deref(),
@@ -1219,6 +1282,7 @@ pub async fn begin_oauth_login_for_server_tool(
         server_name: name.to_string(),
         server: server.clone(),
         scopes_source: resolved_scopes.source,
+        network_policy: network_policy.cloned(),
         flow,
         // The test build drives the loopback callback itself; a real browser
         // launch from a unit test would hijack the developer's desktop.
@@ -1320,17 +1384,6 @@ fn insert_header(headers: &mut HeaderMap, name: &str, value: &str) -> Result<()>
     let value = HeaderValue::from_str(value).with_context(|| "invalid MCP HTTP header value")?;
     headers.insert(name, value);
     Ok(())
-}
-
-pub fn apply_default_headers(
-    builder: reqwest::ClientBuilder,
-    headers: &HeaderMap,
-) -> reqwest::ClientBuilder {
-    if headers.is_empty() {
-        builder
-    } else {
-        builder.default_headers(headers.clone())
-    }
 }
 
 fn contains_authorization_header(headers: &HashMap<String, String>) -> bool {
@@ -1499,8 +1552,7 @@ impl OauthLoginFlow {
     async fn new(
         server_name: &str,
         server_url: &str,
-        http_headers: HashMap<String, String>,
-        env_headers: HashMap<String, String>,
+        client: McpHttpClient,
         scopes: &[String],
         oauth_client_id: Option<&str>,
         oauth_resource: Option<&str>,
@@ -1526,10 +1578,6 @@ impl OauthLoginFlow {
             accept_task: spawn_callback_server(listener, tx, callback_path),
         };
 
-        let headers = build_default_headers(&http_headers, &env_headers)?;
-        let client = apply_default_headers(crate::tls::reqwest_client_builder(), &headers)
-            .build()
-            .context("building MCP OAuth login client")?;
         let scope_refs: Vec<&str> = scopes.iter().map(String::as_str).collect();
         let oauth_state = start_authorization(
             server_url,
@@ -1637,13 +1685,17 @@ impl OauthLoginFlow {
 
 async fn start_authorization(
     server_url: &str,
-    client: reqwest::Client,
+    client: McpHttpClient,
     scopes: &[&str],
     redirect_uri: &str,
     oauth_client_id: Option<&str>,
 ) -> Result<OAuthState> {
     let Some(client_id) = oauth_client_id.filter(|client_id| !client_id.trim().is_empty()) else {
-        let mut oauth_state = OAuthState::new(server_url, Some(client)).await?;
+        let mut oauth_state = OAuthState::new_with_oauth_http_client(
+            server_url,
+            Arc::new(RecordingOAuthHttpClient::new(client)),
+        )
+        .await?;
         oauth_state
             .start_authorization(
                 AuthorizationRequest::new(redirect_uri)
@@ -1654,8 +1706,11 @@ async fn start_authorization(
         return Ok(oauth_state);
     };
 
-    let mut manager = AuthorizationManager::new(server_url).await?;
-    manager.with_client(client)?;
+    let mut manager = AuthorizationManager::new_with_oauth_http_client(
+        server_url,
+        Arc::new(RecordingOAuthHttpClient::new(client)),
+    )
+    .await?;
     let metadata = manager.resolve_metadata().await?.metadata;
     manager.set_metadata(metadata);
     manager.configure_client(
@@ -2178,5 +2233,264 @@ mod tests {
         .context("callback listener did not release its fixed port")??;
         drop(rebound);
         Ok(())
+    }
+
+    async fn guarded_oauth_fixture(
+        token_target: Option<String>,
+        redirect_token: bool,
+    ) -> (
+        String,
+        Arc<std::sync::atomic::AtomicUsize>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let captured = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::clone(&captured);
+        let task = tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                let mut bytes = Vec::new();
+                let mut buffer = [0u8; 2048];
+                loop {
+                    let n = socket.read(&mut buffer).await.unwrap();
+                    if n == 0 {
+                        break;
+                    }
+                    bytes.extend_from_slice(&buffer[..n]);
+                    if bytes.windows(4).any(|part| part == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let request = String::from_utf8_lossy(&bytes);
+                let path = request.split_whitespace().nth(1).unwrap_or("");
+                let (status, extra, body) = if path == "/.well-known/oauth-authorization-server" {
+                    ("200 OK", String::new(), serde_json::json!({
+                        "issuer": format!("http://{addr}"),
+                        "authorization_endpoint": format!("http://{addr}/authorize"),
+                        "token_endpoint": token_target.clone().unwrap_or_else(|| format!("http://{addr}/token")),
+                        "registration_endpoint": format!("http://{addr}/register"),
+                        "response_types_supported": ["code"]
+                    }).to_string())
+                } else if path == "/token" && redirect_token {
+                    (
+                        "307 Redirect",
+                        "Location: /capture\r\n".to_string(),
+                        String::new(),
+                    )
+                } else if path == "/token" || path == "/capture" {
+                    seen.fetch_add(1, Ordering::SeqCst);
+                    ("200 OK", String::new(), r#"{"access_token":"new-fixture","token_type":"Bearer","refresh_token":"fixture-refresh"}"#.to_string())
+                } else if path == "/register" {
+                    (
+                        "200 OK",
+                        String::new(),
+                        r#"{"client_id":"fixture-client","redirect_uris":[]}"#.to_string(),
+                    )
+                } else {
+                    ("404 Not Found", String::new(), String::new())
+                };
+                let response = format!(
+                    "HTTP/1.1 {status}\r\n{extra}Content-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+            }
+        });
+        (format!("http://{addr}/mcp"), captured, task)
+    }
+
+    async fn guarded_oauth_state(
+        url: &str,
+        network_policy: Option<&NetworkPolicyDecider>,
+    ) -> OAuthState {
+        let client = McpHttpClient::new(
+            url,
+            false,
+            false,
+            false,
+            network_policy,
+            Duration::from_secs(1),
+            Duration::from_secs(3),
+        )
+        .unwrap();
+        let mut state = OAuthState::new_with_oauth_http_client(
+            url,
+            Arc::new(RecordingOAuthHttpClient::new(client)),
+        )
+        .await
+        .unwrap();
+        let tokens: OAuthTokenResponse = serde_json::from_value(serde_json::json!({
+            "access_token":"fixture-access", "token_type":"Bearer", "refresh_token":"fixture-refresh"
+        })).unwrap();
+        state
+            .set_credentials("fixture-client", tokens)
+            .await
+            .unwrap();
+        state
+    }
+
+    #[tokio::test]
+    async fn guarded_oauth_refresh_honors_stop_and_preserves_normal_local_refresh() {
+        use std::sync::atomic::Ordering;
+        let _env = crate::test_support::lock_test_env();
+        let _proxy = crate::test_support::EnvVarGuard::set("NO_PROXY", "*");
+        for redirect in [true, false] {
+            let (url, captured, task) = guarded_oauth_fixture(None, redirect).await;
+            let state = guarded_oauth_state(&url, None).await;
+            let result = state.refresh_token().await;
+            if redirect {
+                assert!(result.is_err(), "redirected refresh must not be followed");
+                assert_eq!(captured.load(Ordering::SeqCst), 0);
+            } else {
+                result.unwrap();
+                assert_eq!(captured.load(Ordering::SeqCst), 1);
+            }
+            task.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn guarded_oauth_discovered_private_token_endpoint_never_receives_credentials() {
+        let _env = crate::test_support::lock_test_env();
+        let _proxy = crate::test_support::EnvVarGuard::set("NO_PROXY", "*");
+        let destination = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target = format!("http://{}/token", destination.local_addr().unwrap());
+        let (url, _, task) = guarded_oauth_fixture(Some(target), false).await;
+        let state = guarded_oauth_state(&url, None).await;
+        let error = tokio::time::timeout(Duration::from_secs(1), state.refresh_token())
+            .await
+            .expect("the destination guard rejects before attempting a network request")
+            .unwrap_err();
+        // rmcp intentionally wraps HTTP client failures as `Request failed`.
+        // The observable invariant is an immediate failed refresh and no socket
+        // at the private destination, rather than an SDK-specific error string.
+        assert!(
+            matches!(error, AuthError::TokenRefreshFailed(_)),
+            "{error:#}"
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), destination.accept())
+                .await
+                .is_err()
+        );
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn guarded_oauth_network_deny_applies_to_standalone_and_synthetic_login() {
+        use crate::mcp::{AuthenticateToolStart, McpConfig, McpPool};
+        use crate::network_policy::{DecisionToml, NetworkPolicy};
+        let _env = crate::test_support::lock_test_env();
+        let dir = tempfile::tempdir().unwrap();
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", dir.path());
+        let _backend = crate::test_support::EnvVarGuard::set("CODEWHALE_SECRET_BACKEND", "file");
+        let _proxy = crate::test_support::EnvVarGuard::set("NO_PROXY", "*");
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+        let server: McpServerConfig =
+            serde_json::from_value(serde_json::json!({"url":url})).unwrap();
+        let denied = NetworkPolicyDecider::new(
+            NetworkPolicy {
+                default: DecisionToml::Deny,
+                ..NetworkPolicy::default()
+            },
+            None,
+        );
+        let mut config = McpConfig::default();
+        config
+            .servers
+            .insert("network-guard".to_string(), server.clone());
+        let pool = McpPool::new(config).with_network_policy(denied.clone());
+        let error = match pool.begin_authenticate_tool("network-guard").await {
+            Err(error) => error,
+            Ok(_) => panic!("a configured denied origin must not start synthetic authentication"),
+        };
+        assert!(error.to_string().contains("network policy"), "{error:#}");
+        assert!(oauth_login_support(&server, Some(&denied)).await.is_err());
+        assert_eq!(
+            auth_status_for_server("network-guard", &server, Some(&denied)).await,
+            McpAuthStatus::Unsupported
+        );
+        assert!(
+            perform_oauth_login_for_server(
+                "network-guard",
+                &server,
+                Some(vec!["explicit".to_string()]),
+                None,
+                None,
+                Some(&denied)
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), listener.accept())
+                .await
+                .is_err()
+        );
+
+        let (url, _, task) = guarded_oauth_fixture(None, false).await;
+        let server: McpServerConfig =
+            serde_json::from_value(serde_json::json!({"url":url})).unwrap();
+        let allowed = NetworkPolicyDecider::new(
+            NetworkPolicy {
+                default: DecisionToml::Allow,
+                ..NetworkPolicy::default()
+            },
+            None,
+        );
+        let mut config = McpConfig::default();
+        config.servers.insert("network-control".to_string(), server);
+        let pool = McpPool::new(config).with_network_policy(allowed.clone());
+        let AuthenticateToolStart::Login(login) = pool
+            .begin_authenticate_tool("network-control")
+            .await
+            .unwrap()
+        else {
+            panic!("the configured local control must start a fresh login");
+        };
+        assert!(login.authorization_url().contains("/authorize"));
+        // A later retry carries the same shared session ceiling.
+        allowed.deny_session("127.0.0.1", "mcp");
+        assert_eq!(
+            login
+                .network_policy
+                .as_ref()
+                .unwrap()
+                .evaluate("127.0.0.1", "mcp"),
+            crate::network_policy::Decision::Deny
+        );
+        drop(login);
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn guarded_oauth_refresh_keeps_live_session_network_denials() {
+        use crate::network_policy::{DecisionToml, NetworkPolicy};
+        let _env = crate::test_support::lock_test_env();
+        let _proxy = crate::test_support::EnvVarGuard::set("NO_PROXY", "*");
+        let (url, captured, task) = guarded_oauth_fixture(None, false).await;
+        let policy = NetworkPolicyDecider::new(
+            NetworkPolicy {
+                default: DecisionToml::Allow,
+                ..NetworkPolicy::default()
+            },
+            None,
+        );
+        let state = guarded_oauth_state(&url, Some(&policy)).await;
+        state.refresh_token().await.unwrap();
+        assert_eq!(captured.load(Ordering::SeqCst), 1);
+        policy.deny_session("127.0.0.1", "mcp");
+        assert!(state.refresh_token().await.is_err());
+        assert_eq!(
+            captured.load(Ordering::SeqCst),
+            1,
+            "no refresh request after session denial"
+        );
+        task.abort();
     }
 }

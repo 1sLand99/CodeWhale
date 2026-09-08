@@ -8,9 +8,10 @@
 //! capped at [`MAX_HISTORY_ENTRIES`] entries (older entries are pruned
 //! at append time).
 //!
-//! Entries that begin with `/` (slash commands) are NOT stored — they
-//! pollute the recall stream and the fuzzy slash-menu already covers
-//! them. Empty / whitespace-only inputs are also skipped.
+//! Slash commands are stored as well: recalling `/theme` or `/compact`
+//! with Up-arrow is ordinary recall (#6006), and filtering on the `/`
+//! prefix also dropped absolute paths like `cat /etc/fstab`. Empty /
+//! whitespace-only inputs are still skipped.
 //!
 //! ## Off-thread writes (#1927)
 //!
@@ -219,7 +220,10 @@ fn append_history_entries_to<'a>(
     let mut changed = false;
     for entry in entries_to_append {
         let trimmed = entry.trim();
-        if trimmed.is_empty() || trimmed.starts_with('/') {
+        // Slash commands are stored too: recalling `/theme` with Up-arrow is
+        // ordinary history behavior, and the old `/`-prefix filter also
+        // dropped absolute paths like `cat /etc/fstab` (#6006).
+        if trimmed.is_empty() {
             continue;
         }
         if entries.last().map(String::as_str) == Some(trimmed) {
@@ -358,12 +362,25 @@ mod tests {
     }
 
     #[test]
-    fn slash_commands_skipped() {
+    fn slash_commands_and_absolute_paths_stored() {
         let (_tmp, path) = temp_history_path();
         append_history_to(&path, "/help");
         append_history_to(&path, "real prompt");
         append_history_to(&path, "/cost");
-        assert_eq!(load_history_from(&path), vec!["real prompt"]);
+        append_history_to(&path, "cat /etc/fstab");
+        assert_eq!(
+            load_history_from(&path),
+            vec!["/help", "real prompt", "/cost", "cat /etc/fstab"]
+        );
+    }
+
+    #[test]
+    fn consecutive_duplicate_commands_deduped() {
+        let (_tmp, path) = temp_history_path();
+        append_history_to(&path, "/theme");
+        append_history_to(&path, "/theme");
+        append_history_to(&path, "/theme");
+        assert_eq!(load_history_from(&path), vec!["/theme"]);
     }
 
     #[test]

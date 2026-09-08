@@ -257,6 +257,13 @@ pub struct DeepSeekClient {
     /// this list closes the gap for bare provider tokens with no recognizable
     /// prefix (for example token-plan and provider-specific keys).
     model_bound_secret_values: Arc<Vec<String>>,
+    /// Whether credential-shaped tool output is masked before it is sent to an
+    /// upstream model. The safe default is `true`; it is `false` only after the
+    /// user disabled `[redaction] model_bound` and confirmed the opt-out on the
+    /// startup gate (see [`codewhale_config::redaction`]). Routing/classification
+    /// summaries and durable goal-state text keep their own always-on redaction
+    /// regardless of this flag.
+    model_bound_masking: bool,
     pub(super) base_url: String,
     pub(super) api_provider: ApiProvider,
     /// Exact configured provider identity and billing mode frozen when this
@@ -545,6 +552,7 @@ impl Clone for DeepSeekClient {
             http1_client: self.http1_client.clone(),
             api_key: self.api_key.clone(),
             model_bound_secret_values: Arc::clone(&self.model_bound_secret_values),
+            model_bound_masking: self.model_bound_masking,
             base_url: self.base_url.clone(),
             api_provider: self.api_provider,
             provider_identity: self.provider_identity.clone(),
@@ -1223,6 +1231,11 @@ impl DeepSeekClient {
         };
         let model_bound_secret_values =
             Arc::new(configured_model_bound_secret_values(config, &api_key));
+        // The opt-out is effective only after an explicit startup confirmation;
+        // every unconfirmed or absent request stays on the safe default.
+        let model_bound_masking =
+            !codewhale_config::redaction::effective_masking(config.model_bound_redaction())
+                .is_disabled();
         validate_base_url_security(&base_url, config.allow_insecure_http())?;
         let retry = config.retry_policy();
         let stream_idle_timeout = Duration::from_secs(config.stream_chunk_timeout_secs());
@@ -1300,6 +1313,7 @@ impl DeepSeekClient {
             http1_client,
             api_key,
             model_bound_secret_values,
+            model_bound_masking,
             base_url,
             api_provider,
             provider_identity,
@@ -1384,7 +1398,9 @@ impl DeepSeekClient {
         }
         for message in &mut request.messages {
             for block in &mut message.content {
-                if let ContentBlock::ToolResult { content, .. } = block {
+                if let ContentBlock::ToolResult { content, .. } = block
+                    && self.model_bound_masking
+                {
                     *content = redact_model_bound_text(content, &self.model_bound_secret_values);
                 }
             }
@@ -1393,9 +1409,12 @@ impl DeepSeekClient {
     }
 
     /// Redact configured credentials from text that has been flattened into a
-    /// normal model-bound text block. Most requests preserve tool results as
-    /// structured blocks and are sanitized by `prepare_model_bound_request`,
-    /// but routing/classification prompts intentionally summarize them first.
+    /// normal model-bound text block. Unlike `prepare_model_bound_request`,
+    /// this path always redacts: routing/classification prompts (which may
+    /// summarize tool output) and durable goal-state text are not covered by
+    /// the `[redaction] model_bound` opt-out, which exists so the model can
+    /// quote file bytes back for exact edits — never to relax storage or
+    /// routing summaries.
     pub(crate) fn redact_model_bound_text(&self, text: &str) -> String {
         redact_model_bound_text(text, &self.model_bound_secret_values)
     }
@@ -3122,13 +3141,25 @@ impl DeepSeekClient {
         // auxiliary classifier call, however: it must neither consume nor
         // inherit that mutable foreground state.
         isolated.rate_limiter = Arc::new(AsyncMutex::new(TokenBucket::from_env()));
-        let _inference = isolated.acquire_remote_control_inference_permit().await;
-        let _permit = isolated.acquire_provider_request_permit().await;
-        let prepared = isolated.prepare_outbound_request(request, false)?;
+        isolated
+            .create_message_with_cache_policy(request, false)
+            .await
+    }
+
+    async fn create_message_with_cache_policy(
+        &self,
+        request: MessageRequest,
+        allow_response_cache: bool,
+    ) -> Result<MessageResponse> {
+        let _inference = self.acquire_remote_control_inference_permit().await;
+        let _permit = self.acquire_provider_request_permit().await;
+        let cacheable =
+            allow_response_cache && crate::llm_response_cache::request_is_cacheable(&request);
+        let prepared = self.prepare_outbound_request(request, false)?;
         match prepared.dialect {
-            WireDialect::OpenAiResponses => isolated.handle_responses_message(&prepared).await,
-            WireDialect::AnthropicMessages => isolated.handle_anthropic_message(&prepared).await,
-            WireDialect::ChatCompletions => isolated.create_message_chat(&prepared, false).await,
+            WireDialect::OpenAiResponses => self.handle_responses_message(&prepared).await,
+            WireDialect::AnthropicMessages => self.handle_anthropic_message(&prepared).await,
+            WireDialect::ChatCompletions => self.create_message_chat(&prepared, cacheable).await,
         }
     }
 }
@@ -3196,17 +3227,13 @@ impl LlmClient for DeepSeekClient {
     }
 
     async fn create_message(&self, request: MessageRequest) -> Result<MessageResponse> {
-        let _inference = self.acquire_remote_control_inference_permit().await;
-        let _permit = self.acquire_provider_request_permit().await;
-        // Cacheability is a property of the caller's request, not of the wire
-        // body, so it is read before the request is consumed by the seam.
-        let cacheable = crate::llm_response_cache::request_is_cacheable(&request);
-        let prepared = self.prepare_outbound_request(request, false)?;
-        match prepared.dialect {
-            WireDialect::OpenAiResponses => self.handle_responses_message(&prepared).await,
-            WireDialect::AnthropicMessages => self.handle_anthropic_message(&prepared).await,
-            WireDialect::ChatCompletions => self.create_message_chat(&prepared, cacheable).await,
-        }
+        self.create_message_with_cache_policy(request, true).await
+    }
+
+    async fn create_message_uncached(&self, request: MessageRequest) -> Result<MessageResponse> {
+        // Keep shared provider permits and rate limits. Only the response
+        // cache is bypassed; a guardian is still real, metered inference.
+        self.create_message_with_cache_policy(request, false).await
     }
 
     async fn create_message_stream(
@@ -7138,6 +7165,103 @@ mod tests {
                 client.prepare_model_bound_request(request_with_tool_result(ordinary.to_string()));
             assert_eq!(tool_result_content(&prepared), ordinary);
         }
+    }
+
+    /// The `[redaction] model_bound = "disabled"` opt-out, once confirmed on
+    /// the startup gate, must let the model see tool output byte-for-byte —
+    /// including configured secrets and credential-shaped values that the
+    /// default masking would have removed (#5546 keeps code quotable; this
+    /// opt-out goes further and keeps credentials quotable too).
+    #[test]
+    fn confirmed_opt_out_keeps_configured_secrets_visible_to_the_model() {
+        let _env_lock = crate::test_support::lock_test_env();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&home).expect("create isolated home");
+        let _home = crate::test_support::EnvVarGuard::set("HOME", &home);
+        let _userprofile = crate::test_support::EnvVarGuard::set("USERPROFILE", &home);
+        let codewhale_home = tmp.path().join("codewhale-home");
+        let _codewhale_home =
+            crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", &codewhale_home);
+        std::fs::create_dir_all(&codewhale_home).expect("create config home");
+        std::fs::write(
+            codewhale_home.join("config.toml"),
+            "[redaction]\nmodel_bound = \"disabled\"\n",
+        )
+        .expect("write opt-out request");
+        codewhale_config::redaction::record_model_bound_disabled_confirmation()
+            .expect("record opt-out confirmation");
+
+        let client = DeepSeekClient::new(&Config {
+            provider: Some("zai".to_string()),
+            api_key: Some(CONFIG_SECRET_SENTINELS[0].to_string()),
+            providers: Some(ProvidersConfig {
+                zai: ProviderConfig {
+                    api_key: Some(CONFIG_SECRET_SENTINELS[6].to_string()),
+                    ..ProviderConfig::default()
+                },
+                ..ProvidersConfig::default()
+            }),
+            redaction: Some(codewhale_config::redaction::RedactionToml {
+                model_bound: Some(codewhale_config::redaction::ModelBoundMasking::Disabled),
+            }),
+            ..Config::default()
+        })
+        .expect("client with confirmed opt-out");
+
+        let tool_output = format!(
+            "api_key = \"{}\"\n[providers.arcee]\napi_key = \"{}\"\nbearer {}",
+            CONFIG_SECRET_SENTINELS[0], CONFIG_SECRET_SENTINELS[1], CONFIG_SECRET_SENTINELS[3]
+        );
+        let prepared =
+            client.prepare_model_bound_request(request_with_tool_result(tool_output.clone()));
+        assert_eq!(
+            tool_result_content(&prepared),
+            tool_output,
+            "a confirmed opt-out must keep tool output byte-exact"
+        );
+    }
+
+    /// Without a confirmation receipt the same config request stays masked:
+    /// the gate is what separates a wish from an effective opt-out.
+    #[test]
+    fn unconfirmed_opt_out_request_stays_masked() {
+        let _env_lock = crate::test_support::lock_test_env();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&home).expect("create isolated home");
+        let _home = crate::test_support::EnvVarGuard::set("HOME", &home);
+        let _userprofile = crate::test_support::EnvVarGuard::set("USERPROFILE", &home);
+        let codewhale_home = tmp.path().join("codewhale-home");
+        let _codewhale_home =
+            crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", &codewhale_home);
+
+        let client = DeepSeekClient::new(&Config {
+            provider: Some("zai".to_string()),
+            api_key: Some(CONFIG_SECRET_SENTINELS[0].to_string()),
+            providers: Some(ProvidersConfig {
+                zai: ProviderConfig {
+                    api_key: Some(CONFIG_SECRET_SENTINELS[6].to_string()),
+                    ..ProviderConfig::default()
+                },
+                ..ProvidersConfig::default()
+            }),
+            redaction: Some(codewhale_config::redaction::RedactionToml {
+                model_bound: Some(codewhale_config::redaction::ModelBoundMasking::Disabled),
+            }),
+            ..Config::default()
+        })
+        .expect("client with unconfirmed opt-out request");
+
+        let secret = CONFIG_SECRET_SENTINELS[0];
+        let prepared = client.prepare_model_bound_request(request_with_tool_result(format!(
+            "api_key = \"{secret}\""
+        )));
+        let content = tool_result_content(&prepared);
+        assert!(
+            !content.contains(secret),
+            "an unconfirmed request must stay on the safe default"
+        );
     }
 
     #[test]

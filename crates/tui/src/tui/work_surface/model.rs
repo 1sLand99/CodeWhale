@@ -3526,7 +3526,7 @@ mod tests {
         app.work_surface.effective_placement = WorkSurfacePlacement::Top;
         app.task_panel.push(running_shell_entry(
             "shell_a1b2c3d4",
-            "cd /Volumes/VIXinSSD/ShannonNet",
+            "cd /workspace/example-project",
         ));
         app.subagent_cache
             .push(running_agent("doc-scout-spec-arch"));
@@ -3578,7 +3578,7 @@ mod tests {
         assert_eq!(facts.role_label, "shell");
         assert_eq!(facts.status, "running");
         assert!(
-            facts.objective.contains("ShannonNet"),
+            facts.objective.contains("example-project"),
             "{}",
             facts.objective
         );

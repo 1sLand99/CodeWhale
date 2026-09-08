@@ -2075,8 +2075,10 @@ fn build_acp_tool_registry(
         let kind = kind.trim();
         !kind.is_empty() && !kind.eq_ignore_ascii_case("none")
     });
-    let sandbox_backend = match crate::sandbox::backend::create_backend(config, workspace) {
-        Ok(backend) => backend.map(std::sync::Arc::from),
+    let sandbox_backend = match crate::sandbox::backend::create_backend(config) {
+        Ok(backend) => backend
+            .filter(|backend| backend.kind() != crate::sandbox::backend::SandboxKind::Unsupported)
+            .map(std::sync::Arc::from),
         Err(error) => {
             tracing::warn!("Failed to create ACP sandbox backend: {error}");
             None

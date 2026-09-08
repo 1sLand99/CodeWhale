@@ -1411,22 +1411,32 @@ mod tests {
         }
         let before = repo.list(usize::MAX).unwrap();
         assert_eq!(before.len(), 4);
-        // Guard the fixture itself: if load skewed the timestamps so the cut
-        // would not fall between the pairs, say so instead of failing later
-        // with a confusing count mismatch.
+        // Derive the cut from the timestamps actually recorded rather than a
+        // fixed 6s. A fixed cut assumes `repo.snapshot()` is fast: `new:0` is
+        // only ~1.2s plus one git subprocess older than prune time, so on a
+        // loaded Windows runner that subprocess alone pushed it past 6s and
+        // three snapshots were pruned instead of two. (The old fixture guard
+        // could not catch it either — it checked `before[0]` and `before[2]`,
+        // and `before[1]` is the entry that drifts.)
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs() as i64;
+        // Newest-first: [new:1, new:0, old:1, old:0]. The cut must land
+        // strictly between the pairs, so aim at the midpoint of the 8s gap —
+        // that leaves ~4s of slack against clock drift and a slow runner in
+        // both directions.
+        let survivor = before[1].timestamp;
+        let victim = before[2].timestamp;
         assert!(
-            now - before[0].timestamp < 6 && now - before[2].timestamp > 6,
-            "fixture ages unusable for a 6s cut (newest {}s, oldest-surviving-pair {}s)",
-            now - before[0].timestamp,
-            now - before[2].timestamp
+            survivor - victim >= 2,
+            "fixture needs a real gap between the pairs (survivor {survivor}, victim {victim})"
         );
+        let midpoint = victim + (survivor - victim) / 2;
+        let max_age = Duration::from_secs((now - midpoint).max(0) as u64);
 
-        // Cut 6s back: the two old snapshots drop, the two new ones survive.
-        let removed = repo.prune_older_than(Duration::from_secs(6)).unwrap();
+        // The two old snapshots drop, the two new ones survive.
+        let removed = repo.prune_older_than(max_age).unwrap();
         assert_eq!(removed, 2, "only the old tail should be removed");
 
         let remaining = repo.list(usize::MAX).unwrap();

@@ -181,6 +181,8 @@ pub enum Op {
         status: GoalStatus,
         /// When `true`, clear the objective entirely (`/goal clear`).
         clear: bool,
+        /// Accepted control revision; None lets direct callers mint it.
+        goal_id: Option<String>,
     },
 
     /// Set (or replace) the active goal objective and immediately start goal
@@ -189,6 +191,8 @@ pub enum Op {
     SetGoalObjective {
         objective: String,
         token_budget: Option<u32>,
+        /// Accepted control revision; None lets direct callers mint it.
+        goal_id: Option<String>,
     },
 
     /// Describe the exact request the next turn would send, without

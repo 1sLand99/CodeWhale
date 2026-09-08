@@ -835,40 +835,16 @@ async fn resolve_diff_target(
 ) -> Result<String, ToolError> {
     let base = base.map(str::trim).filter(|base| !base.is_empty());
     let base_commit = if let Some(base) = base {
-        // Resolve the user-supplied ref before placing it in `git diff`. This
-        // both rejects option-looking input and gives the staged path a real
-        // commit from which it can compute the merge base.
-        let revision = format!("{base}^{{commit}}");
-        let output = run_review_git(
-            workspace,
-            vec![
-                "rev-parse".to_string(),
-                "--verify".to_string(),
-                "--end-of-options".to_string(),
-                revision,
-            ],
-            "resolve review base",
-        )
-        .await?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(ToolError::invalid_input(format!(
-                "Invalid git base ref '{base}': {}",
-                stderr.trim()
-            )));
-        }
-        let commit = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if commit.is_empty() || !commit.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-            return Err(ToolError::execution_failed(format!(
-                "git resolved base ref '{base}' to an invalid commit id"
-            )));
-        }
-        Some(commit)
+        Some(super::git::resolve_commit_ref(workspace, base).await?)
     } else {
         None
     };
 
-    let mut args = vec!["diff".to_string()];
+    let mut args = vec![
+        "diff".to_string(),
+        "--no-ext-diff".to_string(),
+        "--no-textconv".to_string(),
+    ];
     if staged {
         args.push("--cached".to_string());
         if let Some(base_commit) = base_commit {

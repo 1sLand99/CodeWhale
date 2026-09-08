@@ -787,6 +787,44 @@ fn mobile_listener_fails_closed_outside_loopback_without_verified_transport() {
 }
 
 #[test]
+fn insecure_runtime_listener_is_loopback_only() {
+    for host in [
+        "0.0.0.0",
+        "::",
+        "192.168.1.2",
+        "8.8.8.8",
+        "localhost",
+        "::ffff:127.0.0.1",
+    ] {
+        let mut options = RuntimeApiOptions {
+            host: host.into(),
+            insecure_no_auth: true,
+            ..RuntimeApiOptions::default()
+        };
+        assert!(
+            validate_runtime_listener_security(&options).is_err(),
+            "{host}"
+        );
+        options.insecure_no_auth = false;
+        assert!(
+            validate_runtime_listener_security(&options).is_ok(),
+            "authenticated {host}"
+        );
+    }
+    for host in ["127.0.0.1", "127.0.0.2", "::1"] {
+        let options = RuntimeApiOptions {
+            host: host.into(),
+            insecure_no_auth: true,
+            ..RuntimeApiOptions::default()
+        };
+        assert!(
+            validate_runtime_listener_security(&options).is_ok(),
+            "{host}"
+        );
+    }
+}
+
+#[test]
 fn consumed_legacy_runtime_token_reports_one_value_free_deprecation_line() {
     let secret = "legacy-super-secret-token";
     let environment = runtime_token_environment(&|name| {

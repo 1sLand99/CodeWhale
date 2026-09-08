@@ -1178,6 +1178,7 @@ async fn goal_continuation_preserves_goal_and_resolves_updated_authoritative_rou
                 .expect("second goal model request was never entered");
                 handle
                     .send(Op::SetGoalStatus {
+                        goal_id: None,
                         status: crate::tools::goal::GoalStatus::Paused,
                         clear: false,
                     })
@@ -1360,6 +1361,7 @@ async fn saturated_mailbox_does_not_deadlock_goal_continuation_self_dispatch() {
         handle
             .tx_op
             .try_send(Op::SetGoalStatus {
+                goal_id: None,
                 status,
                 clear: false,
             })
@@ -1492,6 +1494,7 @@ async fn queued_ordinary_turn_does_not_multiply_engine_goal_continuations() {
         .expect("coalesced synthetic continuation was never entered");
     handle
         .send(Op::SetGoalStatus {
+            goal_id: None,
             status: crate::tools::goal::GoalStatus::Paused,
             clear: false,
         })
@@ -1894,6 +1897,7 @@ async fn goal_pause_during_configured_delay_cancels_pending_continuation() {
 
     handle
         .send(Op::SetGoalStatus {
+            goal_id: None,
             status: crate::tools::goal::GoalStatus::Paused,
             clear: false,
         })
@@ -2438,6 +2442,7 @@ async fn saturated_goal_controls_run_before_ready_idle_child_completion() {
         handle
             .tx_op
             .try_send(Op::SetGoalStatus {
+                goal_id: None,
                 status,
                 clear: false,
             })
@@ -2469,7 +2474,7 @@ async fn saturated_goal_controls_run_before_ready_idle_child_completion() {
         let EngineRunInput::Operation(op) = input else {
             panic!("idle child completion beat queued control {index}");
         };
-        let Op::SetGoalStatus { status, clear } = *op else {
+        let Op::SetGoalStatus { status, clear, .. } = *op else {
             panic!("unexpected operation before queued control {index}");
         };
         assert!(!clear);
@@ -2537,6 +2542,7 @@ async fn unsaturated_goal_control_runs_before_ready_idle_child_completion() {
     handle
         .tx_op
         .try_send(Op::SetGoalStatus {
+            goal_id: None,
             status: crate::tools::goal::GoalStatus::Paused,
             clear: false,
         })
@@ -2566,6 +2572,7 @@ async fn unsaturated_goal_control_runs_before_ready_idle_child_completion() {
     assert!(matches!(
         *first,
         Op::SetGoalStatus {
+            goal_id: None,
             status: crate::tools::goal::GoalStatus::Paused,
             clear: false
         }
@@ -2966,6 +2973,7 @@ async fn queued_goal_clear_refreshes_prompt_and_cancels_stale_continuation() {
     // synthetic continuation that TurnComplete schedules.
     handle
         .send(Op::SetGoalStatus {
+            goal_id: None,
             status: crate::tools::goal::GoalStatus::Active,
             clear: true,
         })
@@ -3155,6 +3163,7 @@ async fn explicit_natural_goal_activates_before_provider_request() {
     // Stop autonomous continuation after the one provider-boundary receipt.
     handle
         .send(Op::SetGoalStatus {
+            goal_id: None,
             status: crate::tools::goal::GoalStatus::Paused,
             clear: false,
         })
@@ -3253,6 +3262,7 @@ async fn operate_goal_probe(mode: AppMode, prompt: &str) -> (Option<String>, boo
         // Stop autonomous continuation after the one provider call.
         handle
             .send(Op::SetGoalStatus {
+                goal_id: None,
                 status: crate::tools::goal::GoalStatus::Paused,
                 clear: false,
             })
@@ -3371,6 +3381,7 @@ async fn operate_contract_is_appended_once_and_an_existing_goal_is_never_replace
     );
     handle
         .send(Op::SetGoalStatus {
+            goal_id: None,
             status: crate::tools::goal::GoalStatus::Paused,
             clear: false,
         })
@@ -6962,6 +6973,139 @@ async fn max_steps_exhaustion_fails_as_budget_never_completed() {
         crate::core::termination::classify_turn_termination(status, Some(category), false, false),
         crate::core::termination::RunTerminationReason::BudgetExhausted
     );
+
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    task.await.expect("engine task");
+}
+
+#[tokio::test]
+async fn goal_turn_uses_goal_step_allowance_and_pauses_budget_limit_after_final_report() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let config = goal_custom_route_config();
+    // The model makes one tool step (consuming the 1-step goal allowance),
+    // then writes its bounded final report when granted it.
+    let turns = vec![
+        canned::tool_call_turn(
+            "call-step-1",
+            "File",
+            r#"{"action":"read","path":"state.txt"}"#,
+        ),
+        canned::simple_text_turn("final report: one step of progress made"),
+    ];
+    let mock = std::sync::Arc::new(MockLlmClient::new(turns));
+    let client: crate::core::model_client::SharedModelClient = mock.clone();
+    let workspace = tempdir().expect("tempdir");
+    fs::write(workspace.path().join("state.txt"), "still-working\n").expect("write fixture");
+    let (engine, handle) = Engine::new_with_model_client(
+        EngineConfig {
+            model: "local-model".to_string(),
+            workspace: workspace.path().to_path_buf(),
+            max_steps: 200,
+            goal_max_steps: Some(1),
+            goal_objective: Some("finish the migration".to_string()),
+            snapshots_enabled: false,
+            terminal_chrome_enabled: false,
+            ..EngineConfig::default()
+        },
+        &config,
+        client,
+    );
+    let goal_state = engine.config.goal_state.clone();
+    let task = tokio::spawn(engine.run());
+    handle
+        .send(active_goal_message_op(
+            &config,
+            "Work on the goal.",
+            "finish the migration",
+            None,
+        ))
+        .await
+        .expect("send goal-budget trajectory");
+
+    let mut rx = handle.rx_event.write().await;
+    let (status, _) = loop {
+        let event = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
+            .await
+            .expect("timed out waiting for goal-budget trajectory")
+            .expect("engine event");
+        if let Event::TurnComplete { status, error, .. } = event {
+            break (status, error);
+        }
+    };
+    drop(rx);
+
+    // The final report closes the turn cleanly; the unfinished goal then
+    // pauses BudgetLimit instead of re-arming another full goal turn (#5994).
+    assert_eq!(status, TurnOutcomeStatus::Completed);
+    let snapshot = goal_state.lock().expect("goal lock").snapshot();
+    assert_eq!(snapshot.status, "paused");
+    assert_eq!(
+        snapshot.pause_reason,
+        Some(crate::tools::goal::GoalPauseReason::BudgetLimit)
+    );
+    // The mock served exactly the tool step plus the final report; any
+    // re-armed continuation would have needed a third provider turn.
+    assert_eq!(mock.call_count(), 2);
+
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    task.await.expect("engine task");
+}
+
+#[tokio::test]
+async fn interactive_turn_keeps_ordinary_ceiling_when_goal_allowance_is_configured() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let workspace = tempdir().expect("tempdir");
+    fs::write(workspace.path().join("state.txt"), "still-working\n").expect("write fixture");
+    // No active goal: the [goal] allowance must never raise the ordinary
+    // interactive ceiling.
+    let turns = vec![
+        canned::tool_call_turn(
+            "call-step-1",
+            "File",
+            r#"{"action":"read","path":"state.txt"}"#,
+        ),
+        canned::tool_call_turn(
+            "call-step-2",
+            "File",
+            r#"{"action":"read","path":"state.txt"}"#,
+        ),
+    ];
+    let mock = std::sync::Arc::new(MockLlmClient::new(turns));
+    let client: crate::core::model_client::SharedModelClient = mock.clone();
+    let engine_config = EngineConfig {
+        max_steps: 1,
+        goal_max_steps: Some(1_000),
+        ..deterministic_engine_config(workspace.path())
+    };
+    let (engine, handle) = Engine::new_with_model_client(engine_config, &Config::default(), client);
+    let task = tokio::spawn(engine.run());
+    handle
+        .send(external_user_message_op(
+            "Keep reading until done.",
+            AppMode::Agent,
+            &Config::default(),
+        ))
+        .await
+        .expect("send interactive trajectory");
+
+    let mut rx = handle.rx_event.write().await;
+    let (status, error) = loop {
+        let event = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
+            .await
+            .expect("timed out waiting for interactive trajectory")
+            .expect("engine event");
+        if let Event::TurnComplete { status, error, .. } = event {
+            break (status, error);
+        }
+    };
+    drop(rx);
+
+    assert_eq!(status, TurnOutcomeStatus::Failed);
+    let error = error.expect("budget exhaustion carries a terminal error");
+    assert!(error.contains("limit: 1"), "{error}");
+    assert!(error.contains("max_steps"), "{error}");
 
     handle.send(Op::Shutdown).await.expect("shutdown engine");
     task.await.expect("engine task");
@@ -11592,6 +11736,7 @@ async fn operate_model_shell_uses_normal_approval_and_workspace_sandbox() {
                 // real Operate turn seals with.
                 handle_for_approval
                     .send(Op::SetGoalStatus {
+                        goal_id: None,
                         status: crate::tools::goal::GoalStatus::Paused,
                         clear: false,
                     })
@@ -20758,6 +20903,7 @@ fn engine_handle_try_send_does_not_block_when_op_channel_is_full() {
     // Construct a minimal EngineHandle with the tiny channel.
     let cancel_token = CancellationToken::new();
     let handle = EngineHandle {
+        goal_state: new_shared_goal_state(),
         tx_op,
         rx_event: Arc::new(RwLock::new(mpsc::channel::<Event>(1).1)),
         cancel_token: Arc::new(StdMutex::new(cancel_token)),
@@ -21170,7 +21316,8 @@ lines.on('line', async (line) => {
     let pool = engine.ensure_mcp_pool().await.expect("engine pool");
     let task = tokio::spawn(async move { engine.run().await });
     let mut events = handle.rx_event.write().await;
-    let progress = tokio::time::timeout(Duration::from_secs(10), async {
+    // This proves ordering, not Node cold-start speed on a loaded runner.
+    let progress = tokio::time::timeout(Duration::from_secs(30), async {
         while let Some(event) = events.recv().await {
             if let Event::McpSessionBoot {
                 snapshot,
@@ -21201,7 +21348,7 @@ lines.on('line', async (line) => {
     }
     // Release and shut down even when testing the old batch-buffered behavior.
     std::fs::write(&release, "continue").expect("release stalled fixture");
-    let finished = tokio::time::timeout(Duration::from_secs(10), async {
+    let finished = tokio::time::timeout(Duration::from_secs(30), async {
         while let Some(event) = events.recv().await {
             if let Event::McpSessionBoot {
                 snapshot,

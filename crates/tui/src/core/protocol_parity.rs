@@ -969,14 +969,21 @@ pub fn op_to_protocol(op: &Op) -> wire_op::Op {
             auto_approve: *auto_approve,
             approval_mode: approval_mode_str(*approval_mode).to_string(),
         },
-        Op::SetGoalStatus { status, clear } => wire_op::Op::SetGoalStatus {
+        Op::SetGoalStatus {
+            status,
+            clear,
+            goal_id,
+        } => wire_op::Op::SetGoalStatus {
+            goal_id: goal_id.clone(),
             status: status.as_str().to_string(),
             clear: *clear,
         },
         Op::SetGoalObjective {
             objective,
             token_budget,
+            goal_id,
         } => wire_op::Op::SetGoalObjective {
+            goal_id: goal_id.clone(),
             objective: objective.clone(),
             token_budget: *token_budget,
         },
@@ -1319,10 +1326,12 @@ mod tests {
     fn protocol_covers_engine_ops() {
         let ops = vec![
             Op::SetGoalStatus {
+                goal_id: None,
                 status: GoalStatus::Paused,
                 clear: false,
             },
             Op::SetGoalObjective {
+                goal_id: None,
                 objective: "ship".into(),
                 token_budget: Some(7),
             },

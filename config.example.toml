@@ -206,6 +206,33 @@ memory_path = "~/.codewhale/memory.md"
 # max_reprompts = 2
 # reprompt_message = "So, what's up ? Keep running !"
 
+# ───────────────────────────────────────────────────────────────────────────
+# Model-bound key redaction ([redaction])
+# ───────────────────────────────────────────────────────────────────────────
+# Codewhale masks credential-looking values in tool output before it reaches
+# the model (the "model boundary"), so a file that contains a configured API
+# key, a bare provider token, or a credential-shaped opaque string never leaks
+# those bytes to the model. Leave this enabled unless the model must read and
+# edit files that contain real credentials.
+#
+# Disabling is a security decision, so it is never a plain flag:
+#   * Set model_bound = "disabled" here, restart Codewhale, and the startup
+#     gate asks twice - a first confirmation, then a red "are you really
+#     sure?" stage. Only the second confirmation takes effect, and it applies
+#     on later launches while model_bound stays "disabled".
+#   * Going back to "enabled" - or rewriting config.toml after the
+#     confirmation - invalidates it: requesting "disabled" again always
+#     asks for a fresh confirmation.
+#   * Until a confirmation exists - including in non-interactive/headless
+#     runs, which never confirm anything - masking stays on regardless of
+#     this key. Choosing "keep masking on" on the gate leaves the key
+#     untouched, so the next launch asks again.
+#   * The value is forgiving: false/"off" mean "disabled"; true/"on" mean
+#     "enabled".
+# [redaction]
+# model_bound = "enabled"    # mask keys before they reach the model (default)
+# model_bound = "disabled"   # request the opt-out (restart + confirm required)
+
 # Native tool catalog controls (#2076). By default only the core tool surface
 # is loaded into the model context; less common native tools are discoverable
 # through ToolSearch and loaded on first use.
@@ -218,6 +245,10 @@ memory_path = "~/.codewhale/memory.md"
 # supported ranges (1..=10 and 2..=10) with a warning.
 # user_input_max_questions = 6
 # user_input_max_options = 4
+#
+# Seconds a question or an approval decision waits before it cancels (#6003).
+# 0 disables the timeout entirely; values above 86400 (24h) are clamped.
+# user_input_timeout_seconds = 300
 
 # ─────────────────────────────────────────────────────────────────────────────────
 # Product telemetry — opt-in, off by default
@@ -424,26 +455,6 @@ sandbox_mode = "workspace-write" # read-only | workspace-write | danger-full-acc
 # The backend uses a 30-second HTTP timeout. Background, interactive, and
 # TTY modes are not supported with external backends — all commands run
 # synchronously via HTTP.
-#
-# ShannonNet backend: each shell command becomes a signed capability
-# invocation on a ShannonNet worker (which may run on another tailnet node).
-# At session start Codewhale resolves its durable `codewhale` Agent, creates
-# a Task World named after the workspace, and attaches the capability; every
-# command then leaves a signed receipt (`shannon trace`). Requires the
-# `shannon` CLI on PATH (or `$SHANNON`) and an admitted provider for the
-# capability (`shannon cap advertise`).
-#
-#   sandbox_backend = "shannon"
-#   sandbox_shannon_home = "~/.shannon"           # default: $SHANNON_HOME or ~/.shannon
-#   sandbox_shannon_capability = "cap://sandbox/exec"  # default
-#   sandbox_shannon_sync = true                   # default: ship the workspace's
-#       # non-ignored files into the worker's per-World session container before
-#       # each command (a full archive first, then only changes), so remote builds
-#       # and tests run on the files just edited here. false runs each command in
-#       # a throwaway container against the worker's own read-only checkout.
-#
-# Env-var overrides: CODEWHALE_SANDBOX_SHANNON_HOME, CODEWHALE_SANDBOX_SHANNON_CAPABILITY,
-# CODEWHALE_SANDBOX_SHANNON_SYNC.
 # ─────────────────────────────────────────────────────────────────────────────────
 # Bubblewrap (Linux only, additional filesystem isolation)
 # ─────────────────────────────────────────────────────────────────────────────────
@@ -1126,6 +1137,17 @@ osc8_links = true            # emit OSC 8 escapes around URLs (Cmd+click in iTer
 # git_branch, last_tool_elapsed, rate_limit — they drove nothing. Old files
 # keep loading; the retired keys are ignored.
 # status_items = ["mode", "model", "context_percent", "cost", "tokens"]
+# Size presets for the two rows themselves (#5950) — composition stays in
+# status_items; these only decide how much of a row paints:
+# posture_bar = "full"          # full | compact | hidden (default full)
+#                               # compact keeps the posture chips (and the cap
+#                               # warning) and drops the clocks, counts and hint;
+#                               # hidden gives the row to the transcript.
+# metrics_line = "full"         # full | compact | hidden (default full)
+#                               # compact keeps the route, context reading, cost
+#                               # and balance and drops the telemetry and the
+#                               # help hint; hidden gives the row to the transcript.
+#                               # Also settable at runtime: /config posture_bar compact
 # notification_condition = "unfocused" # unfocused | always | never
 #                                    "unfocused" = notify only after this terminal has been
 #                                    in the background for two seconds (default);
@@ -1194,6 +1216,26 @@ max_retries = 3
 initial_delay = 1.0
 max_delay = 60.0
 exponential_base = 2.0
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# Goal loop (`[goal]`) — operate-mode persistent goals
+# ─────────────────────────────────────────────────────────────────────────────────
+# Operate-mode goals run to their completion gate with no default token, time,
+# or continuation ceiling. Token/time budgets, when supplied, are telemetry
+# only and do not stop a goal. The keys below are the opt-in circuit breakers.
+# [goal]
+# Optional safety backstop on automatic goal continuation passes.
+# Default: 0 (unlimited). Set a positive value to opt into a ceiling.
+# max_continuations = 100
+# Optional cancellable quiet period between successful turns, useful for
+# coordinator goals that poll on a cadence instead of keeping one provider
+# turn open. Default: 0 (continue immediately). Cap: 86400 (24h).
+# continuation_delay_seconds = 300
+# Per-turn step allowance while a goal is active (#5994): larger but still
+# finite. Default: 1000 (0/absent resolves to 1000). Range: 1..=100,000.
+# Bounds each turn, never the number of continuation passes; explicit
+# per-invocation ceilings (exec --max-turns, worker caps) always win.
+# max_steps = 1000
 
 # ─────────────────────────────────────────────────────────────────────────────────
 # Context Compaction

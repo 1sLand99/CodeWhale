@@ -265,6 +265,9 @@ pub(crate) const FIRST_PARTY_PAYG_BILLING_SURFACE: &str = "first-party-payg";
 /// An aggregator/reseller endpoint: metered, but priced by the aggregator's own
 /// catalog rather than by the upstream model owner's published rates.
 pub(crate) const AGGREGATOR_BILLING_SURFACE: &str = "aggregator-payg";
+pub(crate) const MODELSTUDIO_TOKEN_PLAN_BILLING_SURFACE: &str = "modelstudio-token-plan";
+pub(crate) const MODELSTUDIO_CODING_PLAN_BILLING_SURFACE: &str = "modelstudio-coding-plan";
+pub(crate) const VOLCENGINE_CODING_PLAN_BILLING_SURFACE: &str = "volcengine-coding-plan";
 /// A reachable endpoint CodeWhale could not match to any known billing surface.
 /// Distinct from "not classified yet": this is a positive statement that the
 /// surface is unknown, and it fails closed everywhere it is consumed.
@@ -308,6 +311,18 @@ pub fn endpoint_metering_for_billing_surface(billing_surface: Option<&str>) -> E
         (XIAOMI_PAYG_BILLING_SURFACE, EndpointMetering::Money),
         (FIRST_PARTY_PAYG_BILLING_SURFACE, EndpointMetering::Money),
         (AGGREGATOR_BILLING_SURFACE, EndpointMetering::Money),
+        (
+            MODELSTUDIO_TOKEN_PLAN_BILLING_SURFACE,
+            EndpointMetering::ExactSubscription,
+        ),
+        (
+            MODELSTUDIO_CODING_PLAN_BILLING_SURFACE,
+            EndpointMetering::ExactSubscription,
+        ),
+        (
+            VOLCENGINE_CODING_PLAN_BILLING_SURFACE,
+            EndpointMetering::ExactSubscription,
+        ),
         (
             STEPFUN_PLAN_BILLING_SURFACE,
             EndpointMetering::ExactSubscription,
@@ -417,6 +432,11 @@ pub(crate) fn billing_surface_for_route(
         ApiProvider::Moonshot => moonshot_surface(&shape),
         ApiProvider::Minimax | ApiProvider::MinimaxAnthropic => minimax_surface(&shape),
         ApiProvider::XiaomiMimo => xiaomi_surface(&shape),
+        ApiProvider::ModelstudioTokenPlan
+        | ApiProvider::ModelstudioTokenPlanAnthropic
+        | ApiProvider::ModelstudioCodingPlan
+        | ApiProvider::ModelstudioCodingPlanAnthropic => modelstudio_surface(&shape),
+        ApiProvider::Volcengine => volcengine_surface(&shape),
         ApiProvider::Openrouter
         | ApiProvider::NvidiaNim
         | ApiProvider::OpencodeZen
@@ -427,6 +447,38 @@ pub(crate) fn billing_surface_for_route(
             .then_some(FIRST_PARTY_PAYG_BILLING_SURFACE),
     };
     Some(surface.unwrap_or(UNCLASSIFIED_BILLING_SURFACE))
+}
+
+// Token Plan and Coding Plan keys/endpoints are isolated from PAYG.
+// https://www.alibabacloud.com/help/en/model-studio/token-plan-quick-start
+// https://www.alibabacloud.com/help/en/model-studio/coding-plan-faq
+fn modelstudio_surface(shape: &EndpointShape) -> Option<&'static str> {
+    match (shape.host.as_str(), shape.path.as_str()) {
+        (
+            "token-plan.ap-southeast-1.maas.aliyuncs.com",
+            "/compatible-mode/v1" | "/apps/anthropic" | "/apps/anthropic/v1",
+        ) => Some(MODELSTUDIO_TOKEN_PLAN_BILLING_SURFACE),
+        (
+            "coding-intl.dashscope.aliyuncs.com" | "coding.dashscope.aliyuncs.com",
+            "/v1" | "/apps/anthropic" | "/apps/anthropic/v1",
+        ) => Some(MODELSTUDIO_CODING_PLAN_BILLING_SURFACE),
+        ("dashscope-intl.aliyuncs.com" | "dashscope.aliyuncs.com", "/compatible-mode/v1") => {
+            Some(FIRST_PARTY_PAYG_BILLING_SURFACE)
+        }
+        _ => None,
+    }
+}
+
+// The Coding Plan gateway consumes plan quota; /api/v3 is billed separately.
+// https://www.volcengine.com/docs/82379/1925114
+fn volcengine_surface(shape: &EndpointShape) -> Option<&'static str> {
+    match (shape.host.as_str(), shape.path.as_str()) {
+        ("ark.cn-beijing.volces.com", "/api/coding" | "/api/coding/v3") => {
+            Some(VOLCENGINE_CODING_PLAN_BILLING_SURFACE)
+        }
+        ("ark.cn-beijing.volces.com", "/api/v3") => Some(FIRST_PARTY_PAYG_BILLING_SURFACE),
+        _ => None,
+    }
 }
 
 fn stepfun_surface(shape: &EndpointShape) -> Option<&'static str> {
@@ -578,6 +630,7 @@ pub fn has_pricing_for_provider(provider: ApiProvider, model: &str) -> bool {
 
 /// Return whether a provider/model route has authoritative pricing for an
 /// already-classified billing surface.
+#[cfg(test)]
 #[must_use]
 pub(crate) fn has_pricing_for_billing_surface(
     provider: ApiProvider,
@@ -1143,7 +1196,7 @@ pub(crate) fn calculate_turn_cost_estimate_for_provider_at(
 /// Every `None` from the estimator carries one of these so `/cost`, `/cache`,
 /// and the scorecard can say *why* a turn is missing from a total instead of
 /// letting the total read as complete.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum UnpricedReason {
     /// The route is **exactly identified** as one where money is not the unit:
     /// a named OAuth subscription, a named prepaid token plan, or a local
@@ -1183,6 +1236,10 @@ pub enum UnpricedReason {
     UnrepresentedTier,
     /// No pricing row exists for this provider/model route.
     NoPricingRow,
+    /// Automatic gateway routing has not identified the upstream rate owner.
+    RoutingDependentPrice,
+    /// Saved usage predates cost coverage, or carries an unknown reason code.
+    UnrecordedCoverage,
     /// A row exists, but a token class this turn actually used has no published
     /// price, so the estimate fails closed rather than under-reporting.
     MissingClassPrice,
@@ -1199,6 +1256,51 @@ pub enum UnpricedReason {
 }
 
 impl UnpricedReason {
+    /// Decode persisted receipts without guessing from the current provider.
+    /// Older or future reason codes remain explicitly unrecorded coverage.
+    #[must_use]
+    pub fn from_label(label: &str) -> Self {
+        match label {
+            "not_money_metered" => Self::NotMoneyMetered,
+            "unknown_billing_basis" => Self::UnknownBillingBasis,
+            "ambiguous_billing_surface" => Self::AmbiguousBillingSurface,
+            "unestablished_endpoint" => Self::UnestablishedEndpoint,
+            "unpriced_billing_surface" => Self::UnpricedBillingSurface,
+            "unverified_live_pricing" => Self::UnverifiedLivePricing,
+            "retired_alias" => Self::RetiredAlias,
+            "unrepresented_pricing_tier" => Self::UnrepresentedTier,
+            "no_pricing_row" => Self::NoPricingRow,
+            "routing_dependent_price" => Self::RoutingDependentPrice,
+            "missing_class_price" => Self::MissingClassPrice,
+            "invalid_pricing_row" => Self::InvalidPricingRow,
+            "unsupported_currency" | "currency_not_published" => Self::UnsupportedCurrency,
+            "inconsistent_usage" => Self::InconsistentUsage,
+            _ => Self::UnrecordedCoverage,
+        }
+    }
+
+    #[must_use]
+    pub const fn message_id(self) -> crate::localization::MessageId {
+        use crate::localization::MessageId;
+        match self {
+            Self::NotMoneyMetered => MessageId::CostReasonNotMoney,
+            Self::UnknownBillingBasis => MessageId::CostReasonBillingUnknown,
+            Self::AmbiguousBillingSurface | Self::UnestablishedEndpoint => {
+                MessageId::CostReasonEndpointUnknown
+            }
+            Self::UnpricedBillingSurface | Self::NoPricingRow => MessageId::CostReasonRateMissing,
+            Self::UnverifiedLivePricing => MessageId::CostReasonLiveUnverified,
+            Self::RetiredAlias => MessageId::CostReasonRetiredAlias,
+            Self::UnrepresentedTier => MessageId::CostReasonTierMissing,
+            Self::RoutingDependentPrice => MessageId::CostReasonRoutingDependent,
+            Self::UnrecordedCoverage => MessageId::CostReasonCoverageMissing,
+            Self::MissingClassPrice => MessageId::CostReasonTokenRateMissing,
+            Self::InvalidPricingRow => MessageId::CostReasonInvalidRate,
+            Self::UnsupportedCurrency => MessageId::CostReasonCurrencyMissing,
+            Self::InconsistentUsage => MessageId::CostReasonUsageConflict,
+        }
+    }
+
     /// Stable, non-localized identifier for logs, JSON, and scorecards.
     #[must_use]
     pub fn label(self) -> &'static str {
@@ -1212,6 +1314,8 @@ impl UnpricedReason {
             Self::RetiredAlias => "retired_alias",
             Self::UnrepresentedTier => "unrepresented_pricing_tier",
             Self::NoPricingRow => "no_pricing_row",
+            Self::RoutingDependentPrice => "routing_dependent_price",
+            Self::UnrecordedCoverage => "unrecorded_coverage",
             Self::MissingClassPrice => "missing_class_price",
             Self::InvalidPricingRow => "invalid_pricing_row",
             Self::UnsupportedCurrency => "unsupported_currency",
@@ -1525,6 +1629,14 @@ pub(crate) fn audit_turn_cost_for_provider_on_endpoint_at(
     // the unverified rate or a bare "no pricing row".
     match (live_defect, hand_row) {
         (Some(defect), None) => TurnCostAudit::unverified_live(defect),
+        // Concentrate publishes different upstream rates, and even a requested
+        // provider/model can fail over. A slash is not a billing receipt. Keep
+        // verified scoped offerings and operator overrides above authoritative;
+        // absent those, do not inherit a model owner's or aggregate rate.
+        // https://concentrate.ai/docs/api-reference/endpoint/auto-routing
+        (None, None) if provider == ApiProvider::Concentrate => {
+            TurnCostAudit::unpriced(UnpricedReason::RoutingDependentPrice)
+        }
         (defect, hand_row) => hand_priced_audit(hand_row, usage).with_live_defect(defect),
     }
 }
@@ -4738,6 +4850,107 @@ mod tests {
             (estimate.usd - 0.05).abs() < 1e-12,
             "bundled OpenAI rate must win over models.dev leftover cost: {}",
             estimate.usd
+        );
+    }
+
+    /// Concentrate publishes different upstream rates and can fail over even
+    /// when a provider/model prefix is requested, so a requested model's own
+    /// published rate is never inherited: without a verified scoped offering
+    /// the route reports the explicit routing-dependent reason instead of
+    /// dollars (#5976).
+    #[test]
+    fn concentrate_without_verified_scoped_pricing_reports_routing_dependent() {
+        let _live = crate::provider_lake::lock_live_snapshot();
+        crate::provider_lake::clear_live_snapshot();
+        let usage = million_input_usage();
+
+        // deepseek-v4-pro is the model owner's own hand-priced row; a
+        // Concentrate request for it must not inherit that rate.
+        let audit = official_route_audit(ApiProvider::Concentrate, "deepseek-v4-pro", &usage);
+        assert!(!audit.is_priced(), "{audit:?}");
+        assert_eq!(
+            audit.unpriced_reason,
+            Some(UnpricedReason::RoutingDependentPrice),
+            "{audit:?}"
+        );
+        assert!(!has_pricing_for_provider(
+            ApiProvider::Concentrate,
+            "deepseek-v4-pro"
+        ));
+    }
+
+    /// A fresh per-provider `/models` row fetched from the exact Concentrate
+    /// endpoint is the scoped offering that *is* authoritative: with the
+    /// endpoint fingerprint it prices at the scoped rate; without it the same
+    /// row degrades to an unverified-live receipt rather than billing.
+    #[test]
+    fn concentrate_scoped_offering_prices_only_with_endpoint_provenance() {
+        let _live = crate::provider_lake::lock_live_snapshot();
+        crate::provider_lake::clear_live_snapshot();
+        let now = Utc::now();
+        let fetched_at = u64::try_from(now.timestamp()).expect("timestamp");
+        let fingerprint = codewhale_config::catalog::base_url_fingerprint(
+            crate::config::DEFAULT_CONCENTRATE_BASE_URL,
+        );
+        crate::provider_lake::set_live_snapshot(
+            codewhale_config::catalog::CatalogSnapshot {
+                offerings: vec![codewhale_config::catalog::CatalogOffering {
+                    provider: "concentrate".to_string(),
+                    wire_model_id: "deepseek-v4-pro".to_string(),
+                    endpoint_key: "chat".to_string(),
+                    cost: Some(codewhale_config::models_dev::ModelsDevCost {
+                        input: Some(0.5),
+                        output: Some(1.5),
+                        cache_read: None,
+                        cache_write: None,
+                    }),
+                    source: codewhale_config::catalog::CatalogSource::Live {
+                        base_url_fingerprint: fingerprint.clone(),
+                        fetched_at,
+                    },
+                    ..Default::default()
+                }],
+            },
+            crate::provider_lake::LiveSource::PerProvider,
+        );
+
+        let usage = million_input_usage();
+        let surface = billing_surface_for_route(
+            ApiProvider::Concentrate,
+            Some(crate::config::DEFAULT_CONCENTRATE_BASE_URL),
+        );
+        let scoped = audit_turn_cost_for_route_on_endpoint_at(
+            ApiProvider::Concentrate,
+            "deepseek-v4-pro",
+            surface,
+            Some(&fingerprint),
+            &usage,
+            now,
+        );
+        let unproven = audit_turn_cost_for_route_on_endpoint_at(
+            ApiProvider::Concentrate,
+            "deepseek-v4-pro",
+            surface,
+            None,
+            &usage,
+            now,
+        );
+        crate::provider_lake::clear_live_snapshot();
+
+        assert!(scoped.is_priced(), "{scoped:?}");
+        assert_eq!(scoped.provenance, Some(PricingProvenance::ProviderLive));
+        let estimate = scoped.estimate.expect("priced");
+        assert!(
+            (estimate.usd - 0.5).abs() < 1e-12,
+            "scoped Concentrate rate must govern: {}",
+            estimate.usd
+        );
+
+        assert!(!unproven.is_priced(), "{unproven:?}");
+        assert_eq!(
+            unproven.unpriced_reason,
+            Some(UnpricedReason::UnverifiedLivePricing),
+            "{unproven:?}"
         );
     }
 

@@ -299,7 +299,16 @@ pub(crate) fn cost_coverage_report(app: &App, locale: Locale) -> String {
         out.push_str(
             &tr(locale, MessageId::CmdCostUnpricedTurns)
                 .replace("{unpriced}", &unpriced.to_string())
-                .replace("{reasons}", &joined(reasons)),
+                .replace(
+                    "{reasons}",
+                    &crate::route_billing::format_unpriced_reasons(
+                        &reasons
+                            .iter()
+                            .map(|reason| crate::pricing::UnpricedReason::from_label(reason))
+                            .collect::<Vec<_>>(),
+                        locale,
+                    ),
+                ),
         );
     }
     if !app.session.cost_unpriced_classes.is_empty() {

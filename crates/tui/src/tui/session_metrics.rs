@@ -1,5 +1,5 @@
-//! Session metrics strip: the compact `turns · steps │ LLM · tools │ TTFT ·
-//! tok/s │ cache │ in` ledger painted on the phase strip.
+//! Session metrics: the shared accumulators behind the metrics line and
+//! the detailed `turns · steps │ LLM · tools │ TTFT · avg tok/s │ cache │ in` ledger.
 //!
 //! Every number here is sourced from runtime evidence the engine already
 //! emits — never from transcript timestamps or estimates:
@@ -14,9 +14,19 @@
 //!   by tool id (the runtime's own clock, taken when the events drain).
 //! - **TTFT avg**: mean of `TurnUsage::first_token_ms` over the model calls
 //!   that reported one.
-//! - **tok/s**: provider-reported output tokens over the streamed seconds of
-//!   the same calls (`duration_ms`); calls without a stream duration are
-//!   excluded from both sides.
+//! - **avg tok/s**: sum of provider-reported output tokens divided by the sum
+//!   of measured request seconds (`request_ms`), across this loaded session's
+//!   completed usage receipts. This is effective request throughput, including
+//!   connection setup, time to first token, and pauses within the response;
+//!   it is not a decoder-speed measurement or a live text-token estimate.
+//!   Streaming and non-streaming calls use the same dispatch-to-receipt clock.
+//!   Tool execution and idle time between calls are excluded. A transparent
+//!   retry before any content uses the replacement request's clock; a billed
+//!   response with usage is counted even if a later retry is needed. Calls
+//!   without a positive measured request duration (including aggregate REPL
+//!   child receipts) are excluded from both numerator and denominator. The
+//!   normalized `Usage::output_tokens` receipt is canonical; separate reasoning
+//!   counts are not added again and streamed estimates never enter this average.
 //! - **cache**: provider-reported prompt-cache hit tokens over hit + miss
 //!   (`SessionState::total_cache_hit_tokens` / `total_cache_miss_tokens`).
 //! - **in**: provider-reported input tokens (`SessionState::total_input_tokens`).
@@ -24,10 +34,9 @@
 //! When a provider never reports a metric, or its evidence has not arrived
 //! yet, the cell is omitted. Nothing here is estimated or captioned.
 //!
-//! The strip is one row wide and never grows the layout: it lives in the
-//! phase-strip ledger tail (`crate::tui::phase_strip`), between the phase
-//! marker and the right-hand key hints, and drops its lowest-value groups
-//! until it fits the columns that are genuinely available.
+//! The infoline and detailed ledger consume the same rate. The infoline keeps
+//! the last measured session average while a request is in flight; it does not
+//! divide a text estimate by a turn timer that also includes tools and waits.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -51,10 +60,10 @@ pub struct SessionMetrics {
     ttft_total: Duration,
     /// How many model calls reported a time-to-first-token.
     ttft_samples: u64,
-    /// Output tokens from calls that also reported a stream duration.
+    /// Output tokens from calls that also reported a positive request duration.
     rate_output_tokens: u64,
-    /// Stream time from the same calls.
-    rate_stream_time: Duration,
+    /// Dispatch-to-receipt time from exactly the same calls.
+    rate_request_time: Duration,
     /// Tools currently running, keyed by tool id, with the instant their
     /// start event drained.
     tool_started: HashMap<String, Instant>,
@@ -65,24 +74,24 @@ impl SessionMetrics {
     pub fn record_model_call(
         &mut self,
         output_tokens: u32,
-        stream_ms: u64,
+        duration_ms: u64,
         first_token_ms: Option<u64>,
         request_ms: Option<u64>,
     ) {
         self.model_calls = self.model_calls.saturating_add(1);
-        let call_ms = request_ms.unwrap_or(stream_ms);
+        let call_ms = request_ms.unwrap_or(duration_ms);
         self.llm_time = self.llm_time.saturating_add(Duration::from_millis(call_ms));
         if let Some(ttft) = first_token_ms {
             self.ttft_total = self.ttft_total.saturating_add(Duration::from_millis(ttft));
             self.ttft_samples = self.ttft_samples.saturating_add(1);
         }
-        if stream_ms > 0 {
+        if let Some(request_ms) = request_ms.filter(|millis| *millis > 0) {
             self.rate_output_tokens = self
                 .rate_output_tokens
                 .saturating_add(u64::from(output_tokens));
-            self.rate_stream_time = self
-                .rate_stream_time
-                .saturating_add(Duration::from_millis(stream_ms));
+            self.rate_request_time = self
+                .rate_request_time
+                .saturating_add(Duration::from_millis(request_ms));
         }
     }
 
@@ -132,10 +141,11 @@ impl SessionMetrics {
         Some(self.ttft_total / u32::try_from(self.ttft_samples).unwrap_or(u32::MAX))
     }
 
-    /// Output tokens per streamed second, when the evidence exists.
+    /// Session-average output tokens per measured request second. See the
+    /// module documentation for included time and receipt coverage.
     #[must_use]
     pub fn tokens_per_second(&self) -> Option<f64> {
-        let secs = self.rate_stream_time.as_secs_f64();
+        let secs = self.rate_request_time.as_secs_f64();
         if self.rate_output_tokens == 0 || !secs.is_finite() || secs <= 0.0 {
             return None;
         }
@@ -505,7 +515,7 @@ mod tests {
         let text = full_text(sample(), Locale::En, false);
         assert_eq!(
             text,
-            "4 turns · 108 steps │ LLM 11m46s · Tool call 1m52s │ TTFT avg 1.5s · 120 tok/s │ Cache hit 99% │ Input 9.3M"
+            "4 turns · 108 steps │ LLM 11m46s · Tool call 1m52s │ TTFT avg 1.5s · 120 avg tok/s │ Cache hit 99% │ Input 9.3M"
         );
         let ascii = full_text(sample(), Locale::En, true);
         assert!(ascii.is_ascii(), "{ascii}");
@@ -536,7 +546,7 @@ mod tests {
         snapshot.ttft_avg = None;
         snapshot.tokens_per_second = Some(88.0);
         let text = full_text(snapshot, Locale::En, false);
-        assert!(text.ends_with("│ 88 tok/s"), "{text}");
+        assert!(text.ends_with("│ 88 avg tok/s"), "{text}");
     }
 
     #[test]
@@ -582,13 +592,69 @@ mod tests {
         assert_eq!(metrics.llm_time, Duration::from_millis(3_500));
         assert_eq!(metrics.ttft_average(), Some(Duration::from_millis(500)));
         let rate = metrics.tokens_per_second().expect("rate");
-        assert!((rate - 40.0).abs() < 1e-9, "{rate}");
+        assert!((rate - 120.0 / 3.5).abs() < 1e-9, "{rate}");
 
         // Missing request_ms falls back to the stream duration.
         metrics.record_model_call(0, 700, None, None);
         assert_eq!(metrics.llm_time, Duration::from_millis(4_200));
-        // Zero output tokens must not poison the rate.
-        assert!((metrics.tokens_per_second().unwrap() - 120.0 / 3.7).abs() < 1e-9);
+        // A duration without individual request timing cannot enter the rate.
+        assert!((metrics.tokens_per_second().unwrap() - 120.0 / 3.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn request_average_covers_ttft_stream_pauses_tools_and_non_streaming_calls() {
+        let mut metrics = SessionMetrics::default();
+        let t0 = Instant::now();
+        let connected = t0 + Duration::from_millis(200);
+        let first_token = t0 + Duration::from_secs(1);
+        let pause_started = t0 + Duration::from_secs(2);
+        let pause_finished = pause_started + Duration::from_secs(1);
+        let first_receipt = pause_finished + Duration::from_secs(2);
+        let millis = |duration: Duration| u64::try_from(duration.as_millis()).unwrap();
+        metrics.record_model_call(
+            120,
+            millis(first_receipt.duration_since(connected)),
+            Some(millis(first_token.duration_since(t0))),
+            Some(millis(first_receipt.duration_since(t0))),
+        );
+        assert_eq!(metrics.tokens_per_second(), Some(24.0));
+
+        // Thirty seconds of tool work and ten seconds idle are not model time.
+        metrics.record_tool_started_at("build", first_receipt);
+        let tool_finished = first_receipt + Duration::from_secs(30);
+        metrics.record_tool_completed_at("build", tool_finished);
+        let second_dispatch = tool_finished + Duration::from_secs(10);
+        assert_eq!(metrics.tokens_per_second(), Some(24.0));
+        let second_receipt = second_dispatch + Duration::from_secs(3);
+        metrics.record_model_call(
+            60,
+            2_800,
+            Some(500),
+            Some(millis(second_receipt.duration_since(second_dispatch))),
+        );
+
+        // A buffered/non-streaming call has a real request clock even though
+        // its adapter reports no stream duration or first-content timestamp.
+        let third_dispatch = second_receipt + Duration::from_secs(20);
+        let third_receipt = third_dispatch + Duration::from_secs(2);
+        metrics.record_model_call(
+            80,
+            0,
+            None,
+            Some(millis(third_receipt.duration_since(third_dispatch))),
+        );
+        assert_eq!(metrics.tokens_per_second(), Some(26.0)); // 260 / (5 + 3 + 2)
+        assert_eq!(metrics.ttft_average(), Some(Duration::from_millis(750)));
+        assert_eq!(metrics.tool_time, Duration::from_secs(30));
+
+        // Aggregate child or legacy receipts and zero-duration cache receipts
+        // cannot contribute tokens without their matching request denominator.
+        metrics.record_model_call(1_000, 9_000, None, None);
+        metrics.record_model_call(300, 0, None, Some(0));
+        assert_eq!(metrics.tokens_per_second(), Some(26.0));
+        // A measured, empty response consumes time and produces zero output.
+        metrics.record_model_call(0, 1_000, None, Some(1_000));
+        assert!((metrics.tokens_per_second().unwrap() - 260.0 / 11.0).abs() < 1e-9);
     }
 
     #[test]

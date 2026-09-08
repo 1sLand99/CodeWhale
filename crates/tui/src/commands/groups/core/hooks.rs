@@ -17,7 +17,7 @@ use super::CommandResult;
 pub(in crate::commands) const COMMAND_INFO: CommandInfo = CommandInfo {
     name: "hooks",
     aliases: &["hook", "gouzi"],
-    usage: "/hooks [list|events|edit]",
+    usage: "/hooks [list|events|edit|review|approve <digest>|revoke]",
     description_id: MessageId::CmdHooksDescription,
 };
 
@@ -54,12 +54,34 @@ pub fn hooks(app: &App, arg: Option<&str>) -> CommandResult {
         });
     }
     let sub = arg.map(str::trim).unwrap_or("list").to_ascii_lowercase();
+    if let Some(digest) = sub.strip_prefix("approve ") {
+        return match crate::hooks::authority::approve_project_hooks(&app.workspace, digest.trim()) {
+            Ok(()) => CommandResult::message(
+                "Approved these exact project hooks. They will load on your next session. Changes require another review.",
+            ),
+            Err(error) => CommandResult::error(error),
+        };
+    }
     match sub.as_str() {
         "" | "list" | "ls" | "show" => list(app),
         "events" | "event" | "list-events" => events(),
+        "review" => match crate::hooks::authority::review_project_hooks(&app.workspace) {
+            Ok((authority, contents)) => CommandResult::message(format!(
+                "Project hooks can run shell commands, including scripts they reference. Review the file and those scripts before approval.\n\n{}\n\nTo approve these exact hooks: /hooks approve {}",
+                crate::hooks::sanitize_hook_text(&contents, contents.chars().count()),
+                authority.digest
+            )),
+            Err(error) => CommandResult::error(error),
+        },
+        "revoke" => match crate::config::save_workspace_hook_receipt(&app.workspace, "") {
+            Ok(_) => CommandResult::message(
+                "Project hook approval revoked. Pending hooks will be refused; already running commands are unaffected.",
+            ),
+            Err(_) => CommandResult::error("Could not revoke project hook approval"),
+        },
         "edit" | "add" | "new" => CommandResult::action(AppAction::EditProjectHooks),
         other => CommandResult::error(format!(
-            "unknown subcommand `{other}`. Try `/hooks list`, `/hooks events`, or `/hooks edit`."
+            "unknown subcommand `{other}`. Try `/hooks list`, `/hooks events`, `/hooks edit`, `/hooks review`, `/hooks approve <digest>`, or `/hooks revoke`."
         )),
     }
 }
@@ -112,6 +134,18 @@ fn events() -> CommandResult {
         (
             HookEvent::ShellEnv,
             "fires before each exec_shell; stdout KEY=VALUE lines are merged into its environment",
+        ),
+        (
+            HookEvent::SessionIdle,
+            "fires when the session settles back to idle after a turn or a wait (observer-only)",
+        ),
+        (
+            HookEvent::SessionError,
+            "fires when a turn ends in a terminal failure; absorbed tool failures never fire it (observer-only)",
+        ),
+        (
+            HookEvent::WaitingForUser,
+            "fires when an approval prompt opens, a question is presented, or a goal continuation parks (observer-only)",
         ),
     ];
     for (event, desc) in ordered {
@@ -229,19 +263,7 @@ fn render_problems(problems: &[crate::hooks::HookConfigProblem]) -> String {
 }
 
 fn event_label(event: HookEvent) -> &'static str {
-    match event {
-        HookEvent::SessionStart => "session_start",
-        HookEvent::SessionEnd => "session_end",
-        HookEvent::MessageSubmit => "message_submit",
-        HookEvent::ToolCallBefore => "tool_call_before",
-        HookEvent::ToolCallAfter => "tool_call_after",
-        HookEvent::ModeChange => "mode_change",
-        HookEvent::OnError => "on_error",
-        HookEvent::TurnEnd => "turn_end",
-        HookEvent::SubagentSpawn => "subagent_spawn",
-        HookEvent::SubagentComplete => "subagent_complete",
-        HookEvent::ShellEnv => "shell_env",
-    }
+    event.as_str()
 }
 
 fn condition_summary(condition: &crate::hooks::HookCondition) -> String {
@@ -478,6 +500,9 @@ mod tests {
             "subagent_spawn",
             "subagent_complete",
             "shell_env",
+            "session_idle",
+            "session_error",
+            "waiting_for_user",
         ]
         .iter()
         .map(|name| {

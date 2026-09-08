@@ -24,6 +24,41 @@ const MAX_OUTPUT_CHARS: usize = 40_000;
 const DEFAULT_UNIFIED: u64 = 3;
 const MAX_UNIFIED: u64 = 50;
 
+/// Resolve untrusted revision text before using it as an argument to another
+/// Git command. Only a verified commit ID crosses that option boundary.
+pub(super) async fn resolve_commit_ref(workspace: &Path, base: &str) -> Result<String, ToolError> {
+    let workspace = workspace.to_path_buf();
+    let revision = format!("{base}^{{commit}}");
+    let output = tokio::task::spawn_blocking(move || {
+        run_git_command(
+            &workspace,
+            &[
+                "rev-parse".to_string(),
+                "--verify".to_string(),
+                "--end-of-options".to_string(),
+                revision,
+            ],
+        )
+    })
+    .await
+    .map_err(|error| {
+        ToolError::execution_failed(format!("git resolve task panicked: {error}"))
+    })??;
+    if !output.status.success() {
+        return Err(ToolError::invalid_input(format!(
+            "Invalid git base ref '{base}': {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    let commit = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if !matches!(commit.len(), 40 | 64) || !commit.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(ToolError::execution_failed(
+            "git resolved base to an invalid commit id",
+        ));
+    }
+    Ok(commit)
+}
+
 // === GitStatusTool ===
 
 /// Tool for reading the concise git status of the workspace.

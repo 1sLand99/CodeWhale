@@ -238,13 +238,28 @@ The keys `status`, `agents`, `reasoning_replay`, `prefix_stability`,
 they drove nothing. Old configuration files still load — the retired keys are
 ignored with a warning in the log.
 
+`status_items` composes the rows; two size presets decide how much of each
+row paints. `[tui].posture_bar` and `[tui].metrics_line` each take `full`
+(the default), `compact`, or `hidden`, also settable at runtime with
+`/config posture_bar compact`. `compact` is the row after its first shed
+rungs: the posture bar keeps its permission and mode chips — and the cap
+warning, which is advice, not decoration — and drops the clocks, counts and
+hint; the metrics line keeps the route, the context reading, the cost and
+the balance, and drops the telemetry and the help hint. `hidden` gives the
+row back to the transcript. A small tmux pane can hide both rows without
+touching what `/statusline` composes.
+
 `session_metrics` (on by default) paints the latency pair on the metrics
-line: `ttft 1.5s` — the mean time to first streamed token — and `120 tok/s`,
-provider-reported output tokens over streamed seconds. Both come from the
-same accumulators `/status` prints in full (turns, steps, LLM and tool wall
-time, cache hit, input), and a figure whose provider or runtime evidence has
-not arrived is omitted rather than estimated. On narrow rows the pair sheds
-before the cost and the context reading rather than truncating a number.
+line: `ttft 1.5s` — the mean time to first streamed token — and `120 avg tok/s`,
+the session's provider-reported output tokens divided by the measured request
+seconds for those same calls. The rate includes connection setup, time to first
+token and pauses within a response, and excludes tools and idle time between
+calls. It measures effective request throughput, not decoder speed. Streaming
+and non-streaming calls follow the same rule; receipts without individual
+request timing are excluded from both tokens and time. While a request runs,
+the last measured average stays visible. Both readings use the same
+accumulators `/status` prints in full. Missing evidence is omitted rather than
+estimated. On narrow rows the pair sheds before cost and context.
 
 The transcript is the audit trail. When Codewhale reads files, runs commands,
 or edits code, the action appears there. If a command fails, use the visible

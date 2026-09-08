@@ -183,6 +183,7 @@ pub struct AutoReviewContext<'a> {
     pub approval_mode: ApprovalMode,
     pub workspace_trusted: bool,
     pub write_targets_bounded: bool,
+    pub outbound_web_request: bool,
 }
 
 impl<'a> AutoReviewContext<'a> {
@@ -208,6 +209,10 @@ impl<'a> AutoReviewContext<'a> {
             run_origin,
             approval_mode,
             workspace_trusted,
+            outbound_web_request: matches!(
+                crate::tools::canonical_action::canonical_action_alias(tool_name, params),
+                "web_search" | "fetch_url" | "web_run" | "web.run"
+            ),
             write_targets_bounded: workspace
                 .zip(file_write_target_paths(tool_name, params))
                 .is_some_and(|(workspace, paths)| {
@@ -305,6 +310,7 @@ impl AutoReviewPolicy {
             "approval_mode": ctx.approval_mode.label(),
             "workspace_trusted": ctx.workspace_trusted,
             "write_targets_bounded": ctx.write_targets_bounded,
+            "outbound_web_request": ctx.outbound_web_request,
             "decision": if decision.built_in_safety_gate { "hold_for_review" } else { decision.action.as_str() },
             "reason": decision.reason,
             "rule_id": decision.rule_id.as_deref(),
@@ -345,6 +351,18 @@ fn deterministic_fallback(
     if let Some(rule) = allow_rule {
         return AutoReviewDecision::new(AutoReviewAction::Allow, rule.reason.clone())
             .with_rule(rule.id.clone());
+    }
+
+    // A query can transmit private data even when the request only reads a
+    // remote service. The UI's benign/read-only risk label is not consent to
+    // send that payload. Auto-Review must consult its guardian; Ask retains
+    // the tool's Required approval gate. Explicit operator allow rules above
+    // remain an intentional grant.
+    if ctx.outbound_web_request {
+        return AutoReviewDecision::new(
+            AutoReviewAction::AskUser,
+            "outbound web requests require review of their destination and payload",
+        );
     }
 
     match (ctx.category, ctx.risk, ctx.action_kind) {
@@ -1046,6 +1064,80 @@ mod tests {
 
         assert_eq!(decision.action, AutoReviewAction::Allow);
         assert!(decision.reason.contains("read-only"));
+    }
+
+    #[test]
+    fn outbound_web_reads_reach_review_instead_of_the_benign_fast_path() {
+        use crate::core::engine::{AutoReviewPlanDecision, auto_review_plan_decision_for_context};
+
+        let policy = AutoReviewPolicy::default();
+        for origin in [
+            RunOrigin::Interactive,
+            RunOrigin::Headless,
+            RunOrigin::Background,
+        ] {
+            for (name, input) in [
+                ("web_search", json!({"query": "private workspace content"})),
+                (
+                    "fetch_url",
+                    json!({"url": "https://example.test/?data=private"}),
+                ),
+                (
+                    "web_run",
+                    json!({"search_query": [{"q": "private workspace content"}]}),
+                ),
+                (
+                    "web.run",
+                    json!({"search_query": [{"q": "private workspace content"}]}),
+                ),
+                (
+                    "Web",
+                    json!({"action": "search", "query": "private workspace content"}),
+                ),
+                (
+                    "Web",
+                    json!({"action": "fetch", "url": "https://example.test/?data=private"}),
+                ),
+            ] {
+                let ctx = ctx_for(name, input, origin, ApprovalMode::Auto);
+                assert!(ctx.outbound_web_request, "{name}");
+                assert!(
+                    matches!(
+                        auto_review_plan_decision_for_context(&policy, &ctx).0,
+                        AutoReviewPlanDecision::ConsultReviewer(_)
+                    ),
+                    "{name} must not bypass payload review"
+                );
+            }
+        }
+        for (name, input) in [
+            ("read_file", json!({"path": "README.md"})),
+            (
+                "Web",
+                json!({"action": "wait", "url": "http://127.0.0.1:3000"}),
+            ),
+        ] {
+            let ctx = ctx_for(name, input, RunOrigin::Interactive, ApprovalMode::Auto);
+            assert!(!ctx.outbound_web_request);
+            assert_eq!(policy.evaluate(&ctx).action, AutoReviewAction::Allow);
+        }
+        let explicit_policy = AutoReviewPolicy {
+            allow_rules: vec![
+                AutoReviewRule::allow("operator-web", "operator-approved web route")
+                    .tool_name("web_search"),
+            ],
+            ..Default::default()
+        };
+        let ctx = ctx_for(
+            "web_search",
+            json!({"query": "public documentation"}),
+            RunOrigin::Interactive,
+            ApprovalMode::Auto,
+        );
+        assert_eq!(
+            explicit_policy.evaluate(&ctx).action,
+            AutoReviewAction::Allow
+        );
     }
 
     #[test]

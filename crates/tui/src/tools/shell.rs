@@ -2057,12 +2057,7 @@ impl ShellManager {
         // Create command spec and prepare sandboxed environment
         let spec = if let Some(workspace) = readonly_workspace {
             if command.contains('|') {
-                // An agent read-only pipeline: every segment was admitted by
-                // `is_agent_readonly_shell_command` (no separators, redirects,
-                // expansions, or subshells — only `|` between validated
-                // segments), so a shell is needed solely to bind the segments
-                // and report a failed stage through pipefail.
-                let piped = format!("set -o pipefail; {command}");
+                let piped = hardened_readonly_pipeline(command, workspace)?;
                 CommandSpec::shell(&piped, work_dir.clone(), Duration::from_millis(timeout_ms))
             } else {
                 let (program, args) = hardened_readonly_argv(command)?;
@@ -3798,6 +3793,49 @@ fn exec_shell_input_is_parallel_readonly_shape(input: &serde_json::Value) -> boo
         .get("command")
         .and_then(serde_json::Value::as_str)
         .is_some()
+}
+
+fn hardened_readonly_pipeline(command: &str, workspace: &std::path::Path) -> Result<String> {
+    use crate::shell_dispatcher::ShellKind;
+    // POSIX quoting must never be passed to a different command interpreter.
+    let supported = match crate::shell_dispatcher::global_dispatcher().kind() {
+        ShellKind::Bash => true,
+        ShellKind::Custom { binary, .. } => matches!(
+            std::path::Path::new(binary)
+                .file_name()
+                .and_then(|name| name.to_str()),
+            Some("bash" | "zsh")
+        ),
+        _ => false,
+    };
+    if !supported {
+        return Err(anyhow!(
+            "read-only pipelines require bash or zsh; run each read separately"
+        ));
+    }
+    if !is_agent_readonly_shell_command(command) {
+        return Err(anyhow!(
+            "pipeline contains a command outside the read-only policy"
+        ));
+    }
+    let segments = command
+        .split('|')
+        .map(|segment| {
+            let (program, args) = hardened_readonly_argv(segment)?;
+            let program = resolve_readonly_program(&program, workspace)?;
+            let program = program
+                .to_str()
+                .ok_or_else(|| anyhow!("read-only executable path is not valid UTF-8"))?;
+            Ok(std::iter::once(program)
+                .chain(args.iter().map(String::as_str))
+                .map(|arg| shell_words::quote(arg).into_owned())
+                .collect::<Vec<_>>()
+                .join(" "))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    // The only shell operators are our pipes. Filenames cannot expand into
+    // options or unvalidated symlinks; every Git stage retains helper guards.
+    Ok(format!("set -o pipefail; {}", segments.join(" | ")))
 }
 
 fn hardened_readonly_argv(command: &str) -> Result<(String, Vec<String>)> {

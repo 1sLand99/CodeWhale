@@ -34,7 +34,10 @@
 //! Which segments exist at all is the user's call: `/statusline` and
 //! `tui.status_items` compose the row, and [`crate::tui::ui::frame::info_segments`]
 //! builds only the ones that are on. Shedding decides what survives the
-//! width that is left.
+//! width that is left. `tui.metrics_line` sizes the row (#5950): `hidden`
+//! gives the line back to the transcript, and `compact` starts the shed
+//! pass with the telemetry and the help hint already gone
+//! ([`InfoLine::compact`]).
 //!
 //! Interaction: segment geometry is recorded for parity tests, but only the
 //! model/route segment and the context reading advertise an action in the
@@ -85,6 +88,9 @@ pub enum InfoSegmentId {
     /// only painted when `/statusline` has the balance item on, which is
     /// also what authorises the fetch behind it.
     Balance,
+    /// Active goal with elapsed time and the model's reported progress
+    /// (`Goal (9m) 12% ▓▓░░░░░░`). Painted only while a goal is active.
+    Goal,
 }
 
 impl InfoSegmentId {
@@ -103,6 +109,10 @@ impl InfoSegmentId {
             // The balance outlives the cost: it is off by default, so a row
             // that shows one is a row whose owner asked for it by name.
             Self::Balance => 5,
+            // An active goal is the session's deliberate long-running mode:
+            // its reading outlives every telemetry segment and sheds only
+            // ahead of the route and context readings.
+            Self::Goal => 4,
             Self::Model | Self::Context => 0,
         }
     }
@@ -161,6 +171,12 @@ pub struct InfoLine<'a> {
     /// ASCII-safe / NO_COLOR mode: every glyph goes through
     /// [`glyphs::ascii_fallback`].
     pub ascii_safe: bool,
+    /// `tui.metrics_line = "compact"` (#5950): the shed pass starts with
+    /// the telemetry (everything at or above
+    /// [`InfoSegmentId::SHED_BEFORE_HELP`]) and the help hint already gone,
+    /// so the row states the route, the context reading, the cost and the
+    /// balance. Width sheds the rest exactly as it always did.
+    pub compact: bool,
 }
 
 impl<'a> InfoLine<'a> {
@@ -172,12 +188,19 @@ impl<'a> InfoLine<'a> {
             segments,
             hovered: None,
             ascii_safe: false,
+            compact: false,
         }
     }
 
     #[must_use]
     pub fn ascii_safe(mut self, ascii_safe: bool) -> Self {
         self.ascii_safe = ascii_safe;
+        self
+    }
+
+    #[must_use]
+    pub fn compact(mut self, compact: bool) -> Self {
+        self.compact = compact;
         self
     }
 
@@ -223,7 +246,15 @@ fn shed_pass<'t>(info: &'t InfoLine<'_>, area: Rect) -> ShedRow<'t> {
     let ascii = info.ascii_safe;
     let help = sym(info.help_hint, ascii);
     let join_w = sym(ITEM_JOIN, ascii).width();
-    let mut kept: Vec<&InfoSegment> = info.segments.iter().collect();
+    // A compact row is the full row after its first shed rungs: the
+    // telemetry and the help hint go before width is consulted.
+    let mut kept: Vec<&InfoSegment> = info
+        .segments
+        .iter()
+        .filter(|segment| {
+            !info.compact || segment.id.shed_priority() < InfoSegmentId::SHED_BEFORE_HELP
+        })
+        .collect();
     let left_width = |segs: &[&InfoSegment]| -> usize {
         segs.iter().map(|s| s.rendered_width(ascii)).sum::<usize>()
             + join_w * segs.len().saturating_sub(1)
@@ -245,7 +276,7 @@ fn shed_pass<'t>(info: &'t InfoLine<'_>, area: Rect) -> ShedRow<'t> {
             .map(|(i, _)| i)
     };
 
-    let mut show_help = !help.is_empty();
+    let mut show_help = !help.is_empty() && !info.compact;
     while total_needed(left_width(&kept), show_help) > area.width as usize {
         if let Some(pos) = sheddable(&kept, InfoSegmentId::SHED_BEFORE_HELP) {
             kept.remove(pos);

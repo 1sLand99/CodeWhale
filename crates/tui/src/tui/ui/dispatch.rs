@@ -885,7 +885,6 @@ pub(crate) fn build_dispatch_success_closure(
             }
             app.session.last_prompt_tokens = None;
             app.session.last_completion_tokens = None;
-            app.session.last_output_throughput = None;
             app.session.last_prompt_cache_hit_tokens = None;
             app.session.last_prompt_cache_miss_tokens = None;
             app.session.last_reasoning_replay_tokens = None;

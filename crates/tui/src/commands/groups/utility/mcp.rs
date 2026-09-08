@@ -118,7 +118,12 @@ fn mcp(presentation: &mut dyn CommandPresentationContext, args: Option<&str>) ->
                 }
             }
         }
-        "validate" | "doctor" => CommandResult::action(AppAction::Mcp(McpUiAction::Validate)),
+        "validate" | "doctor" => match parts.next() {
+            Some(name) => CommandResult::action(AppAction::Mcp(McpUiAction::Diagnose {
+                name: name.to_string(),
+            })),
+            None => CommandResult::action(AppAction::Mcp(McpUiAction::Validate)),
+        },
         "reload" | "reconnect" | "restart" => {
             CommandResult::action(AppAction::Mcp(McpUiAction::Reload))
         }
@@ -452,6 +457,12 @@ mod tests {
             doctor.action,
             Some(AppAction::Mcp(McpUiAction::Validate))
         ));
+        for command in ["validate github", "doctor github"] {
+            assert!(matches!(
+                mcp(&mut FakePresentation, Some(command)).action,
+                Some(AppAction::Mcp(McpUiAction::Diagnose { name })) if name == "github"
+            ));
+        }
         let restart = mcp(&mut FakePresentation, Some("restart"));
         assert!(matches!(
             restart.action,

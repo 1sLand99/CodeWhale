@@ -4953,6 +4953,7 @@ fn enforce_lru_capacity_does_not_loop_when_all_threads_are_active() {
         ActiveThreadState {
             engine: harness_a.handle,
             active_turn: Some(ActiveTurnState {
+                goal_id: None,
                 turn_id: "turn_a".to_string(),
                 interrupt_requested: false,
                 compaction_id: None,
@@ -4972,6 +4973,7 @@ fn enforce_lru_capacity_does_not_loop_when_all_threads_are_active() {
         ActiveThreadState {
             engine: harness_b.handle,
             active_turn: Some(ActiveTurnState {
+                goal_id: None,
                 turn_id: "turn_b".to_string(),
                 interrupt_requested: false,
                 compaction_id: None,
@@ -5860,6 +5862,7 @@ async fn update_thread_workspace_rejects_active_turn() -> Result<()> {
         let mut active = manager.active.lock().await;
         let state = active.engines.get_mut(&thread.id).expect("mock engine");
         state.active_turn = Some(ActiveTurnState {
+            goal_id: None,
             turn_id: "turn_live".to_string(),
             interrupt_requested: false,
             compaction_id: None,
@@ -6566,6 +6569,10 @@ fn active_test_goal(thread_id: &str, goal_id: &str) -> codewhale_protocol::Threa
         tokens_used: 0,
         time_used_seconds: 0,
         continuation_count: 0,
+        last_gap_fingerprint: None,
+        repeated_gap_count: 0,
+        last_gap_pass: None,
+        pause_reason: None,
         created_at: 0,
         updated_at: 0,
     }
@@ -6631,6 +6638,7 @@ async fn host_goal_loop_kickoff_arms_one_continuation_and_parks_at_engine_cap() 
         goal: Some(crate::config::GoalConfig {
             max_continuations: Some(2),
             continuation_delay_seconds: None,
+            max_steps: None,
         }),
         ..Config::default()
     };
@@ -6978,13 +6986,26 @@ async fn host_goal_loop_mirrors_terminal_snapshot_and_does_not_rearm() -> Result
             }
         });
         manager.activate_thread_goal(&thread.id).await?;
-        let goal = wait_for_goal_status(
-            &manager,
-            &thread.id,
-            expected,
-            TURN_SETTLEMENT_DEADLOCK_TIMEOUT,
-        )
-        .await?;
+        // The mid-turn checkpoint publishes the terminal status before
+        // settlement accrues turn usage, so wait for both the terminal turn
+        // and the settled counters rather than asserting on the first
+        // status sighting.
+        wait_for_terminal_turn_count(&manager, &thread.id, 1, TURN_SETTLEMENT_DEADLOCK_TIMEOUT)
+            .await?;
+        let deadline = Instant::now() + TURN_SETTLEMENT_DEADLOCK_TIMEOUT;
+        let goal = loop {
+            let goal = manager
+                .store
+                .load_goal(&thread.id)?
+                .ok_or_else(|| anyhow::anyhow!("goal record missing for {}", thread.id))?;
+            if goal.status == expected && goal.tokens_used == 10 {
+                break goal;
+            }
+            if Instant::now() > deadline {
+                bail!("goal settlement did not land in time: {goal:?}");
+            }
+            sleep(Duration::from_millis(20)).await;
+        };
         // Usage and the engine's continuation counter landed on the record.
         assert_eq!(goal.tokens_used, 10);
         assert_eq!(goal.continuation_count, 1);
@@ -7001,6 +7022,241 @@ async fn host_goal_loop_mirrors_terminal_snapshot_and_does_not_rearm() -> Result
             "exactly the kickoff turn ran ({engine_status})"
         );
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn model_created_goal_persists_through_adopted_revision() -> Result<()> {
+    // A turn admitted with no host goal can still create one through the
+    // model's create_goal tool. The monitor must persist that creation and
+    // adopt its revision, so settlement accrues usage and the next admission
+    // restores the goal instead of clearing it.
+    let manager = RuntimeThreadManager::open(
+        Config {
+            goal: Some(crate::config::GoalConfig {
+                max_continuations: None,
+                continuation_delay_seconds: Some(3600),
+                max_steps: None,
+            }),
+            ..Config::default()
+        },
+        PathBuf::from("."),
+        test_manager_config(test_runtime_dir()),
+    )?;
+    let thread = manager
+        .create_thread(CreateThreadRequest::default())
+        .await?;
+    let harness = install_mock_engine(&manager, &thread.id).await;
+    let mut rx_op = harness.rx_op;
+    let tx_event = harness.tx_event;
+    tokio::spawn(async move {
+        while let Some(op) = rx_op.recv().await {
+            if !matches!(op, Op::SendMessage { .. }) {
+                continue;
+            }
+            let snapshot = crate::tools::goal::GoalSnapshot {
+                goal_id: Some("model_created_goal".to_string()),
+                objective: Some("model-built objective".to_string()),
+                status: "active".to_string(),
+                ..Default::default()
+            };
+            let _ = tx_event.send(EngineEvent::GoalUpdated { snapshot }).await;
+            let _ = tx_event
+                .send(EngineEvent::TurnStarted {
+                    turn_id: "engine_model_created".to_string(),
+                    created_at: chrono::Utc::now(),
+                    route: None,
+                })
+                .await;
+            let _ = tx_event
+                .send(EngineEvent::TurnComplete {
+                    usage: Usage {
+                        input_tokens: 10,
+                        output_tokens: 10,
+                        ..Usage::default()
+                    },
+                    status: TurnOutcomeStatus::Completed,
+                    error: None,
+                    tool_catalog: Some(vec![catalog_tool("update_goal")]),
+                    base_url: None,
+                })
+                .await;
+        }
+    });
+    let turn = manager
+        .start_turn(
+            &thread.id,
+            StartTurnRequest {
+                prompt: "build me a goal".to_string(),
+                ..StartTurnRequest::default()
+            },
+        )
+        .await?;
+    wait_for_terminal_turn(&manager, &turn.id, TURN_SETTLEMENT_DEADLOCK_TIMEOUT).await?;
+    let deadline = Instant::now() + TURN_SETTLEMENT_DEADLOCK_TIMEOUT;
+    let goal = loop {
+        match manager.store.load_goal(&thread.id)? {
+            Some(goal) if goal.tokens_used == 20 => break goal,
+            _ if Instant::now() > deadline => {
+                bail!("model-created goal was not persisted and settled")
+            }
+            _ => sleep(Duration::from_millis(20)).await,
+        }
+    };
+    assert_eq!(goal.goal_id, "model_created_goal");
+    assert_eq!(goal.objective, "model-built objective");
+    assert_eq!(goal.status, codewhale_protocol::ThreadGoalStatus::Active);
+    Ok(())
+}
+
+#[tokio::test]
+async fn model_created_goal_never_overwrites_concurrent_explicit_goal() -> Result<()> {
+    // The turn was admitted with no goal; an explicit PUT lands while it runs.
+    // The model's create_goal snapshot must not clobber that newer revision,
+    // and terminal settlement must stay fenced off it.
+    let manager = test_manager(test_runtime_dir())?;
+    let thread = manager
+        .create_thread(CreateThreadRequest::default())
+        .await?;
+    let harness = install_mock_engine(&manager, &thread.id).await;
+    let mut rx_op = harness.rx_op;
+    let tx_event = harness.tx_event;
+    let store = manager.store.clone();
+    let thread_id = thread.id.clone();
+    tokio::spawn(async move {
+        while let Some(op) = rx_op.recv().await {
+            if !matches!(op, Op::SendMessage { .. }) {
+                continue;
+            }
+            // The explicit revision arrives after admission but before the
+            // model's create_goal receipt.
+            let _ = store.save_goal(&active_test_goal(&thread_id, "goal_explicit"));
+            let snapshot = crate::tools::goal::GoalSnapshot {
+                goal_id: Some("model_created_goal".to_string()),
+                objective: Some("model-built objective".to_string()),
+                status: "active".to_string(),
+                ..Default::default()
+            };
+            let _ = tx_event.send(EngineEvent::GoalUpdated { snapshot }).await;
+            let _ = tx_event
+                .send(EngineEvent::TurnStarted {
+                    turn_id: "engine_concurrent".to_string(),
+                    created_at: chrono::Utc::now(),
+                    route: None,
+                })
+                .await;
+            let _ = tx_event
+                .send(EngineEvent::TurnComplete {
+                    usage: Usage {
+                        input_tokens: 10,
+                        output_tokens: 10,
+                        ..Usage::default()
+                    },
+                    status: TurnOutcomeStatus::Completed,
+                    error: None,
+                    tool_catalog: Some(vec![catalog_tool("update_goal")]),
+                    base_url: None,
+                })
+                .await;
+        }
+    });
+    let turn = manager
+        .start_turn(
+            &thread.id,
+            StartTurnRequest {
+                prompt: "build me a goal".to_string(),
+                ..StartTurnRequest::default()
+            },
+        )
+        .await?;
+    wait_for_terminal_turn(&manager, &turn.id, TURN_SETTLEMENT_DEADLOCK_TIMEOUT).await?;
+    sleep(Duration::from_millis(200)).await;
+    let goal = manager
+        .store
+        .load_goal(&thread.id)?
+        .ok_or_else(|| anyhow::anyhow!("explicit goal vanished"))?;
+    assert_eq!(goal.goal_id, "goal_explicit");
+    assert_eq!(goal.objective, "ship the goal loop");
+    assert_eq!(
+        goal.tokens_used, 0,
+        "settlement must not accrue the no-goal turn onto the explicit revision"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn transition_goal_status_commits_only_the_read_revision() -> Result<()> {
+    let manager = test_manager(test_runtime_dir())?;
+    let thread = manager
+        .create_thread(CreateThreadRequest::default())
+        .await?;
+    manager
+        .store
+        .save_goal(&active_test_goal(&thread.id, "goal_a"))?;
+
+    let completed = manager
+        .transition_goal_status(
+            &thread.id,
+            "goal_a",
+            codewhale_protocol::ThreadGoalStatus::Complete,
+        )
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("current revision must commit"))?;
+    assert_eq!(
+        completed.status,
+        codewhale_protocol::ThreadGoalStatus::Complete
+    );
+
+    // A concurrent replacement makes the previously read revision stale.
+    manager
+        .store
+        .save_goal(&active_test_goal(&thread.id, "goal_b"))?;
+    let stale = manager
+        .transition_goal_status(
+            &thread.id,
+            "goal_a",
+            codewhale_protocol::ThreadGoalStatus::Blocked,
+        )
+        .await?;
+    assert!(stale.is_none(), "stale revision must not commit");
+    let goal = manager
+        .store
+        .load_goal(&thread.id)?
+        .ok_or_else(|| anyhow::anyhow!("goal record missing"))?;
+    assert_eq!(goal.goal_id, "goal_b");
+    assert_eq!(goal.status, codewhale_protocol::ThreadGoalStatus::Active);
+    Ok(())
+}
+
+#[test]
+fn corrupt_active_exhausted_stall_window_loads_paused() -> Result<()> {
+    // The engine pauses NoProgress in the same locked mutation that fills the
+    // stall window, so a persisted Active record at the ceiling is corrupt;
+    // loads must restore it paused instead of re-arming spent passes.
+    let manager = test_manager(test_runtime_dir())?;
+    let thread_id = "thread_corrupt_stall";
+    let mut goal = active_test_goal(thread_id, "goal_corrupt");
+    goal.repeated_gap_count = codewhale_protocol::MAX_REPEATED_GAP_COUNT;
+    goal.last_gap_fingerprint = Some("a".repeat(64));
+    goal.last_gap_pass = Some(3);
+    goal.continuation_count = 3;
+    manager.store.save_goal(&goal)?;
+
+    let loaded = manager
+        .store
+        .load_goal(thread_id)?
+        .ok_or_else(|| anyhow::anyhow!("goal record missing"))?;
+    assert_eq!(loaded.status, codewhale_protocol::ThreadGoalStatus::Paused);
+    assert_eq!(
+        loaded.pause_reason,
+        Some(codewhale_protocol::GoalPauseReason::NoProgress)
+    );
+    // The stall history itself is preserved for inspection; only the
+    // impossible Active projection is healed.
+    assert_eq!(
+        loaded.repeated_gap_count,
+        codewhale_protocol::MAX_REPEATED_GAP_COUNT
+    );
     Ok(())
 }
 

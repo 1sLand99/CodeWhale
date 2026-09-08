@@ -17460,67 +17460,53 @@ fn test_disallowed_tools_across_two_generations() {
     assert!(b_registry.is_tool_allowed("read_file"));
 }
 
-// === spawn-path opt-out simulation ===
-
-#[test]
-fn test_disallowed_tools_opt_out_clears_inherited_denies() {
-    // Simulate the spawn-path merge: parent runtime has denies, child sets
-    // inherit_disallowed_tools = false — the inherited denies are cleared.
-    let tmp = tempdir().expect("tempdir");
-    let runtime =
-        stub_runtime_with_disallowed(vec!["exec_shell".to_string(), "write_file".to_string()]);
-    let mut child_runtime = runtime.child_runtime();
-    child_runtime.context = ToolContext::new(tmp.path().to_path_buf());
-    assert!(
-        !child_runtime.worker_profile.denied_tools.is_empty(),
-        "child starts with parent's denies"
-    );
-
-    // Simulate spawn merge: inherit_disallowed_tools = false, no caller deny.
-    child_runtime.worker_profile.denied_tools.clear();
-
-    let registry = new_registry_with_disallowed(child_runtime, None);
-    assert!(
-        registry.is_tool_allowed("exec_shell"),
-        "exec_shell allowed after opt-out cleared parent denies"
-    );
-    assert!(
-        registry.is_tool_allowed("write_file"),
-        "write_file allowed after opt-out cleared parent denies"
-    );
-    assert!(registry.is_tool_allowed("read_file"));
-}
-
-#[test]
-fn test_disallowed_tools_opt_out_keeps_explicit_caller_deny() {
-    // Opt-out clears inherited denies, but explicit caller disallowed_tools
-    // still apply (the union merge — caller deny always applies).
-    let tmp = tempdir().expect("tempdir");
-    let runtime =
-        stub_runtime_with_disallowed(vec!["exec_shell".to_string(), "write_file".to_string()]);
-    let mut child_runtime = runtime.child_runtime();
-    child_runtime.context = ToolContext::new(tmp.path().to_path_buf());
-
-    // Simulate spawn merge: inherit_disallowed_tools = false, then caller adds
-    // ["write_file"].
-    child_runtime.worker_profile.denied_tools.clear();
-    child_runtime
-        .worker_profile
-        .denied_tools
-        .push("write_file".to_string());
-
-    let registry = new_registry_with_disallowed(child_runtime, None);
-    // Parent denied exec_shell, but opt-out cleared it → allowed.
-    assert!(
-        registry.is_tool_allowed("exec_shell"),
-        "exec_shell allowed (parent deny cleared by opt-out)"
-    );
-    // Caller explicitly denied write_file → still denied.
-    assert!(
-        !registry.is_tool_allowed("write_file"),
-        "write_file denied by caller's explicit list"
-    );
-    assert!(registry.is_tool_allowed("read_file"));
+// Exercise the same merge used by the spawn path, then the actual child dispatch.
+#[tokio::test]
+async fn test_disallowed_tools_opt_out_preserves_ancestor_and_explicit_denies() {
+    for key in ["inherit_disallowed_tools", "inheritDisallowedTools"] {
+        let tmp = tempdir().expect("tempdir");
+        let parent =
+            stub_runtime_with_disallowed(vec!["exec_shell".into(), "mcp_private_*".into()]);
+        let mut child = parent.child_runtime();
+        child.context = ToolContext::new(tmp.path().to_path_buf());
+        child.allow_shell = true;
+        let mut input = json!({"prompt":"inspect safely", "disallowed_tools":["write_file"]});
+        input[key] = json!(false);
+        let request = parse_spawn_request(&input).expect("legacy spelling still parses");
+        merge_spawn_disallowed_tools(&mut child.worker_profile.denied_tools, &request);
+        let registry = new_registry_with_disallowed(child.clone(), None);
+        assert!(!registry.is_tool_allowed("exec_shell"));
+        assert!(!registry.is_tool_allowed("mcp_private_read"));
+        assert!(!registry.is_tool_allowed("write_file"));
+        assert!(registry.is_tool_allowed("read_file"));
+        assert!(
+            registry
+                .execute("child", "exec_shell", json!({"command":"echo forbidden"}))
+                .await
+                .is_err()
+        );
+        assert!(
+            registry
+                .execute("child", "mcp_private_read", json!({}))
+                .await
+                .is_err()
+        );
+        let mut grandchild = child.child_runtime();
+        merge_spawn_disallowed_tools(&mut grandchild.worker_profile.denied_tools, &request);
+        assert_eq!(
+            grandchild.worker_profile.denied_tools,
+            child.worker_profile.denied_tools
+        );
+        assert_eq!(
+            parent.worker_profile.denied_tools.len(),
+            2,
+            "child narrowing never mutates its parent"
+        );
+        assert_eq!(
+            registry.registry.context().disallowed_tools,
+            child.worker_profile.denied_tools
+        );
+    }
 }
 
 // === parse_spawn_request disallowed_tools ===
@@ -17942,6 +17928,57 @@ async fn an_exact_member_without_a_network_tool_really_loses_the_network_surface
             .is_err(),
         "the standalone browse tool stays denied by name"
     );
+}
+
+#[tokio::test]
+async fn read_only_web_evidence_keeps_the_parent_approval_gate() {
+    for role in [FleetRole::Scout, FleetRole::Reviewer, FleetRole::Planner] {
+        let tmp = tempdir().expect("tempdir");
+        let mut runtime =
+            stub_runtime().with_agent_tool_surface_options(enabled_agent_surface_options());
+        runtime.context = ToolContext::new(tmp.path());
+        runtime.approval_mode = crate::tui::approval::ApprovalMode::Never;
+        runtime.worker_profile = WorkerRuntimeProfile::for_role(role.clone());
+        runtime.worker_profile.permissions.network = true;
+        let registry = SubAgentToolRegistry::new(
+            runtime,
+            role.clone(),
+            None,
+            crate::tools::todo::new_shared_todo_list(),
+            crate::tools::plan::new_shared_plan_state(),
+        );
+        for (name, input) in [
+            (
+                "Web",
+                json!({"action": "fetch", "url": "https://example.test/private-data"}),
+            ),
+            ("Web", json!({"action": "search", "query": "private-data"})),
+            ("web.run", json!({"search_query": [{"q": "private-data"}]})),
+        ] {
+            assert!(
+                registry.posture_permits_tool(name, Some(&input)),
+                "{role:?}: {name}"
+            );
+            assert!(
+                registry.delegation_refusal(name, &input).is_some(),
+                "outbound data requires consent"
+            );
+            assert!(
+                matches!(
+                    registry
+                        .gate_held_call("agent_scout", "test-web", name, &input)
+                        .await,
+                    ChildGateVerdict::Deny(_)
+                ),
+                "Never must not send the request"
+            );
+        }
+        assert!(
+            registry
+                .delegation_refusal("read", &json!({"file_path": "README.md"}))
+                .is_none()
+        );
+    }
 }
 
 /// A Runtime scout under a network-denied parent gets exactly the bounded web
@@ -18750,9 +18787,7 @@ fn the_durable_work_families_resolve_their_actions_through_the_policy_seam() {
 
 // ── A child may never widen its parent's envelope ───────────────────────────
 
-/// `inherit_disallowed_tools: false` is an escape hatch for *preference*, not
-/// for a ceiling. A Fleet member clamped to `network_tool = false` that spawns a
-/// grandchild asking for a clean surface must not hand it the network back.
+/// Legacy opt-out inputs cannot relax role or operator ceilings.
 #[test]
 fn posture_denials_survive_a_child_that_declines_to_inherit() {
     let authority = crate::fleet::role::ChildAuthority::clamp(
@@ -18766,9 +18801,11 @@ fn posture_denials_survive_a_child_that_declines_to_inherit() {
     let mut inherited = authority.disallowed_tools.clone();
     inherited.push("some_session_preference".to_string());
 
-    // Exactly what the spawn path does for `inherit_disallowed_tools: false`.
     let mut child = inherited.clone();
-    child.retain(|rule| crate::fleet::role::is_posture_denial(rule));
+    let request =
+        parse_spawn_request(&json!({"prompt":"inspect", "inherit_disallowed_tools": false}))
+            .unwrap();
+    merge_spawn_disallowed_tools(&mut child, &request);
 
     for sealed in [
         "fetch_url",
@@ -18784,8 +18821,8 @@ fn posture_denials_survive_a_child_that_declines_to_inherit() {
         );
     }
     assert!(
-        !child.iter().any(|rule| rule == "some_session_preference"),
-        "an ordinary preference is still droppable; got {child:?}"
+        child.iter().any(|rule| rule == "some_session_preference"),
+        "operator rules also remain a ceiling; got {child:?}"
     );
     assert!(
         !crate::fleet::role::is_posture_denial("some_session_preference"),
@@ -20912,4 +20949,67 @@ fn agent_tool_description_names_only_schema_roles() {
             );
         }
     }
+}
+
+#[tokio::test]
+async fn test_disallowed_tools_resume_keeps_saved_and_current_ancestor_denials() {
+    let tmp = tempdir().unwrap();
+    let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 4);
+    let agent_id = {
+        let mut guard = manager.write().await;
+        let (id, _) = guard.insert_test_interrupted_continuable_agent(
+            "saved_worker",
+            tmp.path(),
+            vec![Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: "prior work".to_string(),
+                    cache_control: None,
+                }],
+            }],
+        );
+        guard
+            .worker_records
+            .get_mut(&id)
+            .unwrap()
+            .spec
+            .runtime_profile
+            .denied_tools = vec!["mcp_saved_*".to_string()];
+        id
+    };
+    let mut runtime = stub_runtime_with_disallowed(vec!["mcp_current_*".to_string()]);
+    runtime.manager = Arc::clone(&manager);
+    let resumed = manager
+        .write()
+        .await
+        .resume_from_checkpoint(
+            Arc::clone(&manager),
+            runtime,
+            &agent_id,
+            "continue with current restrictions",
+        )
+        .expect("resume remains available");
+    let guard = manager.read().await;
+    let profile = &guard
+        .worker_records
+        .get(&resumed.agent_id)
+        .unwrap()
+        .spec
+        .runtime_profile;
+    for rule in ["mcp_saved_*", "mcp_current_*"] {
+        assert!(
+            profile.denied_tools.iter().any(|entry| entry == rule),
+            "missing {rule}"
+        );
+    }
+    assert_eq!(
+        guard
+            .worker_records
+            .get(&agent_id)
+            .unwrap()
+            .spec
+            .runtime_profile
+            .denied_tools,
+        vec!["mcp_saved_*"]
+    );
 }

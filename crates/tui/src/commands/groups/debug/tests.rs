@@ -189,7 +189,7 @@ fn cost_report_states_its_coverage_and_names_what_it_excludes() {
     assert!(msg.contains("estimate, not a bill"), "{msg}");
     assert!(msg.contains("Excluded: 1"), "{msg}");
     assert!(msg.contains("Priced subtotal:"), "{msg}");
-    assert!(msg.contains("missing_class_price"), "{msg}");
+    assert!(msg.contains("token class rate unavailable"), "{msg}");
     assert!(msg.contains("cache_write"), "{msg}");
 
     // A run with no unpriced turns says so without an exclusion note.
@@ -976,7 +976,7 @@ fn cache_history_shows_cache_write_tokens_and_explains_unpriced_turns() {
     assert!(msg.contains("sum_reasoning: 50000"), "{msg}");
     // The priced turn shows money; the unpriced one shows why it does not.
     assert!(msg.contains("$1.3450"), "{msg}");
-    assert!(msg.contains("missing_class_price"), "{msg}");
+    assert!(msg.contains("token class rate unavailable"), "{msg}");
     assert!(msg.contains("cache_write"), "{msg}");
 }
 

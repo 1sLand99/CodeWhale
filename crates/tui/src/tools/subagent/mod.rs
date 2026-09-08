@@ -47,7 +47,7 @@ use crate::dependencies::{ExternalTool, Git};
 pub use crate::fleet::role::FleetRole;
 use crate::fleet::role::{
     FLEET_ROLE_SCHEMA_VALUES, NETWORK_DENIAL_SENTINEL, SHELL_AUTHORITY_SENTINEL,
-    VALID_ROLE_ALIASES, is_posture_denial, migrate_legacy_role_token, public_role_label,
+    VALID_ROLE_ALIASES, migrate_legacy_role_token, public_role_label,
 };
 use crate::llm_client::{LlmClient, LlmError};
 use crate::models::{
@@ -1738,8 +1738,8 @@ struct SpawnRequest {
     /// inherited deny-list. Deny always wins over allow (#4042).
     disallowed_tools: Option<Vec<String>>,
     /// When true (default), the child inherits the parent runtime's
-    /// `disallowed_tools`. Set `false` to start the child with a clean slate
-    /// (only the explicit `disallowed_tools` above, if any, then apply).
+    /// `disallowed_tools`. Legacy `false` is accepted but cannot remove any
+    /// ancestor or operator restriction.
     inherit_disallowed_tools: bool,
     /// Declared child write authority. Not schema decoration: `ReadOnly`
     /// narrows the child worker profile's write permission before spawn, so a
@@ -6507,7 +6507,14 @@ impl SubAgentManager {
             None => AgentWorkerToolProfile::Inherited,
         };
         let runtime_profile = match options.preserve_runtime_profile.clone() {
-            Some(preserved) => {
+            Some(mut preserved) => {
+                // A saved worker keeps its prior restrictions, and resuming it
+                // cannot discard restrictions of the current delegating parent.
+                for rule in &runtime.worker_profile.denied_tools {
+                    if !preserved.denied_tools.contains(rule) {
+                        preserved.denied_tools.push(rule.clone());
+                    }
+                }
                 runtime.worker_profile = preserved.clone();
                 preserved
             }
@@ -9362,34 +9369,12 @@ async fn spawn_subagent_from_input(
                 Some(parent_plugins.rediscover_for_workspace(&workspace));
         }
     }
-    // #4042: merge the parent runtime's inherited deny-list with the caller's
-    // explicit `disallowed_tools`. `background_runtime()` already cloned the
-    // parent's `worker_profile.denied_tools` (the session `--disallowed-tools`),
-    // so by default the child inherits it. `inherit_disallowed_tools: false`
-    // drops *only* the inherited list; an explicit caller `disallowed_tools`
-    // always applies (union, deny never relaxes).
-    if !spawn_request.inherit_disallowed_tools {
-        // Drops the *preference* half of the inherited list only. A rule that
-        // expresses an enforced ceiling survives, because a child that could
-        // clear it would be widening its parent's network/write/execution
-        // envelope by asking — see `crate::fleet::role::is_posture_denial`.
-        child_runtime
-            .worker_profile
-            .denied_tools
-            .retain(|rule| is_posture_denial(rule));
-    }
-    if let Some(ref caller_deny) = spawn_request.disallowed_tools {
-        for tool in caller_deny {
-            if !child_runtime
-                .worker_profile
-                .denied_tools
-                .iter()
-                .any(|existing| existing == tool)
-            {
-                child_runtime.worker_profile.denied_tools.push(tool.clone());
-            }
-        }
-    }
+    // Denials are an ancestor/operator ceiling. The legacy inherit=false
+    // spelling is accepted for saved calls, but cannot widen that ceiling.
+    merge_spawn_disallowed_tools(
+        &mut child_runtime.worker_profile.denied_tools,
+        &spawn_request,
+    );
     apply_spawn_write_authority(&mut child_runtime, &spawn_request);
     let write_capable = spawn_request_is_write_capable(&spawn_request);
     let write_claim = write_capable.then(|| WriteScopeClaim {
@@ -11364,132 +11349,7 @@ async fn cancelled_subagent_result(
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-/// Runs one sub-agent under delegated authority. When the session's
-/// sandbox backend can derive a child (ShannonNet: a spawned child identity
-/// with a World projected from the session World), the sub-agent's tools run
-/// through that child backend and never as the session principal; when it
-/// cannot (a plain remote executor, or no backend), the sub-agent shares the
-/// parent's backend as before. A failed delegation fails the spawn rather
-/// than silently running the child with the parent's authority. On
-/// completion the child is joined: a typed receipt on the task and the
-/// child's authority retired.
 async fn run_subagent(
-    runtime: &SubAgentRuntime,
-    agent_id: String,
-    agent_type: FleetRole,
-    prompt: String,
-    assignment: SubAgentAssignment,
-    allowed_tools: Option<Vec<String>>,
-    fork_context: bool,
-    started_at: Instant,
-    max_steps: u32,
-    token_budget: Option<u64>,
-    turn_end_parking: Option<Arc<std::sync::atomic::AtomicBool>>,
-    input_rx: mpsc::UnboundedReceiver<SubAgentInput>,
-) -> Result<SubAgentResult> {
-    let child_backend = match runtime.context.sandbox_backend.as_ref() {
-        Some(backend) => {
-            let role = assignment
-                .role
-                .as_deref()
-                .filter(|role| !role.trim().is_empty())
-                .unwrap_or(agent_type.as_str());
-            backend
-                .for_child(role, &prompt)
-                .map_err(|err| anyhow!("sub-agent authority could not be delegated: {err}"))?
-        }
-        None => None,
-    };
-    let child_runtime = child_backend.as_ref().map(|child| {
-        let mut child_runtime = runtime.clone();
-        child_runtime.context.sandbox_backend = Some(Arc::clone(child));
-        child_runtime
-    });
-    // Bounded context instead of a transcript: the session's memory hits
-    // for this task go into the authority layer's memory graph, and the
-    // child gets back only what its projected World may see.
-    let prompt = match child_backend.as_ref() {
-        Some(child) => {
-            let notes = session_memory_notes(runtime, &prompt);
-            match child.child_context(&prompt, &notes).await {
-                Ok(Some(brief)) => format!("{prompt}\n\n{brief}"),
-                Ok(None) => prompt,
-                Err(err) => {
-                    tracing::warn!(target: "subagent", ?err, agent_id, "sub-agent context was not compiled");
-                    prompt
-                }
-            }
-        }
-        None => prompt,
-    };
-    let result = run_subagent_in(
-        child_runtime.as_ref().unwrap_or(runtime),
-        agent_id.clone(),
-        agent_type,
-        prompt,
-        assignment,
-        allowed_tools,
-        fork_context,
-        started_at,
-        max_steps,
-        token_budget,
-        turn_end_parking,
-        input_rx,
-    )
-    .await;
-    if let Some(child) = child_backend {
-        let (summary, succeeded) = match &result {
-            Ok(outcome) => (
-                outcome.result.as_deref(),
-                matches!(outcome.status, SubAgentStatus::Completed),
-            ),
-            Err(_) => (None, false),
-        };
-        // Token accounting stays in Codewhale's own usage record; the join
-        // carries the child's conclusion and outcome.
-        if let Err(err) = child.child_joined(summary, 0, succeeded).await {
-            tracing::warn!(target: "subagent", ?err, agent_id, "sub-agent join was not recorded");
-        }
-    }
-    result
-}
-
-/// The session's native-memory hits for a task, as notes a child backend
-/// may import. Empty when memory is off or the store has nothing.
-fn session_memory_notes(
-    runtime: &SubAgentRuntime,
-    task: &str,
-) -> Vec<crate::sandbox::backend::MemoryNote> {
-    let Some(memory_path) = runtime.context.memory_path.as_deref() else {
-        return Vec::new();
-    };
-    let store = crate::commands::native_store_from_memory_path(memory_path);
-    match store.search_for_workspace(&runtime.context.workspace, task, 12) {
-        Ok(hits) => hits
-            .into_iter()
-            .filter(|hit| !hit.stale)
-            .map(|hit| crate::sandbox::backend::MemoryNote {
-                key: format!(
-                    "{}:{}-{}",
-                    hit.source.display(),
-                    hit.line_start,
-                    hit.line_end
-                ),
-                content: hit.text,
-                source: format!(
-                    "codewhale-memory:{}:{}-{}",
-                    hit.source.display(),
-                    hit.line_start,
-                    hit.line_end
-                ),
-            })
-            .collect(),
-        Err(_) => Vec::new(),
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn run_subagent_in(
     runtime: &SubAgentRuntime,
     agent_id: String,
     agent_type: FleetRole,
@@ -12722,7 +12582,7 @@ fn parse_spawn_request(input: &Value) -> Result<SpawnRequest, ToolError> {
         .map(|seconds| Duration::from_secs(seconds.clamp(1, MAX_CHILD_WALL_TIME.as_secs())));
 
     // #4042: optional caller-supplied tool deny-list (unioned with the parent's
-    // inherited deny-list) and the inheritance opt-out flag (default inherits).
+    // inherited deny-list) and the legacy inheritance flag (cannot relax policy).
     let disallowed_tools = parse_disallowed_tools(input)?;
     let inherit_disallowed_tools = parse_optional_bool(
         input,
@@ -13370,6 +13230,17 @@ fn parse_optional_bool(input: &Value, names: &[&str]) -> Result<Option<bool>, To
         .as_bool()
         .map(Some)
         .ok_or_else(|| codewhale_tools::type_mismatch(name, value, "a boolean"))
+}
+
+fn merge_spawn_disallowed_tools(inherited: &mut Vec<String>, request: &SpawnRequest) {
+    let _ = request.inherit_disallowed_tools; // compatibility input; never grants authority
+    if let Some(caller) = request.disallowed_tools.as_ref() {
+        for rule in caller {
+            if !inherited.contains(rule) {
+                inherited.push(rule.clone());
+            }
+        }
+    }
 }
 
 /// Parse an optional caller-supplied `disallowed_tools` array (#4042). Mirrors
@@ -14181,7 +14052,8 @@ impl SubAgentToolRegistry {
         let allowed_tools =
             intersect_explicit_tool_scope(&effective_profile.tools, explicit_allowed_tools);
         surface_options.shell_policy = child_shell;
-        let context = runtime.context.clone().with_shell_policy(child_shell);
+        let mut context = runtime.context.clone().with_shell_policy(child_shell);
+        context.disallowed_tools = effective_profile.denied_tools.clone();
         let mut child_runtime = runtime.clone();
         child_runtime.parent_agent_id = Some(owner_agent_id.clone());
         child_runtime.worker_profile = effective_profile.clone();
@@ -14765,6 +14637,19 @@ impl SubAgentToolRegistry {
                         && role_posture_permits(&self.agent_type, ApprovalRequirement::Suggest)
                 }
                 ApprovalRequirement::Required => {
+                    // An outbound read needs approval because its payload can
+                    // disclose data. That hold does not grant shell/write
+                    // authority; network/envelope and parent approval gates
+                    // below independently decide whether this child may send it.
+                    let capabilities = spec.capabilities();
+                    if capabilities.contains(&ToolCapability::ReadOnly)
+                        && capabilities.contains(&ToolCapability::Network)
+                        && !capabilities.contains(&ToolCapability::ExecutesCode)
+                        && !capabilities.contains(&ToolCapability::WritesFiles)
+                    {
+                        return true;
+                    }
+
                     // #5426 acceptance point 1: the bounded read-only shell.
                     // `allows_bounded_readonly_bash` admits canonical `bash`
                     // to the inspection roles through the raw-shell deny
@@ -15251,6 +15136,10 @@ impl SubAgentToolRegistry {
                 role = self.agent_type.as_str()
             ));
         }
+        // Denied network capability cannot be expanded by answering a prompt.
+        if self.network_is_denied() {
+            reject_network_reaching_input(name, &input)?;
+        }
         // The session's permission posture, applied to this child exactly as
         // it is applied to the parent turn: the deterministic Auto-Review
         // floor first, then (Auto-Review) the model guardian for holds it
@@ -15265,9 +15154,6 @@ impl SubAgentToolRegistry {
             return Err(anyhow!(reason));
         }
         reject_subagent_terminal_takeover(name, &input)?;
-        if self.network_is_denied() {
-            reject_network_reaching_input(name, &input)?;
-        }
         if self.write_is_denied() {
             reject_unbounded_verification(name, &input, !self.shell_is_denied())?;
         }

@@ -1811,6 +1811,20 @@ pub struct TuiConfig {
     /// in `~/.deepseek/config.toml`.
     #[serde(default, deserialize_with = "deser_status_items")]
     pub status_items: Option<Vec<StatusItem>>,
+    /// How much of the posture bar — the first row under the composer — to
+    /// paint: `full` (default), `compact`, or `hidden`. `hidden` gives the
+    /// row back to the transcript; `compact` keeps the row and starts its
+    /// shed ladder past the clocks, counts and hints (#5950).
+    ///
+    /// `status_items` still composes what is *in* the row; this only decides
+    /// the row's size. Absent from an older `config.toml` means `full`.
+    #[serde(default)]
+    pub posture_bar: Option<ChromeRowPreset>,
+    /// The same three settings for the metrics line under the posture bar.
+    /// `compact` keeps the route, the context reading, the cost and the
+    /// balance and drops the telemetry and the help hint (#5950).
+    #[serde(default)]
+    pub metrics_line: Option<ChromeRowPreset>,
     /// Ordered list of optional header items the user wants visible.
     ///
     /// `None` (the field missing from `config.toml`) preserves the built-in
@@ -1858,6 +1872,52 @@ pub struct TuiConfig {
     /// `true` only when mouse capture is off; otherwise `false`.
     #[serde(default)]
     pub composer_arrows_scroll: Option<bool>,
+}
+
+/// How much of one bottom-chrome row to paint (#5950). One value for each
+/// of the two rows under the composer — [`TuiConfig::posture_bar`] and
+/// [`TuiConfig::metrics_line`] — so a small tmux pane can give one or both
+/// rows back to the transcript without touching `status_items`.
+///
+/// `compact` is not a second renderer: it starts the row's existing shed
+/// ladder at a fixed rung and lets width shed the rest, so what it keeps is
+/// exactly what a narrow row keeps.
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ChromeRowPreset {
+    /// Every fact the row owns, shed only by width.
+    #[default]
+    Full,
+    /// The row's shed ladder started past its most expendable rungs.
+    Compact,
+    /// No row: the transcript takes the line.
+    Hidden,
+}
+
+impl ChromeRowPreset {
+    /// Every setting value, in the order `/config` names them.
+    pub const SETTINGS: [&'static str; 3] = ["full", "compact", "hidden"];
+
+    /// Stable name used in `config.toml` and `/config`.
+    #[must_use]
+    pub const fn as_setting(self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::Compact => "compact",
+            Self::Hidden => "hidden",
+        }
+    }
+
+    /// Reverse of [`Self::as_setting`]; `None` for anything else.
+    #[must_use]
+    pub fn from_setting(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "full" => Some(Self::Full),
+            "compact" => Some(Self::Compact),
+            "hidden" => Some(Self::Hidden),
+            _ => None,
+        }
+    }
 }
 
 /// High-level notification trigger override. See
@@ -2330,6 +2390,14 @@ pub struct ToolsConfig {
     /// (4). Values outside `2..=10` are clamped with a warning.
     #[serde(default)]
     pub user_input_max_options: Option<u32>,
+
+    /// Seconds Codewhale waits for a user-input answer or an approval
+    /// decision before cancelling it (#6003). `None` uses the built-in
+    /// default (300). An explicit `0` disables the timeout entirely, so
+    /// long human review or overnight automation can wait indefinitely.
+    /// Values above 86,400 (24h) are clamped with a warning.
+    #[serde(default)]
+    pub user_input_timeout_seconds: Option<u64>,
 }
 
 /// Persistent-goal loop controls (`[goal]` table in config.toml, #5052).
@@ -2344,6 +2412,16 @@ pub struct GoalConfig {
     /// control ends the run.
     #[serde(default)]
     pub max_continuations: Option<u32>,
+
+    /// Per-engine-turn step allowance while a goal is active (#5994). Goal
+    /// work gets a larger but still finite budget than an ordinary
+    /// interactive turn: `None` or `0` resolves to
+    /// [`crate::goal_loop::DEFAULT_GOAL_MAX_STEPS`] (1,000); values clamp to
+    /// `1..=100,000`. This bounds each turn, never the number of
+    /// continuation passes; explicit per-invocation ceilings
+    /// (`exec --max-turns`, child-worker caps) still win.
+    #[serde(default)]
+    pub max_steps: Option<u32>,
     /// Optional quiet period between successful cross-turn continuations.
     /// `0` preserves immediate continuation. Positive values make long-lived
     /// coordinator goals yield visibly between turns instead of sleeping
@@ -3098,9 +3176,9 @@ pub struct Config {
     pub fallback_providers: Vec<codewhale_config::ProviderKind>,
     pub yolo: Option<bool>,
     pub verbosity: Option<String>,
-    /// External sandbox backend: `"none"`, `"opensandbox"`, or `"shannon"`.
-    /// When set, exec_shell routes commands through the backend instead of
-    /// spawning a local process.
+    /// External sandbox backend: `"none"` or `"opensandbox"`.
+    /// When set, exec_shell routes commands through the backend's HTTP API
+    /// instead of spawning a local process.
     #[serde(alias = "sandboxBackend")]
     pub sandbox_backend: Option<String>,
     /// Base URL for the external sandbox backend (default: `"http://localhost:8080"`).
@@ -3109,19 +3187,6 @@ pub struct Config {
     /// Optional API key for the external sandbox backend (sent as Bearer token).
     #[serde(alias = "sandboxApiKey")]
     pub sandbox_api_key: Option<String>,
-    /// ShannonNet state directory for `sandbox_backend = "shannon"`
-    /// (default: `$SHANNON_HOME`, else `~/.shannon`).
-    #[serde(alias = "sandboxShannonHome")]
-    pub sandbox_shannon_home: Option<String>,
-    /// Capability invoked per shell command for `sandbox_backend = "shannon"`
-    /// (default: `cap://sandbox/exec`).
-    #[serde(alias = "sandboxShannonCapability")]
-    pub sandbox_shannon_capability: Option<String>,
-    /// Ship the workspace's non-ignored files to the worker's per-World
-    /// session before each command (default true). False runs commands
-    /// against the worker's own checkout in a throwaway container.
-    #[serde(alias = "sandboxShannonSync")]
-    pub sandbox_shannon_sync: Option<bool>,
     /// When true and `/usr/bin/bwrap` is executable on Linux, route exec_shell
     /// through bubblewrap (#2184).
     /// Defaults to false. Requires the `bubblewrap` package to be installed
@@ -3334,6 +3399,14 @@ pub struct Config {
     /// Vision model configuration for the `image_analyze` tool.
     #[serde(default)]
     pub vision_model: Option<VisionModelConfig>,
+
+    /// Model-bound credential redaction policy (`[redaction]`). When absent,
+    /// masking is enabled — the shipped security default. A `"disabled"`
+    /// request only takes effect after a TUI restart and an explicit
+    /// confirmation on the startup gate; see
+    /// [`codewhale_config::redaction`].
+    #[serde(default)]
+    pub redaction: Option<codewhale_config::redaction::RedactionToml>,
 
     /// Sibling `permissions.toml` ask-rules compiled for runtime checks.
     ///
@@ -4855,6 +4928,24 @@ impl Config {
             tools.and_then(|t| t.user_input_max_questions),
             tools.and_then(|t| t.user_input_max_options),
         )
+    }
+
+    /// Effective wait for a user-input answer or an approval decision
+    /// (#6003). `None` means the built-in default (300s). An explicit `0`
+    /// disables the timeout; values above 24h clamp with a warning.
+    #[must_use]
+    pub fn user_input_timeout(&self) -> Option<std::time::Duration> {
+        const MAX_SECONDS: u64 = 86_400;
+        let seconds = self
+            .tools
+            .as_ref()
+            .and_then(|tools| tools.user_input_timeout_seconds)?;
+        if seconds > MAX_SECONDS {
+            tracing::warn!(
+                "[tools] user_input_timeout_seconds={seconds} exceeds 24h; clamping to {MAX_SECONDS}"
+            );
+        }
+        Some(std::time::Duration::from_secs(seconds.min(MAX_SECONDS)))
     }
 
     #[must_use]
@@ -7334,6 +7425,24 @@ impl Config {
             .unwrap_or(crate::goal_loop::DEFAULT_MAX_GOAL_CONTINUATIONS)
     }
 
+    /// Per-engine-turn step allowance while a goal is active (#5994). Goal
+    /// turns get [`crate::goal_loop::DEFAULT_GOAL_MAX_STEPS`] by default —
+    /// five times the ordinary interactive allowance — while staying finite.
+    #[must_use]
+    pub fn goal_max_steps(&self) -> u32 {
+        let configured = self.goal.as_ref().and_then(|goal| goal.max_steps);
+        match configured {
+            None | Some(0) => crate::goal_loop::DEFAULT_GOAL_MAX_STEPS,
+            Some(steps) => {
+                let clamped = steps.clamp(1, 100_000);
+                if clamped != steps {
+                    tracing::warn!("[goal] max_steps={steps} out of range; clamping to {clamped}");
+                }
+                clamped
+            }
+        }
+    }
+
     /// Quiet period between successful interactive goal turns (#5508).
     /// Absent/zero keeps the existing immediate-continuation behavior.
     #[must_use]
@@ -7891,6 +8000,18 @@ impl Config {
         self.workflow.clone().unwrap_or_default()
     }
 
+    /// The requested model-bound masking mode (`[redaction] model_bound`),
+    /// defaulting to enabled. This is the user's *request*; the effective mode
+    /// also depends on the startup-gate confirmation receipt, see
+    /// [`codewhale_config::redaction::effective_masking`].
+    #[must_use]
+    pub fn model_bound_redaction(&self) -> codewhale_config::redaction::ModelBoundMasking {
+        self.redaction
+            .as_ref()
+            .map(codewhale_config::redaction::RedactionToml::model_bound_masking)
+            .unwrap_or_default()
+    }
+
     /// Return the configured DeepSeek reasoning-effort tier, if any.
     #[must_use]
     pub fn reasoning_effort(&self) -> Option<&str> {
@@ -8048,12 +8169,12 @@ fn root_deepseek_model_is_foreign_to_direct_provider(provider: ApiProvider, mode
 mod home;
 mod paths;
 use paths::{
-    canonicalize_or_keep, default_config_path, default_managed_config_path,
+    canonicalize_or_keep, codewhale_home_dir, default_config_path, default_managed_config_path,
     default_mcp_config_path, default_memory_path, default_notes_path, default_requirements_path,
     default_skills_dir, env_config_path, expand_pathbuf, home_config_path, try_default_config_path,
     workspace_config_key,
 };
-pub(crate) use paths::{codewhale_home_dir, effective_home_dir, expand_path};
+pub(crate) use paths::{effective_home_dir, expand_path};
 
 pub(crate) fn workspace_trust_config_candidate_paths() -> Vec<PathBuf> {
     #[cfg(test)]
@@ -8134,6 +8255,31 @@ pub(crate) fn save_workspace_trust(workspace: &Path) -> Result<PathBuf> {
         )
     })
     .with_context(|| format!("Failed to write config to {}", config_path.display()))?;
+    Ok(config_path)
+}
+
+/// Project hook approval lives only in user-owned config, never in the repo.
+pub(crate) fn hook_receipt_for_workspace(workspace: &Path) -> Option<String> {
+    let raw = fs::read_to_string(default_config_path().ok()?).ok()?;
+    let doc = toml::from_str::<toml::Value>(&raw).ok()?;
+    doc.get("projects")?
+        .get(workspace_config_key(workspace))?
+        .get("hooks_sha256")?
+        .as_str()
+        .map(str::to_owned)
+}
+
+pub(crate) fn save_workspace_hook_receipt(workspace: &Path, digest: &str) -> Result<PathBuf> {
+    let config_path = try_default_config_path()?;
+    ensure_parent_dir(&config_path)?;
+    let project_key = workspace_config_key(workspace);
+    crate::config_persistence::mutate_config_document(&config_path, |doc| {
+        crate::config_persistence::set_document_value(
+            doc,
+            &["projects", project_key.as_str(), "hooks_sha256"],
+            digest,
+        )
+    })?;
     Ok(config_path)
 }
 
@@ -9563,15 +9709,6 @@ fn apply_env_overrides_unlocked(config: &mut Config, policy: ConfigEnvironmentPo
     {
         config.sandbox_api_key = Some(value);
     }
-    if let Ok(value) = std::env::var("CODEWHALE_SANDBOX_SHANNON_HOME") {
-        config.sandbox_shannon_home = Some(value);
-    }
-    if let Ok(value) = std::env::var("CODEWHALE_SANDBOX_SHANNON_CAPABILITY") {
-        config.sandbox_shannon_capability = Some(value);
-    }
-    if let Ok(value) = std::env::var("CODEWHALE_SANDBOX_SHANNON_SYNC") {
-        config.sandbox_shannon_sync = Some(value == "1" || value.eq_ignore_ascii_case("true"));
-    }
     if let Ok(value) = std::env::var("CODEWHALE_MANAGED_CONFIG_PATH")
         .or_else(|_| std::env::var("DEEPSEEK_MANAGED_CONFIG_PATH"))
     {
@@ -10680,6 +10817,7 @@ fn merge_config(base: Config, override_cfg: Config) -> Config {
         base_url: override_cfg.base_url.or(base.base_url),
         http_headers: override_cfg.http_headers.or(base.http_headers),
         default_text_model: override_cfg.default_text_model.or(base.default_text_model),
+        redaction: override_cfg.redaction.or(base.redaction),
         auth_mode: override_cfg.auth_mode.or(base.auth_mode),
         reasoning_effort: override_cfg.reasoning_effort.or(base.reasoning_effort),
         reasoning_effort_inferred_from_legacy_alias: override_cfg
@@ -10733,15 +10871,6 @@ fn merge_config(base: Config, override_cfg: Config) -> Config {
         sandbox_backend: override_cfg.sandbox_backend.or(base.sandbox_backend),
         sandbox_url: override_cfg.sandbox_url.or(base.sandbox_url),
         sandbox_api_key: override_cfg.sandbox_api_key.or(base.sandbox_api_key),
-        sandbox_shannon_home: override_cfg
-            .sandbox_shannon_home
-            .or(base.sandbox_shannon_home),
-        sandbox_shannon_capability: override_cfg
-            .sandbox_shannon_capability
-            .or(base.sandbox_shannon_capability),
-        sandbox_shannon_sync: override_cfg
-            .sandbox_shannon_sync
-            .or(base.sandbox_shannon_sync),
         prefer_bwrap: override_cfg.prefer_bwrap.or(base.prefer_bwrap),
         bwrap_ro_roots: if override_cfg.bwrap_ro_roots.is_empty() {
             base.bwrap_ro_roots

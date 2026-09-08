@@ -34,7 +34,7 @@ const MAX_SESSIONS: usize = 50;
 pub const MAX_SESSION_TITLE_CHARS: usize = 100;
 const WORK_GRAPH_IMPORT_ARCHIVE_DIR: &str = ".work-graph-import-archive";
 const SESSION_GOALS_DIR: &str = ".goals";
-const CURRENT_SESSION_GOAL_SCHEMA_VERSION: u32 = 1;
+const CURRENT_SESSION_GOAL_SCHEMA_VERSION: u32 = 2;
 const MAX_SESSION_GOAL_OBJECTIVE_CHARS: usize = 8_192;
 const MAX_SESSION_GOAL_FILE_BYTES: u64 = 64 * 1_024;
 const CURRENT_SESSION_SCHEMA_VERSION: u32 = 1;
@@ -605,6 +605,14 @@ pub struct SessionGoalState {
     pub elapsed_seconds: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pause_reason: Option<GoalPauseReason>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goal_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_gap_fingerprint: Option<String>,
+    #[serde(default)]
+    pub repeated_gap_count: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_gap_pass: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -657,6 +665,10 @@ impl SessionGoalState {
             continuation_count: snapshot.continuation_count,
             elapsed_seconds: snapshot.elapsed_seconds.unwrap_or_default(),
             pause_reason: snapshot.pause_reason,
+            goal_id: snapshot.goal_id.clone(),
+            last_gap_fingerprint: snapshot.last_gap_fingerprint.clone(),
+            repeated_gap_count: snapshot.repeated_gap_count,
+            last_gap_pass: snapshot.last_gap_pass,
         };
         state.validate()?;
         Ok(Some(state))
@@ -681,12 +693,29 @@ impl SessionGoalState {
                 ),
             ));
         }
-        Ok(())
+        if self
+            .goal_id
+            .as_ref()
+            .is_some_and(|id| id.is_empty() || id.len() > 128)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid session goal revision",
+            ));
+        }
+        codewhale_protocol::validate_goal_stall_state(
+            self.last_gap_fingerprint.as_deref(),
+            self.repeated_gap_count,
+            self.last_gap_pass,
+            self.continuation_count,
+        )
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
     }
 
     #[must_use]
     pub fn to_runtime_snapshot(&self) -> GoalSnapshot {
         GoalSnapshot {
+            goal_id: self.goal_id.clone(),
             objective: Some(self.objective.clone()),
             status: match self.status {
                 SessionGoalStatus::Active => "active",
@@ -705,8 +734,10 @@ impl SessionGoalState {
             pause_reason: self.pause_reason,
             completion_verification: None,
             advisories: Vec::new(),
-            last_gap_fingerprint: None,
-            repeated_gap_count: 0,
+            last_gap_fingerprint: self.last_gap_fingerprint.clone(),
+            repeated_gap_count: self.repeated_gap_count,
+            last_gap_pass: self.last_gap_pass,
+            progress: None,
         }
     }
 }
@@ -935,11 +966,21 @@ fn serialize_saved_session(session: &SavedSession) -> io::Result<String> {
 pub struct SessionManager {
     /// Directory where sessions are stored
     sessions_dir: PathBuf,
-    /// Which session this manager last parked or restored an offline queue
-    /// for. `clear_offline_queue_state` has no session argument (the
-    /// persistence actor's clear request carries none), so this is what a
-    /// bare clear resolves to — never another instance's session.
-    queue_owner: std::sync::Mutex<Option<String>>,
+}
+
+/// One interactive editor owns a session's unsent text until its last queued
+/// write finishes. The stable lock file is never unlinked: replacing it would
+/// let two processes lock different files for the same session.
+#[derive(Debug)]
+pub struct OfflineQueueLease {
+    session_id: String,
+    _file: fs::File,
+}
+
+impl OfflineQueueLease {
+    pub fn session_id(&self) -> &str {
+        &self.session_id
+    }
 }
 
 /// Origin of a crash-recovery checkpoint file.
@@ -966,6 +1007,10 @@ const LEGACY_CHECKPOINT_FILE: &str = "latest.json";
 const OFFLINE_QUEUE_FILE: &str = "offline_queue.json";
 /// Per-session offline queue file: `checkpoints/<session_id>.offline_queue.json`.
 const OFFLINE_QUEUE_SUFFIX: &str = ".offline_queue.json";
+
+pub(crate) fn is_offline_queue_file(name: &str) -> bool {
+    name == OFFLINE_QUEUE_FILE || name.ends_with(OFFLINE_QUEUE_SUFFIX)
+}
 
 impl SessionManager {
     fn approval_receipt_store(&self) -> ApprovalReceiptStore {
@@ -1104,10 +1149,7 @@ impl SessionManager {
         let sessions_dir = normalize_managed_dir(sessions_dir)?;
         // Ensure the sessions directory exists
         fs::create_dir_all(&sessions_dir)?;
-        Ok(Self {
-            sessions_dir,
-            queue_owner: std::sync::Mutex::new(None),
-        })
+        Ok(Self { sessions_dir })
     }
 
     /// Create a `SessionManager` using the default location.
@@ -1413,7 +1455,7 @@ impl SessionManager {
             };
             let source = if name == LEGACY_CHECKPOINT_FILE {
                 CheckpointSource::Legacy
-            } else if name == OFFLINE_QUEUE_FILE || name.ends_with(OFFLINE_QUEUE_SUFFIX) {
+            } else if is_offline_queue_file(name) {
                 // Parked offline queues live in this directory but are not
                 // crash-recovery checkpoints.
                 continue;
@@ -1454,6 +1496,41 @@ impl SessionManager {
         Ok(true)
     }
 
+    /// Acquire before loading or editing a queue, including on in-process
+    /// resume. A per-write lock is insufficient: the second editor's stale
+    /// snapshot would overwrite the first as soon as its write completed.
+    pub fn acquire_offline_queue_lease(
+        &self,
+        session_id: &str,
+    ) -> io::Result<std::sync::Arc<OfflineQueueLease>> {
+        let session_id = self.validated_session_id(session_id)?.to_string();
+        let directory = self.checkpoints_dir();
+        fs::create_dir_all(&directory)?;
+        let path = directory.join(format!("{session_id}.offline_queue.lock"));
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(path)?;
+        let mut lock = fd_lock::RwLock::new(file);
+        let guard = lock.try_write().map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!("Cannot open session {session_id}: its queued input is already open in another window, or its previous writes are still finishing ({error})"),
+            )
+        })?;
+        // fd-lock's guard borrows its owner. Retain the underlying descriptor
+        // instead so this lease can travel with asynchronous writes. Forgetting
+        // this non-owning guard keeps the OS lock held; closing the final Arc's
+        // file releases it on both Unix and Windows, including process crashes.
+        std::mem::forget(guard);
+        Ok(std::sync::Arc::new(OfflineQueueLease {
+            session_id,
+            _file: lock.into_inner(),
+        }))
+    }
+
     /// Park this session's offline queue (queued + draft messages).
     ///
     /// Queues are keyed per session (`checkpoints/<session_id>.offline_queue.json`)
@@ -1483,7 +1560,6 @@ impl SessionManager {
         let content = serde_json::to_string_pretty(&owned)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         write_atomic(&path, content.as_bytes())?;
-        self.remember_queue_owner(session_id);
         Ok(path)
     }
 
@@ -1493,27 +1569,10 @@ impl SessionManager {
         session_id: &str,
     ) -> std::io::Result<Option<OfflineQueueState>> {
         let path = self.validated_offline_queue_path(session_id)?;
-        let state = match Self::read_offline_queue_file(&path)? {
+        Ok(match Self::read_offline_queue_file(&path)? {
             Some(state) => Some(state),
             None => self.adopt_legacy_offline_queue(session_id, &path)?,
-        };
-        if state.is_some() {
-            self.remember_queue_owner(session_id);
-        }
-        Ok(state)
-    }
-
-    /// Remove the parked offline queue for the session this manager last
-    /// parked or restored one for.
-    ///
-    /// The persistence actor's clear request carries no session id, so the
-    /// owner is whichever session this manager instance last wrote a queue
-    /// for. It can therefore never reach another session's parked text.
-    pub fn clear_offline_queue_state(&self) -> std::io::Result<()> {
-        let Some(session_id) = self.queue_owner() else {
-            return Ok(());
-        };
-        self.clear_offline_queue_state_for(&session_id)
+        })
     }
 
     /// Remove one named session's parked offline queue.
@@ -1523,10 +1582,6 @@ impl SessionManager {
             Ok(()) => {}
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => return Err(error),
-        }
-        let mut owner = self.lock_queue_owner();
-        if owner.as_deref() == Some(session_id.trim()) {
-            *owner = None;
         }
         Ok(())
     }
@@ -1593,20 +1648,6 @@ impl SessionManager {
             Err(error) => return Err(error),
         }
         Ok(Some(state))
-    }
-
-    fn lock_queue_owner(&self) -> std::sync::MutexGuard<'_, Option<String>> {
-        self.queue_owner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-
-    fn remember_queue_owner(&self, session_id: &str) {
-        *self.lock_queue_owner() = Some(session_id.trim().to_string());
-    }
-
-    fn queue_owner(&self) -> Option<String> {
-        self.lock_queue_owner().clone()
     }
 
     /// Read a session snapshot without repairing tool call/result pairs.
@@ -2694,6 +2735,7 @@ mod tests {
         let manager = SessionManager::new(sessions_dir.clone()).expect("manager");
         let session_id = "11111111-2222-4333-8444-555555555555";
         let runtime = GoalSnapshot {
+            goal_id: None,
             objective: Some("finish the provider migration".to_string()),
             status: "paused".to_string(),
             token_budget: Some(50_000),
@@ -2708,6 +2750,8 @@ mod tests {
             advisories: Vec::new(),
             last_gap_fingerprint: None,
             repeated_gap_count: 0,
+            last_gap_pass: None,
+            progress: None,
         };
         let durable = SessionGoalState::from_runtime(&runtime)
             .expect("valid runtime goal")
@@ -4453,7 +4497,7 @@ mod tests {
         assert!(loaded.draft.is_some());
 
         manager
-            .clear_offline_queue_state()
+            .clear_offline_queue_state_for("test-session")
             .expect("clear queue state");
         assert!(
             manager
@@ -4532,47 +4576,6 @@ mod tests {
                 .load_offline_queue_state("session-C")
                 .expect("load C")
                 .is_none()
-        );
-    }
-
-    #[test]
-    fn bare_clear_only_reaches_this_managers_own_queue() {
-        // The persistence actor's clear request carries no session id, so a
-        // bare clear resolves to whichever session this manager last parked
-        // or restored a queue for.
-        let tmp = tempdir().expect("tempdir");
-        let sessions_dir = tmp.path().join("sessions");
-        let mine = SessionManager::new(sessions_dir.clone()).expect("new");
-        let theirs = SessionManager::new(sessions_dir).expect("new");
-
-        theirs
-            .save_offline_queue_state(&parked("their text"), Some("session-B"))
-            .expect("park B");
-        mine.save_offline_queue_state(&parked("my text"), Some("session-A"))
-            .expect("park A");
-
-        mine.clear_offline_queue_state().expect("clear mine");
-        assert!(
-            mine.load_offline_queue_state("session-A")
-                .expect("load A")
-                .is_none()
-        );
-        assert!(
-            theirs
-                .load_offline_queue_state("session-B")
-                .expect("load B")
-                .is_some(),
-            "a bare clear must not reach another instance's parked text"
-        );
-
-        // Nothing parked through this manager: a bare clear is a no-op.
-        let bystander = SessionManager::new(tmp.path().join("sessions")).expect("new");
-        bystander.clear_offline_queue_state().expect("no-op clear");
-        assert!(
-            theirs
-                .load_offline_queue_state("session-B")
-                .expect("load B")
-                .is_some()
         );
     }
 
@@ -5032,5 +5035,63 @@ mod tests {
                 .is_none()
         );
         assert!(legacy.exists(), "unreadable legacy queue is left in place");
+    }
+    #[test]
+    fn offline_queue_lease_excludes_another_process_and_releases() {
+        const PROBE: &str = "CODEWHALE_QUEUE_LEASE_PROBE_DIR";
+        const HELD: &str = "CODEWHALE_QUEUE_LEASE_PROBE_HELD";
+        if let Some(directory) = std::env::var_os(PROBE) {
+            let manager = SessionManager::new(PathBuf::from(directory)).expect("child store");
+            let result = manager.acquire_offline_queue_lease("shared-session");
+            if std::env::var(HELD).as_deref() == Ok("1") {
+                assert_eq!(result.unwrap_err().kind(), io::ErrorKind::WouldBlock);
+            } else {
+                assert!(result.is_ok(), "closed owner must release its kernel lock");
+            }
+            return;
+        }
+        let directory = tempfile::tempdir().expect("queue fixture");
+        let sessions = directory.path().join("sessions");
+        let manager = SessionManager::new(sessions.clone()).expect("parent store");
+        let lease = manager
+            .acquire_offline_queue_lease("shared-session")
+            .expect("first editor");
+        let probe = |held: bool| {
+            let output = std::process::Command::new(
+                std::env::current_exe().expect("test executable"),
+            )
+            .args([
+                "--exact",
+                "session_manager::tests::offline_queue_lease_excludes_another_process_and_releases",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(PROBE, &sessions)
+            .env(HELD, if held { "1" } else { "0" })
+            .output()
+            .expect("second editor process");
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+        };
+        probe(true);
+        let _different_session = manager
+            .acquire_offline_queue_lease("different-session")
+            .expect("unrelated queue is available");
+        drop(lease);
+        probe(false);
+        for invalid in ["", "../session", "nested/session"] {
+            assert_eq!(
+                manager
+                    .acquire_offline_queue_lease(invalid)
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::InvalidInput
+            );
+        }
     }
 }

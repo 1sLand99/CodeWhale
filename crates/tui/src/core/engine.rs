@@ -475,6 +475,15 @@ pub struct EngineConfig {
     /// (#5949). One authority for the validator, the tool schema, and the
     /// tool description.
     pub user_input_limits: crate::tools::user_input::UserInputLimits,
+    /// Wait for a user-input answer before cancelling it (#6003). `None`
+    /// uses the built-in default (300s); `Some(Duration::ZERO)` waits
+    /// indefinitely.
+    pub user_input_timeout: Option<Duration>,
+    /// Per-turn step allowance while a goal is active (#5994). Hosts opt in
+    /// with their resolved `[goal] max_steps`; `None` keeps the ordinary
+    /// `max_steps` ceiling for goal turns too — which is what exec/worker
+    /// paths with explicit per-invocation ceilings must see.
+    pub goal_max_steps: Option<u32>,
     /// When true and `/usr/bin/bwrap` is executable on Linux, route exec_shell
     /// through bubblewrap (#2184).
     pub prefer_bwrap: bool,
@@ -601,6 +610,8 @@ impl Default for EngineConfig {
             ),
             tools_always_load: HashSet::new(),
             user_input_limits: crate::tools::user_input::UserInputLimits::default(),
+            user_input_timeout: None,
+            goal_max_steps: None,
             prefer_bwrap: false,
             bwrap_extensions: crate::sandbox::BwrapMountExtensions::default(),
             // Fail-closed (F7): `Engine::new` unconditionally installs this
@@ -657,6 +668,7 @@ impl CancelReason {
 /// Handle to communicate with the engine
 #[derive(Clone)]
 pub struct EngineHandle {
+    goal_state: SharedGoalState,
     /// Send operations to the engine
     pub tx_op: mpsc::Sender<Op>,
     /// Receive events from the engine
@@ -1646,13 +1658,12 @@ impl Engine {
         // External sandbox backend (#516). Logged but non-fatal: if the
         // backend fails to construct, the engine continues with local
         // execution as the fallback.
-        let sandbox_backend =
-            crate::sandbox::backend::create_backend(api_config, &config.workspace)
-                .unwrap_or_else(|e| {
-                    tracing::warn!("Failed to create sandbox backend: {e}");
-                    None
-                })
-                .map(std::sync::Arc::from);
+        let sandbox_backend = crate::sandbox::backend::create_backend(api_config)
+            .unwrap_or_else(|e| {
+                tracing::warn!("Failed to create sandbox backend: {e}");
+                None
+            })
+            .map(std::sync::Arc::from);
         let sandbox_enforcement = if sandbox_backend.is_some() {
             crate::sandbox::policy::SandboxEnforcement::ExternalBackend
         } else if crate::sandbox::get_platform_sandbox_with_bwrap_preference(config.prefer_bwrap)
@@ -1738,6 +1749,7 @@ impl Engine {
             advisor_emission_guard: None,
         };
         let handle = EngineHandle {
+            goal_state: engine.config.goal_state.clone(),
             tx_op,
             rx_event: Arc::new(RwLock::new(rx_event)),
             cancel_token: shared_cancel_token,
@@ -2727,14 +2739,19 @@ impl Engine {
                         )
                         .await;
                     }
-                    Op::SetGoalStatus { status, clear } => {
-                        self.handle_set_goal_status(status, clear).await;
+                    Op::SetGoalStatus {
+                        status,
+                        clear,
+                        goal_id,
+                    } => {
+                        self.handle_set_goal_status(status, clear, goal_id).await;
                     }
                     Op::SetGoalObjective {
                         objective,
                         token_budget,
+                        goal_id,
                     } => {
-                        self.handle_set_goal_objective(objective, token_budget)
+                        self.handle_set_goal_objective(objective, token_budget, goal_id)
                             .await;
                     }
                     Op::PreviewOutboundRequest {
@@ -4155,7 +4172,12 @@ impl Engine {
     /// Handle `/goal pause|resume|clear|complete|blocked` by writing the new
     /// status to `SharedGoalState` so the cross-turn continuation loop respects
     /// it. This does NOT dispatch a model turn — it's a control-plane update.
-    async fn handle_set_goal_status(&mut self, status: GoalStatus, clear: bool) {
+    async fn handle_set_goal_status(
+        &mut self,
+        status: GoalStatus,
+        clear: bool,
+        goal_id: Option<String>,
+    ) {
         if clear || status != GoalStatus::Active {
             self.cancel_scheduled_goal_continuation(true).await;
         }
@@ -4181,7 +4203,11 @@ impl Engine {
                     // is preserved (pause/resume shouldn't reset the counter).
                     let objective = state.objective().map(str::to_string);
                     let budget = state.token_budget();
-                    state.sync_from_host_status(objective.as_deref(), budget, status);
+                    if status == GoalStatus::Active {
+                        state.resume(goal_id);
+                    } else {
+                        state.sync_from_host_status(objective.as_deref(), budget, status);
+                    }
                 }
                 state.snapshot()
             }
@@ -4242,7 +4268,12 @@ impl Engine {
     /// publishes the new snapshot, and the first goal turn is dispatched as
     /// runtime steering (the continuation prompt built from the goal
     /// snapshot). The objective is never echoed as a raw user message.
-    async fn handle_set_goal_objective(&mut self, objective: String, token_budget: Option<u32>) {
+    async fn handle_set_goal_objective(
+        &mut self,
+        objective: String,
+        token_budget: Option<u32>,
+        goal_id: Option<String>,
+    ) {
         let Some(objective) = normalized_goal_objective(Some(&objective)) else {
             let _ = self
                 .tx_event
@@ -4252,12 +4283,13 @@ impl Engine {
                 .await;
             return;
         };
-        sync_goal_state_from_host(
-            &self.config.goal_state,
-            Some(&objective),
-            token_budget,
-            GoalStatus::Active,
-        );
+        match self.config.goal_state.lock() {
+            Ok(mut state) => state.replace(&objective, token_budget, goal_id),
+            Err(error) => {
+                tracing::warn!("goal state lock poisoned during replacement: {error}");
+                return;
+            }
+        }
         self.config.goal_objective = Some(objective);
         self.config.goal_token_budget = token_budget;
         self.config.goal_status = GoalStatus::Active;
@@ -4818,7 +4850,19 @@ impl Engine {
         while self.rx_steer.try_recv().is_ok() {}
 
         // Create turn context first so start event includes a stable turn id.
-        let mut turn = TurnContext::new(self.config.max_steps);
+        // An active goal gets the host's goal allowance (#5994); turns with
+        // an explicit per-invocation ceiling (exec --max-turns, child
+        // workers) never see it because those hosts leave `goal_max_steps`
+        // unset.
+        let goal_turn = goal_objective.is_some() && goal_status == GoalStatus::Active;
+        let mut turn = if goal_turn && let Some(goal_max_steps) = self.config.goal_max_steps {
+            TurnContext::with_budget_source(
+                goal_max_steps,
+                crate::core::turn::StepBudgetSource::Goal,
+            )
+        } else {
+            TurnContext::new(self.config.max_steps)
+        };
         self.turn_counter = self.turn_counter.saturating_add(1);
         let turn_started_at = chrono::Utc::now();
         // Mint the route receipt from the client that `install_resolved_runtime_route`
@@ -5308,8 +5352,34 @@ impl Engine {
         // its own op channel. RuntimeThreadManager engines instead yield here:
         // their host must create the next durable claim before dispatching any
         // further turn. A Failed or Interrupted turn never continues.
+        //
+        // #5994: a turn that exhausted the goal step budget got its bounded
+        // final report already. An unfinished goal pauses with BudgetLimit
+        // instead of silently re-arming another full goal turn; a verified
+        // completion reported in that final turn still wins.
+        let goal_budget_exhausted = turn.budget_source == crate::core::turn::StepBudgetSource::Goal
+            && turn.budget_exhausted_final_report;
+        if goal_budget_exhausted {
+            let goal_still_active = self
+                .config
+                .goal_state
+                .lock()
+                .map(|state| state.is_active())
+                .unwrap_or(false);
+            if goal_still_active {
+                self.pause_goal_continuation(
+                    GoalPauseReason::BudgetLimit,
+                    format!(
+                        "Goal paused: the [goal] max_steps budget ({}) was exhausted. Review the final report, then resume the goal explicitly to continue.",
+                        turn.max_steps
+                    ),
+                )
+                .await;
+            }
+        }
         let outcome = SendMessageOutcome::Finished { status, error };
-        if !self.host_managed_turns()
+        if !goal_budget_exhausted
+            && !self.host_managed_turns()
             && matches!(
                 &outcome,
                 SendMessageOutcome::Finished {
@@ -6041,6 +6111,7 @@ impl Engine {
         .with_shell_policy(authority.shell_policy())
         .with_trusted_external_paths(trusted_external_paths)
         .with_follow_symlinks(self.config.workspace_follow_symlinks);
+        ctx.disallowed_tools = self.config.disallowed_tools.clone().unwrap_or_default();
         ctx.persist_services_enabled = self.config.runtime_services.persist_services_enabled;
 
         // Hand the user-memory path to tools so the model-callable
@@ -6215,6 +6286,7 @@ impl Engine {
                 McpPool::new(McpConfig::default())
             })
         });
+        pool = pool.with_disallowed_tools(self.config.disallowed_tools.clone().unwrap_or_default());
         if let Some(decider) = self.config.network_policy.as_ref() {
             pool = pool.with_network_policy(decider.clone());
         }
@@ -7439,6 +7511,7 @@ pub(crate) fn mock_engine_handle() -> MockEngineHandle {
     )));
     let compaction_cancellation = Arc::new(StdMutex::new(CompactionCancellationState::default()));
     let handle = EngineHandle {
+        goal_state: new_shared_goal_state(),
         tx_op,
         rx_event: Arc::new(RwLock::new(rx_event)),
         cancel_token: shared_cancel_token,

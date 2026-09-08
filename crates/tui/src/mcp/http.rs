@@ -10,12 +10,13 @@ use std::time::Duration;
 use anyhow::Result;
 
 use super::headers::{apply_safe_custom_headers, with_default_mcp_http_headers};
+use super::http_client::McpHttpClient;
 use super::sse::SseTransport;
 use super::streamable_http::{StreamableHttpTransport, StreamableSendError};
 use super::{McpServerConfig, McpTransport, ReviewedPluginMcpSource, oauth};
 pub(super) struct HttpTransport {
     mode: HttpTransportMode,
-    client: reqwest::Client,
+    client: McpHttpClient,
     base_url: String,
     auth: McpHttpAuth,
     cancel_token: tokio_util::sync::CancellationToken,
@@ -119,7 +120,7 @@ pub(super) fn mcp_headers_have_authorization(headers: &HashMap<String, String>) 
 
 impl HttpTransport {
     pub(super) fn new(
-        client: reqwest::Client,
+        client: McpHttpClient,
         url: String,
         auth: McpHttpAuth,
         cancel_token: tokio_util::sync::CancellationToken,
@@ -201,7 +202,7 @@ impl HttpTransport {
             _ = cancel.cancelled() => {
                 anyhow::bail!("MCP session preflight cancelled after plugin authority changed")
             }
-            response = tokio::time::timeout(Duration::from_secs(5), request.send()) => {
+            response = tokio::time::timeout(Duration::from_secs(5), transport.client.send(request)) => {
                 response
                     .map_err(|_| anyhow::anyhow!("GET timeout"))?
                     .map_err(|e| anyhow::anyhow!("GET error: {e}"))?

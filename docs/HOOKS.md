@@ -199,14 +199,19 @@ A repository may ship `<workspace>/.codewhale/hooks.toml` using the same shape,
 but only its `[[hooks]]` entries are merged — a project file cannot change
 `enabled`, `default_timeout_secs`, or `working_dir`, which always come from your
 own config. Because hooks are executable configuration, project hooks load
-**only** after the workspace is trusted in user-owned config; session
-`/trust on` alone does not enable them. Trusted project hooks are appended
+**only** after both workspace trust and separate approval of the exact hooks file
+in user-owned config. Use `/hooks review` to inspect the commands and digest,
+then `/hooks approve <digest>` to enable those bytes on the next session. Review
+any scripts the commands call too. A file change requires another approval.
+`/hooks revoke` blocks future and queued launches; it does not stop commands
+already running. Session `/trust on` alone does not enable project hooks.
+Approved project hooks are appended
 after global hooks, so they run last and win `updatedInput` ties. A malformed
 trusted project file logs a warning and Codewhale falls back to global hooks
 only. Validation runs over the merged set, so a rejected project hook is
 reported the same way a rejected global one is.
 
-## The 11 events
+## The 14 events
 
 | Event | Fires | Steering |
 | --- | --- | --- |
@@ -221,6 +226,21 @@ reported the same way a rejected global one is.
 | `subagent_spawn` | when a sub-agent starts | observer |
 | `subagent_complete` | when a sub-agent completes, fails, or is cancelled | observer |
 | `shell_env` | immediately before each `exec_shell` invocation | **contributes environment variables** |
+| `session_idle` | when the session settles back to idle after a turn or a wait — no prompt, approval, or continuation outstanding | observer |
+| `session_error` | when a turn ends in a terminal failure; transient tool failures the agent absorbs never fire it | observer |
+| `waiting_for_user` | when the agent starts waiting on you: an approval prompt opens, a `request_user_input` question is presented, or a goal continuation is parked between passes | observer |
+
+`waiting_for_user`'s payload carries `reason`: `approval`, `user_input`, or
+`goal_continuation`. Both state events carry `from`/`to` transition fields;
+`session_idle` also carries `last_turn_status`, and `session_error` carries
+the bounded terminal `error` text. The three map one-to-one onto the session
+states the control socket's `status` verb already publishes
+(`idle` / `in_progress` / `waiting`), so a hook and a supervisor never
+disagree about what the session is doing. Hook authors that want opencode's
+grace-period semantics for error alerts should debounce inside the hook —
+`session_error` already excludes absorbed, transient failures, and a turn
+that fails and is retried by the operator fires again only if the retry also
+ends failed.
 
 ### What "observer" means, exactly
 
@@ -554,7 +574,7 @@ has no effect because later matching hooks always run.
 
 - Hooks are arbitrary shell commands from your own config; treat
   `~/.codewhale/config.toml` as executable.
-- Project-supplied hooks require an explicit workspace trust decision in
+- Project-supplied hooks require exact-file approval in addition to workspace trust in
   user-owned config.
 - Hook commands inherit Codewhale's own environment. A local `exec_shell` does
   not — see [`shell_env`](#shell_env).

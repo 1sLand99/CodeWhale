@@ -26,7 +26,6 @@ use crate::localization::{Locale, MessageId, resolve_locale, tr};
 use crate::models::{Message, SystemPrompt, Tool, Usage};
 use crate::palette::{self, UiTheme};
 use crate::pricing::{CostCurrency, CostEstimate};
-use crate::resource_telemetry::TokenThroughput;
 use crate::session_manager::{SessionContextReference, SessionMetadata, SessionWorkState};
 use crate::settings::{InlineDiffMode, Settings};
 use crate::tools::plan::{PlanState, SharedPlanState, new_shared_plan_state};
@@ -74,6 +73,25 @@ pub(crate) use types::{
 };
 
 // === Types ===
+
+/// One login owns one mailbox. A cancelled task can only write its abandoned
+/// mailbox, so a late result cannot complete or clear a later login.
+pub(crate) struct PendingMcpLogin {
+    pub server: String,
+    pub cancel: tokio_util::sync::CancellationToken,
+    pub progress: std::sync::Arc<std::sync::Mutex<Option<McpLoginProgress>>>,
+}
+
+pub(crate) enum McpLoginProgress {
+    AuthorizationUrl(String),
+    Finished(Result<(), String>),
+}
+
+impl Drop for PendingMcpLogin {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+    }
+}
 
 /// Lifecycle identity retained until the matching `TurnComplete` arrives.
 ///
@@ -1001,6 +1019,9 @@ pub struct HostGoalState {
     /// While `None`, elapsed time keeps growing; once set, the sidebar freezes
     /// the timer at `finished_at - started_at` so completed goals stop ticking.
     pub finished_at: Option<Instant>,
+    /// Latest progress the model reported for the active goal. Runtime-only
+    /// display state; never persisted and never treated as verified.
+    pub progress: Option<crate::tools::goal::GoalProgressReport>,
     pub status: crate::tools::goal::GoalStatus,
 }
 
@@ -1033,7 +1054,6 @@ pub struct SessionState {
     pub displayed_cost_high_water_cny: f64,
     pub last_prompt_tokens: Option<u32>,
     pub last_completion_tokens: Option<u32>,
-    pub last_output_throughput: Option<TokenThroughput>,
     pub last_prompt_cache_hit_tokens: Option<u32>,
     pub last_prompt_cache_miss_tokens: Option<u32>,
     pub last_reasoning_replay_tokens: Option<u32>,
@@ -1218,7 +1238,6 @@ impl Default for SessionState {
             displayed_cost_high_water_cny: 0.0,
             last_prompt_tokens: None,
             last_completion_tokens: None,
-            last_output_throughput: None,
             last_prompt_cache_hit_tokens: None,
             last_prompt_cache_miss_tokens: None,
             last_reasoning_replay_tokens: None,
@@ -1260,7 +1279,6 @@ impl SessionState {
         self.total_cache_write_tokens = 0;
         self.total_output_tokens = 0;
         self.clear_pending_turn_usage();
-        self.last_output_throughput = None;
     }
 
     /// Add one provider-reported model-call receipt to the display-only
@@ -1921,6 +1939,15 @@ pub struct App {
     pub theme_name: String,
     // Onboarding
     pub onboarding: OnboardingState,
+    /// True while the startup gate for `[redaction] model_bound = "disabled"`
+    /// owns the screen. The gate renders above every other surface and must
+    /// be answered (confirm / keep / quit) before any session starts; see
+    /// `tui::redaction_gate`.
+    pub redaction_gate: bool,
+    /// True while the gate shows its second, final-confirmation stage: the
+    /// user already pressed 1/Y on the first stage and must confirm once more
+    /// before the opt-out actually takes effect.
+    pub redaction_gate_confirming: bool,
     pub onboarding_needs_api_key: bool,
     pub onboarding_provider: ApiProvider,
     pub onboarding_workspace_trust_gate: bool,
@@ -2000,6 +2027,9 @@ pub struct App {
     pub backtrack: crate::tui::backtrack::BacktrackState,
     /// Current session ID for auto-save updates
     pub current_session_id: Option<String>,
+    /// Exclusive editor ownership, shared with outstanding queue writes.
+    pub(crate) offline_queue_lease:
+        Option<std::sync::Arc<crate::session_manager::OfflineQueueLease>>,
     /// Last non-contended Work snapshot captured in this App. The outer
     /// option distinguishes "never captured" from a captured empty state.
     pub(crate) last_known_work_state: Option<Option<SessionWorkState>>,
@@ -2038,6 +2068,16 @@ pub struct App {
     /// items that painted nothing were retired in #5950 rather than left as
     /// toggles that lie.
     pub status_items: Vec<crate::config::StatusItem>,
+    /// How much of the posture bar to paint (`tui.posture_bar`, #5950):
+    /// full, compact, or hidden. Sourced from `config.toml` at startup and
+    /// mutated live by `/config posture_bar`. `hidden` gives the row to the
+    /// transcript; `compact` starts the bar's shed ladder past the clocks,
+    /// counts and hints. `status_items` composes the row; this sizes it.
+    pub posture_bar: crate::config::ChromeRowPreset,
+    /// The same setting for the metrics line (`tui.metrics_line`, #5950).
+    /// `compact` keeps the route, context, cost and balance and drops the
+    /// telemetry and the help hint.
+    pub metrics_line: crate::config::ChromeRowPreset,
     /// Optional header items enabled from `tui.header_items` in `config.toml`
     /// at startup. Built-in header content remains independent of this list.
     /// Unread since the classic header was superseded by the Tideline info
@@ -2260,17 +2300,9 @@ pub struct App {
             )>,
         >,
     >,
-    /// Shared cell for async MCP OAuth login delivery.
-    ///
-    /// The browser callback wait is up to five minutes. Awaiting it inside the
-    /// action handler parked the whole event loop: no input, no redraw, and no
-    /// way to back out of a login started by a misclick. The login runs on the
-    /// background pattern instead, and `mcp_login_cancel` is what Esc trips.
-    #[allow(clippy::type_complexity)]
-    pub mcp_login_cell: std::sync::Arc<std::sync::Mutex<Option<(String, Result<(), String>)>>>,
-    /// Cancels the in-flight MCP OAuth login, if any, and names the server it
-    /// belongs to so the footer/notice can say what Esc would abandon.
-    pub mcp_login_cancel: Option<(String, tokio_util::sync::CancellationToken)>,
+    /// Discovery, registration and the browser callback all run in the
+    /// background. Esc or dropping the app cancels the entire operation.
+    pub(crate) mcp_login: Option<PendingMcpLogin>,
     /// Shared cell for async prompt suggestion delivery from background task.
     pub prompt_suggestion_cell: std::sync::Arc<std::sync::Mutex<Option<(u64, String)>>>,
     /// Tracks whether the initial balance fetch has been attempted for this session.
@@ -2708,6 +2740,7 @@ impl App {
     /// complete total.
     #[must_use]
     pub fn cumulative_usage_chip(&self) -> crate::route_billing::UsageChip {
+        use crate::pricing::UnpricedReason;
         let displayed = self.displayed_session_cost_for_currency(self.cost_currency);
         let (priced, unpriced) = match self.cost_display_currency(self.cost_currency) {
             CostCurrency::Usd => (
@@ -2719,14 +2752,28 @@ impl App {
                 self.session.cost_cny_unpriced_turns,
             ),
         };
+        let saved_reasons = match self.cost_display_currency(self.cost_currency) {
+            CostCurrency::Usd => &self.session.cost_unpriced_reasons,
+            CostCurrency::Cny => &self.session.cost_cny_unpriced_reasons,
+        };
+        let mut reasons: Vec<_> = saved_reasons
+            .iter()
+            .map(|reason| UnpricedReason::from_label(reason))
+            .collect();
+        if (self.session.cost_coverage_unknown_legacy || reasons.is_empty())
+            && !reasons.contains(&UnpricedReason::UnrecordedCoverage)
+        {
+            reasons.push(UnpricedReason::UnrecordedCoverage);
+        }
         if self.session.cost_coverage_unknown_legacy {
             return if displayed.is_finite() && displayed > 0.0 {
                 crate::route_billing::UsageChip::PricedSubtotal {
                     amount: self.format_cost_amount(displayed),
                     legacy: true,
+                    reasons,
                 }
             } else {
-                crate::route_billing::UsageChip::Unknown
+                crate::route_billing::UsageChip::Unknown(reasons)
             };
         }
         if unpriced > 0 {
@@ -2734,9 +2781,10 @@ impl App {
                 crate::route_billing::UsageChip::PricedSubtotal {
                     amount: self.format_cost_amount(displayed),
                     legacy: false,
+                    reasons,
                 }
             } else {
-                crate::route_billing::UsageChip::Unknown
+                crate::route_billing::UsageChip::Unknown(reasons)
             };
         }
         if priced > 0 {
@@ -2802,7 +2850,6 @@ impl App {
     pub(crate) fn clear_model_scoped_telemetry(&mut self) {
         self.session.last_prompt_tokens = None;
         self.session.last_completion_tokens = None;
-        self.session.last_output_throughput = None;
         self.session.last_prompt_cache_hit_tokens = None;
         self.session.last_prompt_cache_miss_tokens = None;
         self.session.last_reasoning_replay_tokens = None;
@@ -4133,7 +4180,7 @@ impl App {
     #[must_use]
     pub fn session_cost_label(&self) -> String {
         let chip = self.cumulative_usage_chip();
-        crate::route_billing::format_usage_chip(&chip).unwrap_or_else(|| {
+        crate::route_billing::format_usage_chip(&chip, self.ui_locale).unwrap_or_else(|| {
             self.format_cost_amount(self.displayed_session_cost_for_currency(self.cost_currency))
         })
     }
@@ -4761,7 +4808,6 @@ impl App {
     /// Total number of cells in the *virtual* transcript: `history.len()`
     /// plus active cell entries (if any).
     #[must_use]
-    #[allow(dead_code)] // Reserved for renderers that need a unified cell count.
     pub fn virtual_cell_count(&self) -> usize {
         self.history.len() + self.active_cell.as_ref().map_or(0, ActiveCell::entry_count)
     }
@@ -6217,6 +6263,21 @@ impl App {
         let requested = self.reasoning_effort;
         let effective = self.effective_reasoning_effort_for_active_route(requested);
         Self::reasoning_effort_resolution_label(requested, effective, self.api_provider)
+    }
+
+    /// The effort label the metrics line's route segment may state: the
+    /// resolution label when the route can prove an effective tier (or an
+    /// enabled-but-untiered toggle), `None` when it cannot (#5950). A custom
+    /// OpenAI-compatible route with no endpoint receipt is the usual `None`;
+    /// printing `high→effective unavailable` there was a placeholder that
+    /// could never resolve, so the row omits the field instead. `/status`
+    /// and the effort cycle message still state the unavailable case in
+    /// full via [`Self::reasoning_effort_display_label`].
+    #[must_use]
+    pub(crate) fn provable_reasoning_effort_label(&self) -> Option<String> {
+        (self.effective_reasoning_effort_for_active_route(self.reasoning_effort)
+            != EffectiveReasoningEffort::Unavailable)
+            .then(|| self.reasoning_effort_display_label())
     }
 
     /// Return the concrete provider/model route whose current prompt may be

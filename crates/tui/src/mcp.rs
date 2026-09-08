@@ -24,6 +24,7 @@ use sha2::Digest as _;
 pub mod external_import;
 mod headers;
 mod http;
+mod http_client;
 pub mod oauth;
 mod sse;
 mod stdio;
@@ -534,6 +535,10 @@ pub struct McpServerConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cwd: Option<PathBuf>,
     pub url: Option<String>,
+    /// Explicit operator authority for private DNS names at this exact origin.
+    /// Ignored for model-added runtime servers.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub allow_private_network: bool,
     /// Optional explicit HTTP transport override.
     ///
     /// By default URL-based MCP servers use Streamable HTTP first and fall
@@ -612,6 +617,9 @@ pub struct McpServerConfig {
     /// only the trusted plugin merge adapter may attach it.
     #[serde(skip)]
     pub(crate) reviewed_plugin: Option<ReviewedPluginMcpSource>,
+    /// Only the runtime registration boundary can attach this provenance.
+    #[serde(skip)]
+    pub(crate) runtime_added: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -1571,45 +1579,15 @@ impl McpConnection {
                     }
                 }
             }
-            // Honor the standard `HTTP_PROXY` / `HTTPS_PROXY` (and their
-            // lowercase equivalents) plus `NO_PROXY` env vars when
-            // reaching MCP HTTP servers (#1408). Reqwest 0.13 does not
-            // auto-detect these by default, so users behind corporate
-            // proxies, on China-mainland connections routing through a
-            // local Clash / Shadowsocks tunnel, etc. previously had MCP
-            // HTTP traffic bypass the proxy entirely while every other
-            // tool on the box (curl, npm, …) used it.
-            // `connect_timeout` bounds only the connect phase; the total request
-            // timeout is the read timeout (a sane backstop) so per-call
-            // execute_timeout can actually govern request duration. Previously
-            // this set reqwest's TOTAL `.timeout()` from connect_timeout (10s),
-            // which silently capped every request at 10s and made the per-server
-            // execute_timeout / read_timeout dead for HTTP transports.
-            let mut client_builder = crate::tls::reqwest_client_builder()
-                .connect_timeout(Duration::from_secs(connect_timeout_secs))
-                .timeout(Duration::from_secs(read_timeout_secs));
-            if let Some(approved_origin) = config
-                .reviewed_plugin
-                .as_ref()
-                .and_then(|source| source.approved_remote_origin.clone())
-            {
-                client_builder =
-                    client_builder.redirect(reqwest::redirect::Policy::custom(move |attempt| {
-                        if attempt.previous().len() >= 5 {
-                            return attempt.stop();
-                        }
-                        if reviewed_redirect_matches_origin(attempt.url(), &approved_origin) {
-                            attempt.follow()
-                        } else {
-                            attempt.stop()
-                        }
-                    }));
-            }
-            client_builder =
-                configure_mcp_proxy(client_builder, config.reviewed_plugin.is_some(), |name| {
-                    std::env::var(name)
-                });
-            let client = client_builder.build()?;
+            let client = http_client::McpHttpClient::new(
+                url,
+                config.runtime_added,
+                config.reviewed_plugin.is_some(),
+                config.allow_private_network,
+                network_policy,
+                Duration::from_secs(connect_timeout_secs),
+                Duration::from_secs(read_timeout_secs),
+            )?;
             let oauth_runtime = if config.reviewed_plugin.is_some() {
                 None
             } else {
@@ -1622,10 +1600,11 @@ impl McpConnection {
                                     "MCP OAuth setup cancelled after plugin authority changed"
                                 )
                             }
-                            prepared = oauth::McpOAuthRuntime::from_server_config(
+                            prepared = oauth::McpOAuthRuntime::from_server_config_with_client(
                                 &name,
                                 &config,
                                 default_headers,
+                                client.clone(),
                             ) => prepared,
                         };
                         match prepared {
@@ -2354,60 +2333,61 @@ impl McpConnection {
     }
 }
 
-/// Apply the ambient proxy policy for MCP HTTP transports.
-///
-/// User-authored MCP configuration keeps the long-standing corporate-proxy
-/// behavior. Reviewed plugin bundles deliberately do not: proxy URLs can carry
-/// credentials and proxy processes can observe request metadata, neither of
-/// which is part of the v1 reviewed remote authority. Return before consulting
-/// the environment so even reading ambient proxy credentials is impossible on
-/// that path, and call `no_proxy` explicitly to keep this invariant stable if
-/// reqwest's defaults change.
-fn configure_mcp_proxy<F>(
-    mut client_builder: reqwest::ClientBuilder,
-    reviewed_plugin: bool,
+/// Resolve the operator's proxy route for this exact request using the same
+/// matcher as reqwest. A NO_PROXY match returns None: direct requests must keep
+/// their public DNS validation and pins. Model and reviewed-plugin requests
+/// return before even reading proxy credentials.
+fn configured_mcp_proxy<F>(
+    url: &reqwest::Url,
+    disallow_ambient_proxy: bool,
     mut read_environment: F,
-) -> reqwest::ClientBuilder
+) -> Result<Option<reqwest::Proxy>>
 where
     F: FnMut(&str) -> std::result::Result<String, std::env::VarError>,
 {
-    if reviewed_plugin {
-        return client_builder.no_proxy();
+    if disallow_ambient_proxy {
+        return Ok(None);
     }
-
-    let env_proxy_url = read_environment("HTTPS_PROXY")
+    let proxy_url = read_environment("HTTPS_PROXY")
         .or_else(|_| read_environment("https_proxy"))
         .or_else(|_| read_environment("HTTP_PROXY"))
         .or_else(|_| read_environment("http_proxy"))
         .ok()
-        .filter(|s| !s.trim().is_empty());
-    if let Some(proxy_url) = env_proxy_url {
-        match reqwest::Proxy::all(&proxy_url) {
-            Ok(proxy) => {
-                let no_proxy = read_environment("NO_PROXY")
-                    .or_else(|_| read_environment("no_proxy"))
-                    .ok()
-                    .and_then(|value| reqwest::NoProxy::from_string(&value));
-                let proxy = proxy.no_proxy(no_proxy);
-                client_builder = client_builder.proxy(proxy);
-            }
-            Err(err) => {
-                // Redact userinfo (the `username[:password]@…`
-                // portion of the URL) before logging so an
-                // HTTPS_PROXY that embeds credentials
-                // (common in corporate setups) doesn't leak the
-                // password to the on-disk `~/.deepseek/logs/`.
-                let proxy_redacted = redact_proxy_userinfo(&proxy_url);
-                tracing::warn!(
-                    target: "mcp",
-                    ?err,
-                    proxy = %proxy_redacted,
-                    "ignoring malformed HTTP(S)_PROXY env var; MCP connection will bypass proxy"
-                );
-            }
-        }
+        .filter(|value| !value.trim().is_empty());
+    let Some(proxy_url) = proxy_url else {
+        return Ok(None);
+    };
+    // Normalize userinfo and Unicode with the URL parser before passing the
+    // URL to reqwest's own underlying matcher. Keep its missing-scheme support.
+    let normalized = reqwest::Url::parse(&proxy_url)
+        .ok()
+        .filter(|url| url.has_host())
+        .or_else(|| reqwest::Url::parse(&format!("http://{proxy_url}")).ok());
+    let Some(normalized) = normalized else {
+        tracing::warn!(target: "mcp", proxy = %redact_proxy_userinfo(&proxy_url), "ignoring malformed HTTP(S)_PROXY URL");
+        return Ok(None);
+    };
+    let no_proxy = read_environment("NO_PROXY")
+        .or_else(|_| read_environment("no_proxy"))
+        .unwrap_or_default();
+    let matcher = hyper_util::client::proxy::matcher::Matcher::builder()
+        .all(normalized.as_str())
+        .no(no_proxy)
+        .build();
+    let destination: oauth2::http::Uri = url.as_str().parse()?;
+    let Some(route) = matcher.intercept(&destination) else {
+        return Ok(None);
+    };
+    // Build the actual proxy from the matched route itself so the decision
+    // that grants delegated DNS authority cannot diverge from the transport.
+    let mut proxy = reqwest::Proxy::all(route.uri().to_string())?;
+    if let Some(auth) = route.basic_auth() {
+        proxy = proxy.custom_http_auth(auth.clone());
     }
-    client_builder
+    if let Some((user, password)) = route.raw_auth() {
+        proxy = proxy.basic_auth(user, password);
+    }
+    Ok(Some(proxy))
 }
 
 impl Drop for McpConnection {
@@ -2486,6 +2466,8 @@ pub(crate) async fn authenticate_tool_via_pool(
 
 /// Pool of MCP connections for reuse
 pub struct McpPool {
+    /// Immutable operator ceiling; source reloads and shared child pools cannot relax it.
+    disallowed_tools: Vec<String>,
     connections: HashMap<String, McpConnection>,
     config: McpConfig,
     network_policy: Option<NetworkPolicyDecider>,
@@ -2567,6 +2549,7 @@ impl McpPool {
         let config_hash = hash_mcp_config(&config);
         Self {
             connections: HashMap::new(),
+            disallowed_tools: Vec::new(),
             config,
             network_policy: None,
             oauth_callback_port: None,
@@ -2662,6 +2645,65 @@ impl McpPool {
         pool.workspace = Some(workspace);
         pool.plugin_registry = Some(plugins);
         Ok(pool)
+    }
+
+    /// Install the session ceiling before any connection or model catalog is exposed.
+    pub(crate) fn with_disallowed_tools(mut self, rules: Vec<String>) -> Self {
+        self.disallowed_tools.extend(rules);
+        self
+    }
+
+    /// Only a prefix covering the entire namespace suppresses a server. An
+    /// individual tool denial must preserve its siblings and resource access.
+    pub(crate) fn server_denied_by(rules: &[String], server: &str) -> bool {
+        let namespace = format!("mcp_{server}_").to_ascii_lowercase();
+        rules.iter().any(|rule| {
+            rule.to_ascii_lowercase()
+                .strip_suffix('*')
+                .is_some_and(|prefix| namespace.starts_with(prefix))
+        })
+    }
+
+    fn server_allowed(&self, server: &str) -> bool {
+        !Self::server_denied_by(&self.disallowed_tools, server)
+    }
+
+    pub(crate) fn tool_allowed(&self, name: &str) -> bool {
+        !crate::core::engine::tool_catalog::tool_matches_any_rule(&self.disallowed_tools, name)
+    }
+
+    fn require_server(&self, server: &str) -> Result<()> {
+        anyhow::ensure!(
+            self.server_allowed(server),
+            "Failed to find MCP server: {server}"
+        );
+        Ok(())
+    }
+
+    pub(crate) fn authorize_call(
+        rules: &[String],
+        name: &str,
+        input: &serde_json::Value,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            !crate::core::engine::tool_catalog::tool_matches_any_rule(rules, name),
+            "Unknown MCP tool name: {name}"
+        );
+        if matches!(
+            name,
+            "list_mcp_resources"
+                | "list_mcp_resource_templates"
+                | "mcp_read_resource"
+                | "read_mcp_resource"
+                | "mcp_get_prompt"
+        ) && let Some(server) = input.get("server").and_then(serde_json::Value::as_str)
+        {
+            anyhow::ensure!(
+                !Self::server_denied_by(rules, server),
+                "Failed to find MCP server: {server}"
+            );
+        }
+        Ok(())
     }
 
     /// Attach a per-domain network policy (#135). When set, HTTP/SSE
@@ -2844,6 +2886,7 @@ impl McpPool {
 
     /// Get or create a connection to a server
     pub async fn get_or_connect(&mut self, server_name: &str) -> Result<&mut McpConnection> {
+        self.require_server(server_name)?;
         // Lazy auto-reload (#1267 part 2): cheap mtime-then-hash check before
         // each connection lookup. Transient FS errors are logged but not
         // propagated so a brief hiccup can't take down the whole tool dispatch.
@@ -2925,6 +2968,7 @@ impl McpPool {
     /// remain owned by the explicit reload path; this operation only replaces
     /// the named transport.
     pub async fn retry_connection(&mut self, server_name: &str) -> Result<&mut McpConnection> {
+        self.require_server(server_name)?;
         // A person asked for this one by name. Clear the cooldown so the
         // attempt happens now and, if it fails again, the ladder restarts
         // from the short end rather than from wherever it had climbed to.
@@ -2986,6 +3030,7 @@ impl McpPool {
         name: String,
         connection: McpConnection,
     ) -> Result<()> {
+        self.require_server(&name)?;
         anyhow::ensure!(
             connection.catalog_generation == self.current_catalog_generation(),
             "MCP configuration changed while connecting {name}; retry against the current config"
@@ -3010,6 +3055,9 @@ impl McpPool {
     /// failure replaces the verdict — the state is "the most recent connect
     /// failed auth-required", not "some connect once did".
     pub(crate) fn note_connect_failure(&mut self, name: &str, error: &anyhow::Error) {
+        if !self.server_allowed(name) {
+            return;
+        }
         let entry = self
             .connect_backoff
             .entry(name.to_string())
@@ -3045,7 +3093,7 @@ impl McpPool {
     /// and by any full connection drop (reload, source switch, shutdown).
     #[must_use]
     pub fn server_needs_auth(&self, name: &str) -> bool {
-        self.needs_auth_servers.contains(name)
+        self.server_allowed(name) && self.needs_auth_servers.contains(name)
     }
 
     /// The needs-auth server that owns a model tool name (`mcp_<server>_…`),
@@ -3057,8 +3105,11 @@ impl McpPool {
         self.needs_auth_servers
             .iter()
             .filter(|server| {
-                rest.strip_prefix(server.as_str())
-                    .is_some_and(|suffix| suffix.starts_with('_'))
+                self.server_allowed(server)
+                    && self.tool_allowed(prefixed_name)
+                    && rest
+                        .strip_prefix(server.as_str())
+                        .is_some_and(|suffix| suffix.starts_with('_'))
             })
             .max_by_key(|server| server.len())
             .cloned()
@@ -3081,7 +3132,7 @@ impl McpPool {
             .config
             .servers
             .iter()
-            .filter(|(_, server)| server.is_enabled())
+            .filter(|(name, server)| server.is_enabled() && self.server_allowed(name))
             .map(|(name, _)| name.clone())
             .collect();
         let mut pending = Vec::new();
@@ -3134,7 +3185,8 @@ impl McpPool {
             // second, contentless entry for the same name buries it: callers
             // fold these pairs into a `HashMap<name, message>`, so the later
             // generic string silently replaced the real cause.
-            if server_cfg.required
+            if self.server_allowed(name)
+                && server_cfg.required
                 && server_cfg.is_enabled()
                 && !self
                     .connections
@@ -3302,6 +3354,9 @@ impl McpPool {
     /// connection advertises a real tool under the same model name — the
     /// server's own `authenticate` tool always wins.
     pub(crate) fn authenticate_tool_target(&self, prefixed_name: &str) -> Option<String> {
+        if !self.tool_allowed(prefixed_name) {
+            return None;
+        }
         let target = self
             .needs_auth_servers
             .iter()
@@ -3328,7 +3383,7 @@ impl McpPool {
                 .or_else(|| dynamic.get(&target))
                 .is_some_and(oauth::server_supports_oauth_login)
         };
-        if !capable {
+        if !capable || !self.server_allowed(&target) {
             return None;
         }
         if self.parse_prefixed_name(prefixed_name).is_ok() {
@@ -3359,6 +3414,12 @@ impl McpPool {
         &self,
         server_name: &str,
     ) -> Result<AuthenticateToolStart> {
+        self.require_server(server_name)?;
+        Self::authorize_call(
+            &self.disallowed_tools,
+            &Self::mcp_model_tool_name(server_name, AUTHENTICATE_TOOL_NAME),
+            &serde_json::json!({}),
+        )?;
         let server = self
             .server_config(server_name)
             .ok_or_else(|| anyhow::anyhow!("MCP server '{server_name}' is no longer configured"))?;
@@ -3382,6 +3443,7 @@ impl McpPool {
             None,
             self.oauth_callback_port,
             self.oauth_callback_url.as_deref(),
+            self.network_policy.as_ref(),
         )
         .await?;
         Ok(AuthenticateToolStart::Login(Box::new(login)))
@@ -3399,6 +3461,8 @@ impl McpPool {
         server_name: &str,
         outcome: AuthenticateToolOutcome,
     ) -> Result<serde_json::Value> {
+        self.require_server(server_name)?;
+        let rules = self.disallowed_tools.clone();
         match self.get_or_connect(server_name).await {
             Ok(conn) => {
                 let tools: Vec<String> = conn
@@ -3406,6 +3470,9 @@ impl McpPool {
                     .iter()
                     .filter(|tool| conn.config().is_tool_enabled(&tool.name))
                     .map(|tool| Self::mcp_model_tool_name(server_name, &tool.name))
+                    .filter(|name| {
+                        !crate::core::engine::tool_catalog::tool_matches_any_rule(&rules, name)
+                    })
                     .collect();
                 let (status, detail) = match &outcome {
                     AuthenticateToolOutcome::Authenticated { .. } => (
@@ -3552,10 +3619,12 @@ impl McpPool {
     #[must_use]
     pub fn resolved_tool_servers(&self) -> std::collections::BTreeMap<String, String> {
         Self::resolve_tool_server_map(self.connections.iter().flat_map(|(server, conn)| {
-            let authorized = conn.catalog_authorized();
+            let authorized = self.server_allowed(server) && conn.catalog_authorized();
             conn.tools().iter().filter_map(move |tool| {
-                (authorized && conn.config().is_tool_enabled(&tool.name))
-                    .then_some((server.as_str(), tool.name.as_str()))
+                (authorized
+                    && conn.config().is_tool_enabled(&tool.name)
+                    && self.tool_allowed(&Self::mcp_model_tool_name(server, &tool.name)))
+                .then_some((server.as_str(), tool.name.as_str()))
             })
         }))
     }
@@ -3565,7 +3634,7 @@ impl McpPool {
         let mut by_name: std::collections::BTreeMap<String, Option<&McpTool>> =
             std::collections::BTreeMap::new();
         for (server, conn) in &self.connections {
-            if !conn.catalog_authorized() {
+            if !self.server_allowed(server) || !conn.catalog_authorized() {
                 continue;
             }
             for tool in conn.tools() {
@@ -3573,6 +3642,9 @@ impl McpPool {
                     continue;
                 }
                 let name = Self::mcp_model_tool_name(server, &tool.name);
+                if !self.tool_allowed(&name) {
+                    continue;
+                }
                 match by_name.entry(name.clone()) {
                     std::collections::btree_map::Entry::Vacant(entry) => {
                         entry.insert(Some(tool));
@@ -3598,7 +3670,7 @@ impl McpPool {
     pub fn all_resources(&self) -> Vec<(String, &McpResource)> {
         let mut resources = Vec::new();
         for (server, conn) in &self.connections {
-            if !conn.catalog_authorized() {
+            if !self.server_allowed(server) || !conn.catalog_authorized() {
                 continue;
             }
             for resource in conn.resources() {
@@ -3616,7 +3688,7 @@ impl McpPool {
     pub fn all_resource_templates(&self) -> Vec<(String, &McpResourceTemplate)> {
         let mut templates = Vec::new();
         for (server, conn) in &self.connections {
-            if !conn.catalog_authorized() {
+            if !self.server_allowed(server) || !conn.catalog_authorized() {
                 continue;
             }
             for template in conn.resource_templates() {
@@ -3655,7 +3727,7 @@ impl McpPool {
             }
         }
         for (server, conn) in &self.connections {
-            if !conn.catalog_authorized() {
+            if !self.server_allowed(server) || !conn.catalog_authorized() {
                 continue;
             }
             for resource in conn.resources() {
@@ -3704,7 +3776,7 @@ impl McpPool {
             }
         }
         for (server, conn) in &self.connections {
-            if !conn.catalog_authorized() {
+            if !self.server_allowed(server) || !conn.catalog_authorized() {
                 continue;
             }
             for template in conn.resource_templates() {
@@ -3741,7 +3813,7 @@ impl McpPool {
     pub fn all_prompts(&self) -> Vec<(String, &McpPrompt)> {
         let mut prompts = Vec::new();
         for (server, conn) in &self.connections {
-            if !conn.catalog_authorized() {
+            if !self.server_allowed(server) || !conn.catalog_authorized() {
                 continue;
             }
             for prompt in conn.prompts() {
@@ -3796,13 +3868,18 @@ impl McpPool {
 
     /// Parse a prefixed name into (server_name, tool_name)
     pub(crate) fn parse_prefixed_name(&self, prefixed_name: &str) -> Result<(String, String)> {
+        Self::authorize_call(
+            &self.disallowed_tools,
+            prefixed_name,
+            &serde_json::json!({}),
+        )?;
         let Some(rest) = prefixed_name.strip_prefix("mcp_") else {
             anyhow::bail!("Invalid MCP tool name: {prefixed_name}");
         };
 
         let mut matched: Option<(String, String)> = None;
         for (server, connection) in &self.connections {
-            if !connection.catalog_authorized() {
+            if !self.server_allowed(server) || !connection.catalog_authorized() {
                 continue;
             }
             for tool in connection.tools() {
@@ -3830,6 +3907,11 @@ impl McpPool {
     /// but lazy server may be connected and asked for `tools/list`; the
     /// requested suffix is never treated as authority on its own.
     async fn resolve_advertised_tool(&mut self, prefixed_name: &str) -> Result<McpToolRoute> {
+        Self::authorize_call(
+            &self.disallowed_tools,
+            prefixed_name,
+            &serde_json::json!({}),
+        )?;
         if let Ok((server_name, tool_name)) = self.parse_prefixed_name(prefixed_name) {
             return self.capture_tool_route(server_name, tool_name);
         }
@@ -3843,6 +3925,7 @@ impl McpPool {
                 .iter()
                 .filter_map(|(name, config)| {
                     (config.is_enabled()
+                        && self.server_allowed(name)
                         && rest
                             .strip_prefix(name)
                             .is_some_and(|suffix| suffix.starts_with('_')))
@@ -3850,6 +3933,7 @@ impl McpPool {
                 })
                 .chain(dynamic.iter().filter_map(|(name, config)| {
                     (config.is_enabled()
+                        && self.server_allowed(name)
                         && rest
                             .strip_prefix(name)
                             .is_some_and(|suffix| suffix.starts_with('_')))
@@ -3901,7 +3985,11 @@ impl McpPool {
             .collect();
         let dynamic = self.dynamic_servers.read();
         for (server, config) in self.config.servers.iter().chain(dynamic.iter()) {
-            if config.is_enabled() && oauth::server_supports_oauth_login(config) {
+            if self.server_allowed(server)
+                && config.is_enabled()
+                && oauth::server_supports_oauth_login(config)
+                && self.tool_allowed(&Self::mcp_model_tool_name(server, AUTHENTICATE_TOOL_NAME))
+            {
                 names.insert(Self::mcp_model_tool_name(server, AUTHENTICATE_TOOL_NAME));
             }
         }
@@ -3942,10 +4030,16 @@ impl McpPool {
                 else {
                     continue;
                 };
-                if !config.is_enabled() || !oauth::server_supports_oauth_login(config) {
+                if !self.server_allowed(server)
+                    || !config.is_enabled()
+                    || !oauth::server_supports_oauth_login(config)
+                {
                     continue;
                 }
                 let name = Self::mcp_model_tool_name(server, AUTHENTICATE_TOOL_NAME);
+                if !self.tool_allowed(&name) {
+                    continue;
+                }
                 if api_tools.iter().any(|tool| tool.name == name) {
                     continue;
                 }
@@ -4080,8 +4174,85 @@ impl McpPool {
 
         // Sort by name for prefix-cache stability — the tool block sent to
         // the model needs to be deterministic across runs (#1319).
+        api_tools.retain(|tool| self.tool_allowed(&tool.name));
         api_tools.sort_by(|a, b| a.name.cmp(&b.name));
         api_tools
+    }
+
+    /// Apply a child's narrower ceiling without changing the shared pool.
+    pub(crate) async fn call_tool_with_disallowed(
+        &mut self,
+        name: &str,
+        input: serde_json::Value,
+        rules: &[String],
+    ) -> Result<serde_json::Value> {
+        Self::authorize_call(&self.disallowed_tools, name, &input)?;
+        Self::authorize_call(rules, name, &input)?;
+        if !rules.is_empty()
+            && rules != self.disallowed_tools.as_slice()
+            && matches!(name, "list_mcp_resources" | "list_mcp_resource_templates")
+            && input
+                .get("server")
+                .and_then(serde_json::Value::as_str)
+                .is_none()
+        {
+            self.reload_if_config_changed().await?;
+            let servers = self.enabled_server_names();
+            let mut items = Vec::new();
+            for server in servers {
+                if Self::server_denied_by(rules, &server) {
+                    continue;
+                }
+                let result = if name == "list_mcp_resources" {
+                    self.list_resources(Some(server.clone())).await
+                } else {
+                    self.list_resource_templates(Some(server.clone())).await
+                };
+                match result {
+                    Ok(mut resources) => items.append(&mut resources),
+                    Err(error) if oauth::error_looks_auth_required(&error) => {
+                        let mut item = self.mcp_auth_required_error_item(&server);
+                        let auth_name = Self::mcp_model_tool_name(&server, AUTHENTICATE_TOOL_NAME);
+                        if crate::core::engine::tool_catalog::tool_matches_any_rule(
+                            rules, &auth_name,
+                        ) {
+                            item.as_object_mut()
+                                .expect("error item object")
+                                .remove("authenticate_tool");
+                            item["message"] =
+                                serde_json::json!("MCP server requires authentication");
+                        }
+                        items.push(item);
+                    }
+                    Err(error) => tracing::warn!("MCP resource discovery failed: {error:#}"),
+                }
+            }
+            let field = if name == "list_mcp_resources" {
+                "resources"
+            } else {
+                "templates"
+            };
+            return Ok(serde_json::json!({ field: items }));
+        }
+        let synthetic_auth = self.authenticate_tool_target(name).is_some();
+        let mut result = self.call_tool(name, input).await?;
+        if synthetic_auth {
+            Self::filter_authenticate_result(&mut result, rules);
+        }
+        Ok(result)
+    }
+
+    pub(crate) fn filter_authenticate_result(result: &mut serde_json::Value, rules: &[String]) {
+        if let Some(tools) = result
+            .get_mut("tools")
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            tools.retain(|name| {
+                name.as_str().is_some_and(|name| {
+                    !crate::core::engine::tool_catalog::tool_matches_any_rule(rules, name)
+                })
+            });
+        }
     }
 
     /// Call a tool by its prefixed name (mcp_{server}_{tool})
@@ -4090,6 +4261,7 @@ impl McpPool {
         prefixed_name: &str,
         arguments: serde_json::Value,
     ) -> Result<serde_json::Value> {
+        Self::authorize_call(&self.disallowed_tools, prefixed_name, &arguments)?;
         if prefixed_name == "list_mcp_resources" {
             let server = arguments
                 .get("server")
@@ -4240,10 +4412,16 @@ impl McpPool {
     /// Get list of configured server names (static + dynamic)
     #[allow(dead_code)] // Public API for MCP consumers
     pub fn server_names(&self) -> Vec<String> {
-        let mut names: Vec<String> = self.config.servers.keys().cloned().collect();
+        let mut names: Vec<String> = self
+            .config
+            .servers
+            .keys()
+            .filter(|name| self.server_allowed(name))
+            .cloned()
+            .collect();
         let dynamic = self.dynamic_servers.read();
         for name in dynamic.keys() {
-            if !names.contains(name) {
+            if self.server_allowed(name) && !names.contains(name) {
                 names.push(name.clone());
             }
         }
@@ -4262,6 +4440,8 @@ impl McpPool {
         name: String,
         config: McpServerConfig,
     ) -> Result<(), String> {
+        self.require_server(&name)
+            .map_err(|error| error.to_string())?;
         if self.config.servers.contains_key(&name) {
             return Err(format!(
                 "MCP server '{}' already exists in the config file. \
@@ -4277,6 +4457,8 @@ impl McpPool {
                 name
             ));
         }
+        let mut config = config;
+        config.runtime_added = true;
         dynamic.insert(name, config);
         self.catalog_generation.fetch_add(1, Ordering::SeqCst);
         Ok(())
@@ -4297,7 +4479,7 @@ impl McpPool {
     pub fn connected_servers(&self) -> Vec<&str> {
         self.connections
             .iter()
-            .filter(|(_, c)| c.is_ready())
+            .filter(|(name, c)| self.server_allowed(name) && c.is_ready())
             .map(|(n, _)| n.as_str())
             .collect()
     }
@@ -4316,12 +4498,12 @@ impl McpPool {
             .config
             .servers
             .iter()
-            .filter(|(_, server)| server.is_enabled())
+            .filter(|(name, server)| server.is_enabled() && self.server_allowed(name))
             .map(|(name, _)| name.clone())
             .collect();
         let dynamic = self.dynamic_servers.read();
         for (name, server) in dynamic.iter() {
-            if server.is_enabled() && !names.contains(name) {
+            if self.server_allowed(name) && server.is_enabled() && !names.contains(name) {
                 names.push(name.clone());
             }
         }
@@ -4458,6 +4640,7 @@ impl McpRecoveryKind {
             Self::Enable => format!("/mcp enable {name}"),
             Self::Connect | Self::Reconnect => "/mcp reload".to_string(),
             Self::Reauth => format!("/mcp login {name}"),
+            Self::Diagnose if mcp_name_is_command_safe(name) => format!("/mcp validate {name}"),
             Self::Diagnose => "/mcp validate".to_string(),
         }
     }
@@ -5018,6 +5201,8 @@ fn mcp_template_json() -> Result<String> {
             oauth: None,
             oauth_resource: None,
             reviewed_plugin: None,
+            runtime_added: false,
+            allow_private_network: false,
         },
     );
     serde_json::to_string_pretty(&cfg).context("Failed to render MCP template JSON")
@@ -5081,6 +5266,8 @@ pub fn add_server_config(
             oauth: None,
             oauth_resource: None,
             reviewed_plugin: None,
+            runtime_added: false,
+            allow_private_network: false,
         },
     );
     save_config(path, &cfg)
@@ -5240,6 +5427,7 @@ fn snapshot_from_config(
     let mut servers = cfg
         .servers
         .iter()
+        .filter(|(name, _)| discovery.is_none_or(|(pool, _)| pool.server_allowed(name)))
         .map(|(name, server)| {
             let transport = if server.url.is_some() {
                 if is_legacy_sse_transport(server) {
@@ -5313,7 +5501,11 @@ fn snapshot_from_config(
                     snapshot.tools = conn
                         .tools()
                         .iter()
-                        .filter(|tool| conn.config().is_tool_enabled(&tool.name))
+                        .filter(|tool| {
+                            conn.config().is_tool_enabled(&tool.name)
+                                && pool
+                                    .tool_allowed(&McpPool::mcp_model_tool_name(name, &tool.name))
+                        })
                         .map(|tool| McpDiscoveredItem {
                             name: tool.name.clone(),
                             model_name: format!("mcp_{}_{}", name, tool.name),

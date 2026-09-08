@@ -234,7 +234,10 @@ impl Engine {
         tx_event: &mpsc::Sender<Event>,
         name: &str,
         input: serde_json::Value,
+        disallowed_tools: &[String],
     ) -> Result<RichToolResult, ToolError> {
+        McpPool::authorize_call(disallowed_tools, name, &input)
+            .map_err(|error| ToolError::not_available(error.to_string()))?;
         // A synthetic `mcp_<server>_authenticate` call runs the shared OAuth
         // login flow with the pool lock released during the browser wait, so
         // parallel MCP tools and the `/mcp` manager keep working while the
@@ -245,7 +248,7 @@ impl Engine {
         // call yet.
         let auth_target = pool.lock().await.authenticate_tool_target(name);
         if let Some(server) = auth_target {
-            let result = crate::mcp::authenticate_tool_via_pool(&pool, &server, |url| {
+            let mut result = crate::mcp::authenticate_tool_via_pool(&pool, &server, |url| {
                 // The model cannot relay the URL until the call returns, and
                 // the call returns only after the sign-in completes — so the
                 // user must see it now. This status is the only copy of the
@@ -265,6 +268,7 @@ impl Engine {
             })
             .await
             .map_err(|e| ToolError::execution_failed(format!("MCP tool failed: {e}")))?;
+            McpPool::filter_authenticate_result(&mut result, disallowed_tools);
             let mut rich = crate::tools::registry::mcp_result_to_bounded_rich_tool_result(result);
             if rich.result.success {
                 rich.result.metadata = Some(serde_json::json!({ "mcp_catalog_changed": true }));
@@ -272,7 +276,11 @@ impl Engine {
             return Ok(rich);
         }
         let needs_auth_generation_before = pool.lock().await.needs_auth_generation();
-        let result = pool.lock().await.call_tool(name, input).await;
+        let result = pool
+            .lock()
+            .await
+            .call_tool_with_disallowed(name, input, disallowed_tools)
+            .await;
         match result {
             Ok(result) => {
                 Ok(crate::tools::registry::mcp_result_to_bounded_rich_tool_result(result))
@@ -544,7 +552,19 @@ impl Engine {
 
         let outcome: Result<RichToolResult, ToolError> = if McpPool::is_mcp_tool(&tool_name) {
             if let Some(pool) = mcp_pool {
-                Engine::execute_mcp_tool_with_pool(pool, &tx_event, &tool_name, tool_input).await
+                let disallowed_tools = context_override
+                    .as_ref()
+                    .or_else(|| registry.map(|registry| registry.context()))
+                    .map(|context| context.disallowed_tools.as_slice())
+                    .unwrap_or_default();
+                Engine::execute_mcp_tool_with_pool(
+                    pool,
+                    &tx_event,
+                    &tool_name,
+                    tool_input,
+                    disallowed_tools,
+                )
+                .await
             } else {
                 Err(ToolError::not_available(format!(
                     "tool '{tool_name}' is not registered"

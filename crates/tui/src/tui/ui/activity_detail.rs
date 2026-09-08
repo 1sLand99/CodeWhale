@@ -1644,7 +1644,7 @@ fn turn_route_lines(app: &App) -> Vec<String> {
         crate::route_billing::UsageChip::PricedSubtotal { .. } => {
             lines.push(format!(
                 "Cost (session): {}",
-                crate::route_billing::format_usage_chip(&chip).unwrap_or_default()
+                crate::route_billing::format_usage_chip(&chip, app.ui_locale).unwrap_or_default()
             ));
         }
         crate::route_billing::UsageChip::Allowance { label, used_pct } => {
@@ -1656,8 +1656,10 @@ fn turn_route_lines(app: &App) -> Vec<String> {
         crate::route_billing::UsageChip::Local => {
             lines.push("Cost: local".to_string());
         }
-        crate::route_billing::UsageChip::Unknown => {
-            lines.push("Cost: unknown".to_string());
+        crate::route_billing::UsageChip::Unknown(_) => {
+            lines.push(
+                crate::route_billing::format_usage_chip(&chip, app.ui_locale).unwrap_or_default(),
+            );
         }
         crate::route_billing::UsageChip::Hidden => {}
     }

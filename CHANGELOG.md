@@ -17,6 +17,10 @@ with an accessibility-first pointer.
 
 ### Fixed
 
+- Bottom-chrome effort is omitted when the route cannot prove an effective
+  tier; `/status` retains the full explanation. Cost remains visible when
+  known, and `cost: unknown` remains on metered routes lacking a reading (#5950).
+
 - Pasting multiline text is one paste again. 0.9.12 gated the
   paste-burst heuristic off whenever bracketed paste was *requested*, but
   a terminal can accept `EnableBracketedPaste` and still deliver a paste
@@ -105,7 +109,7 @@ with an accessibility-first pointer.
   bar's plan/act/operate chip. The `status`, `agents`, `reasoning_replay`,
   `prefix_stability`, `git_branch`, `last_tool_elapsed` and `rate_limit`
   items drove nothing and are retired; an existing `config.toml` still loads
-  and those keys are ignored (#5950).
+  and those keys are ignored (#5950, #5962).
 - The context reading is back on screen at every fullness. 0.9.12 painted
   `ctx NN%` only from 50% up, which left most of a session with no context
   signal at all; it now paints from 0% and keeps its warning colour from 80%
@@ -173,6 +177,14 @@ with an accessibility-first pointer.
 
 ### Added
 
+- `[tui].posture_bar` and `[tui].metrics_line` accept `full`, `compact`, or
+  `hidden`, also available through `/config`. Compact preserves the existing
+  rows' essential fields; hidden returns their space to the transcript (#5973).
+- Optional model-bound tool-output redaction opt-out, with two explicit startup
+  confirmations and a receipt bound to the readable config contents and
+  modification time. Unconfirmed requests keep masking enabled; routing and
+  stored goal summaries remain redacted (#5982, thanks @SparkofSpike).
+
 - The `rusty-alloc` cargo feature on `codewhale-tui` and `codewhale-cli`
   opts the binaries into the `rusty_alloc` global allocator (the mimalloc
   v2.4.5 architecture remade in pure Rust — no C compiler or build script
@@ -225,29 +237,6 @@ with an accessibility-first pointer.
   three explicitly. `--use` saves the new secret as this machine's local
   `codewhale` provider credential in the same secret store `codewhale auth`
   uses; nothing is uploaded.
-- `sandbox_backend = "shannon"`: shell commands run as signed ShannonNet
-  capability invocations (`cap://sandbox/exec`) on a worker that may live on
-  another tailnet node. Codewhale opens a Task World per session for its
-  durable `codewhale` Agent and every command leaves a receipt in
-  `shannon trace`. New keys `sandbox_shannon_home` and
-  `sandbox_shannon_capability`; tool metadata now reports the actual
-  external backend kind instead of always `opensandbox`.
-- `/shannon [world|trace|children]` inspects the session's ShannonNet
-  World: agent, projected capabilities, children, and receipts.
-- ShannonNet sub-agents get compiled context: the session's native-memory
-  hits are imported with provenance and the child's projected World decides
-  what it sees (confidential notes never cross); the session World is
-  checkpointed and closed when the backend drops.
-- Sub-agents under delegated authority: with the ShannonNet backend the
-  `agent` tool spawns a child identity with a World projected from the
-  session World, the child's shell commands are signed as that child, and a
-  join receipt is recorded when it finishes. `SandboxBackend::for_child` /
-  `child_joined` default to sharing the parent backend for other backends.
-- Workspace sync for the ShannonNet backend (`sandbox_shannon_sync`, default
-  on): the session's non-ignored files are shipped into the worker's
-  per-World session container before each command — full tree first, then
-  only changes and deletions — so remote builds and tests run on the files
-  just edited locally and their outputs persist across commands.
 - `Git` grows a `commit_plan` action: a propose-only planner that splits the
   working tree into ordered atomic commits (#3999). It groups whole files —
   lock files ride with their manifest, tests ride with the source they name —

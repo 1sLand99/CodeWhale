@@ -64,6 +64,15 @@ pub trait LlmClient: Send + Sync {
         request: MessageRequest,
     ) -> impl Future<Output = Result<MessageResponse>> + Send;
 
+    /// Dispatch a fresh request. Clients with a local response cache must
+    /// override this; authorization decisions cannot reuse earlier answers.
+    fn create_message_uncached(
+        &self,
+        request: MessageRequest,
+    ) -> impl Future<Output = Result<MessageResponse>> + Send {
+        self.create_message(request)
+    }
+
     /// Creates a streaming message completion
     ///
     /// Returns a stream of SSE events that should be consumed until completion.

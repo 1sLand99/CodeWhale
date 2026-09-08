@@ -762,6 +762,10 @@ impl ThreadManager {
             tokens_used: 0,
             time_used_seconds: 0,
             continuation_count: 0,
+            last_gap_fingerprint: None,
+            repeated_gap_count: 0,
+            last_gap_pass: None,
+            pause_reason: None,
             created_at: now,
             updated_at: now,
         };
@@ -1885,6 +1889,10 @@ fn to_protocol_goal(goal: ThreadGoalRecord) -> ThreadGoal {
         tokens_used: goal.tokens_used,
         time_used_seconds: goal.time_used_seconds,
         continuation_count: goal.continuation_count,
+        last_gap_fingerprint: goal.last_gap_fingerprint,
+        repeated_gap_count: goal.repeated_gap_count,
+        last_gap_pass: goal.last_gap_pass,
+        pause_reason: goal.pause_reason,
         created_at: goal.created_at,
         updated_at: goal.updated_at,
     }

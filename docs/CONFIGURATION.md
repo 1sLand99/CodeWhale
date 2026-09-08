@@ -474,6 +474,29 @@ the direct Arcee provider uses the bare `trinity-large-thinking` ID. Direct
 Arcee large-model API calls are tracked as 256K-context BF16 serving; Thinking
 is reasoning-capable, while Preview is not marked as a thinking model.
 
+### OpenRouter vendor pinning
+
+OpenRouter serves each model through several upstream vendors, and Codewhale
+passes the `model` string to OpenRouter verbatim — so OpenRouter's own
+vendor-selection syntax works today in `[providers.openrouter] model` (or
+`/model`), with no extra configuration (#6007):
+
+```toml
+provider = "openrouter"
+model = "deepseek/deepseek-v4-pro:deepinfra"   # pin the DeepInfra upstream
+# model = "deepseek/deepseek-v4-pro:floor"     # cheapest upstream
+# model = "@preset/my-team-preset"             # an account preset from the OpenRouter dashboard
+```
+
+The `:vendor` suffix pins one upstream vendor, `:floor` / `:ceil` bound its
+price tier, and `@preset/...` resolves an account preset. Codewhale does not
+fetch OpenRouter's per-vendor endpoint list and emits no `provider.order`
+request field, so pricing and availability for a pinned vendor come from
+OpenRouter's response, not from Codewhale's catalog: a pinned vendor may
+bill at a different rate than the model's catalog row, in which case cost
+surfaces report the routing-dependent missing-price reason rather than an
+invented number.
+
 ### Custom OpenAI-Compatible Gateways
 
 For a single third-party service that implements the OpenAI Chat Completions
@@ -2256,6 +2279,8 @@ reasoning contract, and all four membership ids omit generic sampling fields.
 - `tui.stream_chunk_timeout_secs` (int, optional, default `900`): per-SSE-chunk idle timeout for streamed model responses. Slow local or compatible servers can raise this with `/config stream_chunk_timeout_secs <seconds>`; `0` maps to the default and explicit values must be `1..=3600`. The legacy `DEEPSEEK_STREAM_IDLE_TIMEOUT_SECS` env var is still honored when this key is omitted.
 - `tui.header_items` (array of strings, optional, default `[]`): opt-in header chips. Set `header_items = ["tokens"]` under `[tui]` to show the session input, cache-hit, and output token counts. Narrow terminals elide the optional chip; wide terminals show it alongside context utilization.
 - `tui.osc8_links` (bool, optional, default on for macOS/Linux, off for Windows): emit OSC 8 escape sequences around URLs in transcript output so supporting terminals (iTerm2, Terminal.app 13+, Ghostty, Kitty, WezTerm, Alacritty, recent gnome-terminal/konsole) can open them with the terminal's link gesture—usually Cmd-click on macOS and Ctrl-click on Linux/Windows. Terminals without OSC 8 support render the plain label and ignore the escape. The escapes are emitted out-of-band (not inside buffer cells), so column corruption is not a concern; set `false` only for terminals that misrender the OSC 8 terminator itself. Windows legacy consoles default off; opt in with `true`.
+- `tui.max_model_steps` (int, optional, default `200`): finite ceiling on model steps one turn may take. A "step" is one accepted provider response, so this bounds how many billable requests a single user message can trigger. Values are clamped to `1..=100000`; `0` (or absent) resolves to the default — there is no `0`-means-unlimited sentinel. At ~80% of the budget the model gets one soft-landing notice to stop exploring and write its final report; at exhaustion the turn ends `Failed` with `Maximum model steps reached before completion (limit: N)` (after one bounded final-report turn when the model still owes work). This is the interactive runaway guard and applies to every turn, including a single goal pass; raise this knob to enlarge one pass — a goal pass that needs more than 200 model steps in one turn (before a terminal `update_goal`) would otherwise fail the turn. Multi-turn goal runs already continue automatically (see the Goal loop section below).
+- `tui.turn_wall_clock_secs` (int, optional, default `3600`): cumulative per-turn wall-clock budget in seconds, measured across every model step of one turn (not per request). Time blocked on a human approval is excluded. Clamped to `30..=86400` (24 hours is the documented ceiling); `0` resolves to the default. When exhausted the turn stops before authorizing another billable request with a message naming the limit and the key to raise.
 - `transcript.prose_measure` (positive integer, optional, default absent = full width): wrap cap, in columns, for prose cells — user messages, assistant answers, and reasoning/thinking blocks — in the live transcript (#5436). Absent (or `0`) spends the full content width, consistent with tool/status cells and the #5322 wide-frame decision; the former 105-column prose rail is gone. Set a positive whole number (e.g. `prose_measure = 120` under `[transcript]`) to restore a bounded reading measure on ultrawide terminals. Narrow terminals always keep their content width — the cap clamps from above only. Tool, diff, and status cells never inherit this cap. Invalid values (negative or non-integer) are rejected at startup with a `transcript.prose_measure` config error. Resolved once per render pass, so the main transcript cache and the full-screen overlay always agree on the effective width.
 - `hooks` (optional): lifecycle hooks configuration (see `config.example.toml`).
 - `features.*` (optional): feature flag overrides (see below).
@@ -2332,6 +2357,13 @@ max_continuations = 100
 # for coordinator goals that should poll on a cadence instead of keeping one
 # provider turn open. Default: 0 (continue immediately).
 continuation_delay_seconds = 300
+
+# Per-turn step allowance while a goal is active (#5994). Goal turns get a
+# larger but still finite budget than an ordinary interactive turn.
+# Default: 1000 (0 or absent resolves to 1000, never unlimited). Range:
+# 1..=100,000. This bounds each provider turn, never the number of
+# continuation passes.
+max_steps = 1000
 ```
 
 The effective delay is capped at 86,400 seconds (24 hours); use an automation
@@ -2340,6 +2372,15 @@ for schedules that are less frequent than once per day.
 When an explicit backstop fires, the goal pauses with a status message naming
 `[goal] max_continuations` and a warning is logged; resume the goal after
 inspecting progress, or raise/disable the backstop.
+
+`[goal] max_steps` governs one engine turn at a time: the ordinary interactive
+ceiling (`max_steps`, default 200) is unchanged, and explicit per-invocation
+ceilings — `exec --max-turns N`, child-worker caps — always win over it. At
+about 80% of the selected budget the model is told to land; at exhaustion it
+gets one bounded final report and the turn classifies as budget-exhausted. An
+unfinished goal then pauses with the BudgetLimit reason instead of re-arming
+another goal turn — resume it explicitly after reviewing the report. Wall-clock
+and stream protections are separate and still apply.
 
 The delay starts only after a successful turn while an explicitly created goal
 is still active. `/goal pause`, `/goal done`, `/goal blocked`, `/goal clear`,
@@ -2667,6 +2708,22 @@ schema (`minItems` / `maxItems`), its model-visible description, and the
 payload validator. A rejected payload names the key to raise, so the model can
 either resize the batch or tell the user which setting to change.
 
+### User-input / approval wait timeout
+
+Questions from `request_user_input` and approval decisions wait a bounded
+time and then cancel with a timeout (#6003). The default is 300 seconds.
+Raise it when you step away or read carefully, or set `0` to wait forever
+(overnight automation, long human review).
+
+```toml
+[tools]
+user_input_timeout_seconds = 300   # default 300; 0 disables the timeout; clamped to 86400 (24h)
+```
+
+The one key governs both the interactive question wait and the Runtime
+approval-decision wait, and the wait is this table's only user-facing clock —
+wall-clock and stream protections elsewhere are unaffected.
+
 ## Feature Flags
 
 Feature flags live under the `[features]` table and are merged across profiles.
@@ -2902,3 +2959,65 @@ emits one compact `status` notice per turn so the user can see why their
 visible text shrank. Treat any change that re-enables text-based tool
 execution as a regression; the protocol-recovery tests in
 `crates/tui/tests/integration/protocol_recovery.rs` lock the contract.
+
+## Model-bound redaction (`[redaction] model_bound`)
+
+Codewhale masks credential-looking values in tool output **before it is sent
+to an upstream model** — the "model boundary". A file read by a tool can
+contain a configured API key, a bare provider token, or a credential-shaped
+opaque string, and the model must not see those bytes. This backstop is
+separate from the display/export scrubbers: it decides what the model itself
+can quote back, and it is deliberately conservative (`CredentialShaped`
+policy, see `crates/config/src/persistence.rs`), so ordinary code and config
+stay byte-exact while keys, JWTs, bearer tokens, PEM blocks, and long opaque
+runs are masked.
+
+Turning that masking **off** is a security decision, so it is not a plain
+boolean:
+
+```toml
+[redaction]
+model_bound = "disabled"   # "enabled" (default) | "disabled"
+```
+
+Setting `"disabled"` only records a *request*. It takes effect only when all
+of these are true:
+
+1. You restart the interactive TUI.
+2. The startup gate appears and you press `1`/`Y` on its first stage
+   ("confirm and disable"). This only advances to a second, final-confirmation
+   stage - the gate repeats the red warning and asks "are you really sure?".
+3. On that second stage you press `1`/`Y` again. The gate is rendered with the
+   same explicit-key discipline as workspace trust - `Enter` never confirms by
+   reflex, and `2`/`U` on the second stage steps back.
+4. Only that second confirmation persists a receipt to
+   `~/.codewhale/redaction-state.json` (next to `config.toml`) and rebuilds
+   the engine with masking off for the rest of this launch and future ones.
+
+The receipt is bound to the config it was made against and is valid only
+while that config still requests `"disabled"`. Setting `model_bound` back
+to `"enabled"` - or rewriting `config.toml` in any way after the
+confirmation - invalidates it, so requesting `"disabled"` again later
+asks for a fresh confirmation on the next launch. The receipt checks both the
+config contents and modification time; missing, unreadable, or malformed config
+and older receipts without this binding keep masking enabled. Legacy-home
+installs store the receipt beside their resolved config file.
+
+Until a confirmation exists, the effective mode is always `"enabled"`:
+
+- Choosing `2`/`U` ("keep masking on") leaves the config field untouched, so
+  the next launch asks again. Edit the field back to `"enabled"` to stop being
+  asked.
+- Non-interactive entry points (`codewhale exec`, hooks, automations, headless
+  agents) never confirm anything and never apply an unconfirmed request.
+- Routing/classification summaries and durable goal-state text keep their own
+  always-on redaction regardless of this switch; the opt-out exists so the
+  model can quote file bytes for exact edits, not to relax stored state.
+
+The config value itself is forgiving: `true`/`false`, `"on"`/`"off"`, and
+`"enabled"`/`"disabled"` (any casing) all parse, with `false`/`"off"` meaning
+`"disabled"`.
+
+A confirmed opt-out still sends your configured API keys to the provider you
+are already talking to. Only use it when the model must read and edit files
+that contain real credentials.

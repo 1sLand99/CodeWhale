@@ -935,6 +935,8 @@ impl App {
             theme_id,
             theme_name,
             onboarding,
+            redaction_gate: false,
+            redaction_gate_confirming: false,
             onboarding_needs_api_key: needs_api_key,
             onboarding_provider: provider,
             onboarding_workspace_trust_gate,
@@ -967,6 +969,7 @@ impl App {
             pending_user_input_prompt: None,
             backtrack: crate::tui::backtrack::BacktrackState::new(),
             current_session_id: None,
+            offline_queue_lease: None,
             last_known_work_state: None,
             last_known_goal_state: None,
             pending_goal_controls: VecDeque::new(),
@@ -980,6 +983,16 @@ impl App {
                 .as_ref()
                 .and_then(|tui| tui.status_items.clone())
                 .unwrap_or_else(crate::config::StatusItem::default_footer),
+            posture_bar: config
+                .tui
+                .as_ref()
+                .and_then(|tui| tui.posture_bar)
+                .unwrap_or_default(),
+            metrics_line: config
+                .tui
+                .as_ref()
+                .and_then(|tui| tui.metrics_line)
+                .unwrap_or_default(),
             // Prose wrap cap (`[transcript] prose_measure`, #5436). Resolved
             // once here so every render pass — main cache and full-screen
             // overlay — shares one effective width; `None` = full width.
@@ -1056,8 +1069,7 @@ impl App {
             draft_gen: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             fleet_draft_cell: std::sync::Arc::new(std::sync::Mutex::new(None)),
             constitution_draft_cell: std::sync::Arc::new(std::sync::Mutex::new(None)),
-            mcp_login_cell: std::sync::Arc::new(std::sync::Mutex::new(None)),
-            mcp_login_cancel: None,
+            mcp_login: None,
             prompt_suggestion_cell: std::sync::Arc::new(std::sync::Mutex::new(None)),
             balance_initiated: false,
             last_balance_fetch: None,

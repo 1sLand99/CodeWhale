@@ -87,9 +87,8 @@ fn working_app() -> App {
         subagent("agent_b", crate::tools::subagent::SubAgentStatus::Running),
     ];
     app.session_metrics
-        .record_model_call(1_200, 30_000, Some(400), None);
-    app.session.last_output_throughput =
-        crate::resource_telemetry::TokenThroughput::new(1_200, Duration::from_secs(30));
+        .record_model_call(1_200, 29_600, Some(400), Some(30_000));
+    app.session.last_completion_tokens = Some(1_200);
     app
 }
 
@@ -140,7 +139,7 @@ fn composed_frame_paints_each_fact_in_exactly_one_row() {
                 "help hint",
                 crate::tui::shell_key_routing::info_help_hint(app.ui_locale),
             ),
-            ("output rate", "40 tok/s".to_string()),
+            ("output rate", "40 avg tok/s".to_string()),
             ("ttft", "ttft 400ms".to_string()),
         ];
         facts.push(("context reading", format!("ctx {pct}%")));
@@ -232,7 +231,7 @@ fn idle_frame_keeps_two_chrome_rows_and_last_turn_metrics() {
         rows[composer + 1]
     );
     assert!(
-        rows[composer + 1].contains("40 tok/s"),
+        rows[composer + 1].contains("40 avg tok/s"),
         "{}",
         rows[composer + 1]
     );
@@ -298,4 +297,105 @@ fn double_tap_window_shows_the_send_now_hint() {
         rows[composer]
     );
     assert!(!rows[composer].contains("Esc to interrupt"));
+}
+
+/// `tui.posture_bar` / `tui.metrics_line` (#5950): `hidden` gives a row
+/// back to the transcript — one row per hidden preset, two for both — and
+/// `compact` keeps the row with its first shed rungs already gone. Every
+/// other row of the frame stays where it was, so the composer is never
+/// displaced by the choice.
+#[test]
+fn row_presets_reclaim_rows_and_quiet_them_in_the_composed_frame() {
+    use crate::config::ChromeRowPreset;
+    // 160 columns joins the blocker sizes above: the working clock's two
+    // halves only both fit beside the pinned unenforced-scope permission
+    // chip from that width up, and this test asserts the full row's clocks.
+    let (width, height) = (160u16, 32u16);
+    let posture_row = |rows: &[String]| rows.iter().position(|row| row.contains("▶▶"));
+    let metrics_row = |rows: &[String]| rows.iter().position(|row| row.contains("ctx "));
+
+    let mut app = working_app();
+    let full = draw(&mut app, width, height);
+    let posture = posture_row(&full).expect("full frame paints the posture bar");
+    let metrics = metrics_row(&full).expect("full frame paints the metrics line");
+    assert_eq!(
+        metrics,
+        posture + 1,
+        "the metrics line sits under the posture bar"
+    );
+    // The full row's live facts: a turn clock (this fixture waits on
+    // sub-agents, so #5914 words it `sub-agents underway` rather than
+    // `working`), the live counts and the hint — the three compact drops.
+    assert!(full[posture].contains("1m 15s"), "{:?}", full[posture]);
+    assert!(full[posture].contains("2 agents"), "{:?}", full[posture]);
+    assert!(
+        full[posture].contains("Esc to interrupt"),
+        "{:?}",
+        full[posture]
+    );
+    assert!(full[metrics].contains("tok/s"), "{:?}", full[metrics]);
+
+    // Hide the posture bar: the metrics line takes its row, and the
+    // transcript above gains one.
+    app.posture_bar = ChromeRowPreset::Hidden;
+    let rows = draw(&mut app, width, height);
+    assert_eq!(posture_row(&rows), None, "no posture bar: {rows:#?}");
+    assert_eq!(
+        metrics_row(&rows),
+        Some(metrics),
+        "the metrics line keeps its row"
+    );
+    assert_eq!(
+        count_rows_containing(&rows, "ctx "),
+        1,
+        "the context reading is still painted once"
+    );
+
+    // Hide both: two rows reclaimed.
+    app.metrics_line = ChromeRowPreset::Hidden;
+    let rows = draw(&mut app, width, height);
+    assert_eq!(posture_row(&rows), None);
+    assert_eq!(metrics_row(&rows), None);
+    assert_eq!(count_rows_containing(&rows, "deepseek-v4-pro"), 0);
+
+    // Compact both: the rows are back, quieter — the posture and the
+    // route/reading/price, none of the live facts or telemetry.
+    app.posture_bar = ChromeRowPreset::Compact;
+    app.metrics_line = ChromeRowPreset::Compact;
+    let rows = draw(&mut app, width, height);
+    let posture = posture_row(&rows).expect("compact paints the posture bar");
+    let metrics = metrics_row(&rows).expect("compact paints the metrics line");
+    assert_eq!(metrics, posture + 1);
+    let (mode, permission) = crate::tui::underwater::posture_chips(&app);
+    assert!(rows[posture].contains(permission.expect("permission chip").0.as_ref()));
+    assert!(rows[posture].contains(mode.expect("mode chip").0.as_ref()));
+    for gone in ["working", "2 agents", "Esc to interrupt"] {
+        assert!(
+            !rows[posture].contains(gone),
+            "{gone} in {:?}",
+            rows[posture]
+        );
+    }
+    assert!(
+        rows[metrics].contains("deepseek-v4-pro"),
+        "{:?}",
+        rows[metrics]
+    );
+    let pct = super::info_context_percent(&app);
+    assert!(
+        rows[metrics].contains(&format!("ctx {pct}%")),
+        "{:?}",
+        rows[metrics]
+    );
+    for gone in [
+        "tok/s",
+        "ttft",
+        crate::tui::shell_key_routing::info_help_hint(app.ui_locale).as_str(),
+    ] {
+        assert!(
+            !rows[metrics].contains(gone),
+            "{gone} in {:?}",
+            rows[metrics]
+        );
+    }
 }

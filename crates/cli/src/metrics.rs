@@ -7,9 +7,9 @@
 //! - `~/.codewhale/sessions/`   — saved session JSON files (tool call history)
 //! - `~/.codewhale/tasks/runtime/events/` — runtime thread JSONL event streams
 //!
-//! An install that never migrated off the DeepSeek-era `~/.deepseek` root still
-//! reads there, but only for a path that actually exists — see
-//! `resolve_state_file`.
+//! Default-root audit history includes retained rotations and legacy receipts,
+//! excluding records copied across roots. An explicit `CODEWHALE_HOME` never
+//! reads outside that root.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use chrono::{DateTime, Duration, Utc};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Public entry-point
@@ -37,7 +38,7 @@ pub fn run(args: MetricsArgs) -> Result<()> {
     // streams off `<tasks>/runtime`. Resolving the home is fallible, and a
     // rollup of zeros is indistinguishable from real emptiness, so a home we
     // cannot resolve is an error rather than a silent all-zero report.
-    let audit_log = resolve_state_file("audit.log")?;
+    let audit_roots = resolve_audit_roots()?;
     let sessions = codewhale_config::resolve_state_dir("sessions")?;
     let runtime_events = codewhale_config::resolve_state_dir("tasks")?
         .join("runtime")
@@ -45,7 +46,7 @@ pub fn run(args: MetricsArgs) -> Result<()> {
 
     // Collect data from every source; treat missing files as empty.
     let mut rollup = Rollup::default();
-    read_audit_log(&audit_log, args.since, &mut rollup);
+    read_audit_history(&audit_roots, args.since, &mut rollup);
     read_session_files(&sessions, args.since, &mut rollup);
     read_runtime_events(&runtime_events, args.since, &mut rollup);
 
@@ -250,8 +251,37 @@ impl Rollup {
 // Source readers
 // ──────────────────────────────────────────────────────────────────────────────
 
-/// Read one-JSON-line-per-event audit log.
-fn read_audit_log(path: &Path, since: Option<DateTime<Utc>>, rollup: &mut Rollup) {
+/// Read both retained generations from each root. A copied legacy record is
+/// counted once across roots, while repeated records within one root retain
+/// their multiplicity. No source log is rewritten or removed.
+fn read_audit_history(roots: &[PathBuf], since: Option<DateTime<Utc>>, rollup: &mut Rollup) {
+    let mut earlier_roots = HashMap::new();
+    for root in roots {
+        let mut root_counts = HashMap::new();
+        for name in ["audit.log.1", "audit.log"] {
+            read_audit_log(
+                &root.join(name),
+                since,
+                rollup,
+                &earlier_roots,
+                &mut root_counts,
+            );
+        }
+        for (record, count) in root_counts {
+            let prior = earlier_roots.entry(record).or_insert(0);
+            *prior = (*prior).max(count);
+        }
+    }
+}
+
+/// Read one JSON event per line, excluding copies already seen in other roots.
+fn read_audit_log(
+    path: &Path,
+    since: Option<DateTime<Utc>>,
+    rollup: &mut Rollup,
+    earlier_roots: &HashMap<[u8; 32], u64>,
+    root_counts: &mut HashMap<[u8; 32], u64>,
+) {
     let content = match std::fs::read_to_string(path) {
         Ok(c) => c,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
@@ -279,6 +309,16 @@ fn read_audit_log(path: &Path, since: Option<DateTime<Utc>>, rollup: &mut Rollup
                 continue;
             }
         };
+
+        // Copy migration preserves the complete event, including its timestamp.
+        // Count occurrences so two identical legitimate records in one source
+        // are not collapsed into one merely because another root also exists.
+        let fingerprint: [u8; 32] = Sha256::digest(v.to_string().as_bytes()).into();
+        let count = root_counts.entry(fingerprint).or_insert(0);
+        *count += 1;
+        if *count <= earlier_roots.get(&fingerprint).copied().unwrap_or(0) {
+            continue;
+        }
 
         // Parse timestamp — field is "ts" in audit log.
         let ts = parse_ts_field(&v, "ts");
@@ -832,26 +872,18 @@ fn print_human(rollup: &Rollup) {
 // Helpers
 // ──────────────────────────────────────────────────────────────────────────────
 
-/// Resolve a file that lives directly in the state root, preferring the
-/// canonical Codewhale root.
-///
-/// This is the file-shaped twin of `codewhale_config::resolve_state_dir` (and
-/// of `default_config_path`, which resolves `config.toml` the same way): the
-/// primary path wins whenever it exists, the legacy DeepSeek path is used only
-/// when it is the *only* one present, and with neither present the primary is
-/// returned so an empty rollup names the canonical location. An explicit
-/// `CODEWHALE_HOME` is an isolation boundary and never falls back.
-///
-/// The two roots are never unioned. `ensure_state_dir` may migrate legacy state
-/// by *copying* it (`StateMigrationKind::Copied` leaves the legacy tree in
-/// place), so summing both roots would double-count every migrated record.
-fn resolve_state_file(name: &str) -> Result<PathBuf> {
-    let primary = codewhale_config::codewhale_home()?.join(name);
-    if codewhale_config::codewhale_home_is_explicit() || primary.exists() {
-        return Ok(primary);
+/// An explicit home is an isolation boundary. Default installs can have
+/// distinct audit histories in both roots, even after a copied migration.
+fn resolve_audit_roots() -> Result<Vec<PathBuf>> {
+    let primary = codewhale_config::codewhale_home()?;
+    let mut roots = vec![primary];
+    if !codewhale_config::codewhale_home_is_explicit() {
+        let legacy = codewhale_config::legacy_deepseek_home()?;
+        if !roots.contains(&legacy) {
+            roots.push(legacy);
+        }
     }
-    let legacy = codewhale_config::legacy_deepseek_home()?.join(name);
-    Ok(if legacy.exists() { legacy } else { primary })
+    Ok(roots)
 }
 
 /// Parse a timestamp from a JSON value field (tries RFC3339).
@@ -879,6 +911,10 @@ fn fmt_num(n: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn read_audit_test_log(path: &Path, since: Option<DateTime<Utc>>, rollup: &mut Rollup) {
+        super::read_audit_log(path, since, rollup, &HashMap::new(), &mut HashMap::new());
+    }
 
     // ── Duration parser ──
 
@@ -958,7 +994,7 @@ mod tests {
     fn audit_log_empty_file() {
         let mut rollup = Rollup::default();
         // Non-existent path — should not panic, rollup stays empty.
-        read_audit_log(Path::new("/nonexistent/audit.log"), None, &mut rollup);
+        read_audit_test_log(Path::new("/nonexistent/audit.log"), None, &mut rollup);
         assert_eq!(rollup.total_lines, 0);
     }
 
@@ -980,7 +1016,7 @@ mod tests {
         writeln!(tmp, "{line2}").unwrap();
 
         let mut rollup = Rollup::default();
-        read_audit_log(tmp.path(), None, &mut rollup);
+        read_audit_test_log(tmp.path(), None, &mut rollup);
 
         assert_eq!(rollup.parsed_lines, 2);
         assert_eq!(rollup.tools["exec_shell"].calls, 1);
@@ -1000,7 +1036,7 @@ mod tests {
         .unwrap();
 
         let mut rollup = Rollup::default();
-        read_audit_log(tmp.path(), None, &mut rollup);
+        read_audit_test_log(tmp.path(), None, &mut rollup);
 
         // 2 lines total, 1 malformed skipped, 1 parsed.
         assert_eq!(rollup.total_lines, 2);
@@ -1027,7 +1063,7 @@ mod tests {
 
         let cutoff: DateTime<Utc> = "2026-01-01T00:00:00Z".parse().unwrap();
         let mut rollup = Rollup::default();
-        read_audit_log(tmp.path(), Some(cutoff), &mut rollup);
+        read_audit_test_log(tmp.path(), Some(cutoff), &mut rollup);
 
         // Only the newer line should be counted.
         assert_eq!(rollup.parsed_lines, 1);
@@ -1072,70 +1108,101 @@ mod tests {
     }
 
     #[test]
-    fn state_files_resolve_under_the_codewhale_root_on_a_clean_install() {
+    fn default_audit_history_includes_both_roots_without_requiring_existing_files() {
         let (home, _lock, _env) = isolated_home();
         assert_eq!(
-            resolve_state_file("audit.log").expect("resolves"),
-            home.path().join(".codewhale").join("audit.log"),
-            "the reader must land on the root the audit writer actually writes"
+            resolve_audit_roots().expect("resolves"),
+            vec![
+                home.path().join(".codewhale"),
+                home.path().join(".deepseek")
+            ],
         );
     }
 
     #[test]
-    fn a_legacy_file_is_used_only_when_it_is_the_one_that_exists() {
-        let (home, _lock, _env) = isolated_home();
-        let legacy = home.path().join(".deepseek");
-        std::fs::create_dir_all(&legacy).expect("legacy root");
-        std::fs::write(legacy.join("audit.log"), b"{}\n").expect("legacy log");
-
-        assert_eq!(
-            resolve_state_file("audit.log").expect("resolves"),
+    fn copied_audit_history_keeps_unique_legacy_and_rotated_records() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let primary = dir.path().join("primary");
+        let legacy = dir.path().join("legacy");
+        std::fs::create_dir_all(&primary).unwrap();
+        std::fs::create_dir_all(&legacy).unwrap();
+        let shared = r#"{"ts":"2026-09-01T00:00:00Z","event":"credential.save","details":{}}"#;
+        let old = r#"{"ts":"2026-08-01T00:00:00Z","event":"credential.clear","details":{}}"#;
+        let new = r#"{"ts":"2026-09-02T00:00:00Z","event":"credential.save","details":{}}"#;
+        std::fs::write(primary.join("audit.log.1"), format!("{shared}\n{shared}\n")).unwrap();
+        std::fs::write(primary.join("audit.log"), format!("{new}\nmalformed\n")).unwrap();
+        std::fs::write(
             legacy.join("audit.log"),
-            "real DeepSeek-era receipts must not be dropped on the floor"
-        );
-
-        // Once the canonical file exists it wins outright; the two roots are
-        // never summed, because legacy state may have been migrated by copy.
-        let primary = home.path().join(".codewhale");
-        std::fs::create_dir_all(&primary).expect("primary root");
-        std::fs::write(primary.join("audit.log"), b"{}\n").expect("primary log");
+            format!("{shared}\n{shared}\n{shared}\n"),
+        )
+        .unwrap();
+        std::fs::write(legacy.join("audit.log.1"), format!("{old}\n")).unwrap();
+        let roots = [primary, legacy];
+        let before: Vec<_> = roots
+            .iter()
+            .flat_map(|root| {
+                ["audit.log.1", "audit.log"].map(|name| {
+                    let path = root.join(name);
+                    (path.clone(), std::fs::read(path).unwrap())
+                })
+            })
+            .collect();
+        let mut rollup = Rollup::default();
+        read_audit_history(&roots, None, &mut rollup);
         assert_eq!(
-            resolve_state_file("audit.log").expect("resolves"),
-            primary.join("audit.log")
+            rollup.credentials.saves, 4,
+            "maximum occurrence count across copied roots"
         );
+        assert_eq!(
+            rollup.credentials.clears, 1,
+            "unique old rotation is retained"
+        );
+        assert_eq!(rollup.parsed_lines, 5);
+        for (path, bytes) in before {
+            assert_eq!(
+                std::fs::read(path).unwrap(),
+                bytes,
+                "source history is read-only"
+            );
+        }
+        let mut recent = Rollup::default();
+        read_audit_history(
+            &roots,
+            Some("2026-09-01T00:00:00Z".parse().unwrap()),
+            &mut recent,
+        );
+        assert_eq!(recent.credentials.saves, 4);
+        assert_eq!(recent.credentials.clears, 0);
     }
 
     #[test]
-    fn an_explicit_codewhale_home_is_an_isolation_boundary() {
+    fn an_explicit_codewhale_home_is_an_audit_isolation_boundary() {
         let (home, _lock, _env) = isolated_home();
         let legacy = home.path().join(".deepseek");
-        std::fs::create_dir_all(&legacy).expect("legacy root");
-        std::fs::write(legacy.join("audit.log"), b"{}\n").expect("legacy log");
-
-        let explicit = tempfile::TempDir::new().expect("tempdir");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(legacy.join("audit.log"), r#"{"event":"credential.save"}"#).unwrap();
+        let explicit = tempfile::TempDir::new().unwrap();
         let _pin =
             crate::tests::ScopedEnvVar::set("CODEWHALE_HOME", &explicit.path().to_string_lossy());
-
-        assert_eq!(
-            resolve_state_file("audit.log").expect("resolves"),
-            explicit.path().join("audit.log"),
-            "an explicit home must never reach outside its own root"
-        );
+        let roots = resolve_audit_roots().unwrap();
+        assert_eq!(roots, vec![explicit.path().to_path_buf()]);
+        let mut rollup = Rollup::default();
+        read_audit_history(&roots, None, &mut rollup);
+        assert_eq!(rollup.parsed_lines, 0);
     }
 
     #[test]
     fn the_legacy_deepseek_home_variable_is_no_longer_honoured() {
-        // docs/CONFIGURATION.md tells upgraders to rename DEEPSEEK_HOME to
-        // CODEWHALE_HOME; every other subsystem already ignores it, and this
-        // reader was the last consumer of the legacy alias.
         let (home, _lock, _env) = isolated_home();
-        let stale = tempfile::TempDir::new().expect("tempdir");
+        let stale = tempfile::TempDir::new().unwrap();
         let _stale =
             crate::tests::ScopedEnvVar::set("DEEPSEEK_HOME", &stale.path().to_string_lossy());
-
         assert_eq!(
-            resolve_state_file("audit.log").expect("resolves"),
-            home.path().join(".codewhale").join("audit.log")
+            resolve_audit_roots().unwrap(),
+            vec![
+                home.path().join(".codewhale"),
+                home.path().join(".deepseek")
+            ],
         );
     }
 }

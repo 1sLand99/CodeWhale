@@ -4403,3 +4403,78 @@ fn a_finished_job_reports_its_duration_not_a_growing_elapsed() {
         "the frozen value must be the real duration, not the timeout: {second}ms"
     );
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn readonly_pipeline_preserves_arguments_and_disables_git_helpers() {
+    let workspace = tempdir().unwrap();
+    let outside = tempdir().unwrap();
+    let sentinel = outside.path().join("secret");
+    std::fs::write(&sentinel, "private-marker\n").unwrap();
+    std::os::unix::fs::symlink(&sentinel, workspace.path().join("linked-secret")).unwrap();
+    std::fs::write(workspace.path().join("input.txt"), "hello\n").unwrap();
+    for name in ["-i", "-e", "-f", "--output=changed", "-o"] {
+        std::fs::write(workspace.path().join(name), "option-shaped filename\n").unwrap();
+    }
+    let ctx = ToolContext::new(workspace.path())
+        .with_shell_policy(crate::worker_profile::ShellPolicy::ReadOnly);
+    let tool = BashTool::new("Bash");
+    for command in ["sort * | cat", "sed -n 1p * | cat", "cat * | cat"] {
+        let result = tool
+            .execute(json!({"command": command}), &ctx)
+            .await
+            .unwrap();
+        assert!(
+            !result.success,
+            "literal wildcard has no matching operand: {command}"
+        );
+        assert!(!result.content.contains("private-marker"));
+        assert_eq!(
+            std::fs::read_to_string(&sentinel).unwrap(),
+            "private-marker\n"
+        );
+        assert!(!workspace.path().join("changed").exists());
+    }
+    let ordinary = tool
+        .execute(json!({"command": "cat input.txt | wc -l"}), &ctx)
+        .await
+        .unwrap();
+    assert!(ordinary.success, "{}", ordinary.content);
+    assert!(
+        tool.execute(json!({"command": "cat linked-secret | cat"}), &ctx)
+            .await
+            .is_err()
+    );
+    let pipeline = hardened_readonly_pipeline("git show HEAD | cat", workspace.path()).unwrap();
+    assert!(pipeline.contains("--no-ext-diff"));
+    assert!(pipeline.contains("--no-textconv"));
+    assert!(pipeline.contains("--no-show-signature"));
+}
+
+#[tokio::test]
+async fn readonly_sed_extra_options_never_mutate_files() {
+    let workspace = tempdir().unwrap();
+    let source = workspace.path().join("input.txt");
+    std::fs::write(&source, "first\nsecond\n").unwrap();
+    let ctx = ToolContext::new(workspace.path())
+        .with_shell_policy(crate::worker_profile::ShellPolicy::ReadOnly);
+    for command in [
+        "sed -n 1p input.txt -i",
+        "sed -n 1p -i.bak input.txt",
+        "sed -n 1p -e 1e input.txt",
+        "sed -n 1p -f script input.txt",
+    ] {
+        let result = BashTool::new("Bash")
+            .execute(json!({"command": command}), &ctx)
+            .await
+            .unwrap();
+        assert!(!result.success, "{command}");
+        assert!(result.content.contains("read-only shell policy"));
+        assert_eq!(std::fs::read_to_string(&source).unwrap(), "first\nsecond\n");
+    }
+    let result = BashTool::new("Bash")
+        .execute(json!({"command": "sed -n 1p input.txt"}), &ctx)
+        .await
+        .unwrap();
+    assert!(result.success, "{}", result.content);
+}

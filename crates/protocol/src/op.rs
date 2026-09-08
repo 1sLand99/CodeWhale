@@ -217,6 +217,8 @@ pub enum Op {
         status: String,
         #[serde(default)]
         clear: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        goal_id: Option<String>,
     },
 
     /// Set (or replace) the active goal objective and start goal work.
@@ -224,6 +226,8 @@ pub enum Op {
         objective: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         token_budget: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        goal_id: Option<String>,
     },
 
     Cancel,
@@ -560,10 +564,12 @@ mod tests {
                 approval_mode: "suggest".into(),
             },
             Op::SetGoalStatus {
+                goal_id: None,
                 status: "paused".into(),
                 clear: false,
             },
             Op::SetGoalObjective {
+                goal_id: None,
                 objective: "ship".into(),
                 token_budget: Some(10),
             },

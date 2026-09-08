@@ -98,7 +98,7 @@ read-only parent has. Read-only is transitive through any delegation chain:
 the clamp (`ChildAuthority::clamp` in `fleet/exact.rs`) intersects every
 field with the narrower side, the deny-list union means a descendant can
 never drop an ancestor's restriction, and `inherit_disallowed_tools: false`
-cannot drop a posture denial (`is_posture_denial`). This is pinned by
+cannot drop any operator or ancestor denial. This is pinned by
 `a_read_only_parents_delegation_never_widens_authority` in
 `crates/tui/src/fleet/exact.rs` tests.
 

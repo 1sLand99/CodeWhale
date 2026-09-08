@@ -627,13 +627,16 @@ async fn gather_diff_evidence(
     staged: bool,
     base: Option<&str>,
 ) -> Result<Vec<EvidenceBlock>, ToolError> {
-    let base = base.filter(|b| !b.trim().is_empty());
+    let base = match base.filter(|b| !b.trim().is_empty()) {
+        Some(base) => Some(super::git::resolve_commit_ref(workspace, base).await?),
+        None => None,
+    };
     let mut blocks = Vec::new();
 
     if staged {
         // Staged scope: the index (optionally vs an explicit base).
         let mut args: Vec<String> = vec!["--cached".to_string()];
-        if let Some(base) = base {
+        if let Some(base) = &base {
             args.push(base.to_string());
         }
         if let Some(diff) = run_git_diff(workspace, &args).await? {
@@ -678,11 +681,11 @@ async fn run_git_diff(workspace: &Path, args: &[String]) -> Result<Option<String
         // git not installed: degrade gracefully rather than failing the tool.
         return Ok(None);
     };
-    cmd.arg("diff");
+    cmd.args(["diff", "--no-ext-diff", "--no-textconv"]);
     for arg in args {
         cmd.arg(arg);
     }
-    cmd.current_dir(workspace);
+    cmd.arg("--").current_dir(workspace);
 
     let output = tokio::task::spawn_blocking(move || cmd.output())
         .await
@@ -1123,6 +1126,80 @@ mod tests {
             out.status.success(),
             "git {args:?} failed: {}",
             String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    #[tokio::test]
+    async fn diff_base_cannot_inject_options_or_run_diff_helpers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let marker = outside.path().join("sentinel");
+        std::fs::write(&marker, "untouched").unwrap();
+        let repo = tmp.path();
+        run_git(repo, &["init", "-q"]);
+        run_git(repo, &["config", "user.email", "t@example.com"]);
+        run_git(repo, &["config", "user.name", "Test"]);
+        run_git(repo, &["config", "commit.gpgsign", "false"]);
+        std::fs::write(repo.join("f.txt"), "original\n").unwrap();
+        std::fs::write(repo.join(".gitattributes"), "*.txt diff=hostile\n").unwrap();
+        run_git(repo, &["add", "."]);
+        run_git(repo, &["commit", "-q", "-m", "base"]);
+        run_git(
+            repo,
+            &[
+                "config",
+                "diff.hostile.textconv",
+                "definitely-missing-helper",
+            ],
+        );
+        run_git(
+            repo,
+            &["config", "diff.external", "definitely-missing-helper"],
+        );
+        std::fs::write(repo.join("f.txt"), "changed-marker\n").unwrap();
+        run_git(repo, &["add", "f.txt"]);
+        for staged in [false, true] {
+            for base in [
+                format!("--output={}", marker.display()),
+                format!("--out={}", marker.display()),
+                "--ext-diff".into(),
+                "HEAD --output=bad".into(),
+                "HEAD\n--output=bad".into(),
+            ] {
+                assert!(
+                    gather_diff_evidence(repo, staged, Some(&base))
+                        .await
+                        .is_err(),
+                    "{staged}: {base}"
+                );
+                assert_eq!(std::fs::read_to_string(&marker).unwrap(), "untouched");
+            }
+            let blocks = gather_diff_evidence(repo, staged, Some("HEAD"))
+                .await
+                .unwrap();
+            assert!(
+                blocks
+                    .iter()
+                    .any(|block| block.body.contains("changed-marker"))
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn diff_without_base_remains_usable_on_unborn_head() {
+        let tmp = tempfile::tempdir().unwrap();
+        run_git(tmp.path(), &["init", "-q"]);
+        assert!(
+            gather_diff_evidence(tmp.path(), false, None)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            gather_diff_evidence(tmp.path(), true, None)
+                .await
+                .unwrap()
+                .is_empty()
         );
     }
 

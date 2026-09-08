@@ -146,7 +146,7 @@ pub(crate) async fn consult_reviewer(
         _ = cancel_token.cancelled() => {
             return ReviewerResult::finish(ReviewerOutcome::Cancelled, None);
         }
-        response = tokio::time::timeout(REVIEWER_TIMEOUT, client.create_message(request)) => response,
+        response = tokio::time::timeout(REVIEWER_TIMEOUT, client.create_message_uncached(request)) => response,
     };
     let response = match response {
         Err(_) => return ReviewerResult::unavailable("the reviewer timed out", None),
@@ -221,6 +221,49 @@ mod tests {
             stop_sequence: None,
             container: None,
             usage,
+        }
+    }
+
+    #[tokio::test]
+    async fn guardian_rechecks_identical_calls_instead_of_reusing_a_cached_allow() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let client = crate::client::DeepSeekClient::new(&crate::config::Config {
+            api_key: Some("test-guardian-cache-key".to_string()),
+            base_url: Some(server.uri()),
+            ..Default::default()
+        })
+        .unwrap();
+        for (decision, risk) in [("allow", "low"), ("deny", "high")] {
+            server.reset().await;
+            let verdict = serde_json::json!({
+                "decision": decision,
+                "risk_level": risk,
+                "reason": "current authorization evidence",
+            });
+            Mock::given(method("POST"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "id": "guardian-fresh",
+                    "object": "chat.completion",
+                    "model": "deepseek-v4-pro",
+                    "choices": [{"index": 0, "message": {
+                        "role": "assistant", "content": verdict.to_string(),
+                    }, "finish_reason": "stop"}],
+                    "usage": {"prompt_tokens": 9, "completion_tokens": 3, "total_tokens": 12},
+                })))
+                .mount(&server)
+                .await;
+            let result = consult_reviewer(
+                &client,
+                "the same proposed call under current policy",
+                &CancellationToken::new(),
+            )
+            .await;
+            assert_eq!(result.outcome.audit_decision(), decision);
+            assert_eq!(result.usage.unwrap().output_tokens, 3);
+            assert_eq!(server.received_requests().await.unwrap().len(), 1);
         }
     }
 
