@@ -10922,6 +10922,10 @@ async fn measure_production_mode_tool_catalogs() -> serde_json::Value {
     // decision; a deliberately nonexistent PATH root makes its real dependency
     // probes return absent without inheriting the developer or CI host.
     let _path = EnvVarGuard::set("PATH", tmp.path().join("no-host-interpreters"));
+    // Shell syntax is part of the tool schema. A bare name plus the empty
+    // PATH resolves to the same `bash` spelling on Unix and Windows without
+    // executing or requiring that interpreter. Do not inherit the host shell.
+    let _shell = EnvVarGuard::set("SHELL", "bash");
     // The macOS Vision OCR probe is a framework check that ignores PATH, so
     // the profile neutralizes it explicitly: every host presents no local OCR
     // capability here, matching the no-host-interpreters PATH pin above.
@@ -10992,7 +10996,8 @@ async fn measure_production_mode_tool_catalogs() -> serde_json::Value {
     }
 
     serde_json::json!({
-        "surface_profile": "production-default-builtins-no-mcp-no-host-interpreters-v1",
+        "surface_profile": "production-default-builtins-no-mcp-no-host-interpreters-bash-v2",
+        "execution_shell": crate::shell_dispatcher::global_dispatcher().kind().binary(),
         "modes": mode_metrics,
     })
 }
@@ -11067,10 +11072,49 @@ async fn runtime_contract_tool_metric_uses_canonical_mode_surfaces() {
 #[allow(clippy::await_holding_lock)]
 #[allow(clippy::print_stdout)]
 async fn print_mode_tool_catalog_metrics() {
-    println!(
-        "TOOL_CATALOG_METRICS {}",
-        measure_production_mode_tool_catalogs().await
+    let metrics = measure_production_mode_tool_catalogs().await;
+    assert_eq!(
+        metrics["execution_shell"], "bash",
+        "run this exact metric in a fresh process so its shell fixture owns dispatcher initialization"
     );
+    println!("TOOL_CATALOG_METRICS {metrics}");
+}
+
+#[test]
+fn runtime_contract_tool_metric_is_independent_of_inherited_shell() {
+    let metric = "core::engine::tests::print_mode_tool_catalog_metrics";
+    let samples: Vec<serde_json::Value> = ["/bin/zsh", "pwsh"]
+        .into_iter()
+        .map(|shell| {
+            let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+                .args([
+                    metric,
+                    "--exact",
+                    "--ignored",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env("SHELL", shell)
+                .output()
+                .expect("run exact metric in a fresh process");
+            assert!(
+                output.status.success(),
+                "metric failed: {}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8(output.stdout)
+                .expect("metric UTF-8")
+                .lines()
+                .find_map(|line| {
+                    line.split_once("TOOL_CATALOG_METRICS ")
+                        .map(|(_, payload)| serde_json::from_str(payload).expect("metric JSON"))
+                })
+                .expect("metric marker")
+        })
+        .collect();
+    assert_eq!(samples[0], samples[1], "host shell changed the fixture");
+    assert_eq!(samples[0]["execution_shell"], "bash");
 }
 
 #[test]

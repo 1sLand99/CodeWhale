@@ -34,7 +34,7 @@ RECEIPT_KIND = "codewhale.runtime_contract_receipt"
 BUDGET_KIND = "codewhale.runtime_contract_budget"
 SCHEMA_VERSION = 1
 REPRESENTATIVE_FIXTURE_ID = "representative-v1"
-TOOL_SURFACE_PROFILE = "production-default-builtins-no-mcp-no-host-interpreters-v1"
+TOOL_SURFACE_PROFILE = "production-default-builtins-no-mcp-no-host-interpreters-bash-v2"
 
 MetricPath = tuple[str, ...]
 MetricResult = tuple[str, str, int, int]
@@ -130,6 +130,7 @@ METRICS: tuple[tuple[MetricPath, str], ...] = (
 
 IDENTITIES: tuple[tuple[MetricPath, str], ...] = (
     (("tool_catalog", "surface_profile"), "tool surface profile"),
+    (("tool_catalog", "execution_shell"), "tool fixture shell"),
     *(
         (
             ("tool_catalog", "modes", mode, surface, field),
@@ -207,6 +208,12 @@ def validate_identity_structure(document: dict[str, Any], kind: str) -> None:
         raise RuntimeContractError(
             f"{kind} tool surface_profile must be `{TOOL_SURFACE_PROFILE}`, "
             f"got {profile!r}"
+        )
+
+    shell = required_value(document, ("tool_catalog", "execution_shell"), kind)
+    if shell != "bash":
+        raise RuntimeContractError(
+            f"{kind} tool execution_shell must be `bash`, got {shell!r}"
         )
 
     for mode, _label in VISIBLE_MODES:

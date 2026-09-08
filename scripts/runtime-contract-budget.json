@@ -1,5 +1,5 @@
 {
-  "_comment": "One-way numeric ceilings and exact structural identities for the provider-free runtime contract. Decreases pass; increases or identity changes fail. Lock in decreases with: python3 scripts/check-runtime-contract-budget.py --update The v0.9.8 child-receipt restore grew every production tool surface by 1496 schema bytes / 374 estimated tokens (agent tool). The v0.9.8 workshop read/tool-result byte fields then grew every production tool surface by 371 schema bytes / 93 estimated tokens. Both raises are explicit maintainer decisions; identities stay on the pre-raise digests only if the name set is unchanged \u2014 re-measure on Linux CI if Lint reports identity drift. The v0.9.8 pinned session prefix added the <context_update> sentence to the base prompt (5848 -> 6084 bytes, every representative stage re-hashed), and the host-side Workflow/Goal verbs plus honest child posture grew the tool catalog (active 16531 -> 16602 bytes, full 71473 -> 72371); both are explicit v0.9.8 maintainer decisions measured from the release train. The v0.9.9 configured-skills change hides only custom configured-root paths, preserves discoverable default-root paths, normalizes Windows prompt separators, and trims 50 redundant skills-prompt bytes. The skill/memory/goal/handoff identities were re-measured without raising any ceiling. Explicit maintainer decision for #5473/#5492. The v0.9.10 full surfaces intentionally add the safe read_media tool; their measured schemas remain below the prior byte/token ceilings. Representative prompt byte metrics now use the same host-independent normalized text as their identities; the normalized base is 6089 bytes. The v0.9.11 model-visible sub-agent surface intentionally retires six legacy agents/* tools in favor of the canonical agent tool; all affected schema and prompt metrics decrease. The v0.9.12 plugin prompt-match slice intentionally adds the request_plugin_install tool to the full tool surfaces (plan full: +518 schema bytes / +130 estimated tokens / 29 -> 30 tools) so a strong prompt match can surface the human review CTA; explicit maintainer decision for #5663/#5579.",
+  "_comment": "One-way numeric ceilings and exact structural identities for the provider-free runtime contract. Decreases pass; increases or identity changes fail. Lock in decreases with: python3 scripts/check-runtime-contract-budget.py --update The v0.9.8 child-receipt restore grew every production tool surface by 1496 schema bytes / 374 estimated tokens (agent tool). The v0.9.8 workshop read/tool-result byte fields then grew every production tool surface by 371 schema bytes / 93 estimated tokens. Both raises are explicit maintainer decisions; identities stay on the pre-raise digests only if the name set is unchanged \u2014 re-measure on Linux CI if Lint reports identity drift. The v0.9.8 pinned session prefix added the <context_update> sentence to the base prompt (5848 -> 6084 bytes, every representative stage re-hashed), and the host-side Workflow/Goal verbs plus honest child posture grew the tool catalog (active 16531 -> 16602 bytes, full 71473 -> 72371); both are explicit v0.9.8 maintainer decisions measured from the release train. The v0.9.9 configured-skills change hides only custom configured-root paths, preserves discoverable default-root paths, normalizes Windows prompt separators, and trims 50 redundant skills-prompt bytes. The skill/memory/goal/handoff identities were re-measured without raising any ceiling. Explicit maintainer decision for #5473/#5492. The v0.9.10 full surfaces intentionally add the safe read_media tool; their measured schemas remain below the prior byte/token ceilings. Representative prompt byte metrics now use the same host-independent normalized text as their identities; the normalized base is 6089 bytes. The v0.9.11 model-visible sub-agent surface intentionally retires six legacy agents/* tools in favor of the canonical agent tool; all affected schema and prompt metrics decrease. The v0.9.12 plugin prompt-match slice intentionally adds the request_plugin_install tool to the full tool surfaces (plan full: +518 schema bytes / +130 estimated tokens / 29 -> 30 tools) so a strong prompt match can surface the human review CTA; explicit maintainer decision for #5663/#5579. The v0.9.13 profile pins a non-executed bare bash shell so interpreter guidance is reproducible across hosts. The duplicate tts catalog entry is intentionally hidden; speech remains canonical and the alias remains available for saved-transcript dispatch.",
   "document_kind": "codewhale.runtime_contract_budget",
   "representative_context": {
     "fixture_id": "representative-v1",
@@ -82,6 +82,7 @@
     }
   },
   "tool_catalog": {
+    "execution_shell": "bash",
     "modes": {
       "act": {
         "active": {
@@ -101,7 +102,7 @@
         },
         "full": {
           "bytes": 65519,
-          "identity_sha256": "b5ceb72d89dc1e0e4161bd360ed2a05c433ce7b60b2300987165406c33d155af",
+          "identity_sha256": "1878fd9a724fc9645ff8ef827ad9f2b7124fd511d789e45d97e9d83a0cf866ff",
           "tokens_est": 16380,
           "tool_names": [
             "Git",
@@ -147,7 +148,6 @@
             "terminal/wait",
             "todo_write",
             "tool_search",
-            "tts",
             "tui_help",
             "update_goal",
             "validate_data",
@@ -156,7 +156,7 @@
             "workflow",
             "write"
           ],
-          "tools": 51
+          "tools": 50
         }
       },
       "operate": {
@@ -177,7 +177,7 @@
         },
         "full": {
           "bytes": 65519,
-          "identity_sha256": "b5ceb72d89dc1e0e4161bd360ed2a05c433ce7b60b2300987165406c33d155af",
+          "identity_sha256": "1878fd9a724fc9645ff8ef827ad9f2b7124fd511d789e45d97e9d83a0cf866ff",
           "tokens_est": 16380,
           "tool_names": [
             "Git",
@@ -223,7 +223,6 @@
             "terminal/wait",
             "todo_write",
             "tool_search",
-            "tts",
             "tui_help",
             "update_goal",
             "validate_data",
@@ -232,7 +231,7 @@
             "workflow",
             "write"
           ],
-          "tools": 51
+          "tools": 50
         }
       },
       "plan": {
@@ -291,6 +290,6 @@
         }
       }
     },
-    "surface_profile": "production-default-builtins-no-mcp-no-host-interpreters-v1"
+    "surface_profile": "production-default-builtins-no-mcp-no-host-interpreters-bash-v2"
   }
 }

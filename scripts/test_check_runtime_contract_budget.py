@@ -104,6 +104,7 @@ def receipt_fixture() -> dict:
         },
         "tool_catalog": {
             "surface_profile": mod.TOOL_SURFACE_PROFILE,
+            "execution_shell": "bash",
             "modes": {
                 "plan": {
                     "full": tool_surface(["File", "Git", "create_goal"], 18000),
@@ -143,6 +144,23 @@ class RuntimeContractBudgetTests(unittest.TestCase):
         budget = mod.budget_from_receipt(receipt)
         self.assertEqual(len(mod.METRICS), 55)
         self.assertEqual(mod.compare(receipt, budget), ([], []))
+
+    def test_unpinned_shell_receipt_is_rejected(self) -> None:
+        receipt = receipt_fixture()
+        budget = mod.budget_from_receipt(receipt)
+        del receipt["tool_catalog"]["execution_shell"]
+        with self.assertRaisesRegex(mod.RuntimeContractError, "execution_shell"):
+            mod.compare(receipt, budget)
+
+    def test_wrong_shell_is_rejected_even_with_matching_budget(self) -> None:
+        receipt = receipt_fixture()
+        budget = mod.budget_from_receipt(receipt)
+        for shell in ["/bin/bash", "/bin/zsh", "pwsh", None]:
+            with self.subTest(shell=shell):
+                receipt["tool_catalog"]["execution_shell"] = shell
+                budget["tool_catalog"]["execution_shell"] = shell
+                with self.assertRaisesRegex(mod.RuntimeContractError, "execution_shell"):
+                    mod.compare(receipt, budget)
 
     def test_every_owned_metric_rejects_an_increase(self) -> None:
         budget = mod.budget_from_receipt(receipt_fixture())
