@@ -71,22 +71,37 @@ impl EventSoundPolicy {
         now_ms: u64,
         bell_transport: bool,
     ) -> SoundDecision {
-        if self.config.quiet {
+        Self::decide_configured(
+            &self.config,
+            &mut self.last_played_ms,
+            event,
+            now_ms,
+            bell_transport,
+        )
+    }
+
+    fn decide_configured(
+        config: &NotificationsConfig,
+        last_played_ms: &mut [Option<u64>; 6],
+        event: SoundEvent,
+        now_ms: u64,
+        bell_transport: bool,
+    ) -> SoundDecision {
+        if config.quiet {
             return SoundDecision::Suppress(SuppressReason::QuietMode);
         }
-        let selected = if let Some(sound) = self.config.sound {
+        let selected = if let Some(sound) = config.sound {
             Some(sound)
         } else if event == SoundEvent::TurnComplete
-            && self.config.completion_sound != CompletionSound::Off
+            && config.completion_sound != CompletionSound::Off
         {
-            Some(self.config.completion_sound)
+            Some(config.completion_sound)
         } else {
-            if self.config.event_sound.quiet {
+            if config.event_sound.quiet {
                 return SoundDecision::Suppress(SuppressReason::QuietMode);
             }
-            if self.config.event_sound.enabled {
-                if !self
-                    .config
+            if config.event_sound.enabled {
+                if !config
                     .event_sound
                     .events
                     .iter()
@@ -106,16 +121,15 @@ impl EventSoundPolicy {
             Some(CompletionSound::Whale) => SoundCue::Whale,
             Some(CompletionSound::Bell) => SoundCue::Bell,
             Some(CompletionSound::Beep) => SoundCue::Beep,
-            Some(CompletionSound::File) => match &self.config.sound_file {
+            Some(CompletionSound::File) => match &config.sound_file {
                 Some(path) => SoundCue::File(path.clone()),
                 None => return SoundDecision::Suppress(SuppressReason::MissingFile),
             },
             None => cue_for(event),
         };
-        let slot = &mut self.last_played_ms[event.index()];
-        if slot.is_some_and(|last| {
-            now_ms.saturating_sub(last) < self.config.event_sound.min_interval_ms
-        }) {
+        let slot = &mut last_played_ms[event.index()];
+        if slot.is_some_and(|last| now_ms.saturating_sub(last) < config.event_sound.min_interval_ms)
+        {
             return SoundDecision::Suppress(SuppressReason::RateLimited);
         }
         *slot = Some(now_ms);
@@ -146,6 +160,28 @@ pub fn decide(kind: NotificationKind, now_ms: u64, bell_transport: bool) -> Soun
     policy_cell()
         .write()
         .map(|mut policy| policy.decide(event_for_kind(kind), now_ms, bell_transport))
+        .unwrap_or(SoundDecision::Suppress(SuppressReason::Disabled))
+}
+
+/// Decide from this request's configuration while holding the shared history
+/// lock. Request snapshots never replace the installed TUI/model policy.
+pub fn decide_configured(
+    config: &NotificationsConfig,
+    kind: NotificationKind,
+    now_ms: u64,
+    bell_transport: bool,
+) -> SoundDecision {
+    policy_cell()
+        .write()
+        .map(|mut policy| {
+            EventSoundPolicy::decide_configured(
+                config,
+                &mut policy.last_played_ms,
+                event_for_kind(kind),
+                now_ms,
+                bell_transport,
+            )
+        })
         .unwrap_or(SoundDecision::Suppress(SuppressReason::Disabled))
 }
 
@@ -278,6 +314,138 @@ mod tests {
         assert_eq!(
             decide(NotificationKind::ApprovalNeeded, 11, false),
             SoundDecision::Suppress(SuppressReason::RateLimited)
+        );
+        configure(EventSoundPolicy::default());
+    }
+
+    #[test]
+    fn configured_off_decision_ignores_intervening_installed_whale_policy() {
+        let _lock = crate::test_support::lock_test_env();
+        let off = NotificationsConfig {
+            sound: Some(CompletionSound::Off),
+            ..Default::default()
+        };
+        configure(EventSoundPolicy::from_config(&off));
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+        let request = std::thread::spawn(move || {
+            ready_tx.send(()).unwrap();
+            resume_rx.recv().unwrap();
+            decide_configured(&off, NotificationKind::ApprovalNeeded, 10, false)
+        });
+        ready_rx.recv().unwrap();
+        reconfigure(EventSoundPolicy::from_config(&NotificationsConfig {
+            sound: Some(CompletionSound::Whale),
+            ..Default::default()
+        }));
+        resume_tx.send(()).unwrap();
+        assert_eq!(
+            request.join().unwrap(),
+            SoundDecision::Suppress(SuppressReason::Disabled)
+        );
+        assert_eq!(
+            decide(NotificationKind::ApprovalNeeded, 10, false),
+            SoundDecision::Play(SoundCue::Whale),
+            "the suppressed request neither replaces defaults nor consumes history"
+        );
+        configure(EventSoundPolicy::default());
+    }
+
+    #[test]
+    fn configured_sound_keeps_installed_defaults_and_suppression_keeps_history() {
+        let _lock = crate::test_support::lock_test_env();
+        let off = NotificationsConfig {
+            sound: Some(CompletionSound::Off),
+            ..Default::default()
+        };
+        let whale = NotificationsConfig {
+            sound: Some(CompletionSound::Whale),
+            ..Default::default()
+        };
+        configure(EventSoundPolicy::from_config(&off));
+        assert_eq!(
+            decide_configured(&whale, NotificationKind::InputNeeded, 100, false),
+            SoundDecision::Play(SoundCue::Whale)
+        );
+        for config in [
+            off,
+            NotificationsConfig {
+                quiet: true,
+                ..whale.clone()
+            },
+        ] {
+            assert!(matches!(
+                decide_configured(&config, NotificationKind::InputNeeded, 101, false),
+                SoundDecision::Suppress(_)
+            ));
+        }
+        assert_eq!(
+            decide_configured(&whale, NotificationKind::InputNeeded, 102, false),
+            SoundDecision::Suppress(SuppressReason::RateLimited)
+        );
+        assert_eq!(
+            decide(NotificationKind::InputNeeded, 2_100, false),
+            SoundDecision::Suppress(SuppressReason::Disabled),
+            "a request must not replace installed defaults, even after cooldown"
+        );
+        assert_eq!(
+            decide_configured(&whale, NotificationKind::InputNeeded, 2_100, false),
+            SoundDecision::Play(SoundCue::Whale),
+            "suppression must not move the original exact cooldown boundary"
+        );
+        configure(EventSoundPolicy::default());
+    }
+
+    #[test]
+    fn concurrent_configured_decisions_share_history_with_settings_refresh() {
+        let _lock = crate::test_support::lock_test_env();
+        configure(EventSoundPolicy::default());
+        let whale = NotificationsConfig {
+            sound: Some(CompletionSound::Whale),
+            ..Default::default()
+        };
+        let start = std::sync::Arc::new(std::sync::Barrier::new(3));
+        let requests = (0..2)
+            .map(|_| {
+                let start = start.clone();
+                let config = whale.clone();
+                std::thread::spawn(move || {
+                    start.wait();
+                    decide_configured(&config, NotificationKind::ApprovalNeeded, 10, false)
+                })
+            })
+            .collect::<Vec<_>>();
+        start.wait();
+        let results = requests
+            .into_iter()
+            .map(|request| request.join().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| **result == SoundDecision::Play(SoundCue::Whale))
+                .count(),
+            1
+        );
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| **result == SoundDecision::Suppress(SuppressReason::RateLimited))
+                .count(),
+            1
+        );
+        reconfigure(EventSoundPolicy::from_config(&whale));
+        assert_eq!(
+            decide(NotificationKind::ApprovalNeeded, 11, false),
+            SoundDecision::Suppress(SuppressReason::RateLimited)
+        );
+        assert_eq!(
+            decide_configured(&whale, NotificationKind::InputNeeded, 11, false),
+            SoundDecision::Play(SoundCue::Whale)
+        );
+        assert_eq!(
+            decide_configured(&whale, NotificationKind::ApprovalNeeded, 2_010, false),
+            SoundDecision::Play(SoundCue::Whale)
         );
         configure(EventSoundPolicy::default());
     }
