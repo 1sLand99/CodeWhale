@@ -1362,6 +1362,13 @@ pub trait ToolSpec: Send + Sync {
     /// Returns the unique name of this tool (used in API calls).
     fn name(&self) -> &str;
 
+    /// Identifies the implementation in local registration diagnostics only.
+    /// Adapters should use their existing source identity, never credentials,
+    /// command arguments, descriptions, or other execution payloads.
+    fn registration_origin(&self) -> std::borrow::Cow<'_, str> {
+        std::any::type_name::<Self>().into()
+    }
+
     /// Returns a human-readable description of what this tool does.
     fn description(&self) -> &str;
 
