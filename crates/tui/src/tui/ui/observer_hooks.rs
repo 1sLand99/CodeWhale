@@ -444,7 +444,7 @@ mod tests {
 
         app.is_loading = true;
         assert_eq!(turn_state_from_app(&app), TurnState::InProgress);
-        app.is_loading = false;
+        app.runtime_turn_status = Some("in_progress".to_string());
 
         app.pending_user_input_prompt = Some((
             "q1".to_string(),
@@ -457,7 +457,12 @@ mod tests {
             session_wait_reason(&app),
             Some(SessionWaitReason::UserInput)
         );
+        assert_eq!(
+            session_state_transition_event(TurnState::InProgress, turn_state_from_app(&app)),
+            Some(crate::hooks::HookEvent::WaitingForUser)
+        );
         app.pending_user_input_prompt = None;
+        assert_eq!(turn_state_from_app(&app), TurnState::InProgress);
 
         app.goal_continuation_waiting = true;
         assert_eq!(turn_state_from_app(&app), TurnState::Waiting);

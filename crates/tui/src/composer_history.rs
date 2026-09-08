@@ -85,8 +85,8 @@ fn load_history_from(path: &Path) -> Vec<String> {
 }
 
 /// Append an entry to the persisted history, pruning old entries to
-/// stay within [`MAX_HISTORY_ENTRIES`]. Slash-commands and empty input
-/// are skipped — those don't help recall.
+/// stay within [`MAX_HISTORY_ENTRIES`]. Prompts and slash commands are kept;
+/// empty input is skipped.
 ///
 /// Best-effort and non-blocking — work is forwarded to a dedicated writer
 /// thread so the caller (typically the UI submit handler) returns
@@ -288,6 +288,17 @@ fn write_history_atomic(path: &Path, payload: &[u8]) -> std::io::Result<()> {
 }
 
 #[cfg(test)]
+pub(crate) fn flush_history_writer_for_tests(timeout: Duration) {
+    let (done_tx, done_rx) = channel();
+    writer_sender()
+        .send(HistoryWrite::Flush(done_tx))
+        .expect("history writer accepts flush");
+    done_rx
+        .recv_timeout(timeout)
+        .expect("history writer flush timed out");
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::time::{Duration, Instant};
@@ -301,16 +312,6 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let path = tmp.path().join(HISTORY_FILE_NAME);
         (tmp, path)
-    }
-
-    fn flush_history_writer_for_tests(timeout: Duration) {
-        let (done_tx, done_rx) = channel();
-        writer_sender()
-            .send(HistoryWrite::Flush(done_tx))
-            .expect("history writer accepts flush");
-        done_rx
-            .recv_timeout(timeout)
-            .expect("history writer flush timed out");
     }
 
     // #3240: a fresh install must resolve the history file under `.codewhale`,

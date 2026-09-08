@@ -2256,6 +2256,33 @@ fn submit_input_records_absolute_slash_path_as_message_history() {
 }
 
 #[test]
+fn submit_input_recalls_slash_commands_and_persists_them_for_the_next_session() {
+    let _env_lock = lock_test_env();
+    let home = tempfile::tempdir().expect("isolated home");
+    let _home = EnvVarGuard::set("HOME", home.path());
+    let _profile = EnvVarGuard::set("USERPROFILE", home.path());
+    let _state = EnvVarGuard::set("CODEWHALE_HOME", home.path().join(".codewhale"));
+    let mut app = App::new(test_options(false), &Config::default());
+    app.input_history.clear();
+    for input in ["/theme", "/compact"] {
+        app.input = input.to_string();
+        app.cursor_position = input.chars().count();
+        assert_eq!(app.submit_input().as_deref(), Some(input));
+    }
+    app.history_up();
+    assert_eq!(app.input, "/compact");
+    app.history_up();
+    assert_eq!(app.input, "/theme");
+
+    crate::composer_history::flush_history_writer_for_tests(std::time::Duration::from_secs(5));
+    let mut resumed = App::new(test_options(false), &Config::default());
+    resumed.history_up();
+    assert_eq!(resumed.input, "/compact");
+    resumed.history_up();
+    assert_eq!(resumed.input, "/theme");
+}
+
+#[test]
 fn restore_last_scenario() {
     // Scenario consolidation of: restore_last_submitted_prompt_rehydrates_empty_composer, restore_last_submitted_prompt_preserves_existing_draft, restore_last_cleared_input_restores_saved_draft, restore_last_cleared_input_does_nothing_when_composer_not_empty
     // from restore_last_submitted_prompt_rehydrates_empty_composer

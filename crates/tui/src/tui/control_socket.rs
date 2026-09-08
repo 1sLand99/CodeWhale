@@ -442,14 +442,14 @@ impl SessionControl {
 /// `request_user_input` question, or a parked goal continuation — not only
 /// the continuation wait it used to map.
 pub(crate) fn turn_state_from_app(app: &App) -> TurnState {
-    if app.is_loading || matches!(app.runtime_turn_status.as_deref(), Some("in_progress")) {
-        return TurnState::InProgress;
-    }
     if app.goal_continuation_waiting
         || app.pending_user_input_prompt.is_some()
         || app.view_stack.top_kind() == Some(crate::tui::views::ModalKind::Approval)
     {
         return TurnState::Waiting;
+    }
+    if app.is_loading || matches!(app.runtime_turn_status.as_deref(), Some("in_progress")) {
+        return TurnState::InProgress;
     }
     TurnState::Idle
 }
