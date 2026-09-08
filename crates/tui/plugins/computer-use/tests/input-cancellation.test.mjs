@@ -9,7 +9,7 @@ const success = { code: 0, stdout: '{"ok":true}', stderr: "", timedOut: false };
 const decode = (args) => Buffer.from(args[args.indexOf("-EncodedCommand") + 1], "base64").toString("utf16le");
 
 for (const [name, invoke, release] of [
-  ["key hold", (backend) => backend.hold_key({ text: "ctrl+a", duration: 30 }), /KeyInput\(65, 0, 2\).*KeyInput\(17, 0, 2\)/s],
+  ["key hold", (backend) => backend.hold_key({ text: "ctrl+a", duration: 30 }), /SendKey\(65, 2\).*SendKey\(17, 2\)/s],
   ["drag", (backend) => backend.left_click_drag({ from_target: { x: 1, y: 2 }, to: { x: 30, y: 40 } }), /mouse_event\(\[User32\]::LEFTUP/],
   ["right click", (backend) => backend.right_click({ target: { x: 1, y: 2 } }), /mouse_event\(\[User32\]::RIGHTUP/],
 ]) {

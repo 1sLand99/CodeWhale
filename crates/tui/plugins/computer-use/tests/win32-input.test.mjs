@@ -3,7 +3,11 @@
 // -EncodedCommand payload of every spawn, and exits with a code the test
 // controls — mirroring how the failure-truthfulness was verified when the
 // fix was developed on the codewhale side before this port.
-import { test } from "node:test";
+import { test as nodeTest } from "node:test";
+// This transport fixture is a POSIX shell executable, not a Windows PE file.
+// Windows executes the generated commands against managed stubs in
+// win32-native-contract.test.mjs; portable runner tests cover every host.
+const test = (name, fn) => nodeTest(name, { skip: process.platform === "win32" ? "POSIX fake-executable fixture; use the Windows managed-stub suite" : false }, fn);
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
