@@ -284,6 +284,7 @@
   "ScreenModeMouseCaptureOff": "Captura del mouse desactivada; la terminal controla la selección.",
   "ScreenModeUnchanged": "Pantalla sin cambios: {reason}.",
   "ImageInputRejectedResent": "{model} no acepta imágenes — se reenviaron como texto; usa image_ocr para leerlas",
+  "ProviderToolCallMissing": "El proveedor terminó con `{reason}`, pero no incluyó ninguna llamada a herramientas. Vuelve a intentar este turno para continuar.",
   "ConfigLabelShowThinking": "Razonamiento del modelo en el chat",
   "ConfigLabelThinkingHighlight": "Resaltado de fondo del razonamiento",
   "ConfigLabelShowToolDetails": "Nivel de detalle de herramientas",

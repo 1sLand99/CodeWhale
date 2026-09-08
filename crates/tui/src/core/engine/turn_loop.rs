@@ -15,6 +15,7 @@ use crate::runtime_handoff::{
     shell_completion_runtime_message, subagent_completion_runtime_message,
     subagent_failure_runtime_message, waiting_for_subagents_runtime_message,
 };
+use crate::tool_inspection::TurnStopReason;
 use crate::tools::canonical_action::canonical_action_alias;
 use crate::tools::tool_call_budget::ToolCallBudget;
 use codewhale_core::request::{PrimaryTurnRequest, prepare_primary_turn_request};
@@ -714,8 +715,6 @@ impl Engine {
         // Cleared when the loop continues only for optional runtime work
         // (a goal continuation) after the model already delivered an answer.
         let mut step_budget_exhaustion_is_terminal = true;
-        // A1: one soft-landing notice at ~80% of a finite step budget.
-        let mut soft_landing_sent = false;
         // A2: one final report turn after the budget is exhausted, so a child
         // that owes work never finishes silently.
         let mut final_report_sent = false;
@@ -758,8 +757,8 @@ impl Engine {
         // reasoning — a protocol-complete but answerless response that reaches
         // the failure tail with `stream_errors == 0`, so the transport resume
         // path above never sees it. A clean stop there is almost always
-        // transient; re-request a bounded number of times (the prefix is
-        // cached, so each retry is cheap) before surfacing a hard failure.
+        // transient; re-request a bounded number of times before surfacing
+        // a hard failure. Each retry may incur provider usage and cost.
         let mut reasoning_only_reprompts: u32 = 0;
         // Nudge for the *next* request only. A reasoning-only reply persists
         // nothing (a bare Thinking block is not sendable), so the first retry
@@ -876,11 +875,11 @@ impl Engine {
             // spent tell the model once to stop exploring and write its final
             // report. Savings proved out by the grok-style parity work (ops
             // A1): a step-faithful harness ends mid-report far too often.
-            if !soft_landing_sent
+            if !turn.stop_diagnostics.soft_landing_sent
                 && turn.max_steps > 0
                 && turn.steps_used() >= ((turn.max_steps as f32 * 0.8).floor() as u32).max(1)
             {
-                soft_landing_sent = true;
+                turn.stop_diagnostics.soft_landing_sent = true;
                 let notice = format!(
                     "Step budget soft landing: you have used about {}% of your {} step budget ({}). Stop exploring; write your final, complete report now, in final form, with evidence.",
                     80,
@@ -898,6 +897,7 @@ impl Engine {
             }
 
             if turn.at_max_steps() && turn_end_child_coordination_responses_remaining == 0 {
+                turn.stop_diagnostics.reason = Some(TurnStopReason::StepBudgetExhausted);
                 if self
                     .request_turn_owned_child_coordination(
                         foreground_children.as_ref(),
@@ -1036,6 +1036,10 @@ impl Engine {
                 && compaction_go
             {
                 let compaction_id = format!("compact_{}", &uuid::Uuid::new_v4().to_string()[..8]);
+                turn.stop_diagnostics.automatic_compaction_attempts = turn
+                    .stop_diagnostics
+                    .automatic_compaction_attempts
+                    .saturating_add(1);
                 let compaction_cancel = self
                     .claim_compaction(&compaction_id)
                     .expect("a fresh automatic compaction id cannot be pre-canceled");
@@ -1457,6 +1461,10 @@ impl Engine {
                     request.tools.as_deref(),
                     inspection_surface.as_ref(),
                 );
+            turn.last_request_snapshot = Some(tool_request_snapshot.clone());
+            turn.stop_diagnostics.route_context_window_tokens = self
+                .active_route_limits
+                .and_then(|limits| limits.context_tokens);
 
             // Stream the response. Keep the request around (cloned into the
             // first call) so we can resend it on a transparent retry below
@@ -1509,7 +1517,13 @@ impl Engine {
                     let _ = self.tx_event.send(Event::status("Request cancelled")).await;
                     return (TurnOutcomeStatus::Interrupted, None);
                 }
-                result = client.create_message_stream(stream_request.clone()) => result,
+                result = async {
+                    turn.stop_diagnostics.model_requests_started = turn
+                        .stop_diagnostics
+                        .model_requests_started
+                        .saturating_add(1);
+                    client.create_message_stream(stream_request.clone()).await
+                } => result,
             };
             let stream = match stream_result {
                 Ok(s) => {
@@ -1588,9 +1602,12 @@ impl Engine {
                     &stream_request,
                     request_dispatched_at,
                     stream_retry_budget.spent(),
+                    &mut turn.stop_diagnostics,
                 )
                 .await;
             turn_error = turn_error.or(stream_error);
+            turn.stop_diagnostics
+                .observe_provider_response(stop_reason.as_deref(), tool_uses.len());
             // These belong to post-stream response assembly, not stream
             // consumption: blocks are built from the completed stream state,
             // and truncation is derived from its terminal stop reason below.
@@ -1710,6 +1727,8 @@ impl Engine {
             if let Some(resume) = pending_resume
                 && let Some(attempt) = stream_retry_budget.authorize()
             {
+                turn.stop_diagnostics.stream_resumes =
+                    turn.stop_diagnostics.stream_resumes.saturating_add(1);
                 match resume {
                     StreamResume::AfterSleep => {
                         crate::logging::warn(format!(
@@ -1903,6 +1922,30 @@ impl Engine {
                         input_parse_error: None,
                     });
                 }
+            }
+
+            // A protocol-level tool stop promises a call, unlike ordinary
+            // text that merely describes an intended action. Keep that
+            // distinction factual; never synthesize a tool or another request.
+            if tool_uses.is_empty()
+                && turn_error.is_none()
+                && matches!(stop_reason.as_deref(), Some("tool_calls" | "tool_use"))
+            {
+                turn.stop_diagnostics.reason = Some(TurnStopReason::ProviderToolCallMissing);
+                turn.stop_diagnostics.last_response_tool_calls_suppressed = Some(0);
+                self.add_interrupted_assistant_text(&current_text_visible)
+                    .await;
+                let reason = stop_reason.as_deref().expect("matched tool stop");
+                return (
+                    TurnOutcomeStatus::Failed,
+                    Some(
+                        crate::localization::tr(
+                            crate::localization::resolve_locale(&self.config.locale_tag),
+                            crate::localization::MessageId::ProviderToolCallMissing,
+                        )
+                        .replace("{reason}", reason),
+                    ),
+                );
             }
 
             for tool in &mut tool_uses {
@@ -2480,10 +2523,11 @@ impl Engine {
                     // no prefix churn. An output-length stop is excluded above
                     // because retrying would only reproduce it.
                     reasoning_only_reprompts += 1;
+                    turn.stop_diagnostics.reasoning_only_reprompts = reasoning_only_reprompts;
                     let attempt = reasoning_only_reprompts;
                     let max_reprompts = self.config.reasoning_only_max_reprompts;
-                    // Attempt 1 is the free one: the prefix is cached and a
-                    // clean stop here is usually transient. From attempt 2 on,
+                    // Attempt 1 preserves the prefix; a cache hit or lower
+                    // cost is not guaranteed. From attempt 2 on,
                     // an identical request has already failed once, so carry
                     // the nudge rather than reproduce the same answerless reply.
                     let nudged = attempt > 1;
@@ -2548,6 +2592,13 @@ impl Engine {
                         .await;
                 }
 
+                if turn_error.is_none() {
+                    if !turn.budget_exhausted_final_report {
+                        turn.stop_diagnostics.reason = Some(TurnStopReason::ProviderNoToolCall);
+                    }
+                    // This branch received no calls and dispatches no tools.
+                    turn.stop_diagnostics.last_response_tool_calls_suppressed = Some(0);
+                }
                 break;
             }
 
@@ -4390,6 +4441,7 @@ impl Engine {
         stream_request: &crate::models::MessageRequest,
         mut request_dispatched_at: Instant,
         drop_resumes_spent: u32,
+        diagnostics: &mut crate::tool_inspection::TurnStopDiagnostics,
     ) -> StreamOutcome {
         // The stream value is itself `Pin<Box<dyn Stream + Send>>`, which
         // is `Unpin`, so we can rebind it on a transparent retry without
@@ -4434,8 +4486,8 @@ impl Engine {
         let mut last_text_index: Option<usize> = None;
         let mut stream_errors = 0u32;
         // #103 transparent retry bookkeeping. `any_content_received` flips
-        // on the first non-MessageStart event so we know whether DeepSeek
-        // billed us / the user has seen any output for this turn yet.
+        // on the first actionable content event so we know whether the user
+        // has seen output. Absence of content does not establish zero usage.
         // This is distinct from the outer drop-resume budget (which
         // restarts the whole turn-step when a stream died with no
         // content-block delta delivered to the consumer).
@@ -4582,9 +4634,8 @@ impl Engine {
                     }
                     // #103: when the stream errors before any content was
                     // streamed AND we still have retry budget, transparently
-                    // resend the request. DeepSeek has not billed for any
-                    // output and the user has seen nothing — re-trying is
-                    // the right user-visible behavior.
+                    // resend the request. The user has seen nothing, but the
+                    // provider may already have consumed or billed tokens.
                     if should_transparently_retry_stream(
                         any_content_received,
                         transparent_stream_retries,
@@ -4601,7 +4652,13 @@ impl Engine {
                         let retry_stream_result = tokio::select! {
                             biased;
                             () = self.cancel_token.cancelled() => break,
-                            result = client.create_message_stream(stream_request.clone()) => result,
+                            result = async {
+                                diagnostics.transparent_stream_retries =
+                                    diagnostics.transparent_stream_retries.saturating_add(1);
+                                diagnostics.model_requests_started =
+                                    diagnostics.model_requests_started.saturating_add(1);
+                                client.create_message_stream(stream_request.clone()).await
+                            } => result,
                         };
                         match retry_stream_result {
                             Ok(fresh) => {

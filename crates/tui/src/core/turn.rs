@@ -64,6 +64,9 @@ pub struct TurnContext {
     /// it so an exhausted goal pauses instead of re-arming.
     pub budget_exhausted_final_report: bool,
 
+    pub(crate) stop_diagnostics: crate::tool_inspection::TurnStopDiagnostics,
+    pub(crate) last_request_snapshot: Option<crate::tool_inspection::ToolInspectionSnapshot>,
+
     /// Number of tool calls made in this turn.
 
     /// Whether the turn has been cancelled
@@ -114,6 +117,12 @@ impl TurnContext {
             max_steps,
             budget_source,
             budget_exhausted_final_report: false,
+            stop_diagnostics: crate::tool_inspection::TurnStopDiagnostics {
+                effective_max_steps: max_steps,
+                step_budget_source: budget_source.key_label(),
+                ..Default::default()
+            },
+            last_request_snapshot: None,
             cancelled: false,
             usage: Usage {
                 input_tokens: 0,
@@ -155,6 +164,31 @@ impl TurnContext {
     #[allow(dead_code)]
     pub fn elapsed(&self) -> Duration {
         self.started_at.elapsed()
+    }
+
+    /// Complete the existing request projection with observed turn-exit facts.
+    /// A turn that never prepared a request has no request snapshot to publish.
+    pub(crate) fn terminal_request_snapshot(
+        &mut self,
+        status: super::events::TurnOutcomeStatus,
+    ) -> Option<crate::tool_inspection::ToolInspectionSnapshot> {
+        use crate::tool_inspection::TurnStopReason;
+        self.stop_diagnostics.status = Some(status);
+        self.stop_diagnostics.model_step_index = self.step;
+        self.stop_diagnostics.final_report_requested = self.budget_exhausted_final_report;
+        self.stop_diagnostics.last_reported_input_tokens = self.latest_parent_input_tokens;
+        match status {
+            super::events::TurnOutcomeStatus::Interrupted => {
+                self.stop_diagnostics.reason = Some(TurnStopReason::Interrupted);
+            }
+            super::events::TurnOutcomeStatus::Failed if self.stop_diagnostics.reason.is_none() => {
+                self.stop_diagnostics.reason = Some(TurnStopReason::Failed);
+            }
+            _ => {}
+        }
+        let mut snapshot = self.last_request_snapshot.take()?;
+        snapshot.terminal = Some(self.stop_diagnostics.clone());
+        Some(snapshot)
     }
 
     /// Add usage from an API response

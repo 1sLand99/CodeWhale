@@ -284,6 +284,7 @@
   "ScreenModeMouseCaptureOff": "Captura del ratolí desactivada; el terminal controla la selecció.",
   "ScreenModeUnchanged": "Pantalla sense canvis: {reason}.",
   "ImageInputRejectedResent": "{model} no accepta imatges — s'han reenviat com a text; usa image_ocr per llegir-les",
+  "ProviderToolCallMissing": "El proveïdor ha acabat amb `{reason}`, però no ha proporcionat cap crida a una eina. Torna a provar aquest torn per continuar.",
   "ConfigLabelShowThinking": "Raonament del model al xat",
   "ConfigLabelThinkingHighlight": "Ressaltat de fons del raonament",
   "ConfigLabelShowToolDetails": "Nivell de detall de les eines",

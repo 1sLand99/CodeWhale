@@ -17,7 +17,8 @@ use crate::tools::subagent::{AgentWorkerStatus, CoordinationDetailProjection, Su
 use crate::tools::user_input::UserInputRequest;
 
 /// Final status for a turn.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum TurnOutcomeStatus {
     Completed,
     Interrupted,
