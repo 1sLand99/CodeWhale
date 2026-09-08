@@ -4,6 +4,7 @@ export const STREAM_EVENT_NAMES = [
   "thread.forked",
   "turn.started",
   "turn.lifecycle",
+  "turn.usage",
   "turn.steered",
   "turn.interrupt_requested",
   "turn.completed",
