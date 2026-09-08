@@ -248,9 +248,14 @@ impl FleetDetailView {
 
     /// Rows passing the typed filter, as indices into `routes`.
     fn filtered_routes(&self) -> Vec<usize> {
+        let shortlist = matches!(self.pick_target, PickTarget::Member(idx)
+            if self.fleet.members.get(idx).is_some_and(|member| member.shortlist));
         (0..self.routes.len())
             .filter(|idx| {
                 let route = &self.routes[*idx];
+                if shortlist && (route.provider.is_none() || route.model.is_none()) {
+                    return false;
+                }
                 crate::tui::views::fleet_setup::route_matches_query(
                     &self.pick_query,
                     route.provider.as_deref().unwrap_or(""),
@@ -290,9 +295,8 @@ impl FleetDetailView {
                 .and_then(|m| m.provider.as_deref().zip(m.model.as_deref())),
         };
         if let Some((provider, model)) = current {
-            // The filter is empty on open, so a `routes` index is also its
-            // position in the filtered list.
-            for (idx, route) in self.routes.iter().enumerate() {
+            for (idx, route_idx) in self.filtered_routes().into_iter().enumerate() {
+                let route = &self.routes[route_idx];
                 if route.provider.as_deref() == Some(provider)
                     && route.model.as_deref() == Some(model)
                 {
@@ -355,6 +359,7 @@ impl FleetDetailView {
             }
             _ => {
                 if let Some(member) = self.selected_member()
+                    && !member.shortlist
                     && let Some(provider) = &member.provider
                 {
                     reasoning_tiers_for_provider(provider)
@@ -394,6 +399,7 @@ impl FleetDetailView {
     fn toggle_vision_requirement(&mut self) {
         if let Some(member) = self.selected_member_idx()
             && let Some(member) = self.fleet.members.get_mut(member)
+            && !member.shortlist
         {
             if member.requires.iter().any(|r| r == "vision") {
                 member.requires.retain(|r| r != "vision");
@@ -407,13 +413,20 @@ impl FleetDetailView {
 
     fn add_member(&mut self) {
         // First known role not already present.
-        let existing: Vec<&str> = self.fleet.members.iter().map(|m| m.id.as_str()).collect();
-        let Some(role) = KNOWN_ROLES.iter().find(|r| !existing.contains(r)) else {
+        let Some(role) = KNOWN_ROLES.iter().find(|role| {
+            !self.fleet.members.iter().any(|member| {
+                !member.shortlist
+                    && public_role_label(member.role_label())
+                        .eq_ignore_ascii_case(&public_role_label(role))
+            })
+        }) else {
             return;
         };
+        let id = crate::fleet::members::unique_member_id(&self.fleet, role, "role");
         self.fleet.members.push(FleetMember {
-            id: role.to_string(),
+            id,
             display_name: None,
+            shortlist: false,
             role: role.to_string(),
             provider: None,
             model: None,
@@ -503,18 +516,25 @@ impl FleetDetailView {
                 ),
             ],
             DetailStep::Overview => {
+                let shortlist = self
+                    .selected_member()
+                    .is_some_and(|member| member.shortlist);
                 let mut hints = vec![
                     ActionHint::new("↑/↓", "move"),
                     ActionHint::new("o", "Coordinator model"),
                     ActionHint::new("e", "member model"),
-                    ActionHint::new("t", "reasoning"),
                     ActionHint::new("r", "rename"),
                     ActionHint::new("s", "save"),
                     ActionHint::new("c", "copy destination"),
                     ActionHint::new("u/w", "select"),
                 ];
+                if !shortlist {
+                    hints.push(ActionHint::new("t", "reasoning"));
+                }
                 if self.selected > 0 {
-                    hints.push(ActionHint::new("v", "vision"));
+                    if !shortlist {
+                        hints.push(ActionHint::new("v", "vision"));
+                    }
                     hints.push(ActionHint::new("a/d", "add/remove"));
                 }
                 hints.push(ActionHint::new("Esc", "back"));
@@ -784,13 +804,11 @@ impl FleetDetailView {
                     Style::default().fg(palette::WHALE_ERROR),
                 )]));
             } else {
-                let role = member.role.trim();
-                let role = if role.is_empty() {
-                    member.id.as_str()
+                let role = if member.shortlist {
+                    String::new()
                 } else {
-                    role
+                    format!(" · role {}", public_role_label(member.role_label()))
                 };
-                let role = public_role_label(role);
                 let member_label = member
                     .display_name
                     .as_deref()
@@ -803,14 +821,15 @@ impl FleetDetailView {
                 lines.push(Line::from(vec![
                     Span::styled(if selected { "» " } else { "  " }, base),
                     Span::styled(member_label, base),
-                    Span::styled(
-                        format!(" · role {role}"),
-                        Style::default().fg(palette::TEXT_SECONDARY),
-                    ),
+                    Span::styled(role, Style::default().fg(palette::TEXT_SECONDARY)),
                     Span::styled("  ", Style::default()),
                     Span::styled(route, Style::default().fg(palette::TEXT_MUTED)),
                     Span::styled(
-                        format!(" · reasoning: {reasoning}{vision}"),
+                        if member.shortlist {
+                            String::new()
+                        } else {
+                            format!(" · reasoning: {reasoning}{vision}")
+                        },
                         Style::default().fg(palette::TEXT_DIM),
                     ),
                 ]));
@@ -961,6 +980,7 @@ mod tests {
         fleet.members.push(FleetMember {
             id: "scout".to_string(),
             display_name: Some("Flash Scout".to_string()),
+            shortlist: false,
             role: "scout".to_string(),
             provider: None,
             model: None,
@@ -998,6 +1018,7 @@ mod tests {
         duplicate_roles.members.push(FleetMember {
             id: "fast-scout".to_string(),
             display_name: Some("Fast Scout".to_string()),
+            shortlist: false,
             role: "scout".to_string(),
             provider: None,
             model: None,
@@ -1220,6 +1241,90 @@ mod tests {
     }
 
     #[test]
+    fn shortlist_editor_preserves_exact_route_and_cannot_select_inherit() {
+        let _lock = crate::test_support::lock_test_env();
+        let ws = tempfile::tempdir().unwrap();
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", ws.path().join("home"));
+        let mut fleet = FleetFile::new("Shortlist editor".into(), None).unwrap();
+        fleet.members.push(
+            serde_json::from_value(serde_json::json!({
+                "id": "choice", "shortlist": true,
+                "provider": "deepseek", "model": "deepseek-v4-pro",
+            }))
+            .unwrap(),
+        );
+        save_fleet(&fleet, FleetScope::Workspace, ws.path()).unwrap();
+        let config = Config {
+            provider: Some("deepseek".into()),
+            api_key: Some("test-key".into()),
+            ..Default::default()
+        };
+        let mut view = FleetDetailView::open_for_member(
+            &app_in(ws.path().to_path_buf()),
+            &config,
+            &fleet.name,
+            FleetScope::Workspace,
+            Some("choice"),
+        )
+        .unwrap();
+
+        let before = view.fleet.members[0].clone();
+        for code in [KeyCode::Char('t'), KeyCode::Char('v')] {
+            view.handle_key(key(code));
+        }
+        assert_eq!(
+            view.fleet.members[0], before,
+            "role-only keys cannot alter a shortlist choice"
+        );
+        assert!(
+            view.footer_hints()
+                .iter()
+                .all(|hint| !matches!(hint.key.as_ref(), "t" | "v"))
+        );
+        let area = Rect::new(0, 0, 160, 8);
+        let mut buf = Buffer::empty(area);
+        view.render_overview(area, &mut buf);
+        let rows: Vec<String> = (0..area.height)
+            .map(|y| (0..area.width).map(|x| buf[(x, y)].symbol()).collect())
+            .collect();
+        let choice_row = rows
+            .iter()
+            .find(|row| row.contains("choice"))
+            .expect("shortlist row rendered");
+        assert!(
+            !choice_row.contains("role ")
+                && !choice_row.contains("reasoning:")
+                && !choice_row.contains("vision"),
+            "{choice_row}"
+        );
+
+        view.handle_key(key(KeyCode::Char('e')));
+        assert_eq!(view.step, DetailStep::PickRoute);
+        let filtered = view.filtered_routes();
+        assert!(!filtered.is_empty());
+        assert!(
+            filtered.iter().all(|idx| {
+                view.routes[*idx].provider.is_some() && view.routes[*idx].model.is_some()
+            }),
+            "shortlist entries must not offer inherited routes"
+        );
+        let selected = &view.routes[view.picked_route_index().expect("current route selected")];
+        assert_eq!(selected.provider.as_deref(), Some("deepseek"));
+        assert_eq!(selected.model.as_deref(), Some("deepseek-v4-pro"));
+        view.handle_key(key(KeyCode::Enter));
+        assert!(matches!(
+            view.handle_key(key(KeyCode::Char('s'))),
+            ViewAction::EmitAndClose(ViewEvent::FleetStoreChanged { .. })
+        ));
+        let (reloaded, _) =
+            load_fleet_in_scope(&fleet.name, FleetScope::Workspace, ws.path()).unwrap();
+        assert_eq!(
+            reloaded, fleet,
+            "editing a shortlist preserves the complete route and marker"
+        );
+    }
+
+    #[test]
     fn save_writes_the_file_and_receipt_names_the_path() {
         let ws = tempfile::TempDir::new().unwrap();
         let fleet = sample_fleet("Fleet C");
@@ -1263,9 +1368,16 @@ mod tests {
     }
 
     #[test]
-    fn add_member_uses_an_unused_known_role() {
+    fn add_member_uses_role_occupancy_and_preserves_colliding_shortlist() {
         let ws = tempfile::TempDir::new().unwrap();
-        let fleet = sample_fleet("Fleet D");
+        let mut fleet = sample_fleet("Fleet D");
+        fleet.members.push(
+            serde_json::from_value(serde_json::json!({
+                "id": "implement", "shortlist": true,
+                "provider": "custom-a", "model": "implement",
+            }))
+            .unwrap(),
+        );
         save_fleet(&fleet, FleetScope::Workspace, ws.path()).unwrap();
 
         let mut view = FleetDetailView::open(
@@ -1278,12 +1390,32 @@ mod tests {
 
         view.handle_key(key(KeyCode::Char('a')));
         let ids: Vec<&str> = view.fleet.members.iter().map(|m| m.id.as_str()).collect();
-        assert_eq!(ids, vec!["scout", "explore"]);
+        assert_eq!(ids, vec!["scout", "implement", "implement-role"]);
+        assert_eq!(view.fleet.members[2].role, "implement");
+        assert!(!view.fleet.members[2].shortlist);
+        assert!(matches!(
+            view.handle_key(key(KeyCode::Char('s'))),
+            ViewAction::EmitAndClose(ViewEvent::FleetStoreChanged { .. })
+        ));
+        let (reloaded, _) =
+            load_fleet_in_scope("Fleet D", FleetScope::Workspace, ws.path()).unwrap();
+        assert_eq!(reloaded.members[..2], fleet.members);
+        let roster = crate::fleet::identity::roster_from_fleet(
+            &reloaded,
+            FleetScope::Workspace,
+            PathBuf::from("fleet-d.toml").as_path(),
+        );
+        assert_eq!(roster.members().len(), 2);
+        assert!(roster.get("implement").is_none());
+        assert_eq!(
+            roster.get("implement-role").unwrap().profile.role.name,
+            "implement"
+        );
 
         // Remove the new member with the confirmed delete flow.
-        view.selected = 2;
+        view.selected = 3;
         view.handle_key(key(KeyCode::Char('d')));
         view.handle_key(key(KeyCode::Char('y')));
-        assert_eq!(view.fleet.members.len(), 1);
+        assert_eq!(view.fleet.members, fleet.members);
     }
 }

@@ -2082,9 +2082,18 @@ reasoning contract, and all four membership ids omit generic sampling fields.
 - `managed_config_path` (string, optional): managed config file loaded after user/env config.
 - `requirements_path` (string, optional): requirements file used to enforce allowed approval/sandbox values.
 - `max_subagents` (int, optional): defaults to `64` and is clamped to `1..=128`.
-- `subagents.*` (optional compatibility table): per-Fleet-role model defaults
-  for `agent`. Explicit tool `model` values win, then role
-  overrides, then the parent runtime model. Supported convenience keys are
+- `subagents.*` (optional compatibility table): manual per-role model pins
+  for direct and Workflow `agent` starts. An explicit saved profile wins,
+  then a manual role pin, then a unique saved role pin. Conflicting tool
+  `model` or `model_strength` choices are refused before admission. Unpinned
+  roles allow task model/strength choices before inherited defaults.
+  `[subagents.roles.<role>] model = "provider/model"` folds into the existing override
+  map and wins over `[subagents.models]`, then the convenience keys. Structured
+  canonical role keys win over legacy aliases. Only this structured syntax
+  separates the explicit provider from the model suffix; unknown providers
+  fail before admission. Bare structured model ids inherit the active provider.
+  Legacy scalar/map values preserve namespaced provider-owned ids unchanged.
+  Supported convenience keys are
   `default_model`, `worker_model`, `scout_model`, `planner_model`,
   `reviewer_model`, `custom_model`, `max_concurrent`, `max_admitted`,
   `launch_concurrency`, `token_budget`, `api_timeout_secs`, and

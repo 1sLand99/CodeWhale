@@ -110,25 +110,36 @@ trimmed printable line of at most 80 characters.
 
 The same fleet file answers a third question: **which models has this person
 put in their fleet?** Every exact `provider` + `model` pin in the selected
-fleet — the operator route and each pinned member — is a fleet model, and the
-member rows that pin it are the roles it fills. There is no second list.
+fleet — the operator route, each pinned member, and each explicitly marked
+shortlist row — is a fleet model. Executable member rows supply the roles it
+fills; a shortlist row has no role. All remain in the same fleet file. Legacy
+members that omit `role` still use their id as the role identity.
+Shortlist rows carry only model choices; reasoning, instructions, and capability
+requirements belong on executable role members and are refused on shortlist rows.
 
 - `/fleet models` prints the fleet: `provider/model · roles · price · context ·
   tools`, facts read from the model catalog. With no selected fleet the line
   reads "Your fleet is the session model only".
 - `/fleet add <provider> <model> [role…]` adds a model (one member row per
-  role; none for a role-less add). The provider must be one you configured
+  role, or one `shortlist = true` row for a role-less add). The provider must be one you configured
   and, when the catalog knows the provider, must serve that exact id.
   With no fleet selected, a user-global fleet named `My fleet` is created and
   selected first. `/fleet remove <provider> <model>` drops every row that pins
   the route; the operator route is changed with `/fleet save`, not removed.
-- In `/model`, `⇧F` on a row adds or removes that exact route the same way;
+- In `/model`, `⇧F` adds or removes an explicit shortlist row for that exact
+  route. It preserves saved role pins and the operator route;
   fleet models are listed first, labelled `fleet · <roles>`, ahead of your
   own `⇧P` pins and the provider lists. `/models` prints the fleet before the
   provider's list.
 
 The operator model reads this list when it assigns sub-agents (design
 `MODEL-ROUTING-CATALOG-20260901.md` §10, slice F2).
+The model-facing roster resolves roles through the same route admission code
+as a start. Explicit profiles and manual role pins remain authoritative; a
+unique saved role pin also applies to a start naming only its role. Task model
+choices are available for unpinned roles, constrained to the selected models
+plus the session route. Shortlist model rows disclose their own exact route
+independently of any role pin.
 
 ### Interactive and persistent status
 

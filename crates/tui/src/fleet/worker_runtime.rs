@@ -928,6 +928,48 @@ pub(crate) fn append_agent_profile_prompt(prompt: &mut String, agent_profile: &A
     }
 }
 
+/// Find a saved role pin without letting a member id shadow a second member
+/// with the same semantic role. Built-in inherited postures are not pins.
+pub(crate) fn resolve_pinned_role_profile(
+    agent_profiles: &[AgentProfile],
+    role: &str,
+) -> Result<Option<AgentProfile>> {
+    let pinned = agent_profiles
+        .iter()
+        .filter(|profile| {
+            profile.origin != ProfileOrigin::BuiltIn
+                && profile
+                    .profile
+                    .model
+                    .as_deref()
+                    .and_then(non_empty_trimmed)
+                    .is_some_and(|model| !model.eq_ignore_ascii_case("auto"))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    Ok(resolve_member_in_profiles(
+        &pinned,
+        &format!("role:{}", canonical_public_role_name(role)),
+    )?
+    .cloned())
+}
+
+/// Compare only the known route pair; never infer a provider from a wire id's
+/// namespace. A qualified task selector may restate that same exact pair.
+pub(crate) fn requested_model_matches_pin(
+    requested: &str,
+    model: &str,
+    provider: Option<&str>,
+) -> bool {
+    let requested = requested.trim();
+    let model = model.trim();
+    requested.eq_ignore_ascii_case(model)
+        || provider
+            .and_then(non_empty_trimmed)
+            .and_then(|provider| requested.strip_prefix(&format!("{provider}/")))
+            .is_some_and(|requested_model| requested_model.eq_ignore_ascii_case(model))
+}
+
 fn resolve_task_agent_profile<'a>(
     task_spec: &FleetTaskSpec,
     agent_profiles: &'a [AgentProfile],
@@ -999,24 +1041,24 @@ fn validate_selected_member_model(task_spec: &FleetTaskSpec, profile: &AgentProf
     else {
         return Ok(());
     };
-    let Some(profile_provider) = profile
-        .profile
-        .provider
-        .as_deref()
-        .and_then(non_empty_trimmed)
-    else {
-        return Ok(());
-    };
     let Some(profile_model) = profile.profile.model.as_deref().and_then(non_empty_trimmed) else {
         return Ok(());
     };
-    if !task_model.eq_ignore_ascii_case(profile_model) {
+    if profile_model.eq_ignore_ascii_case("auto") {
+        return Ok(());
+    }
+    let profile_provider = profile
+        .profile
+        .provider
+        .as_deref()
+        .and_then(non_empty_trimmed);
+    if !requested_model_matches_pin(task_model, profile_model, profile_provider) {
         bail!(
-            "Fleet task {} selects member {:?} with frozen route {}/{}; worker.model {:?} conflicts with that member route",
+            "Fleet task {} selects member {:?} with pinned model {} on {}; worker.model {:?} conflicts with that member route",
             task_spec.id,
             profile.id,
-            profile_provider,
             profile_model,
+            profile_provider.unwrap_or("the session provider"),
             task_model
         );
     }
@@ -1124,13 +1166,10 @@ fn effective_fleet_model_with_source(
     worker_profile: Option<&FleetTaskWorkerProfile>,
     agent_profile: Option<&AgentProfile>,
 ) -> (String, &'static str) {
-    if agent_profile
-        .and_then(|profile| profile.profile.provider.as_deref())
+    if let Some(model) = agent_profile
+        .and_then(|profile| profile.profile.model.as_deref())
         .and_then(non_empty_trimmed)
-        .is_some()
-        && let Some(model) = agent_profile
-            .and_then(|profile| profile.profile.model.as_deref())
-            .and_then(non_empty_trimmed)
+        .filter(|model| !model.eq_ignore_ascii_case("auto"))
     {
         return (model.to_string(), "agent_profile.model");
     }
@@ -3872,8 +3911,139 @@ mod tests {
 
         let error = validate_task_agent_profiles(&[task], &[profile])
             .expect_err("conflicting task model must fail before lease");
-        assert!(error.to_string().contains("frozen route"), "{error:#}");
+        assert!(error.to_string().contains("pinned model"), "{error:#}");
         assert!(error.to_string().contains("worker.model"), "{error:#}");
+    }
+
+    #[test]
+    fn pinned_role_lookup_ignores_builtins_and_rejects_semantic_ambiguity() {
+        let mut builtin = agent_profile("reviewer", "reviewer", None, FleetLoadout::Inherit);
+        builtin.origin = ProfileOrigin::BuiltIn;
+        builtin.profile.model = Some("builtin-default".into());
+        let mut first = agent_profile("review-choice", "reviewer", None, FleetLoadout::Inherit);
+        first.profile.provider = Some("openrouter".into());
+        first.profile.model = Some("qwen/qwen3.7-plus".into());
+        let selected = resolve_pinned_role_profile(&[builtin.clone(), first.clone()], "review")
+            .unwrap()
+            .expect("the unique saved role wins over the builtin posture");
+        assert_eq!(selected.id, "review-choice");
+        assert_eq!(selected.profile.provider.as_deref(), Some("openrouter"));
+        assert_eq!(selected.profile.model.as_deref(), Some("qwen/qwen3.7-plus"));
+
+        let mut second = first.clone();
+        second.id = "reviewer".into();
+        second.profile.provider = Some("TeamA".into());
+        second.profile.model = Some("private-reviewer".into());
+        for profiles in [
+            vec![builtin.clone(), first.clone(), second.clone()],
+            vec![second, first, builtin],
+        ] {
+            let error = resolve_pinned_role_profile(&profiles, "reviewer")
+                .expect_err("an exact member id must not hide a second same-role pin");
+            assert!(error.to_string().contains("ambiguous"), "{error:#}");
+            assert!(error.to_string().contains("review-choice"), "{error:#}");
+        }
+    }
+
+    #[test]
+    fn pinned_model_comparison_preserves_exact_provider_identity_and_wire_namespace() {
+        assert!(requested_model_matches_pin(
+            "model-x",
+            "model-x",
+            Some("TeamA")
+        ));
+        assert!(requested_model_matches_pin(
+            "TeamA/MODEL-X",
+            "model-x",
+            Some("TeamA")
+        ));
+        assert!(!requested_model_matches_pin(
+            "teama/model-x",
+            "model-x",
+            Some("TeamA")
+        ));
+        assert!(!requested_model_matches_pin(
+            "TeamA/model-x",
+            "model-x",
+            Some("teama")
+        ));
+        assert!(requested_model_matches_pin(
+            "org/model-x",
+            "org/model-x",
+            Some("TeamA")
+        ));
+        assert!(requested_model_matches_pin(
+            "TeamA/org/model-x",
+            "org/model-x",
+            Some("TeamA")
+        ));
+        assert!(!requested_model_matches_pin(
+            "Other/org/model-x",
+            "org/model-x",
+            Some("TeamA")
+        ));
+        assert!(!requested_model_matches_pin(
+            "TeamA/model-x",
+            "model-x",
+            None
+        ));
+    }
+
+    #[test]
+    fn providerless_saved_profile_pin_refuses_conflicts_before_freeze() {
+        let mut profile = agent_profile("review-choice", "reviewer", None, FleetLoadout::Inherit);
+        profile.profile.model = Some("deepseek-v4-flash".into());
+        let mut conflict = fleet_task(
+            "review",
+            Some(worker_profile(
+                Some("review-choice"),
+                None,
+                None,
+                None,
+                Some("deepseek-v4-pro"),
+                vec![],
+            )),
+        );
+        let error = freeze_fleet_task_members(
+            std::slice::from_mut(&mut conflict),
+            &[profile.clone()],
+            false,
+        )
+        .expect_err("providerless saved models are still explicit profile pins");
+        assert!(error.to_string().contains("conflicts"), "{error:#}");
+        assert!(
+            !conflict
+                .metadata
+                .contains_key(FROZEN_FLEET_MEMBER_METADATA_KEY)
+        );
+
+        let mut agreeing = fleet_task(
+            "review",
+            Some(worker_profile(
+                Some("review-choice"),
+                None,
+                None,
+                None,
+                Some("deepseek-v4-flash"),
+                vec![],
+            )),
+        );
+        freeze_fleet_task_members(
+            std::slice::from_mut(&mut agreeing),
+            &[profile.clone()],
+            false,
+        )
+        .unwrap();
+        assert!(
+            agreeing
+                .metadata
+                .contains_key(FROZEN_FLEET_MEMBER_METADATA_KEY)
+        );
+        assert_eq!(
+            fleet_worker_launch_route(&agreeing, &[profile], "deepseek-v4-pro"),
+            ("deepseek-v4-flash".into(), None),
+            "freezing a model-only pin never fabricates provider authority"
+        );
     }
 
     #[test]
@@ -3912,7 +4082,7 @@ mod tests {
     }
 
     #[test]
-    fn fleet_worker_spec_uses_profile_model_and_task_model_precedence() {
+    fn fleet_worker_spec_keeps_profile_pins_and_unpinned_task_choices() {
         let mut profile = agent_profile(
             "reviewer",
             "reviewer",
@@ -3959,6 +4129,32 @@ mod tests {
             ModelRoute::Fixed("glm-5.2".to_string())
         );
 
+        let conflicting_task = fleet_task(
+            "review",
+            Some(worker_profile(
+                Some("reviewer"),
+                None,
+                None,
+                None,
+                Some("deepseek-v4-pro"),
+                vec![],
+            )),
+        );
+        let error = fleet_task_to_worker_spec_with_profiles(
+            "worker-2",
+            "run-1",
+            &conflicting_task,
+            &worker,
+            "auto",
+            std::path::Path::new("/tmp"),
+            std::path::Path::new("/tmp"),
+            &[profile.clone()],
+            None,
+        )
+        .expect_err("a task cannot replace a providerless saved profile pin");
+        assert!(error.to_string().contains("conflicts"), "{error:#}");
+
+        profile.profile.model = None;
         let task_model_spec = fleet_task_to_worker_spec_with_profiles(
             "worker-2",
             "run-1",
@@ -4052,7 +4248,7 @@ mod tests {
     }
 
     #[test]
-    fn fleet_worker_spec_model_route_precedence_is_task_profile_role_then_session() {
+    fn fleet_worker_spec_model_route_precedence_is_profile_unpinned_task_then_session() {
         let worker = FleetWorkerSpec {
             id: "worker-1".to_string(),
             name: "Worker".to_string(),
@@ -4067,6 +4263,8 @@ mod tests {
         let mut profile =
             agent_profile("scout", "scout", None, codewhale_config::FleetLoadout::Fast);
         profile.profile.model = Some("deepseek-v4-flash".to_string());
+        let mut unpinned_profile = profile.clone();
+        unpinned_profile.profile.model = None;
 
         let task_model = fleet_task_to_worker_spec_with_profiles(
             "worker-task",
@@ -4086,7 +4284,7 @@ mod tests {
             run_model,
             std::path::Path::new("/tmp"),
             std::path::Path::new("/tmp"),
-            &[profile.clone()],
+            &[unpinned_profile],
             None,
         )
         .unwrap();

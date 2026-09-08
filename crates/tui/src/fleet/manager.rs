@@ -2609,6 +2609,7 @@ mod tests {
             .map(|(id, role)| FleetMember {
                 id: (*id).to_string(),
                 display_name: None,
+                shortlist: false,
                 role: (*role).to_string(),
                 model: provider.map(|_| "private-model".to_string()),
                 provider: provider.map(str::to_string),
