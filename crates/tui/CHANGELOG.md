@@ -84,9 +84,14 @@ with an accessibility-first pointer.
 
 ### Changed
 
+- Initial tool definitions no longer repeat shell interpreter guidance and
+  agent lifecycle/scope instructions in multiple description fields. Parameter
+  schemas, approval rules and dispatch behavior are preserved. This reduces
+  prompt schema size; it does not establish a provider billing regression.
+
 - The built-in Computer Use plugin bundle is refreshed to the standalone
-  plugin's 0.2.0 runtime (vendored from `Hmbown/codewhale-cu-plugin`
-  PR #12 @ `906b433`): the native macOS accessibility backend with an
+  plugin's 0.2.1 runtime (vendored from `Hmbown/codewhale-cu-plugin`
+  at `89d03ba`): the native macOS accessibility backend with an
   a11y-first pointer strategy (covered points are refused, previews are
   drawn), the permission-owning desktop-app socket transport, remote
   computers over ssh and HarmonyOS HDC with contained temp handling,
@@ -176,6 +181,13 @@ with an accessibility-first pointer.
   the login remedy stays named (#5926; remedy wording landed in #5959).
 
 ### Added
+
+- Native plugin authoring guides now cover English and Chinese. The explicit
+  offline converter supports selected portable Skills and static Streamable
+  HTTP MCP declarations from OpenCode and DSH. Unsupported executable hooks,
+  automatic OAuth and policy-bearing configurations are refused; generated
+  bundles still require native installation, review and trust. Legacy SSE
+  fallback is not reproduced (#5827, requested by @giancarlocp).
 
 - Signed cloud model facts can refresh provider capabilities and prices while
   preserving verified cached data when a refresh fails. A dispatched request
@@ -278,10 +290,10 @@ with an accessibility-first pointer.
 ### Notes
 
 - Upgrading from 0.9.12 with Computer Use trusted and enabled: the
-  bundle's content hash changes with the 0.2.0 refresh, so the plugin
+  bundle's content hash changes with the 0.2.1 refresh, so the plugin
   deactivates and asks for a fresh review — that is the designed
   fail-closed path for a desktop-driving plugin. Re-trust it from the
-  Extensions page.
+  Plugins page.
 - The multiline-paste fix restores v9.11 behavior on terminals that
   accept `EnableBracketedPaste` but deliver pastes as keystrokes
   (reported on Windows 11 / PowerShell). Verified at the input-contract

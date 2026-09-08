@@ -52,14 +52,15 @@ export const CHANGELOG: ChangelogRelease[] = [
       {
         "heading": "Changed",
         "items": [
-          "The built-in Computer Use plugin bundle is refreshed to the standalone plugin's 0.2.0 runtime (vendored from Hmbown/codewhale-cu-plugin PR #12 @ 906b433): the native macOS accessibility backend with an a11y-first pointer strategy (covered points are refused, previews are drawn), the permission-owning desktop-app socket transport, remote computers over ssh and HarmonyOS HDC with contained temp handling, truthful win32 PowerShell failure reporting, and the shared allow-listed…",
+          "Initial tool definitions no longer repeat shell interpreter guidance and agent lifecycle/scope instructions in multiple description fields. Parameter schemas, approval rules and dispatch behavior are preserved. This reduces prompt schema size; it does not establish a provider billing regression.",
+          "The built-in Computer Use plugin bundle is refreshed to the standalone plugin's 0.2.1 runtime (vendored from Hmbown/codewhale-cu-plugin at 89d03ba): the native macOS accessibility backend with an a11y-first pointer strategy (covered points are refused, previews are drawn), the permission-owning desktop-app socket transport, remote computers over ssh and HarmonyOS HDC with contained temp handling, truthful win32 PowerShell failure reporting, and the shared allow-listed…",
           "/statusline drives the bottom chrome again. Since the 0.9.12 shell redesign the posture bar and the metrics line were built independently of tui.status_items, so every toggle in the picker except the balance fetch was decoration. Each remaining item now shows or hides exactly one thing: model, context_percent, cost, balance, cache, tokens and session_metrics are metrics-line segments, and mode is the posture bar's plan/act/operate chip. The status, agents, reasoning_replay,…",
           "The context reading is back on screen at every fullness. 0.9.12 painted ctx NN% only from 50% up, which left most of a session with no context signal at all; it now paints from 0% and keeps its warning colour from 80% up (#5950).",
           "A child agent parked because its parent's turn ended is shown as parked in the Agents panel, the sidebar and Agent Details, with resume_from / cancel as the recovery, instead of wearing the same \"waiting for input\" label as a child that asked a question. Parked work sorts below live and answerable work and no longer inflates the blocked chip; the receipts roster and the wire state gain parked (#5906, #5921).",
           "codewhale account keys set|remove|list no longer carry a hardcoded eight-provider list. Provider ids come from the control plane's public catalog (GET /api/model-providers), are validated locally against ^[a-z0-9][a-z0-9-]{0,63}$ before they reach a URL path, and list shows every catalog provider with its label and stored-key state. --from-local maps a catalog row onto the local runtime provider through the catalog's own runtimeProvider field, so a newly supported provider…",
           "/mcp lists the servers that need a login first, as their own Needs login group above Needs attention, and opens with the cursor already on the first such row so the Enter the screen advertises runs /mcp login <server> straight away; translated in all 15 packs. A snapshot test pins the footer shape the chip landed with (MCP · N connected · N ◆ auth required · N failed) so an expired login never regresses into the failed count (#5926)."
         ],
-        "itemCount": 6
+        "itemCount": 7
       },
       {
         "heading": "Fixed",
@@ -74,6 +75,7 @@ export const CHANGELOG: ChangelogRelease[] = [
       {
         "heading": "Added",
         "items": [
+          "Native plugin authoring guides now cover English and Chinese. The explicit offline converter supports selected portable Skills and static Streamable HTTP MCP declarations from OpenCode and DSH. Unsupported executable hooks, automatic OAuth and policy-bearing configurations are refused; generated bundles still require native installation, review and trust. Legacy SSE fallback is not reproduced (#5827, requested by @giancarlocp).",
           "Signed cloud model facts can refresh provider capabilities and prices while preserving verified cached data when a refresh fails. A dispatched request keeps its selected price snapshot so later catalog updates cannot change its recorded cost (#5752).",
           "Saved sessions preserve exact provider routes. Auxiliary model calls settle their usage once against the route and price snapshot that executed them, including recovery, rather than resolving a new price at completion (#5726, #5848).",
           "[tui].posture_bar and [tui].metrics_line accept full, compact, or hidden, also available through /config. Compact preserves the existing rows' essential fields; hidden returns their space to the transcript (#5973).",
@@ -84,10 +86,9 @@ export const CHANGELOG: ChangelogRelease[] = [
           "[tools] user_input_max_questions (default 6, 1..=10) and [tools] user_input_max_options (default 4, 2..=10) replace the hard-coded request_user_input limits; the validator, the tool schema and its description read one value, spawned children inherit the parent's ceilings, and a rejected payload names the ceiling it hit and the key to raise (#5949).",
           "The slash menu shows a command's usage line and its subcommands as soon as a space is typed after the verb, filtered by what follows, so Tab completes /workspace wor to /workspace worktrees; /help states the focused command's usage in its detail slot (#5952).",
           "The three /fleet views (roster, live workers, saved teams) are one back-navigable stack: Esc in workers or saved teams returns to the roster with its cursor intact and still closes the window at the root or on direct entry; the Esc footer hint says back or close accordingly (#5954).",
-          "/fleet presents its prioritized core (members, setup, teams, workers, help); every other verb stays dispatchable and is documented under explicit groups in /fleet help. The roster no longer shows the untouched built-in general alias next to worker (#5888).",
-          "codewhale provider: account-backed model access over the provider keys a customer connected to their Codewhale account. One base URL (https://api.codewhale.net/v1, overridable with CODEWHALE_API_BASE; HTTPS required except on loopback), one cwc_key_… account API key with the models:infer scope (CODEWHALE_API_KEY), and a per-model wire chosen from the account's authenticated GET /v1/models: ids are provider/model and each row states chat-completions (/v1/chat/completions) or…"
+          "/fleet presents its prioritized core (members, setup, teams, workers, help); every other verb stays dispatchable and is documented under explicit groups in /fleet help. The roster no longer shows the untouched built-in general alias next to worker (#5888)."
         ],
-        "itemCount": 14
+        "itemCount": 15
       },
       {
         "heading": "Contributors",
@@ -110,7 +111,7 @@ export const CHANGELOG: ChangelogRelease[] = [
       {
         "heading": "Notes",
         "items": [
-          "Upgrading from 0.9.12 with Computer Use trusted and enabled: the bundle's content hash changes with the 0.2.0 refresh, so the plugin deactivates and asks for a fresh review — that is the designed fail-closed path for a desktop-driving plugin. Re-trust it from the Extensions page.",
+          "Upgrading from 0.9.12 with Computer Use trusted and enabled: the bundle's content hash changes with the 0.2.1 refresh, so the plugin deactivates and asks for a fresh review — that is the designed fail-closed path for a desktop-driving plugin. Re-trust it from the Plugins page.",
           "The multiline-paste fix restores v9.11 behavior on terminals that accept EnableBracketedPaste but deliver pastes as keystrokes (reported on Windows 11 / PowerShell). Verified at the input-contract level and in CI; a manual paste check on a real Windows terminal is still welcome — please comment on #5981 with your terminal if anything still misbehaves."
         ],
         "itemCount": 2
