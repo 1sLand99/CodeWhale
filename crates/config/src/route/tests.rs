@@ -415,8 +415,8 @@ fn resolver_routes_only_official_deepseek_flash_over_responses() {
             Some("deepseek-v5-future"),
         ))
         .expect("unknown future model preserves direct-provider pass-through");
-    assert_eq!(future.protocol(), RequestProtocol::Responses);
-    assert_eq!(future.endpoint().endpoint_key, "responses");
+    assert_eq!(future.protocol(), RequestProtocol::ChatCompletions);
+    assert_eq!(future.endpoint().endpoint_key, "chat");
 
     let legacy_unknown = resolver
         .resolve(&req(
@@ -442,6 +442,34 @@ fn resolver_routes_only_official_deepseek_flash_over_responses() {
         custom.capabilities().server_side_web_search,
         CapabilityState::Unknown
     );
+}
+
+#[test]
+fn resolver_uncatalogued_deepseek_preview_keeps_chat_and_verbatim_model() {
+    let model = "deepseek-v4.1-flash-expires-on-0910";
+    for base_url in [
+        "https://api.deepseek.com",
+        "https://api.deepseek.com/v1",
+        "https://api.deepseek.com/beta",
+    ] {
+        let route = RouteResolver::new()
+            .resolve(&RouteRequest {
+                base_url_override: Some(base_url.to_string()),
+                ..req(Some(ProviderKind::Deepseek), Some(model))
+            })
+            .expect("uncatalogued preview keeps direct-provider pass-through");
+        assert_eq!(route.provider_kind(), ProviderKind::Deepseek);
+        assert_eq!(route.wire_model_id().as_str(), model);
+        assert!(
+            route.canonical_model().is_none(),
+            "no fallback to a known model"
+        );
+        assert_eq!(route.protocol(), RequestProtocol::ChatCompletions);
+        assert_eq!(route.endpoint().endpoint_key, "chat");
+        assert_eq!(route.endpoint().base_url, base_url);
+        assert_eq!(route.capabilities().image_input, CapabilityState::Unknown);
+        assert_eq!(route.limits().output_tokens, None);
+    }
 }
 
 #[test]
