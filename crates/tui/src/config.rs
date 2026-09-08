@@ -4353,14 +4353,17 @@ impl Config {
             }
         }
 
-        if [
-            "DEEPSEEK_APPROVAL_POLICY",
-            "DEEPSEEK_SANDBOX_MODE",
-            "DEEPSEEK_ALLOW_SHELL",
-        ]
-        .into_iter()
-        .any(|name| std::env::var_os(name).is_some())
-        {
+        let env_controls_runtime = || {
+            approval_policy_env_is_set()
+                || allow_shell_env_is_set()
+                || std::env::var_os("CODEWHALE_SANDBOX_MODE").is_some()
+                || std::env::var_os("DEEPSEEK_SANDBOX_MODE").is_some()
+        };
+        #[cfg(test)]
+        let env_controls_runtime = crate::test_support::with_test_env_lock(env_controls_runtime);
+        #[cfg(not(test))]
+        let env_controls_runtime = env_controls_runtime();
+        if env_controls_runtime {
             return Some("environment-controlled runtime posture");
         }
 

@@ -6630,6 +6630,159 @@ fn setup_runtime_preset_apply_persists_settings_config_and_state() {
 }
 
 #[test]
+fn setup_runtime_presets_preserve_environment_authority_and_state() {
+    use crate::test_support::EnvVarGuard;
+
+    let home = SettingsHomeGuard::new();
+    let _posture_env = [
+        "CODEWHALE_APPROVAL_POLICY",
+        "DEEPSEEK_APPROVAL_POLICY",
+        "CODEWHALE_ALLOW_SHELL",
+        "DEEPSEEK_ALLOW_SHELL",
+        "CODEWHALE_SANDBOX_MODE",
+        "DEEPSEEK_SANDBOX_MODE",
+    ]
+    .map(EnvVarGuard::remove);
+    let _managed = EnvVarGuard::set(
+        "CODEWHALE_MANAGED_CONFIG_PATH",
+        home._tmp.path().join("absent-managed.toml"),
+    );
+    let _requirements = EnvVarGuard::set(
+        "CODEWHALE_REQUIREMENTS_PATH",
+        home._tmp.path().join("absent-requirements.toml"),
+    );
+    let config_path = crate::config_persistence::config_toml_path(None).expect("config path");
+    std::fs::create_dir_all(config_path.parent().expect("config parent"))
+        .expect("config directory");
+    std::fs::write(
+        &config_path,
+        "# preserve root defaults\napproval_policy = \"auto\"\nallow_shell = true\nsandbox_mode = \"workspace-write\"\n",
+    )
+    .expect("seed config");
+    Settings {
+        default_mode: "plan".to_string(),
+        permission_posture: Some("ask".to_string()),
+        ..Settings::default()
+    }
+    .save()
+    .expect("seed settings");
+    codewhale_config::SetupState::default()
+        .save()
+        .expect("seed setup state");
+    let files = [
+        config_path.clone(),
+        Settings::path().expect("settings path"),
+        codewhale_config::SetupState::path().expect("setup state path"),
+    ];
+    let app_posture = |app: &App| {
+        (
+            app.mode,
+            app.allow_shell,
+            app.trust_mode,
+            app.approval_mode,
+            app.yolo,
+            app.approval_policy_locked(),
+            app.configured_sandbox_mode.clone(),
+            app.configured_sandbox_network,
+            app.agent_trust_baseline(),
+            app.needs_redraw,
+        )
+    };
+
+    for (canonical, legacy, restrictive, permissive) in [
+        (
+            "CODEWHALE_APPROVAL_POLICY",
+            "DEEPSEEK_APPROVAL_POLICY",
+            "never",
+            "auto",
+        ),
+        (
+            "CODEWHALE_ALLOW_SHELL",
+            "DEEPSEEK_ALLOW_SHELL",
+            "false",
+            "true",
+        ),
+        (
+            "CODEWHALE_SANDBOX_MODE",
+            "DEEPSEEK_SANDBOX_MODE",
+            "read-only",
+            "workspace-write",
+        ),
+    ] {
+        for (canonical_value, legacy_value) in [
+            (Some(restrictive), None),
+            (None, Some(restrictive)),
+            (Some(restrictive), Some(permissive)),
+        ] {
+            let _canonical = canonical_value.map_or_else(
+                || EnvVarGuard::remove(canonical),
+                |value| EnvVarGuard::set(canonical, value),
+            );
+            let _legacy = legacy_value.map_or_else(
+                || EnvVarGuard::remove(legacy),
+                |value| EnvVarGuard::set(legacy, value),
+            );
+            let mut config = Config::load(Some(config_path.clone()), None)
+                .expect("load the real environment-controlled config");
+            let effective = match canonical {
+                "CODEWHALE_APPROVAL_POLICY" => config.approval_policy.clone(),
+                "CODEWHALE_ALLOW_SHELL" => config.allow_shell.map(|value| value.to_string()),
+                _ => config.sandbox_mode.clone(),
+            };
+            assert_eq!(
+                effective.as_deref(),
+                Some(restrictive),
+                "{canonical}: canonical wins when both are set"
+            );
+
+            let mut options = crate::test_support::test_tui_options(home._tmp.path());
+            options.config_path = Some(config_path.clone());
+            options.allow_shell = config.allow_shell.unwrap_or(false);
+            options.start_in_agent_mode = true;
+            let mut app = App::new(options, &config);
+            let app_before = app_posture(&app);
+            // Compare the whole resolved Config without exposing credential-bearing
+            // fields in an assertion's failure output.
+            let config_before = format!("{config:?}");
+            let files_before = files
+                .each_ref()
+                .map(|path| std::fs::read(path).expect("snapshot"));
+
+            for preset in [
+                crate::tui::setup::SetupRuntimePreset::NormalAgent,
+                crate::tui::setup::SetupRuntimePreset::AskFirst,
+                crate::tui::setup::SetupRuntimePreset::HighTrustLocal,
+            ] {
+                let state = codewhale_config::SetupState {
+                    runtime_posture_source: codewhale_config::RuntimePostureSource::Confirmed,
+                    ..Default::default()
+                };
+                let error = apply_setup_runtime_preset(&mut app, &mut config, preset, state)
+                    .expect_err("a preset must not override environment authority");
+                assert!(
+                    error
+                        .to_string()
+                        .contains("environment-controlled runtime posture"),
+                    "{canonical}/{preset:?}: {error:#}"
+                );
+                assert!(
+                    format!("{config:?}") == config_before,
+                    "{canonical}/{preset:?}: resolved Config changed"
+                );
+                assert_eq!(app_posture(&app), app_before, "{canonical}/{preset:?}");
+                for (path, before) in files.iter().zip(&files_before) {
+                    assert!(
+                        std::fs::read(path).expect("persisted state") == *before,
+                        "{canonical}/{preset:?}: changed {}",
+                        path.display()
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn setup_runtime_preset_rolls_back_durable_and_live_state_when_state_save_fails() {
     let _home = SettingsHomeGuard::new();
     let config_path = crate::config_persistence::config_toml_path(None).expect("config path");
