@@ -91,12 +91,18 @@ with an accessibility-first pointer.
 
 - The built-in Computer Use plugin bundle is refreshed to the standalone
   plugin's 0.2.1 runtime (vendored from `Hmbown/codewhale-cu-plugin`
-  at `89d03ba`): the native macOS accessibility backend with an
+  at `4ffebcc`): the native macOS accessibility backend with an
   a11y-first pointer strategy (covered points are refused, previews are
   drawn), the permission-owning desktop-app socket transport, remote
   computers over ssh and HarmonyOS HDC with contained temp handling,
   truthful win32 PowerShell failure reporting, and the shared
-  allow-listed request handler for the app socket and ssh agent. The
+  allow-listed request handler for the app socket and ssh agent.
+  The bundle retains the hardening port from
+  [standalone plugin PR #12](https://github.com/Hmbown/codewhale-cu-plugin/pull/12).
+  Single left clicks on macOS element targets now revalidate and press
+  the observed element directly, without substituting a point hit-test
+  or raw-pointer fallback. Explicit event clicks retain the app-ownership
+  guard; a sent press still requires visual verification. The
   embed list gained the five new runtime files, and a consistency test
   now pins the embed list to the vendored tree so the bundle cannot rot
   silently again. Because the bundle's content hash changes, Computer
