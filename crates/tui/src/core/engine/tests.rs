@@ -10493,6 +10493,7 @@ fn tool_exec_outcome_tracks_duration() {
         started_at: Instant::now(),
         terminal: ToolExecutionOutcome::from_legacy(Ok(ToolResult::success("ok"))),
         content_blocks: Vec::new(),
+        original_content_digest: None,
     };
 
     assert!(outcome.started_at.elapsed().as_nanos() > 0);
@@ -23546,4 +23547,610 @@ async fn restored_task_binding_is_not_missing_when_its_inventory_is_unavailable(
     );
     tasks.shutdown_and_wait().await?;
     Ok(())
+}
+
+// GH6015: exact engine trajectories, plus the narrow typed observation rules.
+// These fixtures run no shell, native program or live provider.
+mod fleet_permission_denial_tests {
+    use super::super::dispatch::{FleetDenialAction, FleetDenialBatch, FleetDenialGuard};
+    use super::*;
+    use crate::llm_client::mock::{MockLlmClient, canned};
+    use crate::tools::spec::{
+        ToolAuthorityEnvelope, ToolCapability, ToolMutationAuthority, ToolShellAuthority, ToolSpec,
+        ToolTerminalStatus, ToolVerificationAuthority,
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct DeniedEvidenceTool(Arc<AtomicUsize>);
+
+    #[async_trait::async_trait]
+    impl ToolSpec for DeniedEvidenceTool {
+        fn name(&self) -> &str {
+            "fixture_denied"
+        }
+        fn description(&self) -> &str {
+            "A permission-denied evidence fixture."
+        }
+        fn input_schema(&self) -> Value {
+            json!({"type":"object","properties":{"variant":{"type":"integer"}},"required":["variant"]})
+        }
+        fn capabilities(&self) -> Vec<ToolCapability> {
+            vec![ToolCapability::ReadOnly]
+        }
+        fn supports_parallel(&self) -> bool {
+            true
+        }
+        async fn execute(
+            &self,
+            input: Value,
+            _context: &ToolContext,
+        ) -> Result<ToolResult, ToolError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Err(ToolError::permission_denied(format!(
+                "fixture authority refuses variant {}",
+                input["variant"]
+            )))
+        }
+    }
+
+    struct PrepareCountingReadTool(Arc<AtomicUsize>);
+
+    #[async_trait::async_trait]
+    impl ToolSpec for PrepareCountingReadTool {
+        fn name(&self) -> &str {
+            "read_file"
+        }
+        fn description(&self) -> &str {
+            "Count preparation of a held report-only read."
+        }
+        fn input_schema(&self) -> Value {
+            json!({"type":"object"})
+        }
+        fn capabilities(&self) -> Vec<ToolCapability> {
+            vec![ToolCapability::ReadOnly]
+        }
+        fn prepare(
+            &self,
+            input: Value,
+            context: &ToolContext,
+        ) -> Result<crate::tools::spec::PreparedToolCall, ToolError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            crate::tools::file::ReadFileTool.prepare(input, context)
+        }
+        async fn execute(
+            &self,
+            _input: Value,
+            _context: &ToolContext,
+        ) -> Result<ToolResult, ToolError> {
+            panic!("report-only read must never execute")
+        }
+    }
+
+    fn fleet_surface(
+        engine: &Engine,
+        workspace: &Path,
+        executions: Arc<AtomicUsize>,
+        fleet: bool,
+    ) -> ToolSurfacePolicy {
+        let mut context = ToolContext::new(workspace);
+        if fleet {
+            context = context
+                .with_tool_authority(ToolAuthorityEnvelope {
+                    schema_version: 1,
+                    owner: "fixture-worker".to_string(),
+                    authority: ToolMutationAuthority::ReadOnly,
+                    network_access: Some(false),
+                    shell: ToolShellAuthority::None,
+                    verification: ToolVerificationAuthority::None,
+                    writable_roots: Vec::new(),
+                    writable_files: Vec::new(),
+                    coordination_contracts: Vec::new(),
+                })
+                .expect("valid Fleet fixture authority");
+        }
+        let mut registry = crate::tools::ToolRegistry::new(context);
+        registry.register(Arc::new(DeniedEvidenceTool(executions)));
+        registry.register(Arc::new(crate::tools::file::ReadFileTool));
+        // The read alias is hidden in ordinary discovery but deliberately
+        // explicit on this isolated test surface, as in existing engine tests.
+        let tools = Some(vec![
+            catalog_tool("fixture_denied"),
+            catalog_tool("read_file"),
+        ]);
+        test_tool_surface(engine, registry, tools, AppMode::Agent)
+    }
+
+    fn denied_round(index: usize) -> Vec<StreamEvent> {
+        canned::tool_call_turn(
+            &format!("denial-{index}"),
+            "fixture_denied",
+            &format!(r#"{{"variant":{}}}"#, index % 2),
+        )
+    }
+
+    fn observation(
+        guard: &mut FleetDenialGuard,
+        results: &[(&str, Value, Result<ToolResult, ToolError>)],
+    ) -> FleetDenialAction {
+        let mut batch = FleetDenialBatch::default();
+        for (name, input, result) in results {
+            let status = ToolExecutionOutcome::from_legacy(result.clone()).status;
+            guard.observe(&mut batch, name, input, status, result, None);
+        }
+        guard.finish_batch(batch)
+    }
+
+    #[tokio::test]
+    async fn fleet_denials_switch_once_then_bound_the_report_response() {
+        // A cooperative report, an ignored tool_choice, and an empty final
+        // response all consume exactly one report response. None re-arms work.
+        for final_response in [
+            canned::simple_text_turn(
+                "Partial report: evidence access is blocked; no finding is proved.",
+            ),
+            canned::tool_call_turn(
+                "report-must-not-read",
+                "read_file",
+                r#"{"path":"proof.txt"}"#,
+            ),
+            vec![
+                canned::message_start("empty-report"),
+                canned::message_delta("end_turn", None),
+                canned::message_stop(),
+            ],
+        ] {
+            let workspace = tempdir().unwrap();
+            fs::write(workspace.path().join("proof.txt"), "must remain unread").unwrap();
+            let mut responses = (0..6).map(denied_round).collect::<Vec<_>>();
+            responses.push(final_response);
+            responses.push(canned::simple_text_turn(
+                "This eighth request must never run.",
+            ));
+            let mock = Arc::new(MockLlmClient::new(responses));
+            let (mut engine, handle) = Engine::new_with_model_client(
+                EngineConfig {
+                    strict_tool_mode: true,
+                    ..deterministic_engine_config(workspace.path())
+                },
+                &Config::default(),
+                mock.clone(),
+            );
+            let executions = Arc::new(AtomicUsize::new(0));
+            let mut surface = fleet_surface(&engine, workspace.path(), executions.clone(), true);
+            let preparations = Arc::new(AtomicUsize::new(0));
+            surface
+                .registry
+                .register(Arc::new(PrepareCountingReadTool(preparations.clone())));
+            let mut turn = TurnContext::new(u32::MAX);
+            let (status, error) = engine.run_turn(&mut turn, surface, None, None).await;
+            assert_eq!(status, TurnOutcomeStatus::Failed);
+            assert!(error.unwrap().contains("repeated permission denials"));
+            assert_eq!(
+                turn.stop_diagnostics.reason,
+                Some(crate::tool_inspection::TurnStopReason::NoProgress)
+            );
+            assert_eq!(turn.stop_diagnostics.permission_strategy_switches, 1);
+            assert!(turn.stop_diagnostics.final_report_requested);
+            assert_eq!(
+                executions.load(Ordering::SeqCst),
+                3,
+                "held repeats must never execute"
+            );
+            assert_eq!(mock.call_count(), 7);
+            assert_eq!(
+                preparations.load(Ordering::SeqCst),
+                0,
+                "report-only calls must not prepare"
+            );
+            assert_eq!(
+                turn.stop_diagnostics
+                    .permission_denial_rounds_without_progress,
+                6
+            );
+            let requests = mock.captured_requests();
+            assert_eq!(
+                requests[6].tool_choice,
+                Some(json!("none")),
+                "report choice beats strict mode"
+            );
+            assert_eq!(
+                serde_json::to_value(&requests[0].tools).unwrap(),
+                serde_json::to_value(&requests[6].tools).unwrap(),
+                "reporting must not rewrite the tool prefix"
+            );
+            let notice_count = engine.session.messages.iter().flat_map(|message| &message.content)
+                .filter(|block| matches!(block, ContentBlock::Text { text, .. } if text.contains("Fleet strategy switch required:"))).count();
+            assert_eq!(notice_count, 1);
+            assert!(requests[3].messages.iter().flat_map(|message| &message.content)
+                .any(|block| matches!(block, ContentBlock::Text { text, .. } if text.contains("Fleet strategy switch required:"))), "feedback must reach the next provider request");
+            let mut calls = Vec::new();
+            let mut results = Vec::new();
+            for block in engine
+                .session
+                .messages
+                .iter()
+                .flat_map(|message| &message.content)
+            {
+                match block {
+                    ContentBlock::ToolUse { id, .. } => calls.push(id.clone()),
+                    ContentBlock::ToolResult {
+                        tool_use_id,
+                        is_error,
+                        ..
+                    } => {
+                        assert_eq!(*is_error, Some(true));
+                        results.push(tool_use_id.clone());
+                    }
+                    _ => {}
+                }
+            }
+            calls.sort();
+            results.sort();
+            assert_eq!(
+                calls, results,
+                "every suppressed call retains its matching result"
+            );
+            let mut events = handle.rx_event.write().await;
+            assert!(
+                !std::iter::from_fn(|| events.try_recv().ok())
+                    .any(|event| matches!(event, Event::ApprovalRequired { .. })),
+                "guard must not ask for repeated approval"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn fleet_denials_allow_new_evidence_but_unchanged_reads_do_not_rearm_retries() {
+        for changed in [false, true] {
+            let workspace = tempdir().unwrap();
+            let proof = workspace.path().join("proof.txt");
+            fs::write(&proof, "version zero").unwrap();
+            let mock = Arc::new(MockLlmClient::new(Vec::new()));
+            // A read and a denial share each batch: aggregate progress must win
+            // regardless of tool completion order. Only changed bytes count.
+            for index in 0..10 {
+                let proof = proof.clone();
+                mock.push_factory(move |_| {
+                    if changed {
+                        fs::write(&proof, format!("version {index}")).unwrap();
+                    }
+                    tool_batch_turn(&[
+                        (
+                            &format!("denial-{index}"),
+                            "fixture_denied",
+                            r#"{"variant":0}"#,
+                        ),
+                        (
+                            &format!("read-{index}"),
+                            "read_file",
+                            r#"{"path":"proof.txt"}"#,
+                        ),
+                    ])
+                });
+            }
+            mock.push_turn(canned::simple_text_turn(
+                "Review complete with new evidence.",
+            ));
+            let (mut engine, _) = Engine::new_with_model_client(
+                deterministic_engine_config(workspace.path()),
+                &Config::default(),
+                mock.clone(),
+            );
+            let executions = Arc::new(AtomicUsize::new(0));
+            let surface = fleet_surface(&engine, workspace.path(), executions, true);
+            let mut turn = TurnContext::new(u32::MAX);
+            let (status, error) = engine.run_turn(&mut turn, surface, None, None).await;
+            if changed {
+                assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
+                assert_eq!(mock.call_count(), 11);
+                assert_eq!(turn.stop_diagnostics.permission_strategy_switches, 0);
+            } else {
+                assert_eq!(status, TurnOutcomeStatus::Failed);
+                assert_eq!(
+                    mock.call_count(),
+                    8,
+                    "one first read, six denied rounds, one report response"
+                );
+                assert_eq!(
+                    turn.stop_diagnostics.reason,
+                    Some(crate::tool_inspection::TurnStopReason::NoProgress)
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn fleet_denial_cooperative_partial_report_is_not_completed() {
+        let workspace = tempdir().unwrap();
+        let mut responses = (0..3).map(denied_round).collect::<Vec<_>>();
+        responses.push(canned::simple_text_turn(
+            "Partial report: the evidence is blocked; the review is unfinished.",
+        ));
+        let mock = Arc::new(MockLlmClient::new(responses));
+        let (mut engine, _) = Engine::new_with_model_client(
+            deterministic_engine_config(workspace.path()),
+            &Config::default(),
+            mock.clone(),
+        );
+        let surface = fleet_surface(
+            &engine,
+            workspace.path(),
+            Arc::new(AtomicUsize::new(0)),
+            true,
+        );
+        let mut turn = TurnContext::new(u32::MAX);
+        let (status, error) = engine.run_turn(&mut turn, surface, None, None).await;
+        assert_eq!(status, TurnOutcomeStatus::Failed, "{error:?}");
+        assert_eq!(
+            turn.stop_diagnostics.reason,
+            Some(crate::tool_inspection::TurnStopReason::NoProgress)
+        );
+        assert_eq!(mock.call_count(), 4);
+        assert_eq!(
+            turn.stop_diagnostics
+                .permission_denial_rounds_without_progress,
+            3
+        );
+        assert!(engine.session.messages.iter().any(|message| {
+            message.role == Role::Assistant && message.content.iter().any(|block|
+            matches!(block, ContentBlock::Text { text, .. } if text.starts_with("Partial report:")))
+        }));
+    }
+
+    #[tokio::test]
+    async fn ordinary_engine_denials_do_not_acquire_a_fleet_guard() {
+        let workspace = tempdir().unwrap();
+        let mut responses = (0..8).map(denied_round).collect::<Vec<_>>();
+        responses.push(canned::simple_text_turn(
+            "Root has finished evaluating these failures.",
+        ));
+        let mock = Arc::new(MockLlmClient::new(responses));
+        let (mut engine, _) = Engine::new_with_model_client(
+            deterministic_engine_config(workspace.path()),
+            &Config::default(),
+            mock.clone(),
+        );
+        let executions = Arc::new(AtomicUsize::new(0));
+        let surface = fleet_surface(&engine, workspace.path(), executions.clone(), false);
+        let mut turn = TurnContext::new(u32::MAX);
+        let (status, error) = engine.run_turn(&mut turn, surface, None, None).await;
+        assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
+        assert_eq!(executions.load(Ordering::SeqCst), 8);
+        assert_eq!(turn.stop_diagnostics.permission_strategy_switches, 0);
+    }
+
+    #[tokio::test]
+    async fn fleet_denial_report_shares_existing_explicit_budget_allowance() {
+        for limit in [3, 6] {
+            let workspace = tempdir().unwrap();
+            let mut responses = (0..limit).map(denied_round).collect::<Vec<_>>();
+            responses.push(canned::simple_text_turn(
+                "Partial report at the explicit limit.",
+            ));
+            responses.push(canned::simple_text_turn("No second report allowance."));
+            let mock = Arc::new(MockLlmClient::new(responses));
+            let (mut engine, _) = Engine::new_with_model_client(
+                deterministic_engine_config(workspace.path()),
+                &Config::default(),
+                mock.clone(),
+            );
+            let surface = fleet_surface(
+                &engine,
+                workspace.path(),
+                Arc::new(AtomicUsize::new(0)),
+                true,
+            );
+            let mut turn = TurnContext::new(limit as u32);
+            let (status, error) = engine.run_turn(&mut turn, surface, None, None).await;
+            assert_eq!(status, TurnOutcomeStatus::Failed);
+            assert!(error.unwrap().contains("Maximum model steps"));
+            assert_eq!(mock.call_count(), limit + 1);
+            assert_eq!(
+                turn.stop_diagnostics.reason,
+                Some(crate::tool_inspection::TurnStopReason::StepBudgetExhausted)
+            );
+        }
+    }
+
+    #[test]
+    fn fleet_denial_observations_canonicalize_aliases_and_keep_polling_neutral() {
+        let mut guard = FleetDenialGuard::default();
+        for (index, name) in ["bash", "Bash", "exec_shell"].into_iter().enumerate() {
+            let action = observation(
+                &mut guard,
+                &[(
+                    name,
+                    json!({"action":"run","command":format!("variant {index}")}),
+                    Err(ToolError::permission_denied(format!(
+                        "different reason {index}"
+                    ))),
+                )],
+            );
+            assert_eq!(
+                action,
+                if index == 2 {
+                    FleetDenialAction::SwitchStrategy
+                } else {
+                    FleetDenialAction::Continue
+                }
+            );
+        }
+        assert!(
+            guard
+                .admission_error("Bash", &json!({"action":"run","command":"new variant"}))
+                .is_some()
+        );
+        assert!(
+            guard
+                .admission_error("Bash", &json!({"action":"wait","task_id":"live"}))
+                .is_none()
+        );
+        for _ in 0..10 {
+            assert_eq!(
+                observation(
+                    &mut guard,
+                    &[(
+                        "Bash",
+                        json!({"action":"wait","task_id":"live"}),
+                        Ok(ToolResult::success("still running"))
+                    )]
+                ),
+                FleetDenialAction::Continue
+            );
+        }
+        // Alternating other denied families cannot reset a spent strategy
+        // notice or its bounded recovery opportunity.
+        for (index, name) in ["denied-a", "denied-b", "denied-a"].into_iter().enumerate() {
+            let action = observation(
+                &mut guard,
+                &[(name, json!({}), Err(ToolError::permission_denied("held")))],
+            );
+            assert_eq!(
+                action,
+                if index == 2 {
+                    FleetDenialAction::FinalReport
+                } else {
+                    FleetDenialAction::Continue
+                }
+            );
+        }
+        assert!(guard.report_only());
+        guard.reset(); // actual user steer / authority update, not model prose
+        assert!(!guard.report_only());
+        assert!(
+            guard
+                .admission_error("bash", &json!({"action":"run"}))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn fleet_denial_observations_exclude_cancellation_and_untyped_failures() {
+        let mut guard = FleetDenialGuard::default();
+        for _ in 0..20 {
+            for result in [
+                Err(ToolError::execution_failed("changing failure payload")),
+                Err(ToolError::path_escape(PathBuf::from("../outside"))),
+                Ok(ToolResult::error("returned failure")),
+            ] {
+                assert_eq!(
+                    observation(
+                        &mut guard,
+                        &[("read_file", json!({"path":"proof.txt"}), result)]
+                    ),
+                    FleetDenialAction::Continue
+                );
+            }
+        }
+        let mut batch = FleetDenialBatch::default();
+        guard.observe(
+            &mut batch,
+            "read_file",
+            &json!({"path":"proof.txt"}),
+            ToolTerminalStatus::Cancelled,
+            &Ok(ToolResult::success("not executed")
+                .with_metadata(json!({"executed":false,"cancelled":true}))),
+            None,
+        );
+        assert_eq!(guard.finish_batch(batch), FleetDenialAction::Continue);
+        assert!(!guard.report_only());
+    }
+
+    #[test]
+    fn fleet_denial_spillover_call_paths_do_not_create_new_evidence() {
+        let mut guard = FleetDenialGuard::default();
+        let input = json!({"path":"large-proof.txt"});
+        let original = ToolResult::success("unchanged full bytes".repeat(10_000));
+        let digest = FleetDenialGuard::original_content_digest("read_file", &input, &original);
+        for index in 0..4 {
+            let mut batch = FleetDenialBatch::default();
+            // Both legacy and adaptive spillover add per-call artifact paths;
+            // the observation must use the digest captured before either one.
+            let spilled = Ok(ToolResult::success(format!(
+                "preview... full output: artifacts/art_call-{index}.txt"
+            )));
+            guard.observe(
+                &mut batch,
+                "read_file",
+                &input,
+                ToolTerminalStatus::Succeeded,
+                &spilled,
+                digest,
+            );
+            guard.observe(
+                &mut batch,
+                "bash",
+                &json!({"command":"held"}),
+                ToolTerminalStatus::Denied,
+                &Err(ToolError::permission_denied("held")),
+                None,
+            );
+            assert_eq!(
+                guard.finish_batch(batch),
+                if index == 3 {
+                    FleetDenialAction::SwitchStrategy
+                } else {
+                    FleetDenialAction::Continue
+                }
+            );
+        }
+        assert_eq!(guard.denial_rounds_without_progress(), 3);
+        let changed = ToolResult::success("actually changed bytes");
+        let mut batch = FleetDenialBatch::default();
+        guard.observe(
+            &mut batch,
+            "read_file",
+            &input,
+            ToolTerminalStatus::Succeeded,
+            &Ok(ToolResult::success("same preview, new artifact path")),
+            FleetDenialGuard::original_content_digest("read_file", &input, &changed),
+        );
+        assert_eq!(guard.finish_batch(batch), FleetDenialAction::Continue);
+        assert_eq!(guard.denial_rounds_without_progress(), 0);
+        assert!(!guard.awaiting_strategy_change());
+    }
+
+    #[test]
+    fn fleet_denial_read_keys_ignore_json_order_within_observation_window() {
+        let mut guard = FleetDenialGuard::default();
+        // Equivalent arguments stay neutral within the bounded read window.
+        for index in 0..6 {
+            let input: Value =
+                serde_json::from_str(&format!(r#"{{"path":"proof-{index}.txt","limit":100}}"#))
+                    .unwrap();
+            assert_eq!(
+                observation(
+                    &mut guard,
+                    &[("read_file", input, Ok(ToolResult::success("unchanged")))]
+                ),
+                FleetDenialAction::Continue
+            );
+        }
+        for index in 0..6 {
+            let input: Value =
+                serde_json::from_str(&format!(r#"{{"limit":100,"path":"proof-{index}.txt"}}"#))
+                    .unwrap();
+            let action = observation(
+                &mut guard,
+                &[
+                    ("read_file", input, Ok(ToolResult::success("unchanged"))),
+                    (
+                        "bash",
+                        json!({"command":"held"}),
+                        Err(ToolError::permission_denied("held")),
+                    ),
+                ],
+            );
+            assert_eq!(
+                action,
+                match index {
+                    2 => FleetDenialAction::SwitchStrategy,
+                    5 => FleetDenialAction::FinalReport,
+                    _ => FleetDenialAction::Continue,
+                }
+            );
+        }
+        assert!(guard.report_only());
+        assert_eq!(guard.denial_rounds_without_progress(), 6);
+    }
 }

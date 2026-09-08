@@ -52,6 +52,7 @@ pub enum TurnStopReason {
     ProviderNoToolCall,
     ProviderToolCallMissing,
     StepBudgetExhausted,
+    NoProgress,
     Interrupted,
     Failed,
 }
@@ -76,6 +77,9 @@ pub struct TurnStopDiagnostics {
     pub reasoning_only_reprompts: u32,
     pub soft_landing_sent: bool,
     pub final_report_requested: bool,
+    pub permission_strategy_switches: u32,
+    /// Denied provider-response batches since the latest useful progress.
+    pub permission_denial_rounds_without_progress: u32,
     pub last_provider_finish_reason: Option<BoundedString>,
     /// Structured calls decoded from the stream, before legacy text-call parsing.
     pub last_response_tool_calls: Option<usize>,

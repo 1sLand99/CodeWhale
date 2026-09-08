@@ -183,7 +183,7 @@ impl TurnContext {
         use crate::tool_inspection::TurnStopReason;
         self.stop_diagnostics.status = Some(status);
         self.stop_diagnostics.model_step_index = self.step;
-        self.stop_diagnostics.final_report_requested = self.budget_exhausted_final_report;
+        self.stop_diagnostics.final_report_requested |= self.budget_exhausted_final_report;
         self.stop_diagnostics.last_reported_input_tokens = self.latest_parent_input_tokens;
         match status {
             super::events::TurnOutcomeStatus::Interrupted => {
