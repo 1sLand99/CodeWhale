@@ -3,7 +3,7 @@
 
 Codewhale 是一款面向终端的开源编程智能体，使用 Rust 构建，并与用户一起在公开协作中不断改进。
 
-![Codewhale 在终端中运行](assets/screenshot.webp)
+![Codewhale 在终端中运行](web/public/codewhale-tui-171acee.png)
 
 [English](README.md) · [日本語](README.ja-JP.md) · [Tiếng Việt](README.vi.md) · [Bahasa Indonesia](README.id.md) · [한국어](README.ko-KR.md) · [Español](README.es-419.md) · [Português](README.pt-BR.md) · [Русский](README.ru.md) · [Українська](README.uk.md) · [Français](README.fr.md) · [Deutsch](README.de.md) · [繁體中文](README.zh-TW.md) · [हिन्दी](README.hi.md) · [Türkçe](README.tr.md) · [Italiano](README.it.md) · [Polski](README.pl.md) · [العربية](README.ar.md) · [Català](README.ca.md)
 

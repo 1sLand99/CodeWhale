@@ -82,7 +82,7 @@ export const chrome: ChromeDict = {
   themeTitle: "Giao diện tài liệu · tự động / sáng / tối",
 
   footerTagline:
-    "Tạo những gì bạn muốn. Tự động hóa tác vụ. Chọn mô hình bạn muốn dùng.",
+    "Tạo những gì bạn muốn và tự động hóa công việc hằng ngày bằng các mô hình bạn chọn.",
   footerProduct: "Sản phẩm",
   footerProject: "Dự án",
   footerDocs: "Tài liệu",

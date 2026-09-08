@@ -9,20 +9,18 @@ import type { HomeDict } from "../types";
  */
 
 export const home: HomeDict = {
-  metaTitle: "Codewhale — İstediğini oluştur.",
+  metaTitle: "Codewhale — Seçtiğin modellerle geliştir ve işleri otomatikleştir",
   metaDescription:
-    "Codewhale ile yazılım geliştir, dosyalarla çalış ve görevleri otomatikleştir. Barındırılan veya yerel modelleri seç, işinin ihtiyaçları değiştikçe sağlayıcı değiştir.",
-  kicker: "Açık kaynaklı yapay zekâ ajanları",
-  heroTitleA: "İstediğini oluştur.",
-  heroTitleB: "Modellerini seç.",
+    "Açık kaynaklı ajanlar ve seçtiğin barındırılan veya yerel AI modelleriyle yazılım geliştir, dosyaların üzerinde çalış ve günlük görevleri otomatikleştir.",
+  heroTitle: "Seçtiğin modellerle geliştir ve işleri otomatikleştir",
   heroIntro:
-    "{brand}, yazılım geliştirebilen, dosyalarla çalışabilen ve görevleri otomatikleştirebilen ajanlar sunar. Seçtiğin modelleri kullan, işinin ihtiyaçları değiştikçe sağlayıcı değiştir.",
+    "{brand}, yazılım geliştirebilen, dosyaların üzerinde çalışabilen ve tekrarlanan görevleri yeniden kullanılabilir iş akışlarına dönüştürebilen ajanlar sunar. Onlara ne yapmak istediğini anlat ve işe uygun barındırılan veya yerel modelleri seç; çalışırken sağlayıcı değiştirmekte özgürsün.",
   getCodewhale: "Codewhale'i edin",
   exploreProduct: "Ürünü keşfet",
   shotPreview: "Terminal önizlemesi",
   shotBuild: "v{version} geliştirme derlemesi",
   screenshotAlt:
-    "Terminalde Codewhale v0.9.12 geliştirme derlemesi: braille noktalarından balina işareti, geçmişi olmayan yeni bir oturum, mesaj yazma alanı ve Full Access, Work modu, iki zamanlanmış görev, bağlanan MCP sunucuları ile en yüksek çabada GLM-5.3 modelini gösteren alt bilgi",
+    "Codewhale v0.9.12 terminali, derleme 171acee689aa: balina simgesi, mesaj yazma alanı, Full Access ve Operate modu, iki zamanlanmış görev, hâlâ bağlantı kurulmakta olan 21 MCP sunucusu ve en yüksek çaba düzeyindeki GLM-5.3 ile yeni bir oturum.",
   latestRelease: "En yeni sürüm {tag}",
   releaseUnavailable: "Sürüm durumu kullanılamıyor",
   currentSource: "Kaynak",
@@ -31,44 +29,44 @@ export const home: HomeDict = {
   publishedRelease: "yayımlandı",
   figcaptionSourceCandidate: "yayımlanmadı",
   chapterTerminal: "Senin terminalin",
-  chapterTerminalTitle: "Yapmak istediğin bir şeyle başla.",
+  chapterTerminalTitle: "Yapmak istediğin bir şeyle başla",
   gainHeading:
-    "Fikirlerini hayata geçir.",
+    "Codewhale ile neler yapabilirsin",
   gainLede:
-    "Bir proje geliştir, bir soruyu araştır veya bir görevi otomatikleştir. Tek bir ajanla başla, daha büyük işleri birkaç ajana paylaştır.",
+    "Bir projeyle, bir soruyla veya otomatikleştirmek istediğin bir görevle başla; ardından tek bir ajanla çalış ya da daha büyük bir işin parçalarını birkaç ajana ver.",
   gain: [
     [
       "Bir şey geliştir",
-      "Bir fikri çalışan yazılıma dönüştür. Ajanların dosyaları düzenleyebilir, komutları çalıştırabilir ve sonucu kontrol edebilir."
+      "Yapmak istediğini anlat ve kodunu okuyabilen, dosyaları düzenleyebilen, komutları çalıştırabilen ve sonucu kontrol edebilen ajanlarla çalış."
     ],
     [
-      "Tekrarlanan işleri otomatikleştir",
-      "Tekrar tekrar yaptığın işler için betikler ve iş akışları oluştur, ardından bunları terminalden çalıştır."
+      "Günlük işleri otomatikleştir",
+      "Tekrarladığın görevler için betikler ve iş akışları oluştur; böylece ihtiyaç duyduğunda bunları terminalden yeniden çalıştırabilirsin."
     ],
     [
-      "Modellerini seç",
-      "Barındırılan veya yerel modelleri bağla. Büyük bir işin parçalarını farklı model ve rollere sahip ajanlara ver."
+      "Farklı modellerle çalış",
+      "Ajanların için barındırılan veya yerel modeller kullan; farklı modeller ve roller, işin kendilerine uygun kısımlarını üstlensin."
     ]
   ],
   chapterModels: "Senin modellerin",
-  modelsHeading: "Göreve uygun bir model bul.",
+  modelsHeading: "Her görev için model seçenekleri",
   modelsBody:
-    "Barındırılan bir model sağlayıcısı kullan, bir ağ geçidi üzerinden bağlan veya yerel bir model çalıştır. Her oturum için bir sağlayıcı ve model seç, çalışırken bunları değiştir.",
+    "Doğrudan model barındıran bir sağlayıcıya bağlan, birden fazla sağlayıcıya erişmek için bir ağ geçidi kullan veya bir modeli yerel olarak çalıştır; ardından çalışırken her oturumun hangi modeli kullanacağını seç.",
   modelsFacts: [
     ["Barındırılan", "codewhale auth set --provider <id> ile kaydedilen kendi API anahtarın"],
     ["Gateway", "Birçok model için tek uç nokta, sağlayıcıyı yine sen seçersin"],
     ["Yerel", "localhost üzerinde vLLM, SGLang, Ollama — genellikle anahtarsız"],
   ],
   modelsLink: "Modelleri ve sağlayıcıları keşfet",
-  startHeading: "İlk görevine başla.",
+  startHeading: "Codewhale ile işe başla",
   startLede:
-    "Codewhale'i kur, bir model bağla ve ne yapmak istediğini söyle. İşi birkaç ajana paylaştırmak istediğinde bir Fleet ekle.",
+    "Codewhale'i kurup bir model bağladıktan sonra ilk görevini terminalde anlatabilir, birkaç ajanın işi paylaşmasını istediğinde bir Fleet ekleyebilirsin.",
   startGuideLink: "Başlangıç kılavuzunu oku",
   startVocabularyLink: "Ürün sözlüğünü gör",
   chapterAccount: "Codewhale'i edin",
-  availabilityHeading: "Codewhale nerede kullanılır?",
+  availabilityHeading: "Codewhale'i nerelerde kullanabilirsin",
   availabilityLede:
-    "Terminalde başla. Uygulama ve bulut bilgisayarları geliştirme aşamasında.",
+    "Biz web uygulamasını, masaüstü uygulamasını ve bulut bilgisayarlarını geliştirirken sen Codewhale'i bugün terminalinde kullanabilirsin.",
   availability: [
     [
       "Terminal",
@@ -92,9 +90,9 @@ export const home: HomeDict = {
     ]
   ],
   availabilityNote:
-    "Terminal, Codewhale hesabı olmadan çalışır. Barındırılan model kullanımını sağlayıcın ücretlendirir.",
+    "Terminali Codewhale hesabı olmadan kullanabilirsin; barındırılan model kullanımını ise sağlayıcın faturalandırır.",
   accountLink: "Hesap oluştur",
-  surfacesHeading: "Çalışma zamanını işin olduğu yerde kullan.",
+  surfacesHeading: "Codewhale ile çalışma yolları",
   surfaces: [
     ["TUI", "Terminalde etkileşimli iş"],
     ["codewhale exec", "Betikler ve CI"],
@@ -103,15 +101,15 @@ export const home: HomeDict = {
     ["Fleet","Tek bir işte birden çok ajan"],
   ],
   runtimeLink: "Entegrasyonları keşfet",
-  installBandHeading: "Tek komutla başla.",
+  installBandHeading: "Codewhale'i macOS veya Linux üzerine kur",
   copy: "Kopyala",
   copied: "Kopyalandı ✓",
   binaries: "İkililer",
   chinaMirrors: "Çin yansıları",
   installGuideLink: "Kurulum kılavuzunu oku",
-  communityHeading: "Açıkça, halk önünde inşa edildi",
+  communityHeading: "Codewhale'i daha iyi hâle getirmeye yardımcı ol",
   communityBody:
-    "MIT lisanslı; çalışma zamanları, sağlayıcılar, platformlar, belgelendirme ve testler katkısıyla şekillendi.",
+    "Bir hata bulduysan, bir özellik fikrin varsa ya da ilk pull request'ini göndermek istiyorsan seni dinlemek ve sonraki adımlar üzerinde birlikte çalışmak isteriz.",
   communityLinksAria: "Topluluk bağlantıları",
-  contribute: "Katkıda bulun",
+  contribute: "Pull request gönder",
 };

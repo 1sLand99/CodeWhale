@@ -3,7 +3,7 @@
 
 Codewhale là tác nhân lập trình mã nguồn mở dành cho terminal, được xây dựng bằng Rust và được cải thiện công khai cùng những người sử dụng nó.
 
-![Codewhale đang chạy trong terminal](assets/screenshot.webp)
+![Codewhale đang chạy trong terminal](web/public/codewhale-tui-171acee.png)
 
 [English](README.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja-JP.md) · [Bahasa Indonesia](README.id.md) · [한국어](README.ko-KR.md) · [Español](README.es-419.md) · [Português](README.pt-BR.md) · [Русский](README.ru.md) · [Українська](README.uk.md) · [Français](README.fr.md) · [Deutsch](README.de.md) · [繁體中文](README.zh-TW.md) · [हिन्दी](README.hi.md) · [Türkçe](README.tr.md) · [Italiano](README.it.md) · [Polski](README.pl.md) · [العربية](README.ar.md) · [Català](README.ca.md)
 

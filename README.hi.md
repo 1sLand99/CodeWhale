@@ -3,7 +3,7 @@
 
 Codewhale आपके टर्मिनल के लिए Rust में बना एक ओपन सोर्स कोडिंग एजेंट है, जिसे इसके उपयोगकर्ताओं के साथ सार्वजनिक रूप से बेहतर बनाया जाता है।
 
-![टर्मिनल में चलता Codewhale](assets/screenshot.webp)
+![टर्मिनल में चलता Codewhale](web/public/codewhale-tui-171acee.png)
 
 [English](README.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja-JP.md) · [Tiếng Việt](README.vi.md) · [Bahasa Indonesia](README.id.md) · [한국어](README.ko-KR.md) · [Español](README.es-419.md) · [Português](README.pt-BR.md) · [Русский](README.ru.md) · [Українська](README.uk.md) · [Français](README.fr.md) · [Deutsch](README.de.md) · [繁體中文](README.zh-TW.md) · [Türkçe](README.tr.md) · [Italiano](README.it.md) · [Polski](README.pl.md) · [العربية](README.ar.md) · [Català](README.ca.md)
 

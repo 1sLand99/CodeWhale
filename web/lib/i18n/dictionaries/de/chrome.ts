@@ -82,7 +82,7 @@ export const chrome: ChromeDict = {
   themeTitle: "Dokumentations-Design · auto / hell / dunkel",
 
   footerTagline:
-    "Erstelle, was du möchtest. Automatisiere Aufgaben. Wähle deine Modelle.",
+    "Erstelle, was du möchtest, und automatisiere alltägliche Arbeit mit den Modellen deiner Wahl.",
   footerProduct: "Produkt",
   footerProject: "Projekt",
   footerDocs: "Dokumentation",

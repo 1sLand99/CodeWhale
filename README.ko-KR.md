@@ -3,7 +3,7 @@
 
 Codewhale은 Rust로 만든 터미널용 오픈 소스 코딩 에이전트로, 사용자들과 함께 공개적으로 개선해 나갑니다.
 
-![터미널에서 실행 중인 Codewhale](assets/screenshot.webp)
+![터미널에서 실행 중인 Codewhale](web/public/codewhale-tui-171acee.png)
 
 [English](README.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja-JP.md) · [Tiếng Việt](README.vi.md) · [Bahasa Indonesia](README.id.md) · [Español](README.es-419.md) · [Português](README.pt-BR.md) · [Русский](README.ru.md) · [Українська](README.uk.md) · [Français](README.fr.md) · [Deutsch](README.de.md) · [繁體中文](README.zh-TW.md) · [हिन्दी](README.hi.md) · [Türkçe](README.tr.md) · [Italiano](README.it.md) · [Polski](README.pl.md) · [العربية](README.ar.md) · [Català](README.ca.md)
 

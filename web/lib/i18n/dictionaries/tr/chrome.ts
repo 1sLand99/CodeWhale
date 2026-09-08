@@ -79,7 +79,7 @@ export const chrome: ChromeDict = {
   themeTitle: "Belge teması · otomatik / açık / koyu",
 
   footerTagline:
-    "İstediğini oluştur. Görevleri otomatikleştir. Modellerini seç.",
+    "Seçtiğin modellerle istediğini oluştur ve günlük işleri otomatikleştir.",
   footerProduct: "Ürün",
   footerProject: "Proje",
   footerDocs: "Belgeler",

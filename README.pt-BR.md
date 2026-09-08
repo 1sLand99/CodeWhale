@@ -3,7 +3,7 @@
 
 Codewhale é um agente de programação de código aberto para o seu terminal, desenvolvido em Rust e aprimorado publicamente com as pessoas que o utilizam.
 
-![Codewhale em execução em um terminal](assets/screenshot.webp)
+![Codewhale em execução em um terminal](web/public/codewhale-tui-171acee.png)
 
 [English](README.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja-JP.md) · [Tiếng Việt](README.vi.md) · [Bahasa Indonesia](README.id.md) · [한국어](README.ko-KR.md) · [Español](README.es-419.md) · [Русский](README.ru.md) · [Українська](README.uk.md) · [Français](README.fr.md) · [Deutsch](README.de.md) · [繁體中文](README.zh-TW.md) · [हिन्दी](README.hi.md) · [Türkçe](README.tr.md) · [Italiano](README.it.md) · [Polski](README.pl.md) · [العربية](README.ar.md) · [Català](README.ca.md)
 

@@ -77,7 +77,7 @@ export const chrome: ChromeDict = {
   themeTitle: "سمة التوثيق · تلقائي / فاتح / داكن",
 
   footerTagline:
-    "أنشئ ما تريد. أتمت المهام. اختر نماذجك.",
+    "اصنع ما تريد وأتمت العمل اليومي باستخدام النماذج التي تختارها.",
   footerProduct: "المنتج",
   footerProject: "المشروع",
   footerDocs: "التوثيق",

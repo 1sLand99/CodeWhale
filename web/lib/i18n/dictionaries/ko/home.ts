@@ -9,20 +9,18 @@ import type { HomeDict } from "../types";
  */
 
 export const home: HomeDict = {
-  metaTitle: "Codewhale — 원하는 것을 만드세요.",
+  metaTitle: "Codewhale — 원하는 모델로 개발하고 작업을 자동화하세요",
   metaDescription:
-    "Codewhale로 소프트웨어를 만들고, 파일을 다루고, 작업을 자동화하세요. 호스팅 모델이나 로컬 모델을 선택하고, 작업에 맞춰 제공업체를 바꿀 수 있습니다.",
-  kicker: "오픈소스 AI 에이전트",
-  heroTitleA: "원하는 것을 만드세요.",
-  heroTitleB: "모델을 직접 선택하세요.",
+    "오픈소스 에이전트와 직접 선택한 호스팅형 또는 로컬 AI 모델을 사용해 소프트웨어를 개발하고 파일을 다루며 일상적인 작업을 자동화하세요.",
+  heroTitle: "원하는 모델로 개발하고 작업을 자동화하세요",
   heroIntro:
-    "{brand}의 에이전트로 소프트웨어를 만들고, 파일을 다루고, 작업을 자동화할 수 있습니다. 원하는 모델을 사용하고, 작업에 맞춰 제공업체를 바꿔 보세요.",
+    "{brand}은 소프트웨어를 개발하고 파일을 다루며 반복 작업을 재사용 가능한 워크플로로 바꿀 수 있는 에이전트를 제공합니다. 무엇을 이루고 싶은지 알려 주고 작업에 맞는 호스팅형 또는 로컬 모델을 선택하면, 작업을 진행하면서 제공업체도 자유롭게 바꿀 수 있습니다.",
   getCodewhale: "Codewhale 받기",
   exploreProduct: "제품 살펴보기",
   shotPreview: "터미널 미리보기",
   shotBuild: "v{version} 개발 빌드",
   screenshotAlt:
-    "터미널의 Codewhale v0.9.12 개발 빌드: 점자 고래 마크, 아직 기록이 없는 새 세션, 메시지 입력창, 그리고 Full Access, Work 모드, 예약 작업 2개, MCP 서버 연결 중, GLM-5.3 최대 강도를 보여주는 푸터",
+    "Codewhale v0.9.12 터미널, 빌드 171acee689aa: 고래 마크, 메시지 입력창, Full Access와 Operate 모드, 예약된 작업 두 개, 연결 중인 MCP 서버 21개, 추론 강도를 최대로 설정한 GLM-5.3이 표시된 새 세션.",
   latestRelease: "최신 릴리스 {tag}",
   releaseUnavailable: "릴리스 상태를 확인할 수 없음",
   currentSource: "소스",
@@ -31,40 +29,40 @@ export const home: HomeDict = {
   publishedRelease: "공개됨",
   figcaptionSourceCandidate: "미공개",
   chapterTerminal: "당신의 터미널",
-  chapterTerminalTitle: "만들고 싶은 것부터 시작하세요.",
-  gainHeading: "아이디어를 실행에 옮기세요.",
-  gainLede: "프로젝트를 만들거나, 궁금한 것을 조사하거나, 작업을 자동화하세요. 에이전트 하나로 시작하고, 큰 작업은 여러 에이전트가 나눠 맡게 할 수 있습니다.",
+  chapterTerminalTitle: "만들고 싶은 것부터 시작하세요",
+  gainHeading: "Codewhale로 할 수 있는 일",
+  gainLede: "프로젝트나 질문, 자동화하고 싶은 작업에서 시작해 에이전트 하나와 함께 진행하거나 큰 작업의 여러 부분을 여러 에이전트에게 나누어 맡길 수 있습니다.",
   gain: [
     [
-      "직접 만들어 보세요",
-      "아이디어를 작동하는 소프트웨어로 만드세요. 에이전트가 파일을 편집하고, 명령을 실행하고, 결과를 확인할 수 있습니다."
+      "만들고 싶은 것을 구현하세요",
+      "만들고 싶은 것을 설명하고 코드를 읽고 파일을 편집하며 명령을 실행하고 결과를 확인할 수 있는 에이전트와 함께 작업하세요."
     ],
     [
-      "반복 작업을 자동화하세요",
-      "반복하는 작업에 쓸 스크립트와 워크플로를 만들고, 터미널에서 실행하세요."
+      "일상적인 작업을 자동화하세요",
+      "반복하는 작업을 스크립트와 워크플로로 만들어 두면 필요할 때마다 터미널에서 다시 실행할 수 있습니다."
     ],
     [
-      "모델을 직접 선택하세요",
-      "호스팅 모델이나 로컬 모델을 연결하세요. 큰 작업을 나눠 서로 다른 모델과 역할을 가진 에이전트에 맡길 수 있습니다."
+      "다양한 모델을 사용하세요",
+      "에이전트에 호스팅형 또는 로컬 모델을 사용하고 서로 다른 모델과 역할이 각각 적합한 작업을 맡도록 할 수 있습니다."
     ]
   ],
   chapterModels: "당신의 모델",
-  modelsHeading: "작업에 맞는 모델을 찾으세요.",
+  modelsHeading: "작업마다 선택할 수 있는 다양한 모델",
   modelsBody:
-    "호스팅 모델 제공업체를 이용하거나, 게이트웨이로 연결하거나, 모델을 로컬에서 실행하세요. 세션마다 제공업체와 모델을 선택하고 작업 중에도 바꿀 수 있습니다.",
+    "호스팅형 모델 제공업체에 직접 연결하거나 게이트웨이로 여러 제공업체를 이용하거나 모델을 로컬에서 실행한 뒤, 작업하면서 세션별로 사용할 모델을 선택할 수 있습니다.",
   modelsFacts: [
     ["호스팅", "codewhale auth set --provider <id>으로 저장한 내 API 키"],
     ["게이트웨이", "하나의 엔드포인트로 여러 모델, 제공자는 여전히 내가 선택"],
     ["로컬", "localhost의 vLLM, SGLang, Ollama — 보통 키 불필요"],
   ],
   modelsLink: "모델과 제공업체 살펴보기",
-  startHeading: "첫 작업을 시작하세요.",
-  startLede: "Codewhale을 설치하고 모델을 연결한 뒤, 하고 싶은 일을 알려 주세요. 여러 에이전트가 작업을 나눠 맡게 하려면 Fleet을 추가하세요.",
+  startHeading: "Codewhale 시작하기",
+  startLede: "Codewhale을 설치하고 모델을 연결하면 터미널에서 첫 작업을 설명할 수 있으며, 여러 에이전트가 작업을 나누어 맡도록 하고 싶을 때 Fleet을 추가할 수 있습니다.",
   startGuideLink: "시작 가이드 읽기",
   startVocabularyLink: "제품 용어 보기",
   chapterAccount: "Codewhale 받기",
-  availabilityHeading: "Codewhale을 사용할 수 있는 곳.",
-  availabilityLede: "터미널에서 시작하세요. 앱과 클라우드 컴퓨터는 개발 중입니다.",
+  availabilityHeading: "Codewhale을 사용할 수 있는 곳",
+  availabilityLede: "Codewhale은 지금 터미널에서 사용할 수 있으며, 웹 앱과 데스크톱 앱, 클라우드 컴퓨터는 개발 중입니다.",
   availability: [
     [
       "터미널",
@@ -87,9 +85,9 @@ export const home: HomeDict = {
       "작업을 실행할 수 있는 호스팅 컴퓨터."
     ]
   ],
-  availabilityNote: "터미널은 Codewhale 계정 없이 사용할 수 있습니다. 호스팅 모델 사용 요금은 이용하는 제공업체에서 청구합니다.",
+  availabilityNote: "Codewhale 계정 없이도 터미널을 사용할 수 있으며, 호스팅형 모델 사용 요금은 이용하는 제공업체에서 청구합니다.",
   accountLink: "계정 만들기",
-  surfacesHeading: "작업이 일어나는 자리에서 런타임을 사용하세요.",
+  surfacesHeading: "Codewhale로 작업하는 방법",
   surfaces: [
     ["TUI", "대화형 터미널 작업"],
     ["codewhale exec", "스크립트와 CI"],
@@ -98,14 +96,14 @@ export const home: HomeDict = {
     ["Fleet","여러 에이전트가 하나의 작업을 함께 수행"],
   ],
   runtimeLink: "연동 기능 살펴보기",
-  installBandHeading: "명령 하나로 시작하세요.",
+  installBandHeading: "macOS 또는 Linux에 Codewhale을 설치하세요",
   copy: "복사",
   copied: "복사됨 ✓",
   binaries: "바이너리",
   chinaMirrors: "중국 미러",
   installGuideLink: "설치 가이드 읽기",
-  communityHeading: "공개적으로 개발합니다",
-  communityBody: "MIT 라이선스로 공개되어 있으며, 런타임과 프로바이더, 플랫폼, 문서, 테스트 전반의 기여자들이 함께 만들어 갑니다.",
+  communityHeading: "Codewhale을 함께 개선해 주세요",
+  communityBody: "버그를 발견했거나 새로운 기능에 대한 아이디어가 있거나 첫 풀 리퀘스트를 보내고 싶다면, 여러분의 이야기를 듣고 앞으로의 작업을 함께 이어 가고 싶습니다.",
   communityLinksAria: "커뮤니티 링크",
-  contribute: "기여하기",
+  contribute: "풀 리퀘스트 보내기",
 };

@@ -9,20 +9,18 @@ import type { HomeDict } from "../types";
  */
 
 export const home: HomeDict = {
-  metaTitle: "Codewhale — Ciptakan apa yang Anda inginkan.",
+  metaTitle: "Codewhale — Bangun dan otomatisasikan dengan model pilihan Anda",
   metaDescription:
-    "Bangun perangkat lunak, kelola berkas, dan otomatisasi tugas dengan Codewhale. Pilih model yang dihosting atau model lokal, lalu ganti penyedia sesuai kebutuhan pekerjaan Anda.",
-  kicker: "Agen AI sumber terbuka",
-  heroTitleA: "Ciptakan apa yang Anda inginkan.",
-  heroTitleB: "Pilih model Anda.",
+    "Bangun perangkat lunak, kelola berkas Anda, dan otomatisasikan tugas sehari-hari dengan agen sumber terbuka serta model AI yang dihosting atau dijalankan secara lokal sesuai pilihan Anda.",
+  heroTitle: "Bangun dan otomatisasikan dengan model pilihan Anda",
   heroIntro:
-    "{brand} menyediakan agen yang dapat membangun perangkat lunak, mengelola berkas, dan mengotomatiskan tugas. Gunakan model pilihan Anda dan ganti penyedia sesuai kebutuhan pekerjaan Anda.",
+    "{brand} menyediakan agen yang dapat membangun perangkat lunak, mengelola berkas Anda, dan mengubah tugas berulang menjadi alur kerja yang dapat digunakan kembali. Sampaikan apa yang ingin Anda capai dan pilih model yang dihosting atau dijalankan secara lokal sesuai kebutuhan tugas, dengan kebebasan untuk berganti penyedia selama bekerja.",
   getCodewhale: "Dapatkan Codewhale",
   exploreProduct: "Jelajahi produk",
   shotPreview: "Pratinjau terminal",
   shotBuild: "build pengembangan v{version}",
   screenshotAlt:
-    "Build pengembangan Codewhale v0.9.12 di terminal: tanda paus dari titik braille, sesi baru tanpa riwayat, kotak pesan, dan footer yang menampilkan Full Access, mode Work, dua tugas terjadwal, server MCP yang sedang terhubung, dan model GLM-5.3 pada upaya maksimal",
+    "Terminal Codewhale v0.9.12, build 171acee689aa: sesi baru dengan simbol paus, kolom penulisan pesan, Full Access dan mode Operate, dua tugas terjadwal, 21 server MCP yang masih dalam proses koneksi, serta GLM-5.3 pada tingkat upaya maksimum.",
   latestRelease: "Rilis terbaru {tag}",
   releaseUnavailable: "Status rilis tidak tersedia",
   currentSource: "Sumber",
@@ -31,45 +29,45 @@ export const home: HomeDict = {
   publishedRelease: "dirilis",
   figcaptionSourceCandidate: "belum dirilis",
   chapterTerminal: "Terminal Anda",
-  chapterTerminalTitle: "Mulai dengan sesuatu yang ingin Anda buat.",
+  chapterTerminalTitle: "Mulai dengan sesuatu yang ingin Anda buat",
   gainHeading:
-    "Wujudkan ide Anda.",
+    "Yang dapat Anda lakukan dengan Codewhale",
   gainLede:
-    "Bangun proyek, teliti sebuah pertanyaan, atau otomatisasi tugas. Mulai dengan satu agen dan bagi pekerjaan yang lebih besar ke beberapa agen.",
+    "Mulailah dengan proyek, pertanyaan, atau tugas yang ingin Anda otomatisasikan, lalu bekerja dengan satu agen atau bagi pekerjaan yang lebih besar ke beberapa agen.",
   gain: [
     [
       "Bangun sesuatu",
-      "Ubah ide menjadi perangkat lunak yang berfungsi. Agen Anda dapat mengedit berkas, menjalankan perintah, dan memeriksa hasilnya."
+      "Jelaskan apa yang ingin Anda buat dan bekerja dengan agen yang dapat membaca kode Anda, mengedit berkas, menjalankan perintah, dan memeriksa hasilnya."
     ],
     [
-      "Otomatisasi tugas berulang",
-      "Buat skrip dan alur kerja untuk tugas yang berulang, lalu jalankan dari terminal."
+      "Otomatisasikan pekerjaan sehari-hari",
+      "Buat skrip dan alur kerja untuk tugas yang sering Anda ulangi, sehingga Anda dapat menjalankannya lagi dari terminal kapan pun dibutuhkan."
     ],
     [
-      "Pilih model Anda",
-      "Hubungkan model yang dihosting atau model lokal. Bagikan bagian-bagian dari pekerjaan besar ke agen dengan model dan peran yang berbeda."
+      "Bekerja dengan berbagai model",
+      "Gunakan model yang dihosting atau dijalankan secara lokal untuk agen Anda, dengan model dan peran yang berbeda menangani bagian pekerjaan yang sesuai."
     ]
   ],
   chapterModels: "Model Anda",
-  modelsHeading: "Temukan model yang sesuai dengan tugas Anda.",
+  modelsHeading: "Pilihan model untuk setiap tugas",
   modelsBody:
-    "Gunakan penyedia layanan model, hubungkan melalui gateway, atau jalankan model secara lokal. Pilih penyedia dan model untuk setiap sesi, lalu ubah saat Anda bekerja.",
+    "Hubungkan langsung ke penyedia model yang dihosting, gunakan gateway untuk mengakses beberapa penyedia, atau jalankan model secara lokal, lalu pilih model yang digunakan setiap sesi selama Anda bekerja.",
   modelsFacts: [
     ["Hosted", "Kunci API Anda sendiri, disimpan dengan codewhale auth set --provider <id>"],
     ["Gateway", "Satu endpoint untuk banyak model, penyedia tetap Anda yang pilih"],
     ["Lokal", "vLLM, SGLang, Ollama di localhost — biasanya tanpa kunci"],
   ],
   modelsLink: "Jelajahi model dan penyedia",
-  startHeading: "Mulai tugas pertama Anda.",
+  startHeading: "Mulai menggunakan Codewhale",
   startLede:
-    "Pasang Codewhale, hubungkan model, dan sampaikan apa yang ingin Anda lakukan. Tambahkan Fleet saat Anda ingin beberapa agen berbagi pekerjaan.",
+    "Setelah menginstal Codewhale dan menghubungkan model, Anda dapat menjelaskan tugas pertama di terminal dan menambahkan Fleet saat ingin beberapa agen berbagi pekerjaan.",
   startGuideLink: "Baca panduan memulai",
   startVocabularyLink: "Lihat kosakata produk",
   chapterAccount: "Dapatkan Codewhale",
   availabilityHeading:
-    "Di mana Anda dapat menggunakan Codewhale.",
+    "Tempat Anda dapat menggunakan Codewhale",
   availabilityLede:
-    "Mulai di terminal. Aplikasi dan komputer cloud masih dalam pengembangan.",
+    "Anda dapat menggunakan Codewhale di terminal sekarang, sementara kami mengembangkan aplikasi web, aplikasi desktop, dan komputer cloud.",
   availability: [
     [
       "Terminal",
@@ -93,9 +91,9 @@ export const home: HomeDict = {
     ]
   ],
   availabilityNote:
-    "Terminal dapat digunakan tanpa akun Codewhale. Biaya penggunaan model yang dihosting ditagih oleh penyedia Anda.",
+    "Anda dapat menggunakan terminal tanpa akun Codewhale, dan penggunaan model yang dihosting ditagih oleh penyedia Anda.",
   accountLink: "Buat akun",
-  surfacesHeading: "Gunakan runtime di tempat pekerjaan berlangsung.",
+  surfacesHeading: "Cara bekerja dengan Codewhale",
   surfaces: [
     ["TUI", "Kerja terminal interaktif"],
     ["codewhale exec", "Skrip dan CI"],
@@ -104,15 +102,15 @@ export const home: HomeDict = {
     ["Fleet","Beberapa agen mengerjakan satu tugas"],
   ],
   runtimeLink: "Jelajahi integrasi",
-  installBandHeading: "Mulai dengan satu perintah.",
+  installBandHeading: "Instal Codewhale di macOS atau Linux",
   copy: "Salin",
   copied: "Tersalin ✓",
   binaries: "Biner",
   chinaMirrors: "Mirror Tiongkok",
   installGuideLink: "Baca panduan instalasi",
-  communityHeading: "Dibangun secara terbuka",
+  communityHeading: "Bantu membuat Codewhale lebih baik",
   communityBody:
-    "Berlisensi MIT dan dibentuk oleh para kontributor di berbagai runtime, penyedia, platform, dokumentasi, dan pengujian.",
+    "Baik Anda menemukan bug, memiliki ide untuk fitur, maupun ingin mengirim pull request pertama, kami ingin mendengar dari Anda dan bekerja sama menentukan langkah berikutnya.",
   communityLinksAria: "Tautan komunitas",
-  contribute: "Kontribusi",
+  contribute: "Kirim pull request",
 };
