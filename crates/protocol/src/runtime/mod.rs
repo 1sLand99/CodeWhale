@@ -64,6 +64,9 @@ pub struct RuntimeCapabilities {
     /// Bounded inline image inputs, persisted and replayed with their turn.
     #[serde(default)]
     pub turn_image_inputs: bool,
+    /// Per-turn maxOutputTokens is validated and intersected with the route ceiling.
+    #[serde(default)]
+    pub turn_output_token_limit: bool,
     pub turn_steer: bool,
     pub turn_interrupt: bool,
     pub event_replay: bool,
@@ -390,6 +393,7 @@ mod tests {
     #[test]
     fn runtime_capabilities_serializes_expected_shape() {
         let caps = RuntimeCapabilities {
+            turn_output_token_limit: false,
             account_session: true,
             threads: true,
             turns: true,

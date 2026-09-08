@@ -3270,6 +3270,7 @@ mod tests {
         let err = runtime
             .handle_thread(ThreadRequest::Message {
                 images: Vec::new(),
+                max_output_tokens: None,
                 thread_id: thread_id.clone(),
                 input: "run this".to_string(),
             })

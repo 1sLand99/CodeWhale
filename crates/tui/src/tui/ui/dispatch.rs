@@ -787,6 +787,7 @@ pub(crate) async fn spawned_dispatch_inner(
     let send_failure_routed_usage = initial_routed_usage.clone();
     if let Err(err) = engine_handle
         .send(Op::SendMessage {
+            max_output_tokens: None,
             content: prepare.content.clone(),
             images: Vec::new(),
             mode: prepare.mode,

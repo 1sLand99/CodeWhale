@@ -494,7 +494,9 @@ fn sort_turn_items_by_start(items: &mut [TurnItemRecord]) {
 // binary refuses recovery instead of silently dropping accepted attachments.
 const CURRENT_RUNTIME_SCHEMA_VERSION: u32 = 2;
 const IMAGE_RUNTIME_SCHEMA_VERSION: u32 = 3;
-const MAX_SUPPORTED_RUNTIME_SCHEMA_VERSION: u32 = IMAGE_RUNTIME_SCHEMA_VERSION;
+// Explicit allowances need a newer reader so old binaries cannot retry uncapped.
+const OUTPUT_LIMIT_RUNTIME_SCHEMA_VERSION: u32 = 4;
+const MAX_SUPPORTED_RUNTIME_SCHEMA_VERSION: u32 = OUTPUT_LIMIT_RUNTIME_SCHEMA_VERSION;
 
 fn is_zero_u64(value: &u64) -> bool {
     *value == 0
@@ -821,6 +823,14 @@ fn thread_execution_state_matches(left: &ThreadRecord, right: &ThreadRecord) -> 
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TurnRecord {
+    /// Admitted per-request allowance. Older turns have no explicit allowance.
+    #[serde(
+        default,
+        rename = "maxOutputTokens",
+        alias = "max_output_tokens",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub max_output_tokens: Option<std::num::NonZeroU32>,
     #[serde(default = "default_runtime_schema_version")]
     pub schema_version: u32,
     pub id: String,
@@ -952,6 +962,22 @@ pub struct TurnRecord {
 }
 
 impl TurnRecord {
+    fn validate_output_token_limit(&self) -> Result<()> {
+        if self.schema_version > MAX_SUPPORTED_RUNTIME_SCHEMA_VERSION {
+            bail!(
+                "Turn schema v{} is newer than supported v{}",
+                self.schema_version,
+                MAX_SUPPORTED_RUNTIME_SCHEMA_VERSION
+            );
+        }
+        if self.max_output_tokens.is_some()
+            != (self.schema_version == OUTPUT_LIMIT_RUNTIME_SCHEMA_VERSION)
+        {
+            bail!("Turn output allowance does not match its schema");
+        }
+        Ok(())
+    }
+
     pub(crate) fn effective_provider_label(&self) -> Option<&str> {
         self.effective_provider_id
             .as_deref()
@@ -1172,6 +1198,7 @@ fn settle_unaccepted_routed_usage(
     } else {
         let now = Utc::now();
         TurnRecord {
+            max_output_tokens: None,
             schema_version: CURRENT_RUNTIME_SCHEMA_VERSION,
             id: turn_id.clone(),
             thread_id: thread_id.to_string(),
@@ -1311,7 +1338,12 @@ impl TurnItemRecord {
     }
 
     fn user_content(&self) -> Result<Vec<ContentBlock>> {
-        if self.schema_version == IMAGE_RUNTIME_SCHEMA_VERSION
+        if (self.schema_version == IMAGE_RUNTIME_SCHEMA_VERSION
+            || (self.schema_version == OUTPUT_LIMIT_RUNTIME_SCHEMA_VERSION
+                && self
+                    .metadata
+                    .as_ref()
+                    .is_some_and(|meta| meta.get("runtime_image_content").is_some())))
             && self.kind == TurnItemKind::UserMessage
         {
             let content = self
@@ -2105,6 +2137,7 @@ impl RuntimeThreadStore {
     }
 
     pub fn save_turn(&self, turn: &TurnRecord) -> Result<()> {
+        turn.validate_output_token_limit()?;
         validated_record_id(&turn.thread_id, "thread id")?;
         let path = self.turn_path(&turn.id)?;
         write_json_atomic(&path, turn).with_context(|| {
@@ -2188,13 +2221,7 @@ impl RuntimeThreadStore {
                 &path,
             )
         })?;
-        if record.schema_version > MAX_SUPPORTED_RUNTIME_SCHEMA_VERSION {
-            bail!(
-                "Turn schema v{} is newer than supported v{}",
-                record.schema_version,
-                MAX_SUPPORTED_RUNTIME_SCHEMA_VERSION
-            );
-        }
+        record.validate_output_token_limit()?;
         Ok(record)
     }
 
@@ -2223,8 +2250,10 @@ impl RuntimeThreadStore {
                 MAX_SUPPORTED_RUNTIME_SCHEMA_VERSION
             );
         }
-        if record.schema_version == IMAGE_RUNTIME_SCHEMA_VERSION
-            && record.kind == TurnItemKind::UserMessage
+        if matches!(
+            record.schema_version,
+            IMAGE_RUNTIME_SCHEMA_VERSION | OUTPUT_LIMIT_RUNTIME_SCHEMA_VERSION
+        ) && record.kind == TurnItemKind::UserMessage
         {
             record.user_content()?;
         }
@@ -2287,13 +2316,7 @@ impl RuntimeThreadStore {
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let turn: TurnRecord = serde_json::from_str(&raw)
                 .with_context(|| format!("Failed to parse {}", path.display()))?;
-            if turn.schema_version > MAX_SUPPORTED_RUNTIME_SCHEMA_VERSION {
-                bail!(
-                    "Turn schema v{} is newer than supported v{}",
-                    turn.schema_version,
-                    MAX_SUPPORTED_RUNTIME_SCHEMA_VERSION
-                );
-            }
+            turn.validate_output_token_limit()?;
             out.push(turn);
         }
         out.sort_by_key(|a| a.created_at);
@@ -2342,8 +2365,10 @@ impl RuntimeThreadStore {
                     MAX_SUPPORTED_RUNTIME_SCHEMA_VERSION
                 );
             }
-            if item.schema_version == IMAGE_RUNTIME_SCHEMA_VERSION
-                && item.kind == TurnItemKind::UserMessage
+            if matches!(
+                item.schema_version,
+                IMAGE_RUNTIME_SCHEMA_VERSION | OUTPUT_LIMIT_RUNTIME_SCHEMA_VERSION
+            ) && item.kind == TurnItemKind::UserMessage
             {
                 item.user_content()?;
             }
@@ -2408,8 +2433,10 @@ impl RuntimeThreadStore {
                     MAX_SUPPORTED_RUNTIME_SCHEMA_VERSION
                 );
             }
-            if item.schema_version == IMAGE_RUNTIME_SCHEMA_VERSION
-                && item.kind == TurnItemKind::UserMessage
+            if matches!(
+                item.schema_version,
+                IMAGE_RUNTIME_SCHEMA_VERSION | OUTPUT_LIMIT_RUNTIME_SCHEMA_VERSION
+            ) && item.kind == TurnItemKind::UserMessage
             {
                 item.user_content()?;
             }
@@ -2957,6 +2984,14 @@ pub struct UpdateThreadRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct StartTurnRequest {
+    /// Per-primary-request allowance, including reasoning where the provider counts it.
+    #[serde(
+        default,
+        rename = "maxOutputTokens",
+        alias = "max_output_tokens",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub max_output_tokens: Option<std::num::NonZeroU32>,
     pub prompt: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<codewhale_protocol::runtime::RuntimeImageInput>,
@@ -3078,6 +3113,7 @@ fn runtime_turn_request_fingerprint(
     dynamic_tools: &[DynamicToolSpec],
     environment_id: Option<&str>,
     images: &[codewhale_protocol::runtime::RuntimeImageInput],
+    max_output_tokens: Option<std::num::NonZeroU32>,
 ) -> Result<String> {
     let mut payload = json!({
         "version": 1,
@@ -3102,6 +3138,9 @@ fn runtime_turn_request_fingerprint(
     // Preserve the exact historical text-only fingerprint payload.
     if !images.is_empty() {
         payload["images"] = json!(images);
+    }
+    if let Some(max_output_tokens) = max_output_tokens {
+        payload["maxOutputTokens"] = json!(max_output_tokens);
     }
     Ok(crate::hashing::sha256_hex(crate::client::canonical_json(
         &payload,
@@ -5496,6 +5535,7 @@ impl RuntimeThreadManager {
         continuation_index: u32,
     ) -> Result<TurnRecord> {
         let req = StartTurnRequest {
+            max_output_tokens: None,
             prompt,
             images: Vec::new(),
             operation_key: None,
@@ -5967,6 +6007,7 @@ impl RuntimeThreadManager {
             .start_turn_with_source(
                 thread_id,
                 StartTurnRequest {
+                    max_output_tokens: None,
                     prompt,
                     images: Vec::new(),
                     operation_key: None,
@@ -7365,6 +7406,7 @@ impl RuntimeThreadManager {
         ThreadRecord,
         Option<String>,
         Vec<codewhale_protocol::runtime::RuntimeImageInput>,
+        Option<std::num::NonZeroU32>,
     )> {
         let source = self.get_thread(id).await?;
         let source_turns = self.store.list_turns_for_thread(&source.id)?;
@@ -7489,7 +7531,12 @@ impl RuntimeThreadManager {
             }),
         )
         .await?;
-        Ok((forked, original_user_text, original_images))
+        Ok((
+            forked,
+            original_user_text,
+            original_images,
+            source_turns[target_turn_idx].max_output_tokens,
+        ))
     }
 
     /// Persist cloned records before publishing their thread. Until the final
@@ -7877,6 +7924,7 @@ impl RuntimeThreadManager {
             // Only create a turn if there's content.
             if !item_ids.is_empty() {
                 self.store.save_turn(&TurnRecord {
+                    max_output_tokens: None,
                     schema_version: if turn_seed.image_content.is_empty() {
                         CURRENT_RUNTIME_SCHEMA_VERSION
                     } else {
@@ -8598,6 +8646,9 @@ impl RuntimeThreadManager {
             .allowed_tools
             .clone()
             .or_else(|| thread.allowed_tools.clone());
+        if req.max_output_tokens.is_some() && auto_model {
+            bail!("maxOutputTokens requires an exact model; Auto routing is unsupported");
+        }
         let operation = if let Some(operation_key) = req.operation_key.as_deref() {
             validate_runtime_turn_operation_key(operation_key)?;
             let request_fingerprint = runtime_turn_request_fingerprint(
@@ -8613,6 +8664,7 @@ impl RuntimeThreadManager {
                 &req.dynamic_tools,
                 req.environment_id.as_deref(),
                 &req.images,
+                req.max_output_tokens,
             )?;
             self.prepare_runtime_turn_operation(
                 thread_id,
@@ -8628,11 +8680,14 @@ impl RuntimeThreadManager {
         {
             return Ok(original_turn);
         }
-        if !image_blocks.is_empty() {
+        if !image_blocks.is_empty() || req.max_output_tokens.is_some() {
             let identity = self.provider_identity_for_thread(&cfg_snapshot, &thread)?;
             let route = resolve_runtime_thread_route_for_identity(&cfg_snapshot, &identity, Some(&requested_model))?;
-            if route.candidate.capabilities().image_input != codewhale_config::route::CapabilityState::Supported {
+            if !image_blocks.is_empty() && route.candidate.capabilities().image_input != codewhale_config::route::CapabilityState::Supported {
                 bail!("image inputs require a model with explicitly supported image input");
+            }
+            if req.max_output_tokens.is_some() && !crate::route_budget::route_supports_output_token_limit(route.identity.provider, route.candidate.protocol()) {
+                bail!("maxOutputTokens is unsupported by the selected provider transport");
             }
         }
         let engine = self.ensure_engine_loaded(&thread).await?;
@@ -8768,6 +8823,11 @@ impl RuntimeThreadManager {
         let provider_identity = route.identity.clone();
         let model = route.model.clone();
         let route_limits = known_route_limits(route.candidate.limits());
+        let max_output_tokens = req.max_output_tokens.and_then(|requested| {
+            std::num::NonZeroU32::new(crate::route_budget::effective_max_output_tokens_for_turn(
+                provider, &model, route_limits, Some(requested),
+            ))
+        });
         let settings = crate::settings::Settings::load().unwrap_or_default();
         let mut compaction = runtime_compaction_config(
             &route.config,
@@ -8789,7 +8849,8 @@ impl RuntimeThreadManager {
             .clone()
             .unwrap_or_else(|| summarize_text(&prompt, SUMMARY_LIMIT));
         let mut turn = TurnRecord {
-            schema_version: CURRENT_RUNTIME_SCHEMA_VERSION,
+            max_output_tokens,
+            schema_version: if max_output_tokens.is_some() { OUTPUT_LIMIT_RUNTIME_SCHEMA_VERSION } else { CURRENT_RUNTIME_SCHEMA_VERSION },
             id: turn_id.clone(),
             thread_id: thread_id.to_string(),
             status: RuntimeTurnStatus::InProgress,
@@ -8846,7 +8907,9 @@ impl RuntimeThreadManager {
             let mut content = vec![ContentBlock::Text { text: if cfg_snapshot.runtime_chat_isolated { crate::core::engine::sanitize_isolated_chat_attachments(prompt.clone()) } else { prompt.clone() }, cache_control: None }];
             content.extend(image_blocks.iter().cloned());
             user_item.set_image_content(content);
-            turn.schema_version = IMAGE_RUNTIME_SCHEMA_VERSION;
+            if turn.max_output_tokens.is_none() {
+                turn.schema_version = IMAGE_RUNTIME_SCHEMA_VERSION;
+            }
         }
         turn.item_ids.push(user_item_id.clone());
 
@@ -8873,6 +8936,7 @@ impl RuntimeThreadManager {
             .unwrap_or(crate::tools::goal::GoalStatus::Active);
 
         let op = Op::SendMessage {
+            max_output_tokens,
             content: prompt,
             images: req.images,
             mode,
@@ -9228,6 +9292,7 @@ impl RuntimeThreadManager {
         let compaction_id = format!("compact_{}", &Uuid::new_v4().to_string()[..8]);
         compaction.runtime_cost_owner = Some(turn_id.clone());
         let turn = TurnRecord {
+            max_output_tokens: None,
             schema_version: CURRENT_RUNTIME_SCHEMA_VERSION,
             id: turn_id.clone(),
             thread_id: thread_id.to_string(),
@@ -11162,6 +11227,26 @@ impl RuntimeThreadManager {
                         Some(&item.id),
                         "item.failed",
                         json!({ "item": item }),
+                    )
+                    .await?;
+                }
+                EngineEvent::TurnUsage {
+                    max_output_tokens,
+                    usage,
+                    duration_ms,
+                    first_token_ms,
+                    request_ms,
+                } => {
+                    self.emit_event(
+                        &thread_id,
+                        Some(&turn_id),
+                        None,
+                        "turn.usage",
+                        json!({
+                            "usage": usage, "duration_ms": duration_ms,
+                            "first_token_ms": first_token_ms, "request_ms": request_ms,
+                            "maxOutputTokens": max_output_tokens,
+                        }),
                     )
                     .await?;
                 }

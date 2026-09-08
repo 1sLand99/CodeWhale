@@ -201,9 +201,9 @@ mod recovery {
         let thread = manager.get_thread(&thread.id).await?;
         let fork = manager.fork_thread(&thread.id).await?;
         assert_eq!(manager.restore_thread_messages(&fork)?, messages);
-        let (backtrack, _, _) = manager.fork_at_user_message(&thread.id, 0).await?;
+        let (backtrack, _, _, _) = manager.fork_at_user_message(&thread.id, 0).await?;
         assert_eq!(manager.restore_thread_messages(&backtrack)?, messages[..2]);
-        let (empty, _, _) = manager.fork_at_user_message(&thread.id, 1).await?;
+        let (empty, _, _, _) = manager.fork_at_user_message(&thread.id, 1).await?;
         assert!(manager.restore_thread_messages(&empty)?.is_empty());
         assert_eq!(manager.restore_thread_messages(&thread)?, messages);
         let mut legacy = thread.clone();
@@ -312,6 +312,7 @@ mod recovery {
                 &thread.id,
                 StartTurnRequest {
                     prompt: "first request".into(),
+                    max_output_tokens: std::num::NonZeroU32::new(1500),
                     ..Default::default()
                 },
             )
@@ -351,6 +352,10 @@ mod recovery {
             let request = mock
                 .last_request()
                 .expect("real Engine reached mock provider");
+            assert_eq!(
+                request.max_tokens, 1500,
+                "queued steer preserves the admitted allowance"
+            );
             let text = serde_json::to_string(&request.messages)?;
             assert_eq!(text.matches("NEW CORRECTION").count(), 1);
         }
@@ -388,6 +393,280 @@ mod recovery {
         }
         handle.send(Op::Shutdown).await?;
         tokio::time::timeout(Duration::from_secs(10), run).await??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn output_cap_survives_steps_replay_restart_and_retry_without_leaking() -> Result<()> {
+        use std::num::NonZeroU32;
+        let _env = crate::test_support::lock_test_env();
+        let dir = tempfile::tempdir()?;
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", dir.path());
+        let workspace = dir.path().join("workspace");
+        fs::create_dir(&workspace)?;
+        let config = config();
+        let manager_config = test_manager_config(dir.path().join("runtime"));
+        let manager =
+            RuntimeThreadManager::open(config.clone(), workspace.clone(), manager_config.clone())?;
+        let thread = manager
+            .create_thread(CreateThreadRequest {
+                allowed_tools: Some(Vec::new()),
+                ..Default::default()
+            })
+            .await?;
+        let response = |text: &str, stop: &str| {
+            let mut events = canned::simple_text_turn(text);
+            for event in &mut events {
+                if let crate::models::StreamEvent::MessageDelta { delta, usage } = event {
+                    delta.stop_reason = Some(stop.into());
+                    *usage = Some(Usage {
+                        input_tokens: 11,
+                        output_tokens: 7,
+                        reasoning_tokens: Some(2),
+                        ..Default::default()
+                    });
+                }
+            }
+            events
+        };
+        let mock = Arc::new(MockLlmClient::new(vec![
+            response("partial review", "max_tokens"),
+            response("complete review", "end_turn"),
+            response("next turn", "end_turn"),
+        ]));
+        let (engine, handle) = Engine::new_with_model_client(
+            EngineConfig {
+                workspace: workspace.clone(),
+                model: thread.model.clone(),
+                subagents_enabled: false,
+                snapshots_enabled: false,
+                memory_enabled: false,
+                terminal_chrome_enabled: false,
+                ..EngineConfig::default()
+            },
+            &config,
+            mock.clone(),
+        );
+        manager
+            .install_test_engine(&thread.id, handle.clone())
+            .await?;
+        let run = tokio::spawn(engine.run());
+        let request = StartTurnRequest {
+            prompt: "bounded review".into(),
+            operation_key: Some("bounded-review".into()),
+            max_output_tokens: NonZeroU32::new(1500),
+            ..Default::default()
+        };
+        let first = manager.start_turn(&thread.id, request.clone()).await?;
+        let first = wait_for_terminal_turn(&manager, &first.id, Duration::from_secs(10)).await?;
+        assert_eq!(
+            first.status,
+            RuntimeTurnStatus::Completed,
+            "{:?}",
+            first.error
+        );
+        assert_eq!(first.max_output_tokens, NonZeroU32::new(1500));
+        assert_eq!(first.schema_version, OUTPUT_LIMIT_RUNTIME_SCHEMA_VERSION);
+        let calls = mock.captured_requests();
+        assert_eq!(
+            calls.len(),
+            2,
+            "truncation continues through the same turn loop"
+        );
+        assert!(calls.iter().all(|request| request.max_tokens == 1500));
+        let events = manager.events_since(&thread.id, None)?;
+        let receipts: Vec<_> = events
+            .iter()
+            .filter(|event| event.event == "turn.usage")
+            .collect();
+        assert_eq!(receipts.len(), 2);
+        assert!(
+            receipts
+                .iter()
+                .all(|event| event.payload["maxOutputTokens"] == 1500)
+        );
+        assert_eq!(
+            manager.start_turn(&thread.id, request.clone()).await?.id,
+            first.id
+        );
+        assert_eq!(mock.call_count(), 2, "exact replay cannot dispatch again");
+        let mut changed = request.clone();
+        changed.max_output_tokens = NonZeroU32::new(1501);
+        assert!(manager.start_turn(&thread.id, changed).await.is_err());
+        assert_eq!(mock.call_count(), 2);
+        let second = manager
+            .start_turn(
+                &thread.id,
+                StartTurnRequest {
+                    prompt: "ordinary next turn".into(),
+                    ..Default::default()
+                },
+            )
+            .await?;
+        let second = wait_for_terminal_turn(&manager, &second.id, Duration::from_secs(10)).await?;
+        assert_eq!(second.status, RuntimeTurnStatus::Completed);
+        assert_eq!(second.max_output_tokens, None);
+        assert_eq!(second.schema_version, CURRENT_RUNTIME_SCHEMA_VERSION);
+        assert!(
+            mock.last_request().unwrap().max_tokens > 1500,
+            "cap cannot leak to the next turn"
+        );
+        handle.send(Op::Shutdown).await?;
+        tokio::time::timeout(Duration::from_secs(10), run).await??;
+        drop(handle);
+        drop(manager);
+        let manager =
+            RuntimeThreadManager::open(config.clone(), workspace.clone(), manager_config)?;
+        assert_eq!(
+            manager
+                .start_turn(&thread.id, request)
+                .await?
+                .max_output_tokens,
+            NonZeroU32::new(1500)
+        );
+        assert!(
+            manager.active.lock().await.engines.is_empty(),
+            "durable replay does not start an engine"
+        );
+        let (retry_thread, prompt, _, allowance) =
+            manager.fork_at_user_message(&thread.id, 1).await?;
+        assert_eq!(allowance, NonZeroU32::new(1500));
+        let retry_mock = Arc::new(MockLlmClient::new(vec![canned::simple_text_turn(
+            "retried review",
+        )]));
+        let (engine, handle) = Engine::new_with_model_client(
+            EngineConfig {
+                workspace,
+                model: retry_thread.model.clone(),
+                subagents_enabled: false,
+                snapshots_enabled: false,
+                memory_enabled: false,
+                terminal_chrome_enabled: false,
+                ..EngineConfig::default()
+            },
+            &config,
+            retry_mock.clone(),
+        );
+        manager
+            .install_test_engine(&retry_thread.id, handle.clone())
+            .await?;
+        let run = tokio::spawn(engine.run());
+        let retry = manager
+            .start_turn(
+                &retry_thread.id,
+                StartTurnRequest {
+                    prompt: prompt.unwrap(),
+                    max_output_tokens: allowance,
+                    ..Default::default()
+                },
+            )
+            .await?;
+        let retry = wait_for_terminal_turn(&manager, &retry.id, Duration::from_secs(10)).await?;
+        assert_eq!(retry.status, RuntimeTurnStatus::Completed);
+        assert_eq!(retry_mock.last_request().unwrap().max_tokens, 1500);
+        handle.send(Op::Shutdown).await?;
+        tokio::time::timeout(Duration::from_secs(10), run).await??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn output_cap_admission_cannot_raise_route_limit_and_rejects_unsupported_routes()
+    -> Result<()> {
+        let _env = crate::test_support::lock_test_env();
+        let dir = tempfile::tempdir()?;
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", dir.path());
+        let config = config();
+        let manager = RuntimeThreadManager::open(
+            config,
+            dir.path().into(),
+            test_manager_config(dir.path().join("runtime")),
+        )?;
+        let thread = manager
+            .create_thread(CreateThreadRequest::default())
+            .await?;
+        let mut harness = install_mock_engine(&manager, &thread.id).await;
+        let turn = manager
+            .start_turn(
+                &thread.id,
+                StartTurnRequest {
+                    prompt: "downward bound".into(),
+                    max_output_tokens: std::num::NonZeroU32::new(u32::MAX),
+                    ..Default::default()
+                },
+            )
+            .await?;
+        let Some(Op::SendMessage {
+            route,
+            max_output_tokens,
+            ..
+        }) = harness.rx_op.recv().await
+        else {
+            panic!("SendMessage expected")
+        };
+        let ceiling = crate::route_budget::effective_max_output_tokens_for_route(
+            route.identity.provider,
+            &route.model,
+            known_route_limits(route.candidate.limits()),
+        );
+        assert_eq!(max_output_tokens.unwrap().get(), ceiling);
+        assert_eq!(turn.max_output_tokens, max_output_tokens);
+        assert!(ceiling < u32::MAX);
+        let mut corrupt = turn.clone();
+        corrupt.max_output_tokens = None;
+        assert!(
+            manager.store.save_turn(&corrupt).is_err(),
+            "schema4 cannot lose its admitted allowance"
+        );
+        corrupt = turn;
+        corrupt.schema_version = CURRENT_RUNTIME_SCHEMA_VERSION;
+        assert!(
+            manager.store.save_turn(&corrupt).is_err(),
+            "older readers must not ignore a capped record"
+        );
+        let auto = manager
+            .create_thread(CreateThreadRequest::default())
+            .await?;
+        let error = manager
+            .start_turn(
+                &auto.id,
+                StartTurnRequest {
+                    prompt: "reject Auto before classifier".into(),
+                    model: Some("auto".into()),
+                    max_output_tokens: std::num::NonZeroU32::new(1500),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("exact model"), "{error}");
+        assert!(manager.store.list_turns_for_thread(&auto.id)?.is_empty());
+        assert!(!manager.active.lock().await.engines.contains_key(&auto.id));
+        let codex = RuntimeThreadManager::open(
+            Config {
+                provider: Some("openai-codex".into()),
+                default_text_model: Some("gpt-5.5".into()),
+                ..Config::default()
+            },
+            dir.path().into(),
+            test_manager_config(dir.path().join("codex")),
+        )?;
+        let thread = codex.create_thread(CreateThreadRequest::default()).await?;
+        let error = codex
+            .start_turn(
+                &thread.id,
+                StartTurnRequest {
+                    prompt: "reject unenforceable transport".into(),
+                    max_output_tokens: std::num::NonZeroU32::new(1500),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("unsupported"), "{error}");
+        assert!(codex.store.list_turns_for_thread(&thread.id)?.is_empty());
+        assert!(codex.active.lock().await.engines.is_empty());
         Ok(())
     }
 
@@ -817,6 +1096,7 @@ fn sample_thread(thread_id: &str) -> ThreadRecord {
 fn sample_turn(thread_id: &str, turn_id: &str, status: RuntimeTurnStatus) -> TurnRecord {
     let now = Utc::now();
     TurnRecord {
+        max_output_tokens: None,
         schema_version: CURRENT_RUNTIME_SCHEMA_VERSION,
         id: turn_id.to_string(),
         thread_id: thread_id.to_string(),
@@ -1541,6 +1821,7 @@ fn runtime_turn_operation_keys_are_bounded_scoped_and_fingerprint_execution_poli
         &[],
         None,
         &[],
+        None,
     )?;
 
     let mut different_provider = thread.clone();
@@ -1560,6 +1841,7 @@ fn runtime_turn_operation_keys_are_bounded_scoped_and_fingerprint_execution_poli
             &[],
             None,
             &[],
+            None,
         )?,
         runtime_turn_request_fingerprint(
             &thread,
@@ -1574,6 +1856,7 @@ fn runtime_turn_operation_keys_are_bounded_scoped_and_fingerprint_execution_poli
             &[],
             None,
             &[],
+            None,
         )?,
         runtime_turn_request_fingerprint(
             &thread,
@@ -1588,6 +1871,7 @@ fn runtime_turn_operation_keys_are_bounded_scoped_and_fingerprint_execution_poli
             &[],
             None,
             &[],
+            None,
         )?,
         runtime_turn_request_fingerprint(
             &thread,
@@ -1602,6 +1886,7 @@ fn runtime_turn_operation_keys_are_bounded_scoped_and_fingerprint_execution_poli
             &[],
             None,
             &[],
+            None,
         )?,
         runtime_turn_request_fingerprint(
             &thread,
@@ -1616,6 +1901,7 @@ fn runtime_turn_operation_keys_are_bounded_scoped_and_fingerprint_execution_poli
             &[],
             None,
             &[],
+            None,
         )?,
         runtime_turn_request_fingerprint(
             &thread,
@@ -1630,6 +1916,7 @@ fn runtime_turn_operation_keys_are_bounded_scoped_and_fingerprint_execution_poli
             &[],
             None,
             &[],
+            None,
         )?,
     ];
     assert!(
@@ -12898,6 +13185,7 @@ fn opening_manager_recovers_stale_queued_and_in_progress_work() -> Result<()> {
     manager.store.save_item(&queued_item)?;
 
     manager.store.save_turn(&TurnRecord {
+        max_output_tokens: None,
         schema_version: CURRENT_RUNTIME_SCHEMA_VERSION,
         id: "turn_in_progress".to_string(),
         thread_id: thread.id.clone(),
@@ -12930,6 +13218,7 @@ fn opening_manager_recovers_stale_queued_and_in_progress_work() -> Result<()> {
         agent_mail_message_id: None,
     })?;
     manager.store.save_turn(&TurnRecord {
+        max_output_tokens: None,
         schema_version: CURRENT_RUNTIME_SCHEMA_VERSION,
         id: "turn_queued".to_string(),
         thread_id: thread.id.clone(),
@@ -13210,6 +13499,7 @@ fn seed_turns_with_user_messages(
             ended_at: Some(created_at),
         })?;
         manager.store.save_turn(&TurnRecord {
+            max_output_tokens: None,
             schema_version: CURRENT_RUNTIME_SCHEMA_VERSION,
             id: turn_id.clone(),
             thread_id: thread_id.to_string(),
@@ -13269,7 +13559,7 @@ async fn fork_at_user_message_drops_tail_and_returns_user_text() -> Result<()> {
         .await?;
     seed_turns_with_user_messages(&manager, &thread.id, &["first", "second", "third"])?;
 
-    let (forked, original_text, _) = manager.fork_at_user_message(&thread.id, 0).await?;
+    let (forked, original_text, _, _) = manager.fork_at_user_message(&thread.id, 0).await?;
     assert_eq!(original_text.as_deref(), Some("third"));
     assert_ne!(forked.id, thread.id);
 
@@ -13306,7 +13596,7 @@ async fn fork_at_user_message_depth_one_drops_two_turns() -> Result<()> {
         .await?;
     seed_turns_with_user_messages(&manager, &thread.id, &["a", "b", "c", "d"])?;
 
-    let (forked, original_text, _) = manager.fork_at_user_message(&thread.id, 1).await?;
+    let (forked, original_text, _, _) = manager.fork_at_user_message(&thread.id, 1).await?;
     assert_eq!(original_text.as_deref(), Some("c"));
     let forked_turns = manager.store.list_turns_for_thread(&forked.id)?;
     let summaries: Vec<&str> = forked_turns
@@ -13854,6 +14144,7 @@ fn restart_rebuild_restores_tool_call_identity_from_persisted_items() -> Result<
     manager.store.save_item(&user_item)?;
     manager.store.save_item(&call_item)?;
     manager.store.save_turn(&TurnRecord {
+        max_output_tokens: None,
         schema_version: CURRENT_RUNTIME_SCHEMA_VERSION,
         id: "turn_5823".to_string(),
         thread_id: thread.id.clone(),
@@ -13952,6 +14243,7 @@ fn restart_rebuild_keeps_in_flight_tool_call_identity() -> Result<()> {
     };
     manager.store.save_item(&call_item)?;
     manager.store.save_turn(&TurnRecord {
+        max_output_tokens: None,
         schema_version: CURRENT_RUNTIME_SCHEMA_VERSION,
         id: "turn_5823_inflight".to_string(),
         thread_id: thread.id.clone(),
@@ -14045,6 +14337,7 @@ fn restart_rebuild_skips_legacy_tool_items_without_identity() -> Result<()> {
     manager.store.save_item(&user_item)?;
     manager.store.save_item(&legacy_tool_item)?;
     manager.store.save_turn(&TurnRecord {
+        max_output_tokens: None,
         schema_version: CURRENT_RUNTIME_SCHEMA_VERSION,
         id: "turn_5823_legacy".to_string(),
         thread_id: thread.id.clone(),
@@ -14327,6 +14620,19 @@ mod runtime_image_inputs {
 
     #[tokio::test]
     async fn runtime_image_engine_replay_restart_fork_and_retry_keep_exact_order() -> Result<()> {
+        image_engine_replay_restart_fork_and_retry_keep_exact_order(None).await
+    }
+
+    #[tokio::test]
+    async fn output_cap_image_engine_replay_restart_fork_and_retry_keep_exact_order() -> Result<()>
+    {
+        image_engine_replay_restart_fork_and_retry_keep_exact_order(std::num::NonZeroU32::new(1500))
+            .await
+    }
+
+    async fn image_engine_replay_restart_fork_and_retry_keep_exact_order(
+        max_output_tokens: Option<std::num::NonZeroU32>,
+    ) -> Result<()> {
         let _env = crate::test_support::lock_test_env();
         let dir = tempfile::tempdir()?;
         let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", dir.path());
@@ -14366,6 +14672,7 @@ mod runtime_image_inputs {
             .await?;
         let run = tokio::spawn(engine.run());
         let request = StartTurnRequest {
+            max_output_tokens,
             prompt: "compare the two images\n[Attached image: /private/host-only.png]".into(),
             images: images.clone(),
             operation_key: Some("image-exact-replay".into()),
@@ -14378,8 +14685,20 @@ mod runtime_image_inputs {
                 .status,
             RuntimeTurnStatus::Completed
         );
+        assert_eq!(turn.max_output_tokens, max_output_tokens);
+        assert_eq!(
+            turn.schema_version,
+            if max_output_tokens.is_some() {
+                OUTPUT_LIMIT_RUNTIME_SCHEMA_VERSION
+            } else {
+                IMAGE_RUNTIME_SCHEMA_VERSION
+            }
+        );
         assert_eq!(mock.call_count(), 1);
         let provider_request = mock.last_request().context("mock request")?;
+        if let Some(max_output_tokens) = max_output_tokens {
+            assert_eq!(provider_request.max_tokens, max_output_tokens.get());
+        }
         let sent: Vec<_> = provider_request
             .messages
             .iter()
@@ -14419,7 +14738,10 @@ mod runtime_image_inputs {
         drop(manager);
         let reopened =
             RuntimeThreadManager::open(config.clone(), dir.path().to_path_buf(), manager_config)?;
-        assert_eq!(reopened.start_turn(&thread.id, request).await?.id, turn.id);
+        let replayed = reopened.start_turn(&thread.id, request).await?;
+        assert_eq!(replayed.id, turn.id);
+        assert_eq!(replayed.max_output_tokens, max_output_tokens);
+        assert_eq!(replayed.schema_version, turn.schema_version);
         assert!(
             reopened.active.lock().await.engines.is_empty(),
             "exact replay needs no provider or Engine"
@@ -14436,6 +14758,10 @@ mod runtime_image_inputs {
             images
         );
         let fork = reopened.fork_thread(&thread.id).await?;
+        let forked_turns = reopened.store.list_turns_for_thread(&fork.id)?;
+        assert_eq!(forked_turns.len(), 1);
+        assert_eq!(forked_turns[0].max_output_tokens, max_output_tokens);
+        assert_eq!(forked_turns[0].schema_version, turn.schema_version);
         let messages = reopened.restore_thread_messages(&fork)?;
         assert_eq!(
             crate::image_attach::runtime_images_from_blocks(
@@ -14446,9 +14772,11 @@ mod runtime_image_inputs {
             )?,
             images
         );
-        let (_, original_text, retry_images) = reopened.fork_at_user_message(&thread.id, 0).await?;
+        let (_, original_text, retry_images, retry_output_cap) =
+            reopened.fork_at_user_message(&thread.id, 0).await?;
         assert!(original_text.unwrap().starts_with("compare the two images"));
         assert_eq!(retry_images, images);
+        assert_eq!(retry_output_cap, max_output_tokens);
         let followup_mock = Arc::new(MockLlmClient::new(vec![canned::simple_text_turn(
             "remembered screenshots",
         )]));
@@ -14498,6 +14826,10 @@ mod runtime_image_inputs {
                 .await?
                 .status,
             RuntimeTurnStatus::Completed
+        );
+        assert_eq!(
+            followup.max_output_tokens, None,
+            "new turns do not inherit the old allowance"
         );
         let outbound = followup_mock
             .last_request()
@@ -14601,16 +14933,22 @@ mod runtime_image_inputs {
             bad_url,
             truncated,
         ] {
-            let mut damaged = original.clone();
-            damaged.set_image_content(content);
-            manager.store.save_item(&damaged)?;
-            assert!(manager.store.load_item(&damaged.id).is_err());
-            assert!(manager.store.list_items_for_turn(&turn.id).is_err());
-            assert!(
-                manager
-                    .restore_thread_messages(&manager.get_thread(&thread.id).await?)
-                    .is_err()
-            );
+            for schema in [
+                IMAGE_RUNTIME_SCHEMA_VERSION,
+                OUTPUT_LIMIT_RUNTIME_SCHEMA_VERSION,
+            ] {
+                let mut damaged = original.clone();
+                damaged.set_image_content(content.clone());
+                damaged.schema_version = schema;
+                manager.store.save_item(&damaged)?;
+                assert!(manager.store.load_item(&damaged.id).is_err());
+                assert!(manager.store.list_items_for_turn(&turn.id).is_err());
+                assert!(
+                    manager
+                        .restore_thread_messages(&manager.get_thread(&thread.id).await?)
+                        .is_err()
+                );
+            }
         }
         // Legacy records never give this additive metadata field new authority.
         let mut legacy = original.clone();
@@ -14691,7 +15029,7 @@ mod runtime_image_inputs {
                     }],
                 )
                 .await?;
-            let (fork, prompt, images) = manager.fork_at_user_message(&thread.id, 0).await?;
+            let (fork, prompt, images, _) = manager.fork_at_user_message(&thread.id, 0).await?;
             assert_eq!(images, expected);
             let request = StartTurnRequest {
                 prompt: prompt.unwrap(),
@@ -14743,6 +15081,7 @@ fn runtime_image_native_fingerprint_keeps_legacy_text_and_binds_bytes() -> Resul
             &[],
             None,
             images,
+            None,
         )
     };
     // SHA-256 of the canonical committed version-1 text request fields.
@@ -14763,5 +15102,34 @@ fn runtime_image_native_fingerprint_keeps_legacy_text_and_binds_bytes() -> Resul
     let absent: StartTurnRequest = serde_json::from_value(json!({"prompt":"hello"}))?;
     let empty: StartTurnRequest = serde_json::from_value(json!({"prompt":"hello","images":[]}))?;
     assert_eq!(serde_json::to_value(absent)?, serde_json::to_value(empty)?);
+    Ok(())
+}
+
+#[test]
+fn output_cap_wire_requires_positive_integer_and_preserves_legacy_absence() -> Result<()> {
+    for invalid in [
+        json!(0),
+        json!(-1),
+        json!(1.5),
+        json!("1500"),
+        json!(4_294_967_296u64),
+        json!(true),
+    ] {
+        let input = json!({"prompt":"review", "maxOutputTokens":invalid});
+        assert!(
+            serde_json::from_value::<StartTurnRequest>(input.clone()).is_err(),
+            "{input}"
+        );
+        assert!(serde_json::from_value::<codewhale_protocol::PromptRequest>(input).is_err());
+    }
+    let absent: StartTurnRequest = serde_json::from_value(json!({"prompt":"review"}))?;
+    assert!(
+        serde_json::to_value(absent)?
+            .get("maxOutputTokens")
+            .is_none()
+    );
+    let valid: StartTurnRequest =
+        serde_json::from_value(json!({"prompt":"review","maxOutputTokens":1500}))?;
+    assert_eq!(valid.max_output_tokens.unwrap().get(), 1500);
     Ok(())
 }

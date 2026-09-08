@@ -108,6 +108,8 @@ impl UserInputProvenance {
 pub enum Op {
     /// Send a message to the AI
     SendMessage {
+        /// Admitted allowance for this turn only; never changes session settings.
+        max_output_tokens: Option<std::num::NonZeroU32>,
         content: String,
         /// Inline image bytes validated by Runtime admission; no file references.
         images: Vec<codewhale_protocol::runtime::RuntimeImageInput>,

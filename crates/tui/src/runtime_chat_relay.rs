@@ -71,6 +71,8 @@ fn take_state_persist_failure(path: &Path) -> bool {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct RuntimeChatPrompt {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<std::num::NonZeroU32>,
     #[serde(rename = "type")]
     pub command_type: String,
     pub run_id: String,
@@ -760,6 +762,7 @@ impl RuntimeChatRelayHost {
             .start_turn_with_reserved_id(
                 &binding.native_thread_id,
                 StartTurnRequest {
+                    max_output_tokens: command.max_output_tokens,
                     prompt: command.prompt.clone(),
                     images: command.images.clone(),
                     operation_key: Some(command.operation_key.clone()),
@@ -997,6 +1000,22 @@ impl RuntimeChatRelayHost {
                                     == Some("supported"))
                     })
                 });
+        if command.max_output_tokens.is_some()
+            && !provider
+                .get("models")
+                .and_then(Value::as_array)
+                .is_some_and(|models| {
+                    models.iter().any(|model| {
+                        model.get("id").and_then(Value::as_str) == Some(command.model.as_str())
+                            && model.get("outputTokenLimit").and_then(Value::as_str)
+                                == Some("supported")
+                    })
+                })
+        {
+            return Err(
+                "The selected Runtime Chat route does not support maxOutputTokens.".to_string(),
+            );
+        }
         if !route_matches {
             return Err(
                 "The requested Runtime Chat route is not the active ready route.".to_string(),
@@ -1217,10 +1236,7 @@ impl RuntimeChatPrompt {
             return Err("Runtime relay turns must use Chat mode.".to_string());
         }
         if let Some(reasoning) = self.reasoning_effort.as_deref()
-            && !matches!(
-                reasoning,
-                "off" | "low" | "medium" | "high" | "xhigh" | "max"
-            )
+            && crate::tui::app::ReasoningEffort::parse_strict(reasoning).is_err()
         {
             return Err("The Runtime Chat reasoning effort is invalid.".to_string());
         }
@@ -1872,6 +1888,7 @@ mod tests {
     fn chat_command_shape_requires_empty_tools_and_exact_chat_modes() {
         let mut prompt = RuntimeChatPrompt {
             images: Vec::new(),
+            max_output_tokens: None,
             command_type: "prompt.request".to_string(),
             run_id: "run_fixture".to_string(),
             turn_id: format!("local_turn_{}", "b".repeat(24)),
@@ -1893,6 +1910,13 @@ mod tests {
             },
         };
         prompt.validate_shape().unwrap();
+        for reasoning in ["minimal", "ultra"] {
+            prompt.reasoning_effort = Some(reasoning.into());
+            prompt.validate_shape().unwrap();
+        }
+        prompt.reasoning_effort = Some("invented-effort".into());
+        assert!(prompt.validate_shape().is_err());
+        prompt.reasoning_effort = None;
         prompt.allowed_tools.push("bash".to_string());
         assert!(prompt.validate_shape().is_err());
         prompt.allowed_tools.clear();
@@ -1921,6 +1945,7 @@ mod tests {
         host.authorize_run("run_fixture").unwrap();
         let prompt = RuntimeChatPrompt {
             images: Vec::new(),
+            max_output_tokens: None,
             command_type: "prompt.request".to_string(),
             run_id: "run_fixture".to_string(),
             turn_id: format!("local_turn_{}", "e".repeat(24)),
@@ -1987,6 +2012,7 @@ mod tests {
             .to_string();
         let prompt = RuntimeChatPrompt {
             images: Vec::new(),
+            max_output_tokens: None,
             command_type: "prompt.request".to_string(),
             run_id: "run_fixture".to_string(),
             turn_id: format!("local_turn_{}", "8".repeat(24)),

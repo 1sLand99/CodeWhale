@@ -361,6 +361,13 @@ pub enum ThreadRequest {
         input: String,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         images: Vec<runtime::RuntimeImageInput>,
+        #[serde(
+            default,
+            rename = "maxOutputTokens",
+            alias = "max_output_tokens",
+            skip_serializing_if = "Option::is_none"
+        )]
+        max_output_tokens: Option<std::num::NonZeroU32>,
     },
 }
 
@@ -459,6 +466,13 @@ pub struct AppResponse {
 /// A simple prompt request that sends text to the model and returns output.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PromptRequest {
+    #[serde(
+        default,
+        rename = "maxOutputTokens",
+        alias = "max_output_tokens",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub max_output_tokens: Option<std::num::NonZeroU32>,
     /// Optional thread context for the prompt.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thread_id: Option<String>,

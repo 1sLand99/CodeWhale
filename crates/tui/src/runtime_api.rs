@@ -265,6 +265,8 @@ impl Default for RuntimeApiOptions {
 
 #[derive(Debug, Deserialize)]
 struct StreamTurnRequest {
+    #[serde(default, rename = "maxOutputTokens", alias = "max_output_tokens")]
+    max_output_tokens: Option<std::num::NonZeroU32>,
     prompt: String,
     #[serde(default)]
     images: Vec<codewhale_protocol::runtime::RuntimeImageInput>,
@@ -544,6 +546,7 @@ fn default_runtime_capabilities() -> RuntimeCapabilities {
         turns: true,
         turn_operation_idempotency: true,
         turn_image_inputs: true,
+        turn_output_token_limit: true,
         turn_steer: true,
         turn_interrupt: true,
         event_replay: true,
@@ -4453,7 +4456,7 @@ async fn undo_thread_turn(
     Json(req): Json<UndoTurnRequest>,
 ) -> Result<(StatusCode, Json<UndoTurnResponse>), ApiError> {
     let depth = req.depth.unwrap_or(0);
-    let (forked_thread, original_user_text, original_user_images) = state
+    let (forked_thread, original_user_text, original_user_images, _) = state
         .runtime_threads
         .fork_at_user_message(&id, depth)
         .await
@@ -4508,7 +4511,7 @@ async fn patch_undo_thread_turn(
     let patch_result = patch_undo_workspace_files(&thread.workspace, thread.session_id.as_deref());
 
     // Step 2: Remove the last conversation turn (undo_conversation).
-    let (forked_thread, original_user_text, original_user_images) = state
+    let (forked_thread, original_user_text, original_user_images, _) = state
         .runtime_threads
         .fork_at_user_message(&id, depth)
         .await
@@ -4640,7 +4643,7 @@ async fn retry_thread_turn(
     Json(req): Json<RetryTurnRequest>,
 ) -> Result<(StatusCode, Json<RetryTurnResponse>), ApiError> {
     let depth = req.depth.unwrap_or(0);
-    let (forked_thread, original_user_text, original_user_images) = state
+    let (forked_thread, original_user_text, original_user_images, max_output_tokens) = state
         .runtime_threads
         .fork_at_user_message(&id, depth)
         .await
@@ -4658,6 +4661,7 @@ async fn retry_thread_turn(
         .start_turn_from_stored_images(
             &forked_thread.id,
             StartTurnRequest {
+                max_output_tokens,
                 prompt: retry_prompt,
                 images: original_user_images,
                 operation_key: None,
@@ -5287,6 +5291,17 @@ async fn stream_turn(
     crate::image_attach::prepare_runtime_images(&req.images).map_err(map_thread_err)?;
 
     let model = runtime_request_model(&state.config.read(), req.model.as_deref())?;
+    if req.max_output_tokens.is_some() {
+        let config = state.config.read();
+        if model.eq_ignore_ascii_case("auto")
+            || provider_model_output_token_limit_for_api(&config, config.api_provider(), &model)
+                != codewhale_config::route::CapabilityState::Supported
+        {
+            return Err(ApiError::bad_request(
+                "maxOutputTokens requires an exact model with output-limit support",
+            ));
+        }
+    }
     let workspace = req
         .workspace
         .clone()
@@ -5334,6 +5349,7 @@ async fn stream_turn(
         .start_turn(
             &thread.id,
             StartTurnRequest {
+                max_output_tokens: req.max_output_tokens,
                 prompt,
                 images: req.images,
                 input_summary: None,
@@ -6090,6 +6106,7 @@ struct ProviderModelEntry {
     /// offering. Unknown stays unknown: the API never guesses from a model
     /// name or transport protocol.
     image_input: codewhale_config::route::CapabilityState,
+    output_token_limit: codewhale_config::route::CapabilityState,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -6314,6 +6331,26 @@ fn provider_model_image_input_for_api(
         .unwrap_or_default()
 }
 
+fn provider_model_output_token_limit_for_api(
+    config: &Config,
+    provider: ApiProvider,
+    model: &str,
+) -> codewhale_config::route::CapabilityState {
+    use codewhale_config::route::CapabilityState;
+    crate::route_runtime::resolve_runtime_route(config, provider, Some(model))
+        .map(|route| {
+            if crate::route_budget::route_supports_output_token_limit(
+                route.identity.provider,
+                route.candidate.protocol(),
+            ) {
+                CapabilityState::Supported
+            } else {
+                CapabilityState::Unsupported
+            }
+        })
+        .unwrap_or_default()
+}
+
 fn provider_default_model_for_api(
     config: &Config,
     _active_provider: ApiProvider,
@@ -6462,6 +6499,7 @@ pub(crate) fn runtime_chat_relay_catalog(
                 "isolated_chat_threads": true,
                 "turn_operation_idempotency": true,
                 "turn_image_inputs": true,
+                "turn_output_token_limit": true,
                 "tool_execution": false,
                 "stable_event_ids": true,
             },
@@ -6474,6 +6512,7 @@ pub(crate) fn runtime_chat_relay_catalog(
             "credentialState": credential_state,
             "models": models.into_iter().map(|model| json!({
                 "imageInput": provider_model_image_input_for_api(config, provider, &model),
+                "outputTokenLimit": provider_model_output_token_limit_for_api(config, provider, &model),
                 "id": model,
             })).collect::<Vec<_>>(),
         }],
@@ -6582,6 +6621,11 @@ async fn list_provider_models(
         .into_iter()
         .map(|id| ProviderModelEntry {
             image_input: provider_model_image_input_for_api(&config, api_provider, &id),
+            output_token_limit: provider_model_output_token_limit_for_api(
+                &config,
+                api_provider,
+                &id,
+            ),
             id,
         })
         .collect();

@@ -868,6 +868,7 @@ async fn exact_turn_snapshot_restores_custom_endpoint_and_turn_receipt_after_bui
     let run_task = tokio::spawn(engine.run());
     handle
         .send(Op::SendMessage {
+            max_output_tokens: None,
             content: "verify exact route".to_string(),
             images: Vec::new(),
             mode: AppMode::Agent,
@@ -1243,6 +1244,7 @@ async fn goal_continuation_preserves_goal_and_resolves_updated_authoritative_rou
 
     handle
         .send(Op::SendMessage {
+            max_output_tokens: None,
             content: "first turn".to_string(),
             images: Vec::new(),
             mode: AppMode::Agent,
@@ -1524,6 +1526,7 @@ async fn saturated_mailbox_does_not_deadlock_goal_continuation_self_dispatch() {
 
     handle
         .send(Op::SendMessage {
+            max_output_tokens: None,
             content: "start the saturated goal turn".to_string(),
             images: Vec::new(),
             mode: AppMode::Agent,
@@ -1654,6 +1657,7 @@ async fn queued_ordinary_turn_does_not_multiply_engine_goal_continuations() {
     let goal_state = engine.config.goal_state.clone();
     let run_task = tokio::spawn(engine.run());
     let send_message = |content: &str| Op::SendMessage {
+        max_output_tokens: None,
         content: content.to_string(),
         images: Vec::new(),
         mode: AppMode::Agent,
@@ -2853,6 +2857,7 @@ async fn cross_turn_token_budget_exhaustion_does_not_pause_goal() {
 
     handle
         .send(Op::SendMessage {
+            max_output_tokens: None,
             content: "start budgeted goal".to_string(),
             images: Vec::new(),
             mode: AppMode::Agent,
@@ -3312,6 +3317,7 @@ async fn explicit_natural_goal_activates_before_provider_request() {
 
     handle
         .send(Op::SendMessage {
+            max_output_tokens: None,
             content: "hello - take over and make it your /goal to solve navier stokes".to_string(),
             images: Vec::new(),
             mode: AppMode::Agent,
@@ -3424,6 +3430,7 @@ async fn operate_goal_probe(mode: AppMode, prompt: &str) -> (Option<String>, boo
 
     handle
         .send(Op::SendMessage {
+            max_output_tokens: None,
             content: prompt.to_string(),
             images: Vec::new(),
             mode,
@@ -3556,6 +3563,7 @@ async fn operate_contract_is_appended_once_and_an_existing_goal_is_never_replace
     let run_task = tokio::spawn(engine.run());
 
     let send = |content: &str, goal_objective: Option<String>, goal_status| Op::SendMessage {
+        max_output_tokens: None,
         content: content.to_string(),
         images: Vec::new(),
         mode: AppMode::Operate,
@@ -4243,6 +4251,7 @@ async fn host_managed_engine_does_not_self_dispatch_goal_continuation() {
 
     handle
         .send(Op::SendMessage {
+            max_output_tokens: None,
             content: "one host-owned turn".to_string(),
             images: Vec::new(),
             mode: AppMode::Agent,
@@ -4369,6 +4378,7 @@ async fn host_managed_engine_defers_idle_subagent_completion_to_explicit_turn() 
 
     handle
         .send(Op::SendMessage {
+            max_output_tokens: None,
             content: "claim the next turn".to_string(),
             images: Vec::new(),
             mode: AppMode::Agent,
@@ -6022,6 +6032,7 @@ fn active_goal_message_op(
     token_budget: Option<u32>,
 ) -> Op {
     Op::SendMessage {
+        max_output_tokens: None,
         content: content.to_string(),
         images: Vec::new(),
         mode: AppMode::Agent,
@@ -6060,6 +6071,7 @@ fn system_prompt_text(prompt: SystemPrompt) -> String {
 
 fn external_user_message_op(content: &str, mode: AppMode, config: &Config) -> Op {
     Op::SendMessage {
+        max_output_tokens: None,
         content: content.to_string(),
         images: Vec::new(),
         mode,
@@ -6087,6 +6099,7 @@ fn external_user_message_op(content: &str, mode: AppMode, config: &Config) -> Op
 
 fn auto_review_message_op(content: &str, config: &Config) -> Op {
     Op::SendMessage {
+        max_output_tokens: None,
         content: content.to_string(),
         images: Vec::new(),
         mode: AppMode::Agent,
@@ -12192,6 +12205,7 @@ async fn operate_model_shell_uses_normal_approval_and_workspace_sandbox() {
 
     handle
         .send(Op::SendMessage {
+            max_output_tokens: None,
             content: "write the requested local fixture".to_string(),
             images: Vec::new(),
             mode: AppMode::Operate,
@@ -12348,6 +12362,7 @@ async fn full_access_subagent_handoff_keeps_model_shell_free_of_approval_prompts
 
     handle
         .send(Op::SendMessage {
+            max_output_tokens: None,
             content: "continue from the completed child".to_string(),
             images: Vec::new(),
             mode: AppMode::Agent,
@@ -12486,6 +12501,7 @@ async fn assert_full_access_model_tool_batch_is_blocked(
 
     handle
         .send(Op::SendMessage {
+            max_output_tokens: None,
             content: "exercise the Full Access execution boundary".to_string(),
             images: Vec::new(),
             mode: AppMode::Agent,
@@ -12693,6 +12709,7 @@ async fn assert_full_access_model_tool_batch_runs(
 
     handle
         .send(Op::SendMessage {
+            max_output_tokens: None,
             content: "exercise the Full Access auto-approval boundary".to_string(),
             images: Vec::new(),
             mode: AppMode::Agent,
@@ -12971,6 +12988,7 @@ async fn auto_review_auto_resolves_hallucinated_question_without_prompting() {
 
     handle
         .send(Op::SendMessage {
+            max_output_tokens: None,
             content: "continue autonomously".to_string(),
             images: Vec::new(),
             mode: AppMode::Agent,
@@ -13159,6 +13177,7 @@ async fn full_access_permission_allow_cannot_bypass_background_catastrophic_floo
 
     handle
         .send(Op::SendMessage {
+            max_output_tokens: None,
             content: "please run a background shell".to_string(),
             images: Vec::new(),
             mode: AppMode::Agent,
@@ -13301,6 +13320,7 @@ async fn yolo_mode_does_not_prompt_for_background_shell() {
 
     handle
         .send(Op::SendMessage {
+            max_output_tokens: None,
             content: "please run a background shell".to_string(),
             images: Vec::new(),
             mode: AppMode::Agent,
@@ -13439,6 +13459,7 @@ async fn yolo_mode_executes_publish_like_shell_without_prompt() {
 
     handle
         .send(Op::SendMessage {
+            max_output_tokens: None,
             content: "please publish this crate".to_string(),
             images: Vec::new(),
             mode: AppMode::Agent,
@@ -13581,6 +13602,7 @@ async fn yolo_mode_does_not_prompt_for_mcp_action() {
 
     handle
         .send(Op::SendMessage {
+            max_output_tokens: None,
             content: "please open the PR".to_string(),
             images: Vec::new(),
             mode: AppMode::Agent,
@@ -19962,6 +19984,7 @@ async fn run_headless_turn_with_flaky_network(
 
     handle
         .send(Op::SendMessage {
+            max_output_tokens: None,
             content: "solve the task".to_string(),
             images: Vec::new(),
             mode: AppMode::Agent,
@@ -20089,6 +20112,7 @@ async fn terminal_output_limit_followed_by_stream_error_is_charged_and_not_retri
 
     handle
         .send(Op::SendMessage {
+            max_output_tokens: None,
             content: "solve the task".to_string(),
             images: Vec::new(),
             mode: AppMode::Agent,
@@ -20195,6 +20219,7 @@ async fn midstream_error_frame_stops_the_stream_and_drops_trailing_deltas() {
 
     handle
         .send(Op::SendMessage {
+            max_output_tokens: None,
             content: "solve the task".to_string(),
             images: Vec::new(),
             mode: AppMode::Agent,
@@ -20444,6 +20469,7 @@ async fn run_interactive_turn_with_flaky_network(
 
     handle
         .send(Op::SendMessage {
+            max_output_tokens: None,
             content: "solve the task".to_string(),
             images: Vec::new(),
             mode: AppMode::Agent,
@@ -20674,6 +20700,7 @@ async fn interactive_thinking_only_drop_preserves_nothing_and_never_claims_it_di
 
     handle
         .send(Op::SendMessage {
+            max_output_tokens: None,
             content: "solve the task".to_string(),
             images: Vec::new(),
             mode: AppMode::Agent,
@@ -20923,6 +20950,7 @@ async fn run_reasoning_only_turn_with_reprompts(
     let run_task = tokio::spawn(engine.run());
     handle
         .send(Op::SendMessage {
+            max_output_tokens: None,
             content: "solve the task".to_string(),
             images: Vec::new(),
             mode: AppMode::Agent,

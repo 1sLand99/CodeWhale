@@ -2565,6 +2565,7 @@ impl Engine {
                 self.config.verbosity.clone(),
                 UserInputProvenance::Runtime,
                 Vec::new(),
+                None,
             )
             .await;
     }
@@ -2606,6 +2607,7 @@ impl Engine {
                 }
                 EngineRunInput::Operation(op) => match *op {
                     Op::SendMessage {
+                        max_output_tokens,
                         content,
                         images,
                         mode,
@@ -2661,6 +2663,7 @@ impl Engine {
                             verbosity,
                             provenance,
                             images,
+                            max_output_tokens,
                         )
                         .await;
                     }
@@ -2767,6 +2770,7 @@ impl Engine {
                                 self.config.verbosity.clone(),
                                 UserInputProvenance::Runtime,
                                 Vec::new(),
+                                None,
                             )
                             .await;
                     }
@@ -3316,6 +3320,7 @@ impl Engine {
                             self.config.verbosity.clone(),
                             UserInputProvenance::ExternalUser,
                             Vec::new(),
+                            None,
                         )
                         .await;
                     }
@@ -3966,6 +3971,7 @@ impl Engine {
                 self.config.verbosity.clone(),
                 UserInputProvenance::SubAgentHandoff,
                 Vec::new(),
+                None,
             )
             .await;
         if !outcome.started() {
@@ -4748,6 +4754,7 @@ impl Engine {
         verbosity: Option<String>,
         provenance: UserInputProvenance,
         images: Vec<codewhale_protocol::runtime::RuntimeImageInput>,
+        max_output_tokens: Option<std::num::NonZeroU32>,
     ) -> SendMessageOutcome {
         // All surfaces reuse the same bounded validator. Runtime already checks
         // before admission; this also protects direct in-process operations.
@@ -4944,6 +4951,7 @@ impl Engine {
         } else {
             TurnContext::new(self.config.max_steps)
         };
+        turn.max_output_tokens = max_output_tokens;
         self.turn_counter = self.turn_counter.saturating_add(1);
         let turn_started_at = chrono::Utc::now();
         // Mint the route receipt from the client that `install_resolved_runtime_route`

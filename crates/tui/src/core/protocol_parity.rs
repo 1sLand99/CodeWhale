@@ -529,11 +529,13 @@ pub fn event_to_protocol(event: &Event, ids: &ProtocolIds) -> wire::EventMsg {
             base_url: base_url.clone(),
         },
         Event::TurnUsage {
+            max_output_tokens,
             usage,
             duration_ms,
             first_token_ms,
             request_ms,
         } => wire::EventMsg::TurnUsage {
+            max_output_tokens: *max_output_tokens,
             thread_id,
             session_id,
             usage: usage_to_wire(usage),
@@ -930,6 +932,7 @@ pub fn event_to_protocol(event: &Event, ids: &ProtocolIds) -> wire::EventMsg {
 pub fn op_to_protocol(op: &Op) -> wire_op::Op {
     match op {
         Op::SendMessage {
+            max_output_tokens,
             content,
             images,
             mode,
@@ -954,6 +957,7 @@ pub fn op_to_protocol(op: &Op) -> wire_op::Op {
             verbosity,
             provenance,
         } => wire_op::Op::SendMessage {
+            max_output_tokens: *max_output_tokens,
             content: content.clone(),
             images: images.clone(),
             mode: app_mode_str(*mode).to_string(),
@@ -1279,6 +1283,7 @@ mod tests {
         for (event, tag) in [
             (
                 Event::TurnUsage {
+                    max_output_tokens: None,
                     usage: parent,
                     duration_ms: 12,
                     first_token_ms: Some(2),
@@ -1364,6 +1369,7 @@ mod tests {
                 request_ms: None,
             },
             Event::TurnUsage {
+                max_output_tokens: None,
                 usage,
                 duration_ms: 12,
                 first_token_ms: Some(3),

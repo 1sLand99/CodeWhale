@@ -428,6 +428,7 @@ pub(crate) async fn run_exec_agent(
 
     engine_handle
         .send(Op::SendMessage {
+            max_output_tokens: None,
             content: prompt.to_string(),
             images: Vec::new(),
             mode,
