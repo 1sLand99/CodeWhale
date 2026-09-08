@@ -987,22 +987,27 @@ async fn bounded_provider_catalog_text(
 
 fn validate_base_url_security(base_url: &str, provider_allows_insecure_http: bool) -> Result<()> {
     let display_base_url = redact_url_for_display(base_url);
-    if base_url.starts_with("https://")
-        || base_url.starts_with("http://localhost")
-        || base_url.starts_with("http://127.0.0.1")
-        || base_url.starts_with("http://[::1]")
-    {
+    let parsed = reqwest::Url::parse(base_url)
+        .map_err(|_| anyhow::anyhow!("Refusing invalid base URL '{display_base_url}'"))?;
+    let loopback = parsed.host_str().is_some_and(|host| {
+        host.eq_ignore_ascii_case("localhost")
+            || host
+                .trim_matches(['[', ']'])
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|address| address.is_loopback())
+    });
+    if parsed.scheme() == "https" || (parsed.scheme() == "http" && loopback) {
         return Ok(());
     }
 
-    if base_url.starts_with("http://") && provider_allows_insecure_http {
+    if parsed.scheme() == "http" && provider_allows_insecure_http {
         logging::warn(
             "Using insecure HTTP base URL because this provider sets allow_insecure_http = true in config.toml",
         );
         return Ok(());
     }
 
-    if base_url.starts_with("http://")
+    if parsed.scheme() == "http"
         && std::env::var(ALLOW_INSECURE_HTTP_ENV)
             .or_else(|_| std::env::var(LEGACY_ALLOW_INSECURE_HTTP_ENV))
             .ok()
@@ -1015,7 +1020,7 @@ fn validate_base_url_security(base_url: &str, provider_allows_insecure_http: boo
         return Ok(());
     }
 
-    if base_url.starts_with("http://") {
+    if parsed.scheme() == "http" {
         anyhow::bail!(
             "Refusing insecure base URL '{display_base_url}'.\n\
              \n\
@@ -12582,8 +12587,29 @@ mod tests {
             let _guard = AllowInsecureHttpEnvGuard::capture();
             unsafe { std::env::remove_var(ALLOW_INSECURE_HTTP_ENV) };
 
-            assert!(validate_base_url_security("http://localhost:8080", false).is_ok());
-            assert!(validate_base_url_security("http://127.0.0.1:8080", false).is_ok());
+            for url in [
+                "http://localhost:8080",
+                "http://LOCALHOST:8080",
+                "http://127.0.0.1:8080",
+                "http://127.0.0.2:8080",
+                "http://[::1]:8080",
+                "https://provider.example/v1",
+            ] {
+                assert!(validate_base_url_security(url, false).is_ok(), "{url}");
+            }
+            for url in [
+                "http://localhost.attacker.example/v1",
+                "http://127.0.0.1.attacker.example/v1",
+                "http://localhost@attacker.example/v1",
+                "http://127.0.0.1@attacker.example/v1",
+                "HTTP://localhost.attacker.example/v1",
+            ] {
+                assert!(validate_base_url_security(url, false).is_err(), "{url}");
+                assert!(validate_base_url_security(url, true).is_ok(), "{url}");
+            }
+            for url in ["https://", "http://[::1", "file:///tmp/provider"] {
+                assert!(validate_base_url_security(url, true).is_err(), "{url}");
+            }
         }
         // from base_url_security_allows_non_local_http_with_explicit_opt_in
         {

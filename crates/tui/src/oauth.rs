@@ -472,6 +472,9 @@ const OAUTH_ERROR_DETAIL_LIMIT: usize = 256;
 
 fn oauth_http_client(purpose: &str) -> Result<reqwest::blocking::Client> {
     crate::tls::reqwest_blocking_client_builder()
+        // An issuer-approved endpoint cannot delegate credential-bearing forms
+        // to a redirect destination, including HTTPS-to-HTTP downgrades.
+        .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(OAUTH_REQUEST_TIMEOUT_SECS))
         .build()
         .with_context(|| format!("Failed to build OAuth {purpose} client"))
@@ -3090,6 +3093,67 @@ mod tests {
             error.to_string().contains("no device-code flow"),
             "{error:#}"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn oauth_transports_never_forward_forms_to_redirect_destinations() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let issuer = MockServer::start().await;
+        let destination = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "access_token": "synthetic-access",
+            })))
+            .expect(0)
+            .mount(&destination)
+            .await;
+        for status in [301, 302, 303, 307, 308] {
+            let endpoint = format!("{}/redirect-{status}", issuer.uri());
+            Mock::given(path(format!("/redirect-{status}")))
+                .respond_with(
+                    ResponseTemplate::new(status)
+                        .insert_header("Location", format!("{}/token", destination.uri()))
+                        .set_body_json(serde_json::json!({})),
+                )
+                .expect(3)
+                .mount(&issuer)
+                .await;
+            tokio::task::block_in_place(|| {
+                assert!(request_device_grant(&endpoint, "synthetic-client", "scope").is_err());
+                assert!(
+                    poll_device_grant(&endpoint, "synthetic-client", "synthetic-device").is_err()
+                );
+                let (actual_status, _) = ReqwestOAuthFormClient
+                    .post_form(&endpoint, &[("refresh_token", "synthetic-refresh")])
+                    .unwrap();
+                assert_eq!(actual_status, status);
+            });
+        }
+        // An explicitly selected issuer remains usable without a redirect.
+        Mock::given(path("/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "device_code": "synthetic-device",
+                "user_code": "synthetic-user",
+                "access_token": "synthetic-access",
+            })))
+            .expect(3)
+            .mount(&issuer)
+            .await;
+        let endpoint = format!("{}/token", issuer.uri());
+        tokio::task::block_in_place(|| {
+            assert!(request_device_grant(&endpoint, "synthetic-client", "scope").is_ok());
+            assert!(poll_device_grant(&endpoint, "synthetic-client", "synthetic-device").is_ok());
+            assert_eq!(
+                ReqwestOAuthFormClient
+                    .post_form(&endpoint, &[("refresh_token", "synthetic-refresh")])
+                    .unwrap()
+                    .0,
+                200
+            );
+        });
+        assert!(destination.received_requests().await.unwrap().is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
