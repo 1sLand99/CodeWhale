@@ -1793,19 +1793,15 @@ fn entry_access_token_is_fresh(entry: &OwnedAuthEntry) -> bool {
     else {
         return false;
     };
-    if let Some(exp) = entry.expires_at.as_deref().and_then(parse_rfc3339_secs) {
-        let now = now_unix_secs().unwrap_or(0);
-        return exp - now > REFRESH_SKEW_SECS;
-    }
-    // Fall back to the JWT exp claim when expires_at is missing. An
-    // unparseable token cannot prove freshness; treat it as stale.
-    match jwt_expiry_seconds(token) {
-        Some(exp) => {
-            let now = now_unix_secs().unwrap_or(0) as u64;
-            (exp as i64) - (now as i64) > REFRESH_SKEW_SECS
-        }
-        None => false,
-    }
+    let stored_expiry = entry.expires_at.as_deref().and_then(parse_rfc3339_secs);
+    let token_expiry = jwt_expiry_seconds(token).and_then(|exp| i64::try_from(exp).ok());
+    // A later stored expiry must not hide an already-expired access token.
+    // Opaque tokens still use stored expiry; no known expiry remains stale.
+    stored_expiry
+        .into_iter()
+        .chain(token_expiry)
+        .min()
+        .is_some_and(|exp| exp.saturating_sub(now_unix_secs().unwrap_or(0)) > REFRESH_SKEW_SECS)
 }
 
 fn credentials_from_entry(
@@ -2791,6 +2787,45 @@ mod tests {
         let payload = URL_SAFE_NO_PAD.encode(b"{\"exp\":1000000000}");
         let token = format!("header.{payload}.sig");
         assert!(token_is_expired(&token));
+    }
+
+    #[test]
+    fn owned_token_freshness_honors_both_expiries_and_preserves_fallbacks() {
+        let now = now_unix_secs().expect("clock");
+        let future = rfc3339_from_unix(now + 3600);
+        let past = rfc3339_from_unix(now - 3600);
+        let near = rfc3339_from_unix(now + 30);
+        let fresh_token = jwt_with_exp((now + 3600) as u64);
+        let expired_token = jwt_with_exp((now - 3600) as u64);
+        let near_token = jwt_with_exp((now + 30) as u64);
+
+        for (stored, token, expected) in [
+            (Some(future.as_str()), expired_token.as_str(), false),
+            (Some(past.as_str()), fresh_token.as_str(), false),
+            (Some(future.as_str()), fresh_token.as_str(), true),
+            (Some(future.as_str()), near_token.as_str(), false),
+            (Some(near.as_str()), fresh_token.as_str(), false),
+            (None, fresh_token.as_str(), true),
+            (None, expired_token.as_str(), false),
+            (Some("invalid-date"), fresh_token.as_str(), true),
+            (Some(future.as_str()), "opaque-token", true),
+            (Some(past.as_str()), "opaque-token", false),
+            (None, "opaque-token", false),
+            (Some("invalid-date"), "opaque-token", false),
+            (Some(future.as_str()), "", false),
+        ] {
+            let entry: OwnedAuthEntry = serde_json::from_value(serde_json::json!({
+                "access_token": token,
+                "expires_at": stored,
+            }))
+            .expect("synthetic owned entry");
+            assert_eq!(
+                entry_access_token_is_fresh(&entry),
+                expected,
+                "stored={stored:?}, JWT expiry={:?}",
+                jwt_expiry_seconds(token),
+            );
+        }
     }
 
     #[test]
@@ -5309,7 +5344,8 @@ consent_version = 1
             &scope: {
                 "access_token": stale,
                 "refresh_token": "refresh-old",
-                "expires_at": "2000-01-01T00:00:00Z",
+                // Conflicting metadata must not suppress the existing refresh.
+                "expires_at": rfc3339_from_now(3600),
                 "oidc_issuer": CHATGPT_OAUTH_ISSUER,
                 "oidc_client_id": CHATGPT_OAUTH_CLIENT_ID,
                 "originator": CHATGPT_OAUTH_ORIGINATOR
