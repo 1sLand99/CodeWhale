@@ -838,6 +838,10 @@ fn open_runtime_threads_for_server(
         manager_config,
         plugin_registry,
     )?);
+    // Publish the same exact endpoint-scoped catalog as interactive startup
+    // before the server admits turns. A cached model list alone does not make
+    // its capabilities available to route resolution.
+    crate::provider_catalog_live::maybe_load_persisted_cache_for_config(config);
     Ok((manager, workshop_activation))
 }
 
