@@ -833,14 +833,6 @@ impl ModalView for CommandPaletteView {
                 self.move_selection(1);
                 ViewAction::None
             }
-            KeyCode::Char('k') if self.query.is_empty() => {
-                self.move_selection(-1);
-                ViewAction::None
-            }
-            KeyCode::Char('j') if self.query.is_empty() => {
-                self.move_selection(1);
-                ViewAction::None
-            }
             KeyCode::PageUp => {
                 self.move_selection(-8);
                 ViewAction::None
@@ -1115,6 +1107,66 @@ mod tests {
             },
             show_on_empty_query: true,
         }
+    }
+
+    fn assert_palette_search_owns_text(query: &str) {
+        let entries = ["json", "key", "队列é"]
+            .map(|text| palette_entry(PaletteSection::Command, text, "", text))
+            .to_vec();
+        let mut stack = crate::tui::views::ViewStack::new();
+        stack.push(CommandPaletteView::new(entries));
+        for ch in query.chars() {
+            assert!(
+                stack
+                    .handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE))
+                    .is_empty()
+            );
+            assert_eq!(stack.top_kind(), Some(ModalKind::CommandPalette));
+        }
+        let mut modal = stack.pop().unwrap();
+        let view = modal
+            .as_any_mut()
+            .downcast_mut::<CommandPaletteView>()
+            .unwrap();
+        assert_eq!(view.query, query);
+        assert_eq!(view.filtered.len(), 1);
+        for code in [
+            KeyCode::Up,
+            KeyCode::Down,
+            KeyCode::PageUp,
+            KeyCode::PageDown,
+        ] {
+            assert!(matches!(
+                view.handle_key(KeyEvent::new(code, KeyModifiers::NONE)),
+                ViewAction::None
+            ));
+            assert_eq!(view.query, query);
+        }
+        assert!(matches!(
+            view.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            ViewAction::EmitAndClose(ViewEvent::CommandPaletteSelected {
+                action: CommandPaletteAction::InsertText { text }
+            }) if text == query
+        ));
+        assert!(matches!(
+            view.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            ViewAction::Close
+        ));
+    }
+
+    #[test]
+    fn palette_search_owns_initial_j() {
+        assert_palette_search_owns_text("json");
+    }
+
+    #[test]
+    fn palette_search_owns_initial_k() {
+        assert_palette_search_owns_text("key");
+    }
+
+    #[test]
+    fn palette_search_owns_unicode() {
+        assert_palette_search_owns_text("队列é");
     }
 
     #[test]

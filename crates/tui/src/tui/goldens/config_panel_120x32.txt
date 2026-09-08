@@ -26,7 +26,7 @@
                     │                                                         │                                         
   system | terminal | underwater | underwater-retro | dark | light | grayscale | catppuccin-mocha | tokyo-night |…      
   Preview: ▶▶ ask · agent                                                                                               
-  type=filter, Up/Down=select, Enter/e=edit, Esc/q=close                                                                
+  type=filter, Up/Down=select, Enter=edit, Esc=close                                                                    
                                                                                                                         
  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── 
                                                                                                                         
