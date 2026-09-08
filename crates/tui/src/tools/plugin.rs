@@ -77,6 +77,21 @@ impl ToolSpec for ScriptPluginTool {
         &self.metadata.name
     }
 
+    fn registration_origin(&self) -> std::borrow::Cow<'_, str> {
+        use crate::safe_label::SafeLabel;
+        let filename = self
+            .script_path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy();
+        format!(
+            "plugin script {} ({})",
+            SafeLabel::identifier(&filename),
+            SafeLabel::identifier(&self.script_path.to_string_lossy())
+        )
+        .into()
+    }
+
     fn description(&self) -> &str {
         &self.metadata.description
     }
@@ -128,6 +143,14 @@ impl std::fmt::Debug for CommandPluginTool {
 impl ToolSpec for CommandPluginTool {
     fn name(&self) -> &str {
         &self.name
+    }
+
+    fn registration_origin(&self) -> std::borrow::Cow<'_, str> {
+        format!(
+            "config [tools.overrides.{}]",
+            crate::safe_label::SafeLabel::identifier(&self.name)
+        )
+        .into()
     }
 
     fn description(&self) -> &str {

@@ -1893,6 +1893,165 @@ fn a_builder_upgrade_replaces_the_tool_instead_of_registering_it_twice() {
             .any(|tool| tool.name() == "apply_patch"),
         "the upgrade still adds apply_patch"
     );
+    let tmp = tempdir().unwrap();
+    let warnings = capture_registration_warnings(|| {
+        let registry = builder.build(ToolContext::new(tmp.path()));
+        assert!(registry.contains("File"));
+        assert!(registry.contains("apply_patch"));
+    });
+    assert!(warnings.is_empty(), "normal File composition: {warnings}");
+}
+
+fn capture_registration_warnings(action: impl FnOnce()) -> String {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut output = tempfile::tempfile().unwrap();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_max_level(tracing::Level::WARN)
+        .with_writer(std::sync::Mutex::new(output.try_clone().unwrap()))
+        .finish();
+    tracing::subscriber::with_default(subscriber, action);
+    output.seek(SeekFrom::Start(0)).unwrap();
+    let mut warnings = String::new();
+    output.read_to_string(&mut warnings).unwrap();
+    warnings
+}
+
+#[test]
+fn registration_collisions_name_both_origins_and_preserve_replacement() {
+    use crate::safe_label::SafeLabel;
+    use crate::tools::file_tool::FileTool;
+    let tmp = tempdir().unwrap();
+    let mut registry = ToolRegistryBuilder::new()
+        .with_file_tools()
+        .build(ToolContext::new(tmp.path()));
+    let mut previous_origin = std::any::type_name::<FileTool>().to_string();
+    for source in ["first", "second"] {
+        // Same basename and registered name, different actual plugin origins.
+        let directory = tmp.path().join(source);
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("tool.sh");
+        std::fs::write(&path, format!("# name: File\n# description: {source}\n")).unwrap();
+        let _before = registry.to_api_tools();
+        let warnings = capture_registration_warnings(|| registry.load_plugins(&directory));
+        let replacement_origin = format!(
+            "plugin script tool.sh ({})",
+            SafeLabel::identifier(&path.to_string_lossy())
+        );
+        assert_eq!(warnings.lines().count(), 1, "{warnings}");
+        assert!(
+            warnings.contains("Overwriting existing tool: File"),
+            "{warnings}"
+        );
+        assert!(
+            warnings.contains(&format!("previous_origin={previous_origin:?}")),
+            "{warnings}"
+        );
+        assert!(
+            warnings.contains(&format!("replacement_origin={replacement_origin:?}")),
+            "{warnings}"
+        );
+        assert!(!warnings.contains(&tmp.path().to_string_lossy().to_string()));
+        let installed = registry.get("File").unwrap();
+        assert_eq!(installed.description(), source);
+        assert!(
+            installed
+                .capabilities()
+                .contains(&ToolCapability::RequiresApproval)
+        );
+        assert_eq!(
+            registry
+                .to_api_tools()
+                .iter()
+                .find(|tool| tool.name == "File")
+                .unwrap()
+                .description,
+            source,
+            "replacement still invalidates the catalog cache"
+        );
+        previous_origin = replacement_origin;
+    }
+}
+
+#[test]
+fn registration_adapter_origins_are_bounded_and_exclude_execution_payloads() {
+    use crate::tools::dynamic::RuntimeDynamicTool;
+    use crate::tools::plugin::tool_from_override;
+    use codewhale_protocol::runtime::DynamicToolSpec;
+    let tmp = tempdir().unwrap();
+    let hostile = format!(
+        "\u{1b}[31m\nhttps://private.invalid/token?{}",
+        "x".repeat(500)
+    );
+    let command = "do-not-log-command";
+    let argument = "do-not-log-argument";
+    let schema_payload = "do-not-log-schema";
+    let cases: Vec<(Arc<dyn ToolSpec>, &str)> = vec![
+        (
+            Arc::new(RuntimeDynamicTool::new(DynamicToolSpec {
+                name: hostile.clone(),
+                namespace: Some(hostile.clone()),
+                description: command.into(),
+                input_schema: json!({"description":schema_payload}),
+                defer_loading: false,
+            })),
+            "runtime dynamic namespace sha256:",
+        ),
+        (
+            Arc::new(super::McpToolAdapter {
+                name: hostile.clone(),
+                server_name: Some("plugin-4-demo-server_with_underscores".into()),
+                tool: crate::mcp::McpTool {
+                    name: hostile.clone(),
+                    description: Some(command.into()),
+                    input_schema: json!({"description":schema_payload}),
+                },
+                pool: Arc::new(tokio::sync::Mutex::new(crate::mcp::McpPool::new(
+                    crate::mcp::McpConfig::default(),
+                ))),
+            }),
+            "MCP server plugin-4-demo-server_with_underscores, tool sha256:",
+        ),
+        (
+            tool_from_override(
+                &hostile,
+                &ToolOverride::Command {
+                    command: command.into(),
+                    args: Some(vec![argument.into()]),
+                },
+                tmp.path(),
+            )
+            .unwrap(),
+            "config [tools.overrides.sha256:",
+        ),
+    ];
+    for (replacement, expected_origin) in cases {
+        let mut registry = ToolRegistry::new(ToolContext::new(tmp.path()));
+        registry.register(make_test_tool(&hostile));
+        let warnings = capture_registration_warnings(|| registry.register(replacement.clone()));
+        assert_eq!(warnings.lines().count(), 1, "{warnings}");
+        assert!(
+            warnings.contains("Overwriting existing tool: sha256:"),
+            "{warnings}"
+        );
+        assert!(warnings.contains(expected_origin), "{warnings}");
+        assert!(warnings.len() < 600, "{warnings}");
+        for excluded in [
+            &hostile,
+            command,
+            argument,
+            schema_payload,
+            "https://private.invalid",
+            "\u{1b}",
+        ] {
+            assert!(
+                !warnings.contains(excluded),
+                "unexpected payload: {warnings}"
+            );
+        }
+        assert!(Arc::ptr_eq(&registry.get(&hostile).unwrap(), &replacement));
+    }
 }
 
 /// Regression probe for the fleet-52663788 class of provider 400
