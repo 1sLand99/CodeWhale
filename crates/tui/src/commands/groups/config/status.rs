@@ -73,6 +73,21 @@ fn format_status(app: &App) -> String {
             &[("{count}", &app.mcp_configured_count.to_string())],
         ),
     );
+    if let Some(notice) = crate::core::turn::snapshots_disabled_status(
+        &app.workspace,
+        app.current_session_id.as_deref(),
+    ) {
+        let message = localized(
+            locale,
+            MessageId::SnapshotsDisabledNotice,
+            &[
+                ("{workspace}", &notice.workspace),
+                ("{reason}", &notice.reason),
+                ("{config_key}", crate::core::turn::SNAPSHOTS_CAP_CONFIG_KEY),
+            ],
+        );
+        let _ = writeln!(out, "  {message}");
+    }
     let _ = writeln!(out);
 
     push_row(
@@ -459,6 +474,55 @@ mod tests {
     use crate::models::{ContentBlock, Message};
     use crate::tui::app::{AppMode, TuiOptions};
     use crate::tui::history::HistoryCell;
+
+    #[test]
+    fn status_keeps_current_session_snapshot_remedy_after_notice_delivery() {
+        let _env = crate::test_support::lock_test_env();
+        let root = TempDir::new().unwrap();
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", root.path());
+        let _user_home = crate::test_support::EnvVarGuard::set("HOME", root.path());
+        let _user_profile = crate::test_support::EnvVarGuard::set("USERPROFILE", root.path());
+        let workspace = root.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        std::fs::write(workspace.join("large.txt"), vec![b'x'; 4096]).unwrap();
+        let mut app = create_test_app(workspace.clone());
+        app.current_session_id = Some("session-a".into());
+        assert!(
+            crate::core::turn::pre_turn_snapshot(&workspace, 1, 1024, None, Some("session-a"))
+                .is_none()
+        );
+        assert_eq!(
+            crate::core::turn::take_snapshots_disabled_notices(&workspace, Some("session-a")).len(),
+            1
+        );
+        for _ in 0..2 {
+            let report = status(&mut app).message.unwrap();
+            assert!(report.contains("Snapshots and /undo are off"), "{report}");
+            assert!(report.contains("workspace too large"), "{report}");
+            assert!(
+                report.contains(crate::core::turn::SNAPSHOTS_CAP_CONFIG_KEY),
+                "{report}"
+            );
+        }
+        app.current_session_id = Some("session-b".into());
+        assert!(
+            !status(&mut app)
+                .message
+                .unwrap()
+                .contains("Snapshots and /undo are off")
+        );
+        app.current_session_id = Some("session-a".into());
+        assert!(
+            crate::core::turn::pre_turn_snapshot(&workspace, 2, 0, None, Some("session-a"))
+                .is_some()
+        );
+        assert!(
+            !status(&mut app)
+                .message
+                .unwrap()
+                .contains("Snapshots and /undo are off")
+        );
+    }
 
     fn create_test_app(workspace: PathBuf) -> App {
         let options = TuiOptions {
