@@ -37,6 +37,10 @@ export const CHANGELOG: ChangelogRelease[] = [
       {
         "heading": "Fixed",
         "items": [
+          "Cancelling a foreground shell wait stops its owned process group even when the tool future is dropped. Explicitly backgrounded jobs retain their ownership. Interrupted tool receipts distinguish work that started from calls skipped before execution, and returned tool failures remain errors in the next model request.",
+          "Saved Fleet model identifiers retain exact spelling through selection, role pins, and roster changes, so changing one saved model does not modify another identifier that differs only in letter case.",
+          "Chat wrapping reserves its scrollbar gutter consistently, keeping long identifiers readable when the viewport changes.",
+          "The Engine keeps large send-message futures off the event loop's stack, preventing stack exhaustion when a restored session starts a provider turn.",
           "New, imported, and live session titles skip runtime handoffs and use the first real user prompt. Explicitly renamed titles retain priority (#6012, thanks @SparkofSpike).",
           "UI dispatch acceptance now precedes Engine execution, so a delayed acceptance callback cannot overwrite a turn that has already started or completed. Cancelling before acceptance preserves the prompt and leaves the next dispatch usable.",
           "Bottom-chrome effort is omitted when the route cannot prove an effective tier; /status retains the full explanation. Cost remains visible when known, and cost: unknown remains on metered routes lacking a reading (#5950).",
@@ -44,12 +48,9 @@ export const CHANGELOG: ChangelogRelease[] = [
           "serve --acp no longer breaks strict JetBrains clients: the initialize response advertised sessionCapabilities.list as a boolean and carried an undefined nested load capability; it now sends {\"list\": {}} with no load key, per the ACP schema (#5969, reported by @Lujc0523).",
           "Concurrent Codewhale instances no longer destroy each other's queued, unsent text. The offline input queue was one global file that boot cleared on session-id mismatch, so a second instance deleted the first's parked messages. Queues are now keyed per session (mirroring per-session checkpoints), an existing global file is adopted by its owning session rather than discarded, and the adoption race between two instances of the same session tolerates the loser's cleanup.",
           "A tool call truncated at the provider's output limit can no longer be repaired into valid JSON and executed: repairs that had to synthesize structure (append or discard closers) are routed to the existing malformed-arguments path so the model is asked to re-issue — including when the stream is cut before the closing content-block event (#5986).",
-          "codewhale metrics reads Codewhale's own receipts again: the deepseek-home fallback resolved $HOME/.deepseek unconditionally, so the rollup reported all zeros from a directory nothing has written since 2024. The Codewhale audit log is primary, with a checked legacy fallback.",
-          "The goal-continuation loop's promised stall bound actually bounds stalls now, and undeclared fleet role names fail closed to read-only explore in both fleet drivers instead of resolving to write-capable customs in one and not the other.",
-          "allow_insecure_http = true under a [providers.<name>] table works again. 0.9.12 tightened plain-HTTP base URL handling in a way that silently dropped the per-provider key, leaving the process-wide env var as the only opt-in — LAN llama.cpp and internal-gateway users had to export CODEWHALE_ALLOW_INSECURE_HTTP=1 to connect at all. The key is honored again (parsed, settable and unsettable through codewhale config set providers.<name>.allow_insecure_http, and listed in the…",
-          "A Fleet task that selects a roster member with worker.agent_profile now runs with that member's posture. The launch-time resolver only consulted the resolved member when the legacy worker.role label was absent, so a task labelled manager that selected member:reviewer ran as a write-capable manager instead of a reviewer and was never leased. The member's canonical slot now wins whenever one resolved; the label remains the posture only when no member resolved at all. To keep…"
+          "codewhale metrics reads Codewhale's own receipts again: the deepseek-home fallback resolved $HOME/.deepseek unconditionally, so the rollup reported all zeros from a directory nothing has written since 2024. The Codewhale audit log is primary, with a checked legacy fallback."
         ],
-        "itemCount": 11
+        "itemCount": 15
       },
       {
         "heading": "Changed",

@@ -17,6 +17,18 @@ with an accessibility-first pointer.
 
 ### Fixed
 
+- Cancelling a foreground shell wait stops its owned process group even when
+  the tool future is dropped. Explicitly backgrounded jobs retain their
+  ownership. Interrupted tool receipts distinguish work that started from
+  calls skipped before execution, and returned tool failures remain errors in
+  the next model request.
+- Saved Fleet model identifiers retain exact spelling through selection,
+  role pins, and roster changes, so changing one saved model does not modify
+  another identifier that differs only in letter case.
+- Chat wrapping reserves its scrollbar gutter consistently, keeping long
+  identifiers readable when the viewport changes.
+- The Engine keeps large send-message futures off the event loop's stack,
+  preventing stack exhaustion when a restored session starts a provider turn.
 - New, imported, and live session titles skip runtime handoffs and use the
   first real user prompt. Explicitly renamed titles retain priority
   (#6012, thanks @SparkofSpike).

@@ -15,8 +15,9 @@ name: Codewhale PR Review
 # a model review. Keep this pull_request event: a PR must not gain secrets by
 # being fetched for its diff. Same-repository authors already have write access.
 #
-# CODEWHALE_REVIEW_MAX_CHARS is passed to the shared complete-PR collector
-# (default 200000); exceeding it fails without reviewing or posting a prefix.
+# CODEWHALE_REVIEW_MAX_CHARS bounds each complete ordered review pass
+# (default 200000). CODEWHALE_REVIEW_MAX_PASSES defaults to 1; increasing it is
+# an explicit spend/duration choice. Exceeding either bound never posts a prefix.
 # Missing keys and provider outages keep the existing advisory policy, and
 # their explicit non-run receipts must never be counted as completed reviews.
 
@@ -142,6 +143,7 @@ jobs:
           CODEWHALE_REVIEW_MODEL: ${{ vars.CODEWHALE_REVIEW_MODEL }}
           CODEWHALE_REVIEW_MAX_OUTPUT_TOKENS: ${{ vars.CODEWHALE_REVIEW_MAX_OUTPUT_TOKENS }}
           CODEWHALE_REVIEW_MAX_CHARS: ${{ vars.CODEWHALE_REVIEW_MAX_CHARS }}
+          CODEWHALE_REVIEW_MAX_PASSES: ${{ vars.CODEWHALE_REVIEW_MAX_PASSES }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
@@ -184,6 +186,13 @@ jobs:
             exit 1
           fi
 
+          MAX_PASSES="${CODEWHALE_REVIEW_MAX_PASSES:-1}"
+          if [[ ! "$MAX_PASSES" =~ ^[1-9][0-9]?$ ]] || [ "$MAX_PASSES" -gt 64 ]; then
+            echo "::error::CODEWHALE_REVIEW_MAX_PASSES must be an integer from 1 to 64."
+            exit 1
+          fi
+          echo "Review limits: ${MAX_CHARS} characters per pass, at most ${MAX_PASSES} passes"
+
           # --- Output budget ---------------------------------------------
           # Some models share an output budget between reasoning and content.
           # Leave room for the review; unset keeps the CLI's automatic cap.
@@ -211,7 +220,7 @@ jobs:
           if [ -n "$MODEL" ]; then
             CLI_ARGS+=(--model "$MODEL")
           fi
-          REVIEW_ARGS=(--pr "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --max-chars "$MAX_CHARS" --post)
+          REVIEW_ARGS=(--pr "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --max-chars "$MAX_CHARS" --max-passes "$MAX_PASSES" --post)
           set +e
           OUTPUT=$(./target/release/codewhale "${CLI_ARGS[@]}" review "${REVIEW_ARGS[@]}" 2>&1)
           STATUS=$?

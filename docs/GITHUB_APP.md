@@ -84,15 +84,19 @@ submodules, or filters. Checkout credentials are not persisted.
 The shared collector uses the complete GitHub diff when available and a
 verified local Git diff when the API cannot provide it, including large PRs.
 It rejects a changed snapshot, unavailable history, or incomplete diff before
-review. Repository variable `CODEWHALE_REVIEW_MAX_CHARS` sets the review input
-limit (default **200000**, allowed range **1–8388608**). The collector also has
+review. Repository variable `CODEWHALE_REVIEW_MAX_CHARS` sets the input limit
+per pass (default **200000**, allowed range **1–8388608**). The collector also has
 an **8 MiB output** and **60-second command** bound; a character limit does not
 bypass those transport bounds.
 
 A complete diff requiring more than one configured-limit pass fails the job by
 default. It is never silently truncated or treated as a provider funding
-problem. `--max-passes N` is an explicit provider-spend and duration choice for
-at most N complete ordered passes; the hosted workflow does not enable it.
+problem. Repository variable `CODEWHALE_REVIEW_MAX_PASSES` (default **1**,
+allowed range **1–64**) passes `--max-passes N` to the CLI. Raising it explicitly
+authorizes the workflow to run up to N ordered passes for a complete review,
+with additional provider cost and run time. Set it only after reviewing that
+budget; leaving it unset retains one pass. If any pass fails, no partial
+review is posted.
 Increasing the character limit is a separate input-budget choice and still
 requires a model with sufficient context.
 
@@ -148,7 +152,8 @@ same-repository pull requests can post reviews as the App.
 
    App settings control identity. Model access separately requires a review
    key and, for account mode, the catalog model. Optional budget variables are
-   `CODEWHALE_REVIEW_MAX_CHARS` and `CODEWHALE_REVIEW_MAX_OUTPUT_TOKENS`.
+   `CODEWHALE_REVIEW_MAX_CHARS`, `CODEWHALE_REVIEW_MAX_PASSES`, and
+   `CODEWHALE_REVIEW_MAX_OUTPUT_TOKENS`.
 
 ## How the pieces connect
 
