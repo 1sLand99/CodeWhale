@@ -116,6 +116,8 @@ pub enum Op {
     /// `Op::SendMessage` payloads.
     SendMessage {
         content: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        images: Vec<crate::runtime::RuntimeImageInput>,
         /// Effective mode for this turn (`"plan" | "agent" | "operate"` etc).
         #[serde(default = "default_mode")]
         mode: String,
@@ -500,6 +502,7 @@ pub fn headless_send_message_op(thread_id: ThreadId, content: impl Into<String>)
         session_id: SessionId::new(),
         op: Op::SendMessage {
             content: content.into(),
+            images: Vec::new(),
             mode: default_mode(),
             model: None,
             model_provider: None,

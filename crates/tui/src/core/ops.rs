@@ -109,6 +109,8 @@ pub enum Op {
     /// Send a message to the AI
     SendMessage {
         content: String,
+        /// Inline image bytes validated by Runtime admission; no file references.
+        images: Vec<codewhale_protocol::runtime::RuntimeImageInput>,
         mode: AppMode,
         /// Exact, structurally resolved route authority for this turn. The
         /// engine activates its client before mutating turn state; injected

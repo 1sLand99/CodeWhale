@@ -128,13 +128,13 @@ const MCP_REGISTRY_FIRST_INSTRUCTION_SOURCE: &str = "runtime:mcp-registry-first"
 const MCP_REGISTRY_FIRST_INSTRUCTION: &str = "## MCP Registry-first policy\n\nFor any task centered on a specialized capability, including media or document conversion, data transformation, browser automation, database or service access, or a developer utility, you must call `registry_sync` with a `query` describing that capability before `exec_shell`, `fetch_url`, code execution, local programs, custom code, or a manual implementation. It scores the local Registry snapshot host-side and returns at most eight matches; the full catalog never enters the conversation. Treat a returned server as a match when it plausibly covers the core capability; wording need not be exact. If any plausible match exists, you must call `start_registry_mcp_server` with its exact name and inspect its tools before considering a local alternative. If nothing matches, refine the query once; a still-empty refined result means every Registry entry is clearly irrelevant. An installed or familiar shell command is not a reason to skip Registry discovery. Use local tools directly only for ordinary repo-native work and simple file operations, or after the matching server fails to start.";
 const ISOLATED_CHAT_ENGINE_PROMPT: &str = "You are Codewhale Chat. Answer the user's request directly and conversationally. This isolated chat-only session has no local workspace, project, memory, skill, account, credential, path, runtime context, or tools.";
 
-fn sanitize_isolated_chat_attachments(mut text: String) -> String {
+pub(crate) fn sanitize_isolated_chat_attachments(mut text: String) -> String {
     let references = crate::tui::file_mention::media_attachment_references(&text);
     for reference in references.into_iter().rev() {
         let replacement = if text[reference.start_byte..reference.end_byte].ends_with('\n') {
-            "[Attachment omitted: Runtime Chat is text-only.]\n"
+            "[Attachment omitted: Runtime Chat cannot read local file references.]\n"
         } else {
-            "[Attachment omitted: Runtime Chat is text-only.]"
+            "[Attachment omitted: Runtime Chat cannot read local file references.]"
         };
         text.replace_range(reference.start_byte..reference.end_byte, replacement);
     }
@@ -2564,6 +2564,7 @@ impl Engine {
                 self.config.hook_executor.clone(),
                 self.config.verbosity.clone(),
                 UserInputProvenance::Runtime,
+                Vec::new(),
             )
             .await;
     }
@@ -2606,6 +2607,7 @@ impl Engine {
                 EngineRunInput::Operation(op) => match *op {
                     Op::SendMessage {
                         content,
+                        images,
                         mode,
                         route,
                         compaction,
@@ -2658,6 +2660,7 @@ impl Engine {
                             hook_executor,
                             verbosity,
                             provenance,
+                            images,
                         )
                         .await;
                     }
@@ -2763,6 +2766,7 @@ impl Engine {
                                 self.config.hook_executor.clone(),
                                 self.config.verbosity.clone(),
                                 UserInputProvenance::Runtime,
+                                Vec::new(),
                             )
                             .await;
                     }
@@ -3311,6 +3315,7 @@ impl Engine {
                             self.config.hook_executor.clone(),
                             self.config.verbosity.clone(),
                             UserInputProvenance::ExternalUser,
+                            Vec::new(),
                         )
                         .await;
                     }
@@ -3705,8 +3710,8 @@ impl Engine {
     /// Whether the model can *see* the result is decided per request, not
     /// here — see `image_attach::strip_images_when_unsupported`.
     fn user_content_blocks(&self, text: String) -> Vec<ContentBlock> {
-        // Managed Chat currently accepts text only. Treat attachment-marker
-        // syntax as an omitted attachment so an account prompt can never make
+        // Managed Chat accepts validated inline bytes, never host paths. Treat
+        // attachment-marker syntax as an omitted attachment so an account prompt can never make
         // this host read a local path or echo that host path to a provider.
         if self.api_config.runtime_chat_isolated {
             return vec![ContentBlock::Text {
@@ -3960,6 +3965,7 @@ impl Engine {
                 self.config.hook_executor.clone(),
                 self.config.verbosity.clone(),
                 UserInputProvenance::SubAgentHandoff,
+                Vec::new(),
             )
             .await;
         if !outcome.started() {
@@ -4741,7 +4747,29 @@ impl Engine {
         hook_executor: Option<std::sync::Arc<crate::hooks::HookExecutor>>,
         verbosity: Option<String>,
         provenance: UserInputProvenance,
+        images: Vec<codewhale_protocol::runtime::RuntimeImageInput>,
     ) -> SendMessageOutcome {
+        // All surfaces reuse the same bounded validator. Runtime already checks
+        // before admission; this also protects direct in-process operations.
+        let images = match crate::image_attach::prepare_stored_images(&images) {
+            Ok(images) => images,
+            Err(error) => {
+                let message = error.to_string();
+                let _ = self
+                    .tx_event
+                    .send(Event::error(ErrorEnvelope::new(
+                        crate::error_taxonomy::ErrorCategory::InvalidInput,
+                        crate::error_taxonomy::ErrorSeverity::Error,
+                        true,
+                        "image_input_invalid",
+                        message.clone(),
+                    )))
+                    .await;
+                return SendMessageOutcome::NotStarted {
+                    error: Some(message),
+                };
+            }
+        };
         let turn_control = self.begin_turn_control();
         let mut goal_objective = goal_objective;
         let mut goal_token_budget = goal_token_budget;
@@ -5220,7 +5248,7 @@ impl Engine {
         // Add the user message through the same explicit snapshot constructor
         // preview uses. Route limits and mode in resource metadata therefore
         // belong to this turn even when the previous route was different.
-        let user_msg = self.user_text_message_from_snapshot(
+        let mut user_msg = self.user_text_message_from_snapshot(
             content,
             &model,
             auto_model,
@@ -5235,6 +5263,12 @@ impl Engine {
                 policy_narrowing: self.last_policy_narrowing.as_ref(),
             },
         );
+        let image_index = if self.api_config.runtime_chat_isolated {
+            user_msg.content.len()
+        } else {
+            user_msg.content.len().saturating_sub(1)
+        };
+        user_msg.content.splice(image_index..image_index, images);
         self.session.add_message(user_msg);
 
         self.emit_session_updated().await;

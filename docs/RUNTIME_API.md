@@ -692,6 +692,43 @@ resolved, and `auto` remains a per-prompt reasoning decision even when the
 thread uses a fixed model. The request still enters the existing
 `Op::SendMessage` path and the single `Engine::run_turn` loop.
 
+Image input uses the same turn path: `"images": [{"mime": "image/png",
+"dataBase64": "..."}]`. Clients must first observe
+`capabilities.turn_image_inputs: true` in `/v1/runtime/info` (or the isolated
+Runtime Chat relay catalog). Older HTTP runtimes ignore unknown fields, so a
+successful text response is not evidence that an attachment was accepted.
+The field is omitted when empty. It is also accepted by app-server
+`thread/message`, `thread/request` messages, and prompt requests; that bridge
+checks the underlying Runtime capability before forwarding image bytes.
+Legacy remote Work commands do not support images and explicitly refuse them.
+
+New inline images require a named model whose exact resolved route reports
+`image_input: "supported"`; Auto and unknown/unsupported image routes are
+refused before classifier or provider dispatch. This does not change the
+existing trusted-local attachment behavior for routes with unknown capability.
+A nonempty prompt is required. Inputs are limited to 10 images, 4 MiB decoded
+bytes per image, 5 MiB total, and an 8 MiB JSON body. PNG, JPEG, GIF and WebP
+must have matching MIME, canonical padded base64 and valid bounded image
+content: at most 8192 pixels per dimension, 33,554,432 pixels total and 64 MiB
+decoder allocation. The Runtime does not fetch paths or URLs from this field.
+Malformed images refuse the whole turn; callers can retain the draft for
+correction. Relay command polling uses an 8 MiB response budget; the sender
+must paginate by serialized bytes without advancing past unserved commands.
+
+Accepted image bytes and order are retained in the existing turn records and
+reconstructed after restart, import and fork. Retry retains those images even
+when its optional `prompt` changes the text; undo responses include
+`original_user_images` when present. Image-bearing records require schema v3,
+which older readers refuse. Text-only records and operation fingerprints retain
+their prior representation. Validated stored local images retain the existing
+5 MiB per-image ceiling and prior aggregate/count semantics on import/retry;
+this internal storage authority does not
+relax exact model or permission checks. Image bytes, MIME and order participate in request
+identity, so changing an image under the same operation key conflicts.
+Compaction can summarize older context; retaining the original attachment does
+not promise that every later model request includes it. Image pixels are not
+subject to text-secret redaction.
+
 `operation_key` is an optional idempotency key for clients that may lose an
 HTTP response after the Runtime accepted a turn. It is scoped to the current
 Runtime store and thread, may contain at most 128 UTF-8 bytes, and may not be
@@ -963,6 +1000,14 @@ non-empty list does not prove that the route can currently serve a request.
   ]
 }
 ```
+
+For an exact configured route, supply `?model_provider_id=vision-work` and
+require the response to echo that same `model_provider_id`. The Runtime resolves
+that identity under the requested provider kind before reading model support.
+Unknown or mismatched identities return `400`. Named pagination cursors bind the
+configuration identity, endpoint and catalog snapshot; changing any of those
+requires restarting pagination. Omitting the query preserves the legacy catalog
+projection and omits the identity echo.
 
 The catalog for one provider. Returns `400` for an unknown id, and for the
 legacy `deepseek-cn` alias, which has no provider metadata — use `deepseek`.

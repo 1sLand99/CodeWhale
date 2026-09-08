@@ -457,3 +457,95 @@ fn attach_from_path_reports_an_unreadable_file() {
         "got {error:?}"
     );
 }
+
+pub(crate) fn runtime_image_fixture(color: u8) -> codewhale_protocol::runtime::RuntimeImageInput {
+    let image = image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+        2,
+        2,
+        image::Rgba([color, 31, 99, 255]),
+    ));
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    image.write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+    codewhale_protocol::runtime::RuntimeImageInput {
+        mime: "image/png".into(),
+        data_base64: STANDARD.encode(bytes.into_inner()),
+    }
+}
+
+#[test]
+fn runtime_image_validation_preserves_exact_bytes_and_rejects_corruption() {
+    let input = runtime_image_fixture(7);
+    let blocks = prepare_runtime_images(std::slice::from_ref(&input)).unwrap();
+    assert_eq!(
+        runtime_images_from_blocks(&blocks).unwrap(),
+        [input.clone()]
+    );
+    for bad in [
+        codewhale_protocol::runtime::RuntimeImageInput {
+            mime: "image/jpeg".into(),
+            ..input.clone()
+        },
+        codewhale_protocol::runtime::RuntimeImageInput {
+            data_base64: "not base64".into(),
+            ..input.clone()
+        },
+        codewhale_protocol::runtime::RuntimeImageInput {
+            data_base64: String::new(),
+            ..input.clone()
+        },
+        // Existing signature sniffing alone accepted this truncated PNG.
+        codewhale_protocol::runtime::RuntimeImageInput {
+            data_base64: STANDARD.encode(b"\x89PNG\r\n\x1a\n"),
+            ..input.clone()
+        },
+    ] {
+        assert!(prepare_runtime_images(&[bad]).is_err());
+    }
+}
+
+#[test]
+fn runtime_image_validation_bounds_count_encoded_size_and_decode_dimensions() {
+    let input = runtime_image_fixture(7);
+    assert!(prepare_runtime_images(&vec![input.clone(); 11]).is_err());
+    assert!(
+        prepare_runtime_images(&[codewhale_protocol::runtime::RuntimeImageInput {
+            data_base64: "A".repeat(MAX_IMAGE_BYTES.div_ceil(3) * 4 + 1),
+            ..input
+        }])
+        .is_err()
+    );
+    let wide = image::DynamicImage::ImageRgba8(image::RgbaImage::new(MAX_IMAGE_DIMENSION + 1, 1));
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    wide.write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+    let input = codewhale_protocol::runtime::RuntimeImageInput {
+        mime: "image/png".into(),
+        data_base64: STANDARD.encode(bytes.into_inner()),
+    };
+    assert!(prepare_runtime_images(&[input]).is_err());
+}
+
+pub(crate) fn runtime_image_fixture_bytes(
+    size: usize,
+) -> codewhale_protocol::runtime::RuntimeImageInput {
+    let mut image = runtime_image_fixture(42);
+    let mut bytes = STANDARD.decode(&image.data_base64).unwrap();
+    bytes.resize(size, 0);
+    image.data_base64 = STANDARD.encode(bytes);
+    image
+}
+
+#[test]
+fn runtime_image_network_four_mib_and_historical_five_mib_bounds_are_distinct() {
+    let at_network_limit = runtime_image_fixture_bytes(MAX_RUNTIME_IMAGE_BYTES);
+    assert!(prepare_runtime_images(&[at_network_limit]).is_ok());
+    let historical = runtime_image_fixture_bytes(MAX_RUNTIME_IMAGE_BYTES + 1);
+    assert!(prepare_runtime_images(std::slice::from_ref(&historical)).is_err());
+    let stored = prepare_stored_images(std::slice::from_ref(&historical)).unwrap();
+    assert_eq!(runtime_images_from_blocks(&stored).unwrap(), [historical]);
+    assert!(prepare_stored_images(&[runtime_image_fixture_bytes(MAX_IMAGE_BYTES)]).is_ok());
+    assert!(prepare_stored_images(&[runtime_image_fixture_bytes(MAX_IMAGE_BYTES + 1)]).is_err());
+    let three_mib = runtime_image_fixture_bytes(3 * 1024 * 1024);
+    assert!(prepare_runtime_images(&[three_mib.clone(), three_mib.clone()]).is_err());
+    assert!(prepare_stored_images(&[three_mib.clone(), three_mib]).is_ok());
+    assert!(prepare_stored_images(&vec![runtime_image_fixture(1); 11]).is_ok());
+}

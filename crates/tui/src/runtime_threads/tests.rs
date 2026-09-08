@@ -201,9 +201,9 @@ mod recovery {
         let thread = manager.get_thread(&thread.id).await?;
         let fork = manager.fork_thread(&thread.id).await?;
         assert_eq!(manager.restore_thread_messages(&fork)?, messages);
-        let (backtrack, _) = manager.fork_at_user_message(&thread.id, 0).await?;
+        let (backtrack, _, _) = manager.fork_at_user_message(&thread.id, 0).await?;
         assert_eq!(manager.restore_thread_messages(&backtrack)?, messages[..2]);
-        let (empty, _) = manager.fork_at_user_message(&thread.id, 1).await?;
+        let (empty, _, _) = manager.fork_at_user_message(&thread.id, 1).await?;
         assert!(manager.restore_thread_messages(&empty)?.is_empty());
         assert_eq!(manager.restore_thread_messages(&thread)?, messages);
         let mut legacy = thread.clone();
@@ -1540,6 +1540,7 @@ fn runtime_turn_operation_keys_are_bounded_scoped_and_fingerprint_execution_poli
         false,
         &[],
         None,
+        &[],
     )?;
 
     let mut different_provider = thread.clone();
@@ -1558,6 +1559,7 @@ fn runtime_turn_operation_keys_are_bounded_scoped_and_fingerprint_execution_poli
             false,
             &[],
             None,
+            &[],
         )?,
         runtime_turn_request_fingerprint(
             &thread,
@@ -1571,6 +1573,7 @@ fn runtime_turn_operation_keys_are_bounded_scoped_and_fingerprint_execution_poli
             false,
             &[],
             None,
+            &[],
         )?,
         runtime_turn_request_fingerprint(
             &thread,
@@ -1584,6 +1587,7 @@ fn runtime_turn_operation_keys_are_bounded_scoped_and_fingerprint_execution_poli
             false,
             &[],
             None,
+            &[],
         )?,
         runtime_turn_request_fingerprint(
             &thread,
@@ -1597,6 +1601,7 @@ fn runtime_turn_operation_keys_are_bounded_scoped_and_fingerprint_execution_poli
             false,
             &[],
             None,
+            &[],
         )?,
         runtime_turn_request_fingerprint(
             &thread,
@@ -1610,6 +1615,7 @@ fn runtime_turn_operation_keys_are_bounded_scoped_and_fingerprint_execution_poli
             false,
             &[],
             None,
+            &[],
         )?,
         runtime_turn_request_fingerprint(
             &thread,
@@ -1623,6 +1629,7 @@ fn runtime_turn_operation_keys_are_bounded_scoped_and_fingerprint_execution_poli
             true,
             &[],
             None,
+            &[],
         )?,
     ];
     assert!(
@@ -1924,6 +1931,7 @@ async fn operation_key_replays_torn_response_survives_restart_and_rejects_mismat
     let operation_key = "cwc-op-sk-fixture-must-not-persist".to_string();
     let request = StartTurnRequest {
         prompt: "idempotent turn payload".to_string(),
+        images: Vec::new(),
         operation_key: Some(operation_key.clone()),
         reasoning_effort: Some("high".to_string()),
         allowed_tools: Some(Vec::new()),
@@ -2121,6 +2129,7 @@ async fn restart_removes_torn_operation_item_before_reserved_turn_retry() -> Res
             &thread.id,
             StartTurnRequest {
                 prompt: "retry after the pre-submit crash".to_string(),
+                images: Vec::new(),
                 operation_key: Some(operation_key.to_string()),
                 ..StartTurnRequest::default()
             },
@@ -4558,7 +4567,7 @@ fn store_load_scenario() {
 
         // Construct a thread record persisted with a future schema version.
         let mut thread = sample_thread("thr_future");
-        thread.schema_version = CURRENT_RUNTIME_SCHEMA_VERSION + 1;
+        thread.schema_version = MAX_SUPPORTED_RUNTIME_SCHEMA_VERSION + 1;
 
         // Bypass save_thread (which would respect our local schema_version)
         // by writing the JSON directly so we can simulate a future writer.
@@ -4582,7 +4591,7 @@ fn store_load_scenario() {
         let store = RuntimeThreadStore::open(dir.clone()).expect("open store");
 
         let mut turn = sample_turn("thr_t", "trn_future", RuntimeTurnStatus::InProgress);
-        turn.schema_version = CURRENT_RUNTIME_SCHEMA_VERSION + 1;
+        turn.schema_version = MAX_SUPPORTED_RUNTIME_SCHEMA_VERSION + 1;
 
         let path = store.turns_dir.join(format!("{}.json", turn.id));
         std::fs::create_dir_all(path.parent().unwrap()).expect("mkdirs");
@@ -4605,7 +4614,7 @@ fn store_load_scenario() {
         let store = RuntimeThreadStore::open(dir.clone()).expect("open store");
 
         let mut item = sample_item("trn_t", "itm_future", TurnItemLifecycleStatus::InProgress);
-        item.schema_version = CURRENT_RUNTIME_SCHEMA_VERSION + 1;
+        item.schema_version = MAX_SUPPORTED_RUNTIME_SCHEMA_VERSION + 1;
 
         let path = store.items_dir.join(format!("{}.json", item.id));
         std::fs::create_dir_all(path.parent().unwrap()).expect("mkdirs");
@@ -13260,7 +13269,7 @@ async fn fork_at_user_message_drops_tail_and_returns_user_text() -> Result<()> {
         .await?;
     seed_turns_with_user_messages(&manager, &thread.id, &["first", "second", "third"])?;
 
-    let (forked, original_text) = manager.fork_at_user_message(&thread.id, 0).await?;
+    let (forked, original_text, _) = manager.fork_at_user_message(&thread.id, 0).await?;
     assert_eq!(original_text.as_deref(), Some("third"));
     assert_ne!(forked.id, thread.id);
 
@@ -13297,7 +13306,7 @@ async fn fork_at_user_message_depth_one_drops_two_turns() -> Result<()> {
         .await?;
     seed_turns_with_user_messages(&manager, &thread.id, &["a", "b", "c", "d"])?;
 
-    let (forked, original_text) = manager.fork_at_user_message(&thread.id, 1).await?;
+    let (forked, original_text, _) = manager.fork_at_user_message(&thread.id, 1).await?;
     assert_eq!(original_text.as_deref(), Some("c"));
     let forked_turns = manager.store.list_turns_for_thread(&forked.id)?;
     let summaries: Vec<&str> = forked_turns
@@ -14239,3 +14248,520 @@ async fn report_store_failure_names_the_item_file_without_terminalizing() -> Res
 }
 
 mod task_ownership;
+
+mod runtime_image_inputs {
+    use super::*;
+    use crate::core::engine::Engine;
+    use crate::image_attach::tests::runtime_image_fixture;
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    fn config() -> Config {
+        let mut config = Config {
+            provider: Some("deepseek".into()),
+            default_text_model: Some("deepseek-v4-flash-vision-exp".into()),
+            api_key: Some("synthetic-image-fixture-key".into()),
+            runtime_chat_isolated: true,
+            ..Config::default()
+        };
+        config.set_provider_model_override(
+            ApiProvider::Deepseek,
+            Some("deepseek-v4-flash-vision-exp".into()),
+        );
+        config.set_feature("mcp", false).unwrap();
+        config.set_feature("subagents", false).unwrap();
+        config
+    }
+
+    #[tokio::test]
+    async fn runtime_image_admission_rejects_auto_unknown_and_malformed_without_engine()
+    -> Result<()> {
+        let _env = crate::test_support::lock_test_env();
+        let dir = tempfile::tempdir()?;
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", dir.path());
+        let manager = RuntimeThreadManager::open(
+            config(),
+            dir.path().to_path_buf(),
+            test_manager_config(dir.path().join("runtime")),
+        )?;
+        let thread = manager
+            .create_thread(CreateThreadRequest::default())
+            .await?;
+        let good = runtime_image_fixture(17);
+        for (prompt, model, image) in [
+            ("look", "auto", good.clone()),
+            ("look", "deepseek-v4-flash", good.clone()),
+            ("look", "unknown-image-fixture", good.clone()),
+            ("", "deepseek-v4-flash-vision-exp", good.clone()),
+            (
+                "look",
+                "deepseek-v4-flash-vision-exp",
+                codewhale_protocol::runtime::RuntimeImageInput {
+                    mime: "image/jpeg".into(),
+                    ..good
+                },
+            ),
+        ] {
+            assert!(
+                manager
+                    .start_turn(
+                        &thread.id,
+                        StartTurnRequest {
+                            prompt: prompt.into(),
+                            model: Some(model.into()),
+                            images: vec![image],
+                            operation_key: Some("image-rejected".into()),
+                            ..Default::default()
+                        }
+                    )
+                    .await
+                    .is_err()
+            );
+            assert!(
+                manager.active.lock().await.engines.is_empty(),
+                "invalid image must fail before Engine load/classifier"
+            );
+            assert!(manager.store.list_turns_for_thread(&thread.id)?.is_empty());
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn runtime_image_engine_replay_restart_fork_and_retry_keep_exact_order() -> Result<()> {
+        let _env = crate::test_support::lock_test_env();
+        let dir = tempfile::tempdir()?;
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", dir.path());
+        let config = config();
+        let manager_config = test_manager_config(dir.path().join("runtime"));
+        let manager = RuntimeThreadManager::open(
+            config.clone(),
+            dir.path().to_path_buf(),
+            manager_config.clone(),
+        )?;
+        let thread = manager
+            .create_thread(CreateThreadRequest::default())
+            .await?;
+        let images = vec![runtime_image_fixture(17), runtime_image_fixture(33)];
+        let mock = Arc::new(MockLlmClient::new(vec![canned::simple_text_turn(
+            "fixture image response",
+        )]));
+        let (engine, handle) = Engine::new_with_model_client(
+            EngineConfig {
+                workspace: dir.path().to_path_buf(),
+                model: thread.model.clone(),
+                subagents_enabled: false,
+                snapshots_enabled: false,
+                memory_enabled: false,
+                terminal_chrome_enabled: false,
+                runtime_services: crate::tools::spec::RuntimeToolServices {
+                    active_thread_id: Some(thread.id.clone()),
+                    ..Default::default()
+                },
+                ..EngineConfig::default()
+            },
+            &config,
+            mock.clone(),
+        );
+        manager
+            .install_test_engine(&thread.id, handle.clone())
+            .await?;
+        let run = tokio::spawn(engine.run());
+        let request = StartTurnRequest {
+            prompt: "compare the two images\n[Attached image: /private/host-only.png]".into(),
+            images: images.clone(),
+            operation_key: Some("image-exact-replay".into()),
+            ..Default::default()
+        };
+        let turn = manager.start_turn(&thread.id, request.clone()).await?;
+        assert_eq!(
+            wait_for_terminal_turn(&manager, &turn.id, Duration::from_secs(10))
+                .await?
+                .status,
+            RuntimeTurnStatus::Completed
+        );
+        assert_eq!(mock.call_count(), 1);
+        let provider_request = mock.last_request().context("mock request")?;
+        let sent: Vec<_> = provider_request
+            .messages
+            .iter()
+            .flat_map(|m| m.content.clone())
+            .collect();
+        assert_eq!(
+            crate::image_attach::runtime_images_from_blocks(&sent)?,
+            images
+        );
+        assert!(!serde_json::to_string(&provider_request.messages)?.contains("host-only.png"));
+        assert_eq!(
+            manager.start_turn(&thread.id, request.clone()).await?.id,
+            turn.id
+        );
+        let mut changed = request.clone();
+        changed.images.reverse();
+        assert!(manager.start_turn(&thread.id, changed).await.is_err());
+        assert_eq!(mock.call_count(), 1);
+        let item = manager
+            .store
+            .list_items_for_turn(&turn.id)?
+            .into_iter()
+            .find(|i| i.kind == TurnItemKind::UserMessage)
+            .unwrap();
+        assert_eq!(item.schema_version, IMAGE_RUNTIME_SCHEMA_VERSION);
+        assert!(
+            item.schema_version > 2,
+            "pre-image readers reject this schema"
+        );
+        assert_eq!(
+            manager.get_thread(&thread.id).await?.schema_version,
+            IMAGE_RUNTIME_SCHEMA_VERSION
+        );
+        handle.send(Op::Shutdown).await?;
+        tokio::time::timeout(Duration::from_secs(10), run).await??;
+        drop(handle);
+        drop(manager);
+        let reopened =
+            RuntimeThreadManager::open(config.clone(), dir.path().to_path_buf(), manager_config)?;
+        assert_eq!(reopened.start_turn(&thread.id, request).await?.id, turn.id);
+        assert!(
+            reopened.active.lock().await.engines.is_empty(),
+            "exact replay needs no provider or Engine"
+        );
+        let stored_thread = reopened.get_thread(&thread.id).await?;
+        let messages = reopened.restore_thread_messages(&stored_thread)?;
+        assert_eq!(
+            crate::image_attach::runtime_images_from_blocks(
+                &messages
+                    .into_iter()
+                    .flat_map(|m| m.content)
+                    .collect::<Vec<_>>()
+            )?,
+            images
+        );
+        let fork = reopened.fork_thread(&thread.id).await?;
+        let messages = reopened.restore_thread_messages(&fork)?;
+        assert_eq!(
+            crate::image_attach::runtime_images_from_blocks(
+                &messages
+                    .into_iter()
+                    .flat_map(|m| m.content)
+                    .collect::<Vec<_>>()
+            )?,
+            images
+        );
+        let (_, original_text, retry_images) = reopened.fork_at_user_message(&thread.id, 0).await?;
+        assert!(original_text.unwrap().starts_with("compare the two images"));
+        assert_eq!(retry_images, images);
+        let followup_mock = Arc::new(MockLlmClient::new(vec![canned::simple_text_turn(
+            "remembered screenshots",
+        )]));
+        let (engine, handle) = Engine::new_with_model_client(
+            EngineConfig {
+                workspace: dir.path().to_path_buf(),
+                model: thread.model.clone(),
+                subagents_enabled: false,
+                snapshots_enabled: false,
+                memory_enabled: false,
+                terminal_chrome_enabled: false,
+                runtime_services: crate::tools::spec::RuntimeToolServices {
+                    active_thread_id: Some(thread.id.clone()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            &config,
+            followup_mock.clone(),
+        );
+        reopened
+            .install_test_engine(&thread.id, handle.clone())
+            .await?;
+        let run = tokio::spawn(engine.run());
+        handle
+            .send(Op::SyncSession {
+                session_id: stored_thread.session_id.clone(),
+                messages: reopened.restore_thread_messages(&stored_thread)?,
+                system_prompt: None,
+                system_prompt_override: false,
+                model: stored_thread.model.clone(),
+                workspace: stored_thread.workspace.clone(),
+                mode: crate::tui::app::AppMode::Agent,
+            })
+            .await?;
+        let followup = reopened
+            .start_turn(
+                &thread.id,
+                StartTurnRequest {
+                    prompt: "What differed between those screenshots?".into(),
+                    ..Default::default()
+                },
+            )
+            .await?;
+        assert_eq!(
+            wait_for_terminal_turn(&reopened, &followup.id, Duration::from_secs(10))
+                .await?
+                .status,
+            RuntimeTurnStatus::Completed
+        );
+        let outbound = followup_mock
+            .last_request()
+            .context("restored follow-up request")?;
+        assert_eq!(
+            crate::image_attach::runtime_images_from_blocks(
+                &outbound
+                    .messages
+                    .iter()
+                    .flat_map(|m| m.content.clone())
+                    .collect::<Vec<_>>()
+            )?,
+            images
+        );
+        assert!(!serde_json::to_string(&outbound.messages)?.contains("host-only.png"));
+        handle.send(Op::Shutdown).await?;
+        tokio::time::timeout(Duration::from_secs(10), run).await??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn runtime_image_seed_roundtrips_user_block_order_and_future_schema_refuses() -> Result<()>
+    {
+        let dir = tempfile::tempdir()?;
+        let manager = test_manager(dir.path().join("runtime"))?;
+        let thread = manager
+            .create_thread(CreateThreadRequest::default())
+            .await?;
+        let mut content = crate::image_attach::prepare_runtime_images(&[
+            runtime_image_fixture(8),
+            runtime_image_fixture(9),
+        ])?;
+        content.insert(
+            1,
+            ContentBlock::Text {
+                text: "between images".into(),
+                cache_control: None,
+            },
+        );
+        let original = vec![Message {
+            role: Role::User,
+            content,
+        }];
+        manager
+            .seed_thread_from_messages(&thread.id, &original)
+            .await?;
+        let updated = manager.get_thread(&thread.id).await?;
+        assert_eq!(manager.restore_thread_messages(&updated)?, original);
+        let turn = manager.store.list_turns_for_thread(&thread.id)?.remove(0);
+        assert_eq!(turn.schema_version, IMAGE_RUNTIME_SCHEMA_VERSION);
+        let mut item = manager.store.list_items_for_turn(&turn.id)?.remove(0);
+        item.schema_version = MAX_SUPPORTED_RUNTIME_SCHEMA_VERSION + 1;
+        manager.store.save_item(&item)?;
+        assert!(
+            manager
+                .store
+                .load_item(&item.id)
+                .unwrap_err()
+                .to_string()
+                .contains("newer than supported")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn runtime_image_durable_corruption_and_bad_import_fail_closed() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let manager = test_manager(dir.path().join("runtime"))?;
+        let thread = manager.create_thread(Default::default()).await?;
+        let mut valid = crate::image_attach::prepare_runtime_images(&[runtime_image_fixture(4)])?;
+        valid.insert(
+            0,
+            ContentBlock::Text {
+                text: "keep my prompt".into(),
+                cache_control: None,
+            },
+        );
+        manager
+            .seed_thread_from_messages(
+                &thread.id,
+                &[Message {
+                    role: Role::User,
+                    content: valid.clone(),
+                }],
+            )
+            .await?;
+        let turn = manager.store.list_turns_for_thread(&thread.id)?.remove(0);
+        let original = manager.store.list_items_for_turn(&turn.id)?.remove(0);
+        let mut bad_url = valid.clone();
+        if let ContentBlock::ImageUrl { image_url } = &mut bad_url[1] {
+            image_url.url = "https://host.invalid/private-image".into();
+        }
+        let mut truncated = valid.clone();
+        if let ContentBlock::ImageUrl { image_url } = &mut truncated[1] {
+            image_url.url = "data:image/png;base64,iVBORw0KGgo=".into();
+        }
+        for content in [
+            vec![],
+            valid[..1].to_vec(),
+            valid[1..].to_vec(),
+            bad_url,
+            truncated,
+        ] {
+            let mut damaged = original.clone();
+            damaged.set_image_content(content);
+            manager.store.save_item(&damaged)?;
+            assert!(manager.store.load_item(&damaged.id).is_err());
+            assert!(manager.store.list_items_for_turn(&turn.id).is_err());
+            assert!(
+                manager
+                    .restore_thread_messages(&manager.get_thread(&thread.id).await?)
+                    .is_err()
+            );
+        }
+        // Legacy records never give this additive metadata field new authority.
+        let mut legacy = original.clone();
+        legacy.schema_version = 2;
+        legacy.metadata = Some(json!({"runtime_image_content": []}));
+        manager.store.save_item(&legacy)?;
+        assert_eq!(
+            manager.store.load_item(&legacy.id)?.user_content()?,
+            valid[..1]
+        );
+        let empty = manager.create_thread(Default::default()).await?;
+        let mut invalid = valid.clone();
+        if let ContentBlock::ImageUrl { image_url } = &mut invalid[1] {
+            image_url.url = "file:///private/never-read".into();
+        }
+        assert!(
+            manager
+                .seed_thread_from_messages(
+                    &empty.id,
+                    &[
+                        Message {
+                            role: Role::User,
+                            content: valid
+                        },
+                        Message {
+                            role: Role::User,
+                            content: invalid
+                        },
+                    ]
+                )
+                .await
+                .is_err()
+        );
+        assert!(manager.store.list_turns_for_thread(&empty.id)?.is_empty());
+        assert!(
+            manager
+                .get_thread(&empty.id)
+                .await?
+                .latest_turn_id
+                .is_none()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn runtime_image_stored_retry_keeps_five_mib_bytes_without_relaxing_route_policy()
+    -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let config = config();
+        let manager = RuntimeThreadManager::open(
+            config,
+            dir.path().to_path_buf(),
+            test_manager_config(dir.path().join("runtime")),
+        )?;
+        let cases = [
+            vec![crate::image_attach::tests::runtime_image_fixture_bytes(
+                4 * 1024 * 1024 + 1,
+            )],
+            vec![crate::image_attach::tests::runtime_image_fixture_bytes(3 * 1024 * 1024); 2],
+            vec![runtime_image_fixture(5); 11],
+        ];
+        for expected in cases {
+            let thread = manager.create_thread(Default::default()).await?;
+            let mut content = crate::image_attach::prepare_stored_images(&expected)?;
+            content.insert(
+                0,
+                ContentBlock::Text {
+                    text: "stored screenshot".into(),
+                    cache_control: None,
+                },
+            );
+            manager
+                .seed_thread_from_messages(
+                    &thread.id,
+                    &[Message {
+                        role: Role::User,
+                        content,
+                    }],
+                )
+                .await?;
+            let (fork, prompt, images) = manager.fork_at_user_message(&thread.id, 0).await?;
+            assert_eq!(images, expected);
+            let request = StartTurnRequest {
+                prompt: prompt.unwrap(),
+                images,
+                ..Default::default()
+            };
+            assert!(manager.start_turn(&fork.id, request.clone()).await.is_err());
+            let mut unsupported = request.clone();
+            unsupported.model = Some("deepseek-v4-flash".into());
+            assert!(
+                manager
+                    .start_turn_from_stored_images(&fork.id, unsupported)
+                    .await
+                    .is_err()
+            );
+            assert!(!manager.active.lock().await.engines.contains_key(&fork.id));
+            let mut harness = crate::core::engine::mock_engine_handle();
+            manager
+                .install_test_engine(&fork.id, harness.handle.clone())
+                .await?;
+            let turn = manager
+                .start_turn_from_stored_images(&fork.id, request.clone())
+                .await?;
+            let Some(Op::SendMessage { images, .. }) = harness.rx_op.recv().await else {
+                bail!("expected stored image retry");
+            };
+            assert_eq!(images, request.images);
+            assert_eq!(turn.schema_version, IMAGE_RUNTIME_SCHEMA_VERSION);
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn runtime_image_native_fingerprint_keeps_legacy_text_and_binds_bytes() -> Result<()> {
+    let thread = sample_thread("thr_image_legacy");
+    let policy = RuntimePolicyProjection::from_persisted("agent", Some("ask"), false);
+    let fingerprint = |images: &[codewhale_protocol::runtime::RuntimeImageInput]| {
+        runtime_turn_request_fingerprint(
+            &thread,
+            "hello",
+            None,
+            "fixture-model",
+            None,
+            None,
+            policy,
+            false,
+            false,
+            &[],
+            None,
+            images,
+        )
+    };
+    // SHA-256 of the canonical committed version-1 text request fields.
+    assert_eq!(
+        fingerprint(&[])?,
+        "4dd89138dfd3bfdcffbfa4fed71664e98f23e40a8b46ee6a4829871d94103d67"
+    );
+    let one = crate::image_attach::tests::runtime_image_fixture(1);
+    let two = crate::image_attach::tests::runtime_image_fixture(2);
+    assert_ne!(
+        fingerprint(std::slice::from_ref(&one))?,
+        fingerprint(std::slice::from_ref(&two))?
+    );
+    assert_ne!(
+        fingerprint(&[one.clone(), two.clone()])?,
+        fingerprint(&[two, one])?
+    );
+    let absent: StartTurnRequest = serde_json::from_value(json!({"prompt":"hello"}))?;
+    let empty: StartTurnRequest = serde_json::from_value(json!({"prompt":"hello","images":[]}))?;
+    assert_eq!(serde_json::to_value(absent)?, serde_json::to_value(empty)?);
+    Ok(())
+}

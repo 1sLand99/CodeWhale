@@ -7868,7 +7868,9 @@ fn provider_model_catalog_paginates_all_six_hundred_rows_without_truncation() {
                 filter: None,
                 cursor,
                 limit: Some(MAX_PROVIDER_MODELS_PAGE_SIZE),
+                ..Default::default()
             },
+            None,
         )
         .expect("page should be valid");
         page_count += 1;
@@ -7913,7 +7915,9 @@ fn provider_model_catalog_applies_filter_before_cursor_and_rejects_cross_scope_r
             filter: Some(" ALPHA ".to_string()),
             cursor: None,
             limit: Some(1),
+            ..Default::default()
         },
+        None,
     )
     .expect("filtered first page should be valid");
     assert_eq!(first.total, 2);
@@ -7927,7 +7931,9 @@ fn provider_model_catalog_applies_filter_before_cursor_and_rejects_cross_scope_r
             filter: Some("alpha".to_string()),
             cursor: Some(cursor.clone()),
             limit: Some(1),
+            ..Default::default()
         },
+        None,
     )
     .expect("matching filter should continue");
     assert_eq!(second.models[0].id, "alpha-two");
@@ -7940,7 +7946,9 @@ fn provider_model_catalog_applies_filter_before_cursor_and_rejects_cross_scope_r
             filter: Some("alpha".to_string()),
             cursor: Some(cursor),
             limit: Some(1),
+            ..Default::default()
         },
+        None,
     );
     assert!(replay.is_err(), "a cursor cannot cross provider ownership");
 }
@@ -7961,7 +7969,9 @@ fn provider_model_cursor_rejects_catalog_change_between_pages() {
             filter: None,
             cursor: None,
             limit: Some(1),
+            ..Default::default()
         },
+        None,
     )
     .expect("first page");
     let cursor = first.next_cursor.expect("second page remains");
@@ -7978,7 +7988,9 @@ fn provider_model_cursor_rejects_catalog_change_between_pages() {
                 filter: None,
                 cursor: Some(cursor.clone()),
                 limit: Some(1),
-            }
+                ..Default::default()
+            },
+            None,
         )
         .is_err(),
         "an insertion before the cursor must force a restart, not disappear"
@@ -7993,7 +8005,9 @@ fn provider_model_cursor_rejects_catalog_change_between_pages() {
                 filter: None,
                 cursor: Some(cursor),
                 limit: Some(1),
-            }
+                ..Default::default()
+            },
+            None,
         )
         .is_err(),
         "capability changes also invalidate a catalog snapshot"
@@ -8017,7 +8031,9 @@ fn provider_model_cursor_round_trips_multibyte_filter_at_the_allowed_limit() {
             filter: Some(filter.clone()),
             cursor: None,
             limit: Some(1),
+            ..Default::default()
         },
+        None,
     )
     .expect("first page");
     let second = paginate_provider_models(
@@ -8027,7 +8043,9 @@ fn provider_model_cursor_round_trips_multibyte_filter_at_the_allowed_limit() {
             filter: Some(filter),
             cursor: first.next_cursor,
             limit: Some(1),
+            ..Default::default()
         },
+        None,
     )
     .expect("all emitted cursors must be accepted, including multibyte filters");
     assert_eq!(second.models.len(), 1);
@@ -12675,5 +12693,407 @@ async fn native_notification_replay_rechecks_requests_settled_during_the_read() 
         }),
         "requests settled during replay must stay silent: {after_settlement:?}"
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn runtime_image_http_rejects_before_dispatch_and_accepts_large_canonical_bytes() -> Result<()>
+{
+    use crate::image_attach::tests::runtime_image_fixture;
+    use base64::Engine as _;
+    let _env = crate::test_support::lock_test_env();
+    let dir = tempfile::tempdir()?;
+    let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", dir.path());
+    let mut config = Config {
+        provider: Some("deepseek".into()),
+        default_text_model: Some("deepseek-v4-flash-vision-exp".into()),
+        api_key: Some("synthetic-image-key".into()),
+        ..Default::default()
+    };
+    config.set_provider_model_override(
+        ApiProvider::Deepseek,
+        Some("deepseek-v4-flash-vision-exp".into()),
+    );
+    let (addr, manager, server) = spawn_test_server_with_root_token_mobile_workspace_and_overrides(
+        dir.path().to_path_buf(),
+        dir.path().join("sessions"),
+        None,
+        false,
+        dir.path().join("workspace"),
+        TestServerOverrides {
+            config: Some(config),
+            ..Default::default()
+        },
+    )
+    .await?
+    .context("loopback listener required for image contract proof")?;
+    let thread = manager.create_thread(Default::default()).await?;
+    let mut harness = crate::core::engine::mock_engine_handle();
+    manager
+        .install_test_engine(&thread.id, harness.handle.clone())
+        .await?;
+    let client = crate::tls::reqwest_client();
+    let url = format!("http://{addr}/v1/threads/{}/turns", thread.id);
+    let good = runtime_image_fixture(7);
+    for body in [
+        json!({"prompt":"look", "images":[{"mime":"image/png", "dataBase64":"garbage"}]}),
+        json!({"prompt":"", "images":[good.clone()]}),
+        json!({"prompt":"look", "model":"auto", "images":[good.clone()]}),
+        json!({"prompt":"look", "model":"deepseek-v4-flash", "images":[good.clone()]}),
+        json!({"prompt":"look", "images":[{"mime":"image/png", "dataBase64":good.data_base64, "path":"/private/host-only"}]}),
+    ] {
+        let response = client.post(&url).json(&body).send().await?;
+        assert!(response.status().is_client_error());
+        assert!(
+            harness.rx_op.try_recv().is_err(),
+            "rejection must not dispatch any Engine op"
+        );
+        assert!(
+            manager
+                .get_thread_detail(&thread.id)
+                .await?
+                .turns
+                .is_empty()
+        );
+    }
+    // An actual incompressible PNG crosses the former 2 MiB HTTP ceiling.
+    let mut random = 0x4a11_3317_u32;
+    let bytes: Vec<u8> = (0..768 * 768 * 4)
+        .map(|_| {
+            random ^= random << 13;
+            random ^= random >> 17;
+            random ^= random << 5;
+            random as u8
+        })
+        .collect();
+    let image =
+        image::DynamicImage::ImageRgba8(image::RgbaImage::from_raw(768, 768, bytes).unwrap());
+    let mut encoded = std::io::Cursor::new(Vec::new());
+    image.write_to(&mut encoded, image::ImageFormat::Png)?;
+    let large = codewhale_protocol::runtime::RuntimeImageInput {
+        mime: "image/png".into(),
+        data_base64: base64::engine::general_purpose::STANDARD.encode(encoded.into_inner()),
+    };
+    let body = json!({"prompt":"compare screenshot", "operation_key":"http-image-once", "images":[large.clone(),good.clone()]});
+    assert!(serde_json::to_vec(&body)?.len() > 2 * 1024 * 1024);
+    let response = client.post(&url).json(&body).send().await?;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let accepted: Value = response.json().await?;
+    let Op::SendMessage { images, .. } =
+        harness.rx_op.recv().await.context("accepted Engine op")?
+    else {
+        bail!("expected SendMessage");
+    };
+    assert_eq!(images, [large, good]);
+    let replay: Value = client
+        .post(&url)
+        .json(&body)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(replay["turn"]["id"], accepted["turn"]["id"]);
+    assert!(harness.rx_op.try_recv().is_err());
+    harness
+        .tx_event
+        .send(EngineEvent::TurnStarted {
+            turn_id: "image-http-fixture".into(),
+            created_at: Utc::now(),
+            route: None,
+        })
+        .await?;
+    harness
+        .tx_event
+        .send(EngineEvent::TurnComplete {
+            usage: Default::default(),
+            parent_route_usage: Default::default(),
+            routed_usage_dropped_records: 0,
+            status: crate::core::events::TurnOutcomeStatus::Completed,
+            error: None,
+            tool_catalog: None,
+            base_url: None,
+        })
+        .await?;
+    server.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn runtime_image_stream_rejection_does_not_leave_empty_threads() -> Result<()> {
+    use crate::image_attach::tests::{runtime_image_fixture, runtime_image_fixture_bytes};
+    let _env = crate::test_support::lock_test_env();
+    let dir = tempfile::tempdir()?;
+    let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", dir.path());
+    let mut config = Config {
+        provider: Some("deepseek".into()),
+        default_text_model: Some("deepseek-v4-flash-vision-exp".into()),
+        api_key: Some("synthetic-image-key".into()),
+        ..Default::default()
+    };
+    config.set_provider_model_override(
+        ApiProvider::Deepseek,
+        Some("deepseek-v4-flash-vision-exp".into()),
+    );
+    let (addr, manager, server) = spawn_test_server_with_root_token_mobile_workspace_and_overrides(
+        dir.path().to_path_buf(),
+        dir.path().join("sessions"),
+        None,
+        false,
+        dir.path().join("workspace"),
+        TestServerOverrides {
+            config: Some(config),
+            ..Default::default()
+        },
+    )
+    .await?
+    .context("loopback listener required")?;
+    let client = crate::tls::reqwest_client();
+    let good = runtime_image_fixture(3);
+    for body in [
+        json!({"prompt":"look", "images":[{"mime":"image/png","dataBase64":"garbage"}]}),
+        json!({"prompt":"", "images":[good.clone()]}),
+        json!({"prompt":"look", "model":"auto", "images":[good.clone()]}),
+        json!({"prompt":"look", "model":"deepseek-v4-flash", "images":[good]}),
+        json!({"prompt":"look", "images":[runtime_image_fixture_bytes(4 * 1024 * 1024 + 1)]}),
+    ] {
+        let response = client
+            .post(format!("http://{addr}/v1/stream"))
+            .json(&body)
+            .send()
+            .await?;
+        assert!(response.status().is_client_error(), "{}", response.status());
+        assert!(
+            manager
+                .list_threads(
+                    crate::runtime_threads::ThreadListFilter::IncludeArchived,
+                    None
+                )
+                .await?
+                .is_empty(),
+            "failed admission left an empty thread"
+        );
+    }
+    // Cleanup refuses a loaded or accepted session instead of erasing uncertain work.
+    let retained = manager.create_thread(Default::default()).await?;
+    let harness = crate::core::engine::mock_engine_handle();
+    manager
+        .install_test_engine(&retained.id, harness.handle.clone())
+        .await?;
+    assert!(manager.discard_empty_thread(&retained.id).await.is_err());
+    assert!(manager.get_thread(&retained.id).await.is_ok());
+    server.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn runtime_image_named_catalog_resolves_and_echoes_exact_configured_identity() -> Result<()> {
+    let _env = crate::test_support::lock_test_env();
+    let dir = tempfile::tempdir()?;
+    let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", dir.path());
+    let route = crate::config::ProviderConfig {
+        kind: Some("openai-compatible".into()),
+        base_url: Some("http://127.0.0.1:9/v1".into()),
+        model: Some("same-model".into()),
+        ..Default::default()
+    };
+    let config = Config {
+        provider: Some("vision-personal".into()),
+        providers: Some(crate::config::ProvidersConfig {
+            custom: std::collections::HashMap::from([
+                ("vision-personal".into(), route.clone()),
+                ("vision-work".into(), route),
+            ]),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let (addr, _, server) = spawn_test_server_with_root_token_mobile_workspace_and_overrides(
+        dir.path().to_path_buf(),
+        dir.path().join("sessions"),
+        None,
+        false,
+        dir.path().join("workspace"),
+        TestServerOverrides {
+            config: Some(config),
+            ..Default::default()
+        },
+    )
+    .await?
+    .context("loopback listener required")?;
+    let client = crate::tls::reqwest_client();
+    for identity in ["vision-personal", "vision-work"] {
+        let response: Value = client
+            .get({
+                let mut url =
+                    reqwest::Url::parse(&format!("http://{addr}/v1/providers/custom/models"))?;
+                url.query_pairs_mut()
+                    .append_pair("model_provider_id", identity);
+                url
+            })
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        assert_eq!(response["model_provider_id"], identity);
+        assert_eq!(response["provider"], "custom");
+        assert_eq!(response["models"][0]["id"], "same-model");
+        assert_eq!(response["models"][0]["image_input"], "unknown");
+    }
+    for (kind, identity) in [
+        ("custom", "missing"),
+        ("deepseek", "vision-work"),
+        ("custom", " vision-work"),
+    ] {
+        assert_eq!(
+            client
+                .get({
+                    let mut url =
+                        reqwest::Url::parse(&format!("http://{addr}/v1/providers/{kind}/models"))?;
+                    url.query_pairs_mut()
+                        .append_pair("model_provider_id", identity);
+                    url
+                })
+                .send()
+                .await?
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+    let legacy: Value = client
+        .get(format!("http://{addr}/v1/providers/custom/models"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert!(legacy.get("model_provider_id").is_none());
+    server.abort();
+    Ok(())
+}
+
+#[test]
+fn runtime_image_named_catalog_cursor_binds_identity_endpoint_and_catalog() -> Result<()> {
+    let models = ["one", "two"]
+        .into_iter()
+        .map(|id| ProviderModelEntry {
+            id: id.into(),
+            image_input: codewhale_config::route::CapabilityState::Supported,
+        })
+        .collect::<Vec<_>>();
+    let fingerprint = |id: &str, base: &str| {
+        crate::hashing::sha256_hex(serde_json::to_vec(&("custom", id, base)).unwrap())
+    };
+    let params = ListProviderModelsParams {
+        model_provider_id: Some("vision-work".into()),
+        limit: Some(1),
+        ..Default::default()
+    };
+    let route = fingerprint("vision-work", "http://127.0.0.1:9/v1");
+    let first = paginate_provider_models("custom", models.clone(), &params, Some(route.clone()))
+        .map_err(|e| anyhow::anyhow!(e.message))?;
+    let mut next = params;
+    next.cursor = first.next_cursor;
+    assert!(paginate_provider_models("custom", models.clone(), &next, Some(route)).is_ok());
+    for changed in [
+        Some(fingerprint("vision-personal", "http://127.0.0.1:9/v1")),
+        Some(fingerprint("vision-work", "http://127.0.0.1:10/v1")),
+        None,
+    ] {
+        assert!(paginate_provider_models("custom", models.clone(), &next, changed).is_err());
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn runtime_image_saved_session_import_validates_before_creating_a_thread() -> Result<()> {
+    use crate::models::{ContentBlock, ImageUrlContent};
+    let _env = crate::test_support::lock_test_env();
+    let dir = tempfile::tempdir()?;
+    let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", dir.path());
+    let sessions_dir = dir.path().join("sessions");
+    fs::create_dir_all(&sessions_dir)?;
+    let (addr, manager, server) =
+        spawn_test_server_with_root(dir.path().to_path_buf(), sessions_dir.clone())
+            .await?
+            .context("loopback listener required")?;
+    let client = crate::tls::reqwest_client();
+    let expected =
+        vec![crate::image_attach::tests::runtime_image_fixture_bytes(3 * 1024 * 1024); 2];
+    let historical = crate::image_attach::prepare_stored_images(&expected)?;
+    let cases = [
+        vec![ContentBlock::ImageUrl {
+            image_url: ImageUrlContent {
+                url: "https://host.invalid/never-fetch".into(),
+            },
+        }],
+        vec![ContentBlock::ImageUrl {
+            image_url: ImageUrlContent {
+                url: "data:image/png;base64,iVBORw0KGgo=".into(),
+            },
+        }],
+        historical,
+    ];
+    for (index, mut content) in cases.into_iter().enumerate() {
+        content.insert(
+            0,
+            ContentBlock::Text {
+                text: "saved image prompt".into(),
+                cache_control: None,
+            },
+        );
+        let id = format!("sess_image_import_{index}");
+        let session = json!({
+            "schema_version": 1,
+            "metadata": { "id": id, "title": "Image import fixture", "created_at": "2026-09-08T00:00:00Z", "updated_at": "2026-09-08T00:00:00Z", "message_count": 1, "total_tokens": 0, "model": "deepseek-v4-pro", "model_provider": "deepseek", "workspace": dir.path(), "mode": "agent" },
+            "messages": [{ "role": "user", "content": content }], "system_prompt": null,
+        });
+        fs::write(
+            sessions_dir.join(format!("{id}.json")),
+            serde_json::to_vec(&session)?,
+        )?;
+        let response = client
+            .post(format!("http://{addr}/v1/sessions/{id}/resume-thread"))
+            .json(&json!({}))
+            .send()
+            .await?;
+        if index < 2 {
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            assert!(
+                manager
+                    .list_threads(
+                        crate::runtime_threads::ThreadListFilter::IncludeArchived,
+                        None
+                    )
+                    .await?
+                    .is_empty()
+            );
+        } else {
+            assert_eq!(response.status(), StatusCode::CREATED);
+            let response: Value = response.json().await?;
+            let detail = manager
+                .get_thread_detail(
+                    response["thread_id"]
+                        .as_str()
+                        .context("imported thread id")?,
+                )
+                .await?;
+            let item = detail
+                .items
+                .iter()
+                .find(|item| item.kind == crate::runtime_threads::TurnItemKind::UserMessage)
+                .context("imported user item")?;
+            let blocks: Vec<ContentBlock> = serde_json::from_value(
+                item.metadata.as_ref().context("image metadata")?["runtime_image_content"].clone(),
+            )?;
+            assert_eq!(
+                crate::image_attach::runtime_images_from_blocks(&blocks)?,
+                expected
+            );
+            assert_eq!(detail.thread.schema_version, 3);
+        }
+    }
+    server.abort();
     Ok(())
 }
