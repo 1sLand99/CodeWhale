@@ -250,18 +250,8 @@ impl RouteResolver {
                 require_catalog_match,
             )?
         };
-        if provider_kind == ProviderKind::Deepseek {
-            if custom_endpoint {
-                selected.endpoint_key = "chat".to_string();
-            } else if selected.canonical_model.is_none()
-                && deepseek_versioned_model_prefers_responses(selected.wire_model_id.as_str())
-            {
-                // DeepSeek introduced its native agent wire on V4 Flash. Keep
-                // exact catalog rows authoritative (notably V4 Pro => Chat),
-                // while allowing future versioned direct models to adopt the
-                // new Responses surface without a Codewhale release.
-                selected.endpoint_key = "responses".to_string();
-            }
+        if provider_kind == ProviderKind::Deepseek && custom_endpoint {
+            selected.endpoint_key = "chat".to_string();
         }
         if custom_endpoint && !endpoint_catalog_authoritative {
             // Capabilities and pricing belong to the exact provider endpoint
@@ -642,15 +632,6 @@ fn request_uses_custom_endpoint(
 ) -> bool {
     base_url_override
         .is_some_and(|base_url| provider_preserves_custom_base_url_model(descriptor.kind, base_url))
-}
-
-fn deepseek_versioned_model_prefers_responses(model: &str) -> bool {
-    model
-        .trim()
-        .to_ascii_lowercase()
-        .strip_prefix("deepseek-v")
-        .and_then(|suffix| suffix.chars().next())
-        .is_some_and(|first| first.is_ascii_digit())
 }
 
 /// True when `base_url` is an `http://` endpoint whose host is NOT loopback

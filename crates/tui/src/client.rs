@@ -13179,6 +13179,56 @@ mod tests {
     }
 
     #[test]
+    fn uncatalogued_deepseek_preview_binds_chat_request_without_model_fallback() {
+        let model = "deepseek-v4.1-flash-expires-on-0910";
+        let (_config, route) = deepseek_route_for_test("https://api.deepseek.com", model);
+        assert_eq!(route.candidate.protocol(), WireFormat::ChatCompletions);
+        assert_eq!(route.candidate.wire_model_id().as_str(), model);
+        assert!(route.candidate.canonical_model().is_none());
+
+        for client in [
+            DeepSeekClient::new(&route.config).expect("preview client resolves"),
+            DeepSeekClient::from_candidate(&route.config, &route.candidate)
+                .expect("preview client binds the admitted candidate"),
+        ] {
+            assert_eq!(client.wire_format, WireFormat::ChatCompletions);
+            assert_eq!(client.default_model, model);
+            let prepared = client
+                .prepare_outbound_request(
+                    MessageRequest {
+                        model: model.to_string(),
+                        messages: vec![Message {
+                            role: Role::User,
+                            content: vec![ContentBlock::Text {
+                                text: "hello".to_string(),
+                                cache_control: None,
+                            }],
+                        }],
+                        max_tokens: 64,
+                        system: None,
+                        tools: None,
+                        tool_choice: None,
+                        metadata: None,
+                        thinking: None,
+                        reasoning_effort: None,
+                        stream: Some(true),
+                        temperature: None,
+                        top_p: None,
+                    },
+                    true,
+                )
+                .expect("preview Chat request prepares");
+            assert_eq!(prepared.dialect, WireDialect::ChatCompletions);
+            assert_eq!(
+                prepared.endpoint.url,
+                "https://api.deepseek.com/chat/completions"
+            );
+            assert_eq!(prepared.body["model"], model);
+            assert_eq!(prepared.body["messages"][0]["content"], "hello");
+        }
+    }
+
+    #[test]
     fn rebinding_a_chat_bound_client_for_flash_switches_to_responses() {
         // #5042: fleet dispatch binds the child client before the profile
         // model is resolved; a chat-bound DeepSeek client asked to run flash
