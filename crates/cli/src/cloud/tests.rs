@@ -336,68 +336,90 @@ fn user_codes_and_key_inputs_match_the_server_contract() {
 
 #[test]
 fn device_flow_handles_pending_then_authorized_without_printing_tokens() {
-    let (temp, config) = test_config();
-    let _keep_temp = temp;
-    let (secrets, _) = test_secrets();
-    let transport = FakeTransport::new(vec![
-        response(
-            200,
-            json!({
-                "deviceCode": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-                "userCode": "ABCD-EFGH-JKLM",
-                "verificationUri": "https://app.codewhale.net/cli/authorize",
-                "verificationUriComplete": "https://app.codewhale.net/cli/authorize?user_code=ABCD-EFGH-JKLM",
-                "expiresIn": 600,
-                "interval": 1
+    for (no_open, browser_opens) in [(false, true), (false, false), (true, false)] {
+        let (temp, config) = test_config();
+        let _keep_temp = temp;
+        let (secrets, _) = test_secrets();
+        let transport = FakeTransport::new(vec![
+            response(
+                200,
+                json!({
+                    "deviceCode": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                    "userCode": "ABCD-EFGH-JKLM",
+                    "verificationUri": "https://app.codewhale.net/cli/authorize",
+                    "verificationUriComplete": "https://app.codewhale.net/cli/authorize?user_code=ABCD-EFGH-JKLM",
+                    "expiresIn": 600,
+                    "interval": 1
+                }),
+            ),
+            response(202, json!({ "status": "authorization_pending" })),
+            response(
+                200,
+                auth_json("access-never-print", "refresh-never-print", "acct-123"),
+            ),
+            response(200, account("acct-123")),
+        ]);
+        let mut output = Vec::new();
+        let mut key_reader = |_| bail!("key reader should not be called");
+        let mut opened = Vec::new();
+        let mut opener = |url: String| {
+            opened.push(url);
+            browser_opens
+        };
+        let mut sleeper = |_| {};
+        run_with(
+            command(if no_open {
+                &["codewhale", "cloud", "login", "--no-open"]
+            } else {
+                &["codewhale", "cloud", "login"]
             }),
-        ),
-        response(202, json!({ "status": "authorization_pending" })),
-        response(
-            200,
-            auth_json("access-never-print", "refresh-never-print", "acct-123"),
-        ),
-        response(200, account("acct-123")),
-    ]);
-    let mut output = Vec::new();
-    let mut key_reader = |_| bail!("key reader should not be called");
-    let mut opened = Vec::new();
-    let mut opener = |url: String| {
-        opened.push(url);
-        true
-    };
-    let mut sleeper = |_| {};
-    run_with(
-        command(&["codewhale", "cloud", "login"]),
-        "work",
-        "https://api.codewhale.net",
-        &config,
-        &secrets,
-        &secrets,
-        &machine::MachineKeyEnv::default(),
-        &transport,
-        &mut output,
-        &mut key_reader,
-        &mut opener,
-        &mut sleeper,
-    )
-    .unwrap();
+            "work",
+            "https://api.codewhale.net",
+            &config,
+            &secrets,
+            &secrets,
+            &machine::MachineKeyEnv::default(),
+            &transport,
+            &mut output,
+            &mut key_reader,
+            &mut opener,
+            &mut sleeper,
+        )
+        .unwrap();
 
-    let output = String::from_utf8(output).unwrap();
-    assert!(output.contains("ABCD-EFGH-JKLM"));
-    assert!(output.contains("Account ID: acct-123"));
-    assert!(output.contains("Profile: work"));
-    // No-brand invariant: login signs in the account; the internal
-    // cloud-agent credential is never taught here.
-    assert!(!output.to_lowercase().contains("daytona"), "{output}");
-    assert!(!output.contains("set-slot"), "{output}");
-    assert!(!output.contains("access-never-print"));
-    assert!(!output.contains("refresh-never-print"));
-    assert_eq!(opened.len(), 1);
-    let requests = transport.requests();
-    assert_eq!(requests[0].path, "/api/cli/device/start");
-    assert_eq!(requests[1].path, "/api/cli/device/token");
-    assert_eq!(requests[2].path, "/api/cli/device/token");
-    assert_eq!(requests[3].path, "/api/me");
+        let output = String::from_utf8(output).unwrap();
+        assert_eq!(
+            output.lines().find(|line| line.starts_with("Open: ")),
+            Some("Open: https://app.codewhale.net/cli/authorize?user_code=ABCD-EFGH-JKLM")
+        );
+        assert!(output.contains("ABCD-EFGH-JKLM"));
+        assert!(output.contains("Account ID: acct-123"));
+        assert!(output.contains("Profile: work"));
+        // No-brand invariant: login signs in the account; the internal
+        // cloud-agent credential is never taught here.
+        assert!(!output.to_lowercase().contains("daytona"), "{output}");
+        assert!(!output.contains("set-slot"), "{output}");
+        assert!(!output.contains("access-never-print"));
+        assert!(!output.contains("refresh-never-print"));
+        assert!(!output.contains("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"));
+        if no_open {
+            assert!(opened.is_empty());
+        } else {
+            assert_eq!(
+                opened,
+                ["https://app.codewhale.net/cli/authorize?user_code=ABCD-EFGH-JKLM"]
+            );
+        }
+        assert_eq!(
+            output.contains("Browser could not be opened; use the URL and code above."),
+            !no_open && !browser_opens
+        );
+        let requests = transport.requests();
+        assert_eq!(requests[0].path, "/api/cli/device/start");
+        assert_eq!(requests[1].path, "/api/cli/device/token");
+        assert_eq!(requests[2].path, "/api/cli/device/token");
+        assert_eq!(requests[3].path, "/api/me");
+    }
 }
 
 #[test]

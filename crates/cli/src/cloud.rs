@@ -721,7 +721,7 @@ fn run_with<T: CloudTransport, W: Write>(
         CloudCommand::Login(login) => {
             let device = client.start_device()?;
             validate_user_code(&device.user_code)?;
-            let verification_uri = validate_verification_url(
+            validate_verification_url(
                 &device.verification_uri,
                 api_base,
                 &device.user_code,
@@ -735,7 +735,7 @@ fn run_with<T: CloudTransport, W: Write>(
             )?;
             writeln!(out, "Codewhale account sign-in")?;
             writeln!(out, "Code: {}", device.user_code)?;
-            writeln!(out, "Open: {verification_uri}")?;
+            writeln!(out, "Open: {verification_uri_complete}")?;
             writeln!(out, "Profile: {}", printable(profile))?;
             if !login.no_open && !opener(verification_uri_complete) {
                 writeln!(
