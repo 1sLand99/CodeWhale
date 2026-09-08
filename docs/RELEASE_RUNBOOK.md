@@ -29,6 +29,7 @@ Current packaging note:
   - `codewhale-hooks`
   - `codewhale-tools`
   - `codewhale-config`
+  - `codewhale-cloud-facts`
   - `codewhale-lane`
   - `codewhale-agent`
   - `codewhale-core`
@@ -105,7 +106,8 @@ Use an up-to-date stable toolchain (`rustup update stable`) for release work.
 
 Both modes validate publication order against the locked workspace graph, then
 run one `cargo publish --dry-run --locked --registry crates-io` covering all
-21 release crates. Cargo resolves unpublished workspace dependencies through a
+release crates listed in `scripts/release/crates.sh`. Cargo resolves unpublished
+workspace dependencies through a
 temporary local registry, builds every unpacked tarball, and checks publication
 metadata before any upload. Dry-run mode permits source edits and stops there.
 Publish mode requires the approved release checkout and assets, then skips
@@ -289,7 +291,7 @@ and fails branch-only release sources before assets are published.
    ```
 
    Both Cargo and npm publication fail closed unless `HEAD`, the clean local
-   checkout, and the remote `vX.Y.Z` tag still agree. The authoritative 21-crate
+   checkout, and the remote `vX.Y.Z` tag still agree. The authoritative crate
    dependency order lives in `scripts/release/crates.sh`; do not maintain a
    second handwritten order in this runbook. The helper waits for each new
    version to appear on crates.io before moving to dependents and safely skips
@@ -378,7 +380,10 @@ fail; do not add a token fallback to make it pass.
 2. Set `codewhaleBinaryVersion` to the GitHub release tag that should supply binaries.
 3. Push the version bump to `main`. After the release source is frozen, create
    the matching `vX.Y.Z` tag from `main`; `release.yml` then builds the binary
-   matrix and drafts the GitHub Release.
+   matrix and publishes the GitHub Release after its artifact and container gates.
+   The tag also syncs to `cnb.cool/codewhale.net/codewhale`, whose pipeline
+   independently publishes a Linux x64 release and marks it latest. Include
+   that destination in publication approval; it does not wait for GitHub Release.
 4. **Wait for the GitHub Release to finalize** with the full binary and archive
    matrix, Windows installer, and both checksum manifests. The dependent `npm`
    job checks the remote tag again, runs the public asset freshness gate and
