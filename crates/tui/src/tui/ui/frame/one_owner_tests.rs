@@ -93,17 +93,32 @@ fn working_app() -> App {
 }
 
 fn draw(app: &mut App, width: u16, height: u16) -> Vec<String> {
-    let config = Config::default();
     let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+    draw_into(app, &mut terminal).0
+}
+
+fn draw_into(
+    app: &mut App,
+    terminal: &mut Terminal<TestBackend>,
+) -> (Vec<String>, Option<(u16, u16)>) {
+    let config = Config::default();
+    let mut cursor = None;
+    super::prepare_frame_cursor(terminal).unwrap();
     terminal
         .draw(|frame| {
-            let _ = super::render(frame, app, &config);
+            cursor = super::render(frame, app, &config);
         })
         .unwrap();
+    super::finish_frame_cursor(terminal, cursor).unwrap();
     let buf = terminal.backend().buffer();
-    (0..height)
-        .map(|y| (0..width).map(|x| buf[(x, y)].symbol()).collect::<String>())
-        .collect()
+    let rows = (0..buf.area.height)
+        .map(|y| {
+            (0..buf.area.width)
+                .map(|x| buf[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect();
+    (rows, cursor)
 }
 
 fn count_rows_containing(rows: &[String], needle: &str) -> usize {
@@ -397,5 +412,445 @@ fn row_presets_reclaim_rows_and_quiet_them_in_the_composed_frame() {
             "{gone} in {:?}",
             rows[metrics]
         );
+    }
+}
+
+/// Exercise live preset transitions on the same terminal and App, including
+/// restoration. Fresh buffers alone cannot expose stale chrome or hitboxes.
+#[test]
+fn statusline_full_frame_presets_preserve_transcript_composer_and_hitboxes() {
+    use crate::config::{ChromeRowPreset, StatusItem};
+    use crate::tui::tideline::{InteractionAction, InteractionTargetId};
+    use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+    use ratatui::layout::Position;
+
+    for (width, height) in [(40, 12), (60, 16), (80, 24), (100, 32)] {
+        let mut app = frame_app();
+        app.history = vec![HistoryCell::User {
+            content: (0..60)
+                .map(|row| format!("transcript-line-{row:02}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        }];
+        app.resync_history_revisions();
+        app.input = "ab中文".to_string();
+        app.cursor_position = app.input.chars().count();
+        app.composer_border = true;
+        app.status_items = StatusItem::default_footer();
+        app.posture_bar = ChromeRowPreset::Full;
+        app.metrics_line = ChromeRowPreset::Full;
+        app.session_metrics
+            .record_model_call(1_200, 29_600, Some(400), Some(30_000));
+        app.session.last_completion_tokens = Some(1_200);
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        let (full, _) = draw_into(&mut app, &mut terminal);
+        let full_buffer = terminal.backend().buffer().clone();
+        let full_transcript = app.viewport.last_transcript_area.unwrap();
+        let full_composer = app.viewport.last_composer_area.unwrap();
+        let full_visible = count_rows_containing(&full, "transcript-line-");
+        assert!(
+            full_visible > 0 && full_visible < 60,
+            "populated scrollback fixture"
+        );
+
+        for (name, posture, metrics, reclaimed) in [
+            ("full", ChromeRowPreset::Full, ChromeRowPreset::Full, 0),
+            (
+                "metrics-hidden",
+                ChromeRowPreset::Full,
+                ChromeRowPreset::Hidden,
+                1,
+            ),
+            (
+                "posture-hidden",
+                ChromeRowPreset::Hidden,
+                ChromeRowPreset::Full,
+                1,
+            ),
+            (
+                "both-hidden",
+                ChromeRowPreset::Hidden,
+                ChromeRowPreset::Hidden,
+                2,
+            ),
+            (
+                "both-compact",
+                ChromeRowPreset::Compact,
+                ChromeRowPreset::Compact,
+                0,
+            ),
+            (
+                "full-restored",
+                ChromeRowPreset::Full,
+                ChromeRowPreset::Full,
+                0,
+            ),
+        ] {
+            app.posture_bar = posture;
+            app.metrics_line = metrics;
+            let (rows, cursor) = draw_into(&mut app, &mut terminal);
+            let evidence = format!("{width}x{height} {name}\n{}", rows.join("\n"));
+            eprintln!("{evidence}");
+            let transcript = app.viewport.last_transcript_area.unwrap();
+            let composer = app.viewport.last_composer_area.unwrap();
+            assert_eq!(
+                transcript.height,
+                full_transcript.height + reclaimed,
+                "{evidence}"
+            );
+            assert_eq!(composer.y, full_composer.y + reclaimed, "{evidence}");
+            assert_eq!(composer.height, full_composer.height, "{evidence}");
+            assert_eq!(transcript.bottom(), composer.y, "{evidence}");
+            assert_eq!(
+                count_rows_containing(&rows, "transcript-line-"),
+                full_visible + usize::from(reclaimed),
+                "{evidence}"
+            );
+            assert!(
+                rows.iter().any(|row| row.contains("transcript-line-59")),
+                "latest transcript survives: {evidence}"
+            );
+            assert_eq!(app.input, "ab中文");
+            assert!(
+                rows.iter().all(|row| !row.contains('\u{fffd}')),
+                "{evidence}"
+            );
+
+            let cursor = cursor.expect("active composer exposes its caret");
+            let inner = app.viewport.last_composer_content.unwrap();
+            let text = crate::tui::widgets::composer_content_geometry(inner, false).text_area;
+            let submit = crate::tui::widgets::active_composer_submit_rect(&app, composer).unwrap();
+            assert!(
+                text.contains(Position::from(cursor)),
+                "caret inside text grid: {evidence}"
+            );
+            assert_eq!(
+                cursor.0,
+                text.x + 6,
+                "two ASCII and two wide glyphs: {evidence}"
+            );
+            assert!(
+                !submit.contains(Position::from(cursor)),
+                "caret cannot hit Send: {evidence}"
+            );
+            assert!(terminal.backend().cursor_visible());
+            terminal
+                .backend_mut()
+                .assert_cursor_position(Position::from(cursor));
+            let painted_input = (text.x..cursor.0)
+                .map(|x| terminal.backend().buffer()[(x, cursor.1)].symbol())
+                .collect::<String>();
+            // Ratatui represents each CJK continuation cell as a blank cell.
+            assert_eq!(painted_input.replace(' ', ""), "ab中文", "{evidence}");
+            app.viewport.composer_click_trace = None;
+            assert!(crate::tui::mouse_ui::handle_composer_mouse(
+                &mut app,
+                MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column: cursor.0,
+                    row: cursor.1,
+                    modifiers: KeyModifiers::NONE,
+                }
+            ));
+            assert_eq!(
+                app.cursor_position,
+                app.input.chars().count(),
+                "CJK mouse/caret boundary: {evidence}"
+            );
+
+            let context = app
+                .viewport
+                .interaction_targets
+                .iter()
+                .find(|target| target.id == InteractionTargetId::HEADER_CONTEXT);
+            let model = app
+                .viewport
+                .interaction_targets
+                .iter()
+                .find(|target| target.id == InteractionTargetId::HEADER_MODEL);
+            if metrics == ChromeRowPreset::Hidden {
+                assert!(app.viewport.last_infoline_hitboxes.is_empty(), "{evidence}");
+                assert!(
+                    context.is_none() && model.is_none(),
+                    "hidden chrome has no stale actions: {evidence}"
+                );
+                assert_eq!(count_rows_containing(&rows, "ctx "), 0, "{evidence}");
+            } else {
+                let context = context.expect("visible context has an inspector hitbox");
+                let model = model.expect("visible model has a picker hitbox");
+                assert_eq!(
+                    context.mouse_action,
+                    Some(InteractionAction::InspectContext)
+                );
+                assert_eq!(model.mouse_action, Some(InteractionAction::OpenModelPicker));
+                for target in [context, model] {
+                    assert_eq!(target.keyboard_action, target.mouse_action);
+                    assert_eq!(target.area.y, height - 1, "{evidence}");
+                    assert_eq!(
+                        app.viewport
+                            .interaction_targets
+                            .target_at(target.area.x, target.area.y),
+                        Some(target)
+                    );
+                    assert!(!composer.intersects(target.area), "{evidence}");
+                }
+                assert_eq!(count_rows_containing(&rows, "ctx 0%"), 1, "{evidence}");
+            }
+            if metrics == ChromeRowPreset::Compact {
+                for shed in ["tok/s", "ttft", "Ctrl+/ help"] {
+                    assert!(!rows[usize::from(height - 1)].contains(shed), "{evidence}");
+                }
+            }
+            if name == "full-restored" {
+                assert_eq!(
+                    terminal.backend().buffer(),
+                    &full_buffer,
+                    "restoration leaves no stale painted row or style"
+                );
+            }
+        }
+    }
+}
+
+/// #5976 intentionally supersedes #5950's blanket custom-cost omission:
+/// missing coverage is evidence, independent of whether today's route is known.
+#[test]
+fn statusline_full_frame_custom_cost_preserves_evidence_and_width_shedding() {
+    use crate::config::{ApiProvider, ChromeRowPreset, StatusItem};
+    use crate::route_billing::{BillingPresentation, UsageChip};
+
+    for (width, height) in [(40, 12), (60, 16), (80, 24), (100, 32)] {
+        let mut app = frame_app();
+        app.history = vec![HistoryCell::User {
+            content: "Review saved usage".to_string(),
+        }];
+        app.resync_history_revisions();
+        app.set_provider_identity(ApiProvider::Custom, "my-gateway");
+        app.active_route_base_url = "https://gateway.example/v1".to_string();
+        app.model = "vendor-model-x".to_string();
+        app.reasoning_effort = crate::tui::app::ReasoningEffort::High;
+        app.billing_presentation = BillingPresentation::Unknown;
+        app.session.cost_coverage_unknown_legacy = true;
+        app.status_items = vec![StatusItem::ContextPercent, StatusItem::Cost];
+        app.posture_bar = ChromeRowPreset::Hidden;
+        app.metrics_line = ChromeRowPreset::Compact;
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        let expected = "cost: unknown (saved coverage unavailable)";
+        assert_eq!(app.api_provider, ApiProvider::Custom);
+        assert!(matches!(app.cumulative_usage_chip(), UsageChip::Unknown(_)));
+        assert_eq!(super::session_cost_label(&app), expected);
+        let (rows, _) = draw_into(&mut app, &mut terminal);
+        eprintln!("{width}x{height} custom-saved-unknown\n{}", rows.join("\n"));
+        let metrics = rows.last().unwrap();
+        assert!(metrics.contains("ctx 0%"), "{metrics}");
+        if width >= 60 {
+            assert!(metrics.contains(expected), "{width}: {metrics}");
+        } else {
+            // The existing whole-segment shed ladder cannot fit the reason
+            // plus context in 40 columns. It must not invent a zero price.
+            assert!(!metrics.contains("cost:"), "{metrics}");
+            assert!(!metrics.contains('$'), "{metrics}");
+        }
+        assert_eq!(
+            super::session_cost_label(&app),
+            expected,
+            "shedding changes no receipt"
+        );
+
+        app.status_items.retain(|item| *item != StatusItem::Cost);
+        let (hidden, _) = draw_into(&mut app, &mut terminal);
+        assert!(!hidden.last().unwrap().contains("cost:"));
+        assert_eq!(
+            super::session_cost_label(&app),
+            expected,
+            "a toggle changes no receipt"
+        );
+        app.status_items.push(StatusItem::Cost);
+        assert_eq!(
+            draw_into(&mut app, &mut terminal).0,
+            rows,
+            "live cost toggle restores the same frame"
+        );
+
+        app.session.cost_coverage_unknown_legacy = false;
+        app.session.cost_unpriced_turns = 1;
+        app.session.cost_unpriced_reasons.insert(
+            crate::pricing::UnpricedReason::NoPricingRow
+                .label()
+                .to_string(),
+        );
+        let missing_rate = "cost: unknown (rate unavailable)";
+        assert_eq!(super::session_cost_label(&app), missing_rate);
+        let (unpriced, _) = draw_into(&mut app, &mut terminal);
+        eprintln!(
+            "{width}x{height} custom-unpriced-turn\n{}",
+            unpriced.join("\n")
+        );
+        if width >= 60 {
+            assert!(
+                unpriced.last().unwrap().contains(missing_rate),
+                "{unpriced:?}"
+            );
+        } else {
+            assert!(!unpriced.last().unwrap().contains("cost:"), "{unpriced:?}");
+        }
+        assert_eq!(app.session.cost_unpriced_turns, 1);
+        assert!(matches!(app.cumulative_usage_chip(), UsageChip::Unknown(_)));
+
+        // An unavailable effective effort is omitted independently of the
+        // explicit missing-cost reason. At 100 columns both model and reason fit.
+        if width == 100 {
+            app.status_items.insert(0, StatusItem::Model);
+            let (with_model, _) = draw_into(&mut app, &mut terminal);
+            eprintln!(
+                "{width}x{height} custom-model-and-unpriced-turn\n{}",
+                with_model.join("\n")
+            );
+            let metrics = with_model.last().unwrap();
+            assert!(metrics.contains("vendor-model-x"), "{metrics}");
+            assert!(metrics.contains(missing_rate), "{metrics}");
+            assert_eq!(app.provable_reasoning_effort_label(), None);
+            assert!(!metrics.contains("high"), "{metrics}");
+            assert!(!metrics.contains("effective unavailable"), "{metrics}");
+            app.status_items.remove(0);
+        }
+
+        app.session.cost_unpriced_turns = 0;
+        app.session.cost_unpriced_reasons.clear();
+        app.session.cost_priced_turns = 1;
+        app.session.session_cost = 0.42;
+        let (priced, _) = draw_into(&mut app, &mut terminal);
+        eprintln!(
+            "{width}x{height} custom-recorded-price\n{}",
+            priced.join("\n")
+        );
+        assert!(matches!(app.cumulative_usage_chip(), UsageChip::Money(_)));
+        assert!(
+            priced.last().unwrap().contains("0.42"),
+            "real fixture price survives Custom: {priced:?}"
+        );
+        app.set_provider_identity(ApiProvider::Deepseek, "deepseek");
+        app.active_route_base_url = "https://api.deepseek.com/v1".to_string();
+        app.model = "deepseek-v4-pro".to_string();
+        app.billing_presentation = BillingPresentation::Metered;
+        let (first_party, _) = draw_into(&mut app, &mut terminal);
+        assert_eq!(
+            first_party.last(),
+            priced.last(),
+            "historical price does not follow today's provider"
+        );
+        app.set_provider_identity(ApiProvider::Custom, "my-gateway");
+        app.active_route_base_url = "https://gateway.example/v1".to_string();
+        app.model = "vendor-model-x".to_string();
+        app.billing_presentation = BillingPresentation::Unknown;
+        let (restored_custom, _) = draw_into(&mut app, &mut terminal);
+        assert_eq!(restored_custom.last(), priced.last());
+    }
+}
+
+/// Feed real estimated conversation tokens through the composed frame, then
+/// change only the route window. Crossing the warning threshold must repaint
+/// both text and ink without moving the transcript, composer or inspector.
+#[test]
+fn statusline_full_frame_context_reading_updates_below_and_at_warning() {
+    use crate::config::{ChromeRowPreset, StatusItem};
+    use crate::models::{ContentBlock, Message, Role};
+    use crate::palette::ChromeInk;
+    use crate::tui::tideline::InteractionTargetId;
+
+    for (width, height) in [(40, 12), (60, 16), (80, 24), (100, 32)] {
+        let mut app = frame_app();
+        app.history = vec![HistoryCell::User {
+            content: "Keep the context reading visible".to_string(),
+        }];
+        app.resync_history_revisions();
+        app.api_messages = vec![Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: "context ".repeat(400),
+                cache_control: None,
+            }],
+        }];
+        app.input = "next".to_string();
+        app.cursor_position = app.input.chars().count();
+        app.status_items = StatusItem::default_footer();
+        app.posture_bar = ChromeRowPreset::Full;
+        app.metrics_line = ChromeRowPreset::Full;
+        let (used, _, _) = super::context_usage_snapshot(&app).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        let mut first_geometry = None;
+        let mut first_frame = None;
+
+        for pct in [0u8, 10, 79, 80, 10, 0] {
+            let window = if pct == 0 {
+                // 0.1% rounds to the displayed 0% even with real context.
+                used as u64 * 1_000
+            } else {
+                (used as f64 * 100.0 / f64::from(pct)).round() as u64
+            };
+            app.active_route_limits = Some(codewhale_config::route::RouteLimits {
+                context_tokens: Some(window),
+                ..Default::default()
+            });
+            assert_eq!(super::info_context_percent(&app), pct);
+            let (rows, cursor) = draw_into(&mut app, &mut terminal);
+            let evidence = format!("{width}x{height} context-{pct}\n{}", rows.join("\n"));
+            eprintln!("{evidence}");
+            let label = format!("ctx {pct}%");
+            assert_eq!(count_rows_containing(&rows, &label), 1, "{evidence}");
+            assert!(
+                rows.iter()
+                    .any(|row| row.contains("Keep the context reading visible")),
+                "{evidence}"
+            );
+            let context = app
+                .viewport
+                .interaction_targets
+                .iter()
+                .find(|target| target.id == InteractionTargetId::HEADER_CONTEXT)
+                .expect("the visible reading stays inspectable");
+            assert_eq!(context.area.y, height - 1, "{evidence}");
+            let value_ink = if pct >= 80 {
+                ChromeInk::Failure
+            } else {
+                ChromeInk::Info
+            };
+            let label_ink = if pct >= 80 {
+                ChromeInk::Failure
+            } else {
+                ChromeInk::Metadata
+            };
+            let buffer = terminal.backend().buffer();
+            for (x, ink) in [(context.area.x, label_ink), (context.area.x + 4, value_ink)] {
+                assert_eq!(
+                    buffer[(x, context.area.y)].fg,
+                    crate::palette::grammar::chrome_style(&app.ui_theme, ink)
+                        .fg
+                        .unwrap(),
+                    "warning ink must also clear after 80%: {evidence}",
+                );
+            }
+            let geometry = (
+                app.viewport.last_transcript_area,
+                app.viewport.last_composer_area,
+                cursor,
+            );
+            if let Some(first) = first_geometry {
+                assert_eq!(geometry, first, "{evidence}");
+            } else {
+                first_geometry = Some(geometry);
+            }
+            if pct == 0 {
+                if let Some(first) = first_frame.as_ref() {
+                    assert_eq!(
+                        terminal.backend().buffer(),
+                        first,
+                        "returning to 0% clears the warning frame and ink"
+                    );
+                } else {
+                    first_frame = Some(terminal.backend().buffer().clone());
+                }
+            }
+        }
     }
 }
