@@ -2145,5 +2145,8 @@
   "GoalProgressLabel": "Objectiu",
   "GoalProgressReceipt": "Progrés reportat {percent}% {bar}",
   "GoalProgressNow": "L ara {note}",
-  "GoalProgressNext": "  següent {note}"
+  "GoalProgressNext": "  següent {note}",
+  "ConfigLabelContextualTips": "Consells contextuals",
+  "ConfigHintContextualTips": "Suggeriments ocasionals d’ordres després d’accions relacionades; desactiva’ls per amagar els consells.",
+  "ContextualTipsNotSaved": "La preferència dels consells s’aplica a aquesta sessió, però no s’ha pogut desar: {error}"
 }

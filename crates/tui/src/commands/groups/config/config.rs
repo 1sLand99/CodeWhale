@@ -390,6 +390,7 @@ fn show_single_setting(app: &App, key: &str) -> CommandResult {
             }
             .to_string(),
         ),
+        "contextual_tips" => Some(app.behavioral_tips.enabled().to_string()),
         "pin_last_prompt" | "pin_prompt" => {
             Some(if app.pin_last_prompt { "true" } else { "false" }.to_string())
         }
@@ -1977,6 +1978,42 @@ pub fn set_config_value(app: &mut App, key: &str, value: &str, persist: bool) ->
     }
 
     match key.as_str() {
+        "contextual_tips" => {
+            let enabled = match parse_config_bool(value) {
+                Ok(enabled) => enabled,
+                Err(_) => {
+                    return CommandResult::error(
+                        tr(app.ui_locale, MessageId::ConfigCommandInvalidValue)
+                            .replace("{key}", &key)
+                            .replace("{value}", value)
+                            .replace("{choices}", "on/off"),
+                    );
+                }
+            };
+            // Apply the opt-out even when the settings file cannot be read
+            // or saved. Only the existing single-key transaction may claim
+            // persistence; a failure leaves the live preference in effect.
+            app.set_contextual_tips_enabled(enabled);
+            if persist && let Err(error) = persist_single_setting(&key, &enabled.to_string()) {
+                let message = tr(app.ui_locale, MessageId::ContextualTipsNotSaved)
+                    .replace("{error}", &error.to_string());
+                app.push_status_toast(
+                    message.clone(),
+                    crate::tui::app::StatusToastLevel::Error,
+                    Some(8_000),
+                );
+                return CommandResult::error(message);
+            }
+            let scope = if persist {
+                MessageId::ConfigScopeSaved
+            } else {
+                MessageId::ConfigScopeSession
+            };
+            return CommandResult::message(format!(
+                "contextual_tips = {enabled} ({})",
+                tr(app.ui_locale, scope)
+            ));
+        }
         "telemetry" => {
             if !persist {
                 return CommandResult::error(
@@ -3329,6 +3366,110 @@ mod tests {
 
     fn create_test_app() -> App {
         create_test_app_with_config(&Config::default())
+    }
+
+    #[test]
+    fn contextual_tips_disable_only_guidance_and_keep_session_cap() {
+        use crate::tui::app::{StatusToast, StatusToastKind, StatusToastLevel};
+        use crate::tui::behavioral_tips::BehavioralTip;
+
+        let temp = tempfile::tempdir().unwrap();
+        let _guard = EnvGuard::new(temp.path());
+        let mut app = create_test_app();
+        app.status_toasts.clear();
+        assert!(app.maybe_show_behavioral_tip(BehavioralTip::PlanningMode));
+        app.push_status_toast("warning receipt", StatusToastLevel::Warning, None);
+        app.push_status_toast("error receipt", StatusToastLevel::Error, None);
+        app.sticky_status = Some(StatusToast::context_pressure(
+            "context warning",
+            crate::context_budget::PressureLevel::High,
+        ));
+
+        let result = crate::commands::execute("/config contextual_tips off", &mut app);
+        assert!(!result.is_error);
+        assert!(!app.behavioral_tips.enabled());
+        assert_eq!(
+            app.status_toasts
+                .iter()
+                .map(|toast| toast.text.as_str())
+                .collect::<Vec<_>>(),
+            ["warning receipt", "error receipt"]
+        );
+        assert!(matches!(
+            app.sticky_status.as_ref().unwrap().kind,
+            StatusToastKind::ContextPressure(_)
+        ));
+        assert!(!app.maybe_show_behavioral_tip(BehavioralTip::McpValidation));
+
+        assert!(!crate::commands::execute("/config contextual_tips on", &mut app).is_error);
+        assert!(app.behavioral_tips.enabled());
+        assert!(
+            !app.maybe_show_behavioral_tip(BehavioralTip::McpValidation),
+            "reenabling must not reset the session cap"
+        );
+    }
+
+    #[test]
+    fn contextual_tips_command_persists_and_reports_failed_save() {
+        let temp = tempfile::tempdir().unwrap();
+        let _guard = EnvGuard::new(temp.path());
+        let mut app = create_test_app();
+        Settings::transact(|settings| {
+            settings.theme = "terminal".into();
+            settings
+                .behavioral_tip_impressions
+                .insert("planning_mode".into(), 2);
+            Ok(())
+        })
+        .unwrap();
+
+        let result = crate::commands::execute("/config contextual_tips off --save", &mut app);
+        assert!(!result.is_error);
+        let saved = Settings::load_persisted().unwrap();
+        assert!(!saved.contextual_tips);
+        assert_eq!(saved.theme, "terminal");
+        assert_eq!(
+            saved.behavioral_tip_impressions.get("planning_mode"),
+            Some(&2)
+        );
+        assert!(
+            !create_test_app().behavioral_tips.enabled(),
+            "restart must load the saved opt-out"
+        );
+
+        assert!(!crate::commands::execute("/config contextual_tips on --save", &mut app).is_error);
+        assert!(create_test_app().behavioral_tips.enabled());
+        assert_eq!(
+            Settings::load_persisted()
+                .unwrap()
+                .behavioral_tip_impressions
+                .get("planning_mode"),
+            Some(&2)
+        );
+        let path = Settings::path().unwrap();
+        let before = fs::read(&path).unwrap();
+        assert!(
+            crate::commands::execute("/config contextual_tips invalid --save", &mut app).is_error
+        );
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert!(app.behavioral_tips.enabled());
+
+        let malformed = "contextual_tips = [private_fixture_payload\n";
+        fs::write(&path, malformed).unwrap();
+        let failed = crate::commands::execute("/config contextual_tips off --save", &mut app);
+        assert!(failed.is_error);
+        assert!(
+            !app.behavioral_tips.enabled(),
+            "failed persistence still honors the session opt-out"
+        );
+        assert_eq!(fs::read_to_string(path).unwrap(), malformed);
+        let message = failed.message.unwrap();
+        assert!(message.contains("could not be saved"), "{message}");
+        assert!(
+            !message.contains("private_fixture_payload"),
+            "parse errors must not echo settings contents"
+        );
+        assert!(message.ends_with(&app.status_toasts.back().unwrap().text));
     }
 
     #[test]

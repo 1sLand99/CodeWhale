@@ -2216,6 +2216,14 @@ impl ConfigView {
                 facts: ConfigRowFacts::saved_setting(),
             },
             ConfigRow {
+                key: "contextual_tips".to_string(),
+                value: settings.contextual_tips.to_string(),
+                editable: true,
+                scope: ConfigScope::Saved,
+                facts: ConfigRowFacts::saved_setting()
+                    .effective(app.behavioral_tips.enabled().to_string()),
+            },
+            ConfigRow {
                 key: "pin_last_prompt".to_string(),
                 value: settings.pin_last_prompt.to_string(),
                 editable: true,

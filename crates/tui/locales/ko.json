@@ -2145,5 +2145,8 @@
   "GoalProgressLabel": "목표",
   "GoalProgressReceipt": "보고된 진행률 {percent}% {bar}",
   "GoalProgressNow": "L 현재 {note}",
-  "GoalProgressNext": "  다음 {note}"
+  "GoalProgressNext": "  다음 {note}",
+  "ConfigLabelContextualTips": "상황별 도움말",
+  "ConfigHintContextualTips": "관련 작업 후 가끔 명령을 제안합니다. 끄면 도움말을 숨깁니다.",
+  "ContextualTipsNotSaved": "도움말 설정은 이 세션에 적용되지만 저장하지 못했습니다: {error}"
 }

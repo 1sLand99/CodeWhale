@@ -2145,5 +2145,8 @@
   "GoalProgressLabel": "Мета",
   "GoalProgressReceipt": "Повідомлений прогрес {percent}% {bar}",
   "GoalProgressNow": "L зараз {note}",
-  "GoalProgressNext": "  далі {note}"
+  "GoalProgressNext": "  далі {note}",
+  "ConfigLabelContextualTips": "Контекстні підказки",
+  "ConfigHintContextualTips": "Зрідка пропонувати команди після відповідних дій; вимкніть, щоб приховати підказки.",
+  "ContextualTipsNotSaved": "Налаштування підказок діє в цьому сеансі, але його не вдалося зберегти: {error}"
 }

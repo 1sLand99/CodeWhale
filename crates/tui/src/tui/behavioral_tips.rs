@@ -9,7 +9,7 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 
 use crate::localization::{Locale, MessageId, tr};
 use crate::settings::Settings;
-use crate::tui::app::{App, AppMode, StatusToastLevel};
+use crate::tui::app::{App, AppMode, StatusToastKind, StatusToastLevel};
 
 const MAX_TIPS_PER_SESSION: u8 = 1;
 const MAX_LIFETIME_IMPRESSIONS: u8 = 2;
@@ -66,16 +66,38 @@ impl BehavioralTip {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct BehavioralTipState {
+    enabled: bool,
     shown_this_session: HashSet<BehavioralTip>,
     session_impressions: u8,
     manual_command_counts: HashMap<u64, u8>,
 }
 
+impl Default for BehavioralTipState {
+    fn default() -> Self {
+        Self::new(true)
+    }
+}
+
 impl BehavioralTipState {
+    pub fn new(enabled: bool) -> Self {
+        Self {
+            enabled,
+            shown_this_session: HashSet::new(),
+            session_impressions: 0,
+            manual_command_counts: HashMap::new(),
+        }
+    }
+
+    pub fn enabled(&self) -> bool {
+        self.enabled
+    }
+
     fn eligible_in_session(&self, tip: BehavioralTip) -> bool {
-        self.session_impressions < MAX_TIPS_PER_SESSION && !self.shown_this_session.contains(&tip)
+        self.enabled
+            && self.session_impressions < MAX_TIPS_PER_SESSION
+            && !self.shown_this_session.contains(&tip)
     }
 
     fn eligible(&self, tip: BehavioralTip, lifetime_impressions: u8) -> bool {
@@ -103,6 +125,17 @@ impl BehavioralTipState {
 }
 
 impl App {
+    /// A preference change never acknowledges errors, approvals, or recovery
+    /// notices. Keep impression caps intact when tips are enabled again.
+    pub fn set_contextual_tips_enabled(&mut self, enabled: bool) {
+        self.behavioral_tips.enabled = enabled;
+        if !enabled {
+            self.status_toasts
+                .retain(|toast| !matches!(toast.kind, StatusToastKind::BehavioralTip(_)));
+        }
+        self.needs_redraw = true;
+    }
+
     /// Show a behavioral tip when both the quiet session cap and the persisted
     /// lifetime cap allow it. Persistence is best-effort: a read-only home
     /// must not make a useful in-session hint fail closed.
@@ -153,6 +186,9 @@ impl App {
             StatusToastLevel::Info,
             Some(8_000),
         );
+        if let Some(toast) = self.status_toasts.back_mut() {
+            toast.kind = StatusToastKind::BehavioralTip(tip);
+        }
         true
     }
 
@@ -163,7 +199,8 @@ impl App {
     }
 
     pub fn note_manual_command_for_tip(&mut self, input: &str) -> bool {
-        self.behavioral_tips.note_manual_command(input)
+        self.behavioral_tips.enabled
+            && self.behavioral_tips.note_manual_command(input)
             && self.maybe_show_behavioral_tip(BehavioralTip::RepeatedCommandHotbar)
     }
 }

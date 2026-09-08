@@ -2145,5 +2145,8 @@
   "GoalProgressLabel": "Objectif",
   "GoalProgressReceipt": "Progression signalée {percent}% {bar}",
   "GoalProgressNow": "L en cours {note}",
-  "GoalProgressNext": "  ensuite {note}"
+  "GoalProgressNext": "  ensuite {note}",
+  "ConfigLabelContextualTips": "Conseils contextuels",
+  "ConfigHintContextualTips": "Suggestions occasionnelles de commandes après des actions pertinentes ; désactivez pour masquer les conseils.",
+  "ContextualTipsNotSaved": "La préférence des conseils s’applique à cette session, mais n’a pas pu être enregistrée : {error}"
 }

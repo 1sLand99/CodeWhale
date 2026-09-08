@@ -2145,5 +2145,8 @@
   "GoalProgressLabel": "लक्ष्य",
   "GoalProgressReceipt": "रिपोर्ट की गई प्रगति {percent}% {bar}",
   "GoalProgressNow": "L अभी {note}",
-  "GoalProgressNext": "  आगे {note}"
+  "GoalProgressNext": "  आगे {note}",
+  "ConfigLabelContextualTips": "संदर्भ के अनुसार सुझाव",
+  "ConfigHintContextualTips": "संबंधित कार्रवाइयों के बाद कभी-कभी कमांड के सुझाव; इन्हें छिपाने के लिए बंद करें।",
+  "ContextualTipsNotSaved": "सुझावों की प्राथमिकता इस सत्र पर लागू है, लेकिन सहेजी नहीं जा सकी: {error}"
 }
