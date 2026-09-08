@@ -446,6 +446,10 @@ pub struct SelectedFleet {
 }
 
 fn personal_fleets_dir() -> Result<PathBuf, FleetStoreError> {
+    #[cfg(test)]
+    if !crate::test_support::guarded_environment_provides_state_paths() {
+        return Ok(crate::test_support::unsealed_test_state_root().join(FLEET_DIR));
+    }
     codewhale_config::codewhale_home()
         .map(|home| home.join(FLEET_DIR))
         .map_err(|e| FleetStoreError::Io {
@@ -976,31 +980,81 @@ mod tests {
         })
     }
 
-    struct EnvGuard {
-        prev: Option<std::ffi::OsString>,
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            // SAFETY: serialised by lock_test_env held by the caller.
-            unsafe {
-                match &self.prev {
-                    Some(v) => std::env::set_var("CODEWHALE_HOME", v),
-                    None => std::env::remove_var("CODEWHALE_HOME"),
-                }
-            }
-        }
-    }
-
     /// Point CODEWHALE_HOME at a sealed temp dir. Caller must hold
     /// `lock_test_env`.
-    fn set_sealed_home() -> EnvGuard {
-        let prev = std::env::var_os("CODEWHALE_HOME");
-        // SAFETY: serialised by lock_test_env held by the caller.
-        unsafe {
-            std::env::set_var("CODEWHALE_HOME", sealed_home());
+    fn set_sealed_home() -> crate::test_support::EnvVarGuard {
+        crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", sealed_home())
+    }
+
+    #[test]
+    fn unsealed_personal_routes_ignore_ambient_home() {
+        const PROBE: &str = "CODEWHALE_TEST_AMBIENT_FLEET_PROBE";
+        if std::env::var_os(PROBE).is_some() {
+            let workspace = tempfile::tempdir().unwrap();
+            for hold_env_lock in [false, true] {
+                let _lock = hold_env_lock.then(crate::test_support::lock_test_env);
+                let root = crate::test_support::unsealed_test_state_root();
+                assert_eq!(personal_fleets_dir().unwrap(), root.join(FLEET_DIR));
+                assert_eq!(
+                    crate::fleet::profile::personal_agent_profile_dir().unwrap(),
+                    root.join("agents")
+                );
+                assert!(resolve_selected_fleet(workspace.path()).unwrap().is_none());
+                assert!(list_fleets(workspace.path()).is_empty());
+                let roster = crate::fleet::identity::load_effective_roster(
+                    &Default::default(),
+                    workspace.path(),
+                    None,
+                );
+                assert!(roster.load_error().is_none());
+                assert!(roster.members().iter().all(|member| {
+                    member.origin == crate::fleet::roster::ProfileOrigin::BuiltIn
+                }));
+            }
+            return;
         }
-        EnvGuard { prev }
+
+        // A fresh process inherits populated operator state, without earning
+        // the explicit EnvVarGuard seal used by deliberate path fixtures.
+        let ambient = tempfile::tempdir().unwrap();
+        let state = ambient.path().join(".codewhale");
+        let fleets = state.join(FLEET_DIR);
+        std::fs::create_dir_all(&fleets).unwrap();
+        let fleet = sample_fleet();
+        let fleet_path = fleets.join(format!("{}.toml", fleet.file_slug()));
+        let contents = fleet.render_toml().unwrap();
+        std::fs::write(&fleet_path, &contents).unwrap();
+        std::fs::write(fleets.join(SELECTED_FILE), &fleet.name).unwrap();
+        for explicit_override in [false, true] {
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            command
+                .args([
+                    "--exact",
+                    "fleet::store::tests::unsealed_personal_routes_ignore_ambient_home",
+                    "--test-threads=1",
+                ])
+                .env(PROBE, "1")
+                .env("HOME", ambient.path())
+                .env("USERPROFILE", ambient.path())
+                .env_remove("CODEWHALE_HOME")
+                .env_remove("CODEWHALE_CONFIG_PATH")
+                .env_remove("DEEPSEEK_CONFIG_PATH");
+            if explicit_override {
+                command.env("CODEWHALE_HOME", &state);
+            }
+            let output = command.output().unwrap();
+            assert!(
+                output.status.success(),
+                "ambient route probe failed (override={explicit_override})\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        assert_eq!(std::fs::read_to_string(fleet_path).unwrap(), contents);
+        assert_eq!(
+            std::fs::read_to_string(fleets.join(SELECTED_FILE)).unwrap(),
+            fleet.name
+        );
     }
 
     fn sample_fleet() -> FleetFile {
