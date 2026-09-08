@@ -11,11 +11,13 @@ description = "Agentic terminal facade for open-source and open-weight coding mo
 workspace = true
 
 [features]
+default = ["mimalloc-allocator"]
+mimalloc-allocator = ["dep:mimalloc"]
 # Opt-in global-allocator swap (#5872): build on rusty_alloc (the pure-Rust
 # mimalloc v2.4.5 remake — no C compiler, no build script) instead of the
 # default mimalloc. Off by default; the default build is unchanged.
-# Build with: cargo build -p codewhale-cli --features rusty-alloc
-rusty-alloc = ["dep:rusty_alloc-api"]
+# Build with: cargo build -p codewhale-cli --no-default-features --features rusty-alloc
+rusty-alloc = ["dep:rusty_alloc-api", "codewhale-tui/rusty-alloc"]
 
 [[bin]]
 name = "codewhale"
@@ -25,7 +27,7 @@ path = "src/main.rs"
 anyhow.workspace = true
 clap.workspace = true
 clap_complete.workspace = true
-codewhale-tui = { path = "../tui", version = "0.9.13" }
+codewhale-tui = { path = "../tui", version = "0.9.13", default-features = false }
 codewhale-agent = { path = "../agent", version = "0.9.13" }
 codewhale-app-server = { path = "../app-server", version = "0.9.13" }
 codewhale-config = { path = "../config", version = "0.9.13" }
@@ -48,7 +50,7 @@ reqwest = { workspace = true, features = ["blocking"] }
 rustls.workspace = true
 semver.workspace = true
 tokio.workspace = true
-mimalloc.workspace = true
+mimalloc = { workspace = true, optional = true }
 rusty_alloc-api = { workspace = true, optional = true }
 sha2.workspace = true
 tempfile.workspace = true
