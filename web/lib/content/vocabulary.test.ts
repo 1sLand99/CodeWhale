@@ -91,11 +91,11 @@ describe("shared product vocabulary", () => {
 });
 
 describe("shared getting-started path", () => {
-  it("keeps the four-step order: install → offline session → provider → fleet", () => {
+  it("connects a provider before the first task, with Fleet optional afterward", () => {
     expect(GETTING_STARTED_STEPS.map((s) => s.id)).toEqual([
       "install",
-      "first-session",
       "connect-provider",
+      "first-session",
       "fleet-workflow",
     ]);
   });
@@ -124,11 +124,7 @@ describe("shared getting-started path", () => {
     expect(GUIDE_NEXT_LINKS.some((l) => l.href === "/docs/hooks")).toBe(true);
   });
 
-  it("describes the first session truthfully: keyless launch, provider for replies", () => {
-    const first = GETTING_STARTED_STEPS.find((s) => s.id === "first-session")!;
-    expect(first.body.en).toMatch(/without an API key/);
-    expect(first.body.en).toContain("Plan blocks file mutation and shell execution");
-    expect(first.body.en).toMatch(/model replies need a configured provider/);
+  it("keeps offline setup documented without requiring it before a first task", () => {
     // The keyless-launch claim must stay backed by documented runtime
     // behavior. Assert the meaning docs/GUIDE.md owes this step -- a first
     // launch that asks only for the decisions still needed, and a provider

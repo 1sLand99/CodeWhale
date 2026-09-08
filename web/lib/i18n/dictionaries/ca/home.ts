@@ -9,14 +9,14 @@ import type { HomeDict } from "../types";
  */
 
 export const home: HomeDict = {
-  metaTitle: "Codewhale — Els teus models. Més capaços junts.",
+  metaTitle: "Codewhale — Crea el que vulguis.",
   metaDescription:
-    "Codewhale és un sistema de computació agèntica de codi obert. Porta els models que ja fas servir —allotjats, per gateway o locals— i fes-los treballar junts al teu terminal, a la teva màquina, sota el teu control. Rust, MIT.",
-  kicker: "Computació agèntica, en els teus termes",
-  heroTitleA: "Els teus models.",
-  heroTitleB: "Més capaços junts.",
+    "Crea programari, treballa amb fitxers i automatitza tasques amb Codewhale. Tria models allotjats o locals i canvia de proveïdor segons les teves necessitats.",
+  kicker: "Agents d’IA de codi obert",
+  heroTitleA: "Crea el que vulguis.",
+  heroTitleB: "Tria els teus models.",
   heroIntro:
-    "{brand} reuneix els models que ja fas servir en un sol terminal i els fa treballar com una tripulació —llegint el teu codi, editant, executant les comprovacions— mentre tu decideixes què pot fer cadascun. Codi obert, a la teva màquina.",
+    "{brand} et proporciona agents que poden crear programari, treballar amb fitxers i automatitzar tasques. Fes servir els models que triïs i canvia de proveïdor segons les teves necessitats.",
   getCodewhale: "Obtenir Codewhale",
   exploreProduct: "Explorar el producte",
   shotPreview: "Vista prèvia del terminal",
@@ -31,53 +31,78 @@ export const home: HomeDict = {
   publishedRelease: "publicada",
   figcaptionSourceCandidate: "sense publicar",
   chapterTerminal: "El teu terminal",
-  chapterTerminalTitle: "Un lloc familiar per començar.",
+  chapterTerminalTitle: "Comença amb alguna cosa que vulguis crear.",
   gainHeading:
-    "El que obtens no és un chatbot. És palanca sobre els models que ja pagues.",
+    "Posa les teves idees en marxa.",
   gainLede:
-    "Una sessió pot tenir diversos models alhora, cadascun en el rol que li has donat, tots treballant al mateix repositori amb les mateixes regles.",
+    "Crea un projecte, investiga una qüestió o automatitza una tasca. Comença amb un agent i reparteix les feines més grans entre diversos.",
   gain: [
-    ["Els teus models", "Claus allotjades, un gateway o un runtime local sense cap clau. Fixa un model diferent a cada rol i conserva el proveïdor que has triat: un nom de model mai el canvia per tu."],
-    ["Agents capaços", "Modes Plan, Work i Operate; un fleet de subagents per a una mateixa feina; eines per a fitxers, shell, web i MCP; sessions que es desen, es reprenen i es reverteixen."],
-    ["Control a la teva màquina", "Ask, Auto-Review o Full Access: tu fixes quant fa abans de preguntar. S’executa en local, en sandbox on el sistema ho permet, amb un registre d’auditoria que pots llegir."],
+    [
+      "Crea alguna cosa",
+      "Converteix una idea en programari que funcioni. Els teus agents poden editar fitxers, executar ordres i comprovar el resultat."
+    ],
+    [
+      "Automatitza les tasques repetitives",
+      "Crea scripts i fluxos de treball per a les tasques que repeteixes i executa’ls des del terminal."
+    ],
+    [
+      "Tria els teus models",
+      "Connecta models allotjats o locals. Reparteix les parts d’una feina més gran entre agents amb models i rols diferents."
+    ]
   ],
   chapterModels: "Els teus models",
-  modelsHeading: "Porta el que tens. No canviïs res que no hagis triat.",
+  modelsHeading: "Troba un model adequat per a la tasca.",
   modelsBody:
-    "Connecta un proveïdor allotjat compatible, una passarel·la o un servidor de models local. Revisa el proveïdor i el model abans de començar. Un servidor local pot requerir autenticació.",
+    "Fes servir un proveïdor de models allotjats, connecta’t a través d’una passarel·la o executa un model en local. Tria un proveïdor i un model per a cada sessió i canvia’ls mentre treballes.",
   modelsFacts: [
-    ["Allotjat", "La teva pròpia clau d’API, desada amb codewhale auth set"],
+    ["Allotjat", "La teva pròpia clau d’API, desada amb codewhale auth set --provider <id>"],
     ["Gateway", "Un endpoint per a molts models; el proveïdor el segueixes triant tu"],
     ["Local", "vLLM, SGLang, Ollama a localhost; normalment sense clau"],
   ],
-  modelsLink: "Veure tots els proveïdors",
-  startHeading: "Quatre passos fins a la primera sessió.",
+  modelsLink: "Explora els models i els proveïdors",
+  startHeading: "Comença la teva primera tasca.",
   startLede:
-    "Instal·la, obre una sessió sense clau, connecta un proveïdor i després configura un fleet quan un model no sigui prou.",
+    "Instal·la Codewhale, connecta un model i digues-li què vols fer. Afegeix un Fleet quan vulguis repartir la feina entre diversos agents.",
   startGuideLink: "Llegeix la guia d’inici",
   startVocabularyLink: "Consulta el vocabulari del producte",
-  chapterAccount: "On funciona avui",
-  availabilityHeading: "Disponible ara, en desenvolupament i encara no: dit clarament.",
+  chapterAccount: "Obtenir Codewhale",
+  availabilityHeading: "On fer servir Codewhale.",
   availabilityLede:
-    "El terminal és el producte publicat. Tota la resta apareix amb l’estat en què realment es troba.",
+    "Comença al terminal. L’aplicació i els ordinadors al núvol estan en desenvolupament.",
   availability: [
-    ["Terminal", "Publicat", "Binaris de GitHub Releases per a Linux, macOS i Windows; npm i Cargo són alternatives. Android amb Termux és una vista prèvia."],
-    ["Aplicació web", "Inici de sessió i control remot disponibles", "Inicia sessió o crea un compte i escriu /rc en una sessió local en marxa per continuar exactament aquella sessió des del navegador. La resta del banc de treball al navegador continua sent una vista prèvia de desenvolupament."],
-    ["Escriptori", "Build de desenvolupament", "Hi ha builds alfa per a macOS, Linux i Windows. Encara no hi ha cap aplicació d’escriptori publicada."],
-    ["Ordinadors al núvol", "Encara no disponible", "Executar feina en un ordinador allotjat està en desenvolupament. Aquesta pàgina ho dirà quan funcioni."],
+    [
+      "Terminal",
+      "Publicat",
+      "Binaris de les versions publicades a GitHub per a Linux, macOS i Windows; npm i Cargo són alternatives. Android amb Termux és una vista prèvia."
+    ],
+    [
+      "Aplicació web",
+      "Vista prèvia de desenvolupament",
+      "Accés al compte i vinculació amb el navegador a la vista prèvia de desenvolupament."
+    ],
+    [
+      "Escriptori",
+      "Build de desenvolupament",
+      "L’aplicació per a macOS està en desenvolupament; la descàrrega pública arribarà més endavant."
+    ],
+    [
+      "Ordinadors al núvol",
+      "En desenvolupament",
+      "Ordinadors allotjats per executar les teves tasques."
+    ]
   ],
   availabilityNote:
-    "El terminal no necessita compte. Un compte mai és per si sol un pla de pagament, i res en aquest lloc et pot cobrar.",
+    "El terminal funciona sense un compte de Codewhale. El teu proveïdor factura l’ús dels models allotjats.",
   accountLink: "Crear un compte",
   surfacesHeading: "Fes servir el runtime on passa la feina.",
   surfaces: [
     ["TUI", "Treball interactiu al terminal"],
     ["codewhale exec", "Scripts i CI"],
-    ["Client web", "Client de navegador, només loopback"],
+    ["Client web local","Interfície a localhost; espai de treball web allotjat en desenvolupament"],
     ["Runtime API + MCP", "Integracions locals"],
-    ["fleet", "Feina multiagent durable"],
+    ["Fleet","Diversos agents en una mateixa feina"],
   ],
-  runtimeLink: "Veure les superfícies del runtime i les notes d’estabilitat",
+  runtimeLink: "Explora les integracions",
   installBandHeading: "Comença amb una sola ordre.",
   copy: "Copia",
   copied: "Copiat ✓",

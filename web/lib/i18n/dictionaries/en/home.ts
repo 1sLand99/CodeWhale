@@ -11,15 +11,15 @@ import type { HomeDict } from "../types";
  * screenshot is described as the development build it is.
  */
 export const home: HomeDict = {
-  metaTitle: "Codewhale — Your models. More capable together.",
+  metaTitle: "Codewhale — Create what you want.",
   metaDescription:
-    "Codewhale is an open-source agentic computing system. Bring the models you already use — hosted, through a gateway, or local — and put them to work together in your terminal, on your machine, with you in control. Rust, MIT.",
+    "Build software, work with files, and automate tasks with Codewhale. Choose hosted or local models and switch providers as your work changes.",
 
-  kicker: "Agentic computing, on your terms",
-  heroTitleA: "Your models.",
-  heroTitleB: "More capable together.",
+  kicker: "Open-source AI agents",
+  heroTitleA: "Create what you want.",
+  heroTitleB: "Choose your models.",
   heroIntro:
-    "{brand} puts coding agents in your terminal to read code, edit files, and run checks. Choose supported models and set the session’s permissions. Open source, on your machine.",
+    "{brand} gives you agents that can build software, work with files, and automate tasks. Use the models you choose, and switch providers as your work changes.",
   getCodewhale: "Get Codewhale",
   exploreProduct: "Explore the product",
 
@@ -37,47 +37,47 @@ export const home: HomeDict = {
   figcaptionSourceCandidate: "unreleased",
 
   chapterTerminal: "Your terminal",
-  chapterTerminalTitle: "A familiar place to begin.",
+  chapterTerminalTitle: "Start with something you want to make.",
 
-  gainHeading: "Give your models a job to finish.",
+  gainHeading: "Put your ideas to work.",
   gainLede:
-    "Start with one model. Use Fleet to save a roster, and delegate parts of a task when the work benefits from more than one agent.",
+    "Build a project, research a question, or automate a task. Start with one agent and share larger jobs across several.",
   gain: [
     [
-      "Your models",
-      "Use a supported hosted provider, gateway, or local model server. Fleet stores model choices for reusable agent roles.",
+      "Build something",
+      "Turn an idea into working software. Your agents can edit files, run commands, and check the result.",
     ],
     [
-      "Capable agents",
-      "Plan, Work, and Operate modes; a fleet of sub-agents for one job; tools for files, shell, web, and MCP; sessions that save, resume, and roll back.",
+      "Automate the repeat work",
+      "Create scripts and workflows for tasks you repeat, then run them from the terminal.",
     ],
     [
-      "Control on your machine",
-      "Ask, Auto-Review, or Full Access — you set how much it does before it asks. Runs locally, sandboxed where the OS allows, with an audit log you can read.",
+      "Choose your models",
+      "Connect hosted or local models. Give parts of a larger job to agents with different models and roles.",
     ],
   ],
 
   chapterModels: "Your models",
-  modelsHeading: "A place for the models you choose.",
+  modelsHeading: "Find a model that fits the task.",
   modelsBody:
-    "Connect a supported hosted provider, a gateway, or a local model server. Check the selected provider and model before starting work. Local servers may run without an API key, depending on their configuration.",
+    "Use a hosted provider, connect through a gateway, or run a model locally. Choose a provider and model for each session, and change them as you work.",
   modelsFacts: [
-    ["Hosted", "Your own API key, saved with codewhale auth set"],
+    ["Hosted", "Your own API key, saved with codewhale auth set --provider <id>"],
     ["Gateway", "One endpoint for many models, provider still chosen by you"],
     ["Local", "vLLM, SGLang, Ollama on localhost — usually no key"],
   ],
-  modelsLink: "Explore provider options",
+  modelsLink: "Explore models and providers",
 
-  startHeading: "Four steps to a first session.",
+  startHeading: "Start your first task.",
   startLede:
-    "Install, open a session with no key, connect a provider, then set up a fleet when one model is not enough.",
+    "Install Codewhale, connect a model, and tell it what you want to do. Add a Fleet when you want several agents to share the work.",
   startGuideLink: "Read the getting-started guide",
   startVocabularyLink: "Look up a term",
 
-  chapterAccount: "Where it runs today",
-  availabilityHeading: "Available now, in development, and not yet — stated plainly.",
+  chapterAccount: "Get Codewhale",
+  availabilityHeading: "Where to use Codewhale.",
   availabilityLede:
-    "The terminal is the released product. Everything else is listed with the state it is actually in.",
+    "Start in the terminal. The app and cloud computers are in development.",
   availability: [
     [
       "Terminal",
@@ -87,21 +87,21 @@ export const home: HomeDict = {
     [
       "Web app",
       "Development preview",
-      "Account pages and browser pairing are implemented in development. Public end-to-end remote control has not been verified; use the terminal for released task execution.",
+      "Account access and browser pairing in the development preview.",
     ],
     [
       "Desktop",
       "Development build",
-      "A local macOS development build has been tested. There is no released desktop app to download.",
+      "The macOS app is in development; a public download is coming later.",
     ],
     [
       "Cloud computers",
-      "Not available yet",
-      "Running work on a hosted computer is in development. This page will say so when it works.",
+      "In development",
+      "Hosted computers for running your tasks.",
     ],
   ],
   availabilityNote:
-    "The terminal needs no Codewhale account. Hosted model providers bill under your own provider account; creating a Codewhale account does not purchase model access.",
+    "The terminal works without a Codewhale account. Hosted model usage is billed by your provider.",
   accountLink: "Create an account",
 
   surfacesHeading: "Use it where the work happens.",
@@ -112,7 +112,7 @@ export const home: HomeDict = {
     ["Runtime API + MCP", "Local integrations"],
     ["Fleet", "Several agents on one job"],
   ],
-  runtimeLink: "Runtime surfaces and what is stable",
+  runtimeLink: "Explore integrations",
 
   installBandHeading: "Install on macOS or Linux.",
   copy: "Copy",

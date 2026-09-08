@@ -10,6 +10,7 @@ import type { LocalizedText } from "./vocabulary";
 
 export const ACCOUNT_ENTRY_COPY = {
   signIn: {
+    metaTitle: { en: "Sign in · Codewhale", zh: "登录 · Codewhale" },
     kicker: { en: "Sign in", zh: "登录" },
     title: { en: "Sign in to Codewhale.", zh: "登录 Codewhale 账户。" },
     action: { en: "Sign in", zh: "登录" },
@@ -17,6 +18,7 @@ export const ACCOUNT_ENTRY_COPY = {
     switchLabel: { en: "Create account", zh: "创建账户" },
   },
   signUp: {
+    metaTitle: { en: "Create account · Codewhale", zh: "创建账户 · Codewhale" },
     kicker: { en: "Create account", zh: "创建账户" },
     title: { en: "Create a Codewhale account.", zh: "创建 Codewhale 账户。" },
     action: { en: "Create account", zh: "创建账户" },
@@ -24,8 +26,12 @@ export const ACCOUNT_ENTRY_COPY = {
     switchLabel: { en: "Sign in", zh: "去登录" },
   },
   lede: {
-    en: "An account is for the web app: sign in, keep provider keys with the account, and type /rc in a running local session to continue it from the browser. The rest of the browser workbench is a development preview. The open-source terminal works locally without an account — install it and continue on your machine. An account is never a paid plan by itself.",
-    zh: "账户用于网页应用：登录、把提供商密钥保存在账户里，并在正在运行的本地会话里输入 /rc，即可在浏览器中继续该会话。浏览器工作台的其余部分仍是开发预览。开源终端无需账户即可在本机使用——安装后即可继续。账户本身从不等于付费方案。",
+    en: "Sign in to the Codewhale app to keep your conversations and connected providers together. The web app is a development preview. To continue a terminal session in the browser, run /rc in that session. You can use the terminal without an account.",
+    zh: "登录 Codewhale 应用，集中管理对话与已连接的提供商。网页应用目前为开发预览版。要在浏览器中继续终端会话，请在该会话里运行 /rc。使用终端无需账户。",
+  },
+  metaDescription: {
+    en: "Access your Codewhale account and the app’s development preview. Connect to a terminal session from your browser with /rc.",
+    zh: "访问 Codewhale 账户与应用开发预览版。用 /rc 从浏览器连接终端会话。",
   },
   installLocally: { en: "Install locally", zh: "本机安装" },
 } as const satisfies Record<string, unknown> & { lede: LocalizedText; installLocally: LocalizedText };

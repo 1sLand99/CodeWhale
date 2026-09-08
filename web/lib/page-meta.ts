@@ -14,7 +14,7 @@ export const SITE_CONTACT_EMAIL = "help@codewhale.net";
 export const SITE_SECURITY_EMAIL = "hunter@codewhale.net";
 
 /** The one-line product identity, used as the default OG image alt text. */
-export const IDENTITY_PHRASE = "Codewhale — your models, more capable together.";
+export const IDENTITY_PHRASE = "Codewhale — create what you want, with the models you choose.";
 
 /** Accessible text for the shared Open Graph card. */
 export const OG_ALT = IDENTITY_PHRASE;

@@ -33,7 +33,7 @@ export default async function GuidePage({ params }: { params: Promise<{ locale: 
         <GettingStartedSteps locale={locale} />
       </section>
 
-      {session && (
+      {session?.status === "published" && (
         <section id="session-media" className="scroll-mt-32">
           <h2 className="font-display text-2xl mb-1">{t.sessionTitle}</h2>
           <p className={`${t.bodyClassName} mt-3 mb-4`}>{t.sessionLead}</p>

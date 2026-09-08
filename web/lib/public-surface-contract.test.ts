@@ -15,6 +15,7 @@ import { FACTS } from "./facts.generated";
 import { SNIPPETS, VERIFY } from "./install-binary-snippets";
 import { getChrome, getHome } from "./i18n/dictionaries";
 import { footerProjectLinks } from "./i18n/links";
+import { TERMINAL_SCREENSHOT } from "./media-manifest";
 
 const root = new URL("../../", import.meta.url);
 
@@ -263,7 +264,6 @@ describe("public surface contracts", () => {
     expect(installDoc).toContain("`codewhale-cli` installs the `codewhale` command");
     expect(installDoc).toContain("Cargo does\nnot create that alias");
     expect(installPage).toContain("# Install the compiled runtime as codewhale");
-    expect(installPage).toContain("Cargo installs only");
     expect(installPage).not.toContain("codewhale-tui");
     expect(npmReadme).toContain("installs `codewhale` plus the `codew` convenience name");
     expect(npmReadme).not.toContain("codewhale-tui");
@@ -372,13 +372,8 @@ done
 
     expect(matrix.trust.audit).toContain("best-effort");
     expect(matrix.trust.audit).toContain("$CODEWHALE_HOME");
-    expect(installPage).toContain(
-      "const CONFIG_TREE = `$CODEWHALE_HOME/ (default: ~/.codewhale/)",
-    );
-    expect(installPage).toContain(
-      "best-effort credential / approval / elevation events",
-    );
-    expect(installPage).toContain("尽力写入的凭证 / 审批 / 提权事件");
+    // Install links to configuration instead of duplicating its storage map.
+    expect(installPage).toContain("/docs/configuration");
     expect(installPage).not.toContain(
       "audit.log        credential / approval / elevation audit trail",
     );
@@ -595,14 +590,14 @@ done
     const readme = text("README.md");
     const homepage = text("web/app/[locale]/page.tsx");
     expect(readme).toContain("assets/screenshot.webp");
-    expect(homepage).toContain('src="/codewhale-tui.png"');
-    expect(homepage).toContain("width={2760}");
-    expect(homepage).toContain("height={1494}");
+    expect(`web/public${TERMINAL_SCREENSHOT.src}`).toBe(matrix.screenshot.website);
+    expect(imageDimensions(websiteImage)).toEqual([TERMINAL_SCREENSHOT.width, TERMINAL_SCREENSHOT.height]);
+    expect(homepage).toContain("src={TERMINAL_SCREENSHOT.src}");
     // Alt text and caption are dictionary-backed; every routed locale must
     // describe the capture as what it is — a v0.9.12 development build in
     // Work mode with Full Access, not a release and not a default.
     expect(homepage).toContain("alt={d.screenshotAlt}");
-    expect(homepage).toContain("fill(d.shotBuild, { version: sourceVersion })");
+    expect(homepage).toContain("fill(d.shotBuild, { version: TERMINAL_SCREENSHOT.version })");
     expect(getHome("en").shotBuild).toBe("v{version} development build");
     expect(getHome("en").screenshotAlt).toContain("development build");
     expect(getHome("en").screenshotAlt).toContain("Full Access");

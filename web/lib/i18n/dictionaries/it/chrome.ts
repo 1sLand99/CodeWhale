@@ -80,7 +80,7 @@ export const chrome: ChromeDict = {
   themeTitle: "Tema della documentazione · auto / chiaro / scuro",
 
   footerTagline:
-    "I tuoi modelli. Più capaci insieme. Documentazione, codice e comunità del runtime open source.",
+    "Crea quello che vuoi. Automatizza le attività. Scegli i tuoi modelli.",
   footerProduct: "Prodotto",
   footerProject: "Progetto",
   footerDocs: "Documentazione",

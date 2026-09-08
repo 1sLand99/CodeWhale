@@ -9,14 +9,14 @@ import type { HomeDict } from "../types";
  */
 
 export const home: HomeDict = {
-  metaTitle: "Codewhale — Model Anda. Lebih mampu bersama.",
+  metaTitle: "Codewhale — Ciptakan apa yang Anda inginkan.",
   metaDescription:
-    "Codewhale adalah sistem komputasi agentik sumber terbuka. Bawa model yang sudah Anda pakai — hosted, lewat gateway, atau lokal — dan biarkan mereka bekerja bersama di terminal Anda, di mesin Anda, di bawah kendali Anda. Rust, MIT.",
-  kicker: "Komputasi agentik, dengan syarat Anda",
-  heroTitleA: "Model Anda.",
-  heroTitleB: "Lebih mampu bersama.",
+    "Bangun perangkat lunak, kelola berkas, dan otomatisasi tugas dengan Codewhale. Pilih model yang dihosting atau model lokal, lalu ganti penyedia sesuai kebutuhan pekerjaan Anda.",
+  kicker: "Agen AI sumber terbuka",
+  heroTitleA: "Ciptakan apa yang Anda inginkan.",
+  heroTitleB: "Pilih model Anda.",
   heroIntro:
-    "{brand} mengumpulkan model yang sudah Anda pakai ke dalam satu terminal dan membuat mereka bekerja seperti satu awak — membaca kode, mengedit, menjalankan pemeriksaan — sementara Anda yang menentukan apa yang boleh dilakukan tiap model. Sumber terbuka, di mesin Anda.",
+    "{brand} menyediakan agen yang dapat membangun perangkat lunak, mengelola berkas, dan mengotomatiskan tugas. Gunakan model pilihan Anda dan ganti penyedia sesuai kebutuhan pekerjaan Anda.",
   getCodewhale: "Dapatkan Codewhale",
   exploreProduct: "Jelajahi produk",
   shotPreview: "Pratinjau terminal",
@@ -31,54 +31,79 @@ export const home: HomeDict = {
   publishedRelease: "dirilis",
   figcaptionSourceCandidate: "belum dirilis",
   chapterTerminal: "Terminal Anda",
-  chapterTerminalTitle: "Tempat yang akrab untuk memulai.",
+  chapterTerminalTitle: "Mulai dengan sesuatu yang ingin Anda buat.",
   gainHeading:
-    "Yang Anda dapat bukan chatbot, melainkan daya ungkit atas model yang sudah Anda bayar.",
+    "Wujudkan ide Anda.",
   gainLede:
-    "Satu sesi bisa menampung beberapa model sekaligus, masing-masing dalam peran yang Anda beri, semuanya bekerja di repositori yang sama dengan aturan yang sama.",
+    "Bangun proyek, teliti sebuah pertanyaan, atau otomatisasi tugas. Mulai dengan satu agen dan bagi pekerjaan yang lebih besar ke beberapa agen.",
   gain: [
-    ["Model Anda", "Kunci hosted, sebuah gateway, atau runtime lokal tanpa kunci sama sekali. Sematkan model berbeda untuk tiap peran dan pertahankan penyedia yang Anda pilih — nama model tidak pernah mengganti penyedia untuk Anda."],
-    ["Agen yang cakap", "Mode Plan, Work, dan Operate; satu fleet sub-agen untuk satu pekerjaan; alat untuk berkas, shell, web, dan MCP; sesi yang bisa disimpan, dilanjutkan, dan dikembalikan."],
-    ["Kendali di mesin Anda", "Ask, Auto-Review, atau Full Access — Anda menentukan seberapa jauh ia bekerja sebelum bertanya. Berjalan lokal, dalam sandbox jika OS mengizinkan, dengan log audit yang bisa Anda baca."],
+    [
+      "Bangun sesuatu",
+      "Ubah ide menjadi perangkat lunak yang berfungsi. Agen Anda dapat mengedit berkas, menjalankan perintah, dan memeriksa hasilnya."
+    ],
+    [
+      "Otomatisasi tugas berulang",
+      "Buat skrip dan alur kerja untuk tugas yang berulang, lalu jalankan dari terminal."
+    ],
+    [
+      "Pilih model Anda",
+      "Hubungkan model yang dihosting atau model lokal. Bagikan bagian-bagian dari pekerjaan besar ke agen dengan model dan peran yang berbeda."
+    ]
   ],
   chapterModels: "Model Anda",
-  modelsHeading: "Bawa yang Anda punya. Jangan ubah yang tidak Anda pilih.",
+  modelsHeading: "Temukan model yang sesuai dengan tugas Anda.",
   modelsBody:
-    "Hubungkan penyedia yang didukung, gateway, atau server model lokal. Periksa penyedia dan model sebelum mulai bekerja. Server lokal juga dapat memerlukan autentikasi.",
+    "Gunakan penyedia layanan model, hubungkan melalui gateway, atau jalankan model secara lokal. Pilih penyedia dan model untuk setiap sesi, lalu ubah saat Anda bekerja.",
   modelsFacts: [
-    ["Hosted", "Kunci API Anda sendiri, disimpan dengan codewhale auth set"],
+    ["Hosted", "Kunci API Anda sendiri, disimpan dengan codewhale auth set --provider <id>"],
     ["Gateway", "Satu endpoint untuk banyak model, penyedia tetap Anda yang pilih"],
     ["Lokal", "vLLM, SGLang, Ollama di localhost — biasanya tanpa kunci"],
   ],
-  modelsLink: "Lihat semua penyedia",
-  startHeading: "Empat langkah menuju sesi pertama.",
+  modelsLink: "Jelajahi model dan penyedia",
+  startHeading: "Mulai tugas pertama Anda.",
   startLede:
-    "Pasang, buka sesi tanpa kunci, hubungkan penyedia, lalu siapkan fleet saat satu model tidak cukup.",
+    "Pasang Codewhale, hubungkan model, dan sampaikan apa yang ingin Anda lakukan. Tambahkan Fleet saat Anda ingin beberapa agen berbagi pekerjaan.",
   startGuideLink: "Baca panduan memulai",
   startVocabularyLink: "Lihat kosakata produk",
-  chapterAccount: "Di mana ia berjalan hari ini",
+  chapterAccount: "Dapatkan Codewhale",
   availabilityHeading:
-    "Tersedia sekarang, dalam pengembangan, dan belum — dinyatakan apa adanya.",
+    "Di mana Anda dapat menggunakan Codewhale.",
   availabilityLede:
-    "Terminal adalah produk yang sudah dirilis. Yang lain dicantumkan sesuai keadaannya yang sebenarnya.",
+    "Mulai di terminal. Aplikasi dan komputer cloud masih dalam pengembangan.",
   availability: [
-    ["Terminal", "Dirilis", "Biner GitHub Releases untuk Linux, macOS, dan Windows; npm dan Cargo adalah alternatif. Android di Termux masih pratinjau."],
-    ["Aplikasi web", "Masuk dan kendali jarak jauh tersedia", "Masuk atau buat akun, lalu ketik /rc di sesi lokal yang sedang berjalan untuk melanjutkan sesi itu juga dari peramban. Bagian lain meja kerja di peramban masih pratinjau pengembangan."],
-    ["Desktop", "Build pengembangan", "Ada build alfa untuk macOS, Linux, dan Windows. Belum ada aplikasi desktop yang dirilis."],
-    ["Komputer cloud", "Belum tersedia", "Menjalankan pekerjaan di komputer yang di-host masih dalam pengembangan. Halaman ini akan mengatakannya saat sudah berfungsi."],
+    [
+      "Terminal",
+      "Dirilis",
+      "Biner rilis GitHub untuk Linux, macOS, dan Windows; npm dan Cargo tersedia sebagai alternatif. Android di Termux masih dalam tahap pratinjau."
+    ],
+    [
+      "Aplikasi web",
+      "Pratinjau pengembangan",
+      "Akses akun dan penautan peramban dalam pratinjau pengembangan."
+    ],
+    [
+      "Desktop",
+      "Build pengembangan",
+      "Aplikasi macOS masih dalam pengembangan; unduhan untuk publik akan tersedia nanti."
+    ],
+    [
+      "Komputer cloud",
+      "Dalam pengembangan",
+      "Komputer yang dihosting untuk menjalankan tugas Anda."
+    ]
   ],
   availabilityNote:
-    "Terminal tidak memerlukan akun. Akun tidak pernah dengan sendirinya menjadi paket berbayar, dan tidak ada apa pun di situs ini yang bisa menagih Anda.",
+    "Terminal dapat digunakan tanpa akun Codewhale. Biaya penggunaan model yang dihosting ditagih oleh penyedia Anda.",
   accountLink: "Buat akun",
   surfacesHeading: "Gunakan runtime di tempat pekerjaan berlangsung.",
   surfaces: [
     ["TUI", "Kerja terminal interaktif"],
     ["codewhale exec", "Skrip dan CI"],
-    ["Klien Web", "Klien peramban khusus loopback"],
+    ["Klien web lokal","Antarmuka localhost; ruang kerja peramban yang dihosting masih dalam pengembangan"],
     ["Runtime API + MCP", "Integrasi lokal"],
-    ["fleet", "Kerja multi-agen yang tahan lama"],
+    ["Fleet","Beberapa agen mengerjakan satu tugas"],
   ],
-  runtimeLink: "Lihat antarmuka runtime dan catatan stabilitas",
+  runtimeLink: "Jelajahi integrasi",
   installBandHeading: "Mulai dengan satu perintah.",
   copy: "Salin",
   copied: "Tersalin ✓",
