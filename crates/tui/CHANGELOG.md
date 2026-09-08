@@ -7,12 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.9.13] - 2026-09-07
+## [0.9.13] - Unreleased candidate
 
-Codewhale v0.9.13 is the integrity release for 0.9.12: multiline paste is
-one paste again, truncated tool arguments can no longer execute, strict
+Codewhale v0.9.13 source candidate addresses integrity issues in 0.9.12:
+multiline paste is one paste again, truncated tool arguments can no longer execute, strict
 ACP clients connect again, concurrent instances stop destroying each
-other's queued text, and the Computer Use bundle ships at plugin 0.2.0
+other's queued text, and the Computer Use bundle includes plugin 0.2.1
 with an accessibility-first pointer.
 
 ### Fixed

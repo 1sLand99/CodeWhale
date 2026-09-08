@@ -30,9 +30,9 @@ export const CHANGELOG: ChangelogRelease[] = [
   },
   {
     "version": "0.9.13",
-    "date": "2026-09-07",
+    "date": null,
     "unreleased": false,
-    "compareUrl": "https://github.com/Hmbown/CodeWhale/compare/v0.9.12...v0.9.13",
+    "compareUrl": "https://github.com/Hmbown/CodeWhale/compare/v0.9.12...HEAD",
     "sections": [
       {
         "heading": "Fixed",
