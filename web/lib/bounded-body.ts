@@ -6,7 +6,7 @@ export class BodyReadError extends Error {
 }
 
 /** Count raw bytes while reading; Content-Length is only an early rejection. */
-export async function readBoundedBody(request: Request, maxBytes: number): Promise<Uint8Array> {
+export async function readBoundedBody(request: { body: ReadableStream<Uint8Array> | null; headers: Headers }, maxBytes: number): Promise<Uint8Array> {
   const reject = async (status: 400 | 413, message: string): Promise<never> => {
     try { await request.body?.cancel(message); } catch { /* Keep the original rejection. */ }
     throw new BodyReadError(status, message);

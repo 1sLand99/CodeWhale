@@ -2,6 +2,7 @@ pub mod app_mode;
 pub mod auth_source;
 pub mod auto_model;
 pub mod catalog;
+pub mod cloud_facts;
 mod config_document;
 pub mod descriptors;
 pub mod device_code;
@@ -3483,7 +3484,9 @@ impl ConfigToml {
                 {
                     DEFAULT_KIMI_CODE_MODEL.to_string()
                 } else {
-                    default_model_for_provider(provider).to_string()
+                    cloud_facts::cloud_default_model_for_route(provider, &base_url)
+                        .map(|(model, _)| model)
+                        .unwrap_or_else(|| default_model_for_provider(provider).to_string())
                 }
             });
         let model = if provider == ProviderKind::OpencodeGo {

@@ -1780,6 +1780,8 @@
   "StatusLabelContextWindow": "Окно контекста",
   "StatusLabelWindowSource": "Источник окна",
   "StatusLabelWindowOverride": "Настройка окна",
+  "StatusLabelCatalog": "Каталог",
+  "StatusLabelCloudFacts": "Облачные факты",
   "StatusLabelSession": "Сессия",
   "StatusLabelSessionTokens": "Токены сессии",
   "StatusLabelSessionCost": "Стоимость сессии",

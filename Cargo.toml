@@ -4,6 +4,7 @@ members = [
     "crates/app-server",
     "crates/build-support",
     "crates/cli",
+    "crates/cloud-facts",
     "crates/command-contract",
     "crates/config",
     "crates/core",
@@ -55,6 +56,7 @@ encoding_rs = "0.8.35"
 # Sole user is crates/workflow-js (schemaui is gone); keep the graph on one
 # jsonschema/jsonschema-regex/referencing/fancy-regex stack.
 jsonschema = { version = "0.52", default-features = false }
+libc = "0.2"
 reqwest = { version = "0.13.1", default-features = false, features = ["json", "rustls-no-provider", "socks"] }
 # NOT "parallel": the Workflow VM stays single-threaded and bridges to the
 # multi-thread engine over channels (see crates/workflow-js).

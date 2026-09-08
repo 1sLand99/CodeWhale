@@ -107,6 +107,15 @@ reasoning_effort = "max"
 #   pin_last_prompt = true
 #   show_tool_details = false
 
+# Signed catalog overlays are optional and inactive without approved trust keys.
+# Explicit route/model selections and provider-owned rosters keep priority.
+# CODEWHALE_DISABLE_CLOUD_FACTS=1 disables cache, local files and network too.
+[cloud_facts]
+enabled = false
+channel = "stable"
+ttl_hours = 6
+# url = "https://codewhale.net/api/facts/v1/{channel}"
+
 # ─────────────────────────────────────────────────────────────────────────────────
 # Startup update check
 # ─────────────────────────────────────────────────────────────────────────────────

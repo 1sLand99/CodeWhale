@@ -1503,6 +1503,8 @@ pub(crate) fn audit_turn_cost_for_provider_on_endpoint_at(
         endpoint_fingerprint,
         usage,
         recorded_at,
+        true,
+        None,
     )
 }
 
@@ -1521,6 +1523,8 @@ fn audit_turn_cost_for_provider_on_endpoint_for_identity_at(
     endpoint_fingerprint: Option<&str>,
     usage: &Usage,
     recorded_at: DateTime<Utc>,
+    allow_cloud_catalog: bool,
+    frozen_cloud_pricing: Option<OfferingPricing>,
 ) -> TurnCostAudit {
     if !usage_cache_partition_is_consistent(usage) {
         return TurnCostAudit::unpriced(UnpricedReason::InconsistentUsage);
@@ -1601,6 +1605,9 @@ fn audit_turn_cost_for_provider_on_endpoint_for_identity_at(
         );
     }
 
+    if let Some(pricing) = frozen_cloud_pricing {
+        return audit_offering_pricing(pricing, usage);
+    }
     let classes = token_usage_for_pricing(usage);
     // A live catalog row is only authoritative when it is fresh *and* was
     // fetched from the endpoint this turn was served on. When it is not, degrade
@@ -1613,6 +1620,7 @@ fn audit_turn_cost_for_provider_on_endpoint_for_identity_at(
         &catalog_model,
         endpoint_fingerprint,
         recorded_at,
+        allow_cloud_catalog,
     ) {
         VerifiedOffering::Usable(offering) => Some(offering),
         VerifiedOffering::DegradedToBundled { offering, defect } => {
@@ -1734,6 +1742,7 @@ fn verified_catalog_offering(
     catalog_model: &str,
     endpoint_fingerprint: Option<&str>,
     recorded_at: DateTime<Utc>,
+    allow_cloud_catalog: bool,
 ) -> VerifiedOffering {
     let Some(offering) = crate::provider_lake::catalog_offering_for_model_identity(
         provider,
@@ -1742,6 +1751,41 @@ fn verified_catalog_offering(
     ) else {
         return VerifiedOffering::Absent;
     };
+    if allow_cloud_catalog
+        && let codewhale_config::catalog::CatalogSource::CloudFacts {
+            fetched_at,
+            valid_until,
+            ..
+        } = offering.pricing_source()
+    {
+        let at = u64::try_from(recorded_at.timestamp()).unwrap_or(0);
+        if *fetched_at > at {
+            return VerifiedOffering::FutureEffective;
+        }
+        if valid_until.is_some_and(|expires| at > expires) {
+            return crate::provider_lake::bundled_catalog_offering_for_model(
+                provider,
+                catalog_model,
+            )
+            .map(VerifiedOffering::Usable)
+            .unwrap_or(VerifiedOffering::Absent);
+        }
+    }
+    let cloud_price = matches!(
+        offering.pricing_source(),
+        codewhale_config::catalog::CatalogSource::CloudFacts { .. }
+    );
+    if cloud_price
+        && (!allow_cloud_catalog
+            || endpoint_fingerprint.is_some_and(|fingerprint| {
+                codewhale_config::catalog::base_url_fingerprint(provider.default_base_url())
+                    != fingerprint
+            }))
+    {
+        return crate::provider_lake::bundled_catalog_offering_for_model(provider, catalog_model)
+            .map(VerifiedOffering::Usable)
+            .unwrap_or(VerifiedOffering::Absent);
+    }
     // Models.dev is a capabilities catalog. A live overlay from that fetch
     // must never be treated as a rate source — leftover `cost` fields are
     // not provider prices, and `https://api.codewhale.net/session` 503
@@ -1749,15 +1793,22 @@ fn verified_catalog_offering(
     // (#5241). Prefer the bundled snapshot (curated in-repo rates, when
     // present) and otherwise ignore live cost so hand/bundled fallbacks
     // can restore a usable session total.
-    if crate::provider_lake::live_catalog_origin(provider, catalog_model)
-        == Some(crate::provider_lake::LiveSource::ModelsDev)
+    if matches!(
+        offering.pricing_source(),
+        codewhale_config::catalog::CatalogSource::ModelsDevLive { .. }
+    ) || (!cloud_price
+        && crate::provider_lake::live_catalog_origin(provider, catalog_model)
+            == Some(crate::provider_lake::LiveSource::ModelsDev))
     {
         let offering =
             crate::provider_lake::bundled_catalog_offering_for_model(provider, catalog_model)
                 .unwrap_or_else(|| capabilities_only_offering(offering));
         return VerifiedOffering::Usable(offering);
     }
-    let Some(pricing) = OfferingPricing::from_catalog_offering(&offering) else {
+    let Some(pricing) = OfferingPricing::from_catalog_offering_at(
+        &offering,
+        u64::try_from(recorded_at.timestamp()).unwrap_or(0),
+    ) else {
         // No priced row to verify; downstream treats this as unpriced.
         return VerifiedOffering::Usable(offering);
     };
@@ -1975,29 +2026,7 @@ pub(crate) fn audit_turn_cost_for_route_on_endpoint_for_identity_at(
                 return TurnCostAudit::unpriced(UnpricedReason::UnverifiedLivePricing);
             }
         };
-        let classes = token_usage_for_pricing(usage);
-        let unpriced_classes = pricing.unpriced_used_classes(&classes);
-        if !unpriced_classes.is_empty() {
-            return TurnCostAudit::missing_classes(pricing.provenance, unpriced_classes);
-        }
-        let Some(amount) = pricing.estimate_cost(&classes) else {
-            return TurnCostAudit::unpriced(UnpricedReason::InvalidPricingRow);
-        };
-        let (estimate, usd_priced, cny_priced) = match pricing.currency {
-            Currency::Usd => (CostEstimate::usd_only(amount), true, false),
-            Currency::Cny => (
-                CostEstimate {
-                    usd: 0.0,
-                    cny: amount,
-                },
-                false,
-                true,
-            ),
-            Currency::Other(_) => {
-                return TurnCostAudit::unpriced(UnpricedReason::UnsupportedCurrency);
-            }
-        };
-        return TurnCostAudit::priced(estimate, pricing.provenance, usd_priced, cny_priced);
+        return audit_offering_pricing(pricing, usage);
     }
     if provider == ApiProvider::Openrouter && provider_identity.is_some() {
         // A persisted built-in OpenRouter receipt that is missing the exact
@@ -2008,6 +2037,21 @@ pub(crate) fn audit_turn_cost_for_route_on_endpoint_for_identity_at(
     if provider == ApiProvider::Custom {
         return TurnCostAudit::unpriced(UnpricedReason::UnknownBillingBasis);
     }
+    let frozen_cloud_pricing = match provider_live_pricing {
+        Some(quote) if quote.provenance == PricingProvenance::CloudFacts => {
+            let pricing = provider_identity
+                .zip(endpoint_fingerprint)
+                .zip(u64::try_from(recorded_at.timestamp()).ok())
+                .and_then(|((identity, fingerprint), dispatched)| {
+                    quote.pricing_for_route(provider, identity, model, fingerprint, dispatched)
+                });
+            let Some(pricing) = pricing else {
+                return TurnCostAudit::unpriced(UnpricedReason::UnverifiedLivePricing);
+            };
+            Some(pricing)
+        }
+        _ => None,
+    };
     audit_turn_cost_for_provider_on_endpoint_for_identity_at(
         provider,
         provider_identity,
@@ -2015,7 +2059,33 @@ pub(crate) fn audit_turn_cost_for_route_on_endpoint_for_identity_at(
         endpoint_fingerprint,
         usage,
         recorded_at,
+        false,
+        frozen_cloud_pricing,
     )
+}
+
+fn audit_offering_pricing(pricing: OfferingPricing, usage: &Usage) -> TurnCostAudit {
+    let classes = token_usage_for_pricing(usage);
+    let unpriced = pricing.unpriced_used_classes(&classes);
+    if !unpriced.is_empty() {
+        return TurnCostAudit::missing_classes(pricing.provenance, unpriced);
+    }
+    let Some(amount) = pricing.estimate_cost(&classes) else {
+        return TurnCostAudit::unpriced(UnpricedReason::InvalidPricingRow);
+    };
+    let (estimate, usd, cny) = match pricing.currency {
+        Currency::Usd => (CostEstimate::usd_only(amount), true, false),
+        Currency::Cny => (
+            CostEstimate {
+                usd: 0.0,
+                cny: amount,
+            },
+            false,
+            true,
+        ),
+        Currency::Other(_) => return TurnCostAudit::unpriced(UnpricedReason::UnsupportedCurrency),
+    };
+    TurnCostAudit::priced(estimate, pricing.provenance, usd, cny)
 }
 
 /// Price an exact official OpenRouter route without consulting mutable live
@@ -5352,5 +5422,244 @@ mod tests {
             deepseek.report("DeepSeek"),
             "DeepSeek account balance: ¥123.45 (topped up 100.00, granted 23.45)"
         );
+    }
+
+    struct CloudAuditReset;
+    impl Drop for CloudAuditReset {
+        fn drop(&mut self) {
+            codewhale_config::cloud_facts::overlay::clear();
+            crate::provider_lake::clear_live_snapshot();
+            crate::provider_catalog_live::reset_cache_for_test();
+        }
+    }
+
+    fn publish_audit_facts(
+        channel: &str,
+        version: u64,
+        models: Vec<codewhale_config::cloud_facts::ModelFact>,
+        now: u64,
+    ) {
+        use codewhale_config::cloud_facts::{
+            CloudFactsState, CloudFactsStatus, FactsOrigin, ScopedFacts, overlay,
+        };
+        let ticket = overlay::configure(true, channel).unwrap();
+        assert!(overlay::publish(
+            &ticket,
+            Some(ScopedFacts {
+                channel: channel.into(),
+                facts_version: version,
+                key_id: "cwf-test-only".into(),
+                valid_until: Some(now + 600),
+                models,
+                ..Default::default()
+            }),
+            CloudFactsStatus {
+                state: CloudFactsState::Verified {
+                    channel: channel.into(),
+                    facts_version: version,
+                    key_id: "cwf-test-only".into(),
+                    fetched_at: now,
+                    origin: FactsOrigin::LocalFile,
+                    stale: false,
+                    patches: 1,
+                    defaults: 0,
+                    announcements: 0
+                },
+                ..Default::default()
+            }
+        ));
+    }
+
+    fn audit_price_patch(
+        provider: ApiProvider,
+        model: &str,
+        input: f64,
+    ) -> codewhale_config::cloud_facts::ModelFact {
+        use codewhale_config::cloud_facts::{ModelFact, PricingFact};
+        ModelFact {
+            provider: provider.as_str().into(),
+            id: model.into(),
+            context_window: Some(1_000_000),
+            pricing: Some(PricingFact {
+                input_per_m: Some(input),
+                output_per_m: Some(2.0),
+                cache_read_per_m: Some(0.1),
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn cloud_prices_require_dispatch_quotes_and_never_reprice_old_turns() {
+        let _live = crate::provider_lake::lock_live_snapshot();
+        let home = tempfile::tempdir().unwrap();
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", home.path());
+        let _enabled = crate::test_support::EnvVarGuard::remove("CODEWHALE_DISABLE_CLOUD_FACTS");
+        let _reset = CloudAuditReset;
+        codewhale_config::cloud_facts::overlay::clear();
+        crate::provider_lake::clear_live_snapshot();
+        crate::provider_catalog_live::reset_cache_for_test();
+        let provider = ApiProvider::Openai;
+        let model = "cloud-audit-fixture";
+        let base = provider.default_base_url();
+        let fingerprint = codewhale_config::catalog::base_url_fingerprint(base);
+        let now = Utc::now();
+        let at = now.timestamp() as u64;
+        let usage = Usage {
+            input_tokens: 1_000_000,
+            output_tokens: 0,
+            ..Default::default()
+        };
+        let audit = |quote| {
+            audit_turn_cost_for_route_on_endpoint_for_identity_at(
+                provider,
+                Some("openai"),
+                model,
+                billing_surface_for_route(provider, Some(base)),
+                Some(&fingerprint),
+                quote,
+                &usage,
+                now,
+            )
+        };
+        let before = audit(None);
+        publish_audit_facts(
+            "pricing-retro-test",
+            1,
+            vec![audit_price_patch(provider, model, 1.0)],
+            at,
+        );
+        assert_eq!(
+            audit(None),
+            before,
+            "a newly installed catalog cannot price an old dispatch without a quote"
+        );
+        let estimate = audit_turn_cost_for_provider_on_endpoint_at(
+            provider,
+            model,
+            Some(&fingerprint),
+            &usage,
+            now,
+        );
+        assert_eq!(estimate.provenance, Some(PricingProvenance::CloudFacts));
+        assert_eq!(estimate.estimate.unwrap().usd, 1.0);
+        let before_fetch = audit_turn_cost_for_provider_on_endpoint_at(
+            provider,
+            model,
+            Some(&fingerprint),
+            &usage,
+            now - chrono::Duration::seconds(1),
+        );
+        assert_eq!(
+            before_fetch.unpriced_reason,
+            Some(UnpricedReason::UnverifiedLivePricing)
+        );
+        let quote = crate::provider_catalog_live::fresh_dispatch_pricing_quote_at(
+            provider, "openai", model, base, at,
+        )
+        .unwrap();
+        assert_eq!(audit(Some(&quote)).estimate.unwrap().usd, 1.0);
+        publish_audit_facts(
+            "pricing-retro-test",
+            2,
+            vec![audit_price_patch(provider, model, 9.0)],
+            at,
+        );
+        assert_eq!(audit(Some(&quote)).estimate.unwrap().usd, 1.0);
+        assert_eq!(audit(None), before);
+        codewhale_config::cloud_facts::overlay::clear();
+        assert_eq!(audit(Some(&quote)).estimate.unwrap().usd, 1.0);
+    }
+
+    #[test]
+    fn cloud_quote_keeps_provider_hand_tiers_and_recorded_time_authority() {
+        let _live = crate::provider_lake::lock_live_snapshot();
+        let home = tempfile::tempdir().unwrap();
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", home.path());
+        let _enabled = crate::test_support::EnvVarGuard::remove("CODEWHALE_DISABLE_CLOUD_FACTS");
+        let _reset = CloudAuditReset;
+        codewhale_config::cloud_facts::overlay::clear();
+        crate::provider_lake::clear_live_snapshot();
+        crate::provider_catalog_live::reset_cache_for_test();
+        let now = Utc::now();
+        let at = now.timestamp() as u64;
+        let usage = Usage {
+            input_tokens: 600_000,
+            output_tokens: 1000,
+            ..Default::default()
+        };
+        let routes = [
+            (ApiProvider::Deepseek, "deepseek-v4-flash"),
+            (ApiProvider::Anthropic, "claude-sonnet-5"),
+            (ApiProvider::Minimax, "MiniMax-M3"),
+            (ApiProvider::MinimaxAnthropic, "MiniMax-M3"),
+            (ApiProvider::Xai, "grok-4.6"),
+        ];
+        let before: Vec<_> = routes
+            .iter()
+            .map(|(provider, model)| audit_turn_cost_for_provider_at(*provider, model, &usage, now))
+            .collect();
+        assert!(before.iter().all(TurnCostAudit::is_priced));
+        publish_audit_facts(
+            "pricing-hand-test",
+            1,
+            routes
+                .iter()
+                .map(|(provider, model)| audit_price_patch(*provider, model, 999.0))
+                .collect(),
+            at,
+        );
+        for ((provider, model), expected) in routes.into_iter().zip(before) {
+            let base = provider.default_base_url();
+            let quote = crate::provider_catalog_live::fresh_dispatch_pricing_quote_at(
+                provider,
+                provider.as_str(),
+                model,
+                base,
+                at,
+            )
+            .unwrap_or_else(|| {
+                panic!(
+                    "cloud quote missing for {provider:?} identity={} model={model}",
+                    provider.as_str()
+                )
+            });
+            // MiniMax shares these endpoints with subscription keys. Only a
+            // saved PAYG mode supplies this receipt (as the client does); a
+            // signed price cannot itself establish the account billing mode.
+            let surface = if matches!(
+                provider,
+                ApiProvider::Minimax | ApiProvider::MinimaxAnthropic
+            ) {
+                let unknown = audit_turn_cost_for_route_on_endpoint_for_identity_at(
+                    provider,
+                    Some(provider.as_str()),
+                    model,
+                    billing_surface_for_route(provider, Some(base)),
+                    Some(&codewhale_config::catalog::base_url_fingerprint(base)),
+                    Some(&quote),
+                    &usage,
+                    now,
+                );
+                assert_eq!(
+                    unknown.unpriced_reason,
+                    Some(UnpricedReason::UnknownBillingBasis)
+                );
+                Some(MINIMAX_PAYG_BILLING_SURFACE)
+            } else {
+                billing_surface_for_route(provider, Some(base))
+            };
+            let actual = audit_turn_cost_for_route_on_endpoint_for_identity_at(
+                provider,
+                Some(provider.as_str()),
+                model,
+                surface,
+                Some(&codewhale_config::catalog::base_url_fingerprint(base)),
+                Some(&quote),
+                &usage,
+                now,
+            );
+            assert_eq!(actual, expected, "{provider:?}/{model}");
+        }
     }
 }
