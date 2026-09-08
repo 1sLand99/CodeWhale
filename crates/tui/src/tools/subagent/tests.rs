@@ -3199,19 +3199,33 @@ fn child_artifact_copy_surfaces_working_notes_in_the_complete_transcript() {
     assert_eq!(transcript.target, "agent:agent_scout_notes");
     assert!(transcript.description.contains("todo_write working notes"));
     assert!(transcript.description.contains("transcript_handle"));
+    assert!(transcript.description.contains("handle_read"));
 }
 
 #[test]
-fn agent_description_explains_background_child_and_transcript_handle() {
+fn agent_definition_explains_background_child_and_wait() {
     let tmp = tempdir().expect("tempdir");
     let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 1);
     let tool = AgentTool::new(manager, stub_runtime());
     let description = tool.description();
+    let schema = tool.input_schema();
 
     assert!(description.contains("Start with action=start and prompt"));
     assert!(description.contains("Read-only roles need no extra fields"));
     assert!(description.contains("multiple starts"));
-    assert!(description.contains("action=wait"));
+    // Field descriptions carry lifecycle details in the model's definition;
+    // duplicating them in the top-level description wastes every request.
+    let action = schema_property_description(&schema, "action");
+    assert!(action.contains("returns immediately"));
+    assert!(action.contains("wait only observes"));
+    let until = schema_property_description(&schema, "until");
+    assert!(until.contains("For action=wait"));
+    assert!(until.contains("completion (default) returns when any one child settles"));
+    assert!(until.contains("every child running at call time has settled"));
+    assert!(until.contains("activity also returns on progress"));
+    let detached = schema_property_description(&schema, "detached");
+    assert!(detached.contains("False (default): the turn owns"));
+    assert!(detached.contains("true: detached work outlives the turn"));
     assert!(description.contains("action=claim"));
     assert!(description.contains("Fleet role"));
     assert!(
