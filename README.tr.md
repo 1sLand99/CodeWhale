@@ -1,7 +1,7 @@
-<!-- source: README.md sha256:3cc3ffc9b995 -->
+<!-- source: README.md sha256:330cff827493 -->
 # Codewhale
 
-Codewhale, terminaliniz için Rust ile geliştirilmiş ve kullanıcılarıyla birlikte açık biçimde iyileştirilen açık kaynaklı bir kodlama ajanıdır.
+Codewhale, seçtiğiniz modelleri kullanarak yazılım geliştirmenize, dosyalarınızla çalışmanıza ve günlük işleri otomatikleştirmenize yardımcı olan açık kaynaklı bir ajandır. Terminalde bir görevle başlayın ve barındırılan ya da yerel bir modele bağlanın. Daha büyük bir işi farklı modeller ve roller arasında paylaştırmak istediğinizde bir ajan ekibinden yararlanabilirsiniz.
 
 ![Terminalde çalışan Codewhale](web/public/codewhale-tui-171acee.png)
 
@@ -49,7 +49,7 @@ Grafik bir arayüzü mü tercih edersiniz? Topluluk tarafından bakımı yapıla
 
 ## Neden Codewhale
 
-- **İstediğiniz modeli kullanın.** Barındırılan sağlayıcılara veya Ollama, vLLM ya da SGLang üzerinden yerel modellere bağlanın. Sağlayıcı ve modeli `/model` ile değiştirin.
+- **Modellerinizi seçin.** Barındırılan sağlayıcılara veya Ollama, vLLM ya da SGLang üzerinden yerel modellere bağlanın. Sağlayıcı değiştirmek için `/provider`, model seçmek için `/model` kullanın.
 - **Kontrolü elinizde tutun.** Plan salt okunurdur. Ask, Auto-Review ve Full Access, onay davranışını görünür kılar. `/undo` son turu geri alır, `/restore` ise çalışma alanını önceki bir anlık görüntüye döndürür.
 - **Uzun süren işleri düzenli tutun.** Oturumları kaydedin, kalıcı bir `/goal` belirleyin, iş akışlarını çalışmadan önce gözden geçirin ve ajanların iç talimatlarını konuşmanıza taşımadan onları koordine edin.
 - **Elinizdeki ajanı genişletin.** MCP sunucularını ve becerileri bağlayın, hook’ları yapılandırın ve ajan rollerini projenizde veya kişisel ayarlarınızda okunabilir dosyalar olarak saklayın.
@@ -69,10 +69,11 @@ Politikaların kesin sıralaması için [yetkilendirme sırasını](docs/AUTHORI
 - [MCP](docs/MCP.md), [hook’lar](docs/HOOKS.md) ve [yapılandırma](docs/CONFIGURATION.md)
 - [Yerel web istemcisi](docs/WEB.md)
 - [Tüm belgeler](docs)
+- [Depo yapısı ve katkıda bulunma rehberi](CONTRIBUTING.md#project-structure)
 
 ## Topluluğa katılın
 
-İnsanlar Codewhale’i kullandıkça, yanlış gelen noktaları bildirdikçe ve düzeltmeye yardımcı oldukça Codewhale daha iyi olur. Bir sağlayıcı eksikse, bir iş akışı kullanışsızsa veya terminal arayüzü işinizi zorlaştırıyorsa [bir issue açın](https://github.com/Hmbown/CodeWhale/issues). Nasıl iyileştirileceğini biliyorsanız [bir pull request açın](CONTRIBUTING.md). İlk katkılar memnuniyetle karşılanır ve katkıda bulunanların projeye alınan çalışmaları üzerindeki emeği kayda geçer.
+**Hata bildirimleri, özellik fikirleri ve pull request’ler memnuniyetle karşılanır**; Codewhale’i aylardır kullanıyor olmanız ya da ilk kez denemeniz fark etmez. Bir sağlayıcı eksikse, bir iş akışı kullanışsızsa veya terminal arayüzü işinizi zorlaştırıyorsa birlikte iyileştirebilmemiz için [bir issue açın](https://github.com/Hmbown/CodeWhale/issues/new/choose) veya [bir pull request gönderin](CONTRIBUTING.md). İlk katkılar memnuniyetle karşılanır ve katkıda bulunanların projeye alınan çalışmaları üzerindeki emeği kayda geçer.
 
 [Discord’a](https://discord.gg/37gfS3ksug) katılın veya WeChat’te Hunter’ı (`hunterbown`) ekleyip Whale Brothers grubuna katılmak istediğinizi belirtin.
 

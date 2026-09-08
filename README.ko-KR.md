@@ -1,7 +1,7 @@
-<!-- source: README.md sha256:3cc3ffc9b995 -->
+<!-- source: README.md sha256:330cff827493 -->
 # Codewhale
 
-Codewhale은 Rust로 만든 터미널용 오픈 소스 코딩 에이전트로, 사용자들과 함께 공개적으로 개선해 나갑니다.
+Codewhale은 원하는 모델로 소프트웨어 개발, 파일 작업, 일상 작업 자동화를 돕는 오픈 소스 에이전트입니다. 터미널에서 작업을 지정하고 호스팅 모델이나 로컬 모델에 연결해 시작하세요. 더 큰 작업을 여러 모델과 역할로 나누고 싶을 때는 에이전트 팀을 구성할 수 있습니다.
 
 ![터미널에서 실행 중인 Codewhale](web/public/codewhale-tui-171acee.png)
 
@@ -49,7 +49,7 @@ Codewhale은 저장소를 읽고, 파일을 편집하고, 명령을 실행하고
 
 ## Codewhale을 선택하는 이유
 
-- **원하는 모델을 사용하세요.** 호스팅 공급자에 연결하거나 Ollama, vLLM, SGLang을 통해 로컬 모델을 사용할 수 있습니다. `/model`로 공급자와 모델을 전환하세요.
+- **모델을 선택하세요.** 호스팅 공급자에 연결하거나 Ollama, vLLM, SGLang을 통해 로컬 모델을 사용할 수 있습니다. `/provider`로 공급자를 바꾸고 `/model`로 모델을 선택하세요.
 - **계속 주도권을 가지세요.** Plan은 읽기 전용입니다. Ask, Auto-Review, Full Access는 승인 동작을 명확하게 보여 줍니다. `/undo`는 마지막 턴을 되돌리고 `/restore`는 작업 공간을 이전 스냅샷으로 복원합니다.
 - **긴 작업도 체계적으로 관리하세요.** 세션을 저장하고, 지속되는 `/goal`을 설정하고, 워크플로 실행 전에 검토하며, 에이전트의 내부 지시가 대화 기록에 섞이지 않도록 여러 에이전트를 조율할 수 있습니다.
 - **이미 사용 중인 에이전트를 확장하세요.** MCP 서버와 스킬을 연결하고, 훅을 구성하고, 에이전트 역할을 프로젝트나 개인 설정에 읽기 쉬운 파일로 보관할 수 있습니다.
@@ -69,10 +69,11 @@ Codewhale은 사용자가 허용한 접근 권한으로 사용자의 컴퓨터�
 - [MCP](docs/MCP.md), [훅](docs/HOOKS.md), [구성](docs/CONFIGURATION.md)
 - [로컬 웹 클라이언트](docs/WEB.md)
 - [전체 문서](docs)
+- [저장소 구조 및 기여 가이드](CONTRIBUTING.md#project-structure)
 
 ## 커뮤니티 참여
 
-사람들이 Codewhale을 사용하고, 불편한 점을 알리고, 수정에 힘을 보탤 때 Codewhale은 더 좋아집니다. 필요한 공급자가 없거나 워크플로가 불편하거나 터미널 UI가 작업을 방해한다면 [issue를 등록](https://github.com/Hmbown/CodeWhale/issues)해 주세요. 개선 방법을 알고 있다면 [pull request를 등록](CONTRIBUTING.md)해 주세요. 첫 기여도 환영하며, 반영된 작업에는 기여자의 이름을 남깁니다.
+**버그 보고, 기능 제안, pull request를 환영합니다.** Codewhale을 몇 달간 사용했든 처음 사용해 보든 누구나 참여할 수 있습니다. 필요한 공급자가 없거나 워크플로가 불편하거나 터미널 UI가 작업을 방해한다면 [issue를 등록](https://github.com/Hmbown/CodeWhale/issues/new/choose)하거나 [pull request를 보내](CONTRIBUTING.md) 함께 개선해 주세요. 첫 기여도 환영하며, 반영된 작업에는 기여자의 이름을 남깁니다.
 
 [Discord](https://discord.gg/37gfS3ksug)에 참여하거나 WeChat에서 Hunter(`hunterbown`)를 추가한 뒤 Whale Brothers 그룹 참여를 요청하세요.
 

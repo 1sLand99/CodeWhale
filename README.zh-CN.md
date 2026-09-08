@@ -1,7 +1,7 @@
-<!-- source: README.md sha256:3cc3ffc9b995 -->
+<!-- source: README.md sha256:330cff827493 -->
 # Codewhale
 
-Codewhale 是一款面向终端的开源编程智能体，使用 Rust 构建，并与用户一起在公开协作中不断改进。
+Codewhale 是一款开源智能体，可使用你选择的模型帮助你开发软件、处理文件并自动完成日常任务。从终端中的一项任务开始，连接托管模型或本地模型；需要把较大的工作分给不同模型和角色时，还可以组建智能体团队。
 
 ![Codewhale 在终端中运行](web/public/codewhale-tui-171acee.png)
 
@@ -52,7 +52,7 @@ Codewhale 可以读取你的代码仓库、编辑文件、运行命令、检查�
 
 ## 为什么选择 Codewhale
 
-- **使用你想要的模型。** 连接托管提供商，或通过 Ollama、vLLM、SGLang 使用本地模型。使用 `/model` 切换提供商和模型。
+- **选择你的模型。** 连接托管提供商，或通过 Ollama、vLLM、SGLang 使用本地模型。使用 `/provider` 切换提供商，使用 `/model` 选择模型。
 - **掌控始终在你手中。** Plan 模式为只读。Ask、Auto-Review 和 Full Access 会清晰展示审批行为。`/undo` 可撤销上一轮操作，`/restore` 可将工作区恢复到较早的快照。
 - **让长时间任务井然有序。** 保存会话、设置持久的 `/goal`、在工作流运行前进行审查，并协调多个智能体，同时不让其内部指令混入你的对话记录。
 - **扩展你已有的智能体。** 连接 MCP 服务器和技能、配置钩子，并将智能体角色作为可读文件保存在项目或个人设置中。
@@ -72,10 +72,11 @@ Codewhale 在你的机器上运行，并仅拥有你授予的访问权限。审�
 - [MCP](docs/MCP.md)、[钩子](docs/HOOKS.md)和[配置](docs/CONFIGURATION.md)
 - [本地 Web 客户端](docs/WEB.md)
 - [全部文档](docs)
+- [仓库结构与贡献指南](CONTRIBUTING.md#project-structure)
 
 ## 加入社区
 
-当人们使用 Codewhale、反馈不顺手之处并帮助修复问题时，它就会变得更好。如果缺少某个提供商、工作流体验不佳，或终端界面妨碍了你，请[提交 issue](https://github.com/Hmbown/CodeWhale/issues)。如果你知道如何改进，请[提交 pull request](CONTRIBUTING.md)。我们欢迎首次贡献，贡献者也会保留已合入工作的署名。
+**欢迎提交错误报告、功能建议和 pull request**，无论你已使用 Codewhale 数月，还是刚刚开始尝试。如果缺少某个提供商、工作流体验不佳，或终端界面妨碍了你，请[提交 issue](https://github.com/Hmbown/CodeWhale/issues/new/choose) 或[提交 pull request](CONTRIBUTING.md)，一起改进。我们欢迎首次贡献，贡献者也会保留已合入工作的署名。
 
 加入 [Discord](https://discord.gg/37gfS3ksug)，或在微信添加 Hunter（`hunterbown`）并申请加入 Whale Brothers 群。
 

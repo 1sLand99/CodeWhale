@@ -1,7 +1,7 @@
-<!-- source: README.md sha256:3cc3ffc9b995 -->
+<!-- source: README.md sha256:330cff827493 -->
 # Codewhale
 
-Codewhale est un agent de programmation open source pour votre terminal, développé en Rust et amélioré publiquement avec les personnes qui l’utilisent.
+Codewhale est un agent open source qui vous aide à développer des logiciels, à travailler sur vos fichiers et à automatiser les tâches du quotidien avec les modèles de votre choix. Commencez par une tâche dans votre terminal et connectez un modèle hébergé ou local. Vous pouvez faire appel à une équipe d’agents pour répartir un travail plus important entre différents modèles et rôles.
 
 ![Codewhale en cours d’exécution dans un terminal](web/public/codewhale-tui-171acee.png)
 
@@ -49,7 +49,7 @@ Vous préférez une interface graphique ? L'extension CodeWhale for VS Code, mai
 
 ## Pourquoi Codewhale
 
-- **Utilisez le modèle de votre choix.** Connectez des fournisseurs hébergés ou des modèles locaux via Ollama, vLLM ou SGLang. Changez de fournisseur et de modèle avec `/model`.
+- **Choisissez vos modèles.** Connectez des fournisseurs hébergés ou des modèles locaux via Ollama, vLLM ou SGLang. Utilisez `/provider` pour changer de fournisseur et `/model` pour choisir un modèle.
 - **Gardez le contrôle.** Le mode Plan est en lecture seule. Ask, Auto-Review et Full Access rendent le comportement des approbations explicite. `/undo` annule le dernier tour et `/restore` ramène l’espace de travail à un instantané antérieur.
 - **Organisez les travaux de longue durée.** Enregistrez les sessions, définissez un `/goal` durable, examinez les workflows avant leur exécution et coordonnez des agents sans faire apparaître leurs instructions internes dans votre conversation.
 - **Étendez l’agent que vous possédez déjà.** Connectez des serveurs MCP et des compétences, configurez des hooks et conservez les rôles d’agent sous forme de fichiers lisibles dans votre projet ou vos paramètres personnels.
@@ -69,10 +69,11 @@ Consultez l’[ordre d’autorisation](docs/AUTHORIZATION_ORDER.md) pour connaî
 - [MCP](docs/MCP.md), [hooks](docs/HOOKS.md) et [configuration](docs/CONFIGURATION.md)
 - [Client web local](docs/WEB.md)
 - [Toute la documentation](docs)
+- [Organisation du dépôt et guide de contribution](CONTRIBUTING.md#project-structure)
 
 ## Rejoindre la communauté
 
-Codewhale progresse lorsque les gens l’utilisent, signalent ce qui ne va pas et contribuent aux correctifs. S’il manque un fournisseur, si un workflow est peu pratique ou si l’interface du terminal vous gêne, [ouvrez une issue](https://github.com/Hmbown/CodeWhale/issues). Si vous savez comment l’améliorer, [ouvrez une pull request](CONTRIBUTING.md). Les premières contributions sont les bienvenues, et les personnes qui contribuent restent créditées pour le travail intégré.
+**Les signalements de bugs, les idées de fonctionnalités et les pull requests sont les bienvenus**, que vous utilisiez Codewhale depuis des mois ou que vous l’essayiez pour la première fois. S’il manque un fournisseur, si un workflow est peu pratique ou si l’interface du terminal vous gêne, [ouvrez une issue](https://github.com/Hmbown/CodeWhale/issues/new/choose) ou [envoyez une pull request](CONTRIBUTING.md) pour que nous puissions l’améliorer ensemble. Les premières contributions sont les bienvenues, et les personnes qui contribuent restent créditées pour le travail intégré.
 
 Rejoignez le [Discord](https://discord.gg/37gfS3ksug), ou ajoutez Hunter sur WeChat (`hunterbown`) et demandez à rejoindre le groupe Whale Brothers.
 

@@ -1,7 +1,7 @@
-<!-- source: README.md sha256:3cc3ffc9b995 -->
+<!-- source: README.md sha256:330cff827493 -->
 # Codewhale
 
-Codewhale 是一款在終端機中使用的開源程式設計代理，以 Rust 打造，並與使用者一起透過公開協作持續改進。
+Codewhale 是一款開源代理，可使用你選擇的模型協助開發軟體、處理檔案，並自動完成日常工作。從終端機中的一項任務開始，連線至託管模型或本機模型；需要將較大的工作分配給不同模型與角色時，也可以組成代理團隊。
 
 ![Codewhale 在終端機中執行](web/public/codewhale-tui-171acee.png)
 
@@ -49,7 +49,7 @@ Codewhale 可以讀取你的程式碼儲存庫、編輯檔案、執行指令、�
 
 ## 為何選擇 Codewhale
 
-- **使用你想要的模型。** 連線至託管供應商，或透過 Ollama、vLLM、SGLang 使用本機模型。使用 `/model` 切換供應商與模型。
+- **選擇你的模型。** 連線至託管供應商，或透過 Ollama、vLLM、SGLang 使用本機模型。使用 `/provider` 切換供應商，使用 `/model` 選擇模型。
 - **掌控權始終在你手中。** Plan 模式為唯讀。Ask、Auto-Review 與 Full Access 會清楚呈現核准行為。`/undo` 可復原上一輪操作，`/restore` 可將工作區還原至較早的快照。
 - **讓長時間工作井然有序。** 儲存工作階段、設定持久的 `/goal`、在工作流程執行前加以審查，並協調多個代理，同時避免其內部指示混入你的對話記錄。
 - **擴充你已有的代理。** 連接 MCP 伺服器與技能、設定掛鉤，並將代理角色以可讀檔案保存在專案或個人設定中。
@@ -69,10 +69,11 @@ Codewhale 在你的電腦上執行，且只擁有你授予的存取權限。核�
 - [MCP](docs/MCP.md)、[掛鉤](docs/HOOKS.md)與[設定](docs/CONFIGURATION.md)
 - [本機網頁用戶端](docs/WEB.md)
 - [所有文件](docs)
+- [儲存庫結構與貢獻指南](CONTRIBUTING.md#project-structure)
 
 ## 加入社群
 
-當人們使用 Codewhale、回報不順手之處並協助修正問題時，它就會變得更好。如果缺少某個供應商、工作流程操作不便，或終端機介面妨礙了你，請[提出 issue](https://github.com/Hmbown/CodeWhale/issues)。如果你知道如何改善，請[提出 pull request](CONTRIBUTING.md)。我們歡迎首次貢獻，貢獻者也會保留已合併工作的署名。
+**歡迎回報錯誤、提出功能建議及提交 pull request**，無論你已使用 Codewhale 數月，還是第一次嘗試。如果缺少某個供應商、工作流程操作不便，或終端機介面妨礙了你，請[提出 issue](https://github.com/Hmbown/CodeWhale/issues/new/choose) 或[提交 pull request](CONTRIBUTING.md)，一起改善。我們歡迎首次貢獻，貢獻者也會保留已合併工作的署名。
 
 加入 [Discord](https://discord.gg/37gfS3ksug)，或在微信加入 Hunter（`hunterbown`）並申請加入 Whale Brothers 群組。
 

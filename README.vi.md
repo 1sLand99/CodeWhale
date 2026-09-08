@@ -1,7 +1,7 @@
-<!-- source: README.md sha256:3cc3ffc9b995 -->
+<!-- source: README.md sha256:330cff827493 -->
 # Codewhale
 
-Codewhale là tác nhân lập trình mã nguồn mở dành cho terminal, được xây dựng bằng Rust và được cải thiện công khai cùng những người sử dụng nó.
+Codewhale là tác nhân mã nguồn mở giúp bạn phát triển phần mềm, làm việc với tệp và tự động hóa các tác vụ hằng ngày bằng những mô hình bạn chọn. Bắt đầu với một tác vụ trong terminal và kết nối với mô hình được lưu trữ hoặc mô hình cục bộ. Khi muốn chia công việc lớn hơn cho nhiều mô hình và vai trò, bạn có thể sử dụng một nhóm tác nhân.
 
 ![Codewhale đang chạy trong terminal](web/public/codewhale-tui-171acee.png)
 
@@ -49,7 +49,7 @@ Thích giao diện đồ họa hơn? Tiện ích CodeWhale for VS Code do cộng
 
 ## Vì sao chọn Codewhale
 
-- **Dùng mô hình bạn muốn.** Kết nối với nhà cung cấp được lưu trữ hoặc với mô hình cục bộ thông qua Ollama, vLLM hay SGLang. Chuyển nhà cung cấp và mô hình bằng `/model`.
+- **Chọn mô hình của bạn.** Kết nối với nhà cung cấp dịch vụ hoặc với mô hình cục bộ thông qua Ollama, vLLM hay SGLang. Dùng `/provider` để đổi nhà cung cấp và `/model` để chọn mô hình.
 - **Luôn nắm quyền kiểm soát.** Plan chỉ cho phép đọc. Ask, Auto-Review và Full Access hiển thị rõ cách hoạt động của việc phê duyệt. `/undo` hoàn tác lượt gần nhất, còn `/restore` đưa không gian làm việc về một ảnh chụp trước đó.
 - **Sắp xếp công việc dài hạn.** Lưu phiên, đặt `/goal` lâu dài, xem lại quy trình trước khi chạy và phối hợp các tác nhân mà không đưa chỉ dẫn nội bộ của chúng vào bản ghi hội thoại của bạn.
 - **Mở rộng tác nhân bạn đang có.** Kết nối máy chủ MCP và kỹ năng, cấu hình hook, đồng thời lưu vai trò tác nhân dưới dạng các tệp dễ đọc trong dự án hoặc phần cài đặt cá nhân.
@@ -69,10 +69,11 @@ Codewhale chạy trên máy của bạn với quyền truy cập do bạn cấp.
 - [MCP](docs/MCP.md), [hook](docs/HOOKS.md) và [cấu hình](docs/CONFIGURATION.md)
 - [Ứng dụng web cục bộ](docs/WEB.md)
 - [Toàn bộ tài liệu](docs)
+- [Cấu trúc kho mã và hướng dẫn đóng góp](CONTRIBUTING.md#project-structure)
 
 ## Tham gia cộng đồng
 
-Codewhale trở nên tốt hơn khi mọi người sử dụng, phản hồi những điểm chưa ổn và cùng khắc phục. Nếu thiếu một nhà cung cấp, quy trình còn bất tiện hoặc giao diện terminal cản trở công việc, hãy [mở issue](https://github.com/Hmbown/CodeWhale/issues). Nếu bạn biết cách cải thiện, hãy [mở pull request](CONTRIBUTING.md). Chúng tôi chào đón những đóng góp đầu tiên và người đóng góp luôn được ghi nhận cho phần việc đã được hợp nhất.
+**Chúng tôi chào đón báo cáo lỗi, ý tưởng tính năng và pull request**, dù bạn đã dùng Codewhale nhiều tháng hay mới thử lần đầu. Nếu thiếu một nhà cung cấp, quy trình còn bất tiện hoặc giao diện terminal cản trở công việc, hãy [mở issue](https://github.com/Hmbown/CodeWhale/issues/new/choose) hoặc [gửi pull request](CONTRIBUTING.md) để cùng cải thiện. Chúng tôi chào đón những đóng góp đầu tiên và luôn ghi nhận người đóng góp cho phần việc đã được hợp nhất.
 
 Tham gia [Discord](https://discord.gg/37gfS3ksug), hoặc thêm Hunter trên WeChat (`hunterbown`) và đề nghị tham gia nhóm Whale Brothers.
 
