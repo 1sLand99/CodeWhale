@@ -170,8 +170,10 @@ struct Cli {
     session_id: Option<String>,
     #[arg(short = 'p', long = "prompt", value_name = "PROMPT")]
     prompt_flag: Option<String>,
-    /// Per-run config override (`KEY=VALUE`), repeatable. Applied in memory
-    /// after load and never saved — `config set` persists instead. Long-only:
+    /// Per-run config override (`KEY=VALUE`), repeatable, never saved.
+    /// Runtime keys: provider, model/default_text_model, verbosity,
+    /// approval_policy, sandbox_mode, telemetry. Dedicated flags win;
+    /// managed policy still applies. `config set` persists instead. Long-only:
     /// short `-c` is already `--continue`.
     #[arg(long = "set", value_name = "KEY=VALUE")]
     overrides: Vec<String>,
@@ -1875,6 +1877,55 @@ fn config_store_path_for_dispatch(
     explicit_path
 }
 
+/// Runtime `--set` uses the dedicated flag handoff, so the existing loader
+/// owns profile, provider, managed-policy and requirements precedence. Keep
+/// config read/write commands on their separate, never-saved store overlay.
+fn apply_runtime_set_overrides(cli: &mut Cli) -> Result<()> {
+    let mut values = CliRuntimeOverrides::default();
+    let mut provider = None;
+    for spec in &cli.overrides {
+        let (key, value) = spec
+            .split_once('=')
+            .context("invalid --set: expected KEY=VALUE (value omitted)")?;
+        match key.trim() {
+            "provider" => {
+                provider = Some(
+                    parse_provider_identifier(value)
+                        .map_err(|_| anyhow!("invalid --set provider (value omitted)"))?,
+                );
+            }
+            "model" | "default_text_model" => values.model = Some(value.to_string()),
+            "verbosity" => values.verbosity = Some(value.to_string()),
+            "approval_policy" => values.approval_policy = Some(value.to_string()),
+            "sandbox_mode" => values.sandbox_mode = Some(value.to_string()),
+            "telemetry" => {
+                let mut config = ConfigToml::default();
+                config
+                    .set_value("telemetry", value)
+                    .map_err(|_| anyhow!("invalid --set telemetry: expected a boolean"))?;
+                values.telemetry = config.telemetry;
+            }
+            _ => bail!(
+                "unsupported runtime --set key (value omitted): supported keys are provider, \
+                 model, default_text_model, verbosity, approval_policy, sandbox_mode and \
+                 telemetry; use the dedicated option or config set for other keys"
+            ),
+        }
+        if value.trim().is_empty() {
+            bail!("invalid runtime --set: value must not be empty");
+        }
+    }
+    // A dedicated flag is more specific than a generic --set for the same
+    // field. Repeated --set keys otherwise keep their last value.
+    cli.provider = cli.provider.take().or(provider);
+    cli.model = cli.model.take().or(values.model);
+    cli.verbosity = cli.verbosity.take().or(values.verbosity);
+    cli.approval_policy = cli.approval_policy.take().or(values.approval_policy);
+    cli.sandbox_mode = cli.sandbox_mode.take().or(values.sandbox_mode);
+    cli.telemetry = cli.telemetry.or(values.telemetry);
+    Ok(())
+}
+
 fn run() -> Result<()> {
     let matches = Cli::command().get_matches();
     let project_bundle_scope = config_command_targets_project(&matches);
@@ -1886,6 +1937,20 @@ fn run() -> Result<()> {
     let (proxy, command) = split_lane_log_proxy_command(cli.command.take());
     if let Some(args) = proxy {
         return run_lane_log_proxy_command(args);
+    }
+
+    if !cli.overrides.is_empty() && matches!(command, Some(Commands::Auth(_))) {
+        bail!("--set is not supported by auth commands; use a saved config");
+    }
+    if !cli.overrides.is_empty()
+        && matches!(&command, Some(Commands::AppServer(args)) if !args.http && !args.mobile)
+    {
+        bail!(
+            "--set is not supported by the legacy app-server transport; use app-server --http or a saved config"
+        );
+    }
+    if !matches!(command, Some(Commands::Config(_))) {
+        apply_runtime_set_overrides(&mut cli)?;
     }
 
     let pipe_api_key_handoff = matches!(
@@ -1943,10 +2008,12 @@ fn run() -> Result<()> {
              use the subcommand's own flag (for example `codewhale exec --session-id <id>`)."
         );
     }
-    // Per-run `--set KEY=VALUE` overlays: validated and applied in memory,
-    // never saved. Mutating config subcommands refuse them below rather than
-    // letting a per-run value leak into the file.
-    apply_per_run_overrides(&mut store, &cli.overrides)?;
+    // Only config inspection needs the store overlay. Runtime overrides use
+    // the dedicated flags above and must never enter a store that another
+    // command (or legacy credential migration) can save.
+    if matches!(command, Some(Commands::Config(_))) {
+        apply_per_run_overrides(&mut store, &cli.overrides)?;
+    }
 
     match command {
         Some(Commands::Run(args)) => {
