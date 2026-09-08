@@ -230,6 +230,7 @@ pub(crate) enum DispatchRecovery {
 #[derive(Debug, Clone)]
 pub(crate) struct UserDispatchSnapshot {
     pub(crate) is_loading: bool,
+    pub(crate) suppress_stream_events_until_turn_complete: bool,
     pub(crate) runtime_turn_status: Option<String>,
     pub(crate) receipt_text: Option<String>,
     pub(crate) receipt_started_at: Option<Instant>,
@@ -275,6 +276,7 @@ pub(crate) struct UserDispatchPrepare {
     pub(super) auto_compact: bool,
     pub(super) auto_compact_threshold_percent: f64,
     pub(super) snapshot: UserDispatchSnapshot,
+    pub(super) cost_scope: crate::cost_status::CostScopeToken,
     pub(super) message_index: usize,
     pub(super) history_cell: usize,
 }

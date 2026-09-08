@@ -585,6 +585,7 @@ pub(crate) fn prepare_user_dispatch(
     // roll back cleanly.
     let snapshot = UserDispatchSnapshot {
         is_loading: app.is_loading,
+        suppress_stream_events_until_turn_complete: app.suppress_stream_events_until_turn_complete,
         runtime_turn_status: app.runtime_turn_status.clone(),
         receipt_text: app.receipt_text.clone(),
         receipt_started_at: app.receipt_started_at,
@@ -670,6 +671,7 @@ pub(crate) fn prepare_user_dispatch(
         auto_compact: app.auto_compact,
         auto_compact_threshold_percent: app.auto_compact_threshold_percent,
         snapshot,
+        cost_scope: crate::cost_status::scope_token(),
         message_index,
         history_cell,
     })
@@ -717,8 +719,20 @@ pub(crate) async fn spawned_dispatch_execute(
     completion_permit.send(apply);
 }
 
-pub(super) fn settle_failed_dispatch_routed_usage(batch: &crate::cost_status::RuntimeUsageBatch) {
-    crate::cost_status::report_runtime_usage_batch(crate::cost_status::scope_token(), None, batch);
+/// Keep classifier receipts owned until the UI admits the operation to Engine.
+/// Dropping a reserved dispatch (including a closed completion mailbox) must
+/// settle its already-incurred usage in the original session scope.
+pub(super) struct UnacceptedDispatchUsage {
+    pub(super) scope: crate::cost_status::CostScopeToken,
+    pub(super) batch: Option<crate::cost_status::RuntimeUsageBatch>,
+}
+
+impl Drop for UnacceptedDispatchUsage {
+    fn drop(&mut self) {
+        if let Some(batch) = self.batch.as_ref() {
+            crate::cost_status::report_runtime_usage_batch(self.scope, None, batch);
+        }
+    }
 }
 
 pub(crate) async fn spawned_dispatch_inner(
@@ -780,55 +794,86 @@ pub(crate) async fn spawned_dispatch_inner(
         &turn_route.model,
     );
 
-    // Retain one fallback copy until mailbox acceptance. The classifier has
-    // already run; if the engine channel closes now, its exact spend still
-    // belongs to this interactive session rather than disappearing with the
-    // unstarted parent turn.
-    let send_failure_routed_usage = initial_routed_usage.clone();
-    if let Err(err) = engine_handle
-        .send(Op::SendMessage {
-            max_output_tokens: None,
-            content: prepare.content.clone(),
-            images: Vec::new(),
-            mode: prepare.mode,
-            route: Box::new(turn_route),
-            compaction: Box::new(turn_compaction.clone()),
-            initial_routed_usage: Box::new(initial_routed_usage),
-            goal_objective: prepare.goal_objective.clone(),
-            goal_token_budget: prepare.goal_token_budget,
-            goal_status: prepare.goal_status,
-            reasoning_effort: effective_reasoning_effort,
-            reasoning_effort_auto: auto_controls_reasoning,
-            auto_model: prepare.auto_model,
-            allow_shell: prepare.allow_shell,
-            trust_mode: prepare.trust_mode,
-            auto_approve: prepare.auto_approve,
-            approval_mode: prepare.approval_mode,
-            translation_enabled: prepare.translation_enabled,
-            allowed_tools: prepare.allowed_tools.clone(),
-            dynamic_tools: Vec::new(),
-            hook_executor: prepare.hook_executor.clone(),
-            verbosity: prepare.verbosity.clone(),
-            provenance: prepare.provenance,
-        })
-        .await
-    {
-        settle_failed_dispatch_routed_usage(&send_failure_routed_usage);
-        return build_dispatch_error_closure(prepare, recovery, err.to_string());
-    }
-
-    build_dispatch_success_closure(
-        prepare,
-        UserDispatchOutcome {
-            turn_compaction,
-            effective_provider,
-            effective_model,
-            effective_provider_identity,
-            effective_provider_label,
-            effective_reasoning_effort: effective_reasoning_receipt,
-            auto_selection,
-        },
-    )
+    let mut usage = UnacceptedDispatchUsage {
+        scope: prepare.cost_scope,
+        batch: Some(initial_routed_usage.clone()),
+    };
+    let op = Op::SendMessage {
+        max_output_tokens: None,
+        content: prepare.content.clone(),
+        images: Vec::new(),
+        mode: prepare.mode,
+        route: Box::new(turn_route),
+        compaction: Box::new(turn_compaction.clone()),
+        initial_routed_usage: Box::new(initial_routed_usage),
+        goal_objective: prepare.goal_objective.clone(),
+        goal_token_budget: prepare.goal_token_budget,
+        goal_status: prepare.goal_status,
+        reasoning_effort: effective_reasoning_effort,
+        reasoning_effort_auto: auto_controls_reasoning,
+        auto_model: prepare.auto_model,
+        allow_shell: prepare.allow_shell,
+        trust_mode: prepare.trust_mode,
+        auto_approve: prepare.auto_approve,
+        approval_mode: prepare.approval_mode,
+        translation_enabled: prepare.translation_enabled,
+        allowed_tools: prepare.allowed_tools.clone(),
+        dynamic_tools: Vec::new(),
+        hook_executor: prepare.hook_executor.clone(),
+        verbosity: prepare.verbosity.clone(),
+        provenance: prepare.provenance,
+    };
+    // Reserve capacity off the render thread, but do not let Engine start
+    // until the completion callback has installed the UI's acceptance state.
+    // Separate completion/event mailboxes otherwise allow TurnStarted (or
+    // TurnComplete) to arrive before a callback that resets those newer facts.
+    let permit = match engine_handle.tx_op.clone().reserve_owned().await {
+        Ok(permit) => permit,
+        Err(err) => return build_dispatch_error_closure(prepare, recovery, err.to_string()),
+    };
+    let outcome = UserDispatchOutcome {
+        turn_compaction,
+        effective_provider,
+        effective_model,
+        effective_provider_identity,
+        effective_provider_label,
+        effective_reasoning_effort: effective_reasoning_receipt,
+        auto_selection,
+    };
+    Box::new(move |app, current_engine, config| {
+        // Admission stays serialized by this flag until its callback retires,
+        // even if the user replaced the Engine/session while routing waited.
+        app.dispatch_in_flight = false;
+        // This request has no admitted Op and cannot emit TurnComplete. Retire
+        // its local cancellation even after replacement, but leave a previous
+        // admitted turn's suppression for that turn's terminal event to retire.
+        if !prepare.snapshot.suppress_stream_events_until_turn_complete {
+            app.suppress_stream_events_until_turn_complete = false;
+        }
+        if !engine_handle.tx_op.same_channel(&current_engine.tx_op)
+            || prepare.cost_scope != crate::cost_status::scope_token()
+        {
+            anyhow::bail!("Message dispatch belongs to a previous engine or session");
+        }
+        if !app.is_loading || engine_handle.tx_op.is_closed() {
+            let error = if engine_handle.tx_op.is_closed() {
+                "Engine stopped before accepting the message"
+            } else {
+                "Message dispatch was cancelled before it reached the engine"
+            };
+            return build_dispatch_error_closure(prepare, recovery, error.to_string())(
+                app,
+                &engine_handle,
+                config,
+            );
+        }
+        build_dispatch_success_closure(prepare, outcome)(app, &engine_handle, config)?;
+        // Existing Engine admission binds cancellation controls and the Op in
+        // one FIFO. No await separates the UI checkpoint from this handoff.
+        engine_handle.send_reserved_op(permit, op);
+        drop(usage.batch.take());
+        Ok(())
+    })
 }
 
 pub(crate) fn build_dispatch_success_closure(
@@ -939,8 +984,17 @@ pub(crate) fn build_dispatch_error_closure(
               _engine_handle: &EngineHandle,
               _config: &Config|
               -> anyhow::Result<()> {
-            app.remote_control.fail_active_dispatch(&error);
             app.dispatch_in_flight = false;
+            // No operation was admitted, including route/reservation failures:
+            // retire only cancellation introduced by this dispatch. A previous
+            // admitted turn may still need to suppress its queued events.
+            if !prepare.snapshot.suppress_stream_events_until_turn_complete {
+                app.suppress_stream_events_until_turn_complete = false;
+            }
+            if prepare.cost_scope != crate::cost_status::scope_token() {
+                anyhow::bail!("Message dispatch belongs to a previous session");
+            }
+            app.remote_control.fail_active_dispatch(&error);
             // Roll back the optimistic sync prepare mutations.
             app.is_loading = prepare.snapshot.is_loading;
             app.runtime_turn_status = prepare.snapshot.runtime_turn_status.clone();

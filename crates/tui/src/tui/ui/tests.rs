@@ -86,8 +86,12 @@ fn failed_engine_channel_settles_classifier_batch_once() {
         dropped_records: 1,
     };
 
-    super::dispatch::settle_failed_dispatch_routed_usage(&batch);
-    super::dispatch::settle_failed_dispatch_routed_usage(&batch);
+    for _ in 0..2 {
+        drop(super::dispatch::UnacceptedDispatchUsage {
+            scope: crate::cost_status::scope_token(),
+            batch: Some(batch.clone()),
+        });
+    }
     let pending = crate::cost_status::drain();
     assert_eq!(pending.usage_source_fingerprints.len(), 2);
 }
@@ -10873,22 +10877,425 @@ async fn lost_strict_message_submit_executor_keeps_dispatch_atomic_and_recoverab
     )
     .await
     .expect("later dispatch remains usable");
-    match engine.rx_op.recv().await.expect("recovery SendMessage") {
-        crate::core::ops::Op::SendMessage { content, .. } => {
-            assert_eq!(content, "recover now");
-        }
-        other => panic!("expected SendMessage, got {other:?}"),
-    }
     let apply_dispatch =
         tokio::time::timeout(std::time::Duration::from_secs(2), completion_rx.recv())
             .await
             .expect("recovery dispatch result timed out")
             .expect("production completion mailbox closed");
     apply_dispatch(&mut app, &engine.handle, &Config::default()).expect("apply recovery dispatch");
+    match engine.rx_op.recv().await.expect("recovery SendMessage") {
+        crate::core::ops::Op::SendMessage { content, .. } => {
+            assert_eq!(content, "recover now");
+        }
+        other => panic!("expected SendMessage, got {other:?}"),
+    }
     assert!(app.history.iter().any(|cell| matches!(
         cell,
         HistoryCell::User { content } if content == "recover now"
     )));
+}
+
+/// A SendMessage must not beat its UI acceptance callback through the other
+/// mailbox. Previously a fast Engine could finish before this callback reset
+/// loading/status/usage and queued a checkpoint over the completed receipt.
+#[tokio::test]
+async fn reserved_dispatch_waits_for_ui_acceptance_before_engine_op() {
+    let mut app = create_test_app();
+    let config = Config::default();
+    let mut engine = mock_engine_handle();
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::tui::app::DispatchApplyFn>(1);
+    app.dispatch_completion_tx = Some(tx);
+    start_user_dispatch(
+        &mut app,
+        &config,
+        &engine.handle,
+        QueuedMessage::new("preserve Engine lifecycle".to_string(), None),
+        DispatchRecovery::Immediate,
+    )
+    .expect("start dispatch");
+    let apply = tokio::time::timeout(Duration::from_secs(3), rx.recv())
+        .await
+        .expect("dispatch callback timeout")
+        .expect("dispatch callback");
+    assert!(
+        engine.rx_op.try_recv().is_err(),
+        "Engine cannot start or finish before UI acceptance is installed"
+    );
+    assert!(app.dispatch_in_flight);
+    assert!(app.dispatch_started_at.is_none());
+    apply(&mut app, &engine.handle, &config).expect("accept dispatch");
+    assert!(!app.dispatch_in_flight);
+    assert!(app.is_loading);
+    assert!(app.dispatch_started_at.is_some());
+    assert!(app.pending_turn_route.is_some());
+    assert!(matches!(
+        engine.rx_op.try_recv(),
+        Ok(crate::core::ops::Op::SendMessage { content, .. })
+            if content == "preserve Engine lifecycle"
+    ));
+    assert!(engine.rx_op.try_recv().is_err(), "one Engine admission");
+    assert!(rx.try_recv().is_err(), "no late reset callback remains");
+}
+
+#[tokio::test]
+async fn reserved_dispatch_normal_engine_counts_requests_and_accepts_next_turn() {
+    use crate::core::engine::{Engine, EngineConfig};
+    use crate::core::events::TurnOutcomeStatus;
+    use crate::core::ops::Op;
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    async fn snapshot(handle: &EngineHandle) -> crate::core::ops::SessionSnapshot {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        handle
+            .send(Op::GetSessionSnapshot {
+                tx: Arc::new(Mutex::new(Some(tx))),
+            })
+            .await
+            .expect("snapshot request");
+        tokio::time::timeout(Duration::from_secs(10), rx)
+            .await
+            .expect("Engine control barrier")
+            .expect("snapshot response")
+    }
+
+    let workspace = TempDir::new().expect("workspace");
+    let mut app = create_test_app();
+    app.workspace = workspace.path().to_path_buf();
+    let config = Config::default();
+    let mock = Arc::new(MockLlmClient::new(vec![
+        canned::simple_text_turn("Now re-run the tree suite with the job-assignment fix:"),
+        canned::simple_text_turn("Second real user turn completed."),
+    ]));
+    let (engine, handle) = Engine::new_with_model_client(
+        EngineConfig {
+            workspace: workspace.path().to_path_buf(),
+            snapshots_enabled: false,
+            subagents_enabled: false,
+            terminal_chrome_enabled: false,
+            ..EngineConfig::default()
+        },
+        &config,
+        mock.clone(),
+    );
+    let engine_task = tokio::spawn(engine.run());
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::tui::app::DispatchApplyFn>(1);
+    app.dispatch_completion_tx = Some(tx);
+    let mut turn_ids = Vec::new();
+    for (index, prompt) in ["first real user message", "second real user message"]
+        .into_iter()
+        .enumerate()
+    {
+        start_user_dispatch(
+            &mut app,
+            &config,
+            &handle,
+            QueuedMessage::new(prompt.to_string(), None),
+            DispatchRecovery::Immediate,
+        )
+        .expect("start UI dispatch");
+        let apply = tokio::time::timeout(Duration::from_secs(10), rx.recv())
+            .await
+            .expect("dispatch callback timeout")
+            .expect("callback");
+        // A control Op behind an old eager SendMessage waits for that turn.
+        // With reserved admission it returns without any new model request.
+        let before = snapshot(&handle).await;
+        assert_eq!(
+            mock.captured_requests().len(),
+            index,
+            "no model work before UI acceptance"
+        );
+        assert!(
+            !serde_json::to_string(&before.messages)
+                .unwrap()
+                .contains(prompt)
+        );
+        apply(&mut app, &handle, &config).expect("accept UI dispatch");
+        assert!(app.is_loading);
+        assert!(app.dispatch_started_at.is_some());
+        let mut events = handle.rx_event.write().await;
+        let mut terminal_diagnostics = None;
+        loop {
+            let event = tokio::time::timeout(Duration::from_secs(30), events.recv())
+                .await
+                .expect("normal Engine turn timeout")
+                .expect("Engine event");
+            match event {
+                EngineEvent::TurnStarted { turn_id, .. } => turn_ids.push(turn_id),
+                EngineEvent::ToolRequestSnapshot { snapshot } if snapshot.terminal.is_some() => {
+                    terminal_diagnostics = snapshot.terminal;
+                }
+                EngineEvent::TurnComplete { status, error, .. } => {
+                    assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
+                    assert!(error.is_none(), "{error:?}");
+                    break;
+                }
+                EngineEvent::ApprovalRequired { .. }
+                | EngineEvent::UserInputRequired { .. }
+                | EngineEvent::ElevationRequired { .. } => panic!("unexpected blocked state"),
+                _ => {}
+            }
+        }
+        drop(events);
+        assert_eq!(mock.captured_requests().len(), index + 1);
+        let terminal = terminal_diagnostics.expect("normal lifecycle terminal diagnostics");
+        assert_eq!(terminal.model_requests_started, 1);
+        assert_eq!(terminal.last_response_tool_calls, Some(0));
+        assert_eq!(terminal.last_response_tool_calls_suppressed, Some(0));
+        assert_eq!(
+            terminal.reason,
+            Some(crate::tool_inspection::TurnStopReason::ProviderNoToolCall)
+        );
+        let saved = snapshot(&handle).await;
+        let saved_messages = serde_json::to_string(&saved.messages).unwrap();
+        for expected in [
+            "first real user message",
+            "Now re-run the tree suite with the job-assignment fix:",
+            "second real user message",
+            "Second real user turn completed.",
+        ]
+        .into_iter()
+        .take((index + 1) * 2)
+        {
+            assert_eq!(saved_messages.matches(expected).count(), 1, "{expected}");
+        }
+        assert!(
+            rx.try_recv().is_err(),
+            "no late callback can overwrite terminal state"
+        );
+    }
+    assert_eq!(turn_ids.len(), 2);
+    assert_ne!(turn_ids[0], turn_ids[1]);
+    handle.send(Op::Shutdown).await.expect("shutdown");
+    tokio::time::timeout(Duration::from_secs(10), engine_task)
+        .await
+        .expect("Engine shutdown timeout")
+        .expect("Engine task");
+}
+
+#[tokio::test]
+async fn reserved_dispatch_cancel_before_acceptance_keeps_prompt_and_next_dispatch() {
+    let mut app = create_test_app();
+    let config = Config::default();
+    let mut engine = mock_engine_handle();
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::tui::app::DispatchApplyFn>(1);
+    app.dispatch_completion_tx = Some(tx);
+    for cancelled in [true, false] {
+        start_user_dispatch(
+            &mut app,
+            &config,
+            &engine.handle,
+            QueuedMessage::new("recover this prompt".to_string(), None),
+            DispatchRecovery::Immediate,
+        )
+        .expect("start dispatch");
+        let apply = tokio::time::timeout(Duration::from_secs(3), rx.recv())
+            .await
+            .expect("dispatch callback timeout")
+            .expect("dispatch callback");
+        assert!(engine.rx_op.try_recv().is_err());
+        if cancelled {
+            engine.handle.cancel();
+            mark_active_turn_cancelled_locally(&mut app);
+            assert!(engine.handle.is_cancelled());
+            assert!(apply(&mut app, &engine.handle, &config).is_err());
+            assert!(!app.is_loading);
+            assert!(!app.dispatch_in_flight);
+            assert!(app.dispatch_started_at.is_none());
+            assert_eq!(app.input, "recover this prompt");
+            assert!(!app.suppress_stream_events_until_turn_complete);
+            assert!(engine.rx_op.try_recv().is_err());
+        } else {
+            apply(&mut app, &engine.handle, &config).expect("next dispatch");
+            assert!(matches!(
+                engine.rx_op.try_recv(),
+                Ok(crate::core::ops::Op::SendMessage { .. })
+            ));
+            assert!(engine.rx_op.try_recv().is_err());
+        }
+    }
+}
+
+#[tokio::test]
+async fn failed_dispatch_after_local_cancel_retires_suppression() {
+    for replaced_session in [false, true] {
+        let mut app = create_test_app();
+        let config = Config::default();
+        let engine = mock_engine_handle();
+        let prepare = prepare_user_dispatch(
+            &mut app,
+            &config,
+            QueuedMessage::new("route failed while cancelling".to_string(), None),
+        )
+        .expect("prepare dispatch");
+        mark_active_turn_cancelled_locally(&mut app);
+        if replaced_session {
+            let _ = crate::cost_status::close_current_scope();
+            app.input = "replacement draft".to_string();
+        }
+        let apply = build_dispatch_error_closure(
+            prepare,
+            DispatchRecovery::Immediate,
+            "injected route or reservation failure".to_string(),
+        );
+        assert!(apply(&mut app, &engine.handle, &config).is_err());
+        assert!(!app.suppress_stream_events_until_turn_complete);
+        assert!(!app.dispatch_in_flight);
+        assert!(!app.is_loading);
+        assert_eq!(
+            app.input,
+            if replaced_session {
+                "replacement draft"
+            } else {
+                "route failed while cancelling"
+            }
+        );
+    }
+}
+
+#[tokio::test]
+async fn reserved_dispatch_preserves_previous_turn_cancellation_ownership() {
+    for route_error in [true, false] {
+        for previous_turn_completed in [true, false] {
+            let mut app = create_test_app();
+            let config = Config::default();
+            let mut engine = mock_engine_handle();
+            app.suppress_stream_events_until_turn_complete = true;
+            let prepare = prepare_user_dispatch(
+                &mut app,
+                &config,
+                QueuedMessage::new("following a cancelled turn".to_string(), None),
+            )
+            .expect("prepare dispatch");
+            let apply = if route_error {
+                build_dispatch_error_closure(
+                    prepare,
+                    DispatchRecovery::Immediate,
+                    "injected route failure".to_string(),
+                )
+            } else {
+                spawned_dispatch_inner(prepare, DispatchRecovery::Immediate, engine.handle.clone())
+                    .await
+            };
+            // A previous turn may complete during routing. Retirement must
+            // neither clear its outstanding latch nor resurrect a retired one.
+            app.suppress_stream_events_until_turn_complete = !previous_turn_completed;
+            app.is_loading = false;
+            assert!(apply(&mut app, &engine.handle, &config).is_err());
+            assert_eq!(
+                app.suppress_stream_events_until_turn_complete,
+                !previous_turn_completed
+            );
+            assert!(engine.rx_op.try_recv().is_err());
+        }
+    }
+}
+
+#[tokio::test]
+async fn reserved_dispatch_closed_before_acceptance_keeps_prompt() {
+    let mut app = create_test_app();
+    let config = Config::default();
+    let mut engine = mock_engine_handle();
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::tui::app::DispatchApplyFn>(1);
+    app.dispatch_completion_tx = Some(tx);
+    start_user_dispatch(
+        &mut app,
+        &config,
+        &engine.handle,
+        QueuedMessage::new("keep rejected prompt".to_string(), None),
+        DispatchRecovery::Immediate,
+    )
+    .expect("start dispatch");
+    let apply = tokio::time::timeout(Duration::from_secs(3), rx.recv())
+        .await
+        .expect("dispatch callback timeout")
+        .expect("dispatch callback");
+    engine.rx_op.close();
+    assert!(apply(&mut app, &engine.handle, &config).is_err());
+    assert!(!app.is_loading);
+    assert!(!app.dispatch_in_flight);
+    assert!(app.dispatch_started_at.is_none());
+    assert_eq!(app.input, "keep rejected prompt");
+    assert!(engine.rx_op.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn reserved_dispatch_replaced_engine_or_session_leaves_current_state_untouched() {
+    for replace_engine in [true, false] {
+        let mut app = create_test_app();
+        let config = Config::default();
+        let mut origin = mock_engine_handle();
+        let mut replacement = mock_engine_handle();
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::tui::app::DispatchApplyFn>(1);
+        app.dispatch_completion_tx = Some(tx);
+        start_user_dispatch(
+            &mut app,
+            &config,
+            &origin.handle,
+            QueuedMessage::new("old session prompt".to_string(), None),
+            DispatchRecovery::Immediate,
+        )
+        .expect("start dispatch");
+        let apply = tokio::time::timeout(Duration::from_secs(3), rx.recv())
+            .await
+            .expect("dispatch callback timeout")
+            .expect("dispatch callback");
+        origin.handle.cancel();
+        mark_active_turn_cancelled_locally(&mut app);
+        assert!(origin.handle.is_cancelled());
+        assert!(app.suppress_stream_events_until_turn_complete);
+        if !replace_engine {
+            let _ = crate::cost_status::close_current_scope();
+        }
+        app.api_messages = vec![text_message("user", "replacement session")];
+        app.input = "new draft".to_string();
+        assert!(app.dispatch_in_flight, "old admission is still outstanding");
+        app.is_loading = false;
+        let current = if replace_engine {
+            &replacement.handle
+        } else {
+            &origin.handle
+        };
+        assert!(apply(&mut app, current, &config).is_err());
+        assert_eq!(app.api_messages.len(), 1);
+        assert!(
+            matches!(&app.api_messages[0].content[0], ContentBlock::Text { text, .. } if text == "replacement session")
+        );
+        assert_eq!(app.input, "new draft");
+        assert!(!app.is_loading);
+        assert!(!app.dispatch_in_flight);
+        assert!(!app.suppress_stream_events_until_turn_complete);
+        assert!(origin.rx_op.try_recv().is_err());
+        start_user_dispatch(
+            &mut app,
+            &config,
+            current,
+            QueuedMessage::new("new session request".to_string(), None),
+            DispatchRecovery::Immediate,
+        )
+        .expect("next dispatch");
+        let next = tokio::time::timeout(Duration::from_secs(3), rx.recv())
+            .await
+            .expect("next callback timeout")
+            .expect("next callback");
+        next(&mut app, current, &config).expect("accept replacement request");
+        assert!(app.is_loading);
+        assert!(!app.suppress_stream_events_until_turn_complete);
+        assert!(
+            !current.is_cancelled(),
+            "replacement admission is not cancelled"
+        );
+        let next_op = if replace_engine {
+            replacement.rx_op.try_recv()
+        } else {
+            origin.rx_op.try_recv()
+        };
+        assert!(matches!(
+            next_op,
+            Ok(crate::core::ops::Op::SendMessage { content, .. })
+                if content == "new session request"
+        ));
+    }
 }
 
 #[tokio::test]
