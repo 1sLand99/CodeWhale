@@ -105,7 +105,7 @@ export const CHANGELOG: ChangelogRelease[] = [
           "@Gabriel-Degret — reported the loss of the allow_insecure_http provider setting (#5991).",
           "@Lujc0523 — reported the ACP initialize schema violation affecting strict IDE clients (#5969)."
         ],
-        "itemCount": 13
+        "itemCount": 15
       },
       {
         "heading": "Notes",
