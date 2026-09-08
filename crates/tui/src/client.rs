@@ -36,6 +36,10 @@ use crate::llm_client::{
     LlmClient, LlmError, RetryConfig as LlmRetryConfig, extract_retry_after,
     sanitize_http_error_body, with_retry,
 };
+#[cfg(test)]
+#[path = "client/catalog_tests.rs"]
+mod catalog_tests;
+
 use crate::logging;
 use crate::models::Role;
 use crate::models::{ContentBlock, Message, MessageRequest, MessageResponse, SystemPrompt, Usage};
@@ -261,6 +265,9 @@ pub(crate) struct TranslationProviderResponse {
 #[must_use]
 pub struct DeepSeekClient {
     pub(super) http_client: reqwest::Client,
+    // Catalogs and probes must never forward frozen custom auth headers to a
+    // provider-supplied redirect destination. Inference keeps its own policy.
+    models_http_client: reqwest::Client,
     /// HTTP/1.1-only twin of [`Self::http_client`], used for automatic
     /// stream-header fallback when H2 stalls. Same auth and headers.
     pub(super) http1_client: reqwest::Client,
@@ -563,6 +570,7 @@ impl Clone for DeepSeekClient {
     fn clone(&self) -> Self {
         Self {
             http_client: self.http_client.clone(),
+            models_http_client: self.models_http_client.clone(),
             http1_client: self.http1_client.clone(),
             api_key: self.api_key.clone(),
             model_bound_secret_values: Arc::clone(&self.model_bound_secret_values),
@@ -767,6 +775,178 @@ pub(super) const NON_STREAMING_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 const PROVIDER_CATALOG_MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 const PROVIDER_CATALOG_MAX_ROWS: usize = 10_000;
 
+#[derive(Clone, Copy)]
+struct ModelsFetchLimits {
+    bytes: usize,
+    rows: usize,
+    pages: usize,
+    cursor_bytes: usize,
+    timeout: Duration,
+}
+
+const MODELS_FETCH_LIMITS: ModelsFetchLimits = ModelsFetchLimits {
+    bytes: PROVIDER_CATALOG_MAX_RESPONSE_BYTES,
+    rows: PROVIDER_CATALOG_MAX_ROWS,
+    pages: 1_000,
+    cursor_bytes: 4_096,
+    timeout: NON_STREAMING_HTTP_TIMEOUT,
+};
+
+#[derive(Clone, Copy)]
+enum ModelsRequestMode {
+    Interactive,
+    Refresh,
+}
+
+#[derive(Debug)]
+enum ModelsFetchError {
+    Catalog(CatalogRefreshError),
+    Interactive(anyhow::Error),
+}
+
+impl ModelsFetchError {
+    fn into_interactive(self) -> anyhow::Error {
+        match self {
+            Self::Catalog(reason) => anyhow::anyhow!("Failed to list models: {reason:?}"),
+            Self::Interactive(error) => error,
+        }
+    }
+
+    fn into_catalog(self) -> CatalogRefreshError {
+        match self {
+            Self::Catalog(reason) => reason,
+            Self::Interactive(_) => CatalogRefreshError::Network,
+        }
+    }
+}
+
+impl From<CatalogRefreshError> for ModelsFetchError {
+    fn from(reason: CatalogRefreshError) -> Self {
+        Self::Catalog(reason)
+    }
+}
+
+// Keep row bytes intact: a Value round trip would silently accept duplicate
+// fields that the existing typed provider parsers reject.
+#[derive(Deserialize)]
+struct ModelsPage<'a> {
+    #[serde(borrow)]
+    data: &'a serde_json::value::RawValue,
+    #[serde(default)]
+    has_more: bool,
+    last_id: Option<String>,
+}
+
+struct BoundedModelsRows(usize);
+
+impl<'de> serde::de::Visitor<'de> for BoundedModelsRows {
+    type Value = Vec<Box<serde_json::value::RawValue>>;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a bounded model array")
+    }
+
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+        let mut rows = Vec::new();
+        while rows.len() < self.0 {
+            let Some(row) = seq.next_element()? else {
+                return Ok(rows);
+            };
+            rows.push(row);
+        }
+        if seq.next_element::<serde::de::IgnoredAny>()?.is_some() {
+            return Err(serde::de::Error::custom("model row limit exceeded"));
+        }
+        Ok(rows)
+    }
+}
+
+impl<'de> serde::de::DeserializeSeed<'de> for BoundedModelsRows {
+    type Value = Vec<Box<serde_json::value::RawValue>>;
+
+    fn deserialize<D: serde::Deserializer<'de>>(
+        self,
+        deserializer: D,
+    ) -> Result<Self::Value, D::Error> {
+        deserializer.deserialize_seq(self)
+    }
+}
+
+/// One complete traversal, independent of provider row parsing and transport
+/// retry policy. Only a verified endpoint contract supplies a cursor query key;
+/// generation wire format alone does not prove a model-list dialect.
+async fn collect_models_document<F, Fut>(
+    endpoint: reqwest::Url,
+    cursor_query: Option<&str>,
+    limits: ModelsFetchLimits,
+    mut fetch: F,
+) -> Result<(String, tokio::time::Instant), ModelsFetchError>
+where
+    F: FnMut(reqwest::Url) -> Fut,
+    Fut: std::future::Future<Output = Result<reqwest::Response, ModelsFetchError>>,
+{
+    use serde::de::DeserializeSeed;
+    let deadline = tokio::time::Instant::now() + limits.timeout;
+    let body = tokio::time::timeout_at(deadline, async {
+        let mut rows = Vec::new();
+        let mut bytes = 0usize;
+        let mut cursor: Option<String> = None;
+        let mut seen = std::collections::HashSet::new();
+        for page_index in 0..limits.pages {
+            let mut url = endpoint.clone();
+            if let (Some(key), Some(value)) = (cursor_query, cursor.as_deref()) {
+                let query: Vec<_> = url
+                    .query_pairs()
+                    .filter(|(name, _)| name != key)
+                    .map(|(name, value)| (name.into_owned(), value.into_owned()))
+                    .collect();
+                url.query_pairs_mut()
+                    .clear()
+                    .extend_pairs(query)
+                    .append_pair(key, value);
+            }
+            let response = fetch(url).await?;
+            let body =
+                bounded_provider_catalog_text(response, limits.bytes.saturating_sub(bytes)).await?;
+            bytes += body.len();
+            let page: ModelsPage<'_> =
+                serde_json::from_str(&body).map_err(|_| CatalogRefreshError::InvalidResponse)?;
+            let page_rows = BoundedModelsRows(limits.rows.saturating_sub(rows.len()))
+                .deserialize(&mut serde_json::Deserializer::from_str(page.data.get()))
+                .map_err(|_| CatalogRefreshError::InvalidResponse)?;
+            rows.extend(page_rows);
+            if !page.has_more {
+                if tokio::time::Instant::now() >= deadline {
+                    return Err(CatalogRefreshError::Network.into());
+                }
+                if page_index == 0 {
+                    return Ok(body);
+                }
+                #[derive(Serialize)]
+                struct Document {
+                    data: Vec<Box<serde_json::value::RawValue>>,
+                }
+                return serde_json::to_string(&Document { data: rows })
+                    .map_err(|_| CatalogRefreshError::InvalidResponse.into());
+            }
+            let next = page
+                .last_id
+                .filter(|value| !value.is_empty() && value.len() <= limits.cursor_bytes)
+                .ok_or(CatalogRefreshError::InvalidResponse)?;
+            if cursor_query.is_none() || !seen.insert(next.clone()) {
+                return Err(CatalogRefreshError::InvalidResponse.into());
+            }
+            cursor = Some(next);
+        }
+        Err(ModelsFetchError::Catalog(
+            CatalogRefreshError::InvalidResponse,
+        ))
+    })
+    .await
+    .map_err(|_| CatalogRefreshError::Network)??;
+    Ok((body, deadline))
+}
+
 /// Read an error response body with a size limit to prevent unbounded allocation.
 pub(super) async fn bounded_error_text(response: reqwest::Response, max_bytes: usize) -> String {
     use futures_util::StreamExt;
@@ -785,10 +965,11 @@ pub(super) async fn bounded_error_text(response: reqwest::Response, max_bytes: u
 
 async fn bounded_provider_catalog_text(
     response: reqwest::Response,
+    max_bytes: usize,
 ) -> Result<String, CatalogRefreshError> {
     if response
         .content_length()
-        .is_some_and(|length| length > PROVIDER_CATALOG_MAX_RESPONSE_BYTES as u64)
+        .is_some_and(|length| length > max_bytes as u64)
     {
         return Err(CatalogRefreshError::InvalidResponse);
     }
@@ -796,7 +977,7 @@ async fn bounded_provider_catalog_text(
     let mut body = Vec::new();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|_| CatalogRefreshError::Network)?;
-        if body.len().saturating_add(chunk.len()) > PROVIDER_CATALOG_MAX_RESPONSE_BYTES {
+        if body.len().saturating_add(chunk.len()) > max_bytes {
             return Err(CatalogRefreshError::InvalidResponse);
         }
         body.extend_from_slice(&chunk);
@@ -1343,7 +1524,7 @@ impl DeepSeekClient {
             ));
         }
 
-        let http_client = Self::build_http_client_with_auth_mode(
+        let http_client = Self::http_client_builder_with_auth_mode(
             &api_key,
             &http_headers,
             api_provider,
@@ -1351,11 +1532,23 @@ impl DeepSeekClient {
             wire_format,
             auth_disabled,
             false,
-        )?;
+        )?
+        .build()?;
+        let models_http_client = Self::http_client_builder_with_auth_mode(
+            &api_key,
+            &http_headers,
+            api_provider,
+            &base_url,
+            wire_format,
+            auth_disabled,
+            false,
+        )?
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?;
         // Always keep an HTTP/1.1 twin for automatic stream-header fallback
         // when H2 stalls. When CODEWHALE_FORCE_HTTP1 is set, both clients are
         // HTTP/1.1 and the fallback is a no-op retry path.
-        let http1_client = Self::build_http_client_with_auth_mode(
+        let http1_client = Self::http_client_builder_with_auth_mode(
             &api_key,
             &http_headers,
             api_provider,
@@ -1363,10 +1556,12 @@ impl DeepSeekClient {
             wire_format,
             auth_disabled,
             true,
-        )?;
+        )?
+        .build()?;
 
         Ok(Self {
             http_client,
+            models_http_client,
             http1_client,
             api_key,
             model_bound_secret_values,
@@ -1581,7 +1776,7 @@ impl DeepSeekClient {
         api_provider: ApiProvider,
         base_url: &str,
     ) -> Result<reqwest::Client> {
-        Self::build_http_client_with_auth_mode(
+        Self::http_client_builder_with_auth_mode(
             api_key,
             extra_headers,
             api_provider,
@@ -1589,10 +1784,12 @@ impl DeepSeekClient {
             provider_default_wire_format(api_provider),
             false,
             false,
-        )
+        )?
+        .build()
+        .map_err(Into::into)
     }
 
-    fn build_http_client_with_auth_mode(
+    fn http_client_builder_with_auth_mode(
         api_key: &str,
         extra_headers: &HashMap<String, String>,
         api_provider: ApiProvider,
@@ -1600,7 +1797,7 @@ impl DeepSeekClient {
         wire_format: WireFormat,
         auth_disabled: bool,
         force_http1: bool,
-    ) -> Result<reqwest::Client> {
+    ) -> Result<reqwest::ClientBuilder> {
         let headers = build_default_headers(
             api_key,
             extra_headers,
@@ -1629,7 +1826,7 @@ impl DeepSeekClient {
         {
             builder = add_extra_root_certs(builder, &cert_path);
         }
-        builder.build().map_err(Into::into)
+        Ok(builder)
     }
 
     /// HTTP/1.1 client for automatic stream-header fallback.
@@ -1953,6 +2150,7 @@ pub async fn verify_provider_api_key(
     .map_err(|err| format!("failed to build auth headers: {err:#}"))?;
     let client = crate::tls::reqwest_client_builder()
         .default_headers(headers)
+        .redirect(reqwest::redirect::Policy::none())
         .user_agent(concat!(
             "Mozilla/5.0 (compatible; codewhale/",
             env!("CARGO_PKG_VERSION"),
@@ -1967,7 +2165,7 @@ pub async fn verify_provider_api_key(
         .get(&url)
         .send()
         .await
-        .map_err(|err| format!("request failed: {err:#}"))?;
+        .map_err(|err| format!("request failed: {}", err.without_url()))?;
     let status = response.status();
     if status.is_success() {
         // TelecomJS verification already returns the key-scoped model roster.
@@ -1976,8 +2174,11 @@ pub async fn verify_provider_api_key(
         // 2xx response remains sufficient to verify the key even if the body is
         // malformed; in that case failure-preserving catalog semantics keep the
         // existing/static rows.
-        let body = response.text().await.unwrap_or_default();
+        let body = bounded_provider_catalog_text(response, PROVIDER_CATALOG_MAX_RESPONSE_BYTES)
+            .await
+            .unwrap_or_default();
         if matches!(provider, ApiProvider::Telecomjs | ApiProvider::Edenai)
+            && serde_json::from_str::<ModelsPage<'_>>(&body).is_ok_and(|page| !page.has_more)
             && let Some(kind) = provider.kind()
             && let Ok(offerings) = named_gateway_catalog_offerings_from_body(
                 &body,
@@ -1991,7 +2192,12 @@ pub async fn verify_provider_api_key(
         }
         Ok(())
     } else {
-        let body = response.text().await.unwrap_or_default();
+        let body = bounded_error_text(response, ERROR_BODY_MAX_BYTES).await;
+        let body = if api_key.trim().is_empty() {
+            body
+        } else {
+            redact_model_bound_text(&body, &[api_key.trim().to_string()])
+        };
         let summary = if body.chars().count() > 200 {
             format!("{}...", body.chars().take(200).collect::<String>())
         } else {
@@ -2599,34 +2805,68 @@ impl DeepSeekClient {
             .translated
     }
 
-    /// List available models from the provider.
+    /// List every available model under the endpoint's verified pagination contract.
     pub async fn list_models(&self) -> Result<Vec<AvailableModel>> {
-        let url = api_url(&self.base_url, "models");
-        let response = self
-            .send_with_retry(|| {
-                self.http_client
-                    .get(&url)
-                    .timeout(NON_STREAMING_HTTP_TIMEOUT)
-            })
-            .await?;
-
-        let status = response.status();
-        if !status.is_success() {
-            let raw_error_text = bounded_error_text(response, ERROR_BODY_MAX_BYTES).await;
-            let error_text = sanitize_http_error_body(
-                Some(self.api_provider.display_name()),
-                status.as_u16(),
-                &raw_error_text,
-            );
-            anyhow::bail!("Failed to list models: HTTP {status}: {error_text}");
-        }
-        let response_text = response
-            .text()
+        let (body, deadline) = self
+            .models_document(ModelsRequestMode::Interactive)
             .await
-            .context("Failed to read models response body")?;
-
-        parse_models_response(&response_text)
+            .map_err(ModelsFetchError::into_interactive)?;
+        let models = parse_models_response(&body)
             .map(|models| apply_provider_model_cutline(self.api_provider, models))
+            .map_err(|_| {
+                ModelsFetchError::Catalog(CatalogRefreshError::InvalidResponse).into_interactive()
+            })?;
+        if tokio::time::Instant::now() >= deadline {
+            return Err(ModelsFetchError::Catalog(CatalogRefreshError::Network).into_interactive());
+        }
+        Ok(models)
+    }
+
+    async fn models_document(
+        &self,
+        mode: ModelsRequestMode,
+    ) -> Result<(String, tokio::time::Instant), ModelsFetchError> {
+        let endpoint = reqwest::Url::parse(&api_url(&self.base_url, "models"))
+            .map_err(|_| CatalogRefreshError::InvalidResponse)?;
+        // https://platform.claude.com/docs/en/api/models/list specifies after_id.
+        // Go is unpaginated. A Messages generation dialect or a custom identity
+        // resembling a built-in provider does not establish this list contract.
+        let cursor_query = (self.api_provider == ApiProvider::Anthropic).then_some("after_id");
+        collect_models_document(
+            endpoint,
+            cursor_query,
+            MODELS_FETCH_LIMITS,
+            |url| async move {
+                let build = || {
+                    self.models_http_client
+                        .get(url.clone())
+                        .timeout(NON_STREAMING_HTTP_TIMEOUT)
+                };
+                let response = match mode {
+                    ModelsRequestMode::Interactive => self
+                        .send_with_retry_error_body(build, false)
+                        .await
+                        .map_err(ModelsFetchError::Interactive)?,
+                    ModelsRequestMode::Refresh => build()
+                        .send()
+                        .await
+                        .map_err(|_| CatalogRefreshError::Network)?,
+                };
+                if !response.status().is_success() {
+                    return Err(ModelsFetchError::Catalog(
+                        match response.status().as_u16() {
+                            401 => CatalogRefreshError::Unauthorized,
+                            403 => CatalogRefreshError::Forbidden,
+                            404 => CatalogRefreshError::NotFound,
+                            429 => CatalogRefreshError::RateLimited,
+                            _ => CatalogRefreshError::Network,
+                        },
+                    ));
+                }
+                Ok(response)
+            },
+        )
+        .await
     }
 
     /// The catalog provider id for this client (the `ProviderKind` slug, falling
@@ -2661,43 +2901,17 @@ impl DeepSeekClient {
     /// [`ProviderCatalogDelta`] (#3385).
     ///
     /// Uses the same URL construction and auth client as [`Self::list_models`],
-    /// but issues a single request without `send_with_retry` so a refresh
+    /// but fetches pages without `send_with_retry` so a refresh
     /// failure stays typed and non-fatal — bundled / saved / static rows are
     /// untouched. The delta is scoped to the base-URL fingerprint and stamped
     /// with the fetch time; the API key authorizes the request but is **never**
     /// persisted into the delta or cache. Unknown live rows carry no canonical
     /// model, capabilities, or pricing, per the #3385 contract.
     pub async fn fetch_catalog_delta(&self) -> Result<ProviderCatalogDelta, CatalogRefreshError> {
-        let url = api_url(&self.base_url, "models");
-        // A catalog refresh is non-fatal and must produce a *typed* outcome, so
-        // it issues a single request and maps the raw status. This intentionally
-        // does NOT route through `send_with_retry` like `list_models` does: that
-        // path erases the HTTP status into a generic error and retries
-        // non-retryable auth failures, neither of which suits a typed refresh.
-        // Auth headers are baked into `http_client` (the key is used but never
-        // persisted into the delta or cache).
-        let response = self
-            .http_client
-            .get(&url)
-            .timeout(NON_STREAMING_HTTP_TIMEOUT)
-            .send()
+        let (body, deadline) = self
+            .models_document(ModelsRequestMode::Refresh)
             .await
-            .map_err(|_| CatalogRefreshError::Network)?;
-
-        let status = response.status();
-        if !status.is_success() {
-            return Err(match status.as_u16() {
-                401 => CatalogRefreshError::Unauthorized,
-                403 => CatalogRefreshError::Forbidden,
-                404 => CatalogRefreshError::NotFound,
-                429 => CatalogRefreshError::RateLimited,
-                // Any other non-success (5xx, unexpected) is treated as a
-                // transient transport-class failure.
-                _ => CatalogRefreshError::Network,
-            });
-        }
-
-        let body = bounded_provider_catalog_text(response).await?;
+            .map_err(ModelsFetchError::into_catalog)?;
 
         let provider = self.catalog_provider_id();
         let fingerprint = base_url_fingerprint(&self.base_url);
@@ -2804,6 +3018,9 @@ impl DeepSeekClient {
             return Err(CatalogRefreshError::InvalidResponse);
         }
 
+        if tokio::time::Instant::now() >= deadline {
+            return Err(CatalogRefreshError::Network);
+        }
         Ok(ProviderCatalogDelta {
             provider,
             base_url_fingerprint: fingerprint,
@@ -3086,7 +3303,7 @@ impl DeepSeekClient {
         }
         let health_url = api_url(&self.base_url, "models");
         let probe = self
-            .http_client
+            .models_http_client
             .get(health_url)
             .timeout(NON_STREAMING_HTTP_TIMEOUT)
             .send()
@@ -3094,7 +3311,7 @@ impl DeepSeekClient {
         match probe {
             Ok(resp) if resp.status().is_success() => {
                 // Consume the response body so the connection can be returned to the pool.
-                let _ = resp.text().await;
+                let _ = bounded_error_text(resp, ERROR_BODY_MAX_BYTES).await;
                 self.mark_request_success().await;
                 logging::info("Recovery probe succeeded");
             }
@@ -3103,18 +3320,34 @@ impl DeepSeekClient {
                     .await;
             }
             Err(err) => {
-                self.mark_request_failure(&format!("probe error={err}"))
+                self.mark_request_failure(&format!("probe error={}", err.without_url()))
                     .await;
             }
         }
     }
 
-    pub(super) async fn send_with_retry<F>(&self, mut build: F) -> Result<reqwest::Response>
+    pub(super) async fn send_with_retry<F>(&self, build: F) -> Result<reqwest::Response>
+    where
+        F: FnMut() -> reqwest::RequestBuilder,
+    {
+        self.send_with_retry_error_body(build, true).await
+    }
+
+    // Model-list errors can echo opaque cursors or credentials. Keep status and
+    // Retry-After classification, but suppress their bodies before retry logs
+    // and state updates. Other requests retain their existing error details.
+    async fn send_with_retry_error_body<F>(
+        &self,
+        mut build: F,
+        include_error_body: bool,
+    ) -> Result<reqwest::Response>
     where
         F: FnMut() -> reqwest::RequestBuilder,
     {
         if self.isolated_request_state {
-            return self.send_with_isolated_retry(build).await;
+            return self
+                .send_with_isolated_retry(build, include_error_body)
+                .await;
         }
         let retry_cfg: LlmRetryConfig = self.retry.clone().into();
         let request_result = with_retry(
@@ -3134,18 +3367,22 @@ impl DeepSeekClient {
                     let response = request
                         .send()
                         .await
-                        .map_err(|err| LlmError::from_reqwest(&err))?;
+                        .map_err(|err| LlmError::from_reqwest(&err.without_url()))?;
                     let status = response.status();
                     if status.is_success() {
                         return Ok(response);
                     }
                     let retry_after = extract_retry_after(response.headers());
-                    let body = bounded_error_text(response, ERROR_BODY_MAX_BYTES).await;
-                    let body = sanitize_http_error_body(
-                        Some(self.api_provider.display_name()),
-                        status.as_u16(),
-                        &body,
-                    );
+                    let body = if include_error_body {
+                        let body = bounded_error_text(response, ERROR_BODY_MAX_BYTES).await;
+                        sanitize_http_error_body(
+                            Some(self.api_provider.display_name()),
+                            status.as_u16(),
+                            &body,
+                        )
+                    } else {
+                        String::new()
+                    };
                     Err(LlmError::from_http_response_with_retry_after(
                         status.as_u16(),
                         &body,
@@ -3201,7 +3438,11 @@ impl DeepSeekClient {
     /// The same bounded transport retry policy without process-global retry
     /// banners, provider-wide pause cells, or shared connection-health writes.
     /// Used only by the Auto classifier during read-only request inspection.
-    async fn send_with_isolated_retry<F>(&self, mut build: F) -> Result<reqwest::Response>
+    async fn send_with_isolated_retry<F>(
+        &self,
+        mut build: F,
+        include_error_body: bool,
+    ) -> Result<reqwest::Response>
     where
         F: FnMut() -> reqwest::RequestBuilder,
     {
@@ -3215,18 +3456,22 @@ impl DeepSeekClient {
                     let response = request
                         .send()
                         .await
-                        .map_err(|err| LlmError::from_reqwest(&err))?;
+                        .map_err(|err| LlmError::from_reqwest(&err.without_url()))?;
                     let status = response.status();
                     if status.is_success() {
                         return Ok(response);
                     }
                     let retry_after = extract_retry_after(response.headers());
-                    let body = bounded_error_text(response, ERROR_BODY_MAX_BYTES).await;
-                    let body = sanitize_http_error_body(
-                        Some(self.api_provider.display_name()),
-                        status.as_u16(),
-                        &body,
-                    );
+                    let body = if include_error_body {
+                        let body = bounded_error_text(response, ERROR_BODY_MAX_BYTES).await;
+                        sanitize_http_error_body(
+                            Some(self.api_provider.display_name()),
+                            status.as_u16(),
+                            &body,
+                        )
+                    } else {
+                        String::new()
+                    };
                     Err(LlmError::from_http_response_with_retry_after(
                         status.as_u16(),
                         &body,
@@ -3394,7 +3639,7 @@ impl LlmClient for DeepSeekClient {
         let health_url = api_url(&self.base_url, "models");
         self.wait_for_rate_limit().await;
         let response = self
-            .http_client
+            .models_http_client
             .get(health_url)
             .timeout(NON_STREAMING_HTTP_TIMEOUT)
             .send()
@@ -3402,7 +3647,7 @@ impl LlmClient for DeepSeekClient {
         match response {
             Ok(resp) if resp.status().is_success() => {
                 // Consume the response body so the connection can be returned to the pool.
-                let _ = resp.text().await;
+                let _ = bounded_error_text(resp, ERROR_BODY_MAX_BYTES).await;
                 self.mark_request_success().await;
                 Ok(true)
             }
@@ -3412,7 +3657,7 @@ impl LlmClient for DeepSeekClient {
                 Ok(false)
             }
             Err(err) => {
-                self.mark_request_failure(&format!("health error={err}"))
+                self.mark_request_failure(&format!("health error={}", err.without_url()))
                     .await;
                 Ok(false)
             }
@@ -11341,7 +11586,7 @@ mod tests {
     // issue's anti-hardcoding rule.
 
     /// Build a client whose OpenRouter base URL points at a mock server.
-    fn openrouter_client_for(server: &MockServer) -> DeepSeekClient {
+    pub(super) fn openrouter_client_for(server: &MockServer) -> DeepSeekClient {
         let _ = rustls::crypto::ring::default_provider().install_default();
         DeepSeekClient::new(&Config {
             provider: Some("openrouter".to_string()),
@@ -11358,11 +11603,14 @@ mod tests {
         .expect("openrouter client")
     }
 
-    fn baseten_client_for(server: &MockServer) -> DeepSeekClient {
+    pub(super) fn baseten_client_for(server: &MockServer) -> DeepSeekClient {
         baseten_client_for_identity(server, codewhale_config::BASETEN_TEMPLATE_ID)
     }
 
-    fn baseten_client_for_identity(server: &MockServer, identity: &str) -> DeepSeekClient {
+    pub(super) fn baseten_client_for_identity(
+        server: &MockServer,
+        identity: &str,
+    ) -> DeepSeekClient {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let mut providers = ProvidersConfig::default();
         providers.custom.insert(
@@ -11383,7 +11631,7 @@ mod tests {
         .expect("Baseten client")
     }
 
-    fn opencode_go_client_for(server: &MockServer) -> DeepSeekClient {
+    pub(super) fn opencode_go_client_for(server: &MockServer) -> DeepSeekClient {
         let _ = rustls::crypto::ring::default_provider().install_default();
         DeepSeekClient::new(&Config {
             provider: Some("opencode-go".to_string()),
@@ -11434,7 +11682,11 @@ mod tests {
         .expect("Eden AI client")
     }
 
-    async fn mount_models_json(server: &MockServer, status: u16, body: serde_json::Value) {
+    pub(super) async fn mount_models_json(
+        server: &MockServer,
+        status: u16,
+        body: serde_json::Value,
+    ) {
         Mock::given(method("GET"))
             .and(path("/v1/models"))
             .respond_with(ResponseTemplate::new(status).set_body_json(body))

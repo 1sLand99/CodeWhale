@@ -43,6 +43,8 @@ use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use tower_http::cors::CorsLayer;
 
+mod notification_delivery;
+
 #[cfg(test)]
 use crate::dependencies::ExternalTool;
 
@@ -1273,6 +1275,10 @@ pub fn build_router(state: RuntimeApiState) -> Router {
         .route("/v1/providers/{id}/switch", post(switch_provider))
         .route("/v1/config", get(get_config).post(set_config))
         .route("/v1/config/reload", post(reload_config))
+        .route(
+            "/v1/threads/{id}/notifications/prepare",
+            post(notification_delivery::prepare),
+        )
         .route(
             "/v1/memory",
             get(list_memory)
@@ -6714,6 +6720,8 @@ struct GuiConfigResponse {
     memory_enabled: bool,
     search_provider: String,
     prompt_suggestion: bool,
+    /// Effective device settings, using the same leaf vocabulary as CLI/TUI.
+    notifications: std::collections::BTreeMap<String, String>,
 }
 
 /// Request body for `POST /v1/config` (set a single config key).
@@ -6817,6 +6825,15 @@ async fn get_config(
         memory_enabled: config.memory_enabled(),
         search_provider: config.search_provider().as_str().to_string(),
         prompt_suggestion: config.prompt_suggestion_enabled(),
+        notifications: codewhale_config::notifications::NotificationSetting::ALL
+            .into_iter()
+            .map(|setting| {
+                (
+                    setting.key().to_string(),
+                    config.notifications_config().display(setting),
+                )
+            })
+            .collect(),
     }))
 }
 
@@ -6829,6 +6846,39 @@ async fn set_config(
     let key = req.key.to_lowercase();
     let mut value = req.value;
     let persist = req.persist;
+
+    // Reuse the shared validator and locked leaf writer, including the active
+    // profile's existing owner. Dry runs validate too; a typo must never look
+    // like an accepted device setting. Reload remains the existing apply step.
+    if codewhale_config::notifications::in_namespace(&key) {
+        use codewhale_config::notifications::{NotificationConfigUpdate, NotificationSetting};
+        let setting = NotificationSetting::required(&key)
+            .map_err(|error| ApiError::bad_request(error.to_string()))?;
+        let update = NotificationConfigUpdate::parse(setting, &value)
+            .map_err(|error| ApiError::bad_request(error.to_string()))?;
+        if persist {
+            let path = config_persistence::config_toml_path(state.config_path.as_deref()).map_err(
+                |error| ApiError::internal(format!("Failed to resolve config: {error}")),
+            )?;
+            update
+                .persist_for_profile(&path, state.config_profile.as_deref())
+                .map_err(|error| {
+                    ApiError::internal(format!("Failed to persist notification setting: {error}"))
+                })?;
+        }
+        return Ok(Json(SetConfigResponse {
+            key: format!("notifications.{}", setting.key()),
+            value: update.display(),
+            message: if persist {
+                "Config persisted. Call /v1/config/reload to apply."
+            } else {
+                "Config not persisted (add persist: true to save)"
+            }
+            .to_string(),
+            persisted: persist,
+            requires_reload: persist,
+        }));
+    }
 
     // Validate model keys even for dry-run requests. Model ids are provider
     // owned; accepting a DeepSeek id while Z.ai is active creates a saved

@@ -64,14 +64,17 @@ pub(crate) fn route_identity_fields(
     }
     let field = |kind, text: String| RouteIdentityField { kind, text };
     let mut candidates: Vec<Vec<RouteIdentityField>> = Vec::new();
-    if tier != ShellTier::Compact && !provider.is_empty() && !effort.is_empty() {
+    if tier != ShellTier::Compact && !provider.is_empty() {
         // The smallest shell never repeats the provider: model and effort are
         // the two facts that change what comes back.
-        candidates.push(vec![
+        let mut fields = vec![
             field(RouteFieldKind::Provider, provider),
             field(RouteFieldKind::Model, model.clone()),
-            field(RouteFieldKind::Effort, effort.clone()),
-        ]);
+        ];
+        if !effort.is_empty() {
+            fields.push(field(RouteFieldKind::Effort, effort.clone()));
+        }
+        candidates.push(fields);
     }
     if !effort.is_empty() {
         candidates.push(vec![
@@ -480,6 +483,27 @@ mod tests {
     /// long model id; whole fields shed (provider first, effort label next)
     /// and neither name is ever clipped. Ported from the identity band to
     /// `route_identity_fields`.
+    #[test]
+    fn unproven_effort_keeps_named_provider_when_the_route_fits() {
+        let mut app = test_app();
+        app.set_provider_identity(crate::config::ApiProvider::Custom, "lab-gateway");
+        app.model = "unlisted-model".to_string();
+        assert!(app.provable_reasoning_effort_label().is_none());
+        let fields = route_identity_fields(&app, ShellTier::for_chrome_width(160), 100).unwrap();
+        assert_eq!(
+            fields.iter().map(|field| field.kind).collect::<Vec<_>>(),
+            vec![RouteFieldKind::Provider, RouteFieldKind::Model]
+        );
+        assert_eq!(fields[0].text, "lab-gateway");
+        assert_eq!(fields[1].text, "unlisted-model");
+        let compact = route_identity_fields(&app, ShellTier::Compact, 100).unwrap();
+        assert_eq!(compact.len(), 1);
+        assert_eq!(compact[0].kind, RouteFieldKind::Model);
+        let narrow = route_identity_fields(&app, ShellTier::for_chrome_width(160), 14).unwrap();
+        assert_eq!(narrow.len(), 1);
+        assert_eq!(narrow[0].text, "unlisted-model");
+    }
+
     #[test]
     fn long_custom_route_names_shed_whole_fields_across_width_tiers() {
         let model = "deepseek-v4-flash-vision-preview-2026-08-01";

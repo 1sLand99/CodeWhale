@@ -4359,18 +4359,16 @@ fn normalize_model_for_provider(provider: ProviderKind, model: &str) -> String {
     }
 }
 
-/// OpenCode Go models documented for its OpenAI Chat Completions endpoint.
+/// OpenCode Go models reviewed for its OpenAI Chat Completions endpoint.
 ///
 /// Keep config validation, picker/catalog projections, and live-roster
 /// sanitization on this one protocol-scoped contract. The provider's combined
-/// `/models` roster also contains Anthropic-Messages-only models, which are
-/// deliberately absent here.
+/// `/models` roster also contains Messages and Responses models, which are
+/// deliberately absent from this Chat-only route.
 ///
-/// `glm-5.3` is also deliberately absent (2026-08-03): OpenCode Go documents no
-/// glm-5.3 row. The direct Z.ai and OpenRouter glm-5.3 rows inherit their
-/// metadata from glm-5.2, but that inheritance says nothing about which
-/// subscription gateways carry the model. Add it here only against an OpenCode
-/// Go roster listing.
+/// Reviewed against https://opencode.ai/docs/go/#endpoints on 2026-09-08.
+/// Previously reviewed IDs remain compatible absent explicit deprecation;
+/// live availability is established separately by the provider catalog.
 pub const OPENCODE_GO_CHAT_MODELS: &[&str] = &[
     DEFAULT_OPENCODE_GO_MODEL,
     OPENCODE_GO_GROK_4_5_MODEL,
@@ -4382,11 +4380,18 @@ pub const OPENCODE_GO_CHAT_MODELS: &[&str] = &[
     OPENCODE_GO_DEEPSEEK_V4_FLASH_MODEL,
     OPENCODE_GO_MIMO_V2_5_MODEL,
     OPENCODE_GO_MIMO_V2_5_PRO_MODEL,
+    "glm-5.3-flash",
+    "glm-5.3",
+    "longcat-2.0",
+    "deepseek-v4-flash-vision-exp",
+    "hy4-preview",
+    "hy3",
+    "omen-alpha",
 ];
 
 /// Canonicalize an OpenCode Go model that is documented for the OpenAI Chat
 /// Completions endpoint. The live `/models` roster also contains
-/// Anthropic-Messages-only models; returning `None` for those is the protocol
+/// Messages and Responses models; returning `None` for those is the protocol
 /// cutline shared by config and the TUI live-catalog paths.
 #[must_use]
 pub fn opencode_go_chat_model_id(model: &str) -> Option<&'static str> {

@@ -2228,14 +2228,62 @@ pub fn set_config_value(app: &mut App, key: &str, value: &str, persist: bool) ->
         }
         // The two bottom-chrome rows' size presets (`tui.posture_bar`,
         // `tui.metrics_line`, #5950). Live on the next frame; `--save`
-        // writes the `[tui]` key. `/statusline` composes what is in a row;
+        // writes the owning `[tui]` table. `/statusline` composes what is in a row;
         // this only decides whether and how much of it paints.
         row_key @ ("posture_bar" | "metrics_line") => {
             let Some(preset) = crate::config::ChromeRowPreset::from_setting(value) else {
-                return CommandResult::error(format!(
-                    "{row_key} must be one of: {}",
-                    crate::config::ChromeRowPreset::SETTINGS.join(", ")
-                ));
+                return CommandResult::error(
+                    tr(app.ui_locale, MessageId::ConfigCommandInvalidValue)
+                        .replace("{key}", row_key)
+                        .replace("{value}", value)
+                        .replace(
+                            "{choices}",
+                            &crate::config::ChromeRowPreset::SETTINGS.join(", "),
+                        ),
+                );
+            };
+            let value = preset.as_setting();
+            let scope = if persist {
+                let saved = crate::config_persistence::config_toml_path(app.config_path.as_deref())
+                    .and_then(|path| {
+                        crate::config_persistence::mutate_config_document(&path, |doc| {
+                            // Profiles replace the whole TUI table on load. Edit its
+                            // existing owner without creating an empty override that
+                            // would reset the other inherited display settings.
+                            let mut segments = Vec::new();
+                            if let Some(profile) = app.config_profile.as_deref() {
+                                let table = doc
+                                    .get("profiles")
+                                    .and_then(|v| v.get(profile))
+                                    .and_then(toml_edit::Item::as_table_like)
+                                    .ok_or_else(|| {
+                                        anyhow::anyhow!("active profile is missing or malformed")
+                                    })?;
+                                if table.contains_key("tui") {
+                                    segments.extend(["profiles", profile]);
+                                }
+                            }
+                            segments.extend(["tui", row_key]);
+                            crate::config_persistence::set_document_value(doc, &segments, value)
+                        })?;
+                        Ok(path)
+                    });
+                match saved {
+                    Ok(path) => format!(
+                        "{} {}",
+                        tr(app.ui_locale, MessageId::ConfigScopeSaved),
+                        path.display()
+                    ),
+                    Err(error) => {
+                        return CommandResult::error(
+                            tr(app.ui_locale, MessageId::StartupDefaultNotSaved)
+                                .replace("{setting}", row_key)
+                                .replace("{error}", &error.to_string()),
+                        );
+                    }
+                }
+            } else {
+                tr(app.ui_locale, MessageId::ConfigScopeSession).into_owned()
             };
             if row_key == "posture_bar" {
                 app.posture_bar = preset;
@@ -2243,22 +2291,7 @@ pub fn set_config_value(app: &mut App, key: &str, value: &str, persist: bool) ->
                 app.metrics_line = preset;
             }
             app.needs_redraw = true;
-            let value = preset.as_setting();
-            if persist {
-                return match persist_table_string_key(
-                    app.config_path.as_deref(),
-                    "tui",
-                    row_key,
-                    value,
-                ) {
-                    Ok(path) => CommandResult::message(format!(
-                        "{row_key} = {value} (saved to {})",
-                        path.display()
-                    )),
-                    Err(err) => CommandResult::error(format!("Failed to save: {err}")),
-                };
-            }
-            return CommandResult::message(format!("{row_key} = {value} (session only)"));
+            return CommandResult::message(format!("{row_key} = {value} ({scope})"));
         }
         "stream_chunk_timeout_secs" => {
             let raw = match value.trim().parse::<u64>() {
@@ -4453,7 +4486,7 @@ completion_sound = "off"
         );
         assert!(
             msg.contains(
-                "notifications | method=osc9 threshold=45s sound=off quiet=true | runtime+persisted"
+                "notifications | method=osc9 threshold=45s sound=legacy quiet=true | runtime+persisted"
             ),
             "{msg}"
         );
@@ -4854,7 +4887,7 @@ context_window = 262144
         assert_eq!(app.posture_bar, ChromeRowPreset::Compact);
         assert_eq!(
             live.message.as_deref(),
-            Some("posture_bar = compact (session only)")
+            Some("posture_bar = compact (SESSION)")
         );
         assert_eq!(
             config_command(&mut app, Some("posture_bar"))
@@ -4879,7 +4912,7 @@ context_window = 262144
         assert!(
             bad.message
                 .as_deref()
-                .is_some_and(|m| m.contains("metrics_line must be one of: full, compact, hidden")),
+                .is_some_and(|m| m.contains("metrics_line. Try: full, compact, hidden")),
             "{bad:?}"
         );
         assert_eq!(
@@ -4887,6 +4920,81 @@ context_window = 262144
             ChromeRowPreset::Hidden,
             "a bad value changes nothing"
         );
+    }
+
+    #[test]
+    fn row_preset_save_failure_preserves_live_state_and_uses_current_locale() {
+        let temp = tempfile::tempdir().unwrap();
+        let _guard = EnvGuard::new(temp.path());
+        let path = temp.path().join("config.toml");
+        // A directory in place of the file fails on every supported OS.
+        fs::create_dir(&path).unwrap();
+        let mut app = create_test_app();
+        app.config_path = Some(path);
+        app.ui_locale = crate::localization::Locale::ZhHans;
+        let before = (app.posture_bar, app.metrics_line);
+        for key in ["posture_bar", "metrics_line"] {
+            let result = config_command(&mut app, Some(&format!("{key} hidden --save")));
+            assert!(result.is_error, "{result:?}");
+            assert!(result.message.unwrap().contains("未能保存"));
+            assert_eq!((app.posture_bar, app.metrics_line), before);
+            let invalid = config_command(&mut app, Some(&format!("{key} tiny")));
+            assert!(invalid.is_error);
+            assert_eq!(
+                invalid.message,
+                CommandResult::error(
+                    tr(app.ui_locale, MessageId::ConfigCommandInvalidValue)
+                        .replace("{key}", key)
+                        .replace("{value}", "tiny")
+                        .replace("{choices}", "full, compact, hidden")
+                )
+                .message
+            );
+        }
+        // A session-only change needs no writable file and uses the new locale.
+        let result = config_command(&mut app, Some("posture_bar compact"));
+        assert!(!result.is_error);
+        assert_eq!(
+            result.message.as_deref(),
+            Some("posture_bar = compact (会话)")
+        );
+    }
+
+    #[test]
+    fn row_preset_saved_in_active_profile_reloads_without_resetting_other_rows() {
+        use crate::config::ChromeRowPreset;
+        let temp = tempfile::tempdir().unwrap();
+        let _guard = EnvGuard::new(temp.path());
+        let path = temp.path().join("selected.toml");
+        for owns_tui in [false, true] {
+            let mut body = "# Keep this comment\n[tui]\nposture_bar = \"full\"\nmetrics_line = \"hidden\"\n[profiles.\"work.team\"]\nmax_subagents = 4\n".to_string();
+            if owns_tui {
+                body.push_str("[profiles.\"work.team\".tui]\nposture_bar = \"hidden\"\nmetrics_line = \"compact\"\n");
+            }
+            fs::write(&path, body).unwrap();
+            let config = Config::load(Some(path.clone()), Some("work.team")).unwrap();
+            let mut app = create_test_app_with_config(&config);
+            app.config_path = Some(path.clone());
+            app.config_profile = Some("work.team".to_string());
+            let metrics_before = app.metrics_line;
+            let result = config_command(&mut app, Some("posture_bar compact --save"));
+            assert!(!result.is_error, "{result:?}");
+            assert_eq!(app.posture_bar, ChromeRowPreset::Compact);
+            let reloaded = Config::load(Some(path.clone()), Some("work.team")).unwrap();
+            let restarted = create_test_app_with_config(&reloaded);
+            assert_eq!(restarted.posture_bar, app.posture_bar);
+            assert_eq!(restarted.metrics_line, metrics_before);
+            let saved = fs::read_to_string(&path).unwrap();
+            assert!(saved.starts_with("# Keep this comment"));
+            let document: toml::Value = toml::from_str(&saved).unwrap();
+            assert_eq!(
+                document["profiles"]["work.team"].get("tui").is_some(),
+                owns_tui
+            );
+            if owns_tui {
+                assert_eq!(document["tui"]["posture_bar"].as_str(), Some("full"));
+            }
+        }
     }
 
     #[test]

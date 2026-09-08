@@ -12221,3 +12221,316 @@ async fn api_config_reports_local_default_availability_without_blocking_config_r
     crate::provider_lake::clear_live_snapshot();
     Ok(())
 }
+
+#[tokio::test]
+async fn native_notification_settings_use_the_shared_profile_leaf_writer_and_reload() -> Result<()>
+{
+    let _env = lock_test_env();
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("config.toml");
+    let original = r#"# retained owner comment
+[notifications]
+quiet = true
+sound = "off"
+[profiles.desktop.notifications]
+quiet = false # selected owner
+sound = "off"
+[profiles.other.notifications]
+quiet = true
+[future_plugin]
+keep = "untouched"
+"#;
+    fs::write(&path, original)?;
+    let (addr, _, handle) =
+        spawn_test_server_with_config_path_and_profile(path.clone(), "desktop".into())
+            .await?
+            .expect("loopback Runtime must be available");
+    let client = crate::tls::reqwest_client();
+    let reload = || client.post(format!("http://{addr}/v1/config/reload"));
+    assert_eq!(reload().send().await?.status(), StatusCode::OK);
+    let before = get_config(&client, &addr).await;
+    assert_eq!(before["notifications"].as_object().unwrap().len(), 19);
+    assert_eq!(before["notifications"]["quiet"], "false");
+    for persist in [false, true] {
+        for (key, value) in [
+            ("notifications.quiet", "maybe"),
+            ("notifications.typo", "true"),
+            ("notifications.threshold_secs", "-1"),
+            ("notifications.method", "macos"),
+        ] {
+            let (status, _) = post_set_config(&client, &addr, key, value, persist).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{key}");
+        }
+    }
+    assert_eq!(fs::read_to_string(&path)?, original);
+    let (status, dry) =
+        post_set_config(&client, &addr, "notifications.threshold", "0", false).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(dry["key"], "notifications.threshold_secs");
+    assert_eq!(dry["persisted"], false);
+    assert_eq!(fs::read_to_string(&path)?, original);
+    let (status, saved) = post_set_config(&client, &addr, "notifications.quiet", "on", true).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(saved["value"], "true");
+    assert_eq!(saved["persisted"], true);
+    assert_eq!(saved["requires_reload"], true);
+    assert_eq!(
+        get_config(&client, &addr).await["notifications"]["quiet"],
+        "false",
+        "persist is not apply"
+    );
+    let text = fs::read_to_string(&path)?;
+    assert!(text.contains("# retained owner comment") && text.contains("# selected owner"));
+    let doc: toml::Value = toml::from_str(&text)?;
+    assert_eq!(doc["notifications"]["quiet"].as_bool(), Some(true));
+    assert_eq!(
+        doc["profiles"]["desktop"]["notifications"]["quiet"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        doc["profiles"]["other"]["notifications"]["quiet"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(doc["future_plugin"]["keep"].as_str(), Some("untouched"));
+    assert_eq!(reload().send().await?.status(), StatusCode::OK);
+    assert_eq!(
+        get_config(&client, &addr).await["notifications"]["quiet"],
+        "true"
+    );
+    handle.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn native_notification_preparation_authenticates_current_events_and_reuses_live_gates()
+-> Result<()> {
+    let _env = lock_test_env();
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("config.toml");
+    fs::write(
+        &path,
+        "[notifications]\nmethod = 'auto'\ncondition = 'unfocused'\nthreshold_secs = 0\nsound = 'off'\n",
+    )?;
+    let (addr, manager, handle) = spawn_test_server_with_root_token_mobile_workspace_and_overrides(
+        temp.path().join("runtime"),
+        temp.path().join("sessions"),
+        Some("notification-fixture-token".into()),
+        false,
+        temp.path().to_path_buf(),
+        TestServerOverrides {
+            config_path: Some(path),
+            ..Default::default()
+        },
+    )
+    .await?
+    .expect("loopback Runtime must be available");
+    let client = crate::tls::reqwest_client();
+    let token = "notification-fixture-token";
+    let reload = || {
+        client
+            .post(format!("http://{addr}/v1/config/reload"))
+            .bearer_auth(token)
+    };
+    assert_eq!(reload().send().await?.status(), StatusCode::OK);
+    let mut thread = manager
+        .create_thread(crate::runtime_threads::CreateThreadRequest::default())
+        .await?;
+    thread.latest_turn_id = Some("test-turn".into());
+    manager.test_store().save_thread(&thread)?;
+    let mut turn: crate::runtime_threads::TurnRecord = serde_json::from_value(json!({
+        "id": "test-turn", "thread_id": thread.id, "status": "completed", "input_summary": "private user text",
+        "created_at": Utc::now(), "duration_ms": 30000
+    }))?;
+    manager.test_store().save_turn(&turn)?;
+    let event = manager
+        .emit_event_for_test(
+            &thread.id,
+            Some(&turn.id),
+            "turn.completed",
+            json!({"answer": "private answer must not be copied"}),
+        )
+        .await?;
+    let endpoint = format!(
+        "http://{addr}/v1/threads/{}/notifications/prepare",
+        thread.id
+    );
+    let request = |seq, focused, away| json!({"seq":seq,"focused":focused,"unfocused_for_ms":away,"locale":"en"});
+    let post = |value| client.post(&endpoint).bearer_auth(token).json(&value);
+    assert_eq!(
+        client
+            .post(&endpoint)
+            .json(&request(event.seq, false, 2500))
+            .send()
+            .await?
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        post(request(0, false, 2500)).send().await?.status(),
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        post(request(event.seq + 100, false, 2500))
+            .send()
+            .await?
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+    let mut arbitrary = request(event.seq, false, 2500);
+    arbitrary["body"] = json!("renderer injection");
+    assert_eq!(
+        post(arbitrary).send().await?.status(),
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    for (focused, away, expected) in [
+        (true, 2500, "suppressed"),
+        (false, 1999, "suppressed"),
+        (false, 2500, "prepared"),
+    ] {
+        let result: Value = post(request(event.seq, focused, away))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        assert_eq!(result["status"], expected);
+        assert!(!result.to_string().contains("private"));
+        assert_eq!(result["sound"], "off");
+    }
+    for (key, value, expected) in [
+        ("quiet", "true", "suppressed"),
+        ("quiet", "false", "prepared"),
+        ("method", "osc9", "unsupported_method"),
+        ("method", "auto", "prepared"),
+        ("events.turn-complete", "false", "suppressed"),
+        ("events.turn-complete", "true", "prepared"),
+        ("condition", "never", "suppressed"),
+        ("condition", "always", "prepared"),
+    ] {
+        client
+            .post(format!("http://{addr}/v1/config"))
+            .bearer_auth(token)
+            .json(&json!({"key":format!("notifications.{key}"),"value":value,"persist":true}))
+            .send()
+            .await?
+            .error_for_status()?;
+        reload().send().await?.error_for_status()?;
+        let result: Value = post(request(event.seq, false, 2500))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        assert_eq!(result["status"], expected, "{key}={value}");
+    }
+    let other = manager
+        .create_thread(crate::runtime_threads::CreateThreadRequest::default())
+        .await?;
+    let other_event = manager
+        .emit_event_for_test(&other.id, None, "turn.completed", json!({}))
+        .await?;
+    assert_eq!(
+        post(request(other_event.seq, false, 2500))
+            .send()
+            .await?
+            .status(),
+        StatusCode::BAD_REQUEST,
+        "an existing sequence in another authenticated thread cannot be selected"
+    );
+    // Age a durable fixture record without a wall-clock wait or production
+    // timeout changes. Restore its original bytes before later settlement cases.
+    let event_path =
+        RuntimeThreadManagerConfig::from_task_data_dir(temp.path().join("runtime/runtime"))
+            .data_dir
+            .join("events")
+            .join(format!("{}.jsonl", thread.id));
+    let original_events = fs::read_to_string(&event_path)?;
+    let mut aged = String::new();
+    for line in original_events.lines() {
+        let mut record: Value = serde_json::from_str(line)?;
+        if record["seq"] == event.seq {
+            record["timestamp"] = json!(Utc::now() - chrono::Duration::seconds(120));
+        }
+        aged.push_str(&serde_json::to_string(&record)?);
+        aged.push('\n');
+    }
+    fs::write(&event_path, aged)?;
+    let expired: Value = post(request(event.seq, false, 2500))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(expired["status"], "expired");
+    fs::write(&event_path, original_events)?;
+    // Approval/input notifications are eligible only while the matching current
+    // request is actionable, even if a stale pending projection survived.
+    turn.status = crate::runtime_threads::RuntimeTurnStatus::InProgress;
+    manager.test_store().save_turn(&turn)?;
+    let _approval =
+        manager.register_pending_approval_for_thread_for_test(&thread.id, "approval-current");
+    manager.register_pending_user_input_for_thread_for_test(&thread.id, "input-current");
+    let approval = manager
+        .emit_event_for_test(
+            &thread.id,
+            Some(&turn.id),
+            "approval.required",
+            json!({"id":"approval-current","description":"private approval prompt"}),
+        )
+        .await?;
+    let input = manager
+        .emit_event_for_test(
+            &thread.id,
+            Some(&turn.id),
+            "user_input.required",
+            json!({"id":"input-current","questions":["private question"]}),
+        )
+        .await?;
+    for seq in [approval.seq, input.seq] {
+        let value: Value = post(request(seq, false, 2500))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        assert_eq!(value["status"], "prepared");
+        assert!(!value.to_string().contains("private"));
+    }
+    turn.status = crate::runtime_threads::RuntimeTurnStatus::Completed;
+    manager.test_store().save_turn(&turn)?;
+    for seq in [approval.seq, input.seq] {
+        let value: Value = post(request(seq, false, 2500))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        assert_eq!(value["status"], "settled");
+    }
+    let recovered = manager
+        .emit_event_for_test(
+            &thread.id,
+            Some(&turn.id),
+            "turn.completed",
+            json!({"recovered":true}),
+        )
+        .await?;
+    let value: Value = post(request(recovered.seq, false, 2500))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(value["status"], "expired");
+    thread.latest_turn_id = Some("next-turn".into());
+    manager.test_store().save_thread(&thread)?;
+    let value: Value = post(request(event.seq, false, 2500))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(value["status"], "settled");
+    handle.abort();
+    Ok(())
+}
