@@ -60,6 +60,13 @@ a model; it compares the current diff fingerprint with a supplied receipt
 nonzero when the diff no longer matches, the receipt schema is unsupported, the
 receipt has unresolved risk, or an attached check did not pass.
 
+Both receipt modes reject a diff above `--max-chars` before writing or
+accepting a receipt. They never fingerprint a truncated prefix. A receipt for
+`review --base <base-sha> --path <path>` covers only that selected path at the
+checked-out revision; validate it with the same base, path, and input limit.
+It does not cover the rest of a pull request or prove that separately reviewed
+changes work together.
+
 ## Current Data Sources
 
 The current runtime store already persists the core inputs a receipt builder
