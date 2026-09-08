@@ -10,7 +10,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
-import { run, runOk, ExecError, tryJson, have } from "../exec.mjs";
+import { run, runOk, ExecError, tryJson, have, withSignal, wait, throwIfAborted, currentSignal } from "../exec.mjs";
 
 const KEY_CODES = {
   return: 36, enter: 36, tab: 48, space: 49, escape: 53, esc: 53, delete: 51,
@@ -41,20 +41,24 @@ const MOUSE_MOVED = 5;
 
 export function create({ exec }) {
   const runL = (cmd, args, opts) => exec.run(cmd, args, opts);
-  const state = { activeDisplay: 1, lastRaster: null, inputApp: null, previewEnabled: false, pointer: null };
+  const state = { activeDisplay: 1, lastRaster: null, inputApp: null, foregroundInput: false, previewEnabled: false, pointer: null, pointerLease: null };
 
   async function nativeHelper() {
     let helper = process.env.CODEWHALE_CU_APP_BUNDLE
       ? path.join(process.env.CODEWHALE_CU_APP_BUNDLE, "Contents", "MacOS", "accessibility") : null;
     if (!helper || !fs.existsSync(helper)) {
+      const packaged = fileURLToPath(new URL("../../bin/darwin/accessibility", import.meta.url));
+      if (fs.existsSync(packaged)) helper = packaged;
+    }
+    if (!helper || !fs.existsSync(helper)) {
       const source = fileURLToPath(new URL("./darwin-accessibility.m", import.meta.url));
-      const hash = crypto.createHash("sha256").update(fs.readFileSync(source)).update(fs.readFileSync(new URL("./darwin-recording.h", import.meta.url))).digest("hex").slice(0, 16);
+      const hash = crypto.createHash("sha256").update(fs.readFileSync(source)).update(fs.readFileSync(new URL("./darwin-recording.h", import.meta.url))).update(fs.readFileSync(new URL("./darwin-ocr.h", import.meta.url))).digest("hex").slice(0, 16);
       const dir = path.join(os.homedir(), ".codewhale-cu", "bin");
       fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
       helper = path.join(dir, `accessibility-${hash}`);
       if (!fs.existsSync(helper)) {
         const tmp = `${helper}-${process.pid}`;
-        const r = await runL("clang", ["-fobjc-arc", "-Os", "-framework", "Cocoa", "-framework", "ApplicationServices", "-framework", "ScreenCaptureKit", "-framework", "AVFoundation", "-framework", "CoreMedia", source, "-o", tmp], { timeoutMs: 60_000 });
+        const r = await runL("clang", ["-fobjc-arc", "-Os", "-framework", "Cocoa", "-framework", "ApplicationServices", "-framework", "ScreenCaptureKit", "-framework", "AVFoundation", "-framework", "CoreMedia", "-framework", "Vision", source, "-o", tmp], { timeoutMs: 60_000 });
         if (r.code !== 0) throw new ExecError(`native accessibility helper needs a built app or Xcode Command Line Tools: ${r.stderr}`, r);
         fs.renameSync(tmp, helper);
       }
@@ -64,13 +68,28 @@ export function create({ exec }) {
 
   async function native(tool, args = {}) {
     const helper = await nativeHelper();
-    const r = await runL(helper, [JSON.stringify({ tool, args: { ...args, input_app_ref: state.inputApp } })], { timeoutMs: 20_000 });
-    if (r.code !== 0) throw new ExecError(r.stderr.trim() || "native accessibility helper failed", r);
+    const r = await runL(helper, [JSON.stringify({ tool, args: { ...args, input_app_ref: state.inputApp, foreground_input: state.foregroundInput, owner_pipe: true } })], { timeoutMs: 20_000, ownerPipe: true });
+    if (r.aborted || r.timedOut || r.code !== 0) {
+      const error = new ExecError(r.aborted ? "computer request cancelled" : r.timedOut ? "native accessibility helper timed out" : r.stderr.trim() || "native accessibility helper failed", r);
+      if (r.aborted) error.code = "cancelled";
+      // A deterministic native refusal sent no input. A killed/timed-out
+      // helper may have posted the press before losing its response.
+      const postsPress = (tool === "key_event" && args.down) || (tool === "pointer_sequence" && args.steps?.some((step) => [1, 3, 25].includes(step.type)));
+      error.inputMayHaveBeenSent = postsPress && r.spawned === true && (r.aborted || r.timedOut);
+      throw error;
+    }
     const result = tryJson(r.stdout, null);
     if (state.previewEnabled && ["type", "key_event", "pointer_sequence", "set_value", "select_text", "perform_action", "hit_test"].includes(tool)) {
       try { await updatePreview(); } catch (error) { result.preview_error = error.message; }
     }
     return result;
+  }
+
+  async function nativeLease(tool, args) {
+    if (!exec.runInputLease) throw new ExecError("This executor cannot safely own held input; update Computer Use");
+    if ((await native("input_capabilities"))?.input_lease !== 1) throw new ExecError("The native helper needs an update for disconnect-safe held input");
+    const helper = await nativeHelper();
+    return exec.runInputLease(helper, [JSON.stringify({ tool, args: { ...args, input_app_ref: state.inputApp, foreground_input: state.foregroundInput, owner_pipe: true, input_lease: true } })]);
   }
 
   async function updatePreview(show = false) {
@@ -173,7 +192,14 @@ export function create({ exec }) {
              ...(a11yReason ? { a11y_reason: a11yReason } : {}) };
   }
 
-  async function keyEvent(code, flags, down) { return native("key_event", { code, flags, down }); }
+  async function withPressedKey(code, flags, action) {
+    const lease = await nativeLease("key_event", { code, flags, down: true });
+    try {
+      return await action();
+    } finally {
+      await withSignal(null, () => lease.release());
+    }
+  }
 
   function parseChord(text) {
     const parts = String(text).split("+").map((s) => s.trim().toLowerCase()).filter(Boolean);
@@ -197,14 +223,14 @@ export function create({ exec }) {
     return process.env.CODEWHALE_CU_RECORDINGS_DIR || path.join(os.homedir(), ".codewhale-cu", "recordings");
   }
 
-  async function screenshot({ display, region, app_ref, path: outPath } = {}) {
+  async function screenshot({ display, region, app_ref, window_id, path: outPath } = {}) {
     const dir = recordingsDir();
     fs.mkdirSync(dir, { recursive: true });
     const file = outPath || path.join(dir, `shot-${new Date().toISOString().replace(/[:.]/g, "-")}-${crypto.randomBytes(3).toString("hex")}.png`);
     if (!/\.png$/.test(file)) throw new ExecError("screenshot path must end in .png");
     const args = ["-x", "-t", "png"];
     const disp = display ?? state.activeDisplay;
-    const window = app_ref ? await native("window_info", { app_ref }) : null;
+    const window = app_ref ? await native("window_info", { app_ref, window_id }) : null;
     if (window && region) throw new ExecError("choose app_ref or region, not both");
     if (window) args.push("-o", "-l", String(window.window_id));
     else if (disp && disp !== "all") args.push("-D", String(disp));
@@ -254,56 +280,108 @@ export function create({ exec }) {
   }
 
   // ---------- recording ----------
-  const rec = new Map(); // id -> {pid, file, startedAt, mode}
+  const rec = new Map(); // Includes starting children so session close owns them too.
+
+  function requestRecordingStop(r) {
+    if (r.child.exitCode == null && r.child.signalCode == null) {
+      r.child.stdin.end();
+      r.child.kill("SIGINT");
+    }
+  }
+
+  async function waitForRecordingStop(r, timeoutMs) {
+    let timer;
+    try {
+      return await Promise.race([r.completion, new Promise(resolve => {
+        timer = setTimeout(async () => {
+          r.child.kill("SIGKILL");
+          let reapTimer;
+          const terminated = await Promise.race([r.completion.then(() => true), new Promise(done => { reapTimer = setTimeout(() => done(false), 500); })]);
+          clearTimeout(reapTimer);
+          resolve({ code: -1, terminated, error: terminated ? "screen recorder finalization timed out; partial file retained" : "screen recorder could not be terminated; recording ownership retained for retry" });
+        }, timeoutMs);
+      })]);
+    } finally { clearTimeout(timer); }
+  }
 
   async function recordingStart({ display, durationSec, region } = {}) {
     const dir = recordingsDir();
     fs.mkdirSync(dir, { recursive: true });
     const id = crypto.randomBytes(4).toString("hex");
     const file = path.join(dir, `rec-${id}.mov`);
-    const displays=await displayInfo();
-    const disp=display ?? state.activeDisplay;
-    const selected=displays.find(d=>d.index===disp);
-    if(!selected) throw new ExecError("choose one available display for recording");
-    if(durationSec!=null && (!Number.isFinite(durationSec) || durationSec<=0)) throw new ExecError("durationSec must be positive");
-    const helper=await nativeHelper();
-    const child=spawn(helper,[JSON.stringify({tool:"record",args:{file,displayID:selected.id,region,durationSec}})],{stdio:["ignore","pipe","pipe"]});
-    const startedAt=new Date().toISOString();
-    let stderr="", output="", ready=false;
-    const completion=new Promise(resolve=>{
-      child.once("error",error=>resolve({code:-1,error:error.message}));
-      child.once("close",code=>resolve({code,error:stderr.trim()}));
+    const displays = await displayInfo();
+    const disp = display ?? state.activeDisplay;
+    const selected = displays.find(d => d.index === disp);
+    if (!selected) throw new ExecError("choose one available display for recording");
+    if (durationSec != null && (!Number.isFinite(durationSec) || durationSec <= 0)) throw new ExecError("durationSec must be positive");
+    const capabilities = await native("input_capabilities");
+    if (capabilities?.record_owner_pipe !== 1) throw new ExecError("native screen recorder cannot own its client lifetime; update Computer Use before recording");
+    const helper = await nativeHelper();
+    throwIfAborted();
+    const child = spawn(helper, [JSON.stringify({ tool: "record", args: { file, displayID: selected.id, region, durationSec, owner_pipe: true } })], { stdio: ["pipe", "pipe", "pipe"] });
+    child.stdin.on("error", () => {});
+    const startedAt = new Date().toISOString();
+    let stderr = "", output = "", ready = false;
+    const completion = new Promise(resolve => {
+      child.once("error", error => resolve({ code: -1, error: error.message }));
+      child.once("close", code => resolve({ code, error: stderr.trim() }));
     });
-    child.stderr.on("data",chunk=>{stderr=(stderr+chunk).slice(-4000);});
-    const readyPromise=new Promise((resolve,reject)=>{
-      const timer=setTimeout(()=>{child.kill("SIGTERM");reject(new ExecError("screen recorder startup timed out"));},20000);
-      child.stdout.on("data",chunk=>{
-        output+=chunk;
-        let i;
-        while((i=output.indexOf("\n"))>=0){
-          const line=output.slice(0,i);output=output.slice(i+1);
-          try { if(JSON.parse(line).ready){ready=true;clearTimeout(timer);resolve();} } catch {}
-        }
+    child.stderr.on("data", chunk => { stderr = (stderr + chunk).slice(-4000); });
+    const recording = { child, completion, pid: child.pid, file, startedAt, mode: "ScreenCaptureKit", display: disp };
+    rec.set(id, recording);
+    const signal = currentSignal();
+    let timer, abort;
+    try {
+      await new Promise((resolve, reject) => {
+        abort = () => { requestRecordingStop(recording); reject(Object.assign(new ExecError("computer request cancelled"), { code: "cancelled" })); };
+        signal?.addEventListener("abort", abort, { once: true });
+        if (signal?.aborted) { abort(); return; }
+        timer = setTimeout(() => reject(new ExecError("screen recorder startup timed out")), 20_000);
+        child.stdout.on("data", chunk => {
+          output += chunk;
+          let i;
+          while ((i = output.indexOf("\n")) >= 0) {
+            const line = output.slice(0, i); output = output.slice(i + 1);
+            try { if (JSON.parse(line).ready) { ready = true; resolve(); } } catch {}
+          }
+        });
+        completion.then(result => { if (!ready) reject(new ExecError(result.error || "screen recorder exited before capture started")); });
       });
-      completion.then(result=>{clearTimeout(timer);if(!ready)reject(new ExecError(result.error || "screen recorder exited before capture started"));});
-    });
-    await readyPromise;
-    rec.set(id,{child,completion,pid:child.pid,file,startedAt,mode:"ScreenCaptureKit",display:disp});
-    return {id,pid:child.pid,file,display:disp,durationSec:durationSec??null,region:region??null,fps:30,mode:"ScreenCaptureKit",startedAt};
+      throwIfAborted();
+      return { id, pid: child.pid, file, display: disp, durationSec: durationSec ?? null, region: region ?? null, fps: 30, mode: "ScreenCaptureKit", startedAt };
+    } catch (error) {
+      requestRecordingStop(recording);
+      const result = await waitForRecordingStop(recording, 2_000);
+      if (result.terminated !== false) rec.delete(id);
+      throw error;
+    } finally {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", abort);
+    }
   }
 
   async function recordingStop({ id }) {
-    const r=rec.get(id);
-    if(!r) throw new ExecError(`unknown or already-finished recording "${id}"`);
-    if(r.child.exitCode==null && r.child.signalCode==null) r.child.kill("SIGINT");
-    let timer;
-    const result=await Promise.race([r.completion,new Promise(resolve=>{timer=setTimeout(()=>resolve({code:-1,error:"screen recorder finalization timed out; recording retained for retry"}),20000);})]);
-    clearTimeout(timer);
-    if(result.code!==0) throw new ExecError(result.error || "screen recorder failed; partial file retained");
-    const size=fs.existsSync(r.file)?fs.statSync(r.file).size:0;
-    if(!size) throw new ExecError("screen recorder produced no video");
+    const r = rec.get(id);
+    if (!r) throw new ExecError(`unknown or already-finished recording "${id}"`);
+    requestRecordingStop(r);
+    const result = await waitForRecordingStop(r, 20_000);
+    if (result.code !== 0) throw new ExecError(result.error || "screen recorder failed; partial file retained");
+    const size = fs.existsSync(r.file) ? fs.statSync(r.file).size : 0;
+    if (!size) throw new ExecError("screen recorder produced no video");
     rec.delete(id);
-    return {id,file:r.file,mp4:null,bytes:size,mode:r.mode,startedAt:r.startedAt,stoppedAt:new Date().toISOString()};
+    return { id, file: r.file, mp4: null, bytes: size, mode: r.mode, startedAt: r.startedAt, stoppedAt: new Date().toISOString() };
+  }
+
+  async function closeSession() {
+    const owned = [...rec.entries()];
+    for (const [, recording] of owned) requestRecordingStop(recording);
+    const results = await Promise.all(owned.map(async ([id, recording]) => {
+      const result = await waitForRecordingStop(recording, 2_000);
+      if (result.terminated !== false) rec.delete(id);
+      return result;
+    }));
+    const failed = results.find(result => result.code !== 0);
+    if (failed) throw new ExecError(failed.error || "screen recorder failed; partial file retained");
   }
 
   async function recordingStatus({ id }) {
@@ -360,7 +438,8 @@ export function create({ exec }) {
     // A bare executable has no bundle id; carrying an empty one would make the
     // identity unmatchable.
     state.inputApp = { pid: p.pid, ...(p.bundle_id ? { bundle_id: p.bundle_id } : {}) };
-    return { launched: true, activate, url: urlArg ?? null, resolved: p?.found ? { name: p.name, pid: p.pid, bundle_id: p.bundle_id, frontmost: p.frontmost } : null };
+    state.foregroundInput = !!activate;
+    return { launched: true, activate, keyboard_delivery: activate ? "foreground-guarded" : "process", url: urlArg ?? null, resolved: p?.found ? { name: p.name, pid: p.pid, bundle_id: p.bundle_id, frontmost: p.frontmost } : null };
   }
 
   // ---------- clipboard / cursor / waits ----------
@@ -410,9 +489,31 @@ export function create({ exec }) {
     list_apps: listApps,
     list_windows: listWindows,
     open_application: openApplication,
-    get_app_state: async ({ app_ref, detail, depth, window_id }) => {
+    get_app_state: async ({ app_ref, detail, depth, window_id, include_ocr = false }) => {
       const t = await native("get_app_state", { app_ref, detail, window_id });
       if (!t.found) throw new ExecError("application not found — call list_apps for exact names/pids");
+      if (include_ocr) {
+        // Resolve once through AX, then capture only that exact application's
+        // selected window. A changing foreground cannot redirect this image.
+        let raster;
+        try {
+          if (!Number.isSafeInteger(t.pid) || t.pid <= 0) throw new ExecError("The observed application did not provide an exact process identity for OCR");
+          if ((await native("input_capabilities"))?.window_ocr !== 1) throw new ExecError("The native helper needs an update for selected-window text recognition");
+          raster = await screenshot({ app_ref: { pid: t.pid, ...(t.bundle_id ? { bundle_id: t.bundle_id } : {}) }, window_id });
+          const ocr = await native("recognize_text", { file: raster.file });
+          if (ocr?.status === "ok" && ocr.pixels?.w === raster.pixels.w && ocr.pixels?.h === raster.pixels.h && Array.isArray(ocr.blocks)) {
+            t.ocr = { ...ocr, raster, blocks: ocr.blocks.map(block => ({ ...block, target: {
+              type: "coordinate", x: Math.floor(block.bounds.x + block.bounds.w / 2), y: Math.floor(block.bounds.y + block.bounds.h / 2),
+            } })) };
+          } else {
+            t.ocr = { status: "unavailable", engine: "apple_vision", reason: ocr?.reason ?? "The native OCR helper needs an update or returned mismatched image dimensions", blocks: [], raster };
+          }
+        } catch (error) {
+          throwIfAborted();
+          if (error.code === "cancelled") throw error;
+          t.ocr = { status: "unavailable", engine: "apple_vision", reason: error.message, blocks: [], ...(raster ? { raster } : {}) };
+        }
+      }
       return t;
     },
     resolve_element: async ({ app_ref, windowIndex, path: pathArr } = {}) => {
@@ -434,26 +535,39 @@ export function create({ exec }) {
     middle_click: ({ target }) => pointerClick("middle", target.x, target.y, 1),
     mouse_move: async ({ target }) => {
       assertInScreen(target.x, target.y);
+      if (state.pointerLease) {
+        try {
+          const r = await state.pointerLease.send({ point: target });
+          state.pointer = { x: target.x, y: target.y };
+          return { action_sent: true, strategy: "event", at: state.pointer, ...pointerCost(r) };
+        } catch (error) { state.pointerLease = null; throw error; }
+      }
       // A hover has to leave the pointer where it was asked to go.
       const r = await gesture([{ type: MOUSE_MOVED, x: target.x, y: target.y, button: 0, clickState: 0 }], { restore: false, guard: target });
       return { action_sent: true, strategy: "event", at: { x: target.x, y: target.y }, ...pointerCost(r) };
     },
     left_mouse_down: async ({ target }) => {
       assertInScreen(target.x, target.y);
-      const r = await gesture([
-        { type: MOUSE_MOVED, x: target.x, y: target.y, button: 0, clickState: 0 },
-        { type: MOUSE.left.down, x: target.x, y: target.y, button: 0, clickState: 1 },
-      ], { restore: false, guard: target });
-      return { action_sent: true, strategy: "event", at: { x: target.x, y: target.y }, ...pointerCost(r) };
+      if (state.pointerLease) throw new ExecError("this session already holds the left pointer button; release it first");
+      await assertOwnsPoint(target.x, target.y);
+      state.pointerLease = await nativeLease("pointer_sequence", { steps: [
+          { type: MOUSE_MOVED, x: target.x, y: target.y, button: 0, clickState: 0 },
+          { type: MOUSE.left.down, x: target.x, y: target.y, button: 0, clickState: 1 },
+        ], restore: false });
+      state.pointer = { x: target.x, y: target.y };
+      return { action_sent: true, strategy: "event", at: state.pointer, ...pointerCost(state.pointerLease.receipt) };
     },
     left_mouse_up: async ({ target }) => {
+      if (!state.pointerLease) throw new ExecError("no agent pointer button is held by this session");
       const loc = target ?? state.pointer;
       if (!loc) throw new ExecError("no agent pointer position — mouse_move or left_mouse_down first");
       assertInScreen(loc.x, loc.y);
       // No ownership guard: the button is already held, and the drag may have
       // legitimately left the originating window.
-      const r = await gesture([{ type: MOUSE.left.up, x: loc.x, y: loc.y, button: 0, clickState: 1 }], { restore: false });
-      return { action_sent: true, strategy: "event", at: { x: loc.x, y: loc.y }, ...pointerCost(r) };
+      try { await withSignal(null, () => state.pointerLease.release({ point: loc })); }
+      finally { state.pointerLease = null; }
+      state.pointer = { x: loc.x, y: loc.y };
+      return { action_sent: true, strategy: "event", at: state.pointer, pointer_moved: true, pointer_restored: false };
     },
     left_click_drag: async ({ from_target: from, to }) => {
       assertInScreen(from.x, from.y); assertInScreen(to.x, to.y);
@@ -488,19 +602,16 @@ export function create({ exec }) {
     key: async ({ text, repeat = 1 }) => {
       const { flags, code, key } = parseChord(text);
       for (let i = 0; i < Math.max(1, Math.min(100, repeat)); i++) {
-        await keyEvent(code, flags, true);
-        await keyEvent(code, flags, false);
-        if (i < repeat - 1) await new Promise((r) => setTimeout(r, 30));
+        await withPressedKey(code, flags, () => {});
+        if (i < repeat - 1) await wait(30);
       }
-      return { action_sent: true, key, code, repeat: Math.max(1, Math.min(100, repeat)) };
+      return { action_sent: true, key, code, keyboard_delivery: state.foregroundInput ? "foreground-guarded" : "process", repeat: Math.max(1, Math.min(100, repeat)) };
     },
     hold_key: async ({ text, duration }) => {
       const { flags, code, key } = parseChord(text);
       const d = Math.max(0.05, Math.min(30, Number(duration) || 1));
-      await keyEvent(code, flags, true);
-      await new Promise((r) => setTimeout(r, d * 1000));
-      await keyEvent(code, flags, false);
-      return { action_sent: true, key, heldSec: d };
+      await withPressedKey(code, flags, () => wait(d * 1000));
+      return { action_sent: true, key, keyboard_delivery: state.foregroundInput ? "foreground-guarded" : "process", heldSec: d };
     },
     set_value: (args) => native("set_value", args),
     select_text: (args) => native("select_text", args),
@@ -512,6 +623,12 @@ export function create({ exec }) {
     recordingStop,
     recordingStatus,
     recordingList,
+    closeSession,
+    releaseInput: async () => {
+      if (!state.pointerLease) return;
+      try { await withSignal(null, () => state.pointerLease.release({ point: state.pointer })); }
+      finally { state.pointerLease = null; }
+    },
   };
 }
 

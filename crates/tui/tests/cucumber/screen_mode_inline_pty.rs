@@ -71,7 +71,8 @@ fn offline_queue_late_unbracketed_submit_keeps_composer_and_commands_responsive(
             wait_or_panic(&mut tui, "New session", STARTUP_WAIT, "launch card");
             tui.wait_for_idle(Duration::from_millis(100), SETTLE_WAIT)
                 .expect("composer ready");
-            tui.send(keys::key::ctrl('u')).expect("clear suggested prompt");
+            tui.send(keys::key::ctrl('u'))
+                .expect("clear suggested prompt");
 
             tui.send(keys::key::text("late queue draft"))
                 .expect("raw prompt bytes");

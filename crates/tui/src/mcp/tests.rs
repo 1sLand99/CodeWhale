@@ -4133,6 +4133,36 @@ async fn discover_snapshot_includes_underlying_spawn_error_in_chain() {
     );
 }
 
+#[tokio::test]
+async fn discover_snapshot_explains_a_missing_node_runtime() {
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("mcp.json");
+    let missing_node = dir
+        .path()
+        .join(if cfg!(windows) { "node.exe" } else { "node" });
+    fs::write(
+        &config_path,
+        serde_json::to_vec(&serde_json::json!({
+            "mcpServers": { "computer": { "command": missing_node, "args": [] } }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let snapshot = discover_manager_snapshot(&config_path, None, false)
+        .await
+        .unwrap();
+    let error = snapshot
+        .servers
+        .iter()
+        .find(|server| server.name == "computer")
+        .unwrap()
+        .error
+        .as_ref()
+        .unwrap();
+    assert!(error.contains("Node.js 20 or newer"), "{error}");
+    assert!(error.contains("https://nodejs.org/"), "{error}");
+}
+
 /// The same guarantee for a server the user marked `required`. `connect_all`
 /// appends a generic "required MCP server failed to initialize" entry after
 /// the real per-server connect error, and every snapshot path folds the
@@ -4683,6 +4713,70 @@ async fn stdio_transport_shutdown_terminates_child() {
         !still_alive,
         "child {pid} survived StdioTransport::shutdown — SIGTERM not delivered"
     );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn stdio_transport_drop_allows_child_cleanup() {
+    let directory = tempfile::tempdir().expect("temporary cleanup receipt");
+    let receipt = directory.path().join("cleaned");
+    let config: McpServerConfig = serde_json::from_value(serde_json::json!({
+        "args": [
+            "-c",
+            "trap 'sleep 0.1; printf cleaned > \"$1\"; exit 0' TERM; printf 'ready\\n'; while :; do sleep 0.05; done",
+            "cleanup-test",
+            receipt.display().to_string(),
+        ],
+    }))
+    .unwrap();
+    let mut transport = StdioTransport::spawn(
+        "drop-cleanup-test",
+        "/bin/sh",
+        &config,
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .expect("spawn cleanup fixture");
+    assert_eq!(transport.recv().await.unwrap(), b"ready");
+    // Retaining a strong Child reference would mask immediate kill_on_drop.
+    drop(transport);
+    tokio::time::timeout(STDIO_SHUTDOWN_GRACE + Duration::from_secs(1), async {
+        while !receipt.exists() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("dropped transport lets SIGTERM cleanup finish");
+    assert_eq!(std::fs::read_to_string(receipt).unwrap(), "cleaned");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn stdio_transport_drop_kills_child_that_ignores_cleanup() {
+    let config: McpServerConfig = serde_json::from_value(serde_json::json!({
+        "args": [
+            "-c",
+            "trap '' TERM; printf 'ready\\n'; while :; do sleep 0.05; done",
+        ],
+    }))
+    .unwrap();
+    let mut transport = StdioTransport::spawn(
+        "drop-hung-test",
+        "/bin/sh",
+        &config,
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .expect("spawn unresponsive fixture");
+    assert_eq!(transport.recv().await.unwrap(), b"ready");
+    let pid = transport.child.lock().await.id().expect("live child");
+    drop(transport);
+    tokio::time::timeout(STDIO_SHUTDOWN_GRACE + Duration::from_secs(1), async {
+        // Signal zero only observes the process; the owned Child sends kills.
+        while unsafe { libc::kill(pid as i32, 0) } == 0 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("dropped transport force-kills and reaps hung child");
 }
 
 /// Mid-run MCP server crash: the v0.8.x spawn path used `Stdio::null` for

@@ -17,6 +17,13 @@ const PNG_1X1 = Buffer.from(
 const ELEMENTS = [
   { index: 0, path: [0], windowIndex: 0, role: "AXWindow", label: "Main", position: { x: 0, y: 0 }, size: { w: 400, h: 300 } },
   { index: 1, path: [0, 1], windowIndex: 0, role: "AXButton", label: "OK", position: { x: 10, y: 20 }, size: { w: 60, h: 30 } },
+  { index: 2, path: [], windowIndex: -1, role: "AXMenuBar", actions: [] },
+  { index: 3, path: [0], windowIndex: -1, role: "AXMenuBarItem", label: "File", actions: ["AXPress"] },
+  { index: 4, path: [0, 0], windowIndex: -1, role: "AXMenu", actions: [] },
+  { index: 5, path: [0, 0, 0], windowIndex: -1, role: "AXMenuItem", label: "Save", actions: ["AXPress"] },
+  { index: 6, path: [0], windowIndex: -2, role: "AXMenu", actions: [] },
+  { index: 7, path: [0, 0], windowIndex: -2, role: "AXMenuItem", label: "Choose", actions: ["AXPress"] },
+  { index: 8, path: [0, 2], windowIndex: 0, role: "AXTextField", value: "Fixture text", focused: true, enabled: true, actions: ["AXConfirm"], position: { x: 10, y: 60 }, size: { w: 150, h: 25 } },
 ];
 
 function tmpPng(prefix) {
@@ -46,9 +53,13 @@ export function create() {
       record("zoom", { region });
       return { file: tmpPng("cu-fake-zoom-"), region };
     },
-    async get_app_state({ app_ref } = {}) {
-      record("get_app_state", { app_ref });
-      return { found: true, name: app_ref?.name ?? "FakeApp", elements: ELEMENTS };
+    async get_app_state({ app_ref, detail, include_ocr } = {}) {
+      record("get_app_state", { app_ref, detail, include_ocr });
+      return { found: true, name: app_ref?.name ?? "FakeApp", elements: ELEMENTS, ...(include_ocr ? { ocr: {
+        status: app_ref?.name === "OCR unavailable" ? "unavailable" : "ok",
+        raster: { file: "/fixture/ocr.png", points: { x: 100, y: 50, w: 200, h: 100 }, pixels: { w: 400, h: 200 }, scale: 2 },
+        blocks: app_ref?.name === "OCR unavailable" ? [] : [{ text: "Raster text", confidence: 0.9, bounds: { x: 60, y: 20, w: 40, h: 40 }, target: { type: "coordinate", x: 80, y: 40 } }],
+      } } : {}) };
     },
     async resolve_element(args) {
       record("resolve_element", args);
@@ -62,6 +73,7 @@ export function create() {
     async double_click({ target } = {}) { record("double_click", { target }); return { action_sent: true, at: { x: target?.x, y: target?.y } }; },
     async mouse_move({ target } = {}) { record("mouse_move", { target }); return { action_sent: true, at: { x: target?.x, y: target?.y } }; },
     async perform_action(args) { record("perform_action", args); return { action_sent: true, strategy: "a11y" }; },
+    async set_value(args) { record("set_value", args); return { action_sent: true, strategy: "a11y" }; },
   };
 }
 

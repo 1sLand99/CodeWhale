@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { run, runOk, ExecError, have, trim } from "../src/exec.mjs";
+import { run, runOk, runInputLease, ExecError, have, trim, withSignal } from "../src/exec.mjs";
 import { safeRemotePath, b64, localExec, hdcExec } from "../src/transport.mjs";
 
 test("run captures stdout/stderr and exit codes without a shell", async () => {
@@ -34,6 +34,59 @@ test("run enforces timeouts", async () => {
   assert.equal(r.timedOut, true);
 });
 
+test("run distinguishes an early cancellation from a child that was dispatched", async () => {
+  const early = await withSignal(AbortSignal.abort(), () => run(process.execPath, ["-e", "process.exit(9)"]));
+  assert.equal(early.aborted, true);
+  assert.equal(early.spawned, false);
+  const dispatched = await run(process.execPath, ["-e", "setInterval(()=>{}, 1000)"], { timeoutMs: 50 });
+  assert.equal(dispatched.timedOut, true);
+  assert.equal(dispatched.spawned, true);
+});
+
+test("cancelling a later pointer command closes its original input owner promptly", async t => {
+  const dir=fs.mkdtempSync(path.join(os.tmpdir(),"cu-lease-cancel-"));
+  t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
+  const released=path.join(dir,"released");
+  const lease=await runInputLease(process.execPath,["-e",`
+    const fs=require('node:fs');
+    console.log(JSON.stringify({action_sent:true,input_lease:true}));
+    process.stdin.resume();
+    process.stdin.on('data',()=>{});
+    process.stdin.on('end',()=>{fs.writeFileSync(process.argv[1],'released');process.exit(0);});
+  `,released]);
+  const controller=new AbortController();
+  const started=Date.now();
+  const motion=withSignal(controller.signal,()=>lease.send({point:{x:12,y:34}}));
+  setTimeout(()=>controller.abort(),50);
+  await assert.rejects(motion,error=>error.code==='cancelled');
+  assert.equal(fs.readFileSync(released,'utf8'),'released');
+  assert.ok(Date.now()-started<1500,'later request cancellation must not wait for the 20-second motion timeout');
+  await lease.release();
+});
+
+test("an exited input owner rejects later movement immediately", async () => {
+  const lease=await runInputLease(process.execPath,["-e",`
+    console.log(JSON.stringify({action_sent:true,input_lease:true}));
+    setTimeout(()=>process.kill(process.pid,'SIGTERM'),20);
+  `]);
+  await new Promise(resolve=>setTimeout(resolve,100));
+  const started=Date.now();
+  await assert.rejects(lease.send({point:{x:1,y:2}}),/owner is closed/);
+  assert.ok(Date.now()-started<500);
+});
+
+test("an unresponsive input helper is force-terminated within the MCP cleanup budget", async () => {
+  const lease=await runInputLease(process.execPath,["-e",`
+    process.on('SIGTERM',()=>{}); process.stdin.resume();
+    process.stdin.on('data',()=>{}); process.stdin.on('end',()=>{});
+    console.log(JSON.stringify({action_sent:true,input_lease:true}));
+    setInterval(()=>{},1000);
+  `]);
+  const started=Date.now();
+  await assert.rejects(lease.release(),error=>error.code==='input_release_failed' && error.result.signal==='SIGKILL');
+  assert.ok(Date.now()-started<2500);
+});
+
 test("have() detects real and missing tools", async () => {
   assert.equal(await have("node"), true);
   assert.equal(await have("definitely-not-a-real-tool-xyz"), false);
@@ -43,6 +96,14 @@ test("safeRemotePath blocks traversal, metacharacters, and absolute escapes", ()
   assert.equal(safeRemotePath(".codewhale-cu/agent/agent.mjs"), ".codewhale-cu/agent/agent.mjs");
   for (const bad of ["../../etc/passwd", "/etc/passwd", "a;rm -rf /", "a b", "$(id)", "a\nb", "a'b", ".codewhale-cu/../escape"]) {
     assert.throws(() => safeRemotePath(bad), ExecError, `should reject: ${bad}`);
+  }
+});
+
+test("one-shot SSH agent refuses operations that outlive its request", async () => {
+  for(const tool of ['left_mouse_down','recordingStart']) {
+    const result=await run(process.execPath,['agent.mjs',b64({tool,args:{target:{x:1,y:2}}})]);
+    assert.equal(result.code,0);
+    assert.equal(JSON.parse(result.stdout).error.code,'persistent_session_required');
   }
 });
 

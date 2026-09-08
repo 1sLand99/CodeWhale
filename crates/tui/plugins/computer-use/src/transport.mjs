@@ -4,8 +4,8 @@
 //  - ssh:   run the codewhale-cu remote agent over ssh (args travel as base64 JSON,
 //           so no tool argument can ever become remote shell syntax)
 //  - hdc:   HarmonyOS device over `hdc` shell / file push-pull
-import { run, runOk, ExecError } from "./exec.mjs";
-import { ensureApp, appRequest } from "./app-socket.mjs";
+import { run, runOk, runInputLease, ExecError, currentSignal } from "./exec.mjs";
+import { ensureApp, appSessionRequest } from "./app-socket.mjs";
 import { spawn } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -15,6 +15,16 @@ import url from "node:url";
 
 const __dirname = path.dirname(url.fileURLToPath(import.meta.url));
 export const PLUGIN_ROOT = path.resolve(__dirname, "..");
+// A new MCP process always starts a fresh app/input/raster binding, even when
+// the permission-owning desktop helper remains running across tasks.
+export const SESSION_ID = crypto.randomUUID();
+let usedApp = false;
+export function closeAppSession({ releaseOnly = false } = {}) {
+  if (!usedApp) return Promise.resolve();
+  return appSessionRequest({ tool: releaseOnly ? "release_session_input" : "close_session", sessionId: SESSION_ID }, { timeoutMs: 2_500, signal: null }).then((reply) => {
+    if (!reply?.ok) throw Object.assign(new ExecError(reply?.error?.message ?? "Computer input cleanup failed"), { code: reply?.error?.code ?? "input_release_failed" });
+  });
+}
 
 export function b64(obj) {
   return Buffer.from(JSON.stringify(obj), "utf8").toString("base64");
@@ -40,6 +50,7 @@ export function localExec() {
     kind: "local",
     run,
     runOk,
+    runInputLease,
     async readFile(p) { return fs.promises.readFile(p); },
     async writeFile(p, data) { return fs.promises.writeFile(p, data); },
     tmpFile(prefix) {
@@ -52,14 +63,15 @@ export function localExec() {
  * App executor: the local computer driven through the desktop app's socket.
  * Same `remote()` contract as ssh, but files the app writes are on this disk.
  */
-export function appExec(app) {
+export function appExec(app, sessionId = SESSION_ID) {
   return {
     ...localExec(),
     kind: "app",
     app,
     filesLocal: true,
     remote(request, opts = {}) {
-      return appRequest(request, { timeoutMs: opts.timeoutMs ?? 30_000 });
+      usedApp = true;
+      return appSessionRequest({ ...request, sessionId }, { timeoutMs: opts.timeoutMs ?? 30_000 });
     },
   };
 }
@@ -83,6 +95,7 @@ export function sshExec(computer) {
       const r = await run("ssh", [...base, "node", remoteAgent, b64({ args: request.args ?? {}, tool: request.tool, nonce: crypto.randomBytes(6).toString("hex") })], {
         timeoutMs: opts.timeoutMs ?? 25_000,
       });
+      if (r.aborted) throw Object.assign(new ExecError("computer request cancelled", r), { code: "cancelled" });
       if (r.timedOut) throw new ExecError(`ssh ${userHost}: timed out`, r);
       if (r.code !== 0) throw new ExecError(`ssh ${userHost} exited ${r.code}: ${r.stderr.trim().slice(0, 400)}`, r);
       // The agent prints exactly one JSON line; anything before it is MOTD noise.
@@ -158,10 +171,13 @@ export async function executorFor(computer) {
     // agent) in-process, so wire argument preparation is covered by tests.
     if (process.env.CODEWHALE_CU_TEST_REMOTE === "1") {
       const { handle } = await import("./app-handler.mjs");
-      return { ...appExec({ id: "test", name: "test app" }), remote: (request) => handle(request) };
+      return { ...appExec({ id: "test", name: "test app" }), remote: (request) => handle(request, { sessionId: SESSION_ID, signal: currentSignal() }) };
     }
     const status = await ensureApp();
-    if (status.via === "app") return appExec(status.app);
+    if (status.via === "app") {
+      if (status.app.sessionProtocol !== 2) throw Object.assign(new ExecError("The installed Computer Use helper needs an update for isolated sessions and disconnect cleanup. Rebuild/reinstall it, then retry."), { code: "app_upgrade_required" });
+      return appExec(status.app);
+    }
     return { ...localExec(), appReason: status.reason };
   }
   if (computer.transport === "ssh") return sshExec(computer);

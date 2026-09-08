@@ -4381,6 +4381,8 @@ impl Engine {
         // state a preview has no business writing.
         if self.config.features.enabled(Feature::Mcp) && mcp_access.may_connect() {
             let _ = self.ensure_mcp_pool().await;
+            self.wait_for_explicit_mcp_boot(allowed_tools.as_deref())
+                .await;
         }
         let builder = self
             .build_turn_tool_registry_builder_for_route(
@@ -6522,9 +6524,55 @@ impl Engine {
         self.drain_mcp_boot_updates().await;
     }
 
+    /// Explicit MCP tool selections need their schemas on the first request.
+    /// Keep unrelated optional servers in the background, using the existing
+    /// bounded connection pass and its authority-checked progress updates.
+    async fn wait_for_explicit_mcp_boot(&mut self, allowed_tools: Option<&[String]>) {
+        let requested = self
+            .config
+            .tools_always_load
+            .iter()
+            .chain(allowed_tools.into_iter().flatten())
+            .map(|name| name.trim().to_ascii_lowercase())
+            .filter(|name| name.starts_with("mcp_"))
+            .collect::<Vec<_>>();
+        if requested.is_empty() {
+            return;
+        }
+        while self.mcp_boot_in_flight {
+            self.drain_mcp_boot_updates().await;
+            let Some(pool) = self.mcp_pool.as_ref() else {
+                break;
+            };
+            let pending =
+                Self::mcp_connecting_names(&*pool.lock().await, &self.mcp_connection_errors);
+            let needs_schema = pending.iter().any(|server| {
+                let prefix = format!("mcp_{}_", server.to_ascii_lowercase());
+                requested.iter().any(|name| {
+                    name.starts_with(&prefix)
+                        || name
+                            .strip_suffix('*')
+                            .is_some_and(|rule| prefix.starts_with(rule))
+                })
+            });
+            if !needs_schema {
+                break;
+            }
+            let Some(rx) = self.mcp_boot_rx.as_mut() else {
+                break;
+            };
+            let update = tokio::select! {
+                _ = self.cancel_token.cancelled() => None,
+                update = rx.recv() => update,
+            };
+            let Some(update) = update else { break };
+            self.apply_mcp_boot_update(update).await;
+        }
+    }
+
     /// Start the concurrent connect pass without occupying the engine mailbox.
-    /// Optional servers never serialize the first model turn: `mcp_tools`
-    /// snapshots whatever is already ready.
+    /// Optional servers stay in the background unless the task explicitly
+    /// selects their tools; `mcp_tools` snapshots whatever is already ready.
     async fn start_mcp_session_boot(&mut self) {
         if !self.config.features.enabled(Feature::Mcp) {
             return;

@@ -27,7 +27,7 @@ function mockExec({ fail = false } = {}) {
 test("win32: actions run through an injected runner (no powershell needed)", async () => {
   const { run, calls } = mockExec();
   const mod = await import("../src/backends/win32.mjs");
-  const b = mod.create({ exec: { run } });
+  const b = mod.create({ exec: { run, persistentInputOwner: true } });
   const r = await b.left_click({ target: { x: 5, y: 6 } });
   assert.equal(r.action_sent, true);
   assert.ok(calls.length >= 1, "the injected runner must receive the action command");
@@ -36,7 +36,7 @@ test("win32: actions run through an injected runner (no powershell needed)", asy
 test("win32: input actions fail truthfully on a nonzero exit", async () => {
   const { run } = mockExec({ fail: true });
   const mod = await import("../src/backends/win32.mjs");
-  const b = mod.create({ exec: { run } });
+  const b = mod.create({ exec: { run, persistentInputOwner: true } });
   await assert.rejects(() => b.left_click({ target: { x: 1, y: 2 } }), /exited 1/);
   await assert.rejects(() => b.left_mouse_down({ target: { x: 1, y: 2 } }), /exited 1/);
 });
@@ -44,7 +44,7 @@ test("win32: input actions fail truthfully on a nonzero exit", async () => {
 test("win32: coordinate clicks refuse strategy=a11y instead of silently degrading", async () => {
   const { run, calls } = mockExec();
   const mod = await import("../src/backends/win32.mjs");
-  const b = mod.create({ exec: { run } });
+  const b = mod.create({ exec: { run, persistentInputOwner: true } });
   // left_click refuses synchronously (it is not async), like every fail-closed
   // guard in this backend — see backends.test.mjs for the same convention.
   assert.throws(() => b.left_click({ target: { x: 1, y: 2 }, strategy: "a11y" }), /macOS-only/);
@@ -56,7 +56,7 @@ test("win32: coordinate clicks refuse strategy=a11y instead of silently degradin
 test("win32: targeted left_mouse_down both moves and presses, self-contained", async () => {
   const { run, calls } = mockExec();
   const mod = await import("../src/backends/win32.mjs");
-  const b = mod.create({ exec: { run } });
+  const b = mod.create({ exec: { run, persistentInputOwner: true } });
   await b.left_mouse_down({ target: { x: 12, y: 34 } });
   const script = calls.at(-1).script;
   // Self-contained: the User32 P/Invoke type travels with the action.
@@ -68,7 +68,7 @@ test("win32: targeted left_mouse_down both moves and presses, self-contained", a
 test("win32: every User32 action carries the type prelude in-process", async () => {
   const { run, calls } = mockExec();
   const mod = await import("../src/backends/win32.mjs");
-  const b = mod.create({ exec: { run } });
+  const b = mod.create({ exec: { run, persistentInputOwner: true } });
   await b.mouse_move({ target: { x: 3, y: 4 } });
   await b.key({ text: "a" });
   assert.ok(calls.length >= 2, "two actions should have run through the injected runner");

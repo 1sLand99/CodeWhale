@@ -8,11 +8,15 @@
 //! path — installed bundles still arrive through
 //! [`super::install`], and discovery, trust, and enablement are unchanged.
 //!
-//! The bundle is embedded with `include_str!` (the same way locale packs and
+//! The bundle is embedded with `include_bytes!` (the same way locale packs and
 //! the mobile client are embedded) and written under
 //! `$CODEWHALE_HOME/builtin-plugins` on first run, so one binary carries it to
 //! every distribution channel — npm, tarball, `cargo install`, brew — without
 //! any of them learning about plugin files.
+//! macOS builds also carry the native helper built from the vendored sources,
+//! so operating the computer never requires a compiler or a separate app
+//! installation. The helper targets macOS 13+; OS permissions are still user
+//! controlled, and the MCP server uses the host's Node.js runtime.
 //!
 //! Two properties this must not lose:
 //!
@@ -47,7 +51,7 @@ macro_rules! bundle_file {
     ($relative:literal) => {
         (
             $relative,
-            include_str!(concat!("../../plugins/computer-use/", $relative)),
+            include_bytes!(concat!("../../plugins/computer-use/", $relative)),
         )
     };
 }
@@ -58,13 +62,15 @@ macro_rules! bundle_file {
 /// `README.md`) are deliberately absent: nothing at runtime reads them, and
 /// the `.mjs` extension already makes every module ESM without a
 /// `"type": "module"` declaration.
-const COMPUTER_USE_FILES: &[(&str, &str)] = &[
+const COMPUTER_USE_FILES: &[(&str, &[u8])] = &[
+    bundle_file!("LICENSE"),
     bundle_file!("plugin.json"),
     bundle_file!("mcp.json"),
     bundle_file!("commands/computer.md"),
     bundle_file!("skills/computer-use/SKILL.md"),
     bundle_file!("skills/recording/SKILL.md"),
     bundle_file!("agent.mjs"),
+    bundle_file!("app/daemon.mjs"),
     bundle_file!("mcp/server.mjs"),
     bundle_file!("src/app-handler.mjs"),
     bundle_file!("src/app-socket.mjs"),
@@ -77,20 +83,26 @@ const COMPUTER_USE_FILES: &[(&str, &str)] = &[
     bundle_file!("src/backends/darwin.mjs"),
     bundle_file!("src/backends/darwin-accessibility.m"),
     bundle_file!("src/backends/darwin-recording.h"),
+    bundle_file!("src/backends/darwin-ocr.h"),
     bundle_file!("src/backends/harmonyos.mjs"),
     bundle_file!("src/backends/linux.mjs"),
     bundle_file!("src/backends/win32.mjs"),
+    #[cfg(target_os = "macos")]
+    (
+        "bin/darwin/accessibility",
+        include_bytes!(concat!(env!("OUT_DIR"), "/computer-use-accessibility")),
+    ),
 ];
 
 /// Digest of one bundle's entire contents, including its file names, so a
 /// renamed or removed file is as much a change as an edited one.
-fn digest(files: &[(&str, &str)]) -> String {
+fn digest(files: &[(&str, &[u8])]) -> String {
     let mut hasher = Sha256::new();
     for (relative, contents) in files {
         hasher.update((relative.len() as u64).to_le_bytes());
         hasher.update(relative.as_bytes());
         hasher.update((contents.len() as u64).to_le_bytes());
-        hasher.update(contents.as_bytes());
+        hasher.update(contents);
     }
     super::manifest::hex_digest(hasher.finalize())
 }
@@ -144,7 +156,7 @@ fn materialize() -> io::Result<Option<PathBuf>> {
 /// Write one bundle into `root/<name>` when what is there is not already
 /// exactly this bundle. Staged then swapped, so `root/<name>` is either the
 /// previous bundle or this one — never half of either.
-fn write_bundle(root: &Path, name: &str, files: &[(&str, &str)]) -> io::Result<()> {
+fn write_bundle(root: &Path, name: &str, files: &[(&str, &[u8])]) -> io::Result<()> {
     let destination = root.join(name);
     let stamp_path = destination.join(STAMP_NAME);
     let want = digest(files);
@@ -162,7 +174,12 @@ fn write_bundle(root: &Path, name: &str, files: &[(&str, &str)]) -> io::Result<(
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        fs::write(path, contents)?;
+        fs::write(&path, contents)?;
+        #[cfg(unix)]
+        if *relative == "bin/darwin/accessibility" {
+            use std::os::unix::fs::PermissionsExt as _;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o700))?;
+        }
     }
     // Last, so an interrupted write leaves a bundle that fails the stamp check
     // and is rewritten on the next run.
@@ -234,6 +251,8 @@ mod tests {
         let mut embedded: Vec<&str> = COMPUTER_USE_FILES
             .iter()
             .map(|(relative, _)| *relative)
+            // Built from the vendored native sources, never committed as an artifact.
+            .filter(|relative| *relative != "bin/darwin/accessibility")
             .collect();
         embedded.sort_unstable();
 
@@ -267,6 +286,46 @@ mod tests {
         assert!(!plugin.enabled);
         assert_eq!(plugin.trust_status, PluginTrustStatus::NeverReviewed);
         assert!(!home.join("plugins/state.json").exists(), "read-only");
+    }
+
+    /// A stock macOS install has neither a cloned plugin nor clang. The
+    /// reviewed runtime snapshot must carry an executable native helper.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn reviewed_computer_use_carries_a_runnable_native_helper() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let _lock = crate::test_support::lock_test_env();
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let workspace = tmp.path().join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        fs::create_dir_all(&home).unwrap();
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", &home);
+        let mut registry = crate::plugins::PluginDiscoveryContext::capture_pre_dotenv()
+            .registry_for_workspace(&workspace);
+        let registry = std::sync::Arc::get_mut(&mut registry).unwrap();
+        registry.trust(COMPUTER_USE).unwrap();
+        registry.enable(COMPUTER_USE).unwrap();
+        let plugin = registry.get(COMPUTER_USE).unwrap();
+        let staged = plugin.staged_root.as_ref().unwrap();
+        let helper = staged.join("bin/darwin/accessibility");
+        assert_eq!(
+            fs::metadata(&helper).unwrap().permissions().mode() & 0o777,
+            0o500
+        );
+        let result = std::process::Command::new(&helper)
+            .arg(r#"{"tool":"permissions","args":{}}"#)
+            .env("PATH", "")
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let reply: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+        assert!(reply.get("trusted").is_some());
     }
 
     #[test]

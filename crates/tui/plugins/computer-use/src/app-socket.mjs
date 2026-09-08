@@ -14,7 +14,7 @@ import url from "node:url";
 import crypto from "node:crypto";
 import { spawn } from "node:child_process";
 import { stateDir } from "./registry.mjs";
-import { ExecError } from "./exec.mjs";
+import { ExecError, currentSignal, throwIfAborted, wait } from "./exec.mjs";
 
 export const PLUGIN_ROOT = path.resolve(path.dirname(url.fileURLToPath(import.meta.url)), "..");
 export const APP_ID = "net.codewhale.computer-use";
@@ -54,24 +54,73 @@ export function writeRegistration(reg) {
 }
 
 /** Send one request to the app and await its single-line reply. */
-export function appRequest(request, { timeoutMs = 30_000 } = {}) {
+function requestConnection(request, { timeoutMs = 30_000, signal = currentSignal(), keepOpen = false } = {}) {
+  throwIfAborted(signal);
   return new Promise((resolve, reject) => {
     const sock = net.connect(socketPath());
     let buf = "";
     let settled = false;
-    const done = (fn, v) => { if (settled) return; settled = true; clearTimeout(timer); sock.destroy(); fn(v); };
-    const timer = setTimeout(() => done(reject, new ExecError(`${APP_NAME}: request timed out after ${timeoutMs}ms`, { code: "app_timeout" })), timeoutMs);
+    const done = (fn, v) => { if (settled) return; settled = true; clearTimeout(timer); signal?.removeEventListener("abort", abort); if (!keepOpen || fn === reject) sock.destroy(); fn(v); };
+    const abort = () => done(reject, Object.assign(new ExecError("computer request cancelled"), { code: "cancelled" }));
+    const timer = setTimeout(() => done(reject, Object.assign(new ExecError(`${APP_NAME}: request timed out after ${timeoutMs}ms`), { code: "app_timeout" })), timeoutMs);
+    signal?.addEventListener("abort", abort, { once: true });
     sock.on("error", (err) => done(reject, Object.assign(new ExecError(`${APP_NAME} is not reachable at ${socketPath()}: ${err.code ?? err.message}`), { code: "app_unavailable" })));
     sock.on("connect", () => sock.write(JSON.stringify(request) + "\n"));
     sock.on("data", (d) => {
       buf += d.toString("utf8");
       const nl = buf.indexOf("\n");
       if (nl === -1) return;
-      try { done(resolve, JSON.parse(buf.slice(0, nl))); }
+      try { const reply = JSON.parse(buf.slice(0, nl)); done(resolve, keepOpen ? { reply, socket: sock } : reply); }
       catch { done(reject, Object.assign(new ExecError(`${APP_NAME}: malformed reply`), { code: "app_bad_reply" })); }
     });
     sock.on("close", () => done(reject, Object.assign(new ExecError(`${APP_NAME}: connection closed before a reply`), { code: "app_unavailable" })));
   });
+}
+
+export function appRequest(request, options) { return requestConnection(request, options); }
+
+// A live socket is the session owner, independent of short-lived cancellable
+// request sockets. The OS closes it even if the MCP process is killed; no PID
+// lookup or reuse-prone process identity is needed to release held input.
+// When the socket dies without close_session (an app update replaces the
+// daemon and every socket it owned), the dead lease is dropped so the next
+// request re-opens one instead of failing forever.
+const sessionLeases = new Map();
+export function openAppSession(sessionId) {
+  if (!sessionLeases.has(sessionId)) {
+    const pending = requestConnection({ tool: "open_session", sessionId }, { timeoutMs: 3_000, signal: null, keepOpen: true }).then(({ reply, socket }) => {
+      if (!reply?.ok || typeof reply.leaseToken !== "string") {
+        socket.destroy();
+        throw Object.assign(new ExecError(reply?.error?.message ?? "Computer session lease was refused"), { code: reply?.error?.code ?? "app_session_closed" });
+      }
+      const lease = { token: reply.leaseToken, socket, closed: socket.destroyed, deliberate: false };
+      socket.once("close", () => {
+        lease.closed = true;
+        if (sessionLeases.get(sessionId) === pending && !lease.deliberate) sessionLeases.delete(sessionId);
+      });
+      // Library clients need not keep Node alive solely for an idle lease.
+      socket.unref();
+      return lease;
+    });
+    // A refused or unreachable open is retried on the next request, not cached.
+    pending.catch(() => { if (sessionLeases.get(sessionId) === pending) sessionLeases.delete(sessionId); });
+    sessionLeases.set(sessionId, pending);
+  }
+  return sessionLeases.get(sessionId);
+}
+
+export async function appSessionRequest(request, options = {}) {
+  throwIfAborted(options.signal === undefined ? currentSignal() : options.signal);
+  let lease = await openAppSession(request.sessionId);
+  if (lease.closed) {
+    if (lease.deliberate) throw Object.assign(new ExecError("Computer session was closed; start a new session to continue"), { code: "app_session_closed" });
+    // The fresh lease is on a daemon that holds no input for this session,
+    // so nothing the old lease held can replay across the reconnect.
+    lease = await openAppSession(request.sessionId);
+    if (lease.closed) throw Object.assign(new ExecError("Computer session lease could not be re-established with the helper; retry the request"), { code: "app_session_closed" });
+  }
+  try { return await appRequest({ ...request, leaseToken: lease.token }, options); }
+  finally { if (request.tool === "close_session") { lease.deliberate = true; lease.socket.destroy(); } }
 }
 
 /** App identity if it is running, else null. Cheap: one connect. */
@@ -107,11 +156,19 @@ let lastLaunchAt = 0;
  */
 export async function ensureApp({ launch = true } = {}) {
   if (process.env.CODEWHALE_CU_APP === "off") return { via: "direct", reason: "CODEWHALE_CU_APP=off" };
+  if (process.platform === "darwin" && fs.existsSync(path.join(PLUGIN_ROOT, "bin", "darwin", "accessibility"))) {
+    return { via: "direct", reason: "Using the Computer Use helper included with Codewhale. Grant Accessibility and Screen Recording to the host app in macOS System Settings when requested." };
+  }
   let app = await hello();
+  throwIfAborted();
   if (app) return { via: "app", app };
   const reg = readRegistration();
   if (!reg) {
-    return { via: "direct", reason: `${APP_NAME} is not installed on this computer; run "npm run build:app && npm run install:app" in the plugin so OS permissions belong to the app instead of the host terminal` };
+    const standalone = fs.existsSync(path.join(PLUGIN_ROOT, "scripts", "build-app.mjs"));
+    return { via: "direct", reason: standalone
+      ? `${APP_NAME} is not installed. Input and screen permissions belong to the current host. To use a standalone permission-owning helper, run "npm run build:app && npm run install:app" in the plugin checkout.`
+      : "Using the Computer Use helper included with Codewhale. Input and screen permissions belong to the current host app; grant them in your operating system's privacy settings when requested." };
+
   }
   if (!launch || Date.now() - lastLaunchAt < 15_000) {
     return { via: "direct", reason: `${APP_NAME} is installed at ${reg.path} but not running (last launch attempt did not come up)` };
@@ -120,8 +177,9 @@ export async function ensureApp({ launch = true } = {}) {
   launchApp(reg);
   const deadline = Date.now() + 8_000;
   while (Date.now() < deadline) {
-    await new Promise((r) => setTimeout(r, 250));
+    await wait(250);
     app = await hello({ timeoutMs: 1_000 });
+    throwIfAborted();
     if (app) return { via: "app", app, launched: true };
   }
   return { via: "direct", reason: `${APP_NAME} at ${reg.path} did not answer within 8s of launch; open it manually and check ${runInfoPath()}` };

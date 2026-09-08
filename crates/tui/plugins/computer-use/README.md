@@ -1,105 +1,74 @@
-# computer-use
+# Computer Use
 
-Codewhale Computer Use — the `computer-use` plugin. One tool surface, four
-platforms, and **switching between registered computers as a default**: every
-tool accepts `computer`, and using a computer id sticks until you switch.
+This is the Computer Use plugin included in Codewhale. The Engine embeds the
+runtime bundle, discovers it through the existing plugin registry, and runs
+only the copy the user has reviewed and enabled. Codewhale Apps uses that same
+Engine inventory and approval flow.
 
-The bundle is an Agent Plugins v1 package (`plugin.json` + sibling `mcp.json`,
-`commands/`, `skills/`): the Codewhale Engine discovers, reviews, installs, and
-runs it. Nothing here writes to your Codewhale configuration.
+The bundle provides 39 MCP tools for application and window observation,
+accessibility actions, screenshots and zoom, keyboard and pointer input,
+clipboard access, recording, and switching between registered computers.
+Implementation exists for macOS, Windows, Linux and HarmonyOS target devices;
+platform support still depends on the tools, OS grants and actual device
+verification described by the upstream project. A source build is not a
+published or certified release.
+Current launch qualification covers the local macOS candidate. Windows,
+Wayland, HarmonyOS and SSH require separate device and workflow evidence.
 
-| | |
-|---|---|
-| Platforms | macOS, Windows, Linux (X11 + Wayland), HarmonyOS (hdc devices) |
-| Hosts | macOS, Windows, Linux (`when.os`); HarmonyOS is a target device, not a host |
-| Transports | local process, ssh + bundled remote agent, hdc |
-| Runtime deps | none (Node ≥ 20; platform tools probed at call time) |
-| Tools | 38: observe, pointer, keyboard/text, semantic, clipboard, recording, computer registry |
+## Included runtime
 
-## Frontier ability set
+macOS Codewhale builds carry the compiled native helper. Using the included
+plugin needs neither a separate Computer Use app nor a compiler. It uses the
+permission identity of its hosting Codewhale app or terminal. Accessibility
+and Screen Recording grants remain controlled by the user in System Settings.
+Use `request_access` to inspect readiness; a loaded plugin alone does not prove
+its OS permissions work.
 
-- **Observe & resolve** — `list_apps`, `list_windows`, `list_displays`,
-  `switch_display`, `get_app_state` (accessibility/UIA/uitest tree with
-  element indices + `state_id`), `screenshot` (display/region, raster-bound
-  coordinates), `zoom` (close-up crop of the last raster), `cursor_position`,
-  `open_application` (exact-name rule), `request_access` (fail-closed
-  permission/capability probe).
-- **Pointer** — left/double/triple/right/middle click, move, drag,
-  down/up, scroll (4 directions).
-- **Keyboard & text** — `type` (unicode), `key` (chords + repeat),
-  `hold_key`, `set_value` (semantic, background-safe), `select_text`,
-  `perform_action` (element's own actions: AXPress / UIA Invoke / AT-SPI / uitest).
-- **Recording** — `recording_start/stop/status/list` (see below).
-- **Computers** — `computer_list`, `computer_switch`, `computer_register`
-  (ssh agent auto-push), `computer_remove`.
-- **Safety** — `stop_computer_control` kill switch; permission probes that
-  name the missing grant; receipts on every call naming the computer it
-  happened on.
+The MCP server requires Node.js 20 or newer. Codewhale Apps packages its own
+Node runtime; the CLI uses Node on PATH. Homebrew declares the dependency;
+Cargo and direct binary users can install Node from <https://nodejs.org/>.
+Linux also needs the appropriate X11 or Wayland utilities and AT-SPI bindings.
+Windows uses PowerShell and UI Automation. Linux and Windows recording is
+currently unavailable until recorder ownership and shutdown cleanup are built.
+HarmonyOS targets require a connected device and hdc.
 
-## Requirements
+Persistent holds and drags on Linux and Windows currently require the separate
+session-aware Computer Use helper. Their direct bundled path refuses these
+operations before sending input. macOS carries its native input owner in the
+included bundle. Real Windows, Wayland and mixed-display validation is still
+required before claiming equivalent platform readiness.
+The current one-shot SSH agent also loses application binding between calls;
+stateful remote input needs a persistent session transport before it is ready.
 
-Tools and permissions are probed at call time; `request_access` reports what is
-missing and every capability **fails closed naming the missing tool or
-permission** — it never guesses and never half-acts.
+## Control and session ownership
 
-- **macOS** — Accessibility + Screen Recording permission for the terminal
-  app that hosts the Engine (System Settings → Privacy & Security).
-  python3+pyobjc or cliclick improves cursor reads. ffmpeg optional (mp4 remux).
-- **Windows** — PowerShell (built in); ffmpeg for recording.
-- **Linux** — X11: xdotool, wmctrl, scrot or imagemagick, xclip; Wayland:
-  grim, wtype, ydotool+ydotoold, wl-clipboard, wf-recorder; python3-pyatspi
-  for the accessibility tree; ffmpeg for recording on X11.
-- **HarmonyOS** — `hdc` on PATH with the device connected
-  (`hdc list targets`); ffmpeg on the host for snapshot-series recordings.
+Select an application before sending input. Prefer accessibility actions and
+background selection; requests that need foreground input report that fact.
+Screenshots and zoom return actual image content to compatible vision models.
+Preview and recording are explicit opt-ins.
+Application observations return a concise default summary; request full detail
+when needed. Text-only models can use element roles, values and advertised
+actions. On macOS, optional local OCR enriches the selected window observation
+with text and raster bounds; it requires Screen Recording permission and does
+not invent accessibility elements or actions.
+The Engine permits one inline image up to 5 MiB per tool result; use a scoped
+capture or zoom when a larger image receives an omission receipt.
 
-## How the four platforms map
-
-| Ability | macOS | Windows | Linux | HarmonyOS |
-|---|---|---|---|---|
-| Accessibility tree | AX via System Events (JXA) | UIAutomation | AT-SPI (pyatspi) | `uitest dumpLayout` |
-| Raw input | CGEvent (JXA bridge) | user32 SendInput/mouse_event (PowerShell) | xdotool (X11) / ydotool+wtype (Wayland) | `uitest uiInput` |
-| Screenshots | `screencapture` | .NET CopyFromScreen | scrot/import (X11), grim (Wayland) | `snapshot_display` |
-| Recording | `screencapture -v` → .mov, ffmpeg remux to .mp4 | ffmpeg gdigrab | ffmpeg x11grab / wf-recorder | snapshot-series + ffmpeg mux |
-| Clipboard | pbcopy/pbpaste | Get/Set-Clipboard | xclip/xsel, wl-clipboard | fail-closed (not exposed by hdc) |
-
-## Remote computers (ssh)
-
-```json
-computer_register { "computer": "winbox", "transport": "ssh", "host": "winbox.lan", "user": "me" }
-```
-
-Registration pushes the self-contained agent (`agent.mjs` + `src/`) to
-`~/.codewhale-cu/agent/` on the remote over scp, probes the remote platform
-through it, and pins the result. Remote calls run
-`node agent.mjs <base64 json>` — one JSON receipt line back. Only an
-allow-listed tool set executes remotely; arguments travel as data, never as
-shell. Requires publickey ssh (BatchMode) and Node ≥ 20 on the remote.
-
-## HarmonyOS computers
-
-```json
-computer_register { "computer": "pad", "transport": "hdc" }
-```
-
-Drives the device over `hdc shell uitest ...` and `snapshot_display`. Element
-targets come from `dumpLayout`; input is touch-synthesis (click / swipe /
-inputText / keyEvent). Recording is honestly labeled `snapshot-series`
-(frame captures muxed on stop) because HarmonyOS exposes no CLI screen
-recorder.
+Each task owns its MCP connection and computer selection, observations and
+held input. Subagents within that task share the task's Computer Use session.
+Stopping control or closing the task releases that session's input. Stale
+observations, unexpected foreground changes and unavailable capabilities fail
+closed with a receipt; successful dispatch still needs application-state
+verification.
 
 ## Development
 
-The bundle lives at `crates/tui/plugins/computer-use` in the Codewhale repository and has
-no dependencies to install; run its suites from that directory.
+The exact upstream source revision is recorded beside this directory in
+`computer-use.upstream-sha`. This tree contains the runtime and its tests;
+standalone app installers and release tooling belong to the upstream project.
 
-```bash
-npm test          # unit + protocol tests (no GUI input performed)
-npm run smoke     # live end-to-end against this machine (isolated state dirs,
-                  # no clicks/typing into your session, no clipboard access)
-```
-
-Smoke receipts land in `receipts/` with per-check pass/fail and artifact
-paths. Proven levels are separated: local live (this Mac: darwin) > mocked
-transport (ssh protocol, harmony backend logic) > code-complete (win32/linux
-paths, implemented to their documented tool interfaces but only verifiable on
-those platforms).
+Run `npm test` here for unit and protocol coverage. Those tests do not type or
+click in the user's applications. `npm run smoke` is a separate legacy live
+check: it captures and records the selected display, so run it only when that
+capture is intended. The upstream parity suite contains scoped application
+fixtures for interactive verification.

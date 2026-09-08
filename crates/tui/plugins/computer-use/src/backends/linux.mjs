@@ -7,7 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
 import { spawn } from "node:child_process";
-import { run, runOk, ExecError, tryJson, have } from "../exec.mjs";
+import { run as nativeRun, runOk, ExecError, tryJson, have as nativeHave, withSignal, throwIfAborted, wait } from "../exec.mjs";
 import { pngSize } from "../png-size.mjs";
 
 const XKEYS = {
@@ -34,16 +34,42 @@ function assertEventStrategy(strategy) {
   }
 }
 
-export function create({ exec }) {
+export function create({ exec } = {}) {
+  const run = exec?.run ?? nativeRun;
+  const have = exec?.have ?? nativeHave;
+  function requireInputOwner() {
+    if (exec?.persistentInputOwner !== true) throw Object.assign(new ExecError(
+      "This held-input gesture requires a connected Codewhale Computer Use desktop helper so a disconnected client cannot leave keys or buttons pressed. Start the helper and reconnect before retrying."
+    ), { code: "input_owner_required" });
+  }
+
   const tools = {};
   let session = null; // "x11" | "wayland"
   let probed = false;
   let lastRaster = null;
-  let recording = null; // {id, pid, file, startedAt, mode}
+  let mouseHeld = false;
+  const heldKeys = new Set();
+
+  async function releaseMouse() {
+    if (!mouseHeld) return;
+    await withSignal(null, () => session === "x11" ? xdotool(["mouseup", "1"], { timeoutMs: 2_000 }) : ydotool(["click", "0x80"], { timeoutMs: 2_000 }));
+    mouseHeld = false;
+  }
+
+  async function releaseKey(key) {
+    if (!heldKeys.has(key)) return;
+    await withSignal(null, () => xdotool(["keyup", key], { timeoutMs: 2_000 }));
+    heldKeys.delete(key);
+  }
+
+  async function releaseInput() {
+    await releaseMouse();
+    for (const key of heldKeys) await releaseKey(key);
+  }
 
   async function probeSession() {
     if (probed) return session;
-    probed = true;
+    throwIfAborted();
     const wayland = !!(process.env.WAYLAND_DISPLAY || process.env.XDG_SESSION_TYPE === "wayland");
     const x11 = !!(process.env.DISPLAY || process.env.XDG_SESSION_TYPE === "x11");
     session = wayland && !x11 ? "wayland" : x11 ? "x11" : null;
@@ -56,6 +82,8 @@ export function create({ exec }) {
       tools[t] = await have(t);
     }
     tools.pyatspi = tools.python3 && (await run("python3", ["-c", "import pyatspi"], { timeoutMs: 10_000 })).code === 0;
+    throwIfAborted();
+    probed = true;
     return session;
   }
 
@@ -97,14 +125,18 @@ export function create({ exec }) {
 
   async function xdotool(args, opts = {}) {
     need("xdotool", "input on X11");
+    throwIfAborted();
     const r = await run("xdotool", args, opts);
+    throwIfAborted();
     if (r.code !== 0) throw new ExecError(`xdotool ${args[0]} exited ${r.code}: ${r.stderr.trim().slice(0, 200)}`, r);
     return r.stdout.trim();
   }
 
   async function ydotool(args, opts = {}) {
     need("ydotool", "input on Wayland (ydotool needs its daemon running: sudo ydotoold)");
+    throwIfAborted();
     const r = await run("ydotool", args, opts);
+    throwIfAborted();
     if (r.code !== 0) throw new ExecError(`ydotool exited ${r.code}: ${r.stderr.trim().slice(0, 200)}`, r);
     return r.stdout.trim();
   }
@@ -116,6 +148,33 @@ export function create({ exec }) {
       if (/^f\d{1,2}$/.test(k)) return k.toUpperCase();
       return p.trim(); // pass through names already in xdotool form
     }).join("+");
+  }
+
+  async function waylandKey(text, { repeat = 1, holdMs = 0 } = {}) {
+    need("wtype", "key presses on Wayland");
+    const parts = String(text).split("+").map((part) => part.trim().toLowerCase());
+    const aliases = { control: "ctrl", meta: "logo", cmd: "logo", super: "logo" };
+    const modifiers = new Set(["ctrl", "alt", "shift", "logo", "win", "altgr", "capslock"]);
+    const rawKey = parts.pop();
+    const key = xdotoolKey(rawKey);
+    const mods = parts.map((part) => aliases[part] ?? part);
+    if (!key || mods.some((mod) => !modifiers.has(mod))) throw new ExecError(`unknown key combination "${text}"`);
+    const modKey = aliases[rawKey] ?? rawKey;
+    const onlyModifier = modifiers.has(modKey);
+    const args = mods.flatMap((mod) => ["-M", mod]);
+    for (let i = 0; i < repeat; i++) {
+      args.push(onlyModifier ? "-M" : "-P", onlyModifier ? modKey : key);
+      if (holdMs) args.push("-s", String(holdMs));
+      args.push(onlyModifier ? "-m" : "-p", onlyModifier ? modKey : key);
+    }
+    args.push(...mods.reverse().flatMap((mod) => ["-m", mod]));
+    // wtype owns a temporary Wayland keyboard; the compositor releases its
+    // keys on process exit, including cancellation. Keep the complete gesture
+    // in one process (https://github.com/atx/wtype#usage).
+    throwIfAborted();
+    const result = await run("wtype", args, { timeoutMs: Math.max(10_000, holdMs + 8_000) });
+    throwIfAborted();
+    if (result.code !== 0) throw new ExecError(`wtype exited ${result.code}: ${result.stderr.trim().slice(0, 200)}`, result);
   }
 
   function assertNum(v, name) {
@@ -251,20 +310,23 @@ except Exception as e:
 
   return {
     platform: "linux",
+    releaseInput,
     probe: async () => {
       const s = await probeSession();
       const caps = {
         screenshot: !!((session === "wayland" && tools.grim) || (session === "x11" && (tools.scrot || tools.import))),
         clipboard: !!(tools.xclip || tools.xsel || (tools["wl-copy"] && tools["wl-paste"])),
-        recording: !!(tools.ffmpeg || tools["wf-recorder"]),
+        recording: false,
         accessibility_tree: tools.pyatspi,
+        held_input: exec?.persistentInputOwner === true && !!(session === "x11" ? tools.xdotool : tools.wtype && tools.ydotool),
       };
       const missing = [];
+      if (exec?.persistentInputOwner !== true) missing.push("connected Computer Use desktop helper (held keys, held buttons and drag)");
       if (session === "x11" && !tools.xdotool) missing.push("xdotool (input)");
       if (session === "wayland" && !tools.ydotool) missing.push("ydotool+ydotoold (mouse input)");
       if (session === "wayland" && !tools.grim) missing.push("grim (screenshots)");
       if (session === "x11" && !tools.scrot && !tools.import) missing.push("scrot or imagemagick (screenshots)");
-      if (!caps.recording) missing.push("ffmpeg (X11) or wf-recorder (Wayland)");
+      missing.push("session-owned recording (unavailable in this version; use screenshots)");
       if (!tools.pyatspi) missing.push("python3-pyatspi (accessibility tree)");
       // Real permission probes, not just `have()`: each check is bounded to 10s.
       const permissions = { input: "failed", screen_capture: "failed", accessibility: "unavailable" };
@@ -476,19 +538,37 @@ print(json.dumps({"found": True, "reason": None, "element": {
     middle_click: ({ target }) => inputChain(target.x, target.y, () => clickButton(2, 1)),
     mouse_move: ({ target }) => inputMove(target.x, target.y),
     left_click_drag: async ({ from_target: from, to }) => {
+      requireInputOwner();
       await inputMove(from.x, from.y);
-      if (session === "x11") await xdotool(["mousedown", "1"]);
-      else await ydotool(["click", "0x40"]);
-      for (let i = 1; i <= 10; i++) {
-        await new Promise((r) => setTimeout(r, 20));
-        await inputMove(from.x + ((to.x - from.x) * i) / 10, from.y + ((to.y - from.y) * i) / 10);
-      }
-      if (session === "x11") await xdotool(["mouseup", "1"]);
-      else await ydotool(["click", "0x80"]);
+      throwIfAborted();
+      mouseHeld = true;
+      try {
+        if (session === "x11") await xdotool(["mousedown", "1"]);
+        else await ydotool(["click", "0x40"]);
+        for (let i = 1; i <= 10; i++) {
+          await wait(20);
+          await inputMove(from.x + ((to.x - from.x) * i) / 10, from.y + ((to.y - from.y) * i) / 10);
+        }
+      } finally { await releaseMouse(); }
       return { action_sent: true, from, to };
     },
-    left_mouse_down: ({ target }) => session === "x11" ? xdotool(["mousedown", "1"]).then(() => ({ action_sent: true })) : ydotool(["click", "0x40"]).then(() => ({ action_sent: true })),
-    left_mouse_up: () => session === "x11" ? xdotool(["mouseup", "1"]).then(() => ({ action_sent: true })) : ydotool(["click", "0x80"]).then(() => ({ action_sent: true })),
+    left_mouse_down: async ({ target } = {}) => {
+      requireInputOwner();
+      await probeSession();
+      if (target) await inputMove(target.x, target.y);
+      throwIfAborted();
+      mouseHeld = true;
+      try {
+        if (session === "x11") await xdotool(["mousedown", "1"]);
+        else await ydotool(["click", "0x40"]);
+      } catch (err) { await releaseMouse(); throw err; }
+      return { action_sent: true };
+    },
+    left_mouse_up: async () => {
+      if (!mouseHeld) throw Object.assign(new ExecError("no agent pointer press to release"), { code: "input_not_held" });
+      await releaseMouse();
+      return { action_sent: true };
+    },
     scroll: async ({ target, direction = "down", amount = 3 }) => {
       await inputMove(target.x, target.y);
       if (session === "x11") {
@@ -514,29 +594,30 @@ print(json.dumps({"found": True, "reason": None, "element": {
     key: async ({ text, repeat = 1 }) => {
       await probeSession();
       const k = xdotoolKey(text);
+      const n = Math.max(1, Math.min(100, Number(repeat) || 1));
       if (session === "x11") {
-        await xdotool(["key", "--repeat", String(Math.max(1, Math.min(100, repeat))), "--delay", "60", k]);
-        return { action_sent: true, key: k };
-      }
-      need("wtype", "key presses on Wayland");
-      await run("wtype", ["-P", k]);
-      await run("wtype", ["-R", k]);
+        throwIfAborted();
+        heldKeys.add(k);
+        try {
+          await xdotool(["key", "--repeat", String(n), "--delay", "60", k]);
+          heldKeys.delete(k);
+        } finally { await releaseKey(k); }
+      } else await waylandKey(text, { repeat: n });
       return { action_sent: true, key: k };
     },
     hold_key: async ({ text, duration }) => {
+      requireInputOwner();
       await probeSession();
       const k = xdotoolKey(text);
       const d = Math.max(0.05, Math.min(30, Number(duration) || 1));
       if (session === "x11") {
-        await xdotool(["keydown", k]);
-        await new Promise((r) => setTimeout(r, d * 1000));
-        await xdotool(["keyup", k]);
-        return { action_sent: true, key: k, heldSec: d };
-      }
-      need("ydotool", "key hold on Wayland");
-      await ydotool(["key", `${k}:1`]);
-      await new Promise((r) => setTimeout(r, d * 1000));
-      await ydotool(["key", `${k}:0`]);
+        throwIfAborted();
+        heldKeys.add(k);
+        try {
+          await xdotool(["keydown", k]);
+          await wait(d * 1000);
+        } finally { await releaseKey(k); }
+      } else await waylandKey(text, { holdMs: Math.round(d * 1000) });
       return { action_sent: true, key: k, heldSec: d };
     },
     set_value: async ({ target, value }) => {
@@ -607,48 +688,11 @@ print(json.dumps({"found": True, "reason": None, "element": {
       }
       throw new ExecError("cursor position needs an X11 session in this build");
     },
-    recordingStart: async ({ fps = 15, region } = {}) => {
-      await probeSession();
-      const dir = recordingsDir();
-      fs.mkdirSync(dir, { recursive: true });
-      const id = crypto.randomBytes(4).toString("hex");
-      const file = path.join(dir, `rec-${id}.${session === "wayland" ? "mkv" : "mp4"}`);
-      if (session === "x11") {
-        need("ffmpeg", "recording on X11");
-        const dpy = process.env.DISPLAY || ":0";
-        const args = ["-y", "-loglevel", "error", "-f", "x11grab", "-framerate", String(fps)];
-        if (region) args.push("-video_size", `${Math.round(region[2])}x${Math.round(region[3])}`);
-        args.push("-i", `${dpy}${region ? `+${Math.round(region[0])},${Math.round(region[1])}` : ""}`, "-c:v", "libx264", "-pix_fmt", "yuv420p", file);
-        const child = spawnDetached("ffmpeg", args);
-        await new Promise((r) => setTimeout(r, 700));
-        try { process.kill(child.pid, 0); } catch { throw new ExecError("ffmpeg x11grab exited immediately — check DISPLAY, XAUTHORITY and screen permissions"); }
-        recording = { id, pid: child.pid, file, startedAt: new Date().toISOString(), mode: "x11grab" };
-        return { id, pid: child.pid, file, mode: "x11grab", fps };
-      }
-      need("wf-recorder", "recording on Wayland");
-      const args = ["-r", String(fps), "-f", file];
-      if (process.env.CU_WAYLAND_OUTPUT) args.unshift("-o", process.env.CU_WAYLAND_OUTPUT);
-      const child = spawnDetached("wf-recorder", args);
-      await new Promise((r) => setTimeout(r, 700));
-      try { process.kill(child.pid, 0); } catch { throw new ExecError("wf-recorder exited immediately — check compositor support (wlroots)"); }
-      recording = { id, pid: child.pid, file, startedAt: new Date().toISOString(), mode: "wf-recorder" };
-      return { id, pid: child.pid, file, mode: "wf-recorder", fps };
+    recordingStart: async () => {
+      throw Object.assign(new ExecError("Recording is unavailable on this platform until the recorder has session-owned cleanup. Use screenshots instead."), { code: "owned_recording_unavailable" });
     },
-    recordingStop: async ({ id }) => {
-      if (!recording || recording.id !== id) throw new ExecError(`unknown recording "${id}"`);
-      process.kill(recording.pid, "SIGINT");
-      await new Promise((r) => setTimeout(r, 1500));
-      const bytes = fs.existsSync(recording.file) ? fs.statSync(recording.file).size : 0;
-      const out = { id, file: recording.file, bytes, mode: recording.mode, startedAt: recording.startedAt, stoppedAt: new Date().toISOString() };
-      recording = null;
-      return out;
-    },
-    recordingStatus: ({ id }) => {
-      if (!recording || recording.id !== id) return { id, running: false };
-      let alive = true;
-      try { process.kill(recording.pid, 0); } catch { alive = false; }
-      return { id, running: alive, file: recording.file, bytes: fs.existsSync(recording.file) ? fs.statSync(recording.file).size : 0, mode: recording.mode };
-    },
+    recordingStop: async ({ id }) => { throw new ExecError(`unknown recording "${id}"`); },
+    recordingStatus: ({ id }) => ({ id, running: false }),
     recordingList: async () => {
       const dir = recordingsDir();
       const out = fs.existsSync(dir)
@@ -657,7 +701,7 @@ print(json.dumps({"found": True, "reason": None, "element": {
             return { file: path.join(dir, f), bytes: st.size, modifiedAt: st.mtime.toISOString() };
           }).sort((a, b) => b.modifiedAt.localeCompare(a.modifiedAt)).slice(0, 50)
         : [];
-      return { dir, recordings: out, running: recording ? [recording.id] : [] };
+      return { dir, recordings: out, running: [] };
     },
   };
 
@@ -668,6 +712,7 @@ print(json.dumps({"found": True, "reason": None, "element": {
   }
 
   async function inputMove(x, y) {
+    await probeSession();
     const nx = Math.round(assertNum(x, "x"));
     const ny = Math.round(assertNum(y, "y"));
     if (session === "x11") await xdotool(["mousemove", "--sync", String(nx), String(ny)]);

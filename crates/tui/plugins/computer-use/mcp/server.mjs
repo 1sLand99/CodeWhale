@@ -5,19 +5,24 @@
 // computer id switches the sticky active computer.
 import fs from "node:fs";
 import * as registry from "../src/registry.mjs";
-import { backendFor, installRemoteAgent, executorFor } from "../src/transport.mjs";
+import { backendFor, installRemoteAgent, executorFor, closeAppSession } from "../src/transport.mjs";
 import { TOOLS, TOOL_NAMES, READ_ONLY_TOOLS, REMOTE_TOOLS, BACKEND_METHOD } from "../src/tools.mjs";
-import { tryJson } from "../src/exec.mjs";
+import { tryJson, withSignal, throwIfAborted, wait } from "../src/exec.mjs";
 
-const VERSION = "0.2.0";
+const VERSION = "0.2.1";
 const SERVER_NAME = "codewhale-cu";
 
 // ---------- per-session runtime state ----------
 let controlStopped = false;
+// Registered computers are shared; the selected destination belongs to this
+// MCP host. Another task must never redirect an implicit input action.
+let activeComputerId = "local";
 let stateCounter = 0;
 let inFlight = 0; // actions currently dispatching to a backend/executor
 /** request ids cancelled via notifications/cancelled */
 const cancelled = new Set();
+const requests = new Map();
+let dispatch = Promise.resolve();
 /** state_id -> { computerId, app_ref, windowIndex, elements } */
 const appStates = new Map();
 /** computerId -> last raster metadata {file, scale, origin} */
@@ -169,6 +174,23 @@ function rememberState(computer, app_ref, result) {
   return id;
 }
 
+function observeState(computer, app_ref, result, detail) {
+  // Cache the complete backend records before making the model-facing view.
+  // Public indices still address those records, including their private AX
+  // paths; a compact response must never weaken live target revalidation.
+  const state_id = rememberState(computer, app_ref, result);
+  const full = detail === "full";
+  const elements = full ? result.elements : (result.elements ?? [])
+    .filter((el) => el.windowIndex !== -1 || !Array.isArray(el.path) || el.path.length <= 1)
+    .map(({ path, windowIndex, ...el }) => el);
+  return {
+    ...result, state_id, elements, detail: full ? "full" : "summary",
+    note: "Target observed elements with {type:'element', state_id, index}; observe again after UI changes. " +
+      (full ? "" : "Summary keeps app content and top-level menus; use detail:'full' for nested menus and tree structure. ") +
+      "Missing labels or values are unknown; do not guess their contents.",
+  };
+}
+
 // ---------- tool dispatch ----------
 async function callTool(params) {
   const name = params.name;
@@ -179,7 +201,15 @@ async function callTool(params) {
 
   if (name === "stop_computer_control") {
     controlStopped = true;
-    return { content: [{ type: "text", text: JSON.stringify(receipt(null, { ok: true, stopped: true, inFlight, note: "Computer control refused for the rest of this session. Restart the session or the codewhale-cu server to continue. Actions already dispatching may still land." })) }] };
+    for (const request of requests.values()) {
+      if (request.name && request.name !== "stop_computer_control") request.controller.abort();
+    }
+    try {
+      await releaseControl({ releaseOnly: true });
+      return { content: [{ type: "text", text: JSON.stringify(receipt(null, { ok: true, stopped: true, inFlight, inputReleased: true, note: "Queued input was refused and ongoing requests were cancelled. Input already delivered cannot be undone. Restart this MCP session to resume." })) }] };
+    } catch (err) {
+      return { content: [{ type: "text", text: JSON.stringify(fail(null, "input_release_failed", String(err?.message ?? err), { stopped: true, inFlight })) }], isError: true };
+    }
   }
   if (controlStopped && !READ_ONLY_TOOLS.has(name)) {
     return { content: [{ type: "text", text: JSON.stringify(fail(null, "control_stopped", "stop_computer_control is active; no further actions are permitted this session")) }], isError: true };
@@ -187,7 +217,7 @@ async function callTool(params) {
 
   if (name === "wait") {
     const s = Math.max(0, Math.min(30, Number(args.seconds) || 1));
-    await new Promise((r) => setTimeout(r, s * 1000));
+    await wait(s * 1000);
     return { content: [{ type: "text", text: JSON.stringify(receipt(null, { ok: true, waitedSec: s })) }] };
   }
 
@@ -195,7 +225,7 @@ async function callTool(params) {
     const reg = registry.list();
     return { content: [{ type: "text", text: JSON.stringify(receipt(null, {
       ok: true,
-      active: reg.active,
+      active: activeComputerId,
       computers: Object.values(reg.computers).map((c) => ({ id: c.id, transport: c.transport, platform: c.platform ?? c.platformHint ?? null, label: c.label ?? null, host: c.host ?? null })),
       note: "Pass `computer` on any tool to switch (sticky), or computer_switch to switch explicitly.",
     })) }] };
@@ -228,13 +258,16 @@ async function callTool(params) {
 
   if (name === "computer_remove") {
     const res = registry.remove(args.computer);
+    if (activeComputerId === args.computer) activeComputerId = "local";
+    res.active = activeComputerId;
     backendCache.delete(args.computer);
     lastRasters.delete(args.computer);
     return { content: [{ type: "text", text: JSON.stringify(receipt(null, { ok: true, ...res })) }] };
   }
 
   if (name === "computer_switch") {
-    const c = registry.switchTo(args.computer);
+    const c = registry.get(args.computer);
+    activeComputerId = c.id;
     return { content: [{ type: "text", text: JSON.stringify(receipt(c, { ok: true, active: c.id })) }] };
   }
 
@@ -242,11 +275,12 @@ async function callTool(params) {
   let computer;
   let switched = false;
   try {
-    if (args.computer && args.computer !== registry.list().active) {
-      computer = registry.switchTo(args.computer);
+    if (args.computer && args.computer !== activeComputerId) {
+      computer = registry.get(args.computer);
+      activeComputerId = computer.id;
       switched = true;
     } else {
-      computer = registry.active();
+      computer = registry.get(activeComputerId);
     }
   } catch (err) {
     return { content: [{ type: "text", text: JSON.stringify(fail(null, err.code ?? "registry_error", err.message)) }], isError: true };
@@ -275,6 +309,7 @@ async function callTool(params) {
         return rep.data;
       };
       const wireArgs = await prepareArgs(computer, name, args, resolve, sink);
+      throwIfAborted();
       // Re-check the kill switch: a stop that arrived while the executor was
       // being resolved still blocks this dispatch.
       if (controlStopped && !READ_ONLY_TOOLS.has(name)) throw new ServerError("control_stopped", "stop_computer_control is active; no further actions are permitted this session");
@@ -298,8 +333,7 @@ async function callTool(params) {
       }
       if (backendMethod === "zoom") bindZoomRaster(computer, zoomParent, args.region, ex.filesLocal ? data?.file ?? data?.path : null);
       if (name === "get_app_state") {
-        data.state_id = rememberState(computer, wireArgs.app_ref, data);
-        data.note = "Element targets are {type:'element', state_id, index}. State goes stale when the UI changes; observe again.";
+        data = observeState(computer, wireArgs.app_ref, data, args.detail);
       }
       if (backendMethod === "probe") Object.assign(data, { via: ex.kind, app: ex.app ?? null });
     } else {
@@ -309,6 +343,7 @@ async function callTool(params) {
       }
       const resolve = typeof backend.resolve_element === "function" ? (req) => backend.resolve_element(req) : null;
       const prepared = await prepareArgs(computer, name, args, resolve, sink);
+      throwIfAborted();
       if (controlStopped && !READ_ONLY_TOOLS.has(name)) throw new ServerError("control_stopped", "stop_computer_control is active; no further actions are permitted this session");
       inFlight++;
       try {
@@ -320,14 +355,21 @@ async function callTool(params) {
       if (name === "screenshot") bindRaster(computer, data);
       if (backendMethod === "zoom") bindZoomRaster(computer, zoomParent, args.region, data?.file ?? data?.path);
       if (name === "get_app_state") {
-        const stateId = rememberState(computer, prepared.app_ref, data);
-        data.state_id = stateId;
-        data.note = "Element targets are {type:'element', state_id, index}. State goes stale when the UI changes; observe again.";
+        data = observeState(computer, prepared.app_ref, data, args.detail);
       }
       if (backendMethod === "probe" && computer.transport === "local") {
         // Direct mode: permissions belong to whatever hosts this server. Say so.
         Object.assign(data, { via: "direct", app: null, appHint: ex?.appReason ?? null });
       }
+    }
+
+    if (name === "get_app_state" && args.include_ocr) {
+      data.ocr ??= { status: "unavailable", reason: "Text recognition is not available on this backend", blocks: [] };
+      if (data.ocr.raster) {
+        const localFile = typeof ex?.remote !== "function" || ex.filesLocal;
+        bindRaster(computer, localFile ? data.ocr.raster : { ...data.ocr.raster, file: null, path: null });
+      }
+      data.ocr.note = "Recognized text may be imperfect. These coordinate targets belong to this captured image, not to accessibility elements; observe again after the UI changes.";
     }
 
     const content = [{ type: "text", text: JSON.stringify(receipt(computer, { ok: true, tool: name, switched, ...(sink.reacquired ? { target_reacquired: true } : {}), ...data })) }];
@@ -363,7 +405,10 @@ async function prepareArgs(computer, name, args, resolve, sink) {
   }
   if (name === "get_app_state") {
     out.app_ref = out.app_ref ?? null;
-    if (out.window_id != null) out.window_id = Number(out.window_id);
+    if (out.detail != null && !["summary", "compact", "full"].includes(out.detail)) throw new ServerError("bad_args", "detail must be summary or full (compact is an alias for summary)");
+    out.detail = out.detail === "full" ? "full" : "summary";
+    if (out.include_ocr != null && typeof out.include_ocr !== "boolean") throw new ServerError("bad_args", "include_ocr must be true or false");
+    if (out.window_id != null && (!Number.isSafeInteger(out.window_id) || out.window_id < 0)) throw new ServerError("bad_args", "window_id must be a non-negative window index from list_windows");
   }
   return out;
 }
@@ -388,10 +433,25 @@ const HANDLERS = {
     return { tools: TOOLS };
   },
   async "tools/call"(params) {
-    return await callTool(params ?? {});
+    if (params?.name === "stop_computer_control") return callTool(params);
+    const previous = dispatch;
+    let release;
+    dispatch = new Promise((resolve) => { release = resolve; });
+    try {
+      await previous;
+      throwIfAborted();
+      return await callTool(params ?? {});
+    } catch (err) {
+      if (err?.code !== "cancelled") throw err;
+      return { content: [{ type: "text", text: JSON.stringify(fail(null, controlStopped ? "control_stopped" : "cancelled", err.message)) }], isError: true };
+    } finally { release(); }
   },
   "notifications/cancelled"(params) {
-    if (params?.requestId != null) cancelled.add(params.requestId);
+    const request = requests.get(params?.requestId);
+    if (request) {
+      cancelled.add(params.requestId);
+      request.controller.abort();
+    }
     return {};
   },
   ping() {
@@ -411,9 +471,39 @@ process.stdin.on("data", (chunk) => {
     handleLine(line);
   }
 });
-process.stdin.on("end", () => process.exit(0));
+async function releaseControl({ releaseOnly = false } = {}) {
+  let timer;
+  try {
+    await Promise.race([
+      (async () => {
+        await dispatch;
+        await withSignal(null, () => Promise.all([
+          closeAppSession({ releaseOnly }),
+          ...[...backendCache.values()].map(async (backend) => {
+            await backend.releaseInput?.();
+            if (!releaseOnly) await backend.closeSession?.();
+          }),
+        ]));
+      })(),
+      new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("Computer input cleanup did not finish within 3 seconds")), 3_000); }),
+    ]);
+  } finally { clearTimeout(timer); }
+}
+
+let shuttingDown = false;
+async function shutdown() {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  for (const request of requests.values()) request.controller.abort();
+  try { await releaseControl(); }
+  catch (err) { process.stderr.write(`Computer input cleanup failed: ${err?.message ?? err}\n`); }
+  process.exit(0);
+}
+process.stdin.on("end", shutdown);
+for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) process.on(signal, shutdown);
 
 async function handleLine(line) {
+  if (shuttingDown) return;
   const msg = tryJson(line, null);
   if (!msg || typeof msg !== "object") return;
   const { id, method, params } = msg;
@@ -425,8 +515,10 @@ async function handleLine(line) {
   }
   // Cancelled before dispatch: per MCP, respond nothing.
   if (id != null && cancelled.has(id)) { cancelled.delete(id); return; }
+  const controller = new AbortController();
+  if (id != null) requests.set(id, { controller, name: method === "tools/call" ? params?.name : null });
   try {
-    const result = await handler(params);
+    const result = await withSignal(controller.signal, () => handler(params));
     // Cancelled mid-flight: drop the completed response.
     if (id != null) {
       if (cancelled.has(id)) { cancelled.delete(id); return; }
@@ -434,6 +526,8 @@ async function handleLine(line) {
     }
   } catch (err) {
     if (id != null && !cancelled.delete(id)) respondError(id, -32603, err?.message ?? String(err));
+  } finally {
+    if (id != null) requests.delete(id);
   }
 }
 

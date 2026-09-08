@@ -77,7 +77,7 @@ function fakePowershell(t, { exit = 0, stdout = "", stderr = "", onPath = true }
 
 test("win32: targeted left_mouse_down both moves and presses in one self-contained command", async (t) => {
   const fake = fakePowershell(t);
-  const backend = win32.create();
+  const backend = win32.create({ exec: { persistentInputOwner: true } });
   const r = await backend.left_mouse_down({ target: { x: 12, y: 34 } });
   assert.deepEqual(r, { action_sent: true });
   const calls = fake.calls();
@@ -92,7 +92,7 @@ test("win32: targeted left_mouse_down both moves and presses in one self-contain
 
 test("win32: PowerShell exit != 0 becomes an error, never action_sent:true", async (t) => {
   fakePowershell(t, { exit: 1, stderr: "unable to find type [User32]" });
-  const backend = win32.create();
+  const backend = win32.create({ exec: { persistentInputOwner: true } });
   const cases = [
     ["left_mouse_down", () => backend.left_mouse_down({ target: { x: 1, y: 2 } })],
     ["mouse_move", () => backend.mouse_move({ target: { x: 1, y: 2 } })],
@@ -110,7 +110,7 @@ test("win32: PowerShell exit != 0 becomes an error, never action_sent:true", asy
 
 test("win32: spawn failure (powershell.exe missing) becomes an error, never action_sent:true", async (t) => {
   fakePowershell(t, { onPath: false });
-  const backend = win32.create();
+  const backend = win32.create({ exec: { persistentInputOwner: true } });
   await assert.rejects(backend.left_mouse_down({ target: { x: 1, y: 2 } }), (e) => {
     assert.ok(e instanceof ExecError);
     assert.match(e.message, /exited -1|ENOENT/);
@@ -120,7 +120,7 @@ test("win32: spawn failure (powershell.exe missing) becomes an error, never acti
 
 test("win32: successful input still reports success", async (t) => {
   const fake = fakePowershell(t);
-  const backend = win32.create();
+  const backend = win32.create({ exec: { persistentInputOwner: true } });
   assert.deepEqual(await backend.mouse_move({ target: { x: 5, y: 6 } }), { action_sent: true, at: { x: 5, y: 6 } });
   const click = await backend.left_click({ target: { x: 9, y: 8 } });
   assert.equal(click.action_sent, true);
@@ -132,10 +132,11 @@ test("win32: successful input still reports success", async (t) => {
 
 test("win32: every User32-backed action carries the Add-Type definition in its own process", async (t) => {
   const fake = fakePowershell(t);
-  const backend = win32.create();
+  const backend = win32.create({ exec: { persistentInputOwner: true } });
   const at = { x: 3, y: 4 };
   const actions = [
     ["mouse_move", () => backend.mouse_move({ target: at })],
+    ["left_mouse_down", () => backend.left_mouse_down({ target: at })],
     ["left_mouse_up", () => backend.left_mouse_up()],
     ["left_click", () => backend.left_click({ target: at })],
     ["double_click", () => backend.double_click({ target: at })],
@@ -157,7 +158,7 @@ test("win32: every User32-backed action carries the Add-Type definition in its o
 
 test("win32: cursor_position is self-contained and parses JSON output", async (t) => {
   const fake = fakePowershell(t, { stdout: '{"x": 11, "y": 22}' });
-  const backend = win32.create();
+  const backend = win32.create({ exec: { persistentInputOwner: true } });
   assert.deepEqual(await backend.cursor_position(), { x: 11, y: 22 });
   const script = fake.calls()[0].script;
   assert.match(script, /Add-Type -TypeDefinition/, "cursor_position carries the type definition");

@@ -72,6 +72,7 @@ class ${class_name} < Formula
   homepage "https://github.com/Hmbown/CodeWhale"
   version "${VERSION}"
   license "MIT"
+  depends_on "node"
 ${extra_header}
   on_macos do
     if Hardware::CPU.arm?

@@ -21089,6 +21089,171 @@ async fn mcp_boot_reports_ready_server_before_stalled_server_finishes() {
 }
 
 #[tokio::test]
+async fn first_turn_waits_for_explicit_mcp_schema_without_waiting_for_unrelated_server() {
+    let Some(node) = crate::dependencies::resolve_node() else {
+        return;
+    };
+    let tmp = tempdir().expect("tempdir");
+    let server = tmp.path().join("server.mjs");
+    let release = tmp.path().join("release-slow");
+    fs::write(&server, r#"import fs from 'node:fs';
+import readline from 'node:readline';
+readline.createInterface({ input: process.stdin }).on('line', async line => {
+  const request = JSON.parse(line);
+  if (request.id === undefined) return;
+  if (request.method === 'initialize') {
+    if (process.argv[2] === 'slow') while (!fs.existsSync(process.argv[3])) await new Promise(r => setTimeout(r, 10));
+    else await new Promise(r => setTimeout(r, 150));
+  }
+  const result = request.method === 'initialize'
+    ? { protocolVersion: '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: process.argv[2], version: '1' } }
+    : { tools: ['ready', 'denied', 'hidden'].map(name => ({ name, inputSchema: { type: 'object' } })) };
+  process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id, result }) + '\n');
+});"#).expect("fixture");
+    let config_path = tmp.path().join("mcp.json");
+    fs::write(
+        &config_path,
+        serde_json::to_vec(&json!({
+            "timeouts": { "connect_timeout": 10 },
+            "servers": {
+                "fast": { "command": node, "args": [server, "fast", release] },
+                "slow": { "command": node, "args": [server, "slow", release] },
+                "failed": { "command": "codewhale-missing-mcp-fixture-38911" }
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let api_config = Config::default();
+    let (mut engine, _handle) = Engine::new(
+        EngineConfig {
+            workspace: tmp.path().to_path_buf(),
+            mcp_config_path: config_path,
+            tools_always_load: HashSet::from(["mcp_fast_ready".to_string()]),
+            ..Default::default()
+        },
+        &api_config,
+    );
+    engine.start_mcp_session_boot().await;
+    assert!(
+        engine.mcp_tools().await.is_empty(),
+        "ordinary startup remains nonblocking"
+    );
+    let route = TurnRouteContext {
+        provider: ApiProvider::Deepseek,
+        model: DEFAULT_TEXT_MODEL.to_string(),
+        capabilities: codewhale_config::route::RouteCapabilities::default(),
+        limits: None,
+        client: engine.deepseek_client.clone(),
+        api_config: Box::new(api_config),
+        locale_tag: engine.config.locale_tag.clone(),
+        role_models: engine.subagent_role_models(),
+        auto_model: false,
+        reasoning_effort: None,
+        reasoning_effort_auto: false,
+    };
+    let policy = crate::core::authority::TurnAuthority::from_effective_fields(
+        AppMode::Agent,
+        false,
+        false,
+        false,
+        crate::tui::approval::ApprovalMode::Suggest,
+    );
+    let build = tokio::time::timeout(
+        Duration::from_secs(5),
+        engine.build_turn_tool_registry_and_catalog(
+            &policy,
+            &[],
+            Some(vec![
+                "mcp_fast_ready".to_string(),
+                "mcp_failed_ready".to_string(),
+            ]),
+            SubAgentWiring::Inert,
+            McpAccess::Connect,
+            route,
+            "",
+        ),
+    )
+    .await;
+    engine.cancel_token.cancel();
+    tokio::time::timeout(
+        Duration::from_millis(100),
+        engine.wait_for_explicit_mcp_boot(Some(&["mcp_slow_ready".to_string()])),
+    )
+    .await
+    .expect("stop interrupts explicit schema wait");
+    engine.reset_cancel_token();
+    fs::write(&release, "release").unwrap();
+    let build = build.expect("explicit fast/failed selections must not wait for slow");
+    let active = build.surface.active.unwrap_or_default();
+    assert_eq!(
+        active
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>(),
+        ["mcp_fast_ready"]
+    );
+    assert!(engine.mcp_connection_errors.contains_key("failed"));
+
+    // The unrelated connection finishes during the same turn. Refresh into a
+    // narrowed policy, then execute the actual tool-search activation path.
+    let policy = ToolSurfacePolicy::new(
+        ToolRegistryBuilder::new().build(ToolContext::for_empty_registry()),
+        Some(vec![api_tool("read")]),
+        AppMode::Agent,
+        &HashSet::new(),
+        &[],
+        false,
+        Some(vec![
+            "tool_search".into(),
+            "mcp_slow_ready".into(),
+            "mcp_slow_denied".into(),
+        ]),
+        Some(vec!["mcp_slow_denied".into()]),
+        None,
+        crate::tui::approval::ApprovalMode::Suggest,
+    );
+    let mut catalog = policy.catalog.clone();
+    let mut active = policy.active_names.clone();
+    catalog.push(api_tool("mcp_removed_ready"));
+    active.insert("mcp_removed_ready".to_string());
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !catalog.iter().any(|tool| tool.name == "mcp_slow_ready") {
+            engine
+                .refresh_boot_mcp_catalog(&policy, &mut catalog, &mut active)
+                .await;
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("completed tools join this turn");
+    assert!(
+        !active.contains("mcp_slow_ready"),
+        "fresh MCP tools stay deferred"
+    );
+    assert!(
+        !active.contains("mcp_removed_ready"),
+        "removed authority leaves active tools"
+    );
+    assert!(
+        catalog
+            .iter()
+            .all(|tool| !tool.name.starts_with("mcp_") || tool.name == "mcp_slow_ready")
+    );
+    let result = tool_catalog::execute_tool_search_with_cache(
+        "tool_search",
+        &json!({"query":"mcp_slow_ready", "match":"regex"}),
+        &catalog,
+        &mut active,
+        &mut engine.session.tool_activation_cache,
+    )
+    .expect("real search");
+    assert!(result.success);
+    assert!(active.contains("mcp_slow_ready"));
+    engine.wait_for_mcp_boot().await;
+}
+
+#[tokio::test]
 async fn mcp_boot_does_not_restore_servers_removed_during_handshake() {
     assert_incremental_mcp_boot(true).await;
 }

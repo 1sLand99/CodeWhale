@@ -15,6 +15,14 @@ This branch describes the **v0.9.13 source candidate**. Install commands that us
 trail the source candidate. A candidate is not a published install until the
 matching package, tag, checksums, and release assets exist.
 
+Computer Use is included in this source candidate and becomes available after
+plugin review and enablement. Its CLI server needs **Node.js 20 or newer on
+PATH**. npm installations already use Node; the Homebrew formula declares it
+as a dependency. Cargo and direct binary users can install it from
+[Node.js](https://nodejs.org/) and restart Codewhale. macOS builds include the
+native helper, so no separate Computer Use app or compiler is needed. OS
+Accessibility and Screen Recording permissions remain under your control.
+
 ## Recommended: official GitHub Releases
 
 For a new macOS or Linux install:

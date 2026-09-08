@@ -27,25 +27,44 @@ Observe once, act once, then verify.
    permissions and missing tools per platform, and never pops dialogs. Its
    `via` field says who holds the permissions: `"app"` means the Codewhale
    Computer Use desktop app is doing the work (grants belong to it);
-   `"direct"` means this server process is, and `appHint` says how to
-   install the app so grants stop depending on the host terminal.
+   `"direct"` means the hosting app or terminal is. Follow the actual
+   `appHint`: bundled Codewhale builds already carry their native helper.
 2. `list_apps` shows running apps only. If the user names an app that is
    absent, call `open_application` once with the original user-provided name,
    copied character-for-character — including case, spaces, punctuation, and
    suffixes such as `app` or `.exe`. Do not translate, localize, normalize,
    shorten, or retry with guesses.
-3. `get_app_state` returns a bounded accessibility tree (macOS AX / Windows
-   UIA / Linux AT-SPI / HarmonyOS uitest) with element indices and a
-   `state_id`. Start here, without a screenshot.
+3. `get_app_state` defaults to a text-first summary (macOS AX / Windows
+   UIA / Linux AT-SPI / HarmonyOS uitest) with controls, values, actions,
+   layout, element indices and a `state_id`. Start here without a screenshot,
+   whether or not the model supports vision. Use `detail:"full"` for nested
+   menus and tree structure; `compact` remains a summary alias. Missing labels
+   or values mean unknown content, not something to guess.
 4. If the tree contains the target, act on the element: `perform_action`
    (AXPress/Invoke/click…), `set_value` for editable fields, element click.
    The element path is background-safe on macOS and UIA platforms.
-5. Only when accessibility cannot express the target: `screenshot` (optionally
+5. When accessibility cannot read visible text, macOS supports
+   `get_app_state({app_ref, include_ocr:true})`. This explicitly captures the
+   selected app window and recognizes text locally, without a vision model or
+   remote service. Check `ocr.status`; recognized blocks include confidence,
+   pixel bounds and ready-to-use coordinate targets. OCR text is not a control
+   role or an advertised action. Verify uncertain text and observe again after
+   changes. Other platforms return an explicit unavailable status while keeping
+   their accessibility state usable. A text-only model must not infer unlabeled
+   icons, charts or other graphical meaning from OCR or a screenshot file path.
+   With vision, when accessibility cannot express the target: `screenshot` (optionally
    `zoom` for small targets) and act with a coordinate target. Coordinates are
    pixels **in the latest returned raster** for that computer; the server maps
    them to screen points. After a new screenshot, old pixels are stale.
+   If the host reports an omitted or oversized image, capture a smaller app
+   window/region or zoom, then use that returned raster. Do not guess from a
+   file path or reuse coordinates from an image the model never received.
 6. Verify with a fresh observation or a task oracle before claiming success.
    `action_sent: true` means it may already have happened — never replay.
+   On macOS `type` also reports `verified`: `false` (with
+   `verification_required: "screenshot"`) means the focused control's value
+   did not reflect the text, so confirm with a screenshot before relying on
+   the input.
 
 ## Choosing targets
 
@@ -81,6 +100,13 @@ Observe once, act once, then verify.
     and `foreground_taken`. Read it, and tell the user when a step took their
     foreground. Pass `strategy: "a11y"` when the task must not disturb them —
     it fails closed rather than falling back.
+  - For a dialog or toolkit that needs foreground keyboard delivery, select
+    `open_application(activate:true)` explicitly. Receipts say
+    `keyboard_delivery: "foreground-guarded"`; typing fails if another app
+    takes focus. Never keep reactivating after the user takes control. Return
+    to `activate:false` when the foreground-only step ends.
+  - Menus appear in `get_app_state`. Use the advertised action (often
+    `AXPress` to open a menu, then `AXPick` on its item), then observe again.
   - A pointer gesture is refused when another application's window covers the
     point; it names the owner. Raise the window you meant with
     `open_application(activate:true)`, observe again, and retry — do not move
@@ -106,8 +132,9 @@ Observe once, act once, then verify.
 `recording_start` → work → `recording_stop` returns the finalized file path.
 macOS uses ScreenCaptureKit inside the signed helper — no system recorder UI
 and no desktop dimming overlay (a receipt warning about Screen Recording
-permission means the user must grant it once). Linux uses x11grab/wf-recorder,
-Windows ffmpeg gdigrab, HarmonyOS snapshot-series (no native CLI recorder —
+permission means the user must grant it once). Linux and Windows recording is
+unavailable pending session-owned cleanup; use screenshots. HarmonyOS uses
+snapshot-series (no native CLI recorder —
 the receipt says so). `recording_status` / `recording_list` report bytes and
 paths. Screenshots land in the same directory.
 

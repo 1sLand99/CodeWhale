@@ -116,13 +116,14 @@ export const TOOLS = [
   },
   {
     name: "get_app_state",
-    description: "Observe an application once: returns a bounded accessibility/UIA/uitest element tree with stable indices. Elements are the primary action targets; request screenshots only when accessibility cannot express the target.",
+    description: "Read an application's text, controls, actions and layout without requiring vision. The default summary keeps app content and top-level menus; full adds nested menus and tree structure. Act using observed state_id/index targets and refresh after UI changes. Missing labels or values are unknown, not an invitation to guess; request a screenshot only when useful.",
     inputSchema: {
       type: "object",
       properties: {
         app_ref: { type: "object", properties: { pid: { type: "integer" }, name: { type: "string" }, bundle_id: { type: "string" } }, additionalProperties: false },
         window_id: { type: "integer", description: "Zero-based window index within the app" },
-        detail: { enum: ["compact", "full"] },
+        detail: { enum: ["summary", "compact", "full"], default: "summary", description: "Summary is the concise default; full includes nested menus and internal tree structure. Compact is a compatibility alias for summary." },
+        include_ocr: { type: "boolean", default: false, description: "On macOS, also recognize visible text locally from the selected app window. Requires Screen Recording permission. Returns text, confidence and raster coordinate targets for UI that accessibility cannot read; no vision model is required." },
         computer: computerParam,
       },
       additionalProperties: false,
@@ -170,7 +171,7 @@ export const TOOLS = [
       properties: {
         name: { type: "string" }, bundle_id: { type: "string" }, url: { type: "string" },
         pid: { type: "integer", description: "Bind to this exact process. Use when two processes share a bundle id (list_apps shows both); it takes precedence over name and bundle_id and never launches anything." },
-        activate: { type: "boolean", description: "Bring to foreground; defaults to false. Keep false for background work unless the user requests foreground interaction." },
+        activate: { type: "boolean", description: "Bring to foreground; defaults to false. On macOS true also selects foreground keyboard delivery for system dialogs, guarded against another app taking focus. Keep false for background work." },
         computer: computerParam,
       },
       additionalProperties: false,
@@ -219,7 +220,7 @@ export const TOOLS = [
   },
   // ---- text & keyboard ----
   {
-    name: "type", description: "Type text into the focused control (unicode). Focus the field first (click/element action).",
+    name: "type", description: "Type text into the focused control (unicode). Focus the field first (click/element action). On macOS the receipt carries `verified:true` only when the focused control's value actually reflects the typed text; on `verified:false` the text may have gone nowhere — confirm with a screenshot before relying on it.",
     inputSchema: { type: "object", required: ["text"], properties: { text: { type: "string" }, computer: computerParam }, additionalProperties: false },
   },
   {
@@ -254,7 +255,7 @@ export const TOOLS = [
   // ---- recording ----
   {
     name: "recording_start",
-    description: "Start screen recording on a computer (mp4/mov). Darwin: ScreenCaptureKit via the signed helper (timed or until recording_stop; honors region, no recorder overlay). Linux: x11grab/wf-recorder. Windows: ffmpeg gdigrab. HarmonyOS: snapshot-series muxed with ffmpeg.",
+    description: "Start screen recording on a computer (mp4/mov). Darwin: ScreenCaptureKit via the native helper (timed or until recording_stop; honors region, no recorder overlay, stops on session exit). Linux and Windows: unavailable pending session-owned recorder cleanup; use screenshots. HarmonyOS: snapshot-series muxed with ffmpeg.",
     inputSchema: {
       type: "object",
       properties: {

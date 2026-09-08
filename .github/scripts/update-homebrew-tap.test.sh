@@ -37,6 +37,7 @@ grep -Fq 'class Codewhale < Formula' "${formula}"
 grep -Fq 'class DeepseekTui < Formula' "${legacy}"
 grep -Fq 'deprecate! date: "2026-08-14", because: "renamed to codewhale"' "${legacy}"
 grep -Fq 'desc "Agentic terminal for open-source and open-weight coding models"' "${formula}"
+grep -Fq 'depends_on "node"' "${formula}"
 test "$(grep -Fc 'resource "codew" do' "${formula}")" -eq 4
 grep -Fq 'bin.install Dir["*"].first => "codew"' "${formula}"
 grep -Fq 'system "#{bin}/codew", "--version"' "${formula}"

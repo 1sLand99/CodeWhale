@@ -95,6 +95,53 @@ after(() => {
   for (const d of [stateDir, recDir, path.dirname(callsFile)]) { try { fs.rmSync(d, { recursive: true, force: true }); } catch {} }
 });
 
+test("summary preserves readable UI and original target indices while full retains tree structure", async () => {
+  for (const detail of [undefined, "summary", "compact"]) {
+    const state = await tool("get_app_state", { detail });
+    assert.equal(state.detail, "summary");
+    assert.deepEqual(state.elements.map(e => e.index), [0, 1, 2, 3, 6, 7, 8]);
+    assert.ok(state.elements.every(e => !("path" in e) && !("windowIndex" in e)));
+    const field = state.elements.find(e => e.index === 8);
+    assert.deepEqual(field, { index: 8, role: "AXTextField", value: "Fixture text", focused: true, enabled: true, actions: ["AXConfirm"], position: { x: 10, y: 60 }, size: { w: 150, h: 25 } });
+    const action = await tool("perform_action", { target: { type: "element", state_id: state.state_id, index: 1 }, action: "AXPress" });
+    assert.equal(action.ok, true, JSON.stringify(action));
+    assert.deepEqual(calls("perform_action").at(-1).args.target.path, [0, 1]);
+    assert.equal(calls("perform_action").at(-1).args.target.windowIndex, 0);
+  }
+  const full = await tool("get_app_state", { detail: "full" });
+  assert.equal(full.elements.length, 9);
+  assert.deepEqual(full.elements.find(e => e.label === "Save").path, [0, 0, 0]);
+  assert.equal(full.elements.find(e => e.label === "Save").windowIndex, -1);
+  const summary = await tool("get_app_state", {});
+  setControl({ found: true, element: { role: "AXTextField", position: { x: 10, y: 60 }, size: { w: 150, h: 25 } } });
+  try {
+    const changed = await tool("set_value", { target: { type: "element", state_id: summary.state_id, index: 8 }, value: "Changed" });
+    assert.equal(changed.ok, true, JSON.stringify(changed));
+    assert.deepEqual(calls("set_value").at(-1).args.target.path, [0, 2], "sparse public index still addresses the original cached text field");
+  } finally { setControl(null); }
+  assert.equal((await tool("get_app_state", { detail: "guess" })).error.code, "bad_args");
+  assert.equal((await tool("get_app_state", { window_id: -1 })).error.code, "bad_args");
+  assert.equal((await tool("get_app_state", { window_id: 0.5 })).error.code, "bad_args");
+  assert.equal((await tool("get_app_state", { include_ocr: "yes" })).error.code, "bad_args");
+});
+
+test("optional OCR binds its exact raster for coordinate actions while preserving AX state", async () => {
+  const state = await tool("get_app_state", { include_ocr: true });
+  assert.equal(state.ok, true);
+  assert.equal(state.ocr.status, "ok");
+  assert.ok(state.elements.some(e => e.index === 8 && e.value === "Fixture text"));
+  assert.equal(state.ocr.blocks[0].role, undefined, "recognized text is not a fabricated semantic element");
+  const clicked = await tool("left_click", { target: state.ocr.blocks[0].target });
+  assert.equal(clicked.ok, true);
+  assert.deepEqual(calls("left_click").at(-1).args.target, { type: "coordinate", x: 140, y: 70, strategy: "event" });
+  assert.equal((await tool("left_click", { target: { type: "coordinate", x: 400, y: 0 } })).error.code, "target_outside_raster");
+  const unavailable = await tool("get_app_state", { include_ocr: true, app_ref: { name: "OCR unavailable" } });
+  assert.equal(unavailable.ok, true);
+  assert.equal(unavailable.ocr.status, "unavailable");
+  assert.ok(unavailable.elements.length > 0);
+  assert.equal((await tool("get_app_state", {})).ocr, undefined, "normal observations do not request OCR");
+});
+
 test("coordinate targets map raster pixels through the bound scale", async () => {
   const shot = await tool("screenshot");
   assert.equal(shot.ok, true);

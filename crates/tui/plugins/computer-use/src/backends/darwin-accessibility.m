@@ -1,9 +1,112 @@
 #import <Cocoa/Cocoa.h>
 #import <ApplicationServices/ApplicationServices.h>
 #include <unistd.h>
+#include <signal.h>
+#include <poll.h>
+#include <fcntl.h>
+#include <sys/file.h>
+#include <sys/stat.h>
 #import "darwin-recording.h"
+#import "darwin-ocr.h"
+
+static volatile sig_atomic_t cuCancelled = 0;
+static BOOL cuOwnerPipe = NO;
+static NSDictionary *cuLeaseKey = nil;
+static pid_t cuLeasePid = 0;
+static NSRunningApplication *cuLeaseApp = nil;
+static BOOL cuLeaseButtons[3] = {NO,NO,NO};
+static CGPoint cuLeasePoint;
+#ifdef CU_TEST
+static NSString *cuTestLockDir = nil;
+static NSString *cuTestReleaseFile = nil;
+#endif
+static void cuCancel(int signum) { cuCancelled = 1; }
+static void cuCheckCancelled(void) {
+  if(cuOwnerPipe) { struct pollfd fd={STDIN_FILENO,POLLHUP,0}; if(poll(&fd,1,0)>0 && (fd.revents&POLLHUP)) cuCancelled=1; }
+  if(cuCancelled) @throw [NSException exceptionWithName:@"cancelled" reason:@"computer request cancelled" userInfo:nil];
+}
+static void cuLockInput(void) {
+  // One physical desktop, including separately launched direct MCP hosts.
+  // The kernel releases this lock if the native owner itself crashes.
+  NSString *dir=[NSHomeDirectory() stringByAppendingPathComponent:@".codewhale-cu"];
+#ifdef CU_TEST
+  if(cuTestLockDir) dir=cuTestLockDir;
+#endif
+  [NSFileManager.defaultManager createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:@{NSFilePosixPermissions:@0700} error:nil];
+  int fd=open([[dir stringByAppendingPathComponent:@"input.lock"] fileSystemRepresentation],O_CREAT|O_RDWR|O_NOFOLLOW|O_CLOEXEC,0600);
+  if(fd<0) @throw [NSException exceptionWithName:@"input_lock" reason:[NSString stringWithFormat:@"cannot open Computer Use input ownership lock: %s",strerror(errno)] userInfo:nil];
+  struct stat st;
+  if(fd<0 || fstat(fd,&st)!=0 || !S_ISREG(st.st_mode) || st.st_uid!=getuid() || flock(fd,LOCK_EX|LOCK_NB)!=0) {
+    if(fd>=0) close(fd);
+    @throw [NSException exceptionWithName:@"input_busy" reason:@"another Computer Use session owns held input; release its key or pointer before sending input" userInfo:nil];
+  }
+}
+static void cuRequireForeground(NSRunningApplication *expected) {
+  NSRunningApplication *actual=NSWorkspace.sharedWorkspace.frontmostApplication;
+  if(actual.processIdentifier!=expected.processIdentifier)
+    @throw [NSException exceptionWithName:@"focus" reason:[NSString stringWithFormat:@"foreground changed to %@ (pid %d); expected %@ (pid %d). No key-down or text was sent to the new foreground application.",actual.localizedName?:@"unknown application",actual.processIdentifier,expected.localizedName?:@"bound application",expected.processIdentifier] userInfo:nil];
+}
+static id cuPostKey(NSDictionary *args, pid_t destination) {
+  CGEventRef event=CGEventCreateKeyboardEvent(NULL,[args[@"code"] unsignedShortValue],[args[@"down"] boolValue]);
+  CGEventSetFlags(event,[args[@"flags"] unsignedLongLongValue]);
+  if([args[@"foreground_input"] boolValue]) CGEventPost(kCGHIDEventTap,event);
+  else CGEventPostToPid(destination,event);
+  CFRelease(event);
+  return @{@"action_sent":@YES};
+}
+static void cuPrint(id result) {
+  NSData *data=[NSJSONSerialization dataWithJSONObject:result options:NSJSONWritingFragmentsAllowed error:nil];
+  puts([[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding].UTF8String); fflush(stdout);
+}
+static void cuReleaseLease(void) {
+#ifdef CU_TEST
+  if(cuTestReleaseFile) { [@"released" writeToFile:cuTestReleaseFile atomically:YES encoding:NSUTF8StringEncoding error:nil]; cuTestReleaseFile=nil; }
+#endif
+  if(cuLeaseKey) {
+    NSMutableDictionary *up=[cuLeaseKey mutableCopy]; up[@"down"]=@NO;
+    if([up[@"foreground_input"] boolValue] || !cuLeaseApp.terminated) cuPostKey(up,cuLeasePid);
+    cuLeaseKey=nil; cuLeaseApp=nil;
+  }
+  for(int button=0;button<3;button++) if(cuLeaseButtons[button]) {
+    CGEventType up=button==0?kCGEventLeftMouseUp:button==1?kCGEventRightMouseUp:kCGEventOtherMouseUp;
+    CGEventRef event=CGEventCreateMouseEvent(NULL,up,cuLeasePoint,button);
+    CGEventPost(kCGHIDEventTap,event); CFRelease(event); cuLeaseButtons[button]=NO;
+  }
+}
+static void cuWaitForLease(void) {
+  NSMutableData *buffer=[NSMutableData data];
+  @try {
+    while(!cuCancelled) {
+      struct pollfd fd={STDIN_FILENO,POLLIN|POLLHUP,0};
+      int ready=poll(&fd,1,100);
+      if(ready<=0) continue;
+      char byte; ssize_t n=read(STDIN_FILENO,&byte,1);
+      if(n<=0) break;
+      if(byte!='\n') { if(buffer.length>=4096) break; [buffer appendBytes:&byte length:1]; continue; }
+      NSDictionary *message=[NSJSONSerialization JSONObjectWithData:buffer options:0 error:nil];
+      [buffer setLength:0];
+      if(![message isKindOfClass:NSDictionary.class]) break;
+      NSDictionary *point=message[@"point"];
+      if([point[@"x"] isKindOfClass:NSNumber.class] && [point[@"y"] isKindOfClass:NSNumber.class]) {
+        cuLeasePoint=CGPointMake([point[@"x"] doubleValue],[point[@"y"] doubleValue]);
+      }
+      if([message[@"release"] boolValue]) break;
+      cuCheckCancelled();
+      if(!cuLeaseButtons[0] || !point) break;
+      CGEventSourceRef source=CGEventSourceCreate(kCGEventSourceStateHIDSystemState);
+      CGEventRef event=CGEventCreateMouseEvent(source,kCGEventLeftMouseDragged,cuLeasePoint,kCGMouseButtonLeft);
+      CGEventSetIntegerValueField(event,kCGMouseEventClickState,1);
+      CGEventPost(kCGHIDEventTap,event); CFRelease(event); CFRelease(source);
+      cuPrint(@{@"action_sent":@YES,@"restored":@NO});
+    }
+  } @finally { cuReleaseLease(); }
+}
 
 static id attr(AXUIElementRef el, NSString *name) {
+#ifdef CU_TEST
+  // The observation fixture exercises the real walker without reading a GUI.
+  if([(__bridge id)el isKindOfClass:NSDictionary.class]) return ((__bridge NSDictionary *)el)[name];
+#endif
   CFTypeRef out = NULL;
   AXError e = AXUIElementCopyAttributeValue(el, (__bridge CFStringRef)name, &out);
   return e == kAXErrorSuccess ? CFBridgingRelease(out) : nil;
@@ -28,24 +131,72 @@ static NSDictionary *info(AXUIElementRef el, NSInteger index, NSInteger win, NSA
   id p=geometry(attr(el,@"AXPosition"),NO), s=geometry(attr(el,@"AXSize"),YES);
   if(p) d[@"position"]=p; if(s) d[@"size"]=s;
   CFArrayRef actions=NULL;
+#ifdef CU_TEST
+  if([(__bridge id)el isKindOfClass:NSDictionary.class]) d[@"actions"]=attr(el,@"actions")?:@[];
+  else
+#endif
   if(AXUIElementCopyActionNames(el,&actions)==kAXErrorSuccess) d[@"actions"]=CFBridgingRelease(actions);
   else d[@"actions"]=@[];
   return d;
 }
-static void walk(AXUIElementRef el, NSInteger win, NSArray *path, NSInteger depth, NSInteger limit, NSInteger max, NSMutableArray *out, BOOL *truncated) {
-  if(out.count>=max || depth>limit){ *truncated=YES; return; }
-  [out addObject:info(el,out.count,win,path)];
-  NSArray *kids=attr(el,@"AXChildren");
-  for(NSUInteger i=0;i<kids.count;i++) {
+static void walk(AXUIElementRef el, NSInteger win, NSArray *path, NSInteger depth, NSInteger limit, NSInteger max, BOOL depthIsTruncation, NSMutableArray *out, BOOL *truncated) {
+  // Breadth first keeps a long file listing from hiding its dialog buttons.
+  NSMutableArray *queue=[NSMutableArray arrayWithObject:@{@"el":(__bridge id)el,@"path":path,@"depth":@(depth)}];
+  for(NSUInteger cursor=0;cursor<queue.count;cursor++) {
     if(out.count>=max){ *truncated=YES; break; }
-    walk((__bridge AXUIElementRef)kids[i],win,[path arrayByAddingObject:@(i)],depth+1,limit,max,out,truncated);
+    NSDictionary *item=queue[cursor];
+    AXUIElementRef current=(__bridge AXUIElementRef)item[@"el"];
+    NSArray *currentPath=item[@"path"];
+    NSInteger currentDepth=[item[@"depth"] integerValue];
+    [out addObject:info(current,out.count,win,currentPath)];
+    NSArray *kids=attr(current,@"AXChildren");
+    if(currentDepth>=limit){ if(kids.count && depthIsTruncation) *truncated=YES; continue; }
+    for(NSUInteger i=0;i<kids.count;i++) {
+      if(queue.count-cursor>=(NSUInteger)max){ *truncated=YES; break; }
+      [queue addObject:@{@"el":kids[i],@"path":[currentPath arrayByAddingObject:@(i)],@"depth":@(currentDepth+1)}];
+    }
   }
+}
+static NSArray *observeElements(AXUIElementRef app, NSArray *ws, NSDictionary *args, BOOL listWindows, BOOL *truncated) {
+  NSMutableArray *out=[NSMutableArray array];
+  BOOL full=[args[@"detail"] isEqual:@"full"];
+  NSInteger limit=full?16:10, max=full?800:400;
+  if(!listWindows && !args[@"window_id"]) {
+    // Open popup menus remain useful. Hidden menu-bar descendants belong in
+    // the full view; summary reserves their budget for the app's actual UI.
+    NSInteger menuMax=max/4;
+    NSArray *children=attr(app,@"AXChildren");
+    for(NSUInteger i=0;i<children.count;i++) {
+      NSString *role=attr((__bridge AXUIElementRef)children[i],@"AXRole");
+      if([role isEqual:@"AXMenu"]) walk((__bridge AXUIElementRef)children[i],-2,@[@(i)],0,limit,menuMax/2,YES,out,truncated);
+    }
+    id menu=attr(app,@"AXMenuBar");
+    if(menu) walk((__bridge AXUIElementRef)menu,-1,@[],0,full?limit:1,menuMax,full,out,truncated);
+  }
+  for(NSUInteger i=0;i<ws.count;i++) {
+    if(args[@"window_id"] && i!=[args[@"window_id"] unsignedIntegerValue]) continue;
+    if(listWindows){ NSMutableDictionary *d=[info((__bridge AXUIElementRef)ws[i],i,i,@[]) mutableCopy]; d[@"title"]=d[@"label"]?:@""; [out addObject:d]; }
+    else walk((__bridge AXUIElementRef)ws[i],i,@[],0,limit,max,YES,out,truncated);
+  }
+  return out;
 }
 static BOOL cuFrame(AXUIElementRef el, CGRect *out) {
   NSDictionary *p=geometry(attr(el,@"AXPosition"),NO), *z=geometry(attr(el,@"AXSize"),YES);
   if(!p || !z) return NO;
   *out=CGRectMake([p[@"x"] doubleValue],[p[@"y"] doubleValue],[z[@"w"] doubleValue],[z[@"h"] doubleValue]);
   return YES;
+}
+static NSDictionary *capturableWindow(NSArray *windows, pid_t pid, NSString *name, CGRect preferred) {
+  NSDictionary *matched=nil;
+  for(NSDictionary *w in windows) {
+    if([w[(__bridge NSString *)kCGWindowOwnerPID] intValue]!=pid || [w[(__bridge NSString *)kCGWindowLayer] intValue]!=0) continue;
+    CGRect b; if(!CGRectMakeWithDictionaryRepresentation((__bridge CFDictionaryRef)w[(__bridge NSString *)kCGWindowBounds],&b) || b.size.width<1 || b.size.height<1) continue;
+    if(fabs(b.origin.x-preferred.origin.x)>1 || fabs(b.origin.y-preferred.origin.y)>1 || fabs(b.size.width-preferred.size.width)>1 || fabs(b.size.height-preferred.size.height)>1) continue;
+    if(matched) @throw [NSException exceptionWithName:@"window" reason:@"the selected window is ambiguous; observe the app windows again" userInfo:nil];
+    matched=@{@"window_id":w[(__bridge NSString *)kCGWindowNumber],@"name":name?:@"App",@"points":@{@"x":@(b.origin.x),@"y":@(b.origin.y),@"w":@(b.size.width),@"h":@(b.size.height)}};
+  }
+  if(!matched) @throw [NSException exceptionWithName:@"window" reason:@"the selected app window is not capturable; observe the app windows again" userInfo:nil];
+  return matched;
 }
 static BOOL cuPressable(AXUIElementRef el) {
   CFArrayRef names=NULL;
@@ -115,14 +266,131 @@ static CGEventRef textEvent(NSString *text, BOOL down) {
   CGEventRef event=CGEventCreateKeyboardEvent(NULL,0,down);
   CGEventKeyboardSetUnicodeString(event,text.length,chars); free(chars); return event;
 }
+static BOOL cuTextRole(NSString *role) {
+  return [@[@"AXTextField",@"AXTextArea",@"AXComboBox",@"AXSearchField",@"AXSecureTextField",@"AXWebArea"] containsObject:role];
+}
+// NSString lengths are UTF-16 unit counts on both sides, so emoji compare
+// consistently. The length check survives autocorrect/IME transforms that
+// defeat the suffix check, as long as the character count is preserved.
+static BOOL cuTypeVerified(NSString *before, NSString *after, NSString *text) {
+  return after && ([after hasSuffix:text] || (before && after.length==before.length+text.length));
+}
+static id cuFocusedElement(pid_t pid) {
+  AXUIElementRef appEl=AXUIElementCreateApplication(pid);
+  AXUIElementSetMessagingTimeout(appEl,2.0);
+  id focused=attr(appEl,@"AXFocusedUIElement");
+  CFRelease(appEl);
+  return focused;
+}
+/**
+ * Type into whatever holds focus in the bound app, then prove it landed.
+ * Dispatch succeeding is not delivery (a process with no text receiver drops
+ * the events silently), so the receipt reports `verified` from the focused
+ * control's own value. Failure to verify is reported, not thrown — the events
+ * already went out. The one throw is before any event is posted: a focused
+ * element that is clearly not a text control.
+ */
+static NSDictionary *cuType(NSDictionary *args, NSRunningApplication *inputApp, id focused, BOOL simulated) {
+  NSString *text=args[@"text"];
+  if(![text isKindOfClass:NSString.class]) @throw [NSException exceptionWithName:@"text" reason:@"text must be a string" userInfo:nil];
+  NSString *role=focused?attr((__bridge AXUIElementRef)focused,@"AXRole"):nil;
+  BOOL secure=[role isEqual:@"AXSecureTextField"];
+  NSString *before=nil;
+  // A secure field's value is never read; it verifies as unverifiable.
+  if(focused && !secure) { id v=attr((__bridge AXUIElementRef)focused,@"AXValue"); if([v isKindOfClass:NSString.class]) before=v; }
+  // Fail closed only on strong evidence: something holds focus and it is
+  // clearly not text. No focused element at all still receives the events —
+  // some apps take process-directed keys without reporting AX focus.
+  if(focused && !cuTextRole(role) && !before)
+    @throw [NSException exceptionWithName:@"focus" reason:[NSString stringWithFormat:@"focused element is a %@, not a text control — click or focus a text field first",role?:@"unknown element"] userInfo:nil];
+  // One grapheme per event, the way a keyboard delivers them. Batching
+  // several into one CGEventKeyboardSetUnicodeString is faster but Electron
+  // apps coalesce the pending payload and keep only the final batch, so a
+  // typed string silently arrives truncated to its tail.
+  for(NSUInteger i=0;i<text.length && !cuCancelled;) {
+    if([args[@"foreground_input"] boolValue]) cuRequireForeground(inputApp);
+    cuCheckCancelled();
+    NSRange range=[text rangeOfComposedCharacterSequencesForRange:NSMakeRange(i,1)];
+    NSString *chunk=[text substringWithRange:range];
+    if(!simulated) for(int down=1;down>=0;down--){ CGEventRef event=textEvent(chunk,down); if([args[@"foreground_input"] boolValue]) CGEventPost(kCGHIDEventTap,event); else CGEventPostToPid(inputApp.processIdentifier,event); CFRelease(event); }
+    i=NSMaxRange(range); usleep(10000);
+  }
+  if(cuCancelled) @throw [NSException exceptionWithName:@"cancelled" reason:@"computer request cancelled" userInfo:nil];
+  NSString *after=nil;
+  if(focused && !secure) {
+#ifdef CU_TEST
+    if(simulated) { NSString *s=((NSMutableDictionary *)focused)[@"after"]; if(s) ((NSMutableDictionary *)focused)[@"AXValue"]=s; }
+    else
+#endif
+    usleep(80000);
+    id v=attr((__bridge AXUIElementRef)focused,@"AXValue");
+    if([v isKindOfClass:NSString.class]) after=v;
+  }
+  BOOL verified=cuTypeVerified(before,after,text);
+  NSMutableDictionary *receipt=[@{@"action_sent":@YES,@"chars":@(text.length),@"strategy":@"unicode-events",
+                                  @"keyboard_delivery":[args[@"foreground_input"] boolValue]?@"foreground-guarded":@"process",
+                                  @"verified":@(verified),@"focused_role":role?:[NSNull null]} mutableCopy];
+  if(!verified) receipt[@"verification_required"]=@"screenshot";
+  return receipt;
+}
 static id execute(NSDictionary *p) {
   NSString *tool=p[@"tool"]; NSDictionary *args=p[@"args"]?:@{};
+  cuOwnerPipe=[args[@"owner_pipe"] boolValue];
+  BOOL mutates=[@[@"type",@"key_event",@"mouse_event",@"scroll",@"pointer_sequence",@"release_input",@"set_value",@"select_text",@"perform_action"] containsObject:tool]
+    || ([tool isEqual:@"hit_test"] && [args[@"perform"] boolValue])
+    || ([tool isEqual:@"app_info"] && [args[@"activate"] boolValue]);
+  if([tool isEqual:@"release_input"]) {
+    if(!AXIsProcessTrusted()) @throw [NSException exceptionWithName:@"permission" reason:@"Accessibility permission is missing" userInfo:nil];
+    cuLockInput();
+    NSDictionary *point=args[@"point"];
+    CGPoint at=CGPointMake([point[@"x"] doubleValue],[point[@"y"] doubleValue]);
+    CGMouseButton button=[args[@"button"] unsignedIntValue];
+    CGEventType up=button==0?kCGEventLeftMouseUp:button==1?kCGEventRightMouseUp:kCGEventOtherMouseUp;
+    CGEventRef event=CGEventCreateMouseEvent(NULL,up,at,button);
+    CGEventPost(kCGHIDEventTap,event); CFRelease(event);
+    return @{@"released":@YES};
+  }
+  if([tool isEqual:@"key_event"] && ![args[@"down"] boolValue] && [args[@"owned_release"] boolValue]) {
+    if(!AXIsProcessTrusted()) @throw [NSException exceptionWithName:@"permission" reason:@"Accessibility permission is missing" userInfo:nil];
+    cuLockInput();
+    // Release a confirmed/ambiguous press even if its original app has exited.
+    return cuPostKey(args,[args[@"input_app_ref"][@"pid"] intValue]);
+  }
+  cuCheckCancelled();
+  if([tool isEqual:@"input_capabilities"]) return @{@"input_lease":@1,@"owner_pipe":@YES,@"record_owner_pipe":@1,@"window_ocr":@1};
   if([tool isEqual:@"record"]) return cuRecord(args);
+  if([tool isEqual:@"recognize_text"]) return cuRecognizeText(args[@"file"]);
 #ifdef CU_TEST
+  if([tool isEqual:@"inspect_window_match"]) {
+    NSDictionary *b=args[@"bounds"];
+    CGRect bounds=CGRectMake([b[@"x"] doubleValue],[b[@"y"] doubleValue],[b[@"w"] doubleValue],[b[@"h"] doubleValue]);
+    return capturableWindow(args[@"windows"],[args[@"pid"] intValue],@"Fixture",bounds);
+  }
+  if([tool isEqual:@"inspect_observation"]) {
+    BOOL truncated=NO;
+    NSArray *elements=observeElements((__bridge AXUIElementRef)args[@"app"],args[@"windows"]?:@[],args,NO,&truncated);
+    return @{@"elements":elements,@"truncated":@(truncated)};
+  }
+  if([tool isEqual:@"test_input_lease"]) {
+    cuTestLockDir=args[@"lock_dir"]; cuLockInput();
+    cuTestReleaseFile=args[@"release_file"];
+    if([args[@"work_ms"] intValue]>0) {
+      cuPrint(@{@"action_sent":@YES,@"input_lease":@YES});
+      for(int elapsed=0;elapsed<[args[@"work_ms"] intValue];elapsed+=20) { cuCheckCancelled(); usleep(20000); }
+    }
+    return @{@"action_sent":@YES};
+  }
   if([tool isEqual:@"inspect_text_event"]) {
     CGEventRef event=textEvent(args[@"text"],YES); UniChar chars[4096]; UniCharCount length=0;
-    CGEventKeyboardGetUnicodeString(event,4096,&length,chars); CFRelease(event);
-    return @{@"text":[NSString stringWithCharacters:chars length:length]};
+    CGEventKeyboardGetUnicodeString(event,4096,&length,chars); CGEventFlags flags=CGEventGetFlags(event); CFRelease(event);
+    return @{@"text":[NSString stringWithCharacters:chars length:length],@"flags":@(flags)};
+  }
+  // Drives the real typing logic against a fixture focused element instead of
+  // a live app: `after` is the value the element reports once the text lands,
+  // which a fixture omits to model an app that swallows the events.
+  if([tool isEqual:@"inspect_type"]) {
+    id fixture=args[@"focused"];
+    return cuType(args, nil, [fixture isKindOfClass:NSDictionary.class]?[fixture mutableCopy]:nil, YES);
   }
 #endif
   if([tool isEqual:@"permissions"]) return @{@"trusted":@(AXIsProcessTrusted())};
@@ -149,16 +417,14 @@ static id execute(NSDictionary *p) {
     if(!a) @throw [NSException exceptionWithName:@"app" reason:@"application not found" userInfo:nil];
     AXUIElementRef ax=AXUIElementCreateApplication(a.processIdentifier);
     NSArray *axWindows=attr(ax,@"AXWindows");
-    NSDictionary *preferred=axWindows.count?geometry(attr((__bridge AXUIElementRef)axWindows[0],@"AXPosition"),NO):nil;
+    NSInteger index=[args[@"window_id"] integerValue];
+    CGRect preferred;
+    BOOL integerIndex=!args[@"window_id"] || ([args[@"window_id"] isKindOfClass:NSNumber.class] && [args[@"window_id"] doubleValue]==index);
+    BOOL valid=integerIndex && index>=0 && index<axWindows.count && cuFrame((__bridge AXUIElementRef)axWindows[index],&preferred);
     CFRelease(ax);
+    if(!valid) @throw [NSException exceptionWithName:@"window" reason:@"the selected app window has no accessibility geometry; call list_windows for a valid window index" userInfo:nil];
     NSArray *windows=CFBridgingRelease(CGWindowListCopyWindowInfo(kCGWindowListOptionAll,kCGNullWindowID));
-    for(NSDictionary *w in windows) {
-      if([w[(__bridge NSString *)kCGWindowOwnerPID] intValue]!=a.processIdentifier || [w[(__bridge NSString *)kCGWindowLayer] intValue]!=0) continue;
-      CGRect b; if(!CGRectMakeWithDictionaryRepresentation((__bridge CFDictionaryRef)w[(__bridge NSString *)kCGWindowBounds],&b) || b.size.width<1 || b.size.height<1) continue;
-      if(preferred && (fabs(b.origin.x-[preferred[@"x"] doubleValue])>1 || fabs(b.origin.y-[preferred[@"y"] doubleValue])>1)) continue;
-      return @{@"window_id":w[(__bridge NSString *)kCGWindowNumber],@"name":a.localizedName?:@"App",@"points":@{@"x":@(b.origin.x),@"y":@(b.origin.y),@"w":@(b.size.width),@"h":@(b.size.height)}};
-    }
-    @throw [NSException exceptionWithName:@"window" reason:@"application has no capturable window" userInfo:nil];
+    return capturableWindow(windows,a.processIdentifier,a.localizedName,preferred);
   }
   // Which application owns the point a pointer event would land on. A global
   // pointer event goes to whatever is on top, so this is what stops a click
@@ -191,6 +457,8 @@ static id execute(NSDictionary *p) {
   if([tool isEqual:@"app_info"]) {
     NSRunningApplication *a=resolve(args[@"app_ref"]?:@{});
     if(!a) @throw [NSException exceptionWithName:@"app" reason:@"application not found" userInfo:nil];
+    if([args[@"activate"] boolValue]) cuLockInput();
+    cuCheckCancelled();
     if([args[@"activate"] boolValue] && !axActivate(a.processIdentifier)) [a activateWithOptions:0];
     return @{@"found":@YES,@"name":a.localizedName?:@"",@"pid":@(a.processIdentifier),@"bundle_id":a.bundleIdentifier?:@"",@"frontmost":@(a.active)};
   }
@@ -200,25 +468,15 @@ static id execute(NSDictionary *p) {
     inputApp=resolve(args[@"input_app_ref"]);
     if(!inputApp || inputApp.terminated) @throw [NSException exceptionWithName:@"focus" reason:@"input application is no longer running; open_application again" userInfo:nil];
   }
+  if(mutates) { cuCheckCancelled(); cuLockInput(); }
   if(!AXIsProcessTrusted()) @throw [NSException exceptionWithName:@"permission" reason:@"Accessibility permission is missing for Codewhale Computer Use (or the direct host)." userInfo:nil];
-  if([tool isEqual:@"type"]) {
-    NSString *text=args[@"text"];
-    if(![text isKindOfClass:NSString.class]) @throw [NSException exceptionWithName:@"text" reason:@"text must be a string" userInfo:nil];
-    // One grapheme per event, the way a keyboard delivers them. Batching
-    // several into one CGEventKeyboardSetUnicodeString is faster but Electron
-    // apps coalesce the pending payload and keep only the final batch, so a
-    // typed string silently arrives truncated to its tail.
-    for(NSUInteger i=0;i<text.length;) {
-      NSRange range=[text rangeOfComposedCharacterSequencesForRange:NSMakeRange(i,1)];
-      NSString *chunk=[text substringWithRange:range];
-      for(int down=1;down>=0;down--){ CGEventRef event=textEvent(chunk,down); CGEventPostToPid(inputApp.processIdentifier,event); CFRelease(event); }
-      i=NSMaxRange(range); usleep(10000);
-    }
-    return @{@"action_sent":@YES,@"chars":@(text.length),@"strategy":@"unicode-events"};
-  }
+  if([tool isEqual:@"type"]) return cuType(args, inputApp, cuFocusedElement(inputApp.processIdentifier), NO);
   if([tool isEqual:@"key_event"]) {
-    CGEventRef event=CGEventCreateKeyboardEvent(NULL,[args[@"code"] unsignedShortValue],[args[@"down"] boolValue]);
-    CGEventSetFlags(event,[args[@"flags"] unsignedLongLongValue]); CGEventPostToPid(inputApp.processIdentifier,event); CFRelease(event); return @{@"action_sent":@YES};
+    if([args[@"foreground_input"] boolValue] && [args[@"down"] boolValue]) cuRequireForeground(inputApp);
+    cuCheckCancelled();
+    id result=cuPostKey(args,inputApp.processIdentifier);
+    if([args[@"input_lease"] boolValue] && [args[@"down"] boolValue]) { cuLeaseKey=args; cuLeasePid=inputApp.processIdentifier; cuLeaseApp=inputApp; }
+    return result;
   }
   if([tool isEqual:@"mouse_event"]) {
     CGPoint p=CGPointMake([args[@"x"] doubleValue],[args[@"y"] doubleValue]);
@@ -231,6 +489,7 @@ static id execute(NSDictionary *p) {
       CGEventSetIntegerValueField(event,91,[args[@"windowNumber"] longLongValue]);
       CGEventSetIntegerValueField(event,92,[args[@"windowNumber"] longLongValue]);
     }
+    cuCheckCancelled();
     CGEventPostToPid(inputApp.processIdentifier,event); CFRelease(event); return @{@"action_sent":@YES};
   }
   // Accessibility-first coordinate action: resolve the point against the bound
@@ -295,6 +554,7 @@ static id execute(NSDictionary *p) {
 
     NSDictionary *element=info((__bridge AXUIElementRef)chosen,0,0,@[]);
     if(![args[@"perform"] boolValue]) return @{@"found":@YES,@"element":element,@"action":@"AXPress",@"action_sent":@NO};
+    cuCheckCancelled();
     AXError pe=AXUIElementPerformAction((__bridge AXUIElementRef)chosen,CFSTR("AXPress"));
     if(pe!=kAXErrorSuccess) return @{@"found":@YES,@"element":element,@"action":@"AXPress",@"action_sent":@NO,@"reason":[NSString stringWithFormat:@"press_failed_%d",pe]};
     return @{@"found":@YES,@"element":element,@"action":@"AXPress",@"action_sent":@YES};
@@ -327,10 +587,11 @@ static id execute(NSDictionary *p) {
     // from the fact that decides it rather than from a frontmost read that
     // the window server may not have caught up with yet.
     BOOL takes=front.processIdentifier!=inputApp.processIdentifier;
+    cuCheckCancelled();
     if(takes) {
       axActivate(inputApp.processIdentifier);
       for(int i=0;i<20;i++) {
-        if(NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier==inputApp.processIdentifier) break;
+        if(cuCancelled || NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier==inputApp.processIdentifier) break;
         usleep(25000);
       }
     }
@@ -338,19 +599,37 @@ static id execute(NSDictionary *p) {
     // the input hardware; a NULL-source stream delivers down and up but drops
     // every mouseDragged in between.
     CGEventSourceRef source=CGEventSourceCreate(kCGEventSourceStateHIDSystemState);
+    BOOL held[3]={NO,NO,NO};
+    CGPoint last=home;
     for(NSDictionary *step in args[@"steps"]) {
+      @try { cuCheckCancelled(); } @catch(NSException *e) { break; }
       CGEventRef event;
       if(step[@"scroll"]) {
         NSArray *d=step[@"scroll"];
         event=CGEventCreateScrollWheelEvent(source,kCGScrollEventUnitLine,2,[d[1] intValue],[d[0] intValue]);
       } else {
         CGPoint p=CGPointMake([step[@"x"] doubleValue],[step[@"y"] doubleValue]);
+        last=p;
+        int button=[step[@"button"] intValue], kind=[step[@"type"] intValue];
+        if(button>=0 && button<3) {
+          if(kind==kCGEventLeftMouseDown || kind==kCGEventRightMouseDown || kind==kCGEventOtherMouseDown) held[button]=YES;
+          if(kind==kCGEventLeftMouseUp || kind==kCGEventRightMouseUp || kind==kCGEventOtherMouseUp) held[button]=NO;
+        }
         event=CGEventCreateMouseEvent(source,[step[@"type"] unsignedIntValue],p,[step[@"button"] unsignedIntValue]);
         CGEventSetIntegerValueField(event,kCGMouseEventClickState,[step[@"clickState"] longLongValue]);
       }
       CGEventPost(kCGHIDEventTap,event);
       CFRelease(event);
       usleep((useconds_t)([step[@"delayMs"] intValue]?:40)*1000);
+    }
+    if([args[@"input_lease"] boolValue] && !cuCancelled) {
+      for(int button=0;button<3;button++) cuLeaseButtons[button]=held[button];
+      cuLeasePoint=last;
+    }
+    if(cuCancelled || ![args[@"input_lease"] boolValue]) for(int button=0;button<3;button++) if(held[button]) {
+      CGEventType up=button==0?kCGEventLeftMouseUp:button==1?kCGEventRightMouseUp:kCGEventOtherMouseUp;
+      CGEventRef event=CGEventCreateMouseEvent(source,up,last,button);
+      CGEventPost(kCGHIDEventTap,event); CFRelease(event);
     }
     BOOL restore=[args[@"restore"] boolValue];
     if(restore) {
@@ -359,6 +638,7 @@ static id execute(NSDictionary *p) {
       CGEventPost(kCGHIDEventTap,back); CFRelease(back);
     }
     if(source) CFRelease(source);
+    if(cuCancelled) @throw [NSException exceptionWithName:@"cancelled" reason:@"computer request cancelled" userInfo:nil];
     usleep(150000);   // let the window server settle before reading it back
     NSString *after=NSWorkspace.sharedWorkspace.frontmostApplication.localizedName?:@"";
     return @{@"action_sent":@YES,@"pointer_moved":@YES,@"restored":@(restore),
@@ -367,6 +647,7 @@ static id execute(NSDictionary *p) {
              @"home":@{@"x":@(home.x),@"y":@(home.y)}};
   }
   if([tool isEqual:@"scroll"]) {
+    cuCheckCancelled();
     CGEventRef event=CGEventCreateScrollWheelEvent(NULL,kCGScrollEventUnitLine,2,[args[@"dy"] intValue],[args[@"dx"] intValue]); CGEventPostToPid(inputApp.processIdentifier,event); CFRelease(event); return @{@"action_sent":@YES};
   }
   if([tool isEqual:@"cursor_position"]) {
@@ -380,39 +661,53 @@ static id execute(NSDictionary *p) {
     NSArray *ws=attr(app,@"AXWindows")?:@[];
     NSDictionary *identity=@{@"found":@YES,@"name":a.localizedName?:@"",@"pid":@(a.processIdentifier),@"bundle_id":a.bundleIdentifier?:@"",@"frontmost":@(a.active)};
     if([tool isEqual:@"get_app_state"] || [tool isEqual:@"list_windows"]) {
-      NSMutableArray *out=[NSMutableArray array]; BOOL truncated=NO;
-      for(NSUInteger i=0;i<ws.count;i++) {
-        if(args[@"window_id"] && i!=[args[@"window_id"] unsignedIntegerValue]) continue;
-        if([tool isEqual:@"list_windows"]){ NSMutableDictionary *d=[info((__bridge AXUIElementRef)ws[i],i,i,@[]) mutableCopy]; d[@"title"]=d[@"label"]?:@""; [out addObject:d]; }
-        else walk((__bridge AXUIElementRef)ws[i],i,@[],0,[args[@"detail"] isEqual:@"full"]?16:10,[args[@"detail"] isEqual:@"full"]?800:400,out,&truncated);
-      }
+      BOOL truncated=NO;
+      NSArray *out=observeElements(app,ws,args,[tool isEqual:@"list_windows"],&truncated);
       NSMutableDictionary *d=[identity mutableCopy]; d[[tool isEqual:@"list_windows"]?@"windows":@"elements"]=out; d[@"truncated"]=@(truncated); return d;
     }
     if([tool isEqual:@"resolve_element"]) {
-      NSUInteger wi=[args[@"windowIndex"] unsignedIntegerValue];
-      if(wi>=ws.count) return @{@"found":@NO,@"element":[NSNull null],@"reason":@"window_not_found"};
-      id el=ws[wi];
+      NSInteger wi=[args[@"windowIndex"] integerValue];
+      id el=wi==-1?attr(app,@"AXMenuBar"):wi==-2?(__bridge id)app:(wi>=0 && wi<ws.count?ws[wi]:nil);
+      if(!el) return @{@"found":@NO,@"element":[NSNull null],@"reason":@"window_not_found"};
       for(NSNumber *i in args[@"path"]?:@[]) { NSArray *kids=attr((__bridge AXUIElementRef)el,@"AXChildren"); if(i.unsignedIntegerValue>=kids.count) return @{@"found":@NO,@"element":[NSNull null],@"reason":@"path_not_found"}; el=kids[i.unsignedIntegerValue]; }
       return @{@"found":@YES,@"element":info((__bridge AXUIElementRef)el,0,wi,args[@"path"]?:@[]),@"reason":[NSNull null]};
     }
-    NSDictionary *t=args[@"target"]; NSUInteger wi=[t[@"windowIndex"] unsignedIntegerValue];
-    if(wi>=ws.count) @throw [NSException exceptionWithName:@"stale" reason:@"window is no longer available; observe again" userInfo:nil];
-    id el=ws[wi];
+    NSDictionary *t=args[@"target"]; NSInteger wi=[t[@"windowIndex"] integerValue];
+    id el=wi==-1?attr(app,@"AXMenuBar"):wi==-2?(__bridge id)app:(wi>=0 && wi<ws.count?ws[wi]:nil);
+    if(!el) @throw [NSException exceptionWithName:@"stale" reason:@"window is no longer available; observe again" userInfo:nil];
     for(NSNumber *i in t[@"path"]) { NSArray *kids=attr((__bridge AXUIElementRef)el,@"AXChildren"); if(i.unsignedIntegerValue>=kids.count) @throw [NSException exceptionWithName:@"stale" reason:@"element is no longer available; observe again" userInfo:nil]; el=kids[i.unsignedIntegerValue]; }
+    if(wi>=0) {
+      NSArray *sheets=attr((__bridge AXUIElementRef)ws[wi],@"AXSheets");
+      if(sheets.count) {
+        BOOL inside=NO; id ancestor=el;
+        for(int depth=0;ancestor && depth<64;depth++) {
+          for(id sheet in sheets) if(CFEqual((__bridge CFTypeRef)ancestor,(__bridge CFTypeRef)sheet)) inside=YES;
+          if(inside) break;
+          ancestor=attr((__bridge AXUIElementRef)ancestor,@"AXParent");
+        }
+        if(!inside) @throw [NSException exceptionWithName:@"modal" reason:@"window blocked by modal sheet; observe and handle the dialog first" userInfo:nil];
+      }
+    }
+    cuCheckCancelled();
     AXError e=kAXErrorFailure;
     if([tool isEqual:@"set_value"]) e=AXUIElementSetAttributeValue((__bridge AXUIElementRef)el,kAXValueAttribute,(__bridge CFTypeRef)args[@"value"]);
     else if([tool isEqual:@"select_text"]){ NSArray *r=args[@"text_range"]?:@[@0,@0]; if(r.count!=2 || [r[0] longValue]<0 || [r[1] longValue]<0) @throw [NSException exceptionWithName:@"range" reason:@"text_range must be [start, length], both nonnegative" userInfo:nil]; CFRange range=CFRangeMake([r[0] longValue],[r[1] longValue]); AXValueRef v=AXValueCreate(kAXValueCFRangeType,&range); e=AXUIElementSetAttributeValue((__bridge AXUIElementRef)el,kAXSelectedTextRangeAttribute,v); CFRelease(v); }
-    else if([tool isEqual:@"perform_action"]){ CFArrayRef actions=NULL; AXUIElementCopyActionNames((__bridge AXUIElementRef)el,&actions); NSArray *names=CFBridgingRelease(actions); if(![names containsObject:args[@"action"]]) @throw [NSException exceptionWithName:@"action" reason:@"action is not advertised by this element" userInfo:nil]; e=AXUIElementPerformAction((__bridge AXUIElementRef)el,(__bridge CFStringRef)args[@"action"]); }
+    else if([tool isEqual:@"perform_action"]){ CFArrayRef actions=NULL; AXUIElementCopyActionNames((__bridge AXUIElementRef)el,&actions); NSArray *names=CFBridgingRelease(actions); if(![names containsObject:args[@"action"]]) @throw [NSException exceptionWithName:@"action" reason:@"action is not advertised by this element" userInfo:nil]; cuCheckCancelled(); e=AXUIElementPerformAction((__bridge AXUIElementRef)el,(__bridge CFStringRef)args[@"action"]); }
     if(e!=kAXErrorSuccess) @throw [NSException exceptionWithName:@"action" reason:[NSString stringWithFormat:@"accessibility action failed: %d",e] userInfo:nil];
     return @{@"action_sent":@YES,@"strategy":@"a11y"};
   } @finally { CFRelease(app); }
 }
 int main(int argc, const char **argv){ @autoreleasepool {
+  signal(SIGTERM,cuCancel); signal(SIGINT,cuCancel); signal(SIGPIPE,SIG_IGN);
   @try { if(argc!=2) @throw [NSException exceptionWithName:@"args" reason:@"expected one JSON argument" userInfo:nil];
     NSError *error=nil; id p=[NSJSONSerialization JSONObjectWithData:[[NSString stringWithUTF8String:argv[1]] dataUsingEncoding:NSUTF8StringEncoding] options:0 error:&error];
     if(![p isKindOfClass:NSDictionary.class]) @throw [NSException exceptionWithName:@"json" reason:@"invalid request" userInfo:nil];
-    id result=execute(p); NSData *data=[NSJSONSerialization dataWithJSONObject:result options:NSJSONWritingFragmentsAllowed error:&error];
+    id result=execute(p);
+    if([p[@"args"][@"input_lease"] boolValue]) { NSMutableDictionary *ack=[result mutableCopy]; ack[@"input_lease"]=@YES; result=ack; }
+    NSData *data=[NSJSONSerialization dataWithJSONObject:result options:NSJSONWritingFragmentsAllowed error:&error];
     if(!data) @throw [NSException exceptionWithName:@"json" reason:error.localizedDescription userInfo:nil];
-    puts([[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding].UTF8String); return 0;
-  } @catch(NSException *e){ fprintf(stderr,"%s\n",e.reason.UTF8String); return 1; }
+    puts([[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding].UTF8String); fflush(stdout);
+    if([p[@"args"][@"input_lease"] boolValue]) cuWaitForLease();
+    return 0;
+  } @catch(NSException *e){ cuReleaseLease(); fprintf(stderr,"%s\n",e.reason.UTF8String); return 1; }
 } }
