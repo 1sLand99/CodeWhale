@@ -832,15 +832,25 @@ pub fn provider_capability_with_wire(
     // are owned by the membership catalog. It must not become a placeholder
     // number: a fabricated 4K here silently clamped offline membership routes
     // to 4K output via `route_budget`.
-    let max_output = crate::models::max_output_tokens_for_model(resolved_model).or_else(|| {
-        canonical_official_deepseek_model_id(resolved_model)
-            .or_else(|| {
-                alias_deprecation
-                    .as_ref()
-                    .map(|_| DEEPSEEK_ALIAS_REPLACEMENT)
-            })
-            .and_then(crate::models::max_output_tokens_for_model)
-    });
+    let max_output = crate::models::max_output_tokens_for_model(resolved_model)
+        .or_else(|| {
+            // Provider-owned wire IDs need not exist in the legacy model-only
+            // catalog (for example Fireworks' accounts/... slug). Reuse the
+            // exact bundled offering instead of inferring a family ceiling.
+            crate::provider_lake::bundled_catalog_offering_for_model(provider, resolved_model)
+                .and_then(|offering| offering.limit)
+                .and_then(|limit| limit.output)
+                .and_then(|limit| u32::try_from(limit).ok())
+        })
+        .or_else(|| {
+            canonical_official_deepseek_model_id(resolved_model)
+                .or_else(|| {
+                    alias_deprecation
+                        .as_ref()
+                        .map(|_| DEEPSEEK_ALIAS_REPLACEMENT)
+                })
+                .and_then(crate::models::max_output_tokens_for_model)
+        });
 
     // Thinking support: V4 models support thinking on all providers, but
     // only when the model name matches the V4 family.

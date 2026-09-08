@@ -138,7 +138,12 @@ fn shipped_default_routes_have_reviewed_pricing_coverage() {
     let mut unpriced = BTreeMap::new();
     for (config, provider, candidate) in defaults {
         let base_url = config.base_url_for_route(provider);
-        assert_eq!(base_url, candidate.endpoint().base_url);
+        // Config normalizes the optional trailing separator before dispatch.
+        // Retain the exact host/path comparison and audit that runtime form.
+        assert_eq!(
+            base_url,
+            candidate.endpoint().base_url.trim_end_matches('/')
+        );
         let route = EffectiveRouteEnvelope::capture(
             Some(&config),
             provider,
