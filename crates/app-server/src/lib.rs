@@ -1,3 +1,4 @@
+use codewhale_protocol::runtime::{MAX_RUNTIME_IMAGE_BODY_BYTES, RuntimeImageInput};
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -308,6 +309,8 @@ struct ThreadIdParams {
 struct ThreadMessageParams {
     thread_id: String,
     input: String,
+    #[serde(default)]
+    images: Vec<RuntimeImageInput>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -353,9 +356,19 @@ async fn shutdown_signal() {
 
 fn app_router(state: AppState, cors_origins: &[String]) -> Router {
     let protected_routes = Router::new()
-        .route("/thread", post(thread_handler))
+        .route(
+            "/thread",
+            post(thread_handler).layer(axum::extract::DefaultBodyLimit::max(
+                MAX_RUNTIME_IMAGE_BODY_BYTES,
+            )),
+        )
         .route("/app", post(app_handler))
-        .route("/prompt", post(prompt_handler))
+        .route(
+            "/prompt",
+            post(prompt_handler).layer(axum::extract::DefaultBodyLimit::max(
+                MAX_RUNTIME_IMAGE_BODY_BYTES,
+            )),
+        )
         .route("/tool", post(tool_handler))
         .route("/jobs", get(jobs_handler))
         .route("/mcp/startup", post(mcp_startup_handler))
@@ -521,6 +534,12 @@ enum ParsedStdioLine {
 }
 
 fn parse_stdio_line(line: &str) -> ParsedStdioLine {
+    if line.len() > MAX_RUNTIME_IMAGE_BODY_BYTES {
+        return ParsedStdioLine::Rejected(jsonrpc_error(
+            None,
+            JsonRpcError::invalid_params("request exceeds the 8 MiB transport limit"),
+        ));
+    }
     if line.trim().is_empty() {
         return ParsedStdioLine::Blank;
     }
@@ -648,8 +667,13 @@ async fn thread_handler(State(state): State<AppState>, Json(req): Json<ThreadReq
     // A message is a turn, and turns belong to the runtime — not to the
     // bookkeeping `Runtime` behind the other thread operations. This mirrors
     // the interception stdio `thread/message` has always done.
-    if let ThreadRequest::Message { thread_id, input } = req {
-        return match run_http_thread_message(&state, thread_id, input).await {
+    if let ThreadRequest::Message {
+        thread_id,
+        input,
+        images,
+    } = req
+    {
+        return match run_http_thread_message(&state, thread_id, input, images).await {
             Ok(res) => (StatusCode::OK, Json(res)).into_response(),
             Err(err) => http_error_from_jsonrpc(err).into_response(),
         };
@@ -1116,6 +1140,7 @@ struct BridgedTurn<'a> {
     /// Client-facing thread id; the bridge maps it to a runtime thread.
     thread_key: &'a str,
     input: &'a str,
+    images: &'a [RuntimeImageInput],
     /// Model for the runtime thread when this call is the one that creates
     /// it. An existing thread keeps the model it was created with.
     model_override: Option<String>,
@@ -1164,6 +1189,7 @@ async fn run_bridged_turn<W: AsyncWrite + Unpin>(
         .message_thread(
             &runtime_thread_id,
             turn.input,
+            turn.images,
             writer,
             registration,
             transcript,
@@ -1207,6 +1233,7 @@ async fn run_prompt_turn<W: AsyncWrite + Unpin>(
         BridgedTurn {
             thread_key: &thread_key,
             input: &req.prompt,
+            images: &req.images,
             model_override: req.model.clone(),
             // `thread/interrupt` addresses client-facing thread ids. A
             // one-shot prompt has none to hand back, and a caller-supplied
@@ -1256,6 +1283,7 @@ async fn run_http_thread_message(
     state: &AppState,
     thread_id: String,
     input: String,
+    images: Vec<RuntimeImageInput>,
 ) -> std::result::Result<ThreadResponse, JsonRpcError> {
     let mut transcript = TurnTranscript::default();
     let mut sink = tokio::io::sink();
@@ -1265,6 +1293,7 @@ async fn run_http_thread_message(
         BridgedTurn {
             thread_key: &thread_id,
             input: &input,
+            images: &images,
             model_override: None,
             interruptible: false,
             ephemeral: false,
@@ -1302,6 +1331,7 @@ async fn handle_stdio_thread_message<W: AsyncWrite + Unpin>(
         BridgedTurn {
             thread_key: &parsed.thread_id,
             input: &parsed.input,
+            images: &parsed.images,
             model_override: None,
             interruptible: true,
             ephemeral: false,
@@ -1557,17 +1587,39 @@ impl RuntimeBridge {
         &mut self,
         thread_id: &str,
         input: &str,
+        images: &[RuntimeImageInput],
         writer: &mut W,
         registration: Option<(TurnRegistry, String)>,
         mut transcript: Option<&mut TurnTranscript>,
     ) -> Result<Value> {
+        let mut request = json!({ "prompt": input });
+        if !images.is_empty() {
+            let info = self
+                .request_json(
+                    self.authed(
+                        self.client
+                            .get(format!("{}/v1/runtime/info", self.base_url)),
+                    ),
+                )
+                .await?;
+            if info
+                .pointer("/capabilities/turn_image_inputs")
+                .and_then(Value::as_bool)
+                != Some(true)
+            {
+                bail!(
+                    "Runtime image input is unavailable; update the Runtime before sending attachments"
+                );
+            }
+            request["images"] = json!(images);
+        }
         let turn = self
             .request_json(
                 self.authed(
                     self.client
                         .post(format!("{}/v1/threads/{thread_id}/turns", self.base_url)),
                 )
-                .json(&json!({ "prompt": input })),
+                .json(&request),
             )
             .await?;
         let turn_id = turn
@@ -1943,6 +1995,7 @@ async fn dispatch_stdio_request_with_writer<W: AsyncWrite + Unpin>(
                 result: json!({
                     "transport": transport.label(),
                     "families": ["thread/*", "app/*", "prompt/*"],
+                    "turn_image_inputs": true,
                     "methods": methods,
                 }),
                 should_exit: false,
@@ -1950,6 +2003,7 @@ async fn dispatch_stdio_request_with_writer<W: AsyncWrite + Unpin>(
         }
         "thread/capabilities" => StdioDispatchResult {
             result: json!({
+                "turn_image_inputs": true,
                 "methods": [
                     "thread/request",
                     "thread/create",
@@ -1972,11 +2026,20 @@ async fn dispatch_stdio_request_with_writer<W: AsyncWrite + Unpin>(
         },
         "thread/request" => {
             let request: ThreadRequest = parse_params(params)?;
-            if let ThreadRequest::Message { thread_id, input } = request {
+            if let ThreadRequest::Message {
+                thread_id,
+                input,
+                images,
+            } = request
+            {
                 let response = handle_stdio_thread_message(
                     state,
                     writer,
-                    ThreadMessageParams { thread_id, input },
+                    ThreadMessageParams {
+                        thread_id,
+                        input,
+                        images,
+                    },
                 )
                 .await?;
                 return Ok(StdioDispatchResult {
@@ -3461,7 +3524,7 @@ mod tests {
         let (mut reader, mut writer) = tokio::io::duplex(4096);
 
         let result = bridge
-            .message_thread("thr_test", "hello", &mut writer, None, None)
+            .message_thread("thr_test", "hello", &[], &mut writer, None, None)
             .await
             .expect("message_thread should succeed");
         drop(writer);
@@ -3753,9 +3816,10 @@ mod tests {
         let (base_url, prompts, server) = spawn_stub_runtime().await;
         seed_bridge_at(&state, base_url).await;
 
-        let response = run_http_thread_message(&state, "thr_http".to_string(), "go".to_string())
-            .await
-            .expect("http thread message");
+        let response =
+            run_http_thread_message(&state, "thr_http".to_string(), "go".to_string(), Vec::new())
+                .await
+                .expect("http thread message");
 
         assert_eq!(response.status, "completed");
         assert_eq!(response.thread_id, "thr_http");
@@ -3778,9 +3842,10 @@ mod tests {
         let (state, _tmp) = capability_test_state();
         seed_bridge_at(&state, "http://127.0.0.1:9".to_string()).await;
 
-        let err = run_http_thread_message(&state, "thr_http".to_string(), "go".to_string())
-            .await
-            .expect_err("no runtime means no turn");
+        let err =
+            run_http_thread_message(&state, "thr_http".to_string(), "go".to_string(), Vec::new())
+                .await
+                .expect_err("no runtime means no turn");
         assert_eq!(err.code, RUNTIME_UNAVAILABLE_CODE);
     }
 
@@ -4160,5 +4225,77 @@ mod tests {
         assert!(DEFAULT_CORS_ORIGINS.contains(&"http://localhost:3000"));
         assert!(DEFAULT_CORS_ORIGINS.contains(&"http://localhost:5173"));
         assert!(DEFAULT_CORS_ORIGINS.contains(&"tauri://localhost"));
+    }
+    #[tokio::test]
+    async fn runtime_image_daemon_bridge_checks_transport_and_forwards_exact_wire() {
+        async fn capture(
+            State(seen): State<Arc<Mutex<Vec<Value>>>>,
+            Json(body): Json<Value>,
+        ) -> (StatusCode, Json<Value>) {
+            seen.lock().await.push(body);
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error":"fixture stops before an Engine"})),
+            )
+        }
+        for supported in [false, true] {
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            let app = Router::new()
+                .route(
+                    "/v1/runtime/info",
+                    get(move || async move {
+                        Json(json!({"capabilities":{"turn_image_inputs":supported}}))
+                    }),
+                )
+                .route("/v1/threads/{id}/turns", post(capture))
+                .with_state(seen.clone());
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                axum::serve(listener, app).await.unwrap();
+            });
+            let mut bridge = RuntimeBridge::from_base_url_for_test(format!("http://{addr}"));
+            let images = vec![RuntimeImageInput {
+                mime: "image/png".into(),
+                data_base64: "fixture-bytes-validated-by-Core".into(),
+            }];
+            let mut writer = tokio::io::sink();
+            assert!(
+                bridge
+                    .message_thread("thr_fixture", "look", &images, &mut writer, None, None)
+                    .await
+                    .is_err()
+            );
+            let requests = seen.lock().await;
+            assert_eq!(requests.len(), usize::from(supported));
+            if supported {
+                assert_eq!(requests[0], json!({"prompt":"look","images":images}));
+            }
+            server.abort();
+        }
+    }
+
+    #[test]
+    fn runtime_image_daemon_all_input_families_preserve_images() {
+        let image = json!({"mime":"image/png","dataBase64":"AQ=="});
+        let thread: ThreadMessageParams = serde_json::from_value(
+            json!({"thread_id":"thr_fixture","input":"look","images":[image.clone()]}),
+        )
+        .unwrap();
+        let prompt: PromptRequest =
+            serde_json::from_value(json!({"prompt":"look","images":[image.clone()]})).unwrap();
+        let generic: ThreadRequest = serde_json::from_value(
+            json!({"kind":"message","thread_id":"thr_fixture","input":"look","images":[image]}),
+        )
+        .unwrap();
+        assert_eq!(thread.images, prompt.images);
+        let ThreadRequest::Message { images, .. } = generic else {
+            panic!("message");
+        };
+        assert_eq!(thread.images, images);
+        assert!(matches!(
+            parse_stdio_line(&" ".repeat(MAX_RUNTIME_IMAGE_BODY_BYTES + 1)),
+            ParsedStdioLine::Rejected(_)
+        ));
     }
 }

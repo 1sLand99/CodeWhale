@@ -931,6 +931,7 @@ pub fn op_to_protocol(op: &Op) -> wire_op::Op {
     match op {
         Op::SendMessage {
             content,
+            images,
             mode,
             route,
             compaction,
@@ -954,6 +955,7 @@ pub fn op_to_protocol(op: &Op) -> wire_op::Op {
             provenance,
         } => wire_op::Op::SendMessage {
             content: content.clone(),
+            images: images.clone(),
             mode: app_mode_str(*mode).to_string(),
             model: Some(route.model.clone()),
             model_provider: Some(route.identity.key.clone()),

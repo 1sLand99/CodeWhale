@@ -42,6 +42,12 @@
 //! PNG/JPEG/GIF/WebP, and so, therefore, do we. Refusing a BMP here with a
 //! readable message beats letting one through to a provider-side 400.
 
+use anyhow::{Result, bail};
+use codewhale_protocol::runtime::{
+    MAX_RUNTIME_IMAGE_BYTES, MAX_RUNTIME_IMAGE_TOTAL_BYTES, MAX_RUNTIME_IMAGES, RuntimeImageInput,
+};
+use image::{DynamicImage, ImageReader, Limits};
+use std::io::Cursor;
 use std::path::Path;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -56,6 +62,147 @@ use crate::models::{ContentBlock, ImageUrlContent};
 /// tightest provider limit as the shared limit is what makes a "CodeWhale
 /// accepted it" verdict portable across routes.
 pub const MAX_IMAGE_BYTES: usize = 5 * 1024 * 1024;
+
+/// Maximum width or height admitted for an input image (8192 px).
+pub const MAX_IMAGE_DIMENSION: u32 = 8192;
+
+/// Maximum total pixels admitted before decoding is aborted (~33.5 megapixels).
+pub const MAX_IMAGE_PIXELS: u64 = 33_554_432;
+
+/// Memory allocation limit for image decoding (64 MiB).
+pub const MAX_DECODE_ALLOC_BYTES: u64 = 64 * 1024 * 1024;
+
+pub(crate) fn decode_and_guard_image(bytes: &[u8]) -> Result<(DynamicImage, u32, u32)> {
+    let limits = || {
+        let mut limits = Limits::default();
+        limits.max_alloc = Some(MAX_DECODE_ALLOC_BYTES);
+        limits.max_image_width = Some(MAX_IMAGE_DIMENSION);
+        limits.max_image_height = Some(MAX_IMAGE_DIMENSION);
+        limits
+    };
+    let mut reader = ImageReader::new(Cursor::new(bytes)).with_guessed_format()?;
+    reader.limits(limits());
+    let (width, height) = reader
+        .into_dimensions()
+        .map_err(|_| anyhow::anyhow!("invalid image header or decompression bomb guard"))?;
+    if u64::from(width) * u64::from(height) > MAX_IMAGE_PIXELS
+        || width > MAX_IMAGE_DIMENSION
+        || height > MAX_IMAGE_DIMENSION
+    {
+        bail!("image dimensions exceed the decompression bomb guard; downscale or crop first");
+    }
+    let mut reader = ImageReader::new(Cursor::new(bytes)).with_guessed_format()?;
+    reader.limits(limits());
+    let decoded = reader
+        .decode()
+        .map_err(|_| anyhow::anyhow!("invalid image content or decode allocation limit"))?;
+    Ok((decoded, width, height))
+}
+
+/// Validate untrusted inline input before route selection or durable admission.
+/// Return the existing provider-neutral history representation; no file is opened.
+pub(crate) fn prepare_runtime_images(images: &[RuntimeImageInput]) -> Result<Vec<ContentBlock>> {
+    if images.len() > MAX_RUNTIME_IMAGES {
+        bail!("images exceed the {MAX_RUNTIME_IMAGES} attachment limit");
+    }
+    prepare_images_with_limit(
+        images,
+        MAX_RUNTIME_IMAGE_BYTES,
+        Some(MAX_RUNTIME_IMAGE_TOTAL_BYTES),
+    )
+}
+
+/// Internal Engine/history input retains the established local 5 MiB ceiling.
+/// Network callers must first pass `prepare_runtime_images` (4 MiB per image,
+/// 10 images and 5 MiB total). Local history never had those aggregate/count
+/// limits; impose only its existing per-image bound and bounded full decode.
+pub(crate) fn prepare_stored_images(images: &[RuntimeImageInput]) -> Result<Vec<ContentBlock>> {
+    prepare_images_with_limit(images, MAX_IMAGE_BYTES, None)
+}
+
+fn prepare_images_with_limit(
+    images: &[RuntimeImageInput],
+    per_image_limit: usize,
+    total_limit: Option<usize>,
+) -> Result<Vec<ContentBlock>> {
+    let mut total = 0usize;
+    images
+        .iter()
+        .enumerate()
+        .map(|(index, image)| {
+            if image.data_base64.len() > per_image_limit.div_ceil(3) * 4 {
+                bail!(
+                    "image {} exceeds the {} MiB limit",
+                    index + 1,
+                    per_image_limit / (1024 * 1024)
+                );
+            }
+            let bytes = STANDARD
+                .decode(&image.data_base64)
+                .map_err(|_| anyhow::anyhow!("image {} has invalid base64", index + 1))?;
+            if bytes.len() > per_image_limit {
+                bail!(
+                    "image {} exceeds the {} MiB limit",
+                    index + 1,
+                    per_image_limit / (1024 * 1024)
+                );
+            }
+            total = total.saturating_add(bytes.len());
+            if total_limit.is_some_and(|limit| total > limit) {
+                bail!("images exceed the 5 MiB total limit");
+            }
+            let attached = encode_image_bytes(&bytes, &format!("image {}", index + 1))?;
+            if image.mime != attached.media_type {
+                bail!("image {} MIME does not match its content", index + 1);
+            }
+            decode_and_guard_image(&bytes)?;
+            // Standard padded base64 is the one replay representation.
+            if STANDARD.encode(&bytes) != image.data_base64 {
+                bail!("image {} base64 is not canonical", index + 1);
+            }
+            Ok(attached.content_block())
+        })
+        .collect()
+}
+
+/// Reuse durable canonical bytes for retry, never reread a path or URL.
+pub(crate) fn runtime_images_from_blocks(
+    blocks: &[ContentBlock],
+) -> Result<Vec<RuntimeImageInput>> {
+    let mut images = Vec::new();
+    for block in blocks {
+        if let ContentBlock::ImageUrl { image_url } = block {
+            if image_url.url.len() > MAX_IMAGE_BYTES.div_ceil(3) * 4 + 32 {
+                bail!("stored image exceeds the attachment limit");
+            }
+            let (mime, data) = parse_data_url(&image_url.url)
+                .ok_or_else(|| anyhow::anyhow!("stored image requires canonical inline content"))?;
+            images.push(RuntimeImageInput {
+                mime: mime.to_string(),
+                data_base64: data.to_string(),
+            });
+        }
+    }
+    prepare_stored_images(&images)?;
+    Ok(images)
+}
+
+/// Validate new image-bearing durable records without rewriting their block order.
+/// Legacy schema 2 history continues to use its original interpretation.
+pub(crate) fn validate_stored_image_content(blocks: &[ContentBlock]) -> Result<()> {
+    if blocks.iter().any(|block| {
+        !matches!(
+            block,
+            ContentBlock::Text { .. } | ContentBlock::ImageUrl { .. }
+        )
+    }) {
+        bail!("invalid persisted user image content kind");
+    }
+    if runtime_images_from_blocks(blocks)?.is_empty() {
+        bail!("persisted image input must contain an image");
+    }
+    Ok(())
+}
 
 /// Why a file could not be attached as an image.
 ///

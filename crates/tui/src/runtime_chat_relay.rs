@@ -79,6 +79,8 @@ pub(crate) struct RuntimeChatPrompt {
     pub runtime_binding_id: String,
     pub runtime_thread_id: String,
     pub prompt: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<codewhale_protocol::runtime::RuntimeImageInput>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system_prompt: Option<String>,
     pub model: String,
@@ -759,6 +761,7 @@ impl RuntimeChatRelayHost {
                 &binding.native_thread_id,
                 StartTurnRequest {
                     prompt: command.prompt.clone(),
+                    images: command.images.clone(),
                     operation_key: Some(command.operation_key.clone()),
                     input_summary: None,
                     model: Some(command.model.clone()),
@@ -989,6 +992,9 @@ impl RuntimeChatRelayHost {
                 .is_some_and(|models| {
                     models.iter().any(|model| {
                         model.get("id").and_then(Value::as_str) == Some(command.model.as_str())
+                            && (command.images.is_empty()
+                                || model.get("imageInput").and_then(Value::as_str)
+                                    == Some("supported"))
                     })
                 });
         if !route_matches {
@@ -1170,6 +1176,14 @@ impl RuntimeChatRelayHost {
 
 impl RuntimeChatPrompt {
     pub(crate) fn validate_shape(&self) -> Result<(), String> {
+        crate::image_attach::prepare_runtime_images(&self.images)
+            .map_err(|error| error.to_string())?;
+        if !self.images.is_empty() && self.model.trim().eq_ignore_ascii_case("auto") {
+            return Err(
+                "Image inputs require an exact named model; Auto is unavailable for images."
+                    .to_string(),
+            );
+        }
         if self.command_type != "prompt.request" {
             return Err("Codewhale sent an unsupported Runtime Chat command.".to_string());
         }
@@ -1857,6 +1871,7 @@ mod tests {
     #[test]
     fn chat_command_shape_requires_empty_tools_and_exact_chat_modes() {
         let mut prompt = RuntimeChatPrompt {
+            images: Vec::new(),
             command_type: "prompt.request".to_string(),
             run_id: "run_fixture".to_string(),
             turn_id: format!("local_turn_{}", "b".repeat(24)),
@@ -1905,6 +1920,7 @@ mod tests {
             .unwrap();
         host.authorize_run("run_fixture").unwrap();
         let prompt = RuntimeChatPrompt {
+            images: Vec::new(),
             command_type: "prompt.request".to_string(),
             run_id: "run_fixture".to_string(),
             turn_id: format!("local_turn_{}", "e".repeat(24)),
@@ -1970,6 +1986,7 @@ mod tests {
             .unwrap_or_else(|| provider.as_str())
             .to_string();
         let prompt = RuntimeChatPrompt {
+            images: Vec::new(),
             command_type: "prompt.request".to_string(),
             run_id: "run_fixture".to_string(),
             turn_id: format!("local_turn_{}", "8".repeat(24)),
@@ -2035,7 +2052,11 @@ mod tests {
         assert_eq!(catalog["providers"].as_array().unwrap().len(), 1);
         assert_eq!(
             catalog["providers"][0]["models"][0]["imageInput"],
-            "unsupported"
+            "unknown"
+        );
+        assert_eq!(
+            catalog["runtime"]["capabilities"]["turn_image_inputs"],
+            true
         );
         let serialized = catalog.to_string();
         assert!(!serialized.contains("must-not-cross"));
@@ -2481,5 +2502,32 @@ mod tests {
             .unwrap();
         assert!(!reopened.has_unsettled_authorized_turns());
         reopened.authorize_run("run_other").unwrap();
+    }
+    #[test]
+    fn runtime_image_relay_hash_preserves_text_and_binds_order() {
+        let legacy = json!({"type":"prompt.request","runId":"run_fixture","turnId":format!("local_turn_{}", "b".repeat(24)),"operationKey":"operation-1","runtimeBindingId":"binding_fixture","runtimeThreadId":format!("local_thread_{}", "a".repeat(24)),"prompt":"look","model":"deepseek-v4-flash-vision-exp","modelProvider":"deepseek","modelProviderId":"deepseek","allowedTools":[],"mode":"chat","requestedMode":"chat","workspace":{"id":"workspace_fixture","targetRef":"target_fixture"}});
+        let mut command: RuntimeChatPrompt = serde_json::from_value(legacy.clone()).unwrap();
+        command.validate_shape().unwrap();
+        let expected = hex_digest(Sha256::digest(
+            serde_json::to_vec(&canonical_json_value(&legacy)).unwrap(),
+        ));
+        assert_eq!(
+            runtime_chat_request_fingerprint(&command).unwrap(),
+            expected
+        );
+        let mut with_empty = legacy;
+        with_empty["images"] = json!([]);
+        let empty: RuntimeChatPrompt = serde_json::from_value(with_empty).unwrap();
+        assert_eq!(runtime_chat_request_fingerprint(&empty).unwrap(), expected);
+        command.images = vec![
+            crate::image_attach::tests::runtime_image_fixture(1),
+            crate::image_attach::tests::runtime_image_fixture(2),
+        ];
+        command.validate_shape().unwrap();
+        let first = runtime_chat_request_fingerprint(&command).unwrap();
+        command.images.reverse();
+        assert_ne!(runtime_chat_request_fingerprint(&command).unwrap(), first);
+        command.model = "auto".into();
+        assert!(command.validate_shape().is_err());
     }
 }

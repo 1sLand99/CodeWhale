@@ -490,7 +490,11 @@ fn sort_turn_items_by_start(items: &mut [TurnItemRecord]) {
 /// Bumped to 2 for v0.6.6 after live engine semantics changed. The persisted
 /// thread/turn/item records did not change shape, but a v1 reader on a v2
 /// session should still fail closed rather than silently mis-replay.
+// Text-only writes retain v2. Image-bearing records require v3 so an older
+// binary refuses recovery instead of silently dropping accepted attachments.
 const CURRENT_RUNTIME_SCHEMA_VERSION: u32 = 2;
+const IMAGE_RUNTIME_SCHEMA_VERSION: u32 = 3;
+const MAX_SUPPORTED_RUNTIME_SCHEMA_VERSION: u32 = IMAGE_RUNTIME_SCHEMA_VERSION;
 
 fn is_zero_u64(value: &u64) -> bool {
     *value == 0
@@ -1297,6 +1301,44 @@ pub struct TurnItemRecord {
     pub started_at: Option<DateTime<Utc>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ended_at: Option<DateTime<Utc>>,
+}
+
+impl TurnItemRecord {
+    fn set_image_content(&mut self, content: Vec<ContentBlock>) {
+        self.schema_version = IMAGE_RUNTIME_SCHEMA_VERSION;
+        let metadata = self.metadata.get_or_insert_with(|| json!({}));
+        metadata["runtime_image_content"] = json!(content);
+    }
+
+    fn user_content(&self) -> Result<Vec<ContentBlock>> {
+        if self.schema_version == IMAGE_RUNTIME_SCHEMA_VERSION
+            && self.kind == TurnItemKind::UserMessage
+        {
+            let content = self
+                .metadata
+                .as_ref()
+                .and_then(|meta| meta.get("runtime_image_content"))
+                .context("persisted image input is missing its content")?;
+            let blocks: Vec<ContentBlock> =
+                serde_json::from_value(content.clone()).context("invalid persisted image input")?;
+            crate::image_attach::validate_stored_image_content(&blocks)?;
+            if self.detail.as_deref().is_some_and(|text| !text.trim().is_empty())
+                && !blocks.iter().any(|block| matches!(block, ContentBlock::Text { text, .. } if !text.trim().is_empty()))
+            {
+                bail!("persisted image input is missing its prompt");
+            }
+            return Ok(blocks);
+        }
+        let text = self.detail.as_ref().unwrap_or(&self.summary);
+        Ok(if text.trim().is_empty() {
+            Vec::new()
+        } else {
+            vec![ContentBlock::Text {
+                text: text.clone(),
+                cache_control: None,
+            }]
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2118,11 +2160,11 @@ impl RuntimeThreadStore {
                 &path,
             )
         })?;
-        if record.schema_version > CURRENT_RUNTIME_SCHEMA_VERSION {
+        if record.schema_version > MAX_SUPPORTED_RUNTIME_SCHEMA_VERSION {
             bail!(
                 "Thread schema v{} is newer than supported v{}",
                 record.schema_version,
-                CURRENT_RUNTIME_SCHEMA_VERSION
+                MAX_SUPPORTED_RUNTIME_SCHEMA_VERSION
             );
         }
         Ok(record)
@@ -2146,11 +2188,11 @@ impl RuntimeThreadStore {
                 &path,
             )
         })?;
-        if record.schema_version > CURRENT_RUNTIME_SCHEMA_VERSION {
+        if record.schema_version > MAX_SUPPORTED_RUNTIME_SCHEMA_VERSION {
             bail!(
                 "Turn schema v{} is newer than supported v{}",
                 record.schema_version,
-                CURRENT_RUNTIME_SCHEMA_VERSION
+                MAX_SUPPORTED_RUNTIME_SCHEMA_VERSION
             );
         }
         Ok(record)
@@ -2174,12 +2216,17 @@ impl RuntimeThreadStore {
                 &path,
             )
         })?;
-        if record.schema_version > CURRENT_RUNTIME_SCHEMA_VERSION {
+        if record.schema_version > MAX_SUPPORTED_RUNTIME_SCHEMA_VERSION {
             bail!(
                 "Item schema v{} is newer than supported v{}",
                 record.schema_version,
-                CURRENT_RUNTIME_SCHEMA_VERSION
+                MAX_SUPPORTED_RUNTIME_SCHEMA_VERSION
             );
+        }
+        if record.schema_version == IMAGE_RUNTIME_SCHEMA_VERSION
+            && record.kind == TurnItemKind::UserMessage
+        {
+            record.user_content()?;
         }
         Ok(record)
     }
@@ -2199,11 +2246,11 @@ impl RuntimeThreadStore {
                 .with_context(|| format!("Failed to read {}", path.display()))?;
             let thread: ThreadRecord = serde_json::from_str(&raw)
                 .with_context(|| format!("Failed to parse {}", path.display()))?;
-            if thread.schema_version > CURRENT_RUNTIME_SCHEMA_VERSION {
+            if thread.schema_version > MAX_SUPPORTED_RUNTIME_SCHEMA_VERSION {
                 bail!(
                     "Thread schema v{} is newer than supported v{}",
                     thread.schema_version,
-                    CURRENT_RUNTIME_SCHEMA_VERSION
+                    MAX_SUPPORTED_RUNTIME_SCHEMA_VERSION
                 );
             }
             out.push(thread);
@@ -2240,11 +2287,11 @@ impl RuntimeThreadStore {
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let turn: TurnRecord = serde_json::from_str(&raw)
                 .with_context(|| format!("Failed to parse {}", path.display()))?;
-            if turn.schema_version > CURRENT_RUNTIME_SCHEMA_VERSION {
+            if turn.schema_version > MAX_SUPPORTED_RUNTIME_SCHEMA_VERSION {
                 bail!(
                     "Turn schema v{} is newer than supported v{}",
                     turn.schema_version,
-                    CURRENT_RUNTIME_SCHEMA_VERSION
+                    MAX_SUPPORTED_RUNTIME_SCHEMA_VERSION
                 );
             }
             out.push(turn);
@@ -2288,12 +2335,17 @@ impl RuntimeThreadStore {
                     &path,
                 )
             })?;
-            if item.schema_version > CURRENT_RUNTIME_SCHEMA_VERSION {
+            if item.schema_version > MAX_SUPPORTED_RUNTIME_SCHEMA_VERSION {
                 bail!(
                     "Item schema v{} is newer than supported v{}",
                     item.schema_version,
-                    CURRENT_RUNTIME_SCHEMA_VERSION
+                    MAX_SUPPORTED_RUNTIME_SCHEMA_VERSION
                 );
+            }
+            if item.schema_version == IMAGE_RUNTIME_SCHEMA_VERSION
+                && item.kind == TurnItemKind::UserMessage
+            {
+                item.user_content()?;
             }
             if item.turn_id == turn_id {
                 out.push(item);
@@ -2349,12 +2401,17 @@ impl RuntimeThreadStore {
                     &path,
                 )
             })?;
-            if item.schema_version > CURRENT_RUNTIME_SCHEMA_VERSION {
+            if item.schema_version > MAX_SUPPORTED_RUNTIME_SCHEMA_VERSION {
                 bail!(
                     "Item schema v{} is newer than supported v{}",
                     item.schema_version,
-                    CURRENT_RUNTIME_SCHEMA_VERSION
+                    MAX_SUPPORTED_RUNTIME_SCHEMA_VERSION
                 );
+            }
+            if item.schema_version == IMAGE_RUNTIME_SCHEMA_VERSION
+                && item.kind == TurnItemKind::UserMessage
+            {
+                item.user_content()?;
             }
             if wanted.contains(item.turn_id.as_str()) {
                 out.entry(item.turn_id.clone()).or_default().push(item);
@@ -2901,6 +2958,8 @@ pub struct UpdateThreadRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct StartTurnRequest {
     pub prompt: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<codewhale_protocol::runtime::RuntimeImageInput>,
     /// Optional caller-supplied idempotency key, scoped to this Runtime store
     /// and thread. The raw key is validated but never persisted.
     #[serde(default, alias = "operationKey")]
@@ -3018,8 +3077,9 @@ fn runtime_turn_request_fingerprint(
     trust_mode: bool,
     dynamic_tools: &[DynamicToolSpec],
     environment_id: Option<&str>,
+    images: &[codewhale_protocol::runtime::RuntimeImageInput],
 ) -> Result<String> {
-    let payload = json!({
+    let mut payload = json!({
         "version": 1,
         "thread_id": thread.id,
         "provider": thread.model_provider,
@@ -3039,6 +3099,10 @@ fn runtime_turn_request_fingerprint(
         "workspace": thread.workspace,
         "system_prompt": thread.system_prompt,
     });
+    // Preserve the exact historical text-only fingerprint payload.
+    if !images.is_empty() {
+        payload["images"] = json!(images);
+    }
     Ok(crate::hashing::sha256_hex(crate::client::canonical_json(
         &payload,
     )))
@@ -4051,6 +4115,7 @@ enum SeedItem {
 /// A turn being assembled from session messages.
 struct TurnSeed {
     user_text: String,
+    image_content: Vec<ContentBlock>,
     items: Vec<SeedItem>,
 }
 
@@ -5218,6 +5283,7 @@ impl RuntimeThreadManager {
     ) -> Result<TurnRecord> {
         let req = StartTurnRequest {
             prompt,
+            images: Vec::new(),
             operation_key: None,
             input_summary: Some(if continuation_index == 0 {
                 "goal kickoff".to_string()
@@ -5240,6 +5306,7 @@ impl RuntimeThreadManager {
             req,
             RuntimeTurnInputSource::GoalContinuation { continuation_index },
             None,
+            false,
         )
         .await
     }
@@ -5674,6 +5741,7 @@ impl RuntimeThreadManager {
                 thread_id,
                 StartTurnRequest {
                     prompt,
+                    images: Vec::new(),
                     operation_key: None,
                     input_summary: Some(input_summary),
                     model: None,
@@ -5692,6 +5760,7 @@ impl RuntimeThreadManager {
                     persisted_summary: claimed.summary.clone(),
                 },
                 None,
+                false,
             )
             .await;
 
@@ -7051,7 +7120,11 @@ impl RuntimeThreadManager {
         &self,
         id: &str,
         depth_from_tail: usize,
-    ) -> Result<(ThreadRecord, Option<String>)> {
+    ) -> Result<(
+        ThreadRecord,
+        Option<String>,
+        Vec<codewhale_protocol::runtime::RuntimeImageInput>,
+    )> {
         let source = self.get_thread(id).await?;
         let source_turns = self.store.list_turns_for_thread(&source.id)?;
 
@@ -7087,6 +7160,15 @@ impl RuntimeThreadManager {
             .iter()
             .find(|item| item.kind == TurnItemKind::UserMessage)
             .and_then(|item| item.detail.clone());
+        let original_images = target_items
+            .iter()
+            .find(|item| item.kind == TurnItemKind::UserMessage)
+            .map(|item| {
+                item.user_content()
+                    .and_then(|content| crate::image_attach::runtime_images_from_blocks(&content))
+            })
+            .transpose()?
+            .unwrap_or_default();
 
         // Copy turns strictly before `target_turn_idx` into a new thread.
         // Mirrors `fork_thread` but stops at the cutoff instead of copying
@@ -7166,7 +7248,7 @@ impl RuntimeThreadManager {
             }),
         )
         .await?;
-        Ok((forked, original_user_text))
+        Ok((forked, original_user_text, original_images))
     }
 
     /// Persist cloned records before publishing their thread. Until the final
@@ -7264,6 +7346,24 @@ impl RuntimeThreadManager {
                 "user" => {
                     let mut user_text = String::new();
                     let mut tool_results = Vec::new();
+                    let image_content: Vec<_> = if msg
+                        .content
+                        .iter()
+                        .any(|block| matches!(block, ContentBlock::ImageUrl { .. }))
+                    {
+                        msg.content
+                            .iter()
+                            .filter(|block| {
+                                matches!(
+                                    block,
+                                    ContentBlock::Text { .. } | ContentBlock::ImageUrl { .. }
+                                )
+                            })
+                            .cloned()
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
 
                     for block in &msg.content {
                         match block {
@@ -7292,7 +7392,7 @@ impl RuntimeThreadManager {
                         }
                     }
 
-                    if !user_text.is_empty() {
+                    if !user_text.is_empty() || !image_content.is_empty() {
                         // A real user prompt begins a new turn. Tool results
                         // without text belong to the preceding assistant turn.
                         if let Some(t) = current_turn.take() {
@@ -7300,11 +7400,13 @@ impl RuntimeThreadManager {
                         }
                         current_turn = Some(TurnSeed {
                             user_text,
+                            image_content,
                             items: tool_results,
                         });
                     } else if !tool_results.is_empty() {
                         let turn = current_turn.get_or_insert_with(|| TurnSeed {
                             user_text: String::new(),
+                            image_content: Vec::new(),
                             items: Vec::new(),
                         });
                         turn.items.extend(tool_results);
@@ -7314,6 +7416,7 @@ impl RuntimeThreadManager {
                         }
                         current_turn = Some(TurnSeed {
                             user_text: String::new(),
+                            image_content: Vec::new(),
                             items: Vec::new(),
                         });
                     }
@@ -7323,6 +7426,7 @@ impl RuntimeThreadManager {
                     // an assistant message), create a placeholder turn.
                     let turn = current_turn.get_or_insert_with(|| TurnSeed {
                         user_text: String::new(),
+                        image_content: Vec::new(),
                         items: Vec::new(),
                     });
                     for block in &msg.content {
@@ -7367,6 +7471,14 @@ impl RuntimeThreadManager {
             turns.push(t);
         }
 
+        // Validate the entire import before the first durable write. Saved local
+        // images keep their 5 MiB ceiling; no path or remote URL is dereferenced.
+        for turn_seed in &turns {
+            if !turn_seed.image_content.is_empty() {
+                crate::image_attach::validate_stored_image_content(&turn_seed.image_content)?;
+            }
+        }
+
         for turn_seed in turns {
             let turn_at = next_seed_stamp();
             let turn_id = format!("turn_{}", &Uuid::new_v4().to_string()[..8]);
@@ -7375,10 +7487,10 @@ impl RuntimeThreadManager {
             let mut item_ids = Vec::new();
 
             // Save user message item.
-            if !turn_seed.user_text.is_empty() {
+            if !turn_seed.user_text.is_empty() || !turn_seed.image_content.is_empty() {
                 let item_id = format!("item_{}", &Uuid::new_v4().to_string()[..8]);
                 let item_at = next_seed_stamp();
-                self.store.save_item(&TurnItemRecord {
+                let mut item = TurnItemRecord {
                     schema_version: CURRENT_RUNTIME_SCHEMA_VERSION,
                     id: item_id.clone(),
                     turn_id: turn_id.clone(),
@@ -7390,7 +7502,12 @@ impl RuntimeThreadManager {
                     artifact_refs: Vec::new(),
                     started_at: Some(item_at),
                     ended_at: Some(item_at),
-                })?;
+                };
+                if !turn_seed.image_content.is_empty() {
+                    item.set_image_content(turn_seed.image_content.clone());
+                    thread.schema_version = IMAGE_RUNTIME_SCHEMA_VERSION;
+                }
+                self.store.save_item(&item)?;
                 item_ids.push(item_id);
             }
 
@@ -7519,7 +7636,11 @@ impl RuntimeThreadManager {
             // Only create a turn if there's content.
             if !item_ids.is_empty() {
                 self.store.save_turn(&TurnRecord {
-                    schema_version: CURRENT_RUNTIME_SCHEMA_VERSION,
+                    schema_version: if turn_seed.image_content.is_empty() {
+                        CURRENT_RUNTIME_SCHEMA_VERSION
+                    } else {
+                        IMAGE_RUNTIME_SCHEMA_VERSION
+                    },
                     id: turn_id.clone(),
                     thread_id: thread_id.to_string(),
                     status: RuntimeTurnStatus::Completed,
@@ -8124,6 +8245,25 @@ impl RuntimeThreadManager {
             req,
             RuntimeTurnInputSource::ExternalUser,
             reserved_turn_id,
+            false,
+        )
+        .await
+    }
+
+    /// Retry only bytes recovered from validated durable history. This internal
+    /// entry point changes the historical byte ceiling, never model or policy
+    /// admission, and cannot be selected by a network request field.
+    pub(crate) async fn start_turn_from_stored_images(
+        &self,
+        thread_id: &str,
+        req: StartTurnRequest,
+    ) -> Result<TurnRecord> {
+        self.start_turn_with_source(
+            thread_id,
+            req,
+            RuntimeTurnInputSource::ExternalUser,
+            None,
+            true,
         )
         .await
     }
@@ -8134,6 +8274,7 @@ impl RuntimeThreadManager {
         req: StartTurnRequest,
         input_source: RuntimeTurnInputSource,
         reserved_turn_id: Option<&str>,
+        stored_image_bytes: bool,
     ) -> Result<TurnRecord> {
         // Heap-allocate the turn-start state machine. Its future holds two full
         // Config clones plus ThreadRecord/EngineHandle/TurnRecord/TurnItemRecord
@@ -8150,6 +8291,11 @@ impl RuntimeThreadManager {
         // engine handoff, so a completed reload is a hard boundary: no later
         // dispatch can carry its predecessor's URL, key, model, or policy.
         let _config_admission = self.config_admission.read().await;
+        let image_blocks = if stored_image_bytes {
+            crate::image_attach::prepare_stored_images(&req.images)?
+        } else {
+            crate::image_attach::prepare_runtime_images(&req.images)?
+        };
         let prompt = req.prompt.trim().to_string();
         if prompt.is_empty() {
             bail!("prompt is required");
@@ -8186,6 +8332,12 @@ impl RuntimeThreadManager {
         let mode = policy.mode;
         let requested_model = req.model.as_deref().unwrap_or(&thread.model).to_string();
         let auto_model = requested_model.trim().eq_ignore_ascii_case("auto");
+        if !image_blocks.is_empty() && (requested_model.is_empty() || requested_model.trim() != requested_model) {
+            bail!("image inputs require an exact nonempty named model");
+        }
+        if !image_blocks.is_empty() && auto_model {
+            bail!("image inputs require an exact named model with supported image input; Auto is unavailable for images");
+        }
         let cfg_snapshot = self.config.read().clone();
         let configured_reasoning_preference = cfg_snapshot
             .reasoning_effort()
@@ -8216,6 +8368,7 @@ impl RuntimeThreadManager {
                 trust_mode,
                 &req.dynamic_tools,
                 req.environment_id.as_deref(),
+                &req.images,
             )?;
             self.prepare_runtime_turn_operation(
                 thread_id,
@@ -8230,6 +8383,13 @@ impl RuntimeThreadManager {
             && let Some(original_turn) = self.replay_turn_for_operation(operation)?
         {
             return Ok(original_turn);
+        }
+        if !image_blocks.is_empty() {
+            let identity = self.provider_identity_for_thread(&cfg_snapshot, &thread)?;
+            let route = resolve_runtime_thread_route_for_identity(&cfg_snapshot, &identity, Some(&requested_model))?;
+            if route.candidate.capabilities().image_input != codewhale_config::route::CapabilityState::Supported {
+                bail!("image inputs require a model with explicitly supported image input");
+            }
         }
         let engine = self.ensure_engine_loaded(&thread).await?;
 
@@ -8425,7 +8585,7 @@ impl RuntimeThreadManager {
         // adding TurnComplete at settlement would count the same gap twice.
 
         let user_item_id = format!("item_{}", &Uuid::new_v4().to_string()[..8]);
-        let user_item = TurnItemRecord {
+        let mut user_item = TurnItemRecord {
             schema_version: CURRENT_RUNTIME_SCHEMA_VERSION,
             id: user_item_id.clone(),
             turn_id: turn_id.clone(),
@@ -8438,6 +8598,12 @@ impl RuntimeThreadManager {
             started_at: Some(now),
             ended_at: Some(now),
         };
+        if !image_blocks.is_empty() {
+            let mut content = vec![ContentBlock::Text { text: if cfg_snapshot.runtime_chat_isolated { crate::core::engine::sanitize_isolated_chat_attachments(prompt.clone()) } else { prompt.clone() }, cache_control: None }];
+            content.extend(image_blocks.iter().cloned());
+            user_item.set_image_content(content);
+            turn.schema_version = IMAGE_RUNTIME_SCHEMA_VERSION;
+        }
         turn.item_ids.push(user_item_id.clone());
 
         // Every turn carries the persisted goal alongside its message. The
@@ -8464,6 +8630,7 @@ impl RuntimeThreadManager {
 
         let op = Op::SendMessage {
             content: prompt,
+            images: req.images,
             mode,
             route: Box::new(route),
             compaction: Box::new(compaction),
@@ -8558,6 +8725,7 @@ impl RuntimeThreadManager {
                 }
                 self.store.save_item(&user_item)?;
                 self.store.save_turn(&turn)?;
+                current_thread.schema_version = current_thread.schema_version.max(turn.schema_version);
                 current_thread.latest_turn_id = Some(turn_id.clone());
                 current_thread.updated_at = now;
                 self.store.save_thread(&current_thread)
@@ -9479,13 +9647,7 @@ impl RuntimeThreadManager {
                 match item.kind {
                     TurnItemKind::UserMessage => {
                         flush_assistant(&mut assistant_blocks, &mut messages);
-                        let text = item.detail.unwrap_or(item.summary);
-                        if !text.trim().is_empty() {
-                            user_blocks.push(ContentBlock::Text {
-                                text,
-                                cache_control: None,
-                            });
-                        }
+                        user_blocks.extend(item.user_content()?);
                     }
                     TurnItemKind::AgentMessage => {
                         flush_user(&mut user_blocks, &mut messages);

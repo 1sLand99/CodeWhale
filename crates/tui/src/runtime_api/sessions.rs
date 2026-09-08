@@ -297,6 +297,19 @@ pub(super) async fn resume_session_thread(
         .load_session(&id)
         .map_err(|e| map_session_err(&id, e, "read"))?;
 
+    // Validate imported image bytes before allocating a Runtime thread. This
+    // retains local history's existing bounds; invalid content cannot leave an
+    // empty session, and no path or remote image reference is dereferenced.
+    for message in session
+        .messages
+        .iter()
+        .filter(|message| message.role == Role::User)
+    {
+        crate::image_attach::runtime_images_from_blocks(&message.content).map_err(|error| {
+            ApiError::bad_request(format!("Cannot restore session image: {error}"))
+        })?;
+    }
+
     let model = req.model.unwrap_or_else(|| session.metadata.model.clone());
     let mode = req.mode.unwrap_or_else(|| {
         session

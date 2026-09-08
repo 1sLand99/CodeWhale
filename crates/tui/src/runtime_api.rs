@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use async_stream::stream;
-use axum::extract::{ConnectInfo, Path, Query, Request, State};
+use axum::extract::{ConnectInfo, DefaultBodyLimit, Path, Query, Request, State};
 use axum::http::header;
 use axum::http::{HeaderName, HeaderValue, Method, StatusCode};
 use axum::middleware;
@@ -264,6 +264,8 @@ impl Default for RuntimeApiOptions {
 #[derive(Debug, Deserialize)]
 struct StreamTurnRequest {
     prompt: String,
+    #[serde(default)]
+    images: Vec<codewhale_protocol::runtime::RuntimeImageInput>,
     model: Option<String>,
     mode: Option<String>,
     permission_posture: Option<String>,
@@ -539,6 +541,7 @@ fn default_runtime_capabilities() -> RuntimeCapabilities {
         threads: true,
         turns: true,
         turn_operation_idempotency: true,
+        turn_image_inputs: true,
         turn_steer: true,
         turn_interrupt: true,
         event_replay: true,
@@ -1115,7 +1118,12 @@ pub fn build_router(state: RuntimeApiState) -> Router {
             "/v1/fleet/workers/{worker_id}/restart",
             post(restart_fleet_worker),
         )
-        .route("/v1/stream", post(stream_turn))
+        .route(
+            "/v1/stream",
+            post(stream_turn).layer(DefaultBodyLimit::max(
+                codewhale_protocol::runtime::MAX_RUNTIME_IMAGE_BODY_BYTES,
+            )),
+        )
         .route("/v1/threads", get(list_threads).post(create_thread))
         .route("/v1/threads/summary", get(list_threads_summary))
         .route("/v1/threads/{id}", get(get_thread).patch(update_thread))
@@ -1124,7 +1132,12 @@ pub fn build_router(state: RuntimeApiState) -> Router {
         .route("/v1/threads/{id}/undo", post(undo_thread_turn))
         .route("/v1/threads/{id}/patch-undo", post(patch_undo_thread_turn))
         .route("/v1/threads/{id}/retry", post(retry_thread_turn))
-        .route("/v1/threads/{id}/turns", post(start_thread_turn))
+        .route(
+            "/v1/threads/{id}/turns",
+            post(start_thread_turn).layer(DefaultBodyLimit::max(
+                codewhale_protocol::runtime::MAX_RUNTIME_IMAGE_BODY_BYTES,
+            )),
+        )
         .route(
             "/v1/threads/{id}/turns/{turn_id}/steer",
             post(steer_thread_turn),
@@ -4420,6 +4433,8 @@ struct UndoTurnResponse {
     /// The original user message text from the first dropped turn,
     /// so the GUI can pre-populate the input box.
     original_user_text: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    original_user_images: Vec<codewhale_protocol::runtime::RuntimeImageInput>,
 }
 
 async fn undo_thread_turn(
@@ -4428,7 +4443,7 @@ async fn undo_thread_turn(
     Json(req): Json<UndoTurnRequest>,
 ) -> Result<(StatusCode, Json<UndoTurnResponse>), ApiError> {
     let depth = req.depth.unwrap_or(0);
-    let (forked_thread, original_user_text) = state
+    let (forked_thread, original_user_text, original_user_images) = state
         .runtime_threads
         .fork_at_user_message(&id, depth)
         .await
@@ -4438,6 +4453,7 @@ async fn undo_thread_turn(
         Json(UndoTurnResponse {
             thread: forked_thread,
             original_user_text,
+            original_user_images,
         }),
     ))
 }
@@ -4462,6 +4478,8 @@ struct PatchUndoResponse {
     thread: ThreadRecord,
     /// The original user text from the removed turn (for re-editing).
     original_user_text: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    original_user_images: Vec<codewhale_protocol::runtime::RuntimeImageInput>,
 }
 
 async fn patch_undo_thread_turn(
@@ -4480,7 +4498,7 @@ async fn patch_undo_thread_turn(
     let patch_result = patch_undo_workspace_files(&thread.workspace, thread.session_id.as_deref());
 
     // Step 2: Remove the last conversation turn (undo_conversation).
-    let (forked_thread, original_user_text) = state
+    let (forked_thread, original_user_text, original_user_images) = state
         .runtime_threads
         .fork_at_user_message(&id, depth)
         .await
@@ -4492,6 +4510,7 @@ async fn patch_undo_thread_turn(
             patch_result,
             thread: forked_thread,
             original_user_text,
+            original_user_images,
         }),
     ))
 }
@@ -4611,7 +4630,7 @@ async fn retry_thread_turn(
     Json(req): Json<RetryTurnRequest>,
 ) -> Result<(StatusCode, Json<RetryTurnResponse>), ApiError> {
     let depth = req.depth.unwrap_or(0);
-    let (forked_thread, original_user_text) = state
+    let (forked_thread, original_user_text, original_user_images) = state
         .runtime_threads
         .fork_at_user_message(&id, depth)
         .await
@@ -4626,10 +4645,11 @@ async fn retry_thread_turn(
 
     let turn = state
         .runtime_threads
-        .start_turn(
+        .start_turn_from_stored_images(
             &forked_thread.id,
             StartTurnRequest {
                 prompt: retry_prompt,
+                images: original_user_images,
                 operation_key: None,
                 input_summary: None,
                 model: None,
@@ -5249,6 +5269,8 @@ async fn stream_turn(
         return Err(ApiError::bad_request("prompt is required"));
     }
 
+    crate::image_attach::prepare_runtime_images(&req.images).map_err(map_thread_err)?;
+
     let model = runtime_request_model(&state.config.read(), req.model.as_deref())?;
     let workspace = req
         .workspace
@@ -5292,12 +5314,13 @@ async fn stream_turn(
             .map_err(|_| ApiError::internal("Compatibility stream test hook dropped resume"))?;
     }
 
-    let turn = state
+    let turn_result = state
         .runtime_threads
         .start_turn(
             &thread.id,
             StartTurnRequest {
                 prompt,
+                images: req.images,
                 input_summary: None,
                 model: Some(model.clone()),
                 mode: Some(mode.clone()),
@@ -5308,8 +5331,20 @@ async fn stream_turn(
                 ..Default::default()
             },
         )
-        .await
-        .map_err(|e| ApiError::internal(format!("Failed to start stream turn: {e}")))?;
+        .await;
+    let turn = match turn_result {
+        Ok(turn) => turn,
+        Err(error) => {
+            // This helper refuses loaded threads and any thread owning a turn.
+            // A failed/uncertain handoff must remain recoverable; only an empty,
+            // never-loaded admission can be discarded.
+            if let Err(cleanup_error) = state.runtime_threads.discard_empty_thread(&thread.id).await
+            {
+                tracing::warn!(thread_id = %thread.id, %cleanup_error, "Retained stream thread after failed admission");
+            }
+            return Err(map_thread_err(error));
+        }
+    };
 
     // Subscribe before reading the durable replay. Events produced while the
     // replay is loaded then exist in at least one source, and the sequence
@@ -6045,6 +6080,8 @@ struct ProviderModelEntry {
 #[derive(Debug, Clone, Serialize)]
 struct ProviderModelsResponse {
     provider: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model_provider_id: Option<String>,
     models: Vec<ProviderModelEntry>,
     total: usize,
     #[serde(rename = "nextCursor", skip_serializing_if = "Option::is_none")]
@@ -6064,6 +6101,8 @@ struct ProviderModelsCursor {
     provider: String,
     filter: String,
     catalog_fingerprint: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    route_fingerprint: Option<String>,
     offset: usize,
 }
 
@@ -6119,6 +6158,7 @@ fn paginate_provider_models(
     provider: &str,
     mut models: Vec<ProviderModelEntry>,
     params: &ListProviderModelsParams,
+    route_fingerprint: Option<String>,
 ) -> Result<ProviderModelsResponse, ApiError> {
     let filter = normalized_provider_model_filter(params.filter.as_deref())?;
     let limit = params.limit.unwrap_or(DEFAULT_PROVIDER_MODELS_PAGE_SIZE);
@@ -6156,9 +6196,12 @@ fn paginate_provider_models(
         .collect::<String>();
     let start = if let Some(encoded) = params.cursor.as_deref() {
         let cursor = decode_provider_models_cursor(encoded)?;
-        if cursor.provider != provider || cursor.filter != filter {
+        if cursor.provider != provider
+            || cursor.filter != filter
+            || cursor.route_fingerprint != route_fingerprint
+        {
             return Err(ApiError::bad_request(
-                "Provider model cursor does not match this provider and filter",
+                "Provider model cursor does not match this provider, configured route, and filter",
             ));
         }
         if cursor.catalog_fingerprint != catalog_fingerprint {
@@ -6182,6 +6225,7 @@ fn paginate_provider_models(
             provider: provider.to_string(),
             filter,
             catalog_fingerprint,
+            route_fingerprint,
             offset: end,
         })?)
     } else {
@@ -6190,6 +6234,7 @@ fn paginate_provider_models(
 
     Ok(ProviderModelsResponse {
         provider: provider.to_string(),
+        model_provider_id: params.model_provider_id.clone(),
         models: page,
         total,
         next_cursor,
@@ -6401,6 +6446,7 @@ pub(crate) fn runtime_chat_relay_catalog(
                 "relay_chat_v1": true,
                 "isolated_chat_threads": true,
                 "turn_operation_idempotency": true,
+                "turn_image_inputs": true,
                 "tool_execution": false,
                 "stable_event_ids": true,
             },
@@ -6412,10 +6458,7 @@ pub(crate) fn runtime_chat_relay_catalog(
             "defaultModel": default_model,
             "credentialState": credential_state,
             "models": models.into_iter().map(|model| json!({
-                // Runtime Chat commands currently carry text only. Provider
-                // vision support is not relay capability truth until bounded
-                // image bytes are part of this protocol.
-                "imageInput": "unsupported",
+                "imageInput": provider_model_image_input_for_api(config, provider, &model),
                 "id": model,
             })).collect::<Vec<_>>(),
         }],
@@ -6457,8 +6500,11 @@ async fn list_providers(
     Ok(Json(ProvidersResponse { current, providers }))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 struct ListProviderModelsParams {
+    /// Exact configured provider identity; omission retains the legacy projection.
+    #[serde(default)]
+    model_provider_id: Option<String>,
     /// Optional case-insensitive substring filter applied before pagination.
     #[serde(default)]
     filter: Option<String>,
@@ -6475,8 +6521,7 @@ async fn list_provider_models(
     Path(id): Path<String>,
     Query(params): Query<ListProviderModelsParams>,
 ) -> Result<Json<ProviderModelsResponse>, ApiError> {
-    let config = state.config.read().clone();
-    let active_provider = config.api_provider();
+    let mut config = state.config.read().clone();
     let api_provider = ApiProvider::parse(&id)
         .ok_or_else(|| ApiError::bad_request(format!("Unknown provider id '{id}'")))?;
     // Reject requests for the legacy deepseek-cn alias that has no
@@ -6486,14 +6531,46 @@ async fn list_provider_models(
             "provider 'deepseek-cn' is a legacy alias; use 'deepseek' instead",
         ));
     }
-    let models = provider_models_for_api(&config, active_provider, api_provider)
+    let route_fingerprint = if let Some(exact_id) = params.model_provider_id.as_deref() {
+        if exact_id.is_empty()
+            || exact_id != exact_id.trim()
+            || exact_id.chars().any(char::is_control)
+        {
+            return Err(ApiError::bad_request(
+                "model_provider_id must be an exact configured identity",
+            ));
+        }
+        let identity = config
+            .resolve_persisted_provider_identity(Some(api_provider.as_str()), Some(exact_id))
+            .map_err(ApiError::bad_request)?;
+        if identity.provider != api_provider || identity.persisted_id() != Some(exact_id) {
+            return Err(ApiError::bad_request(
+                "model_provider_id does not match this provider route",
+            ));
+        }
+        config.scope_to_provider_identity(&identity);
+        // Do not expose the endpoint in an opaque cursor. Its hash binds even
+        // identical catalogs under distinct named routes or a changed base URL.
+        let route = serde_json::to_vec(&(
+            api_provider.as_str(),
+            exact_id,
+            config.base_url_for_route_identity(api_provider, &identity.key),
+        ))
+        .map_err(|error| {
+            ApiError::internal(format!("Could not fingerprint provider route: {error}"))
+        })?;
+        Some(crate::hashing::sha256_hex(route))
+    } else {
+        None
+    };
+    let models = provider_models_for_api(&config, config.api_provider(), api_provider)
         .into_iter()
         .map(|id| ProviderModelEntry {
             image_input: provider_model_image_input_for_api(&config, api_provider, &id),
             id,
         })
         .collect();
-    paginate_provider_models(api_provider.as_str(), models, &params).map(Json)
+    paginate_provider_models(api_provider.as_str(), models, &params, route_fingerprint).map(Json)
 }
 
 /// Request body for `POST /v1/providers/{id}/switch`.

@@ -359,6 +359,8 @@ pub enum ThreadRequest {
     Message {
         thread_id: String,
         input: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        images: Vec<runtime::RuntimeImageInput>,
     },
 }
 
@@ -462,6 +464,8 @@ pub struct PromptRequest {
     pub thread_id: Option<String>,
     /// The prompt text.
     pub prompt: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<runtime::RuntimeImageInput>,
     /// Model override, or the default if omitted.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
