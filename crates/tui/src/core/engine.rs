@@ -7647,12 +7647,13 @@ fn apply_patch_permission_paths(input: &Value) -> Vec<String> {
 pub fn spawn_engine(config: EngineConfig, api_config: &Config) -> EngineHandle {
     let (engine, handle) = Engine::new(config, api_config);
 
+    // Box the run future before supervision. An extra async wrapper embeds
+    // the large engine state again in both its own and the supervisor's poll
+    // frames, which can overflow an ordinary worker-thread stack.
     spawn_supervised(
         "engine-event-loop",
         std::panic::Location::caller(),
-        async move {
-            engine.run().await;
-        },
+        Box::pin(engine.run()),
     );
 
     handle
@@ -7671,9 +7672,7 @@ pub(crate) fn spawn_engine_with_authoritative_route_config(
     let worker = spawn_supervised(
         "engine-event-loop",
         std::panic::Location::caller(),
-        async move {
-            engine.run().await;
-        },
+        Box::pin(engine.run()),
     );
 
     (handle, worker)
