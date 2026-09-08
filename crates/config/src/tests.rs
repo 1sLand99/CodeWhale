@@ -9366,3 +9366,41 @@ fn telemetry_metadata_update_refuses_corrupt_or_busy_state_and_reloads_the_saved
     .unwrap();
     assert!(SetupState::load_from(&path).unwrap().telemetry_opted_out());
 }
+
+#[test]
+fn openrouter_vendor_config_round_trip_and_trust_boundary() -> Result<()> {
+    let key = "providers.openrouter.vendor";
+    let mut config = ConfigToml::default();
+    config.set_value(key, "deepinfra/turbo")?;
+    let serialized = toml::to_string(&config)?;
+    let mut reloaded: ConfigToml = toml::from_str(&serialized)?;
+    assert_eq!(reloaded.get_value(key).as_deref(), Some("deepinfra/turbo"));
+    assert_eq!(
+        reloaded.list_values().get(key).map(String::as_str),
+        Some("deepinfra/turbo")
+    );
+    // Repository config must not redirect a user-selected upstream vendor.
+    let mut project = ConfigToml::default();
+    project.providers.openrouter.vendor = Some("another-vendor".into());
+    reloaded.merge_project_overrides(project);
+    assert_eq!(reloaded.get_value(key).as_deref(), Some("deepinfra/turbo"));
+    for invalid in ["deep infra", "deepinfra\n/turbo", " deepinfra"] {
+        assert!(reloaded.set_value(key, invalid).is_err());
+    }
+    assert!(
+        reloaded
+            .set_value("providers.openai.vendor", "deepinfra")
+            .is_err()
+    );
+    assert!(
+        reloaded
+            .set_value("providers.my-gateway.vendor", "deepinfra")
+            .is_err()
+    );
+    reloaded.set_value(key, "")?;
+    let cleared: ConfigToml = toml::from_str(&toml::to_string(&reloaded)?)?;
+    assert_eq!(cleared.get_value(key).as_deref(), Some(""));
+    reloaded.unset_value(key)?;
+    assert_eq!(reloaded.get_value(key), None);
+    Ok(())
+}

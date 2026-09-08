@@ -1106,6 +1106,7 @@ fn active_turn_zai_receipt_overrides_all_mutable_parallel_route_metadata() {
                 "test-secret-never-persisted",
             )),
             billing: Some(crate::core::events::RouteBillingEnvelope {
+                openrouter_vendor: None,
                 billing_surface: None,
                 endpoint_fingerprint: None,
                 billing_mode: crate::cost_status::RouteBillingMode::Unknown,

@@ -624,6 +624,7 @@ max_subagents = 10 # optional (default 64, clamped to 1-128)
 
 # OpenRouter — multi-provider gateway (https://openrouter.ai)
 [providers.openrouter]
+# vendor = "deepinfra" # exact upstream slug; disables OpenRouter fallbacks
 # api_key = "YOUR_OPENROUTER_API_KEY"
 # base_url = "https://openrouter.ai/api/v1"
 # model = "deepseek/deepseek-v4-pro"

@@ -14017,3 +14017,39 @@ fn codewhale_route_without_a_key_fails_before_any_request() -> Result<()> {
     assert!(text.contains("cwc_key_..."), "{text}");
     Ok(())
 }
+
+#[test]
+fn openrouter_vendor_profile_override_clear_and_provider_boundary() {
+    let base: Config = toml::from_str(
+        r#"
+provider = "openrouter"
+[providers.openrouter]
+vendor = "deepinfra/turbo"
+"#,
+    )
+    .unwrap();
+    let unrelated: Config = toml::from_str(
+        r#"
+[providers.openrouter]
+model = "deepseek/deepseek-v4-pro"
+"#,
+    )
+    .unwrap();
+    let retained = merge_config(base.clone(), unrelated);
+    assert_eq!(
+        retained.openrouter_vendor().unwrap().as_deref(),
+        Some("deepinfra/turbo")
+    );
+    let clear: Config = toml::from_str("[providers.openrouter]\nvendor = \"\"\n").unwrap();
+    assert_eq!(
+        merge_config(base.clone(), clear)
+            .openrouter_vendor()
+            .unwrap(),
+        None
+    );
+    let mut switched = base;
+    switched.provider = Some("openai".into());
+    assert_eq!(switched.openrouter_vendor().unwrap(), None);
+    switched.provider_config_for_mut(ApiProvider::Openai).vendor = Some("deepinfra".into());
+    assert!(switched.openrouter_vendor().is_err());
+}

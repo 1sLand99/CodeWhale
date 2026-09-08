@@ -750,6 +750,13 @@ pub struct TurnRecord {
         serialize_with = "serialize_route_label_option"
     )]
     pub effective_provider_id: Option<String>,
+    /// Requested OpenRouter upstream frozen at dispatch, when pinned.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_route_label_option"
+    )]
+    pub effective_openrouter_vendor: Option<String>,
     /// Non-secret discriminator for routes whose provider/model pair spans
     /// different billing systems (for example StepFun PAYG vs Step Plan).
     #[serde(
@@ -827,6 +834,7 @@ impl TurnRecord {
         let route = route.sanitized_for_persistence();
         self.effective_provider = Some(route.provider.as_str().to_string());
         self.effective_provider_id = Some(route.provider_identity);
+        self.effective_openrouter_vendor = route.openrouter_vendor;
         self.effective_billing_surface = route.billing_surface;
         self.effective_endpoint_fingerprint = route.endpoint_fingerprint;
         self.effective_billing_mode = Some(route.billing_mode);
@@ -857,6 +865,7 @@ impl TurnRecord {
                 provider,
                 provider_identity,
                 model,
+                openrouter_vendor: self.effective_openrouter_vendor.clone(),
                 billing_surface: self.effective_billing_surface.clone(),
                 endpoint_fingerprint: self.effective_endpoint_fingerprint.clone(),
                 billing_mode: self
@@ -6993,6 +7002,7 @@ impl RuntimeThreadManager {
                     permission_posture: None,
                     effective_provider: None,
                     effective_provider_id: None,
+                    effective_openrouter_vendor: None,
                     effective_billing_surface: None,
                     effective_endpoint_fingerprint: None,
                     effective_billing_mode: None,
@@ -7811,6 +7821,7 @@ impl RuntimeThreadManager {
                 .exact_id
                 .as_deref()
                 .map(crate::cost_status::sanitize_persisted_route_label),
+            effective_openrouter_vendor: None,
             effective_billing_surface: None,
             effective_endpoint_fingerprint: None,
             effective_billing_mode: None,
@@ -8238,6 +8249,7 @@ impl RuntimeThreadManager {
                 .exact_id
                 .as_deref()
                 .map(crate::cost_status::sanitize_persisted_route_label),
+            effective_openrouter_vendor: None,
             effective_billing_surface: None,
             effective_endpoint_fingerprint: None,
             effective_billing_mode: None,

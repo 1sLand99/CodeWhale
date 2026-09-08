@@ -140,8 +140,41 @@ pub fn is_upstream_auth_header(name: &str) -> bool {
     is_sensitive_config_key(name) || name.eq_ignore_ascii_case("cookie")
 }
 
+/// Preserve OpenRouter endpoint slugs verbatim; an empty value clears a pin.
+/// The service owns the vendor catalog, so validation must not freeze one here.
+pub fn validate_openrouter_vendor(value: &str) -> Result<Option<&str>> {
+    if value.trim().is_empty() {
+        return Ok(None);
+    }
+    if value
+        .chars()
+        .any(|ch| ch.is_whitespace() || ch.is_control())
+    {
+        bail!(
+            "providers.openrouter.vendor must be an OpenRouter slug without whitespace or control characters"
+        );
+    }
+    Ok(Some(value))
+}
+
+/// Apply a validated pin to an OpenRouter request without dropping unrelated
+/// caller policies such as data collection or zero-data-retention constraints.
+pub fn apply_openrouter_vendor(body: &mut serde_json::Value, vendor: Option<&str>) {
+    if let Some(vendor) = vendor {
+        if !body["provider"].is_object() {
+            body["provider"] = serde_json::json!({});
+        }
+        body["provider"]["order"] = serde_json::json!([vendor]);
+        body["provider"]["allow_fallbacks"] = serde_json::json!(false);
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ProviderConfigToml {
+    /// OpenRouter upstream slug, including an optional endpoint variant.
+    /// Requests with a vendor pin disable OpenRouter's upstream fallbacks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vendor: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -210,6 +243,7 @@ impl ProviderConfigToml {
         let blank = |value: Option<&String>| value.is_none_or(|value| value.trim().is_empty());
 
         blank(self.api_key.as_ref())
+            && self.vendor.is_none()
             && blank(self.base_url.as_ref())
             && blank(self.model.as_ref())
             && self.context_window.is_none()
@@ -946,6 +980,7 @@ impl ConfigToml {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProviderConfigField {
+    Vendor,
     ApiKey,
     BaseUrl,
     Model,
@@ -962,6 +997,7 @@ enum ProviderConfigField {
 impl ProviderConfigField {
     fn parse(key: &str) -> Option<Self> {
         Some(match key {
+            "vendor" => Self::Vendor,
             "api_key" => Self::ApiKey,
             "base_url" => Self::BaseUrl,
             "model" => Self::Model,
@@ -979,6 +1015,7 @@ impl ProviderConfigField {
 
     fn key(self) -> &'static str {
         match self {
+            Self::Vendor => "vendor",
             Self::ApiKey => "api_key",
             Self::BaseUrl => "base_url",
             Self::Model => "model",
@@ -1040,6 +1077,7 @@ fn get_provider_config_value(
     field: ProviderConfigField,
 ) -> Option<String> {
     match field {
+        ProviderConfigField::Vendor => config.vendor.clone(),
         ProviderConfigField::ApiKey => config.api_key.clone(),
         ProviderConfigField::BaseUrl => config.base_url.clone(),
         ProviderConfigField::Model => config.model.clone(),
@@ -1091,6 +1129,13 @@ fn set_provider_config_value(
         bail!(LEGACY_ANTIGRAVITY_TOMBSTONE_MESSAGE);
     }
     match field {
+        ProviderConfigField::Vendor => {
+            if provider != ProviderKind::Openrouter {
+                bail!("vendor is only supported by providers.openrouter");
+            }
+            validate_openrouter_vendor(value)?;
+            config.providers.for_provider_mut(provider).vendor = Some(value.to_string());
+        }
         ProviderConfigField::ApiKey => {
             let value = value.to_string();
             config.providers.for_provider_mut(provider).api_key = Some(value.clone());
@@ -1157,6 +1202,9 @@ fn unset_provider_config_value(
     field: ProviderConfigField,
 ) {
     match field {
+        ProviderConfigField::Vendor => {
+            config.providers.for_provider_mut(provider).vendor = None;
+        }
         ProviderConfigField::ApiKey => {
             config.providers.for_provider_mut(provider).api_key = None;
             if provider == ProviderKind::Deepseek {
@@ -1220,6 +1268,12 @@ fn insert_provider_config_values(
     provider: ProviderKind,
     config: &ProviderConfigToml,
 ) {
+    if let Some(v) = config.vendor.as_ref() {
+        out.insert(
+            provider_config_key(provider, ProviderConfigField::Vendor),
+            v.clone(),
+        );
+    }
     if let Some(v) = config.api_key.as_ref() {
         out.insert(
             provider_config_key(provider, ProviderConfigField::ApiKey),
@@ -2773,6 +2827,9 @@ impl ConfigToml {
             );
         };
         let toml_value = match field {
+            ProviderConfigField::Vendor => {
+                bail!("vendor is only supported by providers.openrouter")
+            }
             ProviderConfigField::ApiKey
             | ProviderConfigField::BaseUrl
             | ProviderConfigField::Model

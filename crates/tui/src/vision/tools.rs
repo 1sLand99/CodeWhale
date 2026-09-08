@@ -183,6 +183,11 @@ impl ImageAnalyzeTool {
                 |client| client.effective_max_output_tokens(&self.config.model),
             );
         payload[token_limit_field] = json!(route_cap);
+        if let Some(client) = self.route_client.as_ref().filter(|client| {
+            client.base_url().trim_end_matches('/') == configured_base.trim_end_matches('/')
+        }) {
+            client.apply_provider_routing(&mut payload);
+        }
 
         payload
     }
@@ -433,6 +438,52 @@ mod tests {
             Some(standalone_vision_cap(&tool.config.model))
         );
         assert!(payload.get("max_tokens").is_none());
+    }
+
+    #[test]
+    fn vision_vendor_pin_requires_the_matching_bound_route() {
+        let _lock = crate::test_support::lock_test_env();
+        let base_url = "http://127.0.0.1:18080/v1";
+        let client = DeepSeekClient::new(&crate::config::Config {
+            provider: Some("openrouter".to_string()),
+            providers: Some(crate::config::ProvidersConfig {
+                openrouter: crate::config::ProviderConfig {
+                    api_key: Some("fixture-openrouter-key".to_string()),
+                    base_url: Some(base_url.to_string()),
+                    model: Some("fixture/vision".to_string()),
+                    vendor: Some("chutes/region-fixture".to_string()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+        .unwrap();
+        for (vision_base, matched_client, pinned) in [
+            (base_url, Some(client.clone()), true),
+            ("http://127.0.0.1:18081/v1", Some(client.clone()), false),
+            (base_url, None, false),
+        ] {
+            let tool = ImageAnalyzeTool::new_with_route_client(
+                VisionModelConfig {
+                    model: "fixture/vision".to_string(),
+                    api_key: Some("fixture-vision-key".to_string()),
+                    base_url: Some(vision_base.to_string()),
+                },
+                matched_client,
+            );
+            let body = tool.request_payload("describe", "abc123", "image/png");
+            if pinned {
+                assert_eq!(
+                    body["provider"],
+                    json!({
+                        "order": ["chutes/region-fixture"], "allow_fallbacks": false
+                    })
+                );
+            } else {
+                assert!(body.get("provider").is_none());
+            }
+        }
     }
 
     #[test]

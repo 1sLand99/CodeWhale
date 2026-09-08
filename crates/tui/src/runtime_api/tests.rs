@@ -447,6 +447,7 @@ fn messages_from_thread_detail_batches_tool_results() {
         permission_posture: Some("ask".to_string()),
         effective_provider: None,
         effective_provider_id: None,
+        effective_openrouter_vendor: None,
         effective_billing_surface: None,
         effective_endpoint_fingerprint: None,
         effective_billing_mode: None,
@@ -5555,6 +5556,7 @@ async fn session_save_merges_thread_cost_split_and_records_coverage() -> Result<
         permission_posture: None,
         effective_provider: None,
         effective_provider_id: None,
+        effective_openrouter_vendor: None,
         effective_billing_surface: None,
         effective_endpoint_fingerprint: None,
         effective_billing_mode: None,
@@ -5562,6 +5564,7 @@ async fn session_save_merges_thread_cost_split_and_records_coverage() -> Result<
         effective_model: None,
         routed_usage: vec![crate::cost_status::EffectiveRouteUsage {
             route: crate::cost_status::EffectiveRouteEnvelope {
+                openrouter_vendor: None,
                 provider: ApiProvider::Deepseek,
                 provider_identity: ApiProvider::Deepseek.as_str().to_string(),
                 model: "deepseek-v4-flash".to_string(),
@@ -5740,6 +5743,7 @@ async fn session_save_persists_parent_cny_unpriced_reasons_without_double_count(
         permission_posture: None,
         effective_provider: None,
         effective_provider_id: None,
+        effective_openrouter_vendor: None,
         effective_billing_surface: None,
         effective_endpoint_fingerprint: None,
         effective_billing_mode: None,
@@ -5747,6 +5751,7 @@ async fn session_save_persists_parent_cny_unpriced_reasons_without_double_count(
         effective_model: None,
         routed_usage: vec![crate::cost_status::EffectiveRouteUsage {
             route: crate::cost_status::EffectiveRouteEnvelope {
+                openrouter_vendor: None,
                 provider: ApiProvider::Deepseek,
                 provider_identity: ApiProvider::Deepseek.as_str().to_string(),
                 model: "deepseek-v4-flash".to_string(),
@@ -6739,6 +6744,7 @@ fn seed_summary_search_transcript(
             permission_posture: None,
             effective_provider: None,
             effective_provider_id: None,
+            effective_openrouter_vendor: None,
             effective_billing_surface: None,
             effective_endpoint_fingerprint: None,
             effective_billing_mode: None,
@@ -11402,5 +11408,54 @@ async fn stream_compat_mapping_forwards_runtime_store_failures() -> Result<()> {
     let text = String::from_utf8_lossy(&body);
     assert!(text.contains("event: runtime.store_failure"), "{text}");
     assert!(text.contains("/tmp/runtime/items/item_1.json"), "{text}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn reload_config_updates_openrouter_vendor_for_new_clients_only() -> Result<()> {
+    let _env = crate::test_support::lock_test_env();
+    let temp = tempfile::tempdir()?;
+    let config_file = temp.path().join("vendor-pin.toml");
+    fs::write(&config_file, "# initial\n")?;
+    let (addr, manager, handle) = spawn_test_server_with_config_path(config_file.clone())
+        .await?
+        .expect("local Runtime API must be available for reload regression");
+    let client = crate::tls::reqwest_client();
+    for vendor in ["deepinfra/turbo", "another-vendor/region", ""] {
+        fs::write(
+            &config_file,
+            format!(
+                r#"
+provider = "openrouter"
+[providers.openrouter]
+api_key = "vendor-reload-local-fixture"
+base_url = "https://openrouter.ai/api/v1"
+model = "deepseek/deepseek-v4-pro"
+vendor = "{vendor}"
+"#
+            ),
+        )?;
+        let old_config = manager.read_config().clone();
+        let old_vendor = old_config.openrouter_vendor()?;
+        let old_client = if old_config.api_provider() == crate::config::ApiProvider::Openrouter {
+            Some(crate::client::DeepSeekClient::new(&old_config)?)
+        } else {
+            None
+        };
+        let reload = client
+            .post(format!("http://{addr}/v1/config/reload"))
+            .send()
+            .await?;
+        assert_eq!(reload.status(), StatusCode::OK);
+        let fresh = crate::client::DeepSeekClient::new(&manager.read_config())?;
+        assert_eq!(
+            fresh.openrouter_vendor(),
+            (!vendor.is_empty()).then_some(vendor)
+        );
+        if let Some(old) = old_client {
+            assert_eq!(old.openrouter_vendor(), old_vendor.as_deref());
+        }
+    }
+    handle.abort();
     Ok(())
 }

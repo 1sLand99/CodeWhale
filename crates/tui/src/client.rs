@@ -271,6 +271,7 @@ pub struct DeepSeekClient {
     /// these route facts must travel with it instead of being reconstructed
     /// from the mutable parent session at completion time.
     provider_identity: String,
+    openrouter_vendor: Option<String>,
     billing_surface: Option<String>,
     billing_mode: crate::cost_status::RouteBillingMode,
     /// Non-secret limits frozen from the same resolved candidate as the
@@ -556,6 +557,7 @@ impl Clone for DeepSeekClient {
             base_url: self.base_url.clone(),
             api_provider: self.api_provider,
             provider_identity: self.provider_identity.clone(),
+            openrouter_vendor: self.openrouter_vendor.clone(),
             billing_surface: self.billing_surface.clone(),
             billing_mode: self.billing_mode,
             route_limits: self.route_limits,
@@ -580,6 +582,8 @@ impl Clone for DeepSeekClient {
 }
 
 const MIN_EXACT_SECRET_CHARS: usize = 8;
+
+pub(crate) use codewhale_config::apply_openrouter_vendor;
 
 fn push_model_bound_secret(values: &mut Vec<String>, value: Option<&str>) {
     let Some(value) = value
@@ -1198,6 +1202,7 @@ impl DeepSeekClient {
     ) -> Result<Self> {
         let api_provider = config.api_provider();
         let provider_identity = config.provider_identity_for(api_provider);
+        let openrouter_vendor = config.openrouter_vendor()?;
         let billing_surface = crate::route_billing::billing_surface_for_dispatch(
             Some(config),
             api_provider,
@@ -1317,6 +1322,7 @@ impl DeepSeekClient {
             base_url,
             api_provider,
             provider_identity,
+            openrouter_vendor,
             billing_surface,
             billing_mode,
             route_limits,
@@ -2095,12 +2101,13 @@ impl DeepSeekClient {
         match self.wire_format {
             WireFormat::ChatCompletions => {
                 let chat_shape_provider = self.chat_shape_provider(&request.model);
-                let wire = chat::build_chat_wire_body(
+                let mut wire = chat::build_chat_wire_body(
                     &request,
                     chat_shape_provider,
                     &self.base_url,
                     stream,
                 )?;
+                self.apply_provider_routing(&mut wire.body);
                 let url = chat_completions_url(
                     self.chat_transport_base_url(),
                     &self.base_url,
@@ -2186,6 +2193,14 @@ impl DeepSeekClient {
         }
     }
 
+    pub(crate) fn apply_provider_routing(&self, body: &mut Value) {
+        apply_openrouter_vendor(body, self.openrouter_vendor.as_deref());
+    }
+
+    pub(crate) fn openrouter_vendor(&self) -> Option<&str> {
+        self.openrouter_vendor.as_deref()
+    }
+
     /// Typed identity of the endpoint this client would POST to.
     ///
     /// `route_id` is left empty here on purpose: the client knows the provider
@@ -2269,6 +2284,7 @@ impl DeepSeekClient {
             &self.base_url,
             &self.api_key,
         )
+        .with_openrouter_vendor(self.openrouter_vendor.as_deref())
     }
 
     /// Capture the immutable, redacted route envelope for a request immediately
@@ -2284,6 +2300,7 @@ impl DeepSeekClient {
         let model =
             wire_model_for_provider_route(self.api_provider, &self.base_url, requested_model);
         crate::cost_status::EffectiveRouteEnvelope {
+            openrouter_vendor: self.openrouter_vendor.clone(),
             provider: self.api_provider,
             provider_identity: self.provider_identity.clone(),
             model,
@@ -2435,6 +2452,7 @@ impl DeepSeekClient {
             Some("off"),
         );
 
+        self.apply_provider_routing(&mut body);
         let response = self.send_json_with_retry(&url, &body).await?;
 
         let value: serde_json::Value = response.json().await?;
@@ -12039,5 +12057,157 @@ mod tests {
             "https://api.example.com/v1"
         );
         assert_eq!(route.candidate.wire_model_id().as_str(), "custom-model-v1");
+    }
+}
+
+#[cfg(test)]
+mod openrouter_vendor_tests {
+    use super::*;
+    use crate::config::{OPENROUTER_QWEN_3_6_FLASH_MODEL, ProviderConfig, ProvidersConfig};
+    use futures_util::StreamExt;
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+
+    fn config(base_url: &str, vendor: Option<&str>) -> Config {
+        Config {
+            provider: Some("openrouter".into()),
+            providers: Some(ProvidersConfig {
+                openrouter: ProviderConfig {
+                    api_key: Some("vendor-pin-local-fixture".into()),
+                    base_url: Some(base_url.into()),
+                    model: Some("deepseek/deepseek-v4-pro".into()),
+                    vendor: vendor.map(str::to_string),
+                    ..ProviderConfig::default()
+                },
+                ..ProvidersConfig::default()
+            }),
+            ..Config::default()
+        }
+    }
+
+    fn request() -> MessageRequest {
+        translation_message_request("hello", "deepseek/deepseek-v4-pro".into(), "English", 64)
+    }
+
+    #[tokio::test]
+    async fn openrouter_vendor_is_serialized_on_stream_blocking_and_translation_requests() {
+        let _env = crate::test_support::lock_test_env();
+        for streaming in [false, true] {
+            let server = MockServer::start().await;
+            let response = if streaming {
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string("data: [DONE]\n\n")
+            } else {
+                ResponseTemplate::new(200).set_body_json(json!({
+                    "id": "chatcmpl-vendor-pin", "object": "chat.completion",
+                    "model": "deepseek/deepseek-v4-pro",
+                    "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+                }))
+            };
+            Mock::given(method("POST"))
+                .respond_with(response)
+                .expect(if streaming { 1 } else { 2 })
+                .mount(&server)
+                .await;
+            let client =
+                DeepSeekClient::new(&config(&server.uri(), Some("deepinfra/turbo"))).unwrap();
+            let mut input = request();
+            input.stream = Some(streaming);
+            let preview = client
+                .prepare_outbound_request(input.clone(), streaming)
+                .unwrap();
+            if streaming {
+                let mut stream = client.create_message_stream(input).await.unwrap();
+                while let Some(event) = stream.next().await {
+                    event.unwrap();
+                }
+            } else {
+                client.create_message(input).await.unwrap();
+                assert_eq!(
+                    client
+                        .translate("hello", "deepseek/deepseek-v4-pro", "English")
+                        .await
+                        .unwrap(),
+                    "ok"
+                );
+            }
+            let captured = server.received_requests().await.unwrap();
+            for outbound in &captured {
+                let body: Value = serde_json::from_slice(&outbound.body).unwrap();
+                assert_eq!(
+                    body["provider"],
+                    json!({"order": ["deepinfra/turbo"], "allow_fallbacks": false})
+                );
+                assert_eq!(body["provider"], preview.body["provider"]);
+                assert_eq!(body["model"], "deepseek/deepseek-v4-pro");
+            }
+        }
+    }
+
+    #[test]
+    fn openrouter_vendor_freezes_rebinds_and_partitions_cached_requests() {
+        let _env = crate::test_support::lock_test_env();
+        let initial = config("https://openrouter.ai/api/v1", Some("deepinfra/turbo"));
+        let client = DeepSeekClient::new(&initial).unwrap();
+        let mut updated = initial.clone();
+        updated.providers.as_mut().unwrap().openrouter.vendor =
+            Some("another-vendor/region".into());
+        let fresh = DeepSeekClient::new(&updated).unwrap();
+        let rebound = client
+            .rebound_for_model_protocol(Some(&updated), OPENROUTER_QWEN_3_6_FLASH_MODEL)
+            .unwrap()
+            .unwrap();
+        assert_eq!(rebound.openrouter_vendor(), Some("deepinfra/turbo"));
+        assert_eq!(client.clone().openrouter_vendor(), Some("deepinfra/turbo"));
+        let key = |client: &DeepSeekClient| {
+            let body = client
+                .prepare_outbound_request(request(), false)
+                .unwrap()
+                .body;
+            crate::llm_response_cache::ResponseCache::make_key(
+                "openrouter",
+                &client.base_url,
+                None,
+                &client.api_key,
+                &serde_json::to_vec(&body).unwrap(),
+            )
+        };
+        assert_ne!(key(&client), key(&fresh));
+        updated.providers.as_mut().unwrap().openrouter.vendor = Some(String::new());
+        let cleared = DeepSeekClient::new(&updated).unwrap();
+        assert!(
+            cleared
+                .prepare_outbound_request(request(), false)
+                .unwrap()
+                .body
+                .get("provider")
+                .is_none()
+        );
+        assert_ne!(key(&fresh), key(&cleared));
+        assert_eq!(
+            client.turn_route_receipt("openrouter").openrouter_vendor(),
+            Some("deepinfra/turbo")
+        );
+        assert!(
+            DeepSeekClient::new(&config("https://openrouter.ai/api/v1", Some("bad vendor")))
+                .is_err()
+        );
+        updated.provider = Some("openai".into());
+        updated.providers.as_mut().unwrap().openai = ProviderConfig {
+            api_key: Some("other-provider-fixture".into()),
+            base_url: Some("https://openrouter.ai/api/v1".into()),
+            model: Some("deepseek/deepseek-v4-pro".into()),
+            ..ProviderConfig::default()
+        };
+        let other = DeepSeekClient::new(&updated).unwrap();
+        assert!(
+            other
+                .prepare_outbound_request(request(), false)
+                .unwrap()
+                .body
+                .get("provider")
+                .is_none()
+        );
     }
 }
