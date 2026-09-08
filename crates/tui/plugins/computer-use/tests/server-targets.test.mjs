@@ -215,6 +215,9 @@ test("element targets are revalidated; moved geometry re-aims and marks the rece
     assert.equal(r.target_reacquired, true);
     const last = calls("left_click").at(-1);
     assert.deepEqual({ x: last.args.target.x, y: last.args.target.y }, { x: 130, y: 215 }); // fresh center
+    assert.deepEqual(last.args.target.path, [0, 1], "pointer dispatch retains the original element path");
+    assert.equal(last.args.target.windowIndex, 0);
+    assert.equal(last.args.target.label, "OK");
   } finally {
     setControl(null);
   }
@@ -258,6 +261,20 @@ test("in-place replacement (same geometry, different label) fails element_stale"
   } finally {
     setControl(null);
   }
+});
+
+test("an element losing its label or role is stale even if the geometry matches", async () => {
+  const st = await freshState();
+  const before = calls("left_click").length;
+  try {
+    for (const identity of [{ role: "AXButton", label: "" }, { role: "AXButton" }, { label: "OK" }]) {
+      setControl({ found: true, element: { ...identity, position: { x: 10, y: 20 }, size: { w: 60, h: 30 } } });
+      const r = await tool("left_click", { target: { type: "element", state_id: st.state_id, index: 1 } });
+      assert.equal(r.ok, false);
+      assert.equal(r.error.code, "element_stale");
+    }
+    assert.equal(calls("left_click").length, before);
+  } finally { setControl(null); }
 });
 
 test("a state_id issued on another computer fails state_wrong_computer", async () => {

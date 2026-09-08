@@ -139,6 +139,13 @@ static NSDictionary *info(AXUIElementRef el, NSInteger index, NSInteger win, NSA
   else d[@"actions"]=@[];
   return d;
 }
+static void cuValidateElementIdentity(AXUIElementRef el, NSDictionary *target) {
+  NSDictionary *current=info(el,0,0,@[]);
+  for(NSString *key in @[@"role",@"label"]) {
+    id expected=target[key]?:NSNull.null, actual=current[key]?:NSNull.null;
+    if(![expected isEqual:actual]) @throw [NSException exceptionWithName:@"stale" reason:[NSString stringWithFormat:@"element changed %@; observe again before acting",key] userInfo:nil];
+  }
+}
 static void walk(AXUIElementRef el, NSInteger win, NSArray *path, NSInteger depth, NSInteger limit, NSInteger max, BOOL depthIsTruncation, NSMutableArray *out, BOOL *truncated) {
   // Breadth first keeps a long file listing from hiding its dialog buttons.
   NSMutableArray *queue=[NSMutableArray arrayWithObject:@{@"el":(__bridge id)el,@"path":path,@"depth":@(depth)}];
@@ -367,10 +374,14 @@ static id execute(NSDictionary *p) {
     return cuPostKey(args,[args[@"input_app_ref"][@"pid"] intValue]);
   }
   cuCheckCancelled();
-  if([tool isEqual:@"input_capabilities"]) return @{@"input_lease":@1,@"owner_pipe":@YES,@"record_owner_pipe":@1,@"window_ocr":@1};
+  if([tool isEqual:@"input_capabilities"]) return @{@"input_lease":@1,@"owner_pipe":@YES,@"record_owner_pipe":@1,@"window_ocr":@1,@"element_identity":@1};
   if([tool isEqual:@"record"]) return cuRecord(args);
   if([tool isEqual:@"recognize_text"]) return cuRecognizeText(args[@"file"]);
 #ifdef CU_TEST
+  if([tool isEqual:@"inspect_element_identity"]) {
+    cuValidateElementIdentity((__bridge AXUIElementRef)args[@"element"],args[@"target"]);
+    return @{@"identity_matches":@YES};
+  }
   if([tool isEqual:@"inspect_window_match"]) {
     NSDictionary *b=args[@"bounds"];
     CGRect bounds=CGRectMake([b[@"x"] doubleValue],[b[@"y"] doubleValue],[b[@"w"] doubleValue],[b[@"h"] doubleValue]);
@@ -699,6 +710,7 @@ static id execute(NSDictionary *p) {
       }
     }
     cuCheckCancelled();
+    if([t[@"type"] isEqual:@"element"]) cuValidateElementIdentity((__bridge AXUIElementRef)el,t);
     AXError e=kAXErrorFailure;
     if([tool isEqual:@"set_value"]) e=AXUIElementSetAttributeValue((__bridge AXUIElementRef)el,kAXValueAttribute,(__bridge CFTypeRef)args[@"value"]);
     else if([tool isEqual:@"select_text"]){ NSArray *r=args[@"text_range"]?:@[@0,@0]; if(r.count!=2 || [r[0] longValue]<0 || [r[1] longValue]<0) @throw [NSException exceptionWithName:@"range" reason:@"text_range must be [start, length], both nonnegative" userInfo:nil]; CFRange range=CFRangeMake([r[0] longValue],[r[1] longValue]); AXValueRef v=AXValueCreate(kAXValueCFRangeType,&range); e=AXUIElementSetAttributeValue((__bridge AXUIElementRef)el,kAXSelectedTextRangeAttribute,v); CFRelease(v); }

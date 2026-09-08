@@ -63,6 +63,14 @@ test('native summary keeps text and top-level menus without spending the UI budg
   assert.equal(full.elements.find(e=>e.label==='Command 149').windowIndex,-1);
   assert.deepEqual(full.elements.find(e=>e.label==='Command 149').path,[0,0,149]);
   assert.ok(full.elements.some(e=>e.label==='Field 349'));
+  const identity=(element,target)=>spawnSync(binary,[JSON.stringify({tool:'inspect_element_identity',args:{element,target}})],{encoding:'utf8'});
+  const target={role:'AXMenuItem',label:'Files'};
+  assert.equal(identity(node('AXMenuItem','Files'),target).status,0);
+  for(const element of [node('AXMenuItem','Delete'),node('AXButton','Files'),node('AXMenuItem','')]) {
+    const refused=identity(element,target);
+    assert.equal(refused.status,1);assert.match(refused.stderr,/element changed (role|label)/);
+  }
+  assert.equal(identity(node('AXMenuItem','Files'),{role:'AXMenuItem'}).status,1,'an unlabeled element replaced by a labeled one is stale too');
 });
 
 test('native Unicode encoding round-trips through the actual CoreGraphics event', {skip:process.platform!=='darwin'}, t=>{
@@ -192,6 +200,64 @@ function stubBackend(t, reply) {
 
 const PRESSABLE = { found: true, element: { role: 'AXButton', label: 'Tab B', actions: ['AXPress'] }, action: 'AXPress', action_sent: true };
 const NOT_PRESSABLE = { found: false, reason: 'no_pressable_element' };
+const FILES_TARGET = { type:'element', app_ref:{pid:321,bundle_id:'test.app'}, windowIndex:0, path:[0,4,2],
+  role:'AXMenuItem', label:'Files', x:1607, y:692 };
+
+test('macOS element click preserves the observed path despite an oversized frame center', async t => {
+  const {backend,calls}=stubBackend(t,r=>r.tool==='input_capabilities'?{input_lease:1,element_identity:1}:r.tool==='hit_test'?PRESSABLE:null);
+  await backend.open_application({name:'Fixture'});
+  const receipt=await backend.left_click({target:FILES_TARGET});
+  assert.equal(receipt.action_sent,true);
+  assert.equal(receipt.element.label,'Files');
+  assert.equal(receipt.verified,false);
+  assert.equal(receipt.verification_required,'screenshot');
+  const presses=calls.filter(r=>r.tool==='perform_action');
+  assert.equal(presses.length,1,'one dispatch, even when the app does not report a changed state');
+  assert.deepEqual(presses[0].args.target,FILES_TARGET);
+  assert.equal(presses[0].args.action,'AXPress');
+  assert.ok(!calls.some(r=>['hit_test','pointer_sequence','window_at_point'].includes(r.tool)),'the center never selects another control');
+});
+
+for(const reason of ['action is not advertised by this element','element changed label; observe again','window blocked by modal sheet'])
+test(`macOS element click does not fall back after ${reason}`, async t => {
+  const {backend,calls}=stubBackend(t,r=>r.tool==='input_capabilities'?{input_lease:1,element_identity:1}
+    :r.tool==='perform_action'?{nativeResult:{code:1,stdout:'',stderr:reason}}:null);
+  await backend.open_application({name:'Fixture'});
+  await assert.rejects(backend.left_click({target:FILES_TARGET,strategy:'a11y'}),error=>error.message.includes(reason)&&/fresh screenshot or OCR/.test(error.message));
+  assert.equal(calls.filter(r=>r.tool==='perform_action').length,1);
+  assert.ok(!calls.some(r=>['hit_test','pointer_sequence'].includes(r.tool)));
+});
+
+test('macOS ambiguous element press is never retried or converted to pointer input', async t => {
+  const {backend,calls}=stubBackend(t,r=>r.tool==='input_capabilities'?{input_lease:1,element_identity:1}
+    :r.tool==='perform_action'?{nativeResult:{code:null,spawned:true,timedOut:true,stdout:'',stderr:''}}:null);
+  await backend.open_application({name:'Fixture'});
+  await assert.rejects(backend.left_click({target:FILES_TARGET}),error=>error.inputMayHaveBeenSent===true&&/timed out/.test(error.message));
+  assert.equal(calls.filter(r=>r.tool==='perform_action').length,1);
+  assert.ok(!calls.some(r=>['hit_test','pointer_sequence'].includes(r.tool)));
+});
+
+test('macOS element clicks refuse missing identity, another bound app and an old helper before dispatch', async t => {
+  const {backend,calls}=stubBackend(t,()=>null);
+  await backend.open_application({name:'Fixture'});
+  await assert.rejects(backend.left_click({target:{...FILES_TARGET,path:undefined}}),/no resolved accessibility identity/);
+  await assert.rejects(backend.left_click({target:{...FILES_TARGET,app_ref:{pid:999}}}),/bound application/);
+  await assert.rejects(backend.left_click({target:FILES_TARGET}),/helper needs an update/);
+  assert.ok(!calls.some(r=>['perform_action','hit_test','pointer_sequence'].includes(r.tool)));
+});
+
+test('macOS explicit event selection remains usable and retains the app ownership guard', async t => {
+  let covered=false;
+  const {backend,calls}=stubBackend(t,r=>r.tool==='window_at_point'&&covered?{found:true,owner_pid:999,owner_name:'Mail'}:null);
+  await backend.open_application({name:'Fixture'});
+  assert.equal((await backend.left_click({target:FILES_TARGET,strategy:'event'})).strategy,'event');
+  const seq=calls.find(r=>r.tool==='pointer_sequence');
+  assert.deepEqual([seq.args.steps[1].x,seq.args.steps[1].y],[1607,692]);
+  covered=true;
+  await assert.rejects(backend.left_click({target:FILES_TARGET,strategy:'event'}),/covered by a window owned by Mail/);
+  assert.equal(calls.filter(r=>r.tool==='pointer_sequence').length,1);
+  assert.ok(!calls.some(r=>['perform_action','hit_test'].includes(r.tool)));
+});
 
 test('macOS refuses an old native helper before any held input is dispatched', async t => {
   const {backend,calls}=stubBackend(t,request=>request.tool==='input_capabilities'?{input_lease:0}:null);

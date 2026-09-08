@@ -74,7 +74,7 @@ export function create({ exec }) {
       if (r.aborted) error.code = "cancelled";
       // A deterministic native refusal sent no input. A killed/timed-out
       // helper may have posted the press before losing its response.
-      const postsPress = (tool === "key_event" && args.down) || (tool === "pointer_sequence" && args.steps?.some((step) => [1, 3, 25].includes(step.type)));
+      const postsPress = (tool === "key_event" && args.down) || (tool === "perform_action" && args.action === "AXPress") || (tool === "pointer_sequence" && args.steps?.some((step) => [1, 3, 25].includes(step.type)));
       error.inputMayHaveBeenSent = postsPress && r.spawned === true && (r.aborted || r.timedOut);
       throw error;
     }
@@ -528,7 +528,24 @@ export function create({ exec }) {
     },
     screenshot,
     zoom,
-    left_click: ({ target, strategy }) => pointerClick("left", target.x, target.y, 1, strategy ?? "auto"),
+    left_click: async ({ target, strategy = "auto" }) => {
+      if (target.type !== "element" || strategy === "event") return pointerClick("left", target.x, target.y, 1, strategy);
+      if (!["auto", "a11y"].includes(strategy)) throw new ExecError(`strategy must be auto, a11y or event (got ${JSON.stringify(strategy)})`);
+      try {
+        if (!state.inputApp || target.app_ref?.pid !== state.inputApp.pid) throw new ExecError("element does not belong to the bound application — open_application and observe again");
+        if (!Array.isArray(target.path) || !Number.isInteger(target.windowIndex) || !target.role) throw new ExecError("element has no resolved accessibility identity");
+        if ((await native("input_capabilities"))?.element_identity !== 1) throw new ExecError("native helper needs an update for element identity validation");
+        const receipt = await native("perform_action", { target, action: "AXPress" });
+        if (!receipt?.action_sent) throw new ExecError("element press was not acknowledged");
+        return { ...receipt, action: "AXPress", strategy: "a11y", pointer_moved: false,
+          element: { role: target.role, label: target.label ?? null }, verified: false, verification_required: "screenshot" };
+      } catch (error) {
+        // An AX frame can cover other controls. Never turn a refused or
+        // ambiguous element press into another element's press or a raw click.
+        error.message += ' — no coordinate fallback was sent; take a fresh screenshot or OCR observation before choosing a coordinate with strategy "event"';
+        throw error;
+      }
+    },
     double_click: ({ target }) => pointerClick("left", target.x, target.y, 2),
     triple_click: ({ target }) => pointerClick("left", target.x, target.y, 3),
     right_click: ({ target }) => pointerClick("right", target.x, target.y, 1),

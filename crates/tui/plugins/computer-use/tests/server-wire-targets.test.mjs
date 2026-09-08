@@ -109,7 +109,7 @@ test("out-of-process coordinate actions keep the raster refusals", async () => {
     "refusals never reach the backend; the valid click does");
 });
 
-test("element targets travel as a center for pointer tools and an AX path for semantic ones", async () => {
+test("element targets retain their identity and AX path on the out-of-process pointer route", async () => {
   const state = await tool("get_app_state", {});
   assert.equal(state.ok, true);
   assert.equal(state.detail, "summary");
@@ -122,6 +122,10 @@ test("element targets travel as a center for pointer tools and an AX path for se
   assert.equal(click.ok, true, JSON.stringify(click));
   const clicked = calls().filter((c) => c.method === "left_click").at(-1);
   assert.deepEqual({ x: clicked.args.target.x, y: clicked.args.target.y }, { x: 40, y: 35 }, "element center in points");
+  assert.deepEqual(clicked.args.target.path, [0, 1]);
+  assert.equal(clicked.args.target.windowIndex, 0);
+  assert.equal(clicked.args.target.role, "AXButton");
+  assert.equal(clicked.args.target.label, "OK");
 
   const pressed = await tool("perform_action", { target, action: "AXPress" });
   assert.equal(pressed.ok, true, JSON.stringify(pressed));

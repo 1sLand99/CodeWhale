@@ -103,14 +103,12 @@ async function normalizeTarget(computer, target, kind, resolve, sink) {
         throw new ServerError("element_stale", `element ${target.index} of ${target.state_id} no longer resolves (${res?.reason ?? "not_found"}) — call get_app_state again`);
       }
       fresh = res.element;
-      if (fresh.role && element.role && fresh.role !== element.role) {
+      if (fresh.role !== element.role) {
         throw new ServerError("element_stale", `element ${target.index} of ${target.state_id} changed role (${element.role} → ${fresh.role}) — call get_app_state again`);
       }
       // In-place replacement: same role and geometry but a different label is
       // still a different element (e.g. "Load" → "Confirm").
-      if (typeof fresh.label === "string" && fresh.label.length > 0 &&
-          typeof element.label === "string" && element.label.length > 0 &&
-          fresh.label !== element.label) {
+      if (fresh.label !== element.label) {
         throw new ServerError("element_stale", `element ${target.index} of ${target.state_id} changed label (${element.label} → ${fresh.label}) — call get_app_state again`);
       }
     }
@@ -127,9 +125,11 @@ async function normalizeTarget(computer, target, kind, resolve, sink) {
     const sz = fresh?.size ?? element.size;
     if (!pos || !sz) throw new ServerError("element_no_geometry", `element ${target.index} has no cached geometry — use a coordinate target`);
     if (moved && sink) sink.reacquired = true;
-    // Pointer tools on element targets: aim at the (fresh) element center.
+    // Keep the element identity as well as geometry: semantic clicks must not
+    // substitute whichever element happens to occupy an oversized AX center.
     const c = { x: Math.round(pos.x + sz.w / 2), y: Math.round(pos.y + sz.h / 2) };
-    return { ...c, strategy: "a11y-center", role: element.role, label: element.label, app_ref: state.app_ref, reacquired: moved };
+    return { ...c, strategy: "a11y-center", role: element.role, label: element.label, app_ref: state.app_ref,
+      windowIndex: element.windowIndex ?? 0, path: element.path, reacquired: moved };
   }
   throw new ServerError("bad_target", "target must be {type:'coordinate',x,y} or {type:'element',state_id,index}");
 }

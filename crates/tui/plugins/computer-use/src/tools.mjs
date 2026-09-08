@@ -8,7 +8,7 @@ const computerParam = {
 
 const strategyParam = {
   enum: ["auto", "a11y", "event"],
-  description: "How the point is dispatched. auto (default): macOS resolves the point against the bound application's accessibility tree first and performs the element's press action, falling back to a raw pointer event; other platforms always use raw events. a11y: require an accessibility press and fail closed otherwise. event: force the raw pointer event.",
+  description: "macOS auto (default): element targets press that exact revalidated element and fail closed, with no coordinate fallback; coordinate targets hit-test the point for an accessibility press, falling back to a guarded raw event. a11y: require an accessibility press and fail closed otherwise. event: force the guarded raw pointer event. Other platforms use raw events. action_sent confirms dispatch, not the effect; observe again before deciding another action.",
 };
 
 const targetSchema = {
