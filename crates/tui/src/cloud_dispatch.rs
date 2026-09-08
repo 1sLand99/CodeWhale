@@ -65,11 +65,9 @@ pub const SANDBOX_PRODUCT_VALUE: &str = "dispatch";
 pub const CLOUD_AGENT_TOKEN_ENV: &str = "CODEWHALE_API_KEY";
 /// Operator override for the cloud-agent snapshot name.
 pub const CLOUD_AGENT_SNAPSHOT_ENV: &str = "CODEWHALE_DISPATCH_SNAPSHOT";
-/// The Daytona snapshot every cloud agent launches from: built by
-/// `docs/cloud-agent-snapshot/Dockerfile` with the `codewhale` CLI
-/// preinstalled (founder decision 2026-08-29 — the sandbox ships Codewhale
-/// itself, so `codewhale exec` exists inside it and closes the self-hosting
-/// loop: dispatch → sandbox(own codewhale) → account identity → forge PR).
+/// Default Daytona snapshot name. The image definition is maintained in
+/// `computer/snapshots/cloud-agent/Dockerfile`; its pinned Engine version and
+/// credential/acceptance limitations are documented beside it.
 pub const DEFAULT_CLOUD_AGENT_SNAPSHOT: &str = "codewhale-cloud-agent";
 /// Active jobs older than this are stale. The declared harness budget for
 /// one cloud-agent turn is an hour (`HARNESS_TIMEOUT_SECS`), so an active

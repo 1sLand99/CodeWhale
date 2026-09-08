@@ -48,6 +48,8 @@ dist/
 *.log
 
 # Generated
+# Local design critiques and operator receipts do not ship with the product.
+/.impeccable/
 outputs/
 tmp/
 backup/
