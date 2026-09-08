@@ -218,7 +218,7 @@ fn post_image_path(rest: &str) -> Option<String> {
 /// Parse `@@ -a,b +c,d @@ optional context` into
 /// `(right_start, old_count, new_count)`. Counts may be omitted
 /// (`@@ -1 +1 @@` means one line on each side).
-fn parse_hunk_header(line: &str) -> Option<(u32, u32, u32)> {
+pub(super) fn parse_hunk_header(line: &str) -> Option<(u32, u32, u32)> {
     let rest = line.strip_prefix("@@ ")?;
     let end = rest.find(" @@")?;
     let ranges = &rest[..end];

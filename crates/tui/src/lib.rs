@@ -1264,7 +1264,7 @@ struct ReviewArgs {
     /// with "available from configured provider route(s): ...").
     #[arg(long)]
     provider: Option<String>,
-    /// Maximum diff characters to include
+    /// Maximum diff characters; an oversized PR is refused, never truncated
     #[arg(long, default_value_t = 200_000)]
     max_chars: usize,
     /// Write a durable pre-push review receipt after a successful review
@@ -8335,7 +8335,7 @@ async fn run_review(config: &Config, args: ReviewArgs) -> Result<()> {
         Some(number) => Some((number, run_gh_pr_view(number, args.repo.as_deref())?)),
         None => None,
     };
-    let diff = collect_diff(&args)?;
+    let diff = collect_diff(&args, pr_view.as_ref().map(|(_, view)| view))?;
     if diff.trim().is_empty() {
         bail!("No diff to review.");
     }
@@ -8402,9 +8402,19 @@ Provide findings ordered by severity with file references, then open questions, 
             output.push_str(&text);
         }
     }
-    let structured = pr_view
-        .as_ref()
-        .map(|_| crate::tools::review::ReviewOutput::from_str(&output));
+    let structured = pr_view.as_ref().map(|_| {
+        let mut review = crate::tools::review::ReviewOutput::from_str(&output);
+        review.note_binary_coverage(&diff);
+        review
+    });
+    if !review_incomplete && let Some((number, view)) = &pr_view {
+        crate::tools::review_pr::ensure_current(
+            *number,
+            args.repo.as_deref(),
+            &std::env::current_dir()?,
+            view,
+        )?;
+    }
     // A truncated review must not be posted or become a receipt. The partial
     // text is still printed for diagnostics below.
     if args.post && !review_incomplete {
@@ -8417,7 +8427,10 @@ Provide findings ordered by severity with file references, then open questions, 
         post_pr_review(*number, view, args.repo.as_deref(), review, &diff)?;
     }
     let receipt = if args.write_receipt && !review_incomplete {
-        let parsed_output = crate::tools::review::ReviewOutput::from_str(&output);
+        let mut parsed_output = crate::tools::review::ReviewOutput::from_str(&output);
+        if args.pr.is_some() {
+            parsed_output.note_binary_coverage(&diff);
+        }
         let receipt = crate::tools::review::build_review_receipt(
             review_target_label(&args),
             &diff,
@@ -8633,7 +8646,7 @@ async fn run_pr(
     }
 
     let view = run_gh_pr_view(number, repo)?;
-    let diff = run_gh_pr_diff(number, repo)?;
+    let diff = run_gh_pr_diff(number, repo, &view)?;
 
     if checkout {
         match run_gh_pr_checkout(number, repo) {
@@ -8697,69 +8710,14 @@ fn is_command_available(name: &str) -> bool {
     false
 }
 
-#[derive(Debug, Clone, Default)]
-struct GhPullRequest {
-    title: String,
-    body: String,
-    base: String,
-    head: String,
-    url: String,
-    /// Head commit SHA (`headRefOid`). Anchors posted review comments to the
-    /// exact revision that was reviewed.
-    head_sha: String,
-}
+use crate::tools::review_pr::GhPullRequest;
 
 fn run_gh_pr_view(number: u32, repo: Option<&str>) -> Result<GhPullRequest> {
-    let mut cmd = crate::dependencies::Gh::command()
-        .ok_or_else(|| anyhow::anyhow!("gh not found on PATH"))?;
-    cmd.arg("pr").arg("view").arg(number.to_string());
-    if let Some(r) = repo {
-        cmd.arg("--repo").arg(r);
-    }
-    cmd.arg("--json")
-        .arg("title,body,baseRefName,headRefName,url,headRefOid");
-    let output = cmd
-        .output()
-        .map_err(|e| anyhow::anyhow!("Failed to run `gh pr view`: {e}"))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        bail!("gh pr view #{number} failed: {stderr}");
-    }
-    let raw = String::from_utf8_lossy(&output.stdout).to_string();
-    let value: serde_json::Value = serde_json::from_str(&raw)
-        .map_err(|e| anyhow::anyhow!("gh pr view returned non-JSON output: {e}"))?;
-    let pick = |key: &str| {
-        value
-            .get(key)
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default()
-            .to_string()
-    };
-    Ok(GhPullRequest {
-        title: pick("title"),
-        body: pick("body"),
-        base: pick("baseRefName"),
-        head: pick("headRefName"),
-        url: pick("url"),
-        head_sha: pick("headRefOid"),
-    })
+    crate::tools::review_pr::fetch_view(number, repo, &std::env::current_dir()?)
 }
 
-fn run_gh_pr_diff(number: u32, repo: Option<&str>) -> Result<String> {
-    let mut cmd = crate::dependencies::Gh::command()
-        .ok_or_else(|| anyhow::anyhow!("gh not found on PATH"))?;
-    cmd.arg("pr").arg("diff").arg(number.to_string());
-    if let Some(r) = repo {
-        cmd.arg("--repo").arg(r);
-    }
-    let output = cmd
-        .output()
-        .map_err(|e| anyhow::anyhow!("Failed to run `gh pr diff`: {e}"))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        bail!("gh pr diff #{number} failed: {stderr}");
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+fn run_gh_pr_diff(number: u32, repo: Option<&str>, view: &GhPullRequest) -> Result<String> {
+    crate::tools::review_pr::fetch_diff(number, repo, &std::env::current_dir()?, view)
 }
 
 fn run_gh_pr_checkout(number: u32, repo: Option<&str>) -> Result<()> {
@@ -9236,6 +9194,7 @@ fn post_pr_review(
     review: &crate::tools::review::ReviewOutput,
     diff: &str,
 ) -> Result<()> {
+    crate::tools::review_pr::ensure_current(number, repo, &std::env::current_dir()?, view)?;
     let repo_name = match repo.map(str::trim).filter(|repo| !repo.is_empty()) {
         Some(repo) => repo.to_string(),
         None => run_gh_repo_name()?,
@@ -9261,30 +9220,16 @@ fn post_pr_review(
             "warning: {} inline review comment(s) rejected ({err}); retrying summary-only",
             inline.len()
         );
+        crate::tools::review_pr::ensure_current(number, repo, &std::env::current_dir()?, view)?;
         run_gh_post_pr_review(&repo_name, number, &body, &view.head_sha, &[])?;
     }
     Ok(())
 }
 
-/// Format the PR review prompt that lands in the composer. Caps the
-/// diff at 200 KiB so a massive PR doesn't blow the model's context
-/// window before the user even hits Enter — they can always ask the
-/// model to fetch more via `gh pr diff #N` from inside the session.
+/// Both the CLI review and interactive composer receive the complete diff.
+/// Collection and review-budget checks must fail before any partial review.
 fn format_pr_prompt(number: u32, view: &GhPullRequest, diff: &str) -> String {
-    const MAX_DIFF_BYTES: usize = 200 * 1024;
-    let diff_section = if diff.len() > MAX_DIFF_BYTES {
-        let cut = (0..=MAX_DIFF_BYTES)
-            .rev()
-            .find(|&i| diff.is_char_boundary(i))
-            .unwrap_or(0);
-        format!(
-            "{}\n\n[…diff truncated at {} KiB; ask me to fetch more if needed]\n",
-            &diff[..cut],
-            MAX_DIFF_BYTES / 1024
-        )
-    } else {
-        diff.to_string()
-    };
+    let diff_section = diff;
     let body = if view.body.trim().is_empty() {
         "(no description)".to_string()
     } else {
@@ -9306,6 +9251,8 @@ fn format_pr_prompt(number: u32, view: &GhPullRequest, diff: &str) -> String {
          \n\
          URL: {url}\n\
          Branches: {branches}\n\
+         Revision: {head_sha} (base {base_sha}); {changed_files} file patches.\n\
+         Binary patches contain Git binary data, not a semantic inspection of their contents. Do not claim binary contents were inspected.\n\
          \n\
          ## Description\n\
          \n\
@@ -9316,6 +9263,9 @@ fn format_pr_prompt(number: u32, view: &GhPullRequest, diff: &str) -> String {
          ```diff\n\
          {diff_section}\n\
          ```\n",
+        head_sha = view.head_sha,
+        base_sha = view.base_sha,
+        changed_files = view.changed_files,
         url = if view.url.is_empty() {
             "(unavailable)"
         } else {
@@ -9324,9 +9274,13 @@ fn format_pr_prompt(number: u32, view: &GhPullRequest, diff: &str) -> String {
     )
 }
 
-fn collect_diff(args: &ReviewArgs) -> Result<String> {
+fn collect_diff(args: &ReviewArgs, pr_view: Option<&GhPullRequest>) -> Result<String> {
     let mut diff = if let Some(number) = args.pr {
-        run_gh_pr_diff(number, args.repo.as_deref())?
+        run_gh_pr_diff(
+            number,
+            args.repo.as_deref(),
+            pr_view.context("PR snapshot is required")?,
+        )?
     } else {
         let mut cmd = crate::dependencies::Git::command()
             .ok_or_else(|| anyhow::anyhow!("git not found on PATH"))?;
@@ -9350,7 +9304,9 @@ fn collect_diff(args: &ReviewArgs) -> Result<String> {
         }
         String::from_utf8_lossy(&output.stdout).to_string()
     };
-    if diff.len() > args.max_chars {
+    if args.pr.is_some() {
+        crate::tools::review_pr::ensure_input_fits(&diff, args.max_chars)?;
+    } else if diff.len() > args.max_chars {
         diff = crate::utils::truncate_with_ellipsis(&diff, args.max_chars, "\n...[truncated]\n");
     }
     Ok(diff)
@@ -16013,6 +15969,25 @@ api_key = "test-only-key"
     }
 
     #[test]
+    fn pr_prompt_preserves_the_last_patch_beyond_the_old_200kib_cutoff() {
+        let diff = format!(
+            "{}\ndiff --git a/last.rs b/last.rs\n+LAST_PATCH\n",
+            "x".repeat(210 * 1024)
+        );
+        let view = GhPullRequest {
+            head_sha: "b".repeat(40),
+            base_sha: "a".repeat(40),
+            changed_files: 301,
+            ..Default::default()
+        };
+        let prompt = format_pr_prompt(6002, &view, &diff);
+        assert!(prompt.contains(&diff));
+        assert!(prompt.contains("+LAST_PATCH"));
+        assert!(prompt.contains(&view.head_sha));
+        assert!(!prompt.contains("diff truncated"));
+    }
+
+    #[test]
     fn pr_review_markdown_shows_the_computed_replacement() {
         // A plain `codewhale review --pr` (no --post) computes and validates
         // the literal fix; the local report must show it, not just the prose.
@@ -16023,6 +15998,7 @@ api_key = "test-only-key"
             head: "feature".to_string(),
             url: "https://example.invalid/pr/1".to_string(),
             head_sha: "abc123".to_string(),
+            ..Default::default()
         };
         let mut single = review_suggestion(
             Some("crates/tui/src/lib.rs"),
