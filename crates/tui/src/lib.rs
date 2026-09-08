@@ -3285,7 +3285,8 @@ async fn run_fleet_command(workspace: &Path, config: &Config, args: FleetArgs) -
             println!(
                 "manager loop running; use `codewhale fleet status`, `inspect`, `interrupt`, or `stop --all` from another terminal."
             );
-            let mut executor = FleetExecutor::new(workspace);
+            let mut executor = FleetExecutor::new(workspace)
+                .with_sessions_dir(session_manager::default_sessions_dir()?);
             let codewhale_binary = fleet::executor::configured_codewhale_binary();
             let status = manager
                 .run_to_completion(
@@ -3346,7 +3347,8 @@ async fn run_fleet_command(workspace: &Path, config: &Config, args: FleetArgs) -
                 "manager loop running for restarted run {}; use `codewhale fleet status`, `inspect`, `interrupt`, or `stop --all` from another terminal.",
                 report.run_id.0
             );
-            let mut executor = FleetExecutor::new(workspace);
+            let mut executor = FleetExecutor::new(workspace)
+                .with_sessions_dir(session_manager::default_sessions_dir()?);
             let codewhale_binary = fleet::executor::configured_codewhale_binary();
             let status = manager
                 .run_to_completion(
@@ -11397,7 +11399,13 @@ struct ExecStreamMeta {
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_catalog_sha256: Option<String>,
     input_analysis: ExecStreamInputAnalysis,
+    /// Real character count of the visible final answer, before any bound.
     visible_final_answer_chars: usize,
+    /// Bounded, secret-redacted excerpt of the visible final answer (see
+    /// [`exec_stream_final_answer_excerpt`]). Omitted when the run produced
+    /// no visible answer.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    visible_final_answer_excerpt: String,
     session_id: String,
     resume_command: String,
     workspace: String,
@@ -11498,7 +11506,17 @@ enum ExecStreamEvent {
         event: serde_json::Value,
     },
     #[serde(rename = "session_capture")]
-    SessionCapture { content: String },
+    SessionCapture {
+        /// Redacted fingerprint for logs/forensics, the same value the
+        /// terminal `metadata.session_id` carries; never the recoverable id.
+        content: String,
+        /// The real saved-session id a caller can resolve via
+        /// `GET /v1/sessions/{id}` to read the worker's full transcript. This
+        /// is the only place the exec stream carries the raw id: `metadata`
+        /// stays fingerprint-only so a captured terminal receipt is safe to
+        /// log on its own.
+        saved_session_id: String,
+    },
     #[serde(rename = "service_released")]
     #[cfg(unix)]
     ServiceReleased {
@@ -11806,6 +11824,7 @@ async fn run_workflow_tool_command_inner(
             tool_catalog_sha256: None,
             input_analysis: ExecStreamInputAnalysis::default(),
             visible_final_answer_chars: result.content.chars().count(),
+            visible_final_answer_excerpt: exec_stream_final_answer_excerpt(&result.content),
             session_id: String::new(),
             resume_command: String::new(),
             workspace: workspace.display().to_string(),
@@ -12220,11 +12239,74 @@ fn exec_stream_session_ref(session_id: &str) -> String {
     crate::utils::redacted_identifier_for_log(session_id)
 }
 
+/// Resume hint for the terminal `metadata` receipt. `metadata` carries only
+/// the session fingerprint, so the hint names the `session_capture` field
+/// that holds the recoverable id instead of pretending to redact one.
 fn exec_stream_resume_hint(session_id: &str) -> String {
     if session_id.trim().is_empty() {
         String::new()
     } else {
-        "codewhale exec --resume <redacted-session-id>".to_string()
+        "codewhale exec --resume <session_capture.saved_session_id>".to_string()
+    }
+}
+
+/// Character bound for `metadata.visible_final_answer_excerpt`. The excerpt
+/// is a status surface (fleet receipts, event labels, runtime API payloads),
+/// not the transcript: the full answer lives in the saved session and the
+/// worker's stream-json log, and `visible_final_answer_chars` carries the real
+/// length so a consumer can tell a bounded excerpt from a short answer.
+const EXEC_STREAM_FINAL_ANSWER_EXCERPT_CHARS: usize = 4_000;
+
+/// The final visible assistant reply for the terminal receipt: the text
+/// blocks of the last assistant-like message after the current user prompt.
+/// Tool results also use the user role, so they must not start a new turn.
+/// A resumed session can be synchronized before its new prompt is accepted;
+/// without current output its old answer must never become a new deliverable.
+fn exec_stream_final_answer_text(
+    messages: &[Message],
+    current_turn_has_output: bool,
+) -> Option<String> {
+    if !current_turn_has_output {
+        return None;
+    }
+    let turn_start = messages.iter().rposition(|message| {
+        message.role == Role::User
+            && !message
+                .content
+                .iter()
+                .any(|block| matches!(block, ContentBlock::ToolResult { .. }))
+    })?;
+    let text = messages
+        .iter()
+        .skip(turn_start + 1)
+        .rev()
+        .find(|message| message.role.is_assistant_like())?
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string();
+    (!text.is_empty()).then_some(text)
+}
+
+/// Bound and secret-redact the visible final answer once, at the emitter, so
+/// every downstream consumer reads the same excerpt.
+fn exec_stream_final_answer_excerpt(output: &str) -> String {
+    let redacted = codewhale_config::persistence::redact_secrets(output.trim());
+    let mut chars = redacted.chars();
+    let excerpt: String = chars
+        .by_ref()
+        .take(EXEC_STREAM_FINAL_ANSWER_EXCERPT_CHARS)
+        .collect();
+    if chars.next().is_some() {
+        format!("{excerpt}...")
+    } else {
+        excerpt
     }
 }
 
@@ -12242,9 +12324,16 @@ fn persist_exec_session(
     system_prompt: &Option<SystemPrompt>,
     session_id: Option<&str>,
     total_tokens: u64,
+    session_manager: Option<&SessionManager>,
 ) -> Result<String> {
-    let manager =
-        SessionManager::default_location().context("could not open session manager for save")?;
+    let default_manager;
+    let manager = if let Some(manager) = session_manager {
+        manager
+    } else {
+        default_manager = SessionManager::default_location()
+            .context("could not open session manager for save")?;
+        &default_manager
+    };
     let mut saved = if let Some(id) = session_id.filter(|id| !id.trim().is_empty()) {
         match manager.load_session(id) {
             Ok(existing) => session_manager::update_session(
@@ -17063,6 +17152,7 @@ api_key = "test-only-key"
             (
                 ExecStreamEvent::SessionCapture {
                     content: "x".to_string(),
+                    saved_session_id: "session-x".to_string(),
                 },
                 "session_capture",
             ),
@@ -17198,6 +17288,7 @@ api_key = "test-only-key"
                 tool_catalog_sha256: Some("sha256:tools".to_string()),
                 input_analysis: ExecStreamInputAnalysis::default(),
                 visible_final_answer_chars: 17,
+                visible_final_answer_excerpt: "the visible reply".to_string(),
                 session_id: exec_stream_session_ref(raw_session_id),
                 resume_command: exec_stream_resume_hint(raw_session_id),
                 workspace: "/tmp/work".to_string(),
@@ -17223,21 +17314,171 @@ api_key = "test-only-key"
         );
         assert_eq!(
             parsed["meta"]["resume_command"],
-            "codewhale exec --resume <redacted-session-id>"
+            "codewhale exec --resume <session_capture.saved_session_id>"
         );
         assert_eq!(parsed["meta"]["workspace"], "/tmp/work");
         assert_eq!(parsed["meta"]["message_count"], 4);
         assert_eq!(parsed["meta"]["visible_final_answer_chars"], 17);
+        assert_eq!(
+            parsed["meta"]["visible_final_answer_excerpt"],
+            "the visible reply"
+        );
 
+        // Contract (#5946): the raw saved-session id is carried by exactly one
+        // field, `session_capture.saved_session_id`. The `metadata` receipt
+        // above stays fingerprint-only, and the capture's own `content` keeps
+        // the same fingerprint so both surfaces can be correlated in a log.
         let capture = ExecStreamEvent::SessionCapture {
             content: exec_stream_session_ref(raw_session_id),
+            saved_session_id: raw_session_id.to_string(),
         };
         let capture_json = serde_json::to_string(&capture).expect("serializes");
-        assert!(!capture_json.contains(raw_session_id));
         let parsed_capture: serde_json::Value =
             serde_json::from_str(&capture_json).expect("valid json");
         assert_eq!(parsed_capture["type"], "session_capture");
+        assert_eq!(parsed_capture["content"], parsed["meta"]["session_id"]);
         assert_ne!(parsed_capture["content"], raw_session_id);
+        assert_eq!(parsed_capture["saved_session_id"], raw_session_id);
+        assert!(parsed_capture.get("session_id").is_none(), "{capture_json}");
+    }
+
+    #[test]
+    fn exec_stream_final_answer_excerpt_is_bounded_and_redacted() {
+        assert_eq!(
+            exec_stream_final_answer_excerpt("  short reply \n"),
+            "short reply"
+        );
+        let long = "x".repeat(EXEC_STREAM_FINAL_ANSWER_EXCERPT_CHARS + 5);
+        let excerpt = exec_stream_final_answer_excerpt(&long);
+        assert_eq!(
+            excerpt.chars().count(),
+            EXEC_STREAM_FINAL_ANSWER_EXCERPT_CHARS + 3
+        );
+        assert!(excerpt.ends_with("..."));
+        let leaked = exec_stream_final_answer_excerpt("token: sk-ant-must-not-leak-1234567890");
+        assert!(!leaked.contains("sk-ant-must-not-leak"), "{leaked}");
+    }
+
+    #[test]
+    fn exec_stream_final_answer_text_is_the_last_assistant_reply() {
+        // Multi-step turn: pre-tool commentary, a tool result, then a
+        // distinct final answer. The receipt must carry only the final
+        // reply, not the cumulative stream output.
+        let messages = vec![
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: "write the report".to_string(),
+                    cache_control: None,
+                }],
+            },
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::Text {
+                    text: "let me check the workspace first".to_string(),
+                    cache_control: None,
+                }],
+            },
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "call-1".to_string(),
+                    content: "listed files".to_string(),
+                    is_error: Some(false),
+                    content_blocks: None,
+                }],
+            },
+            Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::thinking("final reasoning"),
+                    ContentBlock::Text {
+                        text: "the final report".to_string(),
+                        cache_control: None,
+                    },
+                ],
+            },
+        ];
+        assert_eq!(
+            exec_stream_final_answer_text(&messages, true),
+            Some("the final report".to_string())
+        );
+    }
+
+    #[test]
+    fn exec_stream_final_answer_text_never_reuses_a_resumed_turn_reply() {
+        let mut messages = vec![
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: "old prompt".into(),
+                    cache_control: None,
+                }],
+            },
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::Text {
+                    text: "old reply must not be delivered again".into(),
+                    cache_control: None,
+                }],
+            },
+        ];
+        // The synchronization event can precede acceptance of the new prompt.
+        assert_eq!(exec_stream_final_answer_text(&messages, false), None);
+        messages.push(Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: "new prompt that fails before an answer".into(),
+                cache_control: None,
+            }],
+        });
+        assert_eq!(exec_stream_final_answer_text(&messages, true), None);
+        messages.push(Message {
+            role: Role::InterruptedAssistant,
+            content: vec![ContentBlock::Text {
+                text: "current partial reply".into(),
+                cache_control: None,
+            }],
+        });
+        assert_eq!(
+            exec_stream_final_answer_text(&messages, true).as_deref(),
+            Some("current partial reply")
+        );
+        // Tool results are user-role records inside this same turn.
+        messages.push(Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "call-current".into(),
+                content: "result".into(),
+                is_error: None,
+                content_blocks: None,
+            }],
+        });
+        assert_eq!(
+            exec_stream_final_answer_text(&messages, true).as_deref(),
+            Some("current partial reply")
+        );
+    }
+
+    #[test]
+    fn exec_stream_final_answer_text_requires_assistant_text() {
+        assert_eq!(exec_stream_final_answer_text(&[], true), None);
+        let user_only = vec![Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: "prompt".to_string(),
+                cache_control: None,
+            }],
+        }];
+        assert_eq!(exec_stream_final_answer_text(&user_only, true), None);
+        let textless_assistant = vec![Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::thinking("reasoning only")],
+        }];
+        assert_eq!(
+            exec_stream_final_answer_text(&textless_assistant, true),
+            None
+        );
     }
 
     #[test]
