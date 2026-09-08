@@ -721,7 +721,6 @@ pub(crate) async fn switch_provider(
     } else {
         app.session.last_prompt_tokens = None;
         app.session.last_completion_tokens = None;
-        app.session.last_output_throughput = None;
     }
 
     let _ = engine_handle.send(Op::Shutdown).await;
@@ -848,11 +847,70 @@ pub(crate) fn mcp_reload_summary(snapshot: &crate::mcp::McpManagerSnapshot) -> S
     )
 }
 
+pub(crate) fn mcp_server_diagnosis(app: &App, name: &str) -> String {
+    let Some(server) = app
+        .mcp_snapshot
+        .as_ref()
+        .and_then(|snapshot| snapshot.servers.iter().find(|server| server.name == name))
+    else {
+        return app
+            .tr(MessageId::McpDiagnosisUnobserved)
+            .replace("{server}", name)
+            .replace("{command}", "/mcp");
+    };
+    let state = if !server.enabled {
+        MessageId::McpStateDisabled
+    } else if server.connected {
+        MessageId::ExtensionsStateConnected
+    } else if server.auth_required {
+        MessageId::McpStateAuthorizationRequired
+    } else if server.error.is_some() {
+        MessageId::McpStateFailed
+    } else {
+        MessageId::McpStateDisconnected
+    };
+    let mut receipt = app
+        .tr(MessageId::McpDiagnosisSummary)
+        .replace("{server}", name)
+        .replace("{state}", &app.tr(state))
+        .replace("{transport}", &server.transport)
+        .replace("{tools}", &server.tools.len().to_string())
+        .replace("{resources}", &server.resources.len().to_string())
+        .replace("{prompts}", &server.prompts.len().to_string());
+    if let Some(error) = &server.error {
+        receipt.push(' ');
+        receipt.push_str(&app.tr(MessageId::McpDiagnosisLastError).replace(
+            "{error}",
+            &codewhale_config::persistence::redact_secrets(error),
+        ));
+    }
+    if crate::mcp::mcp_name_is_command_safe(name) {
+        let command = if !server.enabled {
+            format!("/mcp enable {name}")
+        } else if server.auth_required {
+            format!("/mcp login {name}")
+        } else {
+            format!("/mcp retry {name}")
+        };
+        receipt.push(' ');
+        receipt.push_str(
+            &app.tr(MessageId::McpDiagnosisNext)
+                .replace("{command}", &command),
+        );
+    } else {
+        receipt.push(' ');
+        receipt.push_str(
+            &app.tr(MessageId::McpDiagnosisNext)
+                .replace("{command}", "/mcp reload"),
+        );
+    }
+    receipt
+}
+
 pub(crate) fn mcp_ui_action_refreshes_discovery(action: &crate::tui::app::McpUiAction) -> bool {
     matches!(
         action,
         crate::tui::app::McpUiAction::Validate
-            | crate::tui::app::McpUiAction::Login { .. }
             | crate::tui::app::McpUiAction::Logout { .. }
             | crate::tui::app::McpUiAction::ImportList
             | crate::tui::app::McpUiAction::ImportApprove { .. }

@@ -582,6 +582,8 @@ pub struct ToolContext {
 /// useful, without growing the top-level context by another field per feature.
 #[derive(Clone)]
 pub struct ToolExecutionState {
+    /// Effective session/ancestor tool ceiling, carried to MCP dispatch and runtime registration.
+    pub(crate) disallowed_tools: Vec<String>,
     /// Shared shell manager for background tasks and streaming IO.
     pub shell_manager: SharedShellManager,
     /// Per-session snapshots for files successfully observed by `read_file`.
@@ -769,6 +771,7 @@ impl ToolContext {
         Self {
             workspace,
             execution: Box::new(ToolExecutionState {
+                disallowed_tools: Vec::new(),
                 shell_manager,
                 file_read_tracker: new_shared_file_read_tracker(),
                 owner_agent_id: None,

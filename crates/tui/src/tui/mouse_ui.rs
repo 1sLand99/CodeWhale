@@ -1585,16 +1585,7 @@ pub(crate) fn handle_context_menu_action(app: &mut App, action: ContextMenuActio
             }
         }
         ContextMenuAction::ToggleWindowPin => {
-            let pinned = crate::tui::window_control::toggle_pin();
-            app.status_message = Some(
-                app.tr(if pinned {
-                    MessageId::WindowPinActive
-                } else {
-                    MessageId::WindowPinReleased
-                })
-                .into_owned(),
-            );
-            app.needs_redraw = true;
+            crate::tui::window_control::toggle_pin(app);
         }
         ContextMenuAction::OpenCommandPalette => {
             codewhale_telemetry::session_counters()

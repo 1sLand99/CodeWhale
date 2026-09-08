@@ -3141,13 +3141,25 @@ impl DeepSeekClient {
         // auxiliary classifier call, however: it must neither consume nor
         // inherit that mutable foreground state.
         isolated.rate_limiter = Arc::new(AsyncMutex::new(TokenBucket::from_env()));
-        let _inference = isolated.acquire_remote_control_inference_permit().await;
-        let _permit = isolated.acquire_provider_request_permit().await;
-        let prepared = isolated.prepare_outbound_request(request, false)?;
+        isolated
+            .create_message_with_cache_policy(request, false)
+            .await
+    }
+
+    async fn create_message_with_cache_policy(
+        &self,
+        request: MessageRequest,
+        allow_response_cache: bool,
+    ) -> Result<MessageResponse> {
+        let _inference = self.acquire_remote_control_inference_permit().await;
+        let _permit = self.acquire_provider_request_permit().await;
+        let cacheable =
+            allow_response_cache && crate::llm_response_cache::request_is_cacheable(&request);
+        let prepared = self.prepare_outbound_request(request, false)?;
         match prepared.dialect {
-            WireDialect::OpenAiResponses => isolated.handle_responses_message(&prepared).await,
-            WireDialect::AnthropicMessages => isolated.handle_anthropic_message(&prepared).await,
-            WireDialect::ChatCompletions => isolated.create_message_chat(&prepared, false).await,
+            WireDialect::OpenAiResponses => self.handle_responses_message(&prepared).await,
+            WireDialect::AnthropicMessages => self.handle_anthropic_message(&prepared).await,
+            WireDialect::ChatCompletions => self.create_message_chat(&prepared, cacheable).await,
         }
     }
 }
@@ -3215,17 +3227,13 @@ impl LlmClient for DeepSeekClient {
     }
 
     async fn create_message(&self, request: MessageRequest) -> Result<MessageResponse> {
-        let _inference = self.acquire_remote_control_inference_permit().await;
-        let _permit = self.acquire_provider_request_permit().await;
-        // Cacheability is a property of the caller's request, not of the wire
-        // body, so it is read before the request is consumed by the seam.
-        let cacheable = crate::llm_response_cache::request_is_cacheable(&request);
-        let prepared = self.prepare_outbound_request(request, false)?;
-        match prepared.dialect {
-            WireDialect::OpenAiResponses => self.handle_responses_message(&prepared).await,
-            WireDialect::AnthropicMessages => self.handle_anthropic_message(&prepared).await,
-            WireDialect::ChatCompletions => self.create_message_chat(&prepared, cacheable).await,
-        }
+        self.create_message_with_cache_policy(request, true).await
+    }
+
+    async fn create_message_uncached(&self, request: MessageRequest) -> Result<MessageResponse> {
+        // Keep shared provider permits and rate limits. Only the response
+        // cache is bypassed; a guardian is still real, metered inference.
+        self.create_message_with_cache_policy(request, false).await
     }
 
     async fn create_message_stream(

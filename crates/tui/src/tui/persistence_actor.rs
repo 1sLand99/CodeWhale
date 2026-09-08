@@ -26,11 +26,11 @@
 //!   disk boundary instead of doubling every paused request.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use tokio::sync::{mpsc, oneshot};
 
-use crate::session_manager::{OfflineQueueState, SavedSession, SessionManager};
+use crate::session_manager::{OfflineQueueLease, OfflineQueueState, SavedSession, SessionManager};
 use crate::utils::spawn_supervised;
 
 // ---------------------------------------------------------------------------
@@ -58,15 +58,13 @@ pub enum PersistRequest {
     /// Write queued/draft offline input for crash recovery.
     OfflineQueue {
         state: OfflineQueueState,
-        session_id: Option<String>,
+        lease: Arc<OfflineQueueLease>,
     },
     /// Remove the queued/draft offline input file.
     ClearOfflineQueue {
-        /// The session whose queue is being cleared. Carried for the same
-        /// reason `ClearCheckpoint` carries one: the queue is keyed per
-        /// session, so a clear must name its own session or it can drain
-        /// against whichever session this manager instance last wrote for.
-        session_id: Option<String>,
+        /// Captures the exact owner and retains its exclusive editor lease
+        /// until the removal finishes. An unowned clear is unrepresentable.
+        lease: Arc<OfflineQueueLease>,
     },
     /// Remove one session's crash-recovery checkpoint file. Scoped: cannot
     /// remove another session's checkpoint.
@@ -109,10 +107,10 @@ impl FlushReport {
 enum PendingOfflineQueue {
     Save {
         state: Box<OfflineQueueState>,
-        session_id: Option<String>,
+        lease: Arc<OfflineQueueLease>,
     },
     Clear {
-        session_id: Option<String>,
+        lease: Arc<OfflineQueueLease>,
     },
 }
 
@@ -313,10 +311,9 @@ struct PendingState {
     /// Latest-wins per session id, for the same reason `sessions` above is:
     /// a single global slot dropped session A's queued text when session B
     /// queued before the actor drained, which defeats the per-session file
-    /// naming entirely. `None` keys a save with no session id, which
-    /// `save_offline_queue_state` rejects — kept as a key so that error is
-    /// still reported rather than silently coalesced away.
-    offline_queue: BTreeMap<Option<String>, PendingOfflineQueue>,
+    /// naming entirely. Each pending request retains its editor lease, so a
+    /// window changing session cannot release ownership ahead of its writes.
+    offline_queue: BTreeMap<String, PendingOfflineQueue>,
 }
 
 /// What the actor loop should do after absorbing a request.
@@ -373,20 +370,20 @@ impl PendingState {
                 self.checkpoints.remove(&id);
                 self.completed_commits.insert(id, session);
             }
-            PersistRequest::OfflineQueue { state, session_id } => {
+            PersistRequest::OfflineQueue { state, lease } => {
                 self.offline_queue.insert(
-                    session_id.clone(),
+                    lease.session_id().to_string(),
                     PendingOfflineQueue::Save {
                         state: Box::new(state),
-                        session_id,
+                        lease,
                     },
                 );
             }
-            PersistRequest::ClearOfflineQueue { session_id } => {
+            PersistRequest::ClearOfflineQueue { lease } => {
                 // A clear supersedes a pending save for its OWN session only.
                 self.offline_queue.insert(
-                    session_id.clone(),
-                    PendingOfflineQueue::Clear { session_id },
+                    lease.session_id().to_string(),
+                    PendingOfflineQueue::Clear { lease },
                 );
             }
             PersistRequest::ClearCheckpoint { session_id } => {
@@ -459,21 +456,15 @@ fn flush_inner(manager: &SessionManager, pending: &mut PendingState) -> FlushRep
     }
     for (_, request) in std::mem::take(&mut pending.offline_queue) {
         match request {
-            PendingOfflineQueue::Save { state, session_id } => record(
+            PendingOfflineQueue::Save { state, lease } => record(
                 "offline-queue".to_string(),
                 manager
-                    .save_offline_queue_state(&state, session_id.as_deref())
+                    .save_offline_queue_state(&state, Some(lease.session_id()))
                     .map(|_| ()),
             ),
-            // Prefer the session the clear named. The no-argument form falls
-            // back to whichever session THIS manager instance last saved for,
-            // which is not necessarily the caller's.
-            PendingOfflineQueue::Clear { session_id } => record(
+            PendingOfflineQueue::Clear { lease } => record(
                 "clear-offline-queue".to_string(),
-                match session_id.as_deref() {
-                    Some(id) => manager.clear_offline_queue_state_for(id),
-                    None => manager.clear_offline_queue_state(),
-                },
+                manager.clear_offline_queue_state_for(lease.session_id()),
             ),
         }
     }
@@ -530,6 +521,13 @@ mod tests {
         let manager = SessionManager::new(sessions_dir.clone()).expect("manager");
         let (handle, task) = spawn_persistence_actor(manager);
 
+        let queue_manager = SessionManager::new(sessions_dir.clone()).expect("queue manager");
+        let lease_a = queue_manager
+            .acquire_offline_queue_lease("session-A")
+            .expect("lease A");
+        let lease_b = queue_manager
+            .acquire_offline_queue_lease("session-B")
+            .expect("lease B");
         for (session, body) in [("session-A", "text from A"), ("session-B", "text from B")] {
             let state = OfflineQueueState {
                 messages: vec![QueuedSessionMessage {
@@ -541,7 +539,11 @@ mod tests {
             };
             handle.try_send(PersistRequest::OfflineQueue {
                 state,
-                session_id: Some(session.to_string()),
+                lease: Arc::clone(if session == "session-A" {
+                    &lease_a
+                } else {
+                    &lease_b
+                }),
             });
         }
 
@@ -555,7 +557,7 @@ mod tests {
 
         // A clear names its own session and must not touch the other's.
         handle.try_send(PersistRequest::ClearOfflineQueue {
-            session_id: Some("session-A".to_string()),
+            lease: Arc::clone(&lease_a),
         });
         let a = checkpoints.join("session-A.offline_queue.json");
         wait_until(|| !a.exists()).await;
@@ -579,6 +581,9 @@ mod tests {
         let queue_path = sessions_dir
             .join("checkpoints")
             .join("session-A.offline_queue.json");
+        let lease = manager
+            .acquire_offline_queue_lease("session-A")
+            .expect("queue lease");
         let (handle, task) = spawn_persistence_actor(manager);
 
         let state = OfflineQueueState {
@@ -592,7 +597,7 @@ mod tests {
 
         handle.try_send(PersistRequest::OfflineQueue {
             state,
-            session_id: Some("session-A".to_string()),
+            lease: Arc::clone(&lease),
         });
         wait_until(|| {
             std::fs::read_to_string(&queue_path)
@@ -601,7 +606,7 @@ mod tests {
         .await;
 
         handle.try_send(PersistRequest::ClearOfflineQueue {
-            session_id: Some("session-A".to_string()),
+            lease: Arc::clone(&lease),
         });
         wait_until(|| !queue_path.exists()).await;
         handle.try_send(PersistRequest::Shutdown);
@@ -1051,5 +1056,43 @@ mod tests {
         );
         handle.try_send(PersistRequest::Shutdown);
         task.await.expect("persistence actor join");
+    }
+    #[test]
+    fn offline_queue_editor_lease_survives_until_pending_write_finishes() {
+        let directory = tempfile::tempdir().expect("queue fixture");
+        let manager = SessionManager::new(directory.path().join("sessions")).expect("manager");
+        let lease = manager
+            .acquire_offline_queue_lease("session-A")
+            .expect("first editor");
+        let mut pending = PendingState::default();
+        pending.absorb(PersistRequest::OfflineQueue {
+            state: OfflineQueueState {
+                draft: Some(QueuedSessionMessage {
+                    display: "last edited draft".into(),
+                    skill_instruction: None,
+                    skill_provenance: None,
+                }),
+                ..OfflineQueueState::default()
+            },
+            lease: Arc::clone(&lease),
+        });
+        drop(lease); // The old window changed session before the actor ran.
+        assert!(manager.acquire_offline_queue_lease("session-A").is_err());
+        let report = flush_inner(&manager, &mut pending);
+        assert!(report.failures.is_empty());
+        assert_eq!(report.completed, 1);
+        let _next_editor = manager
+            .acquire_offline_queue_lease("session-A")
+            .expect("released after write");
+        assert_eq!(
+            manager
+                .load_offline_queue_state("session-A")
+                .unwrap()
+                .unwrap()
+                .draft
+                .unwrap()
+                .display,
+            "last edited draft"
+        );
     }
 }

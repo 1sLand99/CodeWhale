@@ -458,6 +458,172 @@ pub(crate) async fn handle_bang_shell_input(
     Ok(true)
 }
 
+fn report_mcp_login(app: &mut App, message: String, level: StatusToastLevel) {
+    app.push_status_toast(message.clone(), level, Some(12_000));
+    add_mcp_message(app, message);
+    app.needs_redraw = true;
+}
+
+fn start_mcp_login(app: &mut App, config: &Config, name: String, scopes: Vec<String>) {
+    use crate::tui::app::{McpLoginProgress, PendingMcpLogin};
+
+    if let Some(pending) = &app.mcp_login {
+        let server = pending.server.clone();
+        report_mcp_login(
+            app,
+            app.tr(MessageId::McpLoginInProgress)
+                .replace("{server}", &server)
+                .replace("{cancel_key}", "Esc"),
+            StatusToastLevel::Info,
+        );
+        return;
+    }
+
+    let path = app.mcp_config_path.clone();
+    let workspace = app.workspace.clone();
+    let plugin_registry = Arc::clone(&app.plugin_registry);
+    let network_policy = config.network.clone().map(|network| {
+        crate::network_policy::NetworkPolicyDecider::with_default_audit(network.into_runtime())
+    });
+    let callback_port = config.mcp_oauth_callback_port;
+    let callback_url = config.mcp_oauth_callback_url.clone();
+    let locale = app.ui_locale;
+    let pending = PendingMcpLogin {
+        server: name.clone(),
+        cancel: tokio_util::sync::CancellationToken::new(),
+        progress: Arc::new(std::sync::Mutex::new(None)),
+    };
+    let cancel = pending.cancel.clone();
+    let progress = Arc::clone(&pending.progress);
+    app.mcp_login = Some(pending);
+    report_mcp_login(
+        app,
+        app.tr(MessageId::McpLoginStarting)
+            .replace("{server}", &name)
+            .replace("{cancel_key}", "Esc"),
+        StatusToastLevel::Info,
+    );
+
+    tokio::spawn(async move {
+        let handshake = async {
+            let cfg = crate::mcp::load_config_with_workspace_and_plugins(
+                &path,
+                &workspace,
+                plugin_registry.as_ref(),
+            )?;
+            let server = cfg.servers.get(&name).ok_or_else(|| {
+                anyhow::anyhow!(
+                    crate::localization::tr(locale, MessageId::McpLoginServerNotFound)
+                        .replace("{server}", &name)
+                )
+            })?;
+            crate::mcp::oauth::begin_oauth_login_for_server_tool(
+                &name,
+                server,
+                (!scopes.is_empty()).then_some(scopes),
+                callback_port,
+                callback_url.as_deref(),
+                network_policy.as_ref(),
+            )
+            .await
+        };
+        let operation = async {
+            // Bound the whole handshake as well as each guarded HTTP request.
+            // The timeout is in the background: even an unresponsive issuer
+            // cannot delay redraw, input or cancellation.
+            let login = tokio::time::timeout(Duration::from_secs(15), handshake)
+                .await
+                .with_context(|| {
+                    crate::localization::tr(locale, MessageId::McpLoginHandshakeTimeout)
+                        .into_owned()
+                })??;
+            if let Ok(mut cell) = progress.lock() {
+                *cell = Some(McpLoginProgress::AuthorizationUrl(
+                    login.authorization_url().to_string(),
+                ));
+            }
+            login.finish().await
+        };
+        let outcome = tokio::select! {
+            biased;
+            () = cancel.cancelled() => return,
+            result = operation => result.map_err(|error| {
+                crate::mcp::oauth::mask_oauth_secrets(&format!("{error:#}"))
+            }),
+        };
+        if let Ok(mut cell) = progress.lock() {
+            *cell = Some(McpLoginProgress::Finished(outcome));
+        }
+    });
+}
+
+pub(crate) fn poll_mcp_login(app: &mut App) {
+    use crate::tui::app::McpLoginProgress;
+
+    let delivery = app.mcp_login.as_ref().and_then(|pending| {
+        pending
+            .progress
+            .try_lock()
+            .ok()
+            .and_then(|mut cell| cell.take())
+            .map(|progress| (pending.server.clone(), progress))
+    });
+    let Some((server, progress)) = delivery else {
+        return;
+    };
+    let (message, level) = match progress {
+        McpLoginProgress::AuthorizationUrl(url) => (
+            app.tr(MessageId::McpLoginBrowser)
+                .replace("{server}", &server)
+                .replace("{cancel_key}", "Esc")
+                .replace("{url}", &url),
+            StatusToastLevel::Info,
+        ),
+        McpLoginProgress::Finished(outcome) => {
+            app.mcp_login = None;
+            match outcome {
+                Ok(()) => (
+                    app.tr(MessageId::McpLoginStored)
+                        .replace("{server}", &server)
+                        .replace("{command}", "/mcp reload"),
+                    StatusToastLevel::Success,
+                ),
+                Err(error) => (
+                    app.tr(MessageId::McpLoginFailed)
+                        .replace("{server}", &server)
+                        .replace("{error}", &error),
+                    StatusToastLevel::Error,
+                ),
+            }
+        }
+    };
+    report_mcp_login(app, message, level);
+}
+
+pub(crate) fn handle_mcp_login_key(app: &mut App, key: &KeyEvent) -> bool {
+    if key.kind == KeyEventKind::Press && key.code == KeyCode::Esc && app.mcp_login.is_some() {
+        cancel_mcp_login(app);
+        true
+    } else {
+        false
+    }
+}
+
+pub(crate) fn cancel_mcp_login(app: &mut App) {
+    if let Some(pending) = app.mcp_login.take() {
+        // Drop cancels before the next input event; future writes belong only
+        // to this abandoned mailbox, even if the same server starts again.
+        let server = pending.server.clone();
+        drop(pending);
+        report_mcp_login(
+            app,
+            app.tr(MessageId::McpLoginCancelled)
+                .replace("{server}", &server),
+            StatusToastLevel::Info,
+        );
+    }
+}
+
 pub(crate) async fn handle_mcp_ui_action(
     app: &mut App,
     engine_handle: &EngineHandle,
@@ -478,6 +644,11 @@ pub(crate) async fn handle_mcp_ui_action(
     let discover = mcp_ui_action_refreshes_discovery(&action);
 
     let action_result = match action {
+        crate::tui::app::McpUiAction::Diagnose { name } => {
+            let receipt = mcp_server_diagnosis(app, &name);
+            report_mcp_login(app, receipt, StatusToastLevel::Info);
+            return;
+        }
         crate::tui::app::McpUiAction::Show => Ok(()),
         crate::tui::app::McpUiAction::Init { force } => {
             changed = true;
@@ -535,62 +706,10 @@ pub(crate) async fn handle_mcp_ui_action(
                 .map(|()| message = Some(format!("Removed MCP server '{name}'")))
         }
         crate::tui::app::McpUiAction::Login { name, scopes } => {
-            // Only the handshake runs inline: it is a couple of HTTP calls and
-            // it yields the authorization URL. The five-minute browser-callback
-            // wait goes to the background task pattern, because awaiting it
-            // here parked the event loop — a misclicked `[re-auth]` row left
-            // the session unusable with no way to back out.
-            let begun = async {
-                let cfg = mcp::load_config_with_workspace_and_plugins(
-                    &path,
-                    &app.workspace,
-                    app.plugin_registry.as_ref(),
-                )?;
-                let server = cfg
-                    .servers
-                    .get(&name)
-                    .ok_or_else(|| anyhow::anyhow!("MCP server '{name}' not found"))?;
-                mcp::oauth::begin_oauth_login_for_server_tool(
-                    &name,
-                    server,
-                    (!scopes.is_empty()).then_some(scopes),
-                    config.mcp_oauth_callback_port,
-                    config.mcp_oauth_callback_url.as_deref(),
-                )
-                .await
-            }
-            .await;
-
-            match begun {
-                Ok(login) => {
-                    // Replace any login already in flight so two clicks cannot
-                    // hold two callback listeners.
-                    if let Some((_, token)) = app.mcp_login_cancel.take() {
-                        token.cancel();
-                    }
-                    let token = tokio_util::sync::CancellationToken::new();
-                    let url = login.authorization_url().to_string();
-                    let cell = app.mcp_login_cell.clone();
-                    let task_token = token.clone();
-                    let task_name = name.clone();
-                    tokio::spawn(async move {
-                        let outcome = tokio::select! {
-                            biased;
-                            () = task_token.cancelled() => Err("cancelled".to_string()),
-                            result = login.finish() => result.map_err(|err| err.to_string()),
-                        };
-                        if let Ok(mut guard) = cell.lock() {
-                            *guard = Some((task_name, outcome));
-                        }
-                    });
-                    app.mcp_login_cancel = Some((name.clone(), token));
-                    message = Some(format!(
-                        "Authorizing '{name}' in your browser — Esc cancels. {url}"
-                    ));
-                    Ok(())
-                }
-                Err(err) => Err(err),
-            }
+            start_mcp_login(app, config, name, scopes);
+            // Login owns its background discovery. Do not start a second
+            // discovery here or await network work on the input loop.
+            return;
         }
         crate::tui::app::McpUiAction::Logout { name } => {
             let result = (|| {

@@ -30,15 +30,7 @@ impl RegisterCommand for PinCmd {
             Some(_) => return CommandResult::error(format!("Usage: {}", COMMAND_INFO.usage)),
             None => {}
         }
-        let pinned = crate::tui::window_control::toggle_pin();
-        app.needs_redraw = true;
-        CommandResult::message(
-            app.tr(if pinned {
-                MessageId::WindowPinActive
-            } else {
-                MessageId::WindowPinReleased
-            })
-            .into_owned(),
-        )
+        crate::tui::window_control::toggle_pin(app);
+        CommandResult::ok()
     }
 }

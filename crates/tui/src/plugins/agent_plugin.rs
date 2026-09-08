@@ -714,6 +714,8 @@ fn standard_server_to_config(
         oauth: extension.oauth,
         oauth_resource: extension.oauth_resource,
         reviewed_plugin: None,
+        runtime_added: false,
+        allow_private_network: false,
     })
 }
 

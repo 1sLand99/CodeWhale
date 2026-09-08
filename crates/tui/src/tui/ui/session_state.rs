@@ -5,6 +5,70 @@
 
 use super::*;
 
+pub(crate) struct OfflineQueueTransition {
+    lease: Arc<crate::session_manager::OfflineQueueLease>,
+    restored: Option<OfflineQueueState>,
+}
+
+/// Complete all fallible queue work before a session switch mutates the App.
+/// A second editor must fail without touching either composer or queue file.
+pub(crate) fn prepare_offline_queue_transition(
+    app: &App,
+    session_id: &str,
+) -> Result<Option<OfflineQueueTransition>, String> {
+    if app
+        .offline_queue_lease
+        .as_ref()
+        .is_some_and(|lease| lease.session_id() == session_id)
+    {
+        return Ok(None);
+    }
+    let manager = SessionManager::default_location().map_err(|error| error.to_string())?;
+    let lease = manager
+        .acquire_offline_queue_lease(session_id)
+        .map_err(|error| error.to_string())?;
+    let restored = manager
+        .load_offline_queue_state(session_id)
+        .map_err(|error| {
+            format!("Could not restore queued input for session {session_id}: {error}")
+        })?;
+    Ok(Some(OfflineQueueTransition { lease, restored }))
+}
+
+pub(crate) fn install_offline_queue_transition(
+    app: &mut App,
+    transition: Option<OfflineQueueTransition>,
+) -> bool {
+    let Some(transition) = transition else {
+        return false;
+    };
+    // The request retains the old Arc until the actor finishes its write.
+    // Acquiring the next lease does not release the previous editor early.
+    persist_offline_queue_state(app);
+    if app.queued_draft.take().is_some() {
+        app.clear_input();
+    }
+    app.queued_messages.clear();
+    app.current_session_id = Some(transition.lease.session_id().to_string());
+    app.offline_queue_lease = Some(transition.lease);
+    transition
+        .restored
+        .is_some_and(|state| restore_matching_offline_queue_state(app, state))
+}
+
+/// The editable composer is the durable draft. Keep `queued_draft` itself as
+/// the original message so Escape can still cancel the edit in this window.
+pub(crate) fn offline_queue_projection(
+    app: &App,
+) -> (VecDeque<QueuedMessage>, Option<QueuedMessage>) {
+    let draft = app.queued_draft.as_ref().map(|original| {
+        let mut edited = original.clone();
+        edited.display.clone_from(&app.input);
+        edited
+    });
+    (app.queued_messages.clone(), draft)
+}
+
 pub(crate) async fn publish_pending_work_projection(app: &mut App) -> Result<bool, String> {
     let Some(work) = app.runtime_services.work.clone() else {
         return Ok(false);
@@ -436,24 +500,28 @@ pub(crate) fn record_turn_activity(app: &mut App, event: &EngineEvent, now: Inst
 }
 
 pub(crate) fn persist_offline_queue_state(app: &App) {
+    let Some(lease) = app
+        .offline_queue_lease
+        .as_ref()
+        .filter(|lease| app.current_session_id.as_deref() == Some(lease.session_id()))
+    else {
+        return;
+    };
     if app.queued_messages.is_empty() && app.queued_draft.is_none() {
         persistence_actor::persist(PersistRequest::ClearOfflineQueue {
-            session_id: app.current_session_id.clone(),
+            lease: Arc::clone(lease),
         });
         return;
     }
+    let (messages, draft) = offline_queue_projection(app);
     let state = OfflineQueueState {
-        messages: app
-            .queued_messages
-            .iter()
-            .map(queued_ui_to_session)
-            .collect(),
-        draft: app.queued_draft.as_ref().map(queued_ui_to_session),
+        messages: messages.iter().map(queued_ui_to_session).collect(),
+        draft: draft.as_ref().map(queued_ui_to_session),
         ..OfflineQueueState::default()
     };
     persistence_actor::persist(PersistRequest::OfflineQueue {
         state,
-        session_id: app.current_session_id.clone(),
+        lease: Arc::clone(lease),
     });
 }
 
@@ -583,10 +651,15 @@ pub(crate) fn begin_launch_session(
     app: &mut App,
     workspace: Option<PathBuf>,
 ) -> commands::CommandResult {
+    let session_id = uuid::Uuid::new_v4().to_string();
+    let transition = match prepare_offline_queue_transition(app, &session_id) {
+        Ok(transition) => transition,
+        Err(error) => return commands::CommandResult::error(error),
+    };
+    install_offline_queue_transition(app, transition);
     if let Some(workspace) = workspace {
         app.workspace = workspace;
     }
-    let session_id = uuid::Uuid::new_v4().to_string();
     app.current_session_id = Some(session_id.clone());
     app.current_session_metadata = None;
     app.session_title = Some(app.tr(MessageId::SessionsNewSessionTitle).into_owned());

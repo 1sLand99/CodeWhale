@@ -1547,11 +1547,11 @@ impl ToolSpec for McpToolAdapter {
     async fn execute_rich(
         &self,
         input: Value,
-        _context: &ToolContext,
+        context: &ToolContext,
     ) -> Result<RichToolResult, ToolError> {
         let mut pool = self.pool.lock().await;
         let result = pool
-            .call_tool(&self.name, input)
+            .call_tool_with_disallowed(&self.name, input, &context.disallowed_tools)
             .await
             .map_err(|e| ToolError::execution_failed(format!("MCP tool failed: {e}")))?;
         Ok(mcp_result_to_bounded_rich_tool_result(result))

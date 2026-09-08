@@ -157,9 +157,8 @@ pub struct WorkerRuntimeProfile {
     ///
     /// A child can only ever *add* entries — `derive_child()` takes the union of
     /// the parent's and the child's deny lists, so a descendant can never drop a
-    /// restriction an ancestor imposed. The only way to start without the
-    /// parent's list is an explicit `inherit_disallowed_tools: false` at spawn,
-    /// which clears the cloned runtime's list before the registry reads it.
+    /// restriction an ancestor imposed. The legacy `inherit_disallowed_tools:
+    /// false` input remains accepted but cannot remove this ceiling.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub denied_tools: Vec<String>,
     /// Remaining nested-delegation budget. A worker may spawn children while

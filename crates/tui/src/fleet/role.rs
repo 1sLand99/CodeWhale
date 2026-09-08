@@ -11,7 +11,7 @@
 //! - [`FleetRole`]: the closed 8-role set, parsing, and canonical labels.
 //! - Per-role posture: [`role_requires_read_only_shell`],
 //!   [`effective_runtime_profile_for_role`], [`fleet_effective_permissions`].
-//! - The tool deny lists + [`is_posture_denial`] + [`ChildAuthority`]: how a
+//! - The tool deny lists + [`ChildAuthority`]: how a
 //!   role posture becomes the concrete child surface (allowlist, deny list,
 //!   write authority, delegation budget, fingerprint).
 //!
@@ -442,16 +442,10 @@ pub(crate) const NON_SHELL_EXECUTION_DENYLIST: &[&str] = &[
     "start_mcp_server",
 ];
 
-/// Whether a deny rule was installed by an **enforced posture** rather than by
-/// operator preference.
-///
-/// `inherit_disallowed_tools: false` exists so a child can start from a clean
-/// surface instead of the session's `--disallowed-tools` taste. It must not be
-/// able to drop a rule that expresses a *ceiling*: a Fleet member clamped to
-/// `network_tool = false` that spawns a grandchild with
-/// `inherit_disallowed_tools: false` would otherwise hand that grandchild the
-/// network back, which is a child widening its parent's envelope by asking
-/// politely.
+/// Whether a deny rule belongs to an enforced role posture. Operator and
+/// ancestor denials are also immutable; this identifies posture rules for
+/// authority diagnostics and tests, not a child opt-out exception.
+#[cfg(test)]
 #[must_use]
 pub(crate) fn is_posture_denial(rule: &str) -> bool {
     [

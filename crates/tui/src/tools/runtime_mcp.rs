@@ -60,6 +60,8 @@ pub fn parse_mcp_command(input: &str) -> Result<ParsedMcpServer> {
                 oauth: None,
                 oauth_resource: None,
                 reviewed_plugin: None,
+                runtime_added: false,
+                allow_private_network: false,
             },
         });
     }
@@ -97,6 +99,8 @@ pub fn parse_mcp_command(input: &str) -> Result<ParsedMcpServer> {
             oauth: None,
             oauth_resource: None,
             reviewed_plugin: None,
+            runtime_added: false,
+            allow_private_network: false,
         },
     })
 }
@@ -248,7 +252,7 @@ impl ToolSpec for StartRuntimeMcpServer {
         ApprovalRequirement::Required
     }
 
-    async fn execute(&self, input: Value, _context: &ToolContext) -> Result<ToolResult, ToolError> {
+    async fn execute(&self, input: Value, context: &ToolContext) -> Result<ToolResult, ToolError> {
         let server = input
             .get("server")
             .and_then(|v| v.as_str())
@@ -328,6 +332,12 @@ impl ToolSpec for StartRuntimeMcpServer {
             "stdio"
         };
 
+        // Ancestor restrictions stay request-local because children share the pool.
+        if McpPool::server_denied_by(&context.disallowed_tools, &server_name) {
+            return Err(ToolError::not_available(format!(
+                "Failed to find MCP server: {server_name}"
+            )));
+        }
         // Register server config, connect, and collect tool info
         let mut pool = self.pool.lock().await;
         pool.add_runtime_server_config(server_name.clone(), parsed.config)
@@ -341,7 +351,20 @@ impl ToolSpec for StartRuntimeMcpServer {
             }
         };
 
-        let mcp_tools: Vec<McpTool> = conn.tools().to_vec();
+        let _ = conn;
+        let owners = pool.resolved_tool_servers();
+        let mcp_tools: Vec<McpTool> = pool
+            .all_tools()
+            .into_iter()
+            .filter(|(name, _)| {
+                owners.get(name) == Some(&server_name)
+                    && !crate::core::engine::tool_catalog::tool_matches_any_rule(
+                        &context.disallowed_tools,
+                        name,
+                    )
+            })
+            .map(|(_, tool)| tool.clone())
+            .collect();
 
         // Build tool list with fully qualified names (mcp_{server}_{tool})
         // so the LLM can call them directly without guessing the naming convention.
@@ -362,7 +385,7 @@ impl ToolSpec for StartRuntimeMcpServer {
             "transport": transport,
             "server": server_name,
             "new_tools": mcp_tools.len(),
-            "total_mcp_tools": pool.all_tools().len(),
+            "total_mcp_tools": pool.all_tools().iter().filter(|(name, _)| !crate::core::engine::tool_catalog::tool_matches_any_rule(&context.disallowed_tools, name)).count(),
             "message": format!(
                 "MCP server '{}' connected via {}. {} tools discovered.\n\n\
                  Callable tools (use these exact names):\n{}",
@@ -433,6 +456,32 @@ fn connect_failure_message(server_name: &str, err: &anyhow::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn mcp_ceiling_runtime_registration_respects_child_policy_before_connection() {
+        let directory = tempfile::tempdir().unwrap();
+        let pool = Arc::new(AsyncMutex::new(McpPool::new(
+            crate::mcp::McpConfig::default(),
+        )));
+        let tool = StartRuntimeMcpServer::new(Arc::clone(&pool));
+        let mut context = ToolContext::new(directory.path());
+        context.disallowed_tools = vec!["mcp_private-*".to_string()];
+        // The command would execute if the child ceiling were ignored.
+        let error = tool
+            .execute(
+                json!({"server":"node nonexistent-mcp.js", "name":"private_a"}),
+                &context,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Failed to find MCP server: private-a")
+        );
+        assert!(pool.lock().await.server_names().is_empty());
+        assert!(pool.lock().await.connected_servers().is_empty());
+    }
 
     #[test]
     fn parse_command_stdio() {
