@@ -2189,6 +2189,10 @@ impl SubAgentTerminalDeliveryContext {
                 owner_session_id: self.session_id.clone(),
                 id: result.agent_id.clone(),
                 result: completion.payload,
+                outcome: Some(result.status.clone()),
+                parent_run_id: result.parent_run_id.clone(),
+                spawn_depth: Some(result.spawn_depth),
+                continuable: Some(subagent_checkpoint_is_continuable(result)),
             });
         }
     }
@@ -6885,6 +6889,9 @@ impl SubAgentManager {
                 owner_session_id: runtime.context.state_namespace.clone(),
                 id: agent_id.clone(),
                 prompt: prompt.clone(),
+                worker_status: self
+                    .worker_record_by_ref(&agent_id)
+                    .map(|(_, record)| record.status),
                 parent_run_id: runtime.parent_agent_id.clone(),
                 spawn_depth: runtime.spawn_depth,
                 // The model the child was actually installed with. Read here
@@ -16844,7 +16851,7 @@ fn summarize_subagent_result(result: &SubAgentResult) -> String {
     }
 }
 
-fn subagent_status_name(status: &SubAgentStatus) -> &'static str {
+pub(crate) fn subagent_status_name(status: &SubAgentStatus) -> &'static str {
     match status {
         SubAgentStatus::Running => "running",
         SubAgentStatus::Completed => "completed",

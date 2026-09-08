@@ -683,11 +683,18 @@ pub(crate) async fn run_exec_agent(
             {
                 eprintln!("sub-agent {id}: {status}");
             }
-            Event::AgentComplete { id, result, .. }
-                if output_format == ExecOutputFormat::Text && !json_output =>
-            {
+            Event::AgentComplete {
+                id,
+                result,
+                outcome,
+                ..
+            } if output_format == ExecOutputFormat::Text && !json_output => {
                 eprintln!(
-                    "sub-agent {id} completed: {}",
+                    "sub-agent {id} {}: {}",
+                    outcome
+                        .as_ref()
+                        .map(crate::tools::subagent::subagent_status_name)
+                        .unwrap_or("settled (outcome unconfirmed)"),
                     summarize_tool_output(&result)
                 );
             }

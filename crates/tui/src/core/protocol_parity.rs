@@ -644,6 +644,7 @@ pub fn event_to_protocol(event: &Event, ids: &ProtocolIds) -> wire::EventMsg {
             owner_session_id,
             id,
             prompt,
+            worker_status,
             parent_run_id,
             spawn_depth,
             model,
@@ -654,6 +655,7 @@ pub fn event_to_protocol(event: &Event, ids: &ProtocolIds) -> wire::EventMsg {
             owner_session_id: owner_session_id.clone(),
             id: id.clone(),
             prompt: prompt.clone(),
+            worker_status: worker_status.map(|status| worker_status_str(status).to_string()),
             parent_run_id: parent_run_id.clone(),
             spawn_depth: *spawn_depth,
             model: model.clone(),
@@ -684,12 +686,22 @@ pub fn event_to_protocol(event: &Event, ids: &ProtocolIds) -> wire::EventMsg {
             owner_session_id,
             id,
             result,
+            outcome,
+            parent_run_id,
+            spawn_depth,
+            continuable,
         } => wire::EventMsg::AgentComplete {
             thread_id,
             session_id,
             owner_session_id: owner_session_id.clone(),
             id: id.clone(),
             result: result.clone(),
+            worker_status: outcome
+                .as_ref()
+                .map(|status| crate::tools::subagent::subagent_status_name(status).to_string()),
+            parent_run_id: parent_run_id.clone(),
+            spawn_depth: *spawn_depth,
+            continuable: *continuable,
         },
         Event::SubAgentFollowUp {
             owner_session_id,
@@ -1224,6 +1236,64 @@ mod tests {
         ProtocolIds {
             thread_id: ThreadId::new(),
             session_id: SessionId::new(),
+        }
+    }
+
+    #[test]
+    fn worker_lifecycle_wire_preserves_typed_outcomes_without_parsing_result_text() {
+        use crate::tools::subagent::SubAgentStatus;
+        let ids = ids();
+        for (outcome, expected) in [
+            (Some(SubAgentStatus::Completed), Some("completed")),
+            (
+                Some(SubAgentStatus::Failed("private failure".into())),
+                Some("failed"),
+            ),
+            (
+                Some(SubAgentStatus::Interrupted("private reason".into())),
+                Some("interrupted"),
+            ),
+            (Some(SubAgentStatus::Cancelled), Some("cancelled")),
+            (
+                Some(SubAgentStatus::BudgetExhausted),
+                Some("budget_exhausted"),
+            ),
+            (None, None),
+        ] {
+            let event = Event::AgentComplete {
+                owner_session_id: "owner".into(),
+                id: "worker".into(),
+                result: "Completed successfully".into(),
+                outcome,
+                parent_run_id: Some("parent".into()),
+                spawn_depth: Some(2),
+                continuable: Some(false),
+            };
+            let wire = serde_json::to_value(event_to_protocol(&event, &ids)).unwrap();
+            assert_eq!(wire["worker_status"].as_str(), expected);
+            assert_eq!(wire["parent_run_id"], "parent");
+            assert_eq!(wire["spawn_depth"], 2);
+            assert_eq!(wire["continuable"], false);
+            assert!(!wire.to_string().contains("private"));
+        }
+        for status in [
+            AgentWorkerStatus::Queued,
+            AgentWorkerStatus::Starting,
+            AgentWorkerStatus::Running,
+            AgentWorkerStatus::WaitingForUser,
+            AgentWorkerStatus::ModelWait,
+            AgentWorkerStatus::RunningTool,
+            AgentWorkerStatus::Completed,
+            AgentWorkerStatus::Failed,
+            AgentWorkerStatus::Cancelled,
+            AgentWorkerStatus::Interrupted,
+        ] {
+            // Runtime serializes the producer enum; stream-json uses this
+            // exhaustive adapter. Their discriminants must remain identical.
+            assert_eq!(
+                serde_json::to_value(status).unwrap(),
+                worker_status_str(status)
+            );
         }
     }
 

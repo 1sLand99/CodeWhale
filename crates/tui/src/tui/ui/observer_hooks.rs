@@ -375,25 +375,6 @@ pub(super) fn subagent_failure_notice(result: &str) -> Option<String> {
         })
 }
 
-pub(super) fn subagent_status_from_completion_result(result: &str) -> SubAgentStatus {
-    let reason = result
-        .lines()
-        .find_map(|line| {
-            let trimmed = line.trim();
-            (!trimmed.is_empty() && !trimmed.starts_with("<codewhale:subagent.done>"))
-                .then_some(trimmed.to_string())
-        })
-        .unwrap_or_else(|| "sub-agent finished".to_string());
-    match subagent_completion_status(result).as_deref() {
-        Some("completed") => SubAgentStatus::Completed,
-        Some("cancelled" | "canceled") => SubAgentStatus::Cancelled,
-        Some("failed") => SubAgentStatus::Failed(reason),
-        Some("interrupted") => SubAgentStatus::Interrupted(reason),
-        Some("budget_exhausted") => SubAgentStatus::BudgetExhausted,
-        _ => SubAgentStatus::Completed,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -392,6 +392,7 @@ pub enum Event {
         owner_session_id: String,
         id: String,
         prompt: String,
+        worker_status: Option<AgentWorkerStatus>,
         parent_run_id: Option<String>,
         spawn_depth: u32,
         /// Model the child runtime was actually installed with, after route
@@ -419,6 +420,11 @@ pub enum Event {
         owner_session_id: String,
         id: String,
         result: String,
+        /// Producer-owned outcome. None is a legacy receipt, never success.
+        outcome: Option<crate::tools::subagent::SubAgentStatus>,
+        parent_run_id: Option<String>,
+        spawn_depth: Option<u32>,
+        continuable: Option<bool>,
     },
 
     /// Receipt for an operator follow-up sent to a child (`Op::FollowUpSubAgent`).

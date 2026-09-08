@@ -520,6 +520,8 @@ pub enum EventMsg {
         id: String,
         prompt: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        worker_status: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         parent_run_id: Option<String>,
         spawn_depth: u32,
         model: String,
@@ -543,6 +545,14 @@ pub enum EventMsg {
         owner_session_id: String,
         id: String,
         result: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        worker_status: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_run_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        spawn_depth: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        continuable: Option<bool>,
     },
     SubAgentFollowUp {
         thread_id: ThreadId,
@@ -1154,6 +1164,7 @@ mod tests {
                 owner_session_id: "owner".into(),
                 id: "a1".into(),
                 prompt: "p".into(),
+                worker_status: Some("starting".into()),
                 parent_run_id: None,
                 spawn_depth: 1,
                 model: "m".into(),
@@ -1179,6 +1190,10 @@ mod tests {
                 owner_session_id: "owner".into(),
                 id: "a1".into(),
                 result: "done".into(),
+                worker_status: Some("completed".into()),
+                parent_run_id: None,
+                spawn_depth: Some(1),
+                continuable: Some(false),
             },
             EventMsg::SubAgentFollowUp {
                 thread_id: t.clone(),

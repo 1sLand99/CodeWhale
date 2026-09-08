@@ -7,8 +7,7 @@
 use super::clamp_event_poll_timeout;
 use super::observer_hooks::{
     execute_session_error_hook, execute_session_state_transition_hooks,
-    execute_turn_end_observer_hook, subagent_status_from_completion_result,
-    surface_observer_hook_submission_failure,
+    execute_turn_end_observer_hook, surface_observer_hook_submission_failure,
 };
 use super::task_projection::{
     refresh_active_task_panel, refresh_automation_panel, refresh_automation_panel_blocking,
@@ -3300,6 +3299,7 @@ pub(crate) async fn run_event_loop(
                         owner_session_id,
                         id,
                         prompt,
+                        worker_status,
                         parent_run_id,
                         spawn_depth,
                         model,
@@ -3315,12 +3315,14 @@ pub(crate) async fn run_event_loop(
                         let meta = app.agent_progress_meta.entry(id.clone()).or_default();
                         meta.parent_run_id = parent_run_id;
                         meta.spawn_depth = spawn_depth;
-                        meta.current_activity = Some(AgentCurrentActivity::bounded(
-                            AgentCurrentActivityStatus::Starting,
-                            Some(prompt_summary.clone()),
-                            None,
-                            None,
-                        ));
+                        meta.current_activity = worker_status.map(|status| {
+                            AgentCurrentActivity::bounded(
+                                status.into(),
+                                Some(prompt_summary.clone()),
+                                None,
+                                None,
+                            )
+                        });
                         meta.current_tool = None;
                         record_agent_spawned_route(app, &id, &model);
                         if app.agent_activity_started_at.is_none() {
@@ -3408,6 +3410,8 @@ pub(crate) async fn run_event_loop(
                         owner_session_id,
                         id,
                         result,
+                        outcome,
+                        ..
                     } if event_owner_is_active(
                         app.current_session_id.as_deref(),
                         &owner_session_id,
@@ -3425,38 +3429,46 @@ pub(crate) async fn run_event_loop(
                                         && matches!(agent.status, SubAgentStatus::Running)
                                 });
                         app.agent_progress.remove(&id);
-                        let terminal_status = subagent_status_from_completion_result(&result);
-                        apply_subagent_terminal_projection(
-                            app,
-                            &id,
-                            terminal_status.clone(),
-                            Some(bound_agent_activity_text(&result)),
-                        );
-                        // #3030: stable label with raw-id fallback.
-                        apply_agent_complete_status_and_observer(
-                            app,
-                            &id,
-                            &result,
-                            &terminal_status,
-                        );
+                        let terminal_status = outcome;
+                        if let Some(terminal_status) = terminal_status.as_ref() {
+                            apply_subagent_terminal_projection(
+                                app,
+                                &id,
+                                terminal_status.clone(),
+                                Some(bound_agent_activity_text(&result)),
+                            );
+                            apply_agent_complete_status_and_observer(
+                                app,
+                                &id,
+                                &result,
+                                terminal_status,
+                            );
+                        } else {
+                            let label = app.ensure_agent_label(&id);
+                            app.status_message = Some(format!(
+                                "{label} settled; outcome unconfirmed. Refreshing worker state."
+                            ));
+                        }
                         let should_recapture_terminal =
                             !has_other_running_subagents && app.use_alt_screen();
                         let subagent_notification_mode =
                             config.notifications_config().subagent_completion;
                         let workflow_tool_running = workflow_tool_is_running(app);
-                        if should_notify_subagent_completion(
-                            subagent_notification_mode,
-                            has_other_running_subagents,
-                            workflow_tool_running,
-                        ) && let Some((method, threshold, include_summary)) =
-                            notifications::settings(config)
+                        if let Some(terminal_status) = terminal_status.as_ref()
+                            && should_notify_subagent_completion(
+                                subagent_notification_mode,
+                                has_other_running_subagents,
+                                workflow_tool_running,
+                            )
+                            && let Some((method, threshold, include_summary)) =
+                                notifications::settings(config)
                         {
                             let in_tmux = std::env::var("TMUX").is_ok_and(|v| !v.is_empty());
                             let payload = notifications::subagent_terminal_payload(
                                 app.ui_locale,
                                 &id,
                                 &result,
-                                &terminal_status,
+                                terminal_status,
                                 include_summary,
                                 subagent_elapsed,
                             );

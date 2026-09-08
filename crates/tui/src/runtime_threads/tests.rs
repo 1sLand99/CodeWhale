@@ -8012,6 +8012,172 @@ async fn completed_turn_without_engine_output_fails() -> Result<()> {
 }
 
 #[tokio::test]
+async fn worker_lifecycle_receipts_preserve_owner_outcome_and_durable_replay() -> Result<()> {
+    use crate::core::events::AgentProgressEventMeta;
+    use crate::tools::subagent::AgentWorkerStatus;
+
+    let runtime_dir = test_runtime_dir();
+    let manager = test_manager(runtime_dir.clone())?;
+    let thread = manager
+        .create_thread(CreateThreadRequest::default())
+        .await?;
+    let foreign = manager
+        .create_thread(CreateThreadRequest::default())
+        .await?;
+    let harness = install_mock_engine(&manager, &thread.id).await;
+    let mut rx_op = harness.rx_op;
+    let tx_event = harness.tx_event;
+    let thread_id = thread.id.clone();
+    let foreign_id = foreign.id.clone();
+    tokio::spawn(async move {
+        if matches!(rx_op.recv().await, Some(Op::SendMessage { .. })) {
+            let _ = tx_event
+                .send(EngineEvent::TurnStarted {
+                    turn_id: "engine_worker_lifecycle".into(),
+                    created_at: Utc::now(),
+                    route: None,
+                })
+                .await;
+            for owner in [thread_id.clone(), foreign_id] {
+                let _ = tx_event
+                    .send(EngineEvent::AgentSpawned {
+                        owner_session_id: owner.clone(),
+                        id: "worker_spawn".into(),
+                        prompt: "private prompt".into(),
+                        worker_status: Some(AgentWorkerStatus::Queued),
+                        parent_run_id: Some("parent".into()),
+                        spawn_depth: 2,
+                        model: "fixture".into(),
+                        route_source: None,
+                    })
+                    .await;
+                let _ = tx_event
+                    .send(EngineEvent::AgentProgress {
+                        owner_session_id: owner.clone(),
+                        id: "worker_spawn".into(),
+                        status: "private progress".into(),
+                        activity: AgentProgressEventMeta::new(AgentWorkerStatus::RunningTool)
+                            .with_step(3)
+                            .with_tool("private_tool".into()),
+                        parent_run_id: Some("parent".into()),
+                        spawn_depth: 2,
+                    })
+                    .await;
+                for (id, outcome) in [
+                    ("worker_completed", Some(SubAgentStatus::Completed)),
+                    (
+                        "worker_failed",
+                        Some(SubAgentStatus::Failed("private failure".into())),
+                    ),
+                    (
+                        "worker_interrupted",
+                        Some(SubAgentStatus::Interrupted("private reason".into())),
+                    ),
+                    ("worker_cancelled", Some(SubAgentStatus::Cancelled)),
+                    ("worker_budget", Some(SubAgentStatus::BudgetExhausted)),
+                    ("worker_legacy", None),
+                ] {
+                    let _ = tx_event
+                        .send(EngineEvent::AgentComplete {
+                            owner_session_id: owner.clone(),
+                            id: id.into(),
+                            result: "Completed successfully".into(),
+                            outcome,
+                            parent_run_id: Some("parent".into()),
+                            spawn_depth: Some(2),
+                            continuable: Some(id == "worker_interrupted"),
+                        })
+                        .await;
+                }
+            }
+            let _ = tx_event
+                .send(EngineEvent::TurnComplete {
+                    usage: Usage::default(),
+                    parent_route_usage: Usage::default(),
+                    routed_usage_dropped_records: 0,
+                    status: TurnOutcomeStatus::Completed,
+                    error: None,
+                    tool_catalog: None,
+                    base_url: None,
+                })
+                .await;
+        }
+    });
+    let turn = manager
+        .start_turn(
+            &thread.id,
+            StartTurnRequest {
+                prompt: "worker lifecycle fixture".into(),
+                ..Default::default()
+            },
+        )
+        .await?;
+    let _ = wait_for_terminal_turn(&manager, &turn.id, Duration::from_secs(2)).await?;
+    let events = manager.events_since(&thread.id, None)?;
+    let workers: Vec<_> = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event.event.as_str(),
+                "agent.spawned" | "agent.progress" | "agent.completed"
+            )
+        })
+        .collect();
+    assert_eq!(
+        workers.len(),
+        8,
+        "foreign-owner envelopes must never enter this journal"
+    );
+    assert_eq!(workers[0].payload["worker_status"], "queued");
+    assert_eq!(workers[1].payload["worker_status"], "running_tool");
+    assert_eq!(workers[1].payload["step"], 3);
+    assert!(workers[1].payload.get("tool_name").is_none());
+    for (event, expected) in workers[2..].iter().zip([
+        Some("completed"),
+        Some("failed"),
+        Some("interrupted"),
+        Some("cancelled"),
+        Some("budget_exhausted"),
+        None,
+    ]) {
+        assert_eq!(event.payload["worker_status"].as_str(), expected);
+        assert_eq!(event.payload["parent_run_id"], "parent");
+        assert_eq!(event.payload["spawn_depth"], 2);
+        assert_eq!(
+            event.payload["continuable"],
+            expected == Some("interrupted")
+        );
+    }
+    assert!(
+        workers[7].payload["item"]["summary"]
+            .as_str()
+            .unwrap()
+            .contains("outcome unconfirmed")
+    );
+    assert!(
+        manager
+            .events_since(&foreign.id, None)?
+            .iter()
+            .all(|event| !event.event.starts_with("agent."))
+    );
+
+    // Reopen only the existing journal authority. This proves persisted event
+    // replay, not a fresh worker-state snapshot or process resurrection.
+    let reopened = RuntimeThreadStore::open(runtime_dir)?;
+    let replay = reopened.events_since(&thread.id, None)?;
+    assert_eq!(
+        serde_json::to_value(&replay)?,
+        serde_json::to_value(&events)?
+    );
+    assert!(
+        reopened
+            .events_since(&thread.id, events.last().map(|event| event.seq))?
+            .is_empty()
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn preturn_control_status_does_not_make_empty_turn_succeed() -> Result<()> {
     let manager = test_manager(test_runtime_dir())?;
     let thread = manager
@@ -8028,6 +8194,10 @@ async fn preturn_control_status_does_not_make_empty_turn_succeed() -> Result<()>
                     owner_session_id: thread_id,
                     id: "stale_agent".to_string(),
                     result: "stale completion".to_string(),
+                    outcome: None,
+                    parent_run_id: None,
+                    spawn_depth: None,
+                    continuable: None,
                 })
                 .await;
             let _ = tx_event
@@ -13889,7 +14059,8 @@ fn rebind_event(event: &str, agent_id: &str, seq: u64) -> RuntimeEventRecord {
         turn_id: Some("turn_test".to_string()),
         item_id: None,
         event: event.to_string(),
-        payload: json!({ "agent_id": agent_id }),
+        payload: json!({ "agent_id": agent_id,
+            "worker_status": if event == "agent.completed" { Some("completed") } else { None } }),
     }
 }
 
@@ -13970,6 +14141,30 @@ fn collect_agent_rebind_hints_does_not_downgrade_completed_to_in_progress() {
     let hints = collect_agent_rebind_hints(&events);
     assert_eq!(hints.len(), 1);
     assert_eq!(hints[0].status, AgentRebindStatus::Completed);
+}
+
+#[test]
+fn collect_agent_rebind_hints_preserves_typed_failures_and_legacy_uncertainty() {
+    let cases = [
+        (Some("failed"), AgentRebindStatus::Failed),
+        (Some("interrupted"), AgentRebindStatus::Interrupted),
+        (Some("cancelled"), AgentRebindStatus::Cancelled),
+        (Some("budget_exhausted"), AgentRebindStatus::BudgetExhausted),
+        (None, AgentRebindStatus::Unconfirmed),
+    ];
+    for (worker_status, expected) in cases {
+        let mut terminal = rebind_event("agent.completed", "worker", 2);
+        terminal.payload = json!({"agent_id": "worker", "worker_status": worker_status,
+            "status": "completed", "result": "Completed successfully"});
+        let hints = collect_agent_rebind_hints(&[
+            rebind_event("agent.progress", "worker", 3),
+            terminal.clone(),
+            rebind_event("agent.spawned", "worker", 1),
+            terminal,
+        ]);
+        assert_eq!(hints.len(), 1);
+        assert_eq!(hints[0].status, expected);
+    }
 }
 
 /// Helper for the `fork_at_user_message` tests: write a sequence of

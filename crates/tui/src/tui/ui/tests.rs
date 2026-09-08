@@ -6,7 +6,7 @@ use super::compaction_flow::{
 use super::event_loop::{TabDispatch, dispatch_tab_key, shell_binding_for_key};
 use super::observer_hooks::{
     bounded_subagent_hook_preview, subagent_completion_status, subagent_failure_notice,
-    subagent_status_from_completion_result, turn_end_observer_metadata,
+    turn_end_observer_metadata,
 };
 use super::task_projection::{
     ShellExecLiveUpdate, active_rlm_task_entries, newly_completed_id,
@@ -13461,51 +13461,8 @@ fn subagent_completion_status_reads_summary_fallbacks() {
 }
 
 #[test]
-fn subagent_status_from_completion_result_maps_terminal_sentinels() {
-    let failed = r#"Tool timed out
-<codewhale:subagent.done>{"agent_id":"agent_x","status":"failed"}</codewhale:subagent.done>"#;
-    match subagent_status_from_completion_result(failed) {
-        crate::tools::subagent::SubAgentStatus::Failed(reason) => {
-            assert_eq!(reason, "Tool timed out")
-        }
-        status => panic!("expected failed status, got {status:?}"),
-    }
-
-    let interrupted = r#"Waiting for follow-up
-<codewhale:subagent.done>{"agent_id":"agent_x","status":"interrupted"}</codewhale:subagent.done>"#;
-    match subagent_status_from_completion_result(interrupted) {
-        crate::tools::subagent::SubAgentStatus::Interrupted(reason) => {
-            assert_eq!(reason, "Waiting for follow-up")
-        }
-        status => panic!("expected interrupted status, got {status:?}"),
-    }
-
-    let budget = r#"Token budget exhausted
-<codewhale:subagent.done>{"agent_id":"agent_x","status":"budget_exhausted"}</codewhale:subagent.done>"#;
-    assert_eq!(
-        subagent_status_from_completion_result(budget),
-        crate::tools::subagent::SubAgentStatus::BudgetExhausted
-    );
-
-    let cancelled = r#"Cancelled
-<codewhale:subagent.done>{"agent_id":"agent_x","status":"cancelled"}</codewhale:subagent.done>"#;
-    assert_eq!(
-        subagent_status_from_completion_result(cancelled),
-        crate::tools::subagent::SubAgentStatus::Cancelled
-    );
-
-    assert_eq!(
-        subagent_status_from_completion_result("plain successful summary"),
-        crate::tools::subagent::SubAgentStatus::Completed
-    );
-}
-
-#[test]
 fn agent_complete_toast_is_truthful_and_localized_for_cancelled_workers() {
-    let cancelled = subagent_status_from_completion_result(
-        r#"Cancelled
-<codewhale:subagent.done>{"agent_id":"agent_x","status":"cancelled"}</codewhale:subagent.done>"#,
-    );
+    let cancelled = crate::tools::subagent::SubAgentStatus::Cancelled;
     let mut app = create_test_app();
     app.ui_locale = crate::localization::Locale::Ja;
     apply_agent_complete_status_and_observer(&mut app, "agent_x", "worker result", &cancelled);

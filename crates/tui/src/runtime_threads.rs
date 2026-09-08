@@ -10879,6 +10879,9 @@ impl RuntimeThreadManager {
                     owner_session_id,
                     id,
                     prompt,
+                    worker_status,
+                    parent_run_id,
+                    spawn_depth,
                     ..
                 } if owner_session_id == thread_id => {
                     let message = format!(
@@ -10905,7 +10908,9 @@ impl RuntimeThreadManager {
                         Some(&turn_id),
                         Some(&item.id),
                         "agent.spawned",
-                        json!({ "item": item, "agent_id": id }),
+                        json!({ "item": item, "agent_id": id,
+                            "worker_status": worker_status, "parent_run_id": parent_run_id,
+                            "spawn_depth": spawn_depth }),
                     )
                     .await?;
                 }
@@ -10913,7 +10918,9 @@ impl RuntimeThreadManager {
                     owner_session_id,
                     id,
                     status,
-                    ..
+                    activity,
+                    parent_run_id,
+                    spawn_depth,
                 } if owner_session_id == thread_id => {
                     let message = format!("Sub-agent {id}: {status}");
                     let item = TurnItemRecord {
@@ -10936,7 +10943,9 @@ impl RuntimeThreadManager {
                         Some(&turn_id),
                         Some(&item.id),
                         "agent.progress",
-                        json!({ "item": item, "agent_id": id }),
+                        json!({ "item": item, "agent_id": id,
+                            "worker_status": activity.worker_status, "step": activity.step,
+                            "parent_run_id": parent_run_id, "spawn_depth": spawn_depth }),
                     )
                     .await?;
                 }
@@ -10944,9 +10953,17 @@ impl RuntimeThreadManager {
                     owner_session_id,
                     id,
                     result,
+                    outcome,
+                    parent_run_id,
+                    spawn_depth,
+                    continuable,
                 } if owner_session_id == thread_id => {
+                    let worker_status = outcome
+                        .as_ref()
+                        .map(crate::tools::subagent::subagent_status_name);
                     let message = format!(
-                        "Sub-agent {id} completed: {}",
+                        "Sub-agent {id} {}: {}",
+                        worker_status.unwrap_or("settled (outcome unconfirmed)"),
                         summarize_text(&result, SUMMARY_LIMIT)
                     );
                     let item = TurnItemRecord {
@@ -10969,7 +10986,9 @@ impl RuntimeThreadManager {
                         Some(&turn_id),
                         Some(&item.id),
                         "agent.completed",
-                        json!({ "item": item, "agent_id": id }),
+                        json!({ "item": item, "agent_id": id,
+                            "worker_status": worker_status, "parent_run_id": parent_run_id,
+                            "spawn_depth": spawn_depth, "continuable": continuable }),
                     )
                     .await?;
                 }
@@ -12271,6 +12290,11 @@ pub enum AgentRebindStatus {
     Spawned,
     InProgress,
     Completed,
+    Failed,
+    Interrupted,
+    Cancelled,
+    BudgetExhausted,
+    Unconfirmed,
 }
 
 /// Collapse a chronologically ordered slice of `RuntimeEventRecord` into
@@ -12282,8 +12306,10 @@ pub enum AgentRebindStatus {
 #[allow(dead_code)]
 pub fn collect_agent_rebind_hints(events: &[RuntimeEventRecord]) -> Vec<AgentRebindHint> {
     use std::collections::BTreeMap;
-    let mut latest: BTreeMap<String, AgentRebindStatus> = BTreeMap::new();
-    for event in events {
+    let mut latest: BTreeMap<String, (AgentRebindStatus, u64, bool)> = BTreeMap::new();
+    let mut ordered = events.iter().collect::<Vec<_>>();
+    ordered.sort_by_key(|event| event.seq);
+    for event in ordered {
         let id = match event.payload.get("agent_id").and_then(|v| v.as_str()) {
             Some(id) => id.to_string(),
             None => continue,
@@ -12291,20 +12317,33 @@ pub fn collect_agent_rebind_hints(events: &[RuntimeEventRecord]) -> Vec<AgentReb
         let next_status = match event.event.as_str() {
             "agent.spawned" => Some(AgentRebindStatus::Spawned),
             "agent.progress" => Some(AgentRebindStatus::InProgress),
-            "agent.completed" => Some(AgentRebindStatus::Completed),
+            "agent.completed" => Some(
+                match event.payload.get("worker_status").and_then(Value::as_str) {
+                    Some("completed") => AgentRebindStatus::Completed,
+                    Some("failed") => AgentRebindStatus::Failed,
+                    Some("interrupted") => AgentRebindStatus::Interrupted,
+                    Some("cancelled") => AgentRebindStatus::Cancelled,
+                    Some("budget_exhausted") => AgentRebindStatus::BudgetExhausted,
+                    _ => AgentRebindStatus::Unconfirmed,
+                },
+            ),
             _ => None,
         };
         if let Some(status) = next_status {
-            // Don't downgrade Completed → InProgress on out-of-order events.
-            let entry = latest.entry(id).or_insert(status);
-            if !matches!(*entry, AgentRebindStatus::Completed) {
-                *entry = status;
+            let terminal = event.event == "agent.completed";
+            let entry = latest.entry(id).or_insert((status, event.seq, terminal));
+            // An attempt cannot revive on duplicate/stale progress. A later
+            // typed terminal receipt may clarify a legacy unknown outcome.
+            if event.seq > entry.1
+                && (!entry.2 || (terminal && entry.0 == AgentRebindStatus::Unconfirmed))
+            {
+                *entry = (status, event.seq, terminal);
             }
         }
     }
     latest
         .into_iter()
-        .map(|(agent_id, status)| AgentRebindHint { agent_id, status })
+        .map(|(agent_id, (status, _, _))| AgentRebindHint { agent_id, status })
         .collect()
 }
 
