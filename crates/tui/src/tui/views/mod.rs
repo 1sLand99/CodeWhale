@@ -3697,7 +3697,6 @@ impl ModalView for ConfigView {
                     ViewAction::None
                 }
             }
-            KeyCode::Char('q') if self.filter.is_empty() => ViewAction::Close,
             KeyCode::Tab | KeyCode::Right
                 if !key.modifiers.contains(KeyModifiers::SHIFT) && self.filter.is_empty() =>
             {
@@ -3714,15 +3713,7 @@ impl ModalView for ConfigView {
                 self.move_selection(-1);
                 ViewAction::None
             }
-            KeyCode::Char('k') if self.filter.is_empty() => {
-                self.move_selection(-1);
-                ViewAction::None
-            }
             KeyCode::Down => {
-                self.move_selection(1);
-                ViewAction::None
-            }
-            KeyCode::Char('j') if self.filter.is_empty() => {
                 self.move_selection(1);
                 ViewAction::None
             }
@@ -3758,19 +3749,6 @@ impl ModalView for ConfigView {
                 self.clear_filter();
                 ViewAction::None
             }
-            KeyCode::Char('e') | KeyCode::Char('E') if self.filter.is_empty() => {
-                if self
-                    .selected_row_index()
-                    .and_then(|idx| self.rows.get(idx))
-                    .is_some_and(|row| row.editable)
-                {
-                    if let Some(action) = self.open_selected_catalog_picker() {
-                        return action;
-                    }
-                    self.start_edit();
-                }
-                ViewAction::None
-            }
             KeyCode::Enter => {
                 if self
                     .selected_row_index()
@@ -3786,13 +3764,6 @@ impl ModalView for ConfigView {
                     self.start_edit();
                 }
                 ViewAction::None
-            }
-            KeyCode::Char(' ') if self.filter.is_empty() => {
-                if let Some(action) = self.toggle_selected_boolean() {
-                    action
-                } else {
-                    ViewAction::None
-                }
             }
             KeyCode::Char(ch)
                 if !key.modifiers.contains(KeyModifiers::CONTROL) && !ch.is_control() =>
@@ -8567,7 +8538,7 @@ context_window = 262144
     }
 
     #[test]
-    fn config_view_filter_accepts_j_k_and_unicode_case() {
+    fn config_view_filter_accepts_unicode_case() {
         let app = create_test_app();
         let mut view = ConfigView::new_for_app(&app);
 
@@ -8590,6 +8561,79 @@ context_window = 262144
         view.rows[0].value = "CAFÉ".to_string();
         type_filter(&mut view, "café");
         assert_eq!(visible_row_keys(&view), vec!["theme"]);
+    }
+
+    fn assert_config_search_owns_text(query: &str) {
+        let mut view = create_config_view(Locale::En);
+        // Start on an actionable boolean so a stolen Space would emit a
+        // persisted update, and a stolen e would open an editor.
+        view.focus_key("low_motion");
+        let values = view
+            .rows
+            .iter()
+            .map(|row| row.value.clone())
+            .collect::<Vec<_>>();
+        let mut stack = ViewStack::new();
+        stack.push(view);
+        for ch in query.chars() {
+            assert!(
+                stack
+                    .handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE))
+                    .is_empty(),
+                "{query:?}"
+            );
+            assert_eq!(stack.top_kind(), Some(ModalKind::Config), "{query:?}");
+        }
+        let mut modal = stack.pop().unwrap();
+        let view = modal.as_any_mut().downcast_mut::<ConfigView>().unwrap();
+        assert_eq!(view.filter, query);
+        assert!(
+            view.editing.is_none(),
+            "search text must not enter a settings editor"
+        );
+        assert_eq!(
+            view.rows
+                .iter()
+                .map(|row| row.value.clone())
+                .collect::<Vec<_>>(),
+            values
+        );
+        assert!(matches!(
+            view.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            ViewAction::None
+        ));
+        assert!(view.filter.is_empty());
+        assert!(matches!(
+            view.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            ViewAction::Close
+        ));
+    }
+
+    #[test]
+    fn config_search_owns_initial_q() {
+        assert_config_search_owns_text("quiet");
+        assert_config_search_owns_text("Queue");
+    }
+
+    #[test]
+    fn config_search_owns_initial_e() {
+        assert_config_search_owns_text("effort");
+        assert_config_search_owns_text("Effort");
+    }
+
+    #[test]
+    fn config_search_owns_initial_j() {
+        assert_config_search_owns_text("json");
+    }
+
+    #[test]
+    fn config_search_owns_initial_k() {
+        assert_config_search_owns_text("key");
+    }
+
+    #[test]
+    fn config_search_owns_initial_space() {
+        assert_config_search_owns_text(" 队列é");
     }
 
     #[test]
@@ -9866,7 +9910,7 @@ context_window = 262144
             assert!(matches!(key(&mut view, KeyCode::Enter), ViewAction::None));
             assert!(view.editing.is_none(), "{w}x{h} read-only rows never edit");
 
-            // Tab ×4 → Motion; ↓ → fancy_animations; Space toggles it and
+            // Tab ×4 → Motion; ↓ → fancy_animations; Enter toggles it and
             // emits the persisted update without opening an editor.
             for _ in 0..4 {
                 assert!(matches!(key(&mut view, KeyCode::Tab), ViewAction::None));
@@ -9880,12 +9924,12 @@ context_window = 262144
                 dump.contains(&en(MessageId::ConfigActivateAgain)),
                 "{w}x{h} activation copy:\n{dump}"
             );
-            match key(&mut view, KeyCode::Char(' ')) {
+            match key(&mut view, KeyCode::Enter) {
                 ViewAction::Emit(ViewEvent::ConfigUpdated { key, persist, .. }) => {
                     assert_eq!(key, "fancy_animations");
                     assert!(persist);
                 }
-                other => panic!("{w}x{h} Space should toggle, got {other:?}"),
+                other => panic!("{w}x{h} Enter should toggle, got {other:?}"),
             }
             assert!(view.editing.is_none());
 
