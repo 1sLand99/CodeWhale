@@ -3845,9 +3845,15 @@ mod profile_snapshot_tests {
                 assert_eq!(app.configured_models, expected_models);
                 assert_eq!(app.configured_models, config.custom_models.clone().unwrap());
                 assert_eq!(app.model, "new-preview");
-                assert_eq!(app.active_route_base_url, route.candidate.endpoint().base_url);
+                assert_eq!(
+                    app.active_route_base_url,
+                    route.candidate.endpoint().base_url
+                );
                 assert_eq!(app.active_route_limits, Some(route.candidate.limits()));
-                assert_eq!(app.active_context_window_source, route.context_window.source);
+                assert_eq!(
+                    app.active_context_window_source,
+                    route.context_window.source
+                );
 
                 let mut empty = profile_fixture("no-metadata", "https://empty.example.test/v1");
                 empty.custom_models = None;
@@ -3857,8 +3863,14 @@ mod profile_snapshot_tests {
                 assert!(config.custom_models.is_none());
                 assert_eq!(app.config_profile.as_deref(), Some("empty"));
                 assert_eq!(app.model, "no-metadata");
-                assert_eq!(app.active_route_base_url, empty_route.candidate.endpoint().base_url);
-                assert_eq!(app.active_context_window_source, empty_route.context_window.source);
+                assert_eq!(
+                    app.active_route_base_url,
+                    empty_route.candidate.endpoint().base_url
+                );
+                assert_eq!(
+                    app.active_context_window_source,
+                    empty_route.context_window.source
+                );
                 assert_ne!(
                     app.active_context_window_source,
                     crate::route_runtime::ContextWindowSource::UserDeclared,
