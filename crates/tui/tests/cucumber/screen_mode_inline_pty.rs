@@ -31,6 +31,92 @@ const SETTLE_WAIT: Duration = Duration::from_secs(5);
 const LIVE_SHELL_SENTINEL: &str = "Type a message";
 
 #[test]
+fn offline_queue_late_unbracketed_submit_keeps_composer_and_commands_responsive() {
+    // #5999 requires the burst heuristic to stay armed: type_line() uses
+    // bracketed paste and would hide the original queue/session-id wedge.
+    for (rows, cols) in [(24, 80), (32, 100)] {
+        for delay_ms in [150, 250, 400] {
+            let workspace = make_sealed_workspace().expect("sealed workspace");
+            std::fs::write(workspace.home().join(".codewhale/.onboarded"), "")
+                .expect("onboarded marker");
+            let trust_dir = workspace.workspace().join(".deepseek");
+            std::fs::create_dir_all(&trust_dir).expect("workspace trust dir");
+            std::fs::write(trust_dir.join("trusted"), "").expect("workspace trust marker");
+            let mut tui = Harness::builder(Harness::cargo_bin("codewhale-tui"))
+                .cwd(workspace.workspace())
+                .clear_env()
+                .seal_home(workspace.home())
+                .env("CODEWHALE_DISABLE_MODELS_DEV_FETCH", "1")
+                .env("CODEWHALE_NO_UPDATE_CHECK", "1")
+                .env("NO_ANIMATIONS", "1")
+                .args([
+                    "--workspace",
+                    workspace.workspace().to_str().expect("workspace UTF-8"),
+                    "--no-project-config",
+                    "--fresh",
+                ])
+                .size(rows, cols)
+                .spawn()
+                .expect("start offline TUI");
+
+            wait_or_panic(
+                &mut tui,
+                "Choose your model provider",
+                STARTUP_WAIT,
+                "provider",
+            );
+            tui.send(keys::key::ctrl('o')).expect("Explore Offline");
+            wait_or_panic(&mut tui, "You're ready.", SETTLE_WAIT, "offline ready");
+            tui.send(keys::key::enter()).expect("leave onboarding");
+            wait_or_panic(&mut tui, "New session", STARTUP_WAIT, "launch card");
+            tui.wait_for_idle(Duration::from_millis(100), SETTLE_WAIT)
+                .expect("composer ready");
+            tui.send(keys::key::ctrl('u'))
+                .expect("clear suggested prompt");
+
+            tui.send(keys::key::text("late queue draft"))
+                .expect("raw prompt bytes");
+            std::thread::sleep(Duration::from_millis(delay_ms));
+            tui.send(keys::key::enter()).expect("late submit");
+            wait_or_panic(&mut tui, "Queued #1", STARTUP_WAIT, "offline queue receipt");
+
+            tui.send(keys::key::ctrl('u')).expect("clear queued draft");
+            tui.send(keys::key::text("input is still live"))
+                .expect("type after queued submit");
+            wait_or_panic(
+                &mut tui,
+                "input is still live",
+                SETTLE_WAIT,
+                "composer liveness",
+            );
+            tui.send(keys::key::ctrl('u'))
+                .expect("clear liveness probe");
+            tui.wait_for(|frame| !frame.contains("input is still live"), SETTLE_WAIT)
+                .expect("Ctrl+U still clears the composer");
+            tui.send(keys::key::text("/queue drop 1"))
+                .expect("type queue command");
+            // Keep the heuristic armed, but let this raw command's burst
+            // settle before Enter so it is not a pasted newline.
+            tui.wait_for_idle(Duration::from_millis(300), SETTLE_WAIT)
+                .expect("queue command settles");
+            tui.send(keys::key::enter()).expect("execute queue command");
+            wait_or_panic(
+                &mut tui,
+                "Dropped queued message",
+                SETTLE_WAIT,
+                "command liveness",
+            );
+            assert!(
+                !tui.frame().contains("engine session id diverged"),
+                "{cols}x{rows}, {delay_ms}ms submit: {}",
+                tui.diagnostics()
+            );
+            tui.shutdown();
+        }
+    }
+}
+
+#[test]
 fn inline_start_never_takes_the_alternate_screen_and_screen_commands_switch_it() {
     let workspace = make_sealed_workspace().expect("sealed workspace");
     std::fs::write(workspace.home().join(".codewhale/.onboarded"), "").expect("onboarded marker");
