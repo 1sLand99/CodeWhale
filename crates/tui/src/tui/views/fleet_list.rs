@@ -891,21 +891,18 @@ mod tests {
     #[test]
     fn legacy_entry_opens_a_pager_instead_of_editing() {
         let _lock = crate::test_support::lock_test_env();
-        let prev = std::env::var_os("CODEWHALE_HOME");
-        // SAFETY: serialised by lock_test_env.
-        unsafe { std::env::set_var("CODEWHALE_HOME", sealed_home()) };
+        let home = tempfile::TempDir::new().expect("personal home");
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", home.path());
         let ws = tempfile::TempDir::new().unwrap();
 
         // A legacy exact fleet file (workflow schema) in the personal dir.
-        std::fs::create_dir_all(sealed_home().join("fleets")).unwrap();
-        std::fs::write(
-            sealed_home().join("fleets/stopship.toml"),
-            r#"schema = "exact"
+        std::fs::create_dir_all(home.path().join("fleets")).unwrap();
+        let legacy_path = home.path().join("fleets/stopship.toml");
+        let legacy_source = r#"schema = "exact"
 schema_revision = 1
 name = "stopship"
-members = []"#,
-        )
-        .unwrap();
+members = []"#;
+        std::fs::write(&legacy_path, legacy_source).unwrap();
 
         let mut view = FleetListView::new(&app_in(ws.path().to_path_buf()), &Config::default());
         let idx = view
@@ -916,6 +913,8 @@ members = []"#,
         view.row = idx;
         let entry = view.selected_entry().expect("legacy entry listed");
         assert!(entry.legacy);
+        assert_eq!(entry.scope, FleetScope::Personal);
+        assert_eq!(entry.path, legacy_path);
 
         let action = view.handle_key(key(KeyCode::Enter));
         let ViewAction::Emit(ViewEvent::OpenTextPager { title, content }) = action else {
@@ -925,13 +924,11 @@ members = []"#,
         assert!(content.contains("This team file predates the named-team format"));
         assert!(content.contains("create a new team"));
 
-        // SAFETY: serialised by lock_test_env.
-        unsafe {
-            match prev {
-                Some(v) => std::env::set_var("CODEWHALE_HOME", v),
-                None => std::env::remove_var("CODEWHALE_HOME"),
-            }
-        }
+        assert_eq!(
+            std::fs::read_to_string(&legacy_path).unwrap(),
+            legacy_source
+        );
+        assert!(crate::fleet::store::selected_fleet(ws.path()).is_none());
     }
 
     #[test]
