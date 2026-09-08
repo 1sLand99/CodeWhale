@@ -5650,6 +5650,7 @@ impl Engine {
         let (status, error) = match run_purge(
             &client,
             self.api_provider,
+            &self.session.id,
             &self.session.messages,
             &self.session.model,
             self.session.reasoning_effort.clone(),
@@ -5664,8 +5665,8 @@ impl Engine {
 
                 let summary = format!(
                     "Purge complete: {messages_before} → {messages_after} messages \
-                         ({} removed, {} condensed)",
-                    result.removed_count, result.replaced_count,
+                         ({} removed, {} condensed, {} offloaded)",
+                    result.removed_count, result.replaced_count, result.offloaded_count,
                 );
                 emit_purge_completed(
                     &self.tx_event,
