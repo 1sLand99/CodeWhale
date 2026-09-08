@@ -2185,5 +2185,15 @@
   "ConfigChoiceNotificationUnfocused": "離開時",
   "ConfigChoiceNotificationNever": "永不",
   "ConfigChoiceNotificationFile": "自訂檔案",
-  "ConfigChoiceNotificationBell": "系統鈴聲"
+  "ConfigChoiceNotificationBell": "系統鈴聲",
+  "NotificationApprovalNeeded": "請核准或拒絕「{tool}」以繼續",
+  "NotificationInputNeeded": "請回答終端機中的問題以繼續",
+  "NotificationElevationNeeded": "請允許或拒絕為「{tool}」提升存取權限",
+  "NotificationDecisionWebHint": "請在此處或網頁上作出決定。",
+  "NotificationTurnFailed": "本輪失敗",
+  "NotificationProviderFallback": "供應商發生可復原的錯誤，已切換至 {provider}（備用選項 {position}/{total}）。",
+  "ApprovalNeverPostureBlocked": "已封鎖「{tool}」：此工作階段不允許使用需要核准的工具。",
+  "NotificationWebApproved": "已在網頁上核准。",
+  "NotificationWebDenied": "已在網頁上拒絕。",
+  "NotificationInputSubmitFailed": "無法提交你的回答：{error}。請再試一次。"
 }

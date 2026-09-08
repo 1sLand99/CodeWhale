@@ -2185,5 +2185,15 @@
   "ConfigChoiceNotificationUnfocused": "Quan siguis absent",
   "ConfigChoiceNotificationNever": "Mai",
   "ConfigChoiceNotificationFile": "Fitxer personalitzat",
-  "ConfigChoiceNotificationBell": "Campana del sistema"
+  "ConfigChoiceNotificationBell": "Campana del sistema",
+  "NotificationApprovalNeeded": "Aprova o denega '{tool}' per continuar",
+  "NotificationInputNeeded": "Respon la pregunta al terminal per continuar",
+  "NotificationElevationNeeded": "Permet o denega l'accés elevat per a '{tool}'",
+  "NotificationDecisionWebHint": "Decideix aquí o al web.",
+  "NotificationTurnFailed": "El torn ha fallat",
+  "NotificationProviderFallback": "S'ha canviat a {provider} (alternativa {position}/{total}) després d'un error recuperable del proveïdor.",
+  "ApprovalNeverPostureBlocked": "S'ha bloquejat '{tool}': aquesta sessió no permet eines que requereixen aprovació.",
+  "NotificationWebApproved": "Aprovat al web.",
+  "NotificationWebDenied": "Denegat al web.",
+  "NotificationInputSubmitFailed": "No s'ha pogut enviar la resposta: {error}. Torna-ho a provar."
 }

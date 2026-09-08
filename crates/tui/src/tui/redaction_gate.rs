@@ -22,7 +22,7 @@ use ratatui::{
 
 use crate::localization::MessageId;
 use crate::palette;
-use crate::tui::app::App;
+use crate::tui::app::{App, RedactionGateNotice, StatusToastKind};
 use crate::tui::onboarding::wrap_words;
 use crate::tui::views::{ActionHint, render_modal_footer, render_underwater_surface};
 
@@ -111,15 +111,21 @@ fn action_hints(app: &App) -> Vec<ActionHint> {
 
 fn screen_lines(app: &App, width: usize, height: usize) -> Vec<Line<'static>> {
     let mut out = Vec::new();
-    if let Some(toast) = app
-        .status_toasts
-        .back()
-        .filter(|toast| !toast.is_expired(std::time::Instant::now()))
-    {
+    let now = std::time::Instant::now();
+    if let Some(toast) = [
+        RedactionGateNotice::WriteFailure,
+        RedactionGateNotice::EnterGuidance,
+    ]
+    .into_iter()
+    .find_map(|notice| {
+        app.status_toasts.iter().rev().find(|toast| {
+            toast.kind == StatusToastKind::RedactionGate(notice) && !toast.is_expired(now)
+        })
+    }) {
         for line in wrap_words(&toast.text, width) {
             out.push(Line::from(Span::styled(
                 line,
-                Style::default().fg(palette::STATUS_WARNING),
+                Style::default().fg(toast.level.ink().color(&app.ui_theme)),
             )));
         }
         out.push(Line::from(""));
@@ -375,10 +381,27 @@ mod tests {
         assert!(confirmation_required(&config));
         let mut app = app_fixture();
         let notice = app.tr(MessageId::RedactionGateSaveFailed).into_owned();
+        app.push_status_toast_record(
+            crate::tui::app::StatusToast::new(
+                notice.clone(),
+                crate::tui::app::StatusToastLevel::Error,
+                None,
+            )
+            .for_redaction_gate(RedactionGateNotice::WriteFailure),
+        );
+        let hint = app.tr(MessageId::RedactionGateEnterHint).into_owned();
+        app.push_status_toast_record(
+            crate::tui::app::StatusToast::new(
+                hint.clone(),
+                crate::tui::app::StatusToastLevel::Info,
+                Some(12_000),
+            )
+            .for_redaction_gate(RedactionGateNotice::EnterGuidance),
+        );
         app.push_status_toast(
-            notice.clone(),
+            "Unrelated runtime error",
             crate::tui::app::StatusToastLevel::Error,
-            Some(12_000),
+            None,
         );
         app.status_message = Some("Unrelated runtime status".to_string());
         let lines = screen_lines(&app, 38, 6)
@@ -388,6 +411,12 @@ mod tests {
             .join(" ");
         assert!(lines.contains("Could not save confirmation"));
         assert!(!lines.contains("Unrelated runtime status"));
+        assert!(!lines.contains("Unrelated runtime error"));
+        assert!(!lines.contains(&hint));
+        assert_eq!(
+            screen_lines(&app, 38, 6)[0].spans[0].style.fg,
+            Some(app.ui_theme.error_fg)
+        );
         assert!(app.redaction_gate);
         assert_eq!(
             codewhale_config::redaction::effective_masking(
@@ -396,6 +425,18 @@ mod tests {
             ),
             codewhale_config::redaction::ModelBoundMasking::Enabled
         );
+        app.retire_redaction_gate_notice(RedactionGateNotice::EnterGuidance);
+        assert!(screen_lines(&app, 100, 24)[0].to_string().contains(&notice));
+        app.retire_redaction_gate_notice(RedactionGateNotice::WriteFailure);
+        let remaining = screen_lines(&app, 100, 24)
+            .into_iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(!remaining.contains(&notice));
+        assert!(!remaining.contains("Unrelated runtime error"));
+        assert_eq!(app.status_toasts.len(), 1);
+        assert_eq!(app.status_toasts[0].text, "Unrelated runtime error");
     }
 
     /// The red warning is part of both stages, and the second stage swaps the

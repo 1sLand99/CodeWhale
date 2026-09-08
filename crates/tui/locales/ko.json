@@ -2185,5 +2185,15 @@
   "ConfigChoiceNotificationUnfocused": "자리 비움 시",
   "ConfigChoiceNotificationNever": "안 함",
   "ConfigChoiceNotificationFile": "사용자 지정 파일",
-  "ConfigChoiceNotificationBell": "시스템 벨"
+  "ConfigChoiceNotificationBell": "시스템 벨",
+  "NotificationApprovalNeeded": "계속하려면 '{tool}'을(를) 승인하거나 거부하세요",
+  "NotificationInputNeeded": "계속하려면 터미널의 질문에 답하세요",
+  "NotificationElevationNeeded": "'{tool}'의 추가 접근 권한을 허용하거나 거부하세요",
+  "NotificationDecisionWebHint": "여기 또는 웹에서 결정하세요.",
+  "NotificationTurnFailed": "턴 실패",
+  "NotificationProviderFallback": "복구 가능한 제공업체 오류가 발생하여 {provider}(으)로 전환했습니다(대체 경로 {position}/{total}).",
+  "ApprovalNeverPostureBlocked": "'{tool}'이(가) 차단되었습니다. 이 세션에서는 승인이 필요한 도구를 허용하지 않습니다.",
+  "NotificationWebApproved": "웹에서 승인되었습니다.",
+  "NotificationWebDenied": "웹에서 거부되었습니다.",
+  "NotificationInputSubmitFailed": "답변을 제출하지 못했습니다: {error}. 다시 시도하세요."
 }

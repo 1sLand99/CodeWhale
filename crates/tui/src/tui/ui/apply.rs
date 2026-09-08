@@ -4,7 +4,8 @@
 //! Moved verbatim out of `ui.rs`.
 
 use super::observer_hooks::{
-    execute_subagent_observer_hook, surface_observer_hook_submission_failure,
+    execute_subagent_observer_hook, subagent_failure_notice,
+    surface_observer_hook_submission_failure,
 };
 use super::task_projection::refresh_active_task_panel;
 use super::*;
@@ -34,7 +35,18 @@ pub(crate) fn apply_agent_spawned_status_and_observer(
 ) {
     let label = app.ensure_agent_label(agent_id);
     codewhale_telemetry::session_counters().bump(codewhale_telemetry::Counter::SubagentSpawn);
-    app.status_message = Some(format!("{label} starting: {prompt_summary}"));
+    app.push_status_toast_record(
+        StatusToast::new(
+            format!(
+                "{} · {label} · {}",
+                app.tr(MessageId::SubagentsStatusRunning),
+                bound_agent_activity_text(prompt_summary)
+            ),
+            StatusToastLevel::Info,
+            Some(4_000),
+        )
+        .for_event(format!("subagent-start:{agent_id}")),
+    );
     if let Err(error) =
         execute_subagent_observer_hook(app, HookEvent::SubagentSpawn, agent_id, "prompt", prompt)
     {
@@ -47,13 +59,30 @@ pub(crate) fn apply_agent_complete_status_and_observer(
     app: &mut App,
     agent_id: &str,
     result: &str,
-    terminal_verb: &str,
+    status: &SubAgentStatus,
 ) {
     let label = app.agent_display_label(agent_id);
-    app.status_message = Some(format!(
-        "{label} {terminal_verb}: {}",
-        bound_agent_activity_text(result)
-    ));
+    let level = match status {
+        SubAgentStatus::Completed => StatusToastLevel::Success,
+        SubAgentStatus::Failed(_) | SubAgentStatus::BudgetExhausted => StatusToastLevel::Error,
+        SubAgentStatus::Interrupted(_) | SubAgentStatus::Cancelled => StatusToastLevel::Warning,
+        SubAgentStatus::Running => StatusToastLevel::Info,
+    };
+    let failure = subagent_failure_notice(result);
+    let detail = failure.as_deref().unwrap_or(result);
+    let message = format!(
+        "{} · {label} · {}",
+        app.tr(notifications::subagent_terminal_label(status)),
+        bound_agent_activity_text(detail)
+    );
+    if level == StatusToastLevel::Error {
+        app.set_sticky_status(message, level, Some(App::STICKY_ERROR_TTL_MS));
+    } else {
+        app.push_status_toast_record(
+            StatusToast::new(message, level, Some(5_000))
+                .for_event(format!("subagent-terminal:{agent_id}")),
+        );
+    }
     if let Err(error) =
         execute_subagent_observer_hook(app, HookEvent::SubagentComplete, agent_id, "result", result)
     {
@@ -222,11 +251,13 @@ pub(crate) fn apply_engine_error_to_app(
             Ok(None) => "~/.codewhale/config.toml".to_string(),
             Err(error) => error.to_string(),
         };
-        app.status_message = Some(
+        app.push_status_toast(
             tr(app.ui_locale, MessageId::OnboardApiKeyRejectedEnv)
                 .replace("{provider}", provider.as_str())
                 .replace("{env}", &provider.env_vars_label())
                 .replace("{path}", &config_path),
+            StatusToastLevel::Error,
+            Some(App::STICKY_ERROR_TTL_MS),
         );
         return;
     }
@@ -241,11 +272,14 @@ pub(crate) fn apply_engine_error_to_app(
     {
         let position = app.fallback_chain_position().unwrap_or(0);
         let total = app.fallback_chain_len();
-        app.status_message = Some(format!(
-            "Switched to {} (fallback {position}/{}) after recoverable provider error.",
-            app.api_provider.as_str(),
-            total.saturating_sub(1)
-        ));
+        app.push_status_toast(
+            app.tr(MessageId::NotificationProviderFallback)
+                .replace("{provider}", app.api_provider.as_str())
+                .replace("{position}", &position.to_string())
+                .replace("{total}", &total.saturating_sub(1).to_string()),
+            StatusToastLevel::Warning,
+            Some(8_000),
+        );
         return;
     }
     if !recoverable {
@@ -2639,6 +2673,43 @@ pub(crate) fn apply_hotbar_setup_saved(
     app.needs_redraw = true;
 }
 
+pub(crate) fn settle_user_input_request(app: &mut App, tool_id: &str) {
+    app.retire_action_notices(Some(tool_id));
+    if app
+        .pending_user_input_prompt
+        .as_ref()
+        .is_some_and(|(id, _)| id == tool_id)
+    {
+        app.pending_user_input_prompt = None;
+    }
+}
+
+pub(crate) fn apply_user_input_submission_result(app: &mut App, tool_id: &str, result: Result<()>) {
+    match result {
+        Ok(()) => settle_user_input_request(app, tool_id),
+        Err(error) => {
+            tracing::warn!(tool_id, error = %error, "user input submit failed");
+            if let Some((id, request)) = app
+                .pending_user_input_prompt
+                .as_ref()
+                .filter(|(id, _)| id == tool_id)
+                .cloned()
+            {
+                app.view_stack.push(UserInputView::new(id, request));
+            }
+            app.push_status_toast_record(
+                StatusToast::new(
+                    app.tr(MessageId::NotificationInputSubmitFailed)
+                        .replace("{error}", &error.to_string()),
+                    StatusToastLevel::Error,
+                    Some(App::STICKY_ERROR_TTL_MS),
+                )
+                .for_event(format!("input-submit:{tool_id}")),
+            );
+        }
+    }
+}
+
 pub(crate) async fn apply_approval_decision(
     app: &mut App,
     engine_handle: &mut EngineHandle,
@@ -2677,7 +2748,13 @@ pub(crate) async fn apply_approval_decision(
             // decision acks "no longer pending" instead of double-answering.
             app.remote_control
                 .resolve_pending_approval(&event.tool_id, true);
-            let _ = engine_handle.approve_tool_call(event.tool_id).await;
+            if engine_handle
+                .approve_tool_call(event.tool_id.clone())
+                .await
+                .is_ok()
+            {
+                app.retire_action_notices(Some(&event.tool_id));
+            }
         }
         ReviewDecision::Denied => {
             // Cache the denial so the model retry-loop doesn't re-prompt for
@@ -2689,7 +2766,13 @@ pub(crate) async fn apply_approval_decision(
             }
             app.remote_control
                 .resolve_pending_approval(&event.tool_id, false);
-            let _ = engine_handle.deny_tool_call(event.tool_id).await;
+            if engine_handle
+                .deny_tool_call(event.tool_id.clone())
+                .await
+                .is_ok()
+            {
+                app.retire_action_notices(Some(&event.tool_id));
+            }
         }
         ReviewDecision::Abort => {
             engine_handle.cancel();

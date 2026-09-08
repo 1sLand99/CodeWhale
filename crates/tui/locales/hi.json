@@ -2185,5 +2185,15 @@
   "ConfigChoiceNotificationUnfocused": "जब दूर हों",
   "ConfigChoiceNotificationNever": "कभी नहीं",
   "ConfigChoiceNotificationFile": "कस्टम फ़ाइल",
-  "ConfigChoiceNotificationBell": "सिस्टम घंटी"
+  "ConfigChoiceNotificationBell": "सिस्टम घंटी",
+  "NotificationApprovalNeeded": "आगे बढ़ने के लिए '{tool}' को मंज़ूरी दें या अस्वीकार करें",
+  "NotificationInputNeeded": "आगे बढ़ने के लिए टर्मिनल में दिए गए सवाल का जवाब दें",
+  "NotificationElevationNeeded": "'{tool}' के लिए अतिरिक्त पहुँच की अनुमति दें या अस्वीकार करें",
+  "NotificationDecisionWebHint": "यहाँ या वेब पर फ़ैसला करें।",
+  "NotificationTurnFailed": "टर्न विफल",
+  "NotificationProviderFallback": "प्रदाता की ठीक की जा सकने वाली त्रुटि के बाद {provider} पर स्विच किया गया (वैकल्पिक प्रदाता {position}/{total})।",
+  "ApprovalNeverPostureBlocked": "'{tool}' को ब्लॉक किया गया: इस सत्र में मंज़ूरी की ज़रूरत वाले टूल की अनुमति नहीं है।",
+  "NotificationWebApproved": "वेब पर मंज़ूरी दी गई।",
+  "NotificationWebDenied": "वेब पर अस्वीकार किया गया।",
+  "NotificationInputSubmitFailed": "आपका जवाब भेजा नहीं जा सका: {error}। फिर से कोशिश करें।"
 }

@@ -2185,5 +2185,15 @@
   "ConfigChoiceNotificationUnfocused": "Quando estiver ausente",
   "ConfigChoiceNotificationNever": "Nunca",
   "ConfigChoiceNotificationFile": "Arquivo personalizado",
-  "ConfigChoiceNotificationBell": "Campainha do sistema"
+  "ConfigChoiceNotificationBell": "Campainha do sistema",
+  "NotificationApprovalNeeded": "Aprove ou negue '{tool}' para continuar",
+  "NotificationInputNeeded": "Responda à pergunta no terminal para continuar",
+  "NotificationElevationNeeded": "Permita ou negue acesso elevado para '{tool}'",
+  "NotificationDecisionWebHint": "Decida aqui ou na web.",
+  "NotificationTurnFailed": "O turno falhou",
+  "NotificationProviderFallback": "Alternado para {provider} (alternativa {position}/{total}) após um erro recuperável do provedor.",
+  "ApprovalNeverPostureBlocked": "'{tool}' foi bloqueado: esta sessão não permite ferramentas que exigem aprovação.",
+  "NotificationWebApproved": "Aprovado na web.",
+  "NotificationWebDenied": "Negado na web.",
+  "NotificationInputSubmitFailed": "Não foi possível enviar sua resposta: {error}. Tente novamente."
 }

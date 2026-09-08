@@ -10971,10 +10971,10 @@ fn subagent_event_handlers_preserve_dispatch_failures_as_separate_toasts() {
         "inspect the repository",
         "inspect the repository",
     );
-    assert_eq!(
-        app.status_message.as_deref(),
-        Some("Agent 1 starting: inspect the repository")
-    );
+    assert!(app.status_toasts.iter().any(|toast| {
+        toast.level == StatusToastLevel::Info
+            && toast.text == "Running · Agent 1 · inspect the repository"
+    }));
     assert!(app.status_toasts.back().is_some_and(|toast| {
         toast
             .text
@@ -10986,12 +10986,12 @@ fn subagent_event_handlers_preserve_dispatch_failures_as_separate_toasts() {
         &mut app,
         "agent-test",
         "finished cleanly",
-        "completed",
+        &crate::tools::subagent::SubAgentStatus::Completed,
     );
-    assert_eq!(
-        app.status_message.as_deref(),
-        Some("Agent 1 completed: finished cleanly")
-    );
+    assert!(app.status_toasts.iter().any(|toast| {
+        toast.level == StatusToastLevel::Success
+            && toast.text == "Sub-agent complete · Agent 1 · finished cleanly"
+    }));
     assert!(app.status_toasts.back().is_some_and(|toast| {
         toast
             .text
@@ -12937,17 +12937,25 @@ fn subagent_status_from_completion_result_maps_terminal_sentinels() {
 }
 
 #[test]
-fn agent_complete_terminal_verb_is_truthful_for_cancelled_workers() {
+fn agent_complete_toast_is_truthful_and_localized_for_cancelled_workers() {
     let cancelled = subagent_status_from_completion_result(
         r#"Cancelled
 <codewhale:subagent.done>{"agent_id":"agent_x","status":"cancelled"}</codewhale:subagent.done>"#,
     );
-
-    assert_eq!(subagent_terminal_verb(&cancelled), "cancelled");
-    assert_ne!(subagent_terminal_verb(&cancelled), "completed");
-    assert_eq!(
-        subagent_terminal_verb(&crate::tools::subagent::SubAgentStatus::Completed),
-        "completed"
+    let mut app = create_test_app();
+    app.ui_locale = crate::localization::Locale::Ja;
+    apply_agent_complete_status_and_observer(&mut app, "agent_x", "worker result", &cancelled);
+    let toast = app.status_toasts.back().unwrap();
+    assert_eq!(toast.level, StatusToastLevel::Warning);
+    assert!(
+        toast
+            .text
+            .starts_with(&*app.tr(MessageId::NotificationSubagentCancelled))
+    );
+    assert!(
+        !toast
+            .text
+            .contains(&*app.tr(MessageId::NotificationSubagentComplete))
     );
 }
 
@@ -14241,7 +14249,7 @@ fn context_pressure_warning_survives_later_status_and_can_be_dismissed() {
 
     app.status_message = Some("A later transcript status".to_string());
     let visible = app
-        .active_status_toast()
+        .active_status_toast(crate::tui::underwater::ShellPhase::Working)
         .expect("a later transient status is visible");
     assert_eq!(visible.text, "A later transcript status");
     assert_eq!(
@@ -22077,6 +22085,7 @@ fn recoverable_provider_error_advances_fallback_chain() {
     use crate::error_taxonomy::{ErrorCategory, ErrorEnvelope, ErrorSeverity};
 
     let mut app = create_test_app();
+    app.ui_locale = crate::localization::Locale::Fr;
     app.api_provider = ApiProvider::Deepseek;
     app.provider_chain = Some(codewhale_config::ProviderChain::new(
         codewhale_config::ProviderKind::Deepseek,
@@ -22097,11 +22106,15 @@ fn recoverable_provider_error_advances_fallback_chain() {
     assert_eq!(app.api_provider, ApiProvider::Openrouter);
     assert!(app.is_fallback_active());
     assert!(!app.offline_mode);
-    assert!(
-        app.status_message
-            .as_deref()
-            .unwrap_or_default()
-            .contains("Switched to openrouter")
+    let toast = app.status_toasts.back().expect("fallback notice");
+    assert_eq!(toast.level, StatusToastLevel::Warning);
+    assert_eq!(toast.ttl_ms, Some(8_000));
+    assert_eq!(
+        toast.text,
+        app.tr(MessageId::NotificationProviderFallback)
+            .replace("{provider}", "openrouter")
+            .replace("{position}", "1")
+            .replace("{total}", "1")
     );
     assert!(
         app.last_fallback_reason
@@ -22186,7 +22199,9 @@ fn fallback_switch_status_shows_one_based_position_and_reason() {
         Some(1),
         "first fallback sits at 1-based position 1"
     );
-    let status = app.status_message.as_deref().unwrap_or_default();
+    let toast = app.status_toasts.back().expect("fallback notice");
+    assert_eq!(toast.level, StatusToastLevel::Warning);
+    let status = toast.text.as_str();
     assert!(
         status.contains("Switched to openrouter") && status.contains("(fallback 1/"),
         "visible status must show the destination and 1-based position: {status}"
@@ -22605,6 +22620,7 @@ fn non_recoverable_engine_error_enters_offline_mode() {
 fn env_only_auth_failure_reopens_provider_onboarding() {
     use crate::error_taxonomy::ErrorEnvelope;
     let mut app = create_test_app();
+    app.ui_locale = crate::localization::Locale::Ja;
     app.api_provider = crate::config::ApiProvider::Anthropic;
     app.config_path = Some(std::path::PathBuf::from("/tmp/codewhale-phase2.toml"));
     app.api_key_env_only = true;
@@ -22624,10 +22640,17 @@ fn env_only_auth_failure_reopens_provider_onboarding() {
     );
     assert!(app.onboarding_needs_api_key);
     assert!(app.turn_error_posted, "turn_error_posted must be set");
-    let status = app
-        .status_message
-        .as_deref()
-        .expect("auth recovery should explain the env key source");
+    let toast = app.status_toasts.back().expect("auth recovery notice");
+    assert_eq!(toast.level, StatusToastLevel::Error);
+    assert_eq!(toast.ttl_ms, Some(App::STICKY_ERROR_TTL_MS));
+    let status = toast.text.as_str();
+    assert_eq!(
+        status,
+        app.tr(MessageId::OnboardApiKeyRejectedEnv)
+            .replace("{provider}", "anthropic")
+            .replace("{env}", &app.api_provider.env_vars_label())
+            .replace("{path}", "/tmp/codewhale-phase2.toml")
+    );
     assert!(
         status.contains("anthropic")
             && status.contains("ANTHROPIC_API_KEY")
@@ -26473,4 +26496,145 @@ fn notification_invalid_live_delta_uses_selected_locale_and_keeps_policy() {
         assert_eq!(config.notifications_config(), before);
         assert_eq!(app.notification_settings, before);
     }
+}
+
+#[tokio::test]
+async fn notification_approval_settlement_retires_the_prompt_and_preserves_warning_receipts() {
+    let _guard = crate::test_support::lock_test_env();
+    let mut app = create_test_app();
+    app.ui_locale = crate::localization::Locale::Ja;
+    let payload = notifications::approval_needed_payload(app.ui_locale, "saved-failed-tool");
+    app.push_status_toast_record(
+        StatusToast::new(payload.headline(), StatusToastLevel::Warning, Some(12_000))
+            .for_action("approval-a"),
+    );
+    app.push_status_toast("Keep this receipt", StatusToastLevel::Warning, Some(12_000));
+    let mut engine = mock_engine_handle();
+    apply_approval_decision(
+        &mut app,
+        &mut engine.handle,
+        &mut Config::default(),
+        ApprovalDecisionEvent {
+            tool_id: "approval-a".into(),
+            tool_name: "saved-failed-tool".into(),
+            decision: ReviewDecision::Approved,
+            timed_out: false,
+            approval_key: "key-a".into(),
+            approval_grouping_key: "group-a".into(),
+            persistent_rules: Vec::new(),
+        },
+    )
+    .await;
+    assert_eq!(
+        engine.recv_approval_event().await,
+        Some(crate::core::engine::MockApprovalEvent::Approved {
+            id: "approval-a".into()
+        })
+    );
+    assert!(
+        !app.status_toasts
+            .iter()
+            .any(|toast| toast.text == payload.headline())
+    );
+    app.runtime_turn_status = Some("completed".into());
+    let facts = crate::tui::phase_strip::tideline_footer_from_app(&mut app, 140);
+    assert_eq!(
+        facts.right,
+        Some((
+            "Keep this receipt".into(),
+            crate::palette::ChromeInk::Attention
+        ))
+    );
+}
+
+#[test]
+fn notification_input_failure_keeps_the_request_and_success_retires_only_its_action() {
+    let _guard = crate::test_support::lock_test_env();
+    let mut app = create_test_app();
+    app.ui_locale = crate::localization::Locale::Fr;
+    let payload = notifications::input_needed_payload(app.ui_locale);
+    app.pending_user_input_prompt = Some((
+        "input-a".into(),
+        crate::tools::user_input::UserInputRequest {
+            questions: Vec::new(),
+        },
+    ));
+    app.push_status_toast_record(
+        StatusToast::new(payload.headline(), StatusToastLevel::Warning, Some(12_000))
+            .for_action("input-a"),
+    );
+    apply_user_input_submission_result(
+        &mut app,
+        "input-a",
+        Err(anyhow::anyhow!("injected transport failure")),
+    );
+    assert!(app.pending_user_input_prompt.is_some());
+    assert_eq!(app.status_toasts.len(), 2);
+    let error = app.status_toasts.back().unwrap();
+    assert_eq!(error.level, StatusToastLevel::Error);
+    assert_eq!(
+        error.text,
+        app.tr(MessageId::NotificationInputSubmitFailed)
+            .replace("{error}", "injected transport failure")
+    );
+    let error_text = error.text.clone();
+    app.sync_status_message_to_toasts();
+    assert_eq!(
+        app.status_toasts.len(),
+        2,
+        "failure must have one typed notice"
+    );
+    // The retried view closes before its submitted event is applied.
+    app.view_stack.pop();
+    apply_user_input_submission_result(&mut app, "input-a", Ok(()));
+    assert!(app.pending_user_input_prompt.is_none());
+    assert_eq!(app.status_toasts.len(), 1);
+    assert_eq!(app.status_toasts[0].text, error_text);
+    app.runtime_turn_status = Some("completed".into());
+    let facts = crate::tui::phase_strip::tideline_footer_from_app(&mut app, 500);
+    assert_eq!(
+        facts.right,
+        Some((error_text, crate::palette::ChromeInk::Failure))
+    );
+}
+
+#[test]
+fn notification_input_result_never_reopens_or_clears_a_different_pending_question() {
+    let _guard = crate::test_support::lock_test_env();
+    let mut app = create_test_app();
+    app.pending_user_input_prompt = Some((
+        "input-b".into(),
+        crate::tools::user_input::UserInputRequest {
+            questions: Vec::new(),
+        },
+    ));
+    app.push_status_toast_record(
+        StatusToast::new("Answer B", StatusToastLevel::Warning, Some(12_000)).for_action("input-b"),
+    );
+    assert!(app.view_stack.top_kind().is_none());
+    apply_user_input_submission_result(&mut app, "input-a", Err(anyhow::anyhow!("late failure")));
+    assert!(
+        app.view_stack.top_kind().is_none(),
+        "failure of A must not open B again"
+    );
+    assert_eq!(
+        app.pending_user_input_prompt
+            .as_ref()
+            .map(|(id, _)| id.as_str()),
+        Some("input-b")
+    );
+    apply_user_input_submission_result(&mut app, "input-a", Ok(()));
+    assert_eq!(
+        app.pending_user_input_prompt
+            .as_ref()
+            .map(|(id, _)| id.as_str()),
+        Some("input-b")
+    );
+    assert_eq!(app.status_toasts[0].text, "Answer B");
+    apply_user_input_submission_result(&mut app, "input-b", Err(anyhow::anyhow!("late failure")));
+    assert_eq!(
+        app.status_toasts.len(),
+        3,
+        "different request failures remain independent even with identical text"
+    );
 }

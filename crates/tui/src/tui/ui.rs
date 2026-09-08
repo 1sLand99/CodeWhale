@@ -137,9 +137,10 @@ use super::app::{
     ActiveCompaction, ActiveTurnMetadata, AgentCurrentActivity, AgentCurrentActivityStatus, App,
     AppAction, AppMode, ComposerSubmitAction, ComposerSubmitChord, EffectiveReasoningEffort,
     GoalControlIntent, OnboardingState, PendingGoalControl, PendingProviderSwitch, QueuedMessage,
-    ReasoningEffort, ScreenMode, StatusToast, StatusToastLevel, SubmitDisposition, TaskPanelEntry,
-    TaskPanelEntryKind, ToolEvidence, TuiOptions, bound_agent_activity_text, is_stop_word,
-    looks_like_slash_command_input, shell_command_from_bang_input,
+    ReasoningEffort, RedactionGateNotice, ScreenMode, StatusToast, StatusToastLevel,
+    SubmitDisposition, TaskPanelEntry, TaskPanelEntryKind, ToolEvidence, TuiOptions,
+    bound_agent_activity_text, is_stop_word, looks_like_slash_command_input,
+    shell_command_from_bang_input,
 };
 use super::approval::{
     ApprovalMode, ApprovalRequest, ApprovalView, ElevationRequest, ElevationView, ReviewDecision,
@@ -1047,6 +1048,7 @@ pub(crate) struct ApprovalDecisionEvent {
 }
 
 fn mark_active_turn_cancelled_locally(app: &mut App) {
+    app.retire_action_notices(None);
     // #2739: every local cancel surface (Esc, Ctrl+C, approval abort, paused
     // command abort) must snapshot before it clears turn state. Otherwise
     // --continue reloads the previous save and the interrupted turn vanishes.

@@ -2185,5 +2185,15 @@
   "ConfigChoiceNotificationUnfocused": "When away",
   "ConfigChoiceNotificationNever": "Never",
   "ConfigChoiceNotificationFile": "Custom file",
-  "ConfigChoiceNotificationBell": "System bell"
+  "ConfigChoiceNotificationBell": "System bell",
+  "NotificationApprovalNeeded": "Approve or deny '{tool}' to continue",
+  "NotificationInputNeeded": "Answer the question in the terminal to continue",
+  "NotificationElevationNeeded": "Allow or deny elevated access for '{tool}'",
+  "NotificationDecisionWebHint": "Decide here or on the web.",
+  "NotificationTurnFailed": "Turn failed",
+  "NotificationProviderFallback": "Switched to {provider} (fallback {position}/{total}) after a recoverable provider error.",
+  "ApprovalNeverPostureBlocked": "Blocked '{tool}': this session does not allow tools that require approval.",
+  "NotificationWebApproved": "Approved on the web.",
+  "NotificationWebDenied": "Denied on the web.",
+  "NotificationInputSubmitFailed": "Could not submit your answer: {error}. Try again."
 }

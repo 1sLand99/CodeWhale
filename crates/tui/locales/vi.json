@@ -2185,5 +2185,15 @@
   "ConfigChoiceNotificationUnfocused": "Khi vắng mặt",
   "ConfigChoiceNotificationNever": "Không bao giờ",
   "ConfigChoiceNotificationFile": "Tệp tùy chỉnh",
-  "ConfigChoiceNotificationBell": "Chuông hệ thống"
+  "ConfigChoiceNotificationBell": "Chuông hệ thống",
+  "NotificationApprovalNeeded": "Chấp thuận hoặc từ chối '{tool}' để tiếp tục",
+  "NotificationInputNeeded": "Trả lời câu hỏi trong terminal để tiếp tục",
+  "NotificationElevationNeeded": "Cho phép hoặc từ chối nâng quyền truy cập cho '{tool}'",
+  "NotificationDecisionWebHint": "Đưa ra quyết định tại đây hoặc trên web.",
+  "NotificationTurnFailed": "Lượt thất bại",
+  "NotificationProviderFallback": "Đã chuyển sang {provider} (phương án dự phòng {position}/{total}) sau lỗi có thể khôi phục của nhà cung cấp.",
+  "ApprovalNeverPostureBlocked": "Đã chặn '{tool}': phiên này không cho phép các công cụ cần được chấp thuận.",
+  "NotificationWebApproved": "Đã chấp thuận trên web.",
+  "NotificationWebDenied": "Đã từ chối trên web.",
+  "NotificationInputSubmitFailed": "Không thể gửi câu trả lời của bạn: {error}. Hãy thử lại."
 }

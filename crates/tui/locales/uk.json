@@ -2185,5 +2185,15 @@
   "ConfigChoiceNotificationUnfocused": "За вашої відсутності",
   "ConfigChoiceNotificationNever": "Ніколи",
   "ConfigChoiceNotificationFile": "Власний файл",
-  "ConfigChoiceNotificationBell": "Системний дзвінок"
+  "ConfigChoiceNotificationBell": "Системний дзвінок",
+  "NotificationApprovalNeeded": "Дозвольте або відхиліть '{tool}', щоб продовжити",
+  "NotificationInputNeeded": "Дайте відповідь на запитання в терміналі, щоб продовжити",
+  "NotificationElevationNeeded": "Дозвольте або відхиліть розширений доступ для '{tool}'",
+  "NotificationDecisionWebHint": "Ухваліть рішення тут або у вебінтерфейсі.",
+  "NotificationTurnFailed": "Хід завершився з помилкою",
+  "NotificationProviderFallback": "Після виправної помилки постачальника виконано перемикання на {provider} (резервний варіант {position}/{total}).",
+  "ApprovalNeverPostureBlocked": "'{tool}' заблоковано: у цьому сеансі заборонені інструменти, що потребують схвалення.",
+  "NotificationWebApproved": "Схвалено у вебінтерфейсі.",
+  "NotificationWebDenied": "Відхилено у вебінтерфейсі.",
+  "NotificationInputSubmitFailed": "Не вдалося надіслати відповідь: {error}. Спробуйте ще раз."
 }
