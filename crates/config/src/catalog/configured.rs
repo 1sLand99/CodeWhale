@@ -103,18 +103,17 @@ pub fn validate_configured_models(models: &[ConfiguredModel]) -> anyhow::Result<
         {
             return Err(invalid("display_name"));
         }
-        if let Some(limit) = &model.limit {
-            if [limit.context, limit.input, limit.output]
+        if let Some(limit) = &model.limit
+            && ([limit.context, limit.input, limit.output]
                 .into_iter()
                 .flatten()
                 .any(|value| value == 0 || value > u64::from(u32::MAX))
                 || limit.context.is_some_and(|context| {
                     limit.input.is_some_and(|input| input > context)
                         || limit.output.is_some_and(|output| output > context)
-                })
-            {
-                return Err(invalid("limit"));
-            }
+                }))
+        {
+            return Err(invalid("limit"));
         }
         if model
             .cost

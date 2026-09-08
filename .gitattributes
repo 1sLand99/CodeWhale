@@ -39,3 +39,6 @@ scripts/release/*.sh text eol=lf
 
 # Everything else auto-detects (default).
 * text=auto
+
+# Preserve the qualified upstream font license, including its trailing space.
+web/public/brand/fonts/OFL.txt text eol=lf whitespace=-blank-at-eol

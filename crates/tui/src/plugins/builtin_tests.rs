@@ -157,7 +157,11 @@ fn publication_child() {
     }
     fs::write(root.join(format!("ready-{index}")), b"ready").unwrap();
     await_file(&root.join("start"));
-    let files = if index % 2 == 0 { FIRST } else { SECOND };
+    let files = if index.is_multiple_of(2) {
+        FIRST
+    } else {
+        SECOND
+    };
     for _ in 0..8 {
         let published = write_bundle(&root.join("cache"), NAME, files).unwrap();
         assert_contents(&published, files);
