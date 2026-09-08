@@ -1,5 +1,8 @@
 # Installing plugins
 
+To create a bundle, start with [Write your first Codewhale plugin](PLUGIN_AUTHORING.md)
+and its runnable Skills example.
+
 This is the walkthrough for the `/plugin install` on-ramp (v0.9.4, #5182).
 [PLUGIN_BUNDLES.md](PLUGIN_BUNDLES.md) remains the contract for the bundle
 format (`plugin.json`, compatible `kimi.plugin.json`, or legacy
@@ -84,7 +87,9 @@ matching and the plugin goes inactive until you review again.
   changed bundle is swapped atomically and its trust receipt is automatically
   invalidated (the hash no longer matches), so re-review is forced before the
   plugin can activate again. Plugins installed from a local path cannot be
-  re-downloaded — reinstall them with `/plugin install <path>`.
+  re-downloaded. To replace their installed copy, disable and uninstall it,
+  then run `/plugin install <path>` and review the new bundle; the original
+  source directory is left intact. See the [local authoring loop](PLUGIN_AUTHORING.md#4-iterate-and-review-changes).
 - `uninstall` refuses enabled plugins (disable first), deletes the bundle
   directory, and removes its persisted trust/enablement entry.
 

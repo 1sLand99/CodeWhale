@@ -13,6 +13,8 @@ owns how bits get onto and off disk — the `/plugin install`, `update`,
 `uninstall`, and `suggest` on-ramp added in v0.9.4 (#5182). Claude Code
 plugin repositories are a different, unconverted format; that boundary is
 [CLAUDE_PLUGIN_COMPAT.md](CLAUDE_PLUGIN_COMPAT.md).
+For a runnable native example and explicit OpenCode/DSH data conversion, see
+[Write your first plugin](PLUGIN_AUTHORING.md).
 
 ## Discovery and precedence
 
@@ -26,7 +28,8 @@ v0.9.8), or `plugin.toml` (the legacy Codewhale format, still fully readable):
 
 A bundle that publishes multiple formats is read through `plugin.json` first,
 then `kimi.plugin.json`, then the legacy `plugin.toml`.
-No built-in bundle ships as of v0.9.6. The internal precedence order is
+Computer Use ships as a built-in bundle; it still requires review and
+enablement before activation. The internal precedence order is
 built-in, user, then workspace; the first bundle with a given name wins. This
 prevents a repository from shadowing an explicitly installed user bundle.
 Symbolic-link roots, manifests, component paths, and nested component files
