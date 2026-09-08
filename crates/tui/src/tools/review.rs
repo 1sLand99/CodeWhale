@@ -127,7 +127,7 @@ pub struct ReviewOutput {
 impl ReviewOutput {
     pub(crate) fn note_binary_coverage(&mut self, diff: &str) {
         if diff.contains("\nGIT binary patch\n") {
-            self.summary.push_str("\nCoverage limitation: binary patches were included as Git binary data; their contents were not semantically inspected.");
+            self.summary.push_str("\nCoverage limitation: binary changes were represented by metadata; their contents were not semantically inspected.");
         }
     }
 
@@ -1001,8 +1001,9 @@ Path: {display}\n\n{truncated}\n\nEnd of file."
         ReviewSource::PullRequest {
             label, diff, view, ..
         } => {
+            let diff = super::review_pr::model_diff(diff);
             format!(
-                "Review the complete pull request diff ({label}) at head {} and base {}. Binary patches are supplied as Git binary data, not a semantic review of their contents. Do not claim binary contents were inspected.\n\n{diff}\n\nEnd of diff.",
+                "Review the complete pull request diff ({label}) at head {} and base {}. Binary changes are represented by metadata; their contents are not semantically inspected. Full binary patches remain in the review evidence.\n\n{diff}\n\nEnd of diff.",
                 view.head_sha, view.base_sha,
             )
         }

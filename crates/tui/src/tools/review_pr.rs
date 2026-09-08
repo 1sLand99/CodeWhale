@@ -2,6 +2,7 @@
 //! Replaces their separate `gh pr diff` readers; large PRs use local pinned
 //! Git objects without fetching, checking out or executing pull-request code.
 
+use std::borrow::Cow;
 use std::io::Read;
 use std::path::Path;
 use std::process::Stdio;
@@ -109,13 +110,51 @@ pub(crate) fn ensure_current(
 /// A PR review must never turn its configured input budget into a partial
 /// review or a receipt that appears to cover the whole PR.
 pub(crate) fn ensure_input_fits(diff: &str, max_chars: usize) -> Result<()> {
-    let chars = diff.chars().count();
+    let chars = model_diff(diff).chars().count();
     if chars > max_chars {
         bail!(
             "Complete PR diff requires {chars} characters, exceeding the review limit of {max_chars}. No review was run or posted. Increase max_chars/--max-chars only if the selected model can accept the complete input."
         );
     }
     Ok(())
+}
+
+/// Model-only representation of an already verified complete diff. Keep the
+/// original for revision checks, fingerprints and comment anchors. Binary
+/// payloads are not meaningful text input; their headers retain paths, modes,
+/// rename status and exact object IDs. Every text patch remains byte-exact.
+pub(crate) fn model_diff(diff: &str) -> Cow<'_, str> {
+    if !diff.contains("\nGIT binary patch\n") && !diff.contains("\nGIT binary patch\r\n") {
+        return Cow::Borrowed(diff);
+    }
+    let mut output = String::with_capacity(diff.len());
+    let mut binary = false;
+    let mut block = 0;
+    for line in diff.split_inclusive('\n') {
+        if line.starts_with("diff --git ") {
+            binary = false;
+            block = 0;
+        }
+        let content = line.trim_end_matches(['\r', '\n']);
+        if content == "GIT binary patch" {
+            binary = true;
+            output.push_str("[Binary content not semantically inspected; complete patch retained in review evidence.]\n");
+        } else if !binary {
+            output.push_str(line);
+        } else if let Some((encoding, size)) = content.split_once(' ')
+            && matches!(encoding, "literal" | "delta")
+            && size.parse::<u64>().is_ok()
+        {
+            let side = if block == 0 { "new" } else { "old" };
+            if encoding == "literal" {
+                output.push_str(&format!("[Binary {side} object: {size} bytes.]\n"));
+            } else {
+                output.push_str(&format!("[Binary {side} object: delta instruction stream {size} bytes; object size not established.]\n"));
+            }
+            block += 1;
+        }
+    }
+    Cow::Owned(output)
 }
 
 fn complete_file_set(diff: &str, view: &GhPullRequest) -> Result<()> {
@@ -562,6 +601,46 @@ mod tests {
         let error = ensure_input_fits(&diff, diff.chars().count() - 1).unwrap_err();
         assert!(error.to_string().contains("No review was run or posted"));
         assert!(diff.ends_with("+\u{1f433}\n"));
+    }
+
+    #[test]
+    fn binary_projection_keeps_all_text_headers_and_raw_evidence_unchanged() {
+        let before = patch("before.txt");
+        let after = "diff --git a/after.txt b/after.txt\r\n@@ -0,0 +1 @@\r\n+GIT binary patch\r\n";
+        let headers = "diff --git a/old.png b/new.png\nold mode 100644\nnew mode 100755\nrename from old.png\nrename to new.png\nindex aaa..bbb\n";
+        let raw = format!(
+            "{before}{headers}GIT binary patch\nliteral 123\nOPAQUE_BASE85\n\ndelta 45\nOLD_BASE85\n\n{after}"
+        );
+        let original = raw.clone();
+        let projected = model_diff(&raw);
+        assert!(projected.starts_with(&before));
+        assert!(projected.ends_with(after));
+        assert!(projected.contains(headers));
+        assert!(projected.contains("new object: 123 bytes"));
+        assert!(projected.contains(
+            "old object: delta instruction stream 45 bytes; object size not established"
+        ));
+        assert!(projected.contains("not semantically inspected"));
+        assert!(!projected.contains("OPAQUE_BASE85"));
+        assert!(!projected.contains("OLD_BASE85"));
+        assert_eq!(raw, original);
+        assert!(matches!(model_diff(&before), Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn binary_projection_budget_counts_metadata_and_never_cuts_text() {
+        let text = patch("last.txt");
+        let raw = format!(
+            "diff --git a/image b/image\nnew file mode 100644\nindex 000..abc\nGIT binary patch\nliteral 10000\n{}\n\nliteral 0\n\n{text}",
+            "A".repeat(10_000)
+        );
+        let projected = model_diff(&raw);
+        let limit = projected.chars().count();
+        assert!(raw.chars().count() > limit);
+        ensure_input_fits(&raw, limit).unwrap();
+        assert!(ensure_input_fits(&raw, limit - 1).is_err());
+        assert!(projected.ends_with(&text));
+        assert!(projected.contains("old object: 0 bytes"));
     }
 
     #[test]

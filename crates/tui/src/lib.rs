@@ -8345,7 +8345,13 @@ async fn run_review(config: &Config, args: ReviewArgs) -> Result<()> {
     }
 
     let model = resolve_review_model(config, args.model.as_deref());
-    let route = resolve_cli_exec_route(config, &model, &diff, force_configured_route).await?;
+    let route_input = if pr_view.is_some() {
+        crate::tools::review_pr::model_diff(&diff)
+    } else {
+        std::borrow::Cow::Borrowed(diff.as_str())
+    };
+    let route =
+        resolve_cli_exec_route(config, &model, &route_input, force_configured_route).await?;
     let execution_config = config_for_cli_route(config, &route);
     let route_provider = execution_config.provider_identity_for(route.provider);
     let model = route.model.clone();
@@ -9229,7 +9235,7 @@ fn post_pr_review(
 /// Both the CLI review and interactive composer receive the complete diff.
 /// Collection and review-budget checks must fail before any partial review.
 fn format_pr_prompt(number: u32, view: &GhPullRequest, diff: &str) -> String {
-    let diff_section = diff;
+    let diff_section = crate::tools::review_pr::model_diff(diff);
     let body = if view.body.trim().is_empty() {
         "(no description)".to_string()
     } else {
@@ -9252,7 +9258,7 @@ fn format_pr_prompt(number: u32, view: &GhPullRequest, diff: &str) -> String {
          URL: {url}\n\
          Branches: {branches}\n\
          Revision: {head_sha} (base {base_sha}); {changed_files} file patches.\n\
-         Binary patches contain Git binary data, not a semantic inspection of their contents. Do not claim binary contents were inspected.\n\
+         Binary changes are represented by metadata; their contents are not semantically inspected. Full binary patches remain in the review evidence.\n\
          \n\
          ## Description\n\
          \n\
