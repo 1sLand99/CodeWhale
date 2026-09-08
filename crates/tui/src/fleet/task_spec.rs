@@ -317,13 +317,7 @@ pub fn write_fleet_artifact_ref(
         .join(safe_path_segment(task_id))
         .join(safe_path_segment(worker_id))
         .join(safe_path_segment(filename));
-    let abs_path = workspace.join(&rel_path);
-    if let Some(parent) = abs_path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("creating fleet artifact dir {}", parent.display()))?;
-    }
-    std::fs::write(&abs_path, contents)
-        .with_context(|| format!("writing fleet artifact {}", abs_path.display()))?;
+    super::artifacts::write(workspace, &rel_path, contents)?;
     Ok(FleetArtifactRef {
         kind,
         path: rel_path,
@@ -981,6 +975,31 @@ mod tests {
             error.contains("trust_level is a legacy compatibility field"),
             "unexpected error: {error}"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fleet_artifact_publication_rejects_symlinked_workspace_paths() {
+        use std::os::unix::fs::symlink;
+        let workspace = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        std::fs::create_dir_all(workspace.path().join(".codewhale")).unwrap();
+        symlink(outside.path(), workspace.path().join(".codewhale/fleet")).unwrap();
+        let result = write_fleet_artifact_ref(
+            workspace.path(),
+            &FleetRunId::from("run-1"),
+            "task-a",
+            "worker-1",
+            FleetArtifactKind::Receipt,
+            "receipt.json",
+            b"synthetic receipt",
+            Some("application/json"),
+        );
+        assert!(
+            result.is_err(),
+            "publication must reject a symlinked parent"
+        );
+        assert!(!outside.path().join("run-1").exists());
     }
 
     #[test]

@@ -10647,6 +10647,8 @@ async fn fleet_receipt_api_list_and_get_round_trip() -> Result<()> {
             evidence: vec!["exit_code=0".to_string()],
         },
     )?;
+    let evidence_path = workspace.join(&receipt.artifacts.last().unwrap().path);
+    let original_evidence = fs::read(&evidence_path)?;
     ledger.record_receipt(receipt)?;
 
     let sessions_dir = root.join("sessions");
@@ -10718,6 +10720,55 @@ async fn fleet_receipt_api_list_and_get_round_trip() -> Result<()> {
         "evidence content should parse as JSON object"
     );
     assert_eq!(evidence["content"]["task_id"], "task-receipt");
+
+    // Read the actual route after same-size tampering and symlink swaps. The
+    // ledger still names the original digest: metadata alone is not evidence.
+    let evidence_url = format!(
+        "http://{addr}/v1/fleet/runs/{}/receipts/task-receipt/evidence",
+        run_id.0
+    );
+    let mut rejected = Vec::new();
+    let mut changed = original_evidence.clone();
+    *changed.last_mut().unwrap() ^= 1;
+    fs::write(&evidence_path, changed)?;
+    rejected.push(client.get(&evidence_url).send().await?.status().as_u16());
+    fs::write(&evidence_path, &original_evidence)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+        let outside = root.join("outside-receipt.txt");
+        let canary = "OUTSIDE_SYNTHETIC_RECEIPT_CANARY";
+        fs::write(&outside, canary)?;
+        fs::remove_file(&evidence_path)?;
+        symlink(&outside, &evidence_path)?;
+        let response = client.get(&evidence_url).send().await?;
+        rejected.push(response.status().as_u16());
+        let body = response.text().await?;
+        assert!(!body.contains(canary));
+        fs::remove_file(&evidence_path)?;
+        fs::write(&evidence_path, &original_evidence)?;
+
+        let parent = evidence_path.parent().unwrap();
+        let retained = parent.with_extension("retained");
+        let outside_dir = root.join("outside-directory");
+        fs::create_dir_all(&outside_dir)?;
+        fs::write(outside_dir.join(evidence_path.file_name().unwrap()), canary)?;
+        fs::rename(parent, &retained)?;
+        symlink(&outside_dir, parent)?;
+        let response = client.get(&evidence_url).send().await?;
+        rejected.push(response.status().as_u16());
+        let body = response.text().await?;
+        assert!(!body.contains(canary));
+        fs::remove_file(parent)?;
+        fs::rename(retained, parent)?;
+        assert_eq!(fs::read_to_string(outside)?, canary);
+    }
+    assert!(
+        rejected.iter().all(|status| *status == 400),
+        "unverified evidence status codes: {rejected:?}"
+    );
+    let restored = client.get(&evidence_url).send().await?;
+    assert_eq!(restored.status(), 200);
 
     // Missing task returns 404.
     let missing = client
@@ -11798,16 +11849,16 @@ async fn skill_lifecycle_runtime_info_advertises_skill_lifecycle_capability() ->
 fn receipt_evidence_paths_must_stay_confined_to_the_workspace() {
     use std::path::Path;
 
-    assert!(super::receipt_evidence_path_is_confined(Path::new(
+    assert!(crate::fleet::artifacts::path_is_confined(Path::new(
         "receipts/run-1/task-a.json"
     )));
-    assert!(!super::receipt_evidence_path_is_confined(Path::new(
+    assert!(!crate::fleet::artifacts::path_is_confined(Path::new(
         "/etc/passwd"
     )));
-    assert!(!super::receipt_evidence_path_is_confined(Path::new(
+    assert!(!crate::fleet::artifacts::path_is_confined(Path::new(
         "receipts/../../escape.json"
     )));
-    assert!(!super::receipt_evidence_path_is_confined(Path::new(
+    assert!(!crate::fleet::artifacts::path_is_confined(Path::new(
         "../escape.json"
     )));
 }

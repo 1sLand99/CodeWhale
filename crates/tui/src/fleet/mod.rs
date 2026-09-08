@@ -1,6 +1,7 @@
 //! Agent Fleet control plane — local-first manager, ledger, and workers.
 
 pub mod alerts;
+pub(crate) mod artifacts;
 pub mod capability_badges;
 pub mod control;
 pub mod exact;

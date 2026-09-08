@@ -2458,20 +2458,6 @@ async fn get_fleet_run_receipt(
     Ok(Json(fleet_receipt_json(receipt)))
 }
 
-/// Receipt artifact paths are recorded relative to the workspace; an absolute
-/// path (including Windows drive prefixes and root-relative paths) or any `..`
-/// component would escape it.
-fn receipt_evidence_path_is_confined(path: &std::path::Path) -> bool {
-    use std::path::Component;
-    !path.is_absolute()
-        && !path.components().any(|c| {
-            matches!(
-                c,
-                Component::ParentDir | Component::RootDir | Component::Prefix(_)
-            )
-        })
-}
-
 async fn inspect_fleet_run_receipt_evidence(
     State(state): State<RuntimeApiState>,
     Path((run_id, task_id)): Path<(String, String)>,
@@ -2505,29 +2491,20 @@ async fn inspect_fleet_run_receipt_evidence(
             "no verifier evidence file recorded for run '{run_id}' task '{task_id}'"
         )));
     }
-    if !receipt_evidence_path_is_confined(&receipt_artifact.path) {
+    if !crate::fleet::artifacts::path_is_confined(&receipt_artifact.path) {
         return Err(ApiError::bad_request(format!(
             "evidence path for run '{run_id}' task '{task_id}' escapes the workspace"
         )));
     }
-    let abs_path = state.workspace.join(&receipt_artifact.path);
-    let metadata = std::fs::metadata(&abs_path).map_err(|err| {
-        ApiError::not_found(format!(
-            "evidence file not readable for run '{run_id}' task '{task_id}': {err}"
-        ))
+    let (raw, size_bytes) = crate::fleet::artifacts::read_verified(
+        &state.workspace,
+        receipt_artifact,
+        MAX_RECEIPT_EVIDENCE_READ_BYTES,
+    )
+    .map_err(|err| {
+        ApiError::bad_request(format!("Receipt evidence could not be verified: {err}"))
     })?;
-    let size_bytes = metadata.len();
     let truncated = size_bytes > MAX_RECEIPT_EVIDENCE_READ_BYTES;
-    let raw = {
-        use std::io::Read;
-        let file = std::fs::File::open(&abs_path)
-            .map_err(|err| ApiError::internal(format!("Failed to open evidence file: {err}")))?;
-        let mut buf = Vec::new();
-        file.take(MAX_RECEIPT_EVIDENCE_READ_BYTES)
-            .read_to_end(&mut buf)
-            .map_err(|err| ApiError::internal(format!("Failed to read evidence file: {err}")))?;
-        buf
-    };
     // Parse as JSON if possible; fall back to a raw string representation.
     let content: Value = serde_json::from_slice(&raw)
         .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&raw).into_owned()));
