@@ -346,9 +346,6 @@ pub fn max_output_tokens_for_model(model: &str) -> Option<u32> {
         return Some(max_output);
     }
     let lower = model.to_lowercase();
-    if lower.contains("deepseek") && lower.contains("v4") {
-        return Some(384_000);
-    }
     if is_openai_gpt_55_api_model(&lower)
         || is_openai_gpt_56_api_model(&lower)
         || is_openai_codex_model(&lower)
@@ -901,6 +898,41 @@ mod tests {
             context_window_for_model("deepseek-ai/deepseek-v4-pro"),
             Some(DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS)
         );
+    }
+
+    #[test]
+    fn deepseek_v4_output_caps_require_exact_catalog_metadata() {
+        let _lock = crate::model_catalog::test_catalog_lock();
+        let catalog = crate::model_catalog::MergedCatalog::from_sources(
+            BTreeMap::new(),
+            None,
+            crate::model_catalog::bundled_catalog(),
+            chrono::Utc::now(),
+        );
+        let _guard = crate::model_catalog::replace_active_catalog_for_test(catalog);
+
+        for model in [
+            "deepseek-v4.1-flash-expires-on-0910",
+            "deepseek-v4.1-flash",
+            "deepseek-v4.1-pro",
+            "vendor/deepseek-v4.1-flash",
+            "deepseek-v4-flash-vendor",
+        ] {
+            assert!(
+                crate::model_catalog::resolved_entry(model).is_none(),
+                "{model}"
+            );
+            assert_eq!(max_output_tokens_for_model(model), None, "{model}");
+        }
+
+        for model in [
+            "deepseek-v4-flash",
+            "deepseek-v4-pro",
+            "deepseek-v4-flash-vision-exp",
+            "DEEPSEEK-V4-FLASH",
+        ] {
+            assert_eq!(max_output_tokens_for_model(model), Some(384_000), "{model}");
+        }
     }
 
     #[test]

@@ -26072,7 +26072,7 @@ fn startup_that_cannot_account_for_its_bytes_keeps_the_line_in_the_composer() {
     // The pre-fix shape: a probe swallowed `/plu` (here: consumed bytes it
     // cannot replay) and only the tail reached the composer.
     crate::palette::osc11::note_consumed_unreplayable(b"/plu");
-    crate::palette::osc11::carry_typed_ahead(b"gin install /tmp/bundle\r");
+    crate::palette::osc11::carry_typed_ahead(b"gin install /tmp/bundle\r\rsecond line\r");
 
     let mut pending: VecDeque<Event> = VecDeque::new();
     let receipt = crate::tui::startup_input::replay_into(&mut pending);
@@ -26090,8 +26090,16 @@ fn startup_that_cannot_account_for_its_bytes_keeps_the_line_in_the_composer() {
         "a line the shell cannot vouch for is never submitted to the model"
     );
     assert_eq!(
-        app.input, "gin install /tmp/bundle",
-        "the text stays in the composer for the user to look at"
+        app.input, "gin install /tmp/bundle\n\nsecond line\n",
+        "all text and line boundaries stay in the composer for review"
+    );
+    assert!(
+        app.startup_input_unproven,
+        "queued Enters cannot clear the hold"
+    );
+    assert!(
+        app.handle_composer_enter().is_none(),
+        "the first fresh Enter explains the hold"
     );
     assert!(
         app.status_message
@@ -26103,7 +26111,27 @@ fn startup_that_cannot_account_for_its_bytes_keeps_the_line_in_the_composer() {
 
     // The user has now seen it; a deliberate second Enter sends what is shown.
     let resent = app.handle_composer_enter();
-    assert_eq!(resent.as_deref(), Some("gin install /tmp/bundle"));
+    assert_eq!(
+        resent.as_deref(),
+        Some("gin install /tmp/bundle\n\nsecond line")
+    );
+}
+
+#[test]
+fn delayed_terminal_color_reply_preserves_actual_composer_command_dispatch() {
+    let _lock = startup_input_test_lock();
+    let _home = SettingsHomeGuard::new();
+    crate::palette::osc11::carry_typed_ahead(b"\x1b]11;rgb:1e1e/1e1e/1e1e\x07/plugin list\r");
+    let mut pending = VecDeque::new();
+    let receipt = crate::tui::startup_input::replay_into(&mut pending);
+    assert!(receipt.whole_line_proven(), "{receipt:?}");
+    let mut app = App::new(create_test_options(), &Config::default());
+    app.startup_input_unproven = !receipt.whole_line_proven();
+    assert_eq!(
+        drive_composer_events(&mut app, &mut pending).as_deref(),
+        Some("/plugin list")
+    );
+    assert!(app.input.is_empty());
 }
 
 #[test]

@@ -793,10 +793,20 @@ mod tests {
         let _codewhale = crate::test_support::EnvVarGuard::remove("CODEWHALE_MAX_OUTPUT_TOKENS");
         let _deepseek = crate::test_support::EnvVarGuard::remove("DEEPSEEK_MAX_OUTPUT_TOKENS");
 
-        assert_eq!(
-            output_ceiling_source(ApiProvider::Deepseek, "deepseek-v4-flash"),
-            OutputCeilingSource::Documented(384_000)
-        );
+        for model in [
+            "deepseek-v4-flash",
+            "deepseek-v4-pro",
+            "deepseek-v4flash",
+            "deepseek-ai/deepseek-v4-pro",
+            "deepseek-chat",
+            "deepseek-reasoner",
+        ] {
+            assert_eq!(
+                output_ceiling_source(ApiProvider::Deepseek, model),
+                OutputCeilingSource::Documented(384_000),
+                "{model}"
+            );
+        }
         assert_eq!(
             effective_max_output_tokens("deepseek-v4-flash"),
             API_MAX_OUTPUT_TOKENS,
@@ -807,6 +817,92 @@ mod tests {
             API_MAX_OUTPUT_TOKENS,
             "a 131K capability maximum must also remain a ceiling, not a default"
         );
+    }
+
+    #[test]
+    fn uncatalogued_deepseek_variants_require_exact_output_metadata() {
+        let _env_lock = crate::test_support::lock_test_env();
+        let _codewhale = crate::test_support::EnvVarGuard::remove("CODEWHALE_MAX_OUTPUT_TOKENS");
+        let _deepseek = crate::test_support::EnvVarGuard::remove("DEEPSEEK_MAX_OUTPUT_TOKENS");
+        let _catalog_lock = crate::model_catalog::test_catalog_lock();
+        let catalog = crate::model_catalog::MergedCatalog::from_sources(
+            std::collections::BTreeMap::new(),
+            None,
+            crate::model_catalog::bundled_catalog(),
+            chrono::Utc::now(),
+        );
+        let _catalog = crate::model_catalog::replace_active_catalog_for_test(catalog);
+
+        for provider in [
+            ApiProvider::Deepseek,
+            ApiProvider::DeepseekCN,
+            ApiProvider::DeepseekAnthropic,
+            ApiProvider::Custom,
+        ] {
+            for model in [
+                "deepseek-v4.1-flash-expires-on-0910",
+                "deepseek-v4.1-flash",
+                "deepseek-v4-flash-vendor",
+            ] {
+                assert_eq!(provider_capability(provider, model).max_output, None);
+                let source = output_ceiling_source(provider, model);
+                assert_eq!(source, OutputCeilingSource::Uncatalogued(8_192));
+                assert_eq!(source.as_str(), "uncatalogued");
+                assert_eq!(
+                    effective_max_output_tokens_for_route(provider, model, None),
+                    8_192,
+                    "{provider:?}: {model}"
+                );
+            }
+        }
+
+        // Exact operator metadata can supply a missing ceiling or replace an
+        // existing catalog value; neither case may inherit a family guess.
+        let overrides = [
+            ("deepseek-v4.1-flash-expires-on-0910", 24_576),
+            ("deepseek-v4-flash", 32_768),
+        ]
+        .map(|(id, max_output)| {
+            (
+                id.to_string(),
+                crate::model_catalog::CatalogEntry {
+                    id: id.to_string(),
+                    context_window: Some(128_000),
+                    max_output: Some(max_output),
+                    supports_reasoning: None,
+                    input_usd_per_million: None,
+                    output_usd_per_million: None,
+                    modalities: Vec::new(),
+                    supported_parameters: Vec::new(),
+                    provider_model_id: None,
+                    provenance: crate::model_catalog::MetadataProvenance::UserOverride,
+                },
+            )
+        })
+        .into_iter()
+        .collect();
+        let catalog = crate::model_catalog::MergedCatalog::from_sources(
+            overrides,
+            None,
+            crate::model_catalog::bundled_catalog(),
+            chrono::Utc::now(),
+        );
+        let _override = crate::model_catalog::replace_active_catalog_for_test(catalog);
+        for (model, expected) in [
+            ("deepseek-v4.1-flash-expires-on-0910", 24_576),
+            ("deepseek-v4-flash", 32_768),
+        ] {
+            assert_eq!(
+                provider_capability(ApiProvider::Deepseek, model).max_output,
+                Some(expected),
+                "{model}"
+            );
+            assert_eq!(
+                effective_max_output_tokens_for_route(ApiProvider::Deepseek, model, None),
+                expected,
+                "{model}"
+            );
+        }
     }
 
     #[test]

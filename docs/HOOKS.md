@@ -211,29 +211,30 @@ trusted project file logs a warning and Codewhale falls back to global hooks
 only. Validation runs over the merged set, so a rejected project hook is
 reported the same way a rejected global one is.
 
-## The 14 events
+## The 15 events
 
 | Event | Fires | Steering |
 | --- | --- | --- |
 | `session_start` | once, after the engine is up and before the first draw | observer |
 | `session_end` | once, on graceful shutdown | observer |
+| `turn_end` | after a turn completes and post-turn state is updated | observer |
 | `message_submit` | before a submitted message reaches history or the model | **can replace or block the text** |
 | `tool_call_before` | before each tool call executes | **can allow / deny / ask, rewrite input, add context** |
 | `tool_call_after` | after each tool result settles, including completions the transcript does not redraw | observer |
 | `mode_change` | on every applied Plan/Work/Operate transition (`Act` is a compatibility alias for Work) | observer |
 | `on_error` | on transport, capacity, and auth errors, and on tool failures | observer |
-| `turn_end` | after a turn completes and post-turn state is updated | observer |
 | `subagent_spawn` | when a sub-agent starts | observer |
 | `subagent_complete` | when a sub-agent completes, fails, or is cancelled | observer |
 | `shell_env` | immediately before each `exec_shell` invocation | **contributes environment variables** |
 | `session_idle` | when the session settles back to idle after a turn or a wait — no prompt, approval, or continuation outstanding | observer |
 | `session_error` | when a turn ends in a terminal failure; transient tool failures the agent absorbs never fire it | observer |
 | `waiting_for_user` | when the agent starts waiting on you: an approval prompt opens, a `request_user_input` question is presented, or a goal continuation is parked between passes | observer |
+| `session_busy` | when an idle or waiting session begins or resumes work; startup and repeated observations of the same state stay silent | observer |
 
 `waiting_for_user`'s payload carries `reason`: `approval`, `user_input`, or
-`goal_continuation`. Both state events carry `from`/`to` transition fields;
-`session_idle` also carries `last_turn_status`, and `session_error` carries
-the bounded terminal `error` text. The three map one-to-one onto the session
+`goal_continuation`. All three state events carry `from`/`to` transition fields;
+`session_idle` also carries `last_turn_status` when known, and `session_error` carries
+the bounded terminal `error` text. Busy, idle, and waiting map onto the session
 states the control socket's `status` verb already publishes
 (`idle` / `in_progress` / `waiting`), so a hook and a supervisor never
 disagree about what the session is doing. Hook authors that want opencode's
@@ -296,7 +297,8 @@ rebrand.
 
 **Mode-spelling note.** UI-fired events (`session_start`, `session_end`,
 `message_submit`, `tool_call_after`, `mode_change`, `on_error`, `turn_end`,
-`subagent_*`) set `DEEPSEEK_MODE` to the UI label — `ACT`, `PLAN`, `OPERATE`.
+`subagent_*`, `session_busy`, `session_idle`, `session_error`, `waiting_for_user`)
+set `DEEPSEEK_MODE` to the UI label — `ACT`, `PLAN`, `OPERATE`.
 `tool_call_before` fires inside the engine and uses the engine's own mode
 spelling (`Agent`, `Plan`, `Operate`). `mode` conditions compare
 case-insensitively, so `{ type = "mode", mode = "plan" }` matches both, but a
@@ -470,13 +472,32 @@ condition = { type = "tool_category", category = "shell" }
 
 ## Structured observer payloads
 
-`turn_end`, `subagent_spawn`, and `subagent_complete` receive JSON on stdin in
-addition to the environment variables. Their stdout is ignored. Background
-forms of these events receive the same payload on stdin.
+`turn_end`, `subagent_spawn`, `subagent_complete`, `session_busy`, `session_idle`,
+`session_error`, and `waiting_for_user` receive JSON on stdin in addition to the
+environment variables. Their stdout is ignored. Background forms of these
+events receive the same payload on stdin.
 
 The remaining observer events — `session_start`, `session_end`,
 `tool_call_after`, `mode_change`, `on_error` — receive environment variables
 only, with no stdin payload, in both foreground and background form.
+
+### Session state transitions
+
+The first observed state is recorded silently, whether idle, busy, or waiting.
+Repeating the same state emits nothing. For a turn that pauses for user input
+and then completes, the transition hooks receive these payloads in submission
+order:
+
+| Event | JSON stdin |
+| --- | --- |
+| `session_busy` | `{"from":"idle","to":"in_progress"}` |
+| `waiting_for_user` | `{"from":"in_progress","to":"waiting","reason":"user_input"}` |
+| `session_busy` | `{"from":"waiting","to":"in_progress"}` |
+| `session_idle` | `{"from":"in_progress","to":"idle","last_turn_status":"completed"}` |
+
+The dispatcher has two workers, so command completion order is not guaranteed.
+`session_error` is a separate terminal-failure event, with `status` and `error`
+fields rather than `from` and `to`.
 
 ### `turn_end`
 
@@ -561,7 +582,8 @@ has no effect because later matching hooks always run.
 - For `execute`-path events, `continue_on_error = false` stops later hooks for
   that event; except on `tool_call_before` (above) it does not roll back the
   action that fired them.
-- Structured observer events (`turn_end`, `subagent_*`) always continue to the
+- Structured observer events (`turn_end`, `subagent_*`, `session_busy`,
+  `session_idle`, `session_error`, `waiting_for_user`) always continue to the
   next matching hook.
 - Observer events use a bounded persistent dispatcher. Queue-full and
   dispatcher-unavailable submissions are not retried silently; the TUI keeps

@@ -56,11 +56,25 @@ fn utf8_sequence_len(lead: u8) -> Option<usize> {
 
 /// Exclusive end of the escape sequence that starts at `start` (an `ESC`).
 ///
-/// `ESC [` / `ESC O` run to their final byte (`@`..=`~`); a bare `ESC x` is
-/// two bytes; a trailing `ESC` is one. Used only to keep a sequence together
+/// `ESC [` / `ESC O` run to their final byte (`@`..=`~`); control strings
+/// run to ST (OSC also accepts BEL). A bare `ESC x` is two bytes; a trailing
+/// `ESC` is one. Used only to keep a sequence together
 /// so it is dropped as a unit.
 fn escape_sequence_end(bytes: &[u8], start: usize) -> usize {
     match bytes.get(start + 1) {
+        Some(kind @ (b']' | b'_' | b'P' | b'^' | b'X')) => {
+            let mut end = start + 2;
+            while end < bytes.len() {
+                if *kind == b']' && bytes[end] == 0x07 {
+                    return end + 1;
+                }
+                if bytes[end..].starts_with(b"\x1b\\") {
+                    return end + 2;
+                }
+                end += 1;
+            }
+            end
+        }
         Some(b'[' | b'O') => {
             let mut end = start + 2;
             while end < bytes.len() {
@@ -110,7 +124,29 @@ pub(crate) fn decode(bytes: &[u8]) -> DecodedTypeAhead {
                 // arrow key replayed as its tail would type `[A` into the
                 // composer, which is worse than losing it with a receipt.
                 let end = escape_sequence_end(bytes, index);
-                decoded.undecodable.extend_from_slice(&bytes[index..end]);
+                let sequence = &bytes[index..end];
+                // An OSC 11 answer can arrive after its probe timed out,
+                // during the next startup probe. It is a color measurement,
+                // not a partially consumed user command.
+                let color_reply = sequence
+                    .strip_prefix(b"\x1b]11;")
+                    .and_then(|body| {
+                        body.strip_suffix(b"\x1b\\")
+                            .or_else(|| body.strip_suffix(b"\x07"))
+                    })
+                    .and_then(|body| std::str::from_utf8(body).ok())
+                    .filter(|body| {
+                        body.strip_prefix("rgb:").is_some_and(|spec| {
+                            spec.bytes().all(|b| b.is_ascii_hexdigit() || b == b'/')
+                        }) || body
+                            .strip_prefix('#')
+                            .is_some_and(|spec| spec.bytes().all(|b| b.is_ascii_hexdigit()))
+                    })
+                    .and_then(osc11::parse_osc11_reply)
+                    .is_some();
+                if !color_reply {
+                    decoded.undecodable.extend_from_slice(sequence);
+                }
                 index = end;
             }
             0x00..=0x1f => {
@@ -180,8 +216,20 @@ impl StartupInputReceipt {
 pub(crate) fn replay_into(pending: &mut VecDeque<Event>) -> StartupInputReceipt {
     let carried = osc11::take_carried_type_ahead();
     let mut dropped = osc11::take_consumed_unreplayable();
-    let decoded = decode(&carried);
+    let mut decoded = decode(&carried);
     dropped.extend_from_slice(&decoded.undecodable);
+
+    // A queued Enter is not a fresh acknowledgement of missing startup
+    // bytes. Preserve line boundaries as literal text, so even multiple
+    // queued Enters cannot clear the hold and then submit a damaged line.
+    // The next real submit still goes through the composer's existing hold.
+    if !dropped.is_empty() {
+        for event in &mut decoded.events {
+            if *event == plain_key(KeyCode::Enter) {
+                *event = plain_key(KeyCode::Char('\n'));
+            }
+        }
+    }
 
     let receipt = StartupInputReceipt {
         replayed: decoded.events.len(),
@@ -246,6 +294,47 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn delayed_color_replies_are_consumed_without_damaging_typeahead() {
+        for reply in [
+            "\x1b]11;rgb:1e1e/1e1e/1e1e\x1b\\",
+            "\x1b]11;rgb:1e/1e/1e\x07",
+            "\x1b]11;#1e1e1e\x07",
+        ] {
+            assert_eq!(
+                decode(format!("/plugin{reply} list\r").as_bytes()),
+                decode(b"/plugin list\r"),
+                "late reply: {reply:?}"
+            );
+        }
+        let literal = "11;rgb:1e1e/1e1e/1e1e";
+        assert_eq!(
+            decode(literal.as_bytes()).events,
+            literal
+                .chars()
+                .map(|c| plain_key(KeyCode::Char(c)))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn unknown_or_incomplete_control_strings_never_replay_their_payload() {
+        for sequence in [
+            "\x1b]11;rgb:1e/1e/1egarbage\x07",
+            "\x1b]11;rgb:1e/1e/1e\r\r\x07",
+            "\x1b]52;payload\r\r\x1b\\",
+            "\x1b_payload\r\r\x1b\\",
+            "\x1bPpayload\r\r\x1b\\",
+            "\x1b^payload\r\r\x1b\\",
+            "\x1bXpayload\r\r\x1b\\",
+            "\x1b]11;rgb:1e/1e/1e",
+        ] {
+            let decoded = decode(sequence.as_bytes());
+            assert!(decoded.events.is_empty(), "{sequence:?}: {decoded:?}");
+            assert_eq!(decoded.undecodable, sequence.as_bytes());
+        }
     }
 
     #[test]

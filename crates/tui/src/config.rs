@@ -824,20 +824,23 @@ pub fn provider_capability_with_wire(
         crate::models::LEGACY_DEEPSEEK_CONTEXT_WINDOW_TOKENS
     };
 
-    // Max output tokens: official DeepSeek V4 API metadata lists 384K;
-    // runtime request caps remain separate and more conservative.
-    //
-    // Everything else answers from the static model catalogue, and answers
+    // Output limits require an exact catalog row or an explicitly recognized
+    // compatibility alias. A family-name match cannot document a new model.
+    // The catalog answers
     // `None` when the catalogue has no row. That is the truthful state for
     // membership routes such as the `kimi-for-coding` family, whose ceilings
     // are owned by the membership catalog. It must not become a placeholder
     // number: a fabricated 4K here silently clamped offline membership routes
     // to 4K output via `route_budget`.
-    let max_output = if is_v4_pro || is_v4_flash {
-        Some(384_000)
-    } else {
-        crate::models::max_output_tokens_for_model(resolved_model)
-    };
+    let max_output = crate::models::max_output_tokens_for_model(resolved_model).or_else(|| {
+        canonical_official_deepseek_model_id(resolved_model)
+            .or_else(|| {
+                alias_deprecation
+                    .as_ref()
+                    .map(|_| DEEPSEEK_ALIAS_REPLACEMENT)
+            })
+            .and_then(crate::models::max_output_tokens_for_model)
+    });
 
     // Thinking support: V4 models support thinking on all providers, but
     // only when the model name matches the V4 family.

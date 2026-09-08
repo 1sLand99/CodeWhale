@@ -657,17 +657,12 @@ fn pricing_for_model_at(model: &str, now: DateTime<Utc>) -> Option<ModelPricing>
     if let Some(pricing) = known_pricing_for_model(&lower) {
         return Some(pricing);
     }
-    if lower.contains("deepseek") {
-        if lower.contains("v4-pro") || lower.contains("v4pro") {
-            // First-party DeepSeek V4-Pro publishes tiered peak/off-peak
-            // rates (2026-08-17); each turn resolves its tier from its own
-            // recorded time. Supersedes the #2489 flat-rate adjustment.
-            Some(deepseek_v4_pro_pricing(now))
-        } else {
-            Some(deepseek_v4_flash_pricing(now))
-        }
-    } else {
-        None
+    // A new or expiring model ID does not inherit a neighboring model's
+    // rates. Keep this metadata lookup as exact as the billing route owner.
+    match lower.as_str() {
+        "deepseek-v4-pro" => Some(deepseek_v4_pro_pricing(now)),
+        "deepseek-v4-flash" => Some(deepseek_v4_flash_pricing(now)),
+        _ => None,
     }
 }
 
@@ -4162,6 +4157,71 @@ mod tests {
     }
 
     #[test]
+    fn deepseek_pricing_requires_exact_ids_or_explicit_route_aliases() {
+        let _lock = crate::model_catalog::test_catalog_lock();
+        let at = utc_hm(2, 0);
+        let catalog = crate::model_catalog::MergedCatalog::from_sources(
+            BTreeMap::new(),
+            None,
+            crate::model_catalog::bundled_catalog(),
+            at,
+        );
+        let _guard = crate::model_catalog::replace_active_catalog_for_test(catalog);
+        let usage = Usage {
+            input_tokens: 1_000,
+            output_tokens: 100,
+            ..Default::default()
+        };
+        let providers = [
+            ApiProvider::Deepseek,
+            ApiProvider::DeepseekCN,
+            ApiProvider::DeepseekAnthropic,
+        ];
+
+        for model in [
+            "deepseek-v4.1-flash-expires-on-0910",
+            "deepseek-v4.1-flash",
+            "deepseek-v4.1-pro",
+            "deepseek-v4-flash-vendor-preview",
+            "vendor/deepseek-v4-pro-unverified",
+        ] {
+            assert!(pricing_for_model_at(model, at).is_none(), "{model}");
+            for provider in providers {
+                assert!(
+                    calculate_turn_cost_estimate_for_provider_at(provider, model, &usage, at)
+                        .is_none(),
+                    "{provider:?}/{model} must not inherit V4 rates"
+                );
+            }
+        }
+
+        for (canonical, aliases) in [
+            (
+                "deepseek-v4-flash",
+                ["flash", "deepseek-v4flash", "deepseek-ai/deepseek-v4flash"],
+            ),
+            (
+                "deepseek-v4-pro",
+                ["pro", "deepseek-v4pro", "deepseek/deepseek-v4-pro"],
+            ),
+        ] {
+            let expected = cost_estimate_with_pricing(
+                pricing_for_model_at(canonical, at).expect("canonical V4 pricing"),
+                &usage,
+            );
+            for provider in providers {
+                for model in std::iter::once(canonical).chain(aliases) {
+                    assert_eq!(
+                        calculate_turn_cost_estimate_for_provider_at(provider, model, &usage, at),
+                        Some(expected),
+                        "{provider:?}/{model} must preserve the canonical rate"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn token_usage_for_pricing_maps_cache_classes_without_double_billing_reasoning() {
         let usage = Usage {
             input_tokens: 1_000,
@@ -4325,21 +4385,27 @@ mod tests {
     fn catalog_pricing_overrides_known_row_when_present() {
         let _lock = crate::model_catalog::test_catalog_lock();
         let mut overrides = BTreeMap::new();
-        overrides.insert(
-            "catalog-priced-model".to_string(),
-            crate::model_catalog::CatalogEntry {
-                id: "catalog-priced-model".to_string(),
-                context_window: None,
-                max_output: None,
-                supports_reasoning: None,
-                input_usd_per_million: Some(0.25),
-                output_usd_per_million: Some(1.25),
-                modalities: Vec::new(),
-                supported_parameters: Vec::new(),
-                provider_model_id: None,
-                provenance: crate::model_catalog::MetadataProvenance::UserOverride,
-            },
-        );
+        let models = [
+            "catalog-priced-model",
+            "deepseek-v4.1-flash-expires-on-0910",
+        ];
+        for model in models {
+            overrides.insert(
+                model.to_string(),
+                crate::model_catalog::CatalogEntry {
+                    id: model.to_string(),
+                    context_window: None,
+                    max_output: None,
+                    supports_reasoning: None,
+                    input_usd_per_million: Some(0.25),
+                    output_usd_per_million: Some(1.25),
+                    modalities: Vec::new(),
+                    supported_parameters: Vec::new(),
+                    provider_model_id: None,
+                    provenance: crate::model_catalog::MetadataProvenance::UserOverride,
+                },
+            );
+        }
         let catalog = crate::model_catalog::MergedCatalog::from_sources(
             overrides,
             None,
@@ -4348,11 +4414,14 @@ mod tests {
         );
         let _guard = crate::model_catalog::replace_active_catalog_for_test(catalog);
 
-        let pricing = pricing_for_model_at("catalog-priced-model", Utc::now()).expect("pricing");
-        assert_eq!(pricing.usd.input_cache_hit_per_million, 0.25);
-        assert_eq!(pricing.usd.input_cache_miss_per_million, 0.25);
-        assert_eq!(pricing.usd.output_per_million, 1.25);
-        assert!(pricing.cny.is_none());
+        for model in models {
+            let pricing = pricing_for_model_at(model, Utc::now()).expect(model);
+            assert_eq!(pricing.usd.input_cache_hit_per_million, 0.25, "{model}");
+            assert_eq!(pricing.usd.input_cache_miss_per_million, 0.25, "{model}");
+            assert_eq!(pricing.usd.output_per_million, 1.25, "{model}");
+            assert!(pricing.cny.is_none(), "{model}");
+        }
+        assert!(pricing_for_model_at("deepseek-v4.1-flash", Utc::now()).is_none());
     }
 
     /// Published Claude Sonnet 5 rates per 1M tokens (cache-hit, cache-miss,

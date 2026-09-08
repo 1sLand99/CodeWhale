@@ -67,13 +67,16 @@ pub enum HookEvent {
     /// continuation is parked between passes (#6004). The payload's `reason`
     /// field is `approval`, `user_input`, or `goal_continuation`.
     WaitingForUser,
+    /// Triggered when idle or waiting transitions to active work (#6004).
+    /// Startup and repeated observations of the same state stay silent.
+    SessionBusy,
 }
 
 /// Every event name the runtime actually fires, in the order `/hooks events`
 /// and `docs/HOOKS.md` list them. Tests assert this is exhaustive so a new
 /// variant cannot ship without a documented firing point.
 #[cfg(test)]
-pub const ALL_HOOK_EVENTS: [HookEvent; 14] = [
+pub const ALL_HOOK_EVENTS: [HookEvent; 15] = [
     HookEvent::SessionStart,
     HookEvent::SessionEnd,
     HookEvent::TurnEnd,
@@ -88,6 +91,7 @@ pub const ALL_HOOK_EVENTS: [HookEvent; 14] = [
     HookEvent::SessionIdle,
     HookEvent::SessionError,
     HookEvent::WaitingForUser,
+    HookEvent::SessionBusy,
 ];
 
 /// How much a hook's result can change what Codewhale does next.
@@ -126,6 +130,7 @@ impl HookEvent {
             HookEvent::SessionIdle => "session_idle",
             HookEvent::SessionError => "session_error",
             HookEvent::WaitingForUser => "waiting_for_user",
+            HookEvent::SessionBusy => "session_busy",
         }
     }
 
@@ -146,6 +151,7 @@ impl HookEvent {
             | HookEvent::SubagentComplete
             | HookEvent::SessionIdle
             | HookEvent::SessionError
+            | HookEvent::SessionBusy
             | HookEvent::WaitingForUser => HookSteering::Observer,
         }
     }
@@ -812,11 +818,11 @@ fn collect_condition_problems(
 mod contract_tests {
     use super::*;
 
-    /// The fourteen event names are a public contract: they appear in
+    /// The fifteen event names are a public contract: they appear in
     /// `config.toml`, in `/hooks events`, and in `docs/HOOKS.md`. A rename is
     /// a breaking change, and a new variant must be added deliberately.
     #[test]
-    fn all_fourteen_event_names_are_stable_and_exhaustive() {
+    fn all_fifteen_event_names_are_stable_and_exhaustive() {
         let names: Vec<&str> = ALL_HOOK_EVENTS.iter().map(|e| e.as_str()).collect();
         assert_eq!(
             names,
@@ -835,6 +841,7 @@ mod contract_tests {
                 "session_idle",
                 "session_error",
                 "waiting_for_user",
+                "session_busy",
             ]
         );
 
@@ -855,12 +862,27 @@ mod contract_tests {
                 | HookEvent::ShellEnv
                 | HookEvent::SessionIdle
                 | HookEvent::SessionError
-                | HookEvent::WaitingForUser => true,
+                | HookEvent::WaitingForUser
+                | HookEvent::SessionBusy => true,
             };
             assert!(covered);
         }
         let unique: std::collections::HashSet<&str> = names.iter().copied().collect();
-        assert_eq!(unique.len(), 14);
+        assert_eq!(unique.len(), 15);
+    }
+
+    #[test]
+    fn documented_event_table_matches_the_runtime_registry() {
+        let docs = include_str!("../../../../docs/HOOKS.md");
+        let names: Vec<&str> = docs
+            .lines()
+            .skip_while(|line| *line != "| Event | Fires | Steering |")
+            .skip(2)
+            .take_while(|line| line.starts_with('|'))
+            .map(|line| line.split('`').nth(1).expect("event name in table row"))
+            .collect();
+        assert_eq!(names, ALL_HOOK_EVENTS.map(HookEvent::as_str));
+        assert!(docs.contains(&format!("## The {} events\n", names.len())));
     }
 
     /// Serde round-trip for every event name, in the exact `event = "..."`
