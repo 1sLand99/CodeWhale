@@ -13595,7 +13595,8 @@ fn bind_shortlisted_task_model(
     // fast path. A case-distinct shortlisted declaration must not select the
     // parent's differently cased model or become falsely ambiguous.
     let session_exact = requested == runtime.model
-        || qualified_spawn_model(requested, &session_provider) == Some(runtime.model.as_str());
+        || qualified_spawn_model(runtime, requested, &session_provider)
+            == Some(runtime.model.as_str());
     if session_exact {
         return Ok(Some(runtime.model.clone()));
     }
@@ -13607,7 +13608,7 @@ fn bind_shortlisted_task_model(
         let qualified = models
             .iter()
             .filter(|model| {
-                qualified_spawn_model(requested, &model.provider)
+                qualified_spawn_model(runtime, requested, &model.provider)
                     .is_some_and(|requested| matches(&model.provider, requested, &model.model))
             })
             .collect::<Vec<_>>();
@@ -13620,14 +13621,18 @@ fn bind_shortlisted_task_model(
             qualified
         };
         if allow_aliases {
-            // Projection preserves case-distinct rows, but undeclared aliases
-            // of one provider still represent one convenience choice.
-            let mut seen = std::collections::HashSet::new();
+            // Projection preserves case-distinct rows, but undeclared model
+            // aliases of one exact provider still represent one choice.
+            let mut seen: Vec<(&str, &str)> = Vec::new();
             candidates.retain(|model| {
-                seen.insert((
-                    model.provider.to_ascii_lowercase(),
-                    model.model.to_ascii_lowercase(),
-                ))
+                if seen.iter().any(|(provider, id)| {
+                    id.eq_ignore_ascii_case(&model.model)
+                        && spawn_provider_ids_match(runtime, provider, &model.provider)
+                }) {
+                    return false;
+                }
+                seen.push((&model.provider, &model.model));
+                true
             });
         }
         candidates
@@ -14118,11 +14123,37 @@ fn with_default_fork_context(mut input: Value, default: bool) -> Value {
 
 // Strip only the known provider qualifier; a slash inside a wire ID is not
 // evidence that it names another provider.
-fn qualified_spawn_model<'a>(requested: &'a str, provider: &str) -> Option<&'a str> {
+fn qualified_spawn_model<'a>(
+    runtime: &SubAgentRuntime,
+    requested: &'a str,
+    provider: &str,
+) -> Option<&'a str> {
     let (prefix, model) = requested.split_once('/')?;
-    prefix
-        .eq_ignore_ascii_case(provider.trim())
-        .then_some(model)
+    spawn_provider_ids_match(runtime, prefix, provider).then_some(model)
+}
+
+fn spawn_provider_ids_match(runtime: &SubAgentRuntime, requested: &str, provider: &str) -> bool {
+    if let Some(config) = runtime.api_config.as_deref() {
+        let (Ok(requested), Ok(pinned)) = (
+            config.resolve_provider_pin_identity(requested),
+            config.resolve_provider_pin_identity(provider),
+        ) else {
+            return false;
+        };
+        requested.provider == pinned.provider
+            && requested.key == pinned.key
+            && requested.migrated_legacy_ollama_cloud_route
+                == pinned.migrated_legacy_ollama_cloud_route
+    } else {
+        // With no Config, only exact names and known built-in aliases are
+        // comparable. A named custom provider's spelling is its identity.
+        requested.trim() == provider.trim()
+            || crate::config::ApiProvider::parse(requested)
+                .filter(|provider| *provider != crate::config::ApiProvider::Custom)
+                .is_some_and(|requested| {
+                    Some(requested) == crate::config::ApiProvider::parse(provider)
+                })
+    }
 }
 
 fn declared_spawn_model_for_provider(
@@ -14183,7 +14214,7 @@ fn requested_spawn_model_matches_pin(
         .filter(|provider| !provider.is_empty())
         .unwrap_or(&session_provider);
     spawn_model_ids_match(runtime, provider, requested, model)
-        || qualified_spawn_model(requested, provider)
+        || qualified_spawn_model(runtime, requested, provider)
             .is_some_and(|requested| spawn_model_ids_match(runtime, provider, requested, model))
 }
 
@@ -17124,6 +17155,52 @@ mod declared_shortlist_tests {
             .unwrap();
     }
 
+    #[test]
+    fn shortlisted_case_distinct_named_providers_remain_ambiguous() {
+        let _env = crate::test_support::lock_test_env();
+        let root = tempfile::tempdir().unwrap();
+        let _home =
+            crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", root.path().join("state"));
+        let mut runtime = tests::stub_runtime();
+        runtime.context = ToolContext::new(root.path().to_path_buf());
+        for (provider, model, endpoint) in [
+            ("TeamA", "model-x", "http://127.0.0.1:1/v1"),
+            ("teama", "Model-X", "http://127.0.0.1:2/v1"),
+        ] {
+            Arc::make_mut(runtime.api_config.as_mut().unwrap())
+                .providers
+                .get_or_insert_with(Default::default)
+                .custom
+                .insert(
+                    provider.into(),
+                    crate::config::ProviderConfig {
+                        kind: Some("openai-compatible".into()),
+                        base_url: Some(endpoint.into()),
+                        api_key: Some("fixture-key".into()),
+                        model: Some(model.into()),
+                        ..Default::default()
+                    },
+                );
+            add_fleet_model(root.path(), provider, model, &[]).unwrap();
+        }
+        assert_eq!(
+            crate::fleet::members::fleet_models(root.path())
+                .unwrap()
+                .len(),
+            2
+        );
+        let original_model = runtime.model.clone();
+        let original_endpoint = runtime.client.base_url().to_string();
+        let request =
+            parse_spawn_request(&json!({"prompt":"fixture", "type":"reviewer", "model":"MODEL-X"}))
+                .unwrap();
+        let error = bind_shortlisted_task_model(&mut runtime, &request)
+            .expect_err("model aliases cannot choose between distinct named providers");
+        assert!(error.to_string().contains("multiple providers"), "{error}");
+        assert_eq!(runtime.model, original_model);
+        assert_eq!(runtime.client.base_url(), original_endpoint);
+    }
+
     async fn exercise_selected_pod() {
         let _env = crate::test_support::lock_test_env();
         let root = tempfile::tempdir().unwrap();
@@ -17203,6 +17280,7 @@ mod declared_shortlist_tests {
                 for requested in [
                     requested_model.to_string(),
                     format!("deepseek/{requested_model}"),
+                    format!("DEEPSEEK/{requested_model}"),
                 ] {
                     let mut runtime = runtime_for(&config, root.path(), upper);
                     let member = crate::fleet::profile::AgentProfile {
