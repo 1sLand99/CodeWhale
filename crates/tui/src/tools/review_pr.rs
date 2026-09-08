@@ -126,18 +126,6 @@ pub(crate) fn ensure_current(
     same_revision(expected, &fetch_view(number, repo, workspace)?)
 }
 
-/// A PR review must never turn its configured input budget into a partial
-/// review or a receipt that appears to cover the whole PR.
-pub(crate) fn ensure_input_fits(diff: &str, max_chars: usize) -> Result<()> {
-    let chars = model_diff(diff).chars().count();
-    if chars > max_chars {
-        bail!(
-            "Complete PR diff requires {chars} characters, exceeding the review limit of {max_chars}. No review was run or posted. Increase max_chars/--max-chars only if the selected model can accept the complete input."
-        );
-    }
-    Ok(())
-}
-
 /// Model-only representation of an already verified complete diff. Keep the
 /// original for revision checks, fingerprints and comment anchors. Embedded
 /// binary payloads are not meaningful text input; their headers retain paths,
@@ -625,15 +613,6 @@ mod tests {
     }
 
     #[test]
-    fn review_budget_preserves_unicode_and_rejects_the_whole_oversized_input() {
-        let diff = patch("unicode.txt") + "+\u{1f433}\n";
-        ensure_input_fits(&diff, diff.chars().count()).unwrap();
-        let error = ensure_input_fits(&diff, diff.chars().count() - 1).unwrap_err();
-        assert!(error.to_string().contains("No review was run or posted"));
-        assert!(diff.ends_with("+\u{1f433}\n"));
-    }
-
-    #[test]
     fn binary_projection_keeps_all_text_headers_and_raw_evidence_unchanged() {
         let before = patch("before.txt");
         let after = "diff --git a/after.txt b/after.txt\r\n@@ -0,0 +1 @@\r\n+GIT binary patch\r\n";
@@ -667,8 +646,7 @@ mod tests {
         let projected = model_diff(&raw);
         let limit = projected.chars().count();
         assert!(raw.chars().count() > limit);
-        ensure_input_fits(&raw, limit).unwrap();
-        assert!(ensure_input_fits(&raw, limit - 1).is_err());
+        assert_eq!(projected.chars().count(), limit);
         assert!(projected.ends_with(&text));
         assert!(projected.contains("old object: 0 bytes"));
     }
@@ -780,7 +758,6 @@ mod tests {
         assert!(diff.contains("Binary files /dev/null and b/large.bin differ"));
         assert!(diff.lines().any(full_index_objects));
         assert!(!diff.contains("GIT binary patch"));
-        ensure_input_fits(&diff, diff.chars().count()).unwrap();
     }
 
     #[test]

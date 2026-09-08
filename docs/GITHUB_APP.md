@@ -89,17 +89,20 @@ limit (default **200000**, allowed range **1–8388608**). The collector also ha
 an **8 MiB output** and **60-second command** bound; a character limit does not
 bypass those transport bounds.
 
-A complete diff exceeding the configured limit fails the job. It is never
-silently truncated or treated as a provider funding problem. Increasing the
-limit is an explicit input-budget choice and still requires a model with
-sufficient context; it is not proof that the review can complete.
+A complete diff requiring more than one configured-limit pass fails the job by
+default. It is never silently truncated or treated as a provider funding
+problem. `--max-passes N` is an explicit provider-spend and duration choice for
+at most N complete ordered passes; the hosted workflow does not enable it.
+Increasing the character limit is a separate input-budget choice and still
+requires a model with sufficient context.
 
-When the complete PR cannot fit, keep the failed advisory check and record
-that the model review did not run. Do not turn an input-limit failure into a
-clean review. Maintainers can review explicitly bounded paths with a trusted
-build using `review --base <base-sha> --path <path>` from a checkout pinned to
-the PR head. Local diff reviews also reject oversized input. These scopes
-cannot use `--pr` or `--post`; their receipts cover only the selected paths.
+When the complete PR cannot fit the allowed pass count, keep the failed
+advisory check and record that the model review did not run. Do not turn an
+input-limit failure into a clean review. Maintainers can explicitly authorize
+bounded whole-PR passes, or review bounded paths with a trusted build using
+`review --base <base-sha> --path <path>` from a checkout pinned to the PR head.
+Local diff reviews also reject oversized input. Path scopes cannot use `--pr`
+or `--post`; their receipts cover only the selected paths.
 Record the exact base/head, included paths and diff fingerprints, findings,
 checks actually run, and remaining coverage. Separately review interactions
 across paths and inspect changed media. A file inventory or a passing test
@@ -200,6 +203,9 @@ codewhale --no-project-config --provider codewhale --model PROVIDER/MODEL_ID rev
 
 # explicitly increase a complete-diff input limit when needed
 codewhale review --pr 1234 --repo OWNER/REPO --max-chars 6000000
+
+# explicitly authorize at most 8 complete ordered model passes
+codewhale review --pr 1234 --repo OWNER/REPO --max-passes 8
 
 # publish it to GitHub as whichever identity GH_TOKEN carries
 codewhale review --pr 1234 --post

@@ -1267,6 +1267,10 @@ struct ReviewArgs {
     /// Maximum diff characters; an oversized diff is refused, never truncated
     #[arg(long, default_value_t = 200_000)]
     max_chars: usize,
+    /// Maximum complete PR review passes. Values above 1 explicitly authorize
+    /// additional model requests; the default preserves single-pass behavior.
+    #[arg(long, default_value_t = 1)]
+    max_passes: usize,
     /// Write a durable pre-push review receipt after a successful review
     #[arg(long, default_value_t = false)]
     write_receipt: bool,
@@ -8321,6 +8325,7 @@ async fn run_review(config: &Config, args: ReviewArgs) -> Result<()> {
     // `--provider` fails fast with the provider vocabulary hint.
     let (config, force_configured_route) = review_execution_route(config, &args)?;
     let config = &config;
+    validate_review_receipt_args(&args)?;
 
     if args.pr.is_some() && !is_command_available("gh") {
         bail!(
@@ -8339,32 +8344,29 @@ async fn run_review(config: &Config, args: ReviewArgs) -> Result<()> {
     if diff.trim().is_empty() {
         bail!("No diff to review.");
     }
-    validate_review_receipt_args(&args)?;
     if args.check_receipt {
-        return run_review_receipt_check(&diff, &args);
+        return run_review_receipt_check(&diff, &args, pr_view.as_ref().map(|(_, view)| view));
     }
 
-    let model = resolve_review_model(config, args.model.as_deref());
-    let route_input = if pr_view.is_some() {
-        crate::tools::review_pr::model_diff(&diff)
-    } else {
-        std::borrow::Cow::Borrowed(diff.as_str())
-    };
-    let route =
-        resolve_cli_exec_route(config, &model, &route_input, force_configured_route).await?;
-    let execution_config = config_for_cli_route(config, &route);
-    let route_provider = execution_config.provider_identity_for(route.provider);
-    let model = route.model.clone();
-    // PR reviews run under the structured JSON review contract so findings
-    // carry file/line positions that can be posted as inline review comments.
-    let (user_prompt, system) = if let Some((number, view)) = &pr_view {
+    let pr_plan = pr_view
+        .as_ref()
+        .map(|(_, view)| {
+            crate::tools::review::plan_pr_review(&diff, view, args.max_chars, args.max_passes)
+        })
+        .transpose()?;
+    let (prompts, system) = if let (Some((number, view)), Some(plan)) = (&pr_view, &pr_plan) {
         (
-            format_pr_prompt(*number, view, &diff),
+            plan.passes
+                .iter()
+                .map(|pass| crate::tools::review::build_pr_pass_prompt(*number, view, plan, pass))
+                .collect::<Vec<_>>(),
             SystemPrompt::Text(crate::tools::review::review_system_prompt().to_string()),
         )
     } else {
         (
-            format!("Review the following diff and provide feedback:\n\n{diff}\n\nEnd of diff."),
+            vec![format!(
+                "Review the following diff and provide feedback:\n\n{diff}\n\nEnd of diff."
+            )],
             SystemPrompt::Text(
                 "You are a senior code reviewer. Focus on bugs, risks, behavioral regressions, and missing tests. \
 Provide findings ordered by severity with file references, then open questions, then a brief summary."
@@ -8372,58 +8374,124 @@ Provide findings ordered by severity with file references, then open questions, 
             ),
         )
     };
-    let reasoning_effort = route.reasoning_effort.and_then(|effort| {
-        cli_reasoning_effort_value_for_prompt(&execution_config, &model, effort, &user_prompt)
-    });
-
+    let model = resolve_review_model(config, args.model.as_deref());
+    let route_input = prompts
+        .iter()
+        .max_by_key(|prompt| prompt.chars().count())
+        .expect("review has at least one prompt");
+    let route = resolve_cli_exec_route(config, &model, route_input, force_configured_route).await?;
+    let execution_config = config_for_cli_route(config, &route);
+    let route_provider = execution_config.provider_identity_for(route.provider);
+    let model = route.model.clone();
     let client = DeepSeekClient::new(&execution_config)?;
     let request_route = client.effective_route_envelope(&model, chrono::Utc::now());
-    let request = MessageRequest {
-        model: model.clone(),
-        messages: vec![Message {
-            role: Role::User,
-            content: vec![ContentBlock::Text {
-                text: user_prompt,
-                cache_control: None,
-            }],
-        }],
-        max_tokens: client.effective_max_output_tokens(&request_route.model),
-        system: Some(system),
-        tools: None,
-        tool_choice: None,
-        metadata: None,
-        thinking: None,
-        reasoning_effort,
-        stream: Some(false),
-        temperature: None,
-        top_p: None,
+    let planned_passes = prompts.len();
+    let mut usage = crate::models::Usage::default();
+    let report_failure = |usage: &crate::models::Usage, completed_passes, message| {
+        report_review_failure(
+            &args,
+            &route_provider,
+            &model,
+            usage,
+            completed_passes,
+            planned_passes,
+            message,
+        )
     };
-
-    let response = client.create_message(request).await?;
-    let review_stop_reason = response.stop_reason.clone();
-    let review_incomplete = crate::models::is_incomplete_stop_reason(review_stop_reason.as_deref());
+    let mut accumulator = pr_plan
+        .as_ref()
+        .map(crate::tools::review::PrReviewAccumulator::new);
     let mut output = String::new();
-    for block in response.content {
-        if let ContentBlock::Text { text, .. } = block {
-            output.push_str(&text);
+    let mut review_stop_reason = None;
+    for (index, user_prompt) in prompts.into_iter().enumerate() {
+        let reasoning_effort = route.reasoning_effort.and_then(|effort| {
+            cli_reasoning_effort_value_for_prompt(&execution_config, &model, effort, &user_prompt)
+        });
+        let request = MessageRequest {
+            model: model.clone(),
+            messages: vec![Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: user_prompt,
+                    cache_control: None,
+                }],
+            }],
+            max_tokens: client.effective_max_output_tokens(&request_route.model),
+            system: Some(system.clone()),
+            tools: None,
+            tool_choice: None,
+            metadata: None,
+            thinking: None,
+            reasoning_effort,
+            stream: Some(false),
+            temperature: None,
+            top_p: None,
+        };
+        let response = match client.create_message(request).await {
+            Ok(response) => response,
+            Err(error) => {
+                return report_failure(
+                    &usage,
+                    index,
+                    format!(
+                        "Review pass {}/{} request failed: {error}; no partial review was accepted or posted",
+                        index + 1,
+                        planned_passes
+                    ),
+                );
+            }
+        };
+        crate::tools::review::add_review_usage(&mut usage, &response.usage);
+        review_stop_reason = response.stop_reason.clone();
+        if crate::models::is_incomplete_stop_reason(review_stop_reason.as_deref()) {
+            return report_failure(
+                &usage,
+                index,
+                format!(
+                    "Review pass {}/{} incomplete: provider stop reason `{}`; the partial review was not accepted or posted.",
+                    index + 1,
+                    planned_passes,
+                    crate::models::stop_reason_detail(review_stop_reason.as_deref())
+                ),
+            );
+        }
+        let mut pass_output = String::new();
+        for block in response.content {
+            if let ContentBlock::Text { text, .. } = block {
+                pass_output.push_str(&text);
+            }
+        }
+        if let (Some(plan), Some(accumulator)) = (&pr_plan, accumulator.as_mut()) {
+            if let Err(error) = accumulator.accept(&plan.passes[index], pass_output) {
+                return report_failure(&usage, index, error.to_string());
+            }
+        } else {
+            output = pass_output;
         }
     }
-    let structured = pr_view.as_ref().map(|_| {
-        let mut review = crate::tools::review::ReviewOutput::from_str(&output);
-        review.note_binary_coverage(&diff);
-        review
-    });
-    if !review_incomplete && let Some((number, view)) = &pr_view {
-        crate::tools::review_pr::ensure_current(
+    let (structured, coverage) = if let Some(accumulator) = accumulator {
+        let (review, content, coverage) = match accumulator.finish(&diff) {
+            Ok(complete) => complete,
+            Err(error) => {
+                return report_failure(&usage, planned_passes, error.to_string());
+            }
+        };
+        output = content;
+        (Some(review), Some(coverage))
+    } else {
+        (None, None)
+    };
+    if let Some((number, view)) = &pr_view {
+        if let Err(error) = crate::tools::review_pr::ensure_current(
             *number,
             args.repo.as_deref(),
             &std::env::current_dir()?,
             view,
-        )?;
+        ) {
+            return report_failure(&usage, planned_passes, error.to_string());
+        }
     }
-    // A truncated review must not be posted or become a receipt. The partial
-    // text is still printed for diagnostics below.
-    if args.post && !review_incomplete {
+    if args.post {
         let (number, view) = pr_view
             .as_ref()
             .expect("--post requires --pr (enforced by clap)");
@@ -8432,12 +8500,11 @@ Provide findings ordered by severity with file references, then open questions, 
             .expect("structured output exists for PR reviews");
         post_pr_review(*number, view, args.repo.as_deref(), review, &diff)?;
     }
-    let receipt = if args.write_receipt && !review_incomplete {
-        let mut parsed_output = crate::tools::review::ReviewOutput::from_str(&output);
-        if args.pr.is_some() {
-            parsed_output.note_binary_coverage(&diff);
-        }
-        let receipt = crate::tools::review::build_review_receipt(
+    let receipt = if args.write_receipt {
+        let parsed_output = structured
+            .clone()
+            .unwrap_or_else(|| crate::tools::review::ReviewOutput::from_str(&output));
+        let mut receipt = crate::tools::review::build_review_receipt(
             review_target_label(&args),
             &diff,
             &route_provider,
@@ -8446,18 +8513,15 @@ Provide findings ordered by severity with file references, then open questions, 
             &output,
             Vec::new(),
         );
+        if let Some(coverage) = coverage {
+            crate::tools::review::attach_pr_review_coverage(&mut receipt, coverage)?;
+        }
         let path =
             crate::tools::review::write_review_receipt(&receipt, args.receipt_path.as_deref())?;
         Some((path, receipt))
     } else {
         None
     };
-    let review_error = review_incomplete.then(|| {
-        format!(
-            "Model response incomplete: provider stop reason `{}`; the partial review was not accepted.",
-            crate::models::stop_reason_detail(review_stop_reason.as_deref())
-        )
-    });
     if args.json {
         println!(
             "{}",
@@ -8465,7 +8529,7 @@ Provide findings ordered by severity with file references, then open questions, 
                 "mode": "review",
                 "provider": route_provider,
                 "model": model,
-                "success": !review_incomplete,
+                "success": true,
                 "content": output,
                 "pr": pr_view.as_ref().map(|(number, view)| serde_json::json!({
                     "number": number,
@@ -8475,16 +8539,14 @@ Provide findings ordered by severity with file references, then open questions, 
                 })),
                 "review": structured,
                 "stop_reason": review_stop_reason,
-                "error": review_error,
+                "usage": usage,
+                "review_passes": pr_plan.as_ref().map(|plan| plan.passes.len()),
                 "receipt_path": receipt
                     .as_ref()
                     .map(|(path, _)| path.display().to_string()),
                 "receipt": receipt.as_ref().map(|(_, receipt)| receipt),
             }))?
         );
-        if let Some(error) = review_error {
-            anyhow::bail!(error);
-        }
     } else if let Some((number, view)) = &pr_view {
         let review = structured
             .as_ref()
@@ -8496,19 +8558,63 @@ Provide findings ordered by severity with file references, then open questions, 
         if let Some((path, _)) = receipt {
             eprintln!("Review receipt written: {}", path.display());
         }
-        if let Some(error) = review_error {
-            anyhow::bail!(error);
-        }
     } else {
         println!("{output}");
         if let Some((path, _)) = receipt {
             eprintln!("Review receipt written: {}", path.display());
         }
-        if let Some(error) = review_error {
-            anyhow::bail!(error);
-        }
     }
     Ok(())
+}
+
+fn review_failure_payload(
+    provider: &str,
+    model: &str,
+    usage: &crate::models::Usage,
+    completed_passes: usize,
+    planned_passes: usize,
+    message: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "mode": "review",
+        "provider": provider,
+        "model": model,
+        "success": false,
+        "complete": false,
+        "error": message,
+        "usage": usage,
+        "completed_review_passes": completed_passes,
+        "planned_review_passes": planned_passes,
+    })
+}
+
+fn report_review_failure(
+    args: &ReviewArgs,
+    provider: &str,
+    model: &str,
+    usage: &crate::models::Usage,
+    completed_passes: usize,
+    planned_passes: usize,
+    message: impl Into<String>,
+) -> Result<()> {
+    let message = message.into();
+    if args.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&review_failure_payload(
+                provider,
+                model,
+                usage,
+                completed_passes,
+                planned_passes,
+                &message,
+            ))?
+        );
+    }
+    let usage = serde_json::to_string(usage)?;
+    bail!(
+        "{message}; completed review passes: {completed_passes}/{planned_passes}; accumulated usage: {usage}"
+    )
 }
 
 /// Apply `codewhale review --provider <name>` and decide whether the route is
@@ -8549,10 +8655,23 @@ fn validate_review_receipt_args(args: &ReviewArgs) -> Result<()> {
     if args.write_receipt && args.check_receipt {
         bail!("--write-receipt and --check-receipt are mutually exclusive");
     }
+    if args.pr.is_none() && args.max_passes != 1 {
+        bail!("--max-passes applies only to --pr reviews");
+    }
+    if !(1..=crate::tools::review::MAX_REVIEW_PASSES).contains(&args.max_passes) {
+        bail!(
+            "--max-passes must be from 1 to {}",
+            crate::tools::review::MAX_REVIEW_PASSES
+        );
+    }
     Ok(())
 }
 
-fn run_review_receipt_check(diff: &str, args: &ReviewArgs) -> Result<()> {
+fn run_review_receipt_check(
+    diff: &str,
+    args: &ReviewArgs,
+    pr_view: Option<&GhPullRequest>,
+) -> Result<()> {
     let (path, receipt) = if let Some(path) = args.receipt_path.as_ref() {
         (
             path.clone(),
@@ -8566,8 +8685,16 @@ fn run_review_receipt_check(diff: &str, args: &ReviewArgs) -> Result<()> {
             )
         })?
     };
-    let validation =
+    let mut validation =
         crate::tools::review::validate_review_receipt_for_diff(diff, &receipt, Some(path.clone()));
+    if validation.passed
+        && pr_view
+            .is_some_and(|view| !crate::tools::review::receipt_matches_pr_revision(&receipt, view))
+    {
+        validation.passed = false;
+        validation.reason =
+            "review receipt does not match the current PR base/head revision".into();
+    }
 
     if args.json {
         println!(
@@ -9310,9 +9437,7 @@ fn collect_diff(args: &ReviewArgs, pr_view: Option<&GhPullRequest>) -> Result<St
         }
         String::from_utf8_lossy(&output.stdout).to_string()
     };
-    if args.pr.is_some() {
-        crate::tools::review_pr::ensure_input_fits(&diff, args.max_chars)?;
-    } else {
+    if args.pr.is_none() {
         ensure_local_review_diff_fits(&diff, args.max_chars)?;
     }
     Ok(diff)
@@ -15496,12 +15621,50 @@ api_key = "test-only-key"
         assert_eq!(args.provider.as_deref(), Some("zai"));
         assert_eq!(args.model.as_deref(), Some("GLM-5.3"));
         assert_eq!(args.pr, Some(5709));
+        assert_eq!(args.max_passes, 1);
         // The threaded id round-trips through the provider vocabulary the
         // override validates against — never a model-id sniff.
         assert_eq!(
             crate::config::ApiProvider::parse(args.provider.as_deref().unwrap()),
             Some(crate::config::ApiProvider::Zai)
         );
+    }
+
+    #[test]
+    fn review_batch_passes_require_explicit_bounded_opt_in() {
+        let args = review_args(&["codewhale", "review", "--pr", "6002", "--max-passes", "31"]);
+        assert_eq!(args.max_passes, 31);
+        assert!(validate_review_receipt_args(&args).is_ok());
+        let too_many = review_args(&["codewhale", "review", "--pr", "6002", "--max-passes", "65"]);
+        assert!(validate_review_receipt_args(&too_many).is_err());
+        let local = review_args(&["codewhale", "review", "--max-passes", "2"]);
+        assert!(validate_review_receipt_args(&local).is_err());
+    }
+
+    #[test]
+    fn review_failure_payload_preserves_usage_without_complete_claim() {
+        let usage = crate::models::Usage {
+            input_tokens: 24,
+            output_tokens: 4,
+            reasoning_tokens: Some(3),
+            ..Default::default()
+        };
+        let payload = review_failure_payload(
+            "fixture-provider",
+            "fixture-model",
+            &usage,
+            1,
+            2,
+            "second pass malformed",
+        );
+        assert_eq!(payload["success"], false);
+        assert_eq!(payload["complete"], false);
+        assert_eq!(payload["completed_review_passes"], 1);
+        assert_eq!(payload["planned_review_passes"], 2);
+        assert_eq!(payload["usage"]["input_tokens"], 24);
+        assert_eq!(payload["usage"]["reasoning_tokens"], 3);
+        assert!(payload.get("review").is_none());
+        assert!(payload.get("receipt").is_none());
     }
 
     #[tokio::test]
