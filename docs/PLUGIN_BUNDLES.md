@@ -50,6 +50,9 @@ review and enablement. Moving from the older mutable
 `builtin-plugins/computer-use` layout also requires one fresh review. Legacy
 bundles and receipts remain intact for running older binaries; no trust is
 migrated. Diagnostics do not create a missing Codewhale home.
+The selected home may itself be a symlink: its resolved directory is pinned
+before creating any built-in paths. Links in the owned built-in cache paths
+still fail closed.
 
 New user and workspace bundles are always untrusted and disabled. Discovery is
 read-only and does not inspect any other application's extension or credential

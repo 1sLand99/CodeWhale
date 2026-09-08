@@ -151,7 +151,16 @@ fn materialize() -> io::Result<Option<PathBuf>> {
 }
 
 fn materialize_at_home(home: &Path) -> io::Result<Option<PathBuf>> {
-    match fs::symlink_metadata(home) {
+    // The user-selected home may be an alias (the shared home resolver retains
+    // it verbatim). Resolve it once before appending any Codewhale-owned paths,
+    // so retargeting the alias cannot redirect this snapshot's discovery root.
+    // Descendant links must still be rejected, never canonicalized away.
+    let home = match home.canonicalize() {
+        Ok(home) => home,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    match fs::symlink_metadata(&home) {
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error),
         Ok(metadata) if !metadata.is_dir() || metadata_is_link_or_reparse(&metadata) => {

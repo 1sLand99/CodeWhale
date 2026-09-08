@@ -319,15 +319,50 @@ fn linked_cache_snapshot_directory_and_file_are_rejected() {
 
 #[cfg(unix)]
 #[test]
-fn linked_home_and_builtin_ancestors_are_rejected_without_target_writes() {
+fn linked_home_pins_its_selected_directory_without_creating_missing_targets() {
     use std::os::unix::fs::symlink;
-    for level in ["home", "builtin", "snapshots"] {
+
+    let temp = tempfile::tempdir().unwrap();
+    let first_home = temp.path().join("first-home");
+    let second_home = temp.path().join("second-home");
+    let selected = temp.path().join("selected-home");
+    fs::create_dir(&first_home).unwrap();
+    fs::create_dir(&second_home).unwrap();
+    symlink(&first_home, &selected).unwrap();
+
+    let first = materialize_at_home(&selected).unwrap().unwrap();
+    assert!(first.starts_with(first_home.canonicalize().unwrap()));
+    assert_eq!(materialize_at_home(&first_home).unwrap().unwrap(), first);
+    let manifest = first.join(COMPUTER_USE).join("plugin.json");
+    let original = fs::read(&manifest).unwrap();
+
+    // Retargeting the user's alias cannot redirect an already captured root.
+    fs::remove_file(&selected).unwrap();
+    symlink(&second_home, &selected).unwrap();
+    let second = materialize_at_home(&selected).unwrap().unwrap();
+    assert!(second.starts_with(second_home.canonicalize().unwrap()));
+    assert_ne!(second, first);
+    assert_eq!(fs::read(&manifest).unwrap(), original);
+    assert_eq!(materialize_at_home(&first_home).unwrap().unwrap(), first);
+
+    fs::remove_file(&selected).unwrap();
+    let missing = temp.path().join("missing-home");
+    symlink(&missing, &selected).unwrap();
+    assert!(materialize_at_home(&selected).unwrap().is_none());
+    assert!(!missing.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn linked_builtin_descendants_of_an_aliased_home_are_rejected() {
+    use std::os::unix::fs::symlink;
+    for level in ["builtin", "snapshots"] {
         let temp = tempfile::tempdir().unwrap();
         let home = temp.path().join("home");
+        let selected = temp.path().join("selected-home");
         let target = temp.path().join("target");
         fs::create_dir(&target).unwrap();
         let linked = match level {
-            "home" => home.clone(),
             "builtin" => {
                 fs::create_dir(&home).unwrap();
                 home.join(BUILTIN_DIR_NAME)
@@ -338,8 +373,9 @@ fn linked_home_and_builtin_ancestors_are_rejected_without_target_writes() {
             }
             _ => unreachable!(),
         };
+        symlink(&home, &selected).unwrap();
         symlink(&target, &linked).unwrap();
-        assert!(materialize_at_home(&home).is_err(), "{level}");
+        assert!(materialize_at_home(&selected).is_err(), "{level}");
         assert_eq!(fs::read_dir(target).unwrap().count(), 0);
     }
 }
