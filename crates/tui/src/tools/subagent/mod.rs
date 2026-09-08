@@ -17094,7 +17094,7 @@ async fn configured_model_subagent_full_bind_preserves_task_profile_and_role_ids
 mod declared_shortlist_tests {
     use super::*;
     use crate::config::{ApiProvider, Config};
-    use crate::fleet::store::{FleetFile, FleetScope, save_fleet, set_selected};
+    use crate::fleet::members::{FleetModelChange, add_fleet_model};
 
     fn runtime_for(config: &Config, workspace: &std::path::Path, current: &str) -> SubAgentRuntime {
         let mut config = config.clone();
@@ -17148,22 +17148,13 @@ mod declared_shortlist_tests {
         second.cost.as_mut().unwrap().output = Some(2.0);
         config.custom_models.as_mut().unwrap().push(second);
 
-        let mut fleet = FleetFile::new("Declared case choices".into(), None).unwrap();
-        for (id, model) in [
-            ("upper", upper),
-            ("lower", lower),
-            ("legacy-lower", "deepseek-v4-flash"),
-            ("legacy-mixed", "DeepSeek-V4-Flash"),
-        ] {
-            fleet.members.push(
-                serde_json::from_value(json!({
-                    "id": id, "shortlist": true, "provider": "deepseek", "model": model,
-                }))
-                .unwrap(),
-            );
+        // Build the selected Pod through the same mutation API the picker uses.
+        for model in [upper, lower, "deepseek-v4-flash", "DeepSeek-V4-Flash"] {
+            assert!(matches!(
+                add_fleet_model(root.path(), "deepseek", model, &[]).unwrap(),
+                FleetModelChange::Added { .. }
+            ));
         }
-        save_fleet(&fleet, FleetScope::Workspace, root.path()).unwrap();
-        set_selected(&fleet.name, FleetScope::Workspace, root.path()).unwrap();
         let models = crate::fleet::members::fleet_models(root.path()).unwrap();
         assert_eq!(models.len(), 4, "projection must preserve exact wire IDs");
 

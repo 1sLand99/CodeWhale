@@ -35,10 +35,11 @@ pub struct FleetModel {
 }
 
 impl FleetModel {
+    /// Saved wire IDs are exact. Alias convenience belongs to the bound
+    /// resolver, never to membership mutation or the active-row marker.
     #[must_use]
     pub fn matches(&self, provider: &str, model: &str) -> bool {
-        self.provider.eq_ignore_ascii_case(provider.trim())
-            && self.model.eq_ignore_ascii_case(model.trim())
+        self.provider.eq_ignore_ascii_case(provider.trim()) && self.model == model.trim()
     }
 
     /// `roles` joined for a one-line label, or `member` when none.
@@ -162,13 +163,7 @@ pub fn models_of(fleet: &FleetFile) -> Vec<FleetModel> {
     let mut models: Vec<FleetModel> = Vec::new();
     let mut push = |provider: &str, model: &str, role: Option<&str>| {
         let role = role.map(str::trim).filter(|r| !r.is_empty());
-        // Preserve wire identity before route-aware consumers interpret aliases.
-        // A config-free projection cannot know whether casing denotes an alias
-        // or two distinct endpoint-declared models.
-        if let Some(existing) = models
-            .iter_mut()
-            .find(|m| m.provider.eq_ignore_ascii_case(provider.trim()) && m.model == model.trim())
-        {
+        if let Some(existing) = models.iter_mut().find(|m| m.matches(provider, model)) {
             if let Some(role) = role
                 && !existing.roles.iter().any(|r| r.eq_ignore_ascii_case(role))
             {
@@ -201,10 +196,7 @@ fn member_pins(member: &FleetMember, provider: &str, model: &str) -> bool {
         .provider
         .as_deref()
         .is_some_and(|p| p.eq_ignore_ascii_case(provider))
-        && member
-            .model
-            .as_deref()
-            .is_some_and(|id| id.eq_ignore_ascii_case(model))
+        && member.model.as_deref().is_some_and(|id| id == model)
 }
 
 /// Add `provider/model` to the selected fleet, one member row per role, or
@@ -397,8 +389,7 @@ pub fn toggle_fleet_model(
 
 fn is_operator_route(fleet: &FleetFile, provider: &str, model: &str) -> bool {
     fleet.operator.as_ref().is_some_and(|op| {
-        op.provider.eq_ignore_ascii_case(provider.trim())
-            && op.model.eq_ignore_ascii_case(model.trim())
+        op.provider.eq_ignore_ascii_case(provider.trim()) && op.model == model.trim()
     })
 }
 
@@ -596,6 +587,176 @@ mod tests {
         assert_eq!(models[0].roles, ["operator", "planner"]);
         assert_eq!(models[1].roles, ["scout", "verifier"]);
         assert_eq!(models[1].roles_label(), "explore · test");
+    }
+
+    #[test]
+    fn case_distinct_saved_models_survive_add_remove_and_toggle() {
+        let _lock = crate::test_support::lock_test_env();
+        let (_temp, _home, workspace) = isolated_workspace();
+        let upper = "Preview-fixture";
+        let lower = "preview-fixture";
+        for model in [upper, lower] {
+            assert!(matches!(
+                add_fleet_model(&workspace, "openrouter", model, &[]).unwrap(),
+                FleetModelChange::Added { .. }
+            ));
+            assert!(matches!(
+                add_fleet_model(&workspace, "openrouter", model, &["reviewer".into()]).unwrap(),
+                FleetModelChange::Added { .. }
+            ));
+        }
+        let (before, path) = selected_file(&workspace);
+        assert_eq!(before.members.len(), 4);
+        let upper_rows = before
+            .members
+            .iter()
+            .filter(|member| member.model.as_deref() == Some(upper))
+            .cloned()
+            .collect::<Vec<_>>();
+        let lower_rows = before
+            .members
+            .iter()
+            .filter(|member| member.model.as_deref() == Some(lower))
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(upper_rows.len(), 2);
+        assert_eq!(lower_rows.len(), 2);
+        let models = fleet_models(&workspace).unwrap();
+        assert_eq!(models.len(), 2);
+        for model in [upper, lower] {
+            assert_eq!(
+                models
+                    .iter()
+                    .filter(|row| row.matches("OPENROUTER", model))
+                    .count(),
+                1,
+                "only the exact saved model gets the active marker"
+            );
+        }
+        let bytes = std::fs::read(&path).unwrap();
+        assert!(matches!(
+            add_fleet_model(&workspace, "OPENROUTER", upper, &["reviewer".into()]).unwrap(),
+            FleetModelChange::Unchanged {
+                reason: UnchangedReason::AlreadyPresent,
+                ..
+            }
+        ));
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        assert!(matches!(
+            remove_fleet_model(&workspace, "openrouter", "PREVIEW-FIXTURE"),
+            Err(FleetModelError::NotInFleet { .. })
+        ));
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+
+        // Toggle removes only the exact shortlist row and retains its role pin.
+        assert!(matches!(
+            toggle_fleet_model(&workspace, "OPENROUTER", lower).unwrap(),
+            FleetModelChange::Unchanged {
+                reason: UnchangedReason::AlreadyPresent,
+                ..
+            }
+        ));
+        let (after_toggle, _) = selected_file(&workspace);
+        assert_eq!(
+            after_toggle
+                .members
+                .iter()
+                .filter(|member| member.model.as_deref() == Some(upper))
+                .cloned()
+                .collect::<Vec<_>>(),
+            upper_rows
+        );
+        assert_eq!(
+            after_toggle
+                .members
+                .iter()
+                .filter(|member| member.model.as_deref() == Some(lower))
+                .cloned()
+                .collect::<Vec<_>>(),
+            lower_rows
+                .into_iter()
+                .filter(|member| !member.shortlist)
+                .collect::<Vec<_>>()
+        );
+        assert!(matches!(
+            remove_fleet_model(&workspace, "openrouter", lower).unwrap(),
+            FleetModelChange::Removed { .. }
+        ));
+        assert_eq!(selected_file(&workspace).0.members, upper_rows);
+
+        // Toggling the absent lower spelling adds and removes only that choice.
+        assert!(matches!(
+            toggle_fleet_model(&workspace, "openrouter", lower).unwrap(),
+            FleetModelChange::Added { .. }
+        ));
+        assert_eq!(
+            selected_file(&workspace).0.members.len(),
+            upper_rows.len() + 1
+        );
+        assert!(matches!(
+            toggle_fleet_model(&workspace, "openrouter", lower).unwrap(),
+            FleetModelChange::Removed { .. }
+        ));
+        assert_eq!(selected_file(&workspace).0.members, upper_rows);
+        assert!(matches!(
+            remove_fleet_model(&workspace, "openrouter", upper).unwrap(),
+            FleetModelChange::Removed { .. }
+        ));
+        assert!(selected_file(&workspace).0.members.is_empty());
+    }
+
+    #[test]
+    fn case_distinct_member_does_not_alias_the_saved_operator() {
+        let _lock = crate::test_support::lock_test_env();
+        let (_temp, _home, workspace) = isolated_workspace();
+        let upper = "Preview-fixture";
+        let lower = "preview-fixture";
+        let fleet = fleet_with(Some(("openrouter", upper)), &[]);
+        save_fleet(&fleet, FleetScope::Workspace, &workspace).unwrap();
+        set_selected(&fleet.name, FleetScope::Workspace, &workspace).unwrap();
+        assert!(matches!(
+            add_fleet_model(&workspace, "openrouter", lower, &[]).unwrap(),
+            FleetModelChange::Added { .. }
+        ));
+        assert!(matches!(
+            add_fleet_model(&workspace, "OPENROUTER", upper, &[]).unwrap(),
+            FleetModelChange::Unchanged {
+                reason: UnchangedReason::OperatorRoute,
+                ..
+            }
+        ));
+        let models = fleet_models(&workspace).unwrap();
+        assert_eq!(models.len(), 2);
+        assert!(models[0].matches("OPENROUTER", upper));
+        assert!(!models[1].matches("openrouter", upper));
+        assert!(matches!(
+            remove_fleet_model(&workspace, "openrouter", lower).unwrap(),
+            FleetModelChange::Removed { .. }
+        ));
+        assert_eq!(selected_file(&workspace).0.operator, fleet.operator);
+        assert!(matches!(
+            toggle_fleet_model(&workspace, "openrouter", lower).unwrap(),
+            FleetModelChange::Added { .. }
+        ));
+        assert!(matches!(
+            toggle_fleet_model(&workspace, "openrouter", lower).unwrap(),
+            FleetModelChange::Removed { .. }
+        ));
+        assert_eq!(selected_file(&workspace).0, fleet);
+        let (_, path) = selected_file(&workspace);
+        let bytes = std::fs::read(&path).unwrap();
+        assert!(matches!(
+            toggle_fleet_model(&workspace, "openrouter", upper).unwrap(),
+            FleetModelChange::Unchanged {
+                reason: UnchangedReason::OperatorRoute,
+                ..
+            }
+        ));
+        assert!(matches!(
+            remove_fleet_model(&workspace, "openrouter", upper),
+            Err(FleetModelError::OperatorRoute { .. })
+        ));
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
     }
 
     #[test]

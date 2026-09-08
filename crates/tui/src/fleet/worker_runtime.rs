@@ -963,11 +963,11 @@ pub(crate) fn requested_model_matches_pin(
 ) -> bool {
     let requested = requested.trim();
     let model = model.trim();
-    requested.eq_ignore_ascii_case(model)
+    requested == model
         || provider
             .and_then(non_empty_trimmed)
             .and_then(|provider| requested.strip_prefix(&format!("{provider}/")))
-            .is_some_and(|requested_model| requested_model.eq_ignore_ascii_case(model))
+            .is_some_and(|requested_model| requested_model == model)
 }
 
 fn resolve_task_agent_profile<'a>(
@@ -3953,6 +3953,11 @@ mod tests {
             Some("TeamA")
         ));
         assert!(requested_model_matches_pin(
+            "TeamA/model-x",
+            "model-x",
+            Some("TeamA")
+        ));
+        assert!(!requested_model_matches_pin(
             "TeamA/MODEL-X",
             "model-x",
             Some("TeamA")
@@ -3987,6 +3992,48 @@ mod tests {
             "model-x",
             None
         ));
+    }
+
+    #[test]
+    fn saved_case_distinct_model_conflict_is_rejected_before_freeze() {
+        for provider in [None, Some("TeamA")] {
+            let mut profile =
+                agent_profile("review-choice", "reviewer", None, FleetLoadout::Inherit);
+            profile.profile.model = Some("Preview-fixture".into());
+            profile.profile.provider = provider.map(str::to_string);
+            for requested in ["Preview-fixture", "preview-fixture"] {
+                let mut selectors = vec![requested.to_string()];
+                if let Some(provider) = provider {
+                    selectors.push(format!("{provider}/{requested}"));
+                }
+                for selector in selectors {
+                    let mut task = fleet_task(
+                        "review",
+                        Some(worker_profile(
+                            Some("review-choice"),
+                            None,
+                            None,
+                            None,
+                            Some(&selector),
+                            vec![],
+                        )),
+                    );
+                    let result = freeze_fleet_task_members(
+                        std::slice::from_mut(&mut task),
+                        &[profile.clone()],
+                        false,
+                    );
+                    if requested == "Preview-fixture" {
+                        result.unwrap();
+                        assert!(task.metadata.contains_key(FROZEN_FLEET_MEMBER_METADATA_KEY));
+                    } else {
+                        assert!(result.unwrap_err().to_string().contains("conflicts"));
+                        assert!(!task.metadata.contains_key(FROZEN_FLEET_MEMBER_METADATA_KEY));
+                    }
+                    assert_eq!(profile.profile.model.as_deref(), Some("Preview-fixture"));
+                }
+            }
+        }
     }
 
     #[test]

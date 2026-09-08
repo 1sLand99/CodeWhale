@@ -321,25 +321,40 @@ pub fn resolve_member_in_profiles<'a>(
         return Ok(Some(member));
     }
 
+    // A saved raw ID or qualified route outranks a coincident friendly label.
+    // Friendly member/model names remain case-insensitive only as a fallback.
+    let exact_match = |member: &AgentProfile| match kind.as_deref() {
+        Some("model") => matches_model(member, value),
+        Some("route") => matches_route(member, value),
+        None => matches_model(member, value) || matches_route(member, value),
+        _ => false,
+    };
+    let prefer_exact = profiles.iter().any(exact_match);
     let mut candidates = Vec::new();
     for member in profiles {
-        let matches = match kind.as_deref() {
-            Some("member" | "id") => false,
-            Some("name") => matches_display_name(member, value),
-            Some("role") => public_role_label(member_role(member))
-                .eq_ignore_ascii_case(&public_role_label(value)),
-            Some("model") => matches_model(member, value),
-            Some("route") => matches_route(member, value),
-            Some(_) => false,
-            None => {
-                matches_display_name(member, value)
-                    || public_role_label(member_role(member))
-                        .eq_ignore_ascii_case(&public_role_label(value))
-                    || matches_model(member, value)
-                    || matches_route(member, value)
-                    || friendly_model_name(member)
-                        .as_deref()
-                        .is_some_and(|name| name.eq_ignore_ascii_case(value))
+        let matches = if prefer_exact {
+            exact_match(member)
+        } else {
+            match kind.as_deref() {
+                Some("member" | "id") => false,
+                Some("name") => matches_display_name(member, value),
+                Some("role") => public_role_label(member_role(member))
+                    .eq_ignore_ascii_case(&public_role_label(value)),
+                Some("model") => friendly_model_name(member)
+                    .as_deref()
+                    .is_some_and(|name| name.eq_ignore_ascii_case(value)),
+                Some("route") => matches_route(member, value),
+                Some(_) => false,
+                None => {
+                    matches_display_name(member, value)
+                        || public_role_label(member_role(member))
+                            .eq_ignore_ascii_case(&public_role_label(value))
+                        || matches_model(member, value)
+                        || matches_route(member, value)
+                        || friendly_model_name(member)
+                            .as_deref()
+                            .is_some_and(|name| name.eq_ignore_ascii_case(value))
+                }
             }
         };
         if matches {
@@ -408,10 +423,7 @@ fn matches_model(member: &AgentProfile, value: &str) -> bool {
         .as_deref()
         .map(str::trim)
         .filter(|model| !model.is_empty())
-        .is_some_and(|model| model.eq_ignore_ascii_case(value))
-        || friendly_model_name(member)
-            .as_deref()
-            .is_some_and(|name| name.eq_ignore_ascii_case(value))
+        .is_some_and(|model| model == value)
 }
 
 fn matches_route(member: &AgentProfile, value: &str) -> bool {
@@ -429,7 +441,7 @@ fn matches_route(member: &AgentProfile, value: &str) -> bool {
             .model
             .as_deref()
             .map(str::trim)
-            .is_some_and(|candidate| candidate.eq_ignore_ascii_case(model.trim()))
+            .is_some_and(|candidate| candidate == model.trim())
 }
 
 fn push_unique<'a>(members: &mut Vec<&'a AgentProfile>, member: &'a AgentProfile) {
@@ -698,6 +710,70 @@ model = "qwen/qwen3.7-plus"
                 "selector {selector}"
             );
         }
+    }
+
+    #[test]
+    fn saved_case_distinct_model_and_route_selectors_are_exact() {
+        let profiles = vec![
+            member(
+                "upper",
+                Some("Upper label"),
+                "reviewer",
+                Some("openrouter"),
+                Some("Preview-fixture"),
+            ),
+            member(
+                "lower",
+                Some("Lower label"),
+                "reviewer",
+                Some("openrouter"),
+                Some("preview-fixture"),
+            ),
+            member(
+                "label-shadow",
+                Some("preview-fixture"),
+                "scout",
+                Some("openrouter"),
+                Some("unrelated-model"),
+            ),
+        ];
+        for (model, id) in [("Preview-fixture", "upper"), ("preview-fixture", "lower")] {
+            for selector in [
+                model.to_string(),
+                format!("model:{model}"),
+                format!("route:OPENROUTER/{model}"),
+            ] {
+                assert_eq!(
+                    resolve_member_in_profiles(&profiles, &selector)
+                        .unwrap()
+                        .unwrap()
+                        .id,
+                    id
+                );
+            }
+        }
+        for selector in ["model:PREVIEW-FIXTURE", "route:openrouter/PREVIEW-FIXTURE"] {
+            assert!(
+                resolve_member_in_profiles(&profiles, selector)
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        assert_eq!(
+            resolve_member_in_profiles(&profiles, "name:UPPER LABEL")
+                .unwrap()
+                .unwrap()
+                .id,
+            "upper"
+        );
+        assert_eq!(
+            resolve_member_in_profiles(&profiles, "name:PREVIEW-FIXTURE")
+                .unwrap()
+                .unwrap()
+                .id,
+            "label-shadow"
+        );
+        assert!(resolve_member_in_profiles(&profiles, "role:reviewer").is_err());
     }
 
     #[test]

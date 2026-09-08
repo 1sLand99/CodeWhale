@@ -1680,7 +1680,7 @@ fn picker_model_rows_for_app(app: &App, config: &Config) -> Vec<ModelPickerRow> 
         row.enabled = model_row_enabled_for_app(app, config, row);
         if let Some(pin) = pins.iter().find(|pin| {
             row_provider_identity(row).is_some_and(|provider| provider == pin.provider)
-                && row.id.eq_ignore_ascii_case(&pin.model)
+                && row.id == pin.model
         }) {
             let label = pin.label.as_deref().unwrap_or("pinned");
             row.hint = format!(
@@ -1694,7 +1694,7 @@ fn picker_model_rows_for_app(app: &App, config: &Config) -> Vec<ModelPickerRow> 
         let provider = ApiProvider::parse(&pin.provider).unwrap_or(ApiProvider::Custom);
         if rows.iter().any(|row| {
             row_provider_identity(row).is_some_and(|identity| identity == pin.provider)
-                && row.id.eq_ignore_ascii_case(&pin.model)
+                && row.id == pin.model
         }) {
             continue;
         }
@@ -2465,8 +2465,7 @@ fn sort_model_rows_for_view<'a, T>(
         row_provider_identity(row)
             .and_then(|provider| {
                 pins.iter().position(|pin| {
-                    provider.eq_ignore_ascii_case(&pin.provider)
-                        && row.id.eq_ignore_ascii_case(&pin.model)
+                    provider.eq_ignore_ascii_case(&pin.provider) && row.id == pin.model
                 })
             })
             .unwrap_or(usize::MAX)
@@ -3150,8 +3149,7 @@ impl ModelPickerView {
         // preserving only the numeric index can select a different model.
         let reanchored = selected.and_then(|(provider, model)| {
             self.visible_model_rows().iter().position(|row| {
-                row.id.eq_ignore_ascii_case(&model)
-                    && row_provider_identity(row).map(str::to_owned) == provider
+                row.id == model && row_provider_identity(row).map(str::to_owned) == provider
             })
         });
         if let Some(position) = reanchored {
@@ -4037,6 +4035,113 @@ mod tests {
         assert_eq!(pins[0].model, "z-ai/glm-5.3-flash");
         assert_eq!(pins[0].label.as_deref(), Some("fleet · explore"));
         assert_eq!(pins[1].model, "claude-haiku-4-5");
+    }
+
+    #[test]
+    fn fleet_case_distinct_pins_keep_labels_order_and_refresh_selection() {
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                let _lock = crate::test_support::lock_test_env();
+                let root = tempfile::tempdir().unwrap();
+                let _home = crate::test_support::EnvVarGuard::set(
+                    "CODEWHALE_HOME",
+                    root.path().join("home"),
+                );
+                let workspace = root.path().join("workspace");
+                std::fs::create_dir_all(&workspace).unwrap();
+                let lower = "preview-fixture";
+                let upper = "Preview-fixture";
+                let mut config: Config = toml::from_str(include_str!(
+                    "../../../config/tests/fixtures/custom_models.toml"
+                ))
+                .unwrap();
+                config.default_text_model = Some(lower.into());
+                config.set_provider_model_override(ApiProvider::Deepseek, Some(lower.into()));
+                config.set_provider_api_key_override(
+                    ApiProvider::Deepseek,
+                    Some("fixture-key".into()),
+                );
+                config.custom_models.as_mut().unwrap()[0].id = lower.into();
+                let mut second = config.custom_models.as_ref().unwrap()[0].clone();
+                second.id = upper.into();
+                config.custom_models.as_mut().unwrap().push(second);
+                crate::fleet::members::add_fleet_model(
+                    &workspace,
+                    "deepseek",
+                    lower,
+                    &["scout".into()],
+                )
+                .unwrap();
+                crate::fleet::members::add_fleet_model(
+                    &workspace,
+                    "deepseek",
+                    upper,
+                    &["reviewer".into()],
+                )
+                .unwrap();
+                let options = crate::test_support::test_tui_options(workspace.clone());
+                let mut app = App::new(options, &config);
+                app.workspace = workspace.clone();
+                let pins = picker_pins_for_app(&app);
+                let rows = picker_model_rows_for_app(&app, &config);
+                for pin in &pins {
+                    let row = rows
+                        .iter()
+                        .find(|row| {
+                            row.provider == Some(ApiProvider::Deepseek) && row.id == pin.model
+                        })
+                        .unwrap();
+                    assert!(row.hint.starts_with(pin.label.as_deref().unwrap()));
+                    assert!(
+                        row.hint
+                            .contains(&format!("exact deepseek / {}", pin.model))
+                    );
+                }
+                let mut picker = ModelPickerView::new(&app, &config);
+                let visible = picker.visible_model_rows();
+                assert_eq!(
+                    visible[0].id, lower,
+                    "saved pin order precedes lexical order"
+                );
+                assert_eq!(visible[1].id, upper);
+                let upper_index = visible.iter().position(|row| row.id == upper).unwrap();
+                drop(visible);
+                picker.selected_model_idx = upper_index;
+                picker.re_resolve_from_app(&app, &config);
+                assert_eq!(
+                    picker.resolved_model(),
+                    upper,
+                    "refresh cannot select its case sibling"
+                );
+
+                // The still-saved upper route remains a distinct stale row after its
+                // declaration disappears; a live lower row cannot hide it.
+                config
+                    .custom_models
+                    .as_mut()
+                    .unwrap()
+                    .retain(|row| row.id == lower);
+                let options = crate::test_support::test_tui_options(workspace.clone());
+                let mut reloaded = App::new(options, &config);
+                reloaded.workspace = workspace;
+                let rows = picker_model_rows_for_app(&reloaded, &config);
+                let stale = rows
+                    .iter()
+                    .filter(|row| row.provider == Some(ApiProvider::Deepseek) && row.id == upper)
+                    .collect::<Vec<_>>();
+                assert_eq!(stale.len(), 1);
+                assert_eq!(stale[0].blocked_reason.as_deref(), Some("stale pin"));
+                assert!(
+                    rows.iter()
+                        .any(|row| row.provider == Some(ApiProvider::Deepseek)
+                            && row.id == lower
+                            && row.blocked_reason.as_deref() != Some("stale pin"))
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[test]
