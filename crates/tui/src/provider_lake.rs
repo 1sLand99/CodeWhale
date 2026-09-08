@@ -122,11 +122,13 @@ fn offerings_by_provider(
 /// staleness without re-merging.
 static LIVE_GENERATION: AtomicU64 = AtomicU64::new(0);
 
+type MergedCacheEntry = ((u64, u64), Arc<CatalogSnapshot>);
+
 /// Memoized result of [`merged_snapshot`], tagged with the `LIVE_GENERATION`
 /// it was computed from. Re-merging ~5,700 offerings per call made every
 /// `/model` open pay a multi-second, UI-thread-blocking cost; the merge result
 /// only changes when the live snapshot changes, so cache it.
-static MERGED_CACHE: RwLock<Option<((u64, u64), Arc<CatalogSnapshot>)>> = RwLock::new(None);
+static MERGED_CACHE: RwLock<Option<MergedCacheEntry>> = RwLock::new(None);
 
 /// Generation/freshness-scoped route resolvers for provider-owned catalogs.
 /// Picker calls read the merged snapshot directly; execution projects that
@@ -713,11 +715,10 @@ pub(crate) fn runtime_catalog_resolver_for_identity(
                                     reasoning,
                                 ));
                         }
-                        if patch.pricing.is_some() {
-                            if let Some(row) = source_rows.get(&key) {
-                                offering.pricing =
-                                    codewhale_config::pricing::route_pricing_sku(row);
-                            }
+                        if patch.pricing.is_some()
+                            && let Some(row) = source_rows.get(&key)
+                        {
+                            offering.pricing = codewhale_config::pricing::route_pricing_sku(row);
                         }
                     }
                 }
