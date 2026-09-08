@@ -308,6 +308,12 @@ impl ChatWidget {
             };
         }
 
+        // Reserve the scrollbar's column before wrapping, so painting it cannot
+        // erase the final character of a line. Keep this width stable when the
+        // history starts/stops scrolling; cached lines and copy metadata must
+        // use the same layout on both sides of that transition.
+        let transcript_width = content_area.width.saturating_sub(1).max(1);
+
         // Per-cell revision caching (fix for issue #78):
         //
         // Every committed history cell carries its own revision counter in
@@ -426,7 +432,7 @@ impl ChatWidget {
             app.viewport.transcript_cache.ensure_split(
                 &shards,
                 &cell_revisions,
-                content_area.width.max(1),
+                transcript_width,
                 render_options,
                 &app.folded_thinking,
                 None,
@@ -527,7 +533,7 @@ impl ChatWidget {
             app.viewport.transcript_cache.ensure_filtered(
                 &filtered_cells,
                 &filtered_revs,
-                content_area.width.max(1),
+                transcript_width,
                 render_options,
                 &app.folded_thinking,
                 Some(&app.collapsed_cell_map),
@@ -8088,47 +8094,64 @@ mod tests {
     /// 1-column gutter rather than overdrawing chat content).
     #[test]
     fn chat_widget_reserves_scrollbar_gutter_when_scrollbar_visible() {
-        let mut app = create_test_app();
-        // Many short messages → forces the scrollbar to be visible.
-        for i in 0..200 {
-            app.add_message(HistoryCell::User {
-                content: format!("user message {i}"),
-            });
-        }
-
-        let area = Rect {
-            x: 0,
-            y: 0,
-            width: 80,
-            height: 8,
-        };
-        let mut buf = Buffer::empty(area);
-        let widget = ChatWidget::new(&mut app, area);
-        widget.render(area, &mut buf);
-
-        // The rightmost column should host the scrollbar track/thumb.
-        // The penultimate column should still hold normal content (a digit,
-        // letter, or space — never the scrollbar glyph).
-        let scrollbar_track = "│";
-        let scrollbar_thumb = "┃";
-        let mut scrollbar_seen = false;
-        for y in 0..area.height {
-            let last = buf[(area.width - 1, y)].symbol();
-            let penult = buf[(area.width - 2, y)].symbol();
-            if last == scrollbar_track || last == scrollbar_thumb {
-                scrollbar_seen = true;
+        let content_hash = "0123456789abcdef".repeat(4);
+        let capability_hash = "fedcba9876543210".repeat(4);
+        for filtered in [false, true] {
+            let mut app = create_test_app();
+            app.low_motion = true;
+            app.fancy_animations = false;
+            app.use_mouse_capture = false;
+            for i in 0..20 {
+                app.add_message(HistoryCell::User {
+                    content: format!("user message {i}"),
+                });
             }
-            assert!(
-                penult != scrollbar_track && penult != scrollbar_thumb,
-                "scrollbar leaked into column {} (cell {:?}) at row {y}",
-                area.width - 2,
-                penult
-            );
+            app.add_message(HistoryCell::System {
+                content: format!(
+                    "Content hash:\n{content_hash}\nCapability hash:\n{capability_hash}"
+                ),
+            });
+            if filtered {
+                app.collapsed_cells.insert(0);
+            }
+
+            // Reuse the cache across scrollbar appearance, narrow-pane resizes,
+            // and disappearance. Both ordinary and filtered histories must keep
+            // every trust-token character in the painted terminal cells.
+            for (width, height) in [
+                (40, 100),
+                (40, 16),
+                (58, 16),
+                (60, 16),
+                (80, 16),
+                (40, 16),
+                (40, 100),
+            ] {
+                let area = Rect::new(2, 1, width, height);
+                let mut buf = Buffer::empty(area);
+                let widget = ChatWidget::new(&mut app, area);
+                assert_eq!(widget.scrollbar.is_some(), height == 16);
+                widget.render(area, &mut buf);
+
+                let rendered = buffer_text(&buf, area);
+                let joined: String = rendered
+                    .chars()
+                    .filter(|ch| !ch.is_whitespace() && !matches!(ch, '│' | '┃'))
+                    .collect();
+                for hash in [&content_hash, &capability_hash] {
+                    assert!(
+                        joined.contains(hash.as_str()),
+                        "lost trust-token characters at {width}x{height}, filtered={filtered}: {rendered:?}"
+                    );
+                }
+                if widget.scrollbar.is_some() {
+                    for y in widget.transcript_area.y..widget.transcript_area.bottom() {
+                        assert!(matches!(buf[(area.right() - 1, y)].symbol(), "│" | "┃"));
+                        assert!(!matches!(buf[(area.right() - 2, y)].symbol(), "│" | "┃"));
+                    }
+                }
+            }
         }
-        assert!(
-            scrollbar_seen,
-            "scrollbar should be visible for a long history"
-        );
     }
 
     #[test]
