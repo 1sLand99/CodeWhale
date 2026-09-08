@@ -1,8 +1,8 @@
 /**
  * getting-started.ts — the canonical new-user path for codewhale.net.
  *
- * Four steps, in order: install → first offline session → provider connection
- * → fleet setup. Both the homepage band and the /docs/guide page
+ * Four steps, in order: install → provider connection → first task
+ * → optional fleet setup. Both the homepage band and the /docs/guide page
  * render from this module, so the path reads identically everywhere.
  *
  * TRUTH CONTRACT:
@@ -34,47 +34,47 @@ export const GETTING_STARTED_STEPS: GuideStep[] = [
     id: "install",
     title: { en: "Install Codewhale", zh: "安装 Codewhale" },
     body: {
-      en: "Install a published GitHub release on macOS or Linux. Run codewhale update for later releases. npm and Cargo remain alternatives in the full guide. Local development builds are separate.",
-      zh: "在 macOS 或 Linux 上安装 GitHub 已发布版本。之后运行 codewhale update 获取新版本。完整指南中也提供 npm 和 Cargo 安装方式。本地开发构建与已发布版本分开。",
+      en: "On macOS or Linux, run the command below. The install guide also covers Windows, package managers, and building from source.",
+      zh: "在 macOS 或 Linux 上运行下方命令。安装指南也介绍 Windows、包管理器和源码编译方式。",
     },
-    commands: ["curl -fsSL https://codewhale.net/install.sh | sh", "codewhale doctor"],
+    commands: ["curl -fsSL https://codewhale.net/install.sh | sh"],
     link: {
       href: "/install",
       label: { en: "Full install guide", zh: "完整安装指南" },
     },
   },
   {
-    id: "first-session",
-    title: { en: "Open a first session — no key needed", zh: "打开第一个会话——无需密钥" },
-    body: {
-      en: "The terminal can open without an API key; model replies need a configured provider. Plan blocks file mutation and shell execution. Permitted research can still contact external services.",
-      zh: "终端可在没有 API 密钥时打开；模型回复需要配置提供商。Plan 禁止文件修改与 shell 执行，但获准的研究请求仍可能访问外部服务。",
-    },
-    commands: ["codewhale"],
-    link: {
-      href: "/docs/vocabulary",
-      label: { en: "Learn the product nouns first", zh: "先了解产品名词" },
-    },
-  },
-  {
     id: "connect-provider",
-    title: { en: "Connect a provider", zh: "连接提供商" },
+    title: { en: "Connect your model", zh: "连接你的模型" },
     body: {
-      en: "Configure a supported provider with your own credentials, or connect a local model server. Check the selected provider, endpoint and model before sending a task. Local servers may require authentication.",
-      zh: "用你自己的凭据配置支持的提供商，或连接本地模型服务。发送任务前检查所选提供商、端点与模型。本地服务也可能要求身份验证。",
+      en: "Use your own provider key or connect a local model. This example saves a DeepSeek key; the provider guide covers the other options.",
+      zh: "使用你自己的提供商密钥，或连接本地模型。此示例保存 DeepSeek 密钥；其他选项见提供商指南。",
     },
     commands: ["codewhale auth set --provider deepseek"],
     link: {
       href: "/models",
-      label: { en: "Providers and models", zh: "提供商与模型" },
+      label: { en: "Choose a provider", zh: "选择提供商" },
+    },
+  },
+  {
+    id: "first-session",
+    title: { en: "Give it a task", zh: "交给它一项任务" },
+    body: {
+      en: "Open Codewhale in your project folder. Ask it to explain the code, build a feature, or automate a task. Use /provider and /model to change your selection, and /mode to choose how it works.",
+      zh: "在项目文件夹中打开 Codewhale。让它解释代码、开发功能或自动完成任务。用 /provider 和 /model 切换选择，用 /mode 选择工作模式。",
+    },
+    commands: ["codewhale"],
+    link: {
+      href: "/docs/modes",
+      label: { en: "Modes and permissions", zh: "模式与权限" },
     },
   },
   {
     id: "fleet-workflow",
-    title: { en: "Optional: set up a fleet", zh: "可选：配置 fleet" },
+    title: { en: "Add a Fleet when you need one", zh: "需要时配置 Fleet" },
     body: {
-      en: "Optional in v0.9.11: /fleet setup edits the selected named fleet, or opens profile setup when none is selected. Review the model and save scope before saving. Fleet configuration does not grant execution permissions. You can start with a single agent.",
-      zh: "v0.9.11 的可选步骤：/fleet setup 编辑当前选中的命名 fleet；未选中时则打开角色档案设置。保存前检查模型与保存范围。Fleet 配置不会授予执行权限。你可以先从一个智能体开始。",
+      en: "Start with one agent. When you want a roster of models and roles, run /fleet setup inside Codewhale. From your shell, codewhale fleet status shows the saved Fleet.",
+      zh: "先从一个智能体开始。需要配置模型与角色时，在 Codewhale 中运行 /fleet setup。在 shell 中运行 codewhale fleet status 可查看已保存的 Fleet。",
     },
     commands: ["/fleet setup", "codewhale fleet status"],
     link: {

@@ -81,7 +81,7 @@ export const chrome: ChromeDict = {
   themeTitle: "Tema dokumentasi · otomatis / terang / gelap",
 
   footerTagline:
-    "Model Anda. Lebih mampu bersama. Dokumentasi, sumber, dan komunitas untuk runtime sumber terbuka.",
+    "Ciptakan apa yang Anda inginkan. Otomatisasi tugas. Pilih model Anda.",
   footerProduct: "Produk",
   footerProject: "Proyek",
   footerDocs: "Dokumentasi",

@@ -9,14 +9,14 @@ import type { HomeDict } from "../types";
  */
 
 export const home: HomeDict = {
-  metaTitle: "Codewhale — Mô hình của bạn. Mạnh hơn khi làm việc cùng nhau.",
+  metaTitle: "Codewhale — Tạo những gì bạn muốn.",
   metaDescription:
-    "Codewhale là hệ thống điện toán tác tử mã nguồn mở. Mang những mô hình bạn đang dùng — hosted, qua gateway, hoặc cục bộ — vào terminal và để chúng làm việc cùng nhau trên máy của bạn, dưới sự kiểm soát của bạn. Rust, MIT.",
-  kicker: "Điện toán tác tử, theo điều kiện của bạn",
-  heroTitleA: "Mô hình của bạn.",
-  heroTitleB: "Mạnh hơn khi làm việc cùng nhau.",
+    "Phát triển phần mềm, làm việc với tệp và tự động hóa tác vụ cùng Codewhale. Chọn mô hình từ nhà cung cấp hoặc mô hình cục bộ, rồi đổi nhà cung cấp theo nhu cầu công việc.",
+  kicker: "Tác tử AI mã nguồn mở",
+  heroTitleA: "Tạo những gì bạn muốn.",
+  heroTitleB: "Chọn mô hình bạn muốn dùng.",
   heroIntro:
-    "{brand} gom các mô hình bạn đang dùng vào một terminal và để chúng làm việc như một thủy thủ đoàn — đọc mã, sửa tệp, chạy kiểm tra — trong khi bạn quyết định mỗi mô hình được phép làm gì. Mã nguồn mở, chạy trên máy của bạn.",
+    "{brand} mang đến các tác tử có thể phát triển phần mềm, làm việc với tệp và tự động hóa tác vụ. Dùng mô hình bạn chọn và đổi nhà cung cấp theo nhu cầu công việc.",
   getCodewhale: "Tải Codewhale",
   exploreProduct: "Khám phá sản phẩm",
   shotPreview: "Xem trước terminal",
@@ -31,53 +31,78 @@ export const home: HomeDict = {
   publishedRelease: "đã phát hành",
   figcaptionSourceCandidate: "chưa phát hành",
   chapterTerminal: "Terminal của bạn",
-  chapterTerminalTitle: "Một nơi quen thuộc để bắt đầu.",
+  chapterTerminalTitle: "Bắt đầu với điều bạn muốn tạo ra.",
   gainHeading:
-    "Thứ bạn nhận được không phải chatbot, mà là đòn bẩy cho những mô hình bạn đã trả tiền.",
+    "Biến ý tưởng thành hành động.",
   gainLede:
-    "Một phiên có thể giữ nhiều mô hình cùng lúc, mỗi mô hình một vai trò bạn giao, tất cả cùng làm việc trong một kho mã theo cùng một bộ quy tắc.",
+    "Xây dựng dự án, tìm hiểu một vấn đề hoặc tự động hóa tác vụ. Bắt đầu với một tác tử, rồi chia việc lớn hơn cho nhiều tác tử.",
   gain: [
-    ["Mô hình của bạn", "Khóa hosted, một gateway, hoặc runtime cục bộ không cần khóa. Ghim mỗi vai trò một mô hình khác nhau và giữ nguyên nhà cung cấp bạn chọn — tên mô hình không bao giờ tự đổi nhà cung cấp."],
-    ["Tác tử có năng lực", "Các chế độ Plan, Work và Operate; một fleet tác tử con cho một việc; công cụ cho tệp, shell, web và MCP; phiên lưu được, tiếp tục được và quay lui được."],
-    ["Kiểm soát trên máy của bạn", "Ask, Auto-Review hoặc Full Access — bạn đặt mức nó được làm trước khi hỏi. Chạy cục bộ, có sandbox khi hệ điều hành cho phép, kèm nhật ký kiểm toán bạn đọc được."],
+    [
+      "Bắt tay xây dựng",
+      "Biến ý tưởng thành phần mềm chạy được. Các tác tử có thể chỉnh sửa tệp, chạy lệnh và kiểm tra kết quả."
+    ],
+    [
+      "Tự động hóa việc lặp lại",
+      "Tạo tập lệnh và quy trình cho những tác vụ thường lặp lại, rồi chạy từ terminal."
+    ],
+    [
+      "Chọn mô hình bạn muốn dùng",
+      "Kết nối mô hình từ nhà cung cấp hoặc mô hình cục bộ. Chia một công việc lớn cho các tác tử dùng mô hình và đảm nhiệm vai trò khác nhau."
+    ]
   ],
   chapterModels: "Mô hình của bạn",
-  modelsHeading: "Mang theo những gì bạn có. Không đổi gì bạn chưa chọn.",
+  modelsHeading: "Tìm mô hình phù hợp với tác vụ.",
   modelsBody:
-    "Kết nối nhà cung cấp được hỗ trợ, cổng trung gian hoặc máy chủ mô hình cục bộ. Kiểm tra nhà cung cấp và mô hình trước khi bắt đầu. Máy chủ cục bộ cũng có thể yêu cầu xác thực.",
+    "Dùng dịch vụ của nhà cung cấp, kết nối qua cổng trung gian hoặc chạy mô hình cục bộ. Chọn nhà cung cấp và mô hình cho từng phiên, rồi thay đổi trong lúc làm việc.",
   modelsFacts: [
-    ["Hosted", "Khóa API của bạn, lưu bằng codewhale auth set"],
+    ["Hosted", "Khóa API của bạn, lưu bằng codewhale auth set --provider <id>"],
     ["Gateway", "Một endpoint cho nhiều mô hình, nhà cung cấp vẫn do bạn chọn"],
     ["Cục bộ", "vLLM, SGLang, Ollama trên localhost — thường không cần khóa"],
   ],
-  modelsLink: "Xem mọi nhà cung cấp",
-  startHeading: "Bốn bước tới phiên đầu tiên.",
+  modelsLink: "Khám phá mô hình và nhà cung cấp",
+  startHeading: "Bắt đầu tác vụ đầu tiên.",
   startLede:
-    "Cài đặt, mở phiên không cần khóa, kết nối nhà cung cấp, rồi lập fleet khi một mô hình là chưa đủ.",
+    "Cài đặt Codewhale, kết nối một mô hình và cho biết bạn muốn làm gì. Thêm Fleet khi muốn nhiều tác tử cùng chia sẻ công việc.",
   startGuideLink: "Đọc hướng dẫn bắt đầu",
   startVocabularyLink: "Xem thuật ngữ sản phẩm",
-  chapterAccount: "Nơi nó chạy hôm nay",
-  availabilityHeading: "Đã có, đang phát triển, và chưa có — nói thẳng.",
+  chapterAccount: "Tải Codewhale",
+  availabilityHeading: "Bạn có thể dùng Codewhale ở đâu.",
   availabilityLede:
-    "Terminal là sản phẩm đã phát hành. Mọi thứ khác được liệt kê đúng trạng thái thực tế.",
+    "Bắt đầu từ terminal. Ứng dụng và máy tính đám mây đang được phát triển.",
   availability: [
-    ["Terminal", "Đã phát hành", "Binary trên GitHub Releases cho Linux, macOS và Windows; npm và Cargo là các lựa chọn thay thế. Android trên Termux là bản xem trước."],
-    ["Ứng dụng web", "Đăng nhập và điều khiển từ xa đã có", "Đăng nhập hoặc tạo tài khoản, rồi gõ /rc trong một phiên cục bộ đang chạy để tiếp tục chính phiên đó từ trình duyệt. Phần còn lại của bàn làm việc trên trình duyệt vẫn là bản xem trước phát triển."],
-    ["Máy tính để bàn", "Bản phát triển", "Có bản alpha cho macOS, Linux và Windows. Chưa có ứng dụng desktop phát hành chính thức."],
-    ["Máy tính đám mây", "Chưa có", "Việc chạy công việc trên máy tính được host đang được phát triển. Trang này sẽ nói khi nó hoạt động."],
+    [
+      "Terminal",
+      "Đã phát hành",
+      "Các bản nhị phân phát hành trên GitHub dành cho Linux, macOS và Windows; bạn cũng có thể cài qua npm hoặc Cargo. Phiên bản Android trên Termux là bản xem trước."
+    ],
+    [
+      "Ứng dụng web",
+      "Bản xem trước đang phát triển",
+      "Truy cập tài khoản và ghép nối trình duyệt trong bản xem trước đang phát triển."
+    ],
+    [
+      "Máy tính để bàn",
+      "Bản phát triển",
+      "Ứng dụng macOS đang được phát triển; bản tải xuống công khai sẽ có sau."
+    ],
+    [
+      "Máy tính đám mây",
+      "Đang phát triển",
+      "Máy tính do nhà cung cấp vận hành để chạy tác vụ của bạn."
+    ]
   ],
   availabilityNote:
-    "Terminal không cần tài khoản. Tài khoản tự nó không bao giờ là gói trả phí, và không gì trên trang này có thể tính phí bạn.",
+    "Terminal không cần tài khoản Codewhale. Nhà cung cấp của bạn tính phí sử dụng các mô hình do họ vận hành.",
   accountLink: "Tạo tài khoản",
   surfacesHeading: "Dùng runtime ngay nơi công việc diễn ra.",
   surfaces: [
     ["TUI", "Làm việc tương tác trong terminal"],
     ["codewhale exec", "Script và CI"],
-    ["Ứng dụng web", "Chạy trong trình duyệt, chỉ qua loopback"],
+    ["Trình khách web cục bộ","Giao diện localhost; không gian làm việc trên trình duyệt do máy chủ cung cấp vẫn đang được phát triển"],
     ["Runtime API + MCP", "Tích hợp cục bộ"],
-    ["fleet", "Công việc nhiều tác tử, bền vững"],
+    ["Fleet","Nhiều tác tử cùng làm một việc"],
   ],
-  runtimeLink: "Xem các giao diện runtime và ghi chú về độ ổn định",
+  runtimeLink: "Khám phá các tích hợp",
   installBandHeading: "Bắt đầu chỉ bằng một lệnh.",
   copy: "Sao chép",
   copied: "Đã sao chép ✓",

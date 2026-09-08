@@ -18,6 +18,7 @@
  * the component source carries that contract.
  */
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
   getMediaAsset,
@@ -25,6 +26,7 @@ import {
   MEDIA_BUDGETS,
   MEDIA_PUBLIC_DIR,
   REDUCED_MOTION_POLICY,
+  TERMINAL_SCREENSHOT,
   type MediaAsset,
 } from "./media-manifest";
 import { ALL_LOCALES } from "./i18n/config";
@@ -50,6 +52,14 @@ function pngDimensions(src: string): [number, number] {
 }
 
 describe("media manifest integrity", () => {
+  it("keeps the terminal capture tied to its measured file and captured build", () => {
+    const src = TERMINAL_SCREENSHOT.src.slice(1);
+    const bytes = readFileSync(new URL(`public/${src}`, webRoot));
+    expect(createHash("sha256").update(bytes).digest("hex")).toBe(TERMINAL_SCREENSHOT.sha256);
+    expect(pngDimensions(src)).toEqual([TERMINAL_SCREENSHOT.width, TERMINAL_SCREENSHOT.height]);
+    expect(TERMINAL_SCREENSHOT.sourceCommit).toMatch(/^[0-9a-f]{40}$/);
+  });
+
   it("has unique asset ids and complete localized copy", () => {
     const ids = MEDIA_ASSETS.map((a) => a.id);
     expect(new Set(ids).size).toBe(ids.length);

@@ -16,6 +16,7 @@ import {
 } from "@/lib/i18n/links";
 import { serializeJsonLd } from "@/lib/json-ld";
 import { buildSoftwareApplicationJsonLd } from "@/lib/software-application-schema";
+import { TERMINAL_SCREENSHOT } from "@/lib/media-manifest";
 
 // Revalidate against source-proven runtime facts without giving up static edge
 // caching. `getFacts()` rejects legacy or older KV snapshots.
@@ -93,17 +94,17 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
               is and is not. */}
           <figure className="folio-shot">
             <Image
-              src="/codewhale-tui.png"
+              src={TERMINAL_SCREENSHOT.src}
               alt={d.screenshotAlt}
-              width={2760}
-              height={1494}
+              width={TERMINAL_SCREENSHOT.width}
+              height={TERMINAL_SCREENSHOT.height}
               sizes="(max-width: 58rem) calc(100vw - 2rem), 56rem"
               priority
             />
             <figcaption>
               <p className="dotline">
                 <span>{d.shotPreview}</span>
-                <span>{fill(d.shotBuild, { version: sourceVersion })}</span>
+                <span>{fill(d.shotBuild, { version: TERMINAL_SCREENSHOT.version })}</span>
               </p>
               {/*
                 The TUI header grammar: a `cw` chip and a dot chain. Each fact is

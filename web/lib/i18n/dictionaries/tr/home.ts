@@ -9,14 +9,14 @@ import type { HomeDict } from "../types";
  */
 
 export const home: HomeDict = {
-  metaTitle: "Codewhale — Senin modellerin. Birlikte daha yetenekli.",
+  metaTitle: "Codewhale — İstediğini oluştur.",
   metaDescription:
-    "Codewhale açık kaynaklı bir ajan tabanlı bilişim sistemidir. Zaten kullandığın modelleri —barındırılan, gateway üzerinden ya da yerel— terminaline getir ve senin makinende, senin denetiminde birlikte çalışmalarını sağla. Rust, MIT.",
-  kicker: "Ajan tabanlı bilişim, senin şartlarınla",
-  heroTitleA: "Senin modellerin.",
-  heroTitleB: "Birlikte daha yetenekli.",
+    "Codewhale ile yazılım geliştir, dosyalarla çalış ve görevleri otomatikleştir. Barındırılan veya yerel modelleri seç, işinin ihtiyaçları değiştikçe sağlayıcı değiştir.",
+  kicker: "Açık kaynaklı yapay zekâ ajanları",
+  heroTitleA: "İstediğini oluştur.",
+  heroTitleB: "Modellerini seç.",
   heroIntro:
-    "{brand} zaten kullandığın modelleri tek bir terminalde toplar ve bir mürettebat gibi çalıştırır — kodunu okur, dosyaları düzenler, kontrolleri çalıştırır — her birinin neye izinli olduğuna ise sen karar verirsin. Açık kaynak, senin makinende.",
+    "{brand}, yazılım geliştirebilen, dosyalarla çalışabilen ve görevleri otomatikleştirebilen ajanlar sunar. Seçtiğin modelleri kullan, işinin ihtiyaçları değiştikçe sağlayıcı değiştir.",
   getCodewhale: "Codewhale'i edin",
   exploreProduct: "Ürünü keşfet",
   shotPreview: "Terminal önizlemesi",
@@ -31,53 +31,78 @@ export const home: HomeDict = {
   publishedRelease: "yayımlandı",
   figcaptionSourceCandidate: "yayımlanmadı",
   chapterTerminal: "Senin terminalin",
-  chapterTerminalTitle: "Başlamak için tanıdık bir yer.",
+  chapterTerminalTitle: "Yapmak istediğin bir şeyle başla.",
   gainHeading:
-    "Elde ettiğin bir sohbet botu değil. Zaten ödediğin modeller üzerinde kaldıraç.",
+    "Fikirlerini hayata geçir.",
   gainLede:
-    "Tek bir oturum aynı anda birden çok modeli tutabilir; her biri verdiğin rolde, hepsi aynı depoda, aynı kurallarla çalışır.",
+    "Bir proje geliştir, bir soruyu araştır veya bir görevi otomatikleştir. Tek bir ajanla başla, daha büyük işleri birkaç ajana paylaştır.",
   gain: [
-    ["Senin modellerin", "Barındırılan anahtarlar, bir gateway ya da hiç anahtar gerektirmeyen yerel bir runtime. Her role ayrı bir model sabitle ve seçtiğin sağlayıcıyı koru — bir model adı sağlayıcıyı senin yerine asla değiştirmez."],
-    ["Yetenekli ajanlar", "Plan, Work ve Operate modları; tek bir iş için alt ajanlardan oluşan bir fleet; dosya, kabuk, web ve MCP araçları; kaydedilen, sürdürülen ve geri alınan oturumlar."],
-    ["Makinende denetim", "Ask, Auto-Review ya da Full Access — sormadan önce ne kadar yapacağını sen belirlersin. Yerelde çalışır, işletim sisteminin izin verdiği yerde sandbox içinde, okuyabileceğin bir denetim günlüğüyle."],
+    [
+      "Bir şey geliştir",
+      "Bir fikri çalışan yazılıma dönüştür. Ajanların dosyaları düzenleyebilir, komutları çalıştırabilir ve sonucu kontrol edebilir."
+    ],
+    [
+      "Tekrarlanan işleri otomatikleştir",
+      "Tekrar tekrar yaptığın işler için betikler ve iş akışları oluştur, ardından bunları terminalden çalıştır."
+    ],
+    [
+      "Modellerini seç",
+      "Barındırılan veya yerel modelleri bağla. Büyük bir işin parçalarını farklı model ve rollere sahip ajanlara ver."
+    ]
   ],
   chapterModels: "Senin modellerin",
-  modelsHeading: "Elindekini getir. Seçmediğin hiçbir şeyi değiştirme.",
+  modelsHeading: "Göreve uygun bir model bul.",
   modelsBody:
-    "Desteklenen bir barındırılan sağlayıcıya, ağ geçidine veya yerel model sunucusuna bağlanın. Başlamadan önce sağlayıcıyı ve modeli kontrol edin. Yerel sunucular da kimlik doğrulaması gerektirebilir.",
+    "Barındırılan bir model sağlayıcısı kullan, bir ağ geçidi üzerinden bağlan veya yerel bir model çalıştır. Her oturum için bir sağlayıcı ve model seç, çalışırken bunları değiştir.",
   modelsFacts: [
-    ["Barındırılan", "codewhale auth set ile kaydedilen kendi API anahtarın"],
+    ["Barındırılan", "codewhale auth set --provider <id> ile kaydedilen kendi API anahtarın"],
     ["Gateway", "Birçok model için tek uç nokta, sağlayıcıyı yine sen seçersin"],
     ["Yerel", "localhost üzerinde vLLM, SGLang, Ollama — genellikle anahtarsız"],
   ],
-  modelsLink: "Tüm sağlayıcıları gör",
-  startHeading: "İlk oturuma dört adım.",
+  modelsLink: "Modelleri ve sağlayıcıları keşfet",
+  startHeading: "İlk görevine başla.",
   startLede:
-    "Kur, anahtarsız bir oturum aç, bir sağlayıcı bağla; tek model yetmediğinde bir fleet kur.",
+    "Codewhale'i kur, bir model bağla ve ne yapmak istediğini söyle. İşi birkaç ajana paylaştırmak istediğinde bir Fleet ekle.",
   startGuideLink: "Başlangıç kılavuzunu oku",
   startVocabularyLink: "Ürün sözlüğünü gör",
-  chapterAccount: "Bugün nerede çalışıyor",
-  availabilityHeading: "Şu an kullanılabilir, geliştirmede ve henüz değil — açıkça söylenmiş.",
+  chapterAccount: "Codewhale'i edin",
+  availabilityHeading: "Codewhale nerede kullanılır?",
   availabilityLede:
-    "Terminal yayınlanmış üründür. Geri kalan her şey gerçekte bulunduğu durumla listelenir.",
+    "Terminalde başla. Uygulama ve bulut bilgisayarları geliştirme aşamasında.",
   availability: [
-    ["Terminal", "Yayınlandı", "Linux, macOS ve Windows için GitHub Releases ikili dosyaları; npm ve Cargo alternatiflerdir. Termux üzerinde Android önizlemedir."],
-    ["Web uygulaması", "Giriş ve uzaktan kontrol kullanılabilir", "Giriş yap ya da hesap oluştur, sonra çalışan yerel bir oturumda /rc yazarak tam o oturuma tarayıcıdan devam et. Tarayıcıdaki çalışma tezgâhının geri kalanı geliştirme önizlemesidir."],
-    ["Masaüstü", "Geliştirme derlemesi", "macOS, Linux ve Windows için alfa derlemeleri var. Henüz yayınlanmış bir masaüstü uygulaması yok."],
-    ["Bulut bilgisayarlar", "Henüz kullanılamıyor", "Barındırılan bir bilgisayarda iş çalıştırmak geliştirme aşamasında. Çalıştığında bu sayfa bunu söyleyecek."],
+    [
+      "Terminal",
+      "Yayınlandı",
+      "Linux, macOS ve Windows için GitHub sürüm ikili dosyaları; npm ve Cargo alternatiflerdir. Termux üzerinde Android desteği önizleme aşamasında."
+    ],
+    [
+      "Web uygulaması",
+      "Geliştirme önizlemesi",
+      "Geliştirme önizlemesinde hesap erişimi ve tarayıcı eşleştirme."
+    ],
+    [
+      "Masaüstü",
+      "Geliştirme sürümü",
+      "macOS uygulaması geliştirme aşamasında; herkese açık indirme daha sonra sunulacak."
+    ],
+    [
+      "Bulut bilgisayarları",
+      "Geliştirme aşamasında",
+      "Görevlerini çalıştırmak için barındırılan bilgisayarlar."
+    ]
   ],
   availabilityNote:
-    "Terminal için hesap gerekmez. Bir hesap tek başına asla ücretli bir plan değildir ve bu sitedeki hiçbir şey senden ücret alamaz.",
+    "Terminal, Codewhale hesabı olmadan çalışır. Barındırılan model kullanımını sağlayıcın ücretlendirir.",
   accountLink: "Hesap oluştur",
   surfacesHeading: "Çalışma zamanını işin olduğu yerde kullan.",
   surfaces: [
     ["TUI", "Terminalde etkileşimli iş"],
     ["codewhale exec", "Betikler ve CI"],
-    ["Web istemcisi", "Yalnızca geri döngülü tarayıcı istemcisi"],
+    ["Yerel web istemcisi","localhost arayüzü; barındırılan tarayıcı çalışma alanı geliştirme aşamasında"],
     ["Runtime API + MCP", "Yerel entegrasyonlar"],
-    ["fleet", "Kalıcı çok ajanlı iş"],
+    ["Fleet","Tek bir işte birden çok ajan"],
   ],
-  runtimeLink: "Çalışma zamanı yüzeylerini ve kararlılık notlarını gör",
+  runtimeLink: "Entegrasyonları keşfet",
   installBandHeading: "Tek komutla başla.",
   copy: "Kopyala",
   copied: "Kopyalandı ✓",

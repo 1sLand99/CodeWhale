@@ -1,7 +1,10 @@
 # Codewhale
 
-Codewhale is an open source coding agent for your terminal, built in Rust and
-improved in public with the people who use it.
+Create what you want. Automate tasks. Choose your models.
+
+Codewhale is an open-source agent for building software, working with files,
+and automating tasks. Use hosted or local models, switch providers as your work
+changes, and give larger jobs to a team of agents. Start in your terminal.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="brand/wordmark-inverted.svg">
@@ -71,8 +74,9 @@ source code is on [GitHub](https://github.com/HengQuWorld/CodeWhale-VSCode).
 
 ## Why Codewhale
 
-- **Use the model you want.** Connect hosted providers or local models through
-  Ollama, vLLM, or SGLang. Switch provider and model with `/model`.
+- **Choose your models.** Connect hosted providers or local models through
+  Ollama, vLLM, or SGLang. Use `/provider` to change providers and `/model` to
+  choose a model.
 - **Stay in control.** Plan is read-only. Ask, Auto-Review, and Full Access make
   approval behavior visible. `/undo` reverts the last turn and `/restore`
   returns the workspace to an earlier snapshot.

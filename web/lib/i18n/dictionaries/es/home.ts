@@ -9,14 +9,14 @@ import type { HomeDict } from "../types";
  */
 
 export const home: HomeDict = {
-  metaTitle: "Codewhale — Tus modelos. Más capaces juntos.",
+  metaTitle: "Codewhale — Crea lo que quieras.",
   metaDescription:
-    "Codewhale es un sistema de computación agéntica de código abierto. Trae los modelos que ya usas —alojados, por gateway o locales— y ponlos a trabajar juntos en tu terminal, en tu máquina, bajo tu control. Rust, MIT.",
-  kicker: "Computación agéntica, en tus términos",
-  heroTitleA: "Tus modelos.",
-  heroTitleB: "Más capaces juntos.",
+    "Crea software, trabaja con archivos y automatiza tareas con Codewhale. Elige modelos alojados o locales y cambia de proveedor según lo que necesites.",
+  kicker: "Agentes de IA de código abierto",
+  heroTitleA: "Crea lo que quieras.",
+  heroTitleB: "Elige tus modelos.",
   heroIntro:
-    "{brand} reúne los modelos que ya usas en una sola terminal y los hace trabajar como una tripulación —leyendo tu código, editando, ejecutando las comprobaciones— mientras tú decides qué puede hacer cada uno. Código abierto, en tu máquina.",
+    "{brand} te ofrece agentes que pueden crear software, trabajar con archivos y automatizar tareas. Usa los modelos que elijas y cambia de proveedor según lo que necesites.",
   getCodewhale: "Obtener Codewhale",
   exploreProduct: "Explorar el producto",
   shotPreview: "Vista previa de la terminal",
@@ -31,53 +31,78 @@ export const home: HomeDict = {
   publishedRelease: "publicado",
   figcaptionSourceCandidate: "sin publicar",
   chapterTerminal: "Tu terminal",
-  chapterTerminalTitle: "Un lugar familiar para empezar.",
+  chapterTerminalTitle: "Empieza con algo que quieras crear.",
   gainHeading:
-    "Lo que obtienes no es un chatbot. Es palanca sobre los modelos que ya pagas.",
+    "Pon tus ideas a trabajar.",
   gainLede:
-    "Una sesión puede tener varios modelos a la vez, cada uno en el rol que le diste, todos trabajando en el mismo repositorio bajo las mismas reglas.",
+    "Crea un proyecto, investiga una pregunta o automatiza una tarea. Empieza con un agente y reparte los trabajos más grandes entre varios.",
   gain: [
-    ["Tus modelos", "Claves alojadas, un gateway o un runtime local sin clave alguna. Fija un modelo distinto a cada rol y conserva el proveedor que elegiste: un nombre de modelo nunca lo cambia por ti."],
-    ["Agentes capaces", "Modos Plan, Work y Operate; un fleet de subagentes para un mismo trabajo; herramientas para archivos, shell, web y MCP; sesiones que se guardan, se reanudan y se revierten."],
-    ["Control en tu máquina", "Ask, Auto-Review o Full Access: tú fijas cuánto hace antes de preguntar. Corre en local, en sandbox donde el sistema lo permite, con un registro de auditoría que puedes leer."],
+    [
+      "Crea algo",
+      "Convierte una idea en software que funcione. Tus agentes pueden editar archivos, ejecutar comandos y comprobar el resultado."
+    ],
+    [
+      "Automatiza las tareas repetitivas",
+      "Crea scripts y flujos de trabajo para las tareas que repites y ejecútalos desde la terminal."
+    ],
+    [
+      "Elige tus modelos",
+      "Conecta modelos alojados o locales. Reparte las partes de un trabajo más grande entre agentes con distintos modelos y roles."
+    ]
   ],
   chapterModels: "Tus modelos",
-  modelsHeading: "Trae lo que tienes. No cambies nada que no hayas elegido.",
+  modelsHeading: "Encuentra un modelo adecuado para cada tarea.",
   modelsBody:
-    "Conecta un proveedor alojado compatible, una pasarela o un servidor de modelos local. Revisa el proveedor y el modelo antes de empezar. Un servidor local puede requerir autenticación.",
+    "Usa un proveedor de modelos alojados, conéctate a través de una pasarela o ejecuta un modelo en local. Elige un proveedor y un modelo para cada sesión y cámbialos mientras trabajas.",
   modelsFacts: [
-    ["Alojado", "Tu propia clave de API, guardada con codewhale auth set"],
+    ["Alojado", "Tu propia clave de API, guardada con codewhale auth set --provider <id>"],
     ["Gateway", "Un endpoint para muchos modelos; el proveedor lo sigues eligiendo tú"],
     ["Local", "vLLM, SGLang, Ollama en localhost; normalmente sin clave"],
   ],
-  modelsLink: "Ver todos los proveedores",
-  startHeading: "Cuatro pasos hasta la primera sesión.",
+  modelsLink: "Explorar modelos y proveedores",
+  startHeading: "Empieza tu primera tarea.",
   startLede:
-    "Instala, abre una sesión sin clave, conecta un proveedor y luego configura un fleet cuando un modelo no baste.",
+    "Instala Codewhale, conecta un modelo y dile qué quieres hacer. Añade un Fleet cuando quieras repartir el trabajo entre varios agentes.",
   startGuideLink: "Leer la guía de primeros pasos",
   startVocabularyLink: "Ver el vocabulario del producto",
-  chapterAccount: "Dónde funciona hoy",
-  availabilityHeading: "Disponible ahora, en desarrollo y todavía no: dicho sin rodeos.",
+  chapterAccount: "Obtener Codewhale",
+  availabilityHeading: "Dónde usar Codewhale.",
   availabilityLede:
-    "La terminal es el producto publicado. Todo lo demás aparece con el estado en que realmente está.",
+    "Empieza en la terminal. La aplicación y las computadoras en la nube están en desarrollo.",
   availability: [
-    ["Terminal", "Publicada", "Binarios de GitHub Releases para Linux, macOS y Windows; npm y Cargo son alternativas. Android en Termux está en vista previa."],
-    ["Aplicación web", "Inicio de sesión y control remoto disponibles", "Inicia sesión o crea una cuenta y escribe /rc en una sesión local en marcha para continuar esa misma sesión desde el navegador. El resto del banco de trabajo en el navegador sigue siendo una vista previa de desarrollo."],
-    ["Escritorio", "Build de desarrollo", "Existen builds alfa para macOS, Linux y Windows. Todavía no hay una aplicación de escritorio publicada."],
-    ["Computadoras en la nube", "Todavía no disponible", "Ejecutar trabajo en una computadora alojada está en desarrollo. Esta página lo dirá cuando funcione."],
+    [
+      "Terminal",
+      "Publicada",
+      "Binarios de las versiones publicadas en GitHub para Linux, macOS y Windows; npm y Cargo son alternativas. Android en Termux está en vista previa."
+    ],
+    [
+      "Aplicación web",
+      "Vista previa de desarrollo",
+      "Acceso a la cuenta y vinculación con el navegador en la vista previa de desarrollo."
+    ],
+    [
+      "Escritorio",
+      "Build de desarrollo",
+      "La aplicación para macOS está en desarrollo; la descarga pública llegará más adelante."
+    ],
+    [
+      "Computadoras en la nube",
+      "En desarrollo",
+      "Computadoras alojadas para ejecutar tus tareas."
+    ]
   ],
   availabilityNote:
-    "La terminal no necesita cuenta. Una cuenta nunca es por sí misma un plan de pago, y nada en este sitio puede cobrarte.",
+    "La terminal funciona sin una cuenta de Codewhale. Tu proveedor factura el uso de los modelos alojados.",
   accountLink: "Crear una cuenta",
   surfacesHeading: "Usa el runtime donde ocurre el trabajo.",
   surfaces: [
     ["TUI", "Trabajo interactivo en la terminal"],
     ["codewhale exec", "Scripts y CI"],
-    ["Cliente web", "Cliente de navegador, solo loopback"],
+    ["Cliente web local","Interfaz en localhost; espacio de trabajo web alojado en desarrollo"],
     ["Runtime API + MCP", "Integraciones locales"],
-    ["fleet", "Trabajo multiagente duradero"],
+    ["Fleet","Varios agentes en un mismo trabajo"],
   ],
-  runtimeLink: "Ver las interfaces de runtime y las notas de estabilidad",
+  runtimeLink: "Explorar integraciones",
   installBandHeading: "Empieza con un solo comando.",
   copy: "Copiar",
   copied: "Copiado ✓",

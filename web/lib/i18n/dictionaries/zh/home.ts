@@ -9,14 +9,14 @@ import type { HomeDict } from "../types";
  */
 
 export const home: HomeDict = {
-  metaTitle: "Codewhale — 你的模型，协作更强。",
+  metaTitle: "Codewhale — 把想做的做出来。",
   metaDescription:
-    "Codewhale 是开源的智能体计算系统。把你已经在用的模型——托管、网关或本地——带进终端，让它们在你的机器上协同工作，由你掌控。Rust 编写，MIT 许可。",
-  kicker: "智能体计算，由你定规矩",
-  heroTitleA: "你的模型，",
-  heroTitleB: "协作更强。",
+    "用 Codewhale 开发软件、处理文件、自动化任务。选择托管或本地模型，并随工作需要切换提供商。",
+  kicker: "开源 AI 智能体",
+  heroTitleA: "把想做的做出来。",
+  heroTitleB: "选择你的模型。",
   heroIntro:
-    "{brand} 把编程智能体带进终端，用来读代码、改文件、跑检查。选择支持的模型，并设置会话的权限策略。开源，运行在你自己的机器上。",
+    "{brand} 提供能开发软件、处理文件、自动化任务的智能体。使用你选择的模型，并随工作需要切换提供商。",
   getCodewhale: "获取 Codewhale",
   exploreProduct: "了解产品",
   shotPreview: "终端预览",
@@ -31,38 +31,63 @@ export const home: HomeDict = {
   publishedRelease: "已发布",
   figcaptionSourceCandidate: "未发布",
   chapterTerminal: "你的终端",
-  chapterTerminalTitle: "从熟悉的地方开始。",
-  gainHeading: "让你的模型把任务做完。",
-  gainLede: "先从一个模型开始。用 Fleet 保存成员配置；当任务适合分工时，再把部分工作委派给其他智能体。",
+  chapterTerminalTitle: "从你想做的东西开始。",
+  gainHeading: "让想法付诸行动。",
+  gainLede: "开发一个项目、研究一个问题，或自动化一项任务。从一个智能体开始，较大的工作可以交给多个智能体分担。",
   gain: [
-    ["你的模型", "使用支持的托管提供商、网关或本地模型服务。Fleet 保存可复用智能体角色的模型选择。"],
-    ["能干的智能体", "Plan、Work、Operate 三种模式；一支 fleet 为同一件事分工；文件、shell、网页和 MCP 工具；可保存、恢复、回滚的会话。"],
-    ["本机掌控", "Ask、Auto-Review 或 Full Access——它在问你之前能做多少，由你设定。本地运行，系统允许时启用沙箱，审计日志你随时能读。"],
+    [
+      "动手创造",
+      "把想法变成可运行的软件。智能体可以编辑文件、运行命令，并检查结果。"
+    ],
+    [
+      "自动化重复工作",
+      "为重复任务创建脚本和工作流，再从终端运行。"
+    ],
+    [
+      "选择你的模型",
+      "连接托管或本地模型。将较大的工作拆分，交给使用不同模型、担任不同角色的智能体。"
+    ]
   ],
   chapterModels: "你的模型",
-  modelsHeading: "为你选择的模型留一个位置。",
+  modelsHeading: "找到适合任务的模型。",
   modelsBody:
-    "连接支持的托管提供商、网关或本地模型服务。开始工作前，检查所选提供商与模型。本地服务是否需要 API 密钥，取决于它的配置。",
+    "使用提供商的托管服务，通过网关连接，或在本地运行模型。为每个会话选择提供商和模型，并在工作过程中调整。",
   modelsFacts: [
-    ["托管", "你自己的 API 密钥，用 codewhale auth set 保存"],
+    ["托管", "你自己的 API 密钥，用 codewhale auth set --provider <id> 保存"],
     ["网关", "一个端点接多个模型，提供商仍由你选"],
     ["本地", "localhost 上的 vLLM、SGLang、Ollama——通常无需密钥"],
   ],
-  modelsLink: "了解提供商选项",
-  startHeading: "四步开始第一个会话。",
-  startLede: "安装，无需密钥打开会话，接入提供商；一个模型不够时，再配置 fleet。",
+  modelsLink: "了解模型与提供商",
+  startHeading: "开始你的第一个任务。",
+  startLede: "安装 Codewhale，连接一个模型，再告诉它你想做什么。需要多个智能体分担工作时，就添加一个 Fleet。",
   startGuideLink: "阅读新手指引",
   startVocabularyLink: "查名词",
-  chapterAccount: "现在能在哪里运行",
-  availabilityHeading: "已可用、开发中、暂不可用——如实说明。",
-  availabilityLede: "终端是已发布的产品。其余的按实际状态列出。",
+  chapterAccount: "获取 Codewhale",
+  availabilityHeading: "在哪里使用 Codewhale。",
+  availabilityLede: "从终端开始。应用和云端计算机仍在开发中。",
   availability: [
-    ["终端", "已发布", "优先使用 GitHub Releases 中适用于 Linux、macOS、Windows 的二进制；npm 和 Cargo 为其他安装方式。Android 上的 Termux 为预览。"],
-    ["网页应用", "开发预览", "账户页面与浏览器配对已在开发版本中实现。公开服务上的端到端远程控制尚未验证；已发布的任务执行入口是终端。"],
-    ["桌面端", "开发版本", "本地 macOS 开发构建已做过测试。尚无已发布的桌面应用可供下载。"],
-    ["云端计算机", "暂不可用", "在托管计算机上运行工作仍在开发中。等它真正可用时，本页会如实说明。"],
+    [
+      "终端",
+      "已发布",
+      "GitHub 提供适用于 Linux、macOS 和 Windows 的发布版二进制文件；也可通过 npm 或 Cargo 安装。在 Android 上通过 Termux 运行的版本为预览版。"
+    ],
+    [
+      "网页应用",
+      "开发预览",
+      "开发预览版提供账户访问与浏览器配对。"
+    ],
+    [
+      "桌面端",
+      "开发版本",
+      "macOS 应用仍在开发中，稍后将提供公开下载。"
+    ],
+    [
+      "云端计算机",
+      "开发中",
+      "用于运行任务的托管计算机。"
+    ]
   ],
-  availabilityNote: "终端不需要 Codewhale 账户。托管模型按你自己的提供商账户计费；创建 Codewhale 账户不会购买模型访问权限。",
+  availabilityNote: "使用终端无需 Codewhale 账户。托管模型的使用费用由你的提供商收取。",
   accountLink: "创建账户",
   surfacesHeading: "活在哪里干，就在哪里用。",
   surfaces: [
@@ -72,7 +97,7 @@ export const home: HomeDict = {
     ["运行时 API + MCP", "本地集成"],
     ["fleet", "多个智能体协作一件事"],
   ],
-  runtimeLink: "运行时界面与稳定程度",
+  runtimeLink: "了解集成",
   installBandHeading: "在 macOS 或 Linux 上安装。",
   copy: "复制",
   copied: "已复制 ✓",
