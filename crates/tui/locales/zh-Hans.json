@@ -2177,5 +2177,15 @@
   "ConfigChoiceNotificationUnfocused": "离开时",
   "ConfigChoiceNotificationNever": "从不",
   "ConfigChoiceNotificationFile": "自定义文件",
-  "ConfigChoiceNotificationBell": "系统铃声"
+  "ConfigChoiceNotificationBell": "系统铃声",
+  "NotificationApprovalNeeded": "请批准或拒绝“{tool}”以继续",
+  "NotificationInputNeeded": "请回答终端中的问题以继续",
+  "NotificationElevationNeeded": "请允许或拒绝为“{tool}”提升访问权限",
+  "NotificationDecisionWebHint": "请在此处或网页上作出决定。",
+  "NotificationTurnFailed": "本轮失败",
+  "NotificationProviderFallback": "提供商出现可恢复错误，已切换至 {provider}（备用选项 {position}/{total}）。",
+  "ApprovalNeverPostureBlocked": "已阻止“{tool}”：此会话不允许使用需要批准的工具。",
+  "NotificationWebApproved": "已在网页上批准。",
+  "NotificationWebDenied": "已在网页上拒绝。",
+  "NotificationInputSubmitFailed": "无法提交你的回答：{error}。请重试。"
 }

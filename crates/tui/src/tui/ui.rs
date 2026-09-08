@@ -1015,6 +1015,7 @@ pub(crate) struct ApprovalDecisionEvent {
 }
 
 fn mark_active_turn_cancelled_locally(app: &mut App) {
+    app.retire_action_notices(None);
     // #2739: every local cancel surface (Esc, Ctrl+C, approval abort, paused
     // command abort) must snapshot before it clears turn state. Otherwise
     // --continue reloads the previous save and the interrupted turn vanishes.

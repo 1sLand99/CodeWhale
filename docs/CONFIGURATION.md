@@ -2517,6 +2517,14 @@ model notices; approval/elevation cues use two. The per-category repeat interval
 survives settings refreshes. Old unknown event names are ignored on load; new
 CLI/TUI edits require names from the six categories above.
 
+Local approval/input/elevation prompts and error receipts remain available when
+external notifications are muted. Action prompts use the selected UI language
+and retire when that request settles. Repeated live notices keep their first
+expiry; a later routine update does not hide an unresolved warning at completion.
+Optional plugin suggestion toasts and contextual tips share one session guidance
+budget. `/config contextual_tips off` hides those toasts while preserving
+required notices and explicit plugin review requests.
+
 #### What a notification can contain
 
 A desktop notification is a glance surface: on macOS it can appear on the

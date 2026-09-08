@@ -16,9 +16,8 @@ use crate::plugins::recommend::{
     PluginNextStep, RecommendOptions, load_marketplace_candidates, match_plugin_for_draft,
     recommend_plugins_for_task,
 };
-use crate::tui::app::{App, StatusToastLevel};
+use crate::tui::app::{App, StatusToast, StatusToastKind, StatusToastLevel};
 
-const MAX_PROMPT_SUGGESTS_PER_SESSION: u8 = 2;
 const CATALOG_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const CTA_DEBOUNCE: Duration = Duration::from_millis(200);
 
@@ -67,7 +66,7 @@ impl App {
     /// or a locally added marketplace candidate, toast the next review step
     /// once. Never installs, trusts, or enables anything.
     pub fn maybe_nudge_plugin_for_prompt(&mut self, input: &str) -> bool {
-        if self.plugin_prompt_suggest_count >= MAX_PROMPT_SUGGESTS_PER_SESSION {
+        if !self.behavioral_tips.guidance_available() {
             return false;
         }
         let marketplace = load_marketplace_candidates(self.plugin_registry.state_path());
@@ -80,12 +79,6 @@ impl App {
         let Some(recommendation) = recommendations.into_iter().next() else {
             return false;
         };
-        if self
-            .plugin_prompt_suggest_names
-            .contains(&recommendation.name)
-        {
-            return false;
-        }
         let message_id = match recommendation.next_step {
             PluginNextStep::Trust => MessageId::PluginPromptSuggestTrust,
             PluginNextStep::Enable => MessageId::PluginPromptSuggestEnable,
@@ -98,9 +91,10 @@ impl App {
         if let PluginNextStep::MarketplaceInstall { catalog_id } = &recommendation.next_step {
             message = message.replace("{catalog}", catalog_id);
         }
-        self.plugin_prompt_suggest_names.insert(recommendation.name);
-        self.plugin_prompt_suggest_count = self.plugin_prompt_suggest_count.saturating_add(1);
-        self.push_status_toast(message, StatusToastLevel::Info, Some(8_000));
+        self.behavioral_tips.record_guidance_impression();
+        let mut toast = StatusToast::new(message, StatusToastLevel::Info, Some(8_000));
+        toast.kind = StatusToastKind::PluginSuggestion;
+        self.push_status_toast_record(toast);
         true
     }
 
@@ -337,6 +331,56 @@ mod tests {
             app.status_toasts[0].text
         );
         assert!(!app.maybe_nudge_plugin_for_prompt("add supabase auth to login"));
+    }
+
+    #[test]
+    fn optional_plugin_and_behavioral_guidance_share_one_session_budget() {
+        use crate::tui::behavioral_tips::BehavioralTip;
+        let _lock = crate::test_support::lock_test_env();
+        for plugin_first in [true, false] {
+            let (mut app, _root, _home) = app_with_supabase_plugin();
+            if plugin_first {
+                assert!(app.maybe_nudge_plugin_for_prompt("add supabase auth"));
+                assert!(!app.maybe_show_behavioral_tip(BehavioralTip::PlanningMode));
+            } else {
+                assert!(app.maybe_show_behavioral_tip(BehavioralTip::PlanningMode));
+                assert!(!app.maybe_nudge_plugin_for_prompt("add supabase auth"));
+            }
+            assert_eq!(app.status_toasts.len(), 1);
+        }
+    }
+
+    #[test]
+    fn tips_off_removes_plugin_guidance_but_preserves_required_notices_and_explicit_review() {
+        let _lock = crate::test_support::lock_test_env();
+        let (mut app, _root, _home) = app_with_supabase_plugin();
+        app.set_contextual_tips_enabled(false);
+        assert!(!app.maybe_nudge_plugin_for_prompt("add supabase auth"));
+        app.set_contextual_tips_enabled(true);
+        assert!(app.maybe_nudge_plugin_for_prompt("add supabase auth"));
+        app.push_status_toast_record(
+            StatusToast::new("Review required", StatusToastLevel::Warning, None).for_action("a"),
+        );
+        app.push_status_toast("Keep this error", StatusToastLevel::Error, None);
+        app.set_contextual_tips_enabled(false);
+        assert_eq!(app.status_toasts.len(), 2);
+        assert!(
+            app.status_toasts
+                .iter()
+                .all(|toast| toast.kind != StatusToastKind::PluginSuggestion)
+        );
+        app.surface_plugin_review_request("supabase", "/plugin trust supabase");
+        assert!(app.plugin_cta.phase.is_visible());
+        assert_eq!(
+            app.status_toasts.len(),
+            3,
+            "explicit review is not unsolicited guidance"
+        );
+        app.set_contextual_tips_enabled(true);
+        assert!(
+            !app.maybe_nudge_plugin_for_prompt("add supabase auth"),
+            "reenabling must not reset the shared cap"
+        );
     }
 
     #[test]

@@ -7,8 +7,8 @@
 use super::clamp_event_poll_timeout;
 use super::observer_hooks::{
     execute_session_error_hook, execute_session_state_transition_hooks,
-    execute_turn_end_observer_hook, subagent_failure_notice,
-    subagent_status_from_completion_result, surface_observer_hook_submission_failure,
+    execute_turn_end_observer_hook, subagent_status_from_completion_result,
+    surface_observer_hook_submission_failure,
 };
 use super::task_projection::{
     refresh_active_task_panel, refresh_automation_panel, refresh_automation_panel_blocking,
@@ -2659,6 +2659,7 @@ pub(crate) async fn run_event_loop(
                             cost_audit: cost_audit.clone(),
                             recorded_at: Instant::now(),
                         });
+                        app.retire_action_notices(None);
                         if let Some(error) = error.as_deref() {
                             // Only show "Turn failed:" in the composer status
                             // area when an EngineEvent::Error has NOT already
@@ -2666,7 +2667,14 @@ pub(crate) async fn run_event_loop(
                             // Otherwise the error appears twice: once in a
                             // HistoryCell and again as a redundant status line.
                             if !app.turn_error_posted {
-                                app.status_message = Some(format!("Turn failed: {error}"));
+                                app.set_sticky_status(
+                                    format!(
+                                        "{}: {error}",
+                                        app.tr(MessageId::NotificationTurnFailed)
+                                    ),
+                                    StatusToastLevel::Error,
+                                    None,
+                                );
                             }
                         }
 
@@ -3438,7 +3446,6 @@ pub(crate) async fn run_event_loop(
                                 });
                         app.agent_progress.remove(&id);
                         let terminal_status = subagent_status_from_completion_result(&result);
-                        let terminal_verb = subagent_terminal_verb(&terminal_status);
                         apply_subagent_terminal_projection(
                             app,
                             &id,
@@ -3446,20 +3453,12 @@ pub(crate) async fn run_event_loop(
                             Some(bound_agent_activity_text(&result)),
                         );
                         // #3030: stable label with raw-id fallback.
-                        apply_agent_complete_status_and_observer(app, &id, &result, terminal_verb);
-                        if let Some(failure) = subagent_failure_notice(&result) {
-                            let message_id =
-                                if matches!(terminal_status, SubAgentStatus::BudgetExhausted) {
-                                    MessageId::NotificationSubagentBudgetExhausted
-                                } else {
-                                    MessageId::NotificationSubagentFailed
-                                };
-                            app.set_sticky_status(
-                                format!("{} · {failure}", app.tr(message_id)),
-                                StatusToastLevel::Error,
-                                None,
-                            );
-                        }
+                        apply_agent_complete_status_and_observer(
+                            app,
+                            &id,
+                            &result,
+                            &terminal_status,
+                        );
                         let should_recapture_terminal =
                             !has_other_running_subagents && app.use_alt_screen();
                         let subagent_notification_mode =
@@ -3737,7 +3736,10 @@ pub(crate) async fn run_event_loop(
                                 app.add_message(HistoryCell::System {
                                     content: held.clone(),
                                 });
-                                app.status_message = Some(held);
+                                app.push_status_toast_record(
+                                    StatusToast::new(held, StatusToastLevel::Warning, Some(12_000))
+                                        .for_event(format!("approval-held:{id}")),
+                                );
                             }
                             ApprovalRequestDisposition::AutoDenyNeverPosture => {
                                 log_sensitive_event(
@@ -3749,9 +3751,15 @@ pub(crate) async fn run_event_loop(
                                     }),
                                 );
                                 let _ = engine_handle.deny_tool_call(id.clone()).await;
-                                app.status_message = Some(format!(
-                                    "Blocked tool '{tool_name}' (approval_mode=never)"
-                                ));
+                                app.push_status_toast_record(
+                                    StatusToast::new(
+                                        app.tr(MessageId::ApprovalNeverPostureBlocked)
+                                            .replace("{tool}", &tool_name),
+                                        StatusToastLevel::Warning,
+                                        Some(12_000),
+                                    )
+                                    .for_event(format!("approval-blocked:{id}")),
+                                );
                             }
                             ApprovalRequestDisposition::Prompt => {
                                 let tool_input = input;
@@ -3775,6 +3783,10 @@ pub(crate) async fn run_event_loop(
                                         "mode": app.mode.label(),
                                     }),
                                 );
+                                let payload = notifications::approval_needed_payload(
+                                    app.ui_locale,
+                                    &tool_name,
+                                );
                                 if let Some((method, _, _)) =
                                     crate::tui::notifications::settings(config)
                                 {
@@ -3786,10 +3798,6 @@ pub(crate) async fn run_event_loop(
                                     // in context; the banner names only the
                                     // tool. Copy is centralized (#5041) so
                                     // the action-first phrasing is tested.
-                                    let payload =
-                                        crate::tui::notifications::approval_needed_payload(
-                                            &tool_name,
-                                        );
                                     crate::tui::notifications::notify_done(
                                         method,
                                         in_tmux,
@@ -3798,14 +3806,20 @@ pub(crate) async fn run_event_loop(
                                         Duration::ZERO,
                                     );
                                 }
-                                app.status_message = Some(format!(
-                                    "Approval required for '{tool_name}': {description}{}",
-                                    if shared_with_web {
-                                        " — decide here or on the web"
-                                    } else {
-                                        ""
-                                    }
-                                ));
+                                let mut notice = payload.headline().to_string();
+                                if shared_with_web {
+                                    notice.push_str(" · ");
+                                    notice
+                                        .push_str(&app.tr(MessageId::NotificationDecisionWebHint));
+                                }
+                                app.push_status_toast_record(
+                                    StatusToast::new(
+                                        notice,
+                                        StatusToastLevel::Warning,
+                                        Some(12_000),
+                                    )
+                                    .for_action(id.clone()),
+                                );
                             }
                         }
                     }
@@ -3830,11 +3844,11 @@ pub(crate) async fn run_event_loop(
                         } else {
                             app.pending_user_input_prompt = Some((id.clone(), request.clone()));
                             app.view_stack.push(UserInputView::new(id.clone(), request));
+                            let payload = notifications::input_needed_payload(app.ui_locale);
                             if let Some((method, _, _)) =
                                 crate::tui::notifications::settings(config)
                             {
                                 let in_tmux = std::env::var("TMUX").is_ok_and(|v| !v.is_empty());
-                                let payload = crate::tui::notifications::input_needed_payload();
                                 crate::tui::notifications::notify_done(
                                     method,
                                     in_tmux,
@@ -3843,9 +3857,13 @@ pub(crate) async fn run_event_loop(
                                     Duration::ZERO,
                                 );
                             }
-                            app.status_message = Some(
-                                "Action required: answer the popup with 1-4, arrows, or Enter"
-                                    .to_string(),
+                            app.push_status_toast_record(
+                                StatusToast::new(
+                                    payload.headline(),
+                                    StatusToastLevel::Warning,
+                                    Some(12_000),
+                                )
+                                .for_action(id.clone()),
                             );
                         }
                     }
@@ -3896,14 +3914,15 @@ pub(crate) async fn run_event_loop(
                             );
                             app.view_stack
                                 .push(ElevationView::new(request, app.ui_locale));
+                            let payload = notifications::elevation_needed_payload(
+                                app.ui_locale,
+                                &tool_name,
+                                &denial_reason,
+                            );
                             if let Some((method, _, _)) =
                                 crate::tui::notifications::settings(config)
                             {
                                 let in_tmux = std::env::var("TMUX").is_ok_and(|v| !v.is_empty());
-                                let payload = crate::tui::notifications::elevation_needed_payload(
-                                    &tool_name,
-                                    &denial_reason,
-                                );
                                 crate::tui::notifications::notify_done(
                                     method,
                                     in_tmux,
@@ -3912,8 +3931,14 @@ pub(crate) async fn run_event_loop(
                                     Duration::ZERO,
                                 );
                             }
-                            app.status_message =
-                                Some(format!("Sandbox blocked {tool_name}: {denial_reason}"));
+                            app.push_status_toast_record(
+                                StatusToast::new(
+                                    payload.headline(),
+                                    StatusToastLevel::Warning,
+                                    Some(12_000),
+                                )
+                                .for_action(tool_id.clone()),
+                            );
                         }
                     }
                     EngineEvent::TurnUsage {

@@ -2078,7 +2078,8 @@ fn critical_context_pressure_remains_visible_over_transient_info_toasts() {
     app.push_status_toast("Saved", StatusToastLevel::Info, None);
 
     assert_eq!(
-        app.active_status_toast().map(|toast| toast.text),
+        app.active_status_toast(crate::tui::underwater::ShellPhase::Working)
+            .map(|toast| toast.text),
         Some("Context critical: 95%".to_string())
     );
 }

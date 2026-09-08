@@ -1219,61 +1219,59 @@ pub(crate) async fn handle_view_events(
                 option,
             } => {
                 use crate::tui::approval::ElevationOption;
-                match option {
+                let result = match option {
                     ElevationOption::Abort => {
-                        let _ = engine_handle.deny_tool_call(tool_id).await;
                         app.add_message(HistoryCell::System {
                             content: format!("Sandbox elevation aborted for {tool_name}"),
                         });
+                        engine_handle.deny_tool_call(tool_id.clone()).await
                     }
                     ElevationOption::WithNetwork => {
                         app.add_message(HistoryCell::System {
                             content: format!("Retrying {tool_name} with network access enabled"),
                         });
                         let policy = option.to_policy(&app.workspace);
-                        let _ = engine_handle.retry_tool_with_policy(tool_id, policy).await;
+                        engine_handle
+                            .retry_tool_with_policy(tool_id.clone(), policy)
+                            .await
                     }
                     ElevationOption::WithWriteAccess(_) => {
                         app.add_message(HistoryCell::System {
                             content: format!("Retrying {tool_name} with write access enabled"),
                         });
                         let policy = option.to_policy(&app.workspace);
-                        let _ = engine_handle.retry_tool_with_policy(tool_id, policy).await;
+                        engine_handle
+                            .retry_tool_with_policy(tool_id.clone(), policy)
+                            .await
                     }
                     ElevationOption::FullAccess => {
                         app.add_message(HistoryCell::System {
                             content: format!("Retrying {tool_name} with full access (no sandbox)"),
                         });
                         let policy = option.to_policy(&app.workspace);
-                        let _ = engine_handle.retry_tool_with_policy(tool_id, policy).await;
+                        engine_handle
+                            .retry_tool_with_policy(tool_id.clone(), policy)
+                            .await
                     }
+                };
+                if result.is_ok() {
+                    app.retire_action_notices(Some(&tool_id));
                 }
             }
             ViewEvent::UserInputSubmitted { tool_id, response } => {
-                match engine_handle
+                let result = engine_handle
                     .submit_user_input(tool_id.clone(), response)
-                    .await
-                {
-                    Ok(()) => {
-                        app.pending_user_input_prompt = None;
-                    }
-                    Err(err) => {
-                        tracing::warn!(tool_id = %tool_id, error = %err, "user input submit failed");
-                        if let Some((id, request)) = app.pending_user_input_prompt.clone() {
-                            app.view_stack.push(UserInputView::new(id, request));
-                        }
-                        app.push_status_toast(
-                            format!("Failed to submit response: {err}"),
-                            StatusToastLevel::Error,
-                            None,
-                        );
-                        app.status_message =
-                            Some(format!("Failed to submit response: {err} — try again"));
-                    }
-                }
+                    .await;
+                apply_user_input_submission_result(app, &tool_id, result);
             }
             ViewEvent::UserInputCancelled { tool_id } => {
-                let _ = engine_handle.cancel_user_input(tool_id).await;
+                if engine_handle
+                    .cancel_user_input(tool_id.clone())
+                    .await
+                    .is_ok()
+                {
+                    settle_user_input_request(app, &tool_id);
+                }
                 app.add_message(HistoryCell::System {
                     content: "User input cancelled".to_string(),
                 });

@@ -2177,5 +2177,15 @@
   "ConfigChoiceNotificationUnfocused": "В ваше отсутствие",
   "ConfigChoiceNotificationNever": "Никогда",
   "ConfigChoiceNotificationFile": "Свой файл",
-  "ConfigChoiceNotificationBell": "Системный звонок"
+  "ConfigChoiceNotificationBell": "Системный звонок",
+  "NotificationApprovalNeeded": "Разрешите или отклоните '{tool}', чтобы продолжить",
+  "NotificationInputNeeded": "Ответьте на вопрос в терминале, чтобы продолжить",
+  "NotificationElevationNeeded": "Разрешите или отклоните расширенный доступ для '{tool}'",
+  "NotificationDecisionWebHint": "Примите решение здесь или в веб-интерфейсе.",
+  "NotificationTurnFailed": "Ход завершился с ошибкой",
+  "NotificationProviderFallback": "После устранимой ошибки провайдера выполнено переключение на {provider} (резервный вариант {position}/{total}).",
+  "ApprovalNeverPostureBlocked": "'{tool}' заблокирован: в этом сеансе запрещены инструменты, требующие одобрения.",
+  "NotificationWebApproved": "Одобрено в веб-интерфейсе.",
+  "NotificationWebDenied": "Отклонено в веб-интерфейсе.",
+  "NotificationInputSubmitFailed": "Не удалось отправить ответ: {error}. Попробуйте ещё раз."
 }

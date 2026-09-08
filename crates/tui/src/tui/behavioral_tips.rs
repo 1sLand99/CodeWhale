@@ -9,7 +9,7 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 
 use crate::localization::{Locale, MessageId, tr};
 use crate::settings::Settings;
-use crate::tui::app::{App, AppMode, StatusToastKind, StatusToastLevel};
+use crate::tui::app::{App, AppMode, StatusToast, StatusToastKind, StatusToastLevel};
 
 const MAX_TIPS_PER_SESSION: u8 = 1;
 const MAX_LIFETIME_IMPRESSIONS: u8 = 2;
@@ -94,10 +94,12 @@ impl BehavioralTipState {
         self.enabled
     }
 
+    pub(crate) fn guidance_available(&self) -> bool {
+        self.enabled && self.session_impressions < MAX_TIPS_PER_SESSION
+    }
+
     fn eligible_in_session(&self, tip: BehavioralTip) -> bool {
-        self.enabled
-            && self.session_impressions < MAX_TIPS_PER_SESSION
-            && !self.shown_this_session.contains(&tip)
+        self.guidance_available() && !self.shown_this_session.contains(&tip)
     }
 
     fn eligible(&self, tip: BehavioralTip, lifetime_impressions: u8) -> bool {
@@ -106,6 +108,10 @@ impl BehavioralTipState {
 
     fn record_impression(&mut self, tip: BehavioralTip) {
         self.shown_this_session.insert(tip);
+        self.record_guidance_impression();
+    }
+
+    pub(crate) fn record_guidance_impression(&mut self) {
         self.session_impressions = self.session_impressions.saturating_add(1);
     }
 
@@ -130,8 +136,12 @@ impl App {
     pub fn set_contextual_tips_enabled(&mut self, enabled: bool) {
         self.behavioral_tips.enabled = enabled;
         if !enabled {
-            self.status_toasts
-                .retain(|toast| !matches!(toast.kind, StatusToastKind::BehavioralTip(_)));
+            self.status_toasts.retain(|toast| {
+                !matches!(
+                    toast.kind,
+                    StatusToastKind::BehavioralTip(_) | StatusToastKind::PluginSuggestion
+                )
+            });
         }
         self.needs_redraw = true;
     }
@@ -181,14 +191,13 @@ impl App {
             }
             self.behavioral_tips.record_impression(tip);
         }
-        self.push_status_toast(
+        let mut toast = StatusToast::new(
             tip.message(self.ui_locale),
             StatusToastLevel::Info,
             Some(8_000),
         );
-        if let Some(toast) = self.status_toasts.back_mut() {
-            toast.kind = StatusToastKind::BehavioralTip(tip);
-        }
+        toast.kind = StatusToastKind::BehavioralTip(tip);
+        self.push_status_toast_record(toast);
         true
     }
 

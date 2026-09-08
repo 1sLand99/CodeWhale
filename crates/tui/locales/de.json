@@ -2177,5 +2177,15 @@
   "ConfigChoiceNotificationUnfocused": "Bei Abwesenheit",
   "ConfigChoiceNotificationNever": "Nie",
   "ConfigChoiceNotificationFile": "Eigene Datei",
-  "ConfigChoiceNotificationBell": "Systemglocke"
+  "ConfigChoiceNotificationBell": "Systemglocke",
+  "NotificationApprovalNeeded": "Genehmige oder verweigere '{tool}', um fortzufahren",
+  "NotificationInputNeeded": "Beantworte die Frage im Terminal, um fortzufahren",
+  "NotificationElevationNeeded": "Erlaube oder verweigere erweiterte Zugriffsrechte für '{tool}'",
+  "NotificationDecisionWebHint": "Entscheide hier oder im Web.",
+  "NotificationTurnFailed": "Turn fehlgeschlagen",
+  "NotificationProviderFallback": "Nach einem behebbaren Anbieterfehler zu {provider} gewechselt (Ausweichoption {position}/{total}).",
+  "ApprovalNeverPostureBlocked": "'{tool}' wurde blockiert: Diese Sitzung erlaubt keine Tools, die eine Genehmigung erfordern.",
+  "NotificationWebApproved": "Im Web genehmigt.",
+  "NotificationWebDenied": "Im Web abgelehnt.",
+  "NotificationInputSubmitFailed": "Deine Antwort konnte nicht gesendet werden: {error}. Versuche es erneut."
 }

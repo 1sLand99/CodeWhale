@@ -232,20 +232,10 @@ fn boot_activity_ink(level: crate::tui::session_boot::SessionBootActivityLevel) 
 /// visible after `done`, only routine informational copy yields.
 fn selected_notice(
     status_toast: Option<crate::tui::app::StatusToast>,
-    phase: ShellPhase,
     phase_label: &str,
 ) -> Option<(String, ChromeInk, bool)> {
     status_toast
-        .filter(|toast| {
-            let survives_completion = matches!(
-                toast.level,
-                crate::tui::app::StatusToastLevel::Warning
-                    | crate::tui::app::StatusToastLevel::Error
-            );
-            (phase != ShellPhase::Done || survives_completion)
-                && !toast.text.trim().is_empty()
-                && toast.text.trim() != phase_label
-        })
+        .filter(|toast| !toast.text.trim().is_empty() && toast.text.trim() != phase_label)
         .map(|toast| {
             let urgent = matches!(
                 toast.level,
@@ -303,6 +293,36 @@ mod tests {
             crate::tui::underwater::phase_ink(ShellPhase::Working).family(),
             crate::palette::SemanticFamily::Failure
         );
+    }
+
+    #[test]
+    fn done_footer_preserves_unresolved_notice_behind_later_routine_info() {
+        use crate::tui::app::StatusToastLevel;
+        for (level, ink) in [
+            (StatusToastLevel::Warning, ChromeInk::Attention),
+            (StatusToastLevel::Error, ChromeInk::Failure),
+        ] {
+            let mut app = test_app();
+            app.runtime_turn_status = Some("completed".into());
+            app.push_status_toast("Unresolved issue", level, Some(12_000));
+            app.push_status_toast("Routine update", StatusToastLevel::Info, Some(5_000));
+            assert_eq!(ShellPhase::from_app(&app), ShellPhase::Done);
+            assert!(
+                app.history.is_empty(),
+                "the transcript must not satisfy this fixture"
+            );
+            let facts = tideline_footer_from_app(&mut app, 140);
+            assert_eq!(facts.right, Some(("Unresolved issue".into(), ink)));
+            let mut buf = Buffer::empty(Rect::new(0, 0, 140, 1));
+            render_tideline_footer(
+                Rect::new(0, 0, 140, 1),
+                &mut buf,
+                &facts.widget(&app.ui_theme, false),
+            );
+            let text: String = buf.content.iter().map(|cell| cell.symbol()).collect();
+            assert!(text.contains("Unresolved issue"), "{text}");
+            assert!(!text.contains("Routine update"));
+        }
     }
 
     #[test]
@@ -1269,7 +1289,7 @@ pub(crate) fn tideline_footer_from_app(app: &mut App, width: u16) -> TidelineFoo
     // Clause-shed against half the row — the posture facts own the other
     // half.
     let notice_budget = (usize::from(width) / 2).max(8);
-    let right = selected_notice(app.active_status_toast(), phase, &phase_label)
+    let right = selected_notice(app.active_status_toast(phase), &phase_label)
         .map(|(text, ink, _urgent)| (text, ink))
         .or_else(|| {
             let boot = crate::tui::session_boot::SessionBootSurface::from_app(app);

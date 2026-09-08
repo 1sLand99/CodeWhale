@@ -1209,27 +1209,35 @@ pub fn subagent_terminal_payload(
         .lines()
         .map(str::trim)
         .find(|line| !line.is_empty() && !line.starts_with("<codewhale:subagent.done>"));
-    let label = match status {
+    let headline = completion_status(
+        &tr(locale, subagent_terminal_label(status)),
+        include_summary,
+        elapsed,
+        None,
+    );
+    let preview = result_line.and_then(text_summary);
+
+    NotificationPayload::subagent_terminal(&headline, id).with_preview(preview.as_deref())
+}
+
+pub(crate) fn subagent_terminal_label(status: &SubAgentStatus) -> MessageId {
+    match status {
         SubAgentStatus::Completed => MessageId::NotificationSubagentComplete,
         SubAgentStatus::Failed(_) => MessageId::NotificationSubagentFailed,
         SubAgentStatus::Interrupted(_) => MessageId::NotificationSubagentInterrupted,
         SubAgentStatus::Cancelled => MessageId::NotificationSubagentCancelled,
         SubAgentStatus::BudgetExhausted => MessageId::NotificationSubagentBudgetExhausted,
-        SubAgentStatus::Running => MessageId::NotificationSubagentComplete,
-    };
-    let headline = completion_status(&tr(locale, label), include_summary, elapsed, None);
-    let preview = result_line.and_then(text_summary);
-
-    NotificationPayload::subagent_terminal(&headline, id).with_preview(preview.as_deref())
+        SubAgentStatus::Running => MessageId::SubagentsStatusRunning,
+    }
 }
 
 /// Action-first approval banner (#5041): leads with the decision the user
 /// must make and names the tool it concerns. The tool *description* — the
 /// pending command — intentionally stays in the terminal (#4834).
 #[must_use]
-pub fn approval_needed_payload(tool_name: &str) -> NotificationPayload {
+pub fn approval_needed_payload(locale: Locale, tool_name: &str) -> NotificationPayload {
     NotificationPayload::approval_needed(
-        &format!("Approve or deny '{tool_name}' to continue"),
+        &tr(locale, MessageId::NotificationApprovalNeeded).replace("{tool}", tool_name),
         tool_name,
     )
 }
@@ -1237,16 +1245,20 @@ pub fn approval_needed_payload(tool_name: &str) -> NotificationPayload {
 /// Action-first blocked-on-input banner (#5041): says what to do and
 /// where. The question text itself never leaves the terminal (#4834).
 #[must_use]
-pub fn input_needed_payload() -> NotificationPayload {
-    NotificationPayload::input_needed("Answer the question in the terminal to continue")
+pub fn input_needed_payload(locale: Locale) -> NotificationPayload {
+    NotificationPayload::input_needed(&tr(locale, MessageId::NotificationInputNeeded))
 }
 
 /// Action-first sandbox-elevation banner (#5041): leads with the decision
 /// and names the blocked tool; the denial reason rides in the body.
 #[must_use]
-pub fn elevation_needed_payload(tool_name: &str, denial_reason: &str) -> NotificationPayload {
+pub fn elevation_needed_payload(
+    locale: Locale,
+    tool_name: &str,
+    denial_reason: &str,
+) -> NotificationPayload {
     NotificationPayload::elevation_needed(
-        &format!("Allow or deny elevated access for '{tool_name}'"),
+        &tr(locale, MessageId::NotificationElevationNeeded).replace("{tool}", tool_name),
         tool_name,
         denial_reason,
     )
@@ -1624,7 +1636,7 @@ mod tests {
     /// filtered list somewhere upstream.
     #[test]
     fn gated_emission_produces_no_bytes() {
-        let payload = approval_needed_payload("bash");
+        let payload = approval_needed_payload(Locale::En, "bash");
 
         let quiet = NotificationGate {
             quiet: true,
@@ -1644,7 +1656,7 @@ mod tests {
 
     #[test]
     fn delivery_outcome_reports_why_nothing_was_sent() {
-        let payload = input_needed_payload();
+        let payload = input_needed_payload(Locale::En);
         let mut out = Vec::new();
         assert_eq!(
             DeliveryOutcome::SuppressedByAttention.receipt(),
@@ -1727,21 +1739,71 @@ mod tests {
     /// name the subject, instead of a bare "Approval needed".
     #[test]
     fn interactive_banners_are_action_first_and_name_the_subject() {
-        let approval = approval_needed_payload("bash");
+        let approval = approval_needed_payload(Locale::En, "bash");
         assert_eq!(approval.headline(), "Approve or deny 'bash' to continue");
 
-        let input = input_needed_payload();
+        let input = input_needed_payload(Locale::En);
         assert_eq!(
             input.headline(),
             "Answer the question in the terminal to continue"
         );
 
-        let elevation = elevation_needed_payload("bash", "network blocked");
+        let elevation = elevation_needed_payload(Locale::En, "bash", "network blocked");
         assert_eq!(
             elevation.headline(),
             "Allow or deny elevated access for 'bash'"
         );
         assert!(elevation.body().contains("network blocked"));
+    }
+
+    #[test]
+    fn interactive_notification_locales_keep_action_severity_independent_of_tool_text() {
+        use crate::tui::app::{StatusToast, StatusToastLevel};
+        let _guard = crate::test_support::lock_test_env();
+        for &locale in Locale::shipped_complete() {
+            let mut app = App::new(
+                crate::test_support::test_tui_options(std::path::PathBuf::from(".")),
+                &crate::config::Config::default(),
+            );
+            app.ui_locale = locale;
+            let tool = "failed";
+            let payloads = [
+                (
+                    approval_needed_payload(locale, tool),
+                    MessageId::NotificationApprovalNeeded,
+                ),
+                (
+                    input_needed_payload(locale),
+                    MessageId::NotificationInputNeeded,
+                ),
+                (
+                    elevation_needed_payload(locale, tool, "network-policy"),
+                    MessageId::NotificationElevationNeeded,
+                ),
+            ];
+            for (index, (payload, key)) in payloads.into_iter().enumerate() {
+                assert_eq!(payload.headline(), tr(locale, key).replace("{tool}", tool));
+                app.push_status_toast_record(
+                    StatusToast::new(payload.headline(), StatusToastLevel::Warning, Some(12_000))
+                        .for_action(format!("request-{index}")),
+                );
+                app.status_message = Some(payload.headline().into());
+                app.sync_status_message_to_toasts();
+                assert_eq!(app.status_toasts.len(), index + 1);
+                let toast = app.status_toasts.back().unwrap();
+                assert_eq!(toast.level, StatusToastLevel::Warning);
+                assert_eq!(toast.ttl_ms, Some(12_000));
+                assert!(app.sticky_status.is_none());
+                let facts = crate::tui::phase_strip::tideline_footer_from_app(&mut app, 500);
+                assert_eq!(
+                    facts.right,
+                    Some((
+                        payload.headline().into(),
+                        crate::palette::ChromeInk::Attention
+                    ))
+                );
+            }
+        }
     }
 
     #[test]

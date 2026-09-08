@@ -61,6 +61,7 @@ pub(crate) use composer::{
 };
 pub(crate) use status::StatusToastKind;
 pub use status::{StatusToast, StatusToastLevel};
+
 pub use types::{
     AppAction, AppMode, AppModeUi, AutomationAction, ComposerDensity, ComposerSubmitAction,
     ComposerSubmitChord, InitialInput, McpUiAction, QueuedMessage, ReasoningEffort, ScreenMode,
@@ -1543,9 +1544,6 @@ pub struct App {
     pub context_pressure_warning_dismissed: Option<crate::context_budget::PressureLevel>,
     /// Last on-disk plugin catalog stamp we already nudged `/plugin reload` for.
     pub plugin_reload_nudge_stamp: Option<crate::plugins::PluginCatalogStamp>,
-    /// Plugin names already toasted for this session's prompt matching.
-    pub plugin_prompt_suggest_names: HashSet<String>,
-    pub plugin_prompt_suggest_count: u8,
     /// Last idle catalog fingerprint poll, so disk changes can surface between turns.
     pub last_plugin_catalog_poll: Option<Instant>,
     /// Live composer plugin CTA (debounce + one match, never auto-install).

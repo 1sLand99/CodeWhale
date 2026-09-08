@@ -2177,5 +2177,15 @@
   "ConfigChoiceNotificationUnfocused": "離席中",
   "ConfigChoiceNotificationNever": "通知しない",
   "ConfigChoiceNotificationFile": "カスタムファイル",
-  "ConfigChoiceNotificationBell": "システムベル"
+  "ConfigChoiceNotificationBell": "システムベル",
+  "NotificationApprovalNeeded": "続行するには「{tool}」を承認または拒否してください",
+  "NotificationInputNeeded": "続行するにはターミナルの質問に回答してください",
+  "NotificationElevationNeeded": "「{tool}」への追加権限を許可または拒否してください",
+  "NotificationDecisionWebHint": "ここ、またはウェブで判断してください。",
+  "NotificationTurnFailed": "ターン失敗",
+  "NotificationProviderFallback": "復旧可能なプロバイダーエラーのため、{provider} に切り替えました（代替先 {position}/{total}）。",
+  "ApprovalNeverPostureBlocked": "「{tool}」をブロックしました。このセッションでは承認が必要なツールは許可されていません。",
+  "NotificationWebApproved": "ウェブで承認されました。",
+  "NotificationWebDenied": "ウェブで拒否されました。",
+  "NotificationInputSubmitFailed": "回答を送信できませんでした：{error}。もう一度お試しください。"
 }

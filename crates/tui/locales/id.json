@@ -2177,5 +2177,15 @@
   "ConfigChoiceNotificationUnfocused": "Saat tidak di tempat",
   "ConfigChoiceNotificationNever": "Tidak pernah",
   "ConfigChoiceNotificationFile": "File khusus",
-  "ConfigChoiceNotificationBell": "Bel sistem"
+  "ConfigChoiceNotificationBell": "Bel sistem",
+  "NotificationApprovalNeeded": "Setujui atau tolak '{tool}' untuk melanjutkan",
+  "NotificationInputNeeded": "Jawab pertanyaan di terminal untuk melanjutkan",
+  "NotificationElevationNeeded": "Izinkan atau tolak akses yang lebih luas untuk '{tool}'",
+  "NotificationDecisionWebHint": "Tentukan pilihan di sini atau di web.",
+  "NotificationTurnFailed": "Giliran gagal",
+  "NotificationProviderFallback": "Beralih ke {provider} (alternatif {position}/{total}) setelah terjadi kesalahan penyedia yang dapat dipulihkan.",
+  "ApprovalNeverPostureBlocked": "'{tool}' diblokir: sesi ini tidak mengizinkan alat yang memerlukan persetujuan.",
+  "NotificationWebApproved": "Disetujui di web.",
+  "NotificationWebDenied": "Ditolak di web.",
+  "NotificationInputSubmitFailed": "Jawaban Anda tidak dapat dikirim: {error}. Coba lagi."
 }

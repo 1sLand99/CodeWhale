@@ -2177,5 +2177,15 @@
   "ConfigChoiceNotificationUnfocused": "En votre absence",
   "ConfigChoiceNotificationNever": "Jamais",
   "ConfigChoiceNotificationFile": "Fichier personnalisé",
-  "ConfigChoiceNotificationBell": "Cloche système"
+  "ConfigChoiceNotificationBell": "Cloche système",
+  "NotificationApprovalNeeded": "Approuvez ou refusez « {tool} » pour continuer",
+  "NotificationInputNeeded": "Répondez à la question dans le terminal pour continuer",
+  "NotificationElevationNeeded": "Autorisez ou refusez les droits d'accès supplémentaires pour « {tool} »",
+  "NotificationDecisionWebHint": "Décidez ici ou sur le Web.",
+  "NotificationTurnFailed": "Le tour a échoué",
+  "NotificationProviderFallback": "Passage à {provider} (solution de repli {position}/{total}) après une erreur récupérable du fournisseur.",
+  "ApprovalNeverPostureBlocked": "« {tool} » a été bloqué : cette session n'autorise pas les outils qui nécessitent une approbation.",
+  "NotificationWebApproved": "Approuvé sur le Web.",
+  "NotificationWebDenied": "Refusé sur le Web.",
+  "NotificationInputSubmitFailed": "Impossible d'envoyer votre réponse : {error}. Réessayez."
 }
