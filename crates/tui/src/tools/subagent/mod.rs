@@ -13537,8 +13537,7 @@ fn resolve_spawn_model_selection(
         });
     }
     if let Some(model) = request.model.as_deref() {
-        let model =
-            normalize_requested_subagent_model(model, "model", runtime.client.api_provider())?;
+        let model = normalize_bound_subagent_model(model, "model", &runtime.client)?;
         return Ok(SpawnModelSelection {
             model_route: ModelRoute::Fixed(model),
             source: SpawnRouteSource::TaskModel,
@@ -13667,10 +13666,10 @@ async fn bind_spawn_model_route(
             .filter(|model| !model.is_empty() && !model.eq_ignore_ascii_case("auto"))
     {
         SpawnModelSelection {
-            model_route: ModelRoute::Fixed(normalize_requested_subagent_model(
+            model_route: ModelRoute::Fixed(normalize_bound_subagent_model(
                 model,
                 "profile.model",
-                runtime.client.api_provider(),
+                &runtime.client,
             )?),
             source: SpawnRouteSource::AgentProfileModel,
         }
@@ -13679,10 +13678,10 @@ async fn bind_spawn_model_route(
             bind_spawn_provider(runtime, provider)?;
         }
         let selection = SpawnModelSelection {
-            model_route: ModelRoute::Fixed(normalize_requested_subagent_model(
+            model_route: ModelRoute::Fixed(normalize_bound_subagent_model(
                 &pin.model,
                 "role.model",
-                runtime.client.api_provider(),
+                &runtime.client,
             )?),
             source: SpawnRouteSource::RolePin,
         };
@@ -13691,10 +13690,10 @@ async fn bind_spawn_model_route(
     } else if let Some(model) = bind_shortlisted_task_model(runtime, request)? {
         shortlisted = true;
         SpawnModelSelection {
-            model_route: ModelRoute::Fixed(normalize_requested_subagent_model(
+            model_route: ModelRoute::Fixed(normalize_bound_subagent_model(
                 &model,
                 "model",
-                runtime.client.api_provider(),
+                &runtime.client,
             )?),
             source: SpawnRouteSource::TaskModel,
         }
@@ -13702,10 +13701,10 @@ async fn bind_spawn_model_route(
         // Model rows disclose the shortlist's exact route, independently of a
         // role. Actual starts and role/profile rows always apply role pins.
         SpawnModelSelection {
-            model_route: ModelRoute::Fixed(normalize_requested_subagent_model(
+            model_route: ModelRoute::Fixed(normalize_bound_subagent_model(
                 model,
                 "model",
-                runtime.client.api_provider(),
+                &runtime.client,
             )?),
             source: SpawnRouteSource::TaskModel,
         }
@@ -14081,6 +14080,29 @@ fn with_default_fork_context(mut input: Value, default: bool) -> Value {
     input
 }
 
+// Reuse the bound client's immutable route snapshot before legacy name
+// normalization can turn an exact declaration into a different wire ID.
+fn is_declared_subagent_model(client: &DeepSeekClient, model: &str) -> bool {
+    client.resolve_model_route(model).is_ok_and(|candidate| {
+        candidate.wire_model_id().as_str() == model
+            && candidate.applied_limit_overrides().iter().any(|entry| {
+                entry.source == codewhale_config::route::OverrideSource::UserModelMetadata
+            })
+    })
+}
+
+fn normalize_bound_subagent_model(
+    value: &str,
+    field: &str,
+    client: &DeepSeekClient,
+) -> Result<String, ToolError> {
+    let model = value.trim();
+    if is_declared_subagent_model(client, model) {
+        return Ok(model.to_string());
+    }
+    normalize_requested_subagent_model(value, field, client.api_provider())
+}
+
 pub(crate) fn normalize_requested_subagent_model(
     value: &str,
     field: &str,
@@ -14134,10 +14156,10 @@ pub(crate) fn configured_model_for_role_or_type(
             "subagents.{key}.model has an explicit provider that is not bound to this child; an exact role pin requires the current session Config."
         )));
     }
-    normalize_requested_subagent_model(
+    normalize_bound_subagent_model(
         &pin.model,
         &format!("subagents.{key}.model"),
-        runtime.client.api_provider(),
+        &runtime.client,
     )
     .map(Some)
 }
@@ -14316,7 +14338,9 @@ fn fallback_subagent_assignment_route(
 /// unbundled providers. This consumer only reads the first entry.
 fn operator_model_for_subagent(runtime: &SubAgentRuntime) -> String {
     let provider = runtime.client.api_provider();
-    if crate::config::validate_route(provider, &runtime.model).is_ok() {
+    if is_declared_subagent_model(&runtime.client, &runtime.model)
+        || crate::config::validate_route(provider, &runtime.model).is_ok()
+    {
         return runtime.model.clone();
     }
     crate::provider_lake::all_catalog_models_for_provider(provider)
@@ -14334,7 +14358,9 @@ pub(crate) fn ensure_subagent_model_for_provider(
     model: String,
 ) -> Result<String, ToolError> {
     let provider = runtime.client.api_provider();
-    if crate::config::validate_route(provider, &model).is_ok() {
+    if is_declared_subagent_model(&runtime.client, &model)
+        || crate::config::validate_route(provider, &model).is_ok()
+    {
         return Ok(model);
     }
     match model_route {
@@ -16808,6 +16834,10 @@ fn configured_model_subagent_keeps_exact_id_and_negative_capability() {
         ]),
         ..crate::config::Config::default()
     };
+    config.set_provider_base_url_override(
+        crate::config::ApiProvider::Deepseek,
+        Some("https://api.deepseek.com".into()),
+    );
     runtime.client = DeepSeekClient::new(&config).unwrap();
     config.custom_models.as_mut().unwrap()[0]
         .modalities
@@ -16850,4 +16880,105 @@ fn configured_model_subagent_keeps_exact_id_and_negative_capability() {
     let error = enforce_fleet_member_route_requirements(Some(&member), &runtime, "deepseek-v4pro")
         .unwrap_err();
     assert!(error.to_string().contains("unsupported"));
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn configured_model_subagent_full_bind_preserves_task_profile_and_role_ids() {
+    let _env = crate::test_support::lock_test_env();
+    let workspace = tempfile::tempdir().unwrap();
+    for (base, id) in [
+        ("https://api.deepseek.com", "deepseek-v4pro"),
+        ("https://models.example.test/v1", "preview-fixture-v9"),
+    ] {
+        let mut config = crate::config::Config {
+            provider: Some("deepseek".into()),
+            api_key: Some("configured-model-local-fixture".into()),
+            custom_models: Some(vec![
+                toml::from_str(
+                    r#"
+                provider = "deepseek"
+                base_url = "https://api.deepseek.com"
+                id = "deepseek-v4pro"
+                limit = { context = 96000, output = 8000 }
+                cost = { input = 0.4, output = 1.6 }
+                modalities = { input = ["text"], output = ["text"] }
+            "#,
+                )
+                .unwrap(),
+            ]),
+            ..crate::config::Config::default()
+        };
+        config.set_provider_base_url_override(
+            crate::config::ApiProvider::Deepseek,
+            Some(base.into()),
+        );
+        let declaration = &mut config.custom_models.as_mut().unwrap()[0];
+        declaration.base_url = base.into();
+        declaration.id = id.into();
+        for source in ["task", "profile", "role", "default"] {
+            let mut runtime = tests::stub_runtime();
+            runtime.context = ToolContext::new(workspace.path().to_path_buf());
+            runtime.client = DeepSeekClient::new(&config).unwrap();
+            runtime.api_config = Some(std::sync::Arc::new(config.clone()));
+            let mut member = crate::fleet::profile::AgentProfile {
+                id: "metadata-fixture".into(),
+                display_name: None,
+                description: None,
+                requires: Vec::new(),
+                profile: codewhale_config::FleetProfile::default(),
+                source: std::path::PathBuf::new(),
+                origin: crate::fleet::profile::ProfileOrigin::Config,
+                plugin_authority: None,
+            };
+            let mut input = json!({"prompt": "fixture", "type": "reviewer"});
+            match source {
+                "task" => input["model"] = json!(id),
+                "profile" => member.profile.model = Some(id.into()),
+                "role" => {
+                    std::sync::Arc::make_mut(runtime.api_config.as_mut().unwrap()).subagents = Some(
+                        toml::from_str(&format!("[roles.reviewer]\nmodel = '{id}'\n")).unwrap(),
+                    );
+                }
+                "default" => {
+                    runtime.role_models.insert("reviewer".into(), id.into());
+                }
+                _ => unreachable!(),
+            }
+            let request = parse_spawn_request(&input).unwrap();
+            let (route, _) = bind_spawn_model_route(
+                &mut runtime,
+                &request,
+                (source == "profile").then_some(&member),
+                "",
+                true,
+            )
+            .await
+            .unwrap();
+            assert_eq!(route, ModelRoute::Fixed(id.into()), "{base} {source}");
+            assert_eq!(runtime.model, id, "{source}");
+            assert_eq!(
+                runtime.client.route_limits().unwrap().context_tokens,
+                Some(96000)
+            );
+            assert!(is_declared_subagent_model(&runtime.client, id));
+            let envelope = runtime
+                .client
+                .effective_route_envelope(id, chrono::Utc::now());
+            assert_eq!(envelope.model, id);
+            let quote = serde_json::to_value(envelope.provider_live_pricing.unwrap()).unwrap();
+            assert_eq!(quote["input_per_million"], "0.4");
+            assert_eq!(quote["output_per_million"], "1.6");
+        }
+        config.set_provider_base_url_override(
+            crate::config::ApiProvider::Deepseek,
+            Some("https://different.example.test/v1".into()),
+        );
+        let wrong_endpoint = DeepSeekClient::new(&config).unwrap();
+        assert!(!is_declared_subagent_model(&wrong_endpoint, id));
+        assert!(
+            normalize_bound_subagent_model(id, "model", &wrong_endpoint)
+                .map_or(true, |normalized| normalized != id)
+        );
+    }
 }

@@ -259,6 +259,7 @@ pub struct ProviderDashboardRow {
     pub capabilities: ProviderCapabilityBadges,
     pub model_origin: ProviderModelOrigin,
     pub(crate) readiness: ResolvedProviderReadiness,
+    billing_presentation: crate::route_billing::BillingPresentation,
     pub maturity: ProviderMaturity,
     pub messages: Vec<String>,
     external_credential_status: Option<codewhale_config::ExternalCredentialConsentStatus>,
@@ -539,6 +540,8 @@ impl ProviderDashboardRow {
         active_provider_id: Option<&str>,
         runtime_status: Option<&ProviderRuntimeStatus>,
     ) -> Self {
+        // Capture product presentation once without activating an inactive row.
+        let billing_presentation = crate::route_billing::for_route(config, provider);
         let configured = config.provider_config_for(provider);
         let configured_base_url = configured
             .and_then(|entry| entry.base_url.as_deref())
@@ -629,6 +632,7 @@ impl ProviderDashboardRow {
         let Some(kind) = provider.kind().or(compatibility_kind) else {
             return Self {
                 provider,
+                billing_presentation,
                 provider_id,
                 display_name,
                 kind: "legacy".to_string(),
@@ -686,11 +690,49 @@ impl ProviderDashboardRow {
         // particular, Kimi Code's bare K3 model has a conservative 262K
         // membership-plan baseline (or an explicit configured override), not
         // the generic catalog's unknown-model fallback.
-        let route = crate::route_runtime::resolve_runtime_route(
-            config,
-            provider,
-            configured_model.as_deref(),
-        );
+        let route_base = config.base_url_for_route_identity(provider, &provider_id);
+        let declared_default = configured_model
+            .as_deref()
+            .or_else(|| {
+                is_active
+                    .then_some(config.default_text_model.as_deref())
+                    .flatten()
+            })
+            .filter(|model| {
+                crate::provider_lake::configured_model_for_route(
+                    config,
+                    provider,
+                    &provider_id,
+                    &route_base,
+                    model,
+                )
+                .is_some()
+            });
+        let route = if let Some(model) = declared_default {
+            crate::route_runtime::resolve_declared_model_candidate(
+                provider,
+                &provider_id,
+                model,
+                &route_base,
+                config.context_window_for_provider_config(provider),
+                config.custom_models.as_deref().unwrap_or_default(),
+            )
+        } else {
+            // Browsing a provider is a snapshot projection, not execution
+            // admission. Actual local requests still require an explicit tag
+            // or a fresh endpoint-owned roster in resolve_runtime_route.
+            crate::route_runtime::resolve_route_candidate_with_context_metadata(
+                provider,
+                configured_model.as_deref(),
+                None,
+                // The CN compatibility alias retains its strict namespace.
+                (provider != ApiProvider::DeepseekCN)
+                    .then(|| configured_base_url.clone())
+                    .flatten(),
+                config.context_window_for_provider_config(provider),
+                None,
+            )
+        };
         let (
             base_url,
             supported_protocols,
@@ -816,6 +858,7 @@ impl ProviderDashboardRow {
 
         Self {
             provider,
+            billing_presentation,
             provider_id,
             display_name,
             kind: configured
@@ -1465,13 +1508,7 @@ fn readiness_for(
 /// no row: self-hosted routes are local, Codex rides OAuth quota, and
 /// everything else is honestly unknown.
 fn configured_model_cost_label(config: &Config, row: &ProviderDashboardRow, model: &str) -> String {
-    let mut scoped = config.clone();
-    if let Ok(identity) = config
-        .resolve_persisted_provider_identity(Some(row.provider.as_str()), Some(&row.provider_id))
-    {
-        scoped.scope_to_provider_identity(&identity);
-    }
-    match crate::route_billing::for_route(&scoped, row.provider) {
+    match row.billing_presentation {
         crate::route_billing::BillingPresentation::Subscription(label) => return label.to_string(),
         crate::route_billing::BillingPresentation::Local => return "local".to_string(),
         _ => {}
@@ -8414,7 +8451,7 @@ mod tests {
         .expect("Codex has a picker row");
         assert_eq!(picker.stage, Stage::ModelPick);
         let rendered = render_text(&picker, 100, 24);
-        assert!(rendered.contains("oauth quota"), "{rendered}");
+        assert!(rendered.contains("Codex OAuth quota"), "{rendered}");
         assert!(
             !picker.model_row_hitboxes.borrow().is_empty(),
             "model rows must record hitboxes"

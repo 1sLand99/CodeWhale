@@ -11608,14 +11608,14 @@ fn provider_capability_scenario_3() {
             assert!(!cap.thinking_supported, "{model}");
         }
     }
-    // from provider_capability_ollama_deepseek_tag_uses_deepseek_heuristic
+    // Unknown local tags retain an explicitly conservative budget.
     {
-        // #3023: known model families resolve through models.rs lookups even
-        // on Ollama — a legacy DeepSeek tag gets the 128K heuristic window.
+        // A family name does not establish this deployment's context window.
         let cap = provider_capability(ApiProvider::Ollama, "deepseek-v3.1:671b");
+        assert_eq!(cap.context_window, 8192);
         assert_eq!(
-            cap.context_window,
-            crate::models::LEGACY_DEEPSEEK_CONTEXT_WINDOW_TOKENS
+            crate::models::context_window_for_model("deepseek-v3.1:671b"),
+            None
         );
         assert_eq!(cap.max_output, None);
         assert!(!cap.thinking_supported);

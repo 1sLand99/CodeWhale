@@ -940,8 +940,9 @@ mod tests {
             ))
             .unwrap();
             config.provider = Some(identity.into());
-            config.base_url = Some(base.into());
+            config.base_url = None;
             config.providers = None;
+            config.set_provider_base_url_override(provider, Some(base.into()));
             let declaration = &mut config.custom_models.as_mut().unwrap()[0];
             declaration.provider = identity.into();
             declaration.base_url = base.into();

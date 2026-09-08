@@ -290,3 +290,110 @@ fn persisted_metadata_survives_unrelated_save() {
         Some(ID)
     );
 }
+
+#[test]
+fn declared_wire_id_precedes_real_aggregator_canonical_aliases() {
+    let id = "deepseek-v4-pro";
+    for (provider, kind, base) in [
+        (
+            "openrouter",
+            ProviderKind::Openrouter,
+            "https://openrouter.ai/api/v1",
+        ),
+        (
+            "together",
+            ProviderKind::Together,
+            "https://api.together.xyz/v1",
+        ),
+    ] {
+        let mut definitions = models();
+        definitions[0].provider = provider.into();
+        definitions[0].base_url = base.into();
+        definitions[0].id = id.into();
+        let mut req = request(base, id);
+        req.explicit_provider = Some(kind);
+        let bundled = RouteResolver::new().resolve(&req).unwrap();
+        assert_ne!(
+            bundled.wire_model_id().as_str(),
+            id,
+            "fixture must hit real bundled alias"
+        );
+        let resolver =
+            RouteResolver::new().with_configured_models(&definitions, provider, kind, base);
+        for saved in [false, true] {
+            if saved {
+                req.model_selector = None;
+                req.saved_provider_model = Some(id.into());
+            }
+            let candidate = resolver.resolve(&req).unwrap();
+            assert_eq!(
+                candidate.wire_model_id().as_str(),
+                id,
+                "{provider} saved={saved}"
+            );
+            assert!(candidate.canonical_model().is_none());
+            assert_eq!(
+                candidate.pricing(),
+                Some(&codewhale_config::route::PricingSku::Token {
+                    input_per_mtok: Some(0.4),
+                    output_per_mtok: Some(1.6),
+                })
+            );
+            assert_eq!(candidate.limits().context_tokens, Some(96000));
+            assert_eq!(candidate.limits().output_tokens, Some(8000));
+            assert!(
+                candidate
+                    .applied_limit_overrides()
+                    .iter()
+                    .all(|entry| entry.source == OverrideSource::UserModelMetadata)
+            );
+        }
+        req.base_url_override = Some("https://unrelated.example.test/v1".into());
+        let unrelated = resolver.resolve(&req).unwrap();
+        assert_eq!(unrelated.limits().context_tokens, None);
+        assert!(unrelated.applied_limit_overrides().is_empty());
+    }
+}
+
+#[test]
+fn all_positive_declared_capabilities_stay_unverified() {
+    let mut definitions = models();
+    for flag in [Some(true), Some(false), None] {
+        let model = &mut definitions[0];
+        model.reasoning = flag;
+        model.tool_call = flag;
+        model.attachment = flag;
+        model.structured_output = flag;
+        model.modalities =
+            flag.map(
+                |supported| codewhale_config::models_dev::ModelsDevModalities {
+                    input: if supported {
+                        vec!["text".into(), "image".into()]
+                    } else {
+                        vec!["text".into()]
+                    },
+                    output: vec!["text".into()],
+                },
+            );
+        assert_eq!(model.to_catalog_offering().reasoning, flag);
+        let candidate = RouteResolver::new()
+            .with_configured_models(&definitions, "deepseek", ProviderKind::Deepseek, BASE)
+            .resolve(&request(BASE, ID))
+            .unwrap();
+        let caps = candidate.capabilities();
+        let expected = if flag == Some(false) {
+            CapabilityState::Unsupported
+        } else {
+            CapabilityState::Unknown
+        };
+        for capability in [
+            caps.reasoning,
+            caps.image_input,
+            caps.attachments,
+            caps.native_tool_calls,
+            caps.structured_output,
+        ] {
+            assert_eq!(capability, expected);
+        }
+    }
+}

@@ -6736,16 +6736,14 @@ async fn switch_provider(
     // Mirrors `set_config`'s `model` branch, which validates against the
     // active route — except here we validate against the target provider,
     // because the active route is about to change.
-    let model_override: Option<String> = match req.model.as_deref().map(str::trim) {
-        None | Some("") => None,
-        Some(raw) => Some(normalize_runtime_config_model(target, raw)?),
-    };
-
-    // Resolve the target provider identity *before* mutating config, so
-    // persistence uses the same key the TUI's switch_provider would.
-    let (provider_identity, _active_provider) = {
+    // Read normalization and persistence identity from the same route snapshot.
+    let (model_override, provider_identity) = {
         let config = state.config.read();
-        (config.provider_identity_for(target), config.api_provider())
+        let model = match req.model.as_deref().map(str::trim) {
+            None | Some("") => None,
+            Some(raw) => Some(normalize_runtime_config_model(&config, target, raw)?),
+        };
+        (model, config.provider_identity_for(target))
     };
 
     // Persist `provider` (always) + `model` (only when explicitly given).
@@ -7039,17 +7037,17 @@ async fn set_config(
     let active_route = {
         let config = state.config.read();
         let provider = config.api_provider();
+        match key.as_str() {
+            "model" => {
+                value = normalize_runtime_config_model(&config, provider, &value)?;
+            }
+            "default_model" => {
+                value = normalize_runtime_config_model(&config, ApiProvider::Deepseek, &value)?;
+            }
+            _ => {}
+        }
         (provider, config.provider_identity_for(provider))
     };
-    match key.as_str() {
-        "model" => {
-            value = normalize_runtime_config_model(active_route.0, &value)?;
-        }
-        "default_model" => {
-            value = normalize_runtime_config_model(ApiProvider::Deepseek, &value)?;
-        }
-        _ => {}
-    }
 
     // All persisted config keys require a reload to take effect in the
     // runtime (including syncing to active engines). The caller should
@@ -7247,8 +7245,27 @@ async fn set_config(
     }))
 }
 
-fn normalize_runtime_config_model(provider: ApiProvider, value: &str) -> Result<String, ApiError> {
+fn normalize_runtime_config_model(
+    config: &Config,
+    provider: ApiProvider,
+    value: &str,
+) -> Result<String, ApiError> {
     let value = value.trim();
+    if crate::provider_lake::configured_model_for_route(
+        config,
+        provider,
+        &config.provider_identity_for(provider),
+        &config.base_url_for_route(provider),
+        value,
+    )
+    .is_some()
+    {
+        // The shared resolver preserves exact declarations only after its
+        // protocol and provider allowlist guards. Metadata cannot bypass them.
+        return crate::route_runtime::resolve_runtime_route(config, provider, Some(value))
+            .map(|route| route.model)
+            .map_err(ApiError::bad_request);
+    }
     validate_route(provider, value).map_err(ApiError::bad_request)?;
     if value.eq_ignore_ascii_case("auto") {
         return Ok("auto".to_string());
@@ -7739,3 +7756,298 @@ impl IntoResponse for ApiError {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod configured_model_api_tests {
+    use super::*;
+    use crate::test_support::{EnvVarGuard, lock_test_env};
+
+    fn fixture(provider: &str, model: &str) -> String {
+        format!(
+            r#"provider = "{provider}"
+default_text_model = "deepseek-v4-pro"
+telemetry = false
+
+[[custom_models]]
+provider = "{provider}"
+base_url = "http://127.0.0.1:9/v1"
+id = "{model}"
+limit = {{ context = 96000, input = 88000, output = 8000 }}
+cost = {{ input = 0.4, output = 1.6 }}
+reasoning = false
+tool_call = false
+
+[providers.{provider}]
+base_url = "http://127.0.0.1:9/v1"
+"#
+        )
+    }
+
+    fn isolate_model_environment() -> Vec<EnvVarGuard> {
+        [
+            "CODEWHALE_BASE_URL",
+            "DEEPSEEK_BASE_URL",
+            "CODEWHALE_PROVIDER",
+            "DEEPSEEK_PROVIDER",
+            "CODEWHALE_MODEL",
+            "DEEPSEEK_MODEL",
+            "DEEPSEEK_DEFAULT_TEXT_MODEL",
+            "OPENROUTER_BASE_URL",
+            "OPENROUTER_MODEL",
+            "TOGETHER_BASE_URL",
+            "TOGETHER_MODEL",
+            "CODEWHALE_PROFILE",
+            "DEEPSEEK_PROFILE",
+        ]
+        .into_iter()
+        .map(EnvVarGuard::remove)
+        .collect()
+    }
+
+    async fn serve_fixture(
+        config_path: PathBuf,
+    ) -> Result<(SocketAddr, RuntimeApiState, tokio::task::JoinHandle<()>)> {
+        let root = config_path.parent().expect("fixture root");
+        let workspace = root.join("workspace");
+        fs::create_dir_all(&workspace)?;
+        let config = Config::load(Some(config_path.clone()), None)?;
+        let runtime_threads = Arc::new(RuntimeThreadManager::open_with_plugin_registry(
+            config.clone(),
+            workspace.clone(),
+            RuntimeThreadManagerConfig::from_task_data_dir(root.join("runtime")),
+            Arc::new(crate::plugins::PluginRegistry::empty(&workspace)),
+        )?);
+        let task_manager = TaskManager::start_with_runtime_manager(
+            TaskManagerConfig {
+                data_dir: root.join("tasks"),
+                worker_count: 1,
+                default_workspace: workspace.clone(),
+                default_model: "auto".to_string(),
+                default_mode: "agent".to_string(),
+                allow_shell: false,
+                trust_mode: false,
+                execution_limits: Default::default(),
+            },
+            config.clone(),
+            runtime_threads.clone(),
+        )
+        .await?;
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let state = RuntimeApiState {
+            config: Arc::new(parking_lot::RwLock::new(config)),
+            workspace: workspace.clone(),
+            plugin_discovery: crate::plugins::PluginDiscoveryContext::capture_pre_dotenv(),
+            task_manager,
+            runtime_threads,
+            cors_origins: Vec::new(),
+            sessions_dir: root.join("sessions"),
+            config_path: Some(config_path.clone()),
+            config_profile: None,
+            automations: Arc::new(Mutex::new(AutomationManager::open_for_test(
+                root.join("automations"),
+            )?)),
+            sub_agent_manager: runtime_api_sub_agent_manager(&workspace, 2),
+            runtime_token: None,
+            skill_state: Arc::new(Mutex::new(SkillStateStore::load_from(
+                root.join("skills_state.toml"),
+            )?)),
+            auth_required: false,
+            bind_host: "127.0.0.1".to_string(),
+            bind_port: addr.port(),
+            mobile_enabled: false,
+            mobile: None,
+            web: None,
+            fleet_codewhale_binary: "unused-test-binary".to_string(),
+            mcp_pool: Arc::new(Mutex::new(None)),
+            compat_stream_test_hook: None,
+        };
+        let router = build_router(state.clone());
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                router.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            .expect("local fixture server");
+        });
+        Ok((addr, state, server))
+    }
+
+    async fn post_json(addr: SocketAddr, path: &str, body: Value) -> Result<Value> {
+        let response = crate::tls::reqwest_client()
+            .post(format!("http://{addr}{path}"))
+            .json(&body)
+            .send()
+            .await?;
+        let status = response.status();
+        let body = response.json::<Value>().await?;
+        assert_eq!(status, StatusCode::OK, "{path}: {body}");
+        Ok(body)
+    }
+
+    fn assert_declared_route(config_path: &FsPath, provider: ApiProvider, model: &str) {
+        let config = Config::load(Some(config_path.to_path_buf()), None).expect("reloaded config");
+        let persisted = if provider == ApiProvider::Deepseek {
+            config.default_text_model.as_deref()
+        } else {
+            config
+                .provider_config_for(provider)
+                .and_then(|entry| entry.model.as_deref())
+        };
+        assert_eq!(persisted, Some(model));
+        let selected = provider_default_model_for_api(&config, provider, provider);
+        assert_eq!(selected, model);
+        let route = crate::route_runtime::resolve_runtime_route(&config, provider, Some(&selected))
+            .expect("saved declared route");
+        assert_eq!(route.model, model);
+        assert!(route.candidate.canonical_model().is_none());
+        assert_eq!(route.candidate.limits().context_tokens, Some(96_000));
+        assert_eq!(
+            route.context_window.source,
+            crate::route_runtime::ContextWindowSource::UserDeclared
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn declared_model_posts_preserve_exact_identity_after_reload() -> Result<()> {
+        let _env = lock_test_env();
+        let _live = crate::provider_lake::lock_live_snapshot();
+        let home = tempfile::tempdir()?;
+        let _home = EnvVarGuard::set("CODEWHALE_HOME", home.path());
+        let _model_environment = isolate_model_environment();
+        crate::provider_catalog_live::reset_cache_for_test();
+        crate::provider_lake::clear_live_snapshot();
+        for (provider, model) in [
+            (ApiProvider::Deepseek, "deepseek-v4pro"),
+            (ApiProvider::Openrouter, "deepseek-v4-pro"),
+            (ApiProvider::Together, "deepseek-v4-pro"),
+        ] {
+            let root = tempfile::tempdir()?;
+            let config_path = root.path().join("config.toml");
+            fs::write(&config_path, fixture(provider.as_str(), model))?;
+            let (addr, state, server) = serve_fixture(config_path.clone()).await?;
+            let _shutdown = state.task_manager.shutdown_guard();
+            let body = post_json(
+                addr,
+                &format!("/v1/providers/{}/switch", provider.as_str()),
+                json!({ "model": model }),
+            )
+            .await?;
+            assert_eq!(body["model"], model);
+            assert_declared_route(&config_path, provider, model);
+            let keys = if provider == ApiProvider::Deepseek {
+                vec!["model", "default_model"]
+            } else {
+                vec!["model"]
+            };
+            for key in keys {
+                let body = post_json(
+                    addr,
+                    "/v1/config",
+                    json!({ "key": key, "value": model, "persist": true }),
+                )
+                .await?;
+                assert_eq!(body["value"], model);
+                post_json(addr, "/v1/config/reload", json!({})).await?;
+                assert_declared_route(&config_path, provider, model);
+                let reloaded = state.config.read();
+                let selected = provider_default_model_for_api(&reloaded, provider, provider);
+                let route = crate::route_runtime::resolve_runtime_route(
+                    &reloaded,
+                    provider,
+                    Some(&selected),
+                )
+                .expect("active reloaded route");
+                assert_eq!(route.model, model);
+                assert_eq!(route.candidate.limits().context_tokens, Some(96_000));
+            }
+            server.abort();
+            state.task_manager.shutdown_and_wait().await?;
+        }
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn declared_model_posts_do_not_preserve_alias_at_wrong_endpoint() -> Result<()> {
+        let _env = lock_test_env();
+        let _live = crate::provider_lake::lock_live_snapshot();
+        let root = tempfile::tempdir()?;
+        let _home = EnvVarGuard::set("CODEWHALE_HOME", root.path().join("home"));
+        let _model_environment = isolate_model_environment();
+        crate::provider_catalog_live::reset_cache_for_test();
+        crate::provider_lake::clear_live_snapshot();
+        let config_path = root.path().join("config.toml");
+        let fixture = fixture("deepseek", "deepseek-v4pro").replace(
+            "[providers.deepseek]\nbase_url = \"http://127.0.0.1:9/v1\"",
+            "[providers.deepseek]\nbase_url = \"http://127.0.0.1:10/v1\"",
+        );
+        fs::write(&config_path, fixture)?;
+        let (addr, state, server) = serve_fixture(config_path.clone()).await?;
+        let _shutdown = state.task_manager.shutdown_guard();
+        let body = post_json(
+            addr,
+            "/v1/providers/deepseek/switch",
+            json!({ "model": "deepseek-v4pro" }),
+        )
+        .await?;
+        assert_eq!(body["model"], "deepseek-v4-pro");
+        let body = post_json(
+            addr,
+            "/v1/config",
+            json!({ "key": "model", "value": "deepseek-v4pro", "persist": true }),
+        )
+        .await?;
+        assert_eq!(body["value"], "deepseek-v4-pro");
+        post_json(addr, "/v1/config/reload", json!({})).await?;
+        let config = Config::load(Some(config_path), None)?;
+        assert_eq!(
+            config.default_text_model.as_deref(),
+            Some("deepseek-v4-pro")
+        );
+        let selected =
+            provider_default_model_for_api(&config, ApiProvider::Deepseek, ApiProvider::Deepseek);
+        let route = crate::route_runtime::resolve_runtime_route(
+            &config,
+            ApiProvider::Deepseek,
+            Some(&selected),
+        )
+        .expect("ordinary saved route");
+        assert_eq!(route.model, "deepseek-v4-pro");
+        assert_ne!(route.candidate.limits().context_tokens, Some(96_000));
+        assert_ne!(
+            route.context_window.source,
+            crate::route_runtime::ContextWindowSource::UserDeclared
+        );
+        server.abort();
+        state.task_manager.shutdown_and_wait().await?;
+        Ok(())
+    }
+
+    #[test]
+    fn declared_model_normalization_keeps_identity_and_protocol_guards() {
+        let _env = lock_test_env();
+        let _live = crate::provider_lake::lock_live_snapshot();
+        let root = tempfile::tempdir().expect("test root");
+        let _home = EnvVarGuard::set("CODEWHALE_HOME", root.path());
+        let _model_environment = isolate_model_environment();
+        crate::provider_catalog_live::reset_cache_for_test();
+        crate::provider_lake::clear_live_snapshot();
+        let mut config: Config =
+            toml::from_str(&fixture("deepseek", "deepseek-v4pro")).expect("fixture config");
+        config.custom_models.as_mut().unwrap()[0].provider = "other".to_string();
+        assert_eq!(
+            normalize_runtime_config_model(&config, ApiProvider::Deepseek, "deepseek-v4pro")
+                .expect("legacy alias remains accepted"),
+            "deepseek-v4-pro"
+        );
+        for provider in [ApiProvider::OpencodeGo, ApiProvider::OpencodeZen] {
+            let config: Config = toml::from_str(&fixture(provider.as_str(), "unlisted-model"))
+                .expect("fixture config");
+            assert!(
+                normalize_runtime_config_model(&config, provider, "unlisted-model").is_err(),
+                "a declaration cannot expand the {provider:?} protocol roster"
+            );
+        }
+    }
+}

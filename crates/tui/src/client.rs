@@ -13684,7 +13684,7 @@ mod configured_model_client_tests {
                 provider = "deepseek"
                 base_url = "https://api.deepseek.com"
                 id = "deepseek-v4pro"
-                limit = { context = 1024, output = 32 }
+                limit = { context = 96000, output = 32 }
                 cost = { input = 1.0, output = 2.0 }
             "#,
                 )

@@ -28,6 +28,10 @@ pub(crate) struct ModelRouteCandidate {
     pub(crate) provider_name: &'static str,
     pub(crate) provider_display_name: &'static str,
     pub(crate) model: String,
+    /// Explicit declarations keep case-sensitive wire identity; bundled aliases
+    /// retain the existing case-insensitive convenience lookup.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) user_declared: bool,
     pub(crate) context_window: u32,
     /// The context window came from the legacy capability fallback (an `_Nk`
     /// name-suffix parse or a vendor-family heuristic), not a route fact
@@ -124,6 +128,7 @@ impl ModelInventory {
                 let readiness =
                     crate::provider_readiness::resolve_for_model(config, provider, &model, health);
                 let mut capability = provider_capability(provider, &model);
+                let mut user_declared = false;
                 // #5239/#5441: a candidate whose window came from the legacy
                 // capability fallback (a `_Nk` name-suffix parse or a
                 // vendor-family heuristic) carries the number *and* the fact
@@ -150,15 +155,14 @@ impl ModelInventory {
                     {
                         capability.max_output = Some(max_output);
                     }
-                    let user_declared =
-                        route
-                            .candidate
-                            .applied_limit_overrides()
-                            .iter()
-                            .any(|entry| {
-                                entry.source
-                                    == codewhale_config::route::OverrideSource::UserModelMetadata
-                            });
+                    user_declared = route
+                        .candidate
+                        .applied_limit_overrides()
+                        .iter()
+                        .any(|entry| {
+                            entry.source
+                                == codewhale_config::route::OverrideSource::UserModelMetadata
+                        });
                     if user_declared {
                         context_window_unverified = !route.context_window.source.is_verified();
                         capability.context_window = route.context_window.tokens;
@@ -198,7 +202,9 @@ impl ModelInventory {
                 }
                 // Unready routes stay visible (annotated) so an operator can
                 // override explicitly, but they are never a silent default.
-                let default_for_provider = readiness.can_attempt() && model == default_model;
+                let default_for_provider = readiness.can_attempt()
+                    && (model == default_model
+                        || (!user_declared && model.eq_ignore_ascii_case(&default_model)));
                 if default_for_provider {
                     tags.push("default");
                 }
@@ -212,6 +218,7 @@ impl ModelInventory {
                     provider_display_name: provider.display_name(),
                     default_for_provider,
                     model,
+                    user_declared,
                     context_window: capability.context_window,
                     context_window_unverified,
                     max_output: capability.max_output,
@@ -286,9 +293,17 @@ impl ModelInventory {
         provider: ApiProvider,
         model: &str,
     ) -> Option<&ModelRouteCandidate> {
+        let model = model.trim();
         self.candidates
             .iter()
-            .find(|candidate| candidate.provider == provider && candidate.model == model.trim())
+            .find(|candidate| candidate.provider == provider && candidate.model == model)
+            .or_else(|| {
+                self.candidates.iter().find(|candidate| {
+                    candidate.provider == provider
+                        && !candidate.user_declared
+                        && candidate.model.eq_ignore_ascii_case(model)
+                })
+            })
     }
 
     pub(crate) fn active_default(&self) -> Option<&ModelRouteCandidate> {
@@ -944,6 +959,7 @@ mod tests {
             model: "gpt-5.5".to_string(),
             context_window: 128_000,
             context_window_unverified: false,
+            user_declared: false,
             max_output: Some(16_384),
             thinking_supported: true,
             cache_telemetry_supported: false,
@@ -975,6 +991,7 @@ mod tests {
                 model: "unsupported-model".to_string(),
                 context_window: 1,
                 context_window_unverified: false,
+                user_declared: false,
                 max_output: Some(1),
                 thinking_supported: false,
                 cache_telemetry_supported: false,
@@ -1010,6 +1027,7 @@ mod tests {
             model: "unsupported-model".to_string(),
             context_window: 1,
             context_window_unverified: false,
+            user_declared: false,
             max_output: Some(1),
             thinking_supported: false,
             cache_telemetry_supported: false,
@@ -1143,6 +1161,36 @@ mod tests {
             ..Default::default()
         };
         assert!(!ModelInventory::from_config(&deepseek).router_available);
+    }
+
+    #[test]
+    fn declared_inventory_ids_remain_case_distinct() {
+        let _env = crate::test_support::lock_test_env();
+        let home = tempfile::tempdir().unwrap();
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", home.path());
+        let mut config: Config = toml::from_str(include_str!(
+            "../../config/tests/fixtures/custom_models.toml"
+        ))
+        .unwrap();
+        let declaration = config.custom_models.as_mut().unwrap().first_mut().unwrap();
+        declaration.id = "Preview-fixture".into();
+        let mut other = declaration.clone();
+        other.id = "preview-fixture".into();
+        other.limit.as_mut().unwrap().context = Some(128000);
+        config.custom_models.as_mut().unwrap().push(other);
+        config.set_provider_api_key_override(ApiProvider::Deepseek, Some("fixture-key".into()));
+        let inventory = ModelInventory::from_config(&config);
+        for (id, context) in [("Preview-fixture", 96000), ("preview-fixture", 128000)] {
+            let candidate = inventory.candidate(ApiProvider::Deepseek, id).unwrap();
+            assert!(candidate.user_declared);
+            assert_eq!(candidate.model, id);
+            assert_eq!(candidate.context_window, context);
+        }
+        assert!(
+            inventory
+                .candidate(ApiProvider::Deepseek, "PREVIEW-FIXTURE")
+                .is_none()
+        );
     }
 
     #[test]

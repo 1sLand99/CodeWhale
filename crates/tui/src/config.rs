@@ -810,12 +810,20 @@ pub fn provider_capability_with_wire(
     let is_reasoner = matches!(provider, ApiProvider::WanjieArk)
         && (model_lower.contains("reasoner") || model_lower.contains("r1"));
 
-    // Context window: V4-class models get 1M, everything else falls through
-    // to the model's own lookup or a default.  Ollama defaults to 8192
-    // (conservative for small local models) instead of 128K.
+    // Provider-owned wire IDs can have exact catalog facts without a legacy
+    // model-only row. Reuse those facts before conservative fallback budgets.
+    let offering =
+        crate::provider_lake::bundled_catalog_offering_for_model(provider, resolved_model);
     let context_window = if is_v4_pro || is_v4_flash {
         crate::models::DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS
     } else if let Some(window) = crate::models::context_window_for_model(resolved_model) {
+        window
+    } else if let Some(window) = offering
+        .as_ref()
+        .and_then(|row| row.limit.as_ref())
+        .and_then(|limit| limit.context)
+        .and_then(|window| u32::try_from(window).ok())
+    {
         window
     } else if matches!(provider, ApiProvider::Ollama) {
         8192
@@ -836,8 +844,9 @@ pub fn provider_capability_with_wire(
             // Provider-owned wire IDs need not exist in the legacy model-only
             // catalog (for example Fireworks' accounts/... slug). Reuse the
             // exact bundled offering instead of inferring a family ceiling.
-            crate::provider_lake::bundled_catalog_offering_for_model(provider, resolved_model)
-                .and_then(|offering| offering.limit)
+            offering
+                .as_ref()
+                .and_then(|offering| offering.limit.as_ref())
                 .and_then(|limit| limit.output)
                 .and_then(|limit| u32::try_from(limit).ok())
         })
@@ -851,11 +860,13 @@ pub fn provider_capability_with_wire(
                 .and_then(crate::models::max_output_tokens_for_model)
         });
 
-    // Thinking support: V4 models support thinking on all providers, but
-    // only when the model name matches the V4 family.
+    // Exact catalog reasoning facts and recognized compatibility aliases only.
     let thinking_supported = is_v4_pro
         || is_v4_flash
         || is_reasoner
+        || offering
+            .as_ref()
+            .is_some_and(|row| row.reasoning == Some(true))
         || crate::models::model_supports_reasoning(resolved_model);
 
     // Cache telemetry: returned only by DeepSeek-native and NVIDIA NIM endpoints.

@@ -187,7 +187,11 @@ impl RouteResolver {
                 } else {
                     Default::default()
                 },
-                reasoning: declared.reasoning,
+                reasoning: if model.reasoning == Some(false) {
+                    declared.reasoning
+                } else {
+                    Default::default()
+                },
                 native_tool_calls: if model.tool_call == Some(false) {
                     declared.native_tool_calls
                 } else {
@@ -548,6 +552,17 @@ impl RouteResolver {
         } else {
             provider_scoped_wire_alias(provider_kind, logical_model.raw(), class)
         };
+
+        // This list was scoped to the exact endpoint and raw selector in
+        // resolve_inner, after closed-protocol admission in the builder.
+        // Prefer that literal declaration over a bundled canonical alias.
+        // Keep this after provider protocol/allowlist normalization above;
+        // a declaration cannot preserve an alias those guards must rewrite.
+        if let Some((_, offering)) = self.configured_offerings.iter().find(|(_, offering)| {
+            offering.provider == *provider_id && offering.wire_model_id.as_str() == raw
+        }) {
+            return Ok(ResolvedOffering::from_offering(offering));
+        }
 
         // Try to match a catalog offering owned by THIS provider, either by
         // canonical model id or by exact wire id. This keeps interpretation

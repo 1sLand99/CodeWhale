@@ -2427,25 +2427,14 @@ pub(crate) async fn apply_command_result(
                 }) {
                     Ok((new_config, validated_route)) => {
                         let new_model = validated_route.model.clone();
-                        let provider_identity = validated_route.identity.clone();
-                        let route_limits = crate::route_budget::known_route_limits(
-                            validated_route.candidate.limits(),
+                        apply_validated_profile_config(
+                            app,
+                            config,
+                            &profile,
+                            new_config,
+                            &validated_route,
                         );
-                        app.config_profile = Some(profile.clone());
-                        *config = new_config.clone();
                         crate::initialize_cloud_facts(config);
-                        app.refresh_notification_settings(config);
-                        app.set_provider_identity_record(provider_identity);
-                        app.billing_presentation =
-                            crate::route_billing::for_route(config, app.api_provider);
-                        app.set_model_selection(new_model.clone());
-                        app.set_active_context_window_override(
-                            config.context_window_for_provider_config(app.api_provider),
-                        );
-                        app.active_route_limits = route_limits;
-                        app.update_model_compaction_budget();
-                        app.session.last_prompt_tokens = None;
-                        app.session.last_completion_tokens = None;
                         // Rebuild the engine with the new config so API key/model/base URL take effect.
                         let _ = engine_handle.send(Op::Shutdown).await;
                         let engine_config = build_engine_config(app, config);
@@ -2503,6 +2492,34 @@ pub(crate) async fn apply_command_result(
     }
 
     Ok(false)
+}
+
+/// Commit a successfully loaded profile and its validated route as one snapshot.
+fn apply_validated_profile_config(
+    app: &mut App,
+    config: &mut Config,
+    profile: &str,
+    next_config: Config,
+    route: &crate::route_runtime::ValidatedRuntimeRoute,
+) {
+    *config = next_config;
+    app.config_profile = Some(profile.to_string());
+    app.configured_models = config.custom_models.clone().unwrap_or_default();
+    app.refresh_notification_settings(config);
+    app.set_provider_identity_record(route.identity.clone());
+    app.billing_presentation = crate::route_billing::for_route(config, app.api_provider);
+    app.set_model_selection(route.model.clone());
+    app.set_active_context_window_override(
+        config.context_window_for_provider_config(app.api_provider),
+    );
+    app.set_active_route_resolution(
+        route.candidate.endpoint().base_url.clone(),
+        route.candidate.limits(),
+        route.context_window.source,
+    );
+    app.update_model_compaction_budget();
+    app.session.last_prompt_tokens = None;
+    app.session.last_completion_tokens = None;
 }
 
 /// Open this workspace's `.codewhale/hooks.toml` in `$EDITOR`.
@@ -3779,4 +3796,76 @@ pub(crate) fn apply_loaded_session_config_snapshot(
     crate::initialize_cloud_facts(config);
     app.refresh_notification_settings(config);
     Ok(respawn)
+}
+
+#[cfg(test)]
+mod profile_snapshot_tests {
+    use super::*;
+
+    fn profile_fixture(model: &str, base_url: &str) -> Config {
+        let mut config: Config = toml::from_str(include_str!(
+            "../../../../config/tests/fixtures/custom_models.toml"
+        ))
+        .expect("profile fixture");
+        config.api_key = Some("profile-snapshot-local-fixture".to_string());
+        config.default_text_model = Some(model.to_string());
+        config.providers.as_mut().unwrap().deepseek.base_url = Some(base_url.to_string());
+        let declaration = &mut config.custom_models.as_mut().unwrap()[0];
+        declaration.id = model.to_string();
+        declaration.base_url = base_url.to_string();
+        config
+    }
+
+    #[test]
+    fn profile_switch_replaces_metadata_and_validated_route_snapshot() {
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                let _env = crate::test_support::lock_test_env();
+                let home = tempfile::tempdir().unwrap();
+                let _home = crate::test_support::EnvVarGuard::set(
+                    "CODEWHALE_HOME",
+                    home.path().as_os_str(),
+                );
+                let mut config = profile_fixture("old-preview", "https://old.example.test/v1");
+                let mut options = crate::test_support::test_tui_options(home.path());
+                options.model = config.default_model();
+                let mut app = App::new(options, &config);
+                assert_eq!(app.configured_models[0].id, "old-preview");
+
+                let next = profile_fixture("new-preview", "https://new.example.test/v1");
+                let route = validated_profile_default_route(&next).unwrap();
+                assert_eq!(
+                    route.context_window.source,
+                    crate::route_runtime::ContextWindowSource::UserDeclared,
+                );
+                let expected_models = next.custom_models.clone().unwrap();
+                apply_validated_profile_config(&mut app, &mut config, "new", next, &route);
+                assert_eq!(app.config_profile.as_deref(), Some("new"));
+                assert_eq!(app.configured_models, expected_models);
+                assert_eq!(app.configured_models, config.custom_models.clone().unwrap());
+                assert_eq!(app.model, "new-preview");
+                assert_eq!(app.active_route_base_url, route.candidate.endpoint().base_url);
+                assert_eq!(app.active_route_limits, Some(route.candidate.limits()));
+                assert_eq!(app.active_context_window_source, route.context_window.source);
+
+                let mut empty = profile_fixture("no-metadata", "https://empty.example.test/v1");
+                empty.custom_models = None;
+                let empty_route = validated_profile_default_route(&empty).unwrap();
+                apply_validated_profile_config(&mut app, &mut config, "empty", empty, &empty_route);
+                assert!(app.configured_models.is_empty());
+                assert!(config.custom_models.is_none());
+                assert_eq!(app.config_profile.as_deref(), Some("empty"));
+                assert_eq!(app.model, "no-metadata");
+                assert_eq!(app.active_route_base_url, empty_route.candidate.endpoint().base_url);
+                assert_eq!(app.active_context_window_source, empty_route.context_window.source);
+                assert_ne!(
+                    app.active_context_window_source,
+                    crate::route_runtime::ContextWindowSource::UserDeclared,
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
 }

@@ -174,14 +174,9 @@ pub struct Usage {
 
 /// Map known models to their approximate context window sizes.
 ///
-/// Lookup order:
-/// 1. An explicit `_Nk` suffix in the model name, for **any** vendor. This
-///    lets self-hosted deployments advertise their window through the served
-///    model name (e.g. a vLLM `--served-model-name qwen3-32b-256k`), which is
-///    the only signal we have for non-DeepSeek/Claude models. The 1000-token
-///    approximation is fine for compaction-threshold math.
-/// 2. DeepSeek vendor heuristics (V4 family -> 1M, legacy -> 128K).
-/// 3. Claude -> 200K.
+/// Exact catalog and recognized model facts take precedence. Otherwise an
+/// explicit `_Nk` suffix supplies an unverified hint for self-hosted models.
+/// Unrecognized DeepSeek family names remain unknown.
 #[must_use]
 pub fn context_window_for_model(model: &str) -> Option<u32> {
     if let Some(window) = crate::model_catalog::resolved_context_window(model) {
@@ -1402,10 +1397,7 @@ mod tests {
             context_window_for_model("deepseek-v3.2-256k-preview"),
             Some(256_000)
         );
-        assert_eq!(
-            context_window_for_model("deepseek-v3.2-2k-preview"),
-            Some(LEGACY_DEEPSEEK_CONTEXT_WINDOW_TOKENS)
-        );
+        assert_eq!(context_window_for_model("deepseek-v3.2-2k-preview"), None);
     }
 
     #[test]

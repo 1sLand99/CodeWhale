@@ -1795,11 +1795,18 @@ fn push_provider_model_rows(
         .map(str::to_string)
         .unwrap_or_else(|| config.provider_identity_for(provider));
     let base_url = config.base_url_for_route_identity(provider, &identity);
-    for id in crate::provider_lake::configured_catalog_models_for_route(
-        config, provider, &identity, &base_url,
-    ) {
-        if !model_ids.contains(&id) {
-            model_ids.push(id);
+    for declaration in config.custom_models.as_deref().unwrap_or_default() {
+        if crate::provider_lake::configured_model_for_route(
+            config,
+            provider,
+            &identity,
+            &base_url,
+            &declaration.id,
+        )
+        .is_some()
+            && !model_ids.contains(&declaration.id)
+        {
+            model_ids.push(declaration.id.clone());
         }
     }
     for id in model_ids {
