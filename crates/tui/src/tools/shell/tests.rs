@@ -2923,6 +2923,61 @@ async fn test_exec_shell_foreground_can_move_to_background() {
     assert_eq!(killed.status, ShellStatus::Killed);
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn dropped_foreground_wait_kills_descendants_and_retains_unreceived_output() {
+    let tmp = tempdir().unwrap();
+    let pid_file = tmp.path().join("descendant.pid");
+    let command = format!(
+        "printf 'retained-before-drop\\n'; printf '%{}s\\n' x; \
+         CODEWHALE_SHELL_DESCENDANT_HELPER=1 \
+         CODEWHALE_SHELL_DESCENDANT_PID_FILE={} {} --exact \
+         tools::shell::tests::shell_descendant_helper_process --nocapture",
+        RAW_STREAM_SETTLED_TAIL_BYTES + 1024,
+        shell_words::quote(&pid_file.display().to_string()),
+        shell_words::quote(&std::env::current_exe().unwrap().display().to_string()),
+    );
+    let ctx = ToolContext::new(tmp.path()).with_state_namespace("foreground-drop".to_string());
+    let manager = ctx.shell_manager.clone();
+    let task_ctx = ctx.clone();
+    let task = tokio::spawn(async move {
+        BashTool::new("Bash")
+            .execute(
+                json!({"command": command, "timeout_ms": 600_000}),
+                &task_ctx,
+            )
+            .await
+    });
+    let descendant = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Ok(raw) = std::fs::read_to_string(&pid_file)
+                && let Ok(pid) = raw.trim().parse::<libc::pid_t>()
+            {
+                break pid;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("descendant must start");
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    assert!(
+        wait_for_shell_pid_exit(descendant),
+        "dropping the wait must stop its descendant"
+    );
+    let mut manager = manager.lock().unwrap();
+    let jobs = manager.list_jobs_for_session("foreground-drop");
+    assert_eq!(jobs.len(), 1);
+    assert_eq!(jobs[0].status, ShellStatus::Killed);
+    let detail = manager
+        .inspect_job(&jobs[0].id)
+        .expect("inspect cancelled job");
+    assert!(detail.stdout.contains("retained-before-drop"));
+    assert!(detail.stdout.len() > RAW_STREAM_SETTLED_TAIL_BYTES);
+    assert!(!manager.has_finished_unreported_jobs_for_session("foreground-drop"));
+}
+
 #[tokio::test]
 async fn lowercase_bash_foreground_detach_is_a_successful_running_receipt() {
     let tmp = tempdir().expect("tempdir");

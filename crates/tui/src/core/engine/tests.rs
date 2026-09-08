@@ -23424,6 +23424,7 @@ fn engine_adopts_host_owned_session_id_from_config() {
 }
 
 mod sse_turn_recovery;
+mod tool_cancellation;
 
 #[tokio::test]
 async fn restored_task_binding_is_not_missing_when_its_inventory_is_unavailable()

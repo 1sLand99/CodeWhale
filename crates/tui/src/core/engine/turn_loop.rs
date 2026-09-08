@@ -17,6 +17,7 @@ use crate::runtime_handoff::{
 };
 use crate::tool_inspection::TurnStopReason;
 use crate::tools::canonical_action::canonical_action_alias;
+use crate::tools::spec::ToolTerminalStatus;
 use crate::tools::tool_call_budget::ToolCallBudget;
 use codewhale_core::request::{PrimaryTurnRequest, prepare_primary_turn_request};
 
@@ -3715,7 +3716,9 @@ impl Engine {
                         if outcomes[index].is_some() {
                             continue;
                         }
-                        let terminal = ToolExecutionOutcome::cancelled(interrupted_tool_result());
+                        let terminal = ToolExecutionOutcome::cancelled(
+                            self.cancelled_active_tool_result(&id, origin_turn_id),
+                        );
                         let result = terminal.legacy_result();
                         let _ = self
                             .tx_event
@@ -3794,7 +3797,7 @@ impl Engine {
                             biased;
                             () = cancel_token.cancelled() => {
                                 (
-                                    ToolExecutionOutcome::cancelled(interrupted_tool_result()),
+                                    ToolExecutionOutcome::cancelled(interrupted_active_tool_result()),
                                     Vec::new(),
                                 )
                             },
@@ -3813,6 +3816,13 @@ impl Engine {
                                     Vec::new(),
                                 ),
                             },
+                        };
+                        let terminal = if terminal.status == ToolTerminalStatus::Cancelled {
+                            ToolExecutionOutcome::cancelled(
+                                self.cancelled_active_tool_result(&tool_id, origin_turn_id),
+                            )
+                        } else {
+                            terminal
                         };
                         let result = terminal.legacy_result();
 
@@ -4104,33 +4114,40 @@ impl Engine {
                     }
 
                     let started_at = Instant::now();
-                    let (mut result, cancelled_before_completion) =
-                        if let Some(result_override) = result_override {
-                            (result_override.map(RichToolResult::plain), false)
-                        } else {
-                            tokio::select! {
-                                biased;
-                                () = self.cancel_token.cancelled() => {
-                                    (Ok(RichToolResult::plain(interrupted_tool_result())), true)
-                                },
-                                result = Self::execute_tool_with_lock(
-                                    tool_exec_lock.clone(),
-                                    plan.supports_parallel,
-                                    plan.interactive,
-                                    self.tx_event.clone(),
-                                    Some(self.cancel_token.clone()),
-                                    tool_name.clone(),
-                                    tool_input.clone(),
-                                    self.session.workspace.clone(),
-                                    tool_registry,
-                                    mcp_pool.clone(),
-                                    tool_context_for_call(
-                                        context_override.or_else(|| batch_tool_context.clone()),
-                                        &tool_id,
-                                    ),
-                                ) => (result, false),
-                            }
-                        };
+                    let (mut result, cancelled_before_completion) = if let Some(result_override) =
+                        result_override
+                    {
+                        (result_override.map(RichToolResult::plain), false)
+                    } else {
+                        tokio::select! {
+                            biased;
+                            () = self.cancel_token.cancelled() => {
+                                (Ok(RichToolResult::plain(interrupted_active_tool_result())), true)
+                            },
+                            result = Self::execute_tool_with_lock(
+                                tool_exec_lock.clone(),
+                                plan.supports_parallel,
+                                plan.interactive,
+                                self.tx_event.clone(),
+                                Some(self.cancel_token.clone()),
+                                tool_name.clone(),
+                                tool_input.clone(),
+                                self.session.workspace.clone(),
+                                tool_registry,
+                                mcp_pool.clone(),
+                                tool_context_for_call(
+                                    context_override.or_else(|| batch_tool_context.clone()),
+                                    &tool_id,
+                                ),
+                            ) => (result, false),
+                        }
+                    };
+
+                    if cancelled_before_completion {
+                        result = Ok(RichToolResult::plain(
+                            self.cancelled_active_tool_result(&tool_id, origin_turn_id),
+                        ));
+                    }
 
                     if let Some(approval_stamp) = approval_stamp
                         && let Ok(tool_result) = result.as_mut()
@@ -4195,6 +4212,50 @@ impl Engine {
             }
         }
         outcomes
+    }
+
+    /// Read cancellation evidence only after the active future has been dropped,
+    /// so a foreground shell's drop guard has finished its cleanup attempt.
+    fn cancelled_active_tool_result(&self, tool_id: &str, turn_id: &str) -> ToolResult {
+        let jobs = self
+            .shell_manager
+            .lock()
+            .map(|mut manager| manager.list_jobs_for_session(&self.session.id))
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|job| {
+                job.origin_tool_call_id.as_deref() == Some(tool_id)
+                    && job.origin_turn_id.as_deref() == Some(turn_id)
+            })
+            .collect::<Vec<_>>();
+        if jobs.is_empty() {
+            return interrupted_active_tool_result();
+        }
+        let states = jobs
+            .iter()
+            .map(|job| format!("{}: {:?}", job.id, job.status))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let cleanup_unconfirmed = jobs
+            .iter()
+            .any(|job| job.status == crate::tools::shell::ShellStatus::Running);
+        let cleanup_note = if cleanup_unconfirmed {
+            " Running jobs have not been stopped; cleanup is unconfirmed."
+        } else {
+            ""
+        };
+        ToolResult::error(format!(
+            "Tool execution was interrupted after shell work started. Shell job state: {states}. \
+             Partial effects may remain; inspect the job output before retrying.{cleanup_note}"
+        ))
+        .with_metadata(json!({
+            "executed": true,
+            "cancelled": true,
+            "shell_jobs": jobs.iter().map(|job| json!({
+                "task_id": job.id,
+                "status": job.status,
+            })).collect::<Vec<_>>(),
+        }))
     }
 
     /// Commit collected tool outcomes to the session and related runtime state.
@@ -4376,7 +4437,7 @@ impl Engine {
                         content: vec![ContentBlock::ToolResult {
                             tool_use_id: outcome.id,
                             content: output_for_context,
-                            is_error: None,
+                            is_error: (!output.success).then_some(true),
                             content_blocks: (!content_blocks.is_empty()).then_some(content_blocks),
                         }],
                     })
@@ -5514,6 +5575,15 @@ fn mode_blocks_write_capable_tool(
 /// step's error counters or trip error-escalation.
 fn interrupted_tool_result() -> ToolResult {
     ToolResult::error("Tool not executed: the request was cancelled before this tool ran.")
+        .with_metadata(json!({"executed": false, "cancelled": true}))
+}
+
+fn interrupted_active_tool_result() -> ToolResult {
+    ToolResult::error(
+        "Tool execution was interrupted before a result was received. Execution and cleanup \
+         are unconfirmed; check for partial effects or running work before retrying.",
+    )
+    .with_metadata(json!({"cancelled": true, "cleanup_confirmed": false}))
 }
 
 #[cfg(test)]
@@ -5525,6 +5595,7 @@ mod cancel_batch_tests {
         let result = interrupted_tool_result();
         // Must not be marked successful (the tool never ran)...
         assert!(!result.success, "interrupted tool must not report success");
+        assert_eq!(result.metadata.as_ref().unwrap()["executed"], false);
         // ...and must clearly explain why, for the resumed transcript.
         assert!(
             result.content.to_lowercase().contains("cancel"),
