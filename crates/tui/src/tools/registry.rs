@@ -574,7 +574,19 @@ fn enforce_tool_authority(
     }
     let capabilities = tool.capabilities();
     if matches!(name, "bash" | "Bash" | "exec_shell") {
-        if tool.is_read_only_for(input) {
+        // Numeric sed inspection already has an execution-time read-only
+        // grammar. Reuse it here without promoting the broader child shell
+        // surface (including pipelines/network reads) into machine authority,
+        // or changing the parent's parallel/approval classification (#6015).
+        let bounded_sed = context.shell_policy == crate::worker_profile::ShellPolicy::ReadOnly
+            && input
+                .get("command")
+                .and_then(Value::as_str)
+                .is_some_and(|command| {
+                    command.split_whitespace().next() == Some("sed") && !command.contains('|')
+                })
+            && super::shell::agent_readonly_bash_input(input);
+        if tool.is_read_only_for(input) || bounded_sed {
             if authority.shell != crate::tools::spec::ToolShellAuthority::ReadOnly {
                 return Err(ToolError::permission_denied(format!(
                     "worker '{}' cannot run {name}: its machine-readable authority envelope does not grant read-only shell access",

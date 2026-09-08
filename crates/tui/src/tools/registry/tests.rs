@@ -986,6 +986,11 @@ async fn fleet_authority_allows_scoped_file_writes_and_rejects_outside_paths() {
 async fn fleet_authority_allows_only_classifier_proven_readonly_bash() {
     let tmp = tempdir().expect("tempdir");
     std::fs::create_dir(tmp.path().join("src")).expect("src");
+    std::fs::write(
+        tmp.path().join("src/evidence.txt"),
+        "first\nsecond\nthird\n",
+    )
+    .expect("inspection fixture");
     let registry = ToolRegistryBuilder::new()
         .with_shell_tools()
         .build(readonly_scout_context(tmp.path(), true));
@@ -997,6 +1002,7 @@ async fn fleet_authority_allows_only_classifier_proven_readonly_bash() {
         "rg needle src",
         "gh issue list --limit 10",
         "gh issue view 5287 --json title,state",
+        "sed -n '2,3p' src/evidence.txt",
     ] {
         enforce_tool_authority(
             "Bash",
@@ -1013,6 +1019,24 @@ async fn fleet_authority_allows_only_classifier_proven_readonly_bash() {
         .expect("bounded read-only Bash survives machine authority");
     assert!(result.success, "{}", result.content);
 
+    #[cfg(unix)]
+    for name in ["bash", "Bash"] {
+        let result = registry
+            .execute_full(name, json!({"command": "sed -n '2,3p' src/evidence.txt"}))
+            .await
+            .expect("numeric sed inspection survives machine authority");
+        assert!(result.success, "{}", result.content);
+        assert!(
+            result.content.contains("second\nthird"),
+            "{}",
+            result.content
+        );
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join("src/evidence.txt")).expect("fixture"),
+            "first\nsecond\nthird\n"
+        );
+    }
+
     for command in [
         "touch src/no.txt",
         "git checkout -- src/lib.rs",
@@ -1023,6 +1047,23 @@ async fn fleet_authority_allows_only_classifier_proven_readonly_bash() {
         "gh issue view 5287 > issue.txt",
         "gh issue view 5287 &",
         "bash -lc 'git status'",
+        "sed -i -n '2p' src/evidence.txt",
+        "sed -n '2p' src/evidence.txt -i",
+        "sed -n '2p' src/evidence.txt -e 'w src/no.txt'",
+        "sed -n '2p' src/evidence.txt -f src/evidence.txt",
+        "sed -n 'w src/no.txt' src/evidence.txt",
+        "sed -n 'e touch src/no.txt' src/evidence.txt",
+        "sed -n 's/first/changed/w src/no.txt' src/evidence.txt",
+        "sed -n '2p' $(touch src/no.txt)",
+        "sed -n '2p' src/evidence.txt > src/no.txt",
+        "sed -n '2p' src/evidence.txt && touch src/no.txt",
+        "sed -n '2p' src/evidence.txt | head -n 1",
+        "sed -n '2p' src/evidence.txt | gh issue list",
+        "gh issue list | sed -n '2p'",
+        "npm view codewhale",
+        "find src -name '*.rs'",
+        "find src -delete",
+        "awk '1' src/evidence.txt",
     ] {
         let error = registry
             .execute_full("Bash", json!({"action": "run", "command": command}))
@@ -1043,6 +1084,78 @@ async fn fleet_authority_allows_only_classifier_proven_readonly_bash() {
     .expect_err("mutation authority must not imply shell authority")
     .to_string();
     assert!(error.contains("does not grant read-only shell"), "{error}");
+}
+
+#[test]
+fn fleet_authority_sed_inspection_preserves_policy_boundaries() {
+    let tmp = tempdir().expect("tempdir");
+    let context = readonly_scout_context(tmp.path(), false);
+    let registry = ToolRegistryBuilder::new().with_shell_tools().build(context);
+    for name in ["bash", "Bash"] {
+        let shell = registry.get(name).expect("shell tool");
+        let input = if name == "bash" {
+            json!({"command": "sed -n '300,400p' src/lib.rs", "timeout": 10})
+        } else {
+            json!({"action": "run", "command": "sed -n '300,400p' src/lib.rs", "timeout_ms": 10_000})
+        };
+        enforce_tool_authority(name, &input, shell.as_ref(), registry.context())
+            .expect("local numeric sed inspection needs no network grant");
+        assert!(
+            !shell.is_read_only_for(&input),
+            "parent classification stays strict"
+        );
+        assert!(
+            !shell.supports_parallel_for(&input),
+            "parallel policy stays strict"
+        );
+        assert_eq!(
+            shell.approval_requirement_for(&input),
+            ApprovalRequirement::Required
+        );
+
+        let mut denied = registry.context().clone();
+        denied.disallowed_tools = vec!["Bash".into()];
+        assert!(enforce_tool_authority(name, &input, shell.as_ref(), &denied).is_err());
+        assert!(
+            enforce_tool_authority(name, &input, shell.as_ref(), &scoped_context(tmp.path()))
+                .is_err(),
+            "write authority does not grant shell authority"
+        );
+        assert!(
+            enforce_tool_authority(
+                name,
+                &input,
+                shell.as_ref(),
+                &readonly_verifier_context(tmp.path())
+            )
+            .is_err(),
+            "shell-less evidence authority stays shell-less"
+        );
+        for field in [
+            json!({"background": true}),
+            json!({"tty": true}),
+            json!({"interactive": true}),
+            json!({"stdin": ""}),
+            json!({"action": "wait"}),
+            json!({"action": "interact"}),
+            json!({"action": "cancel"}),
+            json!({"action": 3}),
+            json!({"task_id": "shell_1"}),
+            json!({"persist": true}),
+            json!({"sandbox_permissions": "danger-full-access", "justification": "test"}),
+        ] {
+            let mut rejected = input.clone();
+            rejected
+                .as_object_mut()
+                .unwrap()
+                .extend(field.as_object().unwrap().clone());
+            assert!(
+                enforce_tool_authority(name, &rejected, shell.as_ref(), registry.context())
+                    .is_err(),
+                "{name}: {rejected}"
+            );
+        }
+    }
 }
 
 #[test]
