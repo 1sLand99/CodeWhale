@@ -159,20 +159,22 @@ fn canonical_document(path: &Path) -> Result<PathBuf, String> {
 }
 
 fn read_bounded(path: &Path) -> Result<String, String> {
-    let file = std::fs::File::open(path)
+    // Validate the opened handle, not just the path checked before opening.
+    let file = crate::plugins::registry::open_existing_regular_file(path, false)?
+        .ok_or_else(|| format!("Cannot read catalog at {}: file is missing", path.display()))?;
+    let mut text = String::new();
+    let mut limited = file.take(MAX_CATALOG_BYTES + 1);
+    limited
+        .read_to_string(&mut text)
         .map_err(|e| format!("Cannot read catalog at {}: {e}", path.display()))?;
-    if file.metadata().map_err(|e| e.to_string())?.len() > MAX_CATALOG_BYTES {
+    // Check bytes actually read: the file can grow after its metadata is read.
+    if text.len() as u64 > MAX_CATALOG_BYTES {
         return Err(format!(
             "Catalog at {} exceeds the {} byte limit",
             path.display(),
             MAX_CATALOG_BYTES
         ));
     }
-    let mut text = String::new();
-    let mut limited = file.take(MAX_CATALOG_BYTES + 1);
-    limited
-        .read_to_string(&mut text)
-        .map_err(|e| format!("Cannot read catalog at {}: {e}", path.display()))?;
     Ok(text)
 }
 
@@ -206,6 +208,83 @@ mod tests {
         assert!(!valid_marketplace_name(""));
         assert!(!valid_marketplace_name("has space"));
         assert!(!valid_marketplace_name("a".repeat(65).as_str()));
+    }
+
+    #[test]
+    fn catalog_read_enforces_actual_byte_limit() {
+        use std::io::Write as _;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog.json");
+        let body = " ".repeat(MAX_CATALOG_BYTES as usize);
+        std::fs::write(&path, &body).unwrap();
+        assert_eq!(read_bounded(&path).unwrap(), body);
+        let checked = canonical_document(&path).unwrap();
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        file.write_all(b" ").unwrap();
+        assert!(read_bounded(&checked).unwrap_err().contains("byte limit"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn catalog_read_refuses_symlink_substituted_after_path_check() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog.json");
+        let other = dir.path().join("other.json");
+        std::fs::write(&path, "{}").unwrap();
+        std::fs::write(&other, "synthetic unrelated content").unwrap();
+        let checked = canonical_document(&path).unwrap();
+        std::fs::rename(&path, dir.path().join("original.json")).unwrap();
+        std::os::unix::fs::symlink(&other, &path).unwrap();
+        assert!(read_bounded(&checked).is_err());
+        assert_eq!(
+            std::fs::read_to_string(&other).unwrap(),
+            "synthetic unrelated content"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn catalog_read_refuses_fifo_without_waiting_for_a_writer() {
+        const CHILD_PATH: &str = "CODEWHALE_TEST_CATALOG_FIFO";
+        if let Some(path) = std::env::var_os(CHILD_PATH) {
+            assert!(read_bounded(Path::new(&path)).is_err());
+            return;
+        }
+        // Isolate a regressed blocking open so the test can stop it safely.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog.json");
+        std::fs::write(&path, "{}").unwrap();
+        let checked = canonical_document(&path).unwrap();
+        std::fs::rename(&path, dir.path().join("original.json")).unwrap();
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&path)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "plugins::marketplace::document::tests::catalog_read_refuses_fifo_without_waiting_for_a_writer"])
+            .env(CHILD_PATH, checked)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn().unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                assert!(status.success());
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("catalog read waited for a FIFO writer");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
     }
 
     #[cfg(unix)]

@@ -822,7 +822,8 @@ pub(crate) fn open_existing_regular_file(
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt as _;
-        options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+        // A swapped FIFO must not block before the handle can be validated.
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK);
     }
     #[cfg(windows)]
     {
