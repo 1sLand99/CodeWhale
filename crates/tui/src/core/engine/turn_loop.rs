@@ -55,7 +55,9 @@ pub(super) fn initial_stream_error_user_message(
     _locale_tag: &str,
     error: &anyhow::Error,
 ) -> String {
-    error.to_string()
+    // Like preview and child failures, keep anyhow's actionable source chain.
+    // Reuse the log/persistence scrubber before it reaches transcript state.
+    codewhale_config::persistence::redact_secrets(&format!("{error:#}"))
 }
 
 pub(super) fn preview_request_error_user_message(
@@ -1531,9 +1533,9 @@ impl Engine {
                     s
                 }
                 Err(e) => {
-                    let message = self.decorate_auth_error_message(
-                        initial_stream_error_user_message(&self.config.locale_tag, &e),
-                    );
+                    // Recovery/classification keeps its existing input. Expanding
+                    // diagnostics must not introduce another model request.
+                    let message = self.decorate_auth_error_message(e.to_string());
                     if is_context_length_error_message(&message)
                         && context_recovery_attempts < MAX_CONTEXT_RECOVERY_ATTEMPTS
                         && self
@@ -1566,13 +1568,13 @@ impl Engine {
                         let _ = self.tx_event.send(Event::status(status)).await;
                         continue;
                     }
-                    turn_error = Some(message.clone());
-                    let _ = self
-                        .tx_event
-                        .send(Event::error(crate::error_taxonomy::envelope_for_llm_error(
-                            e, message,
-                        )))
-                        .await;
+                    let display_message = self.decorate_auth_error_message(
+                        initial_stream_error_user_message(&self.config.locale_tag, &e),
+                    );
+                    let mut envelope = crate::error_taxonomy::envelope_for_llm_error(e, message);
+                    envelope.message = display_message.clone();
+                    turn_error = Some(display_message);
+                    let _ = self.tx_event.send(Event::error(envelope)).await;
                     return (TurnOutcomeStatus::Failed, turn_error);
                 }
             };

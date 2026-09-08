@@ -145,8 +145,38 @@ fn preview_request_error_preserves_non_semantic_context_chain() {
     );
     assert_eq!(
         initial_stream_error_user_message("en", &error),
-        "request preparation failed"
+        "request preparation failed: root cause"
     );
+}
+
+#[test]
+fn initial_stream_failure_preserves_sanitized_context_and_typed_category() {
+    let error = anyhow::Error::new(crate::llm_client::LlmError::InvalidRequest {
+        status: 400,
+        message: "image input is unsupported; api_key=fixture-credential-value".to_string(),
+    })
+    .context("Responses API request failed");
+    let display = initial_stream_error_user_message("en", &error);
+    assert!(
+        display.contains("Responses API request failed"),
+        "{display}"
+    );
+    assert!(display.contains("Invalid request (400)"), "{display}");
+    assert!(display.contains("image input is unsupported"), "{display}");
+    assert!(!display.contains("fixture-credential-value"), "{display}");
+    assert!(display.contains("[redacted]"), "{display}");
+
+    // The real boundary classifies the original error independently of its
+    // expanded display text. Preserve the typed terminal invalid-input result.
+    let policy_message = error.to_string();
+    let mut envelope = crate::error_taxonomy::envelope_for_llm_error(error, policy_message);
+    envelope.message = display;
+    assert_eq!(
+        envelope.category,
+        crate::error_taxonomy::ErrorCategory::InvalidInput
+    );
+    assert!(!envelope.recoverable);
+    assert_eq!(envelope.code, "llm_invalid_request");
 }
 const REPRESENTATIVE_INLINE_INSTRUCTIONS: &str = "REPRESENTATIVE_INLINE_INSTRUCTIONS";
 const REPRESENTATIVE_SKILL_DESCRIPTION: &str = "REPRESENTATIVE_SKILL_DESCRIPTION";
