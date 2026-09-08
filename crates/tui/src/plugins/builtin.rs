@@ -24,25 +24,29 @@
 //!   `NeverReviewed` and disabled like any other, because
 //!   [`super::registry`] enables only what the user's `state.json` says.
 //!   Computer use can drive the desktop; it waits to be reviewed.
-//! * **A partial tree is never discoverable.** The bundle is staged in a
-//!   sibling directory and swapped into place, and the stamp that marks it
-//!   current is written last.
+//! * **Each build keeps its own complete tree.** A unique private stage is
+//!   published once under its embedded-content digest. Discovery receives
+//!   only that snapshot root, so another binary cannot replace a live bundle.
+//!   Neither old bundles nor their path-bound trust receipts are migrated.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io;
-use std::path::{Path, PathBuf};
+use std::io::{self, Read};
+use std::path::{Component, Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
 use super::path_identity::metadata_is_link_or_reparse;
 
-/// Directory under the Codewhale home that this module owns entirely.
+/// Directory under the Codewhale home containing built-in bundles.
 /// Deliberately *not* inside `plugins/`: that root is scanned as
 /// [`super::types::PluginScope::User`], and a bundle found twice is a
 /// duplicate-root diagnostic rather than a plugin.
 const BUILTIN_DIR_NAME: &str = "builtin-plugins";
+const SNAPSHOTS_DIR_NAME: &str = "snapshots";
 
-/// File recording the digest of the bundle currently on disk.
+/// Publication marker, outside the plugin itself. It is checked along with
+/// every embedded byte and directory entry, never used as proof by itself.
 const STAMP_NAME: &str = ".stamp";
 
 const COMPUTER_USE: &str = "computer-use";
@@ -108,15 +112,15 @@ fn digest(files: &[(&str, &[u8])]) -> String {
 }
 
 /// Discovery roots holding the built-in bundles, writing them out if what is
-/// on disk is not already exactly this build's copy. An empty list is the
-/// honest answer when the bundle cannot be written: discovery then finds no
+/// on disk is absent. Existing snapshots must exactly match this build. An
+/// empty list is the honest answer when materialization fails: discovery finds no
 /// built-in plugin, rather than a broken one.
 ///
 /// Deliberately not memoized. The result is derived from `$CODEWHALE_HOME`,
 /// and caching a home-derived path process-wide would pin whichever caller ran
 /// first — which is wrong the moment the home differs between callers, as it
-/// does across tests in one process. The steady-state cost is reading one
-/// stamp file.
+/// does across tests in one process. Reuse verifies the full embedded tree;
+/// a matching stamp cannot bless changed bytes or a redirected path.
 #[must_use]
 pub fn materialized_dirs() -> Vec<PathBuf> {
     match materialize() {
@@ -143,34 +147,71 @@ pub fn materialized_dirs() -> Vec<PathBuf> {
 /// practice — the home exists from the moment Codewhale is configured or run.
 fn materialize() -> io::Result<Option<PathBuf>> {
     let home = codewhale_config::codewhale_home().map_err(io::Error::other)?;
-    if !home.is_dir() {
-        return Ok(None);
+    materialize_at_home(&home)
+}
+
+fn materialize_at_home(home: &Path) -> io::Result<Option<PathBuf>> {
+    match fs::symlink_metadata(home) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+        Ok(metadata) if !metadata.is_dir() || metadata_is_link_or_reparse(&metadata) => {
+            return Err(invalid_bundle("Codewhale home must be a real directory"));
+        }
+        Ok(_) => {}
     }
     let root = home.join(BUILTIN_DIR_NAME);
     reject_symlink(&root)?;
-    fs::create_dir_all(&root)?;
-    write_bundle(&root, COMPUTER_USE, COMPUTER_USE_FILES)?;
-    Ok(Some(root))
+    match fs::create_dir(&root) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error),
+    }
+    reject_symlink(&root)?;
+    // Keep the old mutable root intact for older binaries. New snapshots live
+    // in an owner-only namespace that those binaries neither scan nor replace.
+    let snapshots = root.join(SNAPSHOTS_DIR_NAME);
+    reject_symlink(&snapshots)?;
+    super::registry::ensure_private_plugin_state_directory(&snapshots).map_err(io::Error::other)?;
+    write_bundle(&snapshots, COMPUTER_USE, COMPUTER_USE_FILES).map(Some)
 }
 
-/// Write one bundle into `root/<name>` when what is there is not already
-/// exactly this bundle. Staged then swapped, so `root/<name>` is either the
-/// previous bundle or this one — never half of either.
-fn write_bundle(root: &Path, name: &str, files: &[(&str, &[u8])]) -> io::Result<()> {
-    let destination = root.join(name);
-    let stamp_path = destination.join(STAMP_NAME);
+/// Return a discovery root containing exactly this build's bundle. Publication
+/// never replaces an existing entry, including an empty or damaged directory.
+/// Concurrent publishers of identical bytes converge after verifying the winner;
+/// different builds retain different source paths and therefore trust identities.
+fn write_bundle(root: &Path, name: &str, files: &[(&str, &[u8])]) -> io::Result<PathBuf> {
+    reject_symlink(root)?;
+    if !super::agent_plugin::is_standard_plugin_name(name) || files.is_empty() {
+        return Err(invalid_bundle(
+            "invalid embedded plugin name or empty bundle",
+        ));
+    }
     let want = digest(files);
-    if fs::read_to_string(&stamp_path).is_ok_and(|found| found.trim() == want) {
-        return Ok(());
-    }
-    reject_symlink(&destination)?;
-
-    let staging = root.join(format!(".staging-{name}"));
-    if staging.exists() {
-        fs::remove_dir_all(&staging)?;
-    }
+    let destination = root.join(format!("{name}-{want}"));
+    let mut expected = BTreeMap::from([(PathBuf::from(STAMP_NAME), want.as_bytes())]);
     for (relative, contents) in files {
-        let path = staging.join(relative);
+        let path = Path::new(relative);
+        if path.as_os_str().is_empty()
+            || path
+                .components()
+                .any(|part| !matches!(part, Component::Normal(_)))
+            || expected
+                .insert(Path::new(name).join(path), *contents)
+                .is_some()
+        {
+            return Err(invalid_bundle("invalid or duplicate embedded bundle path"));
+        }
+    }
+    if snapshot_exists(&destination)? {
+        verify_snapshot(&destination, &expected)?;
+        return Ok(destination);
+    }
+
+    let staging = tempfile::Builder::new()
+        .prefix(&format!(".staging-{name}-"))
+        .tempdir_in(root)?;
+    for (relative, contents) in files {
+        let path = staging.path().join(name).join(relative);
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -181,15 +222,163 @@ fn write_bundle(root: &Path, name: &str, files: &[(&str, &[u8])]) -> io::Result<
             fs::set_permissions(&path, fs::Permissions::from_mode(0o700))?;
         }
     }
-    // Last, so an interrupted write leaves a bundle that fails the stamp check
-    // and is rewritten on the next run.
-    fs::write(staging.join(STAMP_NAME), &want)?;
-
-    if destination.exists() {
-        fs::remove_dir_all(&destination)?;
+    fs::write(staging.path().join(STAMP_NAME), &want)?;
+    verify_snapshot(staging.path(), &expected)?;
+    match publish_snapshot(staging.path(), &destination) {
+        Ok(()) => {
+            // Only this operation's private temporary directory is ever cleaned
+            // up. Its old path no longer belongs to us after publication.
+            let _ = staging.keep();
+        }
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            // A competing publisher won. Do not remove its directory or assume
+            // it is complete merely because its name/stamp matches our digest.
+        }
+        Err(error) => return Err(error),
     }
-    fs::rename(&staging, &destination)?;
+    verify_snapshot(&destination, &expected)?;
+    Ok(destination)
+}
+
+fn snapshot_exists(path: &Path) -> io::Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+fn invalid_bundle(message: &str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, message)
+}
+
+/// Verify only the bounded embedded inventory. An unexpected file, directory,
+/// link, executable bit, missing byte or forged stamp rejects the whole snapshot.
+fn verify_snapshot(root: &Path, files: &BTreeMap<PathBuf, &[u8]>) -> io::Result<()> {
+    let mut directories = BTreeSet::from([PathBuf::new()]);
+    for relative in files.keys() {
+        directories.extend(relative.ancestors().skip(1).map(Path::to_path_buf));
+    }
+    for relative in &directories {
+        // Joining the empty root marker adds a trailing separator on Unix;
+        // lstat("link/") follows that link before inspecting its target.
+        let directory = if relative.as_os_str().is_empty() {
+            root.to_path_buf()
+        } else {
+            root.join(relative)
+        };
+        let metadata = fs::symlink_metadata(&directory)?;
+        if !metadata.is_dir() || metadata_is_link_or_reparse(&metadata) {
+            return Err(invalid_bundle(
+                "built-in snapshot directory is not a real directory",
+            ));
+        }
+        for entry in fs::read_dir(&directory)? {
+            let entry = entry?;
+            let child = relative.join(entry.file_name());
+            if !files.contains_key(&child) && !directories.contains(&child) {
+                return Err(invalid_bundle(
+                    "built-in snapshot contains unexpected content",
+                ));
+            }
+        }
+    }
+    for (relative, contents) in files {
+        let path = root.join(relative);
+        let mut file = super::registry::open_existing_regular_file(&path, false)
+            .map_err(io::Error::other)?
+            .ok_or_else(|| invalid_bundle("built-in snapshot file is missing"))?;
+        let metadata = file.metadata()?;
+        if metadata.len() != contents.len() as u64 {
+            return Err(invalid_bundle("built-in snapshot content changed"));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let executable = relative.ends_with("bin/darwin/accessibility");
+            if (metadata.permissions().mode() & 0o111 != 0) != executable {
+                return Err(invalid_bundle(
+                    "built-in snapshot executable permissions changed",
+                ));
+            }
+        }
+        let mut buffer = vec![0; 64 * 1024];
+        for chunk in contents.chunks(buffer.len()) {
+            file.read_exact(&mut buffer[..chunk.len()])?;
+            if &buffer[..chunk.len()] != chunk {
+                return Err(invalid_bundle("built-in snapshot content changed"));
+            }
+        }
+        if file.read(&mut buffer[..1])? != 0 {
+            return Err(invalid_bundle(
+                "built-in snapshot content changed during verification",
+            ));
+        }
+    }
     Ok(())
+}
+
+/// Atomic no-replace directory publication. A check followed by ordinary Unix
+/// rename is insufficient: rename is allowed to replace an existing empty dir.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn publish_snapshot(source: &Path, destination: &Path) -> io::Result<()> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let source = CString::new(source.as_os_str().as_bytes())?;
+    let destination = CString::new(destination.as_os_str().as_bytes())?;
+    // SAFETY: the nul-terminated paths remain alive for the syscall. Exclusive
+    // rename never follows/replaces the destination entry, even if it is a link.
+    #[cfg(target_os = "macos")]
+    let result =
+        unsafe { libc::renamex_np(source.as_ptr(), destination.as_ptr(), libc::RENAME_EXCL) };
+    #[cfg(target_os = "linux")]
+    let result = unsafe {
+        libc::renameat2(
+            libc::AT_FDCWD,
+            source.as_ptr(),
+            libc::AT_FDCWD,
+            destination.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(windows)]
+fn publish_snapshot(source: &Path, destination: &Path) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt as _;
+    use windows::Win32::Storage::FileSystem::{MOVEFILE_WRITE_THROUGH, MoveFileExW};
+    use windows::core::PCWSTR;
+
+    let source: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
+    let destination: Vec<u16> = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+    // SAFETY: both paths are nul-terminated and live through the call. Omitting
+    // MOVEFILE_REPLACE_EXISTING preserves every existing destination entry.
+    unsafe {
+        MoveFileExW(
+            PCWSTR(source.as_ptr()),
+            PCWSTR(destination.as_ptr()),
+            MOVEFILE_WRITE_THROUGH,
+        )
+    }
+    .map_err(|_| io::Error::last_os_error())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+fn publish_snapshot(_source: &Path, _destination: &Path) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "atomic built-in snapshot publication is unsupported on this platform",
+    ))
 }
 
 /// Refuse to write through a symbolic link or reparse point, the same rule
@@ -203,9 +392,15 @@ fn reject_symlink(path: &Path) -> io::Result<()> {
                 path.display()
             ),
         )),
-        _ => Ok(()),
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
     }
 }
+
+#[cfg(test)]
+#[path = "builtin_tests.rs"]
+mod snapshot_tests;
 
 #[cfg(test)]
 mod tests {
@@ -329,31 +524,98 @@ mod tests {
     }
 
     #[test]
-    fn a_stale_or_tampered_bundle_is_rewritten() {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().to_path_buf();
-        write_bundle(&root, COMPUTER_USE, COMPUTER_USE_FILES).unwrap();
+    fn build_snapshots_preserve_live_authority_and_require_independent_review() {
+        use crate::plugins::discovery::{DiscoveryConfig, discover_with_config};
+        use crate::plugins::registry::verify_plugin_authority;
 
-        let server = root.join(COMPUTER_USE).join("mcp/server.mjs");
-        let original = fs::read_to_string(&server).unwrap();
-        fs::write(&server, "throw new Error('tampered')").unwrap();
-        // An edit alone is not noticed — the stamp is the contract, and
-        // rewriting on every start would fight a user debugging in place.
-        write_bundle(&root, COMPUTER_USE, COMPUTER_USE_FILES).unwrap();
-        assert_eq!(
-            fs::read_to_string(&server).unwrap(),
-            "throw new Error('tampered')"
-        );
+        let temp = tempfile::tempdir().unwrap();
+        let cache = temp.path().join("cache");
+        let workspace = temp.path().join("workspace");
+        fs::create_dir(&cache).unwrap();
+        fs::create_dir(&workspace).unwrap();
+        let first: &[(&str, &[u8])] = &[
+            ("plugin.json", br#"{"$schema":"https://agent-plugins.org/schemas/plugin.json","name":"fixture","version":"1.0.0"}"#),
+            ("body.txt", b"first bundle"),
+        ];
+        let second: &[(&str, &[u8])] = &[
+            ("plugin.json", br#"{"$schema":"https://agent-plugins.org/schemas/plugin.json","name":"fixture","version":"1.0.0"}"#),
+            ("body.txt", b"other bundle"),
+        ];
+        let mut config = DiscoveryConfig {
+            workspace: workspace.clone(),
+            user_plugins_dir: temp.path().join("plugins"),
+            workspace_plugins_dir: workspace.join(".codewhale/plugins"),
+            builtin_plugin_dirs: vec![cache.clone()],
+            state_path: temp.path().join("plugins/state.json"),
+        };
+        // An older binary's source and path-bound receipt survive the layout
+        // transition. Neither is an authority for the new physical source.
+        let legacy = cache.join("fixture");
+        fs::create_dir(&legacy).unwrap();
+        for (path, contents) in first {
+            fs::write(legacy.join(path), contents).unwrap();
+        }
+        let mut old = discover_with_config(&config);
+        old.trust("fixture").unwrap();
+        old.enable("fixture").unwrap();
+        let old_id = old.get("fixture").unwrap().id.clone();
+        let old_authority = old.authority_for("fixture").unwrap();
+        let old_state = fs::read(&config.state_path).unwrap();
 
-        // A stamp that does not match this build's bundle does force a rewrite,
-        // which is what an upgraded binary sees.
-        fs::write(root.join(COMPUTER_USE).join(STAMP_NAME), "stale").unwrap();
-        write_bundle(&root, COMPUTER_USE, COMPUTER_USE_FILES).unwrap();
-        assert_eq!(fs::read_to_string(&server).unwrap(), original);
+        let first_root = write_bundle(&cache, "fixture", first).unwrap();
+        config.builtin_plugin_dirs = vec![first_root.clone()];
+        let mut current = discover_with_config(&config);
+        let plugin = current.get("fixture").unwrap();
+        assert_eq!(plugin.scope, PluginScope::Builtin);
+        assert_ne!(plugin.id, old_id);
+        assert_eq!(plugin.trust_status, PluginTrustStatus::NeverReviewed);
+        assert!(!plugin.enabled);
+        assert_eq!(fs::read(&config.state_path).unwrap(), old_state);
+        verify_plugin_authority(&old_authority).unwrap();
+
+        current.trust("fixture").unwrap();
+        current.enable("fixture").unwrap();
+        let first_id = current.get("fixture").unwrap().id.clone();
+        let first_authority = current.authority_for("fixture").unwrap();
+        let first_catalog = current.live_catalog_stamp();
+        let state_before_materialization = fs::read(&config.state_path).unwrap();
+        let second_root = write_bundle(&cache, "fixture", second).unwrap();
+        assert_ne!(first_root, second_root);
+        assert_eq!(write_bundle(&cache, "fixture", first).unwrap(), first_root);
         assert_eq!(
-            fs::read_to_string(root.join(COMPUTER_USE).join(STAMP_NAME)).unwrap(),
-            digest(COMPUTER_USE_FILES)
+            fs::read(&config.state_path).unwrap(),
+            state_before_materialization
         );
+        assert_eq!(current.live_catalog_stamp(), first_catalog);
+        verify_plugin_authority(&first_authority).unwrap();
+        verify_plugin_authority(&old_authority).unwrap();
+
+        // Rediscovery uses the process's frozen root even after another build
+        // publishes next to it; same embedded bytes retain identity and trust.
+        let reloaded = current.rediscover_for_workspace(&workspace);
+        let plugin = reloaded.get("fixture").unwrap();
+        assert_eq!(plugin.id, first_id);
+        assert!(plugin.active());
+        config.builtin_plugin_dirs = vec![second_root];
+        let mut next = discover_with_config(&config);
+        let plugin = next.get("fixture").unwrap();
+        assert_ne!(plugin.id, first_id);
+        assert_eq!(plugin.trust_status, PluginTrustStatus::NeverReviewed);
+        assert!(!plugin.enabled);
+        next.trust("fixture").unwrap();
+        next.enable("fixture").unwrap();
+        let next_authority = next.authority_for("fixture").unwrap();
+        verify_plugin_authority(&first_authority).unwrap();
+        verify_plugin_authority(&next_authority).unwrap();
+
+        // A matching publisher stamp cannot launder a changed reviewed source.
+        fs::write(first_root.join("fixture/body.txt"), b"other bundle").unwrap();
+        assert!(write_bundle(&cache, "fixture", first).is_err());
+        assert!(verify_plugin_authority(&first_authority).is_err());
+        verify_plugin_authority(&next_authority).unwrap();
+        verify_plugin_authority(&old_authority).unwrap();
+        next.revoke_trust("fixture").unwrap();
+        assert!(verify_plugin_authority(&next_authority).is_err());
     }
 
     #[test]

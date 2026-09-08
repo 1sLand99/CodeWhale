@@ -35,6 +35,22 @@ prevents a repository from shadowing an explicitly installed user bundle.
 Symbolic-link roots, manifests, component paths, and nested component files
 fail closed.
 
+The embedded Computer Use files are materialized under
+`$CODEWHALE_HOME/builtin-plugins/snapshots/computer-use-<bundle-digest>/computer-use`.
+Each process captures only its own embedded digest's discovery root. Concurrent
+builds therefore keep separate, complete source trees; publishers never delete
+or replace an existing snapshot. Reuse checks every embedded byte, directory
+entry, file type, executable flag, and the stamp. A partial or altered snapshot
+is rejected without repair. Interrupted private staging directories are not
+discovered or reused.
+
+The existing path-bound plugin identity and trust rules apply: identical embedded
+bytes at the same home reuse the same identity; changed bytes require a fresh
+review and enablement. Moving from the older mutable
+`builtin-plugins/computer-use` layout also requires one fresh review. Legacy
+bundles and receipts remain intact for running older binaries; no trust is
+migrated. Diagnostics do not create a missing Codewhale home.
+
 New user and workspace bundles are always untrusted and disabled. Discovery is
 read-only and does not inspect any other application's extension or credential
 directories: ambient roots such as `.claude/plugins` or `.cursor/plugins` are
