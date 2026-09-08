@@ -30,9 +30,24 @@ notes, and relevant issue/PR comments.
 <details open>
 <summary><strong>v0.9.13 — paste integrity, dispatch safety, and the Computer Use bundle</strong></summary>
 
-Contributors and reporters credited in the [0.9.13 changelog](../CHANGELOG.md):
-merged PRs from [gaord](https://github.com/gaord) and [goransh-walia](https://github.com/goransh-walia);
-reports and reproductions from [nsfoxer](https://github.com/nsfoxer), [Nefelibata1024](https://github.com/Nefelibata1024), [Gabriel-Degret](https://github.com/Gabriel-Degret), and [Lujc0523](https://github.com/Lujc0523).
+**Merged or adapted contributions**
+
+- **[gaord](https://github.com/gaord)** — contributed Fleet schema inspection, role precedence and worker deliverable receipts, and linked the community VS Code frontend ([#5944](https://github.com/Hmbown/Codewhale/pull/5944), [#5945](https://github.com/Hmbown/Codewhale/pull/5945), [#5946](https://github.com/Hmbown/Codewhale/pull/5946), [#5992](https://github.com/Hmbown/Codewhale/pull/5992)).
+- **[goransh-walia](https://github.com/goransh-walia)** — contributed the propose-only commit-planning rework ([#5870](https://github.com/Hmbown/Codewhale/pull/5870)).
+- **[7jrxt42BxFZo4iAnN4CX](https://github.com/7jrxt42BxFZo4iAnN4CX)** — documented turn budgets and goal configuration, and reported gaps in command discovery, Fleet navigation, human waits, state hooks, history and provider routing ([#5996](https://github.com/Hmbown/Codewhale/pull/5996), [#5952](https://github.com/Hmbown/Codewhale/issues/5952), [#5954](https://github.com/Hmbown/Codewhale/issues/5954), [#6003](https://github.com/Hmbown/Codewhale/issues/6003), [#6004](https://github.com/Hmbown/Codewhale/issues/6004), [#6006](https://github.com/Hmbown/Codewhale/issues/6006), [#6007](https://github.com/Hmbown/Codewhale/issues/6007)).
+- **[SparkofSpike](https://github.com/SparkofSpike)** — contributed two-stage consent for opting out of model-bound credential redaction ([#5982](https://github.com/Hmbown/Codewhale/pull/5982)).
+- **[aboimpinto](https://github.com/aboimpinto)** — moved session lifecycle and session-control commands onto shared command contracts ([#5902](https://github.com/Hmbown/Codewhale/pull/5902), [#5951](https://github.com/Hmbown/Codewhale/pull/5951)).
+- **[EvanProgramming](https://github.com/EvanProgramming)** — reported Windows input and CRLF-write defects, and contributed CRLF preservation and an injectable Windows input runner ([#5908](https://github.com/Hmbown/Codewhale/issues/5908), [#5909](https://github.com/Hmbown/Codewhale/issues/5909), [#5910](https://github.com/Hmbown/Codewhale/pull/5910), [#5911](https://github.com/Hmbown/Codewhale/pull/5911), [#5912](https://github.com/Hmbown/Codewhale/pull/5912)).
+- **[wuisabel-gif](https://github.com/wuisabel-gif)** — added custom-theme discovery, preview and selection in the theme picker ([#5907](https://github.com/Hmbown/Codewhale/pull/5907)).
+- **[zhuowp](https://github.com/zhuowp)** — matched model-visible shell guidance to the interpreter selected for execution ([#5900](https://github.com/Hmbown/Codewhale/pull/5900)).
+
+**Reports and reproductions**
+
+- **[nsfoxer](https://github.com/nsfoxer)** — reported the multiline-paste regression and incomplete provider model lists ([#5981](https://github.com/Hmbown/Codewhale/issues/5981), [#6009](https://github.com/Hmbown/Codewhale/issues/6009)).
+- **[Nefelibata1024](https://github.com/Nefelibata1024)** — confirmed the multiline-paste regression's impact ([#5981](https://github.com/Hmbown/Codewhale/issues/5981)).
+- **[Gabriel-Degret](https://github.com/Gabriel-Degret)** — reported the loss of the allow_insecure_http provider setting ([#5991](https://github.com/Hmbown/Codewhale/issues/5991)).
+- **[Lujc0523](https://github.com/Lujc0523)** — reported the ACP initialize schema violation affecting strict IDE clients ([#5969](https://github.com/Hmbown/Codewhale/issues/5969)).
+- **[mo-vic](https://github.com/mo-vic)** — proposed storing evicted context on disk so it can be retrieved later ([#6008](https://github.com/Hmbown/Codewhale/issues/6008)).
 
 </details>
 
@@ -1030,6 +1045,17 @@ verified against the GitHub user API) — every one shipped real code:_
 - **[rockeverm3m](https://github.com/rockeverm3m)** — community ACP adapter reference in the docs
 - **[hxy91819](https://github.com/hxy91819)** — stable MCP tool ordering for prefix-cache stability (#1319)
 - **[heloanc](https://github.com/heloanc)** — Home/End keys moving the cursor in the input box (#1246)
+
+**Earlier reports, proposals and reviewed overlap**
+
+- **[dajiaohuang](https://github.com/dajiaohuang)** — independently diagnosed the local-model output-budget problem and submitted a reviewed patch; equivalent behavior had already shipped ([#5883](https://github.com/Hmbown/Codewhale/pull/5883)).
+- **[Edouard-Legoupil](https://github.com/Edouard-Legoupil)** — proposed user-controlled skill evolution from repeated work and corrections ([#5860](https://github.com/Hmbown/Codewhale/issues/5860)).
+- **[freedomlovesfrank](https://github.com/freedomlovesfrank)** — proposed an optional Rust allocator alongside the existing default ([#5872](https://github.com/Hmbown/Codewhale/issues/5872)).
+- **[zyxrealhero](https://github.com/zyxrealhero)** — reported malformed tool-call history after a Runtime restart, with a reproduction and payload analysis ([#5823](https://github.com/Hmbown/Codewhale/issues/5823)).
+- **[cmdcorp6534](https://github.com/cmdcorp6534)** — reported Chinese IME pre-edit and composer behavior in Windows Terminal, including input shown behind modal dialogs ([#2323](https://github.com/Hmbown/Codewhale/issues/2323)).
+- **[ivysrono](https://github.com/ivysrono)** — proposed switching to a configured backup profile after provider rate-limit errors ([#855](https://github.com/Hmbown/Codewhale/issues/855)).
+- **[JoeKerF](https://github.com/JoeKerF)** — proposed desktop project and task workflows with managed runtime startup, recovery, and updates ([#4986](https://github.com/Hmbown/Codewhale/issues/4986)).
+- **[ShikiSuen](https://github.com/ShikiSuen)** — provided a detailed reproduction of SwiftPM test failures inside the macOS sandbox ([#2617](https://github.com/Hmbown/Codewhale/issues/2617)).
 
 </details>
 

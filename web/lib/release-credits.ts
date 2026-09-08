@@ -22,15 +22,22 @@
 export const RELEASE_CONTRIBUTORS: string[] = [
   "@gaord",
   "@goransh-walia",
+  "@7jrxt42BxFZo4iAnN4CX",
+  "@SparkofSpike",
+  "@aboimpinto",
+  "@EvanProgramming",
+  "@wuisabel-gif",
+  "@zhuowp",
 ];
 
 /**
  * Contributors who helped with reports, reproductions, and verification.
- * Each name points at a landed change in the 0.9.12 changelog.
+ * Credit covers the 0.9.13 reports recorded in docs/CONTRIBUTORS.md.
  */
 export const RELEASE_HELPERS: string[] = [
   "@nsfoxer",
   "@Nefelibata1024",
   "@Gabriel-Degret",
   "@Lujc0523",
+  "@mo-vic",
 ];
