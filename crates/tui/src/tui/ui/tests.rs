@@ -15558,6 +15558,189 @@ async fn startup_prompt_waits_for_onboarding_then_dispatches() {
 }
 
 #[tokio::test]
+async fn redaction_gate_preserves_startup_and_external_input_without_dispatch() {
+    let mut app = create_test_app();
+    app.onboarding = OnboardingState::None;
+    app.redaction_gate = true;
+    app.input = "review the local fixture".to_string();
+    app.cursor_position = app.input.chars().count();
+    app.auto_submit_initial_input = true;
+    let config = Config::default();
+    let mut engine = mock_engine_handle();
+    for confirming in [false, true] {
+        app.redaction_gate_confirming = confirming;
+        submit_initial_input_if_ready(&mut app, &config, &engine.handle)
+            .await
+            .unwrap();
+        assert!(app.auto_submit_initial_input);
+        assert_eq!(app.input, "review the local fixture");
+        assert!(app.api_messages.is_empty());
+        assert!(engine.rx_op.try_recv().is_err());
+        assert!(
+            super::dispatch::prepare_user_dispatch(
+                &mut app,
+                &config,
+                QueuedMessage::new("external callback".to_string(), None)
+            )
+            .is_err()
+        );
+    }
+    // Choosing keep masking on releases precisely the original pending input.
+    app.redaction_gate = false;
+    submit_initial_input_if_ready(&mut app, &config, &engine.handle)
+        .await
+        .unwrap();
+    submit_initial_input_if_ready(&mut app, &config, &engine.handle)
+        .await
+        .unwrap();
+    assert!(!app.auto_submit_initial_input);
+    assert!(app.input.is_empty());
+    match engine.rx_op.try_recv().unwrap() {
+        Op::SendMessage { content, .. } => assert!(content.contains("review the local fixture")),
+        other => panic!("unexpected operation: {other:?}"),
+    }
+    assert!(engine.rx_op.try_recv().is_err());
+
+    let mut external = create_test_app();
+    external.redaction_gate = true;
+    dispatch_user_message(
+        &mut external,
+        &config,
+        &engine.handle,
+        QueuedMessage::new("callback while confirming".to_string(), None),
+    )
+    .await
+    .unwrap();
+    assert_eq!(external.input, "callback while confirming");
+    assert!(external.api_messages.is_empty());
+    assert!(engine.rx_op.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn redaction_confirmation_restores_history_before_first_local_provider_request() {
+    use crate::test_support::{EnvVarGuard, lock_test_env};
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path},
+    };
+    let _lock = lock_test_env();
+    let temp = tempfile::tempdir().unwrap();
+    let _home = EnvVarGuard::set("CODEWHALE_HOME", temp.path());
+    let _proxy = EnvVarGuard::set("NO_PROXY", "*");
+    let server = MockServer::builder()
+        .body_print_limit(wiremock::BodyPrintLimit::Limited(0))
+        .start()
+        .await;
+    Mock::given(method("POST")).and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200)
+            .insert_header("content-type", "text/event-stream")
+            .set_body_string(concat!(
+                "data: {\"id\":\"local-consent\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Done.\"},\"finish_reason\":null}]}\n\n",
+                "data: {\"id\":\"local-consent\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+                "data: [DONE]\n\n"
+            )))
+        .expect(1).mount(&server).await;
+    let config_path = temp.path().join("selected.toml");
+    std::fs::write(&config_path, format!(
+        "provider = \"deepseek\"\napi_key = \"synthetic-local-consent-key\"\nbase_url = \"{}\"\n[redaction]\nmodel_bound = \"disabled\"\n",
+        server.uri()
+    )).unwrap();
+    let config = Config::load(Some(config_path), None).unwrap();
+    let mut app = crate::test_support::test_app_with_options(TuiOptions {
+        start_in_agent_mode: true,
+        ..crate::test_support::test_tui_options(temp.path())
+    });
+    app.auto_model = false;
+    app.onboarding = OnboardingState::None;
+    app.redaction_gate = true;
+    app.current_session_id = Some("local-consent-resumed-session".to_string());
+    app.api_messages = vec![
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: "Remember the fixture color is amber.".to_string(),
+                cache_control: None,
+            }],
+        },
+        Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::Text {
+                text: "I will remember amber.".to_string(),
+                cache_control: None,
+            }],
+        },
+    ];
+    let expected_history = serde_json::to_value(&app.api_messages).unwrap();
+    app.input = "What color did I give you?".to_string();
+    app.cursor_position = app.input.chars().count();
+    app.auto_submit_initial_input = true;
+    let engine = spawn_tui_engine_with_session(&mut app, &config)
+        .await
+        .unwrap();
+    for confirming in [false, true] {
+        app.redaction_gate_confirming = confirming;
+        submit_initial_input_if_ready(&mut app, &config, &engine)
+            .await
+            .unwrap();
+        // A snapshot is a FIFO barrier after any accidentally queued operation.
+        let snapshot = engine.get_session_snapshot().await.unwrap();
+        assert_eq!(
+            serde_json::to_value(snapshot.messages).unwrap(),
+            expected_history
+        );
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+    crate::tui::redaction_gate::record_confirmation(&config).unwrap();
+    engine.send(Op::Shutdown).await.unwrap();
+    let replacement = spawn_tui_engine_with_session(&mut app, &config)
+        .await
+        .unwrap();
+    let snapshot = replacement.get_session_snapshot().await.unwrap();
+    assert_eq!(
+        serde_json::to_value(snapshot.messages).unwrap(),
+        expected_history
+    );
+    assert_eq!(
+        app.current_session_id.as_deref(),
+        Some("local-consent-resumed-session")
+    );
+    assert!(!crate::tui::redaction_gate::confirmation_required(&config));
+    app.redaction_gate = false;
+    app.redaction_gate_confirming = false;
+    submit_initial_input_if_ready(&mut app, &config, &replacement)
+        .await
+        .unwrap();
+    submit_initial_input_if_ready(&mut app, &config, &replacement)
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if !server.received_requests().await.unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("one request to the local provider after consent");
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 1);
+    let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+    let wire = body["messages"].to_string();
+    for expected in [
+        "Remember the fixture color is amber.",
+        "I will remember amber.",
+        "What color did I give you?",
+    ] {
+        assert!(
+            wire.contains(expected),
+            "resumed conversation missing from local request"
+        );
+    }
+    replacement.send(Op::Shutdown).await.unwrap();
+}
+
+#[tokio::test]
 async fn steer_user_message_records_prompt_for_cancel_restore() {
     let mut app = create_test_app();
     let mut engine = crate::core::engine::mock_engine_handle();

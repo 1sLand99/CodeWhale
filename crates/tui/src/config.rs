@@ -3408,6 +3408,11 @@ pub struct Config {
     #[serde(default)]
     pub redaction: Option<codewhale_config::redaction::RedactionToml>,
 
+    /// Local provenance of the config actually loaded, including --config and
+    /// CODEWHALE_CONFIG_PATH. Consent must not borrow another config's receipt.
+    #[serde(skip)]
+    pub loaded_config_path: Option<PathBuf>,
+
     /// Sibling `permissions.toml` ask-rules compiled for runtime checks.
     ///
     /// This is deliberately not part of `config.toml`; it is loaded from the
@@ -5017,6 +5022,7 @@ impl Config {
         apply_requirements(&mut config)?;
         normalize_model_config(&mut config);
         config.exec_policy_engine = load_sibling_exec_policy_engine(path.as_deref())?;
+        config.loaded_config_path = path.as_deref().map(std::path::absolute).transpose()?;
         config.validate()?;
         config.warn_on_misplaced_root_base_url();
         Ok(config)
@@ -10837,6 +10843,7 @@ fn merge_config(base: Config, override_cfg: Config) -> Config {
         http_headers: override_cfg.http_headers.or(base.http_headers),
         default_text_model: override_cfg.default_text_model.or(base.default_text_model),
         redaction: override_cfg.redaction.or(base.redaction),
+        loaded_config_path: override_cfg.loaded_config_path.or(base.loaded_config_path),
         auth_mode: override_cfg.auth_mode.or(base.auth_mode),
         reasoning_effort: override_cfg.reasoning_effort.or(base.reasoning_effort),
         reasoning_effort_inferred_from_legacy_alias: override_cfg

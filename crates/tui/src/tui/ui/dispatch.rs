@@ -178,7 +178,7 @@ pub(crate) async fn submit_initial_input_if_ready(
         return Ok(());
     }
 
-    if app.onboarding != OnboardingState::None {
+    if app.onboarding != OnboardingState::None || app.redaction_gate {
         if app.status_message.is_none() && !app.input.trim().is_empty() {
             app.status_message = Some(INITIAL_PROMPT_DEFERRED_STATUS.to_string());
         }
@@ -416,6 +416,10 @@ pub(crate) async fn dispatch_user_message_with_recovery(
     mut message: QueuedMessage,
     recovery: DispatchRecovery,
 ) -> Result<()> {
+    if app.redaction_gate {
+        recover_unstarted_external_message(app, message, recovery, INITIAL_PROMPT_DEFERRED_STATUS);
+        return Ok(());
+    }
     let stop_words = config.stop_words();
     if is_stop_word(&message.display, &stop_words).is_some() {
         engine_handle.cancel();
@@ -541,6 +545,7 @@ pub(crate) fn prepare_user_dispatch(
     config: &Config,
     message: QueuedMessage,
 ) -> Result<UserDispatchPrepare> {
+    anyhow::ensure!(!app.redaction_gate, "{INITIAL_PROMPT_DEFERRED_STATUS}");
     let _ = app.maybe_nudge_for_planning_prompt(&message.display);
     let _ = app.maybe_nudge_plugin_for_prompt(&message.display);
 

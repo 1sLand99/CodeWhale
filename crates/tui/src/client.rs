@@ -1288,9 +1288,11 @@ impl DeepSeekClient {
             Arc::new(configured_model_bound_secret_values(config, &api_key));
         // The opt-out is effective only after an explicit startup confirmation;
         // every unconfirmed or absent request stays on the safe default.
-        let model_bound_masking =
-            !codewhale_config::redaction::effective_masking(config.model_bound_redaction())
-                .is_disabled();
+        let model_bound_masking = !codewhale_config::redaction::effective_masking(
+            config.model_bound_redaction(),
+            config.loaded_config_path.as_deref(),
+        )
+        .is_disabled();
         validate_base_url_security(&base_url, config.allow_insecure_http())?;
         let retry = config.retry_policy();
         let stream_idle_timeout = Duration::from_secs(config.stream_chunk_timeout_secs());
@@ -7866,10 +7868,13 @@ mod tests {
             "[redaction]\nmodel_bound = \"disabled\"\n",
         )
         .expect("write opt-out request");
-        codewhale_config::redaction::record_model_bound_disabled_confirmation()
-            .expect("record opt-out confirmation");
+        codewhale_config::redaction::record_model_bound_disabled_confirmation(
+            &codewhale_home.join("config.toml"),
+        )
+        .expect("record opt-out confirmation");
 
         let client = DeepSeekClient::new(&Config {
+            loaded_config_path: Some(codewhale_home.join("config.toml")),
             provider: Some("zai".to_string()),
             api_key: Some(CONFIG_SECRET_SENTINELS[0].to_string()),
             providers: Some(ProvidersConfig {
@@ -7897,6 +7902,57 @@ mod tests {
             tool_output,
             "a confirmed opt-out must keep tool output byte-exact"
         );
+    }
+
+    #[test]
+    fn redaction_confirmation_follows_explicit_and_environment_config_loading() {
+        use crate::test_support::{EnvVarGuard, lock_test_env};
+        let _lock = lock_test_env();
+        let temp = tempfile::tempdir().unwrap();
+        let _home = EnvVarGuard::set("CODEWHALE_HOME", temp.path());
+        let default = temp.path().join("config.toml");
+        let custom = temp.path().join("selected.toml");
+        let body = format!(
+            "provider = \"zai\"\n[providers.zai]\napi_key = \"{}\"\n[redaction]\nmodel_bound = \"disabled\"\n",
+            CONFIG_SECRET_SENTINELS[6]
+        );
+        std::fs::write(&default, &body).unwrap();
+        std::fs::write(&custom, &body).unwrap();
+        codewhale_config::redaction::record_model_bound_disabled_confirmation(&default).unwrap();
+        let _config_path = EnvVarGuard::set("CODEWHALE_CONFIG_PATH", &custom);
+        let _legacy_config = EnvVarGuard::remove("DEEPSEEK_CONFIG_PATH");
+        let tool_output = format!("api_key = \"{}\"", CONFIG_SECRET_SENTINELS[6]);
+        for explicit in [Some(custom.clone()), None] {
+            let config = Config::load(explicit, None).unwrap();
+            assert_eq!(
+                config
+                    .loaded_config_path
+                    .as_ref()
+                    .unwrap()
+                    .canonicalize()
+                    .unwrap(),
+                custom.canonicalize().unwrap()
+            );
+            assert!(crate::tui::redaction_gate::confirmation_required(&config));
+            let client = DeepSeekClient::new(&config).unwrap();
+            let prepared =
+                client.prepare_model_bound_request(request_with_tool_result(tool_output.clone()));
+            assert!(!tool_result_content(&prepared).contains(CONFIG_SECRET_SENTINELS[6]));
+        }
+        let config = Config::load(None, None).unwrap();
+        crate::tui::redaction_gate::record_confirmation(&config).unwrap();
+        for explicit in [Some(custom.clone()), None] {
+            let config = Config::load(explicit, None).unwrap();
+            assert!(!crate::tui::redaction_gate::confirmation_required(&config));
+            let client = DeepSeekClient::new(&config).unwrap();
+            let prepared =
+                client.prepare_model_bound_request(request_with_tool_result(tool_output.clone()));
+            assert_eq!(tool_result_content(&prepared), tool_output);
+        }
+        // Local provenance is never accepted from serialized configuration.
+        let decoded: Config =
+            toml::from_str("loaded_config_path = \"/untrusted/config.toml\"\n").unwrap();
+        assert!(decoded.loaded_config_path.is_none());
     }
 
     /// Without a confirmation receipt the same config request stays masked:
