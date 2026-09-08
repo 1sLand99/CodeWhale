@@ -1723,7 +1723,7 @@ impl App {
             );
             return None;
         }
-        self.input_history.push(input.clone());
+        crate::composer_history::push_history_entry(&mut self.input_history, &input);
         if self.max_input_history == 0 {
             self.input_history.clear();
         } else if self.input_history.len() > self.max_input_history {

@@ -2266,11 +2266,12 @@ fn submit_input_recalls_slash_commands_and_persists_them_for_the_next_session() 
     let _state = EnvVarGuard::set("CODEWHALE_HOME", home.path().join(".codewhale"));
     let mut app = App::new(test_options(false), &Config::default());
     app.input_history.clear();
-    for input in ["/theme", "/compact"] {
+    for input in ["/theme", "/theme", "/theme", "/compact", "/compact"] {
         app.input = input.to_string();
         app.cursor_position = input.chars().count();
         assert_eq!(app.submit_input().as_deref(), Some(input));
     }
+    assert_eq!(app.input_history, ["/theme", "/compact"]);
     app.history_up();
     assert_eq!(app.input, "/compact");
     app.history_up();
