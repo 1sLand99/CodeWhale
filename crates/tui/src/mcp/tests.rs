@@ -157,31 +157,37 @@ fn reviewed_plugin_redirects_are_exact_normalized_origin_only() {
 #[test]
 fn reviewed_plugin_remote_proxy_policy_never_reads_ambient_environment() {
     let reads = std::cell::Cell::new(0_u32);
-    let builder = configure_mcp_proxy(crate::tls::reqwest_client_builder(), true, |_| {
-        reads.set(reads.get() + 1);
-        Ok("http://127.0.0.1:9999".to_string())
-    });
+    let proxy = configured_mcp_proxy(
+        &reqwest::Url::parse("https://example.com/mcp").unwrap(),
+        true,
+        |_| {
+            reads.set(reads.get() + 1);
+            Ok("http://127.0.0.1:9999".to_string())
+        },
+    );
 
     assert_eq!(
         reads.get(),
         0,
         "reviewed remotes must not read proxy values"
     );
-    builder
-        .build()
-        .expect("explicit no-proxy client must remain buildable");
+    assert!(proxy.unwrap().is_none());
 }
 
 #[test]
 fn user_authored_mcp_proxy_policy_keeps_environment_support() {
     let requested = std::cell::RefCell::new(Vec::new());
-    let builder = configure_mcp_proxy(crate::tls::reqwest_client_builder(), false, |name| {
-        requested.borrow_mut().push(name.to_string());
-        match name {
-            "HTTPS_PROXY" => Ok("http://127.0.0.1:8080".to_string()),
-            _ => Err(std::env::VarError::NotPresent),
-        }
-    });
+    let proxy = configured_mcp_proxy(
+        &reqwest::Url::parse("https://example.com/mcp").unwrap(),
+        false,
+        |name| {
+            requested.borrow_mut().push(name.to_string());
+            match name {
+                "HTTPS_PROXY" => Ok("http://127.0.0.1:8080".to_string()),
+                _ => Err(std::env::VarError::NotPresent),
+            }
+        },
+    );
 
     assert_eq!(
         requested.into_inner(),
@@ -191,9 +197,7 @@ fn user_authored_mcp_proxy_policy_keeps_environment_support() {
             "no_proxy".to_string(),
         ]
     );
-    builder
-        .build()
-        .expect("user-authored proxy client must remain buildable");
+    assert!(proxy.unwrap().is_some());
 }
 
 #[test]
@@ -329,6 +333,8 @@ fn mcp_server_config_omits_headers_when_empty() {
         oauth: None,
         oauth_resource: None,
         reviewed_plugin: None,
+        runtime_added: false,
+        allow_private_network: false,
     };
     let serialized = serde_json::to_string(&cfg).unwrap();
     assert!(
@@ -779,11 +785,10 @@ fn default_mcp_http_post_accepts_json_and_event_stream() {
 
 #[test]
 fn streamable_http_transport_stores_headers() {
-    let client = test_http_client();
     let mut headers = HashMap::new();
     headers.insert("Authorization".to_string(), "Bearer xyz".to_string());
     let transport = StreamableHttpTransport::new(
-        client,
+        test_mcp_http_client("https://example.invalid/mcp"),
         "https://example.invalid/mcp".to_string(),
         McpHttpAuth {
             headers: headers.clone(),
@@ -2041,10 +2046,15 @@ async fn reviewed_plugin_oauth_is_disabled_without_network_or_token_mutation() {
     );
 
     assert_eq!(
-        oauth::auth_status_for_server("plugin-oauth", &server).await,
+        oauth::auth_status_for_server("plugin-oauth", &server, None).await,
         oauth::McpAuthStatus::Unsupported
     );
-    assert!(oauth::oauth_login_support(&server).await.unwrap().is_none());
+    assert!(
+        oauth::oauth_login_support(&server, None)
+            .await
+            .unwrap()
+            .is_none()
+    );
     assert!(
         oauth::McpOAuthRuntime::from_server_config(
             "plugin-oauth",
@@ -2056,7 +2066,7 @@ async fn reviewed_plugin_oauth_is_disabled_without_network_or_token_mutation() {
         .is_none()
     );
     let login_error =
-        oauth::perform_oauth_login_for_server("plugin-oauth", &server, None, None, None)
+        oauth::perform_oauth_login_for_server("plugin-oauth", &server, None, None, None, None)
             .await
             .expect_err("plugin OAuth login must be disabled")
             .to_string();
@@ -2597,6 +2607,8 @@ fn test_server_effective_timeouts() {
         oauth: None,
         oauth_resource: None,
         reviewed_plugin: None,
+        runtime_added: false,
+        allow_private_network: false,
     };
 
     assert_eq!(server_with_override.effective_connect_timeout(&global), 20);
@@ -2738,6 +2750,8 @@ fn test_server_config() -> McpServerConfig {
         oauth: None,
         oauth_resource: None,
         reviewed_plugin: None,
+        runtime_added: false,
+        allow_private_network: false,
     }
 }
 
@@ -3283,6 +3297,8 @@ fn hash_mcp_config_is_stable_and_change_sensitive() {
             oauth: None,
             oauth_resource: None,
             reviewed_plugin: None,
+            runtime_added: false,
+            allow_private_network: false,
         },
     );
     assert_ne!(
@@ -4475,6 +4491,8 @@ async fn mcp_connection_supports_streamable_http_event_stream_responses() {
         oauth: None,
         oauth_resource: None,
         reviewed_plugin: None,
+        runtime_added: false,
+        allow_private_network: false,
     };
 
     let conn = McpConnection::connect_with_policy(
@@ -4789,8 +4807,8 @@ async fn sse_connect_waits_for_endpoint_before_first_send() {
         }
     });
 
-    let client = test_http_client();
     let url = format!("http://{addr}/sse");
+    let client = test_mcp_http_client(&url);
     let mut transport = SseTransport::connect(
         client,
         url,
@@ -4880,8 +4898,8 @@ async fn sse_connect_accepts_crlf_endpoint_events() {
         }
     });
 
-    let client = test_http_client();
     let url = format!("http://{addr}/sse");
+    let client = test_mcp_http_client(&url);
     let mut transport = SseTransport::connect(
         client,
         url,
@@ -4980,8 +4998,8 @@ async fn sse_transport_applies_custom_headers_to_get_and_post() {
         }
     });
 
-    let client = test_http_client();
     let url = format!("http://{addr}/sse");
+    let client = test_mcp_http_client(&url);
     let mut headers = HashMap::new();
     headers.insert("X-Custom-Auth".to_string(), "my-test-token".to_string());
     let mut transport = SseTransport::connect(
@@ -5072,8 +5090,8 @@ async fn sse_post_error_includes_response_body_excerpt() {
         }
     });
 
-    let client = test_http_client();
     let url = format!("http://{addr}/sse");
+    let client = test_mcp_http_client(&url);
     let mut transport = SseTransport::connect(
         client,
         url,
@@ -5414,6 +5432,8 @@ async fn streamable_http_stale_session_reconnects_and_retries_tool_call() {
             oauth: None,
             oauth_resource: None,
             reviewed_plugin: None,
+            runtime_added: false,
+            allow_private_network: false,
         },
     );
     let mut pool = McpPool::new(cfg);
@@ -5471,7 +5491,7 @@ async fn legacy_sse_session_expiry_is_marked_stale() {
     let (_sender, receiver) = mpsc::channel(1);
     let sse_task = tokio::spawn(async {});
     let mut transport = SseTransport {
-        client: test_http_client(),
+        client: test_mcp_http_client(&format!("http://{addr}/sse")),
         base_url: format!("http://{addr}/sse"),
         auth: McpHttpAuth::default(),
         endpoint_url: Some(format!("http://{addr}/messages")),
@@ -5690,6 +5710,8 @@ async fn legacy_sse_closed_stream_reconnects_and_retries_tool_call() {
             oauth: None,
             oauth_resource: None,
             reviewed_plugin: None,
+            runtime_added: false,
+            allow_private_network: false,
         },
     );
     let mut pool = McpPool::new(cfg);
@@ -5713,7 +5735,7 @@ async fn legacy_sse_closed_stream_reconnects_and_retries_tool_call() {
 #[test]
 fn session_id_starts_none() {
     let transport = StreamableHttpTransport::new(
-        test_http_client(),
+        test_mcp_http_client("https://example.invalid/mcp"),
         "https://example.invalid/mcp".to_string(),
         McpHttpAuth::default(),
     );
@@ -5762,9 +5784,9 @@ async fn session_id_captured_from_post_response_and_replayed() {
             .unwrap();
     });
 
-    let client = test_http_client();
     let url = format!("http://{addr}/mcp");
-    let mut transport = StreamableHttpTransport::new(client, url, McpHttpAuth::default());
+    let mut transport =
+        StreamableHttpTransport::new(test_mcp_http_client(&url), url, McpHttpAuth::default());
 
     // First send: server returns Mcp-Session-Id.
     transport
@@ -5802,7 +5824,14 @@ async fn custom_headers_applied_to_get_preflight() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
+    // Lock order is env first, then loopback — the OAuth pool tests take
+    // them in that order, and inverting them deadlocks the suite.
+    let _env = crate::test_support::lock_test_env();
     let _lock = lock_mcp_loopback_tests().await;
+    // The fixture client honors an operator-configured proxy; pin loopback
+    // out of any ambient proxy so a concurrent proxy-configuring test can
+    // never route this GET away from the fixture server.
+    let _no_proxy = crate::test_support::EnvVarGuard::set("NO_PROXY", "*");
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     // The test signals success by writing to this flag — the GET handler
@@ -5827,13 +5856,12 @@ async fn custom_headers_applied_to_get_preflight() {
             .unwrap();
     });
 
-    let client = test_http_client();
     let url = format!("http://{addr}/mcp");
     let mut headers = HashMap::new();
     headers.insert("X-Custom-Auth".to_string(), "my-test-token".to_string());
 
     let mut transport = HttpTransport::new(
-        client,
+        test_mcp_http_client(&url),
         url,
         McpHttpAuth {
             headers,
@@ -6003,6 +6031,10 @@ fn mcp_recovery_kind_names_real_login_and_reload_commands() {
     );
     assert_eq!(
         McpRecoveryKind::Diagnose.slash_command("github"),
+        "/mcp validate github"
+    );
+    assert_eq!(
+        McpRecoveryKind::Diagnose.slash_command("name with spaces"),
         "/mcp validate"
     );
     assert!(
@@ -6525,9 +6557,10 @@ async fn selfserve_auth_flow_persists_tokens_and_swaps_real_tools_back() {
 
     // A declined browser flow must surface a truthful error the model can
     // relay, and leave the server in needs-auth.
-    let login = oauth::begin_oauth_login_for_server_tool("wikiserver", &config, None, None, None)
-        .await
-        .unwrap();
+    let login =
+        oauth::begin_oauth_login_for_server_tool("wikiserver", &config, None, None, None, None)
+            .await
+            .unwrap();
     let auth_url = reqwest::Url::parse(login.authorization_url()).unwrap();
     let redirect_uri = auth_url
         .query_pairs()
@@ -6555,9 +6588,10 @@ async fn selfserve_auth_flow_persists_tokens_and_swaps_real_tools_back() {
     );
 
     // The approved flow: drive the loopback callback in-test.
-    let login = oauth::begin_oauth_login_for_server_tool("wikiserver", &config, None, None, None)
-        .await
-        .unwrap();
+    let login =
+        oauth::begin_oauth_login_for_server_tool("wikiserver", &config, None, None, None, None)
+            .await
+            .unwrap();
     let auth_url = reqwest::Url::parse(login.authorization_url()).unwrap();
     let state = auth_url
         .query_pairs()
@@ -7152,4 +7186,338 @@ fn mcp_display_target_shows_command_names_only() {
         mcp_display_target("sse", "https://example.invalid/sse?token=abc"),
         "https://example.invalid/sse?token=abc"
     );
+}
+
+fn test_mcp_http_client(url: &str) -> super::http_client::McpHttpClient {
+    super::http_client::McpHttpClient::new(
+        url,
+        false,
+        false,
+        false,
+        None,
+        Duration::from_secs(10),
+        Duration::from_secs(120),
+    )
+    .expect("MCP fixture client")
+}
+
+fn ceiling_test_connection(name: &str, sent: Arc<Mutex<Vec<serde_json::Value>>>) -> McpConnection {
+    let mut connection = test_connection(Box::new(ScriptedValueTransport {
+        sent,
+        responses: VecDeque::from([json_frame(serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "result": {"ok": true}
+        }))]),
+    }));
+    connection.name = name.to_string();
+    connection.tools = ["read", "delete"]
+        .into_iter()
+        .map(|name| McpTool {
+            name: name.to_string(),
+            description: None,
+            input_schema: serde_json::json!({}),
+        })
+        .collect();
+    connection.resources = vec![McpResource {
+        name: "one".to_string(),
+        uri: "memory://one".to_string(),
+        description: None,
+        mime_type: None,
+    }];
+    connection.resource_templates = vec![McpResourceTemplate {
+        name: "items".to_string(),
+        uri_template: "memory://{id}".to_string(),
+        description: None,
+        mime_type: None,
+    }];
+    connection.prompts = vec![McpPrompt {
+        name: "review".to_string(),
+        description: None,
+        arguments: vec![],
+    }];
+    connection
+}
+
+#[tokio::test]
+async fn mcp_ceiling_denied_server_is_absent_across_cached_boot_meta_auth_and_runtime_paths() {
+    let sent = Arc::new(Mutex::new(Vec::new()));
+    let connection = ceiling_test_connection("private_a", Arc::clone(&sent));
+    let mut config = connection.config.clone();
+    config.required = true;
+    config.url = Some("https://mcp.example.com".to_string());
+    config.command = None;
+    config.scopes = vec!["read".to_string()];
+    let mut pool = McpPool::new(McpConfig {
+        servers: HashMap::from([("private_a".to_string(), config.clone())]),
+        timeouts: McpTimeouts::default(),
+    })
+    .with_disallowed_tools(vec!["MCP_PRIVATE_A_*".to_string()]);
+    // A previously connected or auth-failed entry must not become reachable.
+    pool.connections.insert("private_a".to_string(), connection);
+    pool.needs_auth_servers.insert("private_a".to_string());
+    assert!(pool.all_tools().is_empty());
+    assert!(pool.all_resources().is_empty());
+    assert!(pool.all_resource_templates().is_empty());
+    assert!(pool.all_prompts().is_empty());
+    assert!(pool.resolved_tool_servers().is_empty());
+    assert!(pool.to_api_tools().is_empty());
+    assert!(pool.model_tool_names().is_empty());
+    assert!(pool.enabled_server_names().is_empty());
+    assert!(pool.server_names().is_empty());
+    assert!(pool.connected_servers().is_empty());
+    assert!(!pool.server_needs_auth("private_a"));
+    assert!(
+        pool.authenticate_tool_target("mcp_private_a_authenticate")
+            .is_none()
+    );
+    let (pending, errors) = pool.collect_pending_connects();
+    assert!(pending.is_empty() && errors.is_empty());
+    assert!(
+        pool.connect_all().await.is_empty(),
+        "a denied required server is absent"
+    );
+    assert!(
+        pool.manager_snapshot(Path::new("/unused"), false, &HashMap::new())
+            .servers
+            .is_empty()
+    );
+    for method in [
+        "list_mcp_resources",
+        "list_mcp_resource_templates",
+        "mcp_read_resource",
+        "read_mcp_resource",
+        "mcp_get_prompt",
+    ] {
+        let error = pool
+            .call_tool(
+                method,
+                serde_json::json!({"server": "private_a", "uri": "memory://one", "name": "review"}),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Failed to find MCP server: private_a",
+            "{method}"
+        );
+    }
+    for method in [
+        "mcp_private_a_read",
+        "mcp_private_a_delete",
+        "mcp_private_a_authenticate",
+    ] {
+        assert_eq!(
+            pool.call_tool(method, serde_json::json!({}))
+                .await
+                .unwrap_err()
+                .to_string(),
+            format!("Unknown MCP tool name: {method}")
+        );
+    }
+    assert!(pool.begin_authenticate_tool("private_a").await.is_err());
+    assert!(pool.retry_connection("private_a").await.is_err());
+    assert!(
+        pool.add_runtime_server_config("private_a".to_string(), config.clone())
+            .is_err()
+    );
+    let denied = pool
+        .get_or_connect("private_a")
+        .await
+        .err()
+        .unwrap()
+        .to_string();
+    let mut absent = McpPool::new(McpConfig::default());
+    let missing = absent
+        .get_or_connect("private_a")
+        .await
+        .err()
+        .unwrap()
+        .to_string();
+    assert_eq!(denied, missing);
+    assert!(sent.lock().unwrap().is_empty(), "no MCP request is sent");
+    let stale = ceiling_test_connection("private_a", Arc::clone(&sent));
+    assert!(
+        pool.store_ready_connection("private_a".to_string(), stale)
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn mcp_ceiling_individual_tool_denial_preserves_server_resources_and_sibling_tool() {
+    let sent = Arc::new(Mutex::new(Vec::new()));
+    let connection = ceiling_test_connection("private_a", Arc::clone(&sent));
+    let mut pool = McpPool::new(McpConfig::default())
+        .with_disallowed_tools(vec!["MCP_PRIVATE_A_DELETE".to_string()]);
+    pool.connections.insert("private_a".to_string(), connection);
+    assert_eq!(
+        pool.all_tools()
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["mcp_private_a_read"]
+    );
+    assert_eq!(pool.all_resources().len(), 1);
+    assert_eq!(pool.all_prompts().len(), 1);
+    assert!(
+        pool.call_tool("mcp_private_a_delete", serde_json::json!({}))
+            .await
+            .is_err()
+    );
+    assert!(sent.lock().unwrap().is_empty());
+    let resources = pool
+        .call_tool(
+            "list_mcp_resources",
+            serde_json::json!({"server": "private_a"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resources["resources"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        pool.call_tool("mcp_private_a_read", serde_json::json!({}))
+            .await
+            .unwrap(),
+        serde_json::json!({"ok": true})
+    );
+    assert_eq!(sent.lock().unwrap().len(), 1);
+    assert_eq!(sent.lock().unwrap()[0]["params"]["name"], "read");
+}
+
+#[tokio::test]
+async fn mcp_ceiling_child_scoped_meta_calls_do_not_widen_or_mutate_sibling_policy() {
+    let sent = Arc::new(Mutex::new(Vec::new()));
+    let private = ceiling_test_connection("private_a", Arc::clone(&sent));
+    let public = ceiling_test_connection("public", Arc::clone(&sent));
+    let mut pool = McpPool::new(McpConfig {
+        servers: HashMap::from([
+            ("private_a".to_string(), private.config.clone()),
+            ("public".to_string(), public.config.clone()),
+        ]),
+        timeouts: McpTimeouts::default(),
+    });
+    pool.connections.insert("private_a".to_string(), private);
+    pool.connections.insert("public".to_string(), public);
+    let child_rules = vec!["mcp_private_a_*".to_string()];
+    for (method, field) in [
+        ("list_mcp_resources", "resources"),
+        ("list_mcp_resource_templates", "templates"),
+    ] {
+        let child = pool
+            .call_tool_with_disallowed(method, serde_json::json!({}), &child_rules)
+            .await
+            .unwrap();
+        assert_eq!(child[field].as_array().unwrap().len(), 1);
+        assert_eq!(child[field][0]["server"], "public");
+        let sibling = pool
+            .call_tool_with_disallowed(method, serde_json::json!({}), &[])
+            .await
+            .unwrap();
+        assert_eq!(sibling[field].as_array().unwrap().len(), 2);
+    }
+    assert!(
+        pool.call_tool_with_disallowed(
+            "read_mcp_resource",
+            serde_json::json!({"server":"private_a","uri":"memory://one"}),
+            &child_rules
+        )
+        .await
+        .is_err()
+    );
+    assert!(
+        pool.call_tool_with_disallowed("mcp_private_a_read", serde_json::json!({}), &child_rules)
+            .await
+            .is_err()
+    );
+    assert!(sent.lock().unwrap().is_empty());
+    assert_eq!(
+        pool.call_tool_with_disallowed("mcp_private_a_read", serde_json::json!({}), &[])
+            .await
+            .unwrap(),
+        serde_json::json!({"ok":true})
+    );
+}
+
+#[tokio::test]
+async fn mcp_ceiling_survives_source_reload_and_blocks_new_runtime_names() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("mcp.json");
+    fs::write(&source, r#"{"mcpServers": {}}"#).unwrap();
+    let mut pool = McpPool::from_config_path(&source)
+        .unwrap()
+        .with_disallowed_tools(vec!["mcp_private*".to_string()]);
+    fs::write(&source, r#"{"mcpServers":{"private":{"command":"must-not-execute-private","required":true},"private_a":{"command":"must-not-execute-private"}}}"#).unwrap();
+    assert!(pool.reload_and_connect_all().await.unwrap().is_empty());
+    assert!(pool.enabled_server_names().is_empty());
+    assert!(pool.get_or_connect("private_a").await.is_err());
+    assert!(
+        pool.add_runtime_server_config("private_new".to_string(), test_server_config())
+            .is_err()
+    );
+    assert!(!pool.dynamic_servers.read().contains_key("private_new"));
+    pool.add_runtime_server_config("public".to_string(), test_server_config())
+        .unwrap();
+    assert_eq!(pool.enabled_server_names(), vec!["public"]);
+}
+
+#[test]
+fn mcp_ceiling_namespace_rules_keep_individual_denials_distinct_and_aliases_consistent() {
+    assert!(McpPool::server_denied_by(&["MCP_A_B_*".to_string()], "a_b"));
+    assert!(!McpPool::server_denied_by(&["MCP_A_B_*".to_string()], "a"));
+    assert!(!McpPool::server_denied_by(
+        &["mcp_a_delete".to_string()],
+        "a"
+    ));
+    assert!(!McpPool::server_denied_by(
+        &["mcp_a_delete*".to_string()],
+        "a"
+    ));
+    assert!(McpPool::server_denied_by(
+        &["mcp*".to_string()],
+        "any_server"
+    ));
+    for name in ["mcp_read_resource", "read_mcp_resource"] {
+        assert!(
+            McpPool::authorize_call(
+                &["mcp_a_*".to_string()],
+                name,
+                &serde_json::json!({"server":"a"})
+            )
+            .is_err()
+        );
+    }
+}
+
+#[tokio::test]
+async fn mcp_ceiling_preserves_ordinary_tool_result_tools_field() {
+    let sent = Arc::new(Mutex::new(Vec::new()));
+    let expected = serde_json::json!({"tools":[{"name":"server-owned-data"}], "ok":true});
+    let mut connection = ceiling_test_connection("public", Arc::clone(&sent));
+    connection.transport = Box::new(ScriptedValueTransport {
+        sent,
+        responses: VecDeque::from([json_frame(
+            serde_json::json!({"jsonrpc":"2.0","id":1,"result":expected}),
+        )]),
+    });
+    let mut pool = McpPool::new(McpConfig::default());
+    pool.connections.insert("public".to_string(), connection);
+    assert_eq!(
+        pool.call_tool_with_disallowed(
+            "mcp_public_read",
+            serde_json::json!({}),
+            &["mcp_private_*".to_string()]
+        )
+        .await
+        .unwrap(),
+        expected
+    );
+    for alias in ["read_mcp_resource", "mcp_read_resource"] {
+        for denied in ["read_mcp_resource", "mcp_read_resource"] {
+            assert!(
+                McpPool::authorize_call(
+                    &[denied.to_string()],
+                    alias,
+                    &serde_json::json!({"server":"public"})
+                )
+                .is_err()
+            );
+        }
+    }
 }

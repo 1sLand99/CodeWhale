@@ -19,6 +19,7 @@
 //! Configuration is done via `[[hooks.hooks]]` in config.toml. See
 //! `docs/HOOKS.md` for the per-event contract.
 
+pub(crate) mod authority;
 mod config;
 mod executor;
 

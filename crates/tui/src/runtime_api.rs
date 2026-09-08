@@ -1008,6 +1008,11 @@ fn validate_runtime_listener_security(options: &RuntimeApiOptions) -> Result<()>
             "Codewhale mobile is loopback-only without TLS or a verified overlay; bind to 127.0.0.1 or ::1"
         );
     }
+    if options.insecure_no_auth && !is_loopback_bind_host(&options.host) {
+        bail!(
+            "Unauthenticated Runtime access is loopback-only; remove --insecure or bind to 127.0.0.1 or ::1"
+        );
+    }
     Ok(())
 }
 
@@ -3872,6 +3877,8 @@ fn mcp_server_config_from_write_request(
         oauth: None,
         oauth_resource: req.oauth_resource.flatten(),
         reviewed_plugin: None,
+        runtime_added: false,
+        allow_private_network: false,
     }
 }
 
@@ -4843,6 +4850,10 @@ async fn upsert_thread_goal(
         tokens_used: 0,
         time_used_seconds: 0,
         continuation_count: 0,
+        last_gap_fingerprint: None,
+        repeated_gap_count: 0,
+        last_gap_pass: None,
+        pause_reason: None,
         created_at: now,
         updated_at: now,
     };
@@ -4921,17 +4932,19 @@ async fn complete_thread_goal(
             message: format!("goal for thread '{id}' is already complete"),
         });
     }
-    let now = chrono::Utc::now().timestamp();
-    let updated = codewhale_protocol::ThreadGoal {
-        status: codewhale_protocol::ThreadGoalStatus::Complete,
-        updated_at: now,
-        ..goal
-    };
-    state
+    let updated = state
         .runtime_threads
-        .save_goal(updated.clone())
+        .transition_goal_status(
+            &id,
+            &goal.goal_id,
+            codewhale_protocol::ThreadGoalStatus::Complete,
+        )
         .await
-        .map_err(|e| ApiError::internal(e.to_string()))?;
+        .map_err(|e| ApiError::internal(e.to_string()))?
+        .ok_or_else(|| ApiError {
+            status: StatusCode::CONFLICT,
+            message: format!("goal for thread '{id}' changed concurrently; retry"),
+        })?;
     let _ = state
         .runtime_threads
         .emit_goal_updated_event(&id, updated.clone())
@@ -4968,17 +4981,19 @@ async fn block_thread_goal(
             ),
         });
     }
-    let now = chrono::Utc::now().timestamp();
-    let updated = codewhale_protocol::ThreadGoal {
-        status: codewhale_protocol::ThreadGoalStatus::Blocked,
-        updated_at: now,
-        ..goal
-    };
-    state
+    let updated = state
         .runtime_threads
-        .save_goal(updated.clone())
+        .transition_goal_status(
+            &id,
+            &goal.goal_id,
+            codewhale_protocol::ThreadGoalStatus::Blocked,
+        )
         .await
-        .map_err(|e| ApiError::internal(e.to_string()))?;
+        .map_err(|e| ApiError::internal(e.to_string()))?
+        .ok_or_else(|| ApiError {
+            status: StatusCode::CONFLICT,
+            message: format!("goal for thread '{id}' changed concurrently; retry"),
+        })?;
     let _ = state
         .runtime_threads
         .emit_goal_updated_event(&id, updated.clone())

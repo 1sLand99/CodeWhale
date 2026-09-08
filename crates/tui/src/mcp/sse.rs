@@ -3,6 +3,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 
 use super::headers::{apply_safe_custom_headers, with_default_mcp_http_headers};
+use super::http_client::McpHttpClient;
 use super::wire::{
     MAX_SSE_FRAME_BYTES, find_sse_event_separator_bytes, is_mcp_stale_session_body, sse_field_value,
 };
@@ -13,7 +14,7 @@ use super::{
 const SSE_INBOUND_CHANNEL_CAPACITY: usize = 4;
 
 pub(super) struct SseTransport {
-    pub(super) client: reqwest::Client,
+    pub(super) client: McpHttpClient,
     pub(super) base_url: String,
     pub(super) auth: McpHttpAuth,
     pub(super) endpoint_url: Option<String>,
@@ -29,7 +30,7 @@ pub(super) enum SseInbound {
 
 impl SseTransport {
     pub(super) async fn connect(
-        client: reqwest::Client,
+        client: McpHttpClient,
         url: String,
         auth: McpHttpAuth,
         cancel_token: tokio_util::sync::CancellationToken,
@@ -88,7 +89,7 @@ impl SseTransport {
     }
 
     async fn run_sse_loop(
-        client: reqwest::Client,
+        client: McpHttpClient,
         url: String,
         auth: McpHttpAuth,
         tx: tokio::sync::mpsc::Sender<SseInbound>,
@@ -110,7 +111,7 @@ impl SseTransport {
             _ = cancel_token.cancelled() => {
                 anyhow::bail!("MCP SSE connect cancelled before the request completed")
             }
-            response = request.send() => response.with_context(|| {
+            response = client.send(request) => response.with_context(|| {
                 format!(
                     "MCP SSE connect failed (transport=http url={})",
                     mask_url_secrets(&url),
@@ -277,14 +278,12 @@ impl McpTransport for SseTransport {
             .context("SSE endpoint not yet discovered")?
             .clone();
         let headers = self.auth.resolved_headers().await?;
-        let response = apply_safe_custom_headers(
+        let request = apply_safe_custom_headers(
             with_default_mcp_http_headers(self.client.post(&endpoint), true),
             &headers,
         )
-        .body(msg)
-        .send()
-        .await
-        .with_context(|| {
+        .body(msg);
+        let response = self.client.send(request).await.with_context(|| {
             format!(
                 "MCP SSE POST send failed (transport=sse endpoint={})",
                 mask_url_secrets(&endpoint)
@@ -342,7 +341,7 @@ impl Drop for SseTransport {
 mod endpoint_tests {
     use std::time::Duration;
 
-    use super::{McpHttpAuth, SseInbound, SseTransport};
+    use super::{McpHttpAuth, McpHttpClient, SseInbound, SseTransport};
 
     #[test]
     fn resolve_endpoint_accepts_relative_and_same_origin() {
@@ -385,7 +384,16 @@ mod endpoint_tests {
             .await
             .unwrap();
         let mut transport = SseTransport {
-            client: reqwest::Client::new(),
+            client: McpHttpClient::new(
+                "https://example.invalid/sse",
+                false,
+                false,
+                false,
+                None,
+                Duration::from_secs(10),
+                Duration::from_secs(120),
+            )
+            .unwrap(),
             base_url: "https://example.invalid/sse".to_string(),
             auth: McpHttpAuth::default(),
             endpoint_url: None,

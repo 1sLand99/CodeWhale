@@ -246,7 +246,9 @@ impl ToolSpec for WebSearchTool {
     }
 
     fn approval_requirement(&self) -> ApprovalRequirement {
-        ApprovalRequirement::Auto
+        // Read-only HTTP can still disclose local data through a URL or query.
+        // Host allowlisting controls reachability, not approval of this payload.
+        ApprovalRequirement::Required
     }
 
     fn supports_parallel(&self) -> bool {

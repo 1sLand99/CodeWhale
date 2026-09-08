@@ -5,11 +5,12 @@ use reqwest::StatusCode;
 use reqwest::header::CONTENT_TYPE;
 
 use super::headers::{apply_safe_custom_headers, with_default_mcp_http_headers};
+use super::http_client::McpHttpClient;
 use super::wire::{MAX_MCP_RESPONSE_BYTES, parse_sse_message_data};
 use super::{ERROR_BODY_PREVIEW_BYTES, McpHttpAuth, bounded_body_excerpt, mask_url_secrets};
 
 pub(super) struct StreamableHttpTransport {
-    pub(super) client: reqwest::Client,
+    pub(super) client: McpHttpClient,
     pub(super) url: String,
     /// Request-time auth and custom header resolver for outbound POSTs.
     pub(super) auth: McpHttpAuth,
@@ -30,7 +31,7 @@ pub(super) enum StreamableSendError {
 }
 
 impl StreamableHttpTransport {
-    pub(super) fn new(client: reqwest::Client, url: String, auth: McpHttpAuth) -> Self {
+    pub(super) fn new(client: McpHttpClient, url: String, auth: McpHttpAuth) -> Self {
         Self {
             client,
             url,
@@ -67,11 +68,11 @@ impl StreamableHttpTransport {
             if let Some(ref sid) = self.session_id {
                 request = request.header("Mcp-Session-Id", sid.as_str());
             }
-            let response = request
-                .body(msg.clone())
-                .send()
+            let response = self
+                .client
+                .send(request.body(msg.clone()))
                 .await
-                .map_err(|err| StreamableSendError::Other(err.into()))?;
+                .map_err(StreamableSendError::Other)?;
 
             let status = response.status();
 

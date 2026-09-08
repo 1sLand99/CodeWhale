@@ -141,7 +141,9 @@ impl ToolSpec for FetchUrlTool {
     }
 
     fn approval_requirement(&self) -> ApprovalRequirement {
-        ApprovalRequirement::Auto
+        // Read-only HTTP can still disclose local data through a URL or query.
+        // Host allowlisting controls reachability, not approval of this payload.
+        ApprovalRequirement::Required
     }
 
     async fn execute(&self, input: Value, context: &ToolContext) -> Result<ToolResult, ToolError> {

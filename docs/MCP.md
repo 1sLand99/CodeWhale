@@ -171,6 +171,40 @@ Headless surfaces are the exception: the `ConfigReload` app-server request does
 **not** refresh MCP connections, so a headless runtime still needs a restart
 after MCP config changes.
 
+## Remote network authority
+
+Direct HTTP/SSE requests to public hostnames validate every DNS answer and pin
+connections to a public address. This also applies to configured servers,
+redirects, and OAuth HTTP requests. The configured network allow/deny policy
+applies to login and token refresh as well as MCP tool requests.
+
+A configured `localhost` name or private IP literal explicitly permits that
+local endpoint. For a private DNS name, opt in on the server configuration:
+
+```json
+{
+  "mcpServers": {
+    "internal": {
+      "url": "https://mcp.internal.example/mcp",
+      "allow_private_network": true
+    }
+  }
+}
+```
+
+`allow_private_network` defaults to false. This exception applies only to the
+configured origin (scheme, host, and port); it does not authorize a different
+redirect or OAuth origin. Servers added by the model during a session cannot
+use this exception, even if their configuration contains the flag.
+
+Operator-configured servers continue to honor `HTTP_PROXY`, `HTTPS_PROXY`, and
+`NO_PROXY`. When a proxy is selected for the configured origin, destination DNS
+resolution and private-network filtering are delegated to that operator-chosen
+proxy; a local DNS pin cannot constrain a proxy's own resolution. A `NO_PROXY`
+match uses the direct guarded connection instead. Model-added servers,
+reviewed plugin remotes, and secondary redirect/OAuth origins do not inherit
+ambient proxy authority.
+
 ## Remote HTTP Auth
 
 URL-based MCP servers can use static headers, env-derived headers, bearer-token
@@ -443,6 +477,7 @@ Per-server settings:
 - `enabled_tools` (array, optional): allowlist of tool names for this server.
 - `disabled_tools` (array, optional): denylist applied after `enabled_tools`.
 - `url` (string, optional): Streamable HTTP endpoint for a remote MCP server.
+- `allow_private_network` (boolean, default false): operator opt-in for private DNS addresses on this configured origin; ignored for model-added servers.
 - `transport` (string, optional): set to `"sse"` for legacy SSE endpoints.
 - `headers` (object, optional): literal HTTP headers for URL-based servers.
 - `env_headers` or `env_http_headers` (object, optional): header names mapped to environment variable names.

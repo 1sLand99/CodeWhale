@@ -240,6 +240,7 @@ interface KVNamespace {
 
 export interface CommunityAgentEnv {
   CURATED_KV?: KVNamespace;
+  ADMIN_LOGIN_LIMITER?: { limit(options: { key: string }): Promise<{ success: boolean }> };
   DEEPSEEK_API_KEY?: string;
   DEEPSEEK_BASE_URL?: string;
   DEEPSEEK_MODEL?: string;

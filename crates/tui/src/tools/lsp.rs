@@ -98,7 +98,7 @@ impl ToolSpec for LspTool {
             )
         })?;
 
-        let path = resolve_workspace_path(&context.workspace, path_raw);
+        let path = context.resolve_path(path_raw)?;
         let payload = manager
             .intelligence(operation, &path, line, character, query)
             .await
@@ -346,15 +346,6 @@ fn resolve_lint_path(workspace: &Path, raw: &str) -> Result<PathBuf, ToolError> 
     Ok(path)
 }
 
-fn resolve_workspace_path(workspace: &std::path::Path, raw: &str) -> std::path::PathBuf {
-    let candidate = std::path::PathBuf::from(raw);
-    if candidate.is_absolute() {
-        candidate
-    } else {
-        workspace.join(candidate)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -506,6 +497,59 @@ mod tests {
             properties["query"]["description"],
             "Workspace symbol query."
         );
+    }
+
+    #[tokio::test]
+    async fn intelligence_paths_cannot_escape_before_transport_dispatch() {
+        let root = tempdir().unwrap();
+        let workspace = root.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let outside = root.path().join("secret.rs");
+        std::fs::write(&outside, "fn secret() {}\n").unwrap();
+        std::fs::write(workspace.join("lib.rs"), "fn local() {}\n").unwrap();
+        let mgr = Arc::new(LspManager::new(LspConfig::default(), workspace.clone()));
+        let transport = Arc::new(CountingTransport {
+            calls: AtomicUsize::new(0),
+            request_calls: AtomicUsize::new(0),
+        });
+        mgr.install_test_transport(Language::Rust, transport.clone())
+            .await;
+        let ctx = ToolContext::new(&workspace).with_lsp_manager(mgr);
+        let mut denied = vec![outside.display().to_string(), "../secret.rs".into()];
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&outside, workspace.join("escape.rs")).unwrap();
+            denied.push("escape.rs".into());
+        }
+        for operation in ["diagnostics", "symbols", "definition", "references"] {
+            for path in &denied {
+                let result = LspTool
+                    .execute(
+                        json!({"operation": operation, "path": path, "line": 1}),
+                        &ctx,
+                    )
+                    .await;
+                assert!(result.is_err(), "{operation}: {path}");
+            }
+        }
+        assert_eq!(transport.calls.load(Ordering::Relaxed), 0);
+        assert_eq!(transport.request_calls.load(Ordering::Relaxed), 0);
+        for path in [
+            "lib.rs".to_string(),
+            workspace.join("lib.rs").display().to_string(),
+        ] {
+            assert!(
+                LspTool
+                    .execute(
+                        json!({"operation": "definition", "path": path, "line": 1}),
+                        &ctx
+                    )
+                    .await
+                    .unwrap()
+                    .success
+            );
+        }
+        assert_eq!(transport.request_calls.load(Ordering::Relaxed), 2);
     }
 
     #[tokio::test]

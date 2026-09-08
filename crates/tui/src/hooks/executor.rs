@@ -1396,6 +1396,7 @@ struct BackgroundHookJob {
     label: String,
     timeout: Duration,
     plugin_authority: Option<crate::plugins::types::PluginAuthority>,
+    project_authority: Option<super::authority::ProjectHookAuthority>,
 }
 
 impl BackgroundHookJob {
@@ -1408,18 +1409,17 @@ impl BackgroundHookJob {
             label,
             timeout,
             plugin_authority,
+            project_authority,
         } = self;
-        if let Some(authority) = plugin_authority.as_ref()
-            && let Err(error) = crate::plugins::registry::verify_plugin_component_authority(
-                authority,
-                crate::plugins::activation::PluginActivationCapability::Hooks,
-            )
-        {
+        if let Err(error) = super::authority::verify_hook_authorities(
+            plugin_authority.as_ref(),
+            project_authority.as_ref(),
+        ) {
             tracing::warn!(
                 target: "hooks",
                 hook = %label,
                 error = %error,
-                "denied queued plugin hook after authority changed"
+                "denied queued hook after authority changed"
             );
             return;
         }
@@ -2137,12 +2137,10 @@ impl HookExecutor {
         stdin_json: Option<&serde_json::Value>,
     ) -> HookResult {
         let started = Instant::now();
-        if let Some(authority) = hook.plugin_authority.as_ref()
-            && let Err(reason) = crate::plugins::registry::verify_plugin_component_authority(
-                authority,
-                crate::plugins::activation::PluginActivationCapability::Hooks,
-            )
-        {
+        if let Err(reason) = super::authority::verify_hook_authorities(
+            hook.plugin_authority.as_ref(),
+            hook.project_authority.as_ref(),
+        ) {
             return HookResult {
                 name: hook.name.clone(),
                 background: false,
@@ -2152,7 +2150,7 @@ impl HookExecutor {
                 stdout: String::new(),
                 stderr: String::new(),
                 duration: started.elapsed(),
-                error: Some(format!("Plugin hook authority was denied: {reason}")),
+                error: Some(format!("Hook authority was denied: {reason}")),
             };
         }
         let working_dir = self
@@ -2394,12 +2392,10 @@ impl HookExecutor {
         stdin_json: Option<&serde_json::Value>,
     ) -> HookResult {
         let started = Instant::now();
-        if let Some(authority) = hook.plugin_authority.as_ref()
-            && let Err(reason) = crate::plugins::registry::verify_plugin_component_authority(
-                authority,
-                crate::plugins::activation::PluginActivationCapability::Hooks,
-            )
-        {
+        if let Err(reason) = super::authority::verify_hook_authorities(
+            hook.plugin_authority.as_ref(),
+            hook.project_authority.as_ref(),
+        ) {
             return HookResult {
                 name: hook.name.clone(),
                 background: true,
@@ -2409,7 +2405,7 @@ impl HookExecutor {
                 stdout: String::new(),
                 stderr: String::new(),
                 duration: started.elapsed(),
-                error: Some(format!("Plugin hook authority was denied: {reason}")),
+                error: Some(format!("Hook authority was denied: {reason}")),
             };
         }
         let working_dir = self
@@ -2442,6 +2438,7 @@ impl HookExecutor {
             label: sanitize_hook_label(hook.name.as_deref()),
             timeout: Duration::from_secs(self.effective_timeout_secs(hook)),
             plugin_authority: hook.plugin_authority.clone(),
+            project_authority: hook.project_authority.clone(),
         });
 
         // The result describes the bounded submission, not the run: no caller
@@ -4401,6 +4398,8 @@ command = "echo project"
             ..HooksConfig::default()
         };
 
+        let (authority, _) = super::super::authority::review_project_hooks(dir.path()).unwrap();
+        super::super::authority::approve_project_hooks(dir.path(), &authority.digest).unwrap();
         let merged = HooksConfig::load_with_project(global, dir.path());
         assert_eq!(merged.hooks.len(), 2);
         assert_eq!(
@@ -4495,6 +4494,97 @@ command = "echo project"
         let merged = HooksConfig::load_with_project(global, dir.path());
         assert_eq!(merged.hooks.len(), 1, "malformed project file is ignored");
         assert_eq!(merged.hooks[0].command, "echo global");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn project_hooks_require_exact_review_at_load_and_every_spawn() {
+        let _lock = lock_test_env();
+        let dir = tempfile::tempdir().unwrap();
+        let _config = trust_workspace_for_project_hooks(dir.path(), &dir.path().join("user.toml"));
+        let _legacy = EnvVarGuard::remove("DEEPSEEK_CONFIG_PATH");
+        std::fs::create_dir(dir.path().join(".codewhale")).unwrap();
+        let hook_path = dir.path().join(".codewhale/hooks.toml");
+        let contents = "[[hooks]]\nevent = \"session_start\"\ncommand = \"touch hook-ran\"\n";
+        std::fs::write(&hook_path, contents).unwrap();
+        let load = || {
+            HooksConfig::load_with_project(
+                HooksConfig {
+                    enabled: true,
+                    ..Default::default()
+                },
+                dir.path(),
+            )
+        };
+        assert!(load().hooks.is_empty(), "folder trust is not hook approval");
+        let (authority, _) = super::super::authority::review_project_hooks(dir.path()).unwrap();
+        assert!(super::super::authority::approve_project_hooks(dir.path(), "bad-digest").is_err());
+        super::super::authority::approve_project_hooks(dir.path(), &authority.digest).unwrap();
+        let config = load();
+        let hook = config.hooks[0].clone();
+        let executor = HookExecutor::new(config, dir.path().to_path_buf());
+        let good = executor.execute_sync(&hook, &HashMap::new());
+        assert!(good.success, "{good:?}");
+        std::fs::remove_file(dir.path().join("hook-ran")).unwrap();
+        std::fs::write(&hook_path, format!("{contents}# changed\n")).unwrap();
+        assert!(load().hooks.is_empty());
+        assert!(!executor.execute_sync(&hook, &HashMap::new()).success);
+        assert!(
+            !executor
+                .execute_background_inner(&hook, &HashMap::new(), None)
+                .success
+        );
+        let queued = BackgroundHookJob {
+            command: hook.command.clone(),
+            env: HashMap::new(),
+            working_dir: dir.path().to_path_buf(),
+            stdin_bytes: None,
+            label: "project".into(),
+            timeout: Duration::from_secs(2),
+            plugin_authority: None,
+            project_authority: hook.project_authority.clone(),
+        };
+        queued.run();
+        assert!(
+            !dir.path().join("hook-ran").exists(),
+            "queued work must revalidate"
+        );
+        std::fs::write(&hook_path, contents).unwrap();
+        crate::config::save_workspace_hook_receipt(dir.path(), "").unwrap();
+        assert!(!executor.execute_sync(&hook, &HashMap::new()).success);
+        assert!(!dir.path().join("hook-ran").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn project_hook_approval_rejects_symlinks_and_repository_receipts() {
+        let _lock = lock_test_env();
+        let dir = tempfile::tempdir().unwrap();
+        let _config = trust_workspace_for_project_hooks(dir.path(), &dir.path().join("user.toml"));
+        let _legacy = EnvVarGuard::remove("DEEPSEEK_CONFIG_PATH");
+        std::fs::create_dir(dir.path().join(".codewhale")).unwrap();
+        let target = dir.path().join("hook-source.toml");
+        std::fs::write(
+            &target,
+            "[[hooks]]\nevent = \"session_start\"\ncommand = \"true\"\n",
+        )
+        .unwrap();
+        let hook_path = dir.path().join(".codewhale/hooks.toml");
+        std::os::unix::fs::symlink(&target, &hook_path).unwrap();
+        assert!(super::super::authority::review_project_hooks(dir.path()).is_err());
+        std::fs::remove_file(&hook_path).unwrap();
+        std::fs::copy(&target, &hook_path).unwrap();
+        let (authority, _) = super::super::authority::review_project_hooks(dir.path()).unwrap();
+        std::fs::write(
+            dir.path().join(".codewhale/config.toml"),
+            format!("hooks_sha256 = \"{}\"", authority.digest),
+        )
+        .unwrap();
+        assert!(
+            HooksConfig::load_with_project(HooksConfig::default(), dir.path())
+                .hooks
+                .is_empty()
+        );
     }
 
     // === v0.9.2 hooks contract regression tests ===============================
