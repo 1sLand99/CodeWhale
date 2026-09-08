@@ -211,8 +211,18 @@ path = {outbox}
     assert!(submitted.elapsed() >= HEALTHY_RESPONSE_DELAY);
     tui.wait_for_text("recovered after retry", WAIT)
         .expect("second answer reaches the actual UI");
-    tui.wait_for_text("turn completed", WAIT)
-        .expect("second turn completion reaches the actual UI");
+    // Completion is proved by the lifecycle receipt below. The composer
+    // intentionally omits the old transient "turn completed" chrome; prove
+    // that the actual UI is ready and still accepts an unsent edit instead.
+    tui.wait_for(
+        |frame| frame.contains("recovered after retry") && frame.contains("Type a message"),
+        WAIT,
+    )
+    .expect("completed answer and ready composer reach the actual UI");
+    const UNSENT: &str = "R4_UNSENT_RECOVERY_CHECK";
+    tui.paste(UNSENT).expect("edit the recovered composer");
+    tui.wait_for(|frame| frame.row(frame.cursor().0).contains(UNSENT), WAIT)
+        .expect("the same composer remains editable after completion");
     assert_eq!(tui.pid(), Some(pid));
     let events = read_tui_outbox(&outbox);
     let starts = events
