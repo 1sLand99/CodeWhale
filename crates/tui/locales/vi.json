@@ -284,6 +284,7 @@
   "ScreenModeMouseCaptureOff": "Đã tắt bắt chuột; thiết bị đầu cuối quản lý việc chọn.",
   "ScreenModeUnchanged": "Màn hình không thay đổi: {reason}.",
   "ImageInputRejectedResent": "{model} không chấp nhận hình ảnh — đã gửi lại dưới dạng văn bản; hãy dùng image_ocr để đọc chúng",
+  "ProviderToolCallMissing": "Nhà cung cấp kết thúc với `{reason}` nhưng không gửi lệnh gọi công cụ nào. Hãy thử lại lượt này để tiếp tục.",
   "ConfigLabelShowThinking": "Hiển thị suy luận trong trò chuyện",
   "ConfigLabelThinkingHighlight": "Tô nền phần suy luận",
   "ConfigLabelShowToolDetails": "Mức chi tiết công cụ",

@@ -47,17 +47,17 @@ pub(super) const STREAM_MAX_DURATION_SECS: u64 = 1800; // 30 minutes (was 300s; 
 /// tolerate a longer streak before giving up on the turn.
 pub(super) const MAX_STREAM_ERRORS_BEFORE_FAIL: u32 = 5;
 /// Cap on transparent stream-level retries — these only happen when the wire
-/// dies before any content was streamed, so DeepSeek hasn't billed us and
-/// the user hasn't seen anything. Two attempts is enough to ride out a
+/// dies before any content was streamed. The user has seen nothing, but
+/// provider usage or billing may already exist. Two attempts can ride out a
 /// flaky edge node without amplifying real outages (#103).
 pub(super) const MAX_TRANSPARENT_STREAM_RETRIES: u32 = 2;
 
 /// Decide whether a stream error is eligible for a transparent retry.
 ///
 /// True only when ALL three conditions hold:
-/// 1. No content has been received on the current attempt — otherwise DeepSeek
-///    has already billed us for output tokens and the user has seen partial
-///    deltas; resending would double-bill and desync the UI.
+/// 1. No content has been received on the current attempt. Reissuing after
+///    visible partial deltas needs a separate recovery policy. This content
+///    check is not evidence that the provider consumed or billed zero tokens.
 /// 2. We still have transparent-retry budget remaining.
 /// 3. The turn has not been cancelled.
 ///

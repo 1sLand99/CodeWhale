@@ -6506,6 +6506,147 @@ async fn request_selector_distinguishes_absent_tools_from_present_empty_tools() 
 }
 
 #[tokio::test]
+async fn terminal_diagnostics_distinguish_narration_from_missing_protocol_tool_calls() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+    use crate::tool_inspection::TurnStopReason;
+
+    for finish in ["end_turn", "tool_calls", "tool_use"] {
+        let workspace = tempdir().expect("tempdir");
+        let response = vec![
+            canned::message_start("stop_diagnostic_fixture"),
+            canned::text_block_start(0),
+            canned::text_delta(0, "I will edit the file. 我现在修改文件。"),
+            canned::block_stop(0),
+            canned::message_delta(
+                finish,
+                Some(Usage {
+                    input_tokens: 100,
+                    output_tokens: 12,
+                    reasoning_tokens: Some(4),
+                    prompt_cache_hit_tokens: Some(80),
+                    prompt_cache_miss_tokens: Some(20),
+                    ..Usage::default()
+                }),
+            ),
+            canned::message_stop(),
+        ];
+        let mock = std::sync::Arc::new(MockLlmClient::new(vec![response]));
+        let client: crate::core::model_client::SharedModelClient = mock.clone();
+        let (mut engine, handle) = Engine::new_with_model_client(
+            deterministic_engine_config(workspace.path()),
+            &Config::default(),
+            client,
+        );
+        let registry = crate::tools::ToolRegistry::new(crate::tools::ToolContext::new(
+            workspace.path().to_path_buf(),
+        ));
+        let surface = test_tool_surface(&engine, registry, None, AppMode::Agent);
+        let mut turn = crate::core::turn::TurnContext::new(4);
+        let (status, error) = engine.run_turn(&mut turn, surface, None, None).await;
+        let expected = if finish == "end_turn" {
+            assert!(
+                error.is_none(),
+                "ordinary narration is not a protocol error"
+            );
+            TurnStopReason::ProviderNoToolCall
+        } else {
+            assert_eq!(status, TurnOutcomeStatus::Failed);
+            assert!(
+                error
+                    .as_deref()
+                    .is_some_and(|error| error.contains("supplied no tool call"))
+            );
+            TurnStopReason::ProviderToolCallMissing
+        };
+        let snapshot = turn
+            .terminal_request_snapshot(status)
+            .expect("terminal request snapshot");
+        let terminal = snapshot.terminal.as_ref().expect("terminal facts");
+        assert_eq!(terminal.reason, Some(expected));
+        assert_eq!(terminal.model_requests_started, 1);
+        assert_eq!(terminal.last_reported_input_tokens, Some(100));
+        assert_eq!(terminal.last_response_tool_calls, Some(0));
+        assert_eq!(terminal.last_response_tool_calls_suppressed, Some(0));
+        assert_eq!(
+            terminal.last_provider_finish_reason.as_ref().unwrap().value,
+            finish
+        );
+        assert_eq!(
+            mock.captured_requests().len(),
+            1,
+            "narration must not synthesize continuation"
+        );
+        assert_eq!(turn.usage.input_tokens, 100);
+        assert_eq!(
+            turn.usage.output_tokens, 12,
+            "reasoning is an output subset, not additional output"
+        );
+        assert!(snapshot.render_text().contains("Terminal diagnostics"));
+        let json = serde_json::to_value(&snapshot).expect("serialize snapshot");
+        assert_eq!(json["terminal"]["model_requests_started"], 1);
+        let mut events = handle.rx_event.write().await;
+        assert!(
+            !std::iter::from_fn(|| events.try_recv().ok())
+                .any(|event| matches!(event, Event::ToolCallStarted { .. }))
+        );
+    }
+}
+
+#[tokio::test]
+async fn terminal_diagnostics_merge_cumulative_usage_within_one_request() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let workspace = tempdir().expect("tempdir");
+    let usage = Usage {
+        input_tokens: 100,
+        output_tokens: 12,
+        reasoning_tokens: Some(4),
+        prompt_cache_hit_tokens: Some(80),
+        prompt_cache_miss_tokens: Some(20),
+        ..Usage::default()
+    };
+    let mut start = canned::message_start("cumulative_usage_fixture");
+    if let StreamEvent::MessageStart { message } = &mut start {
+        message.usage = usage.clone();
+    }
+    let mock = std::sync::Arc::new(MockLlmClient::new(vec![vec![
+        start,
+        canned::text_block_start(0),
+        canned::text_delta(0, "Done."),
+        canned::block_stop(0),
+        canned::message_delta("end_turn", Some(usage.clone())),
+        canned::message_delta("end_turn", Some(usage.clone())),
+        canned::message_stop(),
+    ]]));
+    let client: crate::core::model_client::SharedModelClient = mock.clone();
+    let (mut engine, handle) = Engine::new_with_model_client(
+        deterministic_engine_config(workspace.path()),
+        &Config::default(),
+        client,
+    );
+    let registry = crate::tools::ToolRegistry::new(crate::tools::ToolContext::new(
+        workspace.path().to_path_buf(),
+    ));
+    let surface = test_tool_surface(&engine, registry, None, AppMode::Agent);
+    let mut turn = crate::core::turn::TurnContext::new(4);
+    let (status, error) = engine.run_turn(&mut turn, surface, None, None).await;
+    assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
+    assert_eq!(mock.captured_requests().len(), 1);
+    assert_eq!(
+        turn.usage, usage,
+        "repeated cumulative receipts are counted once"
+    );
+    let mut events = handle.rx_event.write().await;
+    let usages = std::iter::from_fn(|| events.try_recv().ok())
+        .filter_map(|event| match event {
+            Event::TurnUsage { usage, .. } => Some(usage),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(usages, vec![usage]);
+}
+
+#[tokio::test]
 async fn request_snapshots_advance_to_the_latest_tool_step() {
     use crate::llm_client::mock::{MockLlmClient, canned};
 
@@ -19878,6 +20019,7 @@ struct FlakyNetworkDropModelClient {
     calls: std::sync::atomic::AtomicUsize,
     failures: usize,
     terminal_before_drop: bool,
+    content_before_drop: bool,
 }
 
 #[async_trait::async_trait]
@@ -19932,6 +20074,14 @@ impl crate::core::model_client::ModelClient for FlakyNetworkDropModelClient {
                 ];
                 return Ok(Box::pin(futures_util::stream::iter(events)));
             }
+            if !self.content_before_drop {
+                return Ok(Box::pin(futures_util::stream::iter(vec![
+                    Ok(canned::message_start("empty_then_drop")),
+                    Err(anyhow::anyhow!(
+                        "Stream read error: error decoding response body"
+                    )),
+                ])));
+            }
             // Partial content first — this flips `any_content_received` so
             // the #103 transparent retry cannot fire — then the transport
             // dies the way the 0.9.4 Terminal-Bench crashes did.
@@ -19969,6 +20119,7 @@ async fn run_headless_turn_with_flaky_network(
         calls: std::sync::atomic::AtomicUsize::new(0),
         failures,
         terminal_before_drop: false,
+        content_before_drop: true,
     });
     let client: crate::core::model_client::SharedModelClient = model.clone();
     let config = Config::default();
@@ -20034,6 +20185,17 @@ async fn run_headless_turn_with_flaky_network(
 async fn headless_turn_retries_mid_stream_network_drop_and_recovers() {
     let (model, events) = run_headless_turn_with_flaky_network(1).await;
 
+    let terminal = events
+        .iter()
+        .find_map(|event| match event {
+            Event::ToolRequestSnapshot { snapshot } => snapshot.terminal.as_ref(),
+            _ => None,
+        })
+        .expect("terminal diagnostics through existing event authority");
+    assert_eq!(terminal.model_requests_started, 2);
+    assert_eq!(terminal.stream_resumes, 1);
+    assert_eq!(terminal.transparent_stream_retries, 0);
+
     assert_eq!(
         model.calls.load(std::sync::atomic::Ordering::SeqCst),
         2,
@@ -20092,11 +20254,53 @@ async fn headless_turn_retries_mid_stream_network_drop_and_recovers() {
 }
 
 #[tokio::test]
+async fn terminal_diagnostics_count_transparent_stream_requests_without_extra_snapshots() {
+    let workspace = tempdir().expect("tempdir");
+    let model = std::sync::Arc::new(FlakyNetworkDropModelClient {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        failures: 1,
+        terminal_before_drop: false,
+        content_before_drop: false,
+    });
+    let client: crate::core::model_client::SharedModelClient = model.clone();
+    let (mut engine, handle) = Engine::new_with_model_client(
+        deterministic_engine_config(workspace.path()),
+        &Config::default(),
+        client,
+    );
+    let registry = crate::tools::ToolRegistry::new(crate::tools::ToolContext::new(
+        workspace.path().to_path_buf(),
+    ));
+    let surface = test_tool_surface(&engine, registry, None, AppMode::Agent);
+    let mut turn = crate::core::turn::TurnContext::new(4);
+    let (status, error) = engine.run_turn(&mut turn, surface, None, None).await;
+    assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
+    assert_eq!(model.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    let snapshot = turn
+        .terminal_request_snapshot(status)
+        .expect("terminal snapshot");
+    let terminal = snapshot.terminal.expect("terminal facts");
+    assert_eq!(terminal.model_requests_started, 2);
+    assert_eq!(terminal.transparent_stream_retries, 1);
+    assert_eq!(terminal.stream_resumes, 0);
+    assert_eq!(terminal.model_step_index, 0);
+    let mut events = handle.rx_event.write().await;
+    let snapshots = std::iter::from_fn(|| events.try_recv().ok())
+        .filter(|event| matches!(event, Event::ToolRequestSnapshot { .. }))
+        .count();
+    assert_eq!(
+        snapshots, 1,
+        "request construction is distinct from stream retries"
+    );
+}
+
+#[tokio::test]
 async fn terminal_output_limit_followed_by_stream_error_is_charged_and_not_retried() {
     let model = std::sync::Arc::new(FlakyNetworkDropModelClient {
         calls: std::sync::atomic::AtomicUsize::new(0),
         failures: 1,
         terminal_before_drop: true,
+        content_before_drop: true,
     });
     let client: crate::core::model_client::SharedModelClient = model.clone();
     let config = Config::default();
@@ -20454,6 +20658,7 @@ async fn run_interactive_turn_with_flaky_network(
         calls: std::sync::atomic::AtomicUsize::new(0),
         failures,
         terminal_before_drop: false,
+        content_before_drop: true,
     });
     let client: crate::core::model_client::SharedModelClient = model.clone();
     let config = Config::default();
@@ -20995,11 +21200,23 @@ async fn run_reasoning_only_turn_with_reprompts(
     (model, events)
 }
 
-/// A reasoning-only clean-stop response is re-requested (cheap: the prefix is
-/// cached) and the turn recovers with the real answer instead of dead-ending.
+/// A reasoning-only clean-stop response is re-requested and the turn recovers
+/// with the real answer. Local fixtures make no cache-hit or billing claim.
 #[tokio::test]
 async fn reasoning_only_clean_stop_is_retried_and_recovers() {
     let (model, events) = run_reasoning_only_turn(1, "stop").await;
+
+    let terminal = events
+        .iter()
+        .find_map(|event| match event {
+            Event::ToolRequestSnapshot { snapshot } => snapshot.terminal.as_ref(),
+            _ => None,
+        })
+        .expect("terminal diagnostics through existing event authority");
+    assert_eq!(terminal.model_requests_started, 2);
+    assert_eq!(terminal.reasoning_only_reprompts, 1);
+    assert_eq!(terminal.transparent_stream_retries, 0);
+    assert_eq!(terminal.status, Some(TurnOutcomeStatus::Completed));
 
     assert_eq!(
         model.calls.load(std::sync::atomic::Ordering::SeqCst),
@@ -21113,7 +21330,7 @@ async fn the_reasoning_only_nudge_rides_one_request_and_never_joins_the_session(
             .contains(nudge)
     };
     assert!(!carries_nudge(&requests[0]), "no nudge before any failure");
-    assert!(!carries_nudge(&requests[1]), "no nudge on the free retry");
+    assert!(!carries_nudge(&requests[1]), "no nudge on the first retry");
     assert!(
         carries_nudge(&requests[2]),
         "nudge present once retrying again"

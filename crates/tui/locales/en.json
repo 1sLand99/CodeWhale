@@ -285,6 +285,7 @@
   "ScreenModeMouseCaptureOff": "Mouse off — the terminal owns selection.",
   "ScreenModeUnchanged": "Screen unchanged: {reason}.",
   "ImageInputRejectedResent": "{model} does not accept images — resent as text; use image_ocr to read them",
+  "ProviderToolCallMissing": "Provider ended with `{reason}` but supplied no tool call. Retry the turn to continue.",
   "ConfigLabelShowThinking": "Model reasoning in chat",
   "ConfigLabelThinkingHighlight": "Reasoning background highlight",
   "ConfigLabelShowToolDetails": "Tool detail level",

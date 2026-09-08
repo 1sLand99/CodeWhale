@@ -5433,6 +5433,12 @@ impl Engine {
         if status == TurnOutcomeStatus::Interrupted {
             self.emit_interrupted_survivor_status().await;
         }
+        if let Some(snapshot) = turn.terminal_request_snapshot(status) {
+            let _ = self
+                .tx_event
+                .send(Event::ToolRequestSnapshot { snapshot })
+                .await;
+        }
         drop(turn_control);
         let turn_complete_delivered = self
             .tx_event
@@ -5995,6 +6001,10 @@ impl Engine {
         };
 
         let id = format!("compact_{}", &uuid::Uuid::new_v4().to_string()[..8]);
+        turn.stop_diagnostics.emergency_compaction_attempts = turn
+            .stop_diagnostics
+            .emergency_compaction_attempts
+            .saturating_add(1);
         let start_message = format!("Emergency context compaction started ({reason})");
         self.emit_compaction_started(id.clone(), true, start_message)
             .await;

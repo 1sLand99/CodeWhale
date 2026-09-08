@@ -284,6 +284,7 @@
   "ScreenModeMouseCaptureOff": "Захоплення миші вимкнено; вибором керує термінал.",
   "ScreenModeUnchanged": "Екран без змін: {reason}.",
   "ImageInputRejectedResent": "{model} не приймає зображення — їх повторно надіслано як текст; скористайтеся image_ocr, щоб їх прочитати",
+  "ProviderToolCallMissing": "Провайдер завершив відповідь із `{reason}`, але не передав виклик інструмента. Повторіть цей хід, щоб продовжити.",
   "ConfigLabelShowThinking": "Міркування моделі в чаті",
   "ConfigLabelThinkingHighlight": "Підсвічування тла міркувань",
   "ConfigLabelShowToolDetails": "Рівень деталізації інструментів",
