@@ -602,17 +602,22 @@ async fn emergency_compaction_cancellation_drops_provider_and_never_mutates_cont
 }
 const REPRESENTATIVE_HANDOFF_RELAY: &str = "REPRESENTATIVE_HANDOFF_RELAY";
 
-/// R1 inverted this: the ordinary engine default used to be
-/// `UNBOUNDED_MODEL_STEPS = u32::MAX`, i.e. an agent loop with no finite
-/// bound. The default is now finite and every host resolves from it.
 #[test]
-fn ordinary_engine_default_has_a_finite_step_budget() {
+fn ordinary_engine_default_does_not_install_a_step_budget() {
     assert_eq!(
         DEFAULT_MODEL_STEPS,
         crate::core::engine::turn_budget::DEFAULT_MAX_MODEL_STEPS
     );
-    const { assert!(DEFAULT_MODEL_STEPS < u32::MAX) };
     assert_eq!(EngineConfig::default().max_steps, DEFAULT_MODEL_STEPS);
+    let mut turn = TurnContext::new(EngineConfig::default().max_steps);
+    assert_eq!(turn.step_limit(), None);
+    assert_eq!(turn.stop_diagnostics.effective_max_steps, None);
+    // No substitute ceiling or overflow may stop an uncapped turn.
+    turn.step = u32::MAX - 1;
+    assert!(turn.next_step());
+    assert!(turn.next_step());
+    assert!(!turn.at_max_steps());
+    assert_eq!(turn.steps_used(), u32::MAX);
 }
 
 #[test]
@@ -7448,7 +7453,7 @@ async fn sandbox_escalation_fails_closed_when_the_posture_cannot_prompt() {
 async fn productive_tool_results_do_not_hit_no_user_input_backstop() {
     use crate::llm_client::mock::{MockLlmClient, canned};
 
-    const TOOL_ROUNDS: usize = 20;
+    const TOOL_ROUNDS: usize = 201;
     const FINAL_ANSWER: &str = "All productive tool rounds completed.";
 
     let workspace = tempdir().expect("tempdir");
@@ -7516,7 +7521,7 @@ async fn productive_tool_results_do_not_hit_no_user_input_backstop() {
                 assert_eq!(
                     mock.call_count(),
                     TOOL_ROUNDS + 1,
-                    "the final provider request must follow tool round 20"
+                    "productive work must finish beyond the former 200-step default"
                 );
                 assert!(
                     saw_final_answer,
@@ -23252,19 +23257,16 @@ async fn idle_engine_routes_child_approval_decisions_to_the_waiting_child() {
 }
 
 // ---------------------------------------------------------------------------
-// R1: finite turn budgets. Each limit must fire, and each must be overridable.
+// Explicit step limits and finite wall-clock/stream budgets remain enforceable.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn engine_config_defaults_carry_finite_turn_budgets() {
+fn engine_config_defaults_keep_wall_clock_and_stream_budgets() {
     use crate::core::engine::turn_budget;
 
     let config = EngineConfig::default();
     assert_eq!(config.max_steps, turn_budget::DEFAULT_MAX_MODEL_STEPS);
-    assert!(
-        config.max_steps < u32::MAX,
-        "the default model-step ceiling must be finite"
-    );
+    assert_eq!(TurnContext::new(config.max_steps).step_limit(), None);
     assert_eq!(
         config.turn_wall_clock,
         std::time::Duration::from_secs(turn_budget::DEFAULT_TURN_WALL_CLOCK_SECS),

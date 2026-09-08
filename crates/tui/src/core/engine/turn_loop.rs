@@ -879,8 +879,9 @@ impl Engine {
             // report. Savings proved out by the grok-style parity work (ops
             // A1): a step-faithful harness ends mid-report far too often.
             if !turn.stop_diagnostics.soft_landing_sent
-                && turn.max_steps > 0
-                && turn.steps_used() >= ((turn.max_steps as f32 * 0.8).floor() as u32).max(1)
+                && let Some(step_limit) = turn.step_limit()
+                && step_limit > 0
+                && turn.steps_used() >= ((step_limit as f32 * 0.8).floor() as u32).max(1)
             {
                 turn.stop_diagnostics.soft_landing_sent = true;
                 let notice = format!(

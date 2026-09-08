@@ -63,7 +63,8 @@ pub struct TurnStopDiagnostics {
     pub status: Option<crate::core::events::TurnOutcomeStatus>,
     /// None means the precise runtime exit boundary was not observed.
     pub reason: Option<TurnStopReason>,
-    pub effective_max_steps: u32,
+    /// None means the caller did not install a model-step ceiling.
+    pub effective_max_steps: Option<u32>,
     pub step_budget_source: &'static str,
     /// Existing zero-based scheduler step; transport retries do not advance it.
     pub model_step_index: u32,
@@ -470,7 +471,7 @@ impl ToolInspectionSnapshot {
         ));
         out.push_str(&format!("Step: {}\n", self.step));
         if let Some(terminal) = &self.terminal {
-            out.push_str("Terminal diagnostics (observed facts; null means unknown):\n");
+            out.push_str("Terminal diagnostics (observed facts; effective_max_steps null means uncapped, other nulls mean unknown):\n");
             if let Ok(json) = serde_json::to_string_pretty(terminal) {
                 out.push_str(&json);
                 out.push('\n');

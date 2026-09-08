@@ -1792,10 +1792,9 @@ pub struct TuiConfig {
     /// Per-SSE-chunk idle timeout in seconds. Defaults to 900 seconds when
     /// omitted. `0` maps to the default; values clamp to `1..=3600`.
     pub stream_chunk_timeout_secs: Option<u64>,
-    /// R1: ceiling on model steps in a single turn. Omitted or `0` resolve
-    /// to the finite default (200); explicit values clamp to
-    /// `1..=100_000`. There is deliberately no "unlimited" value — `0` is
-    /// an invalid setting, not a sentinel that disables the cap.
+    /// Optional ceiling on model steps in a single turn. Omitted or `0`
+    /// leaves model steps uncapped; explicit positive values clamp to
+    /// `1..=100_000`. Wall-clock and stream budgets remain independent.
     pub max_model_steps: Option<u32>,
     /// R1: cumulative wall-clock budget for a single turn, in seconds.
     /// Omitted or `0` resolve to the finite default (3600); explicit values
@@ -7886,12 +7885,11 @@ impl Config {
         raw.clamp(MIN_STREAM_CHUNK_TIMEOUT_SECS, MAX_STREAM_CHUNK_TIMEOUT_SECS)
     }
 
-    /// R1: resolved ceiling on model steps in a single turn.
+    /// Resolved optional ceiling on model steps in a single turn.
     ///
     /// Reads `[tui].max_model_steps`, falling back to the
-    /// `CODEWHALE_MAX_MODEL_STEPS` env var, then to the finite default.
-    /// `0` — from either source — is treated as an invalid value and
-    /// resolves to the default; it never means "unlimited".
+    /// `CODEWHALE_MAX_MODEL_STEPS` env var, then to the uncapped default.
+    /// `0` from either source also selects the uncapped default.
     #[must_use]
     pub fn max_model_steps(&self) -> u32 {
         let raw = self
