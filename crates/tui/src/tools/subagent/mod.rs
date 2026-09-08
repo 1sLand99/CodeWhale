@@ -13591,26 +13591,60 @@ fn bind_shortlisted_task_model(
         || runtime.client.api_provider().as_str().to_string(),
         |config| config.provider_identity_for(runtime.client.api_provider()),
     );
-    // The session route is always an explicit allowed choice.
-    if requested.eq_ignore_ascii_case(&runtime.model)
-        || requested.eq_ignore_ascii_case(&format!("{session_provider}/{}", runtime.model))
-    {
+    // Exact wire choices precede alias convenience, including the session
+    // fast path. A case-distinct shortlisted declaration must not select the
+    // parent's differently cased model or become falsely ambiguous.
+    let session_exact = requested == runtime.model
+        || qualified_spawn_model(requested, &session_provider) == Some(runtime.model.as_str());
+    if session_exact {
         return Ok(Some(runtime.model.clone()));
     }
-    let exact = models
-        .iter()
-        .filter(|model| {
-            requested.eq_ignore_ascii_case(&format!("{}/{}", model.provider, model.model))
-        })
-        .collect::<Vec<_>>();
-    let candidates = if exact.is_empty() {
-        models
+    let find_candidates = |allow_aliases: bool| {
+        let matches = |provider: &str, requested: &str, model: &str| {
+            requested == model
+                || (allow_aliases && spawn_model_ids_match(runtime, provider, requested, model))
+        };
+        let qualified = models
             .iter()
-            .filter(|model| requested.eq_ignore_ascii_case(&model.model))
-            .collect::<Vec<_>>()
-    } else {
-        exact
+            .filter(|model| {
+                qualified_spawn_model(requested, &model.provider)
+                    .is_some_and(|requested| matches(&model.provider, requested, &model.model))
+            })
+            .collect::<Vec<_>>();
+        let mut candidates = if qualified.is_empty() {
+            models
+                .iter()
+                .filter(|model| matches(&model.provider, requested, &model.model))
+                .collect::<Vec<_>>()
+        } else {
+            qualified
+        };
+        if allow_aliases {
+            // Projection preserves case-distinct rows, but undeclared aliases
+            // of one provider still represent one convenience choice.
+            let mut seen = std::collections::HashSet::new();
+            candidates.retain(|model| {
+                seen.insert((
+                    model.provider.to_ascii_lowercase(),
+                    model.model.to_ascii_lowercase(),
+                ))
+            });
+        }
+        candidates
     };
+    let mut candidates = find_candidates(false);
+    if candidates.is_empty() {
+        // Ordinary aliases retain the historical current-route preference.
+        if requested_spawn_model_matches_pin(
+            runtime,
+            requested,
+            &runtime.model,
+            Some(&session_provider),
+        ) {
+            return Ok(Some(runtime.model.clone()));
+        }
+        candidates = find_candidates(true);
+    }
     let selected = match candidates.as_slice() {
         [model] => *model,
         [] => {
@@ -13782,16 +13816,18 @@ fn validate_spawn_pin_request(
         |config| config.provider_identity_for(runtime.client.api_provider()),
     );
     let matches = |model: &str| {
-        crate::fleet::worker_runtime::requested_model_matches_pin(requested, model, Some(&provider))
+        requested_spawn_model_matches_pin(runtime, requested, model, Some(&provider))
             || member.is_some_and(|member| {
-                crate::fleet::worker_runtime::requested_model_matches_pin(
+                requested_spawn_model_matches_pin(
+                    runtime,
                     requested,
                     model,
                     member.profile.provider.as_deref(),
                 )
             })
             || manual_pin.is_some_and(|pin| {
-                crate::fleet::worker_runtime::requested_model_matches_pin(
+                requested_spawn_model_matches_pin(
+                    runtime,
                     requested,
                     model,
                     pin.provider.as_deref(),
@@ -14078,6 +14114,77 @@ fn with_default_fork_context(mut input: Value, default: bool) -> Value {
         object.insert("fork_context".to_string(), Value::Bool(default));
     }
     input
+}
+
+// Strip only the known provider qualifier; a slash inside a wire ID is not
+// evidence that it names another provider.
+fn qualified_spawn_model<'a>(requested: &'a str, provider: &str) -> Option<&'a str> {
+    let (prefix, model) = requested.split_once('/')?;
+    prefix
+        .eq_ignore_ascii_case(provider.trim())
+        .then_some(model)
+}
+
+fn declared_spawn_model_for_provider(
+    runtime: &SubAgentRuntime,
+    provider: &str,
+    model: &str,
+) -> bool {
+    if provider_pin_matches_session(runtime, provider) {
+        return is_declared_subagent_model(&runtime.client, model);
+    }
+    let Some(config) = runtime.api_config.as_deref() else {
+        return false;
+    };
+    let Ok(identity) = config.resolve_provider_pin_identity(provider) else {
+        return false;
+    };
+    // Other providers bind from this config snapshot, while the active
+    // provider above keeps its already-frozen endpoint and declarations.
+    crate::route_runtime::resolve_runtime_route_for_identity(config, &identity, Some(model))
+        .is_ok_and(|route| {
+            route.model == model
+                && route
+                    .candidate
+                    .applied_limit_overrides()
+                    .iter()
+                    .any(|entry| {
+                        entry.source == codewhale_config::route::OverrideSource::UserModelMetadata
+                    })
+        })
+}
+
+fn spawn_model_ids_match(
+    runtime: &SubAgentRuntime,
+    provider: &str,
+    requested: &str,
+    model: &str,
+) -> bool {
+    requested == model
+        || (requested.eq_ignore_ascii_case(model)
+            && !declared_spawn_model_for_provider(runtime, provider, requested)
+            && !declared_spawn_model_for_provider(runtime, provider, model))
+}
+
+fn requested_spawn_model_matches_pin(
+    runtime: &SubAgentRuntime,
+    requested: &str,
+    model: &str,
+    provider: Option<&str>,
+) -> bool {
+    let requested = requested.trim();
+    let model = model.trim();
+    let session_provider = runtime.api_config.as_deref().map_or_else(
+        || runtime.client.api_provider().as_str().to_string(),
+        |config| config.provider_identity_for(runtime.client.api_provider()),
+    );
+    let provider = provider
+        .map(str::trim)
+        .filter(|provider| !provider.is_empty())
+        .unwrap_or(&session_provider);
+    spawn_model_ids_match(runtime, provider, requested, model)
+        || qualified_spawn_model(requested, provider)
+            .is_some_and(|requested| spawn_model_ids_match(runtime, provider, requested, model))
 }
 
 // Reuse the bound client's immutable route snapshot before legacy name
@@ -16979,6 +17086,230 @@ async fn configured_model_subagent_full_bind_preserves_task_profile_and_role_ids
         assert!(
             normalize_bound_subagent_model(id, "model", &wrong_endpoint)
                 .map_or(true, |normalized| normalized != id)
+        );
+    }
+}
+
+#[cfg(test)]
+mod declared_shortlist_tests {
+    use super::*;
+    use crate::config::{ApiProvider, Config};
+    use crate::fleet::store::{FleetFile, FleetScope, save_fleet, set_selected};
+
+    fn runtime_for(config: &Config, workspace: &std::path::Path, current: &str) -> SubAgentRuntime {
+        let mut config = config.clone();
+        config.default_text_model = Some(current.into());
+        config.set_provider_model_override(ApiProvider::Deepseek, Some(current.into()));
+        let mut runtime = tests::stub_runtime();
+        runtime.context = ToolContext::new(workspace.to_path_buf());
+        runtime.client = DeepSeekClient::new(&config).unwrap();
+        runtime.model = current.into();
+        runtime.api_config = Some(Arc::new(config));
+        runtime
+    }
+
+    #[test]
+    fn configured_model_selected_pod_preserves_case_identity_and_saved_pins() {
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(exercise_selected_pod());
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    async fn exercise_selected_pod() {
+        let _env = crate::test_support::lock_test_env();
+        let root = tempfile::tempdir().unwrap();
+        let _home =
+            crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", root.path().join("state"));
+        let mut config: Config = toml::from_str(include_str!(
+            "../../../../config/tests/fixtures/custom_models.toml"
+        ))
+        .unwrap();
+        config.set_provider_api_key_override(ApiProvider::Deepseek, Some("fixture-key".into()));
+        config.set_provider_base_url_override(
+            ApiProvider::Openrouter,
+            Some("https://models.example.test/v1".into()),
+        );
+        let upper = "Preview-fixture";
+        let lower = "preview-fixture";
+        let declaration = config.custom_models.as_mut().unwrap().first_mut().unwrap();
+        declaration.id = upper.into();
+        let mut second = declaration.clone();
+        second.id = lower.into();
+        second.limit.as_mut().unwrap().context = Some(112000);
+        second.cost.as_mut().unwrap().output = Some(2.0);
+        config.custom_models.as_mut().unwrap().push(second);
+
+        let mut fleet = FleetFile::new("Declared case choices".into(), None).unwrap();
+        for (id, model) in [
+            ("upper", upper),
+            ("lower", lower),
+            ("legacy-lower", "deepseek-v4-flash"),
+            ("legacy-mixed", "DeepSeek-V4-Flash"),
+        ] {
+            fleet.members.push(
+                serde_json::from_value(json!({
+                    "id": id, "shortlist": true, "provider": "deepseek", "model": model,
+                }))
+                .unwrap(),
+            );
+        }
+        save_fleet(&fleet, FleetScope::Workspace, root.path()).unwrap();
+        set_selected(&fleet.name, FleetScope::Workspace, root.path()).unwrap();
+        let models = crate::fleet::members::fleet_models(root.path()).unwrap();
+        assert_eq!(models.len(), 4, "projection must preserve exact wire IDs");
+
+        // Exercise both the session fast path and two shortlisted
+        // declarations, with bare and provider-qualified selectors.
+        for current in [upper, "deepseek-v4-pro"] {
+            for (model, context, output_rate) in [(upper, 96000, "1.6"), (lower, 112000, "2")] {
+                for requested in [model.to_string(), format!("deepseek/{model}")] {
+                    let mut runtime = runtime_for(&config, root.path(), current);
+                    // Matching must retain the client's frozen declarations.
+                    Arc::make_mut(runtime.api_config.as_mut().unwrap()).custom_models = None;
+                    let request = parse_spawn_request(
+                        &json!({"prompt":"fixture", "type":"reviewer", "model":requested}),
+                    )
+                    .unwrap();
+                    let (route, _) = bind_spawn_model_route(&mut runtime, &request, None, "", true)
+                        .await
+                        .unwrap();
+                    assert_eq!(route, ModelRoute::Fixed(model.into()));
+                    assert_eq!(runtime.model, model);
+                    assert_eq!(
+                        runtime.client.route_limits().unwrap().context_tokens,
+                        Some(context)
+                    );
+                    let envelope = runtime
+                        .client
+                        .effective_route_envelope(model, chrono::Utc::now());
+                    assert_eq!(envelope.model, model);
+                    let quote =
+                        serde_json::to_value(envelope.provider_live_pricing.unwrap()).unwrap();
+                    assert_eq!(quote["output_per_million"], output_rate);
+                }
+            }
+        }
+
+        // Profile and manual role pins must reject a different
+        // declared ID even when its spelling differs only by case.
+        for (source, pin_provider) in [
+            ("profile", Some("deepseek")),
+            ("profile", None),
+            ("profile", Some("")),
+            ("profile", Some(" ")),
+            ("role", None),
+        ] {
+            for requested_model in [upper, lower] {
+                for requested in [
+                    requested_model.to_string(),
+                    format!("deepseek/{requested_model}"),
+                ] {
+                    let mut runtime = runtime_for(&config, root.path(), upper);
+                    let member = crate::fleet::profile::AgentProfile {
+                        id: "case-pin".into(),
+                        display_name: None,
+                        description: None,
+                        requires: Vec::new(),
+                        profile: codewhale_config::FleetProfile {
+                            provider: pin_provider.map(str::to_string),
+                            model: Some(upper.into()),
+                            ..Default::default()
+                        },
+                        source: std::path::PathBuf::new(),
+                        origin: crate::fleet::profile::ProfileOrigin::Config,
+                        plugin_authority: None,
+                    };
+                    if source == "role" {
+                        Arc::make_mut(runtime.api_config.as_mut().unwrap()).subagents = Some(
+                            toml::from_str(&format!("[roles.reviewer]\nmodel = '{upper}'\n"))
+                                .unwrap(),
+                        );
+                    }
+                    let request = parse_spawn_request(
+                        &json!({"prompt":"fixture", "type":"reviewer", "model":requested}),
+                    )
+                    .unwrap();
+                    let result = bind_spawn_model_route(
+                        &mut runtime,
+                        &request,
+                        (source == "profile").then_some(&member),
+                        "",
+                        true,
+                    )
+                    .await;
+                    if requested_model == upper {
+                        assert_eq!(result.unwrap().0, ModelRoute::Fixed(upper.into()));
+                    } else {
+                        assert!(
+                            result
+                                .unwrap_err()
+                                .to_string()
+                                .contains("conflicts with that route")
+                        );
+                    }
+                    assert_eq!(runtime.model, upper);
+                }
+            }
+        }
+
+        let mut runtime = runtime_for(&config, root.path(), upper);
+        let request = parse_spawn_request(
+            &json!({"prompt":"fixture", "type":"reviewer", "model":"PREVIEW-FIXTURE"}),
+        )
+        .unwrap();
+        assert!(
+            bind_spawn_model_route(&mut runtime, &request, None, "", true)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("outside the selected Pod")
+        );
+        assert!(
+            !declared_spawn_model_for_provider(&runtime, "openrouter", lower),
+            "same endpoint on another provider cannot inherit declarations"
+        );
+
+        // An endpoint mismatch cannot inherit declarations or their
+        // limits. The provider's ordinary admission rules still apply.
+        let mut wrong = config.clone();
+        wrong.set_provider_base_url_override(
+            ApiProvider::Deepseek,
+            Some("https://other.example.test/v1".into()),
+        );
+        let mut runtime = runtime_for(&wrong, root.path(), "deepseek-v4-pro");
+        assert!(!declared_spawn_model_for_provider(
+            &runtime, "deepseek", lower
+        ));
+        let request =
+            parse_spawn_request(&json!({"prompt":"fixture", "type":"reviewer", "model":lower}))
+                .unwrap();
+        assert!(
+            bind_spawn_model_route(&mut runtime, &request, None, "", true)
+                .await
+                .is_err()
+        );
+
+        // Duplicate ordinary aliases still allow convenient casing.
+        let mut runtime = runtime_for(&config, root.path(), "deepseek-v4-pro");
+        let request = parse_spawn_request(
+            &json!({"prompt":"fixture", "type":"reviewer", "model":"DEEPSEEK-V4-FLASH"}),
+        )
+        .unwrap();
+        assert_eq!(
+            bind_spawn_model_route(&mut runtime, &request, None, "", true)
+                .await
+                .unwrap()
+                .0,
+            ModelRoute::Fixed("deepseek-v4-flash".into())
         );
     }
 }

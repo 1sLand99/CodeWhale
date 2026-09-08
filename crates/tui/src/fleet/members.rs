@@ -162,7 +162,13 @@ pub fn models_of(fleet: &FleetFile) -> Vec<FleetModel> {
     let mut models: Vec<FleetModel> = Vec::new();
     let mut push = |provider: &str, model: &str, role: Option<&str>| {
         let role = role.map(str::trim).filter(|r| !r.is_empty());
-        if let Some(existing) = models.iter_mut().find(|m| m.matches(provider, model)) {
+        // Preserve wire identity before route-aware consumers interpret aliases.
+        // A config-free projection cannot know whether casing denotes an alias
+        // or two distinct endpoint-declared models.
+        if let Some(existing) = models
+            .iter_mut()
+            .find(|m| m.provider.eq_ignore_ascii_case(provider.trim()) && m.model == model.trim())
+        {
             if let Some(role) = role
                 && !existing.roles.iter().any(|r| r.eq_ignore_ascii_case(role))
             {
