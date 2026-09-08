@@ -30,7 +30,10 @@ fn shell_catalog_guidance_matches_execution() {
         .unwrap();
     let dispatcher = crate::shell_dispatcher::global_dispatcher();
     assert!(command.contains(dispatcher.kind().binary()));
-    assert!(tool.description().contains(command));
+    assert!(
+        !tool.description().contains(command),
+        "the command's interpreter guidance must appear once in each request"
+    );
     assert_eq!(tool.name(), "bash");
     assert!(tool.model_visible());
     assert!(!command.contains("action=run"));
