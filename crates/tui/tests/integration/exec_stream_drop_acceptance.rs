@@ -195,9 +195,12 @@ path = {outbox}
     assert!(
         first["payload"]["error"]
             .as_str()
-            .is_some_and(|error| error.contains("error decoding response body")),
+            .is_some_and(|error| error.starts_with("Provider stream connection dropped")),
         "the first UI turn must exhaust an actual partial SSE loss: {first:#}"
     );
+    // The lifecycle outbox contains a bounded user-facing error, not the
+    // underlying reqwest chain. The server's partial SSE body and the exact
+    // request count prove the real transport loss and exhausted retry budget.
     assert_eq!(chat_posts.load(Ordering::SeqCst), 4);
 
     // No restart, continuation, event injection, approval answer, or queue

@@ -53,6 +53,10 @@ impl FleetProfileScope {
 }
 
 pub fn personal_agent_profile_dir() -> Result<PathBuf> {
+    #[cfg(test)]
+    if !crate::test_support::guarded_environment_provides_state_paths() {
+        return Ok(crate::test_support::unsealed_test_state_root().join(PERSONAL_AGENT_PROFILE_DIR));
+    }
     Ok(codewhale_config::codewhale_home()?.join(PERSONAL_AGENT_PROFILE_DIR))
 }
 
