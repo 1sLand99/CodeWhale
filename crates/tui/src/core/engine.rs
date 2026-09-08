@@ -5347,12 +5347,15 @@ impl Engine {
             .as_ref()
             .map(|barrier| Arc::clone(&barrier.foreground_children));
         let turn_result = std::panic::AssertUnwindSafe(async {
-            self.run_turn(
+            // Keep the turn state machine out of the enclosing event-loop
+            // futures. Their nested poll frames must fit ordinary thread
+            // stacks while cloning route config or executing tools.
+            Box::pin(self.run_turn(
                 &mut turn,
                 surface,
                 foreground_children_for_turn,
                 Some(tool_surface),
-            )
+            ))
             .await
         })
         .catch_unwind()
