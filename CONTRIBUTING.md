@@ -420,28 +420,40 @@ branding, or global prompts without prior maintainer sign-off.
 
 ## Project Structure
 
-codewhale is a Cargo workspace. The live runtime and the majority of TUI,
-engine, and tool code currently live in `crates/tui/src/`. Smaller workspace
-crates provide shared abstractions that are being extracted incrementally.
+Codewhale is a Cargo workspace with one Engine implementation in
+`crates/tui/src/core/engine/`. The public `codewhale` executable links the
+TUI/runtime library; interactive sessions, noninteractive runs and the Runtime
+API share that Engine.
 
-```
-crates/
-├── tui/           codewhale-tui binary (interactive TUI + runtime API)
-├── cli/           codewhale binary (dispatcher facade)
-├── app-server/    HTTP/SSE + JSON-RPC transport
-├── core/          Agent loop / session / turn management
-├── protocol/      Request/response framing
-├── config/        Config loading, profiles, env precedence
-├── state/         SQLite thread/session persistence
-├── tools/         Typed tool specs and lifecycle
-├── mcp/           MCP client + stdio server
-├── hooks/         Lifecycle hooks (stdout/jsonl/webhook)
-├── execpolicy/    Approval/sandbox policy engine
-├── agent/         Model/provider registry
-```
+| Path | Purpose |
+| --- | --- |
+| `crates/cli/` | Public command entrypoint, configuration commands and runtime dispatch |
+| `crates/tui/` | Interactive terminal, Engine, tools, Runtime API and embedded local web client |
+| `crates/core/`, `crates/protocol/`, `crates/state/` | Request construction, session/turn types, protocol framing and persistence |
+| Other `crates/` | Shared configuration, credentials, telemetry, hooks, workflow and packaging support; see each Cargo manifest |
+| `web/` | Public Next.js website and documentation; separate from the embedded Runtime web client |
+| `telemetry-ingest/` | Telemetry service, schemas and service tests |
+| `extensions/`, `integrations/` | Editor integration and external-service bridges |
+| `npm/`, `packaging/`, `nix/` | npm wrappers/SDK and platform installation definitions |
+| `computer/snapshots/` | Cloud Computer image definitions, pinned independently of the source checkout |
+| `deploy/` | Deployment templates consumed by setup scripts, including Tencent Lighthouse services |
+| `fleets/`, `workflows/` | Distributed Fleet definitions and workflow examples |
+| `brand/` | Source artwork and generated brand variants used by the README, website and terminal |
+| `docs/` | User/developer documentation, schemas, fixtures and referenced release material |
+| `scripts/`, `.github/`, `.buildkite/`, `.cnb.yml` | Development, validation, CI and release tooling |
+| `patches/` | Vendored dependency fixes, including their licensing files |
 
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the live data flow across
-these crates, including the bottom-up build order.
+Generated files that the product embeds or validates, such as model catalogs,
+website facts and schemas, remain tracked with their generators. Platform
+mirrors such as `.winget/` are retained when their packaging tools require them.
+Keep local critique output, temporary verification reports and personal
+operator instructions outside the tracked product tree; describe the change
+and its validation in the pull request. Do not copy workspace-level operator
+`AGENTS.md` or `CLAUDE.md` files into this repository.
+
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the runtime data flow and
+[the build guide](docs/BUILD_PERFORMANCE.md) for crate dependencies and local
+verification.
 
 ## Submitting Changes
 

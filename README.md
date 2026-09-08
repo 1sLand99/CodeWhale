@@ -105,6 +105,7 @@ stack and [configuration](docs/CONFIGURATION.md) for local settings.
 - [MCP](docs/MCP.md), [hooks](docs/HOOKS.md), and [configuration](docs/CONFIGURATION.md)
 - [Local web client](docs/WEB.md)
 - [All documentation](docs)
+- [Repository layout and contribution guide](CONTRIBUTING.md#project-structure)
 
 ## Join the community
 
