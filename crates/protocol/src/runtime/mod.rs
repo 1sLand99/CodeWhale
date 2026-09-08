@@ -61,6 +61,9 @@ pub struct RuntimeCapabilities {
     /// `operation_key` and returns the original turn for exact retries.
     #[serde(default)]
     pub turn_operation_idempotency: bool,
+    /// Read-only exact accepted-turn lookup by thread and operation key.
+    #[serde(default)]
+    pub turn_operation_lookup: bool,
     /// Bounded inline image inputs, persisted and replayed with their turn.
     #[serde(default)]
     pub turn_image_inputs: bool,
@@ -398,6 +401,7 @@ mod tests {
             threads: true,
             turns: true,
             turn_operation_idempotency: true,
+            turn_operation_lookup: true,
             turn_image_inputs: true,
             turn_steer: true,
             turn_interrupt: true,
@@ -422,6 +426,17 @@ mod tests {
         assert_eq!(obj.get("threads").unwrap(), &json!(true));
         assert_eq!(obj.get("account_session").unwrap(), &json!(true));
         assert_eq!(obj.get("turn_operation_idempotency").unwrap(), &json!(true));
+        assert_eq!(obj.get("turn_operation_lookup").unwrap(), &json!(true));
+        let mut without_lookup = value.clone();
+        without_lookup
+            .as_object_mut()
+            .unwrap()
+            .remove("turn_operation_lookup");
+        assert!(
+            !serde_json::from_value::<RuntimeCapabilities>(without_lookup)
+                .unwrap()
+                .turn_operation_lookup
+        );
         assert_eq!(obj.get("turn_image_inputs").unwrap(), &json!(true));
         let mut legacy = value.clone();
         legacy.as_object_mut().unwrap().remove("turn_image_inputs");

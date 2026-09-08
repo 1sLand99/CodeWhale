@@ -2374,6 +2374,303 @@ async fn operation_key_replays_torn_response_survives_restart_and_rejects_mismat
     Ok(())
 }
 
+mod turn_operation_lookup {
+    use super::*;
+
+    fn binding(
+        manager: &RuntimeThreadManager,
+        thread: &ThreadRecord,
+        turn: &TurnRecord,
+        key: &str,
+    ) -> Result<RuntimeTurnOperationBinding> {
+        Ok(RuntimeTurnOperationBinding {
+            schema_version: TURN_OPERATION_BINDING_SCHEMA_VERSION,
+            thread_id: thread.id.clone(),
+            turn_id: turn.id.clone(),
+            operation_key_fingerprint: runtime_turn_operation_key_fingerprint(
+                &manager.store.owner_id,
+                &thread.id,
+                key,
+            )?,
+            request_fingerprint: crate::hashing::sha256_hex("original request configuration"),
+            created_at: turn.created_at,
+        })
+    }
+
+    fn directory_bytes(
+        root: &Path,
+    ) -> Result<std::collections::BTreeMap<PathBuf, Option<Vec<u8>>>> {
+        let mut pending = vec![root.to_path_buf()];
+        let mut snapshot = std::collections::BTreeMap::new();
+        while let Some(dir) = pending.pop() {
+            for entry in fs::read_dir(dir)? {
+                let entry = entry?;
+                let path = entry.path();
+                let bytes = if entry.file_type()?.is_dir() {
+                    pending.push(path.clone());
+                    None
+                } else if entry.metadata()?.len() == 0 {
+                    // Empty claim locks may be held exclusively on Windows;
+                    // their length already proves their complete byte content.
+                    Some(Vec::new())
+                } else {
+                    Some(fs::read(&path)?)
+                };
+                snapshot.insert(path.strip_prefix(root)?.to_path_buf(), bytes);
+            }
+        }
+        Ok(snapshot)
+    }
+
+    #[tokio::test]
+    async fn exact_lookup_is_read_only_without_an_engine_and_survives_restart() -> Result<()> {
+        let _env = crate::test_support::lock_test_env();
+        let temp = tempfile::tempdir()?;
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", temp.path());
+        let runtime_dir = temp.path().join("runtime");
+        let mut manager = test_manager(runtime_dir.clone())?;
+        let mut thread = sample_thread("thr_lookup_exact");
+        let mut turn = sample_turn(
+            &thread.id,
+            "turn_lookup_exact",
+            RuntimeTurnStatus::Completed,
+        );
+        thread.latest_turn_id = Some(turn.id.clone());
+        turn.input_summary = "the exact accepted fixture".into();
+        turn.effective_model = Some("retired-fixture-model".into());
+        turn.ended_at = Some(turn.created_at + chrono::Duration::seconds(2));
+        turn.duration_ms = Some(2_000);
+        let key = "lookup-fixture-key";
+        let binding = binding(&manager, &thread, &turn, key)?;
+        manager.store.save_thread(&thread)?;
+        manager.store.save_turn(&turn)?;
+        manager.store.save_turn_operation_binding(&binding)?;
+        drop(
+            manager
+                .store
+                .open_turn_operation_claim_lock(&binding.operation_key_fingerprint)?,
+        );
+        let owner_id = manager.store.owner_id.clone();
+        let expected = serde_json::to_value(&turn)?;
+
+        for restart in [false, true] {
+            if restart {
+                drop(manager);
+                manager = test_manager(runtime_dir.clone())?;
+            }
+            assert_eq!(manager.store.owner_id, owner_id);
+            assert!(manager.active.lock().await.engines.is_empty());
+            let before = directory_bytes(temp.path())?;
+            let observed = manager
+                .lookup_turn_operation(&thread.id, key)?
+                .context("accepted operation must remain available")?;
+            assert_eq!(serde_json::to_value(observed)?, expected);
+            assert!(manager.active.lock().await.engines.is_empty());
+            assert_eq!(directory_bytes(temp.path())?, before);
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn absence_and_incomplete_acceptance_never_create_or_repair_records() -> Result<()> {
+        use RuntimeTurnOperationLookupError::Incomplete;
+        let _env = crate::test_support::lock_test_env();
+        let temp = tempfile::tempdir()?;
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", temp.path());
+        let manager = test_manager(temp.path().join("runtime"))?;
+        let thread = sample_thread("thr_lookup_incomplete");
+        let turn = sample_turn(
+            &thread.id,
+            "turn_lookup_incomplete",
+            RuntimeTurnStatus::Completed,
+        );
+        let key = "incomplete-fixture-key";
+        let binding = binding(&manager, &thread, &turn, key)?;
+        let lock_path = manager
+            .store
+            .turn_operation_lock_path(&binding.operation_key_fingerprint)?;
+        let before = directory_bytes(temp.path())?;
+        assert!(manager.lookup_turn_operation(&thread.id, key)?.is_none());
+        assert_eq!(directory_bytes(temp.path())?, before);
+
+        drop(
+            manager
+                .store
+                .open_turn_operation_claim_lock(&binding.operation_key_fingerprint)?,
+        );
+        assert!(manager.lookup_turn_operation(&thread.id, key)?.is_none());
+        fs::remove_file(&lock_path)?;
+        manager.store.save_thread(&thread)?;
+        manager.store.save_turn(&turn)?;
+        manager.store.save_turn_operation_binding(&binding)?;
+        let before = directory_bytes(temp.path())?;
+        assert!(matches!(
+            manager.lookup_turn_operation(&thread.id, key),
+            Err(Incomplete)
+        ));
+        assert_eq!(
+            directory_bytes(temp.path())?,
+            before,
+            "lookup cannot recreate a missing lock"
+        );
+
+        drop(
+            manager
+                .store
+                .open_turn_operation_claim_lock(&binding.operation_key_fingerprint)?,
+        );
+        manager.store.remove_turn(&turn.id)?;
+        let before = directory_bytes(temp.path())?;
+        assert!(matches!(
+            manager.lookup_turn_operation(&thread.id, key),
+            Err(Incomplete)
+        ));
+        assert_eq!(
+            directory_bytes(temp.path())?,
+            before,
+            "lookup cannot recover a torn binding"
+        );
+
+        manager.store.save_turn(&turn)?;
+        let mut claim = fd_lock::RwLock::new(
+            manager
+                .store
+                .open_turn_operation_claim_lock(&binding.operation_key_fingerprint)?,
+        );
+        let guard = claim.try_write()?;
+        let before = directory_bytes(temp.path())?;
+        assert!(matches!(
+            manager.lookup_turn_operation(&thread.id, key),
+            Err(Incomplete)
+        ));
+        assert_eq!(directory_bytes(temp.path())?, before);
+        drop(guard);
+        assert_eq!(
+            manager.lookup_turn_operation(&thread.id, key)?.unwrap().id,
+            turn.id
+        );
+        assert!(manager.active.lock().await.engines.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn mismatched_records_are_hidden_and_invalid_store_objects_are_not_absence() -> Result<()>
+    {
+        use RuntimeTurnOperationLookupError::Unavailable;
+        let _env = crate::test_support::lock_test_env();
+        let temp = tempfile::tempdir()?;
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", temp.path());
+        let manager = test_manager(temp.path().join("runtime"))?;
+        let thread = sample_thread("thr_lookup_scope");
+        let turn = sample_turn(
+            &thread.id,
+            "turn_lookup_scope",
+            RuntimeTurnStatus::Completed,
+        );
+        let key = "scope-fixture-key";
+        let binding = binding(&manager, &thread, &turn, key)?;
+        let binding_path = manager
+            .store
+            .turn_operation_path(&binding.operation_key_fingerprint)?;
+        let lock_path = manager
+            .store
+            .turn_operation_lock_path(&binding.operation_key_fingerprint)?;
+        let turn_path = manager.store.turn_path(&turn.id)?;
+        let thread_path = manager.store.thread_path(&thread.id)?;
+        drop(
+            manager
+                .store
+                .open_turn_operation_claim_lock(&binding.operation_key_fingerprint)?,
+        );
+
+        for mismatch in [
+            "binding_thread",
+            "binding_hash",
+            "turn_id",
+            "turn_thread",
+            "thread_id",
+        ] {
+            let mut candidate_binding = binding.clone();
+            let mut candidate_turn = turn.clone();
+            let mut candidate_thread = thread.clone();
+            match mismatch {
+                "binding_thread" => candidate_binding.thread_id = "thr_other".into(),
+                "binding_hash" => {
+                    candidate_binding.operation_key_fingerprint =
+                        crate::hashing::sha256_hex("other operation")
+                }
+                "turn_id" => candidate_turn.id = "turn_other".into(),
+                "turn_thread" => candidate_turn.thread_id = "thr_other".into(),
+                "thread_id" => candidate_thread.id = "thr_other".into(),
+                _ => unreachable!(),
+            }
+            // Keep the expected filenames: save_* would follow the mutated
+            // identity and accidentally test missing files instead of mismatch.
+            write_json_atomic(&binding_path, &candidate_binding)?;
+            write_json_atomic(&turn_path, &candidate_turn)?;
+            write_json_atomic(&thread_path, &candidate_thread)?;
+            let before = directory_bytes(temp.path())?;
+            assert!(
+                manager.lookup_turn_operation(&thread.id, key)?.is_none(),
+                "{mismatch}"
+            );
+            assert_eq!(directory_bytes(temp.path())?, before, "{mismatch}");
+        }
+        manager.store.save_thread(&thread)?;
+        manager.store.save_turn(&turn)?;
+        manager.store.save_turn_operation_binding(&binding)?;
+        assert!(manager.lookup_turn_operation("thr_other", key)?.is_none());
+
+        fs::write(&binding_path, "{")?;
+        assert!(matches!(
+            manager.lookup_turn_operation(&thread.id, key),
+            Err(Unavailable)
+        ));
+        fs::remove_file(&binding_path)?;
+        fs::create_dir(&binding_path)?;
+        assert!(matches!(
+            manager.lookup_turn_operation(&thread.id, key),
+            Err(Unavailable)
+        ));
+        fs::remove_dir(&binding_path)?;
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(temp.path().join("missing-binding"), &binding_path)?;
+            assert!(matches!(
+                manager.lookup_turn_operation(&thread.id, key),
+                Err(Unavailable)
+            ));
+            fs::remove_file(&binding_path)?;
+        }
+        manager.store.save_turn_operation_binding(&binding)?;
+        fs::remove_file(&lock_path)?;
+        fs::create_dir(&lock_path)?;
+        assert!(matches!(
+            manager.lookup_turn_operation(&thread.id, key),
+            Err(Unavailable)
+        ));
+        fs::remove_dir(&lock_path)?;
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(temp.path().join("missing-lock"), &lock_path)?;
+            assert!(matches!(
+                manager.lookup_turn_operation(&thread.id, key),
+                Err(Unavailable)
+            ));
+            fs::remove_file(&lock_path)?;
+        }
+        let moved_operations = temp.path().join("unavailable-operations");
+        fs::rename(&manager.store.turn_operations_dir, &moved_operations)?;
+        assert!(matches!(
+            manager.lookup_turn_operation(&thread.id, key),
+            Err(Unavailable)
+        ));
+        fs::rename(&moved_operations, &manager.store.turn_operations_dir)?;
+        assert!(manager.active.lock().await.engines.is_empty());
+        Ok(())
+    }
+}
+
 #[tokio::test]
 async fn restart_removes_torn_operation_item_before_reserved_turn_retry() -> Result<()> {
     let runtime_dir = test_runtime_dir();

@@ -3594,6 +3594,204 @@ async fn turn_endpoint_operation_key_returns_original_and_conflicts_on_mismatch(
 }
 
 #[tokio::test]
+async fn turn_operation_lookup_is_authenticated_read_only_and_survives_restart() -> Result<()> {
+    fn file_bytes(root: &Path) -> Result<std::collections::BTreeMap<PathBuf, Vec<u8>>> {
+        let mut files = std::collections::BTreeMap::new();
+        for entry in fs::read_dir(root)? {
+            let entry = entry?;
+            if entry.file_type()?.is_dir() {
+                files.extend(file_bytes(&entry.path())?);
+            } else {
+                files.insert(entry.path(), fs::read(entry.path())?);
+            }
+        }
+        Ok(files)
+    }
+
+    let _env = lock_test_env();
+    let dir = tempfile::tempdir()?;
+    let home = dir.path().join("home");
+    fs::create_dir_all(&home)?;
+    let _home = EnvVarGuard::set("CODEWHALE_HOME", &home);
+    let store_root = dir.path().join("store");
+    let _runtime_dir = EnvVarGuard::set("CODEWHALE_RUNTIME_DIR", &store_root);
+    let root = dir.path().join("server");
+    let sessions = dir.path().join("sessions");
+    let workspace = dir.path().join("workspace");
+    let token = "turn-lookup-local-fixture";
+    let _backend = EnvVarGuard::set("CODEWHALE_SECRET_BACKEND", "file");
+    let _proxy = EnvVarGuard::set("NO_PROXY", "*");
+    let (addr, manager, server) = spawn_test_server_with_root_token_mobile_workspace(
+        root.clone(),
+        sessions.clone(),
+        Some(token.into()),
+        false,
+        workspace.clone(),
+    )
+    .await?
+    .context("loopback listener required for turn operation lookup proof")?;
+    let client = crate::tls::reqwest_client_builder()
+        .timeout(ci_scaled(Duration::from_secs(2)))
+        .build()?;
+    let thread = manager.create_thread(Default::default()).await?;
+    let other_thread = manager.create_thread(Default::default()).await?;
+    let mut engine = crate::core::engine::mock_engine_handle();
+    manager
+        .install_test_engine(&thread.id, engine.handle.clone())
+        .await?;
+    let key = "cwc-http-operation-lookup";
+    let accepted = client
+        .post(format!("http://{addr}/v1/threads/{}/turns", thread.id))
+        .bearer_auth(token)
+        .json(&json!({"prompt":"one accepted lookup fixture", "operation_key":key}))
+        .send()
+        .await?;
+    assert_eq!(accepted.status(), StatusCode::CREATED);
+    let accepted: Value = accepted.json().await?;
+    let turn_id = accepted["turn"]["id"]
+        .as_str()
+        .context("accepted turn id")?
+        .to_string();
+    assert!(matches!(
+        tokio::time::timeout(ci_scaled(Duration::from_secs(2)), engine.rx_op.recv())
+            .await?
+            .context("accepted mock Engine operation")?,
+        Op::SendMessage { .. }
+    ));
+
+    let endpoint = format!(
+        "http://{addr}/v1/threads/{}/turn-operations/{key}",
+        thread.id
+    );
+    let before = file_bytes(&store_root)?;
+    let response = client.get(&endpoint).bearer_auth(token).send().await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let found: Value = response.json().await?;
+    assert_eq!(
+        found,
+        serde_json::to_value(manager.test_store().load_turn(&turn_id)?)?,
+        "lookup returns the existing bare TurnRecord"
+    );
+    assert_eq!(found["id"], accepted["turn"]["id"]);
+    assert!(found.get("turn").is_none());
+    for bearer in [None, Some("wrong-lookup-token")] {
+        let mut request = client.get(&endpoint);
+        if let Some(bearer) = bearer {
+            request = request.bearer_auth(bearer);
+        }
+        assert_eq!(request.send().await?.status(), StatusCode::UNAUTHORIZED);
+    }
+    for (thread_id, operation_key) in [
+        (thread.id.as_str(), "absent-operation"),
+        (other_thread.id.as_str(), key),
+    ] {
+        let response = client
+            .get(format!(
+                "http://{addr}/v1/threads/{thread_id}/turn-operations/{operation_key}"
+            ))
+            .bearer_auth(token)
+            .send()
+            .await?;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+    let overlong = "x".repeat(crate::runtime_threads::MAX_RUNTIME_TURN_OPERATION_KEY_BYTES + 1);
+    for (thread_id, operation_key) in [
+        (thread.id.as_str(), "%20leading"),
+        (thread.id.as_str(), "control%0Acharacter"),
+        (thread.id.as_str(), overlong.as_str()),
+        ("invalid%20thread", key),
+    ] {
+        let response = client
+            .get(format!(
+                "http://{addr}/v1/threads/{thread_id}/turn-operations/{operation_key}"
+            ))
+            .bearer_auth(token)
+            .send()
+            .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+    assert_eq!(
+        file_bytes(&store_root)?,
+        before,
+        "GET must not create a lock or rewrite records"
+    );
+    assert!(
+        engine.rx_op.try_recv().is_err(),
+        "GET must not dispatch an Engine operation"
+    );
+
+    engine
+        .tx_event
+        .send(EngineEvent::TurnComplete {
+            usage: Default::default(),
+            parent_route_usage: Default::default(),
+            routed_usage_dropped_records: 0,
+            status: TurnOutcomeStatus::Completed,
+            error: None,
+            tool_catalog: None,
+            base_url: None,
+        })
+        .await?;
+    tokio::time::timeout(ci_scaled(Duration::from_secs(2)), async {
+        loop {
+            if manager.test_store().load_turn(&turn_id)?.status == RuntimeTurnStatus::Completed {
+                return Ok::<_, anyhow::Error>(());
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .context("mock turn did not settle before restart")??;
+    tokio::time::timeout(
+        ci_scaled(Duration::from_secs(2)),
+        manager.shutdown_and_wait(),
+    )
+    .await??;
+    let settled = serde_json::to_value(manager.test_store().load_turn(&turn_id)?)?;
+    let released = Arc::downgrade(&manager);
+    server.abort();
+    let _ = server.await;
+    drop(manager);
+    drop(engine);
+    tokio::time::timeout(ci_scaled(Duration::from_secs(2)), async {
+        while released.upgrade().is_some() {
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .context("old Runtime did not release its store before restart")?;
+
+    let (addr, _manager, server) = spawn_test_server_with_root_token_mobile_workspace(
+        root,
+        sessions,
+        Some(token.into()),
+        false,
+        workspace,
+    )
+    .await?
+    .context("loopback listener required for restarted lookup proof")?;
+    // Startup recovery is complete. No Engine is installed in this Runtime.
+    let before = file_bytes(&store_root)?;
+    let response = client
+        .get(format!(
+            "http://{addr}/v1/threads/{}/turn-operations/{key}",
+            thread.id
+        ))
+        .bearer_auth(token)
+        .send()
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.json::<Value>().await?, settled);
+    assert_eq!(
+        file_bytes(&store_root)?,
+        before,
+        "restart lookup must remain read-only"
+    );
+    server.abort();
+    Ok(())
+}
+
+#[tokio::test]
 async fn events_endpoint_respects_since_seq_cursor() -> Result<()> {
     let Some((addr, runtime_threads, handle)) = spawn_test_server().await? else {
         return Ok(());
@@ -6097,6 +6295,7 @@ async fn runtime_info_reports_bind_state() -> Result<()> {
         info["capabilities"]["turn_operation_idempotency"], true,
         "clients must have an explicit fail-closed gate before sending operation_key"
     );
+    assert_eq!(info["capabilities"]["turn_operation_lookup"], true);
     assert_eq!(info["capabilities"]["account_session"], true);
     assert_eq!(info["capabilities"]["external_tools"], true);
     assert_eq!(info["capabilities"]["worker_runtime"], true);

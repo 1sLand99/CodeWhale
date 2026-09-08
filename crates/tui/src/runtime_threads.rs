@@ -1945,11 +1945,21 @@ impl RuntimeThreadStore {
         operation_key_fingerprint: &str,
     ) -> Result<Option<RuntimeTurnOperationBinding>> {
         let path = self.turn_operation_path(operation_key_fingerprint)?;
-        if !path.exists() {
-            return Ok(None);
-        }
-        let raw = read_store_file(&path)
-            .with_context(|| format!("Failed to read Runtime turn operation {}", path.display()))?;
+        let raw = match read_store_file(&path) {
+            Ok(raw) => raw,
+            Err(error)
+                if error
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
+            {
+                return Ok(None);
+            }
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("Failed to read Runtime turn operation {}", path.display())
+                });
+            }
+        };
         let binding: RuntimeTurnOperationBinding =
             serde_json::from_str(&raw).with_context(|| {
                 format!("Failed to parse Runtime turn operation {}", path.display())
@@ -3063,6 +3073,17 @@ impl RuntimeTurnOperationBinding {
 struct PreparedRuntimeTurnOperation {
     binding: RuntimeTurnOperationBinding,
     requested_turn_id: Option<String>,
+}
+
+/// Lookup errors deliberately omit operation keys and persisted file paths.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum RuntimeTurnOperationLookupError {
+    #[error("Invalid thread id or operation key")]
+    InvalidRequest,
+    #[error("Turn operation acceptance is incomplete; retry lookup")]
+    Incomplete,
+    #[error("Turn operation lookup unavailable")]
+    Unavailable,
 }
 
 fn validate_runtime_turn_operation_key(value: &str) -> Result<()> {
@@ -8040,6 +8061,100 @@ impl RuntimeThreadManager {
         let turn = self.store.load_turn(&persisted.turn_id)?;
         if turn.id != persisted.turn_id || turn.thread_id != persisted.thread_id {
             bail!("operation_key binding does not match its persisted Runtime turn");
+        }
+        Ok(Some(turn))
+    }
+
+    /// Read the exact durable binding without replaying, recovering, loading an
+    /// engine, or creating even a claim-lock file. The shared claim prevents a
+    /// reader from observing admission records that can still be rolled back.
+    pub(crate) fn lookup_turn_operation(
+        &self,
+        thread_id: &str,
+        operation_key: &str,
+    ) -> Result<Option<TurnRecord>, RuntimeTurnOperationLookupError> {
+        use RuntimeTurnOperationLookupError::{Incomplete, InvalidRequest, Unavailable};
+        validated_record_id(thread_id, "thread id").map_err(|_| InvalidRequest)?;
+        let fingerprint =
+            runtime_turn_operation_key_fingerprint(&self.store.owner_id, thread_id, operation_key)
+                .map_err(|_| InvalidRequest)?;
+        checked_existing_runtime_store_dir(&self.store.turn_operations_dir)
+            .map_err(|_| Unavailable)?;
+        let lock_path = self
+            .store
+            .turn_operation_lock_path(&fingerprint)
+            .map_err(|_| Unavailable)?;
+        let lock_file = match open_runtime_store_file(
+            &lock_path,
+            "Runtime turn operation lookup lock",
+            |options| {
+                options.read(true);
+            },
+        ) {
+            Ok(file) => file,
+            Err(error)
+                if error
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
+            {
+                return match self
+                    .store
+                    .load_turn_operation_binding(&fingerprint)
+                    .map_err(|_| Unavailable)?
+                {
+                    None => Ok(None),
+                    Some(binding)
+                        if binding.thread_id != thread_id
+                            || binding.operation_key_fingerprint != fingerprint =>
+                    {
+                        Ok(None)
+                    }
+                    Some(_) => Err(Incomplete),
+                };
+            }
+            Err(_) => return Err(Unavailable),
+        };
+        let claim = fd_lock::RwLock::new(lock_file);
+        let _guard = claim.try_read().map_err(|error| match error.kind() {
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted => Incomplete,
+            _ => Unavailable,
+        })?;
+        let Some(binding) = self
+            .store
+            .load_turn_operation_binding(&fingerprint)
+            .map_err(|_| Unavailable)?
+        else {
+            return Ok(None);
+        };
+        if binding.thread_id != thread_id || binding.operation_key_fingerprint != fingerprint {
+            return Ok(None);
+        }
+        let thread = match self.store.load_thread(thread_id) {
+            Ok(thread) => thread,
+            Err(error)
+                if error
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
+            {
+                return Ok(None);
+            }
+            Err(_) => return Err(Unavailable),
+        };
+        if thread.id != thread_id {
+            return Ok(None);
+        }
+        let turn = self.store.load_turn(&binding.turn_id).map_err(|error| {
+            if error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+            {
+                Incomplete
+            } else {
+                Unavailable
+            }
+        })?;
+        if turn.id != binding.turn_id || turn.thread_id != thread_id {
+            return Ok(None);
         }
         Ok(Some(turn))
     }
