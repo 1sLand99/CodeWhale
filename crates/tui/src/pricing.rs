@@ -2650,6 +2650,9 @@ pub fn format_cost_estimate(estimate: CostEstimate, currency: CostCurrency) -> S
 }
 
 #[cfg(test)]
+mod default_coverage_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use chrono::TimeZone;
