@@ -803,11 +803,10 @@ pub fn provider_capability_with_wire(
     } else {
         None
     };
-    let is_v4_pro = model_lower.contains("v4-pro") || model_lower == "deepseek-v4pro";
-    let is_v4_flash = model_lower.contains("v4-flash")
-        || model_lower == "deepseek-v4flash"
-        || model_lower == "deepseek-v4"
-        || alias_deprecation.is_some();
+    let exact_deepseek = canonical_official_deepseek_model_id(&model_lower);
+    let is_v4_pro = exact_deepseek == Some("deepseek-v4-pro");
+    let is_v4_flash =
+        exact_deepseek == Some(DEEPSEEK_ALIAS_REPLACEMENT) || alias_deprecation.is_some();
     let is_reasoner = matches!(provider, ApiProvider::WanjieArk)
         && (model_lower.contains("reasoner") || model_lower.contains("r1"));
 
@@ -1057,23 +1056,7 @@ pub fn validate_route(provider: ApiProvider, model: &str) -> Result<(), String> 
     Ok(())
 }
 
-fn canonical_official_deepseek_model_id(model: &str) -> Option<&'static str> {
-    match model.trim().to_ascii_lowercase().as_str() {
-        "deepseek-v4-pro"
-        | "deepseek-v4pro"
-        | "deepseek-ai/deepseek-v4-pro"
-        | "deepseek-ai/deepseek-v4pro"
-        | "deepseek/deepseek-v4-pro"
-        | "deepseek/deepseek-v4pro" => Some("deepseek-v4-pro"),
-        "deepseek-v4-flash"
-        | "deepseek-v4flash"
-        | "deepseek-ai/deepseek-v4-flash"
-        | "deepseek-ai/deepseek-v4flash"
-        | "deepseek/deepseek-v4-flash"
-        | "deepseek/deepseek-v4flash" => Some("deepseek-v4-flash"),
-        _ => None,
-    }
-}
+use crate::models::canonical_official_deepseek_model_id;
 
 /// Resolve model names accepted by DeepSeek's first-party endpoints.
 ///
@@ -2822,6 +2805,12 @@ impl TranscriptConfig {
 /// Resolved CLI configuration, including defaults and environment overrides.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct Config {
+    /// Persisted exact-route declarations, separate from provider credentials.
+    #[serde(
+        default,
+        deserialize_with = "codewhale_config::catalog::configured::deserialize_configured_models"
+    )]
+    pub custom_models: Option<Vec<codewhale_config::catalog::configured::ConfiguredModel>>,
     /// Single-token inputs that cancel the active turn before dispatch.
     #[serde(default)]
     pub stop_words: Option<Vec<String>>,
@@ -4858,6 +4847,9 @@ impl Config {
 
     /// Validate that critical config fields are present.
     pub fn validate(&self) -> Result<()> {
+        codewhale_config::catalog::configured::validate_configured_models(
+            self.custom_models.as_deref().unwrap_or_default(),
+        )?;
         self.openrouter_vendor()?;
         if self
             .provider
@@ -5842,6 +5834,7 @@ impl Config {
     /// controls. Provider tables carry their endpoint, auth, headers, TLS,
     /// model-passthrough, and per-route limits as one atomic registry.
     pub(crate) fn refresh_provider_routes_from(&mut self, fresh: &Self) {
+        self.custom_models.clone_from(&fresh.custom_models);
         self.provider.clone_from(&fresh.provider);
         self.api_key.clone_from(&fresh.api_key);
         self.base_url.clone_from(&fresh.base_url);
@@ -6002,11 +5995,22 @@ impl Config {
     #[must_use]
     pub fn default_model(&self) -> String {
         let provider = self.api_provider();
+        let declared = |model: &str| {
+            crate::provider_lake::configured_model_for_route(
+                self,
+                provider,
+                &self.provider_identity_for(provider),
+                &self.deepseek_base_url(),
+                model,
+            )
+            .is_some()
+        };
         if let Some(model) =
             self.provider_config_string_with_runtime_fallback(provider, |entry| entry.model.clone())
         {
             let model = model.trim();
-            if provider_passes_model_through(provider)
+            if declared(model)
+                || provider_passes_model_through(provider)
                 || self.active_provider_preserves_custom_base_url_model()
             {
                 return model.to_string();
@@ -6024,6 +6028,13 @@ impl Config {
             {
                 return model.to_string();
             }
+        }
+        if let Some(model) = self
+            .default_text_model
+            .as_deref()
+            .filter(|model| declared(model))
+        {
+            return model.to_string();
         }
         let moonshot_config = (provider == ApiProvider::Moonshot)
             .then(|| self.provider_config())
@@ -9623,12 +9634,34 @@ fn apply_env_overrides_unlocked(config: &mut Config, policy: ConfigEnvironmentPo
 fn normalize_model_config(config: &mut Config) {
     let provider = config.api_provider();
     let base_url = config.deepseek_base_url();
+    let mut declared = Vec::new();
+    for provider in ApiProvider::all()
+        .iter()
+        .copied()
+        .chain([ApiProvider::DeepseekCN])
+    {
+        for model in config.custom_models.as_deref().unwrap_or_default() {
+            if crate::provider_lake::configured_model_for_route(
+                config,
+                provider,
+                &config.provider_identity_for(provider),
+                &config.base_url_for_route(provider),
+                &model.id,
+            )
+            .is_some()
+            {
+                declared.push((provider, model.id.clone()));
+            }
+        }
+    }
+    let is_declared = |provider, model: &str| declared.contains(&(provider, model.to_string()));
     config.migrated_deepseek_model_alias = if matches!(
         provider,
         ApiProvider::Deepseek | ApiProvider::DeepseekCN | ApiProvider::DeepseekAnthropic
     ) {
         config
             .active_configured_model_id()
+            .filter(|model| !is_declared(provider, model))
             .map(str::to_ascii_lowercase)
             .filter(|model| deepseek_alias_deprecation(model).is_some())
             .filter(|model| {
@@ -9654,6 +9687,7 @@ fn normalize_model_config(config: &mut Config) {
     }
 
     if let Some(model) = config.default_text_model.as_deref()
+        && !is_declared(provider, model)
         && !provider_passes_model_through(config.api_provider())
         && !config.active_provider_preserves_custom_base_url_model()
         && let Some(normalized) = normalize_model_for_provider(config.api_provider(), model)
@@ -9664,12 +9698,14 @@ fn normalize_model_config(config: &mut Config) {
     if let Some(providers) = config.providers.as_mut() {
         if let Some(model) = providers.deepseek.model.as_deref()
             && !provider_entry_uses_custom_base_url(ApiProvider::Deepseek, &providers.deepseek)
+            && !is_declared(ApiProvider::Deepseek, model)
             && let Some(normalized) = normalize_model_for_provider(ApiProvider::Deepseek, model)
         {
             providers.deepseek.model = Some(normalized);
         }
         if let Some(model) = providers.deepseek_cn.model.as_deref()
             && !provider_entry_uses_custom_base_url(ApiProvider::DeepseekCN, &providers.deepseek_cn)
+            && !is_declared(ApiProvider::DeepseekCN, model)
             && let Some(normalized) = normalize_model_for_provider(ApiProvider::DeepseekCN, model)
         {
             providers.deepseek_cn.model = Some(normalized);
@@ -9679,6 +9715,7 @@ fn normalize_model_config(config: &mut Config) {
                 ApiProvider::DeepseekAnthropic,
                 &providers.deepseek_anthropic,
             )
+            && !is_declared(ApiProvider::DeepseekAnthropic, model)
             && let Some(normalized) =
                 normalize_model_for_provider(ApiProvider::DeepseekAnthropic, model)
         {
@@ -9686,24 +9723,28 @@ fn normalize_model_config(config: &mut Config) {
         }
         if let Some(model) = providers.nvidia_nim.model.as_deref()
             && !provider_entry_uses_custom_base_url(ApiProvider::NvidiaNim, &providers.nvidia_nim)
+            && !is_declared(ApiProvider::NvidiaNim, model)
             && let Some(normalized) = normalize_model_for_provider(ApiProvider::NvidiaNim, model)
         {
             providers.nvidia_nim.model = Some(normalized);
         }
         if let Some(model) = providers.openrouter.model.as_deref()
             && !provider_entry_uses_custom_base_url(ApiProvider::Openrouter, &providers.openrouter)
+            && !is_declared(ApiProvider::Openrouter, model)
             && let Some(normalized) = normalize_model_for_provider(ApiProvider::Openrouter, model)
         {
             providers.openrouter.model = Some(normalized);
         }
         if let Some(model) = providers.novita.model.as_deref()
             && !provider_entry_uses_custom_base_url(ApiProvider::Novita, &providers.novita)
+            && !is_declared(ApiProvider::Novita, model)
             && let Some(normalized) = normalize_model_for_provider(ApiProvider::Novita, model)
         {
             providers.novita.model = Some(normalized);
         }
         if let Some(model) = providers.fireworks.model.as_deref()
             && !provider_entry_uses_custom_base_url(ApiProvider::Fireworks, &providers.fireworks)
+            && !is_declared(ApiProvider::Fireworks, model)
             && let Some(normalized) = normalize_model_for_provider(ApiProvider::Fireworks, model)
         {
             providers.fireworks.model = Some(normalized);
@@ -9713,6 +9754,7 @@ fn normalize_model_config(config: &mut Config) {
                 ApiProvider::Siliconflow,
                 &providers.siliconflow,
             )
+            && !is_declared(ApiProvider::Siliconflow, model)
             && let Some(normalized) = normalize_model_for_provider(ApiProvider::Siliconflow, model)
         {
             providers.siliconflow.model = Some(normalized);
@@ -9722,6 +9764,7 @@ fn normalize_model_config(config: &mut Config) {
                 ApiProvider::SiliconflowCn,
                 &providers.siliconflow_cn,
             )
+            && !is_declared(ApiProvider::SiliconflowCn, model)
             && let Some(normalized) =
                 normalize_model_for_provider(ApiProvider::SiliconflowCn, model)
         {
@@ -9729,24 +9772,28 @@ fn normalize_model_config(config: &mut Config) {
         }
         if let Some(model) = providers.moonshot.model.as_deref()
             && !provider_entry_uses_custom_base_url(ApiProvider::Moonshot, &providers.moonshot)
+            && !is_declared(ApiProvider::Moonshot, model)
             && let Some(normalized) = normalize_model_for_provider(ApiProvider::Moonshot, model)
         {
             providers.moonshot.model = Some(normalized);
         }
         if let Some(model) = providers.sglang.model.as_deref()
             && !provider_entry_uses_custom_base_url(ApiProvider::Sglang, &providers.sglang)
+            && !is_declared(ApiProvider::Sglang, model)
             && let Some(normalized) = normalize_model_for_provider(ApiProvider::Sglang, model)
         {
             providers.sglang.model = Some(normalized);
         }
         if let Some(model) = providers.vllm.model.as_deref()
             && !provider_entry_uses_custom_base_url(ApiProvider::Vllm, &providers.vllm)
+            && !is_declared(ApiProvider::Vllm, model)
             && let Some(normalized) = normalize_model_for_provider(ApiProvider::Vllm, model)
         {
             providers.vllm.model = Some(normalized);
         }
         if let Some(model) = providers.deepinfra.model.as_deref()
             && !provider_entry_uses_custom_base_url(ApiProvider::Deepinfra, &providers.deepinfra)
+            && !is_declared(ApiProvider::Deepinfra, model)
             && let Some(normalized) = normalize_model_for_provider(ApiProvider::Deepinfra, model)
         {
             providers.deepinfra.model = Some(normalized);
@@ -10678,6 +10725,7 @@ fn merge_config(base: Config, override_cfg: Config) -> Config {
     // Captured before the struct literal moves the field out of `override_cfg`.
     let override_defines_root_base_url = override_cfg.base_url.is_some();
     Config {
+        custom_models: override_cfg.custom_models.or(base.custom_models),
         provider: override_cfg.provider.or(base.provider),
         telemetry: override_cfg.telemetry.or(base.telemetry),
         api_key: override_cfg.api_key.or(base.api_key),

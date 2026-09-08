@@ -294,6 +294,7 @@ pub struct DeepSeekClient {
     openrouter_vendor: Option<String>,
     billing_surface: Option<String>,
     billing_mode: crate::cost_status::RouteBillingMode,
+    configured_models: Arc<Vec<codewhale_config::catalog::configured::ConfiguredModel>>,
     /// Non-secret limits frozen from the same resolved candidate as the
     /// endpoint and wire model. Auxiliary calls carry only this client, so
     /// they must not reconstruct output caps with `None` and discard a custom
@@ -581,6 +582,7 @@ impl Clone for DeepSeekClient {
             openrouter_vendor: self.openrouter_vendor.clone(),
             billing_surface: self.billing_surface.clone(),
             billing_mode: self.billing_mode,
+            configured_models: Arc::clone(&self.configured_models),
             route_limits: self.route_limits,
             codex_account_id: self.codex_account_id.clone(),
             wire_format: self.wire_format,
@@ -1577,6 +1579,7 @@ impl DeepSeekClient {
             openrouter_vendor,
             billing_surface,
             billing_mode,
+            configured_models: Arc::new(config.custom_models.clone().unwrap_or_default()),
             route_limits,
             codex_account_id,
             wire_format,
@@ -1677,6 +1680,58 @@ impl DeepSeekClient {
         redact_model_bound_text(text, &self.model_bound_secret_values)
     }
 
+    /// Alternate models share this client's frozen endpoint and declarations.
+    /// Resolution still owns protocol admission, including closed rosters.
+    pub(crate) fn resolve_model_route(&self, model: &str) -> Result<ReadyRouteCandidate> {
+        static RESOLVER: OnceLock<RouteResolver> = OnceLock::new();
+        let resolver = RESOLVER.get_or_init(RouteResolver::new);
+        let request = RouteRequest {
+            explicit_provider: self.api_provider.kind(),
+            model_selector: Some(LogicalModelRef::from(model)),
+            saved_provider_model: None,
+            base_url_override: Some(self.base_url.clone()),
+            limit_overrides: Vec::new(),
+        };
+        if self.configured_models.is_empty() || self.api_provider == ApiProvider::OpenaiCodex {
+            resolver.resolve(&request)
+        } else {
+            resolver
+                .clone()
+                .with_configured_models(
+                    &self.configured_models,
+                    &self.provider_identity,
+                    self.api_provider.kind().unwrap_or_default(),
+                    &self.base_url,
+                )
+                .resolve(&request)
+        }
+        .map_err(anyhow::Error::msg)
+    }
+
+    fn declared_wire_model<'a>(&self, model: &'a str) -> Option<&'a str> {
+        if self.api_provider == ApiProvider::OpenaiCodex
+            || !self.configured_models.iter().any(|row| {
+                row.id == model && row.matches_route(&self.provider_identity, &self.base_url)
+            })
+        {
+            return None;
+        }
+        // A declaration cannot admit a new model to a closed protocol roster,
+        // or defeat a required protocol alias such as OpenCode Go's allowlist.
+        self.resolve_model_route(model)
+            .ok()
+            .filter(|candidate| candidate.wire_model_id().as_str() == model)
+            .map(|_| model)
+    }
+
+    fn wire_model_for_route(&self, model: &str) -> String {
+        self.declared_wire_model(model)
+            .map(str::to_string)
+            .unwrap_or_else(|| {
+                wire_model_for_provider_route(self.api_provider, &self.base_url, model)
+            })
+    }
+
     /// Resolve `model` through the central route resolver and rebuild this
     /// client whenever its exact wire identity, limits, or protocol differs
     /// from the route bound at construction (#5042). `Ok(None)` means the
@@ -1693,17 +1748,7 @@ impl DeepSeekClient {
         if model == self.default_model {
             return Ok(None);
         }
-        static RESOLVER: OnceLock<RouteResolver> = OnceLock::new();
-        let candidate = RESOLVER
-            .get_or_init(RouteResolver::new)
-            .resolve(&RouteRequest {
-                explicit_provider: self.api_provider.kind(),
-                model_selector: Some(LogicalModelRef::from(model)),
-                saved_provider_model: None,
-                base_url_override: Some(self.base_url.clone()),
-                limit_overrides: Vec::new(),
-            })
-            .map_err(anyhow::Error::msg)?;
+        let candidate = self.resolve_model_route(model)?;
         let candidate_limits = crate::route_budget::known_route_limits(candidate.limits());
         if candidate.protocol() == self.wire_format
             && candidate.wire_model_id().as_str() == self.default_model
@@ -1731,7 +1776,9 @@ impl DeepSeekClient {
                 self.wire_format
             )
         })?;
-        Self::from_candidate(config, &candidate).map(Some)
+        let mut rebound = Self::from_candidate(config, &candidate)?;
+        rebound.configured_models = Arc::clone(&self.configured_models);
+        Ok(Some(rebound))
     }
 
     fn bind_request_to_protocol(
@@ -1750,18 +1797,11 @@ impl DeepSeekClient {
             return Ok((request, self.route_limits));
         }
 
-        static RESOLVER: OnceLock<RouteResolver> = OnceLock::new();
-        let candidate = match RESOLVER
-            .get_or_init(RouteResolver::new)
-            .resolve(&RouteRequest {
-                explicit_provider: self.api_provider.kind(),
-                model_selector: Some(LogicalModelRef::from(request.model.as_str())),
-                saved_provider_model: None,
-                base_url_override: Some(self.base_url.clone()),
-                limit_overrides: Vec::new(),
-            }) {
+        let candidate = match self.resolve_model_route(&request.model) {
             Ok(candidate) => candidate,
-            Err(error) if model_aware => return Err(anyhow::Error::msg(error)),
+            Err(error) if model_aware || self.api_provider == ApiProvider::OpencodeGo => {
+                return Err(error);
+            }
             Err(_) => {
                 // A fixed-protocol gateway may legitimately accept an id that
                 // is newer than our offline catalog. Preserve the caller's
@@ -2357,6 +2397,7 @@ impl DeepSeekClient {
         let (request, request_route_limits) =
             self.bind_request_to_protocol(self.prepare_model_bound_request(request))?;
         let mut request = clamp_output_cap(request, request_route_limits);
+        let declared_wire_model = self.declared_wire_model(&request.model).map(str::to_string);
         if self.is_local_ds4_model(&request.model)
             && let Some(tools) = request.tools.as_mut()
         {
@@ -2380,6 +2421,10 @@ impl DeepSeekClient {
                     &self.base_url,
                     stream,
                 )?;
+                if let Some(model) = &declared_wire_model {
+                    wire.model.clone_from(model);
+                    wire.body["model"] = json!(model);
+                }
                 self.apply_provider_routing(&mut wire.body);
                 let url = chat_completions_url(
                     self.chat_transport_base_url(),
@@ -2406,7 +2451,10 @@ impl DeepSeekClient {
                 .with_omitted_tool_names(wire.omitted_tool_names))
             }
             WireFormat::AnthropicMessages => {
-                let body = self.build_anthropic_body(&request, stream);
+                let mut body = self.build_anthropic_body(&request, stream);
+                if let Some(model) = &declared_wire_model {
+                    body["model"] = json!(model);
+                }
                 let url = anthropic::anthropic_messages_url(&self.base_url);
                 let shape = if self.api_provider == ApiProvider::OpencodeZen {
                     RouteShape::OpencodeZen
@@ -2431,8 +2479,11 @@ impl DeepSeekClient {
                 ))
             }
             WireFormat::Responses => {
-                let body =
+                let mut body =
                     responses::build_responses_body_for_provider(&request, self.api_provider);
+                if let Some(model) = &declared_wire_model {
+                    body["model"] = json!(model);
+                }
                 let is_codex = self.api_provider == ApiProvider::OpenaiCodex;
                 let url = if is_codex {
                     format!("{}{}", self.base_url, responses::CODEX_RESPONSES_PATH)
@@ -2507,16 +2558,7 @@ impl DeepSeekClient {
         let route_limits = if requested_model.trim() == self.default_model {
             self.route_limits
         } else {
-            static RESOLVER: OnceLock<RouteResolver> = OnceLock::new();
-            RESOLVER
-                .get_or_init(RouteResolver::new)
-                .resolve(&RouteRequest {
-                    explicit_provider: self.api_provider.kind(),
-                    model_selector: Some(LogicalModelRef::from(requested_model)),
-                    saved_provider_model: None,
-                    base_url_override: Some(self.base_url.clone()),
-                    limit_overrides: Vec::new(),
-                })
+            self.resolve_model_route(requested_model)
                 .ok()
                 .and_then(|candidate| crate::route_budget::known_route_limits(candidate.limits()))
         };
@@ -2529,8 +2571,7 @@ impl DeepSeekClient {
         requested_model: &str,
         route_limits: Option<RouteLimits>,
     ) -> u32 {
-        let wire_model =
-            wire_model_for_provider_route(self.api_provider, &self.base_url, requested_model);
+        let wire_model = self.wire_model_for_route(requested_model);
         crate::route_budget::effective_max_output_tokens_for_route(
             self.api_provider,
             &wire_model,
@@ -2571,19 +2612,28 @@ impl DeepSeekClient {
         requested_model: &str,
         dispatched_at: chrono::DateTime<chrono::Utc>,
     ) -> crate::cost_status::EffectiveRouteEnvelope {
-        let model =
-            wire_model_for_provider_route(self.api_provider, &self.base_url, requested_model);
+        let model = self.wire_model_for_route(requested_model);
         let endpoint_fingerprint = crate::cost_status::endpoint_fingerprint(&self.base_url);
         let provider_live_pricing = u64::try_from(dispatched_at.timestamp())
             .ok()
             .and_then(|at| {
-                crate::provider_catalog_live::fresh_dispatch_pricing_quote_at(
+                crate::provider_catalog_live::configured_dispatch_pricing_quote_at(
+                    &self.configured_models,
                     self.api_provider,
                     &self.provider_identity,
                     &model,
                     &self.base_url,
                     at,
                 )
+                .or_else(|| {
+                    crate::provider_catalog_live::fresh_dispatch_pricing_quote_at(
+                        self.api_provider,
+                        &self.provider_identity,
+                        &model,
+                        &self.base_url,
+                        at,
+                    )
+                })
             });
         crate::cost_status::EffectiveRouteEnvelope {
             openrouter_vendor: self.openrouter_vendor.clone(),
@@ -2693,7 +2743,7 @@ impl DeepSeekClient {
         let route = self.effective_route_envelope(model, chrono::Utc::now());
         let _inference = self.acquire_remote_control_inference_permit().await;
         let _permit = self.acquire_provider_request_permit().await;
-        let model = wire_model_for_provider_route(self.api_provider, &self.base_url, model);
+        let model = self.wire_model_for_route(model);
         let max_tokens = self.effective_max_output_tokens(&model);
         if self.wire_format != WireFormat::ChatCompletions {
             // Non-Chat dialects reuse the prepared-request seam so translation
@@ -3213,7 +3263,7 @@ impl DeepSeekClient {
         }
 
         let audio_format = normalize_audio_format(&request.audio_format);
-        let model = wire_model_for_provider_route(self.api_provider, &self.base_url, &model);
+        let model = self.wire_model_for_route(&model);
         let model_lower = model.to_ascii_lowercase();
         let instruction = request
             .instruction
@@ -4917,7 +4967,7 @@ impl DeepSeekClient {
             );
         }
         let url = api_url_with_suffix(&self.base_url, "beta/completions", None);
-        let model = wire_model_for_provider_route(self.api_provider, &self.base_url, model);
+        let model = self.wire_model_for_route(model);
         let max_tokens = max_tokens.min(self.effective_max_output_tokens(&model));
         let body = json!({
             "model": model,
@@ -13608,6 +13658,143 @@ mod tests {
                 .modalities
                 .as_ref()
                 .is_some_and(|modalities| modalities.input.iter().any(|value| value == "image"))
+        );
+    }
+}
+
+#[cfg(test)]
+mod configured_model_client_tests {
+    use super::*;
+    use crate::config::{ProviderConfig, ProvidersConfig};
+
+    fn config() -> Config {
+        Config {
+            provider: Some("deepseek".into()),
+            providers: Some(ProvidersConfig {
+                deepseek: ProviderConfig {
+                    api_key: Some("configured-model-local-fixture".into()),
+                    base_url: Some("https://api.deepseek.com".into()),
+                    ..ProviderConfig::default()
+                },
+                ..ProvidersConfig::default()
+            }),
+            custom_models: Some(vec![
+                toml::from_str(
+                    r#"
+                provider = "deepseek"
+                base_url = "https://api.deepseek.com"
+                id = "deepseek-v4pro"
+                limit = { context = 1024, output = 32 }
+                cost = { input = 1.0, output = 2.0 }
+            "#,
+                )
+                .unwrap(),
+            ]),
+            ..Config::default()
+        }
+    }
+
+    #[test]
+    fn alternate_declared_model_freezes_wire_limits_and_price() {
+        let _env = crate::test_support::lock_test_env();
+        let mut config = config();
+        let client = DeepSeekClient::from_parts(
+            "https://api.deepseek.com".into(),
+            "initial-model".into(),
+            WireFormat::ChatCompletions,
+            None,
+            &config,
+        )
+        .unwrap();
+        let model = "deepseek-v4pro";
+        config.providers.as_mut().unwrap().deepseek.model = Some(model.into());
+        crate::config::normalize_model_config_for_test(&mut config);
+        assert_eq!(config.default_model(), model);
+        assert_eq!(
+            config.providers.as_ref().unwrap().deepseek.model.as_deref(),
+            Some(model)
+        );
+        config.custom_models.as_mut().unwrap()[0]
+            .limit
+            .as_mut()
+            .unwrap()
+            .output = Some(512);
+        config.custom_models.as_mut().unwrap()[0]
+            .cost
+            .as_mut()
+            .unwrap()
+            .output = Some(99.0);
+
+        assert_eq!(client.effective_max_output_tokens(model), 32);
+        let prepared = client
+            .prepare_outbound_request(
+                translation_message_request("hello", model.into(), "English", 4096),
+                false,
+            )
+            .unwrap();
+        assert_eq!(prepared.wire_model, model);
+        assert_eq!(prepared.body["model"], model);
+        assert_eq!(prepared.body["max_tokens"], 32);
+        let rebound = client
+            .rebound_for_model_protocol(Some(&config), model)
+            .unwrap()
+            .unwrap();
+        assert_eq!(rebound.default_model, model);
+        assert_eq!(rebound.route_limits.unwrap().output_tokens, Some(32));
+        let envelope = rebound.effective_route_envelope(model, chrono::Utc::now());
+        assert_eq!(envelope.model, model);
+        let quote = serde_json::to_value(envelope.provider_live_pricing.unwrap()).unwrap();
+        assert_eq!(quote["output_per_million"], "2");
+
+        let mut wrong_endpoint = client.clone();
+        wrong_endpoint.base_url = "https://other.example.test/v1".into();
+        assert_eq!(wrong_endpoint.declared_wire_model(model), None);
+        assert_ne!(wrong_endpoint.effective_max_output_tokens(model), 32);
+        let mut wrong_identity = client;
+        wrong_identity.provider_identity = "other-provider".into();
+        assert_eq!(wrong_identity.declared_wire_model(model), None);
+    }
+
+    #[test]
+    fn declaration_does_not_open_opencode_go_protocol_roster() {
+        let _env = crate::test_support::lock_test_env();
+        let mut config = config();
+        config.provider = Some("opencode-go".into());
+        config.providers.as_mut().unwrap().opencode_go = ProviderConfig {
+            api_key: Some("configured-model-local-fixture".into()),
+            ..ProviderConfig::default()
+        };
+        let base_url = ApiProvider::OpencodeGo.default_base_url();
+        let declaration = &mut config.custom_models.as_mut().unwrap()[0];
+        declaration.provider = "opencode-go".into();
+        declaration.base_url = base_url.into();
+        declaration.id = "claude-sonnet-unproven".into();
+        let client = DeepSeekClient::from_parts(
+            base_url.into(),
+            config.default_model(),
+            WireFormat::ChatCompletions,
+            None,
+            &config,
+        )
+        .unwrap();
+        assert_eq!(client.declared_wire_model("claude-sonnet-unproven"), None);
+        assert!(
+            client
+                .rebound_for_model_protocol(None, "claude-sonnet-unproven")
+                .is_err()
+        );
+        assert!(
+            client
+                .prepare_outbound_request(
+                    translation_message_request(
+                        "hello",
+                        "claude-sonnet-unproven".into(),
+                        "English",
+                        64
+                    ),
+                    false,
+                )
+                .is_err()
         );
     }
 }

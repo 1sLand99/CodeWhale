@@ -928,17 +928,7 @@ pub(crate) async fn apply_model_picker_choice(
     let mut resolved_model = model.clone();
     let mut route_base_url = config.deepseek_base_url();
     if !model_is_auto {
-        let saved_provider_model = config
-            .provider_config_for(app.api_provider)
-            .and_then(|provider| provider.model.as_deref());
-        match crate::route_runtime::resolve_route_candidate_with_context_metadata(
-            app.api_provider,
-            Some(&model),
-            saved_provider_model,
-            Some(config.deepseek_base_url()),
-            config.context_window_for_provider_config(app.api_provider),
-            None,
-        ) {
+        match crate::route_runtime::resolve_runtime_route(config, app.api_provider, Some(&model)) {
             Ok(resolution) => {
                 resolved_model = resolution.candidate.wire_model_id().as_str().to_string();
                 route_base_url = resolution.candidate.endpoint().base_url.clone();
@@ -3785,6 +3775,7 @@ pub(crate) fn apply_loaded_session_config_snapshot(
             &previous_workspace,
         );
     *config = next_config;
+    app.configured_models = config.custom_models.clone().unwrap_or_default();
     crate::initialize_cloud_facts(config);
     app.refresh_notification_settings(config);
     Ok(respawn)

@@ -194,13 +194,26 @@ impl EffectiveRouteEnvelope {
             u64::try_from(dispatched_at.timestamp())
                 .ok()
                 .and_then(|at| {
-                    crate::provider_catalog_live::fresh_dispatch_pricing_quote_at(
-                        provider,
-                        &provider_identity,
-                        &model,
-                        base_url,
-                        at,
-                    )
+                    config
+                        .and_then(|config| {
+                            crate::provider_catalog_live::configured_dispatch_pricing_quote_at(
+                                config.custom_models.as_deref().unwrap_or_default(),
+                                provider,
+                                &provider_identity,
+                                &model,
+                                base_url,
+                                at,
+                            )
+                        })
+                        .or_else(|| {
+                            crate::provider_catalog_live::fresh_dispatch_pricing_quote_at(
+                                provider,
+                                &provider_identity,
+                                &model,
+                                base_url,
+                                at,
+                            )
+                        })
                 })
         });
         Self {
@@ -232,11 +245,29 @@ impl EffectiveRouteEnvelope {
             Some(&self.provider_identity),
             self.endpoint_fingerprint.as_deref(),
         );
+        let declared_estimate = self.provider_live_pricing.as_ref().is_some_and(|quote| {
+            quote.provenance == codewhale_config::pricing::PricingProvenance::UserOverride
+                && self
+                    .endpoint_fingerprint
+                    .as_deref()
+                    .zip(u64::try_from(self.dispatched_at.timestamp()).ok())
+                    .is_some_and(|(fingerprint, at)| {
+                        quote
+                            .pricing_for_route(
+                                self.provider,
+                                &self.provider_identity,
+                                &self.model,
+                                fingerprint,
+                                at,
+                            )
+                            .is_some()
+                    })
+        });
         match self.billing_mode {
             RouteBillingMode::Subscription | RouteBillingMode::Local => {
                 return TurnCostAudit::unpriced(crate::pricing::UnpricedReason::NotMoneyMetered);
             }
-            RouteBillingMode::Unknown if !reviewed_custom_metered => {
+            RouteBillingMode::Unknown if !reviewed_custom_metered && !declared_estimate => {
                 return TurnCostAudit::unpriced(
                     crate::pricing::UnpricedReason::UnknownBillingBasis,
                 );
@@ -2099,6 +2130,119 @@ pub(crate) fn test_scope() -> TestCostScope {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn configured_fixture_receipt() -> (crate::config::Config, EffectiveRouteEnvelope, Usage) {
+        let config = toml::from_str(include_str!(
+            "../../config/tests/fixtures/custom_models.toml"
+        ))
+        .unwrap();
+        let receipt = EffectiveRouteEnvelope::capture(
+            Some(&config),
+            ApiProvider::Deepseek,
+            "deepseek",
+            "deepseek-v4.1-flash-expires-on-0910",
+            Some("https://models.example.test/v1"),
+            Utc::now(),
+        );
+        let usage = Usage {
+            input_tokens: 1_000_000,
+            output_tokens: 1_000_000,
+            ..Usage::default()
+        };
+        (config, receipt, usage)
+    }
+
+    #[test]
+    fn configured_model_estimate_is_frozen_and_exactly_bound() {
+        let (mut config, receipt, usage) = configured_fixture_receipt();
+        let audit = receipt.audit(&usage);
+        assert_eq!(
+            audit.provenance,
+            Some(codewhale_config::pricing::PricingProvenance::UserOverride)
+        );
+        assert!((audit.estimate.unwrap().usd - 2.0).abs() < 1e-12);
+        let frozen: EffectiveRouteEnvelope =
+            serde_json::from_str(&serde_json::to_string(&receipt).unwrap()).unwrap();
+        config.custom_models.as_mut().unwrap()[0]
+            .cost
+            .as_mut()
+            .unwrap()
+            .input = Some(9.0);
+        assert!((frozen.audit(&usage).estimate.unwrap().usd - 2.0).abs() < 1e-12);
+        for (field, value) in [
+            ("model", "deepseek-v4.1-flash"),
+            ("identity", "other-provider"),
+            ("endpoint", "https://other.example.test/v1"),
+        ] {
+            let mut wrong = frozen.clone();
+            match field {
+                "model" => wrong.model = value.into(),
+                "identity" => wrong.provider_identity = value.into(),
+                _ => wrong.endpoint_fingerprint = endpoint_fingerprint(value),
+            }
+            assert!(wrong.audit(&usage).estimate.is_none(), "{field}");
+        }
+        for billing in [RouteBillingMode::Local, RouteBillingMode::Subscription] {
+            let mut nonmoney = frozen.clone();
+            nonmoney.billing_mode = billing;
+            assert_eq!(
+                nonmoney.audit(&usage).unpriced_reason,
+                Some(crate::pricing::UnpricedReason::NotMoneyMetered)
+            );
+        }
+        let mut cached = usage.clone();
+        cached.prompt_cache_write_tokens = Some(500);
+        assert!(frozen.audit(&cached).estimate.is_none());
+    }
+
+    #[test]
+    fn configured_model_missing_prices_stay_unknown_and_vendor_pin_still_wins() {
+        let (mut config, receipt, usage) = configured_fixture_receipt();
+        config.custom_models.as_mut().unwrap()[0].cost = None;
+        let unknown = EffectiveRouteEnvelope::capture(
+            Some(&config),
+            receipt.provider,
+            receipt.provider_identity.clone(),
+            receipt.model.clone(),
+            Some("https://models.example.test/v1"),
+            receipt.dispatched_at,
+        );
+        assert!(unknown.provider_live_pricing.is_some());
+        assert!(unknown.audit(&usage).estimate.is_none());
+        let mut pinned = receipt;
+        pinned.provider = ApiProvider::Openrouter;
+        pinned.openrouter_vendor = Some("exact-upstream".into());
+        pinned.billing_mode = RouteBillingMode::Metered;
+        assert_eq!(
+            pinned.audit(&usage).unpriced_reason,
+            Some(crate::pricing::UnpricedReason::RoutingDependentPrice)
+        );
+    }
+
+    #[test]
+    fn configured_model_client_keeps_its_metadata_snapshot_after_reload() {
+        let (mut config, _, usage) = configured_fixture_receipt();
+        config.api_key = Some("fixture-not-a-provider-credential".into());
+        let id = "deepseek-v4.1-flash-expires-on-0910";
+        let route =
+            crate::route_runtime::resolve_runtime_route(&config, ApiProvider::Deepseek, Some(id))
+                .unwrap();
+        let client =
+            crate::client::DeepSeekClient::from_candidate(&config, &route.candidate).unwrap();
+        config.custom_models.as_mut().unwrap()[0]
+            .cost
+            .as_mut()
+            .unwrap()
+            .input = Some(9.0);
+        let envelope = client.effective_route_envelope(id, Utc::now());
+        assert!((envelope.audit(&usage).estimate.unwrap().usd - 2.0).abs() < 1e-12);
+        assert_eq!(
+            client
+                .effective_route_envelope("other-model", Utc::now())
+                .provider_live_pricing,
+            None
+        );
+    }
 
     struct ProviderCatalogTestReset;
 

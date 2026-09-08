@@ -102,6 +102,20 @@ impl ModelInventory {
             for model in models_for_provider(config, active_provider, provider) {
                 push_model(&mut models, provider, &model);
             }
+            for declaration in config.custom_models.as_deref().unwrap_or_default() {
+                if crate::provider_lake::configured_model_for_route(
+                    config,
+                    provider,
+                    &config.provider_identity_for(provider),
+                    &config.base_url_for_route(provider),
+                    &declaration.id,
+                )
+                .is_some()
+                    && !models.contains(&declaration.id)
+                {
+                    models.push(declaration.id.clone());
+                }
+            }
             if models.is_empty() {
                 push_model(&mut models, provider, &default_model);
             }
@@ -122,7 +136,7 @@ impl ModelInventory {
                 {
                     if let Some(context_window) = route.candidate.limits().context_tokens {
                         capability.context_window = context_window.min(u64::from(u32::MAX)) as u32;
-                        context_window_unverified = false;
+                        context_window_unverified = !route.context_window.source.is_verified();
                     }
                     // A concrete offering maximum is a stronger fact than the
                     // static compatibility matrix — and is the only way a
@@ -136,14 +150,36 @@ impl ModelInventory {
                     {
                         capability.max_output = Some(max_output);
                     }
+                    let user_declared =
+                        route
+                            .candidate
+                            .applied_limit_overrides()
+                            .iter()
+                            .any(|entry| {
+                                entry.source
+                                    == codewhale_config::route::OverrideSource::UserModelMetadata
+                            });
+                    if user_declared {
+                        context_window_unverified = !route.context_window.source.is_verified();
+                        capability.context_window = route.context_window.tokens;
+                        capability.max_output = route
+                            .candidate
+                            .limits()
+                            .output_tokens
+                            .and_then(|value| u32::try_from(value).ok());
+                        capability.thinking_supported = route.candidate.capabilities().reasoning
+                            == codewhale_config::route::CapabilityState::Supported;
+                    }
                     // Do not promote bare `k3` into the global capability
                     // catalog. Its thinking trace contract belongs only to
                     // Kimi Code's exact membership-plan route.
-                    if crate::config::is_exact_kimi_code_k3_route(
-                        provider,
-                        &route.candidate.endpoint().base_url,
-                        route.candidate.wire_model_id().as_str(),
-                    ) {
+                    if !user_declared
+                        && crate::config::is_exact_kimi_code_k3_route(
+                            provider,
+                            &route.candidate.endpoint().base_url,
+                            route.candidate.wire_model_id().as_str(),
+                        )
+                    {
                         capability.thinking_supported = true;
                     }
                 }
@@ -162,8 +198,7 @@ impl ModelInventory {
                 }
                 // Unready routes stay visible (annotated) so an operator can
                 // override explicitly, but they are never a silent default.
-                let default_for_provider =
-                    readiness.can_attempt() && model.eq_ignore_ascii_case(&default_model);
+                let default_for_provider = readiness.can_attempt() && model == default_model;
                 if default_for_provider {
                     tags.push("default");
                 }
@@ -251,9 +286,9 @@ impl ModelInventory {
         provider: ApiProvider,
         model: &str,
     ) -> Option<&ModelRouteCandidate> {
-        self.candidates.iter().find(|candidate| {
-            candidate.provider == provider && candidate.model.eq_ignore_ascii_case(model.trim())
-        })
+        self.candidates
+            .iter()
+            .find(|candidate| candidate.provider == provider && candidate.model == model.trim())
     }
 
     pub(crate) fn active_default(&self) -> Option<&ModelRouteCandidate> {

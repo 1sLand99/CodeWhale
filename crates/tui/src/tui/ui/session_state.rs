@@ -1013,17 +1013,7 @@ pub(crate) fn resolve_loaded_session_route(app: &mut App, config: &Config) {
         return;
     }
 
-    let saved_provider_model = config
-        .provider_config_for(app.api_provider)
-        .and_then(|provider| provider.model.as_deref());
-    match crate::route_runtime::resolve_route_candidate_with_context_metadata(
-        app.api_provider,
-        Some(&app.model),
-        saved_provider_model,
-        Some(config.deepseek_base_url()),
-        context_override,
-        None,
-    ) {
+    match crate::route_runtime::resolve_runtime_route(config, app.api_provider, Some(&app.model)) {
         Ok(resolution) => {
             app.set_active_route_resolution(
                 resolution.candidate.endpoint().base_url.clone(),

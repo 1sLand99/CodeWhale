@@ -1929,6 +1929,21 @@ pub(crate) fn audit_turn_cost_for_route_on_endpoint_for_identity_at(
     usage: &Usage,
     recorded_at: DateTime<Utc>,
 ) -> TurnCostAudit {
+    let declared_pricing = match provider_live_pricing {
+        Some(quote) if quote.provenance == PricingProvenance::UserOverride => {
+            let pricing = provider_identity
+                .zip(endpoint_fingerprint)
+                .zip(u64::try_from(recorded_at.timestamp()).ok())
+                .and_then(|((identity, fingerprint), at)| {
+                    quote.pricing_for_route(provider, identity, model, fingerprint, at)
+                });
+            let Some(pricing) = pricing else {
+                return TurnCostAudit::unpriced(UnpricedReason::UnverifiedLivePricing);
+            };
+            Some(pricing)
+        }
+        _ => None,
+    };
     let reviewed_custom_metered =
         reviewed_custom_route_is_metered(provider, provider_identity, endpoint_fingerprint);
     let reviewed_provider_live =
@@ -1940,13 +1955,20 @@ pub(crate) fn audit_turn_cost_for_route_on_endpoint_for_identity_at(
         EndpointMetering::ExactSubscription | EndpointMetering::LocalNoBill => {
             return TurnCostAudit::unpriced(UnpricedReason::NotMoneyMetered);
         }
-        EndpointMetering::Unknown if billing_surface.is_some() && !reviewed_custom_metered => {
+        EndpointMetering::Unknown
+            if billing_surface.is_some()
+                && !reviewed_custom_metered
+                && declared_pricing.is_none() =>
+        {
             return TurnCostAudit::unpriced(UnpricedReason::UnknownBillingBasis);
         }
         EndpointMetering::Unknown | EndpointMetering::Money => {}
     }
     if !usage_cache_partition_is_consistent(usage) {
         return TurnCostAudit::unpriced(UnpricedReason::InconsistentUsage);
+    }
+    if let Some(pricing) = declared_pricing {
+        return audit_offering_pricing(pricing, usage);
     }
     if provider == ApiProvider::Stepfun {
         return match pricing_for_billing_surface(provider, model, billing_surface) {

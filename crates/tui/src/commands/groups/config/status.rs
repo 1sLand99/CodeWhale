@@ -452,7 +452,8 @@ fn context_window_source_label(
     tr(
         locale,
         match source {
-            crate::route_runtime::ContextWindowSource::Configured => {
+            crate::route_runtime::ContextWindowSource::Configured
+            | crate::route_runtime::ContextWindowSource::UserDeclared => {
                 MessageId::StatusContextSourceConfigured
             }
             crate::route_runtime::ContextWindowSource::ProviderReported => {

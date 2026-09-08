@@ -894,6 +894,13 @@ pub struct ConfigToml {
     pub tools: Option<ToolsToml>,
     #[serde(default, skip_serializing_if = "ProvidersToml::is_empty")]
     pub providers: ProvidersToml,
+    /// Operator declarations for exact provider/endpoint/model tuples.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "catalog::configured::deserialize_configured_models"
+    )]
+    pub custom_models: Option<Vec<catalog::configured::ConfiguredModel>>,
     /// Provider fallback chain (#2574). TUI runtime code may advance through
     /// these providers after recoverable provider errors; config resolution
     /// itself still reports the selected primary provider.
@@ -5430,6 +5437,9 @@ impl ConfigStore {
     /// [`persistence::SetupTransaction`] alongside sibling files and keep the
     /// comment-preserving write atomic with the rest of the transaction.
     pub fn rendered_body(&self) -> Result<String> {
+        catalog::configured::validate_configured_models(
+            self.config.custom_models.as_deref().unwrap_or_default(),
+        )?;
         let mut serialized =
             toml::to_string_pretty(&self.config).context("failed to serialize config")?;
         if let Some(provider_id) = self.config.named_custom_provider_id() {

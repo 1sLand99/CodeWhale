@@ -36,6 +36,24 @@ pub const DIRECT_KIMI_K3_MAX_OUTPUT_TOKENS: u32 = 1_048_576;
 /// models resolve to their own scaled value via
 /// `compaction_threshold_for_model` (#664).
 pub const DEFAULT_COMPACTION_TOKEN_THRESHOLD: usize = 102_400;
+pub(crate) fn canonical_official_deepseek_model_id(model: &str) -> Option<&'static str> {
+    match model.trim().to_ascii_lowercase().as_str() {
+        "deepseek-v4-pro"
+        | "deepseek-v4pro"
+        | "deepseek-ai/deepseek-v4-pro"
+        | "deepseek-ai/deepseek-v4pro"
+        | "deepseek/deepseek-v4-pro"
+        | "deepseek/deepseek-v4pro" => Some("deepseek-v4-pro"),
+        "deepseek-v4-flash"
+        | "deepseek-v4flash"
+        | "deepseek-ai/deepseek-v4-flash"
+        | "deepseek-ai/deepseek-v4flash"
+        | "deepseek/deepseek-v4-flash"
+        | "deepseek/deepseek-v4flash" => Some("deepseek-v4-flash"),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 const COMPACTION_THRESHOLD_PERCENT: u32 = 80;
 
@@ -175,14 +193,11 @@ pub fn context_window_for_model(model: &str) -> Option<u32> {
     if let Some(window) = known_context_window_for_model(&lower) {
         return Some(window);
     }
+    if canonical_official_deepseek_model_id(&lower).is_some() {
+        return Some(DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS);
+    }
     if let Some(explicit_window) = explicit_context_window_hint(&lower) {
         return Some(explicit_window);
-    }
-    if lower.contains("deepseek") {
-        if lower.contains("v4") {
-            return Some(DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS);
-        }
-        return Some(LEGACY_DEEPSEEK_CONTEXT_WINDOW_TOKENS);
     }
     if is_openai_gpt_55_api_model(&lower) || is_openai_gpt_56_api_model(&lower) {
         return Some(1_050_000);
@@ -437,7 +452,7 @@ pub fn model_supports_reasoning(model: &str) -> bool {
         return supports_reasoning;
     }
     let lower = model.to_lowercase();
-    if lower.contains("deepseek") && lower.contains("v4") {
+    if canonical_official_deepseek_model_id(&lower).is_some() {
         return true;
     }
     // #3016 plus the 2026 Kimi Code K2.7 update: Moonshot-native Kimi IDs,
@@ -860,28 +875,19 @@ mod tests {
     }
 
     #[test]
-    fn v4_snapshots_preserve_context_window() {
-        // v-series snapshots get 1M context since they contain "v4"
-        assert_eq!(
-            context_window_for_model("deepseek-v4-flash-20260423"),
-            Some(DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS)
-        );
-        assert_eq!(
-            context_window_for_model("deepseek-v4-pro-20260423"),
-            Some(DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS)
-        );
-    }
-
-    #[test]
-    fn unknown_legacy_deepseek_models_map_to_128k_context_window() {
-        assert_eq!(
-            context_window_for_model("deepseek-coder"),
-            Some(LEGACY_DEEPSEEK_CONTEXT_WINDOW_TOKENS)
-        );
-        assert_eq!(
-            context_window_for_model("deepseek-v3.2-0324"),
-            Some(LEGACY_DEEPSEEK_CONTEXT_WINDOW_TOKENS)
-        );
+    fn unrecognized_deepseek_models_do_not_inherit_sibling_metadata() {
+        for model in [
+            "deepseek-v4-flash-20260423",
+            "deepseek-v4-pro-20260423",
+            "deepseek-coder",
+            "deepseek-v3.2-0324",
+            "deepseek-v4.1-flash-expires-on-0910",
+        ] {
+            assert_eq!(context_window_for_model(model), None, "{model}");
+        }
+        assert!(!model_supports_reasoning(
+            "deepseek-v4.1-flash-expires-on-0910"
+        ));
     }
 
     #[test]

@@ -13400,13 +13400,7 @@ fn enforce_fleet_member_route_requirements(
     }
     let member_id = crate::fleet::identity::FleetMemberIdentity::from_member(member).member_id;
 
-    let candidate = crate::route_runtime::resolve_route_candidate(
-        runtime.client.api_provider(),
-        Some(model),
-        None,
-        Some(runtime.client.base_url().to_string()),
-        None,
-    )
+    let candidate = runtime.client.resolve_model_route(model)
     .map_err(|error| {
         ToolError::execution_failed(format!(
             "Fleet member '{member_id}' requirements could not be checked against its exact child route: {}",
@@ -13964,7 +13958,15 @@ fn resolve_fixed_spawn_model_route(
         return Ok(());
     };
     let provider = runtime.client.api_provider();
+    let candidate = runtime.client.resolve_model_route(model);
+    let declared = candidate.as_ref().is_ok_and(|candidate| {
+        candidate
+            .applied_limit_overrides()
+            .iter()
+            .any(|entry| entry.source == codewhale_config::route::OverrideSource::UserModelMetadata)
+    });
     if providerless
+        && !declared
         && let Err(reason) = crate::route_runtime::validate_unpinned_model_provider(
             provider,
             model,
@@ -13990,22 +13992,7 @@ fn resolve_fixed_spawn_model_route(
         selection.source = SpawnRouteSource::RunModel;
         return Ok(());
     }
-    let candidate = if providerless {
-        crate::route_runtime::resolve_unpinned_model_candidate(
-            provider,
-            model,
-            runtime.client.base_url(),
-        )
-    } else {
-        crate::route_runtime::resolve_route_candidate(
-            provider,
-            Some(model),
-            None,
-            Some(runtime.client.base_url().to_string()),
-            None,
-        )
-    }
-    .map_err(ToolError::invalid_input)?;
+    let candidate = candidate.map_err(|error| ToolError::invalid_input(error.to_string()))?;
     selection.model_route = ModelRoute::Fixed(candidate.wire_model_id().as_str().to_string());
     Ok(())
 }
@@ -16797,3 +16784,70 @@ mod tests;
 
 #[cfg(test)]
 pub(crate) use tests::kimi_general_child_request_tools_fixture;
+
+#[cfg(test)]
+#[test]
+fn configured_model_subagent_keeps_exact_id_and_negative_capability() {
+    let _env = crate::test_support::lock_test_env();
+    let mut runtime = tests::stub_runtime();
+    let mut config = crate::config::Config {
+        provider: Some("deepseek".into()),
+        api_key: Some("configured-model-local-fixture".into()),
+        custom_models: Some(vec![
+            toml::from_str(
+                r#"
+            provider = "deepseek"
+            base_url = "https://api.deepseek.com"
+            id = "deepseek-v4pro"
+            modalities = { input = ["text"], output = ["text"] }
+            tool_call = false
+            limit = { context = 4096, output = 64 }
+        "#,
+            )
+            .unwrap(),
+        ]),
+        ..crate::config::Config::default()
+    };
+    runtime.client = DeepSeekClient::new(&config).unwrap();
+    config.custom_models.as_mut().unwrap()[0]
+        .modalities
+        .as_mut()
+        .unwrap()
+        .input
+        .push("image".into());
+    runtime.api_config = Some(std::sync::Arc::new(config));
+    let mut selection = SpawnModelSelection {
+        model_route: ModelRoute::Fixed("deepseek-v4pro".into()),
+        source: SpawnRouteSource::TaskModel,
+    };
+    resolve_fixed_spawn_model_route(&runtime, &mut selection, true).unwrap();
+    assert_eq!(
+        selection.model_route,
+        ModelRoute::Fixed("deepseek-v4pro".into())
+    );
+    let candidate = runtime
+        .client
+        .resolve_model_route("deepseek-v4pro")
+        .unwrap();
+    assert_eq!(
+        candidate.capabilities().image_input,
+        codewhale_config::route::CapabilityState::Unsupported
+    );
+    assert_eq!(
+        candidate.capabilities().native_tool_calls,
+        codewhale_config::route::CapabilityState::Unsupported
+    );
+    let member = crate::fleet::profile::AgentProfile {
+        id: "metadata-fixture".into(),
+        display_name: None,
+        description: None,
+        requires: vec!["vision".into()],
+        profile: codewhale_config::FleetProfile::default(),
+        source: std::path::PathBuf::new(),
+        origin: crate::fleet::profile::ProfileOrigin::Config,
+        plugin_authority: None,
+    };
+    let error = enforce_fleet_member_route_requirements(Some(&member), &runtime, "deepseek-v4pro")
+        .unwrap_err();
+    assert!(error.to_string().contains("unsupported"));
+}

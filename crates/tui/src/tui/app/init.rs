@@ -398,16 +398,10 @@ impl App {
                     },
                 )
             } else {
-                let saved_provider_model = config
-                    .provider_config_for(provider)
-                    .and_then(|provider| provider.model.as_deref());
-                crate::route_runtime::resolve_route_candidate_with_context_metadata(
+                crate::route_runtime::resolve_runtime_route(
+                    &effective_auth_config,
                     provider,
                     Some(&model),
-                    saved_provider_model,
-                    Some(configured_route_base_url.clone()),
-                    active_context_window_override,
-                    None,
                 )
                 .map(|resolution| {
                     (
@@ -802,6 +796,7 @@ impl App {
             model,
             provider_models,
             enabled_provider_models,
+            configured_models: config.custom_models.clone().unwrap_or_default(),
             pinned_models: settings.pinned_models.clone(),
             auto_model,
             last_effective_model: None,

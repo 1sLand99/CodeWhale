@@ -1561,6 +1561,9 @@ pub struct App {
     /// The catalog remains separately discoverable and selecting from it adds
     /// to this set rather than replacing earlier enabled choices.
     pub enabled_provider_models: HashMap<String, Vec<String>>,
+    /// Non-secret declarations from the loaded config snapshot. Completion
+    /// reads this snapshot without reloading credentials on each keystroke.
+    pub configured_models: Vec<codewhale_config::catalog::configured::ConfiguredModel>,
     /// Exact provider/model pins loaded from settings, in user order.
     pub pinned_models: Vec<crate::settings::PinnedModel>,
     /// When true, the model is auto-selected based on request complexity

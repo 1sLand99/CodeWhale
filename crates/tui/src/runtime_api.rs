@@ -6320,6 +6320,20 @@ fn provider_models_for_api(
             push_unique_model(&mut models, &model);
         }
     }
+    for model in config.custom_models.as_deref().unwrap_or_default() {
+        if crate::provider_lake::configured_model_for_route(
+            config,
+            provider,
+            &config.provider_identity_for(provider),
+            &config.base_url_for_route(provider),
+            &model.id,
+        )
+        .is_some()
+            && !models.contains(&model.id)
+        {
+            models.push(model.id.clone());
+        }
+    }
     if provider == ApiProvider::Ollama {
         models.retain(|model| !crate::config::is_unresolved_local_ollama_model(model));
     }
@@ -6538,9 +6552,13 @@ async fn list_providers(
         let default_model = provider_default_model_for_api(&config, active_provider, api_provider);
         let identity = config.provider_identity_for(api_provider);
         let base_url = config.base_url_for_route_identity(api_provider, &identity);
-        let has_model_catalog =
-            !crate::provider_lake::catalog_models_for_route(api_provider, &identity, &base_url)
-                .is_empty();
+        let has_model_catalog = !crate::provider_lake::configured_catalog_models_for_route(
+            &config,
+            api_provider,
+            &identity,
+            &base_url,
+        )
+        .is_empty();
         providers.push(ProviderEntry {
             id: api_provider.as_str().to_string(),
             model_provider_id: (api_provider == active_provider)

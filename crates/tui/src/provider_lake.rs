@@ -981,6 +981,60 @@ pub(crate) fn catalog_offering_for_route(
     Some(offering)
 }
 
+pub(crate) fn configured_model_for_route<'a>(
+    config: &'a Config,
+    provider: ApiProvider,
+    identity: &str,
+    base_url: &str,
+    model: &str,
+) -> Option<&'a codewhale_config::catalog::configured::ConfiguredModel> {
+    // Account-owned OAuth rosters retain their separate authority.
+    if provider == ApiProvider::OpenaiCodex {
+        return None;
+    }
+    let models = config.custom_models.as_deref()?;
+    codewhale_config::catalog::configured::validate_configured_models(models).ok()?;
+    models
+        .iter()
+        .find(|row| row.id == model && row.matches_route(identity, base_url))
+}
+
+/// Config declarations take precedence only for the exact selected route.
+pub(crate) fn configured_catalog_offering_for_route(
+    config: &Config,
+    provider: ApiProvider,
+    identity: &str,
+    base_url: &str,
+    model: &str,
+) -> Option<CatalogOffering> {
+    configured_model_for_route(config, provider, identity, base_url, model)
+        .map(|row| row.to_catalog_offering())
+        .or_else(|| catalog_offering_for_route(provider, identity, base_url, model))
+}
+
+pub(crate) fn configured_catalog_models_for_route(
+    config: &Config,
+    provider: ApiProvider,
+    identity: &str,
+    base_url: &str,
+) -> Vec<String> {
+    let mut ids = catalog_models_for_route(provider, identity, base_url);
+    if provider != ApiProvider::OpenaiCodex {
+        let models = config.custom_models.as_deref().unwrap_or_default();
+        if codewhale_config::catalog::configured::validate_configured_models(models).is_ok() {
+            for model in models
+                .iter()
+                .filter(|row| row.matches_route(identity, base_url))
+            {
+                if !ids.contains(&model.id) {
+                    ids.push(model.id.clone());
+                }
+            }
+        }
+    }
+    ids
+}
+
 /// Look up the **bundled-snapshot** offering for `(provider, wire_model_id)`,
 /// ignoring any live rows merged over it.
 ///
@@ -1034,7 +1088,8 @@ pub fn models_for_provider(
     provider: ApiProvider,
 ) -> Vec<String> {
     if provider_is_configured_for_active(config, provider, active) {
-        catalog_models_for_route(
+        configured_catalog_models_for_route(
+            config,
             provider,
             &config.provider_identity_for(provider),
             &config.base_url_for_route(provider),
@@ -1515,7 +1570,8 @@ pub(crate) async fn run_models(
     let identity = &identities[0];
     let mut route_config = config.clone();
     route_config.scope_to_provider_identity(identity);
-    let mut models = catalog_models_for_route(
+    let mut models = configured_catalog_models_for_route(
+        config,
         identity.provider,
         &identity.key,
         &route_config.deepseek_base_url(),

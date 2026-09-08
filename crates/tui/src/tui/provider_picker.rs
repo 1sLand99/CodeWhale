@@ -179,6 +179,7 @@ enum ProviderListView {
 }
 
 pub struct ProviderPickerView {
+    route_config: Config,
     rows: Vec<ProviderDashboardRow>,
     selected_idx: usize,
     stage: Stage,
@@ -685,18 +686,10 @@ impl ProviderDashboardRow {
         // particular, Kimi Code's bare K3 model has a conservative 262K
         // membership-plan baseline (or an explicit configured override), not
         // the generic catalog's unknown-model fallback.
-        let route = crate::route_runtime::resolve_route_candidate_with_context_metadata(
+        let route = crate::route_runtime::resolve_runtime_route(
+            config,
             provider,
             configured_model.as_deref(),
-            None,
-            // The legacy CN alias shares DeepSeek's strict model contract.
-            // Passing its endpoint as a generic override would classify the
-            // route as custom and accidentally accept foreign model ids.
-            (provider != ApiProvider::DeepseekCN)
-                .then(|| configured_base_url.clone())
-                .flatten(),
-            config.context_window_for_provider_config(provider),
-            None,
         );
         let (
             base_url,
@@ -784,6 +777,34 @@ impl ProviderDashboardRow {
             capabilities.context_window = Some(context_window);
         }
         capabilities.context_window_source = route_context_window_source;
+        if let Some(declared) = crate::provider_lake::configured_model_for_route(
+            config,
+            provider,
+            &provider_id,
+            &base_url,
+            &default_route.wire_model,
+        ) {
+            capabilities = ProviderCapabilityBadges::unknown();
+            capabilities.context_window = declared
+                .limit
+                .as_ref()
+                .and_then(|limit| limit.context)
+                .and_then(|value| u32::try_from(value).ok());
+            capabilities.max_output = declared
+                .limit
+                .as_ref()
+                .and_then(|limit| limit.output)
+                .and_then(|value| u32::try_from(value).ok());
+            capabilities.context_window_source = Some("user declared (unverified)".into());
+            messages.push("Model metadata is user declared; availability and capabilities have not been verified.".into());
+        }
+        let available_model_count = crate::provider_lake::configured_catalog_models_for_route(
+            config,
+            provider,
+            &provider_id,
+            &base_url,
+        )
+        .len();
         // #5772: the status projection needs an ambient candidate path to
         // report `ambient_path_changed`, so resolving it for a provider the
         // user never consented to would derive (and then render) another CLI's
@@ -1443,6 +1464,33 @@ fn readiness_for(
 /// Provider-agnostic fallbacks keep the label truthful when the catalog has
 /// no row: self-hosted routes are local, Codex rides OAuth quota, and
 /// everything else is honestly unknown.
+fn configured_model_cost_label(config: &Config, row: &ProviderDashboardRow, model: &str) -> String {
+    let mut scoped = config.clone();
+    if let Ok(identity) = config
+        .resolve_persisted_provider_identity(Some(row.provider.as_str()), Some(&row.provider_id))
+    {
+        scoped.scope_to_provider_identity(&identity);
+    }
+    match crate::route_billing::for_route(&scoped, row.provider) {
+        crate::route_billing::BillingPresentation::Subscription(label) => return label.to_string(),
+        crate::route_billing::BillingPresentation::Local => return "local".to_string(),
+        _ => {}
+    }
+    if let Some(declared) = crate::provider_lake::configured_model_for_route(
+        config,
+        row.provider,
+        &row.provider_id,
+        &row.base_url,
+        model,
+    ) {
+        let card = codewhale_config::model_reference::ModelReferenceCard::from_offering(
+            &declared.to_catalog_offering(),
+        );
+        return format!("{} · user estimate", card.price_label());
+    }
+    model_cost_label(row.provider, model)
+}
+
 fn model_cost_label(provider: ApiProvider, model: &str) -> String {
     // OpenCode Go spends a subscription allowance, not per-token dollars, so
     // a catalog token price would misreport it as metered spend (#4526).
@@ -1459,8 +1507,13 @@ fn model_cost_label(provider: ApiProvider, model: &str) -> String {
 /// model sorts first so the eye lands on what Enter would use; the rest are
 /// alphabetical. Falls back to the default route when the catalog has no rows
 /// for the provider, so the pane never renders empty.
-fn provider_pane_models(row: &ProviderDashboardRow, limit: usize) -> Vec<(String, String, bool)> {
-    let mut models = crate::provider_lake::catalog_models_for_route(
+fn provider_pane_models(
+    config: &Config,
+    row: &ProviderDashboardRow,
+    limit: usize,
+) -> Vec<(String, String, bool)> {
+    let mut models = crate::provider_lake::configured_catalog_models_for_route(
+        config,
         row.provider,
         &row.provider_id,
         &row.base_url,
@@ -1481,7 +1534,7 @@ fn provider_pane_models(row: &ProviderDashboardRow, limit: usize) -> Vec<(String
         .map(|model| {
             let is_default =
                 model.eq_ignore_ascii_case(&default) || model.eq_ignore_ascii_case(&wire);
-            let price = model_cost_label(row.provider, &model);
+            let price = configured_model_cost_label(config, row, &model);
             (model, price, is_default)
         })
         .collect()
@@ -1649,6 +1702,7 @@ impl ProviderPickerView {
             ProviderListView::Catalog
         };
         let mut picker = Self {
+            route_config: config.clone(),
             rows,
             selected_idx,
             stage: Stage::List,
@@ -2184,7 +2238,8 @@ impl ProviderPickerView {
             route.logical_model.clone()
         };
         let row = &self.rows[self.selected_idx];
-        let mut models = crate::provider_lake::catalog_models_for_route(
+        let mut models = crate::provider_lake::configured_catalog_models_for_route(
+            &self.route_config,
             provider,
             &row.provider_id,
             &row.base_url,
@@ -2931,7 +2986,7 @@ impl ProviderPickerView {
                 .fg(palette::TEXT_PRIMARY)
                 .add_modifier(Modifier::BOLD),
         )));
-        let pane_models = provider_pane_models(row, 8);
+        let pane_models = provider_pane_models(&self.route_config, row, 8);
         let name_budget = usize::from(inner.width).saturating_sub(22).max(8);
         for (model, price, is_default) in &pane_models {
             let name = crate::tui::ui_text::truncate_line_to_width(model, name_budget);
@@ -2951,7 +3006,8 @@ impl ProviderPickerView {
             }
             lines.push(Line::from(spans));
         }
-        let total_models = crate::provider_lake::catalog_models_for_route(
+        let total_models = crate::provider_lake::configured_catalog_models_for_route(
+            &self.route_config,
             row.provider,
             &row.provider_id,
             &row.base_url,
@@ -3510,7 +3566,6 @@ impl ProviderPickerView {
         // and every visible row is clickable, so record this frame's geometry
         // for hover + click handling.
         self.model_row_hitboxes.borrow_mut().clear();
-        let model_provider = self.rows[self.selected_idx].provider;
         let mut lines: Vec<Line> = Vec::with_capacity(visible_rows);
         for (idx, model) in self
             .model_options
@@ -3539,7 +3594,11 @@ impl ProviderPickerView {
                 ""
             };
             // Slice D: cost moved off the provider level down to the model.
-            let price = model_cost_label(model_provider, model);
+            let price = configured_model_cost_label(
+                &self.route_config,
+                &self.rows[self.selected_idx],
+                model,
+            );
             let mut spans = vec![
                 Span::styled(format!(" {arrow} {model}"), label_style),
                 Span::styled(
@@ -8238,7 +8297,7 @@ mod tests {
             .iter()
             .find(|row| row.provider == ApiProvider::Deepseek)
             .expect("DeepSeek has a picker row");
-        let models = provider_pane_models(row, 8);
+        let models = provider_pane_models(&config, row, 8);
         assert!(!models.is_empty(), "models pane must never render empty");
         assert!(models.len() <= 8);
         let (first, _, first_default) = &models[0];

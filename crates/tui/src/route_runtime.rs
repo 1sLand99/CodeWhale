@@ -22,6 +22,7 @@ use crate::models::DIRECT_KIMI_K3_MAX_OUTPUT_TOKENS;
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ContextWindowSource {
     Configured,
+    UserDeclared,
     ProviderReported,
     StaticKimiCodeSafeFloor,
     Catalog,
@@ -37,8 +38,9 @@ impl ContextWindowSource {
     /// Every rung, in precedence order. The name-suffix hint sits between
     /// catalog data and the conservative fallback: any concrete fact about
     /// the route beats a naming convention.
-    pub(crate) const ALL: [Self; 6] = [
+    pub(crate) const ALL: [Self; 7] = [
         Self::Configured,
+        Self::UserDeclared,
         Self::ProviderReported,
         Self::StaticKimiCodeSafeFloor,
         Self::Catalog,
@@ -50,6 +52,7 @@ impl ContextWindowSource {
     pub(crate) const fn label(self) -> &'static str {
         match self {
             Self::Configured => "configured",
+            Self::UserDeclared => "user declared",
             Self::ProviderReported => "provider-reported",
             Self::StaticKimiCodeSafeFloor => "static Kimi Code safe floor",
             Self::Catalog => "catalog",
@@ -73,7 +76,10 @@ impl ContextWindowSource {
     /// #5441).
     #[must_use]
     pub(crate) const fn is_verified(self) -> bool {
-        !matches!(self, Self::NameSuffixHint | Self::Fallback)
+        !matches!(
+            self,
+            Self::NameSuffixHint | Self::Fallback | Self::UserDeclared
+        )
     }
 
     /// Suffix every rendered window carries: verified rungs stay bare,
@@ -398,6 +404,7 @@ pub(crate) fn validate_unpinned_model_provider(
 /// Resolve a provider-less fixed model to the provider's exact wire id before
 /// child admission. This shares the runtime resolver used by Fleet receipts,
 /// including aggregator alias translation, without making a live request.
+#[cfg(test)]
 pub(crate) fn resolve_unpinned_model_candidate(
     provider: ApiProvider,
     model: &str,
@@ -418,6 +425,35 @@ pub(crate) fn resolve_unpinned_model_candidate(
 /// Code bare-K3 endpoint, only at the documented 1M entitlement, and only
 /// while fresh; this prevents generic Moonshot or stale metadata from being
 /// inherited by a membership-plan route.
+/// Resolve a manual selection from the App's loaded, non-secret metadata
+/// snapshot. This shares the same scoped resolver and limit precedence as
+/// config-backed runtime selection, without loading credentials while typing.
+pub(crate) fn resolve_declared_model_candidate(
+    provider: ApiProvider,
+    identity: &str,
+    model: &str,
+    base_url: &str,
+    context_window: Option<u32>,
+    models: &[codewhale_config::catalog::configured::ConfiguredModel],
+) -> Result<RouteCandidateResolution, String> {
+    let resolver = RouteResolver::new().with_configured_models(
+        models,
+        identity,
+        provider.kind().unwrap_or_default(),
+        base_url,
+    );
+    resolve_route_candidate_with_catalog_resolver(
+        provider,
+        Some(model),
+        None,
+        Some(base_url.into()),
+        context_window,
+        None,
+        &resolver,
+        false,
+    )
+}
+
 pub(crate) fn resolve_route_candidate_with_context_metadata(
     provider: ApiProvider,
     model_selector: Option<&str>,
@@ -518,13 +554,23 @@ fn plan_limit_overrides(
     provider_reported_context: Option<ProviderReportedKimiCodeContext>,
 ) -> LimitOverridePlan {
     let mut overrides = Vec::new();
+    let declared_field = |field| {
+        resolved
+            .applied_limit_overrides()
+            .iter()
+            .rev()
+            .find(|entry| entry.field == field)
+            .is_some_and(|entry| entry.source == OverrideSource::UserModelMetadata)
+    };
     let configured = context_window_override.filter(|window| *window > 0);
     let mut effective_context = resolved.limits().context_tokens;
-    if is_exact_direct_moonshot_k3_route(
-        provider,
-        &resolved.endpoint().base_url,
-        resolved.wire_model_id().as_str(),
-    ) {
+    if !declared_field(LimitField::OutputTokens)
+        && is_exact_direct_moonshot_k3_route(
+            provider,
+            &resolved.endpoint().base_url,
+            resolved.wire_model_id().as_str(),
+        )
+    {
         overrides.push(SourcedLimitOverride {
             field: LimitField::OutputTokens,
             value: Some(u64::from(DIRECT_KIMI_K3_MAX_OUTPUT_TOKENS)),
@@ -576,6 +622,25 @@ fn plan_limit_overrides(
                 tokens: context_window,
                 source: ContextWindowSource::Configured,
             },
+        };
+    }
+
+    // Exact operator metadata wins over inferred/catalog/provider-family facts.
+    // A missing field remains unknown, with only the conservative budget floor.
+    if declared_field(LimitField::ContextTokens) {
+        let context_window = effective_context
+            .and_then(|tokens| u32::try_from(tokens).ok())
+            .map(|tokens| ContextWindowResolution {
+                tokens,
+                source: ContextWindowSource::UserDeclared,
+            })
+            .unwrap_or(ContextWindowResolution {
+                tokens: 128_000,
+                source: ContextWindowSource::Fallback,
+            });
+        return LimitOverridePlan {
+            overrides,
+            context_window,
         };
     }
 
@@ -700,11 +765,17 @@ pub(crate) fn resolve_runtime_route_for_identity(
     let resolution = if provider != ApiProvider::OpenaiCodex {
         let status =
             crate::provider_catalog_live::status_for_route(provider, &identity.key, &base_url);
-        let catalog = crate::provider_lake::runtime_catalog_resolver_for_identity(
+        let mut catalog = crate::provider_lake::runtime_catalog_resolver_for_identity(
             provider,
             Some(&identity.key),
             &base_url,
             status,
+        );
+        catalog.resolver = catalog.resolver.with_configured_models(
+            route_config.custom_models.as_deref().unwrap_or_default(),
+            &identity.key,
+            provider.kind().unwrap_or_default(),
+            &base_url,
         );
         // Local Ollama's placeholder is never an executable model. Resolve
         // an unset/auto/placeholder selection from this endpoint's fresh roster,
@@ -840,6 +911,57 @@ mod tests {
     use super::*;
     use crate::config::{DEFAULT_TEXT_MODEL, DEFAULT_ZAI_MODEL, ProviderConfig, ProvidersConfig};
 
+    #[test]
+    fn configured_model_limits_precede_provider_defaults() {
+        let _env = crate::test_support::lock_test_env();
+        let _catalog = crate::provider_lake::lock_live_snapshot();
+        for (provider, identity, base, model) in [
+            (
+                ApiProvider::Moonshot,
+                "moonshot",
+                "https://api.moonshot.ai/v1",
+                "kimi-k3",
+            ),
+            (
+                ApiProvider::Moonshot,
+                "moonshot",
+                "https://api.kimi.com/coding/v1",
+                "k3",
+            ),
+            (
+                ApiProvider::DeepseekCN,
+                "deepseek-cn",
+                "https://models.example.test/v1",
+                "deepseek-v4.1-flash-expires-on-0910",
+            ),
+        ] {
+            let mut config: Config = toml::from_str(include_str!(
+                "../../config/tests/fixtures/custom_models.toml"
+            ))
+            .unwrap();
+            config.provider = Some(identity.into());
+            config.base_url = Some(base.into());
+            config.providers = None;
+            let declaration = &mut config.custom_models.as_mut().unwrap()[0];
+            declaration.provider = identity.into();
+            declaration.base_url = base.into();
+            declaration.id = model.into();
+            let route = resolve_runtime_route(&config, provider, Some(model)).unwrap();
+            assert_eq!(route.model, model);
+            assert_eq!(route.candidate.limits().context_tokens, Some(96000));
+            assert_eq!(route.candidate.limits().output_tokens, Some(8000));
+            assert_eq!(
+                route.context_window.source,
+                ContextWindowSource::UserDeclared
+            );
+            config.custom_models.as_mut().unwrap()[0].limit = None;
+            let unknown = resolve_runtime_route(&config, provider, Some(model)).unwrap();
+            assert_eq!(unknown.candidate.limits().context_tokens, None);
+            assert_eq!(unknown.candidate.limits().output_tokens, None);
+            assert_eq!(unknown.context_window.source, ContextWindowSource::Fallback);
+        }
+    }
+
     /// Every rung keeps its own label and round-trips through it, and only
     /// the guesses read as unverified.  Two rungs sharing a label would let a
     /// guess be displayed as evidence.
@@ -859,7 +981,9 @@ mod tests {
                 source.is_verified(),
                 !matches!(
                     source,
-                    ContextWindowSource::Fallback | ContextWindowSource::NameSuffixHint
+                    ContextWindowSource::Fallback
+                        | ContextWindowSource::NameSuffixHint
+                        | ContextWindowSource::UserDeclared
                 ),
                 "{source:?} misreports whether its window rests on route evidence"
             );

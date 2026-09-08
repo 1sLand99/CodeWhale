@@ -350,6 +350,7 @@ impl ProviderLivePricingQuote {
             return None;
         }
         match (&self.provenance, &self.cloud_facts) {
+            (PricingProvenance::UserOverride, None) => {}
             (PricingProvenance::ProviderLive, None)
                 if dispatched_at_unix.saturating_sub(self.catalog_fetched_at)
                     < DEFAULT_PROVIDER_CATALOG_TTL_SECS
@@ -388,13 +389,16 @@ impl ProviderLivePricingQuote {
         }
         // A reviewed per-token route needs both ordinary request classes. Cache
         // classes remain optional and fail closed later if a turn used them.
-        if self.cloud_facts.is_none() && (cost.input.is_none() || cost.output.is_none()) {
+        if self.provenance == PricingProvenance::ProviderLive
+            && (cost.input.is_none() || cost.output.is_none())
+        {
             return None;
         }
         if cost.input.is_none()
             && cost.output.is_none()
             && cost.cache_read.is_none()
             && cost.cache_write.is_none()
+            && self.provenance != PricingProvenance::UserOverride
         {
             return None;
         }
@@ -1300,6 +1304,47 @@ fn cloud_pricing_scope(provider: ApiProvider, identity: &str, base_url: &str) ->
 /// Capture the effective mutable price authority once. Provider-owned live
 /// prices retain priority; signed cloud prices are admitted only on the exact
 /// canonical official route. The historical wire field name remains stable.
+pub(crate) fn configured_dispatch_pricing_quote_at(
+    models: &[codewhale_config::catalog::configured::ConfiguredModel],
+    provider: ApiProvider,
+    identity: &str,
+    model: &str,
+    base_url: &str,
+    dispatched_at: u64,
+) -> Option<ProviderLivePricingQuote> {
+    if provider == ApiProvider::OpenaiCodex {
+        return None;
+    }
+    codewhale_config::catalog::configured::validate_configured_models(models).ok()?;
+    let declared = models
+        .iter()
+        .find(|row| row.id == model && row.matches_route(identity, base_url))?;
+    let cost = declared.cost.clone().unwrap_or_default();
+    let pricing = OfferingPricing {
+        provider: identity.to_string(),
+        wire_model_id: model.to_string(),
+        canonical_model: None,
+        currency: Currency::Usd,
+        input_per_million: cost.input,
+        output_per_million: cost.output,
+        cache_read_per_million: cost.cache_read,
+        cache_write_per_million: cost.cache_write,
+        provenance: PricingProvenance::UserOverride,
+        effective_at: None,
+        endpoint_fingerprint: Some(base_url_fingerprint(base_url)),
+    };
+    // Freeze even an unpriced declaration: missing rates must not fall through
+    // to a same-named bundled or subsequently refreshed price.
+    ProviderLivePricingQuote::from_pricing(
+        provider,
+        identity,
+        model,
+        &base_url_fingerprint(base_url),
+        dispatched_at,
+        &pricing,
+    )
+}
+
 pub(crate) fn fresh_dispatch_pricing_quote_at(
     provider: ApiProvider,
     provider_identity: &str,

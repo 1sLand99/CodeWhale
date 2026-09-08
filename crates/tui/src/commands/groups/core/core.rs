@@ -300,7 +300,21 @@ pub fn model(app: &mut App, model_name: Option<&str>) -> CommandResult {
                 AppAction::UpdateCompaction(app.compaction_config()),
             );
         }
-        let model_id = if app.accepts_custom_model_ids() {
+        let declared = app.api_provider != ApiProvider::OpenaiCodex
+            && codewhale_config::catalog::configured::validate_configured_models(
+                &app.configured_models,
+            )
+            .is_ok()
+            && app.configured_models.iter().any(|model| {
+                model.id == name
+                    && model.matches_route(
+                        app.provider_identity_for_persistence(),
+                        &app.active_route_base_url,
+                    )
+            });
+        let model_id = if declared {
+            name.to_string()
+        } else if app.accepts_custom_model_ids() {
             let Some(model_id) = normalize_custom_model_id(name) else {
                 return CommandResult::error(format!(
                     "Invalid model '{name}'. Expected a non-empty model ID."
@@ -321,7 +335,19 @@ pub fn model(app: &mut App, model_name: Option<&str>) -> CommandResult {
                 app.api_provider,
                 ApiProvider::Deepseek | ApiProvider::DeepseekCN | ApiProvider::Zai
             );
-        let route_resolution = if strict_direct_custom_endpoint {
+        let route_resolution = if declared {
+            match crate::route_runtime::resolve_declared_model_candidate(
+                app.api_provider,
+                app.provider_identity_for_persistence(),
+                &model_id,
+                &app.active_route_base_url,
+                app.active_context_window_override,
+                &app.configured_models,
+            ) {
+                Ok(resolution) => Some(resolution),
+                Err(reason) => return CommandResult::error(reason),
+            }
+        } else if strict_direct_custom_endpoint {
             None
         } else {
             // `/model` normally resolves against the active provider's

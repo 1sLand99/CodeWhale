@@ -68,6 +68,7 @@ pub struct RouteRequest {
 #[derive(Debug, Clone)]
 pub struct RouteResolver {
     offerings: Vec<ProviderModelOffering>,
+    configured_offerings: Vec<(String, ProviderModelOffering)>,
 }
 
 /// Offering-owned facts selected within one provider scope before the final
@@ -136,7 +137,73 @@ impl RouteResolver {
     /// changing route-resolution semantics.
     #[must_use]
     pub fn from_offerings(offerings: Vec<ProviderModelOffering>) -> Self {
-        Self { offerings }
+        Self {
+            offerings,
+            configured_offerings: Vec::new(),
+        }
+    }
+
+    /// Add validated operator declarations for this exact route. This does
+    /// not grant provider-catalog authority or establish model availability.
+    pub fn with_configured_models(
+        mut self,
+        models: &[crate::catalog::configured::ConfiguredModel],
+        identity: &str,
+        provider: ProviderKind,
+        base_url: &str,
+    ) -> Self {
+        if crate::catalog::configured::validate_configured_models(models).is_err() {
+            return self;
+        }
+        for model in models
+            .iter()
+            .filter(|model| model.matches_route(identity, base_url))
+        {
+            let mut offering = model.to_catalog_offering().to_offering();
+            offering.provider = ProviderId::from(provider.as_str());
+            // Preserve an adapter's established protocol for an existing ID.
+            // The label/config declaration cannot choose a new wire dialect.
+            if let Some(existing) = self.offerings.iter().find(|row| {
+                row.provider == offering.provider && row.wire_model_id == offering.wire_model_id
+            }) {
+                offering.endpoint_key.clone_from(&existing.endpoint_key);
+                offering.default_for_provider = existing.default_for_provider;
+            } else if ProviderDescriptor::for_kind(provider).wire_policy() == WirePolicy::ModelAware
+                && provider != ProviderKind::Deepseek
+            {
+                continue;
+            }
+            // Positive declarations are not verified executable capabilities.
+            // Explicit negatives can still restrict a route conservatively.
+            let declared = offering.capabilities;
+            offering.capabilities = RouteCapabilities {
+                attachments: if model.attachment == Some(false) {
+                    declared.attachments
+                } else {
+                    Default::default()
+                },
+                image_input: if declared.image_input == super::CapabilityState::Unsupported {
+                    declared.image_input
+                } else {
+                    Default::default()
+                },
+                reasoning: declared.reasoning,
+                native_tool_calls: if model.tool_call == Some(false) {
+                    declared.native_tool_calls
+                } else {
+                    Default::default()
+                },
+                structured_output: if model.structured_output == Some(false) {
+                    declared.structured_output
+                } else {
+                    Default::default()
+                },
+                ..RouteCapabilities::default()
+            };
+            self.configured_offerings
+                .push((crate::catalog::base_url_fingerprint(base_url), offering));
+        }
+        self
     }
 
     /// Resolve a request into an executable route candidate.
@@ -164,6 +231,45 @@ impl RouteResolver {
     }
 
     fn resolve_inner(
+        &self,
+        req: &RouteRequest,
+        endpoint_catalog_authoritative: bool,
+    ) -> Result<ReadyRouteCandidate, RouteError> {
+        if self.configured_offerings.is_empty() {
+            return self.resolve_scoped(req, endpoint_catalog_authoritative);
+        }
+        let mut scoped = self.clone();
+        scoped.configured_offerings.clear();
+        let provider = req.explicit_provider.unwrap_or_default();
+        let base_url = req
+            .base_url_override
+            .as_deref()
+            .unwrap_or_else(|| ProviderDescriptor::for_kind(provider).default_base_url());
+        let fingerprint = crate::catalog::base_url_fingerprint(base_url);
+        let selected_id = req
+            .model_selector
+            .as_ref()
+            .map(LogicalModelRef::raw)
+            .or_else(|| req.saved_provider_model.as_ref().map(WireModelId::as_str));
+        for (endpoint, offering) in &self.configured_offerings {
+            if !base_url.contains(['@', '?', '#'])
+                && *endpoint == fingerprint
+                && offering.provider.as_str() == provider.as_str()
+                && selected_id == Some(offering.wire_model_id.as_str())
+            {
+                scoped.offerings.retain(|row| {
+                    row.provider != offering.provider || row.wire_model_id != offering.wire_model_id
+                });
+                scoped.offerings.push(offering.clone());
+                scoped
+                    .configured_offerings
+                    .push((endpoint.clone(), offering.clone()));
+            }
+        }
+        scoped.resolve_scoped(req, endpoint_catalog_authoritative)
+    }
+
+    fn resolve_scoped(
         &self,
         req: &RouteRequest,
         endpoint_catalog_authoritative: bool,
@@ -271,6 +377,43 @@ impl RouteResolver {
             selected.capabilities = RouteCapabilities::default();
             selected.pricing = PricingSku::UnknownOrStale;
         }
+        let base_url = req
+            .base_url_override
+            .as_deref()
+            .unwrap_or_else(|| descriptor.default_base_url());
+        let mut declared_limit_overrides = Vec::new();
+        if let Some((_, offering)) =
+            self.configured_offerings
+                .iter()
+                .find(|(fingerprint, offering)| {
+                    !base_url.contains(['@', '?', '#'])
+                        && offering.provider == provider_id
+                        && offering.wire_model_id == selected.wire_model_id
+                        && req
+                            .model_selector
+                            .as_ref()
+                            .map(LogicalModelRef::raw)
+                            .or_else(|| req.saved_provider_model.as_ref().map(WireModelId::as_str))
+                            == Some(offering.wire_model_id.as_str())
+                        && *fingerprint == crate::catalog::base_url_fingerprint(base_url)
+                })
+        {
+            selected.canonical_model = None;
+            selected.limits = offering.limits;
+            selected.capabilities = offering.capabilities;
+            selected.pricing = offering.pricing.clone();
+            for (field, value) in [
+                (LimitField::ContextTokens, offering.limits.context_tokens),
+                (LimitField::InputTokens, offering.limits.input_tokens),
+                (LimitField::OutputTokens, offering.limits.output_tokens),
+            ] {
+                declared_limit_overrides.push(SourcedLimitOverride {
+                    field,
+                    value,
+                    source: super::OverrideSource::UserModelMetadata,
+                });
+            }
+        }
         if provider_kind == ProviderKind::Zai {
             let effective_base_url = req
                 .base_url_override
@@ -351,7 +494,10 @@ impl RouteResolver {
             // no offering was matched or the offering carried no price.
             Some(selected.pricing),
             validation,
-            req.limit_overrides.clone(),
+            declared_limit_overrides
+                .into_iter()
+                .chain(req.limit_overrides.iter().cloned())
+                .collect(),
         ))
     }
 
@@ -382,6 +528,12 @@ impl RouteResolver {
                 .strip_prefix("opencode/")
                 .or_else(|| logical_model.raw().strip_prefix("opencode-zen/"))
                 .unwrap_or_else(|| logical_model.raw())
+        } else if self.configured_offerings.iter().any(|(_, offering)| {
+            offering.provider == *provider_id
+                && offering.wire_model_id.as_str() == logical_model.raw()
+        }) {
+            // An explicitly declared wire ID is not a convenience selector.
+            logical_model.raw()
         } else if provider_kind == ProviderKind::Concentrate {
             // Concentrate's own namespace is not part of its wire ids.
             // `concentrate/auto` is the explicit spelling for the gateway's

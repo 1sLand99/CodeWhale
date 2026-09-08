@@ -44,6 +44,8 @@ use serde_json::Value;
 use crate::models_dev::{ModelsDevCatalog, ModelsDevCost, ModelsDevLimit, ModelsDevModalities};
 use crate::route::{ModelId, ProviderId, ProviderModelOffering, RouteLimits, WireModelId};
 
+pub mod configured;
+
 /// Provenance of a catalog row. Drives layer precedence and UI provenance.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]

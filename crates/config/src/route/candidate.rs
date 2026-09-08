@@ -88,6 +88,8 @@ pub enum LimitField {
 pub enum OverrideSource {
     /// Operator-configured context window.
     UserContextWindow,
+    /// Limits declared by the operator for an exact model and endpoint.
+    UserModelMetadata,
     /// Catalog limits describe the public API offering, not the account-scoped
     /// Codex route; the API-only limits are stripped.
     CodexPublicApiLimitStrip,

@@ -305,6 +305,8 @@ struct ModelPickerRow {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 struct EffectivePickerMetadata {
+    display_name: Option<String>,
+    declared_input_price: Option<String>,
     context_window: Option<u32>,
     /// The context window came through the legacy provider fallback rather
     /// than an offering, catalog row, roster, or operator override — shown,
@@ -317,6 +319,7 @@ struct EffectivePickerMetadata {
     max_output_unverified: bool,
     tool_calls: Option<bool>,
     reasoning: bool,
+    reasoning_unknown: bool,
     vision: SupportState,
     pricing: PickerPricing,
     source: Option<CatalogSource>,
@@ -544,7 +547,12 @@ impl ModelPickerView {
         let mut rows: Vec<_> = visible
             .iter()
             .map(|row| PaneRow {
-                primary: row.id.clone(),
+                primary: row
+                    .metadata
+                    .display_name
+                    .as_ref()
+                    .map(|label| format!("{label} ({})", row.id))
+                    .unwrap_or_else(|| row.id.clone()),
                 route: row
                     .provider
                     .map(|provider| {
@@ -1597,6 +1605,14 @@ fn picker_model_rows_for_app(app: &App, config: &Config) -> Vec<ModelPickerRow> 
     } else {
         provider_scoped_model_ids_for_app(app, false)
     };
+    if let Some(enabled) = app
+        .enabled_provider_models
+        .get(app.provider_identity_for_persistence())
+    {
+        for id in enabled {
+            push_model_id(&mut active_model_ids, id);
+        }
+    }
     push_configured_provider_model(&mut active_model_ids, config, app.api_provider);
     push_provider_model_rows(
         &mut rows,
@@ -1636,6 +1652,11 @@ fn picker_model_rows_for_app(app: &App, config: &Config) -> Vec<ModelPickerRow> 
                     config.model_ids_pass_through_for_provider(provider),
                 ),
             );
+        }
+        if let Some(enabled) = app.enabled_provider_models.get(provider.as_str()) {
+            for id in enabled {
+                push_model_id(&mut model_ids, id);
+            }
         }
         push_configured_provider_model(&mut model_ids, config, provider);
         push_provider_model_rows(
@@ -1704,6 +1725,9 @@ fn picker_model_rows_for_app(app: &App, config: &Config) -> Vec<ModelPickerRow> 
 }
 
 fn model_row_enabled_for_app(app: &App, config: &Config, row: &ModelPickerRow) -> bool {
+    if matches!(row.metadata.source, Some(CatalogSource::ConfigOverride)) {
+        return true;
+    }
     let Some(provider) = row.provider else {
         return true;
     };
@@ -1761,12 +1785,23 @@ fn push_provider_model_rows(
     rows: &mut Vec<ModelPickerRow>,
     provider: ApiProvider,
     provider_identity: Option<&str>,
-    model_ids: Vec<String>,
+    mut model_ids: Vec<String>,
     active_provider: ApiProvider,
     config: &Config,
     codex_roster: &CodexModelRoster,
     provider_health: &crate::provider_readiness::ProviderReadinessSnapshot,
 ) {
+    let identity = provider_identity
+        .map(str::to_string)
+        .unwrap_or_else(|| config.provider_identity_for(provider));
+    let base_url = config.base_url_for_route_identity(provider, &identity);
+    for id in crate::provider_lake::configured_catalog_models_for_route(
+        config, provider, &identity, &base_url,
+    ) {
+        if !model_ids.contains(&id) {
+            model_ids.push(id);
+        }
+    }
     for id in model_ids {
         if id == "auto" {
             continue;
@@ -1806,6 +1841,9 @@ fn push_provider_model_rows(
             codex_freshness,
             provider_catalog_receipt.as_ref(),
         );
+        if metadata.display_name.is_some() {
+            hint = format!("{id} · {hint}");
+        }
         hint = format!("{readiness_label} · {hint}");
         if provider != active_provider {
             hint = format!("switch route · {hint}");
@@ -1965,6 +2003,22 @@ fn provider_scoped_model_ids_for_app(app: &App, include_current_model: bool) -> 
         push_model_id(&mut models, &id);
     }
 
+    if app.api_provider != ApiProvider::OpenaiCodex
+        && codewhale_config::catalog::configured::validate_configured_models(&app.configured_models)
+            .is_ok()
+    {
+        for declaration in app.configured_models.iter().filter(|declaration| {
+            declaration.matches_route(
+                app.provider_identity_for_persistence(),
+                &app.active_route_base_url,
+            )
+        }) {
+            if !models.contains(&declaration.id) {
+                models.push(declaration.id.clone());
+            }
+        }
+    }
+
     if let Some(model) = app
         .provider_models
         .get(app.provider_identity_for_persistence())
@@ -2119,6 +2173,7 @@ fn model_row_matches_query(
             || matches(provider.display_name())
     });
     provider_matches
+        || row.metadata.display_name.as_deref().is_some_and(matches)
         || matches(&row.id)
         || ((row.provider.is_none() || row.provider == Some(initial_provider))
             && matches(&row.hint))
@@ -2252,6 +2307,45 @@ fn catalog_family_for_identity(
 }
 
 fn model_row_meta_chips(row: &ModelPickerRow) -> Vec<String> {
+    if row.metadata.source == Some(CatalogSource::ConfigOverride) {
+        // The qualifier comes first so compact rows cannot shed it while
+        // keeping an unverified declaration visible as a provider fact.
+        return vec![
+            "user declared (unverified)".to_string(),
+            row.metadata
+                .context_window
+                .map(|value| format_picker_context_window(u64::from(value)))
+                .unwrap_or_else(|| "context unknown".into()),
+            row.metadata
+                .max_output
+                .map(|value| format!("{value} out"))
+                .unwrap_or_else(|| "output unknown".into()),
+            match &row.metadata.pricing {
+                PickerPricing::Known(price) => format!("estimate {price}"),
+                _ => "price unknown".into(),
+            },
+            if row.metadata.reasoning_unknown {
+                "reasoning unknown"
+            } else if row.metadata.reasoning {
+                "reasoning"
+            } else {
+                "no reasoning"
+            }
+            .into(),
+            match row.metadata.tool_calls {
+                Some(true) => "tools declared",
+                Some(false) => "no tools",
+                None => "tools unknown",
+            }
+            .into(),
+            match row.metadata.vision {
+                SupportState::Supported => "vision declared",
+                SupportState::Unsupported => "text only",
+                SupportState::Unknown => "vision unknown",
+            }
+            .into(),
+        ];
+    }
     let mut chips = Vec::new();
     if let Some(context_window) = row.metadata.context_window {
         chips.push(format_picker_context_window(u64::from(context_window)));
@@ -2557,6 +2651,13 @@ fn context_tokens(row: &ModelPickerRow) -> u64 {
 }
 
 fn input_price_per_million(row: &ModelPickerRow) -> Option<f64> {
+    if matches!(row.metadata.source, Some(CatalogSource::ConfigOverride)) {
+        return row
+            .metadata
+            .declared_input_price
+            .as_ref()
+            .and_then(|price| price.parse().ok());
+    }
     if matches!(row.metadata.pricing, PickerPricing::Unavailable) {
         return None;
     }
@@ -2620,7 +2721,9 @@ fn effective_picker_metadata_with_codex(
             .map(str::to_string)
             .unwrap_or_else(|| config.provider_identity_for(provider));
         let base_url = config.base_url_for_route_identity(provider, &identity);
-        crate::provider_lake::catalog_offering_for_route(provider, &identity, &base_url, id)
+        crate::provider_lake::configured_catalog_offering_for_route(
+            config, provider, &identity, &base_url, id,
+        )
     });
     let card = offering.as_ref().map(ModelReferenceCard::from_offering);
     let registry = model_registry::lookup(id);
@@ -2641,6 +2744,9 @@ fn effective_picker_metadata_with_codex(
             } else {
                 PickerPricing::Unknown
             },
+            display_name: None,
+            reasoning_unknown: false,
+            declared_input_price: None,
             source: None,
         };
     };
@@ -2659,6 +2765,42 @@ fn effective_picker_metadata_with_codex(
         config.context_window_for_provider_config(provider)
     };
     let base_url = config.base_url_for_route_identity(provider, &identity);
+    if let Some(declared) =
+        crate::provider_lake::configured_model_for_route(config, provider, &identity, &base_url, id)
+    {
+        return EffectivePickerMetadata {
+            display_name: declared.display_name.clone(),
+            declared_input_price: declared
+                .cost
+                .as_ref()
+                .and_then(|cost| cost.input)
+                .map(|price| price.to_string()),
+            context_window: context_override.or_else(|| {
+                declared
+                    .limit
+                    .as_ref()
+                    .and_then(|limit| limit.context)
+                    .and_then(|value| u32::try_from(value).ok())
+            }),
+            max_output: declared
+                .limit
+                .as_ref()
+                .and_then(|limit| limit.output)
+                .and_then(|value| u32::try_from(value).ok()),
+            tool_calls: declared.tool_call,
+            reasoning: declared.reasoning.unwrap_or(false),
+            reasoning_unknown: declared.reasoning.is_none(),
+            vision: codewhale_config::models_dev::image_input_support(declared.modalities.as_ref()),
+            pricing: card
+                .as_ref()
+                .filter(|card| card.price_label() != "unknown")
+                .map_or(PickerPricing::Unknown, |card| {
+                    PickerPricing::Known(card.price_label())
+                }),
+            source: Some(CatalogSource::ConfigOverride),
+            ..EffectivePickerMetadata::default()
+        };
+    }
     if offering.is_none()
         && provider != ApiProvider::OpenaiCodex
         && provider.kind().is_none_or(|kind| {
@@ -2787,6 +2929,9 @@ fn effective_picker_metadata_with_codex(
         reasoning,
         vision,
         pricing,
+        display_name: None,
+        reasoning_unknown: false,
+        declared_input_price: None,
         source: card.map(|card| card.source),
     }
 }
@@ -2897,7 +3042,7 @@ fn render_picker_model_hint(
         }
         Some(CatalogSource::CloudFacts { .. }) => parts.push("signed facts".to_string()),
         Some(CatalogSource::ConfigOverride | CatalogSource::UserOverride) => {
-            parts.push("override".to_string())
+            parts.push("user declared (unverified)".to_string())
         }
         None => {}
     }
@@ -3644,6 +3789,91 @@ fn default_picker_effort_idx(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn configured_model_picker_and_runtime_share_exact_persisted_metadata() {
+        let _env = crate::test_support::lock_test_env();
+        let _catalog = crate::provider_lake::lock_live_snapshot();
+        let mut config: Config = toml::from_str(include_str!(
+            "../../../config/tests/fixtures/custom_models.toml"
+        ))
+        .unwrap();
+        let id = "deepseek-v4.1-flash-expires-on-0910";
+        let base = "https://models.example.test/v1";
+        let metadata = effective_picker_metadata(&config, Some(ApiProvider::Deepseek), id);
+        assert_eq!(metadata.display_name.as_deref(), Some("Temporary preview"));
+        assert_eq!(metadata.context_window, Some(96000));
+        assert_eq!(metadata.max_output, Some(8000));
+        assert_eq!(metadata.tool_calls, Some(true));
+        assert_eq!(metadata.source, Some(CatalogSource::ConfigOverride));
+        let mut row = model_row(ApiProvider::Deepseek, true);
+        row.id = id.into();
+        row.metadata = metadata.clone();
+        let chips = model_row_meta_chips(&row);
+        assert_eq!(chips[0], "user declared (unverified)");
+        assert!(chips.iter().any(|chip| chip.starts_with("estimate ")));
+        assert!(fit_meta_chips(&chips, 30).starts_with("user declared"));
+        assert!(
+            render_picker_model_hint(id, Some(ApiProvider::Deepseek), &metadata, None, None)
+                .contains("user declared")
+        );
+        assert!(
+            crate::provider_lake::configured_catalog_models_for_route(
+                &config,
+                ApiProvider::Deepseek,
+                "deepseek",
+                base
+            )
+            .iter()
+            .any(|model| model == id)
+        );
+        let route =
+            crate::route_runtime::resolve_runtime_route(&config, ApiProvider::Deepseek, Some(id))
+                .unwrap();
+        assert_eq!(route.model, id);
+        assert_eq!(Some(route.context_window.tokens), metadata.context_window);
+        assert_eq!(
+            route.context_window.source,
+            crate::route_runtime::ContextWindowSource::UserDeclared
+        );
+        assert!(!route.context_window.source.is_verified());
+        assert_eq!(
+            route.candidate.capabilities().image_input,
+            SupportState::Unknown
+        );
+        assert_eq!(
+            route.candidate.capabilities().native_tool_calls,
+            SupportState::Unknown
+        );
+        assert_eq!(
+            crate::route_budget::route_output_limit_tokens(Some(route.candidate.limits())),
+            metadata.max_output
+        );
+        // /load replaces the same metadata alongside the provider route.
+        let mut reloaded = config.clone();
+        reloaded.custom_models.as_mut().unwrap()[0].reasoning = None;
+        reloaded.custom_models.as_mut().unwrap()[0].limit = None;
+        reloaded.custom_models.as_mut().unwrap()[0].cost = None;
+        reloaded.custom_models.as_mut().unwrap()[0].tool_call = None;
+        reloaded.custom_models.as_mut().unwrap()[0].modalities = None;
+        config.refresh_provider_routes_from(&reloaded);
+        let unknown = effective_picker_metadata(&config, Some(ApiProvider::Deepseek), id);
+        assert_eq!(unknown.context_window, None);
+        assert_eq!(unknown.max_output, None);
+        assert_eq!(unknown.tool_calls, None);
+        assert_eq!(unknown.vision, SupportState::Unknown);
+        assert_eq!(unknown.pricing, PickerPricing::Unknown);
+        row.metadata = unknown;
+        assert!(model_row_meta_chips(&row).contains(&"reasoning unknown".to_string()));
+        assert_eq!(
+            crate::route_budget::effective_max_output_tokens_for_route(
+                ApiProvider::Deepseek,
+                id,
+                None
+            ),
+            8192
+        );
+    }
 
     fn model_row(provider: ApiProvider, enabled: bool) -> ModelPickerRow {
         ModelPickerRow {
