@@ -1807,6 +1807,28 @@ mod tests {
         assert_eq!(receipt.schema_version, PR_COVERAGE_RECEIPT_SCHEMA_VERSION);
         assert_eq!(receipt.findings.issue_count, 2);
         assert_eq!(receipt.findings.suggestion_count, 1);
+        let unresolved = validate_review_receipt_for_diff(&diff, &receipt, None);
+        assert!(!unresolved.passed);
+        assert!(unresolved.reason.contains("unresolved review issue"));
+
+        let mut clean_accumulator = PrReviewAccumulator::new(&plan);
+        for (index, pass) in plan.passes.iter().enumerate() {
+            clean_accumulator
+                .accept(pass, clean_pass(&format!("clean pass {}", index + 1)))
+                .unwrap();
+        }
+        let (clean_output, clean_content, clean_coverage) =
+            clean_accumulator.finish(&diff).unwrap();
+        let mut receipt = build_review_receipt(
+            "pr:1",
+            &diff,
+            "fixture",
+            "fixture-model",
+            &clean_output,
+            &clean_content,
+            Vec::new(),
+        );
+        attach_pr_review_coverage(&mut receipt, clean_coverage).unwrap();
         assert!(validate_review_receipt_for_diff(&diff, &receipt, None).passed);
         let mut missing = receipt.clone();
         missing

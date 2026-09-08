@@ -3,8 +3,8 @@
 //! GitHub's "create a review" API rejects the *entire* review with a 422 when
 //! any single inline comment anchors to a line that is not part of the diff.
 //! Before this module existed the reviewer only checked that the *file* was
-//! touched, so one model-estimated line number silently discarded every
-//! inline comment (the summary-only retry in `post_pr_review` hid the loss).
+//! touched, so one model-estimated line number could make the whole review
+//! request fail after every other inline comment had already been prepared.
 //!
 //! [`DiffHunks::parse`] turns a unified diff into the exact set of RIGHT-side
 //! (post-image) line numbers GitHub will accept per file, so a bad anchor

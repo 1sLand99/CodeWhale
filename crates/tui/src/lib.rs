@@ -8387,7 +8387,12 @@ Provide findings ordered by severity with file references, then open questions, 
     let request_route = client.effective_route_envelope(&model, chrono::Utc::now());
     let planned_passes = prompts.len();
     let mut usage = crate::models::Usage::default();
-    let report_failure = |usage: &crate::models::Usage, completed_passes, message| {
+    let mut publication = if args.post {
+        ReviewPublication::NotAttempted
+    } else {
+        ReviewPublication::NotRequested
+    };
+    let report_failure = |usage: &crate::models::Usage, completed_passes, publication, message| {
         report_review_failure(
             &args,
             &route_provider,
@@ -8395,6 +8400,7 @@ Provide findings ordered by severity with file references, then open questions, 
             usage,
             completed_passes,
             planned_passes,
+            publication,
             message,
         )
     };
@@ -8433,6 +8439,7 @@ Provide findings ordered by severity with file references, then open questions, 
                 return report_failure(
                     &usage,
                     index,
+                    publication,
                     format!(
                         "Review pass {}/{} request failed: {error}; no partial review was accepted or posted",
                         index + 1,
@@ -8447,6 +8454,7 @@ Provide findings ordered by severity with file references, then open questions, 
             return report_failure(
                 &usage,
                 index,
+                publication,
                 format!(
                     "Review pass {}/{} incomplete: provider stop reason `{}`; the partial review was not accepted or posted.",
                     index + 1,
@@ -8463,7 +8471,7 @@ Provide findings ordered by severity with file references, then open questions, 
         }
         if let (Some(plan), Some(accumulator)) = (&pr_plan, accumulator.as_mut()) {
             if let Err(error) = accumulator.accept(&plan.passes[index], pass_output) {
-                return report_failure(&usage, index, error.to_string());
+                return report_failure(&usage, index, publication, error.to_string());
             }
         } else {
             output = pass_output;
@@ -8473,7 +8481,7 @@ Provide findings ordered by severity with file references, then open questions, 
         let (review, content, coverage) = match accumulator.finish(&diff) {
             Ok(complete) => complete,
             Err(error) => {
-                return report_failure(&usage, planned_passes, error.to_string());
+                return report_failure(&usage, planned_passes, publication, error.to_string());
             }
         };
         output = content;
@@ -8481,72 +8489,97 @@ Provide findings ordered by severity with file references, then open questions, 
     } else {
         (None, None)
     };
-    if let Some((number, view)) = &pr_view {
-        if let Err(error) = crate::tools::review_pr::ensure_current(
-            *number,
-            args.repo.as_deref(),
-            &std::env::current_dir()?,
-            view,
-        ) {
-            return report_failure(&usage, planned_passes, error.to_string());
+    let finalized = (|| -> Result<_> {
+        if let Some((number, view)) = &pr_view {
+            let cwd = std::env::current_dir().context(
+                "Failed to resolve the current directory before final PR revision check",
+            )?;
+            crate::tools::review_pr::ensure_current(*number, args.repo.as_deref(), &cwd, view)?;
         }
-    }
-    if args.post {
-        let (number, view) = pr_view
-            .as_ref()
-            .expect("--post requires --pr (enforced by clap)");
-        let review = structured
-            .as_ref()
-            .expect("structured output exists for PR reviews");
-        post_pr_review(*number, view, args.repo.as_deref(), review, &diff)?;
-    }
-    let receipt = if args.write_receipt {
-        let parsed_output = structured
-            .clone()
-            .unwrap_or_else(|| crate::tools::review::ReviewOutput::from_str(&output));
-        let mut receipt = crate::tools::review::build_review_receipt(
-            review_target_label(&args),
-            &diff,
-            &route_provider,
-            &model,
-            &parsed_output,
-            &output,
-            Vec::new(),
-        );
-        if let Some(coverage) = coverage {
-            crate::tools::review::attach_pr_review_coverage(&mut receipt, coverage)?;
+        if args.post {
+            let (number, view) = pr_view
+                .as_ref()
+                .expect("--post requires --pr (enforced by clap)");
+            let review = structured
+                .as_ref()
+                .expect("structured output exists for PR reviews");
+            post_pr_review(
+                *number,
+                view,
+                args.repo.as_deref(),
+                review,
+                &diff,
+                &mut publication,
+            )
+            .context("PR review publication failed")?;
         }
-        let path =
-            crate::tools::review::write_review_receipt(&receipt, args.receipt_path.as_deref())?;
-        Some((path, receipt))
-    } else {
-        None
+        let receipt = if args.write_receipt {
+            let parsed_output = structured
+                .clone()
+                .unwrap_or_else(|| crate::tools::review::ReviewOutput::from_str(&output));
+            let mut receipt = crate::tools::review::build_review_receipt(
+                review_target_label(&args),
+                &diff,
+                &route_provider,
+                &model,
+                &parsed_output,
+                &output,
+                Vec::new(),
+            );
+            if let Some(coverage) = coverage {
+                crate::tools::review::attach_pr_review_coverage(&mut receipt, coverage)
+                    .context("Failed to attach complete PR coverage to review receipt")?;
+            }
+            let path =
+                crate::tools::review::write_review_receipt(&receipt, args.receipt_path.as_deref())
+                    .context("Failed to write review receipt")?;
+            Some((path, receipt))
+        } else {
+            None
+        };
+        Ok(receipt)
+    })();
+    let receipt = match finalized {
+        Ok(receipt) => receipt,
+        Err(error) => {
+            return report_failure(&usage, planned_passes, publication, error.to_string());
+        }
     };
     if args.json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "mode": "review",
-                "provider": route_provider,
-                "model": model,
-                "success": true,
-                "content": output,
-                "pr": pr_view.as_ref().map(|(number, view)| serde_json::json!({
-                    "number": number,
-                    "url": view.url,
-                    "title": view.title,
-                    "head_sha": view.head_sha,
-                })),
-                "review": structured,
-                "stop_reason": review_stop_reason,
-                "usage": usage,
-                "review_passes": pr_plan.as_ref().map(|plan| plan.passes.len()),
-                "receipt_path": receipt
-                    .as_ref()
-                    .map(|(path, _)| path.display().to_string()),
-                "receipt": receipt.as_ref().map(|(_, receipt)| receipt),
-            }))?
-        );
+        let payload = serde_json::json!({
+            "mode": "review",
+            "provider": route_provider,
+            "model": model,
+            "success": true,
+            "publication": publication.as_str(),
+            "content": output,
+            "pr": pr_view.as_ref().map(|(number, view)| serde_json::json!({
+                "number": number,
+                "url": view.url,
+                "title": view.title,
+                "head_sha": view.head_sha,
+            })),
+            "review": structured,
+            "stop_reason": review_stop_reason,
+            "usage": usage,
+            "review_passes": pr_plan.as_ref().map(|plan| plan.passes.len()),
+            "receipt_path": receipt
+                .as_ref()
+                .map(|(path, _)| path.display().to_string()),
+            "receipt": receipt.as_ref().map(|(_, receipt)| receipt),
+        });
+        let payload = match serde_json::to_string_pretty(&payload) {
+            Ok(payload) => payload,
+            Err(error) => {
+                return report_failure(
+                    &usage,
+                    planned_passes,
+                    publication,
+                    format!("Failed to serialize completed review output: {error}"),
+                );
+            }
+        };
+        println!("{payload}");
     } else if let Some((number, view)) = &pr_view {
         let review = structured
             .as_ref()
@@ -8567,12 +8600,32 @@ Provide findings ordered by severity with file references, then open questions, 
     Ok(())
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ReviewPublication {
+    NotRequested,
+    NotAttempted,
+    Uncertain,
+    Posted,
+}
+
+impl ReviewPublication {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::NotRequested => "not_requested",
+            Self::NotAttempted => "not_attempted",
+            Self::Uncertain => "uncertain",
+            Self::Posted => "posted",
+        }
+    }
+}
+
 fn review_failure_payload(
     provider: &str,
     model: &str,
     usage: &crate::models::Usage,
     completed_passes: usize,
     planned_passes: usize,
+    publication: ReviewPublication,
     message: &str,
 ) -> serde_json::Value {
     serde_json::json!({
@@ -8581,6 +8634,7 @@ fn review_failure_payload(
         "model": model,
         "success": false,
         "complete": false,
+        "publication": publication.as_str(),
         "error": message,
         "usage": usage,
         "completed_review_passes": completed_passes,
@@ -8595,6 +8649,7 @@ fn report_review_failure(
     usage: &crate::models::Usage,
     completed_passes: usize,
     planned_passes: usize,
+    publication: ReviewPublication,
     message: impl Into<String>,
 ) -> Result<()> {
     let message = message.into();
@@ -8607,13 +8662,15 @@ fn report_review_failure(
                 usage,
                 completed_passes,
                 planned_passes,
+                publication,
                 &message,
             ))?
         );
     }
     let usage = serde_json::to_string(usage)?;
+    let publication = publication.as_str();
     bail!(
-        "{message}; completed review passes: {completed_passes}/{planned_passes}; accumulated usage: {usage}"
+        "{message}; publication: {publication}; completed review passes: {completed_passes}/{planned_passes}; accumulated usage: {usage}"
     )
 }
 
@@ -9277,6 +9334,7 @@ fn run_gh_post_pr_review(
     body: &str,
     commit_id: &str,
     comments: &[serde_json::Value],
+    publication: &mut ReviewPublication,
 ) -> Result<()> {
     let mut payload = serde_json::json!({
         "body": body,
@@ -9302,6 +9360,7 @@ fn run_gh_post_pr_review(
     let mut child = cmd
         .spawn()
         .map_err(|e| anyhow::anyhow!("Failed to run `gh api`: {e}"))?;
+    *publication = ReviewPublication::Uncertain;
     if let Some(stdin) = child.stdin.as_mut() {
         use std::io::Write;
         stdin
@@ -9315,17 +9374,21 @@ fn run_gh_post_pr_review(
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         bail!("gh api POST repos/{repo}/pulls/{number}/reviews failed: {stderr}");
     }
+    *publication = ReviewPublication::Posted;
     Ok(())
 }
 
-/// Publish a completed PR review: resolve the repository, render the summary,
-/// and post it (with inline comments where the diff confirms the position).
+/// Publish a completed PR review exactly once: resolve the repository, render
+/// the summary, and include every comment whose position the diff confirms.
+/// A failed request can have an uncertain remote outcome, so reconciliation
+/// and any retry stay under the caller's control rather than risking a duplicate.
 fn post_pr_review(
     number: u32,
     view: &GhPullRequest,
     repo: Option<&str>,
     review: &crate::tools::review::ReviewOutput,
     diff: &str,
+    publication: &mut ReviewPublication,
 ) -> Result<()> {
     crate::tools::review_pr::ensure_current(number, repo, &std::env::current_dir()?, view)?;
     let repo_name = match repo.map(str::trim).filter(|repo| !repo.is_empty()) {
@@ -9336,27 +9399,15 @@ fn post_pr_review(
     if let Some(receipt) = plan.receipt() {
         eprintln!("{receipt}");
     }
-    let inline = plan.comments;
     let body = render_pr_review_markdown(number, view, review, true);
-    if inline.is_empty() {
-        run_gh_post_pr_review(&repo_name, number, &body, &view.head_sha, &[])?;
-    } else if let Err(err) =
-        run_gh_post_pr_review(&repo_name, number, &body, &view.head_sha, &inline)
-    {
-        // Anchors are pre-filtered against the parsed diff hunks, so this
-        // path should now be unreachable in the common case. It stays as a
-        // last resort for anchors GitHub rejects for reasons the diff cannot
-        // show (a stale head SHA, a suppressed large file), and it announces
-        // exactly how many inline comments were lost rather than failing
-        // silently.
-        eprintln!(
-            "warning: {} inline review comment(s) rejected ({err}); retrying summary-only",
-            inline.len()
-        );
-        crate::tools::review_pr::ensure_current(number, repo, &std::env::current_dir()?, view)?;
-        run_gh_post_pr_review(&repo_name, number, &body, &view.head_sha, &[])?;
-    }
-    Ok(())
+    run_gh_post_pr_review(
+        &repo_name,
+        number,
+        &body,
+        &view.head_sha,
+        &plan.comments,
+        publication,
+    )
 }
 
 /// Both the CLI review and interactive composer receive the complete diff.
@@ -15655,16 +15706,68 @@ api_key = "test-only-key"
             &usage,
             1,
             2,
+            ReviewPublication::NotAttempted,
             "second pass malformed",
         );
         assert_eq!(payload["success"], false);
         assert_eq!(payload["complete"], false);
         assert_eq!(payload["completed_review_passes"], 1);
         assert_eq!(payload["planned_review_passes"], 2);
+        assert_eq!(payload["publication"], "not_attempted");
         assert_eq!(payload["usage"]["input_tokens"], 24);
         assert_eq!(payload["usage"]["reasoning_tokens"], 3);
         assert!(payload.get("review").is_none());
         assert!(payload.get("receipt").is_none());
+    }
+
+    #[test]
+    fn review_failure_after_publication_preserves_all_usage_and_post_state() {
+        let mut usage = crate::models::Usage::default();
+        for response_usage in [
+            crate::models::Usage {
+                input_tokens: 21,
+                output_tokens: 5,
+                reasoning_tokens: Some(2),
+                ..Default::default()
+            },
+            crate::models::Usage {
+                input_tokens: 34,
+                output_tokens: 8,
+                reasoning_tokens: Some(3),
+                ..Default::default()
+            },
+        ] {
+            crate::tools::review::add_review_usage(&mut usage, &response_usage);
+        }
+
+        for (publication, message) in [
+            (
+                ReviewPublication::Uncertain,
+                "PR review publication failed after request dispatch",
+            ),
+            (
+                ReviewPublication::Posted,
+                "review posted but receipt write failed",
+            ),
+        ] {
+            let payload = review_failure_payload(
+                "fixture-provider",
+                "fixture-model",
+                &usage,
+                2,
+                2,
+                publication,
+                message,
+            );
+            assert_eq!(payload["success"], false);
+            assert_eq!(payload["complete"], false);
+            assert_eq!(payload["publication"], publication.as_str());
+            assert_eq!(payload["usage"]["input_tokens"], 55);
+            assert_eq!(payload["usage"]["output_tokens"], 13);
+            assert_eq!(payload["usage"]["reasoning_tokens"], 5);
+            assert!(payload.get("review").is_none());
+            assert!(payload.get("receipt").is_none());
+        }
     }
 
     #[tokio::test]
@@ -15923,8 +16026,7 @@ api_key = "test-only-key"
     #[test]
     fn inline_review_comments_drop_one_out_of_hunk_anchor_not_the_whole_review() {
         // Line 25 is inside the file but between the two hunks. Before the
-        // hunk filter this single bad anchor 422'd the review and every inline
-        // comment was lost to the summary-only retry.
+        // hunk filter this single bad anchor 422'd the whole review request.
         let review = review_with(
             vec![
                 review_issue("error", Some("crates/tui/src/lib.rs"), Some(11)),
