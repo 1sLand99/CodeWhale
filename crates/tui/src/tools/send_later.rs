@@ -178,7 +178,7 @@ Returns trigger_id and resolved fire_at."
             "status".to_string(),
             json!({
                 "type": "string",
-                "enum": ["pending", "fired", "canceled", "failed"],
+                "enum": ["pending", "dispatching", "fired", "canceled", "failed"],
                 "description": "Filter by trigger status. (action=list)"
             }),
         );
@@ -428,11 +428,12 @@ async fn execute_cancel(input: &Value, context: &ToolContext) -> Result<ToolResu
 fn parse_trigger_status(s: &str) -> Result<DelayedTriggerStatus, String> {
     match s {
         "pending" => Ok(DelayedTriggerStatus::Pending),
+        "dispatching" => Ok(DelayedTriggerStatus::Dispatching),
         "fired" => Ok(DelayedTriggerStatus::Fired),
         "canceled" => Ok(DelayedTriggerStatus::Canceled),
         "failed" => Ok(DelayedTriggerStatus::Failed),
         other => Err(format!(
-            "unknown trigger status '{other}'; expected one of: pending, fired, canceled, failed"
+            "unknown trigger status '{other}'; expected one of: pending, dispatching, fired, canceled, failed"
         )),
     }
 }
@@ -440,6 +441,7 @@ fn parse_trigger_status(s: &str) -> Result<DelayedTriggerStatus, String> {
 fn trigger_status_str(status: DelayedTriggerStatus) -> &'static str {
     match status {
         DelayedTriggerStatus::Pending => "pending",
+        DelayedTriggerStatus::Dispatching => "dispatching",
         DelayedTriggerStatus::Fired => "fired",
         DelayedTriggerStatus::Canceled => "canceled",
         DelayedTriggerStatus::Failed => "failed",

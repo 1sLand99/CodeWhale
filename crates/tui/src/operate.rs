@@ -1136,9 +1136,8 @@ pub fn upsert_keepalive(
         "Keep Operate alive. Read the Operate record (current.json) and its direction, refresh the lead plan, and dispatch ready slices with at most `writersInFlight` concurrent workers — that budget already encodes pace (hold/throttle/widen), so honor it instead of widening on your own. Burn rate paces spend; it never stops the operation. Workspace: {}",
         workspace.display()
     );
-    let mut record = manager
-        .get_automation(OPERATE_KEEPALIVE_ID)
-        .unwrap_or_else(|_| AutomationRecord {
+    manager.edit_automation(OPERATE_KEEPALIVE_ID, |current| {
+        let mut record = current.unwrap_or_else(|| AutomationRecord {
             schema_version: crate::automation_manager::CURRENT_AUTOMATION_SCHEMA_VERSION,
             id: OPERATE_KEEPALIVE_ID.to_string(),
             name: "Operate keep-alive".to_string(),
@@ -1159,22 +1158,24 @@ pub fn upsert_keepalive(
             next_run_at: None,
             last_run_at: None,
         });
-    record.name = "Operate keep-alive".to_string();
-    record.prompt = prompt;
-    record.rrule = OPERATE_KEEPALIVE_RRULE.to_string();
-    record.cwds = vec![workspace.to_path_buf()];
-    record.model = Some(OPERATE_LEAD_MODEL.to_string());
-    record.mode = Some("operate".to_string());
-    record.allow_shell = Some(true);
-    record.trust_mode = Some(false);
-    record.auto_approve = Some(false);
-    record.delivery_mode = None;
-    record.status = AutomationStatus::Active;
-    record.updated_at = now;
-    if kick_now {
-        record.next_run_at = Some(now);
-    }
-    manager.save_automation(&record)
+        record.name = "Operate keep-alive".to_string();
+        record.prompt = prompt;
+        record.rrule = OPERATE_KEEPALIVE_RRULE.to_string();
+        record.cwds = vec![workspace.to_path_buf()];
+        record.model = Some(OPERATE_LEAD_MODEL.to_string());
+        record.mode = Some("operate".to_string());
+        record.allow_shell = Some(true);
+        record.trust_mode = Some(false);
+        record.auto_approve = Some(false);
+        record.delivery_mode = None;
+        record.status = AutomationStatus::Active;
+        record.updated_at = now;
+        if kick_now {
+            record.next_run_at = Some(now);
+        }
+        Ok(Some(record))
+    })?;
+    Ok(())
 }
 
 /// Cancel tears the operation down *including* its keepalive: an unattended
@@ -1196,17 +1197,20 @@ pub fn pause_keepalive(manager: &AutomationManager) -> Result<()> {
 /// after a direction PATCH invalidated the plan). No-op when the keepalive is
 /// absent or paused (a paused keepalive belongs to a cancelled operation).
 pub fn kick_keepalive(manager: &AutomationManager) -> Result<bool> {
-    let Ok(mut record) = manager.get_automation(OPERATE_KEEPALIVE_ID) else {
-        return Ok(false);
-    };
-    if !matches!(record.status, AutomationStatus::Active) {
-        return Ok(false);
-    }
-    let now = Utc::now();
-    record.next_run_at = Some(now);
-    record.updated_at = now;
-    manager.save_automation(&record)?;
-    Ok(true)
+    let mut kicked = false;
+    manager.edit_automation(OPERATE_KEEPALIVE_ID, |current| {
+        let Some(mut record) = current else {
+            return Ok(None);
+        };
+        if record.status == AutomationStatus::Active {
+            let now = Utc::now();
+            record.next_run_at = Some(now);
+            record.updated_at = now;
+            kicked = true;
+        }
+        Ok(Some(record))
+    })?;
+    Ok(kicked)
 }
 
 #[must_use]
