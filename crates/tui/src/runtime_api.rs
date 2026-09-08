@@ -4100,8 +4100,11 @@ fn operate_store() -> Result<crate::operate::OperationStore, ApiError> {
         .map_err(|e| ApiError::internal(format!("Failed to open operate store: {e}")))
 }
 
-fn operate_credentials_present(config: &Config) -> bool {
-    crate::operate::operate_credentials_present(config)
+async fn operate_readiness(state: &RuntimeApiState) -> Result<(String, bool), ApiError> {
+    let config = state.config.read().clone();
+    let manager = state.automations.lock().await;
+    crate::operate::keepalive_readiness(&manager, &config, None)
+        .map_err(|error| ApiError::bad_request(format!("Operate route unavailable: {error}")))
 }
 
 fn operate_view(operation: crate::operate::Operation) -> Json<OperateView> {
@@ -4150,18 +4153,19 @@ async fn start_operate(
     // always-on, and a fresh operation has no lead plan yet — kick the first
     // lead run to the next scheduler tick instead of waiting out the hourly
     // recurrence.
-    {
+    let config = state.config.read().clone();
+    let (model, credentials) = {
         let manager = state.automations.lock().await;
-        crate::operate::upsert_keepalive(&manager, &state.workspace, true)
-            .map_err(|e| ApiError::internal(format!("Failed to keep operate alive: {e}")))?;
-    }
-    let config = state.config.read();
+        crate::operate::upsert_keepalive(&manager, &state.workspace, true, &config, None)
+            .map_err(|e| ApiError::bad_request(format!("Failed to keep operate alive: {e}")))?
+    };
     let operation = crate::operate::start_operation(
         &store,
         &state.workspace,
         req.direction,
         burn,
-        operate_credentials_present(&config),
+        credentials,
+        &model,
     )
     .map_err(|e| ApiError::bad_request(e.to_string()))?;
     Ok(operate_view(operation))
@@ -4172,10 +4176,7 @@ async fn patch_operate(
     Json(patch): Json<serde_json::Value>,
 ) -> Result<Json<OperateView>, ApiError> {
     let store = operate_store()?;
-    let credentials = {
-        let config = state.config.read();
-        operate_credentials_present(&config)
-    };
+    let (model, credentials) = operate_readiness(&state).await?;
     // Read-merge-write under the operate store lock: a concurrent keepalive
     // or plan save can no longer be lost by a stale read.
     let direction_changed = std::cell::Cell::new(false);
@@ -4184,6 +4185,7 @@ async fn patch_operate(
             let before = op.direction.clone();
             crate::operate::apply_operate_patch(op, &patch)?;
             direction_changed.set(op.direction != before);
+            op.set_lead_model(&model);
             op.credentials_present = credentials;
             op.project();
             Ok(())
@@ -4211,13 +4213,18 @@ async fn keepalive_operate(
     Json(req): Json<KeepAliveOperateRequest>,
 ) -> Result<Json<OperateView>, ApiError> {
     let store = operate_store()?;
-    let config = state.config.read();
-    let credentials = req
-        .credentials_present
-        .unwrap_or_else(|| operate_credentials_present(&config));
-    drop(config);
+    let (model, credentials) = match req.credentials_present {
+        Some(observed) => (None, observed),
+        None => {
+            let (model, credentials) = operate_readiness(&state).await?;
+            (Some(model), credentials)
+        }
+    };
     let operation = store
         .mutate(|op| {
+            if let Some(model) = &model {
+                op.set_lead_model(model);
+            }
             crate::operate::keep_alive_observation(
                 op,
                 req.observed_burn_usd_per_hour,

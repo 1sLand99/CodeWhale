@@ -8348,6 +8348,156 @@ async fn mode_change_update_sends_restored_agent_policy() {
     }
 }
 
+fn operate_tui_route_config() -> Config {
+    let mut config: Config = toml::from_str(
+        r#"
+provider = "startup-route"
+[providers.startup-route]
+kind = "openai-compatible"
+base_url = "https://startup.example.test/v1"
+model = "startup-model"
+auth_mode = "none"
+[providers.collision-route]
+kind = "openai-compatible"
+base_url = "https://custom-openai.example.test/v1"
+model = "table-default"
+auth_mode = "none"
+"#,
+    )
+    .expect("operate TUI routes");
+    let custom = &mut config.providers.as_mut().expect("providers").custom;
+    let collision = custom.remove("collision-route").expect("custom fixture");
+    custom.insert("openai".to_string(), collision);
+    config
+}
+
+#[tokio::test]
+async fn operate_entry_preserves_live_custom_identity_and_auto_over_startup_route() {
+    let _env = crate::test_support::lock_test_env();
+    for selected in ["session-model", "auto"] {
+        let root = TempDir::new().expect("root");
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", root.path());
+        let _operate = crate::test_support::EnvVarGuard::set(
+            "CODEWHALE_OPERATE_DIR",
+            root.path().join("operate"),
+        );
+        let mut config = operate_tui_route_config();
+        config.fleet_operator_route_applied = true;
+        let manager =
+            crate::automation_manager::AutomationManager::open(root.path().join("automations"))
+                .expect("manager");
+        let automations = Arc::new(tokio::sync::Mutex::new(manager));
+        let mut app = create_test_app();
+        app.workspace = root.path().to_path_buf();
+        app.runtime_services.automations = Some(automations.clone());
+        app.set_provider_identity_record(
+            config
+                .resolve_persisted_provider_identity(Some("custom"), Some("openai"))
+                .expect("exact custom"),
+        );
+        app.set_model_selection(selected.to_string());
+        app.last_effective_model = Some("previous-turn-model".to_string());
+        let engine = mock_engine_handle();
+        apply_mode_update(
+            &mut app,
+            &engine.handle,
+            &config,
+            crate::tui::app::AppMode::Operate,
+        )
+        .await;
+        let record = automations
+            .lock()
+            .await
+            .get_automation(crate::operate::OPERATE_KEEPALIVE_ID)
+            .expect("keepalive installed");
+        assert_eq!(record.model.as_deref(), Some(selected));
+        assert_eq!(record.model_provider.as_deref(), Some("custom"));
+        assert_eq!(record.model_provider_id.as_deref(), Some("openai"));
+        assert_eq!(record.auto_approve, Some(false));
+        let operation = crate::operate::OperationStore::open(root.path().join("operate"))
+            .expect("store")
+            .load()
+            .expect("load")
+            .expect("operation");
+        assert_eq!(operation.lead_operator.model, selected);
+        assert!(
+            operation
+                .roster
+                .iter()
+                .filter(|member| member.id == "lead")
+                .all(|member| member.model == selected)
+        );
+        assert!(operation.credentials_present);
+        assert!(
+            automations
+                .lock()
+                .await
+                .list_runs(&record.id, None)
+                .expect("runs")
+                .is_empty(),
+            "entry alone is not task execution"
+        );
+    }
+}
+
+#[tokio::test]
+async fn operate_rejected_attach_does_not_reactivate_saved_keepalive() {
+    let _env = crate::test_support::lock_test_env();
+    let root = TempDir::new().expect("root");
+    let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", root.path());
+    let operate_dir = root.path().join("operate");
+    let _operate = crate::test_support::EnvVarGuard::set("CODEWHALE_OPERATE_DIR", &operate_dir);
+    let config = operate_tui_route_config();
+    let manager =
+        crate::automation_manager::AutomationManager::open(root.path().join("automations"))
+            .expect("manager");
+    crate::operate::upsert_keepalive(&manager, root.path(), true, &config, None).expect("upsert");
+    crate::operate::pause_keepalive(&manager).expect("pause");
+    let before = serde_json::to_value(
+        manager
+            .get_automation(crate::operate::OPERATE_KEEPALIVE_ID)
+            .expect("record"),
+    )
+    .expect("json");
+    std::fs::create_dir_all(&operate_dir).expect("directory");
+    std::fs::write(operate_dir.join("current.json"), b"{broken")
+        .expect("corrupt operation fixture");
+    let automations = Arc::new(tokio::sync::Mutex::new(manager));
+    let mut app = create_test_app();
+    app.workspace = root.path().to_path_buf();
+    app.runtime_services.automations = Some(automations.clone());
+    app.set_provider_identity_record(
+        config
+            .active_provider_identity(ApiProvider::Custom)
+            .expect("identity"),
+    );
+    app.set_model_selection("startup-model".into());
+    let engine = mock_engine_handle();
+    apply_mode_update(
+        &mut app,
+        &engine.handle,
+        &config,
+        crate::tui::app::AppMode::Operate,
+    )
+    .await;
+    let record = automations
+        .lock()
+        .await
+        .get_automation(crate::operate::OPERATE_KEEPALIVE_ID)
+        .expect("saved keepalive");
+    assert_eq!(serde_json::to_value(&record).expect("json"), before);
+    assert_eq!(
+        record.status,
+        crate::automation_manager::AutomationStatus::Paused
+    );
+    assert!(record.next_run_at.is_none());
+    assert_eq!(
+        std::fs::read(operate_dir.join("current.json")).expect("operation"),
+        b"{broken"
+    );
+    assert!(app.history.iter().any(|cell| matches!(cell, HistoryCell::System { content } if content.contains("Operate did not start"))));
+}
+
 #[tokio::test]
 async fn operate_mode_entry_attaches_to_recorded_operation() {
     let _lock = crate::test_support::lock_test_env();
@@ -8356,14 +8506,24 @@ async fn operate_mode_entry_attaches_to_recorded_operation() {
     // Pre-record a planned operation: entering Operate must attach to it
     // (same id) instead of minting a fresh record that resets spend and plan.
     let store = crate::operate::OperationStore::open(dir.path()).expect("store");
-    let recorded =
-        crate::operate::start_operation(&store, dir.path(), Some("Steady ops".into()), None, true)
-            .expect("start");
+    let recorded = crate::operate::start_operation(
+        &store,
+        dir.path(),
+        Some("Steady ops".into()),
+        None,
+        true,
+        "selected-model",
+    )
+    .expect("start");
     let mut planned = recorded.clone();
     planned.plan_from_direction();
     store.save(&planned).expect("save planned");
 
     let mut app = create_test_app();
+    app.runtime_services.automations = Some(Arc::new(tokio::sync::Mutex::new(
+        crate::automation_manager::AutomationManager::open(dir.path().join("automations"))
+            .expect("automations"),
+    )));
     let engine = crate::core::engine::mock_engine_handle();
     assert!(
         apply_mode_update(

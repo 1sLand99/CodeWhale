@@ -8423,6 +8423,156 @@ fn provider_credential_state_wire_values_are_stable_and_sanitized() {
 }
 
 #[tokio::test]
+async fn operate_api_uses_saved_route_for_start_patch_and_keepalive_readiness() -> Result<()> {
+    let _env = lock_test_env();
+    let root = tempfile::tempdir()?;
+    let _home = EnvVarGuard::set("CODEWHALE_HOME", root.path());
+    let _operate = EnvVarGuard::set("CODEWHALE_OPERATE_DIR", root.path().join("operate"));
+    let _cli = EnvVarGuard::remove("CODEWHALE_CLI_API_KEY");
+    let _missing = EnvVarGuard::remove("CW_OPERATE_MISSING_TEST_KEY");
+    let mut config: Config = toml::from_str(
+        r#"
+provider = "fleet-route"
+[providers.fleet-route]
+kind = "openai-compatible"
+base_url = "https://fleet.example.test/v1"
+model = "fleet-model"
+auth_mode = "none"
+[providers.saved-route]
+kind = "openai-compatible"
+base_url = "https://saved.example.test/v1"
+model = "saved-model"
+auth_mode = "api-key"
+api_key_env = "CW_OPERATE_MISSING_TEST_KEY"
+"#,
+    )?;
+    config.fleet_operator_route_applied = true;
+    let (addr, _runtime, server) =
+        spawn_test_server_with_root_token_mobile_workspace_and_overrides(
+            root.path().to_path_buf(),
+            root.path().join("sessions"),
+            None,
+            false,
+            root.path().join("workspace"),
+            TestServerOverrides {
+                config: Some(config),
+                ..Default::default()
+            },
+        )
+        .await?
+        .context("loopback server is required for Operate API acceptance")?;
+    let client = crate::tls::reqwest_client();
+    let url = format!("http://{addr}/v1/operate");
+    let started: serde_json::Value = client
+        .post(&url)
+        .json(&json!({"direction":"route fixture"}))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(started["operation"]["credentialsPresent"], true);
+    assert_eq!(started["operation"]["leadOperator"]["model"], "fleet-model");
+    let manager = AutomationManager::open(root.path().join("automations"))?;
+    let mut record = manager.get_automation(crate::operate::OPERATE_KEEPALIVE_ID)?;
+    assert_eq!(record.model.as_deref(), Some("fleet-model"));
+    assert_eq!(record.model_provider.as_deref(), Some("custom"));
+    assert_eq!(record.model_provider_id.as_deref(), Some("fleet-route"));
+    assert_eq!(record.auto_approve, Some(false));
+
+    record.model = Some("saved-model".into());
+    record.model_provider_id = Some("saved-route".into());
+    manager.save_automation(&record)?;
+    let restarted: serde_json::Value = client
+        .post(&url)
+        .json(&json!({"direction":"saved fixture"}))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(restarted["operation"]["credentialsPresent"], false);
+    assert_eq!(
+        restarted["operation"]["leadOperator"]["model"],
+        "saved-model"
+    );
+    let patched: serde_json::Value = client
+        .patch(&url)
+        .json(&json!({"direction":"changed direction"}))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(patched["operation"]["credentialsPresent"], false);
+    assert_eq!(patched["operation"]["leadOperator"]["model"], "saved-model");
+    let observed: serde_json::Value = client
+        .post(format!("{url}/keepalive"))
+        .json(&json!({"credentialsPresent":true}))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(
+        observed["operation"]["credentialsPresent"], true,
+        "explicit observation retained"
+    );
+    let inferred: serde_json::Value = client
+        .post(format!("{url}/keepalive"))
+        .json(&json!({}))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(
+        inferred["operation"]["credentialsPresent"], false,
+        "fallback checks saved route, not ready parent"
+    );
+
+    record.model = Some("auto".into());
+    manager.save_automation(&record)?;
+    let auto: serde_json::Value = client
+        .post(&url)
+        .json(&json!({"direction":"auto fixture"}))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(auto["operation"]["leadOperator"]["model"], "auto");
+    assert_eq!(
+        manager.get_automation(&record.id)?.model.as_deref(),
+        Some("auto")
+    );
+    record.model_provider_id = Some("removed-route".into());
+    manager.save_automation(&record)?;
+    let before = serde_json::to_value(manager.get_automation(&record.id)?)?;
+    let operation_before = fs::read(root.path().join("operate/current.json"))?;
+    let rejected = client
+        .post(&url)
+        .json(&json!({"direction":"must not apply"}))
+        .send()
+        .await?;
+    assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        serde_json::to_value(manager.get_automation(&record.id)?)?,
+        before
+    );
+    assert_eq!(
+        fs::read(root.path().join("operate/current.json"))?,
+        operation_before
+    );
+    assert!(
+        manager.list_runs(&record.id, None)?.is_empty(),
+        "API installation did not execute a provider task"
+    );
+    server.abort();
+    Ok(())
+}
+
+#[tokio::test]
 async fn provider_catalog_reports_exact_named_custom_credential_state_without_secrets() -> Result<()>
 {
     let _env_lock = lock_test_env();
