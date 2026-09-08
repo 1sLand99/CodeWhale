@@ -448,6 +448,7 @@ fn messages_from_thread_detail_batches_tool_results() {
         ended_at: Some(now),
         duration_ms: Some(0),
         usage: None,
+        model_request_diagnostics: None,
         routing_settlement: false,
         effective_route_usage: None,
         permission_posture: Some("ask".to_string()),
@@ -5996,6 +5997,7 @@ async fn session_save_merges_thread_cost_split_and_records_coverage() -> Result<
             output_tokens: 1_000,
             ..Usage::default()
         }),
+        model_request_diagnostics: None,
         routing_settlement: false,
         effective_route_usage: None,
         permission_posture: None,
@@ -6189,6 +6191,7 @@ async fn session_save_persists_parent_cny_unpriced_reasons_without_double_count(
             output_tokens: 1_000,
             ..Usage::default()
         }),
+        model_request_diagnostics: None,
         routing_settlement: false,
         effective_route_usage: None,
         permission_posture: None,
@@ -7202,6 +7205,7 @@ fn seed_summary_search_transcript(
             ended_at: Some(created_at),
             duration_ms: Some(0),
             usage: None,
+            model_request_diagnostics: None,
             routing_settlement: false,
             effective_route_usage: None,
             permission_posture: None,
