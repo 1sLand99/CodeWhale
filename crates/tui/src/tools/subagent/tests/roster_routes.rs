@@ -521,3 +521,180 @@ async fn selected_fleet_capability_and_broken_selection_refuse_actual_start() {
     assert!(manager.read().await.agents.is_empty());
     assert_eq!(calls.load(Ordering::SeqCst), 0);
 }
+
+#[tokio::test]
+async fn selected_models_reach_exact_provider_and_off_list_refuses_before_admission() {
+    use crate::fleet::store::{FleetFile, FleetScope, save_fleet, set_selected};
+    let _env = crate::test_support::lock_test_env();
+    let root = tempdir().unwrap();
+    let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", root.path().join("state"));
+    let (client, calls, bodies) = delayed_chat_client(Duration::ZERO, "done").await;
+    let mut config = crate::config::Config {
+        api_key: Some("test-key".into()),
+        base_url: Some(client.base_url().into()),
+        ..Default::default()
+    };
+    let router = config.provider_config_for_mut(ApiProvider::Openrouter);
+    router.api_key = Some("test-router-key".into());
+    router.base_url = Some(client.base_url().into());
+    router.vendor = Some("cerebras".into());
+    let mut fleet = FleetFile::new("Selected routes".into(), None).unwrap();
+    fleet.members.push(serde_json::from_value(json!({
+        "id":"review-choice", "role":"reviewer", "provider":"openrouter", "model":"qwen/qwen3.7-plus"
+    })).unwrap());
+    save_fleet(&fleet, FleetScope::Workspace, root.path()).unwrap();
+    set_selected(&fleet.name, FleetScope::Workspace, root.path()).unwrap();
+    let manager = new_shared_subagent_manager(root.path().to_path_buf(), 2);
+    let context = ToolContext::new(root.path()).with_state_namespace("shortlist-consumer");
+    let runtime = SubAgentRuntime::new(
+        client,
+        "deepseek-v4-flash".into(),
+        context.clone(),
+        false,
+        None,
+        manager.clone(),
+    )
+    .with_api_config(config);
+    let tool = AgentTool::new(manager.clone(), runtime);
+    let roster = tool
+        .execute(json!({"action":"roster"}), &context)
+        .await
+        .unwrap();
+    let rows: Value = serde_json::from_str(&roster.content).unwrap();
+    assert_eq!(rows["model_total_count"], 1);
+    assert_eq!(
+        rows["models"][0]["selector"]["model"],
+        "openrouter/qwen/qwen3.7-plus"
+    );
+    assert_eq!(rows["models"][0]["route"]["provider"], "openrouter");
+    assert_eq!(rows["models"][0]["route"]["openrouter_vendor"], "cerebras");
+    assert_eq!(rows["models"][0]["route"]["reachability"], "unverified");
+    assert_eq!(calls.load(Ordering::SeqCst), 0, "discovery must not infer");
+    let error = tool
+        .execute(
+            json!({"type":"explore", "model":"deepseek-v4-pro", "prompt":"Inspect."}),
+            &context,
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("outside the selected Pod"),
+        "{error}"
+    );
+    assert!(
+        error.to_string().contains("openrouter/qwen/qwen3.7-plus"),
+        "{error}"
+    );
+    assert!(
+        error.to_string().contains("deepseek/deepseek-v4-flash"),
+        "{error}"
+    );
+    assert!(manager.read().await.agents.is_empty());
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    let started = tool
+        .execute(
+            json!({"type":"explore", "model":"openrouter/qwen/qwen3.7-plus", "prompt":"Say done."}),
+            &context,
+        )
+        .await
+        .unwrap();
+    let meta = started.metadata.as_ref().unwrap();
+    assert_eq!(meta["child_route"]["provider_id"], "openrouter");
+    assert_eq!(meta["child_route"]["model_id"], "qwen/qwen3.7-plus");
+    assert!(
+        meta["child_route"]["resolved_profile_id"].is_null(),
+        "model choice does not invent a saved profile"
+    );
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while calls.load(Ordering::SeqCst) == 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("local fixture receives selected model request");
+    let body = bodies.lock().unwrap()[0].clone();
+    assert_eq!(body["model"], "qwen/qwen3.7-plus");
+    assert_eq!(body["provider"]["order"], json!(["cerebras"]));
+    assert_eq!(body["provider"]["allow_fallbacks"], false);
+    let id = meta["agent_id"].as_str().unwrap();
+    if manager.read().await.agents[id].status == SubAgentStatus::Running {
+        manager.write().await.cancel_agent(id).unwrap();
+    }
+    let session = tool
+        .execute(
+            json!({"type":"explore", "model":"deepseek/deepseek-v4-flash", "prompt":"Say done."}),
+            &context,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        session.metadata.as_ref().unwrap()["child_route"]["provider_id"],
+        "deepseek"
+    );
+    let id = session.metadata.as_ref().unwrap()["agent_id"]
+        .as_str()
+        .unwrap();
+    if manager.read().await.agents[id].status == SubAgentStatus::Running {
+        manager.write().await.cancel_agent(id).unwrap();
+    }
+    fleet.members.clear();
+    save_fleet(&fleet, FleetScope::Workspace, root.path()).unwrap();
+    let empty = tool
+        .execute(json!({"action":"roster"}), &context)
+        .await
+        .unwrap();
+    let rows: Value = serde_json::from_str(&empty.content).unwrap();
+    assert_eq!(
+        rows["model_total_count"], 0,
+        "live removal must not preserve stale choices"
+    );
+    let error = tool
+        .execute(
+            json!({"type":"explore", "model":"openrouter/qwen/qwen3.7-plus", "prompt":"Inspect."}),
+            &context,
+        )
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("provider DeepSeek"), "{error}");
+}
+
+#[tokio::test]
+async fn shortlisted_model_on_multiple_providers_requires_exact_selector() {
+    use crate::fleet::store::{FleetFile, FleetScope, save_fleet, set_selected};
+    let _env = crate::test_support::lock_test_env();
+    let root = tempdir().unwrap();
+    let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", root.path().join("state"));
+    let (client, calls, _) = delayed_chat_client(Duration::ZERO, "done").await;
+    let mut fleet = FleetFile::new("Ambiguous routes".into(), None).unwrap();
+    for (id, provider) in [("review-a", "openrouter"), ("review-b", "openai")] {
+        fleet.members.push(
+            serde_json::from_value(json!({
+                "id":id, "role":"reviewer", "provider":provider, "model":"shared-wire-model"
+            }))
+            .unwrap(),
+        );
+    }
+    save_fleet(&fleet, FleetScope::Workspace, root.path()).unwrap();
+    set_selected(&fleet.name, FleetScope::Workspace, root.path()).unwrap();
+    let manager = new_shared_subagent_manager(root.path().to_path_buf(), 1);
+    let context = ToolContext::new(root.path()).with_state_namespace("ambiguous-model-consumer");
+    let runtime = SubAgentRuntime::new(
+        client,
+        "deepseek-v4-flash".into(),
+        context.clone(),
+        false,
+        None,
+        manager.clone(),
+    );
+    let tool = AgentTool::new(manager.clone(), runtime);
+    let error = tool
+        .execute(
+            json!({"type":"explore", "model":"shared-wire-model", "prompt":"Inspect."}),
+            &context,
+        )
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("multiple providers"), "{error}");
+    assert!(manager.read().await.agents.is_empty());
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}

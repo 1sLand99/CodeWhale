@@ -402,8 +402,12 @@ session (docs/CACHE.md; accepted at the v0.9.9 boundary).
 reasoning effort, known route limits and capability provenance. It uses the
 same resolver as execution, including live session role defaults. Per-task `model` takes precedence over
 `model_strength`, then role defaults and the inherited session route.
-Foreign-provider model requests fail before admission; these controls do not
-change a child's authority.
+When a Pod is selected, the `models` rows list its exact routes in saved order.
+Use a listed `provider/model` selector for a task on an unpinned role; the session
+model remains allowed. Off-list choices fail with the allowed routes, and a bare
+model shared by multiple providers requires an exact selector. Without selected
+models, current-provider overrides and `model_strength` retain their behavior;
+foreign-provider requests fail. These choices do not change child authority.
 
 The `profiles` rows expose saved members from the existing selected Fleet or
 trusted config/personal/workspace/plugin layers, with bounded identities and the

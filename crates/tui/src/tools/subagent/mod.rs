@@ -8485,7 +8485,7 @@ impl ToolSpec for AgentTool {
                 },
                 "model": {
                     "type": "string",
-                    "description": "Exact model on the current provider for this task. Overrides role defaults and model_strength; foreign-provider models are refused."
+                    "description": "Exact model or provider/model from roster models, plus the session model. A selected Pod constrains task choices to those routes; saved profile pins remain exact. With no selected models, current-provider overrides remain available."
                 },
                 "model_strength": {
                     "type": "string",
@@ -8678,12 +8678,30 @@ impl ToolSpec for AgentTool {
                 {
                     profiles.push(resolved_profile_roster_entry(&runtime, &roster, member).await);
                 }
+                let mut model_rows = Vec::new();
+                let selected_models =
+                    crate::fleet::members::fleet_models(&runtime.context.workspace);
+                if let Ok(models) = &selected_models {
+                    for model in models.iter().take(64) {
+                        let selector = format!("{}/{}", model.provider, model.model);
+                        model_rows.push(resolved_spawn_roster_entry(
+                            &runtime, &roster,
+                            json!({"provider": model.provider, "model": model.model, "roles": model.roles,
+                                "selector": {"model": selector}}),
+                            json!({"prompt": "Preview selected model.", "type": "general", "model": selector}),
+                        ).await);
+                    }
+                }
                 let payload = json!({
                     "action": "roster",
                     "count": members.len(),
                     "total_count": members.len(),
                     "truncated": false,
                     "members": members,
+                    "models": model_rows,
+                    "model_total_count": selected_models.as_ref().map_or(0, Vec::len),
+                    "model_load_error": selected_models.err().map(|error| error.to_string()),
+                    "model_help": "Choose an exact model selector with any unpinned type. The session model is always allowed. Empty models retains current-provider model/strength choices. Saved profile pins remain exact.",
                     "profiles": profiles,
                     "profile_count": profiles.len(),
                     "profile_total_count": roster.members().iter().filter(|member| member.origin != crate::fleet::roster::ProfileOrigin::BuiltIn).count(),
@@ -13116,9 +13134,6 @@ fn bind_profile_provider(
     if provider_pin_matches_session(runtime, &provider_id) {
         return Ok(());
     }
-    let config = runtime.api_config.as_deref().ok_or_else(|| ToolError::execution_failed(
-        "Saved provider pin needs the session Config; the child cannot safely change providers without it."
-    ))?;
     if member
         .and_then(|member| member.profile.model.as_deref())
         .is_none_or(|model| model.trim().is_empty() || model.eq_ignore_ascii_case("auto"))
@@ -13127,8 +13142,18 @@ fn bind_profile_provider(
             "A saved cross-provider route must pin an exact model as well as its provider.",
         ));
     }
+    bind_spawn_provider(runtime, &provider_id)
+}
+
+fn bind_spawn_provider(runtime: &mut SubAgentRuntime, provider_id: &str) -> Result<(), ToolError> {
+    if provider_pin_matches_session(runtime, provider_id) {
+        return Ok(());
+    }
+    let config = runtime.api_config.as_deref().ok_or_else(|| ToolError::execution_failed(
+        "An exact provider choice needs the session Config; the child cannot safely change providers without it."
+    ))?;
     let identity = config
-        .resolve_provider_pin_identity(&provider_id)
+        .resolve_provider_pin_identity(provider_id)
         .map_err(ToolError::invalid_input)?;
     let mut scoped = config.clone();
     scoped.scope_to_provider_identity(&identity);
@@ -13312,8 +13337,7 @@ struct SpawnModelSelection {
 
 /// Resolve the child model once, with receipt-grade precedence provenance:
 /// explicit task field > configured role/type default > operator run model.
-/// Roles pin no model, so there is no profile layer: a later
-/// configured-model lookup cannot silently override anything.
+/// Saved member pins are bound before this unpinned task/default fallback.
 fn resolve_spawn_model_selection(
     runtime: &SubAgentRuntime,
     request: &SpawnRequest,
@@ -13354,6 +13378,80 @@ fn resolve_spawn_model_selection(
     })
 }
 
+/// Resolve an explicit task choice against the existing selected Pod's routes.
+/// No selection preserves current-provider overrides; a broken selection is an
+/// error, never an empty shortlist. Provider identity is matched before model
+/// validation, so a deliberately saved cross-provider route cannot be guessed.
+fn bind_shortlisted_task_model(
+    runtime: &mut SubAgentRuntime,
+    request: &SpawnRequest,
+) -> Result<Option<String>, ToolError> {
+    let Some(requested) = request.model.as_deref() else {
+        return Ok(None);
+    };
+    let models = crate::fleet::members::fleet_models(&runtime.context.workspace)
+        .map_err(|error| ToolError::execution_failed(error.to_string()))?;
+    if models.is_empty() {
+        return Ok(None);
+    }
+    let session_provider = runtime.api_config.as_ref().map_or_else(
+        || runtime.client.api_provider().as_str().to_string(),
+        |config| config.provider_identity_for(runtime.client.api_provider()),
+    );
+    // The session route is always an explicit allowed choice.
+    if requested.eq_ignore_ascii_case(&runtime.model)
+        || requested.eq_ignore_ascii_case(&format!("{session_provider}/{}", runtime.model))
+    {
+        return Ok(Some(runtime.model.clone()));
+    }
+    let exact = models
+        .iter()
+        .filter(|model| {
+            requested.eq_ignore_ascii_case(&format!("{}/{}", model.provider, model.model))
+        })
+        .collect::<Vec<_>>();
+    let candidates = if exact.is_empty() {
+        models
+            .iter()
+            .filter(|model| requested.eq_ignore_ascii_case(&model.model))
+            .collect::<Vec<_>>()
+    } else {
+        exact
+    };
+    let selected = match candidates.as_slice() {
+        [model] => *model,
+        [] => {
+            let choices = models
+                .iter()
+                .take(32)
+                .map(|model| {
+                    crate::fleet::identity::bounded_identity_field(&format!(
+                        "{}/{}",
+                        model.provider, model.model
+                    ))
+                })
+                .chain(std::iter::once(
+                    crate::fleet::identity::bounded_identity_field(&format!(
+                        "{session_provider}/{}",
+                        runtime.model
+                    )),
+                ))
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(ToolError::invalid_input(format!(
+                "Requested model is outside the selected Pod. Available routes: {choices}. Use action=roster; saved profile pins remain authoritative."
+            )));
+        }
+        _ => {
+            return Err(ToolError::invalid_input(
+                "That model is shortlisted on multiple providers. Use the exact provider/model selector from action=roster.",
+            ));
+        }
+    };
+    bind_spawn_provider(runtime, &selected.provider)?;
+    Ok(Some(selected.model.clone()))
+}
+
 /// Bind discovery and execution through the same provider/model/effort path.
 /// This performs no inference and reserves no child or workspace resources.
 async fn bind_spawn_model_route(
@@ -13363,6 +13461,7 @@ async fn bind_spawn_model_route(
     prompt: &str,
 ) -> Result<(ModelRoute, SpawnRouteSource), ToolError> {
     bind_profile_provider(runtime, member)?;
+    let mut shortlisted = false;
     let mut selection = if let Some(member) = member
         && let Some(model) = member
             .profile
@@ -13379,10 +13478,21 @@ async fn bind_spawn_model_route(
             )?),
             source: SpawnRouteSource::AgentProfileModel,
         }
+    } else if let Some(model) = bind_shortlisted_task_model(runtime, request)? {
+        shortlisted = true;
+        SpawnModelSelection {
+            model_route: ModelRoute::Fixed(normalize_requested_subagent_model(
+                &model,
+                "model",
+                runtime.client.api_provider(),
+            )?),
+            source: SpawnRouteSource::TaskModel,
+        }
     } else {
         resolve_spawn_model_selection(runtime, request)?
     };
-    let providerless = crate::fleet::worker_runtime::explicit_fleet_provider_id(member).is_none();
+    let providerless =
+        crate::fleet::worker_runtime::explicit_fleet_provider_id(member).is_none() && !shortlisted;
     resolve_fixed_spawn_model_route(runtime, &mut selection, providerless)?;
     let route = resolve_subagent_assignment_route(
         runtime,
