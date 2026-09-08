@@ -543,6 +543,7 @@ fn default_runtime_capabilities() -> RuntimeCapabilities {
         threads: true,
         turns: true,
         turn_operation_idempotency: true,
+        turn_operation_lookup: true,
         turn_image_inputs: true,
         turn_steer: true,
         turn_interrupt: true,
@@ -1138,6 +1139,10 @@ pub fn build_router(state: RuntimeApiState) -> Router {
         .route("/v1/threads/{id}/undo", post(undo_thread_turn))
         .route("/v1/threads/{id}/patch-undo", post(patch_undo_thread_turn))
         .route("/v1/threads/{id}/retry", post(retry_thread_turn))
+        .route(
+            "/v1/threads/{id}/turn-operations/{operation_key}",
+            get(get_thread_turn_operation),
+        )
         .route(
             "/v1/threads/{id}/turns",
             post(start_thread_turn).layer(DefaultBodyLimit::max(
@@ -4705,6 +4710,25 @@ async fn start_thread_turn(
         StatusCode::CREATED,
         Json(StartTurnResponse { thread, turn }),
     ))
+}
+
+async fn get_thread_turn_operation(
+    State(state): State<RuntimeApiState>,
+    Path((id, operation_key)): Path<(String, String)>,
+) -> Result<Json<TurnRecord>, ApiError> {
+    use crate::runtime_threads::RuntimeTurnOperationLookupError;
+    let turn = state
+        .runtime_threads
+        .lookup_turn_operation(&id, &operation_key)
+        .map_err(|error| match error {
+            RuntimeTurnOperationLookupError::InvalidRequest => {
+                ApiError::bad_request(error.to_string())
+            }
+            RuntimeTurnOperationLookupError::Incomplete => ApiError::conflict(error.to_string()),
+            RuntimeTurnOperationLookupError::Unavailable => ApiError::internal(error.to_string()),
+        })?
+        .ok_or_else(|| ApiError::not_found("Turn operation not found"))?;
+    Ok(Json(turn))
 }
 
 #[derive(Debug, Serialize)]

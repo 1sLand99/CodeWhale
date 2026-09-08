@@ -76,6 +76,9 @@ The same response advertises `capabilities.account_session: true` and
 `capabilities.turn_operation_idempotency: true`. A client must require the
 latter before relying on `operation_key`; do not infer support from a 2xx turn
 response because an older tolerant reader may ignore an unknown request field.
+`capabilities.turn_operation_lookup: true` separately advertises the read-only
+operation lookup below; clients must require it before relying on GET-based
+recovery of a lost turn response.
 The response also includes a token-free account receipt:
 
 ```json
@@ -750,6 +753,29 @@ are stored in the Runtime's private turn-operation index. The raw key is never
 persisted or logged, and request bodies, credentials, and attachments are not
 copied into that index. Existing thread/turn persistence remains the source of
 the returned turn after a process restart.
+
+**Exact accepted-turn lookup**
+
+`GET /v1/threads/{id}/turn-operations/{operation_key}` uses the same Runtime
+authentication as turn submission. URL-encode each path segment. It returns
+`200 OK` with the existing bare `TurnRecord` (the `turn` object in the POST
+response), identified by that exact thread and operation key. It does not use
+the thread's latest turn or require the original request body or current route
+settings to match.
+
+- `404 Not Found`: no binding exists for that thread/key, or persisted identities
+  do not match. These cases share a generic response.
+- `409 Conflict`: admission holds the operation claim, or its durable binding
+  is incomplete. Retry the lookup; this response does not authorize another turn.
+- `400 Bad Request`: the thread ID or operation key is malformed. The key uses
+  the same 128-byte and whitespace/control-character rules as POST.
+- `500 Internal Server Error`: storage or the existing claim lock cannot be
+  checked safely. This is not evidence that the operation is absent.
+
+The lookup holds a shared read lock on the existing operation claim while
+reading the binding and turn. It creates no files, starts no engine, emits no
+events, and performs no replay or recovery. Normal Runtime startup may recover
+an incomplete admission before a later lookup, but GET itself never does so.
 
 **Approvals**
 - `POST /v1/approvals/{approval_id}` with body
