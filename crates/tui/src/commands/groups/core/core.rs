@@ -1279,6 +1279,8 @@ mod tests {
         // model either — the change is session-local until the user explicitly
         // saves it via the route-save prompt.
         let _settings = SettingsPathGuard::new();
+        let startup_config = crate::config::home_config_path().expect("isolated startup config");
+        let startup_before = std::fs::read(&startup_config).ok();
         {
             let seed = crate::settings::Settings {
                 default_provider: Some("deepseek".to_string()),
@@ -1297,7 +1299,8 @@ mod tests {
         assert!(!result.is_error, "GLM-5.2 is valid on Z.ai");
 
         let settings = crate::settings::Settings::load().expect("load settings");
-        // The shared default provider is untouched.
+        // Neither canonical startup config nor the legacy archive changes.
+        assert_eq!(std::fs::read(startup_config).ok(), startup_before);
         assert_eq!(settings.default_provider.as_deref(), Some("deepseek"));
         // No scoped entry was written either — session-local.
         assert_eq!(

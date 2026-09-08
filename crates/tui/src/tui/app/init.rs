@@ -120,6 +120,23 @@ impl App {
             false
         };
         settings.apply_env_overrides();
+        // Config::load resolves this once for every runtime. Direct in-memory
+        // callers use the same policy here, before any startup route is used.
+        let mut startup_config = config.clone();
+        if config_profile.is_some()
+            || (startup_config.remembered_selection_scope.is_none()
+                && (crate::config::explicit_launch_provider_override().is_some()
+                    || crate::config::explicit_launch_model_override().is_some()))
+        {
+            startup_config.remembered_selection_scope = Some(false);
+        }
+        let selected = startup_config.apply_saved_selection(&settings);
+        let config = &startup_config;
+        let model = if selected {
+            config.default_model()
+        } else {
+            model
+        };
         // Tideline Startup is the fresh interactive landing surface. It must
         // not be bypassed by a stale historical `launch_screen = false`, a
         // provider/config notice, or a previous session record: only an
@@ -142,35 +159,22 @@ impl App {
                 None
             }
         });
-        let mut provider = config.api_provider();
-
-        // A startup route saved explicitly from `/model` is a user choice and
-        // must win over a provider merely seeded in config.toml. A one-launch
-        // CLI/environment provider override still wins so scripts can pin
-        // their route without changing the user's next interactive launch.
-        let explicit_launch_provider = crate::config::explicit_launch_provider_override().is_some();
-        let mut provider_identity_record = config
-            .active_provider_identity(provider)
-            .unwrap_or_else(|_| {
-                let key = config.provider_identity_for(provider);
-                let exact_id = (!(provider == ApiProvider::Custom
-                    && config.uses_legacy_literal_custom_route()))
-                .then(|| key.clone());
-                crate::config::ProviderIdentity {
-                    provider,
-                    key,
-                    exact_id,
-                    migrated_legacy_ollama_cloud_route: false,
-                }
-            });
-        if !explicit_launch_provider
-            && !config.fleet_operator_route_applied
-            && let Some(ref provider_str) = settings.default_provider
-            && let Ok(resolved) = config.resolve_provider_identity(provider_str)
-        {
-            provider = resolved.provider;
-            provider_identity_record = resolved;
-        }
+        let provider = config.api_provider();
+        let provider_identity_record =
+            config
+                .active_provider_identity(provider)
+                .unwrap_or_else(|_| {
+                    let key = config.provider_identity_for(provider);
+                    let exact_id = (!(provider == ApiProvider::Custom
+                        && config.uses_legacy_literal_custom_route()))
+                    .then(|| key.clone());
+                    crate::config::ProviderIdentity {
+                        provider,
+                        key,
+                        exact_id,
+                        migrated_legacy_ollama_cloud_route: false,
+                    }
+                });
         let mut effective_auth_config = config.clone();
         effective_auth_config.scope_to_provider_identity(&provider_identity_record);
         let provider_identity = provider_identity_record.key;
@@ -341,40 +345,26 @@ impl App {
             }
             (id.name().to_string(), id, theme)
         });
-        let provider_models = settings.provider_models.clone().unwrap_or_default();
-        // `provider_models` remembers the last `/model` pick per provider. It
-        // is a convenience default, not an override: when this launch named a
-        // model explicitly (`--model`, forwarded as `CODEWHALE_MODEL`), that
-        // request wins. Before this fix the memory won unconditionally, so
-        // `codewhale --provider moonshot --model kimi-k3` silently kept running
-        // the remembered `kimi-k2.7-code` while `doctor` reported `kimi-k3`.
-        let model = if crate::config::explicit_launch_model_override().is_some()
-            || config.fleet_operator_route_applied
-        {
-            model
-        } else {
-            let configured = model;
-            provider_models
-                .get(&provider_identity)
-                .cloned()
-                .or_else(|| {
-                    // default_model is a DeepSeek-centric setting; other providers
-                    // get their model from config.toml / env (e.g. OPENAI_MODEL).
-                    if matches!(provider, ApiProvider::Deepseek | ApiProvider::DeepseekCN) {
-                        settings.default_model.clone()
-                    } else {
-                        None
-                    }
-                })
-                // The remembered pick may be a catalog spelling of the model
-                // the config file already names. Case-sensitive self-hosted
-                // endpoints reject the wrong spelling, so config.toml wins a
-                // case-only disagreement (the selection itself is unchanged).
-                .map(|remembered| {
-                    crate::config::prefer_configured_model_spelling(&configured, remembered)
-                })
-                .unwrap_or(configured)
-        };
+        // Remembered route choices were resolved once into Config. The
+        // chooser and hotbar must not revive archived Settings values.
+        let mut provider_models = HashMap::new();
+        for &candidate in ApiProvider::all() {
+            if candidate != ApiProvider::Custom
+                && let Some(model) = config
+                    .provider_config_for(candidate)
+                    .and_then(|entry| entry.model.as_ref())
+            {
+                provider_models.insert(config.provider_identity_for(candidate), model.clone());
+            }
+        }
+        if let Some(providers) = config.providers.as_ref() {
+            for (identity, entry) in &providers.custom {
+                if let Some(model) = entry.model.as_ref() {
+                    provider_models.insert(identity.clone(), model.clone());
+                }
+            }
+        }
+        provider_models.insert(provider_identity.clone(), model.clone());
         let auto_model = model.trim().eq_ignore_ascii_case("auto");
         let mut enabled_provider_models = settings.enabled_models.clone().unwrap_or_default();
         for (saved_provider, saved_model) in &provider_models {

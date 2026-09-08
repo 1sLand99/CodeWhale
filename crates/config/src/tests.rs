@@ -4642,6 +4642,64 @@ api_key_env = "ACME_ZEN_GATEWAY_API_KEY"
 }
 
 #[test]
+fn config_store_preserves_builtin_shadowing_custom_and_regional_selectors() {
+    let _lock = env_lock();
+    let _env = EnvGuard::without_deepseek_runtime_overrides();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("config.toml");
+    for (selector, kind, table) in [
+        (
+            "OpenAI",
+            ProviderKind::Custom,
+            "[providers.OpenAI]\nkind = 'openai-compatible'\nbase_url = 'https://gateway.example/v1'\nmodel = 'Exact-Model'\n",
+        ),
+        (
+            "deepseek-cn",
+            ProviderKind::Deepseek,
+            "[providers.deepseek_cn]\nbase_url = 'https://api.deepseek.cn'\nmodel = 'deepseek-v4-flash'\n",
+        ),
+    ] {
+        fs::write(&path, format!("provider = '{selector}'\n{table}")).unwrap();
+        let mut store = ConfigStore::load(Some(path.clone())).unwrap();
+        assert_eq!(store.config.provider, kind);
+        assert_eq!(store.config.provider_id(), selector);
+        if kind == ProviderKind::Custom {
+            let route = store
+                .config
+                .resolve_runtime_options(&CliRuntimeOverrides::default());
+            assert_eq!(route.base_url, "https://gateway.example/v1");
+            assert_eq!(route.model, "Exact-Model");
+        }
+        store.config.set_value("verbosity", "quiet").unwrap();
+        store.save().unwrap();
+        let saved: toml::Value = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved["provider"].as_str(), Some(selector));
+        let mut reloaded = ConfigStore::load(Some(path.clone())).unwrap();
+        assert_eq!(reloaded.config.provider, kind);
+        assert_eq!(reloaded.config.provider_id(), selector);
+        reloaded.config.set_value("provider", selector).unwrap();
+        assert_eq!(reloaded.config.provider, kind);
+        assert_eq!(reloaded.config.provider_id(), selector);
+        // Direct typed callers that change kind cannot retain an old alias.
+        reloaded.config.provider = if kind == ProviderKind::Custom {
+            ProviderKind::Openai
+        } else {
+            ProviderKind::Custom
+        };
+        assert_eq!(
+            reloaded.config.provider_id(),
+            reloaded.config.provider.as_str()
+        );
+        assert!(reloaded.config.named_custom_provider_id().is_none());
+        reloaded.save().unwrap();
+        let rebound = ConfigStore::load(Some(path.clone())).unwrap();
+        assert_eq!(rebound.config.provider, reloaded.config.provider);
+        reloaded.config.provider = ProviderKind::Zai;
+        assert_eq!(reloaded.config.provider_id(), "zai");
+    }
+}
+
+#[test]
 fn named_custom_root_provider_requires_a_matching_openai_compatible_table() {
     for body in [
         "provider = \"acme_zen_gateway\"\n",

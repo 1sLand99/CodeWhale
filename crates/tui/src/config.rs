@@ -2843,6 +2843,10 @@ pub struct Config {
     pub title: Option<String>,
     #[serde(alias = "defaultTextModel")]
     pub default_text_model: Option<String>,
+    /// Read-only compatibility for the dispatcher's historical root `model`.
+    /// New durable choices are written to the provider model slot.
+    #[serde(rename = "model", skip_serializing)]
+    pub(crate) legacy_model: Option<String>,
     #[serde(alias = "authMode")]
     pub auth_mode: Option<String>,
     /// DeepSeek reasoning-effort tier: `"off" | "low" | "medium" | "high" | "max"`.
@@ -3189,6 +3193,20 @@ pub struct Config {
     /// CODEWHALE_CONFIG_PATH. Consent must not borrow another config's receipt.
     #[serde(skip)]
     pub loaded_config_path: Option<PathBuf>,
+
+    /// A resolved startup snapshot never reads remembered route choices again.
+    /// False means an explicit config/profile owns the route instead.
+    #[serde(skip)]
+    pub(crate) remembered_selection_scope: Option<bool>,
+
+    /// An explicit model applied by the environment/CLI layer outranks project
+    /// defaults, including when it equals the previously saved model.
+    #[serde(skip)]
+    pub(crate) environment_model_applied: bool,
+
+    /// Atomic migration receipt: provider/model selections now belong to this
+    /// config document. Settings route fields are legacy inputs only.
+    pub(crate) route_preferences_version: Option<u32>,
 
     /// Sibling `permissions.toml` ask-rules compiled for runtime checks.
     ///
@@ -4770,6 +4788,15 @@ impl Config {
         )
     }
 
+    /// Parse persisted configuration through the same profile precedence used
+    /// at startup, without environment, credentials, or filesystem writes.
+    pub(crate) fn from_saved_document(contents: &str, profile: Option<&str>) -> Result<Self> {
+        let parsed: ConfigFile = toml::from_str(contents).map_err(|_| {
+            anyhow::anyhow!("Failed to parse configuration; file contents were omitted")
+        })?;
+        apply_profile(parsed, profile)
+    }
+
     fn load_with_environment_policy(
         path: Option<PathBuf>,
         profile: Option<&str>,
@@ -4780,16 +4807,16 @@ impl Config {
             if path.exists() {
                 let contents = fs::read_to_string(path)
                     .with_context(|| format!("Failed to read config file: {}", path.display()))?;
-                let parsed: ConfigFile = toml::from_str(&contents).map_err(|_| {
-                    anyhow::anyhow!(
-                        "Failed to parse config file {}; file contents were omitted",
+                let parsed = Self::from_saved_document(&contents, profile).with_context(|| {
+                    format!(
+                        "Failed to load config file {}",
                         codewhale_config::quote_os_path(path)
                     )
                 })?;
                 if let Some(msg) = warn_on_misplaced_top_level_keys(&contents) {
                     tracing::warn!("{msg}");
                 }
-                apply_profile(parsed, profile)?
+                parsed
             } else {
                 Config::default()
             }
@@ -4797,6 +4824,18 @@ impl Config {
             Config::default()
         };
 
+        // Scope and profile choices outrank device startup memory. Environment
+        // and managed values are applied afterwards, so their models win too.
+        if profile.is_none() && path.as_deref().is_some_and(is_home_config_path) {
+            if let Ok(settings) =
+                crate::settings::Settings::load_legacy_route_preferences_read_only()
+            {
+                config.apply_saved_selection(&settings);
+            }
+            config.remembered_selection_scope = Some(true);
+        } else {
+            config.remembered_selection_scope = Some(false);
+        }
         apply_env_overrides(&mut config, environment_policy);
         apply_managed_overrides(&mut config)?;
         apply_requirements(&mut config)?;
@@ -4806,6 +4845,116 @@ impl Config {
         config.validate()?;
         config.warn_on_misplaced_root_base_url();
         Ok(config)
+    }
+
+    pub(crate) fn remembered_selection_is_applicable(&self) -> bool {
+        self.remembered_selection_scope.unwrap_or(true)
+    }
+
+    /// Old chooser memory used the public Cloud key even when the active
+    /// hosted Ollama route still owns the legacy `ollama` table.
+    pub(crate) fn legacy_selection_identity(
+        &self,
+        key: &str,
+    ) -> std::result::Result<ProviderIdentity, String> {
+        if key == self.provider_identity_for(self.api_provider()) {
+            self.active_provider_identity(self.api_provider())
+        } else {
+            self.resolve_provider_pin_identity(key)
+        }
+    }
+
+    /// Resolve the existing startup preferences into the Config snapshot shared
+    /// by the TUI, inventory and Runtime. Never touch persisted preferences or
+    /// reread them while binding a saved thread's route.
+    pub(crate) fn apply_saved_selection(&mut self, settings: &crate::settings::Settings) -> bool {
+        if self.remembered_selection_scope.is_some() {
+            return false;
+        }
+        self.remembered_selection_scope = Some(true);
+        if self.default_text_model.is_none() {
+            self.default_text_model.clone_from(&self.legacy_model);
+        }
+        if self.fleet_operator_route_applied || self.route_preferences_version.is_some() {
+            return false;
+        }
+        let mut active_changed = false;
+        if let Some(provider) = settings.default_provider.as_deref()
+            && let Ok(identity) = self.resolve_provider_identity(provider)
+        {
+            active_changed = self.provider_identity_for(self.api_provider()) != identity.key;
+            self.scope_to_provider_identity(&identity);
+        }
+        let mut choices = settings.provider_models.clone().unwrap_or_default();
+        if let Some(model) = settings.default_model.as_ref() {
+            for provider in [ApiProvider::Deepseek, ApiProvider::DeepseekCN] {
+                choices
+                    .entry(provider.as_str().into())
+                    .or_insert_with(|| model.clone());
+            }
+        }
+        let mut choices: Vec<_> = choices.into_iter().collect();
+        // Old TUI reads used the exact public identity. If a hand-edited
+        // archive contains aliases too, process that canonical entry last.
+        choices.sort_by_key(|(key, _)| {
+            (
+                self.legacy_selection_identity(key)
+                    .is_ok_and(|identity| identity.key == *key),
+                key.clone(),
+            )
+        });
+        for (key, remembered) in choices {
+            let remembered = remembered.trim();
+            if remembered.is_empty() || remembered.chars().any(char::is_control) {
+                continue;
+            }
+            let Ok(identity) = self.legacy_selection_identity(&key) else {
+                continue;
+            };
+            let provider = identity.provider;
+            let mut scoped = self.clone();
+            scoped.scope_to_provider_identity(&identity);
+            let configured = scoped
+                .provider_config_for(provider)
+                .and_then(|entry| entry.model.as_deref())
+                .or_else(|| {
+                    (provider == self.api_provider())
+                        .then_some(self.default_text_model.as_deref())
+                        .flatten()
+                })
+                .unwrap_or_default();
+            let declared = crate::provider_lake::configured_model_for_route(
+                &scoped,
+                provider,
+                &identity.key,
+                &scoped.base_url_for_route(provider),
+                remembered,
+            )
+            .is_some();
+            let model = if declared {
+                remembered.to_string()
+            } else {
+                prefer_configured_model_spelling(configured, remembered.to_string())
+            };
+            if provider == ApiProvider::Custom && identity.persisted_id().is_some() {
+                if let Some(entry) = self
+                    .providers
+                    .as_mut()
+                    .and_then(|providers| providers.custom.get_mut(&identity.key))
+                {
+                    entry.model = Some(model);
+                }
+            } else if identity.migrated_legacy_ollama_cloud_route {
+                self.providers
+                    .get_or_insert_with(ProvidersConfig::default)
+                    .ollama
+                    .model = Some(model);
+            } else {
+                self.set_provider_model_override(provider, Some(model));
+            }
+            active_changed |= self.provider_identity_for(self.api_provider()) == identity.key;
+        }
+        active_changed
     }
 
     /// Surface a one-line warning when the user has set the legacy root
@@ -5527,6 +5676,7 @@ impl Config {
         let model = self
             .default_text_model
             .as_deref()
+            .or(self.legacy_model.as_deref())
             .map(str::trim)
             .filter(|model| !model.is_empty())
             .ok_or_else(|| {
@@ -5855,6 +6005,10 @@ impl Config {
         self.http_headers.clone_from(&fresh.http_headers);
         self.default_text_model
             .clone_from(&fresh.default_text_model);
+        self.legacy_model.clone_from(&fresh.legacy_model);
+        self.remembered_selection_scope = fresh.remembered_selection_scope;
+        self.route_preferences_version = fresh.route_preferences_version;
+        self.environment_model_applied = fresh.environment_model_applied;
         self.auth_mode.clone_from(&fresh.auth_mode);
         self.fallback_providers
             .clone_from(&fresh.fallback_providers);
@@ -6008,6 +6162,11 @@ impl Config {
 
     #[must_use]
     pub fn default_model(&self) -> String {
+        if self.default_text_model.is_none() && self.legacy_model.is_some() {
+            let mut config = self.clone();
+            config.default_text_model.clone_from(&self.legacy_model);
+            return config.default_model();
+        }
         let provider = self.api_provider();
         let declared = |model: &str| {
             crate::provider_lake::configured_model_for_route(
@@ -8054,8 +8213,8 @@ fn root_deepseek_model_is_foreign_to_direct_provider(provider: ApiProvider, mode
 
 // === Defaults ===
 
-// Pure filesystem path helpers live in the `paths` leaf module. The two
-// `pub(crate)` entry points are re-exported so external `crate::config::`
+// Pure filesystem path helpers live in the `paths` leaf module. Shared
+// entry points are re-exported so external `crate::config::`
 // callers resolve unchanged; the remaining helpers are imported privately for
 // the workspace-trust/config-load logic that stays in this file (#3311).
 mod home;
@@ -8063,10 +8222,10 @@ mod paths;
 use paths::{
     canonicalize_or_keep, codewhale_home_dir, default_config_path, default_managed_config_path,
     default_mcp_config_path, default_memory_path, default_notes_path, default_requirements_path,
-    default_skills_dir, env_config_path, expand_pathbuf, home_config_path, try_default_config_path,
+    default_skills_dir, env_config_path, expand_pathbuf, try_default_config_path,
     workspace_config_key,
 };
-pub(crate) use paths::{effective_home_dir, expand_path};
+pub(crate) use paths::{effective_home_dir, expand_path, home_config_path, is_home_config_path};
 
 pub(crate) fn workspace_trust_config_candidate_paths() -> Vec<PathBuf> {
     #[cfg(test)]
@@ -9136,24 +9295,32 @@ fn apply_env_overrides_unlocked(config: &mut Config, policy: ConfigEnvironmentPo
     if matches!(config.api_provider(), ApiProvider::Sglang)
         && let Ok(value) = std::env::var("SGLANG_MODEL")
     {
-        config.default_text_model = Some(value);
+        config.default_text_model = Some(value.clone());
+        config.set_provider_model_override(config.api_provider(), Some(value));
+        config.environment_model_applied = true;
     }
     if matches!(config.api_provider(), ApiProvider::Vllm)
         && let Ok(value) = std::env::var("VLLM_MODEL")
     {
-        config.default_text_model = Some(value);
+        config.default_text_model = Some(value.clone());
+        config.set_provider_model_override(config.api_provider(), Some(value));
+        config.environment_model_applied = true;
     }
     if matches!(
         config.api_provider(),
         ApiProvider::Ollama | ApiProvider::OllamaCloud
     ) && let Ok(value) = std::env::var("OLLAMA_MODEL")
     {
-        config.default_text_model = Some(value);
+        config.default_text_model = Some(value.clone());
+        config.set_provider_model_override(config.api_provider(), Some(value));
+        config.environment_model_applied = true;
     }
     if matches!(config.api_provider(), ApiProvider::OllamaCloud)
         && let Ok(value) = std::env::var("OLLAMA_CLOUD_MODEL")
     {
-        config.default_text_model = Some(value);
+        config.default_text_model = Some(value.clone());
+        config.set_provider_model_override(config.api_provider(), Some(value));
+        config.environment_model_applied = true;
     }
     if matches!(config.api_provider(), ApiProvider::Openai)
         && let Ok(value) = std::env::var("OPENAI_MODEL")
@@ -9163,6 +9330,7 @@ fn apply_env_overrides_unlocked(config: &mut Config, policy: ConfigEnvironmentPo
             .get_or_insert_with(ProvidersConfig::default)
             .openai
             .model = Some(value);
+        config.environment_model_applied = true;
     }
     if matches!(config.api_provider(), ApiProvider::XiaomiMimo)
         && let Ok(value) =
@@ -9173,11 +9341,14 @@ fn apply_env_overrides_unlocked(config: &mut Config, policy: ConfigEnvironmentPo
             .get_or_insert_with(ProvidersConfig::default)
             .xiaomi_mimo
             .model = Some(value);
+        config.environment_model_applied = true;
     }
     if matches!(config.api_provider(), ApiProvider::Atlascloud)
         && let Ok(value) = std::env::var("ATLASCLOUD_MODEL")
     {
-        config.default_text_model = Some(value);
+        config.default_text_model = Some(value.clone());
+        config.set_provider_model_override(config.api_provider(), Some(value));
+        config.environment_model_applied = true;
     }
     if matches!(config.api_provider(), ApiProvider::WanjieArk)
         && let Ok(value) = std::env::var("WANJIE_ARK_MODEL")
@@ -9190,6 +9361,7 @@ fn apply_env_overrides_unlocked(config: &mut Config, policy: ConfigEnvironmentPo
             .get_or_insert_with(ProvidersConfig::default)
             .wanjie_ark
             .model = Some(value);
+        config.environment_model_applied = true;
     }
     if matches!(config.api_provider(), ApiProvider::Openrouter)
         && let Ok(value) = std::env::var("OPENROUTER_MODEL")
@@ -9200,6 +9372,7 @@ fn apply_env_overrides_unlocked(config: &mut Config, policy: ConfigEnvironmentPo
             .get_or_insert_with(ProvidersConfig::default)
             .openrouter
             .model = Some(value);
+        config.environment_model_applied = true;
     }
     if matches!(config.api_provider(), ApiProvider::Volcengine)
         && let Ok(value) =
@@ -9211,6 +9384,7 @@ fn apply_env_overrides_unlocked(config: &mut Config, policy: ConfigEnvironmentPo
             .get_or_insert_with(ProvidersConfig::default)
             .volcengine
             .model = Some(value);
+        config.environment_model_applied = true;
     }
     if matches!(config.api_provider(), ApiProvider::Novita)
         && let Ok(value) = std::env::var("NOVITA_MODEL")
@@ -9221,6 +9395,7 @@ fn apply_env_overrides_unlocked(config: &mut Config, policy: ConfigEnvironmentPo
             .get_or_insert_with(ProvidersConfig::default)
             .novita
             .model = Some(value);
+        config.environment_model_applied = true;
     }
     if matches!(config.api_provider(), ApiProvider::Fireworks)
         && let Ok(value) = std::env::var("FIREWORKS_MODEL")
@@ -9231,6 +9406,7 @@ fn apply_env_overrides_unlocked(config: &mut Config, policy: ConfigEnvironmentPo
             .get_or_insert_with(ProvidersConfig::default)
             .fireworks
             .model = Some(value);
+        config.environment_model_applied = true;
     }
     if matches!(config.api_provider(), ApiProvider::Moonshot)
         && let Ok(value) = std::env::var("MOONSHOT_MODEL")
@@ -9243,6 +9419,7 @@ fn apply_env_overrides_unlocked(config: &mut Config, policy: ConfigEnvironmentPo
             .get_or_insert_with(ProvidersConfig::default)
             .moonshot
             .model = Some(value);
+        config.environment_model_applied = true;
     }
     let active_provider = config.api_provider();
     if matches!(
@@ -9252,6 +9429,7 @@ fn apply_env_overrides_unlocked(config: &mut Config, policy: ConfigEnvironmentPo
         && !value.trim().is_empty()
     {
         config.provider_config_for_mut(active_provider).model = Some(value);
+        config.environment_model_applied = true;
     }
     if matches!(config.api_provider(), ApiProvider::Arcee)
         && let Ok(value) = std::env::var("ARCEE_MODEL")
@@ -9262,6 +9440,7 @@ fn apply_env_overrides_unlocked(config: &mut Config, policy: ConfigEnvironmentPo
             .get_or_insert_with(ProvidersConfig::default)
             .arcee
             .model = Some(value);
+        config.environment_model_applied = true;
     }
     if matches!(config.api_provider(), ApiProvider::Huggingface)
         && let Ok(value) = std::env::var("HUGGINGFACE_MODEL").or_else(|_| std::env::var("HF_MODEL"))
@@ -9272,6 +9451,7 @@ fn apply_env_overrides_unlocked(config: &mut Config, policy: ConfigEnvironmentPo
             .get_or_insert_with(ProvidersConfig::default)
             .huggingface
             .model = Some(value);
+        config.environment_model_applied = true;
     }
     if matches!(config.api_provider(), ApiProvider::Meta)
         && let Ok(value) =
@@ -9283,6 +9463,7 @@ fn apply_env_overrides_unlocked(config: &mut Config, policy: ConfigEnvironmentPo
             .get_or_insert_with(ProvidersConfig::default)
             .meta
             .model = Some(value);
+        config.environment_model_applied = true;
     }
     if matches!(config.api_provider(), ApiProvider::Xai)
         && let Ok(value) = std::env::var("XAI_MODEL")
@@ -9293,6 +9474,7 @@ fn apply_env_overrides_unlocked(config: &mut Config, policy: ConfigEnvironmentPo
             .get_or_insert_with(ProvidersConfig::default)
             .xai
             .model = Some(value);
+        config.environment_model_applied = true;
     }
     if matches!(config.api_provider(), ApiProvider::Mistral)
         && let Ok(value) = std::env::var("MISTRAL_MODEL")
@@ -9303,6 +9485,7 @@ fn apply_env_overrides_unlocked(config: &mut Config, policy: ConfigEnvironmentPo
             .get_or_insert_with(ProvidersConfig::default)
             .mistral
             .model = Some(value);
+        config.environment_model_applied = true;
     }
     if matches!(config.api_provider(), ApiProvider::OpencodeGo)
         && let Ok(value) = std::env::var("OPENCODE_GO_MODEL")
@@ -9313,6 +9496,7 @@ fn apply_env_overrides_unlocked(config: &mut Config, policy: ConfigEnvironmentPo
             .get_or_insert_with(ProvidersConfig::default)
             .opencode_go
             .model = Some(value);
+        config.environment_model_applied = true;
     }
     if matches!(config.api_provider(), ApiProvider::Telecomjs)
         && let Ok(value) = std::env::var("TELECOMJS_MODEL")
@@ -9323,6 +9507,7 @@ fn apply_env_overrides_unlocked(config: &mut Config, policy: ConfigEnvironmentPo
             .get_or_insert_with(ProvidersConfig::default)
             .telecomjs
             .model = Some(value);
+        config.environment_model_applied = true;
     }
     if matches!(config.api_provider(), ApiProvider::Concentrate)
         && let Ok(value) = std::env::var("CONCENTRATE_MODEL")
@@ -9333,6 +9518,7 @@ fn apply_env_overrides_unlocked(config: &mut Config, policy: ConfigEnvironmentPo
             .get_or_insert_with(ProvidersConfig::default)
             .concentrate
             .model = Some(value);
+        config.environment_model_applied = true;
     }
     if matches!(config.api_provider(), ApiProvider::Edenai)
         && let Ok(value) = std::env::var("EDENAI_MODEL")
@@ -9343,6 +9529,7 @@ fn apply_env_overrides_unlocked(config: &mut Config, policy: ConfigEnvironmentPo
             .get_or_insert_with(ProvidersConfig::default)
             .edenai
             .model = Some(value);
+        config.environment_model_applied = true;
     }
     if matches!(
         config.api_provider(),
@@ -9364,6 +9551,7 @@ fn apply_env_overrides_unlocked(config: &mut Config, policy: ConfigEnvironmentPo
                 .model
         };
         *field = Some(value);
+        config.environment_model_applied = true;
     }
     if matches!(
         config.api_provider(),
@@ -9385,6 +9573,7 @@ fn apply_env_overrides_unlocked(config: &mut Config, policy: ConfigEnvironmentPo
                 .model
         };
         *field = Some(value);
+        config.environment_model_applied = true;
     }
     if matches!(config.api_provider(), ApiProvider::OpencodeZen)
         && let Ok(value) = std::env::var("OPENCODE_ZEN_MODEL")
@@ -9395,6 +9584,14 @@ fn apply_env_overrides_unlocked(config: &mut Config, policy: ConfigEnvironmentPo
             .get_or_insert_with(ProvidersConfig::default)
             .opencode_zen
             .model = Some(value);
+        config.environment_model_applied = true;
+    }
+    if matches!(config.api_provider(), ApiProvider::NvidiaNim)
+        && let Ok(value) = std::env::var("NVIDIA_NIM_MODEL")
+    {
+        config.default_text_model = Some(value.clone());
+        config.set_provider_model_override(config.api_provider(), Some(value));
+        config.environment_model_applied = true;
     }
     if let Some(value) = codewhale_env_var("CODEWHALE_MODEL", "DEEPSEEK_MODEL")
         .ok()
@@ -9404,101 +9601,15 @@ fn apply_env_overrides_unlocked(config: &mut Config, policy: ConfigEnvironmentPo
                 .filter(|value| !value.trim().is_empty())
         })
     {
-        // The CLI `--model` handoff always sets DEEPSEEK_MODEL, never the
-        // provider-specific *_MODEL var. The legacy root `default_text_model`
-        // is a DeepSeek-only slot (the validator rejects non-DeepSeek IDs
-        // there). For a non-DeepSeek provider the explicit model must land in
-        // the provider-scoped slot instead so the verbatim-passthrough path
-        // honors it rather than falling back to a DeepSeek/provider default
-        // (issue #1714). Mirror the OPENAI_MODEL branch above for every
-        // non-DeepSeek provider.
         let provider = config.api_provider();
-        if (provider == ApiProvider::Custom && config.uses_legacy_literal_custom_route())
-            || matches!(
-                provider,
-                ApiProvider::Deepseek | ApiProvider::DeepseekCN | ApiProvider::DeepseekAnthropic
-            )
-        {
-            config.default_text_model = Some(value);
-        } else {
-            // Capture the custom entry key before the mutable borrow below (#1519).
-            let custom_key = (provider == ApiProvider::Custom).then(|| {
-                config
-                    .provider
-                    .clone()
-                    .unwrap_or_else(|| "__custom__".to_string())
-            });
-            let providers = config
-                .providers
-                .get_or_insert_with(ProvidersConfig::default);
-            let entry = match provider {
-                ApiProvider::Deepseek
-                | ApiProvider::DeepseekCN
-                | ApiProvider::DeepseekAnthropic => unreachable!(
-                    "DeepSeek providers are handled in the if branch above (issue #1714)"
-                ),
-                ApiProvider::Custom => providers
-                    .custom
-                    .entry(custom_key.unwrap_or_else(|| "__custom__".to_string()))
-                    .or_default(),
-                ApiProvider::NvidiaNim => &mut providers.nvidia_nim,
-                ApiProvider::Openai => &mut providers.openai,
-                ApiProvider::Atlascloud => &mut providers.atlascloud,
-                ApiProvider::WanjieArk => &mut providers.wanjie_ark,
-                ApiProvider::Openrouter => &mut providers.openrouter,
-                ApiProvider::Orcarouter => &mut providers.orcarouter,
-                ApiProvider::XiaomiMimo => &mut providers.xiaomi_mimo,
-                ApiProvider::Novita => &mut providers.novita,
-                ApiProvider::Fireworks => &mut providers.fireworks,
-                ApiProvider::Siliconflow => &mut providers.siliconflow,
-                ApiProvider::SiliconflowCn => &mut providers.siliconflow_cn,
-                ApiProvider::Arcee => &mut providers.arcee,
-                ApiProvider::Moonshot => &mut providers.moonshot,
-                ApiProvider::Sglang => &mut providers.sglang,
-                ApiProvider::Vllm => &mut providers.vllm,
-                ApiProvider::Ollama => &mut providers.ollama,
-                ApiProvider::OllamaCloud => &mut providers.ollama_cloud,
-                ApiProvider::Volcengine => &mut providers.volcengine,
-                ApiProvider::Huggingface => &mut providers.huggingface,
-                ApiProvider::Deepinfra => &mut providers.deepinfra,
-                ApiProvider::Together => &mut providers.together,
-                ApiProvider::Qianfan => &mut providers.qianfan,
-                ApiProvider::OpenaiCodex => &mut providers.openai_codex,
-                ApiProvider::Anthropic => &mut providers.anthropic,
-                ApiProvider::Openmodel => &mut providers.openmodel,
-                ApiProvider::Zai => &mut providers.zai,
-                ApiProvider::Stepfun => &mut providers.stepfun,
-                ApiProvider::Minimax => &mut providers.minimax,
-                ApiProvider::MinimaxAnthropic => &mut providers.minimax_anthropic,
-                ApiProvider::Sakana => &mut providers.sakana,
-                ApiProvider::LongCat => &mut providers.longcat,
-                ApiProvider::OpencodeGo => &mut providers.opencode_go,
-                ApiProvider::OpencodeZen => &mut providers.opencode_zen,
-                ApiProvider::Meta => &mut providers.meta,
-                ApiProvider::Xai => &mut providers.xai,
-                ApiProvider::Mistral => &mut providers.mistral,
-                ApiProvider::Google => &mut providers.google,
-                ApiProvider::Antigravity => &mut providers.antigravity,
-                ApiProvider::Telecomjs => &mut providers.telecomjs,
-                ApiProvider::Edenai => &mut providers.edenai,
-                ApiProvider::Concentrate => &mut providers.concentrate,
-                ApiProvider::Codewhale => &mut providers.codewhale,
-                ApiProvider::ModelstudioTokenPlan => &mut providers.modelstudio_token_plan,
-                ApiProvider::ModelstudioTokenPlanAnthropic => {
-                    &mut providers.modelstudio_token_plan_anthropic
-                }
-                ApiProvider::ModelstudioCodingPlan => &mut providers.modelstudio_coding_plan,
-                ApiProvider::ModelstudioCodingPlanAnthropic => {
-                    &mut providers.modelstudio_coding_plan_anthropic
-                }
-            };
-            entry.model = Some(value);
+        if matches!(
+            provider,
+            ApiProvider::Deepseek | ApiProvider::DeepseekCN | ApiProvider::DeepseekAnthropic
+        ) {
+            config.default_text_model = Some(value.clone());
         }
-    }
-    if matches!(config.api_provider(), ApiProvider::NvidiaNim)
-        && let Ok(value) = std::env::var("NVIDIA_NIM_MODEL")
-    {
-        config.default_text_model = Some(value);
+        config.set_provider_model_override(provider, Some(value));
+        config.environment_model_applied = true;
     }
     if let Ok(value) =
         std::env::var("CODEWHALE_SKILLS_DIR").or_else(|_| std::env::var("DEEPSEEK_SKILLS_DIR"))
@@ -9646,6 +9757,9 @@ fn apply_env_overrides_unlocked(config: &mut Config, policy: ConfigEnvironmentPo
 }
 
 fn normalize_model_config(config: &mut Config) {
+    if config.default_text_model.is_none() {
+        config.default_text_model.clone_from(&config.legacy_model);
+    }
     let provider = config.api_provider();
     let base_url = config.deepseek_base_url();
     let mut declared = Vec::new();
@@ -10710,11 +10824,41 @@ fn parse_http_headers(raw: &str) -> Result<HashMap<String, String>> {
     Ok(headers)
 }
 
+// A higher file layer's legacy root model must not be masked by an inherited
+// provider slot. Clear that lower slot in memory so the existing root-model
+// validation and foreign-model guards still decide what this layer means.
+fn apply_layer_root_model(config: &mut Config, layer: &Config) {
+    if layer.default_text_model.is_none() && layer.legacy_model.is_none() {
+        return;
+    }
+    let provider = config.api_provider();
+    if provider == ApiProvider::Custom && config.uses_legacy_literal_custom_route() {
+        return;
+    }
+    let mut scoped = layer.clone();
+    if let Ok(identity) = config.active_provider_identity(provider) {
+        scoped.scope_to_provider_identity(&identity);
+    } else {
+        scoped.provider.clone_from(&config.provider);
+    }
+    if scoped
+        .provider_config_for(provider)
+        .and_then(|entry| entry.model.as_ref())
+        .is_none()
+    {
+        config.set_provider_model_override(provider, None);
+    }
+}
+
 fn apply_profile(config: ConfigFile, profile: Option<&str>) -> Result<Config> {
     if let Some(profile_name) = profile {
         let profiles = config.profiles.as_ref();
         match profiles.and_then(|profiles| profiles.get(profile_name)) {
-            Some(override_cfg) => Ok(merge_config(config.base, override_cfg.clone())),
+            Some(override_cfg) => {
+                let mut merged = merge_config(config.base, override_cfg.clone());
+                apply_layer_root_model(&mut merged, override_cfg);
+                Ok(merged)
+            }
             None => {
                 let available = profiles
                     .map(|profiles| {
@@ -10745,9 +10889,22 @@ fn merge_config(base: Config, override_cfg: Config) -> Config {
         api_key: override_cfg.api_key.or(base.api_key),
         base_url: override_cfg.base_url.or(base.base_url),
         http_headers: override_cfg.http_headers.or(base.http_headers),
-        default_text_model: override_cfg.default_text_model.or(base.default_text_model),
+        default_text_model: override_cfg
+            .default_text_model
+            .or_else(|| override_cfg.legacy_model.clone())
+            .or(base.default_text_model)
+            .or_else(|| base.legacy_model.clone()),
+        legacy_model: override_cfg.legacy_model.or(base.legacy_model),
         redaction: override_cfg.redaction.or(base.redaction),
         loaded_config_path: override_cfg.loaded_config_path.or(base.loaded_config_path),
+        remembered_selection_scope: override_cfg
+            .remembered_selection_scope
+            .or(base.remembered_selection_scope),
+        route_preferences_version: override_cfg
+            .route_preferences_version
+            .or(base.route_preferences_version),
+        environment_model_applied: override_cfg.environment_model_applied
+            || base.environment_model_applied,
         auth_mode: override_cfg.auth_mode.or(base.auth_mode),
         reasoning_effort: override_cfg.reasoning_effort.or(base.reasoning_effort),
         reasoning_effort_inferred_from_legacy_alias: override_cfg
@@ -11164,6 +11321,17 @@ fn apply_managed_overrides(config: &mut Config) -> Result<()> {
         config.provider_identity_for(config.api_provider()),
     );
     let mut merged = merge_config(config.clone(), managed.clone());
+    apply_layer_root_model(&mut merged, &managed);
+    if managed.provider.is_some()
+        || managed.default_text_model.is_some()
+        || managed.legacy_model.is_some()
+        || managed
+            .provider_config_for(merged.api_provider())
+            .and_then(|entry| entry.model.as_ref())
+            .is_some()
+    {
+        merged.remembered_selection_scope = Some(false);
+    }
     let merged_route = (
         merged.api_provider(),
         merged.provider_identity_for(merged.api_provider()),
@@ -12223,51 +12391,23 @@ fn save_api_key_for_identity_unlocked(
     Ok(SavedCredential::ConfigFile(config_path))
 }
 
-/// Persist a default model for `provider` via the comment-preserving config
-/// path used by guided provider setup (#3875). DeepSeek writes root
-/// `default_text_model`; other hosted providers write `[providers.<name>] model`.
+/// Persist a guided-setup model through the same canonical route writer used
+/// by Runtime and the interactive model picker.
 pub(crate) fn save_provider_model_for_identity(
     identity: &ProviderIdentity,
     _route_config: &Config,
     model: &str,
 ) -> Result<PathBuf> {
-    let provider = identity.provider;
     let model = model.trim();
     anyhow::ensure!(!model.is_empty(), "model cannot be empty");
-
     let config_path =
         try_default_config_path().context("Failed to resolve config path for provider model.")?;
-    ensure_parent_dir(&config_path)?;
-
-    let is_legacy_literal_custom = provider == ApiProvider::Custom
-        && identity.key.trim() == ApiProvider::Custom.as_str()
-        && identity.persisted_id().is_none();
-    if matches!(provider, ApiProvider::Deepseek | ApiProvider::DeepseekCN)
-        || is_legacy_literal_custom
-    {
-        crate::config_persistence::mutate_config_document(&config_path, |doc| {
-            crate::config_persistence::set_document_value(doc, &["default_text_model"], model)
-        })
-        .with_context(|| format!("Failed to write config to {}", config_path.display()))?;
-        return Ok(config_path);
-    }
-
-    let key_inside = if provider == ApiProvider::Custom {
-        let key = identity.key.trim();
-        anyhow::ensure!(!key.is_empty(), "custom provider id cannot be empty");
-        key
-    } else {
-        provider_config_key(provider).context("provider model table")?
-    };
-    crate::config_persistence::mutate_config_document(&config_path, |doc| {
-        crate::config_persistence::set_document_value(
-            doc,
-            &["providers", key_inside, "model"],
-            model,
-        )
-    })
-    .with_context(|| format!("Failed to write config to {}", config_path.display()))?;
-    Ok(config_path)
+    crate::config_persistence::persist_provider_model_key(
+        Some(&config_path),
+        identity.provider,
+        identity.persisted_id().unwrap_or(&identity.key),
+        model,
+    )
 }
 
 /// Persist a guided-setup endpoint choice into the provider's own

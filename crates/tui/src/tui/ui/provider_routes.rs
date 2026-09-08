@@ -108,8 +108,7 @@ pub(crate) fn complete_provider_picker_onboarding(app: &mut App, provider: ApiPr
     // Persist the exact live identity/model before advancing, otherwise a
     // clean first run can finish on Ollama (or another non-DeepSeek route)
     // while the next launch silently reconstructs the old DeepSeek default.
-    // `settings.toml`, rather than a workspace `config.toml`, is the durable
-    // user-global owner for this choice.
+    // The user-global `config.toml` owns this startup choice.
     let provider_action_receipt = app.status_message.take();
     let startup_default_receipt = match app.try_save_live_route_as_startup_default() {
         Ok(receipt) => receipt,

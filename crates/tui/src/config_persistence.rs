@@ -24,7 +24,198 @@ pub(crate) fn mutate_config_document<F>(path: &Path, mutate: F) -> anyhow::Resul
 where
     F: FnOnce(&mut toml_edit::DocumentMut) -> anyhow::Result<()>,
 {
-    codewhale_config::mutate_config_document(path, mutate)
+    codewhale_config::mutate_config_document(path, |doc| {
+        migrate_legacy_route_preferences(path, doc)?;
+        mutate(doc)
+    })
+}
+
+/// Commit the legacy effective startup selection with its receipt in the same
+/// atomic config write. Settings remains untouched, so an interrupted cleanup
+/// or an older binary cannot erase the user's historical choices. After this
+/// marker, Config never consults those legacy route fields again.
+pub(crate) fn migrate_legacy_route_preferences(
+    path: &Path,
+    doc: &mut toml_edit::DocumentMut,
+) -> anyhow::Result<()> {
+    if !crate::config::is_home_config_path(path)
+        || doc
+            .get("route_preferences_version")
+            .and_then(toml_edit::Item::as_integer)
+            .is_some()
+    {
+        return Ok(());
+    }
+    let mut config: crate::config::Config = toml::from_str(&doc.to_string()).map_err(|_| {
+        anyhow::anyhow!(
+            "Could not parse configuration for route preference migration; contents omitted"
+        )
+    })?;
+    let previous_config = config.clone();
+    let settings =
+        crate::settings::Settings::load_legacy_route_preferences_read_only().map_err(|_| {
+            anyhow::anyhow!(
+                "Could not read legacy route preferences; configuration was not changed"
+            )
+        })?;
+    config.apply_saved_selection(&settings);
+    let active_identity = config.active_provider_identity(config.api_provider()).ok();
+    let selector = active_identity
+        .as_ref()
+        .and_then(|identity| {
+            identity
+                .migrated_legacy_ollama_cloud_route
+                .then(|| identity.persisted_id())
+                .flatten()
+        })
+        .or(config.provider.as_deref());
+    if let Some(provider) = selector {
+        if previous_config.provider.as_deref() != Some(provider)
+            && let Some(previous) = previous_config.provider.as_deref()
+        {
+            set_document_value(
+                doc,
+                &["route_preferences_migration", "previous_provider"],
+                previous,
+            )?;
+        }
+        set_document_value(doc, &["provider"], provider)?;
+    }
+    let mut providers: Vec<&str> = settings
+        .provider_models
+        .as_ref()
+        .map(|models| models.keys().map(String::as_str).collect())
+        .unwrap_or_default();
+    if settings.default_model.is_some() {
+        for provider in [ApiProvider::Deepseek, ApiProvider::DeepseekCN] {
+            if !providers.contains(&provider.as_str()) {
+                providers.push(provider.as_str());
+            }
+        }
+    }
+    providers.sort_unstable();
+    for provider in providers {
+        let Ok(identity) = config.legacy_selection_identity(provider) else {
+            continue;
+        };
+        let mut scoped = config.clone();
+        scoped.scope_to_provider_identity(&identity);
+        let model = if identity.provider == ApiProvider::Custom && identity.persisted_id().is_none()
+        {
+            scoped.default_text_model.as_deref()
+        } else {
+            scoped
+                .provider_config_for(identity.provider)
+                .and_then(|entry| entry.model.as_deref())
+        };
+        if let Some(model) = model {
+            let mut previous = previous_config.clone();
+            previous.scope_to_provider_identity(&identity);
+            if let Some(old_model) = previous
+                .provider_config_for(identity.provider)
+                .and_then(|entry| entry.model.as_deref())
+                .or_else(|| {
+                    (previous_config.api_provider() == identity.provider)
+                        .then_some(previous_config.default_text_model.as_deref())
+                        .flatten()
+                })
+                && old_model != model
+            {
+                // Keep the displaced Config choice as an inert migration
+                // receipt. Nothing resolves routes from this archive.
+                set_document_value(
+                    doc,
+                    &[
+                        "route_preferences_migration",
+                        "previous_models",
+                        &identity.key,
+                    ],
+                    old_model,
+                )?;
+            }
+            set_provider_model_document(
+                doc,
+                identity.provider,
+                identity.persisted_id().unwrap_or(&identity.key),
+                model,
+            )?;
+        }
+    }
+    set_document_value(doc, &["route_preferences_version"], 1_i64)
+}
+
+pub(crate) fn set_provider_model_document(
+    doc: &mut toml_edit::DocumentMut,
+    provider: ApiProvider,
+    provider_identity: &str,
+    model: &str,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        !model.trim().is_empty() && !model.chars().any(char::is_control),
+        "model must be nonempty and contain no control characters"
+    );
+    let config: crate::config::Config = toml::from_str(&doc.to_string()).map_err(|_| {
+        anyhow::anyhow!("Could not parse destination route identity; contents omitted")
+    })?;
+    let identity = config
+        .resolve_provider_pin_identity(provider_identity)
+        .map_err(anyhow::Error::msg)?;
+    anyhow::ensure!(
+        identity.provider == provider,
+        "The destination config has a different provider identity"
+    );
+    let provider_key = if provider == ApiProvider::Custom {
+        if identity.persisted_id().is_none() {
+            return set_document_value(doc, &["default_text_model"], model);
+        }
+        identity.key
+    } else if identity.migrated_legacy_ollama_cloud_route {
+        "ollama".to_string()
+    } else if provider == ApiProvider::DeepseekCN {
+        "deepseek_cn".to_string()
+    } else {
+        provider
+            .metadata()
+            .context("provider config metadata")?
+            .provider_config_key()
+            .to_string()
+    };
+    set_document_value(doc, &["providers", &provider_key, "model"], model)
+}
+
+/// One persistent owner and atomic write for an explicitly saved route.
+pub(crate) fn persist_provider_selection(
+    config_path: Option<&Path>,
+    provider: ApiProvider,
+    provider_identity: &str,
+    model: Option<&str>,
+) -> anyhow::Result<PathBuf> {
+    let path = config_toml_path(config_path)?;
+    mutate_config_document(&path, |doc| {
+        let config: crate::config::Config = toml::from_str(&doc.to_string())
+            .map_err(|_| anyhow::anyhow!("Could not parse destination route; contents omitted"))?;
+        let identity = config
+            .resolve_provider_pin_identity(provider_identity)
+            .map_err(anyhow::Error::msg)?;
+        anyhow::ensure!(
+            identity.provider == provider,
+            "The destination config has a different provider identity"
+        );
+        if let Some(model) = model {
+            set_provider_model_document(
+                doc,
+                provider,
+                identity.persisted_id().unwrap_or(&identity.key),
+                model,
+            )?;
+        }
+        set_document_value(
+            doc,
+            &["provider"],
+            identity.persisted_id().unwrap_or(&identity.key),
+        )
+    })?;
+    Ok(path)
 }
 
 /// Atomically replace `path` with `body` via a same-directory temp file and
@@ -245,31 +436,18 @@ pub(crate) fn persist_provider_base_url_key(
 /// Persist the model for one exact provider route without rewriting the
 /// legacy root DeepSeek fallback used by unrelated providers.
 ///
-/// First-party DeepSeek retains its historical `default_text_model` root key.
-/// Every other built-in provider writes to its typed `[providers.<name>]`
-/// table, while named custom routes use their exact user-owned table id.
+/// Built-in providers write to their typed `[providers.<name>]` table, while
+/// named custom routes use their exact user-owned table id. Only a legacy
+/// literal custom route retains its root model field.
 pub(crate) fn persist_provider_model_key(
     config_path: Option<&Path>,
     provider: ApiProvider,
     provider_identity: &str,
     value: &str,
 ) -> anyhow::Result<PathBuf> {
-    if matches!(provider, ApiProvider::Deepseek | ApiProvider::DeepseekCN) {
-        return persist_root_string_key(config_path, "default_text_model", value);
-    }
-
-    let provider_key = if provider == ApiProvider::Custom {
-        normalize_custom_provider_id(provider_identity)?
-    } else {
-        provider
-            .metadata()
-            .context("provider config metadata")?
-            .provider_config_key()
-            .to_string()
-    };
     let path = config_toml_path(config_path)?;
     mutate_config_document(&path, |doc| {
-        set_document_value(doc, &["providers", &provider_key, "model"], value)
+        set_provider_model_document(doc, provider, provider_identity, value)
     })?;
     Ok(path)
 }
@@ -1403,5 +1581,150 @@ slot = 1
 
             let _ = fs::remove_dir_all(&temp_root);
         }
+    }
+    #[test]
+    fn route_migration_is_atomic_preserves_conflicts_and_ignores_scoped_settings() {
+        use crate::test_support::{EnvVarGuard, lock_test_env};
+        let _lock = lock_test_env();
+        let home = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let _home = EnvVarGuard::set("CODEWHALE_HOME", home.path());
+        let _scope = EnvVarGuard::set("CODEWHALE_CONFIG_PATH", project.path().join("config.toml"));
+        let path = home.path().join("config.toml");
+        let source = "# keep this comment\nprovider = 'deepseek'\n[providers.zai]\nmodel = 'GLM-5.2'\n[providers.TeamA]\nkind = 'openai-compatible'\nbase_url = 'https://upper.example.test/v1'\nmodel = 'Old-Upper'\n[providers.teama]\nkind = 'openai-compatible'\nbase_url = 'https://lower.example.test/v1'\nmodel = 'Old-Lower'\n";
+        let legacy = "default_provider = 'zai'\n[provider_models]\nzai = 'GLM-5.3'\nTeamA = 'New-Upper'\nteama = 'New-Lower'\n";
+        fs::write(&path, source).unwrap();
+        fs::write(home.path().join("settings.toml"), legacy).unwrap();
+        fs::write(
+            project.path().join("settings.toml"),
+            "default_provider = 'openai'\n[provider_models]\nzai = 'wrong-scoped-model'\n",
+        )
+        .unwrap();
+
+        let error = persist_provider_selection(
+            Some(&path),
+            ApiProvider::Custom,
+            "Missing",
+            Some("new-model"),
+        );
+        assert!(error.is_err());
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            source,
+            "failed save must not commit migration separately"
+        );
+
+        persist_provider_selection(
+            Some(&path),
+            ApiProvider::Deepseek,
+            "deepseek",
+            Some("deepseek-v4-pro"),
+        )
+        .unwrap();
+        let body = fs::read_to_string(&path).unwrap();
+        let doc: toml::Value = toml::from_str(&body).unwrap();
+        assert!(body.contains("# keep this comment"));
+        assert_eq!(doc["route_preferences_version"].as_integer(), Some(1));
+        assert_eq!(doc["provider"].as_str(), Some("deepseek"));
+        assert_eq!(
+            doc["providers"]["deepseek"]["model"].as_str(),
+            Some("deepseek-v4-pro")
+        );
+        assert_eq!(doc["providers"]["zai"]["model"].as_str(), Some("GLM-5.3"));
+        assert_eq!(
+            doc["providers"]["TeamA"]["model"].as_str(),
+            Some("New-Upper")
+        );
+        assert_eq!(
+            doc["providers"]["teama"]["model"].as_str(),
+            Some("New-Lower")
+        );
+        assert_eq!(
+            doc["providers"]["TeamA"]["base_url"].as_str(),
+            Some("https://upper.example.test/v1")
+        );
+        assert_eq!(
+            doc["route_preferences_migration"]["previous_models"]["zai"].as_str(),
+            Some("GLM-5.2")
+        );
+        assert_eq!(
+            fs::read_to_string(home.path().join("settings.toml")).unwrap(),
+            legacy
+        );
+
+        persist_provider_model_key(Some(&path), ApiProvider::Zai, "zai", "GLM-5.1").unwrap();
+        let doc: toml::Value = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(doc["providers"]["zai"]["model"].as_str(), Some("GLM-5.1"));
+        assert_eq!(
+            doc["route_preferences_migration"]["previous_models"]["zai"].as_str(),
+            Some("GLM-5.2")
+        );
+    }
+
+    #[test]
+    fn canonical_model_writer_keeps_legacy_custom_shape_and_exact_named_ids() {
+        use crate::test_support::{EnvVarGuard, lock_test_env};
+        let _lock = lock_test_env();
+        let home = tempfile::tempdir().unwrap();
+        let _home = EnvVarGuard::set("CODEWHALE_HOME", home.path());
+        let path = home.path().join("config.toml");
+        fs::write(&path, "route_preferences_version = 1\nprovider = 'custom'\nbase_url = 'https://legacy.example.test/v1'\ndefault_text_model = 'old-wire-id'\n").unwrap();
+        persist_provider_selection(
+            Some(&path),
+            ApiProvider::Custom,
+            "custom",
+            Some("Exact-New-ID"),
+        )
+        .unwrap();
+        let doc: toml::Value = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(doc["default_text_model"].as_str(), Some("Exact-New-ID"));
+        assert!(doc.get("providers").is_none());
+
+        fs::write(&path, "route_preferences_version = 1\nprovider = 'Team.A'\n[providers.'Team.A']\nkind = 'openai-compatible'\nbase_url = 'https://named.example.test/v1'\nmodel = 'old'\n").unwrap();
+        persist_provider_selection(
+            Some(&path),
+            ApiProvider::Custom,
+            "Team.A",
+            Some("Exact-Named-ID"),
+        )
+        .unwrap();
+        let doc: toml::Value = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            doc["providers"]["Team.A"]["model"].as_str(),
+            Some("Exact-Named-ID")
+        );
+        assert!(
+            persist_provider_selection(Some(&path), ApiProvider::Custom, "team.a", Some("wrong"))
+                .is_err()
+        );
+        persist_provider_model_key(
+            Some(&path),
+            ApiProvider::DeepseekCN,
+            "deepseek-cn",
+            "deepseek-v4-pro",
+        )
+        .unwrap();
+        let doc: toml::Value = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            doc["providers"]["deepseek_cn"]["model"].as_str(),
+            Some("deepseek-v4-pro")
+        );
+    }
+
+    #[test]
+    fn malformed_legacy_preferences_do_not_partially_commit_a_route_save() {
+        use crate::test_support::{EnvVarGuard, lock_test_env};
+        let _lock = lock_test_env();
+        let home = tempfile::tempdir().unwrap();
+        let _home = EnvVarGuard::set("CODEWHALE_HOME", home.path());
+        let path = home.path().join("config.toml");
+        let source = "provider = 'zai'\n[providers.zai]\nmodel = 'GLM-5.2'\n";
+        fs::write(&path, source).unwrap();
+        fs::write(home.path().join("settings.toml"), "default_provider = [\n").unwrap();
+        assert!(
+            persist_provider_selection(Some(&path), ApiProvider::Zai, "zai", Some("GLM-5.3"))
+                .is_err()
+        );
+        assert_eq!(fs::read_to_string(&path).unwrap(), source);
     }
 }

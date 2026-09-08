@@ -486,11 +486,10 @@ fn show_single_setting(app: &App, key: &str) -> CommandResult {
             }
             .to_string(),
         ),
-        "default_model" => Settings::load().ok().map(|settings| {
-            settings
-                .default_model
-                .unwrap_or_else(|| "(default)".to_string())
-        }),
+        "default_model" => match saved_deepseek_default_model(app) {
+            Ok(model) => Some(model),
+            Err(error) => return CommandResult::error(error),
+        },
         "reasoning_effort" | "effort" => Some(
             app.reasoning_effort
                 .as_setting_for_provider(app.api_provider)
@@ -1318,6 +1317,38 @@ fn load_command_config(app: &App) -> Result<Config, String> {
         .map_err(|err| format!("Failed to load config: {err}"))
 }
 
+/// The compatibility default_model command describes saved DeepSeek config,
+/// independent of the active provider and one-launch environment overrides.
+fn saved_deepseek_default_model(app: &App) -> Result<String, String> {
+    let path = crate::config_persistence::config_toml_path(app.config_path.as_deref())
+        .map_err(|error| format!("Failed to resolve config: {error}"))?;
+    let read = || -> anyhow::Result<String> {
+        let store = codewhale_config::ConfigStore::load(Some(path.clone()))?;
+        let mut config = Config::from_saved_document(
+            store.original_body().unwrap_or(""),
+            app.config_profile.as_deref(),
+        )?;
+        if app.config_profile.is_none() && crate::config::is_home_config_path(&path) {
+            config.apply_saved_selection(&Settings::load_legacy_route_preferences_read_only()?);
+        }
+        let provider = if app.api_provider == ApiProvider::DeepseekCN {
+            ApiProvider::DeepseekCN
+        } else {
+            ApiProvider::Deepseek
+        };
+        let identity = config
+            .resolve_provider_pin_identity(provider.as_str())
+            .map_err(anyhow::Error::msg)?;
+        anyhow::ensure!(
+            identity.provider == provider,
+            "The saved provider identity is shadowed by another route"
+        );
+        config.scope_to_provider_identity(&identity);
+        Ok(config.default_model())
+    };
+    read().map_err(|error| format!("Failed to read saved model config: {error}"))
+}
+
 fn subagents_status(app: &App) -> CommandResult {
     let config = match load_command_config(app) {
         Ok(config) => config,
@@ -1850,26 +1881,64 @@ pub fn set_config_value(app: &mut App, key: &str, value: &str, persist: bool) ->
                 CommandResult::message(message)
             };
         }
-        "model" => {
-            // Support "/model auto" — auto-select model based on request complexity
-            if value.trim().eq_ignore_ascii_case("auto") {
-                app.set_model_selection("auto".to_string());
-                app.update_model_compaction_budget();
-                app.session.last_prompt_tokens = None;
-                app.session.last_completion_tokens = None;
-                return CommandResult::with_message_and_action(
-                    format!(
-                        "model = auto (auto-select model per turn; thinking = {})",
-                        app.reasoning_effort_display_label()
-                    ),
-                    AppAction::UpdateCompaction(app.compaction_config()),
-                );
+        "default_model" => {
+            let value = value.trim();
+            let value = if value.is_empty()
+                || matches!(
+                    value.to_ascii_lowercase().as_str(),
+                    "none" | "default" | "(default)"
+                ) {
+                crate::config::DEFAULT_TEXT_MODEL
+            } else {
+                value
+            };
+            if matches!(
+                app.api_provider,
+                ApiProvider::Deepseek | ApiProvider::DeepseekCN
+            ) {
+                return set_config_value(app, "model", value, persist);
             }
+            if !persist {
+                return CommandResult::error(format!(
+                    "default_model is the DeepSeek startup fallback and cannot change the active {} session. Use /model for the current provider, or add --save to change only future DeepSeek sessions.",
+                    app.api_provider.as_str()
+                ));
+            }
+            let model = if value.eq_ignore_ascii_case("auto") {
+                "auto".to_string()
+            } else {
+                let Some(model) = normalize_model_name_for_provider(ApiProvider::Deepseek, value)
+                else {
+                    return CommandResult::error(format!("Invalid DeepSeek model '{value}'."));
+                };
+                if let Err(error) = validate_route(ApiProvider::Deepseek, &model) {
+                    return CommandResult::error(error);
+                }
+                model
+            };
+            return match crate::config_persistence::persist_provider_model_key(
+                app.config_path.as_deref(),
+                ApiProvider::Deepseek,
+                "deepseek",
+                &model,
+            ) {
+                Ok(path) => CommandResult::message(format!(
+                    "default_model = {model} (saved to {}); DeepSeek fallback only — active {}/{} is unchanged",
+                    path.display(),
+                    app.api_provider.as_str(),
+                    app.model_display_label()
+                )),
+                Err(error) => CommandResult::error(format!("Failed to save model: {error}")),
+            };
+        }
+        "model" => {
             // Route-aware: a custom DeepSeek (or other) endpoint owns its model
             // namespace. Provider-only normalization would reject a non-DeepSeek
             // id that the live session is already allowed to use via `/model`.
             // OpenCode Go stays protocol-strict even on a custom host.
-            let model = if app.api_provider == ApiProvider::OpencodeGo {
+            let model = if value.trim().eq_ignore_ascii_case("auto") {
+                "auto".to_string()
+            } else if app.api_provider == ApiProvider::OpencodeGo {
                 let Some(model) = normalize_model_name_for_provider(app.api_provider, value) else {
                     return CommandResult::error(format!(
                         "Invalid model '{value}' for provider {}.",
@@ -1880,7 +1949,16 @@ pub fn set_config_value(app: &mut App, key: &str, value: &str, persist: bool) ->
                     return CommandResult::error(reason);
                 }
                 model
-            } else if app.accepts_custom_model_ids() {
+            } else if app.accepts_custom_model_ids()
+                || (app.api_provider != ApiProvider::OpenaiCodex
+                    && app.configured_models.iter().any(|row| {
+                        row.id == value.trim()
+                            && row.matches_route(
+                                app.provider_identity_for_persistence(),
+                                &app.active_route_base_url,
+                            )
+                    }))
+            {
                 let Some(model) = normalize_custom_model_id(value) else {
                     return CommandResult::error(format!(
                         "Invalid model '{value}' for provider {}.",
@@ -1900,12 +1978,44 @@ pub fn set_config_value(app: &mut App, key: &str, value: &str, persist: bool) ->
                 }
                 model
             };
+            let saved = if persist {
+                let provider_id = match app.provider_selector_for_config_persistence() {
+                    Ok(provider_id) => provider_id,
+                    Err(error) => {
+                        return CommandResult::error(format!("Failed to save model: {error}"));
+                    }
+                };
+                match crate::config_persistence::persist_provider_selection(
+                    app.config_path.as_deref(),
+                    app.api_provider,
+                    provider_id,
+                    Some(&model),
+                ) {
+                    Ok(path) => Some(path),
+                    Err(error) => {
+                        return CommandResult::error(format!("Failed to save model: {error}"));
+                    }
+                }
+            } else {
+                None
+            };
             app.set_model_selection(model.clone());
             app.update_model_compaction_budget();
             app.session.last_prompt_tokens = None;
             app.session.last_completion_tokens = None;
+            let mut message = if model == "auto" {
+                format!(
+                    "model = auto (auto-select model per turn; thinking = {})",
+                    app.reasoning_effort_display_label()
+                )
+            } else {
+                format!("model = {model}")
+            };
+            if let Some(path) = saved {
+                message.push_str(&format!(" (saved to {})", path.display()));
+            }
             return CommandResult::with_message_and_action(
-                format!("model = {model}"),
+                message,
                 AppAction::UpdateCompaction(app.compaction_config()),
             );
         }
@@ -2363,19 +2473,6 @@ pub fn set_config_value(app: &mut App, key: &str, value: &str, persist: bool) ->
         Err(e) => return CommandResult::error(format!("Failed to load settings: {e}")),
     };
 
-    if key == "default_model"
-        && !matches!(
-            app.api_provider,
-            ApiProvider::Deepseek | ApiProvider::DeepseekCN
-        )
-        && !persist
-    {
-        return CommandResult::error(format!(
-            "default_model is the DeepSeek startup fallback and cannot change the active {} session. Use /model for the current provider, or add --save to change only future DeepSeek sessions.",
-            app.api_provider.as_str()
-        ));
-    }
-
     if let Err(e) = settings.set(&key, value) {
         return CommandResult::error(format!("{e}"));
     }
@@ -2641,19 +2738,6 @@ pub fn set_config_value(app: &mut App, key: &str, value: &str, persist: bool) ->
         "max_history" | "history" => {
             app.max_input_history = settings.max_input_history;
         }
-        "default_model" => {
-            if matches!(
-                app.api_provider,
-                ApiProvider::Deepseek | ApiProvider::DeepseekCN
-            ) && let Some(ref model) = settings.default_model
-            {
-                app.set_model_selection(model.clone());
-                app.update_model_compaction_budget();
-                app.session.last_prompt_tokens = None;
-                app.session.last_completion_tokens = None;
-                action = Some(AppAction::UpdateCompaction(app.compaction_config()));
-            }
-        }
         "reasoning_effort" | "effort" => {
             app.reasoning_effort_preference = settings
                 .reasoning_effort
@@ -2716,7 +2800,7 @@ pub fn set_config_value(app: &mut App, key: &str, value: &str, persist: bool) ->
         _ => value.to_string(),
     };
 
-    let mut message = if persist {
+    let message = if persist {
         if let Err(e) = persist_single_setting(&key, value) {
             return CommandResult::error(format!("Failed to save: {e}"));
         }
@@ -2724,19 +2808,6 @@ pub fn set_config_value(app: &mut App, key: &str, value: &str, persist: bool) ->
     } else {
         format!("{key} = {display_value} (session only, add --save to persist)")
     };
-    if key == "default_model"
-        && !matches!(
-            app.api_provider,
-            ApiProvider::Deepseek | ApiProvider::DeepseekCN
-        )
-    {
-        message.push_str(&format!(
-            "; DeepSeek fallback only — active {}/{} is unchanged",
-            app.api_provider.as_str(),
-            app.model_display_label()
-        ));
-    }
-
     CommandResult {
         message: Some(message),
         action,
@@ -3779,7 +3850,11 @@ mod tests {
         let text = settings_command(&mut app, Some("text"));
         let message = text.message.as_deref().expect("settings diagnostic text");
         assert!(message.contains("Settings:"), "{message}");
-        assert!(message.contains("provider_models:"), "{message}");
+        assert!(
+            message.contains("model defaults:     config.toml"),
+            "{message}"
+        );
+        assert!(!message.contains("provider_models:"), "{message}");
         assert!(message.contains("Config file:"), "{message}");
         assert!(text.action.is_none());
     }
@@ -3881,12 +3956,15 @@ mod tests {
 
     #[test]
     fn config_default_model_cannot_replace_a_non_deepseek_live_route() {
-        let temp_root = env::temp_dir().join(format!(
-            "codewhale-tui-provider-scoped-default-model-test-{}",
-            std::process::id()
-        ));
-        fs::create_dir_all(&temp_root).unwrap();
-        let _guard = EnvGuard::new(&temp_root);
+        let temp_root = tempfile::tempdir().expect("isolated configuration");
+        let _guard = EnvGuard::new(temp_root.path());
+        let config_path = crate::config_persistence::config_toml_path(None).expect("config path");
+        fs::create_dir_all(config_path.parent().expect("config directory")).expect("mkdir");
+        fs::write(
+            &config_path,
+            "provider = 'zai'\n[providers.zai]\nmodel = 'GLM-5.2'\n",
+        )
+        .expect("config");
         let mut app = create_test_app();
         app.api_provider = ApiProvider::Zai;
         app.model = crate::config::ZAI_GLM_5_2_MODEL.to_string();
@@ -3915,11 +3993,45 @@ mod tests {
                 .as_deref()
                 .is_some_and(|message| message.contains("active zai/GLM-5.2 is unchanged"))
         );
-        let persisted = Settings::load_persisted().expect("saved settings");
+        let persisted: toml::Value =
+            toml::from_str(&fs::read_to_string(&config_path).expect("saved config")).expect("toml");
         assert_eq!(
-            persisted.default_model.as_deref(),
+            persisted["providers"]["deepseek"]["model"].as_str(),
             Some("deepseek-v4-flash")
         );
+        assert_eq!(persisted["provider"].as_str(), Some("zai"));
+        assert_eq!(
+            saved_deepseek_default_model(&app).expect("saved value"),
+            "deepseek-v4-flash"
+        );
+        assert!(
+            Settings::load_persisted()
+                .expect("settings")
+                .default_model
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn saved_model_display_uses_the_same_profile_root_precedence_as_startup() {
+        let temp_root = tempfile::tempdir().unwrap();
+        let _guard = EnvGuard::new(temp_root.path());
+        let path = crate::config_persistence::config_toml_path(None).unwrap();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut app = create_test_app();
+        app.config_path = Some(path.clone());
+        app.config_profile = Some("pro".to_string());
+        for field in ["default_text_model", "model"] {
+            fs::write(&path, format!("route_preferences_version = 1\nprovider = 'deepseek'\n[providers.deepseek]\nmodel = 'deepseek-v4-flash'\n[profiles.pro]\n{field} = 'deepseek-v4-pro'\n")).unwrap();
+            let configured =
+                Config::from_saved_document(&fs::read_to_string(&path).unwrap(), Some("pro"))
+                    .unwrap();
+            assert_eq!(configured.default_model(), "deepseek-v4-pro");
+            assert_eq!(
+                saved_deepseek_default_model(&app).unwrap(),
+                configured.default_model()
+            );
+        }
     }
 
     #[test]
@@ -4012,8 +4124,107 @@ mod tests {
         let temp_root = tempfile::tempdir().expect("isolated settings dir");
         let _guard = EnvGuard::new(temp_root.path());
         let mut app = create_test_app();
-        let _result = config_command(&mut app, Some("model deepseek-v4-flash --save"));
+        let result = config_command(&mut app, Some("model deepseek-v4-flash --save"));
+        assert!(!result.is_error, "{:?}", result.message);
         assert_eq!(app.model, "deepseek-v4-flash");
+        let config_path = crate::config_persistence::config_toml_path(app.config_path.as_deref())
+            .expect("config path");
+        let persisted: toml::Value =
+            toml::from_str(&fs::read_to_string(config_path).expect("saved config")).expect("toml");
+        assert_eq!(persisted["provider"].as_str(), Some("deepseek"));
+        assert_eq!(
+            persisted["providers"]["deepseek"]["model"].as_str(),
+            Some("deepseek-v4-flash")
+        );
+        assert!(
+            Settings::load_persisted()
+                .expect("settings")
+                .provider_models
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn failed_model_save_keeps_the_live_selection() {
+        let temp_root = tempfile::tempdir().expect("isolated config");
+        let _guard = EnvGuard::new(temp_root.path());
+        let mut app = create_test_app();
+        let previous = app.model.clone();
+        let blocked_path = temp_root.path().join("config-directory");
+        fs::create_dir(&blocked_path).expect("blocked config path");
+        app.config_path = Some(blocked_path);
+
+        let result = config_command(&mut app, Some("model deepseek-v4-flash --save"));
+
+        assert!(result.is_error);
+        assert!(result.action.is_none());
+        assert_eq!(app.model, previous);
+    }
+
+    #[test]
+    fn hosted_ollama_model_saves_keep_the_legacy_provider_slot() {
+        use crate::tui::app::PendingRouteSave;
+        use crate::tui::views::route_save_prompt::RouteSaveChoice;
+
+        let temp_root = tempfile::tempdir().expect("isolated config");
+        let _guard = EnvGuard::new(temp_root.path());
+        let config_path = temp_root.path().join(".codewhale/config.toml");
+        fs::create_dir_all(config_path.parent().expect("config parent")).expect("config home");
+        fs::write(
+            &config_path,
+            "provider = \"ollama\"\n[providers.ollama]\nbase_url = \"https://ollama.com/v1\"\nmodel = \"original:cloud\"\napi_key_env = \"TEST_OLLAMA_KEY\"\n",
+        )
+        .expect("legacy hosted config");
+        let mut app = create_test_app();
+        app.config_path = Some(config_path.clone());
+        app.set_provider_identity(ApiProvider::OllamaCloud, "ollama");
+        app.active_route_base_url = "https://ollama.com/v1".to_string();
+        app.model_ids_passthrough = true;
+
+        for (index, model) in ["live:cloud", "pending:cloud", "command:cloud"]
+            .into_iter()
+            .enumerate()
+        {
+            app.model = model.to_string();
+            match index {
+                0 => {
+                    let receipt = app
+                        .try_save_live_route_as_startup_default()
+                        .expect("remember live hosted route");
+                    assert!(receipt.contains("ollama-cloud/live:cloud"), "{receipt}");
+                }
+                1 => {
+                    app.pending_route_save = Some(PendingRouteSave {
+                        provider_identity: "ollama-cloud".to_string(),
+                        model: model.to_string(),
+                        fleet: None,
+                    });
+                    let receipt = app.apply_route_save_choice(RouteSaveChoice::SaveAsDefault);
+                    assert!(receipt.starts_with("Remembered "), "{receipt}");
+                }
+                _ => {
+                    let result = set_config_value(&mut app, "model", model, true);
+                    assert!(!result.is_error, "{:?}", result.message);
+                }
+            }
+            let saved: toml::Value =
+                toml::from_str(&fs::read_to_string(&config_path).expect("saved config"))
+                    .expect("valid config");
+            assert_eq!(saved["provider"].as_str(), Some("ollama"));
+            assert_eq!(saved["providers"]["ollama"]["model"].as_str(), Some(model));
+            assert_eq!(
+                saved["providers"]["ollama"]["base_url"].as_str(),
+                Some("https://ollama.com/v1")
+            );
+            assert_eq!(
+                saved["providers"]["ollama"]["api_key_env"].as_str(),
+                Some("TEST_OLLAMA_KEY")
+            );
+            assert!(saved["providers"].get("ollama_cloud").is_none());
+            assert!(saved["providers"].get("ollama-cloud").is_none());
+            assert_eq!(app.provider_identity_for_persistence(), "ollama-cloud");
+            assert_eq!(app.provider_id_for_persistence(), Some("ollama"));
+        }
     }
 
     #[test]

@@ -6676,68 +6676,31 @@ async fn fixed_route_thinking_cycle_persists_raw_preference() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn interleaved_mode_thinking_and_model_writes_do_not_clobber_each_other() {
+async fn queued_mode_and_thinking_writes_finish_before_a_synchronous_selection() {
     let _lock = lock_test_env();
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let _env = sealed_settings_home(tmp.path());
     let _writes = crate::tui::startup_defaults::allow_writes_in_tests();
-
     let mut app = App::new(test_options(false), &Config::default());
     app.api_provider = ApiProvider::Deepseek;
     app.auto_model = false;
     app.reasoning_effort = ReasoningEffort::Off;
-
-    // Queued, non-blocking: mode then thinking.
     assert_eq!(app.select_mode(AppMode::Plan), SettingSelection::Changed);
     app.apply_reasoning_effort_cycle();
-    let cycled_effort = app.reasoning_effort.as_setting_for_route(
-        app.api_provider,
-        &app.active_route_base_url,
-        &app.model,
-    );
 
-    // The model picker's synchronous write. It must apply *behind* the two
-    // queued selections above, so neither is lost and neither is re-applied
-    // over a newer value.
+    // A newer synchronous effort selection drains the older queued mode and
+    // effort first, so a late background writer cannot restore the old effort.
     app.startup_defaults
-        .apply_blocking(
-            crate::tui::startup_defaults::StartupDefaults::default()
-                .with_default_model("deepseek-chat"),
-        )
-        .expect("model write must land");
-
-    let after_model = Settings::load().expect("reload");
-    let persisted_model = after_model
-        .default_model
-        .clone()
-        .expect("model picker write must be on disk");
-    assert_eq!(
-        after_model.default_mode, "plan",
-        "the queued mode selection must have been applied before the model write"
-    );
-    assert_eq!(
-        after_model.reasoning_effort.as_deref(),
-        Some(cycled_effort),
-        "the queued thinking selection must not be lost by the model write"
-    );
-
-    // A later mode selection must win for its own field and leave the other
-    // two fields exactly as the earlier writes left them.
+        .apply_blocking(crate::tui::startup_defaults::StartupDefaults::reasoning_effort("high"))
+        .expect("effort write must land");
+    let saved = Settings::load_persisted().expect("reload");
+    assert_eq!(saved.default_mode, "plan");
+    assert_eq!(saved.reasoning_effort.as_deref(), Some("high"));
     assert_eq!(app.select_mode(AppMode::Operate), SettingSelection::Changed);
     app.startup_defaults.flush();
-
-    let final_settings = Settings::load().expect("reload");
-    assert_eq!(final_settings.default_mode, "operate");
-    assert_eq!(
-        final_settings.default_model.as_deref(),
-        Some(persisted_model.as_str()),
-        "a mode write must not roll back the model"
-    );
-    assert_eq!(
-        final_settings.reasoning_effort.as_deref(),
-        Some(cycled_effort),
-        "a mode write must not roll back the thinking level"
-    );
+    let saved = Settings::load_persisted().expect("reload");
+    assert_eq!(saved.default_mode, "operate");
+    assert_eq!(saved.reasoning_effort.as_deref(), Some("high"));
     assert!(app.startup_defaults.drain_failures().is_empty());
 }
 
@@ -6915,14 +6878,12 @@ async fn rapid_mixed_writes_settle_on_the_last_value_for_every_field() {
         Settings::transact(|settings| settings.set("max_history", &(200 + index).to_string()))
             .expect("the direct write must land");
     }
-    // A model write goes through the synchronous startup-defaults path, which
-    // must land behind everything queued before it.
+    // A synchronous mode selection must land after every queued writer.
     app.startup_defaults
-        .apply_blocking(
-            crate::tui::startup_defaults::StartupDefaults::default()
-                .with_default_model("deepseek-chat"),
-        )
-        .expect("model write must land");
+        .apply_blocking(crate::tui::startup_defaults::StartupDefaults::mode(
+            app.mode,
+        ))
+        .expect("mode write must land");
     app.startup_defaults.flush();
 
     let expected_effort = app.reasoning_effort.as_setting_for_route(
@@ -6936,7 +6897,6 @@ async fn rapid_mixed_writes_settle_on_the_last_value_for_every_field() {
     assert_eq!(saved.reasoning_effort.as_deref(), Some(expected_effort));
     assert_eq!(saved.permission_posture.as_deref(), Some(expected_posture));
     assert_eq!(saved.max_input_history, 204);
-    assert_eq!(saved.default_model.as_deref(), Some("deepseek-chat"));
     assert!(app.startup_defaults.drain_failures().is_empty());
 }
 
@@ -7301,6 +7261,7 @@ fn hotbar_mode_row_for_the_live_mode_still_shows_the_saved_receipt() {
 fn an_explicit_launch_model_outranks_the_remembered_provider_model() {
     let _lock = lock_test_env();
     let temp = tempfile::tempdir().expect("sealed state root");
+    let _home = EnvVarGuard::set("CODEWHALE_HOME", temp.path());
     let config_path = temp.path().join("config.toml");
     std::fs::write(
         &config_path,
@@ -7315,12 +7276,11 @@ fn an_explicit_launch_model_outranks_the_remembered_provider_model() {
     let _config_path_guard = EnvVarGuard::set("DEEPSEEK_CONFIG_PATH", &config_path);
     let _codewhale_config_path = EnvVarGuard::remove("CODEWHALE_CONFIG_PATH");
 
-    let config = Config::load(Some(config_path.clone()), None).expect("load sealed config");
-
     // Without an explicit request this launch, the remembered pick still wins:
     // that stickiness is what `/model` exists for.
     let _no_flag = EnvVarGuard::remove("CODEWHALE_MODEL");
     let _no_legacy_flag = EnvVarGuard::remove("DEEPSEEK_MODEL");
+    let config = Config::load(Some(config_path.clone()), None).expect("load sealed config");
     let remembered = App::new(
         TuiOptions {
             model: config.default_model(),
@@ -7335,6 +7295,7 @@ fn an_explicit_launch_model_outranks_the_remembered_provider_model() {
 
     // `--model` reaches this binary as CODEWHALE_MODEL. It must win.
     let _model_flag = EnvVarGuard::set("CODEWHALE_MODEL", "kimi-k3");
+    let config = Config::load(Some(config_path), None).expect("load explicit launch snapshot");
     let requested = App::new(
         TuiOptions {
             model: config.default_model(),

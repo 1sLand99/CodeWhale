@@ -445,6 +445,8 @@ fn is_machine_bound_top_level_key(key: &str) -> bool {
                     | "project_instruction_imports"
                     | "projects"
                     | "requirements_path"
+                    | "route_preferences_version"
+                    | "route_preferences_migration"
                     | "runtime_api"
                     | "workspace"
             )
@@ -849,7 +851,29 @@ pub fn export_bundle(
     let mut global = BundleTable::default();
     let mut project = BundleTable::default();
 
-    for (key, value) in config_document(config)? {
+    let mut document = config_document(config)?;
+    if scope == BundleScope::Global {
+        let slot = codewhale_tui::route_preferences::model_slot_for_document(
+            &toml::to_string(&document)?,
+            "model",
+        )?;
+        let has_canonical_model = match slot.as_slice() {
+            [root, provider, field] if root == "providers" => document
+                .get(root)
+                .and_then(|table| table.get(provider.as_str())?.get(field.as_str())?.as_str())
+                .is_some_and(|model| !model.trim().is_empty()),
+            // Literal Custom still owns its root model; it is not shadowed.
+            _ => false,
+        };
+        if has_canonical_model {
+            // These legacy aliases address the active route on import. A
+            // shadowed root must not conflict with the canonical slot in our
+            // own export; inactive providers keep their independent slots.
+            document.remove("model");
+            document.remove("default_text_model");
+        }
+    }
+    for (key, value) in document {
         if let Some(value) = sanitize_export_value(&key, &value) {
             match export_section_for(&key, scope) {
                 ExportSection::Preferences => {
@@ -996,55 +1020,33 @@ pub struct ImportReceipt {
 /// Apply a validated bundle to `store` transactionally.
 ///
 /// The current document is backed up to `<target>.bundle-backup-<timestamp>-<random>`,
-/// entries are applied through `ConfigStore::set_value`, and any failure
+/// the prepared candidate is committed through one `ConfigStore::save`, and any failure
 /// restores the backup before returning the error. The receipt redacts by
 /// construction: it carries only key paths and counts, never values.
 pub fn apply_bundle(
     bundle: &PortableBundle,
     store: &mut codewhale_config::ConfigStore,
     scope: BundleScope,
-    workspace: &Path,
+    _workspace: &Path,
 ) -> Result<ImportReceipt> {
-    apply_bundle_with(bundle, store, scope, workspace, apply_entries)
+    let prepared = prepare_import(bundle, store, scope)?;
+    apply_prepared_bundle(prepared, store, save_candidate)
 }
 
-fn apply_bundle_with<F>(
-    bundle: &PortableBundle,
+struct PreparedImport {
+    plan: ImportPlan,
+    candidate: ConfigToml,
+}
+
+fn apply_prepared_bundle<F>(
+    prepared: PreparedImport,
     store: &mut codewhale_config::ConfigStore,
-    scope: BundleScope,
-    workspace: &Path,
     apply: F,
 ) -> Result<ImportReceipt>
 where
-    F: FnOnce(
-        &PortableBundle,
-        &mut codewhale_config::ConfigStore,
-        BundleScope,
-        &Path,
-        &mut bool,
-    ) -> Result<()>,
+    F: FnOnce(ConfigToml, &mut codewhale_config::ConfigStore, &mut bool) -> Result<()>,
 {
-    // Scope isolation is structural: project entries belong only in a
-    // project document, global entries only in the user-global one. A bundle
-    // carrying the other scope's section is refused up front rather than
-    // silently writing across the boundary.
-    match scope {
-        BundleScope::Global if !bundle.project.entries.is_empty() => {
-            bail!(
-                "bundle carries [project] entries; import it with --project from the workspace instead"
-            );
-        }
-        BundleScope::Project if !bundle.global.entries.is_empty() => {
-            bail!(
-                "bundle carries [global] entries; importing them into a project document would leak machine state"
-            );
-        }
-        _ => {}
-    }
-    // A project-scoped import must target an actual workspace document — the
-    // user-global file is never a landing zone for [project] entries.
-    validate_scope_target(scope, store.path())?;
-    let plan = plan_import(bundle, &store.config, scope);
+    let PreparedImport { plan, candidate } = prepared;
     if !plan.conflicting.is_empty() {
         bail!(
             "bundle contains conflicting or rejected entries: {}; remove duplicate keys or credential-shaped entries and re-export",
@@ -1071,7 +1073,7 @@ where
     };
 
     let mut target_written = false;
-    let apply_result = apply(bundle, store, scope, workspace, &mut target_written);
+    let apply_result = apply(candidate, store, &mut target_written);
     if let Err(error) = apply_result {
         store.config = original_config;
         let rollback = rollback_import_target(&target, backup_path.as_deref(), target_written)
@@ -1125,44 +1127,41 @@ fn rollback_import_target(
     }
 }
 
-fn apply_entries(
+/// Build the exact candidate used for both preview and commit. Legacy route
+/// migration remains in memory until the existing ConfigStore CAS save.
+fn prepare_import(
     bundle: &PortableBundle,
-    store: &mut codewhale_config::ConfigStore,
+    store: &codewhale_config::ConfigStore,
     scope: BundleScope,
-    workspace: &Path,
-    target_written: &mut bool,
-) -> Result<()> {
-    let mut candidate = store.config.clone();
-    for (section, table) in [
-        ("preferences", &bundle.preferences),
-        ("profiles", &bundle.profiles),
-        ("plugins", &bundle.plugins),
-        ("project", &bundle.project),
-        ("global", &bundle.global),
-    ] {
-        let applies = match section {
-            "project" => scope == BundleScope::Project,
-            "global" => scope == BundleScope::Global,
-            _ => true,
-        };
-        if !applies {
-            continue;
-        }
-        for (key, value) in &table.entries {
-            if key == "provider" {
-                continue;
-            }
-            let dotted = format!("{section}.{key}");
-            if nonportable_path_reason(key).is_some()
-                || value_rejection_reason(key, value).is_some()
-            {
-                bail!("refusing to import non-portable config path {dotted}");
-            }
-            apply_config_value(&mut candidate, key, value)?;
-        }
+) -> Result<PreparedImport> {
+    match scope {
+        BundleScope::Global if !bundle.project.entries.is_empty() => bail!(
+            "bundle carries [project] entries; import it with --project from the workspace instead"
+        ),
+        BundleScope::Project if !bundle.global.entries.is_empty() => bail!(
+            "bundle carries [global] entries; importing them into a project document would leak machine state"
+        ),
+        _ => {}
     }
-    // Apply provider selection after provider tables so an exact named custom
-    // provider exported with its definition can validate successfully.
+    validate_scope_target(scope, store.path())?;
+    let mut plan = plan_import(bundle, &store.config, scope);
+    if !plan.conflicting.is_empty() || (plan.is_no_op() && plan.skipped.is_empty()) {
+        return Ok(PreparedImport {
+            plan,
+            candidate: store.config.clone(),
+        });
+    }
+    let rendered;
+    let original = if let Some(original) = store.original_body() {
+        original
+    } else {
+        rendered = store.rendered_body()?;
+        &rendered
+    };
+    let mut document = codewhale_tui::route_preferences::prepare_document(store.path(), original)?;
+    let mut candidate = config_from_document(&document.to_string())?;
+    let mut model_edits = Vec::<(String, String, String)>::new();
+    let mut selected_provider = None;
     for (section, table) in [
         ("preferences", &bundle.preferences),
         ("profiles", &bundle.profiles),
@@ -1173,27 +1172,144 @@ fn apply_entries(
         if !section_applies(section, scope) {
             continue;
         }
-        if let Some(value) = table.entries.get("provider") {
-            apply_config_value(&mut candidate, "provider", value)?;
+        for (key, value) in &table.entries {
+            let dotted = format!("{section}.{key}");
+            if nonportable_path_reason(key).is_some()
+                || value_rejection_reason(key, value).is_some()
+            {
+                bail!("refusing to import non-portable config path {dotted}");
+            }
+            if key == "provider" {
+                selected_provider = Some(
+                    value
+                        .as_str()
+                        .ok_or_else(|| anyhow!("config entry {dotted:?} must be a string"))?,
+                );
+                continue;
+            }
+            collect_model_edits(&dotted, key, value, &mut model_edits)?;
+            if codewhale_tui::route_preferences::is_route_key(key) {
+                continue;
+            }
+            apply_config_value(&mut candidate, key, value)?;
         }
     }
+    document = toml::to_string(&toml::Value::Table(config_document(&candidate)?))?
+        .parse()
+        .map_err(|_| anyhow!("could not prepare imported configuration; contents omitted"))?;
+    // Definitions precede the exact final selector. Root aliases then target
+    // that selected route, so an old provider slot cannot mask an imported model.
+    if let Some(provider) = selected_provider {
+        codewhale_tui::route_preferences::set_document(
+            store.path(),
+            &mut document,
+            "provider",
+            provider,
+        )?;
+    }
+    model_edits.sort_by_key(|(_, key, _)| !key.starts_with("providers."));
+    for (_, key, value) in &model_edits {
+        codewhale_tui::route_preferences::set_document(store.path(), &mut document, key, value)?;
+    }
+    let final_value: toml::Value = toml::from_str(&document.to_string())?;
+    for (dotted, key, value) in &model_edits {
+        let mut replay = document.clone();
+        codewhale_tui::route_preferences::set_document(store.path(), &mut replay, key, value)?;
+        if toml::from_str::<toml::Value>(&replay.to_string())? != final_value {
+            plan.conflicting.push(dotted.clone());
+        }
+    }
+    candidate = config_from_document(&document.to_string())?;
+    // Run the same validation/serialization as the final save before consent
+    // or backup creation. This clone never writes or replaces the CAS snapshot.
+    let mut validation_store = store.clone();
+    validation_store.config = candidate.clone();
+    validation_store.rendered_body()?;
+    if config_document(&candidate)? == config_document(&store.config)? {
+        plan.skipped.append(&mut plan.added);
+        plan.skipped.append(&mut plan.changed);
+    } else {
+        // A raw root alias may already match while its canonical provider
+        // slot differs. Such an import is a real change, not a skipped write.
+        if plan.is_no_op() {
+            for (dotted, _, _) in &model_edits {
+                plan.skipped.retain(|key| key != dotted);
+                plan.changed.push(dotted.clone());
+            }
+        }
+        let original_value: toml::Value = toml::from_str(original)?;
+        if original_value.get("route_preferences_version").is_none()
+            && final_value.get("route_preferences_version").is_some()
+        {
+            plan.added
+                .push("global.route_preferences_version (local migration)".to_string());
+        }
+    }
+    for keys in [
+        &mut plan.added,
+        &mut plan.changed,
+        &mut plan.skipped,
+        &mut plan.conflicting,
+    ] {
+        keys.sort();
+        keys.dedup();
+    }
+    Ok(PreparedImport { plan, candidate })
+}
+
+fn collect_model_edits(
+    dotted: &str,
+    key: &str,
+    value: &toml::Value,
+    edits: &mut Vec<(String, String, String)>,
+) -> Result<()> {
+    if key != "provider" && codewhale_tui::route_preferences::is_route_key(key) {
+        let value = value
+            .as_str()
+            .ok_or_else(|| anyhow!("config entry {dotted:?} must be a string"))?;
+        edits.push((dotted.to_string(), key.to_string(), value.to_string()));
+    } else if (key == "providers" || key.starts_with("providers."))
+        && let Some(table) = value.as_table()
+    {
+        for (child, value) in table {
+            collect_model_edits(
+                &format!("{dotted}.{child}"),
+                &format!("{key}.{child}"),
+                value,
+                edits,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn config_from_document(body: &str) -> Result<ConfigToml> {
+    let mut config: ConfigToml = toml::from_str(body).map_err(|_| {
+        anyhow!("imported configuration has an invalid TOML type; contents omitted")
+    })?;
+    let document: toml::Value = toml::from_str(body)?;
+    if let Some(provider) = document.get("provider").and_then(toml::Value::as_str) {
+        config.bind_persisted_provider_id(provider)?;
+    }
+    Ok(config)
+}
+
+fn save_candidate(
+    candidate: ConfigToml,
+    store: &mut codewhale_config::ConfigStore,
+    target_written: &mut bool,
+) -> Result<()> {
     store.config = candidate;
     store.save().context("saving imported bundle")?;
     *target_written = true;
-    let _ = workspace;
     Ok(())
 }
 
 fn apply_config_value(config: &mut ConfigToml, key: &str, value: &toml::Value) -> Result<()> {
-    if key == "provider"
-        || key == "auth.mode"
-        || key == "hook_sinks.unix_socket_path"
-        || key.starts_with("providers.")
-    {
+    if key == "auth.mode" || key == "hook_sinks.unix_socket_path" || key.starts_with("providers.") {
         return config.set_value(key, &render_toml_value(value)?);
     }
 
-    let selected_provider_id = config.selected_provider_id.clone();
     let mut document = config_document(config)?;
     if let Some(current) = document.get_mut(key) {
         deep_merge_toml_value(current, value);
@@ -1205,10 +1321,7 @@ fn apply_config_value(config: &mut ConfigToml, key: &str, value: &toml::Value) -
     // tables or strings.
     let text = toml::to_string(&toml::Value::Table(document))
         .with_context(|| format!("config entry {key:?} could not be serialized"))?;
-    let mut updated: ConfigToml = toml::from_str(&text)
-        .map_err(|_| anyhow!("config entry {key:?} has an invalid TOML type"))?;
-    updated.selected_provider_id = selected_provider_id;
-    *config = updated;
+    *config = config_from_document(&text)?;
     Ok(())
 }
 
@@ -1365,7 +1478,7 @@ pub struct ExportArgs {
 pub fn run_import(
     args: &ImportArgs,
     store: &mut codewhale_config::ConfigStore,
-    workspace: &Path,
+    _workspace: &Path,
 ) -> Result<()> {
     let scope = if args.project {
         BundleScope::Project
@@ -1409,7 +1522,8 @@ pub fn run_import(
     };
 
     let bundle = parse_bundle_bytes(&raw, source_label)?;
-    let plan = plan_import(&bundle, &store.config, scope);
+    let prepared = prepare_import(&bundle, store, scope)?;
+    let plan = &prepared.plan;
 
     println!("import plan ({} scope, {source_label}):", scope.label());
     println!("  added:       {}", plan.added.len());
@@ -1435,8 +1549,8 @@ pub fn run_import(
         return Ok(());
     }
 
-    require_import_consent(args.yes, &plan)?;
-    let receipt = apply_bundle(&bundle, store, scope, workspace)?;
+    require_import_consent(args.yes, plan)?;
+    let receipt = apply_prepared_bundle(prepared, store, save_candidate)?;
     if receipt.plan.is_no_op() {
         println!("nothing to apply; config already matches the bundle (idempotent re-import)");
         return Ok(());
@@ -1944,9 +2058,339 @@ verbosity = "verbose"
         let store = isolated_store();
         let before = std::fs::read_to_string(store.path()).expect("read config");
         let bundle = sample_bundle();
-        let _plan = plan_import(&bundle, &store.config, BundleScope::Global);
+        let _prepared = prepare_import(&bundle, &store, BundleScope::Global)
+            .expect("prepare import without writing");
         let after = std::fs::read_to_string(store.path()).expect("read config");
         assert_eq!(before, after, "planning must not write");
+    }
+
+    #[test]
+    fn route_import_prepares_migration_once_and_overrides_a_masking_provider_slot() {
+        use crate::tests::{ScopedEnvVar, env_lock};
+        let _env = env_lock();
+        let home = tempfile::tempdir().expect("isolated home");
+        let _home = ScopedEnvVar::set("CODEWHALE_HOME", &home.path().to_string_lossy());
+        let _config_override = ScopedEnvVar::remove("CODEWHALE_CONFIG_PATH");
+        let _legacy_override = ScopedEnvVar::remove("DEEPSEEK_CONFIG_PATH");
+        let path = home.path().join("config.toml");
+        let original = "provider = 'zai'\ndefault_text_model = 'GLM-5.3'\n[providers.zai]\nmodel = 'GLM-5.2'\n";
+        std::fs::write(&path, original).expect("seed config");
+        let settings_path = home.path().join("settings.toml");
+        let old_settings = "default_provider = 'deepseek'\n[provider_models]\ndeepseek = 'deepseek-v4-pro'\nzai = 'GLM-5.4'\n";
+        std::fs::write(&settings_path, old_settings).expect("seed legacy choices");
+        let bundle = parse_bundle_str(
+            "schema_version = 1\nkind = 'codewhale.portable-config'\n[global]\nprovider = 'zai'\ndefault_text_model = 'GLM-5.3'\n",
+            "route.toml",
+        ).expect("route bundle");
+        let mut store = ConfigStore::load(Some(path.clone())).expect("store");
+        let prepared = prepare_import(&bundle, &store, BundleScope::Global).expect("preview");
+        assert!(
+            prepared
+                .plan
+                .changed
+                .iter()
+                .any(|key| key == "global.default_text_model")
+        );
+        assert!(
+            !prepared.plan.is_no_op(),
+            "the old slot still masks the root value"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+        assert_eq!(
+            std::fs::read_to_string(&settings_path).unwrap(),
+            old_settings
+        );
+
+        // Consent commits exactly the preview even if the archived input moves.
+        let later_settings = "default_provider = 'openai'\n";
+        std::fs::write(&settings_path, later_settings).unwrap();
+        apply_prepared_bundle(prepared, &mut store, save_candidate).expect("commit preview");
+        let saved: toml::Value = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved["provider"].as_str(), Some("zai"));
+        assert_eq!(saved["providers"]["zai"]["model"].as_str(), Some("GLM-5.3"));
+        assert_eq!(
+            saved["providers"]["deepseek"]["model"].as_str(),
+            Some("deepseek-v4-pro")
+        );
+        assert_eq!(saved["route_preferences_version"].as_integer(), Some(1));
+        assert_eq!(
+            std::fs::read_to_string(settings_path).unwrap(),
+            later_settings
+        );
+        assert_eq!(
+            codewhale_tui::route_preferences::get(&path, "provider")
+                .unwrap()
+                .as_deref(),
+            Some("zai")
+        );
+        assert_eq!(
+            codewhale_tui::route_preferences::get(&path, "model")
+                .unwrap()
+                .as_deref(),
+            Some("GLM-5.3")
+        );
+        let again = prepare_import(&bundle, &store, BundleScope::Global).expect("repeat preview");
+        assert!(again.plan.is_no_op(), "{:?}", again.plan);
+    }
+
+    #[test]
+    fn conflicting_import_model_aliases_fail_before_any_write() {
+        let dir = tempfile::tempdir().expect("config dir");
+        let path = dir.path().join("config.toml");
+        let original = "provider = 'zai'\n[providers.zai]\nmodel = 'GLM-5.2'\n";
+        std::fs::write(&path, original).unwrap();
+        let mut store = ConfigStore::load(Some(path.clone())).unwrap();
+        let bundle = parse_bundle_str(
+            "schema_version = 1\nkind = 'codewhale.portable-config'\n[global]\ndefault_text_model = 'GLM-5.3'\n[global.providers.zai]\nmodel = 'GLM-5.4'\n",
+            "conflict.toml",
+        ).unwrap();
+        let prepared = prepare_import(&bundle, &store, BundleScope::Global).unwrap();
+        assert!(
+            prepared
+                .plan
+                .conflicting
+                .iter()
+                .any(|key| key == "global.providers.zai.model")
+        );
+        let error = apply_prepared_bundle(prepared, &mut store, save_candidate)
+            .expect_err("conflicting aliases must be refused");
+        assert!(error.to_string().contains("conflicting"));
+        assert!(!error.to_string().contains("GLM-5.4"));
+        assert_eq!(std::fs::read_to_string(path).unwrap(), original);
+        assert_eq!(
+            std::fs::read_dir(dir.path()).unwrap().count(),
+            1,
+            "no backup or staged write before validation"
+        );
+    }
+
+    #[test]
+    fn prepared_import_keeps_configstore_cas_against_concurrent_edits() {
+        let dir = tempfile::tempdir().expect("config dir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "provider = 'deepseek'\n").unwrap();
+        let mut store = ConfigStore::load(Some(path.clone())).unwrap();
+        let prepared = prepare_import(&sample_bundle(), &store, BundleScope::Global).unwrap();
+        let concurrent = "provider = 'openai'\n# concurrent writer\n";
+        std::fs::write(&path, concurrent).unwrap();
+        apply_prepared_bundle(prepared, &mut store, save_candidate)
+            .expect_err("stale preview must fail closed");
+        assert_eq!(std::fs::read_to_string(path).unwrap(), concurrent);
+    }
+
+    #[test]
+    fn route_migration_receipts_are_local_and_not_portable() {
+        let bundle = parse_bundle_str(
+            "schema_version = 1\nkind = 'codewhale.portable-config'\n[global]\nroute_preferences_version = 1\n[global.route_preferences_migration]\nprevious_provider = 'zai'\n",
+            "receipt.toml",
+        ).unwrap();
+        assert_eq!(find_rejected_entries(&bundle).len(), 2);
+        let config: ConfigToml = toml::from_str(
+            "route_preferences_version = 1\n[route_preferences_migration]\nprevious_provider = 'zai'\n",
+        ).unwrap();
+        let exported =
+            export_bundle(&config, BundleScope::Global, BundleMetadata::default()).unwrap();
+        assert!(
+            !exported
+                .global
+                .entries
+                .contains_key("route_preferences_version")
+        );
+        assert!(
+            !exported
+                .global
+                .entries
+                .contains_key("route_preferences_migration")
+        );
+    }
+
+    #[test]
+    fn canonical_route_export_omits_shadowed_roots_and_round_trips_provider_slots() {
+        let config: ConfigToml = toml::from_str(
+            "provider = 'zai'\ndefault_text_model = 'deepseek-v4-pro'\nmodel = 'old-root-model'\n[providers.zai]\nmodel = 'GLM-5.3'\n[providers.deepseek]\nmodel = 'deepseek-v4-flash'\n[providers.openai]\nmodel = 'gpt-4.1'\n",
+        ).unwrap();
+        let bundle =
+            export_bundle(&config, BundleScope::Global, BundleMetadata::default()).unwrap();
+        assert!(!bundle.global.entries.contains_key("model"));
+        assert!(!bundle.global.entries.contains_key("default_text_model"));
+        let dir = tempfile::tempdir().expect("config dir");
+        let mut store = ConfigStore::load(Some(dir.path().join("config.toml"))).unwrap();
+        let receipt = apply_bundle(&bundle, &mut store, BundleScope::Global, dir.path())
+            .expect("canonical export must import without alias conflicts");
+        assert!(receipt.plan.conflicting.is_empty());
+        assert_eq!(store.config.provider_id(), "zai");
+        assert_eq!(
+            store.config.get_value("providers.zai.model").as_deref(),
+            Some("GLM-5.3")
+        );
+        assert_eq!(
+            store
+                .config
+                .get_value("providers.deepseek.model")
+                .as_deref(),
+            Some("deepseek-v4-flash")
+        );
+        assert_eq!(
+            store.config.get_value("providers.openai.model").as_deref(),
+            Some("gpt-4.1")
+        );
+        let again = export_bundle(
+            &store.config,
+            BundleScope::Global,
+            BundleMetadata::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            serialize_bundle(&again).unwrap(),
+            serialize_bundle(&bundle).unwrap()
+        );
+
+        let root_only: ConfigToml =
+            toml::from_str("default_text_model = 'deepseek-v4-pro'\n").unwrap();
+        let legacy =
+            export_bundle(&root_only, BundleScope::Global, BundleMetadata::default()).unwrap();
+        assert_eq!(
+            legacy
+                .global
+                .entries
+                .get("default_text_model")
+                .and_then(toml::Value::as_str),
+            Some("deepseek-v4-pro")
+        );
+        let literal_custom = config_from_document(
+            "provider = 'custom'\nbase_url = 'https://literal.example.test/v1'\ndefault_text_model = 'LiteralRootModel'\n",
+        ).unwrap();
+        let literal_export = export_bundle(
+            &literal_custom,
+            BundleScope::Global,
+            BundleMetadata::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            literal_export
+                .global
+                .entries
+                .get("default_text_model")
+                .and_then(toml::Value::as_str),
+            Some("LiteralRootModel")
+        );
+    }
+
+    #[test]
+    fn imports_preserve_exact_builtin_shadowing_custom_provider_identity() {
+        let dir = tempfile::tempdir().expect("config dir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "provider = 'OpenAI'\n[providers.OpenAI]\nkind = 'openai-compatible'\nbase_url = 'https://custom.example.test/v1'\nmodel = 'LiteralOldModel'\n[providers.openai]\nmodel = 'gpt-4.1'\n",
+        ).unwrap();
+        let mut store = ConfigStore::load(Some(path.clone())).unwrap();
+        for (entries, expected_model) in [
+            ("verbosity = 'quiet'\n", "LiteralOldModel"),
+            (
+                "provider = 'OpenAI'\nmodel = 'LiteralNewModel'\noutput_mode = 'plain'\n",
+                "LiteralNewModel",
+            ),
+        ] {
+            let bundle = parse_bundle_str(
+                &format!(
+                    "schema_version = 1\nkind = 'codewhale.portable-config'\n[global]\n{entries}"
+                ),
+                "custom.toml",
+            )
+            .unwrap();
+            apply_bundle(&bundle, &mut store, BundleScope::Global, dir.path()).unwrap();
+            let saved: toml::Value =
+                toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            assert_eq!(saved["provider"].as_str(), Some("OpenAI"));
+            assert_eq!(
+                saved["providers"]["OpenAI"]["model"].as_str(),
+                Some(expected_model)
+            );
+            assert_eq!(
+                saved["providers"]["OpenAI"]["base_url"].as_str(),
+                Some("https://custom.example.test/v1")
+            );
+            assert_eq!(
+                saved["providers"]["openai"]["model"].as_str(),
+                Some("gpt-4.1")
+            );
+            store.reload().unwrap();
+            assert_eq!(
+                store.config.provider,
+                codewhale_config::ProviderKind::Custom
+            );
+            assert_eq!(store.config.provider_id(), "OpenAI");
+            assert_eq!(
+                codewhale_tui::route_preferences::get(&path, "provider")
+                    .unwrap()
+                    .as_deref(),
+                Some("OpenAI")
+            );
+        }
+    }
+
+    #[test]
+    fn imports_preserve_regional_selector_and_canonical_model_slot() {
+        let dir = tempfile::tempdir().expect("config dir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "provider = 'deepseek-cn'\n[providers.deepseek_cn]\nmodel = 'deepseek-v4-pro'\n[providers.deepseek]\nmodel = 'deepseek-v4-pro'\n",
+        ).unwrap();
+        let mut store = ConfigStore::load(Some(path.clone())).unwrap();
+        for (entries, expected_model) in [
+            ("verbosity = 'quiet'\n", "deepseek-v4-pro"),
+            (
+                "'providers.deepseek_cn.model' = 'deepseek-v4-flash'\n",
+                "deepseek-v4-flash",
+            ),
+        ] {
+            let bundle = parse_bundle_str(
+                &format!(
+                    "schema_version = 1\nkind = 'codewhale.portable-config'\n[global]\n{entries}"
+                ),
+                "regional.toml",
+            )
+            .unwrap();
+            apply_bundle(&bundle, &mut store, BundleScope::Global, dir.path()).unwrap();
+            let saved: toml::Value =
+                toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            assert_eq!(saved["provider"].as_str(), Some("deepseek-cn"));
+            assert_eq!(
+                saved["providers"]["deepseek_cn"]["model"].as_str(),
+                Some(expected_model)
+            );
+            assert_eq!(
+                saved["providers"]["deepseek"]["model"].as_str(),
+                Some("deepseek-v4-pro")
+            );
+            store.reload().unwrap();
+            assert_eq!(store.config.provider_id(), "deepseek-cn");
+            assert_eq!(
+                codewhale_tui::route_preferences::get(&path, "model")
+                    .unwrap()
+                    .as_deref(),
+                Some(expected_model)
+            );
+            let mut export_config = store.config.clone();
+            export_config.default_text_model = Some("stale-regional-root".to_string());
+            let exported = export_bundle(
+                &export_config,
+                BundleScope::Global,
+                BundleMetadata::default(),
+            )
+            .unwrap();
+            assert!(!exported.global.entries.contains_key("default_text_model"));
+            assert_eq!(
+                exported
+                    .global
+                    .entries
+                    .get("provider")
+                    .and_then(toml::Value::as_str),
+                Some("deepseek-cn")
+            );
+        }
     }
 
     #[test]
@@ -2083,17 +2527,14 @@ output_mode = "plain"
         let path = dir.path().join("config.toml");
         let mut store = ConfigStore::load(Some(path.clone())).expect("missing config loads");
 
-        let error = apply_bundle_with(
-            &sample_bundle(),
-            &mut store,
-            BundleScope::Global,
-            dir.path(),
-            |bundle, store, scope, workspace, target_written| {
-                apply_entries(bundle, store, scope, workspace, target_written)?;
+        let prepared =
+            prepare_import(&sample_bundle(), &store, BundleScope::Global).expect("prepare import");
+        let error =
+            apply_prepared_bundle(prepared, &mut store, |candidate, store, target_written| {
+                save_candidate(candidate, store, target_written)?;
                 bail!("forced failure after the new document was saved")
-            },
-        )
-        .expect_err("forced post-save failure must roll back");
+            })
+            .expect_err("forced post-save failure must roll back");
 
         assert!(error.to_string().contains("rolled back"), "{error:#}");
         assert!(

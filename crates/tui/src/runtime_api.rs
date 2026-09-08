@@ -6731,8 +6731,7 @@ async fn list_provider_models(
 /// the runtime resolves the active model from `[providers.<id>].model` (or
 /// the provider's built-in default) and **does not** persist a `model` key,
 /// so the user's per-provider config is preserved. When provided, the model
-/// is normalized, persisted for the target provider, and (for DeepSeek
-/// providers) also pinned as `default_text_model`.
+/// is normalized and persisted in the target provider's canonical model slot.
 #[derive(Debug, Deserialize, Default)]
 struct SwitchProviderRequest {
     #[serde(default)]
@@ -6779,10 +6778,9 @@ struct SwitchProviderResponse {
 /// Persistence mirrors `switch_provider` (ui.rs:9390-9410):
 /// - `provider` is always persisted (root `provider` key).
 /// - `model` is persisted **only** when `model_override.is_some()`, via
-///   `persist_provider_model_key` (writes `[providers.<id>].model`, or the
-///   root `default_text_model` for DeepSeek). The `Settings` provider-model
-///   map is updated the same way, including the DeepSeek-specific
-///   `default_model` pin.
+///   `persist_provider_model_key` (writes `[providers.<id>].model`, retaining
+///   the root field only for a legacy literal custom route). Provider and model
+///   are committed together through the canonical Config writer.
 /// - Config is reloaded from disk and synced to active engines via
 ///   `runtime_threads.reload_config`, exactly like `POST /v1/config/reload`.
 async fn switch_provider(
@@ -6806,13 +6804,26 @@ async fn switch_provider(
     // active route — except here we validate against the target provider,
     // because the active route is about to change.
     // Read normalization and persistence identity from the same route snapshot.
-    let (model_override, provider_identity) = {
+    let (target, model_override, provider_identity) = {
         let config = state.config.read();
+        let identity = config
+            .resolve_provider_pin_identity(&id)
+            .map_err(ApiError::bad_request)?;
+        let mut scoped = config.clone();
+        scoped.scope_to_provider_identity(&identity);
         let model = match req.model.as_deref().map(str::trim) {
             None | Some("") => None,
-            Some(raw) => Some(normalize_runtime_config_model(&config, target, raw)?),
+            Some(raw) => Some(normalize_runtime_config_model(
+                &scoped,
+                identity.provider,
+                raw,
+            )?),
         };
-        (model, config.provider_identity_for(target))
+        (
+            identity.provider,
+            model,
+            identity.persisted_id().unwrap_or(&identity.key).to_string(),
+        )
     };
 
     // Persist `provider` (always) + `model` (only when explicitly given).
@@ -6820,34 +6831,13 @@ async fn switch_provider(
     // model arg) MUST NOT write a `model` key, otherwise the user's
     // per-provider `[providers.<id>].model` config gets overwritten with
     // whatever the runtime resolves as the default.
-    config_persistence::persist_root_string_key(
+    config_persistence::persist_provider_selection(
         state.config_path.as_deref(),
-        "provider",
+        target,
         &provider_identity,
+        model_override.as_deref(),
     )
-    .map_err(|e| ApiError::internal(format!("Failed to persist provider: {e}")))?;
-
-    if let Some(ref model) = model_override {
-        config_persistence::persist_provider_model_key(
-            state.config_path.as_deref(),
-            target,
-            &provider_identity,
-            model,
-        )
-        .map_err(|e| ApiError::internal(format!("Failed to persist model: {e}")))?;
-
-        // Mirror the TUI's Settings update (ui.rs:9398-9406): record the
-        // provider→model mapping, and for DeepSeek also pin the global
-        // `default_model`. Failures here are non-fatal — the config.toml
-        // write above is the source of truth.
-        let _ = crate::settings::Settings::transact(|settings| {
-            settings.set_model_for_provider(target.as_str(), model);
-            if matches!(target, ApiProvider::Deepseek | ApiProvider::DeepseekCN) {
-                let _ = settings.set("default_model", model);
-            }
-            Ok(())
-        });
-    }
+    .map_err(|e| ApiError::internal(format!("Failed to persist provider selection: {e}")))?;
 
     // Reload config from disk and sync to active engines. This matches
     // `POST /v1/config/reload` exactly: load → validate thread routes →
@@ -7004,13 +6994,14 @@ async fn get_config(
     let reasoning_effort = config.reasoning_effort().unwrap_or("auto").to_string();
     let cost_currency = settings.cost_currency.clone();
     let default_mode = settings.default_mode.as_str().to_string();
-    // This field is the legacy root DeepSeek fallback, not the active
-    // provider model above. Keeping the two explicit prevents a Z.ai model
-    // update from silently rewriting a future DeepSeek route.
-    let default_model = config
-        .default_text_model
-        .clone()
-        .unwrap_or_else(|| DEFAULT_TEXT_MODEL.to_string());
+    // This field remains the DeepSeek preference even when another provider
+    // is active. The root field is a legacy fallback for unmigrated configs.
+    let identity = config
+        .resolve_provider_pin_identity("deepseek")
+        .map_err(ApiError::bad_request)?;
+    let mut deepseek_config = config.clone();
+    deepseek_config.scope_to_provider_identity(&identity);
+    let default_model = deepseek_config.default_model();
     let base_url = config.deepseek_base_url().to_string();
 
     Ok(Json(GuiConfigResponse {
@@ -7115,7 +7106,15 @@ async fn set_config(
             }
             _ => {}
         }
-        (provider, config.provider_identity_for(provider))
+        let identity = if key == "model" {
+            let identity = config
+                .active_provider_identity(provider)
+                .map_err(ApiError::bad_request)?;
+            identity.persisted_id().unwrap_or(&identity.key).to_string()
+        } else {
+            config.provider_identity_for(provider)
+        };
+        (provider, identity)
     };
 
     // All persisted config keys require a reload to take effect in the
@@ -7135,9 +7134,10 @@ async fn set_config(
                 &active_route.1,
                 &value,
             ),
-            "default_model" => config_persistence::persist_root_string_key(
+            "default_model" => config_persistence::persist_provider_model_key(
                 config_path,
-                "default_text_model",
+                ApiProvider::Deepseek,
+                ApiProvider::Deepseek.as_str(),
                 &value,
             ),
             "reasoning_effort" => {
@@ -7156,7 +7156,7 @@ async fn set_config(
                 // GUI gets a clear error instead of silently persisting an
                 // unknown value that `Config::api_provider()` would later
                 // ignore (falling back to DeepSeek).
-                let parsed = ApiProvider::parse(&value).ok_or_else(|| {
+                ApiProvider::parse(&value).ok_or_else(|| {
                     ApiError::bad_request(format!(
                         "Unknown provider '{value}'. Call GET /v1/providers for the list of supported ids."
                     ))
@@ -7167,8 +7167,8 @@ async fn set_config(
                     // Keep the in-memory provider in step with the persisted
                     // value so a following set_config(model) resolves the new
                     // provider's table instead of clobbering the previous
-                    // provider's root default_text_model (#4658 follow-up).
-                    state.config.write().provider = Some(parsed.as_str().to_string());
+                    // provider's model slot (#4658 follow-up).
+                    state.config.write().provider = Some(value.clone());
                 }
                 result
             }
@@ -7853,7 +7853,9 @@ base_url = "http://127.0.0.1:9/v1"
     }
 
     fn isolate_model_environment() -> Vec<EnvVarGuard> {
-        [
+        let mut guards: Vec<_> = [
+            "CODEWHALE_CONFIG_PATH",
+            "DEEPSEEK_CONFIG_PATH",
             "CODEWHALE_BASE_URL",
             "DEEPSEEK_BASE_URL",
             "CODEWHALE_PROVIDER",
@@ -7867,10 +7869,16 @@ base_url = "http://127.0.0.1:9/v1"
             "TOGETHER_MODEL",
             "CODEWHALE_PROFILE",
             "DEEPSEEK_PROFILE",
+            "OLLAMA_MODEL",
+            "OLLAMA_CLOUD_MODEL",
+            "OLLAMA_BASE_URL",
+            "OLLAMA_CLOUD_BASE_URL",
         ]
         .into_iter()
         .map(EnvVarGuard::remove)
-        .collect()
+        .collect();
+        guards.push(EnvVarGuard::set("CODEWHALE_DISABLE_CLOUD_FACTS", "1"));
+        guards
     }
 
     async fn serve_fixture(
@@ -7957,13 +7965,9 @@ base_url = "http://127.0.0.1:9/v1"
 
     fn assert_declared_route(config_path: &FsPath, provider: ApiProvider, model: &str) {
         let config = Config::load(Some(config_path.to_path_buf()), None).expect("reloaded config");
-        let persisted = if provider == ApiProvider::Deepseek {
-            config.default_text_model.as_deref()
-        } else {
-            config
-                .provider_config_for(provider)
-                .and_then(|entry| entry.model.as_deref())
-        };
+        let persisted = config
+            .provider_config_for(provider)
+            .and_then(|entry| entry.model.as_deref());
         assert_eq!(persisted, Some(model));
         let selected = provider_default_model_for_api(&config, provider, provider);
         assert_eq!(selected, model);
@@ -7976,6 +7980,366 @@ base_url = "http://127.0.0.1:9/v1"
             route.context_window.source,
             crate::route_runtime::ContextWindowSource::UserDeclared
         );
+    }
+
+    fn write_remembered_selection_fixture(home: &FsPath, config_path: &FsPath) -> Result<()> {
+        fs::create_dir_all(home)?;
+        fs::create_dir_all(config_path.parent().expect("config parent"))?;
+        fs::write(
+            home.join("settings.toml"),
+            "default_provider = \"zai\"\n[provider_models]\nzai = \"GLM-5.3\"\n",
+        )?;
+        fs::write(
+            config_path,
+            r#"provider = "deepseek"
+default_text_model = "deepseek-v4-pro"
+telemetry = false
+
+[cloud_facts]
+enabled = false
+
+[providers.zai]
+base_url = "https://api.z.ai/api/coding/paas/v4"
+model = "GLM-5.2"
+"#,
+        )?;
+        Ok(())
+    }
+
+    async fn assert_catalog_and_new_thread_selection(
+        addr: SocketAddr,
+        provider: &str,
+        model: &str,
+    ) -> Result<Value> {
+        let client = crate::tls::reqwest_client();
+        let catalog = client
+            .get(format!("http://{addr}/v1/providers"))
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<Value>()
+            .await?;
+        assert_eq!(catalog["current"], provider);
+        let entry = catalog["providers"]
+            .as_array()
+            .expect("provider catalog")
+            .iter()
+            .find(|entry| entry["id"] == provider)
+            .expect("selected provider");
+        assert_eq!(entry["default_model"], model);
+        let config = client
+            .get(format!("http://{addr}/v1/config"))
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<Value>()
+            .await?;
+        assert_eq!(config["model"], model);
+        if provider == "deepseek" {
+            assert_eq!(config["default_model"], model);
+        }
+        // Creation only saves the route; this fixture never starts a turn or
+        // contacts any provider, including the official catalog URLs above.
+        let response = client
+            .post(format!("http://{addr}/v1/threads"))
+            .json(&json!({}))
+            .send()
+            .await?;
+        let status = response.status();
+        let thread = response.json::<Value>().await?;
+        assert_eq!(status, StatusCode::CREATED, "{thread}");
+        assert_eq!(thread["model_provider"], provider);
+        assert_eq!(thread["model"], model);
+        assert_eq!(thread["model_provider_id"], entry["model_provider_id"]);
+        Ok(thread)
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn remembered_selection_aligns_catalog_and_new_thread_after_load() -> Result<()> {
+        let _env = lock_test_env();
+        let _live = crate::provider_lake::lock_live_snapshot();
+        let root = tempfile::tempdir()?;
+        let _home = EnvVarGuard::set("CODEWHALE_HOME", root.path());
+        let _model_environment = isolate_model_environment();
+        crate::provider_catalog_live::reset_cache_for_test();
+        crate::provider_lake::clear_live_snapshot();
+        let config_path = root.path().join("config.toml");
+        write_remembered_selection_fixture(root.path(), &config_path)?;
+        let original_config = fs::read(&config_path)?;
+        let original_settings = fs::read(root.path().join("settings.toml"))?;
+        let (addr, state, server) = serve_fixture(config_path.clone()).await?;
+        let _shutdown = state.task_manager.shutdown_guard();
+        assert_catalog_and_new_thread_selection(addr, "zai", "GLM-5.3").await?;
+        post_json(addr, "/v1/config/reload", json!({})).await?;
+        assert_catalog_and_new_thread_selection(addr, "zai", "GLM-5.3").await?;
+        assert_eq!(fs::read(&config_path)?, original_config);
+        assert_eq!(
+            fs::read(root.path().join("settings.toml"))?,
+            original_settings
+        );
+        server.abort();
+        state.task_manager.shutdown_and_wait().await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn explicit_runtime_selections_migrate_legacy_memory_into_config_once() -> Result<()> {
+        let _env = lock_test_env();
+        let _live = crate::provider_lake::lock_live_snapshot();
+        let root = tempfile::tempdir()?;
+        let _home = EnvVarGuard::set("CODEWHALE_HOME", root.path());
+        let _model_environment = isolate_model_environment();
+        crate::provider_catalog_live::reset_cache_for_test();
+        crate::provider_lake::clear_live_snapshot();
+        let config_path = root.path().join("config.toml");
+        write_remembered_selection_fixture(root.path(), &config_path)?;
+        let (addr, state, server) = serve_fixture(config_path.clone()).await?;
+        let _shutdown = state.task_manager.shutdown_guard();
+        let original_thread =
+            assert_catalog_and_new_thread_selection(addr, "zai", "GLM-5.3").await?;
+        let original_settings = fs::read(root.path().join("settings.toml"))?;
+        post_json(
+            addr,
+            "/v1/config",
+            json!({ "key": "model", "value": "GLM-5.2", "persist": false }),
+        )
+        .await?;
+        assert_eq!(
+            fs::read(root.path().join("settings.toml"))?,
+            original_settings
+        );
+        post_json(
+            addr,
+            "/v1/config",
+            json!({ "key": "model", "value": "GLM-5.2", "persist": true }),
+        )
+        .await?;
+        assert_eq!(
+            runtime_request_model(&state.config.read(), None).expect("current default"),
+            "GLM-5.3"
+        );
+        let migrated: toml::Value = toml::from_str(&fs::read_to_string(&config_path)?)?;
+        assert_eq!(migrated["route_preferences_version"].as_integer(), Some(1));
+        assert_eq!(migrated["provider"].as_str(), Some("zai"));
+        assert_eq!(
+            migrated["providers"]["zai"]["model"].as_str(),
+            Some("GLM-5.2")
+        );
+        post_json(addr, "/v1/config/reload", json!({})).await?;
+        assert_catalog_and_new_thread_selection(addr, "zai", "GLM-5.2").await?;
+        let saved_thread = state
+            .runtime_threads
+            .get_thread(original_thread["id"].as_str().expect("thread id"))
+            .await?;
+        assert_eq!(saved_thread.model, "GLM-5.3");
+
+        post_json(
+            addr,
+            "/v1/providers/deepseek/switch",
+            json!({ "model": "deepseek-v4-flash" }),
+        )
+        .await?;
+        assert_catalog_and_new_thread_selection(addr, "deepseek", "deepseek-v4-flash").await?;
+        post_json(
+            addr,
+            "/v1/config",
+            json!({ "key": "default_model", "value": "deepseek-v4-pro", "persist": true }),
+        )
+        .await?;
+        post_json(addr, "/v1/config/reload", json!({})).await?;
+        assert_catalog_and_new_thread_selection(addr, "deepseek", "deepseek-v4-pro").await?;
+
+        for (key, value) in [("provider", "zai"), ("model", "GLM-5.3")] {
+            post_json(
+                addr,
+                "/v1/config",
+                json!({ "key": key, "value": value, "persist": true }),
+            )
+            .await?;
+        }
+        post_json(addr, "/v1/config/reload", json!({})).await?;
+        assert_catalog_and_new_thread_selection(addr, "zai", "GLM-5.3").await?;
+        post_json(addr, "/v1/providers/deepseek/switch", json!({})).await?;
+        post_json(addr, "/v1/config/reload", json!({})).await?;
+        assert_catalog_and_new_thread_selection(addr, "deepseek", "deepseek-v4-pro").await?;
+        // The old Settings selection remains unchanged and cannot reassert
+        // itself once Config owns the migrated route preferences.
+        assert_eq!(
+            fs::read(root.path().join("settings.toml"))?,
+            original_settings
+        );
+        server.abort();
+        state.task_manager.shutdown_and_wait().await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn provider_switch_migrates_legacy_selection_before_explicit_choice() -> Result<()> {
+        let _env = lock_test_env();
+        let _live = crate::provider_lake::lock_live_snapshot();
+        let root = tempfile::tempdir()?;
+        let _home = EnvVarGuard::set("CODEWHALE_HOME", root.path());
+        let _model_environment = isolate_model_environment();
+        crate::provider_catalog_live::reset_cache_for_test();
+        crate::provider_lake::clear_live_snapshot();
+        let config_path = root.path().join("config.toml");
+        write_remembered_selection_fixture(root.path(), &config_path)?;
+        let original_settings = fs::read(root.path().join("settings.toml"))?;
+        let (addr, state, server) = serve_fixture(config_path.clone()).await?;
+        let _shutdown = state.task_manager.shutdown_guard();
+        post_json(
+            addr,
+            "/v1/providers/deepseek/switch",
+            json!({ "model": "deepseek-v4-flash" }),
+        )
+        .await?;
+        let migrated: toml::Value = toml::from_str(&fs::read_to_string(&config_path)?)?;
+        assert_eq!(migrated["route_preferences_version"].as_integer(), Some(1));
+        assert_eq!(migrated["provider"].as_str(), Some("deepseek"));
+        assert_eq!(
+            migrated["providers"]["deepseek"]["model"].as_str(),
+            Some("deepseek-v4-flash")
+        );
+        assert_eq!(
+            migrated["providers"]["zai"]["model"].as_str(),
+            Some("GLM-5.3")
+        );
+        post_json(addr, "/v1/config/reload", json!({})).await?;
+        assert_catalog_and_new_thread_selection(addr, "deepseek", "deepseek-v4-flash").await?;
+        assert_eq!(
+            fs::read(root.path().join("settings.toml"))?,
+            original_settings
+        );
+        server.abort();
+        state.task_manager.shutdown_and_wait().await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn runtime_model_writes_keep_legacy_hosted_ollama_identity() -> Result<()> {
+        #[derive(Deserialize)]
+        struct Selection {
+            provider: String,
+            model: String,
+            persisted: bool,
+        }
+
+        let _env = lock_test_env();
+        let _live = crate::provider_lake::lock_live_snapshot();
+        let home = tempfile::tempdir()?;
+        let _home = EnvVarGuard::set("CODEWHALE_HOME", home.path());
+        let _model_environment = isolate_model_environment();
+        crate::provider_catalog_live::reset_cache_for_test();
+        crate::provider_lake::clear_live_snapshot();
+        let config_path = home.path().join("config.toml");
+        fs::write(
+            &config_path,
+            "provider = 'ollama'\ntelemetry = false\n[providers.ollama]\nbase_url = 'https://ollama.com/v1'\nmodel = 'old-cloud-model'\n[providers.ollama_cloud]\nmodel = 'explicit-cloud-model'\n",
+        )?;
+        let settings = "default_provider = 'ollama'\n[provider_models]\nollama-cloud = 'remembered-cloud-model'\n";
+        fs::write(home.path().join("settings.toml"), settings)?;
+        let (addr, state, server) = serve_fixture(config_path.clone()).await?;
+        let _shutdown = state.task_manager.shutdown_guard();
+        assert_eq!(
+            state.config.read().default_model(),
+            "remembered-cloud-model"
+        );
+        post_json(
+            addr,
+            "/v1/config",
+            json!({"key": "model", "value": "current-cloud-model", "persist": true}),
+        )
+        .await?;
+        post_json(addr, "/v1/config/reload", json!({})).await?;
+        assert_eq!(state.config.read().default_model(), "current-cloud-model");
+        for (selector, model) in [
+            ("ollama", "legacy-choice"),
+            ("ollama-cloud", "explicit-choice"),
+            ("ollama", "legacy-final"),
+        ] {
+            let selection: Selection = serde_json::from_value(
+                post_json(
+                    addr,
+                    &format!("/v1/providers/{selector}/switch"),
+                    json!({"model": model}),
+                )
+                .await?,
+            )?;
+            assert_eq!(selection.provider, "ollama-cloud");
+            assert_eq!(selection.model, model);
+            assert!(selection.persisted);
+            post_json(addr, "/v1/config/reload", json!({})).await?;
+            let config = state.config.read();
+            let identity = config
+                .active_provider_identity(ApiProvider::OllamaCloud)
+                .map_err(anyhow::Error::msg)?;
+            assert_eq!(identity.persisted_id(), Some(selector));
+            assert_eq!(config.default_model(), model);
+        }
+        let document: toml::Value = toml::from_str(&fs::read_to_string(&config_path)?)?;
+        assert_eq!(document["route_preferences_version"].as_integer(), Some(1));
+        assert_eq!(document["provider"].as_str(), Some("ollama"));
+        assert_eq!(
+            document["providers"]["ollama"]["model"].as_str(),
+            Some("legacy-final")
+        );
+        assert_eq!(
+            document["providers"]["ollama_cloud"]["model"].as_str(),
+            Some("explicit-choice")
+        );
+        assert_eq!(
+            fs::read_to_string(home.path().join("settings.toml"))?,
+            settings
+        );
+        let thread =
+            assert_catalog_and_new_thread_selection(addr, "ollama-cloud", "legacy-final").await?;
+        assert_eq!(thread["model_provider_id"], "ollama");
+        server.abort();
+        state.task_manager.shutdown_and_wait().await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn scoped_runtime_selections_leave_device_memory_unchanged() -> Result<()> {
+        let _env = lock_test_env();
+        let _live = crate::provider_lake::lock_live_snapshot();
+        let root = tempfile::tempdir()?;
+        let home = root.path().join("home");
+        let _home = EnvVarGuard::set("CODEWHALE_HOME", &home);
+        let _model_environment = isolate_model_environment();
+        crate::provider_catalog_live::reset_cache_for_test();
+        crate::provider_lake::clear_live_snapshot();
+        let config_path = root.path().join("project/config.toml");
+        write_remembered_selection_fixture(&home, &config_path)?;
+        let original_settings = fs::read(home.join("settings.toml"))?;
+        let (addr, state, server) = serve_fixture(config_path).await?;
+        let _shutdown = state.task_manager.shutdown_guard();
+        assert_catalog_and_new_thread_selection(addr, "deepseek", "deepseek-v4-pro").await?;
+        for (key, value) in [
+            ("provider", "zai"),
+            ("model", "GLM-5.1"),
+            ("provider", "deepseek"),
+            ("default_model", "deepseek-v4-flash"),
+        ] {
+            post_json(
+                addr,
+                "/v1/config",
+                json!({ "key": key, "value": value, "persist": true }),
+            )
+            .await?;
+        }
+        post_json(
+            addr,
+            "/v1/providers/zai/switch",
+            json!({ "model": "GLM-5.2" }),
+        )
+        .await?;
+        post_json(addr, "/v1/config/reload", json!({})).await?;
+        assert_catalog_and_new_thread_selection(addr, "zai", "GLM-5.2").await?;
+        assert_eq!(fs::read(home.join("settings.toml"))?, original_settings);
+        server.abort();
+        state.task_manager.shutdown_and_wait().await?;
+        Ok(())
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -8071,7 +8435,9 @@ base_url = "http://127.0.0.1:9/v1"
         post_json(addr, "/v1/config/reload", json!({})).await?;
         let config = Config::load(Some(config_path), None)?;
         assert_eq!(
-            config.default_text_model.as_deref(),
+            config
+                .provider_config_for(ApiProvider::Deepseek)
+                .and_then(|provider| provider.model.as_deref()),
             Some("deepseek-v4-pro")
         );
         let selected =

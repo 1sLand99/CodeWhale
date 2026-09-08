@@ -1413,37 +1413,34 @@ pub struct PendingRouteSave {
     pub fleet: Option<(String, crate::fleet::store::FleetScope)>,
 }
 
-/// Write `provider_identity`/`model` to `settings.toml` as the route the next
+/// Write `provider_identity`/`model` to the user-global config as the route the next
 /// launch should open with, and return the line to show the operator.
-///
-/// `default_provider` is what `App::new` consults first, so pinning it is the
-/// half that actually survives a restart; the provider-scoped entry carries the
-/// model. `default_model` is a DeepSeek-only legacy key and is written only for
-/// those providers, matching how startup reads it back.
-fn persist_route_as_startup_default(provider_identity: &str, model: &str) -> String {
+fn persist_route_as_startup_default(
+    provider: ApiProvider,
+    provider_identity: &str,
+    model: &str,
+) -> String {
     let route = format!("{provider_identity}/{model}");
-    match try_persist_route_as_startup_default(provider_identity, model) {
-        Ok(()) => format!("Remembered {route} as the startup default (settings.toml)."),
+    match try_persist_route_as_startup_default(provider, provider_identity, model) {
+        Ok(()) => format!("Remembered {route} as the startup default (config.toml)."),
         Err(err) => format!("Save failed: {err}"),
     }
 }
 
 fn try_persist_route_as_startup_default(
+    provider: ApiProvider,
     provider_identity: &str,
     model: &str,
 ) -> anyhow::Result<()> {
-    crate::settings::Settings::transact(|settings| {
-        settings.default_provider = Some(provider_identity.to_string());
-        settings.set_model_for_provider(provider_identity, model);
-        if matches!(
-            crate::config::ApiProvider::parse(provider_identity),
-            Some(crate::config::ApiProvider::Deepseek)
-                | Some(crate::config::ApiProvider::DeepseekCN)
-        ) {
-            settings.set("default_model", model)?;
-        }
-        Ok(())
-    })
+    let path = crate::config::home_config_path()
+        .ok_or_else(|| anyhow::anyhow!("Cannot resolve the user-global model configuration."))?;
+    crate::config_persistence::persist_provider_selection(
+        Some(&path),
+        provider,
+        provider_identity,
+        Some(model),
+    )
+    .map(|_| ())
 }
 
 pub struct App {
@@ -2686,7 +2683,20 @@ impl App {
                 }
             }
             RouteSaveChoice::SaveAsDefault => {
-                persist_route_as_startup_default(&pending.provider_identity, &pending.model)
+                let active_model = if self.auto_model { "auto" } else { &self.model };
+                if (pending.provider_identity != self.provider_identity_for_persistence()
+                    && Some(pending.provider_identity.as_str())
+                        != self.provider_id_for_persistence())
+                    || pending.model != active_model
+                {
+                    return "Save failed: the pending provider/model route is no longer active."
+                        .to_string();
+                }
+                let provider_id = match self.provider_selector_for_config_persistence() {
+                    Ok(provider_id) => provider_id,
+                    Err(error) => return format!("Save failed: {error}"),
+                };
+                persist_route_as_startup_default(self.api_provider, provider_id, &pending.model)
             }
             RouteSaveChoice::SessionOnly => {
                 format!("Model {route} kept for this session only — nothing was written.")
@@ -2722,12 +2732,16 @@ impl App {
         } else {
             self.model.clone()
         };
-        try_persist_route_as_startup_default(&provider_identity, &model)?;
+        try_persist_route_as_startup_default(
+            self.api_provider,
+            self.provider_selector_for_config_persistence()?,
+            &model,
+        )?;
         // Resolve the prompt only after the write lands. If persistence fails,
         // keep the retry available instead of discarding the operator's route.
         self.pending_route_save = None;
         Ok(format!(
-            "Remembered {provider_identity}/{model} as the startup default (settings.toml)."
+            "Remembered {provider_identity}/{model} as the startup default (config.toml)."
         ))
     }
 
@@ -3219,7 +3233,6 @@ impl App {
                     self.tr(match subject {
                         StartupDefaultSubject::Mode => MessageId::StartupDefaultSubjectMode,
                         StartupDefaultSubject::Thinking => MessageId::StartupDefaultSubjectThinking,
-                        StartupDefaultSubject::Model => MessageId::StartupDefaultSubjectModel,
                     })
                     .into_owned()
                 })
@@ -6017,6 +6030,22 @@ impl App {
     #[must_use]
     pub(crate) fn provider_id_for_persistence(&self) -> Option<&str> {
         self.provider_exact_id.as_deref()
+    }
+
+    /// Config selectors retain the exact saved slot, including legacy hosted
+    /// Ollama's `ollama` slot. Session receipts keep their canonical identity.
+    pub(crate) fn provider_selector_for_config_persistence(&self) -> anyhow::Result<&str> {
+        self.provider_id_for_persistence()
+            .or_else(|| {
+                (self.api_provider == ApiProvider::Custom
+                    && self
+                        .provider_identity
+                        .eq_ignore_ascii_case(ApiProvider::Custom.as_str()))
+                .then(|| self.provider_identity_for_persistence())
+            })
+            .ok_or_else(|| {
+                anyhow::anyhow!("The active route has no exact provider config identity.")
+            })
     }
 
     pub(crate) fn set_provider_identity(

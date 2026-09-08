@@ -109,6 +109,7 @@ mod retry_status;
 pub mod rlm;
 mod route_billing;
 mod route_budget;
+pub mod route_preferences;
 mod route_receipt;
 mod route_runtime;
 mod runtime_api;
@@ -10718,8 +10719,15 @@ fn merge_project_config_with_approval_baseline(
 
     // String fields a project may legitimately override (model,
     // approval/sandbox tightening, notes path, reasoning effort).
+    if !config.environment_model_applied
+        && let Some(model) = table.get("model").and_then(toml::Value::as_str)
+        && !model.is_empty()
+    {
+        config.default_text_model = Some(model.to_string());
+        config.set_provider_model_override(config.api_provider(), Some(model.to_string()));
+        config.remembered_selection_scope = Some(false);
+    }
     for (key, field) in [
-        ("model", &mut config.default_text_model),
         ("reasoning_effort", &mut config.reasoning_effort),
         ("notes_path", &mut config.notes_path),
     ] {
@@ -18307,6 +18315,61 @@ mod project_config_tests {
                 Some("deepseek-v4-flash")
             );
         });
+    }
+
+    #[test]
+    fn project_model_overrides_saved_selection_but_yields_to_actual_launch_models() {
+        use crate::test_support::{EnvVarGuard, lock_test_env};
+        let _lock = lock_test_env();
+        let home = tempfile::tempdir().unwrap();
+        let _home = EnvVarGuard::set("CODEWHALE_HOME", home.path());
+        let _overrides: Vec<_> = [
+            "CODEWHALE_CONFIG_PATH",
+            "DEEPSEEK_CONFIG_PATH",
+            "CODEWHALE_PROVIDER",
+            "DEEPSEEK_PROVIDER",
+            "CODEWHALE_MODEL",
+            "DEEPSEEK_MODEL",
+            "DEEPSEEK_DEFAULT_TEXT_MODEL",
+            "OPENAI_MODEL",
+        ]
+        .into_iter()
+        .map(EnvVarGuard::remove)
+        .collect();
+        fs::write(
+            home.path().join("config.toml"),
+            "provider = 'openai'\n[providers.openai]\nmodel = 'gpt-5.6-sol'\n",
+        )
+        .unwrap();
+        fs::write(
+            home.path().join("settings.toml"),
+            "[provider_models]\nopenai = 'gpt-5.6-terra'\n",
+        )
+        .unwrap();
+        let workspace = workspace_with_project_config("model = 'gpt-5.6-luna'\n");
+        let mut saved = Config::load(None, None).unwrap();
+        assert_eq!(saved.default_model(), "gpt-5.6-terra");
+        merge_project_config(&mut saved, workspace.path());
+        assert_eq!(saved.default_model(), "gpt-5.6-luna");
+        for key in [
+            "CODEWHALE_MODEL",
+            "DEEPSEEK_MODEL",
+            "DEEPSEEK_DEFAULT_TEXT_MODEL",
+            "OPENAI_MODEL",
+        ] {
+            // Equal to the saved model still counts as an explicit request.
+            let _model = EnvVarGuard::set(key, "gpt-5.6-terra");
+            let mut explicit = Config::load(None, None).unwrap();
+            merge_project_config(&mut explicit, workspace.path());
+            assert_eq!(explicit.default_model(), "gpt-5.6-terra", "{key}");
+            assert_eq!(
+                crate::route_runtime::resolve_runtime_route(&explicit, ApiProvider::Openai, None)
+                    .unwrap()
+                    .model,
+                "gpt-5.6-terra",
+                "{key}"
+            );
+        }
     }
 
     #[test]

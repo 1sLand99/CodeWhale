@@ -7745,9 +7745,9 @@ api_key_env = "ACME_API_KEY"
     }
 
     #[test]
-    fn config_view_saved_deepseek_fallback_stays_settable_without_a_row() {
-        // The backend key stays live even with no row: a saved fallback still
-        // parses, and `/set` still accepts it for cleanup.
+    fn config_view_saved_deepseek_fallback_is_a_read_only_migration_input() {
+        // Old fallback values still parse, but new model choices belong to
+        // the canonical config selection writer.
         let _guard = ConfigSettingsEnvGuard::new("default_model = \"deepseek-v4-pro\"\n");
         let mut app = create_test_app();
         app.api_provider = crate::config::ApiProvider::Zai;
@@ -7758,9 +7758,11 @@ api_key_env = "ACME_API_KEY"
             "saved legacy fallback must not surface a row"
         );
         let mut settings = Settings::default();
-        settings
+        let error = settings
             .set("default_model", "deepseek-v4-pro")
-            .expect("default_model stays settable through `/set` after the row is gone");
+            .expect_err("legacy model settings must not become another writer");
+        assert!(error.to_string().contains("config.toml"));
+        assert!(settings.default_model.is_none());
     }
 
     /// Retired rows leave no section behind: sub-agent depth moved into the

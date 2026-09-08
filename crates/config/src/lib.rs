@@ -855,12 +855,12 @@ pub struct ConfigToml {
     pub default_text_model: Option<String>,
     #[serde(default, deserialize_with = "deserialize_root_provider")]
     pub provider: ProviderKind,
-    /// Exact id for a dynamically named root provider.
+    /// Exact saved selector for a named custom provider or a built-in alias.
     ///
     /// This is runtime parse state rather than a second on-disk key. The
     /// serialized `provider` value is restored by [`ConfigStore`] so a typed
-    /// dispatcher read/write cannot collapse `[providers.<name>]` back to the
-    /// legacy literal `custom` route.
+    /// dispatcher read/write cannot collapse a named route to `custom` or a
+    /// regional selector to its catalog parent.
     #[doc(hidden)]
     #[serde(skip)]
     pub selected_provider_id: Option<String>,
@@ -2733,7 +2733,16 @@ impl ConfigToml {
     /// provider selected by the TUI.
     #[must_use]
     pub fn provider_id(&self) -> &str {
-        self.named_custom_provider_id()
+        self.selected_provider_id
+            .as_deref()
+            .filter(|id| {
+                if self.providers.extras.contains_key(*id) {
+                    self.provider == ProviderKind::Custom
+                } else {
+                    self.provider != ProviderKind::Custom
+                        && ProviderKind::parse_config_identity(id) == Some(self.provider)
+                }
+            })
             .unwrap_or_else(|| self.provider.as_str())
     }
 
@@ -2744,6 +2753,7 @@ impl ConfigToml {
         (self.provider == ProviderKind::Custom)
             .then_some(self.selected_provider_id.as_deref())
             .flatten()
+            .filter(|id| self.providers.extras.contains_key(*id))
     }
 
     fn named_custom_provider_table(&self, provider_id: &str) -> Result<&toml::value::Table> {
@@ -2896,14 +2906,28 @@ impl ConfigToml {
         table.remove(leg);
     }
 
-    fn bind_persisted_provider_id(&mut self, provider_id: &str) -> Result<()> {
-        self.selected_provider_id = None;
-        if self.provider != ProviderKind::Custom || provider_id == ProviderKind::Custom.as_str() {
-            return Ok(());
-        }
-
-        self.named_custom_provider_table(provider_id)?;
-        self.selected_provider_id = Some(provider_id.to_string());
+    /// Bind the raw selector after deserializing a document. Exact custom
+    /// tables take precedence over built-in aliases, and regional spellings
+    /// survive later typed saves. This does not apply environment overrides.
+    pub fn bind_persisted_provider_id(&mut self, provider_id: &str) -> Result<()> {
+        let provider_id = provider_id.trim();
+        let parsed = ProviderKind::parse_config_identity(provider_id);
+        let provider = if parsed != Some(ProviderKind::Antigravity)
+            && self.providers.extras.contains_key(provider_id)
+        {
+            self.named_custom_provider_table(provider_id)?;
+            ProviderKind::Custom
+        } else if let Some(provider) = parsed {
+            provider
+        } else {
+            self.named_custom_provider_table(provider_id)?;
+            ProviderKind::Custom
+        };
+        self.provider = provider;
+        self.selected_provider_id = (provider_id != provider.as_str()
+            && (provider != ProviderKind::Custom
+                || self.providers.extras.contains_key(provider_id)))
+        .then(|| provider_id.to_string());
         Ok(())
     }
 
@@ -3105,24 +3129,15 @@ impl ConfigToml {
 
         match key {
             "provider" => {
-                if let Some(provider) = ProviderKind::parse_config_identity(value) {
-                    if provider == ProviderKind::Antigravity {
-                        bail!(LEGACY_ANTIGRAVITY_TOMBSTONE_MESSAGE);
-                    }
-                    self.provider = provider;
-                    self.selected_provider_id = None;
-                } else {
-                    let provider_id = value.trim();
-                    self.named_custom_provider_table(provider_id)
-                        .with_context(|| {
-                            format!(
-                                "unknown provider '{value}': expected {} or a configured custom provider",
-                                ProviderKind::names_hint()
-                            )
-                        })?;
-                    self.provider = ProviderKind::Custom;
-                    self.selected_provider_id = Some(provider_id.to_string());
+                if ProviderKind::parse_config_identity(value) == Some(ProviderKind::Antigravity) {
+                    bail!(LEGACY_ANTIGRAVITY_TOMBSTONE_MESSAGE);
                 }
+                self.bind_persisted_provider_id(value).with_context(|| {
+                    format!(
+                        "unknown provider '{value}': expected {} or a configured custom provider",
+                        ProviderKind::names_hint()
+                    )
+                })?;
             }
             "api_key" => self.api_key = Some(value.to_string()),
             "base_url" => self.base_url = Some(value.to_string()),
@@ -5394,6 +5409,14 @@ fn parse_config_toml_str(contents: &str) -> Result<ConfigToml, toml::de::Error> 
 }
 
 impl ConfigStore {
+    /// The validated file snapshot captured by the last load or successful
+    /// save. This read-only view preserves literal provider identities that a
+    /// typed serialization may normalize; it excludes unsaved in-memory edits.
+    #[must_use]
+    pub fn original_body(&self) -> Option<&str> {
+        self.original_raw.as_deref()
+    }
+
     pub fn load(path: Option<PathBuf>) -> Result<Self> {
         let path = resolve_config_path(path)?;
         let (config, original_raw) = if checked_path_exists(&path)? {
@@ -5442,7 +5465,8 @@ impl ConfigStore {
         )?;
         let mut serialized =
             toml::to_string_pretty(&self.config).context("failed to serialize config")?;
-        if let Some(provider_id) = self.config.named_custom_provider_id() {
+        let provider_id = self.config.provider_id();
+        if provider_id != self.config.provider.as_str() {
             let mut document = serialized
                 .parse::<toml_edit::DocumentMut>()
                 .context("failed to edit serialized config")?;

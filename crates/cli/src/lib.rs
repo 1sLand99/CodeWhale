@@ -4611,6 +4611,14 @@ fn run_config_command(
     }
     match command {
         ConfigCommand::Get { key } => {
+            if per_run_overrides.is_empty() && codewhale_tui::route_preferences::is_route_key(&key)
+            {
+                if let Some(value) = codewhale_tui::route_preferences::get(store.path(), &key)? {
+                    println!("{value}");
+                    return Ok(());
+                }
+                bail!("key not found: {key}");
+            }
             if codewhale_config::notifications::in_namespace(&key) {
                 let config = codewhale_config::notifications::from_extras(&store.config.extras)?;
                 let keys = if key.eq_ignore_ascii_case("notifications") {
@@ -4646,6 +4654,12 @@ fn run_config_command(
             bail!("key not found: {key}");
         }
         ConfigCommand::Set { key, value } => {
+            if codewhale_tui::route_preferences::is_route_key(&key) {
+                codewhale_tui::route_preferences::set(store.path(), &key, &value)?;
+                store.reload()?;
+                println!("set {key}");
+                return Ok(());
+            }
             if codewhale_config::notifications::in_namespace(&key) {
                 let setting = codewhale_config::notifications::NotificationSetting::required(&key)?;
                 codewhale_config::notifications::NotificationConfigUpdate::parse(setting, &value)?
@@ -4693,6 +4707,12 @@ fn run_config_command(
             Ok(())
         }
         ConfigCommand::Unset { key } => {
+            if codewhale_tui::route_preferences::is_route_key(&key) {
+                codewhale_tui::route_preferences::unset(store.path(), &key)?;
+                store.reload()?;
+                println!("unset {key}");
+                return Ok(());
+            }
             if codewhale_config::notifications::in_namespace(&key) {
                 let setting = codewhale_config::notifications::NotificationSetting::required(&key)?;
                 setting.unset(store.path())?;
@@ -4785,7 +4805,17 @@ fn run_config_doctor(store: &ConfigStore) -> Result<()> {
     let mut warnings = 0;
     let mut errors: Vec<String> = Vec::new();
 
-    let mut unknown: Vec<&String> = store.config.extras.keys().collect();
+    let mut unknown: Vec<&String> = store
+        .config
+        .extras
+        .keys()
+        .filter(|key| {
+            !matches!(
+                key.as_str(),
+                "route_preferences_version" | "route_preferences_migration"
+            )
+        })
+        .collect();
     unknown.sort();
     for key in unknown {
         println!("warning: unrecognized key `{key}` (preserved, never applied)");
@@ -4916,17 +4946,36 @@ fn run_model_command(
             // re-deriving one from an empty flag set. Re-deriving is what made
             // a Z.ai config report `provider: deepseek` (#4832).
             if queried.is_none() && subcommand_provider.is_none() {
-                let source = resolved_runtime.model_source;
+                let saved = if matches!(resolved_runtime.provider_source, ProviderSource::Config)
+                    && !matches!(
+                        resolved_runtime.model_source,
+                        codewhale_config::ModelSource::Cli | codewhale_config::ModelSource::Env
+                    ) {
+                    Some(codewhale_tui::route_preferences::selected_route(
+                        store.path(),
+                    )?)
+                } else {
+                    None
+                };
+                let provider = saved
+                    .as_ref()
+                    .map_or(resolved_runtime.provider.as_str(), |(provider, _, _)| {
+                        provider.as_str()
+                    });
+                let model = saved
+                    .as_ref()
+                    .map_or(resolved_runtime.model.as_str(), |(_, model, _)| {
+                        model.as_str()
+                    });
+                let source = saved
+                    .as_ref()
+                    .map_or(resolved_runtime.model_source, |(_, _, source)| *source);
                 println!(
                     "requested: {}",
-                    if source.is_explicit() {
-                        resolved_runtime.model.as_str()
-                    } else {
-                        ""
-                    }
+                    if source.is_explicit() { model } else { "" }
                 );
-                println!("resolved: {}", resolved_runtime.model);
-                println!("provider: {}", resolved_runtime.provider.as_str());
+                println!("resolved: {model}");
+                println!("provider: {provider}");
                 println!("used_fallback: {}", !source.is_explicit());
                 println!(
                     "provider_source: {}",
@@ -4974,8 +5023,8 @@ fn run_model_command(
                 bail!("Model name cannot be empty");
             }
             let canonical = canonical_model_for_set(trimmed);
-            store.config.default_text_model = Some(canonical.to_string());
-            store.save()?;
+            codewhale_tui::route_preferences::set(store.path(), "model", canonical)?;
+            store.reload()?;
             println!("Default model set to '{canonical}'");
             Ok(())
         }
@@ -6461,6 +6510,84 @@ verbosity = "project-imported"
                 command: ModelCommand::List { provider: None }
             }))
         ));
+    }
+
+    #[test]
+    fn durable_cli_route_edits_use_canonical_config_and_keep_temporary_overrides_unsaved() {
+        let _env = env_lock();
+        let home = tempfile::tempdir().expect("isolated home");
+        let _home = ScopedEnvVar::set("CODEWHALE_HOME", &home.path().to_string_lossy());
+        let _config_path = ScopedEnvVar::remove("CODEWHALE_CONFIG_PATH");
+        let _legacy_config_path = ScopedEnvVar::remove("DEEPSEEK_CONFIG_PATH");
+        let path = home.path().join("config.toml");
+        std::fs::write(&path, "provider = \"deepseek\"\ndefault_text_model = \"deepseek-v4-pro\"\n[providers.zai]\nmodel = \"GLM-5.2\"\n").unwrap();
+        let settings_path = home.path().join("settings.toml");
+        let settings = "default_provider = \"zai\"\n[provider_models]\nzai = \"GLM-5.3\"\n";
+        std::fs::write(&settings_path, settings).unwrap();
+        let mut store = ConfigStore::load(Some(path.clone())).unwrap();
+        let runtime = resolved_runtime_for_test(ProviderKind::Deepseek, ProviderSource::Config);
+        run_model_command(
+            &mut store,
+            ModelCommand::Set {
+                model: "GLM-5.2".into(),
+            },
+            None,
+            &runtime,
+        )
+        .unwrap();
+        assert_eq!(store.config.provider, ProviderKind::Zai);
+        assert_eq!(store.config.providers.zai.model.as_deref(), Some("GLM-5.2"));
+        assert_eq!(
+            store.config.extras["route_preferences_version"].as_integer(),
+            Some(1)
+        );
+
+        run_config_command(
+            &mut store,
+            ConfigCommand::Set {
+                key: "default_text_model".into(),
+                value: "GLM-5.1".into(),
+            },
+            false,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(store.config.providers.zai.model.as_deref(), Some("GLM-5.1"));
+        assert_eq!(
+            codewhale_tui::route_preferences::get(&path, "model")
+                .unwrap()
+                .as_deref(),
+            Some("GLM-5.1")
+        );
+        run_config_command(
+            &mut store,
+            ConfigCommand::Unset {
+                key: "providers.zai.model".into(),
+            },
+            false,
+            &[],
+        )
+        .unwrap();
+        assert!(store.config.providers.zai.model.is_none());
+        assert_eq!(std::fs::read_to_string(settings_path).unwrap(), settings);
+
+        let before = std::fs::read(&path).unwrap();
+        let overrides = vec!["model=temporary-model".to_string()];
+        assert!(
+            run_config_command(
+                &mut store,
+                ConfigCommand::Set {
+                    key: "model".into(),
+                    value: "GLM-5.2".into(),
+                },
+                false,
+                &overrides
+            )
+            .is_err()
+        );
+        apply_per_run_overrides(&mut store, &overrides).unwrap();
+        assert_eq!(store.config.model.as_deref(), Some("temporary-model"));
+        assert_eq!(std::fs::read(&path).unwrap(), before);
     }
 
     #[test]

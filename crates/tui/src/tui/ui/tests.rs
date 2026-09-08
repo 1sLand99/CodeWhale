@@ -2076,6 +2076,24 @@ impl SettingsHomeGuard {
     }
 }
 
+fn assert_saved_startup_route(provider: &str, provider_key: &str, model: &str) -> toml::Value {
+    let path = crate::config::home_config_path().expect("isolated global config path");
+    let saved: toml::Value =
+        toml::from_str(&std::fs::read_to_string(path).expect("read canonical startup config"))
+            .expect("parse canonical startup config");
+    assert_eq!(saved["route_preferences_version"].as_integer(), Some(1));
+    assert_eq!(saved["provider"].as_str(), Some(provider));
+    assert_eq!(
+        saved["providers"][provider_key]["model"].as_str(),
+        Some(model)
+    );
+    let settings = crate::settings::Settings::load().expect("unchanged settings archive");
+    assert_eq!(settings.default_provider, None);
+    assert_eq!(settings.default_model, None);
+    assert_eq!(settings.provider_models, None);
+    saved
+}
+
 #[test]
 fn resume_hint_reconstructs_exact_command_for_canonical_uuid() {
     let id = "019dd9d6-4f44-7c83-9863-59674a12b827";
@@ -8924,7 +8942,7 @@ async fn provider_switch_from_mimo_to_openrouter_without_key_fails_before_dispat
 async fn successful_custom_provider_activation_completes_onboarding() {
     let config_env = ConfigPathEnvGuard::new();
     let mut app = create_test_app();
-    app.config_path = Some(config_env.config_path());
+    app.config_path = crate::config::home_config_path();
     app.onboarding = OnboardingState::Provider;
     app.onboarding_needs_api_key = true;
     app.onboarding_missing_key_recovery = true;
@@ -8953,32 +8971,21 @@ async fn successful_custom_provider_activation_completes_onboarding() {
         .unwrap()
         .join("settings.toml");
     assert_eq!(crate::settings::Settings::path().unwrap(), fixture_settings);
-    assert!(fixture_settings.is_file());
+    assert!(fixture_home.join("config.toml").is_file());
     assert!(fixture_home.join("setup_state.json").is_file());
     assert_ne!(
         app.onboarding,
         OnboardingState::Provider,
         "a successfully activated custom route must complete provider onboarding"
     );
-    let settings = crate::settings::Settings::load().expect("reload custom startup route");
-    assert_eq!(
-        settings.default_provider.as_deref(),
-        Some("fixture-local"),
-        "named custom onboarding must persist the exact identity, not `custom`",
-    );
-    assert_eq!(
-        settings
-            .provider_models
-            .as_ref()
-            .and_then(|models| models.get("fixture-local"))
-            .map(String::as_str),
-        Some("fixture-model"),
-    );
+    assert_saved_startup_route("fixture-local", "fixture-local", "fixture-model");
 }
 
 #[tokio::test]
 async fn failed_custom_provider_activation_stays_in_onboarding_recovery() {
     let config_env = ConfigPathEnvGuard::new();
+    let global_config = crate::config::home_config_path().expect("global config path");
+    let startup_before = std::fs::read(&global_config).ok();
     let blocked_parent = config_env._tmp.path().join("not-a-directory");
     std::fs::write(&blocked_parent, "fixture").expect("create blocking file");
     let mut app = create_test_app();
@@ -9003,6 +9010,7 @@ async fn failed_custom_provider_activation_stays_in_onboarding_recovery() {
     assert!(!switched);
     assert_eq!(app.onboarding, OnboardingState::Provider);
     assert_eq!(app.api_provider, ApiProvider::Deepseek);
+    assert_eq!(std::fs::read(global_config).ok(), startup_before);
     assert_eq!(
         crate::settings::Settings::load()
             .expect("reload failed custom setup settings")
@@ -9216,6 +9224,8 @@ fn setup_confirm_toast_names_secret_store_and_global_scope() {
 #[tokio::test]
 async fn provider_switch_is_session_local_until_explicitly_saved() {
     let _home = SettingsHomeGuard::new();
+    let global_config = crate::config::home_config_path().expect("global config path");
+    let startup_before = std::fs::read(&global_config).ok();
     let tmp = TempDir::new().expect("config tempdir");
     let config_path = tmp.path().join("config.toml");
     std::fs::write(
@@ -9265,6 +9275,7 @@ api_key = "arcee-key"
 
     let settings = crate::settings::Settings::load().expect("load settings");
     assert_eq!(settings.default_provider.as_deref(), None);
+    assert_eq!(std::fs::read(global_config).ok(), startup_before);
 
     // The save decision is pending for the route-save prompt.
     let pending = app.pending_route_save.as_ref().expect("pending save");
@@ -9274,10 +9285,10 @@ api_key = "arcee-key"
 
 /// The provider step is the first run's explicit startup-route decision, not
 /// an ordinary session-local `/provider` preview. Persist it in user-global
-/// settings so a completed Ollama setup cannot restart on DeepSeek merely
+/// config so a completed Ollama setup cannot restart on DeepSeek merely
 /// because the compatibility config still carries a DeepSeek root default.
 #[test]
-fn first_run_ollama_choice_survives_restart_without_rewriting_config() {
+fn first_run_ollama_choice_survives_restart_from_canonical_config() {
     let _home = SettingsHomeGuard::new();
     let config_path = std::env::var_os("DEEPSEEK_CONFIG_PATH")
         .map(PathBuf::from)
@@ -9308,16 +9319,7 @@ fn first_run_ollama_choice_survives_restart_without_rewriting_config() {
 
     complete_provider_picker_onboarding(&mut app, ApiProvider::Ollama);
 
-    let settings = crate::settings::Settings::load().expect("reload onboarding settings");
-    assert_eq!(settings.default_provider.as_deref(), Some("ollama"));
-    assert_eq!(
-        settings
-            .provider_models
-            .as_ref()
-            .and_then(|models| models.get("ollama"))
-            .map(String::as_str),
-        Some(crate::config::DEFAULT_OLLAMA_MODEL),
-    );
+    let saved = assert_saved_startup_route("ollama", "ollama", crate::config::DEFAULT_OLLAMA_MODEL);
     assert!(app.pending_route_save.is_none());
     assert!(
         app.status_message.as_deref().is_some_and(|message| {
@@ -9330,11 +9332,11 @@ fn first_run_ollama_choice_survives_restart_without_rewriting_config() {
         app.status_message,
     );
 
-    // The route belongs to user-global startup settings. Do not rewrite a
-    // folder's compatibility config as a side effect of onboarding.
+    // The canonical provider slot owns the selection; preserve the unrelated
+    // compatibility root for callers that still explicitly read it.
     assert_eq!(
-        std::fs::read_to_string(&config_path).expect("reload config bytes"),
-        original_config,
+        saved["default_text_model"].as_str(),
+        Some("deepseek-v4-pro"),
     );
 
     // Selecting a keyless route is not a health check. Setup state must keep
@@ -17181,16 +17183,7 @@ fn external_grant_reuse_completes_provider_onboarding() {
     assert_eq!(app.onboarding_provider, crate::config::ApiProvider::Xai);
     assert!(!app.onboarding_needs_api_key);
     assert!(!app.offline_mode);
-    let settings = crate::settings::Settings::load().expect("reload onboarding default");
-    assert_eq!(settings.default_provider.as_deref(), Some("xai"));
-    assert_eq!(
-        settings
-            .provider_models
-            .as_ref()
-            .and_then(|models| models.get("xai"))
-            .map(String::as_str),
-        Some(crate::config::DEFAULT_XAI_MODEL),
-    );
+    assert_saved_startup_route("xai", "xai", crate::config::DEFAULT_XAI_MODEL);
 }
 
 #[test]
@@ -20174,6 +20167,8 @@ fn app_new_auto_model_ignores_reasoning_inferred_from_legacy_alias() {
 #[tokio::test]
 async fn model_picker_apply_is_session_local_until_startup_default_is_requested() {
     let _guard = SettingsHomeGuard::new();
+    let global_config = crate::config::home_config_path().expect("global config path");
+    let startup_before = std::fs::read(&global_config).ok();
     let mut app = create_test_app();
     app.set_model_selection("auto".to_string());
     app.reasoning_effort = ReasoningEffort::Auto;
@@ -20208,6 +20203,7 @@ async fn model_picker_apply_is_session_local_until_startup_default_is_requested(
         None
     );
     assert_eq!(settings.reasoning_effort.as_deref(), None);
+    assert_eq!(std::fs::read(global_config).ok(), startup_before);
     assert!(!app.auto_model);
     assert_eq!(app.reasoning_effort, ReasoningEffort::High);
 
@@ -20255,6 +20251,13 @@ async fn model_picker_startup_default_overrides_configured_xai_route_after_resta
         }),
         ..Config::default()
     };
+    let config_path = crate::config::home_config_path().expect("global config path");
+    std::fs::create_dir_all(config_path.parent().expect("config home")).expect("config home");
+    std::fs::write(
+        &config_path,
+        "provider = \"xai\"\n[providers.xai]\nmodel = \"grok-4.5\"\n",
+    )
+    .expect("seed canonical xAI route");
     let mut config = xai_config.clone();
     let initial_options = TuiOptions {
         model: config.default_model(),
@@ -20294,28 +20297,24 @@ async fn model_picker_startup_default_overrides_configured_xai_route_after_resta
         "the explicit save must report what it wrote: {:?}",
         app.status_message
     );
-    let settings = crate::settings::Settings::load().expect("load settings");
-    assert_eq!(settings.default_provider.as_deref(), Some("deepseek"));
+    let saved = assert_saved_startup_route("deepseek", "deepseek", "deepseek-v4-flash");
     assert_eq!(
-        settings
-            .provider_models
-            .as_ref()
-            .and_then(|models| models.get("deepseek"))
-            .map(String::as_str),
-        Some("deepseek-v4-flash")
+        saved["providers"]["xai"]["model"].as_str(),
+        Some("grok-4.5")
     );
 
+    let restart_config = Config::load(Some(config_path), None).expect("reload saved route");
     let restart_options = TuiOptions {
-        model: xai_config.default_model(),
+        model: restart_config.default_model(),
         start_in_agent_mode: true,
         skip_onboarding: false,
         ..crate::test_support::test_tui_options(PathBuf::from("."))
     };
-    let restarted = App::new(restart_options, &xai_config);
+    let restarted = App::new(restart_options, &restart_config);
     assert_eq!(restarted.api_provider, ApiProvider::Deepseek);
     assert_eq!(
         restarted.model, "deepseek-v4-flash",
-        "the explicit startup default must outrank config's xAI seed"
+        "the explicit startup default must replace config's xAI selection"
     );
 }
 
@@ -20438,6 +20437,8 @@ async fn auto_model_effort_picker_persists_unresolved_tier_verbatim() {
 #[tokio::test]
 async fn reselecting_live_model_and_thinking_is_session_local() {
     let _guard = SettingsHomeGuard::new();
+    let global_config = crate::config::home_config_path().expect("global config path");
+    let startup_before = std::fs::read(&global_config).ok();
     let mut app = create_test_app();
     app.set_model_selection("deepseek-v4-pro".to_string());
     app.reasoning_effort = ReasoningEffort::High;
@@ -20480,6 +20481,7 @@ async fn reselecting_live_model_and_thinking_is_session_local() {
         None
     );
     assert_eq!(settings.reasoning_effort.as_deref(), None);
+    assert_eq!(std::fs::read(global_config).ok(), startup_before);
     assert!(app.pending_route_save.is_some());
     assert!(
         app.status_message
@@ -25996,6 +25998,8 @@ mod work_surface {
 #[tokio::test]
 async fn refused_route_change_does_not_pin_a_startup_default_and_says_so() {
     let _guard = SettingsHomeGuard::new();
+    let global_config = crate::config::home_config_path().expect("global config path");
+    let startup_before = std::fs::read(&global_config).ok();
     let mut config = Config {
         provider: Some("xai".to_string()),
         providers: Some(ProvidersConfig {
@@ -26040,6 +26044,7 @@ async fn refused_route_change_does_not_pin_a_startup_default_and_says_so() {
         "the refused switch must leave the live route alone"
     );
     let settings = crate::settings::Settings::load().expect("load settings");
+    assert_eq!(std::fs::read(global_config).ok(), startup_before);
     assert_eq!(
         settings.default_provider.as_deref(),
         None,

@@ -9,6 +9,301 @@ use std::sync::mpsc;
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[test]
+fn remembered_deepseek_cn_and_layered_root_models_keep_their_precedence() {
+    let _lock = lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let _home = EnvVarGuard::set("CODEWHALE_HOME", home.path());
+    let _overrides: Vec<_> = [
+        "CODEWHALE_CONFIG_PATH",
+        "DEEPSEEK_CONFIG_PATH",
+        "CODEWHALE_PROVIDER",
+        "DEEPSEEK_PROVIDER",
+        "CODEWHALE_MODEL",
+        "DEEPSEEK_MODEL",
+        "DEEPSEEK_DEFAULT_TEXT_MODEL",
+    ]
+    .into_iter()
+    .map(EnvVarGuard::remove)
+    .collect();
+    let path = home.path().join("config.toml");
+    fs::write(
+        &path,
+        "provider = 'deepseek-cn'\ndefault_text_model = 'deepseek-v4-flash'\n",
+    )
+    .unwrap();
+    fs::write(
+        home.path().join("settings.toml"),
+        "default_model = 'deepseek-v4-pro'\n",
+    )
+    .unwrap();
+    assert_eq!(
+        Config::load(None, None).unwrap().default_model(),
+        "deepseek-v4-pro"
+    );
+    crate::config_persistence::persist_root_bool_key(Some(&path), "allow_shell", false).unwrap();
+    assert_eq!(
+        Config::load(None, None).unwrap().default_model(),
+        "deepseek-v4-pro"
+    );
+
+    fs::write(&path, "route_preferences_version = 1\nprovider = 'deepseek'\n[providers.deepseek]\nmodel = 'deepseek-v4-flash'\n[profiles.pro]\ndefault_text_model = 'deepseek-v4-pro'\n").unwrap();
+    let profile = Config::load(None, Some("pro")).unwrap();
+    assert_eq!(profile.default_model(), "deepseek-v4-pro");
+    assert_eq!(
+        crate::route_runtime::resolve_runtime_route(&profile, ApiProvider::Deepseek, None)
+            .unwrap()
+            .model,
+        "deepseek-v4-pro"
+    );
+
+    let managed = home.path().join("managed.toml");
+    fs::write(&managed, "default_text_model = 'deepseek-v4-pro'\n").unwrap();
+    let source = format!(
+        "route_preferences_version = 1\nprovider = 'deepseek'\nmanaged_config_path = '{}'\n[providers.deepseek]\nmodel = 'deepseek-v4-flash'\n",
+        managed.display()
+    );
+    fs::write(&path, source).unwrap();
+    assert_eq!(
+        Config::load(None, None).unwrap().default_model(),
+        "deepseek-v4-pro"
+    );
+}
+
+#[test]
+fn legacy_hosted_ollama_migration_keeps_the_existing_table_and_endpoint() {
+    let _lock = lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let _home = EnvVarGuard::set("CODEWHALE_HOME", home.path());
+    let _overrides: Vec<_> = [
+        "CODEWHALE_CONFIG_PATH",
+        "DEEPSEEK_CONFIG_PATH",
+        "CODEWHALE_PROVIDER",
+        "DEEPSEEK_PROVIDER",
+        "CODEWHALE_MODEL",
+        "DEEPSEEK_MODEL",
+        "DEEPSEEK_DEFAULT_TEXT_MODEL",
+        "OLLAMA_MODEL",
+        "OLLAMA_CLOUD_MODEL",
+        "OLLAMA_BASE_URL",
+        "OLLAMA_CLOUD_BASE_URL",
+    ]
+    .into_iter()
+    .map(EnvVarGuard::remove)
+    .collect();
+    let path = home.path().join("config.toml");
+    fs::write(&path, "provider = 'ollama'\n[providers.ollama]\nbase_url = 'https://ollama.com/v1'\nmodel = 'old-model'\n").unwrap();
+    fs::write(
+        home.path().join("settings.toml"),
+        "default_provider = 'ollama'\n[provider_models]\nollama-cloud = 'remembered-model'\n",
+    )
+    .unwrap();
+    let before = Config::load(None, None).unwrap();
+    assert_eq!(before.api_provider(), ApiProvider::OllamaCloud);
+    assert_eq!(before.default_model(), "remembered-model");
+    crate::config_persistence::persist_root_bool_key(Some(&path), "allow_shell", false).unwrap();
+    let after = Config::load(None, None).unwrap();
+    assert_eq!(after.api_provider(), ApiProvider::OllamaCloud);
+    assert_eq!(after.default_model(), "remembered-model");
+    assert_eq!(after.deepseek_base_url(), "https://ollama.com/v1");
+    assert_eq!(
+        after
+            .active_provider_identity(ApiProvider::OllamaCloud)
+            .unwrap()
+            .persisted_id(),
+        Some("ollama")
+    );
+    let doc: toml::Value = toml::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+    assert_eq!(doc["provider"].as_str(), Some("ollama"));
+    assert_eq!(
+        doc["providers"]["ollama"]["model"].as_str(),
+        Some("remembered-model")
+    );
+    assert!(doc["providers"].get("ollama_cloud").is_none());
+}
+
+#[test]
+fn loaded_startup_selection_is_shared_and_does_not_rewrite_saved_files() {
+    let _lock = lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let _home = EnvVarGuard::set("CODEWHALE_HOME", home.path());
+    let _overrides: Vec<_> = [
+        "CODEWHALE_CONFIG_PATH",
+        "DEEPSEEK_CONFIG_PATH",
+        "CODEWHALE_PROVIDER",
+        "DEEPSEEK_PROVIDER",
+        "CODEWHALE_MODEL",
+        "DEEPSEEK_MODEL",
+        "DEEPSEEK_DEFAULT_TEXT_MODEL",
+    ]
+    .into_iter()
+    .map(EnvVarGuard::remove)
+    .collect();
+    let path = home.path().join("config.toml");
+    let source = "provider = 'zai'\n[providers.zai]\nmodel = 'GLM-5.2'\n";
+    let saved = "[provider_models]\nzai = 'GLM-5.3'\n";
+    fs::write(&path, source).unwrap();
+    fs::write(home.path().join("settings.toml"), saved).unwrap();
+    let mut config = Config::load(None, None).unwrap();
+    assert_eq!(config.default_model(), "GLM-5.3");
+    assert_eq!(
+        crate::model_inventory::provider_default_model(&config, ApiProvider::Zai),
+        "GLM-5.3"
+    );
+    let route =
+        crate::route_runtime::resolve_runtime_route(&config, ApiProvider::Zai, None).unwrap();
+    assert_eq!(
+        route.model, "GLM-5.3",
+        "an omitted new-thread model uses the same selection"
+    );
+    let explicit =
+        crate::route_runtime::resolve_runtime_route(&config, ApiProvider::Zai, Some("GLM-5.2"))
+            .unwrap();
+    assert_eq!(explicit.model, "GLM-5.2");
+    let other = crate::settings::Settings {
+        provider_models: Some(HashMap::from([("zai".into(), "GLM-5.1".into())])),
+        ..Default::default()
+    };
+    assert!(
+        !config.apply_saved_selection(&other),
+        "loaded route snapshots never reread preferences"
+    );
+    assert_eq!(config.default_model(), "GLM-5.3");
+    assert_eq!(fs::read_to_string(path).unwrap(), source);
+    assert_eq!(
+        fs::read_to_string(home.path().join("settings.toml")).unwrap(),
+        saved
+    );
+}
+
+#[test]
+fn startup_memory_yields_to_explicit_launch_scoped_config_and_profile() {
+    let _lock = lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let _home = EnvVarGuard::set("CODEWHALE_HOME", home.path());
+    let _overrides: Vec<_> = [
+        "CODEWHALE_CONFIG_PATH",
+        "DEEPSEEK_CONFIG_PATH",
+        "CODEWHALE_PROVIDER",
+        "DEEPSEEK_PROVIDER",
+        "CODEWHALE_MODEL",
+        "DEEPSEEK_MODEL",
+        "DEEPSEEK_DEFAULT_TEXT_MODEL",
+    ]
+    .into_iter()
+    .map(EnvVarGuard::remove)
+    .collect();
+    let source = "provider = 'zai'\n[providers.zai]\nmodel = 'GLM-5.2'\n[profiles.pinned.providers.zai]\nmodel = 'GLM-5.1'\n";
+    fs::write(home.path().join("config.toml"), source).unwrap();
+    fs::write(
+        home.path().join("settings.toml"),
+        "[provider_models]\nzai = 'GLM-5.3'\n",
+    )
+    .unwrap();
+    {
+        let _explicit = EnvVarGuard::set("CODEWHALE_MODEL", "GLM-5.2");
+        let config = Config::load(None, None).unwrap();
+        assert_eq!(config.default_model(), "GLM-5.2");
+        assert_eq!(
+            crate::route_runtime::resolve_runtime_route(&config, ApiProvider::Zai, None)
+                .unwrap()
+                .model,
+            "GLM-5.2"
+        );
+    }
+    let profile = Config::load(None, Some("pinned")).unwrap();
+    assert_eq!(profile.default_model(), "GLM-5.1");
+    assert!(!profile.remembered_selection_is_applicable());
+    let project = home.path().join("project");
+    fs::create_dir(&project).unwrap();
+    let path = project.join("config.toml");
+    fs::write(&path, source).unwrap();
+    let config = Config::load(Some(path), None).unwrap();
+    assert_eq!(config.default_model(), "GLM-5.2");
+    assert!(!config.remembered_selection_is_applicable());
+}
+
+#[test]
+fn startup_memory_preserves_named_and_custom_endpoint_wire_ids() {
+    let _lock = lock_test_env();
+    let settings = crate::settings::Settings {
+        default_provider: Some("TeamA".into()),
+        provider_models: Some(HashMap::from([
+            ("TeamA".into(), "memory-upper".into()),
+            ("teama".into(), "memory-lower".into()),
+            ("zai".into(), "GLM-5.3".into()),
+        ])),
+        ..Default::default()
+    };
+    let mut config: Config = toml::from_str("provider = 'teama'\n[providers.TeamA]\nkind = 'openai-compatible'\nbase_url = 'https://upper.example.test/v1'\nmodel = 'Wire-Upper'\n[providers.teama]\nkind = 'openai-compatible'\nbase_url = 'https://lower.example.test/v1'\nmodel = 'wire-lower'\n[providers.zai]\nbase_url = 'https://proxy.example.test/v1'\nmodel = 'Exact-Zai-ID'\n").unwrap();
+    let _provider = EnvVarGuard::remove("CODEWHALE_PROVIDER");
+    let _legacy_provider = EnvVarGuard::remove("DEEPSEEK_PROVIDER");
+    assert!(config.apply_saved_selection(&settings));
+    assert_eq!(config.provider.as_deref(), Some("TeamA"));
+    let identity = config
+        .active_provider_identity(ApiProvider::Custom)
+        .unwrap();
+    let route =
+        crate::route_runtime::resolve_runtime_route_for_identity(&config, &identity, None).unwrap();
+    assert_eq!(route.model, "memory-upper");
+    assert_eq!(
+        route.candidate.endpoint().base_url,
+        "https://upper.example.test/v1"
+    );
+    let lower = config.resolve_provider_identity("teama").unwrap();
+    assert_eq!(
+        crate::route_runtime::resolve_runtime_route_for_identity(&config, &lower, None)
+            .unwrap()
+            .model,
+        "memory-lower"
+    );
+    assert_eq!(
+        config
+            .provider_config_for(ApiProvider::Zai)
+            .unwrap()
+            .model
+            .as_deref(),
+        Some("GLM-5.3")
+    );
+}
+
+#[test]
+fn provider_environment_model_outranks_startup_memory() {
+    let _lock = lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let _home = EnvVarGuard::set("CODEWHALE_HOME", home.path());
+    let _overrides: Vec<_> = [
+        "CODEWHALE_CONFIG_PATH",
+        "DEEPSEEK_CONFIG_PATH",
+        "CODEWHALE_PROVIDER",
+        "DEEPSEEK_PROVIDER",
+        "CODEWHALE_MODEL",
+        "DEEPSEEK_MODEL",
+    ]
+    .into_iter()
+    .map(EnvVarGuard::remove)
+    .collect();
+    fs::write(
+        home.path().join("config.toml"),
+        "provider = 'openai'\n[providers.openai]\nmodel = 'gpt-5.6-sol'\n",
+    )
+    .unwrap();
+    fs::write(
+        home.path().join("settings.toml"),
+        "[provider_models]\nopenai = 'gpt-5.6-terra'\n",
+    )
+    .unwrap();
+    let _model = EnvVarGuard::set("OPENAI_MODEL", "gpt-5.6-luna");
+    let config = Config::load(None, None).unwrap();
+    assert_eq!(config.default_model(), "gpt-5.6-luna");
+    assert_eq!(
+        crate::route_runtime::resolve_runtime_route(&config, ApiProvider::Openai, None)
+            .unwrap()
+            .model,
+        "gpt-5.6-luna"
+    );
+}
+
 #[derive(Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 struct HeaderItemsTestConfig {
     #[serde(default, deserialize_with = "deser_header_items")]
