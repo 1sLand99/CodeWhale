@@ -365,9 +365,12 @@ one reviewed source, and `/plugin suggest` ranks only what is already
 installed), no ambient compatibility discovery, no automatic trust, no
 plugin-contributed MCP OAuth, no LSP adapter, native extension runtime, or MCP
 subscription adapter, no
-migration of another application's bundle, and no on-disk auto-migration of a
-legacy `plugin.toml` to `plugin.json`. These remain later work rather than
-implied capabilities.
+foreign executable plugin runtime import, and no on-disk auto-migration of a
+legacy `plugin.toml` to `plugin.json`. The explicit offline
+[OpenCode/DSH converter](PLUGIN_AUTHORING.md#convert-an-existing-plugin) supports
+selected portable Skills and static Streamable HTTP MCP declarations; it does
+not migrate arbitrary bundles or reproduce another client's runtime or policy.
+The other capabilities above remain later work rather than implied support.
 
 ## Marketplace catalogs (#5311)
 

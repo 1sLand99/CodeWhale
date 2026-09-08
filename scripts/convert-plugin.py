@@ -277,6 +277,11 @@ def mcp_config(path, dialect):
             mapping(servers, {"servers", "timeout"})
             defaults = servers.get("timeout", {})
             servers = mapping(servers.get("servers", {}))
+        # These application fields govern MCP tool access, including legacy
+        # per-agent overrides. A server-level enabled flag cannot preserve them.
+        if servers:
+            require(not document.keys() & {"tools", "permission", "permissions", "agent", "agents", "mode", "default_agent"},
+                    "OpenCode tool permissions and agent policies require a manual port; preserve their restrictions in Codewhale before supplying MCP-only input.")
         entries = [(key, value, False) for key, value in servers.items()]
     require(len(entries) <= 64, "At most 64 MCP servers can be converted at once.")
     result, hosts = {}, set()
@@ -320,6 +325,7 @@ def convert(args):
         "Companion skill files were copied as data; review them before loading a skill.\n"
         "This output is not installed, trusted or enabled. Run `/plugin install <directory>`,\n"
         "then `/plugin validate <name>` and review the exact trust token before enabling.\n"
+        "Remote MCP output uses Streamable HTTP only; OpenCode's legacy SSE fallback is not reproduced.\n"
         "Conversion does not prove server connectivity or foreign runtime compatibility.\n").encode()
     require(len(files) <= MAX_FILES and sum(map(len, files.values())) <= MAX_BYTES,
             "Output exceeds the 4096-file / 64 MiB bundle budget.")

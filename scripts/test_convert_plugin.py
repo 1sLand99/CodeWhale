@@ -183,6 +183,34 @@ class ConversionTests(unittest.TestCase):
                 self.assertFalse(args.output.exists())
                 self.assertFalse(sentinel.exists())
 
+    def test_cli_global_tool_disable_is_not_dropped_during_mcp_conversion(self):
+        document = {**self.v1(), "tools": {"docs*": False}}
+        source = self.config(document)
+        original = source.read_bytes()
+        args = self.args(config=source)
+        result = self.cli(args)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("preserve their restrictions in Codewhale", result.stderr)
+        self.assertFalse(args.output.exists())
+        self.assertEqual(source.read_bytes(), original)
+
+    def test_opencode_policy_fields_require_a_manual_port_even_for_disabled_servers(self):
+        rules = [{"action": "docs_*", "resource": "*", "effect": "deny"}]
+        policies = {"tools": {"docs*": False}, "permission": {"docs_*": "deny"},
+                    "permissions": rules,
+                    "agent": {"reviewer": {"permission": {"docs_*": "deny"}}},
+                    "agents": {"reviewer": {"permissions": rules}},
+                    "mode": {"plan": {"tools": {"docs*": False}}}, "default_agent": "plan"}
+        for dialect in ("opencode-v1", "opencode-v2"):
+            for disabled in (False, True):
+                for field, value in policies.items():
+                    with self.subTest(dialect=dialect, disabled=disabled, field=field):
+                        document = self.v1(enabled=not disabled) if dialect == "opencode-v1" else {
+                            "mcp": {"servers": {"docs": self.remote(disabled=disabled)}}}
+                        document[field] = value
+                        self.refuse(self.args(config=self.config(document), dialect=dialect),
+                                    message="require a manual port")
+
     def test_dsh_tag_and_plain_expression_are_rejected_even_when_disabled(self):
         sentinel = self.root / "expression-ran"
         expression = f"require('node:fs').writeFileSync({json.dumps(str(sentinel))}, 'ran')"

@@ -187,6 +187,15 @@ python3 scripts/convert-plugin.py --format opencode-v1 \
 如果数据采用 `mcp.servers.<name>` 结构，请选择 `--format opencode-v2`；
 该格式的服务器开关是 `disabled`，不是 `enabled`。根据数据选择格式，
 不要依据文件名或上游分支名推断版本。两种格式都要求明确设置 `oauth: false`。
+远程 MCP 输出**仅使用 Streamable HTTP**，不会复现 OpenCode 回退到旧版 SSE 的行为。
+对于仅支持 SSE 的端点，请手工编写包含 `type: "sse"` 的原生 `mcp.json`，
+并使用相同的审查流程。
+
+选定 MCP 服务器时，配置中若包含 `tools`、`permission`/`permissions`、
+`agent`/`agents`、旧版 `mode` 或 `default_agent`，转换将被拒绝。
+这些设置可能在服务器开关之外进一步限制工具访问。请先在 Codewhale 中手工保留
+这些限制，再提供只含 MCP 声明的输入；直接删除这些设置可能扩大访问权限。
+
 转换器不接受 JSONC 注释或末尾多余逗号；请提供只含待移植声明的纯 JSON 副本。
 
 ### DeepSeek Harness（DSH）
@@ -227,7 +236,7 @@ patch 组合。每个条目的 `name` 都必须为 `@deepseek-ai/dsh-mcp-client`
 只有完全符合 `{env:MCP_TOKEN}` 形式的 OpenCode 请求头引用会转换为原生
 `env_headers`；转换器不会读取变量值。字面量请求头、DSH 请求头表达式以及
 URL 中的文件或环境变量替换都会被拒绝。配置的超时值以毫秒表示，
-必须是 `1000` 到 `3600000` 之间的整秒值。
+必须是 `1000` 到 `3600000` 之间的整秒值。未指定的超时使用 Codewhale 的默认值。
 
 可执行插件和 hooks、stdio 服务器、自动 OAuth、JavaScript、YAML 别名或标签、
 `__jsExpr`，以及不支持的 skill 运行时字段（包括 `user-invocable: false`）

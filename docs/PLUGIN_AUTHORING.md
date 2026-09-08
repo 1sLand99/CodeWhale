@@ -196,7 +196,17 @@ python3 scripts/convert-plugin.py --format opencode-v1 \
 Choose `--format opencode-v2` for the `mcp.servers.<name>` layout, whose server
 flag is `disabled` instead of `enabled`. Select the format from the data;
 filenames and upstream branch names do not determine its version. Both formats
-require explicit `oauth: false`. JSONC comments and trailing commas are not
+require explicit `oauth: false`. Remote MCP output uses **Streamable HTTP only**;
+OpenCode's fallback to legacy SSE is not reproduced. For an SSE-only endpoint,
+author native `mcp.json` with `type: "sse"` and use the same review flow.
+
+When MCP servers are selected, configurations containing `tools`,
+`permission`/`permissions`, `agent`/`agents`, legacy `mode`, or `default_agent`
+are refused. These settings can restrict tool access beyond server enablement.
+Manually preserve those restrictions in Codewhale before supplying an MCP-only
+input; simply deleting the settings can widen access.
+
+JSONC comments and trailing commas are not
 accepted: provide a plain JSON copy containing the declarations you intend
 to port.
 
@@ -241,7 +251,7 @@ Only exact OpenCode header references such as `{env:MCP_TOKEN}` become native
 `env_headers`; the converter never reads the variable's value. Literal headers,
 DSH header expressions, and URL file/environment substitution are refused.
 Configured timeouts must be whole seconds expressed in milliseconds, from
-`1000` through `3600000`.
+`1000` through `3600000`. Omitted timeouts use Codewhale's defaults.
 
 Executable plugins and hooks, stdio servers, automatic OAuth, JavaScript,
 YAML aliases/tags, `__jsExpr`, and unsupported skill runtime fields (including
