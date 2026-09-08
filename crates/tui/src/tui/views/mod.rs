@@ -6453,7 +6453,7 @@ mod tests {
             "{empty_text}"
         );
         assert!(
-            empty_text.contains("Configure roles and launch posture with /fleet."),
+            empty_text.contains("Set up roles with /fleet."),
             "{empty_text}"
         );
 

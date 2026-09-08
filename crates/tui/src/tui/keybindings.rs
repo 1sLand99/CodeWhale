@@ -645,7 +645,7 @@ mod tests {
             .expect("external-editor keybinding should be documented");
         assert_eq!(
             crate::localization::tr(crate::localization::Locale::En, editor.description_id,),
-            "Open composer draft in external editor"
+            "Edit the draft externally"
         );
     }
 

@@ -22,9 +22,9 @@ Feature: Core command visible surfaces
     Then the message window should include "Model changed:"
     And the message window should include "auto"
     When the user runs the core command "/translate"
-    Then the message window should include "Output translation enabled"
+    Then the message window should include "Translation on"
     When the user runs the core command "/translate"
-    Then the message window should include "Output translation disabled"
+    Then the message window should include "Translation off"
 
   Scenario: Clear replaces prior transcript with visible confirmation
     Given a CodeWhale core command workspace with one visible user message

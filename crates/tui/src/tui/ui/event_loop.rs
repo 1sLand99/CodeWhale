@@ -6676,7 +6676,7 @@ mod fleet_workers_status_tests {
     fn current_session_fleet_worker_status_keeps_the_english_session_boundary() {
         assert_eq!(
             current_session_fleet_workers_status(Locale::En, 3),
-            "Current-session fleet workers: 3 total"
+            "Fleet workers this session: 3"
         );
     }
 }
