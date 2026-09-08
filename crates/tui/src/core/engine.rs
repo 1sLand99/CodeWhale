@@ -1191,9 +1191,12 @@ async fn forward_subagent_mailbox_message(
 
 impl Engine {
     /// Surface the snapshots-disabled notice a blocking snapshot task parked
-    /// (#5930). Called at turn boundaries; a workspace yields at most one.
+    /// (#5930). Called at turn boundaries; each session gets its own notice.
     pub(super) async fn emit_pending_snapshot_notices(&self) {
-        for notice in crate::core::turn::take_snapshots_disabled_notices(&self.session.workspace) {
+        for notice in crate::core::turn::take_snapshots_disabled_notices(
+            &self.session.workspace,
+            Some(&self.session.id),
+        ) {
             let _ = self
                 .tx_event
                 .send(Event::SnapshotsDisabled {
@@ -1851,7 +1854,6 @@ impl Engine {
                 route: None,
             })
             .await;
-        self.emit_pending_snapshot_notices().await;
 
         if self.config.snapshots_enabled {
             let pre_workspace = self.session.workspace.clone();
@@ -1870,6 +1872,8 @@ impl Engine {
             })
             .await;
         }
+
+        self.emit_pending_snapshot_notices().await;
 
         let _ = self
             .tx_event
@@ -4981,7 +4985,6 @@ impl Engine {
                 route: Some(turn_route),
             })
             .await;
-        self.emit_pending_snapshot_notices().await;
 
         // Apply the host-resolved route budget before building the request.
         // The model, limits, and compaction policy arrive in one operation so
@@ -5032,6 +5035,8 @@ impl Engine {
             })
             .await;
         }
+
+        self.emit_pending_snapshot_notices().await;
 
         // A new turn means any leftover retry banner (success cleared
         // it, failure pinned it) is no longer relevant — reset to idle

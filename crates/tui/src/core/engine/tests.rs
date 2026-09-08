@@ -40,6 +40,103 @@ const REPRESENTATIVE_PROJECT_AUTHORITY_BODY: &str = concat!(
 );
 
 #[test]
+fn snapshot_notice_precedes_first_provider_call_and_is_owned_by_session() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+    let _env = lock_test_env();
+    let root = tempdir().unwrap();
+    let _home = EnvVarGuard::set("CODEWHALE_HOME", root.path());
+    let _user_home = EnvVarGuard::set("HOME", root.path());
+    let _user_profile = EnvVarGuard::set("USERPROFILE", root.path());
+    let workspace = root.path().join("workspace");
+    fs::create_dir(&workspace).unwrap();
+    fs::write(workspace.join("large.txt"), vec![b'x'; 4096]).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        // A resumed Engine for session-a must not warn again. Session-b in
+        // the same process/workspace must receive its own first-turn notice.
+        for (session_id, expected_notices) in [("session-a", 1), ("session-b", 1), ("session-a", 0)]
+        {
+            let config = Config::default();
+            let client = std::sync::Arc::new(MockLlmClient::new(Vec::new()));
+            let (engine, handle) = Engine::new_with_model_client(
+                EngineConfig {
+                    session_id: Some(session_id.into()),
+                    snapshots_enabled: true,
+                    snapshots_max_workspace_bytes: 1024,
+                    ..deterministic_engine_config(&workspace)
+                },
+                &config,
+                client.clone(),
+            );
+            let events = std::sync::Arc::clone(&handle.rx_event);
+            let observations = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let observed = std::sync::Arc::clone(&observations);
+            client.push_factory(move |_| {
+                let mut events = events.try_write().expect("fixture owns the event receiver");
+                let mut notices = Vec::new();
+                while let Ok(event) = events.try_recv() {
+                    if let Event::SnapshotsDisabled { reason, .. } = event {
+                        notices.push(reason);
+                    }
+                }
+                observed.lock().unwrap().push(notices);
+                canned::simple_text_turn("snapshot fixture done")
+            });
+            let run = tokio::spawn(engine.run());
+            handle
+                .send(external_user_message_op(
+                    "check snapshots",
+                    AppMode::Agent,
+                    &config,
+                ))
+                .await
+                .unwrap();
+            let snapshot =
+                tokio::time::timeout(Duration::from_secs(10), handle.get_session_snapshot())
+                    .await
+                    .unwrap()
+                    .unwrap();
+            // The Engine catches provider panics, so assertions inside the
+            // factory are not a test oracle. Inspect its observations here.
+            {
+                let observed = observations.lock().unwrap();
+                assert_eq!(
+                    observed.len(),
+                    1,
+                    "factory must have recorded an observation"
+                );
+                assert_eq!(
+                    observed[0].len(),
+                    expected_notices,
+                    "notice must precede provider dispatch for this session"
+                );
+                assert!(
+                    observed[0]
+                        .iter()
+                        .all(|reason| reason.contains("workspace too large"))
+                );
+            }
+            assert_eq!(client.call_count(), 1);
+            assert!(
+                serde_json::to_string(&snapshot.messages)
+                    .unwrap()
+                    .contains("snapshot fixture done")
+            );
+            handle.send(Op::Shutdown).await.unwrap();
+            tokio::time::timeout(Duration::from_secs(10), run)
+                .await
+                .unwrap()
+                .unwrap();
+        }
+    });
+    // Await the owned blocking post-turn snapshots before restoring test home.
+    drop(runtime);
+}
+
+#[test]
 fn preview_request_error_preserves_non_semantic_context_chain() {
     let error = anyhow::Error::msg("root cause").context("request preparation failed");
     assert_eq!(

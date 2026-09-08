@@ -175,8 +175,8 @@ pub enum Event {
     },
 
     /// Workspace snapshots (undo) could not be enabled for this workspace.
-    /// Emitted once per workspace per process so the operator sees why undo
-    /// is missing and which config key turns it back on (#5930).
+    /// Emitted once per session/workspace so another session cannot consume
+    /// its notice. The disabled state also remains visible in `/status` (#5930).
     SnapshotsDisabled { workspace: String, reason: String },
     // === Streaming Events ===
     /// A new message block has started
