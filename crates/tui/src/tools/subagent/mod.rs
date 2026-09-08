@@ -1696,8 +1696,8 @@ struct SpawnRequest {
     /// the child can do. Only the latter can contradict `write_authority`
     /// (#5123).
     agent_type_named: bool,
-    /// Optional Fleet role id (trimmed, lowercased). Resolved at spawn time
-    /// against the closed role set — parsing has no runtime access.
+    /// Saved Fleet member selector or built-in role. Resolved from the trusted
+    /// current roster at spawn time; parsing has no runtime access.
     profile: Option<String>,
     assignment: SubAgentAssignment,
     allowed_tools: Option<Vec<String>>,
@@ -1708,6 +1708,7 @@ struct SpawnRequest {
     /// default does not.
     model_strength_explicit: bool,
     thinking: SubAgentThinking,
+    thinking_explicit: bool,
     /// Optional working directory for the child. Must canonicalize to a path
     /// inside the parent's workspace. For first-class git worktree isolation,
     /// use `worktree` instead of pre-creating a cwd by hand.
@@ -8402,7 +8403,7 @@ const AGENT_TOOL_DESCRIPTION: &str = concat!(
     "Start with action=start and prompt; returns a turn-owned agent_id immediately. Read-only roles need no extra fields. Set detached=true only for work that must remain independently observable after the turn. ",
     "Use multiple starts for independent parallel tasks. ",
     "type selects the Fleet role: general (full tool access for multi-step tasks), explore (fast read-only exploration), planner (grounded strategy, read-only probes), reviewer (reads and grades code), implement (lands focused code changes), test (runs tests and reports evidence), advisor (read-only design counsel), or custom (allowed_tools on the parent's posture). ",
-    "profile selects a built-in role. model, model_strength and thinking override task routing on the current provider; foreign models are refused. ",
+    "profile selects a saved member or built-in role. Saved pins are exact; model/strength override unpinned role routing; thinking overrides the tier. ",
     "Use action=roster for resolved roles, models, reasoning, context and cost evidence; it makes no provider request. ",
     "Child run budgets (model turns, wall time) come from Fleet role defaults and operator [subagents] config, not per-call fields. ",
     "worktree=true gives the child an isolated git worktree — use it whenever parallel writers must not collide with the parent checkout. ",
@@ -8480,7 +8481,7 @@ impl ToolSpec for AgentTool {
                 },
                 "profile": {
                     "type": "string",
-                    "description": "Optional Fleet role selector. Use a role name (action=roster lists the roles); unknown values are refused. The resolved role supplies the child's posture; model and thinking may override its route defaults."
+                    "description": "Saved member id or built-in role from action=roster. Saved instructions, route and depth bounds apply; conflicting model/type pins are refused. thinking may override the saved tier."
                 },
                 "model": {
                     "type": "string",
@@ -8663,9 +8664,19 @@ impl ToolSpec for AgentTool {
             AgentToolAction::Roster => {
                 let mut runtime = self.runtime.clone();
                 refresh_spawn_route_sources(&mut runtime);
+                let roster = spawn_roster(&runtime);
                 let mut members = Vec::new();
                 for role in FleetRole::all() {
-                    members.push(resolved_role_roster_entry(&runtime, &role).await);
+                    members.push(resolved_role_roster_entry(&runtime, &roster, &role).await);
+                }
+                let mut profiles = Vec::new();
+                for member in roster
+                    .members()
+                    .iter()
+                    .filter(|member| member.origin != crate::fleet::roster::ProfileOrigin::BuiltIn)
+                    .take(64)
+                {
+                    profiles.push(resolved_profile_roster_entry(&runtime, &roster, member).await);
                 }
                 let payload = json!({
                     "action": "roster",
@@ -8673,7 +8684,11 @@ impl ToolSpec for AgentTool {
                     "total_count": members.len(),
                     "truncated": false,
                     "members": members,
-                    "selector_help": "Use type:<role> with a listed built-in role. model, model_strength and thinking can override task defaults on the current provider. Saved Pod members use the durable Pod dispatch surface.",
+                    "profiles": profiles,
+                    "profile_count": profiles.len(),
+                    "profile_total_count": roster.members().iter().filter(|member| member.origin != crate::fleet::roster::ProfileOrigin::BuiltIn).count(),
+                    "profile_load_error": roster.load_error(),
+                    "selector_help": "Use type:<role> for a built-in posture, or profile:<member_id> for a saved member with its instructions and exact route. model/model_strength override unpinned role defaults; saved model pins cannot change. thinking may override the saved tier.",
                 });
                 let mut result = ToolResult::json(&payload)
                     .map_err(|error| ToolError::execution_failed(error.to_string()))?;
@@ -9266,7 +9281,7 @@ async fn spawn_subagent_from_input(
         requested_profile: spawn_request.profile.clone(),
         requested_reasoning: subagent_thinking_label(spawn_request.thinking).to_string(),
     };
-    resolve_spawn_role(&mut spawn_request)?;
+    let profile_member = resolve_spawn_profile(&mut spawn_request, &spawn_roster(&runtime))?;
     // Role resolution runs before classification so the bounded-write contract
     // sees the effective role: read-only roles stay ergonomic while a
     // manager/builder role can never acquire an implicit repository-wide
@@ -9300,12 +9315,18 @@ async fn spawn_subagent_from_input(
         .map(|file_path| read_bounded_resident_context(&runtime.context, file_path))
         .transpose()?;
     let effective_prompt = assemble_spawn_prompt(&spawn_request, resident_context.as_ref());
-    let (model_route, route_source) =
-        bind_spawn_model_route(&mut child_runtime, &spawn_request, &effective_prompt).await?;
+    let (model_route, route_source) = bind_spawn_model_route(
+        &mut child_runtime,
+        &spawn_request,
+        profile_member.as_ref(),
+        &effective_prompt,
+    )
+    .await?;
     let effective_model = child_runtime.model.clone();
     let child_route = mint_child_route_receipt(
         &requested_route,
         &spawn_request,
+        profile_member.as_ref(),
         &child_runtime,
         effective_model.clone(),
         route_source.as_str(),
@@ -9328,7 +9349,15 @@ async fn spawn_subagent_from_input(
     child_runtime.max_spawn_depth = child_max_spawn_depth_for_spawn(
         child_runtime.max_spawn_depth,
         child_runtime.spawn_depth,
-        spawn_request.max_depth,
+        match (
+            spawn_request.max_depth,
+            profile_member
+                .as_ref()
+                .and_then(|member| member.profile.delegation.max_spawn_depth),
+        ) {
+            (Some(task), Some(profile)) => Some(task.min(profile)),
+            (task, profile) => task.or(profile),
+        },
     );
     if let Some(workspace) = child_workspace {
         child_runtime.context.workspace = workspace.clone();
@@ -9512,7 +9541,7 @@ async fn spawn_subagent_from_input(
 
     Ok((result, spawn_metadata))
 }
-const CHILD_ROUTE_RECEIPT_MAX_BYTES: usize = 448;
+const CHILD_ROUTE_RECEIPT_MAX_BYTES: usize = 1024;
 
 fn assemble_spawn_prompt(request: &SpawnRequest, resident: Option<&ResidentContext>) -> String {
     let prompt = match resident {
@@ -9548,12 +9577,12 @@ fn assemble_spawn_prompt(request: &SpawnRequest, resident: Option<&ResidentConte
 fn mint_child_route_receipt(
     requested_route: &RequestedChildRoute,
     request: &SpawnRequest,
+    member: Option<&crate::fleet::profile::AgentProfile>,
     runtime: &SubAgentRuntime,
     model_id: String,
     route_source: &str,
 ) -> Result<ChildRouteReceipt, ToolError> {
-    // Role-only dispatch: the canonical role comes from the resolved request,
-    // and no saved member is ever bound, so the profile fields stay empty.
+    // Identity comes from the same member snapshot used to bind this child.
     let canonical_role = request
         .assignment
         .role
@@ -9568,8 +9597,8 @@ fn mint_child_route_receipt(
     let receipt = ChildRouteReceipt {
         requested_type: requested_route.requested_type.clone(),
         requested_profile: requested_route.requested_profile.clone(),
-        resolved_profile_id: None,
-        profile_origin: None,
+        resolved_profile_id: member.map(|member| member.id.clone()),
+        profile_origin: member.map(|member| member.origin.to_string()),
         canonical_role,
         provider_id,
         model_id,
@@ -12519,7 +12548,10 @@ fn parse_spawn_request(input: &Value) -> Result<SpawnRequest, ToolError> {
     // A cheaper sibling is an explicit routing choice through model_strength,
     // a saved Fleet profile, or a concrete model override.
     let model_strength = explicit_model_strength.unwrap_or(SubAgentModelStrength::Same);
-    let thinking = optional_input_str(input, &["thinking", "reasoning_effort", "reasoningEffort"])?
+    let requested_thinking =
+        optional_input_str(input, &["thinking", "reasoning_effort", "reasoningEffort"])?;
+    let thinking_explicit = requested_thinking.is_some();
+    let thinking = requested_thinking
         .map(SubAgentThinking::parse)
         .transpose()?
         .unwrap_or(SubAgentThinking::Inherit);
@@ -12676,6 +12708,7 @@ fn parse_spawn_request(input: &Value) -> Result<SpawnRequest, ToolError> {
         model_strength,
         model_strength_explicit,
         thinking,
+        thinking_explicit,
         cwd,
         worktree,
         resident_file,
@@ -12958,34 +12991,247 @@ fn validate_roster_selector(value: &str, field: &str) -> Result<String, ToolErro
     Ok(trimmed.to_string())
 }
 
-/// Refresh the role-model defaults from the session `Config` at spawn time
-/// (#5099). The runtime's `role_models` are a launch-time snapshot, so an
-/// explicit `[subagents]` config change mid-session would otherwise stay
-/// invisible. There is no roster to re-read: role-only dispatch resolves
-/// roles, never saved members. Without the session `Config` (tests, legacy
-/// runtimes) the launch-time snapshot is the only source available and is kept.
+/// Re-read current saved role defaults and overlay the session's live explicit
+/// subagent settings. Removed profile pins cannot survive as a launch snapshot.
 fn refresh_spawn_route_sources(runtime: &mut SubAgentRuntime) {
     let Some(config) = runtime.api_config.as_deref() else {
         return;
     };
-    // No roster to re-read: keep the launch-time role defaults (which include
-    // the roster's model overrides) and overlay the live `[subagents]` config
-    // on top so mid-session config edits still win.
-    let mut role_models = std::mem::take(&mut runtime.role_models);
+    let mut role_models = spawn_roster(runtime).model_overrides();
     role_models.extend(config.subagent_model_overrides());
     runtime.role_models = role_models;
 }
 
-/// Resolve the `profile` spawn parameter against the closed role set and fold
-/// it into the request: agent type (when not explicitly given) and assignment
-/// role.
-///
-/// Runs at spawn time — `parse_spawn_request` has no runtime access. There is
-/// no roster: `profile` must name a Fleet role (canonical or legacy alias),
-/// and roles carry no provider/model pins, instruction overlays, or delegation
-/// hints — the child's capability posture is governed by its [`FleetRole`]
-/// via `WorkerRuntimeProfile::for_role`. Anything else fails closed with the
-/// role list, the same shape the roster lookup's unknown-member error had.
+fn spawn_roster(runtime: &SubAgentRuntime) -> crate::fleet::roster::FleetRoster {
+    let config = runtime
+        .api_config
+        .as_deref()
+        .map(crate::config::Config::fleet_config)
+        .unwrap_or_default();
+    crate::fleet::identity::load_effective_roster(
+        &config,
+        &runtime.context.workspace,
+        runtime.context.plugin_registry.as_deref(),
+    )
+}
+
+/// Resolve saved identity through the same trusted roster as durable Fleet.
+/// The role posture and the parent's policy remain the authority ceiling.
+fn resolve_spawn_profile(
+    request: &mut SpawnRequest,
+    roster: &crate::fleet::roster::FleetRoster,
+) -> Result<Option<crate::fleet::profile::AgentProfile>, ToolError> {
+    if let Some(error) = roster.load_error() {
+        return Err(ToolError::execution_failed(error.to_string()));
+    }
+    let Some(selector) = request.profile.as_deref() else {
+        return Ok(None);
+    };
+    let member = crate::fleet::identity::resolve_member_in_profiles(roster.members(), selector)
+        .map_err(|error| ToolError::invalid_input(error.to_string()))?;
+    let Some(member) = member else {
+        if !roster.is_exact_selection() && FleetRole::from_str(selector).is_some() {
+            resolve_spawn_role(request)?;
+            return Ok(None);
+        }
+        let available = roster
+            .members()
+            .iter()
+            .take(16)
+            .map(|member| crate::fleet::identity::bounded_identity_field(&member.id))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(ToolError::invalid_input(format!(
+            "Unknown Fleet role/profile '{selector}'. Available members: {available}. Use action=roster."
+        )));
+    };
+    if member.origin == crate::fleet::roster::ProfileOrigin::BuiltIn {
+        resolve_spawn_role(request)?;
+        return Ok(None);
+    }
+    if let Some(authority) = member.plugin_authority.as_ref() {
+        crate::plugins::registry::verify_plugin_component_authority(
+            authority, crate::plugins::activation::PluginActivationCapability::Agents,
+        ).map_err(|reason| ToolError::permission_denied(format!(
+            "Plugin Agent profile '{}' is unavailable: {reason}. Reload and review the bundle before retrying.", member.id
+        )))?;
+    }
+    let role = crate::fleet::worker_runtime::roster_member_agent_type(member);
+    if request.agent_type_explicit && request.agent_type != role {
+        return Err(ToolError::invalid_input(format!(
+            "profile '{}' implies type {}; conflicting explicit type '{}'",
+            member.id,
+            role.as_str(),
+            request.agent_type.as_str(),
+        )));
+    }
+    if let Some(pinned) = member
+        .profile
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|model| !model.is_empty() && !model.eq_ignore_ascii_case("auto"))
+    {
+        if let Some(model) = request.model.as_deref()
+            && !model.eq_ignore_ascii_case(pinned)
+        {
+            return Err(ToolError::invalid_input(format!(
+                "Fleet profile '{}' pins model '{pinned}', but the task requested '{model}'. Select another profile or omit profile to choose a task model.",
+                member.id
+            )));
+        }
+        if request.model_strength_explicit {
+            return Err(ToolError::invalid_input(format!(
+                "Fleet profile '{}' pins model '{pinned}'; model_strength cannot change an exact saved route.",
+                member.id
+            )));
+        }
+        request.model = None;
+    }
+    request.agent_type = role;
+    request.profile = Some(member.id.clone());
+    request.assignment.role = Some(member.profile.role.name.clone());
+    if !request.thinking_explicit
+        && let Some(effort) =
+            crate::fleet::worker_runtime::effective_fleet_reasoning_effort(Some(member))
+    {
+        request.thinking = SubAgentThinking::parse(&effort).map_err(|_| {
+            ToolError::invalid_input(format!(
+                "Fleet profile '{}' has invalid reasoning_effort '{effort}'",
+                member.id
+            ))
+        })?;
+    }
+    crate::fleet::worker_runtime::append_agent_profile_prompt(&mut request.prompt, member);
+    Ok(Some(member.clone()))
+}
+
+fn bind_profile_provider(
+    runtime: &mut SubAgentRuntime,
+    member: Option<&crate::fleet::profile::AgentProfile>,
+) -> Result<(), ToolError> {
+    let Some(provider_id) = crate::fleet::worker_runtime::explicit_fleet_provider_id(member) else {
+        return Ok(());
+    };
+    if provider_pin_matches_session(runtime, &provider_id) {
+        return Ok(());
+    }
+    let config = runtime.api_config.as_deref().ok_or_else(|| ToolError::execution_failed(
+        "Saved provider pin needs the session Config; the child cannot safely change providers without it."
+    ))?;
+    if member
+        .and_then(|member| member.profile.model.as_deref())
+        .is_none_or(|model| model.trim().is_empty() || model.eq_ignore_ascii_case("auto"))
+    {
+        return Err(ToolError::invalid_input(
+            "A saved cross-provider route must pin an exact model as well as its provider.",
+        ));
+    }
+    let identity = config
+        .resolve_provider_pin_identity(&provider_id)
+        .map_err(ToolError::invalid_input)?;
+    let mut scoped = config.clone();
+    scoped.scope_to_provider_identity(&identity);
+    runtime.client = DeepSeekClient::new(&scoped).map_err(|error| {
+        ToolError::execution_failed(format!(
+            "Saved provider '{provider_id}' is unavailable: {}",
+            runtime.client.redact_model_bound_text(&error.to_string())
+        ))
+    })?;
+    runtime.api_config = Some(Arc::new(scoped));
+    Ok(())
+}
+
+fn provider_pin_matches_session(runtime: &SubAgentRuntime, provider_id: &str) -> bool {
+    let provider_id = provider_id.trim();
+    let session_provider = runtime.client.api_provider();
+    if let Some(config) = runtime.api_config.as_ref() {
+        let Ok(pinned) = config.resolve_provider_pin_identity(provider_id) else {
+            return false;
+        };
+        let Ok(active) = config.active_provider_identity(session_provider) else {
+            return false;
+        };
+        return pinned.provider == active.provider
+            && pinned.key == active.key
+            && pinned.migrated_legacy_ollama_cloud_route
+                == active.migrated_legacy_ollama_cloud_route;
+    }
+    if let Some(provider) = crate::config::ApiProvider::parse(provider_id) {
+        // A Cloud client alone cannot reveal whether it was built from the
+        // explicit Cloud table/slot or the released legacy Ollama tuple. With
+        // no Config to prove provenance, a provider pin must not guess that
+        // either identity is reusable.
+        if session_provider == crate::config::ApiProvider::OllamaCloud {
+            return false;
+        }
+        return provider == session_provider;
+    }
+    false
+}
+
+fn enforce_fleet_member_route_requirements(
+    member: Option<&crate::fleet::profile::AgentProfile>,
+    runtime: &SubAgentRuntime,
+    model: &str,
+) -> Result<(), ToolError> {
+    let Some(member) = member else {
+        return Ok(());
+    };
+    if member.requires.is_empty() {
+        return Ok(());
+    }
+    let member_id = crate::fleet::identity::FleetMemberIdentity::from_member(member).member_id;
+
+    let candidate = crate::route_runtime::resolve_route_candidate(
+        runtime.client.api_provider(),
+        Some(model),
+        None,
+        Some(runtime.client.base_url().to_string()),
+        None,
+    )
+    .map_err(|error| {
+        ToolError::execution_failed(format!(
+            "Fleet member '{member_id}' requirements could not be checked against its exact child route: {}",
+            crate::safe_label::safe_error_text(&error.to_string())
+        ))
+    })?;
+    let provider_id = runtime.api_config.as_ref().map_or_else(
+        || candidate.provider_id().as_str().to_string(),
+        |config| config.provider_identity_for(runtime.client.api_provider()),
+    );
+    let provider_id = crate::safe_label::SafeLabel::identifier(&provider_id);
+    let model_id = crate::safe_label::SafeLabel::catalog_model(candidate.wire_model_id().as_str());
+
+    for requirement in &member.requires {
+        match crate::fleet::store::MemberCapability::parse(requirement) {
+            Some(crate::fleet::store::MemberCapability::Vision) => {
+                let state = candidate.capabilities().image_input;
+                if !state.is_supported() {
+                    let state = match state {
+                        codewhale_config::route::CapabilityState::Unsupported => "unsupported",
+                        codewhale_config::route::CapabilityState::Unknown => "unknown",
+                        codewhale_config::route::CapabilityState::Supported => unreachable!(),
+                    };
+                    return Err(ToolError::execution_failed(format!(
+                        "Fleet member '{member_id}' requires vision, but exact route {provider_id}/{model_id} has image_input={state}. Codewhale will not reroute a capability-bound member; pin an exact route with verified image_input support."
+                    )));
+                }
+            }
+            None => {
+                let requirement = crate::fleet::identity::bounded_identity_field(requirement);
+                return Err(ToolError::execution_failed(format!(
+                    "Fleet member '{member_id}' has unknown capability requirement '{}'; valid values: {}",
+                    requirement,
+                    crate::fleet::store::MemberCapability::VOCABULARY.join(", ")
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+/// Resolve the built-in compatibility role when no saved member is selected.
+/// Saved profile identity and route checks are owned by `resolve_spawn_profile`.
 fn resolve_spawn_role(request: &mut SpawnRequest) -> Result<(), ToolError> {
     let Some(profile_id) = request.profile.clone() else {
         return Ok(());
@@ -13039,6 +13285,7 @@ pub(crate) fn session_permission_ceiling(
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SpawnRouteSource {
+    AgentProfileModel,
     TaskModel,
     TaskModelStrength,
     RoleDefault,
@@ -13048,6 +13295,7 @@ enum SpawnRouteSource {
 impl SpawnRouteSource {
     fn as_str(self) -> &'static str {
         match self {
+            Self::AgentProfileModel => "agent_profile.model",
             Self::TaskModel => "task.model",
             Self::TaskModelStrength => "task.model_strength",
             Self::RoleDefault => "role.default",
@@ -13111,10 +13359,31 @@ fn resolve_spawn_model_selection(
 async fn bind_spawn_model_route(
     runtime: &mut SubAgentRuntime,
     request: &SpawnRequest,
+    member: Option<&crate::fleet::profile::AgentProfile>,
     prompt: &str,
 ) -> Result<(ModelRoute, SpawnRouteSource), ToolError> {
-    let mut selection = resolve_spawn_model_selection(runtime, request)?;
-    resolve_fixed_spawn_model_route(runtime, &mut selection, true)?;
+    bind_profile_provider(runtime, member)?;
+    let mut selection = if let Some(member) = member
+        && let Some(model) = member
+            .profile
+            .model
+            .as_deref()
+            .map(str::trim)
+            .filter(|model| !model.is_empty() && !model.eq_ignore_ascii_case("auto"))
+    {
+        SpawnModelSelection {
+            model_route: ModelRoute::Fixed(normalize_requested_subagent_model(
+                model,
+                "profile.model",
+                runtime.client.api_provider(),
+            )?),
+            source: SpawnRouteSource::AgentProfileModel,
+        }
+    } else {
+        resolve_spawn_model_selection(runtime, request)?
+    };
+    let providerless = crate::fleet::worker_runtime::explicit_fleet_provider_id(member).is_none();
+    resolve_fixed_spawn_model_route(runtime, &mut selection, providerless)?;
     let route = resolve_subagent_assignment_route(
         runtime,
         None,
@@ -13136,25 +13405,65 @@ async fn bind_spawn_model_route(
     {
         runtime.client = rebound;
     }
+    enforce_fleet_member_route_requirements(member, runtime, &model)?;
     runtime.model = model;
     runtime.reasoning_effort = route.reasoning_effort;
     runtime.reasoning_effort_auto = false;
     Ok((route.model_route, selection.source))
 }
 
-async fn resolved_role_roster_entry(runtime: &SubAgentRuntime, role: &FleetRole) -> Value {
-    let mut entry = json!({
-        "member_id": role.as_str(),
-        "role": role.as_str(),
-        "description": role.description(),
+async fn resolved_role_roster_entry(
+    runtime: &SubAgentRuntime,
+    roster: &crate::fleet::roster::FleetRoster,
+    role: &FleetRole,
+) -> Value {
+    resolved_spawn_roster_entry(
+        runtime,
+        roster,
+        json!({
+            "member_id": role.as_str(), "role": role.as_str(), "description": role.description(),
+            "selector": {"type": role.as_str()},
+        }),
+        json!({"prompt": "Preview role defaults.", "type": role.as_str()}),
+    )
+    .await
+}
+
+async fn resolved_profile_roster_entry(
+    runtime: &SubAgentRuntime,
+    roster: &crate::fleet::roster::FleetRoster,
+    member: &crate::fleet::profile::AgentProfile,
+) -> Value {
+    let mut entry = serde_json::to_value(crate::fleet::identity::FleetMemberIdentity::from_member(
+        member,
+    ))
+    .expect("member identity serializes");
+    entry["selector"] = json!({"profile": member.id});
+    resolved_spawn_roster_entry(
+        runtime,
+        roster,
+        entry,
+        json!({"prompt": "Preview saved profile.", "profile": member.id}),
+    )
+    .await
+}
+
+async fn resolved_spawn_roster_entry(
+    runtime: &SubAgentRuntime,
+    roster: &crate::fleet::roster::FleetRoster,
+    mut entry: Value,
+    input: Value,
+) -> Value {
+    // Exactly the spawn's parser/profile/provider/model binding, without admission or inference.
+    let request = parse_spawn_request(&input).and_then(|mut request| {
+        let member = resolve_spawn_profile(&mut request, roster)?;
+        Ok((request, member))
     });
-    // The parser owns role-specific defaults, including explore's faster lane.
-    // No execution or permission check is skipped: this only previews a route.
-    let request =
-        parse_spawn_request(&json!({"prompt": "Preview role defaults.", "type": role.as_str()}));
     let mut child = runtime.child_runtime();
     let resolved = match request {
-        Ok(request) => bind_spawn_model_route(&mut child, &request, "").await,
+        Ok((request, member)) => {
+            bind_spawn_model_route(&mut child, &request, member.as_ref(), "").await
+        }
         Err(error) => Err(error),
     };
     match resolved {
@@ -13229,7 +13538,9 @@ fn resolve_fixed_spawn_model_route(
 ) -> Result<(), ToolError> {
     if !matches!(
         selection.source,
-        SpawnRouteSource::TaskModel | SpawnRouteSource::RoleDefault
+        SpawnRouteSource::TaskModel
+            | SpawnRouteSource::RoleDefault
+            | SpawnRouteSource::AgentProfileModel
     ) {
         return Ok(());
     }
@@ -13244,7 +13555,10 @@ fn resolve_fixed_spawn_model_route(
             runtime.client.base_url(),
         )
     {
-        if matches!(selection.source, SpawnRouteSource::TaskModel) {
+        if matches!(
+            selection.source,
+            SpawnRouteSource::TaskModel | SpawnRouteSource::AgentProfileModel
+        ) {
             return Err(ToolError::invalid_input(reason));
         }
         tracing::warn!(

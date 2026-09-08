@@ -2,8 +2,7 @@
 //!
 //! A selected v2 Fleet is the runtime source of truth. Legacy profile layers
 //! are consulted only when no Fleet is selected. The selector resolver feeds
-//! durable Fleet task dispatch; in-process agent spawns resolve roles only
-//! and never consult the roster.
+//! durable Fleet task dispatch and explicit saved-profile agent spawns.
 
 use std::path::Path;
 

@@ -567,7 +567,7 @@ impl FleetRoster {
     /// `deepseek-v4-flash-0731`) nothing downstream rejects it, so the child
     /// dies on the provider's own denial instead of inheriting the parent's
     /// working model. Provider-pinned profiles keep their full route through
-    /// the profile spawn path (`child_provider_binding`), which builds a client
+    /// the profile spawn path (`bind_profile_provider`), which builds a client
     /// for the pinned provider and carries the model with it.
     #[must_use]
     pub fn model_overrides(&self) -> HashMap<String, String> {

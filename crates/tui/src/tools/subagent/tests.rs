@@ -4099,10 +4099,9 @@ fn providerless_foreign_spawn_default_inherits_session_route() {
 }
 
 #[test]
-fn spawn_route_sources_refresh_overlays_live_config_on_launch_time_defaults() {
-    // #5099: role-model defaults are a launch-time snapshot, so a mid-session
-    // `[subagents]` config change must still win at spawn time. There is no
-    // roster to re-read: the snapshot is kept and the live config overlays it.
+fn spawn_route_sources_refresh_removes_stale_pins_and_overlays_live_config() {
+    // Disk/current config own saved route defaults; removed launch-time pins
+    // cannot survive refresh. Explicit live subagent settings still win.
     let mut runtime = stub_runtime();
     runtime
         .role_models
@@ -4111,8 +4110,8 @@ fn spawn_route_sources_refresh_overlays_live_config_on_launch_time_defaults() {
     refresh_spawn_route_sources(&mut runtime);
     assert_eq!(
         runtime.role_models.get("builder").map(String::as_str),
-        Some("stale-launch-model"),
-        "launch-time defaults survive a refresh with no live override"
+        None,
+        "removed launch-time defaults cannot survive refresh"
     );
 
     let config = runtime.api_config.clone().expect("stub config");
@@ -4126,8 +4125,8 @@ fn spawn_route_sources_refresh_overlays_live_config_on_launch_time_defaults() {
     refresh_spawn_route_sources(&mut runtime);
     assert_eq!(
         runtime.role_models.get("builder").map(String::as_str),
-        Some("stale-launch-model"),
-        "unrelated launch-time defaults are kept"
+        None,
+        "removed pins remain absent when other defaults change"
     );
     assert_eq!(
         runtime.role_models.get("worker").map(String::as_str),
@@ -4706,7 +4705,7 @@ fn test_invalid_role_error_lists_real_aliases() {
 }
 
 #[test]
-fn plugin_agent_profile_loads_but_is_not_a_spawn_role() {
+fn plugin_agent_profile_resolves_from_staged_snapshot_and_rechecks_revocation() {
     let _lock = crate::test_support::lock_test_env();
     let fixture = crate::plugins::test_fixture::DeclarativePluginFixture::new();
     let config = codewhale_config::FleetConfigToml::default();
@@ -4725,22 +4724,25 @@ fn plugin_agent_profile_loads_but_is_not_a_spawn_role() {
         "Agent profile must execute from the immutable staged snapshot"
     );
 
-    // Plugin Agents are durable-Fleet members, not spawn roles: dispatching
-    // one through the agent tool fails closed with the role list.
+    // Direct agent dispatch uses the same staged identity and current
+    // component authority as durable Fleet.
     let mut request = parse_spawn_request(&json!({
         "prompt": "inspect the plugin boundary",
         "profile": "plugin-scout"
     }))
     .expect("spawn request parses");
-    let denied = resolve_spawn_role(&mut request)
-        .expect_err("plugin Agent is not a spawn role")
-        .to_string();
-    assert!(
-        denied.contains("Unknown Fleet role/profile 'plugin-scout'"),
-        "{denied}"
-    );
+    let resolved = resolve_spawn_profile(&mut request, &roster)
+        .expect("trusted plugin Agent resolves")
+        .expect("saved identity");
+    assert_eq!(resolved.id, "plugin-scout");
+    assert_eq!(request.agent_type, FleetRole::Scout);
 
     let inactive = fixture.disable_from_fresh_registry();
+    let mut request =
+        parse_spawn_request(&json!({"prompt":"Inspect.", "profile":"plugin-scout"})).unwrap();
+    let denied = resolve_spawn_profile(&mut request, &roster)
+        .expect_err("cached roster cannot retain revoked authority");
+    assert!(denied.to_string().contains("unavailable"), "{denied}");
     let reloaded = FleetRoster::load_with_plugins(&config, &fixture.workspace, &inactive);
     assert!(
         reloaded.get("plugin-scout").is_none(),

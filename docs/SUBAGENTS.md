@@ -37,8 +37,9 @@ filtered out of a child's catalog only when the depth budget is spent —
 grandchildren. The removed `agent_open`/`agent_eval`/`agent_close` lifecycle
 tools are gone from every registry, parent and child alike.
 
-`agent` launches detached background work: cancelling the parent turn stops the
-parent wait path, but it does not kill already-opened child runs.
+`agent` children are owned by the current parent turn by default. Ending or
+cancelling that turn parks its foreground descendants. Explicit `detached=true`
+starts background work with an independent cancellation token.
 
 This doc covers the role taxonomy and current compatibility controls. The active
 orchestration surface is `agent`; see the sub-agent guidance in
@@ -399,11 +400,20 @@ session (docs/CACHE.md; accepted at the v0.9.9 boundary).
 
 `agent(action="roster")` reports each built-in role's resolved provider, model,
 reasoning effort, known route limits and capability provenance. It uses the
-same resolver as execution, including live session role defaults and the
-explore role's faster lane. Per-task `model` takes precedence over
+same resolver as execution, including live session role defaults. Per-task `model` takes precedence over
 `model_strength`, then role defaults and the inherited session route.
 Foreign-provider model requests fail before admission; these controls do not
-change a child's authority. Saved Pod members use durable Pod dispatch.
+change a child's authority.
+
+The `profiles` rows expose saved members from the existing selected Fleet or
+trusted config/personal/workspace/plugin layers, with bounded identities and the
+same route/cost evidence. `profile="bug-hunter"` loads that member's instructions,
+role, provider/model pin and depth limit. Conflicting type or model requests are
+refused; explicit `thinking` overrides the saved tier. Missing providers, revoked
+plugin authority and disabled project profiles fail before child admission.
+Discovery never creates a profile or enrolls a model. These identity choices use
+the existing child lifecycle; a saved profile alone does not create a continuing
+Bot conversation or a computer lease.
 
 Cost classes describe current uncached text input/output rates, not the total
 price of a future task. Missing or routing-dependent prices remain unknown;

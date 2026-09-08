@@ -902,25 +902,30 @@ fn fleet_task_prompt_with_profile(
         }
     }
 
-    if let Some(agent_profile) = agent_profile {
-        prompt.push_str("\nFleet profile: ");
-        prompt.push_str(&agent_profile.id);
-        if let Some(display_name) = agent_profile.display_name.as_deref() {
-            prompt.push_str(" (");
-            prompt.push_str(display_name);
-            prompt.push(')');
-        }
-        if let Some(description) = agent_profile.description.as_deref() {
-            prompt.push_str("\nProfile description:\n");
-            prompt.push_str(description);
-        }
-        if let Some(instructions) = agent_profile.profile.role.instructions.as_deref() {
-            prompt.push_str("\nProfile instructions:\n");
-            prompt.push_str(instructions);
-        }
+    if let Some(profile) = agent_profile {
+        append_agent_profile_prompt(&mut prompt, profile);
     }
 
     prompt
+}
+
+/// Shared saved-profile instructions for direct and durable Fleet children.
+pub(crate) fn append_agent_profile_prompt(prompt: &mut String, agent_profile: &AgentProfile) {
+    prompt.push_str("\nFleet profile: ");
+    prompt.push_str(&agent_profile.id);
+    if let Some(display_name) = agent_profile.display_name.as_deref() {
+        prompt.push_str(" (");
+        prompt.push_str(display_name);
+        prompt.push(')');
+    }
+    if let Some(description) = agent_profile.description.as_deref() {
+        prompt.push_str("\nProfile description:\n");
+        prompt.push_str(description);
+    }
+    if let Some(instructions) = agent_profile.profile.role.instructions.as_deref() {
+        prompt.push_str("\nProfile instructions:\n");
+        prompt.push_str(instructions);
+    }
 }
 
 fn resolve_task_agent_profile<'a>(
