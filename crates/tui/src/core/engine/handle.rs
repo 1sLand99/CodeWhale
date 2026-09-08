@@ -165,8 +165,21 @@ impl EngineHandle {
         {
             self.publish_runtime_authority(authority);
         }
-        self.send_reserved_op(result?, op);
-        Ok(())
+        // Keep the public error bound to the rejected operation. Callers use
+        // TrySendError<Op> to distinguish a retryable full mailbox from a
+        // stopped engine; reservation errors otherwise carry a Sender<Op>.
+        match result {
+            Ok(permit) => {
+                self.send_reserved_op(permit, op);
+                Ok(())
+            }
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                Err(mpsc::error::TrySendError::Full(op).into())
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                Err(mpsc::error::TrySendError::Closed(op).into())
+            }
+        }
     }
 
     /// Bind controls and enqueue under one lock, preserving the same FIFO as

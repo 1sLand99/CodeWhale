@@ -350,6 +350,106 @@ struct BlockingEmergencyCompactionModelClient {
     request_dropped: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
+#[tokio::test]
+async fn manual_compaction_accounts_accepted_and_rejected_responses_once() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let _env_lock = lock_test_env();
+    let _cost_scope = crate::cost_status::test_scope();
+    let workspace = tempdir().expect("isolated compaction workspace");
+    let _home = EnvVarGuard::set("CODEWHALE_HOME", workspace.path());
+    for (finish_reason, expected_status) in [
+        ("stop", TurnOutcomeStatus::Completed),
+        ("length", TurnOutcomeStatus::Failed),
+    ] {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": format!("compaction-{finish_reason}"),
+                "object": "chat.completion",
+                "model": crate::config::DEFAULT_TEXT_MODEL,
+                "choices": [{
+                    "index": 0,
+                    "message": { "role": "assistant", "content": "Primary request: preserve the session migration. Completed: inspected the existing store. Constraints: keep every user message and failing test. Next: finish the transactional migration and rerun session_store::roundtrip." },
+                    "finish_reason": finish_reason,
+                }],
+                "usage": { "prompt_tokens": 41, "completion_tokens": 7, "total_tokens": 48 },
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let route_config = Config {
+            provider: Some("deepseek".to_string()),
+            api_key: Some("fixture-key".to_string()),
+            base_url: Some(format!("{}/v1", server.uri())),
+            ..Config::default()
+        };
+        let (mut engine, handle) = Engine::new(
+            EngineConfig {
+                workspace: workspace.path().to_path_buf(),
+                snapshots_enabled: false,
+                subagents_enabled: false,
+                ..EngineConfig::default()
+            },
+            &route_config,
+        );
+        engine.session.messages.push(Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: "Preserve the transactional session migration.".to_string(),
+                cache_control: None,
+            }],
+        });
+        engine.config.goal_state.lock().unwrap().replace(
+            "Finish the session migration",
+            Some(1000),
+            None,
+        );
+        engine
+            .handle_manual_compaction("compact-accounting".to_string(), CancellationToken::new())
+            .await;
+
+        assert_eq!(engine.session.total_usage.input_tokens, 41);
+        assert_eq!(engine.session.total_usage.output_tokens, 7);
+        assert_eq!(
+            engine
+                .config
+                .goal_state
+                .lock()
+                .unwrap()
+                .snapshot()
+                .tokens_used,
+            48
+        );
+        let mut events = handle.rx_event.write().await;
+        let mut telemetry_count = 0;
+        let mut terminal_count = 0;
+        while let Ok(event) = events.try_recv() {
+            match event {
+                Event::RoutedTurnUsage { usage, .. } => {
+                    telemetry_count += 1;
+                    assert_eq!((usage.input_tokens, usage.output_tokens), (41, 7));
+                }
+                Event::TurnComplete {
+                    usage,
+                    parent_route_usage,
+                    status,
+                    ..
+                } => {
+                    terminal_count += 1;
+                    assert_eq!((usage.input_tokens, usage.output_tokens), (41, 7));
+                    assert_eq!(parent_route_usage, Usage::default());
+                    assert_eq!(status, expected_status);
+                }
+                _ => {}
+            }
+        }
+        assert_eq!((telemetry_count, terminal_count), (1, 1));
+    }
+}
+
 #[async_trait::async_trait]
 impl crate::core::model_client::ModelClient for BlockingEmergencyCompactionModelClient {
     fn provider_name(&self) -> &str {
@@ -413,8 +513,9 @@ async fn emergency_compaction_cancellation_drops_provider_and_never_mutates_cont
     });
 
     let recovery = tokio::spawn(async move {
+        let mut turn = TurnContext::new(1);
         let recovered = engine
-            .recover_context_overflow(client.as_ref(), "cancellation regression")
+            .recover_context_overflow(client.as_ref(), "cancellation regression", &mut turn)
             .await;
         (engine, recovered)
     });
@@ -774,6 +875,7 @@ async fn exact_turn_snapshot_restores_custom_endpoint_and_turn_receipt_after_bui
                     .expect("resolve exact custom route"),
             ),
             compaction: Box::new(CompactionConfig::default()),
+            initial_routed_usage: Box::default(),
             goal_objective: None,
             goal_token_budget: None,
             goal_status: crate::tools::goal::GoalStatus::Active,
@@ -1144,6 +1246,7 @@ async fn goal_continuation_preserves_goal_and_resolves_updated_authoritative_rou
             mode: AppMode::Agent,
             route: resolved_route_for_test(&config, "local-model"),
             compaction: Box::new(CompactionConfig::default()),
+            initial_routed_usage: Box::default(),
             goal_objective: Some("keep going".to_string()),
             goal_token_budget: Some(50_000),
             goal_status: crate::tools::goal::GoalStatus::Active,
@@ -1423,6 +1526,7 @@ async fn saturated_mailbox_does_not_deadlock_goal_continuation_self_dispatch() {
             mode: AppMode::Agent,
             route: resolved_route_for_test(&config, "local-model"),
             compaction: Box::new(CompactionConfig::default()),
+            initial_routed_usage: Box::default(),
             goal_objective: Some("survive a saturated mailbox".to_string()),
             goal_token_budget: None,
             goal_status: crate::tools::goal::GoalStatus::Active,
@@ -1551,6 +1655,7 @@ async fn queued_ordinary_turn_does_not_multiply_engine_goal_continuations() {
         mode: AppMode::Agent,
         route: resolved_route_for_test(&config, "local-model"),
         compaction: Box::new(CompactionConfig::default()),
+        initial_routed_usage: Box::default(),
         goal_objective: Some("coalesce queued goal turns".to_string()),
         goal_token_budget: None,
         goal_status: crate::tools::goal::GoalStatus::Active,
@@ -2748,6 +2853,7 @@ async fn cross_turn_token_budget_exhaustion_does_not_pause_goal() {
             mode: AppMode::Agent,
             route: resolved_route_for_test(&config, crate::config::DEFAULT_TEXT_MODEL),
             compaction: Box::new(CompactionConfig::default()),
+            initial_routed_usage: Box::default(),
             goal_objective: Some("finish within budget".to_string()),
             goal_token_budget: Some(10),
             goal_status: crate::tools::goal::GoalStatus::Active,
@@ -3205,6 +3311,7 @@ async fn explicit_natural_goal_activates_before_provider_request() {
             mode: AppMode::Agent,
             route: resolved_route_for_test(&config, "local-model"),
             compaction: Box::new(CompactionConfig::default()),
+            initial_routed_usage: Box::default(),
             goal_objective: None,
             goal_token_budget: None,
             goal_status: crate::tools::goal::GoalStatus::Active,
@@ -3315,6 +3422,7 @@ async fn operate_goal_probe(mode: AppMode, prompt: &str) -> (Option<String>, boo
             mode,
             route: resolved_route_for_test(&config, "local-model"),
             compaction: Box::new(CompactionConfig::default()),
+            initial_routed_usage: Box::default(),
             goal_objective: None,
             goal_token_budget: None,
             goal_status: crate::tools::goal::GoalStatus::Active,
@@ -3445,6 +3553,7 @@ async fn operate_contract_is_appended_once_and_an_existing_goal_is_never_replace
         mode: AppMode::Operate,
         route: resolved_route_for_test(&config, "local-model"),
         compaction: Box::new(CompactionConfig::default()),
+        initial_routed_usage: Box::default(),
         goal_objective,
         goal_token_budget: None,
         goal_status,
@@ -4130,6 +4239,7 @@ async fn host_managed_engine_does_not_self_dispatch_goal_continuation() {
             mode: AppMode::Agent,
             route: resolved_route_for_test(&config, "local-model"),
             compaction: Box::new(CompactionConfig::default()),
+            initial_routed_usage: Box::default(),
             goal_objective: Some("keep going".to_string()),
             goal_token_budget: None,
             goal_status: crate::tools::goal::GoalStatus::Active,
@@ -4254,6 +4364,7 @@ async fn host_managed_engine_defers_idle_subagent_completion_to_explicit_turn() 
             mode: AppMode::Agent,
             route: resolved_route_for_test(&config, "local-model"),
             compaction: Box::new(CompactionConfig::default()),
+            initial_routed_usage: Box::default(),
             goal_objective: None,
             goal_token_budget: None,
             goal_status: crate::tools::goal::GoalStatus::Active,
@@ -4459,14 +4570,14 @@ fn subagent_mailbox_keeps_lifecycle_events_reliable() {
         &MailboxMessage::TokenUsage {
             agent_id: "agent_a".to_string(),
             source_id: "response-a".to_string(),
-            route: crate::cost_status::EffectiveRouteEnvelope::capture(
+            route: Box::new(crate::cost_status::EffectiveRouteEnvelope::capture(
                 None,
                 ApiProvider::Deepseek,
                 "deepseek",
                 "model",
                 Some(ApiProvider::Deepseek.default_base_url()),
                 chrono::Utc::now(),
-            ),
+            )),
             usage: Usage::default(),
         }
     ));
@@ -4553,14 +4664,14 @@ fn subagent_mailbox_never_samples_lifecycle_or_usage_events() {
         &MailboxMessage::TokenUsage {
             agent_id: "agent_a".to_string(),
             source_id: "response-a".to_string(),
-            route: crate::cost_status::EffectiveRouteEnvelope::capture(
+            route: Box::new(crate::cost_status::EffectiveRouteEnvelope::capture(
                 None,
                 ApiProvider::Deepseek,
                 "deepseek",
                 "model",
                 Some(ApiProvider::Deepseek.default_base_url()),
                 chrono::Utc::now(),
-            ),
+            )),
             usage: Usage::default(),
         },
         start,
@@ -5774,6 +5885,7 @@ fn active_goal_message_op(
         mode: AppMode::Agent,
         route: resolved_route_for_test(config, "local-model"),
         compaction: Box::new(CompactionConfig::default()),
+        initial_routed_usage: Box::default(),
         goal_objective: Some(objective.to_string()),
         goal_token_budget: token_budget,
         goal_status: crate::tools::goal::GoalStatus::Active,
@@ -5810,6 +5922,7 @@ fn external_user_message_op(content: &str, mode: AppMode, config: &Config) -> Op
         mode,
         route: resolved_route_for_test(config, crate::config::DEFAULT_TEXT_MODEL),
         compaction: Box::new(CompactionConfig::default()),
+        initial_routed_usage: Box::default(),
         goal_objective: None,
         goal_token_budget: None,
         goal_status: crate::tools::goal::GoalStatus::Active,
@@ -5835,6 +5948,7 @@ fn auto_review_message_op(content: &str, config: &Config) -> Op {
         mode: AppMode::Agent,
         route: resolved_route_for_test(config, crate::config::DEFAULT_TEXT_MODEL),
         compaction: Box::new(CompactionConfig::default()),
+        initial_routed_usage: Box::default(),
         goal_objective: None,
         goal_token_budget: None,
         goal_status: crate::tools::goal::GoalStatus::Active,
@@ -6111,8 +6225,11 @@ async fn normal_repl_kernel_persists_across_user_turns() {
     assert_eq!(first_turn.usage.output_tokens, 11);
     let child_usage_event = {
         let mut events = handle.rx_event.write().await;
+        // Kernel child calls carry their own routed cost receipt, so their
+        // per-call telemetry arrives as `RoutedTurnUsage` rather than the
+        // parent-route `TurnUsage` receipt.
         std::iter::from_fn(|| events.try_recv().ok()).find_map(|event| match event {
-            Event::TurnUsage { usage, .. }
+            Event::RoutedTurnUsage { usage, .. }
                 if usage.input_tokens == 7 && usage.output_tokens == 11 =>
             {
                 Some(usage)
@@ -6464,6 +6581,131 @@ fn deterministic_engine_config(workspace: &Path) -> EngineConfig {
         subagents_enabled: false,
         ..EngineConfig::default()
     }
+}
+
+#[tokio::test]
+async fn initial_routed_usage_is_total_only_emitted_once_and_keeps_parent_route_separate() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let _cost_scope = crate::cost_status::test_scope();
+    let workspace = tempdir().expect("tempdir");
+    let parent_usage = Usage {
+        input_tokens: 11,
+        output_tokens: 3,
+        ..Usage::default()
+    };
+    let classifier_usage = Usage {
+        input_tokens: 7,
+        output_tokens: 5,
+        ..Usage::default()
+    };
+    let mock = std::sync::Arc::new(MockLlmClient::new(vec![vec![
+        canned::message_start("parent-response"),
+        canned::text_block_start(0),
+        canned::text_delta(0, "done"),
+        canned::block_stop(0),
+        canned::message_delta("end_turn", Some(parent_usage.clone())),
+        canned::message_stop(),
+    ]]));
+    let client: crate::core::model_client::SharedModelClient = mock;
+    let api_config = Config::default();
+    let (engine, handle) = Engine::new_with_model_client(
+        deterministic_engine_config(workspace.path()),
+        &api_config,
+        client,
+    );
+    let task = tokio::spawn(engine.run());
+
+    let mut op = external_user_message_op("account for classifier", AppMode::Agent, &api_config);
+    let Op::SendMessage {
+        initial_routed_usage,
+        ..
+    } = &mut op
+    else {
+        unreachable!("external_user_message_op always builds SendMessage");
+    };
+    let mut missing_usage_route = crate::cost_status::EffectiveRouteEnvelope::capture(
+        None,
+        ApiProvider::Openai,
+        "openai",
+        "classifier-model",
+        Some(ApiProvider::Openai.default_base_url()),
+        chrono::Utc::now(),
+    );
+    missing_usage_route.billing_mode = crate::cost_status::RouteBillingMode::Metered;
+    **initial_routed_usage = crate::cost_status::RuntimeUsageBatch {
+        records: vec![crate::cost_status::RuntimeUsageRecord {
+            source_id: "auto-router:engine-fixture".to_string(),
+            usage: crate::cost_status::EffectiveRouteUsage {
+                route: crate::cost_status::EffectiveRouteEnvelope::capture(
+                    None,
+                    ApiProvider::Openai,
+                    "openai",
+                    "classifier-model",
+                    Some(ApiProvider::Openai.default_base_url()),
+                    chrono::Utc::now(),
+                ),
+                usage: classifier_usage.clone(),
+            },
+        }],
+        drop_records: vec![crate::cost_status::RuntimeUsageDropRecord {
+            source_id: "auto-router:engine-fixture:missing-usage".to_string(),
+            route: missing_usage_route,
+        }],
+        // One exact route-aware missing receipt plus two residual gaps whose
+        // route identity was truncated upstream.
+        dropped_records: 3,
+    };
+    handle.send(op).await.expect("send routed-usage turn");
+
+    let mut routed_events = Vec::new();
+    let mut rx = handle.rx_event.write().await;
+    let (total_usage, terminal_parent_usage, dropped_records) = loop {
+        let event = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
+            .await
+            .expect("timed out waiting for routed-usage turn")
+            .expect("engine event stream closed");
+        match event {
+            Event::RoutedTurnUsage { usage, .. } => routed_events.push(usage),
+            Event::TurnComplete {
+                usage,
+                parent_route_usage,
+                routed_usage_dropped_records,
+                status,
+                error,
+                ..
+            } => {
+                assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
+                break (usage, parent_route_usage, routed_usage_dropped_records);
+            }
+            _ => {}
+        }
+    };
+    drop(rx);
+
+    assert_eq!(routed_events, vec![classifier_usage.clone()]);
+    assert_eq!(terminal_parent_usage, parent_usage);
+    assert_eq!(total_usage.input_tokens, 18);
+    assert_eq!(total_usage.output_tokens, 8);
+    assert_eq!(dropped_records, 2);
+    let initial_cost = crate::cost_status::drain();
+    assert!(
+        initial_cost.usage_source_fingerprints.contains(
+            &crate::cost_status::usage_source_fingerprint(
+                "auto-router:engine-fixture:missing-usage"
+            )
+        ),
+        "exact missing-usage response identity was not settled"
+    );
+    assert!(
+        initial_cost
+            .unpriced_reasons
+            .contains("provider_success_missing_usage"),
+        "metered missing-usage route was not marked incomplete"
+    );
+
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    task.await.expect("engine task");
 }
 
 #[tokio::test]
@@ -7855,7 +8097,12 @@ async fn collect_guardian_journey_with_receipts(
                     "duplicate tool result"
                 );
             }
-            Event::TurnUsage { usage, .. } => usage_events.push(usage),
+            // Guardian consults carry their own routed receipt; both the
+            // parent-route and routed per-call telemetry count as reaching
+            // the cost UI.
+            Event::TurnUsage { usage, .. } | Event::RoutedTurnUsage { usage, .. } => {
+                usage_events.push(usage);
+            }
             Event::ToolGateDecision {
                 tool_id,
                 gate,
@@ -11805,6 +12052,7 @@ async fn operate_model_shell_uses_normal_approval_and_workspace_sandbox() {
             mode: AppMode::Operate,
             route: resolved_route_for_test(&api_config, crate::config::DEFAULT_TEXT_MODEL),
             compaction: Box::new(CompactionConfig::default()),
+            initial_routed_usage: Box::default(),
             goal_objective: None,
             goal_token_budget: None,
             goal_status: crate::tools::goal::GoalStatus::Active,
@@ -11959,6 +12207,7 @@ async fn full_access_subagent_handoff_keeps_model_shell_free_of_approval_prompts
             mode: AppMode::Agent,
             route: resolved_route_for_test(&api_config, crate::config::DEFAULT_TEXT_MODEL),
             compaction: Box::new(CompactionConfig::default()),
+            initial_routed_usage: Box::default(),
             goal_objective: None,
             goal_token_budget: None,
             goal_status: crate::tools::goal::GoalStatus::Active,
@@ -12095,6 +12344,7 @@ async fn assert_full_access_model_tool_batch_is_blocked(
             mode: AppMode::Agent,
             route: resolved_route_for_test(&api_config, crate::config::DEFAULT_TEXT_MODEL),
             compaction: Box::new(CompactionConfig::default()),
+            initial_routed_usage: Box::default(),
             goal_objective: None,
             goal_token_budget: None,
             goal_status: crate::tools::goal::GoalStatus::Active,
@@ -12300,6 +12550,7 @@ async fn assert_full_access_model_tool_batch_runs(
             mode: AppMode::Agent,
             route: resolved_route_for_test(&api_config, crate::config::DEFAULT_TEXT_MODEL),
             compaction: Box::new(CompactionConfig::default()),
+            initial_routed_usage: Box::default(),
             goal_objective: None,
             goal_token_budget: None,
             goal_status: crate::tools::goal::GoalStatus::Active,
@@ -12576,6 +12827,7 @@ async fn auto_review_auto_resolves_hallucinated_question_without_prompting() {
             mode: AppMode::Agent,
             route: resolved_route_for_test(&api_config, crate::config::DEFAULT_TEXT_MODEL),
             compaction: Box::new(CompactionConfig::default()),
+            initial_routed_usage: Box::default(),
             goal_objective: None,
             goal_token_budget: None,
             goal_status: crate::tools::goal::GoalStatus::Active,
@@ -12762,6 +13014,7 @@ async fn full_access_permission_allow_cannot_bypass_background_catastrophic_floo
             mode: AppMode::Agent,
             route: resolved_route_for_test(&api_config, crate::config::DEFAULT_TEXT_MODEL),
             compaction: Box::new(CompactionConfig::default()),
+            initial_routed_usage: Box::default(),
             goal_objective: None,
             goal_token_budget: None,
             goal_status: crate::tools::goal::GoalStatus::Active,
@@ -12902,6 +13155,7 @@ async fn yolo_mode_does_not_prompt_for_background_shell() {
             mode: AppMode::Agent,
             route: resolved_route_for_test(&api_config, crate::config::DEFAULT_TEXT_MODEL),
             compaction: Box::new(CompactionConfig::default()),
+            initial_routed_usage: Box::default(),
             goal_objective: None,
             goal_token_budget: None,
             goal_status: crate::tools::goal::GoalStatus::Active,
@@ -13038,6 +13292,7 @@ async fn yolo_mode_executes_publish_like_shell_without_prompt() {
             mode: AppMode::Agent,
             route: resolved_route_for_test(&api_config, crate::config::DEFAULT_TEXT_MODEL),
             compaction: Box::new(CompactionConfig::default()),
+            initial_routed_usage: Box::default(),
             goal_objective: None,
             goal_token_budget: None,
             goal_status: crate::tools::goal::GoalStatus::Active,
@@ -13178,6 +13433,7 @@ async fn yolo_mode_does_not_prompt_for_mcp_action() {
             mode: AppMode::Agent,
             route: resolved_route_for_test(&api_config, crate::config::DEFAULT_TEXT_MODEL),
             compaction: Box::new(CompactionConfig::default()),
+            initial_routed_usage: Box::default(),
             goal_objective: None,
             goal_token_budget: None,
             goal_status: crate::tools::goal::GoalStatus::Active,
@@ -19557,6 +19813,7 @@ async fn run_headless_turn_with_flaky_network(
             mode: AppMode::Agent,
             route: resolved_route_for_test(&config, crate::config::DEFAULT_TEXT_MODEL),
             compaction: Box::new(CompactionConfig::default()),
+            initial_routed_usage: Box::default(),
             goal_objective: None,
             goal_token_budget: None,
             goal_status: crate::tools::goal::GoalStatus::Active,
@@ -19682,6 +19939,7 @@ async fn terminal_output_limit_followed_by_stream_error_is_charged_and_not_retri
             mode: AppMode::Agent,
             route: resolved_route_for_test(&config, crate::config::DEFAULT_TEXT_MODEL),
             compaction: Box::new(CompactionConfig::default()),
+            initial_routed_usage: Box::default(),
             goal_objective: None,
             goal_token_budget: None,
             goal_status: crate::tools::goal::GoalStatus::Active,
@@ -19786,6 +20044,7 @@ async fn midstream_error_frame_stops_the_stream_and_drops_trailing_deltas() {
             mode: AppMode::Agent,
             route: resolved_route_for_test(&config, crate::config::DEFAULT_TEXT_MODEL),
             compaction: Box::new(CompactionConfig::default()),
+            initial_routed_usage: Box::default(),
             goal_objective: None,
             goal_token_budget: None,
             goal_status: crate::tools::goal::GoalStatus::Active,
@@ -20033,6 +20292,7 @@ async fn run_interactive_turn_with_flaky_network(
             mode: AppMode::Agent,
             route: resolved_route_for_test(&config, crate::config::DEFAULT_TEXT_MODEL),
             compaction: Box::new(CompactionConfig::default()),
+            initial_routed_usage: Box::default(),
             goal_objective: None,
             goal_token_budget: None,
             goal_status: crate::tools::goal::GoalStatus::Active,
@@ -20261,6 +20521,7 @@ async fn interactive_thinking_only_drop_preserves_nothing_and_never_claims_it_di
             mode: AppMode::Agent,
             route: resolved_route_for_test(&config, crate::config::DEFAULT_TEXT_MODEL),
             compaction: Box::new(CompactionConfig::default()),
+            initial_routed_usage: Box::default(),
             goal_objective: None,
             goal_token_budget: None,
             goal_status: crate::tools::goal::GoalStatus::Active,
@@ -20508,6 +20769,7 @@ async fn run_reasoning_only_turn_with_reprompts(
             mode: AppMode::Agent,
             route: resolved_route_for_test(&config, crate::config::DEFAULT_TEXT_MODEL),
             compaction: Box::new(CompactionConfig::default()),
+            initial_routed_usage: Box::default(),
             goal_objective: None,
             goal_token_budget: None,
             goal_status: crate::tools::goal::GoalStatus::Active,
@@ -21006,7 +21268,7 @@ fn engine_handle_try_send_does_not_block_when_op_channel_is_full() {
     use tokio::sync::mpsc;
 
     // Create a channel with the smallest possible capacity.
-    let (tx_op, _rx_op) = mpsc::channel::<Op>(1);
+    let (tx_op, rx_op) = mpsc::channel::<Op>(1);
 
     // Construct a minimal EngineHandle with the tiny channel.
     let cancel_token = CancellationToken::new();
@@ -21052,7 +21314,11 @@ fn engine_handle_try_send_does_not_block_when_op_channel_is_full() {
         approval_mode: crate::tui::approval::ApprovalMode::Auto,
         configured_sandbox_mode: None,
     });
-    assert!(result.is_err(), "try_send should fail when channel is full");
+    let error = result.expect_err("try_send should fail when channel is full");
+    assert!(matches!(
+        error.downcast_ref::<mpsc::error::TrySendError<Op>>(),
+        Some(mpsc::error::TrySendError::Full(Op::ChangeMode { .. }))
+    ));
     let authority = handle.runtime_permission_authority();
     assert_eq!(
         authority.approval_mode,
@@ -21072,6 +21338,12 @@ fn engine_handle_try_send_does_not_block_when_op_channel_is_full() {
             .is_none(),
         "cancellation authority remains visible even when its wake-up op cannot fit"
     );
+    drop(rx_op);
+    let error = handle.try_send(Op::ListSubAgents).unwrap_err();
+    assert!(matches!(
+        error.downcast_ref::<mpsc::error::TrySendError<Op>>(),
+        Some(mpsc::error::TrySendError::Closed(Op::ListSubAgents))
+    ));
 }
 
 #[tokio::test]

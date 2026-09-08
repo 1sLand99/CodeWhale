@@ -1890,7 +1890,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let config = Config {
             provider: Some("ollama".to_string()),
-            default_text_model: Some(crate::config::DEFAULT_OLLAMA_MODEL.to_string()),
+            default_text_model: Some("relay-local:fixture".to_string()),
             ..Config::default()
         };
         let host = RuntimeChatRelayHost::open(
@@ -1913,7 +1913,7 @@ mod tests {
             runtime_thread_id: format!("local_thread_{}", "f".repeat(24)),
             prompt: "hello".to_string(),
             system_prompt: None,
-            model: crate::config::DEFAULT_OLLAMA_MODEL.to_string(),
+            model: "relay-local:fixture".to_string(),
             model_provider: "ollama".to_string(),
             model_provider_id: "ollama".to_string(),
             reasoning_effort: None,
@@ -2024,6 +2024,8 @@ mod tests {
         config.api_key = Some("must-not-cross".to_string());
         config.base_url = Some("http://127.0.0.1:11434/v1".to_string());
         let challenge = "c".repeat(32);
+        assert!(crate::runtime_api::runtime_chat_relay_catalog(&config, &challenge).is_err());
+        config.default_text_model = Some("relay-local:fixture".to_string());
         let catalog = crate::runtime_api::runtime_chat_relay_catalog(&config, &challenge).unwrap();
         assert_eq!(catalog["protocol"], "codewhale.runtime-chat-relay.v1");
         assert_eq!(catalog["challenge"], challenge);

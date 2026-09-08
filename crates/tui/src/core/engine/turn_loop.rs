@@ -579,16 +579,25 @@ impl Engine {
                 context.tool_name
             )))
             .await;
+        let cost_scope = crate::cost_status::scope_token();
+        let review_route = client.effective_route_envelope(client.model(), chrono::Utc::now());
         let started = Instant::now();
         let review =
             super::reviewer::consult_reviewer(client, &context_text, &self.cancel_token).await;
         if let Some(usage) = &review.usage {
             turn.add_usage(usage);
+            crate::cost_status::report_effective_route_for_runtime(
+                cost_scope,
+                self.config.compaction.runtime_cost_owner.as_deref(),
+                &format!("auto-review:{}:{tool_id}", turn.id),
+                &review_route,
+                usage,
+            );
             if usage_has_reported_data(usage) {
                 let request_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
                 let _ = self
                     .tx_event
-                    .send(Event::TurnUsage {
+                    .send(Event::RoutedTurnUsage {
                         usage: usage.clone(),
                         duration_ms: request_ms,
                         first_token_ms: None,
@@ -596,6 +605,12 @@ impl Engine {
                     })
                     .await;
             }
+        } else if matches!(
+            &review.outcome,
+            super::reviewer::ReviewerOutcome::Unavailable { reason }
+                if reason == "the reviewer timed out" || reason == "the reviewer request failed"
+        ) {
+            turn.add_routed_usage_dropped_records(1);
         }
         let decision = review.outcome.audit_decision();
         let risk = review.outcome.audit_risk();
@@ -1033,6 +1048,8 @@ impl Engine {
                 let auto_messages_before = self.session.messages.len();
                 let auto_tokens_before = self.estimated_input_tokens();
                 let turn_cancel = self.cancel_token.clone();
+                let started = Instant::now();
+                let mut compaction_usage = Usage::default();
                 let (compaction_result, turn_was_canceled) = tokio::select! {
                     biased;
                     _ = turn_cancel.cancelled() => (None, true),
@@ -1042,8 +1059,12 @@ impl Engine {
                         &self.session.messages,
                         self.session.system_prompt.as_ref(),
                         &prepared,
+                        &mut compaction_usage,
                     ) => (Some(result), false),
                 };
+                turn.add_usage(&compaction_usage);
+                self.emit_compaction_usage(&compaction_usage, started.elapsed())
+                    .await;
                 let Some(compaction_result) = compaction_result else {
                     self.finish_compaction(&compaction_id);
                     let message = if turn_was_canceled {
@@ -1201,7 +1222,7 @@ impl Engine {
                     }
 
                     if self
-                        .recover_context_overflow(client.as_ref(), "preflight token budget")
+                        .recover_context_overflow(client.as_ref(), "preflight token budget", turn)
                         .await
                     {
                         context_recovery_attempts = context_recovery_attempts.saturating_add(1);
@@ -1442,7 +1463,26 @@ impl Engine {
                 .await;
             if let Some(mut route) = turn.pending_route.take() {
                 if let Some(billing) = route.billing.as_mut() {
-                    billing.dispatched_at = chrono::Utc::now();
+                    // Freeze the exact provider-live row at CodeWhale's
+                    // pre-permit application-dispatch boundary. This is an
+                    // admission contract, not provider invoice-time evidence;
+                    // a later cancellation/preparation failure has no usage
+                    // and therefore contributes no usage cost.
+                    let dispatched_at = chrono::Utc::now();
+                    billing.dispatched_at = dispatched_at;
+                    billing.provider_live_pricing = u64::try_from(dispatched_at.timestamp())
+                        .ok()
+                        .and_then(|dispatched_at_unix| {
+                            billing.endpoint_fingerprint.as_deref().and_then(|fingerprint| {
+                                crate::provider_catalog_live::fresh_provider_live_pricing_quote_at(
+                                    route.provider,
+                                    &route.provider_identity,
+                                    &route.model,
+                                    fingerprint,
+                                    dispatched_at_unix,
+                                )
+                            })
+                        });
                 }
                 let _ = self
                     .tx_event
@@ -1479,6 +1519,7 @@ impl Engine {
                             .recover_context_overflow(
                                 client.as_ref(),
                                 "provider context-length rejection",
+                                turn,
                             )
                             .await
                     {
@@ -2080,8 +2121,7 @@ impl Engine {
                             1,
                         )
                     });
-                    let bridge_usage_handle =
-                        bridge.as_ref().map(crate::rlm::RlmBridge::usage_handle);
+                    let repl_cost_scope = crate::cost_status::scope_token();
                     let repl_started = Instant::now();
 
                     let mut final_result: Option<String> = None;
@@ -2219,20 +2259,41 @@ impl Engine {
                     // into the parent turn exactly once, including failures
                     // after a partial fan-out, so `/cost`, goals, and the
                     // final receipt cannot undercount the working kernel.
-                    if let Some(usage_handle) = bridge_usage_handle {
-                        let child_usage = usage_handle.lock().await.clone();
-                        turn.add_usage(&child_usage);
-                        if usage_has_reported_data(&child_usage) {
+                    if let Some(bridge) = bridge.as_ref() {
+                        let snapshot = bridge.usage_snapshot().await;
+                        turn.add_usage(&snapshot.usage);
+                        let residual_dropped_records = snapshot.dropped_records.saturating_sub(
+                            u64::try_from(snapshot.drop_records.len()).unwrap_or(u64::MAX),
+                        );
+                        turn.add_routed_usage_dropped_records(residual_dropped_records);
+                        if usage_has_reported_data(&snapshot.usage) {
                             let _ = self
                                 .tx_event
-                                .send(Event::TurnUsage {
-                                    usage: child_usage,
+                                .send(Event::RoutedTurnUsage {
+                                    usage: snapshot.usage.clone(),
                                     duration_ms: u64::try_from(repl_started.elapsed().as_millis())
                                         .unwrap_or(u64::MAX),
                                     first_token_ms: None,
                                     request_ms: None,
                                 })
                                 .await;
+                        }
+                        for record in snapshot.records {
+                            crate::cost_status::report_effective_route_for_runtime(
+                                repl_cost_scope,
+                                self.config.compaction.runtime_cost_owner.as_deref(),
+                                &record.source_id,
+                                &record.usage.route,
+                                &record.usage.usage,
+                            );
+                        }
+                        for record in snapshot.drop_records {
+                            crate::cost_status::report_unreceipted_provider_success(
+                                repl_cost_scope,
+                                self.config.compaction.runtime_cost_owner.as_deref(),
+                                &record.source_id,
+                                &record.route,
+                            );
                         }
                     }
 
@@ -2558,6 +2619,7 @@ impl Engine {
 
             self.process_tool_results(
                 outcomes,
+                turn,
                 &mut tool_catalog,
                 &mut active_tool_names,
                 &hook_contexts,
@@ -4073,6 +4135,7 @@ impl Engine {
     async fn process_tool_results(
         &mut self,
         outcomes: Vec<Option<ToolExecOutcome>>,
+        turn: &mut TurnContext,
         tool_catalog: &mut Vec<crate::models::Tool>,
         active_tool_names: &mut std::collections::HashSet<String>,
         hook_contexts: &std::collections::HashMap<String, String>,
@@ -4090,12 +4153,43 @@ impl Engine {
             let tool_input = outcome.input.clone();
             let tool_name_for_ws = outcome.name.clone();
             let terminal_status = outcome.terminal.status;
+            let routed_duration_ms =
+                u64::try_from(outcome.started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
             let result = outcome.terminal.into_legacy_result();
             if matches!(outcome.name.as_str(), "create_goal" | "update_goal") {
                 goal_tool_ran = true;
             }
             match result {
                 Ok(output) => {
+                    let routed_usage = if let Some(metadata) = output.metadata.as_ref()
+                        && let Some(batch) =
+                            crate::cost_status::child_usage_records_from_metadata(metadata)
+                    {
+                        let residual_dropped_records = batch.dropped_records.saturating_sub(
+                            u64::try_from(batch.drop_records.len()).unwrap_or(u64::MAX),
+                        );
+                        turn.add_routed_usage_dropped_records(residual_dropped_records);
+                        turn.add_routed_usages(
+                            batch.records.iter().map(|record| &record.usage.usage),
+                        )
+                    } else if let Some(metadata) = output.metadata.as_ref()
+                        && let Some(usage) = crate::cost_status::child_usage_from_metadata(metadata)
+                    {
+                        turn.add_routed_usages(std::iter::once(&usage))
+                    } else {
+                        Usage::default()
+                    };
+                    if usage_has_reported_data(&routed_usage) {
+                        let _ = self
+                            .tx_event
+                            .send(Event::RoutedTurnUsage {
+                                usage: routed_usage,
+                                duration_ms: routed_duration_ms,
+                                first_token_ms: None,
+                                request_ms: None,
+                            })
+                            .await;
+                    }
                     let mut tool_surface_changed =
                         super::tool_catalog::activate_result_dependencies(
                             tool_catalog,

@@ -103,8 +103,8 @@ pub enum RouteProduct {
     Metered,
 }
 
-/// Dispatch-time billing evidence, stamped at the wire boundary. Absent for a
-/// route that was planned but never sent.
+/// Billing evidence captured at application admission before the provider permit.
+/// This does not attest network delivery. Absent before admission.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RouteBillingEnvelope {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -113,6 +113,9 @@ pub struct RouteBillingEnvelope {
     pub billing_surface: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub endpoint_fingerprint: Option<String>,
+    /// Validated frozen provider-live quote serialized by the runtime owner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_live_pricing: Option<Value>,
     /// `RouteBillingMode` in snake_case.
     pub billing_mode: String,
     pub dispatched_at: DateTime<Utc>,
@@ -375,7 +378,7 @@ pub enum EventMsg {
         session_id: SessionId,
         snapshot: Value,
     },
-    /// Immutable billing route captured at the real provider dispatch boundary.
+    /// Immutable billing route captured at application admission.
     RouteDispatched {
         thread_id: ThreadId,
         session_id: SessionId,
@@ -393,6 +396,11 @@ pub enum EventMsg {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
         usage: TokenUsage,
+        /// Parent-route subset; absent in legacy events, whose split is unknown.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_route_usage: Option<TokenUsage>,
+        #[serde(default)]
+        routed_usage_dropped_records: u64,
         /// Tool catalog sent with this turn's model request (`Tool` serialized).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tool_catalog: Option<Vec<Value>>,
@@ -401,6 +409,18 @@ pub enum EventMsg {
     },
     /// Usage for one model call within the turn.
     TurnUsage {
+        thread_id: ThreadId,
+        session_id: SessionId,
+        usage: TokenUsage,
+        duration_ms: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        first_token_ms: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_ms: Option<u64>,
+    },
+
+    /// Child-call telemetry; cost belongs to its own routed receipt.
+    RoutedTurnUsage {
         thread_id: ThreadId,
         session_id: SessionId,
         usage: TokenUsage,
@@ -716,6 +736,7 @@ pub const EVENT_KINDS: &[&str] = &[
     "route_dispatched",
     "turn_complete",
     "turn_usage",
+    "routed_turn_usage",
     "goal_updated",
     "goal_continuation_waiting",
     "goal_continuation_wait_ended",
@@ -768,6 +789,7 @@ impl EventMsg {
             Self::RouteDispatched { .. } => "route_dispatched",
             Self::TurnComplete { .. } => "turn_complete",
             Self::TurnUsage { .. } => "turn_usage",
+            Self::RoutedTurnUsage { .. } => "routed_turn_usage",
             Self::GoalUpdated { .. } => "goal_updated",
             Self::GoalContinuationWaiting { .. } => "goal_continuation_waiting",
             Self::GoalContinuationWaitEnded { .. } => "goal_continuation_wait_ended",
@@ -820,6 +842,7 @@ impl EventMsg {
             | Self::RouteDispatched { thread_id, .. }
             | Self::TurnComplete { thread_id, .. }
             | Self::TurnUsage { thread_id, .. }
+            | Self::RoutedTurnUsage { thread_id, .. }
             | Self::GoalUpdated { thread_id, .. }
             | Self::GoalContinuationWaiting { thread_id, .. }
             | Self::GoalContinuationWaitEnded { thread_id, .. }
@@ -872,6 +895,7 @@ impl EventMsg {
             | Self::RouteDispatched { session_id, .. }
             | Self::TurnComplete { session_id, .. }
             | Self::TurnUsage { session_id, .. }
+            | Self::RoutedTurnUsage { session_id, .. }
             | Self::GoalUpdated { session_id, .. }
             | Self::GoalContinuationWaiting { session_id, .. }
             | Self::GoalContinuationWaitEnded { session_id, .. }
@@ -941,6 +965,7 @@ mod tests {
                 openrouter_vendor: None,
                 billing_surface: None,
                 endpoint_fingerprint: Some("fp".into()),
+                provider_live_pricing: None,
                 billing_mode: "metered".into(),
                 dispatched_at: DateTime::<Utc>::from_timestamp(0, 0).unwrap(),
             }),
@@ -1029,10 +1054,20 @@ mod tests {
                 status: TurnOutcomeStatus::Failed,
                 error: Some("boom".into()),
                 usage: usage.clone(),
+                parent_route_usage: Some(usage.clone()),
+                routed_usage_dropped_records: 0,
                 tool_catalog: Some(vec![json!({"name": "read_file"})]),
                 base_url: None,
             },
             EventMsg::TurnUsage {
+                thread_id: t.clone(),
+                session_id: s.clone(),
+                usage: usage.clone(),
+                duration_ms: 10,
+                first_token_ms: Some(2),
+                request_ms: None,
+            },
+            EventMsg::RoutedTurnUsage {
                 thread_id: t.clone(),
                 session_id: s.clone(),
                 usage,
@@ -1365,6 +1400,8 @@ mod tests {
             status: TurnOutcomeStatus::Completed,
             error: None,
             usage: TokenUsage::default(),
+            parent_route_usage: None,
+            routed_usage_dropped_records: 0,
             tool_catalog: None,
             base_url: None,
         };

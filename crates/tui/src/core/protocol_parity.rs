@@ -178,6 +178,11 @@ fn billing_to_wire(billing: &RouteBillingEnvelope) -> wire::RouteBillingEnvelope
             .map(crate::cost_status::sanitize_persisted_route_label),
         billing_surface: billing.billing_surface.clone(),
         endpoint_fingerprint: billing.endpoint_fingerprint.clone(),
+        provider_live_pricing: billing
+            .provider_live_pricing
+            .as_ref()
+            .map(to_value)
+            .filter(|v| !v.is_null()),
         billing_mode: billing_mode_str(billing.billing_mode).to_string(),
         dispatched_at: billing.dispatched_at,
     }
@@ -503,6 +508,8 @@ pub fn event_to_protocol(event: &Event, ids: &ProtocolIds) -> wire::EventMsg {
         },
         Event::TurnComplete {
             usage,
+            parent_route_usage,
+            routed_usage_dropped_records,
             status,
             error,
             tool_catalog,
@@ -514,6 +521,8 @@ pub fn event_to_protocol(event: &Event, ids: &ProtocolIds) -> wire::EventMsg {
             status: outcome_status_to_wire(*status),
             error: error.clone(),
             usage: usage_to_wire(usage),
+            parent_route_usage: Some(usage_to_wire(parent_route_usage)),
+            routed_usage_dropped_records: *routed_usage_dropped_records,
             tool_catalog: tool_catalog
                 .as_ref()
                 .map(|tools| tools.iter().map(to_value).collect()),
@@ -525,6 +534,19 @@ pub fn event_to_protocol(event: &Event, ids: &ProtocolIds) -> wire::EventMsg {
             first_token_ms,
             request_ms,
         } => wire::EventMsg::TurnUsage {
+            thread_id,
+            session_id,
+            usage: usage_to_wire(usage),
+            duration_ms: *duration_ms,
+            first_token_ms: *first_token_ms,
+            request_ms: *request_ms,
+        },
+        Event::RoutedTurnUsage {
+            usage,
+            duration_ms,
+            first_token_ms,
+            request_ms,
+        } => wire::EventMsg::RoutedTurnUsage {
             thread_id,
             session_id,
             usage: usage_to_wire(usage),
@@ -912,6 +934,7 @@ pub fn op_to_protocol(op: &Op) -> wire_op::Op {
             mode,
             route,
             compaction,
+            initial_routed_usage: _, // Host-owned accounting, never model input.
             goal_objective,
             goal_token_budget,
             goal_status,
@@ -1198,6 +1221,89 @@ mod tests {
         }
     }
 
+    #[test]
+    fn wire_accounting_preserves_parent_total_and_distinct_routed_telemetry() {
+        let ids = ids();
+        let total = Usage {
+            input_tokens: 49,
+            output_tokens: 19,
+            ..Usage::default()
+        };
+        let parent = Usage {
+            input_tokens: 7,
+            output_tokens: 5,
+            ..Usage::default()
+        };
+        let complete = event_to_protocol(
+            &Event::TurnComplete {
+                usage: total.clone(),
+                parent_route_usage: parent.clone(),
+                routed_usage_dropped_records: 3,
+                status: TurnOutcomeStatus::Completed,
+                error: None,
+                tool_catalog: None,
+                base_url: None,
+            },
+            &ids,
+        );
+        let json = serde_json::to_value(&complete).unwrap();
+        assert_eq!(json["usage"]["input_tokens"], 49);
+        assert_eq!(json["usage"]["output_tokens"], 19);
+        assert_eq!(json["parent_route_usage"]["input_tokens"], 7);
+        assert_eq!(json["parent_route_usage"]["output_tokens"], 5);
+        assert_eq!(json["routed_usage_dropped_records"], 3);
+        assert_eq!(
+            serde_json::from_value::<wire::EventMsg>(json.clone()).unwrap(),
+            complete
+        );
+
+        // A legacy terminal receipt has no parent subset, which differs from
+        // an explicitly reported zero parent on a compaction-only turn.
+        let mut legacy = json;
+        legacy.as_object_mut().unwrap().remove("parent_route_usage");
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("routed_usage_dropped_records");
+        assert!(matches!(
+            serde_json::from_value::<wire::EventMsg>(legacy).unwrap(),
+            wire::EventMsg::TurnComplete {
+                parent_route_usage: None,
+                routed_usage_dropped_records: 0,
+                ..
+            }
+        ));
+
+        for (event, tag) in [
+            (
+                Event::TurnUsage {
+                    usage: parent,
+                    duration_ms: 12,
+                    first_token_ms: Some(2),
+                    request_ms: Some(10),
+                },
+                "turn_usage",
+            ),
+            (
+                Event::RoutedTurnUsage {
+                    usage: total,
+                    duration_ms: 27,
+                    first_token_ms: None,
+                    request_ms: None,
+                },
+                "routed_turn_usage",
+            ),
+        ] {
+            let projected = event_to_protocol(&event, &ids);
+            let json = serde_json::to_value(&projected).unwrap();
+            assert_eq!(json["event"], tag);
+            assert_eq!(
+                serde_json::from_value::<wire::EventMsg>(json).unwrap(),
+                projected
+            );
+        }
+    }
+
     /// The guard is the exhaustive `match` in `event_to_protocol`: this test
     /// exists so the guard has a name in the test log and so the projection
     /// is proven to agree with the protocol's wire-tag table.
@@ -1242,10 +1348,18 @@ mod tests {
             },
             Event::TurnComplete {
                 usage: usage.clone(),
+                parent_route_usage: usage.clone(),
+                routed_usage_dropped_records: 0,
                 status: TurnOutcomeStatus::Interrupted,
                 error: Some("stopped".into()),
                 tool_catalog: None,
                 base_url: Some("https://example.invalid".into()),
+            },
+            Event::RoutedTurnUsage {
+                usage: usage.clone(),
+                duration_ms: 12,
+                first_token_ms: Some(3),
+                request_ms: None,
             },
             Event::TurnUsage {
                 usage,
@@ -1321,7 +1435,11 @@ mod tests {
             serde_json::to_value(events[8].to_protocol(&ids)).unwrap()["status"],
             "interrupted"
         );
-        let error = serde_json::to_value(events[10].to_protocol(&ids)).unwrap();
+        let error = events
+            .iter()
+            .find(|event| matches!(event, Event::Error { .. }))
+            .unwrap();
+        let error = serde_json::to_value(error.to_protocol(&ids)).unwrap();
         assert_eq!(error["category"], "rate_limit");
         assert_eq!(error["severity"], "warning");
     }

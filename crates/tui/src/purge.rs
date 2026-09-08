@@ -684,7 +684,24 @@ pub async fn run_purge(
 
     // Report the route, not just the provider name: the endpoint decides
     // whether this is a metered public API, a plan quota, or a local runtime.
-    crate::cost_status::report_effective_route(cost_scope, &cost_route, &response.usage);
+    // Purge currently has TUI admission only. Freeze that session origin rather
+    // than borrowing a previous Runtime turn's owner from ambient config.
+    let source_id = format!(
+        "purge:{}:{}",
+        cost_route
+            .dispatched_at
+            .timestamp_nanos_opt()
+            .unwrap_or_default(),
+        response.id
+    );
+    crate::cost_status::report_effective_route_for_interactive_origin(
+        cost_scope,
+        session_id,
+        &source_id,
+        &source_id,
+        &cost_route,
+        &response.usage,
+    );
 
     // A truncated response can still carry a complete-looking `purge_context`
     // call; executing it would mutate the session from incomplete output.
@@ -1117,6 +1134,9 @@ mod tests {
 
     #[tokio::test]
     async fn run_purge_removes_message() {
+        let _env = crate::test_support::lock_test_env();
+        let home = tempfile::tempdir().unwrap();
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", home.path());
         let _cost_guard = crate::cost_status::test_scope();
         let mock = MockLlmClient::new(vec![]);
         mock.push_message_response(msg_response_with_tool_call(json!([
@@ -1164,6 +1184,9 @@ mod tests {
 
     #[tokio::test]
     async fn run_purge_replace_condenses_text() {
+        let _env = crate::test_support::lock_test_env();
+        let home = tempfile::tempdir().unwrap();
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", home.path());
         let _cost_guard = crate::cost_status::test_scope();
         let mock = MockLlmClient::new(vec![]);
         mock.push_message_response(msg_response_with_tool_call(json!([
@@ -1198,6 +1221,9 @@ mod tests {
 
     #[tokio::test]
     async fn run_purge_errors_when_no_tool_call() {
+        let _env = crate::test_support::lock_test_env();
+        let home = tempfile::tempdir().unwrap();
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", home.path());
         let _cost_guard = crate::cost_status::test_scope();
         let mock = MockLlmClient::new(vec![]);
         mock.push_message_response(msg_response_without_tool_call("nothing to clean up"));
@@ -1219,6 +1245,9 @@ mod tests {
 
     #[tokio::test]
     async fn run_purge_errors_on_api_failure() {
+        let _env = crate::test_support::lock_test_env();
+        let home = tempfile::tempdir().unwrap();
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", home.path());
         let _cost_guard = crate::cost_status::test_scope();
         // No canned response — MockLlmClient returns an error.
         let mock = MockLlmClient::new(vec![]);
