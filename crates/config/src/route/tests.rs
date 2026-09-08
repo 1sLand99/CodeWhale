@@ -1101,11 +1101,30 @@ fn openrouter_custom_endpoint_preserves_qwen37_alias() {
 #[test]
 fn opencode_go_resolver_accepts_only_chat_completions_models() {
     let resolver = RouteResolver::new();
-    let chat_models = crate::OPENCODE_GO_CHAT_MODELS;
-    assert!(chat_models.contains(&"grok-4.5"));
-    assert!(chat_models.contains(&"kimi-k3"));
+    // Literal review fixture: the 2026-09-08 endpoint table plus previously
+    // accepted IDs retained for compatibility. Do not derive from the contract.
+    let chat_models = [
+        "deepseek-v4-pro",
+        "grok-4.5",
+        "glm-5.2",
+        "glm-5.1",
+        "kimi-k3",
+        "kimi-k2.7-code",
+        "kimi-k2.6",
+        "deepseek-v4-flash",
+        "mimo-v2.5",
+        "mimo-v2.5-pro",
+        "glm-5.3-flash",
+        "glm-5.3",
+        "longcat-2.0",
+        "deepseek-v4-flash-vision-exp",
+        "hy4-preview",
+        "hy3",
+        "omen-alpha",
+    ];
+    assert_eq!(crate::OPENCODE_GO_CHAT_MODELS, &chat_models);
 
-    for &model in chat_models {
+    for model in chat_models {
         for requested in [model.to_string(), format!("opencode-go/{model}")] {
             let route = resolver
                 .resolve(&req(Some(ProviderKind::OpencodeGo), Some(&requested)))
@@ -1116,6 +1135,7 @@ fn opencode_go_resolver_accepts_only_chat_completions_models() {
                 "{requested}"
             );
             assert_eq!(route.wire_model_id().as_str(), model, "{requested}");
+            assert_eq!(route.protocol(), RequestProtocol::ChatCompletions);
         }
     }
 
@@ -1126,18 +1146,24 @@ fn opencode_go_resolver_accepts_only_chat_completions_models() {
 }
 
 #[test]
-fn opencode_go_resolver_rejects_messages_models_even_on_custom_base_urls() {
+fn opencode_go_resolver_rejects_non_chat_models_even_on_custom_base_urls() {
     let resolver = RouteResolver::new();
-    let messages_models = [
+    let non_chat_models = [
         "minimax-m3",
         "minimax-m2.7",
         "minimax-m2.5",
         "qwen3.7-max",
         "qwen3.7-plus",
         "qwen3.6-plus",
+        "qwen3.8-max",
+        "qwen3.8-flash",
+        "grok-4.6",
+        "gpt-5.6-luna",
+        "muse-spark-1.3-contributor",
+        "muse-spark-1.2-contributor",
     ];
 
-    for model in messages_models {
+    for model in non_chat_models {
         for requested in [model.to_string(), format!("opencode-go/{model}")] {
             for base_url_override in [None, Some("https://go-gateway.example.test/v1".to_string())]
             {

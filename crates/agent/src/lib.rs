@@ -149,7 +149,7 @@ pub struct ModelRegistry {
 /// Creates a registry pre-populated with all built-in models and their aliases.
 impl Default for ModelRegistry {
     fn default() -> Self {
-        let models = vec![
+        let mut models = vec![
             ModelInfo {
                 id: "deepseek-v4-pro".to_string(),
                 provider: ProviderKind::Deepseek,
@@ -1188,82 +1188,6 @@ impl Default for ModelRegistry {
                 supports_tools: true,
                 supports_reasoning: true,
             },
-            // OpenCode Go Chat Completions models (https://opencode.ai/docs/go/).
-            // Go models documented only on `/messages` are intentionally not
-            // advertised by this OpenAI-compatible provider slice.
-            ModelInfo {
-                id: "deepseek-v4-pro".to_string(),
-                provider: ProviderKind::OpencodeGo,
-                aliases: vec!["opencode-go/deepseek-v4-pro".to_string()],
-                supports_tools: true,
-                supports_reasoning: true,
-            },
-            ModelInfo {
-                id: "grok-4.5".to_string(),
-                provider: ProviderKind::OpencodeGo,
-                aliases: vec!["opencode-go/grok-4.5".to_string()],
-                supports_tools: true,
-                supports_reasoning: true,
-            },
-            // No glm-5.3 row (2026-08-03): OpenCode Go publishes no glm-5.3
-            // model. The Z.ai/OpenRouter glm-5.3 rows inherit glm-5.2 metadata;
-            // that inheritance is not evidence this gateway serves it.
-            ModelInfo {
-                id: "glm-5.2".to_string(),
-                provider: ProviderKind::OpencodeGo,
-                aliases: vec!["opencode-go/glm-5.2".to_string()],
-                supports_tools: true,
-                supports_reasoning: true,
-            },
-            ModelInfo {
-                id: "glm-5.1".to_string(),
-                provider: ProviderKind::OpencodeGo,
-                aliases: vec!["opencode-go/glm-5.1".to_string()],
-                supports_tools: true,
-                supports_reasoning: true,
-            },
-            ModelInfo {
-                id: "kimi-k3".to_string(),
-                provider: ProviderKind::OpencodeGo,
-                aliases: vec!["opencode-go/kimi-k3".to_string()],
-                supports_tools: true,
-                supports_reasoning: true,
-            },
-            ModelInfo {
-                id: "kimi-k2.7-code".to_string(),
-                provider: ProviderKind::OpencodeGo,
-                aliases: vec!["opencode-go/kimi-k2.7-code".to_string()],
-                supports_tools: true,
-                supports_reasoning: true,
-            },
-            ModelInfo {
-                id: "kimi-k2.6".to_string(),
-                provider: ProviderKind::OpencodeGo,
-                aliases: vec!["opencode-go/kimi-k2.6".to_string()],
-                supports_tools: true,
-                supports_reasoning: true,
-            },
-            ModelInfo {
-                id: "deepseek-v4-flash".to_string(),
-                provider: ProviderKind::OpencodeGo,
-                aliases: vec!["opencode-go/deepseek-v4-flash".to_string()],
-                supports_tools: true,
-                supports_reasoning: true,
-            },
-            ModelInfo {
-                id: "mimo-v2.5".to_string(),
-                provider: ProviderKind::OpencodeGo,
-                aliases: vec!["opencode-go/mimo-v2.5".to_string()],
-                supports_tools: true,
-                supports_reasoning: true,
-            },
-            ModelInfo {
-                id: "mimo-v2.5-pro".to_string(),
-                provider: ProviderKind::OpencodeGo,
-                aliases: vec!["opencode-go/mimo-v2.5-pro".to_string()],
-                supports_tools: true,
-                supports_reasoning: true,
-            },
             // Meta Model API / Muse Spark. Keep these in step with
             // `DEFAULT_META_MODEL` in config's provider_defaults and with the
             // bundled models.dev catalog: this registry resolves the `muse`
@@ -1437,6 +1361,33 @@ impl Default for ModelRegistry {
                 supports_reasoning: false,
             },
         ];
+        // The shared Chat roster owns Go compatibility; Messages and Responses
+        // models must not enter this provider's registry through a second list.
+        models.extend(codewhale_config::OPENCODE_GO_CHAT_MODELS.iter().map(|&id| {
+            // Preserve the existing reviewed flags. Roster membership alone
+            // proves neither capability; false withholds a positive assertion
+            // for new models because ModelInfo cannot express unknown.
+            let reviewed_capabilities = matches!(
+                id,
+                "deepseek-v4-pro"
+                    | "grok-4.5"
+                    | "glm-5.2"
+                    | "glm-5.1"
+                    | "kimi-k3"
+                    | "kimi-k2.7-code"
+                    | "kimi-k2.6"
+                    | "deepseek-v4-flash"
+                    | "mimo-v2.5"
+                    | "mimo-v2.5-pro"
+            );
+            ModelInfo {
+                id: id.to_string(),
+                provider: ProviderKind::OpencodeGo,
+                aliases: vec![format!("opencode-go/{id}")],
+                supports_tools: reviewed_capabilities,
+                supports_reasoning: reviewed_capabilities,
+            }
+        }));
         Self::new(models)
     }
 }
@@ -1522,9 +1473,9 @@ impl ModelRegistry {
                     fallback_chain,
                 });
             }
-            // OpenCode Go's catalog spans Chat Completions and Anthropic
-            // Messages, while Codewhale's provider slice intentionally speaks
-            // Chat only. Resolve a hinted Go model through the shared Chat
+            // OpenCode Go's catalog spans Chat Completions, Messages, and
+            // Responses, while this provider slice intentionally speaks Chat
+            // only. Resolve a hinted Go model through the shared Chat
             // allowlist and never fall through to a same-named global alias on
             // OpenRouter or MiniMax.
             if provider_hint == Some(ProviderKind::OpencodeGo)
@@ -2391,51 +2342,77 @@ mod tests {
             .map(|model| model.id.as_str())
             .collect();
 
+        // Literal expectations independently catch an incomplete shared roster
+        // and prevent new compatibility entries from claiming capabilities.
+        let expected = [
+            ("deepseek-v4-pro", true),
+            ("grok-4.5", true),
+            ("glm-5.2", true),
+            ("glm-5.1", true),
+            ("kimi-k3", true),
+            ("kimi-k2.7-code", true),
+            ("kimi-k2.6", true),
+            ("deepseek-v4-flash", true),
+            ("mimo-v2.5", true),
+            ("mimo-v2.5-pro", true),
+            ("glm-5.3-flash", false),
+            ("glm-5.3", false),
+            ("longcat-2.0", false),
+            ("deepseek-v4-flash-vision-exp", false),
+            ("hy4-preview", false),
+            ("hy3", false),
+            ("omen-alpha", false),
+        ];
         assert_eq!(
             models,
-            vec![
-                "deepseek-v4-pro",
-                "grok-4.5",
-                "glm-5.2",
-                "glm-5.1",
-                "kimi-k3",
-                "kimi-k2.7-code",
-                "kimi-k2.6",
-                "deepseek-v4-flash",
-                "mimo-v2.5",
-                "mimo-v2.5-pro",
-            ]
+            expected.iter().map(|(id, _)| *id).collect::<Vec<_>>()
         );
 
         let default = registry.resolve_ok(None, Some(ProviderKind::OpencodeGo));
         assert_eq!(default.resolved.provider, ProviderKind::OpencodeGo);
         assert_eq!(default.resolved.id, "deepseek-v4-pro");
 
-        for model in ["grok-4.5", "kimi-k3"] {
+        for (model, expected_capabilities) in expected {
             for requested in [model.to_string(), format!("opencode-go/{model}")] {
                 let resolved =
                     registry.resolve_ok(Some(&requested), Some(ProviderKind::OpencodeGo));
                 assert_eq!(resolved.resolved.provider, ProviderKind::OpencodeGo);
                 assert_eq!(resolved.resolved.id, model);
                 assert!(!resolved.used_fallback);
+                assert_eq!(
+                    resolved.resolved.aliases,
+                    vec![format!("opencode-go/{model}")],
+                    "{requested}"
+                );
+                assert_eq!(
+                    resolved.resolved.supports_tools, expected_capabilities,
+                    "{requested} tool support"
+                );
+                assert_eq!(
+                    resolved.resolved.supports_reasoning, expected_capabilities,
+                    "{requested} reasoning support"
+                );
             }
         }
 
-        for messages_only in [
+        for non_chat in [
             "minimax-m3",
             "minimax-m2.7",
             "minimax-m2.5",
             "qwen3.7-max",
             "qwen3.7-plus",
             "qwen3.6-plus",
+            "qwen3.8-max",
+            "qwen3.8-flash",
+            "grok-4.6",
+            "gpt-5.6-luna",
+            "muse-spark-1.3-contributor",
+            "muse-spark-1.2-contributor",
         ] {
-            for requested in [
-                messages_only.to_string(),
-                format!("opencode-go/{messages_only}"),
-            ] {
+            for requested in [non_chat.to_string(), format!("opencode-go/{non_chat}")] {
                 let rejected = registry
                     .resolve(Some(&requested), Some(ProviderKind::OpencodeGo))
-                    .expect_err("Messages-only id must not fall back on the Chat-only route");
+                    .expect_err("Messages/Responses id must not fall back on the Chat-only route");
                 assert_eq!(
                     rejected,
                     ModelResolutionError::ModelNotAvailableForProvider {

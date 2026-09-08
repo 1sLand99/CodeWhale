@@ -219,6 +219,120 @@ async fn unpaginated_rosters_stay_single_request_and_unknown_continuation_refuse
 }
 
 #[tokio::test]
+async fn opencode_go_published_unpaginated_roster_keeps_new_chat_ids_only() {
+    let server = MockServer::start().await;
+    let base_url = format!("{}/zen/go/v1", server.uri());
+    // Literal additions from the pinned Go documentation plus retained routes:
+    // do not generate this fixture from the production allowlist it verifies.
+    let positives = [
+        "glm-5.3-flash",
+        "glm-5.3",
+        "longcat-2.0",
+        "deepseek-v4-flash-vision-exp",
+        "hy4-preview",
+        "hy3",
+        "omen-alpha",
+        "deepseek-v4-pro",
+        "grok-4.5",
+    ];
+    let negatives = [
+        "qwen3.8-max",
+        "qwen3.8-flash",
+        "minimax-m3",
+        "grok-4.6",
+        "gpt-5.6-luna",
+        "muse-spark-1.3-contributor",
+        "muse-spark-1.2-contributor",
+    ];
+    let rows: Vec<_> = positives
+        .iter()
+        .chain(negatives.iter())
+        .map(
+            |id| json!({"id":id, "object":"model", "created":1_700_000_000, "owned_by":"opencode"}),
+        )
+        .collect();
+    Mock::given(method("GET"))
+        .and(path("/zen/go/v1/models"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"object":"list", "data":rows})),
+        )
+        .mount(&server)
+        .await;
+    let mut client = DeepSeekClient::new(&Config {
+        provider: Some("opencode-go".into()),
+        providers: Some(ProvidersConfig {
+            opencode_go: ProviderConfig {
+                api_key: Some(KEY.into()),
+                base_url: Some(base_url.clone()),
+                ..ProviderConfig::default()
+            },
+            ..ProvidersConfig::default()
+        }),
+        ..Config::default()
+    })
+    .expect("explicit local Go route");
+    client.retry.enabled = false;
+    client.retry.max_retries = 0;
+
+    let expected: std::collections::BTreeSet<_> = positives.into_iter().collect();
+    let listed = client.list_models().await.unwrap();
+    assert_eq!(
+        listed
+            .iter()
+            .map(|row| row.id.as_str())
+            .collect::<std::collections::BTreeSet<_>>(),
+        expected
+    );
+    assert_eq!(listed.len(), expected.len());
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    let delta = client.fetch_catalog_delta().await.unwrap();
+    assert_eq!(delta.provider, "opencode-go");
+    assert_eq!(delta.base_url_fingerprint, base_url_fingerprint(&base_url));
+    assert_eq!(
+        delta
+            .offerings
+            .iter()
+            .map(|row| row.wire_model_id.as_str())
+            .collect::<std::collections::BTreeSet<_>>(),
+        expected
+    );
+    assert_eq!(delta.offerings.len(), expected.len());
+    for row in &delta.offerings {
+        assert_eq!(row.provider, "opencode-go");
+        assert_eq!(row.endpoint_key, "chat");
+        assert_eq!(row.canonical_model, None);
+        assert_eq!(row.family, None);
+        assert_eq!(row.limit, None);
+        assert_eq!(row.cost, None);
+        assert_eq!(row.cost_source, None);
+        assert_eq!(row.modalities, None);
+        assert_eq!(row.attachment, None);
+        assert_eq!(row.reasoning, None);
+        assert_eq!(row.tool_call, None);
+        assert_eq!(row.structured_output, None);
+        assert!(row.reasoning_options.is_empty());
+        assert!(
+            matches!(&row.source, CatalogSource::Live { base_url_fingerprint, fetched_at }
+            if base_url_fingerprint == &delta.base_url_fingerprint && *fetched_at == delta.fetched_at)
+        );
+    }
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(
+        requests.len(),
+        2,
+        "one unpaginated request per public consumer"
+    );
+    for request in requests {
+        assert_eq!(request.url.path(), "/zen/go/v1/models");
+        assert!(request.url.query().is_none());
+        assert_eq!(
+            request.headers.get("authorization").unwrap(),
+            format!("Bearer {KEY}").as_str()
+        );
+    }
+}
+
+#[tokio::test]
 async fn models_redirects_never_reach_another_server_from_any_consumer() {
     let destination = MockServer::start().await;
     for status in [302, 307] {
