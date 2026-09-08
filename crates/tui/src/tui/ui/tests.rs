@@ -8383,9 +8383,10 @@ async fn operate_entry_preserves_live_custom_identity_and_auto_over_startup_rout
         );
         let mut config = operate_tui_route_config();
         config.fleet_operator_route_applied = true;
-        let manager =
-            crate::automation_manager::AutomationManager::open(root.path().join("automations"))
-                .expect("manager");
+        let manager = crate::automation_manager::AutomationManager::open_for_test(
+            root.path().join("automations"),
+        )
+        .expect("manager");
         let automations = Arc::new(tokio::sync::Mutex::new(manager));
         let mut app = create_test_app();
         app.workspace = root.path().to_path_buf();
@@ -8448,9 +8449,10 @@ async fn operate_rejected_attach_does_not_reactivate_saved_keepalive() {
     let operate_dir = root.path().join("operate");
     let _operate = crate::test_support::EnvVarGuard::set("CODEWHALE_OPERATE_DIR", &operate_dir);
     let config = operate_tui_route_config();
-    let manager =
-        crate::automation_manager::AutomationManager::open(root.path().join("automations"))
-            .expect("manager");
+    let manager = crate::automation_manager::AutomationManager::open_for_test(
+        root.path().join("automations"),
+    )
+    .expect("manager");
     crate::operate::upsert_keepalive(&manager, root.path(), true, &config, None).expect("upsert");
     crate::operate::pause_keepalive(&manager).expect("pause");
     let before = serde_json::to_value(
@@ -8521,7 +8523,7 @@ async fn operate_mode_entry_attaches_to_recorded_operation() {
 
     let mut app = create_test_app();
     app.runtime_services.automations = Some(Arc::new(tokio::sync::Mutex::new(
-        crate::automation_manager::AutomationManager::open(dir.path().join("automations"))
+        crate::automation_manager::AutomationManager::open_for_test(dir.path().join("automations"))
             .expect("automations"),
     )));
     let engine = crate::core::engine::mock_engine_handle();
@@ -23841,6 +23843,7 @@ mod work_sidebar_projection_tests {
         owner_session_id: Option<&str>,
     ) -> TaskSummary {
         TaskSummary {
+            execution_binding_known: true,
             id: id.to_string(),
             status,
             prompt_summary: format!("task {id}"),
@@ -26665,4 +26668,76 @@ fn notification_input_result_never_reopens_or_clears_a_different_pending_questio
         3,
         "different request failures remain independent even with identical text"
     );
+}
+
+#[tokio::test]
+async fn task_inventory_failure_preserves_only_the_same_session_snapshot() -> anyhow::Result<()> {
+    use crate::task_manager::{
+        NewTaskRequest, TaskExecutionResult, TaskManager, TaskManagerConfig, TaskStatus,
+        TaskTerminalReason,
+    };
+    struct Done;
+    #[async_trait::async_trait]
+    impl crate::task_manager::TaskExecutor for Done {
+        async fn execute(
+            &self,
+            _: crate::task_manager::ExecutionTask,
+            _: tokio::sync::mpsc::Sender<crate::task_manager::TaskExecutionEvent>,
+            _: tokio_util::sync::CancellationToken,
+        ) -> TaskExecutionResult {
+            TaskExecutionResult {
+                status: TaskStatus::Completed,
+                result_text: Some("fixture".into()),
+                error: None,
+                terminal_reason: TaskTerminalReason::Completed,
+            }
+        }
+    }
+    let root = TempDir::new()?;
+    let tasks = TaskManager::start_with_executor(
+        TaskManagerConfig {
+            data_dir: root.path().into(),
+            worker_count: 1,
+            default_workspace: root.path().into(),
+            default_model: "fixture".into(),
+            default_mode: "plan".into(),
+            allow_shell: false,
+            trust_mode: false,
+            execution_limits: crate::task_manager::TaskExecutionLimits::default(),
+        },
+        Arc::new(Done),
+    )
+    .await?;
+    let record = tasks
+        .add_task(NewTaskRequest {
+            owner_session_id: Some("session-a".into()),
+            ..NewTaskRequest::from_prompt("session A receipt")
+        })
+        .await?;
+    crate::task_manager::wait_for_terminal_state(&tasks, &record.id, Duration::from_secs(5))
+        .await?;
+    let mut app = create_test_app();
+    app.current_session_id = Some("session-a".into());
+    app.session_started_at = chrono::Utc::now() - chrono::Duration::minutes(1);
+    super::task_projection::refresh_active_task_panel(&mut app, &tasks).await;
+    assert!(app.task_panel.iter().any(|row| row.id == record.id));
+    let queue = root.path().join("queue.json");
+    let saved = std::fs::read(&queue)?;
+    std::fs::write(&queue, b"{corrupt")?;
+    assert!(super::task_projection::refresh_active_task_panel(&mut app, &tasks).await);
+    assert!(app.task_panel_unavailable);
+    assert!(app.task_panel.iter().any(|row| row.id == record.id));
+    app.current_session_id = Some("session-b".into());
+    assert!(super::task_projection::refresh_active_task_panel(&mut app, &tasks).await);
+    assert!(app.task_panel_unavailable);
+    assert!(
+        app.task_panel.is_empty(),
+        "session A's stale rows cannot cross into B"
+    );
+    std::fs::write(queue, saved)?;
+    super::task_projection::refresh_active_task_panel(&mut app, &tasks).await;
+    assert!(!app.task_panel_unavailable);
+    assert!(app.task_panel.is_empty());
+    tasks.shutdown_and_wait().await?;
+    Ok(())
 }

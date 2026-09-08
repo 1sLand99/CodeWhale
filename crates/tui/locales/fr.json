@@ -1579,6 +1579,8 @@
   "WorkflowReceiptProviderReported": "rapporté par le fournisseur",
   "WorkflowReceiptEstimated": "estimé",
   "SidebarTasksLabel": "Tâches",
+  "TaskOwnershipUnverified": "Responsable de l’exécution non vérifié",
+  "TaskInventoryUnavailable": "Le stockage des tâches est indisponible ; le dernier état connu est affiché.",
   "SidebarTodoLabel": "À faire",
   "WorkSurfaceTodoProgress": "{label} {completed}/{total} · {remaining} restantes",
   "SidebarStopControl": "arrêter",

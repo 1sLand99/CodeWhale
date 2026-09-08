@@ -1579,6 +1579,8 @@
   "WorkflowReceiptProviderReported": "dilaporkan penyedia",
   "WorkflowReceiptEstimated": "perkiraan",
   "SidebarTasksLabel": "Tugas",
+  "TaskOwnershipUnverified": "Pemilik eksekusi belum diverifikasi",
+  "TaskInventoryUnavailable": "Penyimpanan tugas tidak tersedia; menampilkan status terakhir yang diketahui.",
   "SidebarTodoLabel": "Perlu dikerjakan",
   "WorkSurfaceTodoProgress": "{label} {completed}/{total} · sisa {remaining}",
   "SidebarStopControl": "berhenti",

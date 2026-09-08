@@ -538,7 +538,8 @@ impl TasksTool {
         let limit = optional_u64(input, "limit", 20)?.clamp(1, 100) as usize;
         let tasks = manager
             .list_tasks_for_owner(Some(limit), None, &context.state_namespace)
-            .await;
+            .await
+            .map_err(|error| ToolError::execution_failed(error.to_string()))?;
         ToolResult::json(&json!({
             "summary": format!("{} durable task(s)", tasks.len()),
             "tasks": tasks,
@@ -1084,6 +1085,7 @@ fn task_result_with_lifecycle_warning(
         "summary": format!("{label}: {} ({:?})", task.id, task.status),
         "task": task,
         "lifecycle_warning": lifecycle_warning,
+        "execution_ownership": if task.execution_scope.is_some() { "scope_bound" } else { "unverified" },
     }))
     .map_err(|e| ToolError::execution_failed(e.to_string()))
 }

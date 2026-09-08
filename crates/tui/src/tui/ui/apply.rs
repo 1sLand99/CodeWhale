@@ -2351,11 +2351,18 @@ pub(crate) async fn apply_command_result(
                             .list_tasks_for_owner(Some(30), None, session_id)
                             .await
                     }
-                    None => Vec::new(),
+                    None => Ok(Vec::new()),
                 };
                 refresh_active_task_panel(app, task_manager).await;
                 app.add_message(HistoryCell::System {
-                    content: format_task_list(&tasks),
+                    content: match tasks {
+                        Ok(tasks) => format_task_list(&tasks),
+                        Err(_) => crate::localization::tr(
+                            app.ui_locale,
+                            crate::localization::MessageId::TaskInventoryUnavailable,
+                        )
+                        .to_string(),
+                    },
                 });
             }
             AppAction::RemoteControl(action) => match action {

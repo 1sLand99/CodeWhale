@@ -1579,6 +1579,8 @@
   "WorkflowReceiptProviderReported": "प्रदाता द्वारा बताया गया",
   "WorkflowReceiptEstimated": "अनुमानित",
   "SidebarTasksLabel": "कार्य",
+  "TaskOwnershipUnverified": "निष्पादन स्वामित्व सत्यापित नहीं है",
+  "TaskInventoryUnavailable": "कार्य संग्रह उपलब्ध नहीं है; अंतिम ज्ञात स्थिति दिखाई जा रही है।",
   "SidebarTodoLabel": "करने योग्य",
   "WorkSurfaceTodoProgress": "{label} {completed}/{total} · {remaining} शेष",
   "SidebarStopControl": "रोकें",

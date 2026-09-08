@@ -27,9 +27,9 @@ use crate::utils::spawn_supervised;
 /// can build a fixed-id record directly (no create/delete id swap).
 // v2 pins provider identity. Older runtimes must reject a pinned definition
 // instead of silently sending its model through their current provider.
-pub(crate) const CURRENT_AUTOMATION_SCHEMA_VERSION: u32 = 2;
-const CURRENT_RUN_SCHEMA_VERSION: u32 = 2;
-const CURRENT_TRIGGER_SCHEMA_VERSION: u32 = 2;
+pub(crate) const CURRENT_AUTOMATION_SCHEMA_VERSION: u32 = 3;
+const CURRENT_RUN_SCHEMA_VERSION: u32 = 3;
+const CURRENT_TRIGGER_SCHEMA_VERSION: u32 = 3;
 const DEFAULT_AUTOMATION_MODE: &str = "agent";
 const DEFAULT_AUTOMATION_ALLOW_SHELL: bool = false;
 const DEFAULT_AUTOMATION_TRUST_MODE: bool = false;
@@ -102,6 +102,9 @@ pub struct DelayedTriggerRecord {
     pub parent_trigger_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dispatch: Option<AutomationDispatch>,
+    /// Bound by the trusted service, independently of visibility ownership.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_scope: Option<String>,
 }
 
 /// Input for creating a new delayed trigger.
@@ -181,6 +184,9 @@ pub struct AutomationRecord {
     pub next_run_at: Option<DateTime<Utc>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_run_at: Option<DateTime<Utc>>,
+    /// Bound by the trusted service, independently of visibility ownership.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_scope: Option<String>,
 }
 
 impl AutomationRecord {
@@ -240,6 +246,8 @@ pub struct AutomationRunRecord {
 /// `accepted` records task promotion, not provider execution or completion.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AutomationDispatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    execution_scope: Option<String>,
     request: NewTaskRequest,
     task_data_dir: PathBuf,
     #[serde(default)]
@@ -937,6 +945,7 @@ fn days_in_month(year: i32, month: u32) -> u32 {
 
 #[derive(Debug, Clone)]
 pub struct AutomationManager {
+    execution_scope: Option<String>,
     automations_dir: PathBuf,
     runs_dir: PathBuf,
     triggers_dir: PathBuf,
@@ -1028,10 +1037,72 @@ impl AutomationManager {
         fs::create_dir_all(&triggers_dir)
             .with_context(|| format!("Failed to create {}", triggers_dir.display()))?;
         Ok(Self {
+            execution_scope: None,
             automations_dir,
             runs_dir,
             triggers_dir,
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn open_for_test(root: PathBuf) -> Result<Self> {
+        let mut manager = Self::open(root)?;
+        manager.execution_scope = Some(crate::task_manager::test_execution_scope("test"));
+        Ok(manager)
+    }
+
+    pub(crate) fn bind_task_manager(
+        &mut self,
+        tasks: &crate::task_manager::TaskManager,
+    ) -> Result<()> {
+        if self
+            .execution_scope
+            .as_deref()
+            .is_some_and(|scope| scope != tasks.execution_scope())
+        {
+            bail!("Automation service belongs to another Runtime scope");
+        }
+        self.execution_scope = Some(tasks.execution_scope().to_string());
+        Ok(())
+    }
+
+    pub(crate) fn execution_scope(&self) -> Option<&str> {
+        self.execution_scope.as_deref()
+    }
+
+    fn eligible_scope(&self, scope: Option<&str>) -> bool {
+        scope.is_some() && scope == self.execution_scope()
+    }
+
+    /// Explicit control may bind an unbound definition; saved admissions never
+    /// read this field back from the definition during recovery.
+    fn adopt_for_run(&self, automation: &mut AutomationRecord) -> Result<()> {
+        let scope = self
+            .execution_scope()
+            .context("Automation execution ownership is unverified")?;
+        if let Some(bound) = &automation.execution_scope {
+            if bound != scope {
+                bail!("Automation belongs to another Runtime execution scope");
+            }
+        } else {
+            automation.execution_scope = Some(scope.to_string());
+            automation.schema_version = CURRENT_AUTOMATION_SCHEMA_VERSION;
+            automation.updated_at = Utc::now();
+            if automation.status == AutomationStatus::Active {
+                let schedule = AutomationSchedule::parse_rrule(&automation.rrule)?;
+                automation.next_run_at =
+                    match schedule.next_after_with_anchor(Utc::now(), automation.created_at) {
+                        Ok(next) => Some(next),
+                        Err(_) if matches!(schedule, AutomationSchedule::Once { .. }) => {
+                            automation.status = AutomationStatus::Paused;
+                            None
+                        }
+                        Err(error) => return Err(error),
+                    };
+            }
+            self.save_automation_unlocked(automation)?;
+        }
+        Ok(())
     }
 
     pub fn default_location() -> Result<Self> {
@@ -1087,6 +1158,7 @@ impl AutomationManager {
 
         let record = AutomationRecord {
             schema_version: CURRENT_AUTOMATION_SCHEMA_VERSION,
+            execution_scope: self.execution_scope.clone(),
             id: Uuid::new_v4().to_string(),
             name: req.name.trim().to_string(),
             prompt: req.prompt.trim().to_string(),
@@ -1188,7 +1260,13 @@ impl AutomationManager {
         req: UpdateAutomationRequest,
     ) -> Result<AutomationRecord> {
         let mut existing = self.get_automation(id)?;
-        let schedule_changed = req.rrule.is_some() || req.status.is_some();
+        let adopting = existing.execution_scope.is_none()
+            && self.execution_scope.is_some()
+            && req.status != Some(AutomationStatus::Paused);
+        if adopting {
+            existing.execution_scope = self.execution_scope.clone();
+        }
+        let schedule_changed = adopting || req.rrule.is_some() || req.status.is_some();
 
         if let Some(name) = req.name {
             if name.trim().is_empty() {
@@ -1249,7 +1327,10 @@ impl AutomationManager {
             }
         }
 
-        if existing.model_provider.is_some() || existing.model_provider_id.is_some() {
+        if existing.execution_scope.is_some()
+            || existing.model_provider.is_some()
+            || existing.model_provider_id.is_some()
+        {
             existing.schema_version = CURRENT_AUTOMATION_SCHEMA_VERSION;
         }
 
@@ -1492,7 +1573,9 @@ impl AutomationManager {
         self.with_transaction(|| {
             let mut due = Vec::new();
             for mut automation in self.list_automations()? {
-                if automation.status != AutomationStatus::Active {
+                if automation.status != AutomationStatus::Active
+                    || !self.eligible_scope(automation.execution_scope.as_deref())
+                {
                     continue;
                 }
                 let schedule = AutomationSchedule::parse_rrule(&automation.rrule)?;
@@ -1537,7 +1620,8 @@ impl AutomationManager {
                 return Ok(None);
             }
             let mut current = self.get_automation(&observed.id)?;
-            if current != *observed
+            if !self.eligible_scope(current.execution_scope.as_deref())
+                || current != *observed
                 || current.status != AutomationStatus::Active
                 || current.next_run_at != Some(run.scheduled_for)
             {
@@ -1694,6 +1778,7 @@ impl AutomationManager {
         }
         let record = DelayedTriggerRecord {
             schema_version: CURRENT_TRIGGER_SCHEMA_VERSION,
+            execution_scope: self.execution_scope.clone(),
             trigger_id: format!("trig_{}", Uuid::new_v4().simple()),
             fire_at: req.fire_at,
             message: req.message.trim().to_string(),
@@ -1889,9 +1974,13 @@ fn bind_run_dispatch(
     task_data_dir: &Path,
     scheduled: bool,
 ) -> Result<()> {
+    if automation.execution_scope.is_none() {
+        bail!("Automation execution ownership is unverified");
+    }
     run.schema_version = CURRENT_RUN_SCHEMA_VERSION;
     run.task_id = Some(crate::task_manager::TaskManager::new_task_id());
     run.dispatch = Some(AutomationDispatch {
+        execution_scope: automation.execution_scope.clone(),
         request: automation_task_request(automation),
         task_data_dir: task_data_dir
             .canonicalize()
@@ -1920,6 +2009,11 @@ async fn dispatch_bound_task(
     tasks: &SharedTaskManager,
 ) -> Result<crate::task_manager::TaskRecord> {
     check_dispatch_store(dispatch, tasks)?;
+    if dispatch.execution_scope.as_deref() != Some(tasks.execution_scope()) {
+        bail!(
+            "Automation admission execution ownership is unverified or belongs to another Runtime"
+        );
+    }
     let task = if dispatch.accepted {
         tasks
             .read_bound_task(task_id)?
@@ -1972,6 +2066,7 @@ pub async fn run_now_shared(
     automation_id: &str,
     task_manager: &SharedTaskManager,
 ) -> Result<AutomationRunRecord> {
+    automations.lock().await.bind_task_manager(task_manager)?;
     let task_manager = Arc::clone(task_manager);
     let task_data_dir = task_manager.data_dir();
     run_now_with(
@@ -2004,7 +2099,8 @@ where
     let (automation, run) = {
         let manager = automations.lock().await;
         manager.with_transaction(|| {
-            let automation = manager.get_automation(automation_id)?;
+            let mut automation = manager.get_automation(automation_id)?;
+            manager.adopt_for_run(&mut automation)?;
             let now = Utc::now();
             let mut run = new_run_record(&automation.id, now, now);
             bind_run_dispatch(&mut run, &automation, task_data_dir, false)?;
@@ -2024,6 +2120,7 @@ async fn scheduler_tick_shared(
     automations: &SharedAutomationManager,
     task_manager: &SharedTaskManager,
 ) -> Result<()> {
+    automations.lock().await.bind_task_manager(task_manager)?;
     let tasks = Arc::clone(task_manager);
     scheduler_tick_with(automations, &tasks.data_dir(), move |mut run| {
         let tasks = Arc::clone(&tasks);
@@ -2058,6 +2155,13 @@ where
             .as_ref()
             .is_some_and(|dispatch| !dispatch.accepted)
     }) {
+        if !automations.lock().await.eligible_scope(
+            run.dispatch
+                .as_ref()
+                .and_then(|dispatch| dispatch.execution_scope.as_deref()),
+        ) {
+            continue;
+        }
         automations.lock().await.recover_schedule_advance(&run)?;
         let run = enqueue(run).await;
         automations
@@ -2068,6 +2172,13 @@ where
     let now = Utc::now();
     let due = automations.lock().await.collect_due_runs(now)?;
     for (observed, proposed) in due {
+        if !automations
+            .lock()
+            .await
+            .eligible_scope(observed.execution_scope.as_deref())
+        {
+            continue;
+        }
         let run =
             automations
                 .lock()
@@ -2086,6 +2197,7 @@ async fn fire_due_triggers_shared(
     automations: &SharedAutomationManager,
     task_manager: &SharedTaskManager,
 ) -> Result<()> {
+    automations.lock().await.bind_task_manager(task_manager)?;
     let tasks = Arc::clone(task_manager);
     fire_due_triggers_with(automations, &tasks.data_dir(), move |trigger| {
         let tasks = Arc::clone(&tasks);
@@ -2138,6 +2250,17 @@ where
     let now = Utc::now();
     let candidates = automations.lock().await.collect_due_triggers(now)?;
     for candidate in candidates {
+        let scope = if candidate.status == DelayedTriggerStatus::Dispatching {
+            candidate
+                .dispatch
+                .as_ref()
+                .and_then(|d| d.execution_scope.as_deref())
+        } else {
+            candidate.execution_scope.as_deref()
+        };
+        if !automations.lock().await.eligible_scope(scope) {
+            continue;
+        }
         if !(candidate.status == DelayedTriggerStatus::Dispatching
             || (candidate.status == DelayedTriggerStatus::Pending && candidate.fire_at <= now))
         {
@@ -2148,12 +2271,21 @@ where
             manager.with_transaction(|| {
                 let mut current = manager.get_trigger(&candidate.trigger_id)?;
                 if current.status == DelayedTriggerStatus::Dispatching {
+                    if !manager.eligible_scope(
+                        current
+                            .dispatch
+                            .as_ref()
+                            .and_then(|d| d.execution_scope.as_deref()),
+                    ) {
+                        return Ok(None);
+                    }
                     if current.dispatch.is_none() || current.task_id.is_none() {
                         bail!("Claimed delayed trigger has no durable task binding");
                     }
                     return Ok(Some(current));
                 }
-                if current.status != DelayedTriggerStatus::Pending
+                if !manager.eligible_scope(current.execution_scope.as_deref())
+                    || current.status != DelayedTriggerStatus::Pending
                     || current.fire_at > now
                     || current.owner_session_id.is_none()
                 {
@@ -2163,6 +2295,7 @@ where
                 current.status = DelayedTriggerStatus::Dispatching;
                 current.task_id = Some(crate::task_manager::TaskManager::new_task_id());
                 current.dispatch = Some(AutomationDispatch {
+                    execution_scope: current.execution_scope.clone(),
                     request: NewTaskRequest {
                         prompt: current.message.clone(),
                         model: None,
@@ -2305,6 +2438,7 @@ async fn reconcile_run_statuses_shared(
             continue;
         }
         let dispatch = run.dispatch.get_or_insert_with(|| AutomationDispatch {
+            execution_scope: task.execution_scope.clone(),
             request: NewTaskRequest::from_task(&task),
             task_data_dir: task_manager.data_dir(),
             accepted: true,
@@ -2580,7 +2714,7 @@ mod tests {
             let root = tempfile::tempdir()?;
             let receipts = root.path().join("executions");
             let tasks = fixture_tasks(&root.path().join("tasks"), &receipts).await?;
-            let manager = AutomationManager::open(root.path().join("automations"))?;
+            let manager = AutomationManager::open_for_test(root.path().join("automations"))?;
             let automation = fixture_due_automation(&manager, "recover", 1);
             let shared = Arc::new(Mutex::new(manager));
             let (at_cut, reached_cut) = tokio::sync::oneshot::channel();
@@ -2642,7 +2776,7 @@ mod tests {
             // Simulate a dropped request/process before the final run receipt.
             tick.abort();
             assert!(tick.await.unwrap_err().is_cancelled());
-            let reopened = AutomationManager::open(root.path().join("automations"))?;
+            let reopened = AutomationManager::open_for_test(root.path().join("automations"))?;
             let future = Utc::now() + Duration::hours(4);
             let edited = reopened.update_automation(
                 &automation.id,
@@ -2699,7 +2833,7 @@ mod tests {
         let root = tempfile::tempdir()?;
         let receipts = root.path().join("executions");
         let tasks = fixture_tasks(&root.path().join("tasks"), &receipts).await?;
-        let manager = AutomationManager::open(root.path().join("automations"))?;
+        let manager = AutomationManager::open_for_test(root.path().join("automations"))?;
         let first = fixture_due_automation(&manager, "first", 1);
         let paused = fixture_due_automation(&manager, "paused", 2);
         let deleted = fixture_due_automation(&manager, "deleted", 3);
@@ -2731,7 +2865,7 @@ mod tests {
             admitted.automation_id, first.id,
             "ordered first claim really entered"
         );
-        let other = AutomationManager::open(root.path().join("automations"))?;
+        let other = AutomationManager::open_for_test(root.path().join("automations"))?;
         other.pause_automation(&paused.id)?;
         other.delete_automation(&deleted.id)?;
         // Pause after durable admission affects future runs; this run remains owned.
@@ -2767,7 +2901,7 @@ mod tests {
             let root = tempfile::tempdir()?;
             let receipts = root.path().join("executions");
             let tasks = fixture_tasks(&root.path().join("tasks"), &receipts).await?;
-            let manager = AutomationManager::open(root.path().join("automations"))?;
+            let manager = AutomationManager::open_for_test(root.path().join("automations"))?;
             let automation = fixture_due_automation(&manager, "history", 1);
             let shared = Arc::new(Mutex::new(manager));
             let run = run_now_shared(&shared, &automation.id, &tasks).await?;
@@ -2833,7 +2967,7 @@ mod tests {
         let other_receipts = root.path().join("foreign-executions");
         let other_tasks =
             fixture_tasks(&root.path().join("foreign-tasks"), &other_receipts).await?;
-        let manager = AutomationManager::open(root.path().join("automations"))?;
+        let manager = AutomationManager::open_for_test(root.path().join("automations"))?;
         let automation = fixture_due_automation(&manager, "bound-store", 1);
         let proposed = manager.collect_due_runs(Utc::now())?.remove(0);
         let mut run = manager
@@ -2888,7 +3022,7 @@ mod tests {
         let root = tempfile::tempdir()?;
         let receipts = root.path().join("executions");
         let tasks = fixture_tasks(&root.path().join("tasks"), &receipts).await?;
-        let manager = AutomationManager::open(root.path().join("automations"))?;
+        let manager = AutomationManager::open_for_test(root.path().join("automations"))?;
         let mut triggers = Vec::new();
         for index in 0..2 {
             let mut trigger = manager.create_trigger(CreateDelayedTriggerRequest {
@@ -2928,7 +3062,7 @@ mod tests {
         let admitted = tokio::time::timeout(std::time::Duration::from_secs(5), reached).await??;
         assert_eq!(admitted.trigger_id, triggers[0].trigger_id);
         assert_eq!(admitted.status, DelayedTriggerStatus::Dispatching);
-        let other = AutomationManager::open(root.path().join("automations"))?;
+        let other = AutomationManager::open_for_test(root.path().join("automations"))?;
         other.cancel_trigger_for_owner(&triggers[1].trigger_id, "fixture-owner")?;
         assert!(
             other
@@ -3035,10 +3169,20 @@ mod tests {
         if !matches!(role.as_str(), "first" | "second") {
             bail!("invalid fixture role");
         }
-        let tasks = fixture_tasks(&root.join("tasks"), &root.join("executions")).await?;
-        let shared = Arc::new(Mutex::new(AutomationManager::open(
-            root.join("automations"),
-        )?));
+        let scope = if role == "first" {
+            "test"
+        } else {
+            "foreign-scheduler"
+        };
+        let tasks = TaskManager::start_with_executor_in_scope(
+            automation_task_config(root.join("tasks")),
+            Arc::new(AutomationRecordingExecutor(root.join("executions"))),
+            scope,
+        )
+        .await?;
+        let mut service = AutomationManager::open(root.join("automations"))?;
+        service.bind_task_manager(&tasks)?;
+        let shared = Arc::new(Mutex::new(service));
         crate::utils::write_atomic(&root.join(format!("{role}-ready")), b"ready")?;
         wait_fixture_path(&root.join(format!("{role}-go"))).await?;
         let observations = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -3093,15 +3237,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn two_scheduler_processes_share_one_claim_and_execute_one_bound_task() -> Result<()> {
+    async fn two_scheduler_processes_preserve_the_bound_scope_and_execute_one_task() -> Result<()> {
         let root = tempfile::tempdir()?;
-        let manager = AutomationManager::open(root.path().join("automations"))?;
+        let manager = AutomationManager::open_for_test(root.path().join("automations"))?;
         let automation = fixture_due_automation(&manager, "cross-process", 1);
         let mut first = spawn_scheduler_fixture(root.path(), "first")?;
         let mut second = spawn_scheduler_fixture(root.path(), "second")?;
-        // Both independent TaskManagers open the empty task store before the
-        // first task is accepted; this isolates scheduler ownership from the
-        // separate pre-existing TaskManager-startup ownership limitation.
+        // Separate Runtime scopes share storage. The foreign scheduler cannot
+        // adopt the first scope's immutable dispatch even before acceptance.
         wait_fixture_path(&root.path().join("first-ready")).await?;
         wait_fixture_path(&root.path().join("second-ready")).await?;
         crate::utils::write_atomic(&root.path().join("first-go"), b"go")?;
@@ -3281,6 +3424,7 @@ mod tests {
         let now = Utc::now();
         AutomationRecord {
             schema_version: CURRENT_AUTOMATION_SCHEMA_VERSION,
+            execution_scope: Some(crate::task_manager::test_execution_scope("test")),
             id: Uuid::new_v4().to_string(),
             name: "Test automation".to_string(),
             prompt: "Run the automation".to_string(),
@@ -3537,11 +3681,13 @@ mod tests {
             .expect("reset-anchor schedule");
         assert_ne!(expected, reset_anchor, "fixture must detect anchor resets");
 
-        let manager = AutomationManager::open(tempdir.path().to_path_buf()).expect("manager");
+        let manager =
+            AutomationManager::open_for_test(tempdir.path().to_path_buf()).expect("manager");
         manager.save_automation(&automation).expect("save");
         drop(manager);
 
-        let restarted = AutomationManager::open(tempdir.path().to_path_buf()).expect("reopen");
+        let restarted =
+            AutomationManager::open_for_test(tempdir.path().to_path_buf()).expect("reopen");
         assert!(
             restarted
                 .collect_due_runs(now)
@@ -3558,7 +3704,8 @@ mod tests {
     #[test]
     fn resume_uses_persisted_creation_anchor() {
         let tempdir = tempfile::tempdir().expect("tempdir");
-        let manager = AutomationManager::open(tempdir.path().to_path_buf()).expect("manager");
+        let manager =
+            AutomationManager::open_for_test(tempdir.path().to_path_buf()).expect("manager");
         let before = Utc::now();
         let created_at = before - Duration::hours(51);
         let automation = anchored_automation(created_at, AutomationStatus::Paused);
@@ -3679,7 +3826,8 @@ mod tests {
     #[test]
     fn automation_model_round_trips_through_create_and_update() {
         let tempdir = tempfile::tempdir().expect("tempdir");
-        let manager = AutomationManager::open(tempdir.path().to_path_buf()).expect("manager");
+        let manager =
+            AutomationManager::open_for_test(tempdir.path().to_path_buf()).expect("manager");
 
         let created = manager
             .create_automation(CreateAutomationRequest {
@@ -3723,7 +3871,8 @@ mod tests {
     #[test]
     fn deletes_definition_and_settled_runs_but_retains_unfinished_receipts() {
         let tempdir = tempfile::tempdir().expect("tempdir");
-        let manager = AutomationManager::open(tempdir.path().to_path_buf()).expect("manager");
+        let manager =
+            AutomationManager::open_for_test(tempdir.path().to_path_buf()).expect("manager");
 
         let created = manager
             .create_automation(CreateAutomationRequest {
@@ -3788,7 +3937,8 @@ mod tests {
     #[test]
     fn automation_storage_rejects_traversal_ids() {
         let tempdir = tempfile::tempdir().expect("tempdir");
-        let manager = AutomationManager::open(tempdir.path().join("root")).expect("manager");
+        let manager =
+            AutomationManager::open_for_test(tempdir.path().join("root")).expect("manager");
         let escaped_file = tempdir.path().join("escape.json");
         let escaped_runs = tempdir.path().join("escape-runs");
 
@@ -3921,7 +4071,7 @@ api_key = "fixture-second"
 model = "private-model"
 "#,
         )?;
-        let automations = AutomationManager::open(root.path().join("schedules"))?;
+        let automations = AutomationManager::open_for_test(root.path().join("schedules"))?;
         let mut record = automation_record_with_settings(None, None, None, None);
         record.schema_version = 1;
         record.model = Some("private-model".to_string());
@@ -3930,7 +4080,7 @@ model = "private-model"
         automations.save_automation(&record)?;
         let record = automations.get_automation(&record.id)?;
         assert_eq!(
-            record.schema_version, 2,
+            record.schema_version, CURRENT_AUTOMATION_SCHEMA_VERSION,
             "a pin cannot be ignored by an older reader"
         );
 
@@ -3956,7 +4106,7 @@ model = "private-model"
             .await?;
         let task: crate::task_manager::TaskRecord =
             serde_json::from_slice(&serde_json::to_vec(&task)?)?;
-        assert_eq!(task.schema_version, 3);
+        assert_eq!(task.schema_version, 4);
         let thread = runtime
             .create_thread(ExecutionTask::from(&task).thread_request())
             .await?;
@@ -3999,7 +4149,7 @@ model = "private-model"
             std::sync::Arc::new(AutomationNoopExecutor),
         )
         .await?;
-        let manager = AutomationManager::open(tempdir.path().join("automations"))?;
+        let manager = AutomationManager::open_for_test(tempdir.path().join("automations"))?;
 
         let mut owned = manager.create_trigger(CreateDelayedTriggerRequest {
             fire_at: Utc::now() + Duration::hours(1),
@@ -4084,7 +4234,7 @@ model = "private-model"
     fn interrupted_watcher_migration_deduplicates_before_visibility() -> Result<()> {
         for suppressed in [false, true] {
             let root = tempfile::tempdir()?;
-            let manager = AutomationManager::open(root.path().join("automations"))?;
+            let manager = AutomationManager::open_for_test(root.path().join("automations"))?;
             let automation = automation_record_with_settings(None, None, None, None);
             let mut run = queued_run_for(&automation);
             write_legacy_run_file(&manager, &run);
@@ -4123,7 +4273,8 @@ model = "private-model"
     #[test]
     fn save_run_uses_sortable_names_and_migrates_legacy_files() {
         let tempdir = tempfile::tempdir().expect("tempdir");
-        let manager = AutomationManager::open(tempdir.path().to_path_buf()).expect("manager");
+        let manager =
+            AutomationManager::open_for_test(tempdir.path().to_path_buf()).expect("manager");
         let automation = automation_record_with_settings(None, None, None, None);
         let run = queued_run_for(&automation);
 
@@ -4151,7 +4302,8 @@ model = "private-model"
     #[test]
     fn finish_scheduled_run_persists_run_when_automation_deleted_mid_enqueue() {
         let tempdir = tempfile::tempdir().expect("tempdir");
-        let manager = AutomationManager::open(tempdir.path().to_path_buf()).expect("manager");
+        let manager =
+            AutomationManager::open_for_test(tempdir.path().to_path_buf()).expect("manager");
         let automation = automation_record_with_settings(None, None, None, None);
         manager.save_automation(&automation).expect("save");
         let run = queued_run_for(&automation);
@@ -4180,7 +4332,8 @@ model = "private-model"
     #[test]
     fn once_schedule_fires_once_and_auto_completes() {
         let tempdir = tempfile::tempdir().expect("tempdir");
-        let manager = AutomationManager::open(tempdir.path().to_path_buf()).expect("manager");
+        let manager =
+            AutomationManager::open_for_test(tempdir.path().to_path_buf()).expect("manager");
         let due_at = Utc::now() - Duration::minutes(1);
         let automation = AutomationRecord {
             rrule: due_at
@@ -4225,7 +4378,8 @@ model = "private-model"
     #[test]
     fn get_runs_by_ids_finds_live_runs_past_the_newest_window() {
         let tempdir = tempfile::tempdir().expect("tempdir");
-        let manager = AutomationManager::open(tempdir.path().to_path_buf()).expect("manager");
+        let manager =
+            AutomationManager::open_for_test(tempdir.path().to_path_buf()).expect("manager");
         let automation = automation_record_with_settings(None, None, None, None);
         let base = Utc::now();
 
@@ -4264,7 +4418,8 @@ model = "private-model"
     #[test]
     fn get_runs_by_ids_ignores_non_json_noise() {
         let tempdir = tempfile::tempdir().expect("tempdir");
-        let manager = AutomationManager::open(tempdir.path().to_path_buf()).expect("manager");
+        let manager =
+            AutomationManager::open_for_test(tempdir.path().to_path_buf()).expect("manager");
         let automation = automation_record_with_settings(None, None, None, None);
         let run = queued_run_for(&automation);
         manager.save_run(&run).expect("save json run");
@@ -4295,7 +4450,8 @@ model = "private-model"
     #[test]
     fn list_runs_merges_legacy_and_sortable_files_newest_first() {
         let tempdir = tempfile::tempdir().expect("tempdir");
-        let manager = AutomationManager::open(tempdir.path().to_path_buf()).expect("manager");
+        let manager =
+            AutomationManager::open_for_test(tempdir.path().to_path_buf()).expect("manager");
         let automation = automation_record_with_settings(None, None, None, None);
         let base = Utc::now();
 
@@ -4334,7 +4490,8 @@ model = "private-model"
     #[test]
     fn list_runs_with_limit_skips_older_sortable_files_entirely() {
         let tempdir = tempfile::tempdir().expect("tempdir");
-        let manager = AutomationManager::open(tempdir.path().to_path_buf()).expect("manager");
+        let manager =
+            AutomationManager::open_for_test(tempdir.path().to_path_buf()).expect("manager");
         let automation = automation_record_with_settings(None, None, None, None);
         let base = Utc::now();
 
@@ -4363,7 +4520,8 @@ model = "private-model"
     #[tokio::test]
     async fn list_automations_completes_during_slow_enqueue() {
         let tempdir = tempfile::tempdir().expect("tempdir");
-        let manager = AutomationManager::open(tempdir.path().to_path_buf()).expect("manager");
+        let manager =
+            AutomationManager::open_for_test(tempdir.path().to_path_buf()).expect("manager");
         let created = manager
             .create_automation(CreateAutomationRequest {
                 name: "Slow enqueue".to_string(),
@@ -4445,7 +4603,8 @@ model = "private-model"
         let mut automation = automation_record_with_settings(None, None, None, None);
         automation.delivery_mode = Some(AutomationDeliveryMode::Watcher);
         automation.next_run_at = Some(Utc::now() - Duration::seconds(1));
-        let manager = AutomationManager::open(tempdir.path().join("automations")).expect("manager");
+        let manager =
+            AutomationManager::open_for_test(tempdir.path().join("automations")).expect("manager");
         manager
             .save_automation(&automation)
             .expect("save automation");
@@ -4494,7 +4653,7 @@ model = "private-model"
         manager.save_automation(&updated)?;
         drop(manager);
         scheduler_tick_shared(&shared, &task_manager).await?;
-        assert_eq!(task_manager.list_tasks(None).await.len(), 1);
+        assert_eq!(task_manager.list_tasks(None).await?.len(), 1);
         assert!(
             shared
                 .lock()
@@ -4541,4 +4700,5 @@ model = "private-model"
             std::env::remove_var("CODEWHALE_HOME");
         }
     }
+    mod ownership;
 }

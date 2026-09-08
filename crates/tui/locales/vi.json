@@ -1602,6 +1602,8 @@
   "WorkflowReceiptProviderReported": "nhà cung cấp báo cáo",
   "WorkflowReceiptEstimated": "ước tính",
   "SidebarTasksLabel": "Nhiệm vụ",
+  "TaskOwnershipUnverified": "Chưa xác minh chủ thể thực thi",
+  "TaskInventoryUnavailable": "Không thể truy cập kho tác vụ; đang hiển thị trạng thái được ghi nhận gần nhất.",
   "SidebarTodoLabel": "Cần làm",
   "WorkSurfaceTodoProgress": "{label} {completed}/{total} · còn {remaining}",
   "SidebarStopControl": "dừng",

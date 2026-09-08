@@ -915,9 +915,10 @@ pub async fn run_tui(
         &session_id,
     )
     .await?;
-    let automations = std::sync::Arc::new(tokio::sync::Mutex::new(
-        AutomationManager::default_location()?,
-    ));
+    let _task_shutdown = task_manager.shutdown_guard();
+    let mut automation_service = AutomationManager::default_location()?;
+    automation_service.bind_task_manager(&task_manager)?;
+    let automations = std::sync::Arc::new(tokio::sync::Mutex::new(automation_service));
     let automation_cancel = tokio_util::sync::CancellationToken::new();
     let automation_scheduler = spawn_scheduler(
         automations.clone(),
@@ -1071,7 +1072,7 @@ pub async fn run_tui(
         &mut app,
         config,
         engine_handle,
-        task_manager,
+        task_manager.clone(),
         &event_broker,
         translation_client,
         pending_telemetry_notice,
@@ -1080,6 +1081,9 @@ pub async fn run_tui(
     .await;
     automation_cancel.cancel();
     automation_scheduler.abort();
+    if let Err(error) = task_manager.shutdown_and_wait().await {
+        tracing::error!(%error, "Task manager shutdown remains incomplete");
+    }
 
     // Join the startup-default writer before anything else tears down.
     //

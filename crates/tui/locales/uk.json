@@ -1579,6 +1579,8 @@
   "WorkflowReceiptProviderReported": "за даними провайдера",
   "WorkflowReceiptEstimated": "оцінка",
   "SidebarTasksLabel": "Завдання",
+  "TaskOwnershipUnverified": "Власника виконання не підтверджено",
+  "TaskInventoryUnavailable": "Сховище завдань недоступне; показано останній відомий стан.",
   "SidebarTodoLabel": "До виконання",
   "WorkSurfaceTodoProgress": "{label} {completed}/{total} · залишилося {remaining}",
   "SidebarStopControl": "стоп",

@@ -1579,6 +1579,8 @@
   "WorkflowReceiptProviderReported": "vom Anbieter gemeldet",
   "WorkflowReceiptEstimated": "geschätzt",
   "SidebarTasksLabel": "Aufgaben",
+  "TaskOwnershipUnverified": "Ausführungsverantwortung ungeprüft",
+  "TaskInventoryUnavailable": "Der Aufgabenspeicher ist nicht verfügbar; der zuletzt bekannte Zustand wird angezeigt.",
   "SidebarTodoLabel": "Zu erledigen",
   "WorkSurfaceTodoProgress": "{label} {completed}/{total} · {remaining} übrig",
   "SidebarStopControl": "Stopp",

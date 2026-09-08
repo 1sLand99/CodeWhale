@@ -1579,6 +1579,8 @@
   "WorkflowReceiptProviderReported": "по данным провайдера",
   "WorkflowReceiptEstimated": "оценка",
   "SidebarTasksLabel": "Задачи",
+  "TaskOwnershipUnverified": "Владелец выполнения не подтверждён",
+  "TaskInventoryUnavailable": "Хранилище задач недоступно; показано последнее известное состояние.",
   "SidebarTodoLabel": "Сделать",
   "WorkSurfaceTodoProgress": "{label} {completed}/{total} · осталось {remaining}",
   "SidebarStopControl": "стоп",

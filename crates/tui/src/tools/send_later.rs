@@ -469,7 +469,7 @@ mod tests {
     }
 
     fn make_context_for_session(tmp: &TempDir, session_id: &str) -> ToolContext {
-        let manager = AutomationManager::open(tmp.path().to_path_buf()).unwrap();
+        let manager = AutomationManager::open_for_test(tmp.path().to_path_buf()).unwrap();
         let shared = Arc::new(Mutex::new(manager));
         ToolContext::new(".")
             .with_state_namespace(session_id)
@@ -875,7 +875,7 @@ mod tests {
             .unwrap()
             .to_string();
 
-        let manager = AutomationManager::open(tmp.path().to_path_buf()).unwrap();
+        let manager = AutomationManager::open_for_test(tmp.path().to_path_buf()).unwrap();
         let mut legacy = manager
             .create_trigger(crate::automation_manager::CreateDelayedTriggerRequest {
                 fire_at: chrono::Utc::now() + Duration::hours(1),
@@ -952,7 +952,7 @@ mod tests {
     #[tokio::test]
     async fn collect_due_triggers_returns_past_pending() {
         let tmp = TempDir::new().unwrap();
-        let manager = AutomationManager::open(tmp.path().to_path_buf()).unwrap();
+        let manager = AutomationManager::open_for_test(tmp.path().to_path_buf()).unwrap();
 
         // Create a trigger with fire_at one hour from now — not due yet.
         let req = crate::automation_manager::CreateDelayedTriggerRequest {

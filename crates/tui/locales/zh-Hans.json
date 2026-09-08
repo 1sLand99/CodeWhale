@@ -1602,6 +1602,8 @@
   "WorkflowReceiptProviderReported": "提供商报告",
   "WorkflowReceiptEstimated": "估算",
   "SidebarTasksLabel": "任务",
+  "TaskOwnershipUnverified": "执行归属尚未验证",
+  "TaskInventoryUnavailable": "任务存储不可用，正在显示最后已知的状态。",
   "SidebarTodoLabel": "待办",
   "WorkSurfaceTodoProgress": "{label} {completed}/{total} · 剩余 {remaining}",
   "SidebarStopControl": "停止",

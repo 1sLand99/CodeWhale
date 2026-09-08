@@ -865,7 +865,10 @@ pub async fn run_http_server(
     let task_manager =
         TaskManager::start_with_runtime_manager(task_cfg, config.clone(), runtime_threads.clone())
             .await?;
-    let automations = Arc::new(Mutex::new(AutomationManager::default_location()?));
+    let _task_shutdown = task_manager.shutdown_guard();
+    let mut automation_service = AutomationManager::default_location()?;
+    automation_service.bind_task_manager(&task_manager)?;
+    let automations = Arc::new(Mutex::new(automation_service));
     runtime_threads.attach_automation_manager(automations.clone());
     let scheduler_cancel = CancellationToken::new();
     let scheduler_handle = spawn_scheduler(
@@ -908,7 +911,7 @@ pub async fn run_http_server(
         config: Arc::new(parking_lot::RwLock::new(config.clone())),
         workspace,
         plugin_discovery,
-        task_manager,
+        task_manager: task_manager.clone(),
         runtime_threads,
         cors_origins: options.cors_origins.clone(),
         sessions_dir,
@@ -994,6 +997,7 @@ pub async fn run_http_server(
     .map_err(|e| anyhow!("Runtime API server error: {e}"));
     scheduler_cancel.cancel();
     scheduler_handle.abort();
+    task_manager.shutdown_and_wait().await?;
     serve_result
 }
 
@@ -5067,8 +5071,13 @@ async fn list_tasks(
                 .await
         }
         None => state.task_manager.list_tasks(query.limit).await,
-    };
-    let counts = state.task_manager.counts().await;
+    }
+    .map_err(|error| ApiError::internal(format!("Task inventory unavailable: {error}")))?;
+    let counts = state
+        .task_manager
+        .counts()
+        .await
+        .map_err(|error| ApiError::internal(format!("Task inventory unavailable: {error}")))?;
     Ok(Json(TasksResponse { tasks, counts }))
 }
 

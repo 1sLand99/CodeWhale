@@ -1602,6 +1602,8 @@
   "WorkflowReceiptProviderReported": "provider-reported",
   "WorkflowReceiptEstimated": "estimated",
   "SidebarTasksLabel": "Tasks",
+  "TaskOwnershipUnverified": "Execution ownership unverified",
+  "TaskInventoryUnavailable": "Task storage is unavailable; showing the last known state.",
   "SidebarTodoLabel": "To-do",
   "WorkSurfaceTodoProgress": "{label} {completed}/{total} · {remaining} left",
   "SidebarStopControl": "stop",

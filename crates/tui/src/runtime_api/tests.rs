@@ -1171,7 +1171,7 @@ async fn build_test_server(
         RuntimeThreadManagerConfig::from_task_data_dir(root.join("runtime")),
     )?);
     runtime_threads.attach_task_manager(manager.clone());
-    let automations = Arc::new(Mutex::new(AutomationManager::open(
+    let automations = Arc::new(Mutex::new(AutomationManager::open_for_test(
         root.join("automations"),
     )?));
     runtime_threads.attach_automation_manager(automations.clone());
@@ -8473,7 +8473,7 @@ api_key_env = "CW_OPERATE_MISSING_TEST_KEY"
         .await?;
     assert_eq!(started["operation"]["credentialsPresent"], true);
     assert_eq!(started["operation"]["leadOperator"]["model"], "fleet-model");
-    let manager = AutomationManager::open(root.path().join("automations"))?;
+    let manager = AutomationManager::open_for_test(root.path().join("automations"))?;
     let mut record = manager.get_automation(crate::operate::OPERATE_KEEPALIVE_ID)?;
     assert_eq!(record.model.as_deref(), Some("fleet-model"));
     assert_eq!(record.model_provider.as_deref(), Some("custom"));

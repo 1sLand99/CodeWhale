@@ -6366,33 +6366,46 @@ impl Engine {
         let checked_at = chrono::Utc::now().timestamp_millis();
 
         let mut seen_tasks = HashSet::new();
+        let mut task_inventory_available = false;
         if let Some(task_manager) = self.config.runtime_services.task_manager.as_ref() {
-            for task in task_manager
+            match task_manager
                 .list_tasks_for_owner(None, None, session_id)
                 .await
             {
-                let external = format!("task:{}", task.id);
-                if !candidates.contains(&external) {
-                    continue;
+                Ok(tasks) => {
+                    task_inventory_available = true;
+                    for task in tasks {
+                        let external = format!("task:{}", task.id);
+                        if !candidates.contains(&external) {
+                            continue;
+                        }
+                        seen_tasks.insert(external.clone());
+                        if !task.execution_binding_known {
+                            continue;
+                        }
+                        if let Err(err) = work.reconcile_operation(
+                            session_id,
+                            crate::work_graph::task_owner_snapshot(
+                                &task.id,
+                                task.status,
+                                task.lifecycle_seq,
+                                task.created_at,
+                                task.started_at,
+                                task.ended_at,
+                            ),
+                        ) {
+                            tracing::warn!(task_id = %task.id, error = %err, "failed to reconcile restored task owner");
+                        }
+                    }
                 }
-                seen_tasks.insert(external.clone());
-                if let Err(err) = work.reconcile_operation(
-                    session_id,
-                    crate::work_graph::task_owner_snapshot(
-                        &task.id,
-                        task.status,
-                        task.lifecycle_seq,
-                        task.created_at,
-                        task.started_at,
-                        task.ended_at,
-                    ),
-                ) {
-                    tracing::warn!(task_id = %task.id, error = %err, "failed to reconcile restored task owner");
+                Err(error) => {
+                    tracing::warn!(%error, "Task owner inventory unavailable; retaining Work bindings")
                 }
             }
         }
         for external in candidates
             .iter()
+            .filter(|_| task_inventory_available)
             .filter(|external| external.starts_with("task:"))
             .filter(|external| !seen_tasks.contains(*external))
         {
@@ -7594,11 +7607,11 @@ pub(crate) fn spawn_engine_with_authoritative_route_config(
     config: EngineConfig,
     api_config: &Config,
     authoritative_route_config: Arc<parking_lot::RwLock<Config>>,
-) -> EngineHandle {
+) -> (EngineHandle, tokio::task::JoinHandle<()>) {
     let (mut engine, handle) = Engine::new(config, api_config);
     engine.authoritative_route_config = Some(authoritative_route_config);
 
-    spawn_supervised(
+    let worker = spawn_supervised(
         "engine-event-loop",
         std::panic::Location::caller(),
         async move {
@@ -7606,7 +7619,7 @@ pub(crate) fn spawn_engine_with_authoritative_route_config(
         },
     );
 
-    handle
+    (handle, worker)
 }
 
 #[cfg(test)]

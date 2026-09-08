@@ -3823,6 +3823,30 @@ struct ActiveThreads {
     lru: VecDeque<String>,
 }
 
+/// Shared ownership of an existing task's join. A canceled drain drops only
+/// its await/lock guard; the unfinished join stays available to the next drain.
+type RuntimeCompletion = Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>;
+
+fn retained_completion(worker: tokio::task::JoinHandle<()>) -> RuntimeCompletion {
+    Arc::new(Mutex::new(Some(worker)))
+}
+
+fn completion_finished(completion: &RuntimeCompletion) -> bool {
+    completion
+        .try_lock()
+        .is_ok_and(|worker| worker.as_ref().is_none_or(|worker| worker.is_finished()))
+}
+
+async fn await_retained_completion(completion: &RuntimeCompletion) -> Result<()> {
+    let mut worker = completion.lock().await;
+    let Some(join) = worker.as_mut() else {
+        return Ok(());
+    };
+    let result = join.await;
+    *worker = None;
+    result.context("Runtime worker shutdown failed")
+}
+
 pub type SharedRuntimeThreadManager = Arc<RuntimeThreadManager>;
 
 #[derive(Clone)]
@@ -3876,13 +3900,18 @@ pub struct RuntimeThreadManager {
     /// This orders both route changes and saved-history boundaries with dispatch.
     config_admission: Arc<AsyncRwLock<()>>,
     engine_load: Arc<Mutex<()>>,
+    shutdown_drain: Arc<Mutex<()>>,
+    engine_workers: Arc<parking_lot::Mutex<Vec<(EngineHandle, RuntimeCompletion)>>>,
+    turn_monitors: Arc<parking_lot::Mutex<Vec<RuntimeCompletion>>>,
     active: Arc<Mutex<ActiveThreads>>,
     event_emit: Arc<Mutex<()>>,
     projection_locks: Arc<parking_lot::Mutex<HashMap<String, Arc<Mutex<()>>>>>,
     event_tx: broadcast::Sender<RuntimeEventRecord>,
     manager_cfg: RuntimeThreadManagerConfig,
     cancel_token: CancellationToken,
-    task_manager: Arc<parking_lot::Mutex<Option<crate::task_manager::SharedTaskManager>>>,
+    task_manager: Arc<parking_lot::Mutex<std::sync::Weak<crate::task_manager::TaskManager>>>,
+    task_execution_lease:
+        Arc<parking_lot::Mutex<Option<Arc<crate::task_manager::TaskExecutionLease>>>>,
     automations:
         Arc<parking_lot::Mutex<Option<crate::automation_manager::SharedAutomationManager>>>,
     pending_approvals: Arc<parking_lot::Mutex<HashMap<String, PendingApprovalEntry>>>,
@@ -3897,11 +3926,34 @@ pub struct RuntimeThreadManager {
 }
 
 #[derive(Debug)]
-struct RuntimeProcessOwnerLock {
+pub(crate) struct RuntimeProcessOwnerLock {
     _file: File,
 }
 
 impl RuntimeProcessOwnerLock {
+    /// Reuse the Runtime's protected OS lease for task-store ownership. A
+    /// missing existing lease is uncertainty, never proof that an owner died.
+    pub(crate) fn try_acquire_file(path: &Path, create: bool) -> Result<Option<Self>> {
+        let root = checked_runtime_store_root(
+            path.parent()
+                .context("Owner lease has no parent")?
+                .to_path_buf(),
+        )?;
+        ensure_runtime_store_dir(&root)?;
+        let file = open_runtime_store_file(path, "Execution owner lease", |options| {
+            options
+                .create(create)
+                .truncate(false)
+                .read(true)
+                .write(true);
+        })?;
+        match Self::try_lock_exclusive(&file) {
+            Ok(()) => Ok(Some(Self { _file: file })),
+            Err(error) if Self::is_contention(&error) => Ok(None),
+            Err(error) => Err(error).context("Failed to acquire execution owner lease"),
+        }
+    }
+
     fn acquire(root: &Path) -> Result<Self> {
         let root = checked_runtime_store_root(root.to_path_buf())?;
         ensure_runtime_store_dir(&root)?;
@@ -4379,13 +4431,17 @@ impl RuntimeThreadManager {
             _process_owner_lock: process_owner_lock,
             config_admission: Arc::new(AsyncRwLock::new(())),
             engine_load: Arc::new(Mutex::new(())),
+            shutdown_drain: Arc::new(Mutex::new(())),
+            engine_workers: Arc::new(parking_lot::Mutex::new(Vec::new())),
+            turn_monitors: Arc::new(parking_lot::Mutex::new(Vec::new())),
             active: Arc::new(Mutex::new(ActiveThreads::default())),
             event_emit: Arc::new(Mutex::new(())),
             projection_locks: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             event_tx,
             manager_cfg,
             cancel_token: CancellationToken::new(),
-            task_manager: Arc::new(parking_lot::Mutex::new(None)),
+            task_manager: Arc::new(parking_lot::Mutex::new(std::sync::Weak::new())),
+            task_execution_lease: Arc::new(parking_lot::Mutex::new(None)),
             automations: Arc::new(parking_lot::Mutex::new(None)),
             pending_approvals: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             pending_user_inputs: Arc::new(parking_lot::Mutex::new(HashMap::new())),
@@ -4404,7 +4460,140 @@ impl RuntimeThreadManager {
     /// Attach the durable task manager so model-visible task tools work inside
     /// runtime thread turns as well as interactive TUI turns.
     pub fn attach_task_manager(&self, task_manager: crate::task_manager::SharedTaskManager) {
-        *self.task_manager.lock() = Some(task_manager);
+        *self.task_manager.lock() = Arc::downgrade(&task_manager);
+    }
+
+    /// Identity of the actual Runtime store, not a model-supplied session label.
+    pub(crate) fn task_execution_identity(&self) -> (String, Arc<RuntimeProcessOwnerLock>) {
+        let mut digest = Sha256::new();
+        digest.update(self.store.owner_id.as_bytes());
+        digest.update([0]);
+        digest.update(self.store.event_lock_path.as_os_str().as_encoded_bytes());
+        (
+            digest
+                .finalize()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect(),
+            self._process_owner_lock.clone(),
+        )
+    }
+
+    pub(crate) async fn close_execution_admission(&self) {
+        let _admission = self.config_admission.write().await;
+        self.cancel_token.cancel();
+        let _loading = self.engine_load.lock().await;
+    }
+
+    /// Close admission, then drain the existing engines and terminal receipt
+    /// monitors. Ownership stays attached to this Runtime until its last user
+    /// drops it, including any actual execution still awaiting shutdown.
+    pub(crate) async fn shutdown_and_wait(&self) -> Result<()> {
+        let _drain = self.shutdown_drain.lock().await;
+        self.close_execution_admission().await;
+        let (engines, active_turns) = {
+            let active = self.active.lock().await;
+            (
+                active
+                    .engines
+                    .values()
+                    .map(|state| state.engine.clone())
+                    .collect::<Vec<_>>(),
+                active
+                    .engines
+                    .iter()
+                    .filter_map(|(id, state)| {
+                        state
+                            .active_turn
+                            .as_ref()
+                            .map(|turn| (id.clone(), turn.turn_id.clone()))
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        };
+        let mut failure = None;
+        for (thread_id, turn_id) in active_turns {
+            if let Err(error) = self.interrupt_turn(&thread_id, &turn_id).await {
+                if !self
+                    .store
+                    .load_turn(&turn_id)
+                    .is_ok_and(|turn| turn.status != RuntimeTurnStatus::InProgress)
+                {
+                    failure = Some(anyhow!("Runtime turn interruption failed: {error}"));
+                }
+            }
+        }
+        let workers = self.engine_workers.lock().clone();
+        for engine in engines
+            .iter()
+            .chain(workers.iter().map(|(engine, _)| engine))
+        {
+            engine.cancel_with_reason(crate::core::engine::CancelReason::Internal);
+        }
+        for engine in engines
+            .iter()
+            .chain(workers.iter().map(|(engine, _)| engine))
+        {
+            let _ = engine.send(Op::Shutdown).await;
+        }
+        for (_, worker) in workers {
+            if let Err(error) = await_retained_completion(&worker).await {
+                failure = Some(anyhow!("Runtime engine shutdown failed: {error}"));
+            }
+        }
+        // Recovery reads can publish receipts too. Flushes that already passed
+        // their admission check retain this mutex through all receipt writes;
+        // later readers see the closed latch under the same mutex.
+        {
+            let _recovery = self.recovery_flush.lock().await;
+        }
+        loop {
+            let monitors = self.turn_monitors.lock().clone();
+            for monitor in monitors {
+                if let Err(error) = await_retained_completion(&monitor).await {
+                    failure = Some(anyhow!("Runtime terminal receipt monitor failed: {error}"));
+                }
+            }
+            let mut monitors = self.turn_monitors.lock();
+            monitors.retain(|monitor| !completion_finished(monitor));
+            if monitors.is_empty() {
+                break;
+            }
+        }
+        self.engine_workers
+            .lock()
+            .retain(|(_, worker)| !completion_finished(worker));
+        let mut active = self.active.lock().await;
+        active.engines.clear();
+        active.lru.clear();
+        failure.map_or(Ok(()), Err)
+    }
+
+    fn track_receipt_worker(&self, worker: tokio::task::JoinHandle<()>) {
+        let mut monitors = self.turn_monitors.lock();
+        monitors.retain(|monitor| !completion_finished(monitor));
+        monitors.push(retained_completion(worker));
+    }
+
+    fn ensure_accepting_execution(&self) -> Result<()> {
+        if self.cancel_token.is_cancelled() {
+            bail!("Runtime is shutting down; execution admission is closed");
+        }
+        Ok(())
+    }
+
+    /// Runtime clones retained by live Engine/tool work retain this lease too.
+    /// A TaskManager cancellation timeout cannot release execution ownership.
+    pub(crate) fn retain_task_execution_lease(
+        &self,
+        lease: Arc<crate::task_manager::TaskExecutionLease>,
+    ) -> Result<()> {
+        let mut current = self.task_execution_lease.lock();
+        if current.is_some() {
+            bail!("This Runtime already owns a task execution manager");
+        }
+        *current = Some(lease);
+        Ok(())
     }
 
     /// Attach the automation manager for model-visible scheduling tools.
@@ -4776,6 +4965,8 @@ impl RuntimeThreadManager {
         call_id: &str,
         result: DynamicToolCallResult,
     ) -> Result<bool> {
+        let admission = self.config_admission.read().await;
+        self.ensure_accepting_execution()?;
         let claim = match self.claim_pending_dynamic_tool(thread_id, turn_id, call_id) {
             PendingDynamicToolClaim::Claimed(claim) => claim,
             PendingDynamicToolClaim::Settling(_) | PendingDynamicToolClaim::Missing => {
@@ -4789,6 +4980,7 @@ impl RuntimeThreadManager {
         };
         let ack =
             self.spawn_dynamic_tool_settlement(claim, DynamicToolTerminalOutcome::Resolved(result));
+        drop(admission);
         Ok(Self::await_dynamic_tool_settlement(ack)
             .await?
             .result_accepted)
@@ -4800,6 +4992,8 @@ impl RuntimeThreadManager {
         input_id: &str,
         response: crate::tools::user_input::UserInputResponse,
     ) -> Result<bool> {
+        let admission = self.config_admission.read().await;
+        self.ensure_accepting_execution()?;
         let engine = {
             let active = self.active.lock().await;
             let Some(state) = active.engines.get(thread_id) else {
@@ -4824,22 +5018,27 @@ impl RuntimeThreadManager {
         // between durable acceptance and engine delivery.
         let manager = self.clone();
         let thread_id = thread_id.to_string();
-        tokio::spawn(async move {
-            manager
+        let (ack_tx, ack_rx) = oneshot::channel();
+        let worker = tokio::spawn(async move {
+            let result = manager
                 .settle_claimed_user_input(
                     &thread_id,
                     Some(engine),
                     request,
                     UserInputTerminalOutcome::Answered(response),
                 )
-                .await
-        })
-        .await
-        .context("User-input settlement task failed")?
+                .await;
+            let _ = ack_tx.send(result);
+        });
+        self.track_receipt_worker(worker);
+        drop(admission);
+        ack_rx.await.context("User-input settlement task failed")?
     }
 
     #[allow(dead_code)]
     pub async fn cancel_user_input(&self, thread_id: &str, input_id: &str) -> Result<bool> {
+        let admission = self.config_admission.read().await;
+        self.ensure_accepting_execution()?;
         let engine = {
             let active = self.active.lock().await;
             let Some(state) = active.engines.get(thread_id) else {
@@ -4860,18 +5059,23 @@ impl RuntimeThreadManager {
         };
         let manager = self.clone();
         let thread_id = thread_id.to_string();
-        tokio::spawn(async move {
-            manager
+        let (ack_tx, ack_rx) = oneshot::channel();
+        let worker = tokio::spawn(async move {
+            let result = manager
                 .settle_claimed_user_input(
                     &thread_id,
                     Some(engine),
                     request,
                     UserInputTerminalOutcome::Canceled { terminal: false },
                 )
-                .await
-        })
-        .await
-        .context("User-input cancellation task failed")?
+                .await;
+            let _ = ack_tx.send(result);
+        });
+        self.track_receipt_worker(worker);
+        drop(admission);
+        ack_rx
+            .await
+            .context("User-input cancellation task failed")?
     }
 
     async fn settle_claimed_user_input(
@@ -5367,28 +5571,39 @@ impl RuntimeThreadManager {
     }
 
     /// Arm one goal continuation pass to run after the quiet period. The
-    /// sleep is deliberately never cancelled: a pause, clear, completion, or
+    /// sleep is interrupted by Runtime shutdown. A pause, clear, completion, or
     /// cap that lands while the timer runs is honored by the re-read inside
     /// `run_goal_continuation`, which is the cancellation path — `DELETE
     /// /goal` and status syncs therefore do not need to interrupt this task.
     fn spawn_goal_continuation(&self, thread_id: String, delay_seconds: u64) {
+        if self.cancel_token.is_cancelled() {
+            return;
+        }
         let manager = self.clone();
-        tokio::spawn(async move {
+        let worker = tokio::spawn(async move {
             // Quiet period between passes, mirroring the interactive
             // engine's `goal_continuation_delay_seconds` behavior (#5508).
             if delay_seconds > 0 {
-                tokio::time::sleep(std::time::Duration::from_secs(delay_seconds)).await;
+                tokio::select! {
+                    _ = manager.cancel_token.cancelled() => return,
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(delay_seconds)) => {}
+                }
+            }
+            if manager.cancel_token.is_cancelled() {
+                return;
             }
             if let Err(err) = manager.run_goal_continuation(&thread_id).await {
                 tracing::warn!("goal continuation for {thread_id} failed: {err}");
             }
         });
+        self.track_receipt_worker(worker);
     }
 
     /// Dispatch one goal continuation pass after the quiet period. Every
     /// guard re-reads durable state: the goal may have been paused, cleared,
     /// completed, or capped while the timer ran.
     async fn run_goal_continuation(&self, thread_id: &str) -> Result<()> {
+        self.ensure_accepting_execution()?;
         let Some(goal) = self.store.load_goal(thread_id)? else {
             return Ok(());
         };
@@ -5562,6 +5777,7 @@ impl RuntimeThreadManager {
         thread_id: &str,
         message_id: &AgentMailMessageId,
     ) -> Result<(AgentMailEnvelope, Option<TurnRecord>)> {
+        self.ensure_accepting_execution()?;
         let thread = self.get_thread(thread_id).await?;
         let address = agent_mail_address(&self.store.owner_id, &thread)?;
         {
@@ -5584,6 +5800,7 @@ impl RuntimeThreadManager {
 
         let (claimed, terminal) = {
             let _mail_mutation = self.store.mail_mutation.lock();
+            self.ensure_accepting_execution()?;
             let mut envelope = self.store.load_agent_mail(message_id)?;
             if envelope.destination != address {
                 bail!("Agent Mail ownership denied: message does not belong to this destination");
@@ -5783,6 +6000,7 @@ impl RuntimeThreadManager {
     }
 
     async fn deliver_next_wake_agent_mail(&self, thread_id: &str) -> Result<()> {
+        self.ensure_accepting_execution()?;
         let next = self
             .list_agent_mail_for_thread(thread_id)
             .await?
@@ -5804,12 +6022,16 @@ impl RuntimeThreadManager {
     }
 
     fn spawn_agent_mail_safe_boundary_delivery(&self, thread_id: String) {
+        if self.cancel_token.is_cancelled() {
+            return;
+        }
         let manager = self.clone();
-        tokio::spawn(async move {
+        let worker = tokio::spawn(async move {
             if let Err(error) = Box::pin(manager.deliver_next_wake_agent_mail(&thread_id)).await {
                 tracing::warn!(thread_id, %error, "Failed to deliver queued Agent Mail");
             }
         });
+        self.track_receipt_worker(worker);
     }
 
     fn projection_lock(&self, thread_id: &str) -> Arc<Mutex<()>> {
@@ -5932,6 +6154,9 @@ impl RuntimeThreadManager {
             return Ok(());
         }
         let _recovery_flush = self.recovery_flush.lock().await;
+        if self.cancel_token.is_cancelled() {
+            bail!("Runtime is shutting down; recovery receipts remain pending");
+        }
         loop {
             let next = self
                 .recovery_receipts
@@ -6056,7 +6281,7 @@ impl RuntimeThreadManager {
     ) -> oneshot::Receiver<std::result::Result<DynamicToolSettlementAck, String>> {
         let (ack_tx, ack_rx) = oneshot::channel();
         let manager = self.clone();
-        tokio::spawn(async move {
+        let worker = tokio::spawn(async move {
             use futures_util::FutureExt;
 
             let mut claim = Some(claim);
@@ -6194,6 +6419,7 @@ impl RuntimeThreadManager {
             };
             let _ = ack_tx.send(result);
         });
+        self.track_receipt_worker(worker);
         ack_rx
     }
 
@@ -8020,7 +8246,7 @@ impl RuntimeThreadManager {
     ) -> oneshot::Receiver<std::result::Result<TurnRecord, String>> {
         let (acceptance_tx, acceptance_rx) = oneshot::channel();
         let manager = Arc::new(self.clone());
-        tokio::spawn(async move {
+        let monitor = tokio::spawn(async move {
             use futures_util::FutureExt;
             let start_events = std::panic::AssertUnwindSafe(manager.emit_claimed_turn_started(
                 &turn,
@@ -8049,6 +8275,7 @@ impl RuntimeThreadManager {
                 .monitor_claimed_turn(turn.thread_id.clone(), turn.id.clone(), engine, kind)
                 .await;
         });
+        self.track_receipt_worker(monitor);
         acceptance_rx
     }
 
@@ -8060,7 +8287,7 @@ impl RuntimeThreadManager {
     ) -> oneshot::Receiver<TurnRecord> {
         let (receipt_tx, receipt_rx) = oneshot::channel();
         let manager = Arc::new(self.clone());
-        tokio::spawn(async move {
+        let worker = tokio::spawn(async move {
             use futures_util::FutureExt;
             let receipts = std::panic::AssertUnwindSafe(async {
                 if let Err(err) = manager
@@ -8102,6 +8329,7 @@ impl RuntimeThreadManager {
             }
             let _ = receipt_tx.send(turn);
         });
+        self.track_receipt_worker(worker);
         receipt_rx
     }
 
@@ -8165,6 +8393,7 @@ impl RuntimeThreadManager {
         // engine handoff, so a completed reload is a hard boundary: no later
         // dispatch can carry its predecessor's URL, key, model, or policy.
         let _config_admission = self.config_admission.read().await;
+        self.ensure_accepting_execution()?;
         let prompt = req.prompt.trim().to_string();
         if prompt.is_empty() {
             bail!("prompt is required");
@@ -8677,6 +8906,8 @@ impl RuntimeThreadManager {
         turn_id: &str,
         req: SteerTurnRequest,
     ) -> Result<TurnRecord> {
+        let _admission = self.config_admission.read().await;
+        self.ensure_accepting_execution()?;
         let prompt = req.prompt.trim().to_string();
         if prompt.is_empty() {
             bail!("prompt is required");
@@ -8786,6 +9017,7 @@ impl RuntimeThreadManager {
         // handoff so it cannot dispatch an old credential or endpoint after a
         // successful config reload.
         let _config_admission = self.config_admission.read().await;
+        self.ensure_accepting_execution()?;
         let thread = self.get_thread(thread_id).await?;
         let engine = self.ensure_engine_loaded(&thread).await?;
 
@@ -9038,8 +9270,10 @@ impl RuntimeThreadManager {
     }
 
     async fn ensure_engine_loaded(&self, thread_hint: &ThreadRecord) -> Result<EngineHandle> {
+        self.ensure_accepting_execution()?;
         {
             let mut active = self.active.lock().await;
+            self.ensure_accepting_execution()?;
             if let Some(engine) = active
                 .engines
                 .get(thread_hint.id.as_str())
@@ -9053,9 +9287,11 @@ impl RuntimeThreadManager {
         // Only one cache-miss build may run at a time. Recheck after taking
         // the build lock because another caller may already have won.
         let _engine_load = self.engine_load.lock().await;
+        self.ensure_accepting_execution()?;
         loop {
             {
                 let mut active = self.active.lock().await;
+                self.ensure_accepting_execution()?;
                 if let Some(engine) = active
                     .engines
                     .get(thread_hint.id.as_str())
@@ -9205,7 +9441,7 @@ impl RuntimeThreadManager {
                     .saturating_mul(1024 * 1024 * 1024),
                 lsp_config,
                 runtime_services: crate::tools::spec::RuntimeToolServices {
-                    task_manager: self.task_manager.lock().clone(),
+                    task_manager: self.task_manager.lock().upgrade(),
                     automations: self.automations.lock().clone(),
                     task_data_dir: Some(self.manager_cfg.task_data_dir.clone()),
                     active_task_id: thread.task_id.clone(),
@@ -9304,11 +9540,16 @@ impl RuntimeThreadManager {
 
             // Verify the persisted history before spawning an Engine task.
             let session_messages = self.restore_thread_messages(&thread)?;
-            let engine = spawn_engine_with_authoritative_route_config(
+            let (engine, worker) = spawn_engine_with_authoritative_route_config(
                 engine_cfg,
                 &cfg,
                 Arc::clone(&self.config),
             );
+            {
+                let mut workers = self.engine_workers.lock();
+                workers.retain(|(_, worker)| !completion_finished(worker));
+                workers.push((engine.clone(), retained_completion(worker)));
+            }
 
             let sys_prompt = thread
                 .system_prompt

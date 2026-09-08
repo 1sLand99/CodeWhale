@@ -544,6 +544,7 @@ mod tests {
         let now = Utc::now();
         AutomationRecord {
             schema_version: 1,
+            execution_scope: Some(crate::task_manager::test_execution_scope("test")),
             id: "auto_1".to_string(),
             name: "Nightly checks".to_string(),
             prompt: "Run checks".to_string(),
@@ -715,7 +716,7 @@ mod tests {
     #[tokio::test]
     async fn pause_and_resume_emit_typed_mutation_receipts() {
         let temp = TempDir::new().expect("temp dir");
-        let manager = AutomationManager::open(temp.path().to_path_buf()).expect("manager");
+        let manager = AutomationManager::open_for_test(temp.path().to_path_buf()).expect("manager");
         let automation = manager
             .create_automation(CreateAutomationRequest {
                 name: "Nightly checks".to_string(),
@@ -764,7 +765,7 @@ mod tests {
     #[tokio::test]
     async fn delete_is_a_noop_until_snapshot_confirmation_then_removes_definition_and_runs() {
         let temp = TempDir::new().expect("temp dir");
-        let manager = AutomationManager::open(temp.path().to_path_buf()).expect("manager");
+        let manager = AutomationManager::open_for_test(temp.path().to_path_buf()).expect("manager");
         let automation = manager
             .create_automation(CreateAutomationRequest {
                 name: "Nightly checks".to_string(),
