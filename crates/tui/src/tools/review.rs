@@ -126,7 +126,7 @@ pub struct ReviewOutput {
 
 impl ReviewOutput {
     pub(crate) fn note_binary_coverage(&mut self, diff: &str) {
-        if diff.contains("\nGIT binary patch\n") {
+        if diff.contains("\nGIT binary patch\n") || diff.contains("\nBinary files ") {
             self.summary.push_str("\nCoverage limitation: binary changes were represented by metadata; their contents were not semantically inspected.");
         }
     }
@@ -1180,6 +1180,15 @@ mod tests {
         let mut review = ReviewOutput::from_str(r#"{"summary":"Review findings"}"#);
         review.note_binary_coverage("diff --git a/image b/image\nGIT binary patch\nliteral 4\n");
         assert!(review.summary.contains("not semantically inspected"));
+        let mut metadata_review = ReviewOutput::from_str(r#"{"summary":"Review findings"}"#);
+        metadata_review.note_binary_coverage(
+            "diff --git a/image b/image\nBinary files a/image and b/image differ\n",
+        );
+        assert!(
+            metadata_review
+                .summary
+                .contains("not semantically inspected")
+        );
         let mut text_review = ReviewOutput::from_str(r#"{"summary":"Text review"}"#);
         text_review.note_binary_coverage("diff --git a/a b/a\n@@ -0,0 +1 @@\n+text\n");
         assert_eq!(text_review.summary, "Text review");

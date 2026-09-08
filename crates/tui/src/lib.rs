@@ -9258,7 +9258,7 @@ fn format_pr_prompt(number: u32, view: &GhPullRequest, diff: &str) -> String {
          URL: {url}\n\
          Branches: {branches}\n\
          Revision: {head_sha} (base {base_sha}); {changed_files} file patches.\n\
-         Binary changes are represented by metadata; their contents are not semantically inspected. Full binary patches remain in the review evidence.\n\
+         Binary changes are represented by metadata; their contents are not semantically inspected. Exact binary object IDs remain in the review evidence.\n\
          \n\
          ## Description\n\
          \n\

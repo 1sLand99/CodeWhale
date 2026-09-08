@@ -55,6 +55,25 @@ fn commit_id(value: &str) -> bool {
     matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
+fn full_index_objects(line: &str) -> bool {
+    let Some(index) = line.strip_prefix("index ") else {
+        return false;
+    };
+    let fields = index.split_ascii_whitespace().collect::<Vec<_>>();
+    let valid_fields = match fields.as_slice() {
+        [_] => true,
+        [_, mode] => mode.len() == 6 && mode.bytes().all(|byte| matches!(byte, b'0'..=b'7')),
+        _ => false,
+    };
+    if !valid_fields {
+        return false;
+    }
+    let Some((old, new)) = fields[0].split_once("..") else {
+        return false;
+    };
+    commit_id(old) && commit_id(new) && old.len() == new.len()
+}
+
 fn view_with(
     number: u32,
     repo: Option<&str>,
@@ -120,9 +139,11 @@ pub(crate) fn ensure_input_fits(diff: &str, max_chars: usize) -> Result<()> {
 }
 
 /// Model-only representation of an already verified complete diff. Keep the
-/// original for revision checks, fingerprints and comment anchors. Binary
-/// payloads are not meaningful text input; their headers retain paths, modes,
-/// rename status and exact object IDs. Every text patch remains byte-exact.
+/// original for revision checks, fingerprints and comment anchors. Embedded
+/// binary payloads are not meaningful text input; their headers retain paths,
+/// modes, rename status and exact object IDs. Every text patch remains
+/// byte-exact. Local large-PR collection already asks Git for that metadata
+/// without embedding the payload.
 pub(crate) fn model_diff(diff: &str) -> Cow<'_, str> {
     if !diff.contains("\nGIT binary patch\n") && !diff.contains("\nGIT binary patch\r\n") {
         return Cow::Borrowed(diff);
@@ -162,6 +183,7 @@ fn complete_file_set(diff: &str, view: &GhPullRequest) -> Result<()> {
     let (mut additions, mut deletions) = (0, 0);
     let mut remaining = (0_u32, 0_u32);
     let mut has_patch = false;
+    let mut has_full_index = false;
     for line in diff.lines() {
         if remaining != (0, 0) {
             match line.as_bytes().first() {
@@ -188,6 +210,9 @@ fn complete_file_set(diff: &str, view: &GhPullRequest) -> Result<()> {
             }
             files += 1;
             has_patch = false;
+            has_full_index = false;
+        } else if line.starts_with("index ") {
+            has_full_index = full_index_objects(line);
         } else if let Some((_, old, new)) = super::review_hunks::parse_hunk_header(line) {
             remaining = (old, new);
             has_patch = true;
@@ -207,9 +232,12 @@ fn complete_file_set(diff: &str, view: &GhPullRequest) -> Result<()> {
         {
             has_patch = true;
         } else if line.starts_with("Binary files ") {
-            bail!(
-                "PR diff contains a missing binary patch; complete local Git objects are required"
-            );
+            if !has_full_index {
+                bail!(
+                    "PR diff contains binary metadata without exact full object IDs; complete local Git objects are required"
+                );
+            }
+            has_patch = true;
         }
     }
     if remaining != (0, 0)
@@ -278,7 +306,6 @@ fn diff_with(
                         "--no-textconv".into(),
                         "--no-color".into(),
                         "--no-relative".into(),
-                        "--binary".into(),
                         "--full-index".into(),
                         "--find-renames=50%".into(),
                         "--src-prefix=a/".into(),
@@ -437,7 +464,7 @@ mod tests {
     }
 
     #[test]
-    fn large_pr_uses_all_pinned_git_patches_including_binary_not_the_checkout() {
+    fn large_pr_uses_all_pinned_git_patches_and_exact_binary_ids_not_the_checkout() {
         let dir = repository();
         git(dir.path(), &["commit", "--allow-empty", "-m", "base"]);
         let base = git(dir.path(), &["rev-parse", "HEAD"]).trim().to_string();
@@ -485,7 +512,9 @@ mod tests {
             302
         );
         assert!(diff.contains("+file 300\n"));
-        assert!(diff.contains("GIT binary patch\nliteral 4\n"));
+        assert!(diff.contains("Binary files /dev/null and b/binary.dat differ"));
+        assert!(diff.lines().any(full_index_objects));
+        assert!(!diff.contains("GIT binary patch"));
         assert!(!diff.contains("unreviewed checkout content"));
         assert!(!diff.contains("dirty worktree content"));
     }
@@ -520,7 +549,8 @@ mod tests {
                     used_local = true;
                     assert!(args.contains(&"--no-ext-diff".into()));
                     assert!(args.contains(&"--no-textconv".into()));
-                    assert!(args.contains(&"--binary".into()));
+                    assert!(!args.contains(&"--binary".into()));
+                    assert!(args.contains(&"--full-index".into()));
                     assert_eq!(
                         &args[args.len() - 3..],
                         &[view.base_sha.clone(), view.head_sha.clone(), "--".into()]
@@ -662,6 +692,95 @@ mod tests {
             assert!(complete_file_set(diff, &view).is_err(), "{diff}");
         }
         complete_file_set(&patch("a"), &view).unwrap();
+    }
+
+    #[test]
+    fn binary_metadata_requires_exact_full_object_ids() {
+        let view = GhPullRequest {
+            additions: 0,
+            ..view(1)
+        };
+        let prefix = "diff --git a/image.png b/image.png\n";
+        for index in [
+            String::new(),
+            "index abc..def 100644\n".to_string(),
+            format!(
+                "index {}..{} extra fields\n",
+                "a".repeat(40),
+                "b".repeat(40)
+            ),
+        ] {
+            let diff = format!("{prefix}{index}Binary files a/image.png and b/image.png differ\n");
+            assert!(complete_file_set(&diff, &view).is_err(), "{diff}");
+        }
+        let complete = format!(
+            "{prefix}index {}..{} 100644\nBinary files a/image.png and b/image.png differ\n",
+            "a".repeat(40),
+            "b".repeat(40)
+        );
+        complete_file_set(&complete, &view).unwrap();
+    }
+
+    #[test]
+    fn oversized_embedded_binary_baseline_fails_but_metadata_fallback_is_complete() {
+        let dir = repository();
+        git(dir.path(), &["commit", "--allow-empty", "-m", "base"]);
+        let base = git(dir.path(), &["rev-parse", "HEAD"]).trim().to_string();
+        let mut bytes = vec![0_u8; 7 * 1024 * 1024];
+        let mut state = 0x9e37_79b9_u32;
+        for byte in &mut bytes {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            *byte = state as u8;
+        }
+        bytes[0] = 0;
+        std::fs::write(dir.path().join("large.bin"), bytes).unwrap();
+        git(dir.path(), &["add", "large.bin"]);
+        git(dir.path(), &["commit", "-m", "binary PR head"]);
+        let head = git(dir.path(), &["rev-parse", "HEAD"]).trim().to_string();
+
+        let baseline = run_command(
+            dir.path(),
+            Program::Git,
+            &[
+                "diff".into(),
+                "--no-ext-diff".into(),
+                "--no-textconv".into(),
+                "--no-color".into(),
+                "--no-relative".into(),
+                "--binary".into(),
+                "--full-index".into(),
+                base.clone(),
+                head.clone(),
+                "--".into(),
+            ],
+        )
+        .unwrap_err();
+        assert!(baseline.to_string().contains("bounded capture limit"));
+
+        let view = GhPullRequest {
+            base_sha: base,
+            head_sha: head,
+            additions: 0,
+            changed_files: 1,
+            ..view(1)
+        };
+        let diff = diff_with(6002, None, &view, &mut |program, args| {
+            if program == Program::Gh {
+                if args[1] == "diff" {
+                    bail!("remote diff unavailable")
+                }
+                Ok(metadata(&view))
+            } else {
+                run_command(dir.path(), program, args)
+            }
+        })
+        .unwrap();
+        assert!(diff.contains("Binary files /dev/null and b/large.bin differ"));
+        assert!(diff.lines().any(full_index_objects));
+        assert!(!diff.contains("GIT binary patch"));
+        ensure_input_fits(&diff, diff.chars().count()).unwrap();
     }
 
     #[test]
