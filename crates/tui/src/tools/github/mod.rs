@@ -19,6 +19,7 @@ use crate::tools::spec::{
 
 mod actions;
 mod cli;
+pub(crate) mod report;
 mod schema;
 mod shape;
 
@@ -36,13 +37,15 @@ use serde_json::json;
 use std::path::PathBuf;
 
 /// Actions the Plan-mode read-only surface exposes.
-const READ_ACTIONS: &[&str] = &["issue_context", "pr_context"];
+const READ_ACTIONS: &[&str] = &["issue_context", "pr_context", "report_read"];
 const ALL_ACTIONS: &[&str] = &[
     "issue_context",
     "pr_context",
     "comment",
     "close_issue",
     "close_pr",
+    "report_draft",
+    "report_read",
 ];
 
 /// Unified GitHub tool.
@@ -144,10 +147,10 @@ impl ToolSpec for GithubTool {
                 "Close a GitHub pull request only when structured acceptance evidence is present and approved. Use this for PRs instead of github_close_issue so the UI, audit trail, and comments keep PR wording clear."
             }
             _ if self.read_only => {
-                "Read GitHub issue/PR context using gh. Actions: \"issue_context\" and \"pr_context\"; bodies/comments/labels/state are summarized and large bodies become task artifacts when a durable task is active."
+                "Read GitHub issue/PR context using gh (issue_context, pr_context), or read a local current-session Codewhale issue draft with report_read. Local report publication is unavailable."
             }
             _ => {
-                "Read and guardedly mutate GitHub issues/PRs using gh. Actions: \"issue_context\", \"pr_context\" (read-only; large bodies become task artifacts when a durable task is active), \"comment\" (approval; evidence-backed), \"close_issue\", \"close_pr\" (approval; only with structured acceptance evidence — never close merely because the agent is stopping). No push/merge."
+                "GitHub context (issue_context, pr_context) and guarded comment/close_issue/close_pr actions. Also report_draft and report_read: save/revise/read a LOCAL structured Codewhale issue draft in this session, without network or publication. When you observe evidence of a likely Codewhale/runtime/tool defect, you may draft it yourself, separate observations from inferences, offer /feedback review, and continue the original task. Ordinary user-code failures alone are not Codewhale defects; avoid repeated reports. Include only bounded narrative evidence, never prompts, logs, private code, credentials or paths. report_draft revises an existing draft when revises is supplied; exact repeats converge. Draft publication and duplicate search are unavailable: do not use other tools to post the draft without separate explicit user authorization. No push/merge."
             }
         }
     }
@@ -181,6 +184,7 @@ impl ToolSpec for GithubTool {
 
     fn approval_requirement_for(&self, input: &Value) -> ApprovalRequirement {
         match self.resolve_action(input) {
+            Ok("report_draft") => ApprovalRequirement::Auto,
             Ok(action) if Self::action_is_read(action) => ApprovalRequirement::Auto,
             _ => ApprovalRequirement::Required,
         }
@@ -195,6 +199,8 @@ impl ToolSpec for GithubTool {
 
     async fn execute(&self, input: Value, context: &ToolContext) -> Result<ToolResult, ToolError> {
         match self.resolve_action(&input)? {
+            "report_draft" => report::draft(input, context),
+            "report_read" => report::read(input, context),
             "issue_context" => self.execute_issue_context(&input, context).await,
             "pr_context" => self.execute_pr_context(&input, context).await,
             "comment" => self.execute_comment(&input, context).await,
@@ -330,7 +336,7 @@ mod tests {
         let schema = tool.input_schema();
         assert_eq!(
             schema["properties"]["action"]["enum"],
-            json!(["issue_context", "pr_context"])
+            json!(["issue_context", "pr_context", "report_read"])
         );
         assert!(!schema["properties"]["body"].is_object());
         assert_eq!(tool.approval_requirement(), ApprovalRequirement::Auto);

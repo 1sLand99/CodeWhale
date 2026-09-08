@@ -89,6 +89,8 @@ pub(crate) const CANONICAL_ACTION_ALIASES: &[(&str, &str, &str)] = &[
     ("github", "comment", "github_comment"),
     ("github", "close_issue", "github_close_issue"),
     ("github", "close_pr", "github_close_pr"),
+    ("github", "report_draft", "github_report_draft"),
+    ("github", "report_read", "github_report_read"),
 ];
 
 /// The conservative action label policy uses when the model omits `action`.
