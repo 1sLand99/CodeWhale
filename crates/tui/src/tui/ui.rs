@@ -228,7 +228,6 @@ pub(crate) const UI_GHOSTTY_UNDERWATER_ANIMATION_MS: u64 = 34;
 // this constant once described no longer gates on it.)
 pub(crate) const FILE_TREE_MIN_HOST_WIDTH: u16 = 60;
 const DEFAULT_TERMINAL_PROBE_TIMEOUT_MS: u64 = 500;
-const TURN_META_PREFIX: &str = "<turn_meta>";
 const SESSION_TITLE_MAX_CHARS: usize = 32;
 const VERSION_HINT_TOAST_TTL_MS: u64 = 12_000;
 

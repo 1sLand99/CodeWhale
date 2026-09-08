@@ -1054,14 +1054,7 @@ pub(crate) fn resolve_loaded_session_route(app: &mut App, config: &Config) {
 ///
 /// Never leaks raw prompt text — the result is always a concise label.
 pub(crate) fn derive_session_title(messages: &[Message]) -> Option<String> {
-    let text = messages.iter().find(|m| m.role == "user").and_then(|m| {
-        m.content.iter().find_map(|block| match block {
-            ContentBlock::Text { text, .. } if !text.starts_with(TURN_META_PREFIX) => {
-                Some(text.trim().to_string())
-            }
-            _ => None,
-        })
-    })?;
+    let text = crate::session_manager::conversation_title_prompt(messages)?;
 
     let first_line =
         crate::session_manager::sanitize_session_title(text.lines().next().unwrap_or("").trim());
@@ -1112,6 +1105,21 @@ mod derived_title_tests {
         );
         // Controls alone leave no title to derive.
         assert_eq!(derive_session_title(&[user("\u{1b}\u{7}\u{200b}")]), None);
+    }
+
+    #[test]
+    fn live_title_uses_the_same_user_prompt_after_runtime_handoffs() {
+        let handoff = crate::runtime_handoff::operate_contract_runtime_message();
+        assert_eq!(derive_session_title(std::slice::from_ref(&handoff)), None);
+        let messages = [handoff, user("/goal Fix the diagnostic display")];
+        assert_eq!(
+            derive_session_title(&messages).as_deref(),
+            Some("/goal Fix")
+        );
+        assert_eq!(
+            crate::session_manager::conversation_title_prompt(&messages),
+            Some("/goal Fix the diagnostic display")
+        );
     }
 }
 
