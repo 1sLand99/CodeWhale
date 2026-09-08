@@ -882,7 +882,8 @@ mod contract_tests {
             .map(|line| line.split('`').nth(1).expect("event name in table row"))
             .collect();
         assert_eq!(names, ALL_HOOK_EVENTS.map(HookEvent::as_str));
-        assert!(docs.contains(&format!("## The {} events\n", names.len())));
+        let heading = format!("## The {} events", names.len());
+        assert!(docs.lines().any(|line| line == heading));
     }
 
     /// Serde round-trip for every event name, in the exact `event = "..."`

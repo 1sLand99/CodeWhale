@@ -3602,7 +3602,17 @@ async fn turn_operation_lookup_is_authenticated_read_only_and_survives_restart()
             if entry.file_type()?.is_dir() {
                 files.extend(file_bytes(&entry.path())?);
             } else {
-                files.insert(entry.path(), fs::read(entry.path())?);
+                // Match the Runtime-store lookup fixture: Windows locks can
+                // deny reads even on empty claim files. Their length proves
+                // their bytes; retain every path so a new lock still fails.
+                let bytes = if entry.metadata()?.len() == 0 {
+                    Vec::new()
+                } else {
+                    fs::read(entry.path()).with_context(|| {
+                        format!("read Runtime fixture file {:?}", entry.file_name())
+                    })?
+                };
+                files.insert(entry.path(), bytes);
             }
         }
         Ok(files)
