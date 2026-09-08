@@ -2640,7 +2640,9 @@ impl Engine {
                             controls.active = control.clone();
                             control
                         };
-                        self.handle_send_message(
+                        // Keep the send-message state machine out of this
+                        // event-loop future's stack frame.
+                        Box::pin(self.handle_send_message(
                             content,
                             mode,
                             *route,
@@ -2664,7 +2666,7 @@ impl Engine {
                             provenance,
                             images,
                             max_output_tokens,
-                        )
+                        ))
                         .await;
                     }
                     Op::ContinueGoal {
