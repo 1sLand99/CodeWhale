@@ -686,11 +686,88 @@ pub struct ThreadRecord {
     /// additive metadata — older readers ignore it without misinterpretation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
-    /// The session ID associated with this thread. When set, `ensure_engine_loaded`
-    /// loads the full message history (including thinking/tool blocks) from the
-    /// session file instead of reconstructing from turns (which loses process info).
+    /// Full-fidelity saved history prefix. Engine recovery verifies its checkpoint
+    /// and appends later durable Runtime turns without duplicating saved messages.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
+    /// Exact saved transcript and the last Runtime turn it already contains.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub saved_session_checkpoint: Option<SavedSessionCheckpoint>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SavedSessionCheckpoint {
+    pub covered_turn_id: Option<String>,
+    pub messages_sha256: String,
+    /// A backtracked fork may retain only a prefix of the verified snapshot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retained_messages: Option<usize>,
+}
+
+fn session_messages_sha256(messages: &[Message]) -> Result<String> {
+    Ok(Sha256::digest(serde_json::to_vec(messages)?)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
+}
+
+/// Compare only fields represented by legacy seeding. A match identifies a
+/// prefix boundary; the saved messages themselves retain every raw block.
+fn session_recovery_projection(messages: &[Message]) -> Vec<Value> {
+    let mut projection = Vec::new();
+    for message in messages {
+        let role = message.role.as_str();
+        if role == "user" {
+            let text = message
+                .content
+                .iter()
+                .filter_map(|block| match block {
+                    ContentBlock::Text { text, .. } if !text.trim().is_empty() => {
+                        Some(text.as_str())
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            if !text.is_empty() {
+                projection.push(json!(["user", text]));
+            }
+        }
+        for block in &message.content {
+            match block {
+                ContentBlock::Text { text, .. }
+                    if role == "assistant" && !text.trim().is_empty() =>
+                {
+                    projection.push(json!(["assistant", text]))
+                }
+                ContentBlock::Thinking { thinking, .. }
+                    if role == "assistant" && !thinking.trim().is_empty() =>
+                {
+                    projection.push(json!(["thinking", thinking]))
+                }
+                ContentBlock::ToolUse {
+                    id, name, input, ..
+                }
+                | ContentBlock::ServerToolUse {
+                    id, name, input, ..
+                } if role == "assistant" => projection.push(json!(["tool_use", id, name, input])),
+                ContentBlock::ToolResult {
+                    tool_use_id,
+                    content,
+                    is_error,
+                    content_blocks,
+                } if role == "user" => projection.push(json!([
+                    "tool_result",
+                    tool_use_id,
+                    content,
+                    is_error.unwrap_or(false),
+                    content_blocks
+                ])),
+                _ => {}
+            }
+        }
+    }
+    projection
 }
 
 fn thread_execution_state_matches(left: &ThreadRecord, right: &ThreadRecord) -> bool {
@@ -713,6 +790,7 @@ fn thread_execution_state_matches(left: &ThreadRecord, right: &ThreadRecord) -> 
         && left.system_prompt == right.system_prompt
         && left.task_id == right.task_id
         && left.session_id == right.session_id
+        && left.saved_session_checkpoint == right.saved_session_checkpoint
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3420,9 +3498,9 @@ pub struct RuntimeThreadManager {
     store: RuntimeThreadStore,
     _process_owner_lock: Arc<RuntimeProcessOwnerLock>,
     /// Concurrent turn admissions share a read lease; config reload owns the
-    /// write lease from validation through publication. A turn therefore
-    /// cannot snapshot old credentials/routes and dispatch after reload has
-    /// returned.
+    /// write lease from validation through publication. Saved-session binding
+    /// also owns the write lease across snapshot and checkpoint persistence.
+    /// This orders both route changes and saved-history boundaries with dispatch.
     config_admission: Arc<AsyncRwLock<()>>,
     engine_load: Arc<Mutex<()>>,
     active: Arc<Mutex<ActiveThreads>>,
@@ -5915,6 +5993,7 @@ impl RuntimeThreadManager {
             task_id: req.task_id,
             title: None,
             session_id: None,
+            saved_session_checkpoint: None,
         };
         self.store.save_thread(&thread)?;
         if let Err(error) = self
@@ -6376,20 +6455,30 @@ impl RuntimeThreadManager {
         Ok(thread)
     }
 
-    /// Link a session to a thread so that `ensure_engine_loaded` can restore
-    /// the full message history (including thinking/tool blocks) from the
-    /// session file instead of reconstructing from turns.
-    pub async fn set_thread_session_id(&self, thread_id: &str, session_id: &str) -> Result<()> {
+    /// Save/resume holds this existing admission lease from snapshot through
+    /// binding, so a newer turn cannot be mistaken for part of the snapshot.
+    pub(crate) async fn session_checkpoint_guard(&self) -> tokio::sync::OwnedRwLockWriteGuard<()> {
+        Arc::clone(&self.config_admission).write_owned().await
+    }
+
+    /// Bind full-fidelity saved history to the exact prefix it covers. Callers
+    /// hold session_checkpoint_guard across the snapshot, save and this write.
+    pub(crate) async fn set_thread_session_checkpoint(
+        &self,
+        thread_id: &str,
+        session: &crate::session_manager::SavedSession,
+    ) -> Result<()> {
+        let session_id = &session.metadata.id;
+        let messages_sha256 = session_messages_sha256(&session.messages)?;
         let thread = {
             let _thread_mutation = self.store.thread_mutation.lock();
-            let mut thread = self
-                .store
-                .load_thread(thread_id)
-                .with_context(|| format!("Thread not found: {thread_id}"))?;
-            if thread.session_id.as_deref() == Some(session_id) {
-                return Ok(());
-            }
-            thread.session_id = Some(session_id.to_string());
+            let mut thread = self.store.load_thread(thread_id)?;
+            thread.session_id = Some(session_id.clone());
+            thread.saved_session_checkpoint = Some(SavedSessionCheckpoint {
+                covered_turn_id: thread.latest_turn_id.clone(),
+                messages_sha256,
+                retained_messages: None,
+            });
             thread.updated_at = Utc::now();
             self.store.save_thread(&thread)?;
             thread
@@ -6489,6 +6578,11 @@ impl RuntimeThreadManager {
             let mut cloned_turn = source_turn.clone();
             cloned_turn.id = format!("turn_{}", &Uuid::new_v4().to_string()[..8]);
             cloned_turn.thread_id = forked.id.clone();
+            if let Some(checkpoint) = forked.saved_session_checkpoint.as_mut()
+                && checkpoint.covered_turn_id.as_deref() == Some(source_turn.id.as_str())
+            {
+                checkpoint.covered_turn_id = Some(cloned_turn.id.clone());
+            }
             cloned_turn.item_ids.clear();
 
             let items = self.store.list_items_for_turn(&source_turn.id)?;
@@ -6601,11 +6695,40 @@ impl RuntimeThreadManager {
         forked.latest_turn_id = None;
         forked.archived = false;
 
+        if let Some((messages, covered)) = self.saved_session_prefix(&source, &source_turns)? {
+            let kept_turns = covered.min(target_turn_idx);
+            let retained_messages = if covered <= target_turn_idx {
+                messages.len()
+            } else {
+                let expected = session_recovery_projection(
+                    &self.reconstruct_messages_from_turns(&source_turns[..target_turn_idx])?,
+                );
+                (0..=messages.len())
+                    .find(|count| session_recovery_projection(&messages[..*count]) == expected)
+                    .context("Cannot identify an exact saved-history boundary for this backtrack; the source thread was preserved")?
+            };
+            forked.saved_session_checkpoint = Some(SavedSessionCheckpoint {
+                covered_turn_id: kept_turns
+                    .checked_sub(1)
+                    .map(|index| source_turns[index].id.clone()),
+                messages_sha256: match &source.saved_session_checkpoint {
+                    Some(checkpoint) => checkpoint.messages_sha256.clone(),
+                    None => session_messages_sha256(&messages)?,
+                },
+                retained_messages: Some(retained_messages),
+            });
+        }
+
         let mut cloned_records = Vec::with_capacity(target_turn_idx);
         for source_turn in source_turns.iter().take(target_turn_idx) {
             let mut cloned_turn = source_turn.clone();
             cloned_turn.id = format!("turn_{}", &Uuid::new_v4().to_string()[..8]);
             cloned_turn.thread_id = forked.id.clone();
+            if let Some(checkpoint) = forked.saved_session_checkpoint.as_mut()
+                && checkpoint.covered_turn_id.as_deref() == Some(source_turn.id.as_str())
+            {
+                checkpoint.covered_turn_id = Some(cloned_turn.id.clone());
+            }
             cloned_turn.item_ids.clear();
 
             let items = self.store.list_items_for_turn(&source_turn.id)?;
@@ -8013,7 +8136,7 @@ impl RuntimeThreadManager {
                 policy.permission,
                 configured_sandbox_mode,
             );
-            let _sender = permit.send(op);
+            engine.send_reserved_op(permit, op);
             touch_lru(&mut active.lru, thread_id);
             self.spawn_claimed_turn_monitor(
                 turn.clone(),
@@ -8332,7 +8455,7 @@ impl RuntimeThreadManager {
                 policy.permission,
                 configured_sandbox_mode,
             );
-            let _sender = permit.send(op);
+            engine.send_reserved_op(permit, op);
             touch_lru(&mut active.lru, thread_id);
             self.spawn_claimed_turn_monitor(
                 turn.clone(),
@@ -8677,52 +8800,14 @@ impl RuntimeThreadManager {
                     .unwrap_or_else(crate::tools::subagent::AdvisorConfig::disabled),
             };
 
+            // Verify the persisted history before spawning an Engine task.
+            let session_messages = self.restore_thread_messages(&thread)?;
             let engine = spawn_engine_with_authoritative_route_config(
                 engine_cfg,
                 &cfg,
                 Arc::clone(&self.config),
             );
 
-            // When the thread has an associated session, load the full message history
-            // (including thinking/tool blocks) from the session file. This preserves
-            // process information that `reconstruct_messages_from_turns` would lose.
-            let session_messages = if let Some(ref sid) = thread.session_id {
-                match crate::session_manager::default_sessions_dir() {
-                    Ok(sessions_dir) => {
-                        match crate::session_manager::SessionManager::new(sessions_dir) {
-                            Ok(manager) => match manager.load_session(sid) {
-                                Ok(session) => session.messages,
-                                Err(e) => {
-                                    tracing::warn!(
-                                        "Failed to load session {} for thread {}: {e}; falling back to turn reconstruction",
-                                        sid,
-                                        thread.id
-                                    );
-                                    let turns = self.store.list_turns_for_thread(&thread.id)?;
-                                    self.reconstruct_messages_from_turns(&turns)?
-                                }
-                            },
-                            Err(e) => {
-                                tracing::warn!(
-                                    "Failed to open sessions dir: {e}; falling back to turn reconstruction"
-                                );
-                                let turns = self.store.list_turns_for_thread(&thread.id)?;
-                                self.reconstruct_messages_from_turns(&turns)?
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            "Failed to resolve sessions dir: {e}; falling back to turn reconstruction"
-                        );
-                        let turns = self.store.list_turns_for_thread(&thread.id)?;
-                        self.reconstruct_messages_from_turns(&turns)?
-                    }
-                }
-            } else {
-                let turns = self.store.list_turns_for_thread(&thread.id)?;
-                self.reconstruct_messages_from_turns(&turns)?
-            };
             let sys_prompt = thread
                 .system_prompt
                 .as_ref()
@@ -8800,6 +8885,77 @@ impl RuntimeThreadManager {
     pub async fn get_engine(&self, thread_id: &str) -> Result<EngineHandle> {
         let thread = self.get_thread(thread_id).await?;
         self.ensure_engine_loaded(&thread).await
+    }
+
+    fn restore_thread_messages(&self, thread: &ThreadRecord) -> Result<Vec<Message>> {
+        let turns = self.store.list_turns_for_thread(&thread.id)?;
+        let (mut messages, covered) = self
+            .saved_session_prefix(thread, &turns)?
+            .unwrap_or_default();
+        messages.extend(self.reconstruct_messages_from_turns(&turns[covered..])?);
+        Ok(messages)
+    }
+
+    fn saved_session_prefix(
+        &self,
+        thread: &ThreadRecord,
+        turns: &[TurnRecord],
+    ) -> Result<Option<(Vec<Message>, usize)>> {
+        let Some(session_id) = thread.session_id.as_deref() else {
+            return Ok(None);
+        };
+        let session = crate::session_manager::default_sessions_dir()
+            .and_then(crate::session_manager::SessionManager::new)
+            .and_then(|manager| manager.load_session(session_id))
+            .with_context(|| format!("Cannot read saved session {session_id}; restore that session file before resuming thread {}", thread.id))?;
+        let covered = if let Some(checkpoint) = &thread.saved_session_checkpoint {
+            if checkpoint.messages_sha256 != session_messages_sha256(&session.messages)? {
+                bail!(
+                    "Saved session {session_id} changed after this thread's checkpoint; re-import it into a separate thread to preserve both histories"
+                );
+            }
+            match checkpoint.covered_turn_id.as_deref() {
+                Some(id) => turns.iter().position(|turn| turn.id == id)
+                    .map(|index| index + 1)
+                    .with_context(|| format!("Saved session checkpoint turn {id} is missing; restore the Runtime turn records before resuming"))?,
+                None => 0,
+            }
+        } else {
+            // Legacy links have no cursor. Establish it only from an exact
+            // match to the existing seeder's projection; never use mtime or
+            // silently let a saved file replace a newer Runtime transcript.
+            let expected = session_recovery_projection(&session.messages);
+            let mut prefix = Vec::new();
+            let mut covered = (expected.is_empty()).then_some(0);
+            for (index, turn) in turns.iter().enumerate() {
+                if covered.is_some() {
+                    break;
+                }
+                prefix.extend(session_recovery_projection(
+                    &self.reconstruct_messages_from_turns(std::slice::from_ref(turn))?,
+                ));
+                if prefix == expected {
+                    covered = Some(index + 1);
+                } else if !expected.starts_with(&prefix) {
+                    break;
+                }
+            }
+            covered.with_context(|| format!("Saved session {session_id} has no verifiable Runtime checkpoint; keep both histories and re-import the saved session into a separate thread"))?
+        };
+        let mut messages = session.messages;
+        if let Some(retained) = thread
+            .saved_session_checkpoint
+            .as_ref()
+            .and_then(|checkpoint| checkpoint.retained_messages)
+        {
+            if retained > messages.len() {
+                bail!(
+                    "Saved session checkpoint exceeds its transcript; restore the saved session before resuming"
+                );
+            }
+            messages.truncate(retained);
+        }
+        Ok(Some((messages, covered)))
     }
 
     fn reconstruct_messages_from_turns(&self, turns: &[TurnRecord]) -> Result<Vec<Message>> {

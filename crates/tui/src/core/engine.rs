@@ -684,7 +684,8 @@ pub struct EngineHandle {
     /// Send user input responses to the engine
     tx_user_input: mpsc::Sender<UserInputDecision>,
     /// Send steer input for an in-flight turn.
-    tx_steer: mpsc::Sender<String>,
+    tx_steer: mpsc::Sender<handle::SteerInput>,
+    turn_controls: Arc<StdMutex<handle::TurnControls>>,
     /// Shared pause flag set by the TUI and read by the turn loop.
     shared_paused: Arc<StdMutex<bool>>,
     /// Whether the host must construct the route's concrete provider client
@@ -875,7 +876,9 @@ pub struct Engine {
     /// approval gate still fails closed.
     approval_receipt_store: Result<ApprovalReceiptStore, String>,
     rx_user_input: mpsc::Receiver<UserInputDecision>,
-    rx_steer: mpsc::Receiver<String>,
+    rx_steer: mpsc::Receiver<handle::SteerInput>,
+    turn_controls: Arc<StdMutex<handle::TurnControls>>,
+    admitted_turn_control: Option<handle::TurnControl>,
     tx_event: mpsc::Sender<Event>,
     /// Wakeup channel for the parent turn loop when a direct child sub-agent
     /// terminates (issue #756). Cloned into `SubAgentRuntime` so the runtime
@@ -1291,28 +1294,46 @@ impl Engine {
             .finish(id);
     }
 
-    fn reset_cancel_token(&mut self) {
-        let token = CancellationToken::new();
-        self.cancel_token = token.clone();
-        match self.shared_cancel_token.lock() {
-            Ok(mut shared) => {
-                *shared = token;
+    fn begin_turn_control(&mut self) -> handle::TurnControlGuard {
+        let mut controls = self
+            .turn_controls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let control = self
+            .admitted_turn_control
+            .take()
+            .unwrap_or_else(|| controls.fresh());
+        self.cancel_token = control.cancel.clone();
+        self.cancel_reason = Arc::clone(&control.reason);
+        *self
+            .shared_cancel_token
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = control.cancel.clone();
+        *self
+            .shared_paused
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = false;
+        controls.active = Some(control.clone());
+        handle::TurnControlGuard {
+            controls: Arc::clone(&self.turn_controls),
+            id: control.id,
+        }
+    }
+
+    fn next_turn_steer(&mut self) -> Option<String> {
+        let active_id = self
+            .turn_controls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .active
+            .as_ref()
+            .map(|control| control.id);
+        while let Ok(steer) = self.rx_steer.try_recv() {
+            if steer.turn_id == active_id {
+                return Some(steer.content);
             }
-            Err(poisoned) => {
-                *poisoned.into_inner() = token;
-            }
         }
-        // Fresh turn → clear any latched cancellation reason from the
-        // previous turn so a downstream "request cancelled" message
-        // doesn't inherit a stale cause.
-        match self.cancel_reason.lock() {
-            Ok(mut slot) => *slot = None,
-            Err(poisoned) => *poisoned.into_inner() = None,
-        }
-        match self.shared_paused.lock() {
-            Ok(mut paused) => *paused = false,
-            Err(poisoned) => *poisoned.into_inner() = false,
-        }
+        None
     }
 
     fn env_only_api_key_recovery_hint(api_config: &Config) -> Option<String> {
@@ -1472,6 +1493,7 @@ impl Engine {
         let (tx_approval, rx_approval) = mpsc::channel(64);
         let (tx_user_input, rx_user_input) = mpsc::channel(32);
         let (tx_steer, rx_steer) = mpsc::channel(64);
+        let turn_controls = Arc::new(StdMutex::new(handle::TurnControls::default()));
         let (tx_subagent_completion, rx_subagent_completion) = mpsc::unbounded_channel();
         let cancel_token = CancellationToken::new();
         let shared_cancel_token = Arc::new(StdMutex::new(cancel_token.clone()));
@@ -1726,6 +1748,8 @@ impl Engine {
             approval_receipt_store,
             rx_user_input,
             rx_steer,
+            turn_controls: Arc::clone(&turn_controls),
+            admitted_turn_control: None,
             tx_event,
             tx_subagent_completion,
             rx_subagent_completion,
@@ -1757,6 +1781,7 @@ impl Engine {
             tx_approval,
             tx_user_input,
             tx_steer,
+            turn_controls,
             shared_paused,
             client_preflight_required: true,
             live_runtime_authority,
@@ -1793,7 +1818,7 @@ impl Engine {
         auto_approve: bool,
         approval_mode: crate::tui::approval::ApprovalMode,
     ) {
-        self.reset_cancel_token();
+        let turn_control = self.begin_turn_control();
         self.turn_counter = self.turn_counter.saturating_add(1);
 
         let turn_id = format!(
@@ -1947,6 +1972,7 @@ impl Engine {
         if status == TurnOutcomeStatus::Interrupted {
             self.emit_interrupted_survivor_status().await;
         }
+        drop(turn_control);
         let _ = self
             .tx_event
             .send(Event::TurnComplete {
@@ -2593,6 +2619,15 @@ impl Engine {
                         verbosity,
                         provenance,
                     } => {
+                        self.admitted_turn_control = {
+                            let mut controls = self
+                                .turn_controls
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            let control = controls.pending.pop_front();
+                            controls.active = control.clone();
+                            control
+                        };
                         self.handle_send_message(
                             content,
                             mode,
@@ -4692,6 +4727,7 @@ impl Engine {
         verbosity: Option<String>,
         provenance: UserInputProvenance,
     ) -> SendMessageOutcome {
+        let turn_control = self.begin_turn_control();
         let mut goal_objective = goal_objective;
         let mut goal_token_budget = goal_token_budget;
         let mut goal_status = goal_status;
@@ -4838,16 +4874,11 @@ impl Engine {
         if let Some(status) = input_policy.status() {
             let _ = self.tx_event.send(Event::status(status)).await;
         }
-        // Reset cancel token for fresh turn (in case previous was cancelled)
-        self.reset_cancel_token();
 
         // Track the complete effective mode policy so mid-turn metadata, `/edit`,
         // idle worker resumptions, and approval gates cannot read a stale policy
         // after the UI changed modes (#3568).
         self.apply_runtime_mode_policy(&input_policy);
-
-        // Drain stale steer messages from previous turns.
-        while self.rx_steer.try_recv().is_ok() {}
 
         // Create turn context first so start event includes a stable turn id.
         // An active goal gets the host's goal allowance (#5994); turns with
@@ -5266,6 +5297,7 @@ impl Engine {
         if status == TurnOutcomeStatus::Interrupted {
             self.emit_interrupted_survivor_status().await;
         }
+        drop(turn_control);
         let turn_complete_delivered = self
             .tx_event
             .send(Event::TurnComplete {
@@ -7437,7 +7469,7 @@ pub(crate) struct MockEngineHandle {
     pub rx_op: mpsc::Receiver<Op>,
     rx_approval: mpsc::Receiver<ApprovalDecision>,
     rx_user_input: mpsc::Receiver<UserInputDecision>,
-    pub rx_steer: mpsc::Receiver<String>,
+    pub rx_steer: mpsc::Receiver<handle::SteerInput>,
     pub tx_event: mpsc::Sender<Event>,
     pub cancel_token: CancellationToken,
 }
@@ -7524,6 +7556,7 @@ pub(crate) fn mock_engine_handle() -> MockEngineHandle {
         tx_approval,
         tx_user_input,
         tx_steer,
+        turn_controls: Arc::new(StdMutex::new(handle::TurnControls::default())),
         shared_paused,
         client_preflight_required: false,
         live_runtime_authority,

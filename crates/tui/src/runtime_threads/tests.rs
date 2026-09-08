@@ -7,6 +7,406 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::time::sleep;
 use uuid::Uuid;
 
+mod recovery {
+    use super::*;
+    use crate::core::engine::Engine;
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    fn config() -> Config {
+        let mut config = Config {
+            provider: Some("recovery-fixture".into()),
+            providers: Some(crate::config::ProvidersConfig {
+                custom: HashMap::from([(
+                    "recovery-fixture".into(),
+                    crate::config::ProviderConfig {
+                        kind: Some("openai-compatible".into()),
+                        base_url: Some("http://127.0.0.1:18181/v1".into()),
+                        model: Some("fixture-model".into()),
+                        api_key: Some("local-test-key".into()),
+                        ..Default::default()
+                    },
+                )]),
+                ..Default::default()
+            }),
+            ..Config::default()
+        };
+        config.set_feature("mcp", false).unwrap();
+        config.set_feature("subagents", false).unwrap();
+        config
+    }
+
+    async fn close_engines(manager: &RuntimeThreadManager) -> Result<()> {
+        let handles = manager
+            .active
+            .lock()
+            .await
+            .engines
+            .drain()
+            .map(|(_, state)| state.engine)
+            .collect::<Vec<_>>();
+        for handle in handles {
+            handle.send(Op::Shutdown).await?;
+            tokio::time::timeout(Duration::from_secs(10), async {
+                while handle.rx_event.write().await.recv().await.is_some() {}
+            })
+            .await?;
+        }
+        Ok(())
+    }
+
+    async fn history_case(restart: bool) -> Result<()> {
+        let _env = crate::test_support::lock_test_env();
+        let dir = tempfile::tempdir()?;
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", dir.path());
+        let workspace = dir.path().join("workspace");
+        fs::create_dir(&workspace)?;
+        let runtime_dir = dir.path().join("runtime");
+        let manager_cfg = RuntimeThreadManagerConfig {
+            max_active_threads: 1,
+            ..test_manager_config(runtime_dir)
+        };
+        let mut manager =
+            RuntimeThreadManager::open(config(), workspace.clone(), manager_cfg.clone())?;
+        let thread = manager
+            .create_thread(CreateThreadRequest::default())
+            .await?;
+        let old: Vec<Message> = serde_json::from_value(json!([
+            {"role":"user","content":[{"type":"text","text":"OLD"},{"type":"image_url","image_url":{"url":"data:image/png;base64,AA=="}}]},
+            {"role":"assistant","content":[{"type":"thinking","thinking":"prior reasoning","signature":"fixture-signed-thinking"},{"type":"tool_use","id":"fixture-call","name":"read_file","input":{"path":"fixture.txt"},"thought_signature":"fixture-tool-signature"}]},
+            {"role":"user","content":[{"type":"tool_result","tool_use_id":"fixture-call","content":"old result"}]},
+            {"role":"assistant","content":[{"type":"text","text":"OLD ANSWER"}]}
+        ]))?;
+        manager.seed_thread_from_messages(&thread.id, &old).await?;
+        let mut saved = crate::session_manager::create_saved_session_with_id_and_mode(
+            Uuid::new_v4().to_string(),
+            &old,
+            &thread.model,
+            &workspace,
+            0,
+            None,
+            Some("agent"),
+        );
+        saved.metadata.set_model_provider_route(
+            thread.model_provider.as_deref().unwrap(),
+            thread.model_provider_id.as_deref(),
+        );
+        let sessions = crate::session_manager::SessionManager::new(
+            crate::session_manager::default_sessions_dir()?,
+        )?;
+        {
+            let _admission = manager.session_checkpoint_guard().await;
+            sessions.save_session(&saved)?;
+            manager
+                .set_thread_session_checkpoint(&thread.id, &saved)
+                .await?;
+        }
+        let original_engine = manager.get_engine(&thread.id).await?;
+        assert_eq!(original_engine.get_session_snapshot().await?.messages, old);
+        // Simulate a later durable turn using the real store writer. The saved
+        // full-fidelity snapshot deliberately remains at the OLD boundary.
+        let tail: Vec<Message> = serde_json::from_value(json!([
+            {"role":"user","content":[{"type":"text","text":"NEW"}]},
+            {"role":"assistant","content":[{"type":"text","text":"NEW ANSWER"}]}
+        ]))?;
+        manager.seed_thread_from_messages(&thread.id, &tail).await?;
+        assert_eq!(sessions.load_session(&saved.metadata.id)?.messages, old);
+        if restart {
+            close_engines(&manager).await?;
+            drop(original_engine);
+            drop(manager);
+            manager = RuntimeThreadManager::open(config(), workspace, manager_cfg)?;
+        } else {
+            let other = manager
+                .create_thread(CreateThreadRequest::default())
+                .await?;
+            manager
+                .get_engine(&other.id)
+                .await?
+                .get_session_snapshot()
+                .await?;
+            assert!(!manager.active.lock().await.engines.contains_key(&thread.id));
+        }
+        let restored = manager
+            .get_engine(&thread.id)
+            .await?
+            .get_session_snapshot()
+            .await?
+            .messages;
+        let mut expected = old;
+        expected.extend(tail);
+        assert_eq!(
+            restored, expected,
+            "snapshot plus durable tail must be exact, including raw signatures/media"
+        );
+        let detail = manager.get_thread_detail(&thread.id).await?;
+        assert!(
+            detail
+                .items
+                .iter()
+                .any(|item| item.detail.as_deref() == Some("NEW"))
+        );
+        close_engines(&manager).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn linked_saved_session_replays_runtime_tail_after_eviction() -> Result<()> {
+        history_case(false).await
+    }
+
+    #[tokio::test]
+    async fn linked_saved_session_replays_runtime_tail_after_restart() -> Result<()> {
+        history_case(true).await
+    }
+
+    #[tokio::test]
+    async fn saved_checkpoint_validation_and_forks_preserve_history() -> Result<()> {
+        let _env = crate::test_support::lock_test_env();
+        let dir = tempfile::tempdir()?;
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", dir.path());
+        let manager = RuntimeThreadManager::open(
+            config(),
+            dir.path().to_path_buf(),
+            test_manager_config(dir.path().join("runtime")),
+        )?;
+        let thread = manager
+            .create_thread(CreateThreadRequest::default())
+            .await?;
+        let messages: Vec<Message> = serde_json::from_value(json!([
+            {"role":"user","content":[{"type":"text","text":"keep"},{"type":"image_url","image_url":{"url":"data:image/png;base64,AA=="}}]},
+            {"role":"assistant","content":[{"type":"thinking","thinking":"kept reasoning","signature":"kept signature"},{"type":"text","text":"kept answer"}]},
+            {"role":"user","content":[{"type":"text","text":"drop"}]},
+            {"role":"assistant","content":[{"type":"text","text":"dropped answer"}]}
+        ]))?;
+        manager
+            .seed_thread_from_messages(&thread.id, &messages)
+            .await?;
+        let saved = crate::session_manager::create_saved_session_with_id_and_mode(
+            Uuid::new_v4().to_string(),
+            &messages,
+            &thread.model,
+            dir.path(),
+            0,
+            None,
+            Some("agent"),
+        );
+        let sessions = crate::session_manager::SessionManager::new(
+            crate::session_manager::default_sessions_dir()?,
+        )?;
+        let _admission = manager.session_checkpoint_guard().await;
+        sessions.save_session(&saved)?;
+        manager
+            .set_thread_session_checkpoint(&thread.id, &saved)
+            .await?;
+        let thread = manager.get_thread(&thread.id).await?;
+        let fork = manager.fork_thread(&thread.id).await?;
+        assert_eq!(manager.restore_thread_messages(&fork)?, messages);
+        let (backtrack, _) = manager.fork_at_user_message(&thread.id, 0).await?;
+        assert_eq!(manager.restore_thread_messages(&backtrack)?, messages[..2]);
+        let (empty, _) = manager.fork_at_user_message(&thread.id, 1).await?;
+        assert!(manager.restore_thread_messages(&empty)?.is_empty());
+        assert_eq!(manager.restore_thread_messages(&thread)?, messages);
+        let mut legacy = thread.clone();
+        legacy.saved_session_checkpoint = None;
+        assert_eq!(manager.restore_thread_messages(&legacy)?, messages);
+        let tail = vec![Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: "new tail".into(),
+                cache_control: None,
+            }],
+        }];
+        manager.seed_thread_from_messages(&thread.id, &tail).await?;
+        let mut expected = messages.clone();
+        expected.extend(tail);
+        assert_eq!(manager.restore_thread_messages(&legacy)?, expected);
+        let mut missing = thread.clone();
+        missing
+            .saved_session_checkpoint
+            .as_mut()
+            .unwrap()
+            .covered_turn_id = Some("turn_missing".into());
+        assert!(
+            manager
+                .restore_thread_messages(&missing)
+                .unwrap_err()
+                .to_string()
+                .contains("checkpoint turn turn_missing is missing")
+        );
+        let mut changed = saved.clone();
+        changed.messages[0] = Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: "conflicting history".into(),
+                cache_control: None,
+            }],
+        };
+        sessions.save_session(&changed)?;
+        assert!(
+            manager
+                .restore_thread_messages(&thread)
+                .unwrap_err()
+                .to_string()
+                .contains("changed after this thread's checkpoint")
+        );
+        assert!(
+            manager
+                .restore_thread_messages(&legacy)
+                .unwrap_err()
+                .to_string()
+                .contains("no verifiable Runtime checkpoint")
+        );
+        assert!(manager.get_engine(&thread.id).await.is_err());
+        assert!(manager.active.lock().await.engines.is_empty());
+        sessions.save_session(&saved)?;
+        assert_eq!(manager.restore_thread_messages(&thread)?, expected);
+        Ok(())
+    }
+
+    async fn control_case(interrupt: bool, follow_up: bool) -> Result<()> {
+        let _env = crate::test_support::lock_test_env();
+        let dir = tempfile::tempdir()?;
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", dir.path());
+        let workspace = dir.path().join("workspace");
+        fs::create_dir(&workspace)?;
+        let config = config();
+        let manager = RuntimeThreadManager::open(
+            config.clone(),
+            workspace.clone(),
+            test_manager_config(dir.path().join("runtime")),
+        )?;
+        let thread = manager
+            .create_thread(CreateThreadRequest::default())
+            .await?;
+        let mock = Arc::new(MockLlmClient::new(vec![canned::simple_text_turn(
+            "fixture response",
+        )]));
+        let (engine, handle) = Engine::new_with_model_client(
+            EngineConfig {
+                workspace,
+                model: thread.model.clone(),
+                features: crate::features::Features::default(),
+                subagents_enabled: false,
+                snapshots_enabled: false,
+                memory_enabled: false,
+                terminal_chrome_enabled: false,
+                runtime_services: crate::tools::spec::RuntimeToolServices {
+                    active_thread_id: Some(thread.id.clone()),
+                    ..Default::default()
+                },
+                ..EngineConfig::default()
+            },
+            &config,
+            mock.clone(),
+        );
+        manager
+            .install_test_engine(&thread.id, handle.clone())
+            .await?;
+        let (release, begin) = oneshot::channel();
+        let run = tokio::spawn(async move {
+            begin.await.unwrap();
+            engine.run().await;
+        });
+        let first = manager
+            .start_turn(
+                &thread.id,
+                StartTurnRequest {
+                    prompt: "first request".into(),
+                    ..Default::default()
+                },
+            )
+            .await?;
+        assert_eq!(mock.call_count(), 0);
+        if interrupt {
+            manager.interrupt_turn(&thread.id, &first.id).await?;
+        } else {
+            manager
+                .steer_turn(
+                    &thread.id,
+                    &first.id,
+                    SteerTurnRequest {
+                        prompt: "NEW CORRECTION".into(),
+                    },
+                )
+                .await?;
+        }
+        release.send(()).unwrap();
+        let terminal = wait_for_terminal_turn(&manager, &first.id, Duration::from_secs(10)).await?;
+        if interrupt {
+            assert_eq!(terminal.status, RuntimeTurnStatus::Interrupted);
+            assert_eq!(
+                mock.call_count(),
+                0,
+                "pre-dispatch interrupt must prevent the first provider request"
+            );
+            assert!(
+                manager
+                    .store
+                    .list_items_for_turn(&first.id)?
+                    .iter()
+                    .all(|item| item.kind != TurnItemKind::ToolCall)
+            );
+        } else {
+            assert_eq!(terminal.status, RuntimeTurnStatus::Completed);
+            let request = mock
+                .last_request()
+                .expect("real Engine reached mock provider");
+            let text = serde_json::to_string(&request.messages)?;
+            assert_eq!(text.matches("NEW CORRECTION").count(), 1);
+        }
+        assert_eq!(
+            manager
+                .events_since(&thread.id, None)?
+                .iter()
+                .filter(|event| event.event == "turn.completed"
+                    && event.turn_id.as_deref() == Some(first.id.as_str()))
+                .count(),
+            1
+        );
+        if follow_up {
+            handle.steer("stale correction after completion").await?;
+            let second = manager
+                .start_turn(
+                    &thread.id,
+                    StartTurnRequest {
+                        prompt: "second request".into(),
+                        ..Default::default()
+                    },
+                )
+                .await?;
+            assert_eq!(
+                wait_for_terminal_turn(&manager, &second.id, Duration::from_secs(10))
+                    .await?
+                    .status,
+                RuntimeTurnStatus::Completed
+            );
+            assert_eq!(mock.call_count(), 1);
+            assert!(
+                !serde_json::to_string(&mock.last_request().unwrap().messages)?
+                    .contains("stale correction after completion")
+            );
+        }
+        handle.send(Op::Shutdown).await?;
+        tokio::time::timeout(Duration::from_secs(10), run).await??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn queued_turn_interrupt_survives_engine_startup() -> Result<()> {
+        control_case(true, false).await
+    }
+
+    #[tokio::test]
+    async fn queued_turn_steer_reaches_first_request() -> Result<()> {
+        control_case(false, false).await
+    }
+
+    #[tokio::test]
+    async fn new_turn_does_not_inherit_previous_turn_controls() -> Result<()> {
+        control_case(true, true).await
+    }
+}
+
 fn test_runtime_dir() -> PathBuf {
     std::env::temp_dir().join(format!("deepseek-runtime-threads-{}", Uuid::new_v4()))
 }
@@ -410,6 +810,7 @@ fn sample_thread(thread_id: &str) -> ThreadRecord {
         task_id: None,
         title: None,
         session_id: None,
+        saved_session_checkpoint: None,
     }
 }
 
@@ -10507,7 +10908,7 @@ async fn steer_turn_on_active_turn_records_item_and_event() -> Result<()> {
                 })
                 .await;
             if let Some(steer) = rx_steer.recv().await {
-                let _ = steer_seen_tx.send(steer);
+                let _ = steer_seen_tx.send(steer.content);
             }
             let _ = tx_event
                 .send(EngineEvent::MessageStarted { index: 0 })
@@ -10627,7 +11028,9 @@ async fn steer_receipts_outlive_caller_cancellation_after_engine_acceptance() ->
             .await
     });
     assert_eq!(
-        tokio::time::timeout(Duration::from_secs(2), rx_steer.recv()).await?,
+        tokio::time::timeout(Duration::from_secs(2), rx_steer.recv())
+            .await?
+            .map(|steer| steer.content),
         Some("keep the accepted steer".to_string())
     );
     steer_task.abort();
@@ -11211,6 +11614,7 @@ fn opening_manager_recovers_stale_queued_and_in_progress_work() -> Result<()> {
         task_id: None,
         title: None,
         session_id: None,
+        saved_session_checkpoint: None,
     };
     manager.store.save_thread(&thread)?;
 

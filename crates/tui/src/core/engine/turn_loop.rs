@@ -805,7 +805,7 @@ impl Engine {
             }
 
             let mut accepted_steer = false;
-            while let Ok(steer) = self.rx_steer.try_recv() {
+            while let Some(steer) = self.next_turn_steer() {
                 let steer = steer.trim().to_string();
                 if steer.is_empty() {
                     continue;
@@ -4386,7 +4386,7 @@ impl Engine {
             let Some(event_result) = poll_outcome else {
                 break;
             };
-            while let Ok(steer) = self.rx_steer.try_recv() {
+            while let Some(steer) = self.next_turn_steer() {
                 let steer = steer.trim().to_string();
                 if steer.is_empty() {
                     continue;

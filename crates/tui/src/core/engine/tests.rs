@@ -4955,10 +4955,21 @@ async fn steer_during_final_coordination_response_gets_its_own_provider_reply() 
     };
     let (mut engine, handle) =
         Engine::new_with_model_client(engine_config, &Config::default(), client);
-    let tx_steer = handle.tx_steer.clone();
+    let steer_handle = handle.clone();
     mock.push_factory(move |_request| {
-        tx_steer
-            .try_send("Include this user steer in the final answer.".to_string())
+        let turn_id = steer_handle
+            .turn_controls
+            .lock()
+            .unwrap()
+            .active
+            .as_ref()
+            .map(|control| control.id);
+        steer_handle
+            .tx_steer
+            .try_send(handle::SteerInput {
+                turn_id,
+                content: "Include this user steer in the final answer.".to_string(),
+            })
             .expect("test steer channel remains open");
         canned::tool_call_turn(
             "call-coordination-read-2",
@@ -9282,7 +9293,7 @@ fn engine_handle_cancel_tracks_latest_turn_token() {
     let (mut engine, handle) = Engine::new(EngineConfig::default(), &Config::default());
     let stale_token = engine.cancel_token.clone();
 
-    engine.reset_cancel_token();
+    let _turn_control = engine.begin_turn_control();
     handle.cancel();
 
     assert!(engine.cancel_token.is_cancelled());
@@ -20911,6 +20922,7 @@ fn engine_handle_try_send_does_not_block_when_op_channel_is_full() {
         tx_approval: mpsc::channel(1).0,
         tx_user_input: mpsc::channel(1).0,
         tx_steer: mpsc::channel(1).0,
+        turn_controls: Arc::new(StdMutex::new(handle::TurnControls::default())),
         shared_paused: Arc::new(StdMutex::new(false)),
         client_preflight_required: true,
         live_runtime_authority: Arc::new(StdMutex::new(LiveRuntimeAuthorityState::new(
@@ -21182,7 +21194,7 @@ readline.createInterface({ input: process.stdin }).on('line', async line => {
     )
     .await
     .expect("stop interrupts explicit schema wait");
-    engine.reset_cancel_token();
+    let _turn_control = engine.begin_turn_control();
     fs::write(&release, "release").unwrap();
     let build = build.expect("explicit fast/failed selections must not wait for slow");
     let active = build.surface.active.unwrap_or_default();
