@@ -436,6 +436,25 @@ fn attention_delivery_allowed() -> bool {
     )
 }
 
+/// Native hosts provide focus observations; the same grace/condition rule
+/// applies before either native sound or banner preparation.
+pub(crate) fn native_attention_allowed(
+    config: &crate::config::NotificationsConfig,
+    focused: bool,
+    unfocused_for: Duration,
+) -> bool {
+    let condition = match config
+        .condition
+        .unwrap_or(crate::config::NotificationCondition::Unfocused)
+    {
+        crate::config::NotificationCondition::Always => AttentionCondition::Always,
+        crate::config::NotificationCondition::Unfocused => AttentionCondition::Unfocused,
+        crate::config::NotificationCondition::Never => AttentionCondition::Never,
+    };
+    let elapsed = unfocused_for.as_millis().min(u128::from(u64::MAX - 1)) as u64;
+    attention_delivery_allowed_at(condition, focused, 1, elapsed + 1)
+}
+
 /// Install `gate` as the process-wide notification policy.
 pub fn install_notification_gate(gate: NotificationGate) {
     NOTIFICATION_GATE.store(gate.to_bits(), Ordering::SeqCst);
@@ -482,7 +501,7 @@ pub fn notify_done_to<W: Write>(
 
 /// All side effects sit behind injected sinks. A disallowed event reaches none.
 #[allow(clippy::too_many_arguments)]
-fn notify_with_sinks(
+pub(crate) fn notify_with_sinks(
     method: Method,
     in_tmux: bool,
     payload: &NotificationPayload,
