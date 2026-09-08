@@ -125,6 +125,12 @@ pub struct ReviewOutput {
 }
 
 impl ReviewOutput {
+    pub(crate) fn note_binary_coverage(&mut self, diff: &str) {
+        if diff.contains("\nGIT binary patch\n") {
+            self.summary.push_str("\nCoverage limitation: binary patches were included as Git binary data; their contents were not semantically inspected.");
+        }
+    }
+
     #[must_use]
     pub fn from_str(raw: &str) -> Self {
         if let Some(parsed) = parse_review_output_json(raw) {
@@ -643,7 +649,7 @@ impl ToolSpec for ReviewTool {
                 },
                 "max_chars": {
                     "type": "integer",
-                    "description": "Maximum characters to include from the source (default: 200000)."
+                    "description": "Maximum source characters (default: 200000). A larger PR is refused before review, never truncated."
                 }
             },
             "required": ["target"]
@@ -679,6 +685,10 @@ impl ToolSpec for ReviewTool {
         let source =
             resolve_review_source(target, kind.as_deref(), staged, base.as_deref(), context)
                 .await?;
+        if let ReviewSource::PullRequest { diff, .. } = &source {
+            super::review_pr::ensure_input_fits(diff, max_chars)
+                .map_err(|error| ToolError::invalid_input(error.to_string()))?;
+        }
         let prompt = build_review_prompt(&source, max_chars);
 
         let route = client.effective_route_envelope(&self.model, chrono::Utc::now());
@@ -722,8 +732,12 @@ impl ToolSpec for ReviewTool {
             .with_metadata(review_usage_metadata(&route, &response.usage)));
         }
 
+        ensure_pr_source_current(&source, &context.workspace).await?;
         let response_text = extract_text(&response.content);
-        let output = ReviewOutput::from_str(&response_text);
+        let mut output = ReviewOutput::from_str(&response_text);
+        if let ReviewSource::PullRequest { diff, .. } = &source {
+            output.note_binary_coverage(diff);
+        }
         let metadata = review_usage_metadata(&route, &response.usage);
         let result =
             ToolResult::json(&output).map_err(|e| ToolError::execution_failed(e.to_string()))?;
@@ -747,9 +761,20 @@ fn review_usage_metadata(
 }
 
 enum ReviewSource {
-    File { display: String, content: String },
-    Diff { label: String, diff: String },
-    PullRequest { label: String, diff: String },
+    File {
+        display: String,
+        content: String,
+    },
+    Diff {
+        label: String,
+        diff: String,
+    },
+    PullRequest {
+        label: String,
+        diff: String,
+        pr: PullRequestRef,
+        view: super::review_pr::GhPullRequest,
+    },
 }
 
 async fn resolve_review_source(
@@ -772,11 +797,7 @@ async fn resolve_review_source(
             "pr" | "pull" | "pull_request" => {
                 let pr = parse_pr_url(target)
                     .ok_or_else(|| ToolError::invalid_input("Invalid pull request URL"))?;
-                let diff = gh_pr_diff(&pr, &context.workspace).await?;
-                Ok(ReviewSource::PullRequest {
-                    label: pr.label(),
-                    diff,
-                })
+                gh_pr_source(pr, &context.workspace).await
             }
             other => Err(ToolError::invalid_input(format!(
                 "Unknown review kind '{other}'"
@@ -785,11 +806,7 @@ async fn resolve_review_source(
     }
 
     if let Some(pr) = parse_pr_url(target) {
-        let diff = gh_pr_diff(&pr, &context.workspace).await?;
-        return Ok(ReviewSource::PullRequest {
-            label: pr.label(),
-            diff,
-        });
+        return gh_pr_source(pr, &context.workspace).await;
     }
 
     if let Some(staged_override) = diff_mode_from_target(target) {
@@ -911,35 +928,56 @@ async fn run_review_git(
     .map_err(|e| ToolError::execution_failed(format!("git {operation} task panicked: {e}")))?
 }
 
-async fn gh_pr_diff(pr: &PullRequestRef, workspace: &Path) -> Result<String, ToolError> {
-    let Some(mut cmd) = crate::dependencies::Gh::command() else {
-        return Err(ToolError::execution_failed("gh not found"));
-    };
-    cmd.arg("pr")
-        .arg("diff")
-        .arg(&pr.number)
-        .arg("--repo")
-        .arg(format!("{}/{}", pr.owner, pr.repo))
-        .current_dir(workspace);
+async fn gh_pr_source(pr: PullRequestRef, workspace: &Path) -> Result<ReviewSource, ToolError> {
+    let workspace = workspace.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let number = pr
+            .number
+            .parse::<u32>()
+            .map_err(|_| ToolError::invalid_input("Invalid pull request number"))?;
+        let repo = format!("{}/{}", pr.owner, pr.repo);
+        let view = super::review_pr::fetch_view(number, Some(&repo), &workspace)
+            .map_err(|error| ToolError::execution_failed(format!("{error:#}")))?;
+        let diff = super::review_pr::fetch_diff(number, Some(&repo), &workspace, &view)
+            .map_err(|error| ToolError::execution_failed(format!("{error:#}")))?;
+        Ok(ReviewSource::PullRequest {
+            label: pr.label(),
+            diff,
+            pr,
+            view,
+        })
+    })
+    .await
+    .map_err(|error| ToolError::execution_failed(format!("PR input task failed: {error}")))?
+}
 
-    let output = tokio::task::spawn_blocking(move || cmd.output())
+async fn ensure_pr_source_current(
+    source: &ReviewSource,
+    workspace: &Path,
+) -> Result<(), ToolError> {
+    if let ReviewSource::PullRequest { pr, view, .. } = source {
+        let pr = pr.clone();
+        let view = view.clone();
+        let workspace = workspace.to_path_buf();
+        tokio::task::spawn_blocking(move || {
+            let number = pr
+                .number
+                .parse::<u32>()
+                .map_err(|_| ToolError::invalid_input("Invalid pull request number"))?;
+            super::review_pr::ensure_current(
+                number,
+                Some(&format!("{}/{}", pr.owner, pr.repo)),
+                &workspace,
+                &view,
+            )
+            .map_err(|error| ToolError::execution_failed(format!("{error:#}")))
+        })
         .await
-        .map_err(|e| ToolError::execution_failed(format!("gh pr diff task panicked: {e}")))?
-        .map_err(|e| {
-            ToolError::execution_failed(format!("Failed to run gh pr diff (is gh installed?): {e}"))
-        })?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(ToolError::execution_failed(format!(
-            "gh pr diff failed: {}",
-            stderr.trim()
-        )));
+        .map_err(|error| {
+            ToolError::execution_failed(format!("PR revision check failed: {error}"))
+        })??;
     }
-    let diff = String::from_utf8_lossy(&output.stdout).to_string();
-    if diff.trim().is_empty() {
-        return Err(ToolError::invalid_input("Pull request diff is empty."));
-    }
-    Ok(diff)
+    Ok(())
 }
 
 fn build_review_prompt(source: &ReviewSource, max_chars: usize) -> String {
@@ -960,10 +998,12 @@ Path: {display}\n\n{truncated}\n\nEnd of file."
                 "Review the following {label} and provide feedback.\n\n{truncated}\n\nEnd of diff."
             )
         }
-        ReviewSource::PullRequest { label, diff } => {
-            let truncated = truncate_with_ellipsis(diff, max_chars, "\n...[truncated]\n");
+        ReviewSource::PullRequest {
+            label, diff, view, ..
+        } => {
             format!(
-                "Review the following pull request diff ({label}) and provide feedback.\n\n{truncated}\n\nEnd of diff."
+                "Review the complete pull request diff ({label}) at head {} and base {}. Binary patches are supplied as Git binary data, not a semantic review of their contents. Do not claim binary contents were inspected.\n\n{diff}\n\nEnd of diff.",
+                view.head_sha, view.base_sha,
             )
         }
     }
@@ -1132,6 +1172,36 @@ mod tests {
         assert!(diff.contains("+committed"), "{diff}");
         assert!(diff.contains("+staged"), "{diff}");
         assert!(!diff.contains("unstaged"), "{diff}");
+    }
+
+    #[test]
+    fn binary_coverage_limit_is_part_of_the_returned_review_summary() {
+        let mut review = ReviewOutput::from_str(r#"{"summary":"Review findings"}"#);
+        review.note_binary_coverage("diff --git a/image b/image\nGIT binary patch\nliteral 4\n");
+        assert!(review.summary.contains("not semantically inspected"));
+        let mut text_review = ReviewOutput::from_str(r#"{"summary":"Text review"}"#);
+        text_review.note_binary_coverage("diff --git a/a b/a\n@@ -0,0 +1 @@\n+text\n");
+        assert_eq!(text_review.summary, "Text review");
+    }
+
+    #[test]
+    fn pr_tool_prompt_preserves_the_complete_diff_after_budget_admission() {
+        let diff = format!("{}\n+LAST_PATCH\n", "x".repeat(DEFAULT_MAX_CHARS + 1));
+        let source = ReviewSource::PullRequest {
+            label: "example/repo#6002".into(),
+            diff: diff.clone(),
+            pr: PullRequestRef {
+                owner: "example".into(),
+                repo: "repo".into(),
+                number: "6002".into(),
+            },
+            view: super::super::review_pr::GhPullRequest::default(),
+        };
+        assert!(super::super::review_pr::ensure_input_fits(&diff, DEFAULT_MAX_CHARS).is_err());
+        super::super::review_pr::ensure_input_fits(&diff, diff.len()).unwrap();
+        let prompt = build_review_prompt(&source, diff.len());
+        assert!(prompt.contains(&diff));
+        assert!(!prompt.contains("[truncated]"));
     }
 
     #[test]
