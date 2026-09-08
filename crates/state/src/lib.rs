@@ -229,6 +229,14 @@ pub struct ThreadGoalRecord {
     pub created_at: i64,
     /// Unix timestamp (seconds) when the goal was last updated.
     pub updated_at: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_gap_fingerprint: Option<String>,
+    #[serde(default)]
+    pub repeated_gap_count: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_gap_pass: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pause_reason: Option<codewhale_protocol::GoalPauseReason>,
 }
 
 /// Filters for listing conversation threads.
@@ -635,6 +643,26 @@ impl StateStore {
                 "#
             ))
             .context("failed to initialize thread goal continuation schema")?;
+            user_version = 4;
+        }
+        if user_version < 5 {
+            let mut additions = String::new();
+            for (column, definition) in [
+                ("last_gap_fingerprint", "TEXT"),
+                ("repeated_gap_count", "INTEGER NOT NULL DEFAULT 0"),
+                ("last_gap_pass", "INTEGER"),
+                ("pause_reason", "TEXT"),
+            ] {
+                if !column_exists(conn, "thread_goals", column)? {
+                    additions.push_str(&format!(
+                        "ALTER TABLE thread_goals ADD COLUMN {column} {definition};\n"
+                    ));
+                }
+            }
+            conn.execute_batch(&format!(
+                "BEGIN; {additions} PRAGMA user_version = 5; COMMIT;"
+            ))
+            .context("failed to initialize durable goal stall schema")?;
         }
         Ok(())
     }
@@ -827,6 +855,17 @@ impl StateStore {
 
     /// Insert or replace the persisted goal for a thread.
     pub fn upsert_thread_goal(&self, goal: &ThreadGoalRecord) -> Result<()> {
+        codewhale_protocol::validate_goal_stall_state(
+            goal.last_gap_fingerprint.as_deref(),
+            goal.repeated_gap_count,
+            goal.last_gap_pass,
+            u32::try_from(goal.continuation_count.max(0)).unwrap_or(u32::MAX),
+        )
+        .map_err(anyhow::Error::msg)?;
+        let pause_reason = goal
+            .pause_reason
+            .map(|reason| serde_json::to_string(&reason))
+            .transpose()?;
         let conn = self.conn()?;
         let exists: Option<i64> = conn
             .query_row(
@@ -844,8 +883,9 @@ impl StateStore {
             r#"
             INSERT INTO thread_goals (
                 thread_id, goal_id, objective, status, token_budget, tokens_used,
-                time_used_seconds, continuation_count, created_at, updated_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                time_used_seconds, continuation_count, created_at, updated_at,
+                last_gap_fingerprint, repeated_gap_count, last_gap_pass, pause_reason
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
             ON CONFLICT(thread_id) DO UPDATE SET
                 goal_id=excluded.goal_id,
                 objective=excluded.objective,
@@ -855,7 +895,11 @@ impl StateStore {
                 time_used_seconds=excluded.time_used_seconds,
                 continuation_count=excluded.continuation_count,
                 created_at=excluded.created_at,
-                updated_at=excluded.updated_at
+                updated_at=excluded.updated_at,
+                last_gap_fingerprint=excluded.last_gap_fingerprint,
+                repeated_gap_count=excluded.repeated_gap_count,
+                last_gap_pass=excluded.last_gap_pass,
+                pause_reason=excluded.pause_reason
             "#,
             params![
                 goal.thread_id,
@@ -868,6 +912,10 @@ impl StateStore {
                 goal.continuation_count,
                 goal.created_at,
                 goal.updated_at,
+                goal.last_gap_fingerprint,
+                goal.repeated_gap_count,
+                goal.last_gap_pass,
+                pause_reason,
             ],
         )
         .context("failed to upsert thread goal")?;
@@ -956,7 +1004,8 @@ impl StateStore {
         conn.query_row(
             r#"
             SELECT thread_id, goal_id, objective, status, token_budget, tokens_used,
-                   time_used_seconds, continuation_count, created_at, updated_at
+                   time_used_seconds, continuation_count, created_at, updated_at,
+                   last_gap_fingerprint, repeated_gap_count, last_gap_pass, pause_reason
             FROM thread_goals
             WHERE thread_id = ?1
             "#,
@@ -2024,7 +2073,8 @@ fn row_to_thread(row: &rusqlite::Row<'_>) -> rusqlite::Result<ThreadMetadata> {
 
 fn row_to_thread_goal(row: &rusqlite::Row<'_>) -> rusqlite::Result<ThreadGoalRecord> {
     let status_raw: String = row.get(3)?;
-    Ok(ThreadGoalRecord {
+    let pause_reason: Option<String> = row.get(13)?;
+    let mut goal = ThreadGoalRecord {
         thread_id: row.get(0)?,
         goal_id: row.get(1)?,
         objective: row.get(2)?,
@@ -2035,7 +2085,48 @@ fn row_to_thread_goal(row: &rusqlite::Row<'_>) -> rusqlite::Result<ThreadGoalRec
         continuation_count: row.get(7)?,
         created_at: row.get(8)?,
         updated_at: row.get(9)?,
-    })
+        last_gap_fingerprint: row.get(10)?,
+        repeated_gap_count: row.get(11)?,
+        last_gap_pass: row.get(12)?,
+        pause_reason: pause_reason
+            .map(|value| serde_json::from_str(&value))
+            .transpose()
+            .map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    13,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })?,
+    };
+    codewhale_protocol::validate_goal_stall_state(
+        goal.last_gap_fingerprint.as_deref(),
+        goal.repeated_gap_count,
+        goal.last_gap_pass,
+        u32::try_from(goal.continuation_count.max(0)).unwrap_or(u32::MAX),
+    )
+    .map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            10,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, error)),
+        )
+    })?;
+    goal.normalize_restored_stall_state();
+    Ok(goal)
+}
+
+impl ThreadGoalRecord {
+    /// Same restore rule as `codewhale_protocol::ThreadGoal`: an Active
+    /// record with an exhausted stall window is corrupt and reads as paused.
+    fn normalize_restored_stall_state(&mut self) {
+        if matches!(self.status, ThreadGoalStatus::Active)
+            && self.repeated_gap_count >= codewhale_protocol::MAX_REPEATED_GAP_COUNT
+        {
+            self.status = ThreadGoalStatus::Paused;
+            self.pause_reason = Some(codewhale_protocol::GoalPauseReason::NoProgress);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2101,6 +2192,10 @@ mod tests {
             tokens_used: 7,
             time_used_seconds: 11,
             continuation_count: 0,
+            last_gap_fingerprint: None,
+            repeated_gap_count: 0,
+            last_gap_pass: None,
+            pause_reason: None,
             created_at: 100,
             updated_at: 101,
         }

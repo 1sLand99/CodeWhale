@@ -13,7 +13,7 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 use crate::error_taxonomy::{ErrorCategory, ErrorEnvelope, ErrorSeverity};
-use crate::resource_telemetry::{TokenThroughput, estimate_output_tokens_from_text};
+use crate::resource_telemetry::estimate_output_tokens_from_text;
 use anyhow::{Context, Result};
 use codewhale_release::InstallMethod;
 // On Windows the push/pop helpers write the escapes directly; crossterm's
@@ -359,12 +359,34 @@ fn tui_launch_preflight_rejects_background_process_group() {
     assert!(message.contains("codewhale exec"), "{message}");
 }
 
-fn should_show_resume_hint(session_id: Option<&str>) -> bool {
-    session_id.is_some_and(|id| !id.trim().is_empty())
-}
-
-fn resume_hint_text() -> &'static str {
-    "To continue this session, execute codewhale run --continue"
+fn resume_hint_text(
+    locale: crate::localization::Locale,
+    session_id: Option<&str>,
+    terminal_output: bool,
+) -> Option<String> {
+    use crate::localization::{MessageId, tr};
+    if !terminal_output {
+        return None;
+    }
+    let session_id = session_id.filter(|id| !id.trim().is_empty())?;
+    // Reconstruct a canonical UUID rather than interpolating a stored string
+    // into a shell command or terminal output. Legacy/noncanonical identities
+    // get the existing picker, never an ambiguous "most recent" shortcut.
+    let canonical = uuid::Uuid::parse_str(session_id)
+        .ok()
+        .map(|id| id.hyphenated().to_string())
+        .filter(|id| id == session_id);
+    let (message, command) = match canonical {
+        Some(id) => (
+            MessageId::ResumeExactSessionHint,
+            format!("codewhale resume {id}"),
+        ),
+        None => (
+            MessageId::ResumeSavedSessionHint,
+            "codewhale resume".to_string(),
+        ),
+    };
+    Some(tr(locale, message).replace("{command}", &command))
 }
 
 struct TerminalCleanupGuard {

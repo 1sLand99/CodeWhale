@@ -412,26 +412,17 @@ impl CommandSessionLifecycleContext for SessionLifecycleAdapter<'_> {
         let mut app = self.host.app.borrow_mut();
         let explicit_save_path = explicit_path.map(PathBuf::from);
 
-        let messages = app.api_messages.clone();
-        let mut session = crate::session_manager::create_saved_session_with_mode(
-            &messages,
-            &app.model,
-            &app.workspace,
-            u64::from(app.session.total_tokens),
-            app.system_prompt.as_ref(),
-            Some(app.mode.label()),
-        );
-        session
-            .metadata
-            .set_model_provider_route(app.api_provider.as_str(), app.provider_id_for_persistence());
-        app.sync_cost_to_metadata(&mut session.metadata);
-        session.context_references = app.session_context_references.clone();
-        session.artifacts = app.session_artifacts.clone();
-        session.work_state = match app.work_state_snapshot() {
-            Ok(state) => state,
-            Err(err) => return Err(format!("Failed to snapshot Work state: {err}")),
-        };
-        session.last_auto_route = app.auto_route_for_persistence();
+        // Explicit save must report contended Work state instead of falling
+        // back to the last automatic snapshot. Reuse the canonical snapshot
+        // builder after that preflight so stable IDs also retain lifecycle,
+        // title, provider, and window metadata.
+        app.work_state_snapshot()
+            .map_err(|error| format!("Failed to snapshot Work state: {error}"))?;
+        let manager = crate::session_manager::SessionManager::default_location()
+            .map_err(|error| format!("could not open sessions directory: {error}"))?;
+        let session = crate::tui::ui::build_session_snapshot(&mut app, &manager)?;
+        let queue_transition =
+            crate::tui::ui::prepare_offline_queue_transition(&app, &session.metadata.id)?;
         let save_path = explicit_save_path.unwrap_or_else(|| {
             let dir = crate::session_manager::default_sessions_dir()
                 .unwrap_or_else(|_| app.workspace.clone());
@@ -451,6 +442,10 @@ impl CommandSessionLifecycleContext for SessionLifecycleAdapter<'_> {
                 };
                 match crate::utils::write_atomic(&save_path, json.as_bytes()) {
                     Ok(()) => {
+                        crate::tui::ui::install_offline_queue_transition(
+                            &mut app,
+                            queue_transition,
+                        );
                         app.current_session_id = Some(session.metadata.id.clone());
                         app.current_session_metadata = Some(session.metadata.clone());
                         app.session_title = Some(session.metadata.title.clone());
@@ -553,6 +548,8 @@ impl CommandSessionLifecycleContext for SessionLifecycleAdapter<'_> {
         forked.artifacts = app.session_artifacts.clone();
         forked.work_state = work_state;
         forked.last_auto_route = app.auto_route_for_persistence();
+        let queue_transition =
+            crate::tui::ui::prepare_offline_queue_transition(&app, &forked.metadata.id)?;
 
         if let Err(err) = manager.save_session(&forked) {
             return Err(format!("Failed to save forked session: {err}"));
@@ -563,6 +560,7 @@ impl CommandSessionLifecycleContext for SessionLifecycleAdapter<'_> {
             ));
         }
 
+        crate::tui::ui::install_offline_queue_transition(&mut app, queue_transition);
         app.current_session_id = Some(forked.metadata.id.clone());
         app.current_session_metadata = Some(forked.metadata.clone());
         app.session_title = Some(forked.metadata.title.clone());
@@ -647,9 +645,12 @@ impl CommandSessionLifecycleContext for SessionLifecycleAdapter<'_> {
         forked.artifacts = source_session.artifacts.clone();
         forked.work_state = source_session.work_state.clone();
         forked.last_auto_route = source_session.last_auto_route.clone();
+        let queue_transition =
+            crate::tui::ui::prepare_offline_queue_transition(&app, &forked.metadata.id)?;
         if let Err(err) = manager.save_session(&forked) {
             return Err(format!("Failed to save forked session: {err}"));
         }
+        crate::tui::ui::install_offline_queue_transition(&mut app, queue_transition);
         app.current_session_id = Some(forked.metadata.id.clone());
         app.current_session_metadata = Some(forked.metadata.clone());
         app.session_title = Some(forked.metadata.title.clone());
@@ -696,12 +697,14 @@ impl CommandSessionLifecycleContext for SessionLifecycleAdapter<'_> {
         }
 
         let new_id = uuid::Uuid::new_v4().to_string();
+        let queue_transition = crate::tui::ui::prepare_offline_queue_transition(&app, &new_id)?;
         if !crate::commands::groups::core::reset_conversation_state(&mut app) {
             return Err(
                 "Could not start a new session because Work state is busy; retry in a moment."
                     .to_string(),
             );
         }
+        crate::tui::ui::install_offline_queue_transition(&mut app, queue_transition);
         app.clear_input();
         app.session_artifacts.clear();
         app.session_context_references.clear();
@@ -1442,9 +1445,11 @@ fn import_session_container(
             Err(e) => return Err(format!("foreign import failed: {e}")),
         };
     let new_id = imported.metadata.id.clone();
+    let queue_transition = crate::tui::ui::prepare_offline_queue_transition(app, &new_id)?;
     if let Err(e) = manager.save_session(&imported) {
         return Err(format!("imported session could not be saved: {e}"));
     }
+    crate::tui::ui::install_offline_queue_transition(app, queue_transition);
     app.current_session_id = Some(new_id.clone());
     app.current_session_metadata = Some(imported.metadata.clone());
     app.api_messages = imported.messages.clone();
@@ -4733,6 +4738,7 @@ mod tests {
         // Pending controls flip the effective source to the durable state.
         app.pending_goal_controls
             .push_back(crate::tui::app::PendingGoalControl {
+                goal_id: None,
                 intent: crate::tui::app::GoalControlIntent::SetStatus {
                     status: crate::tools::goal::GoalStatus::Paused,
                     clear: false,
@@ -4741,6 +4747,10 @@ mod tests {
             });
         app.last_known_goal_state = Some(crate::session_manager::SessionGoalState {
             schema_version: 1,
+            goal_id: None,
+            last_gap_fingerprint: None,
+            repeated_gap_count: 0,
+            last_gap_pass: None,
             objective: "Durable objective".to_string(),
             status: crate::session_manager::SessionGoalStatus::Paused,
             token_budget: None,

@@ -957,6 +957,48 @@ mod tests {
     }
 
     #[test]
+    fn outbound_web_payloads_require_a_session_decision_even_for_allowed_hosts() {
+        use crate::tools::{
+            fetch_url::FetchUrlTool, spec::ToolSpec, web_run::WebRunTool,
+            web_search::WebSearchTool, web_tool::WebTool,
+        };
+        let request = serde_json::json!({"action": "fetch", "url": "https://example.com/collect?data=synthetic-secret"});
+        for requirement in [
+            FetchUrlTool.approval_requirement_for(&request),
+            WebTool::new("Web").approval_requirement_for(&request),
+            WebSearchTool.approval_requirement(),
+            WebRunTool.approval_requirement(),
+        ] {
+            for approval in [ApprovalMode::Suggest, ApprovalMode::Auto] {
+                let ask = authority(AppMode::Agent, false, approval);
+                assert_eq!(
+                    resolve_tool_permission(&ask, requirement, false),
+                    ToolPermission::Prompt
+                );
+            }
+            let never = authority(AppMode::Agent, false, ApprovalMode::Never);
+            assert_eq!(
+                resolve_tool_permission(&never, requirement, false),
+                ToolPermission::Deny
+            );
+            let granted = authority(AppMode::Agent, true, ApprovalMode::Bypass);
+            assert_eq!(
+                resolve_tool_permission(&granted, requirement, false),
+                ToolPermission::Allow
+            );
+        }
+        let local_read = crate::tools::file::ReadFileTool.approval_requirement();
+        assert_eq!(
+            resolve_tool_permission(
+                &authority(AppMode::Agent, false, ApprovalMode::Suggest),
+                local_read,
+                false
+            ),
+            ToolPermission::Allow
+        );
+    }
+
+    #[test]
     fn auto_requirement_always_allows() {
         for (mode, auto_approve, approval_mode) in [
             (AppMode::Agent, false, ApprovalMode::Suggest),

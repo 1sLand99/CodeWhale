@@ -245,6 +245,10 @@ memory_path = "~/.codewhale/memory.md"
 # supported ranges (1..=10 and 2..=10) with a warning.
 # user_input_max_questions = 6
 # user_input_max_options = 4
+#
+# Seconds a question or an approval decision waits before it cancels (#6003).
+# 0 disables the timeout entirely; values above 86400 (24h) are clamped.
+# user_input_timeout_seconds = 300
 
 # ─────────────────────────────────────────────────────────────────────────────────
 # Product telemetry — opt-in, off by default
@@ -1227,6 +1231,11 @@ exponential_base = 2.0
 # coordinator goals that poll on a cadence instead of keeping one provider
 # turn open. Default: 0 (continue immediately). Cap: 86400 (24h).
 # continuation_delay_seconds = 300
+# Per-turn step allowance while a goal is active (#5994): larger but still
+# finite. Default: 1000 (0/absent resolves to 1000). Range: 1..=100,000.
+# Bounds each turn, never the number of continuation passes; explicit
+# per-invocation ceilings (exec --max-turns, worker caps) always win.
+# max_steps = 1000
 
 # ─────────────────────────────────────────────────────────────────────────────────
 # Context Compaction

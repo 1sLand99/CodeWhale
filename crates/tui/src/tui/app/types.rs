@@ -891,6 +891,7 @@ pub(crate) enum GoalControlIntent {
 /// already ordered in the engine channel; both remain pending until receipt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PendingGoalControl {
+    pub goal_id: Option<String>,
     pub intent: GoalControlIntent,
     pub dispatched: bool,
 }
@@ -1298,5 +1299,9 @@ pub enum McpUiAction {
         name: String,
     },
     Validate,
+    /// Report this server's last observed state without starting a new pool.
+    Diagnose {
+        name: String,
+    },
     Reload,
 }

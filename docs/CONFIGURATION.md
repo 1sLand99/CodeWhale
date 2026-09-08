@@ -474,6 +474,29 @@ the direct Arcee provider uses the bare `trinity-large-thinking` ID. Direct
 Arcee large-model API calls are tracked as 256K-context BF16 serving; Thinking
 is reasoning-capable, while Preview is not marked as a thinking model.
 
+### OpenRouter vendor pinning
+
+OpenRouter serves each model through several upstream vendors, and Codewhale
+passes the `model` string to OpenRouter verbatim — so OpenRouter's own
+vendor-selection syntax works today in `[providers.openrouter] model` (or
+`/model`), with no extra configuration (#6007):
+
+```toml
+provider = "openrouter"
+model = "deepseek/deepseek-v4-pro:deepinfra"   # pin the DeepInfra upstream
+# model = "deepseek/deepseek-v4-pro:floor"     # cheapest upstream
+# model = "@preset/my-team-preset"             # an account preset from the OpenRouter dashboard
+```
+
+The `:vendor` suffix pins one upstream vendor, `:floor` / `:ceil` bound its
+price tier, and `@preset/...` resolves an account preset. Codewhale does not
+fetch OpenRouter's per-vendor endpoint list and emits no `provider.order`
+request field, so pricing and availability for a pinned vendor come from
+OpenRouter's response, not from Codewhale's catalog: a pinned vendor may
+bill at a different rate than the model's catalog row, in which case cost
+surfaces report the routing-dependent missing-price reason rather than an
+invented number.
+
 ### Custom OpenAI-Compatible Gateways
 
 For a single third-party service that implements the OpenAI Chat Completions
@@ -2334,6 +2357,13 @@ max_continuations = 100
 # for coordinator goals that should poll on a cadence instead of keeping one
 # provider turn open. Default: 0 (continue immediately).
 continuation_delay_seconds = 300
+
+# Per-turn step allowance while a goal is active (#5994). Goal turns get a
+# larger but still finite budget than an ordinary interactive turn.
+# Default: 1000 (0 or absent resolves to 1000, never unlimited). Range:
+# 1..=100,000. This bounds each provider turn, never the number of
+# continuation passes.
+max_steps = 1000
 ```
 
 The effective delay is capped at 86,400 seconds (24 hours); use an automation
@@ -2342,6 +2372,15 @@ for schedules that are less frequent than once per day.
 When an explicit backstop fires, the goal pauses with a status message naming
 `[goal] max_continuations` and a warning is logged; resume the goal after
 inspecting progress, or raise/disable the backstop.
+
+`[goal] max_steps` governs one engine turn at a time: the ordinary interactive
+ceiling (`max_steps`, default 200) is unchanged, and explicit per-invocation
+ceilings — `exec --max-turns N`, child-worker caps — always win over it. At
+about 80% of the selected budget the model is told to land; at exhaustion it
+gets one bounded final report and the turn classifies as budget-exhausted. An
+unfinished goal then pauses with the BudgetLimit reason instead of re-arming
+another goal turn — resume it explicitly after reviewing the report. Wall-clock
+and stream protections are separate and still apply.
 
 The delay starts only after a successful turn while an explicitly created goal
 is still active. `/goal pause`, `/goal done`, `/goal blocked`, `/goal clear`,
@@ -2668,6 +2707,22 @@ The effective values are applied in three places at once: the tool's JSON
 schema (`minItems` / `maxItems`), its model-visible description, and the
 payload validator. A rejected payload names the key to raise, so the model can
 either resize the batch or tell the user which setting to change.
+
+### User-input / approval wait timeout
+
+Questions from `request_user_input` and approval decisions wait a bounded
+time and then cancel with a timeout (#6003). The default is 300 seconds.
+Raise it when you step away or read carefully, or set `0` to wait forever
+(overnight automation, long human review).
+
+```toml
+[tools]
+user_input_timeout_seconds = 300   # default 300; 0 disables the timeout; clamped to 86400 (24h)
+```
+
+The one key governs both the interactive question wait and the Runtime
+approval-decision wait, and the wait is this table's only user-facing clock —
+wall-clock and stream protections elsewhere are unaffected.
 
 ## Feature Flags
 

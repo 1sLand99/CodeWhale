@@ -221,6 +221,9 @@ impl Engine {
             })
             .await;
 
+        // #6003: `[tools] user_input_timeout_seconds` — absent uses the
+        // built-in default; an explicit 0 waits indefinitely.
+        let wait = self.config.user_input_timeout.unwrap_or(USER_INPUT_TIMEOUT);
         loop {
             tokio::select! {
                 _ = self.cancel_token.cancelled() => {
@@ -229,7 +232,13 @@ impl Engine {
                         format!("Request cancelled while awaiting user input{suffix}"),
                     ));
                 }
-                result = tokio::time::timeout(USER_INPUT_TIMEOUT, self.rx_user_input.recv()) => {
+                result = async {
+                    if wait.is_zero() {
+                        Ok(self.rx_user_input.recv().await)
+                    } else {
+                        tokio::time::timeout(wait, self.rx_user_input.recv()).await
+                    }
+                } => {
                     match result {
                         Ok(Some(decision)) => {
                             match decision {
@@ -255,12 +264,12 @@ impl Engine {
                                 .send(Event::Status {
                                     message: format!(
                                         "User input timed out after {}s",
-                                        USER_INPUT_TIMEOUT.as_secs()
+                                        wait.as_secs()
                                     ),
                                 })
                                 .await;
                             return Err(ToolError::Timeout {
-                                seconds: USER_INPUT_TIMEOUT.as_secs(),
+                                seconds: wait.as_secs(),
                             });
                         }
                     }

@@ -334,6 +334,12 @@ fn desired_goal_state(
                 GoalStatus::Complete => crate::session_manager::SessionGoalStatus::Complete,
                 GoalStatus::Blocked => crate::session_manager::SessionGoalStatus::Blocked,
             };
+            if *status == GoalStatus::Active {
+                goal.goal_id = Some(uuid::Uuid::new_v4().to_string());
+                goal.last_gap_fingerprint = None;
+                goal.repeated_gap_count = 0;
+                goal.last_gap_pass = None;
+            }
             goal.pause_reason = (*status == GoalStatus::Paused)
                 .then_some(crate::tools::goal::GoalPauseReason::User);
             Ok(base)
@@ -342,6 +348,7 @@ fn desired_goal_state(
             objective,
             token_budget,
         } => crate::session_manager::SessionGoalState::from_runtime(&GoalSnapshot {
+            goal_id: Some(uuid::Uuid::new_v4().to_string()),
             objective: Some(objective.clone()),
             status: GoalStatus::Active.as_str().to_string(),
             token_budget: *token_budget,
@@ -375,9 +382,10 @@ fn persist_accepted_goal_state(
         .map_err(|error| error.to_string())
 }
 
-fn goal_control_op(intent: &GoalControlIntent) -> Op {
+fn goal_control_op(intent: &GoalControlIntent, goal_id: Option<String>) -> Op {
     match intent {
         GoalControlIntent::SetStatus { status, clear } => Op::SetGoalStatus {
+            goal_id,
             status: *status,
             clear: *clear,
         },
@@ -385,6 +393,7 @@ fn goal_control_op(intent: &GoalControlIntent) -> Op {
             objective,
             token_budget,
         } => Op::SetGoalObjective {
+            goal_id,
             objective: objective.clone(),
             token_budget: *token_budget,
         },
@@ -399,7 +408,7 @@ pub(crate) fn flush_pending_goal_controls(app: &mut App, engine_handle: &EngineH
             continue;
         }
         if engine_handle
-            .try_send(goal_control_op(&pending.intent))
+            .try_send(goal_control_op(&pending.intent, pending.goal_id.clone()))
             .is_err()
         {
             return engine_handle.tx_op.is_closed();
@@ -465,6 +474,10 @@ fn accept_goal_control(app: &mut App, engine_handle: &EngineHandle, intent: Goal
     }
     app.last_known_goal_state = desired;
     app.pending_goal_controls.push_back(PendingGoalControl {
+        goal_id: app
+            .last_known_goal_state
+            .as_ref()
+            .and_then(|goal| goal.goal_id.clone()),
         intent,
         dispatched: false,
     });
@@ -490,10 +503,22 @@ pub(crate) fn apply_goal_snapshot_to_app(app: &mut App, snapshot: &GoalSnapshot)
         }
     };
     let pending_desired = app.last_known_goal_state.clone();
-    let matched_pending = app
-        .pending_goal_controls
-        .front()
-        .is_some_and(|pending| goal_control_matches(&pending.intent, durable_goal.as_ref()));
+    let matched_pending = app.pending_goal_controls.front().is_some_and(|pending| {
+        pending.dispatched
+            && pending.goal_id.as_deref().is_none_or(|id| {
+                Some(id)
+                    == durable_goal
+                        .as_ref()
+                        .and_then(|goal| goal.goal_id.as_deref())
+            })
+            && goal_control_matches(&pending.intent, durable_goal.as_ref())
+    });
+    // Accepted controls own the durable target until their exact revision's
+    // receipt arrives. An earlier pass cannot restore pre-resume stall state.
+    if !app.pending_goal_controls.is_empty() && !matched_pending {
+        return false;
+    }
+    let durable_changed = app.last_known_goal_state != durable_goal;
     if matched_pending {
         app.pending_goal_controls.pop_front();
     }
@@ -515,7 +540,7 @@ pub(crate) fn apply_goal_snapshot_to_app(app: &mut App, snapshot: &GoalSnapshot)
         } else {
             pending_desired
         };
-        return changed || matched_pending;
+        return changed || matched_pending || durable_changed;
     }
 
     let Some(objective) = snapshot
@@ -536,12 +561,14 @@ pub(crate) fn apply_goal_snapshot_to_app(app: &mut App, snapshot: &GoalSnapshot)
     };
     let verdict = status;
     let objective_changed = app.goal.objective.as_deref() != Some(objective);
+    let progress_changed = app.goal.progress != snapshot.progress;
     let changed = objective_changed
         || app.goal.token_budget != snapshot.token_budget
         || app.goal.tokens_used != snapshot.tokens_used
         || app.goal.time_used_seconds != snapshot.time_used_seconds
         || app.goal.continuation_count != snapshot.continuation_count
         || app.goal.pause_reason != snapshot.pause_reason
+        || progress_changed
         || app.goal.status != verdict;
     if !changed {
         app.last_known_goal_state = if app.pending_goal_controls.is_empty() {
@@ -549,7 +576,7 @@ pub(crate) fn apply_goal_snapshot_to_app(app: &mut App, snapshot: &GoalSnapshot)
         } else {
             pending_desired
         };
-        return matched_pending;
+        return matched_pending || durable_changed;
     }
 
     // The runtime introduced a new active objective (the model called
@@ -570,6 +597,38 @@ pub(crate) fn apply_goal_snapshot_to_app(app: &mut App, snapshot: &GoalSnapshot)
         };
         app.add_message(crate::tui::history::HistoryCell::System { content });
     }
+    // A fresh reported-progress receipt reads like the model's own status
+    // line: percent with a bar, then the optional now/next lines it wrote.
+    // Paused/complete goals keep their last report silent — the lifecycle
+    // receipt already spoke.
+    if progress_changed
+        && verdict == GoalStatus::Active
+        && let Some(progress) = snapshot.progress.as_ref()
+    {
+        let mut content = app
+            .tr(crate::localization::MessageId::GoalProgressReceipt)
+            .replace("{percent}", &progress.percent.to_string())
+            .replace(
+                "{bar}",
+                &crate::tools::goal::goal_progress_bar(progress.percent),
+            );
+        if let Some(now) = progress.now.as_deref() {
+            content.push('\n');
+            content.push_str(
+                &app.tr(crate::localization::MessageId::GoalProgressNow)
+                    .replace("{note}", now),
+            );
+        }
+        if let Some(next) = progress.next.as_deref() {
+            content.push('\n');
+            content.push_str(
+                &app.tr(crate::localization::MessageId::GoalProgressNext)
+                    .replace("{note}", next),
+            );
+        }
+        app.add_message(crate::tui::history::HistoryCell::System { content });
+    }
+    app.goal.progress = snapshot.progress.clone();
     app.goal.objective = Some(objective.to_string());
     app.goal.token_budget = snapshot.token_budget;
     app.goal.tokens_used = snapshot.tokens_used;
@@ -1080,7 +1139,6 @@ pub(crate) async fn apply_provider_fallback_switch(
     } else {
         app.session.last_prompt_tokens = None;
         app.session.last_completion_tokens = None;
-        app.session.last_output_throughput = None;
     }
 
     let _ = engine_handle.send(Op::Shutdown).await;
@@ -1268,8 +1326,17 @@ pub(crate) async fn apply_command_result(
                 let is_full_reset = messages.is_empty() && system_prompt.is_none();
                 if is_full_reset && session_id.is_none() {
                     let new_session_id = uuid::Uuid::new_v4().to_string();
-                    app.current_session_id = Some(new_session_id.clone());
                     session_id = Some(new_session_id);
+                }
+                if let Some(session_id) = session_id.as_deref() {
+                    let transition = match prepare_offline_queue_transition(app, session_id) {
+                        Ok(transition) => transition,
+                        Err(error) => {
+                            app.push_status_toast(error, StatusToastLevel::Error, Some(6_000));
+                            return Ok(false);
+                        }
+                    };
+                    install_offline_queue_transition(app, transition);
                 }
                 let workspace_changed = task_manager.default_workspace().await != workspace;
                 if workspace_changed {
@@ -2272,7 +2339,6 @@ pub(crate) async fn apply_command_result(
                         app.update_model_compaction_budget();
                         app.session.last_prompt_tokens = None;
                         app.session.last_completion_tokens = None;
-                        app.session.last_output_throughput = None;
                         // Rebuild the engine with the new config so API key/model/base URL take effect.
                         let _ = engine_handle.send(Op::Shutdown).await;
                         let engine_config = build_engine_config(app, config);
@@ -2386,8 +2452,8 @@ fn edit_project_hooks_from_tui(terminal: &mut AppTerminal, app: &mut App, config
             // a silent no-op unless it is said out loud.
             if !crate::hooks::workspace_allows_project_hooks(&app.workspace) {
                 content.push_str(
-                    " This workspace is not trusted, so project hooks are read but not run \
-                     (`/trust` to allow them).",
+                    " Project hooks are not approved for these exact contents. Use /hooks review, \
+                     then /hooks approve <digest> after reviewing the commands.",
                 );
             }
             if !reloaded.problems.is_empty() {
@@ -3318,11 +3384,13 @@ pub(crate) fn apply_loaded_session_with_goal(
     // Restore/validate the contended state before mutating conversation or
     // workspace fields. A failed session switch must leave the current session
     // wholly intact.
+    let queue_transition = prepare_offline_queue_transition(app, &session.metadata.id)?;
     app.restore_work_state(
         &session.metadata.id,
         &session.metadata.workspace,
         session.work_state.as_ref(),
     )?;
+    install_offline_queue_transition(app, queue_transition);
     // All fallible preflight is complete. Retire the old session's background
     // accounting atomically before mutating live state; any late old-scope
     // provider response is rejected by `cost_status::report`.
@@ -3486,7 +3554,6 @@ pub(crate) fn apply_loaded_session_with_goal(
     app.session.displayed_cost_high_water_cny = restored_high_water.cny.max(total_restored_cny);
     app.session.last_prompt_tokens = None;
     app.session.last_completion_tokens = None;
-    app.session.last_output_throughput = None;
     app.session.last_prompt_cache_hit_tokens = None;
     app.session.last_prompt_cache_miss_tokens = None;
     app.session.last_reasoning_replay_tokens = None;

@@ -88,6 +88,9 @@ pub enum InfoSegmentId {
     /// only painted when `/statusline` has the balance item on, which is
     /// also what authorises the fetch behind it.
     Balance,
+    /// Active goal with elapsed time and the model's reported progress
+    /// (`Goal (9m) 12% ▓▓░░░░░░`). Painted only while a goal is active.
+    Goal,
 }
 
 impl InfoSegmentId {
@@ -106,6 +109,10 @@ impl InfoSegmentId {
             // The balance outlives the cost: it is off by default, so a row
             // that shows one is a row whose owner asked for it by name.
             Self::Balance => 5,
+            // An active goal is the session's deliberate long-running mode:
+            // its reading outlives every telemetry segment and sheds only
+            // ahead of the route and context readings.
+            Self::Goal => 4,
             Self::Model | Self::Context => 0,
         }
     }

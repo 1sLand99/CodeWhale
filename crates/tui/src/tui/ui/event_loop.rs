@@ -6,6 +6,7 @@
 
 use super::clamp_event_poll_timeout;
 use super::observer_hooks::{
+    execute_session_error_hook, execute_session_state_transition_hooks,
     execute_turn_end_observer_hook, subagent_failure_notice,
     subagent_status_from_completion_result, surface_observer_hook_submission_failure,
 };
@@ -24,6 +25,81 @@ pub(super) fn event_owner_is_active(
     owner_session_id: &str,
 ) -> bool {
     !owner_session_id.is_empty() && current_session_id == Some(owner_session_id)
+}
+
+/// Apply only the projection owned by this host session. A delayed SetModel
+/// receipt from the previous session cannot replace the current transcript.
+pub(super) fn apply_engine_session_projection(
+    app: &mut App,
+    config: &Config,
+    event: EngineEvent,
+) -> bool {
+    let EngineEvent::SessionUpdated {
+        session_id,
+        messages,
+        system_prompt,
+        model,
+        workspace,
+    } = event
+    else {
+        return false;
+    };
+    // SetModel can emit the old session while a host-owned
+    // SyncSession is still queued. Reject that entire stale
+    // projection before changing transcript or persistence.
+    if !event_owner_is_active(app.current_session_id.as_deref(), &session_id) {
+        tracing::debug!(
+            expected = ?app.current_session_id,
+            received = %session_id,
+            "ignoring stale engine session projection"
+        );
+        return false;
+    }
+    if app.last_known_goal_state.is_some()
+        && let Err(error) = persist_current_session_goal(app)
+    {
+        surface_goal_persistence_failure(app, &error);
+    }
+    app.context_token_cache.borrow_mut().clear();
+    app.api_messages = messages;
+    app.system_prompt = system_prompt;
+    if app.auto_model {
+        app.last_effective_model = Some(model);
+    } else {
+        app.set_model_selection(model);
+    }
+    app.update_model_compaction_budget();
+    if app.workspace != workspace {
+        apply_workspace_runtime_state(app, config, workspace);
+    }
+    if (app.is_loading || app.is_compacting || app.is_purging)
+        && let Ok(manager) = SessionManager::default_location()
+    {
+        if let Ok(session) = build_session_snapshot(app, &manager) {
+            app.session_title = Some(session.metadata.title.clone());
+            // The engine's session id was pinned above, so
+            // every checkpoint of this session lands in the
+            // same per-session file.
+            if let Err(err) =
+                persist_with_pending_work_boundary(app, PersistRequest::SaveCheckpoint { session })
+            {
+                app.status_message = Some(format!(
+                    "To-do list update pending: checkpoint could not be queued ({err})"
+                ));
+            }
+        }
+    } else if app.session_title.is_none() {
+        // Never synchronously reload the growing session
+        // JSON on the event-loop task just to recover a
+        // title. The in-memory metadata cache is authoritative.
+        let cached = app
+            .current_session_metadata
+            .as_ref()
+            .filter(|metadata| metadata.id == session_id)
+            .map(|metadata| metadata.title.clone());
+        app.session_title = cached.or_else(|| derive_session_title(&app.api_messages));
+    }
+    true
 }
 
 fn current_session_fleet_workers_status(
@@ -622,37 +698,19 @@ pub async fn run_tui(
         app.status_message = Some(notice);
     }
 
-    // The parked offline queue is keyed per session, so this reads back only
-    // *this* session's own unsent text: a fresh session has none, and a
-    // concurrent instance's queue is a different file that nothing here can
-    // reach. A session that is not being resumed has nothing parked yet.
-    let mut restored_offline_queue = false;
-    if let Some(session_id) = app.current_session_id.clone()
-        && let Ok(manager) = SessionManager::default_location()
-    {
-        match manager.load_offline_queue_state(&session_id) {
-            Ok(Some(state)) => {
-                restored_offline_queue = restore_matching_offline_queue_state(&mut app, state);
-                if restored_offline_queue
-                    && app.status_message.is_none()
-                    && app.queued_message_count() > 0
-                {
-                    app.status_message = Some(format!(
-                        "Restored {} queued message(s) from previous session — ↑ to edit, Ctrl+X to discard",
-                        app.queued_message_count()
-                    ));
-                }
-            }
-            Ok(None) => {}
-            Err(err) => {
-                if app.status_message.is_none() {
-                    app.status_message = Some(format!("Failed to restore offline queue: {err}"));
-                }
-            }
-        }
+    let session_id = ensure_runtime_session_id(&mut app);
+    let transition =
+        prepare_offline_queue_transition(&app, &session_id).map_err(anyhow::Error::msg)?;
+    let restored_offline_queue = install_offline_queue_transition(&mut app, transition)
+        || !app.queued_messages.is_empty()
+        || app.queued_draft.is_some();
+    if restored_offline_queue && app.status_message.is_none() && app.queued_message_count() > 0 {
+        app.status_message = Some(format!(
+            "Restored {} queued message(s) from previous session — ↑ to edit, Ctrl+X to discard",
+            app.queued_message_count()
+        ));
     }
 
-    let session_id = ensure_runtime_session_id(&mut app);
     let task_manager = TaskManager::start(
         TaskManagerConfig::from_runtime(
             config,
@@ -918,6 +976,9 @@ pub async fn run_tui(
     // clearing it here unconditionally could erase in-flight progress that
     // never reached a snapshot, so it survives for startup recovery review.
     if let Some((handle, task)) = persistence_runtime {
+        // A quit key can leave the frame before its usual queue comparison.
+        // Capture the final edited draft before the shutdown durability barrier.
+        persist_offline_queue_state(&app);
         let turn_in_flight = app.is_loading || app.dispatch_in_flight;
         if !turn_in_flight && let Some(session_id) = app.current_session_id.clone() {
             handle.try_send(PersistRequest::ClearCheckpoint { session_id });
@@ -984,7 +1045,13 @@ pub async fn run_tui(
         }
     }
 
-    if result.is_ok() && should_show_resume_hint(app.current_session_id.as_deref()) {
+    if result.is_ok()
+        && let Some(hint) = resume_hint_text(
+            app.ui_locale,
+            app.current_session_id.as_deref(),
+            io::stdout().is_terminal(),
+        )
+    {
         // Printed AFTER `LeaveAlternateScreen` / `drop(terminal)` above,
         // so we're back on the primary screen — this is the one
         // legitimate stdout write in the TUI module tree. The
@@ -992,7 +1059,7 @@ pub async fn run_tui(
         // refuse it.
         #[allow(clippy::print_stdout)]
         {
-            println!("{}", resume_hint_text());
+            println!("{hint}");
         }
     }
 
@@ -1197,7 +1264,7 @@ pub(crate) async fn run_event_loop(
     // channel, which nothing else in this loop reads.
     let mut runtime_event_rx = task_manager.subscribe_runtime_events();
     let mut pending_thinking_translations = 0usize;
-    let mut last_queue_state = (app.queued_messages.clone(), app.queued_draft.clone());
+    let mut last_queue_state = offline_queue_projection(app);
     let mut last_queue_was_empty = app.queued_messages.is_empty() && app.queued_draft.is_none();
     let mut last_task_refresh = Instant::now()
         .checked_sub(Duration::from_secs(2))
@@ -1232,6 +1299,9 @@ pub(crate) async fn run_event_loop(
     );
     let mut prev_input_snapshot = String::new();
     let mut terminal_paused_at: Option<Instant> = None;
+    // Last observed coarse turn state for the session-state hook transitions
+    // (#6004); `None` until the first publish records it without firing.
+    let mut previous_turn_state = None;
     let mut force_terminal_repaint = false;
     // FocusGained debounce: some terminal emulators (e.g. Tabby) re-trigger
     // FocusGained when we re-arm focus-change reporting inside
@@ -1323,6 +1393,7 @@ pub(crate) async fn run_event_loop(
         // seam) exits the loop through the ordinary `/exit` teardown.
         session_control.reconcile(app.current_session_id.as_deref());
         session_control.update_status(app);
+        execute_session_state_transition_hooks(app, &mut previous_turn_state);
         if session_control
             .drain(
                 app,
@@ -1546,31 +1617,8 @@ pub(crate) async fn run_event_loop(
             deliver_constitution_draft_result(app, model_label, draft_locale, outcome);
         }
 
-        // Poll the MCP OAuth login cell (same background pattern).
-        let mcp_login_delivery = app
-            .mcp_login_cell
-            .try_lock()
-            .ok()
-            .and_then(|mut guard| guard.take());
-        if let Some((server, outcome)) = mcp_login_delivery {
-            if app
-                .mcp_login_cancel
-                .as_ref()
-                .is_some_and(|(pending, _)| *pending == server)
-            {
-                app.mcp_login_cancel = None;
-            }
-            app.status_message = Some(match outcome {
-                Ok(()) => format!(
-                    "Stored OAuth credentials for MCP server '{server}'. Run /mcp reload to reconnect it."
-                ),
-                Err(error) if error == "cancelled" => {
-                    format!("Cancelled the OAuth login for MCP server '{server}'.")
-                }
-                Err(error) => format!("OAuth login for MCP server '{server}' failed: {error}"),
-            });
-            app.needs_redraw = true;
-        }
+        // Discovery and callback delivery never park terminal input.
+        poll_mcp_login(app);
 
         // #1830/#2317: service any already-arrived terminal keys before a
         // potentially long engine batch so composer/modal input stays live.
@@ -2040,7 +2088,6 @@ pub(crate) async fn run_event_loop(
                         let now = Instant::now();
                         app.turn_started_at = Some(now);
                         app.turn_last_activity_at = Some(now);
-                        app.session.last_output_throughput = None;
                         app.session.clear_pending_turn_usage();
                         app.streaming_output_token_estimate = 0;
                         app.provider_wait_incident_logged = false;
@@ -2195,6 +2242,12 @@ pub(crate) async fn run_event_loop(
                         ) {
                             subagent_list_refresh_requested = true;
                         }
+                        // #6004: only a turn that *ended* failed is a session
+                        // error; transient tool failures the agent absorbed
+                        // never fire it.
+                        if matches!(status, crate::core::events::TurnOutcomeStatus::Failed) {
+                            execute_session_error_hook(app, error.as_deref());
+                        }
                         crate::tui::notifications::clear_taskbar_progress();
                         if status != crate::core::events::TurnOutcomeStatus::Completed {
                             crate::retry_status::clear();
@@ -2243,8 +2296,6 @@ pub(crate) async fn run_event_loop(
                         }
                         app.session.last_prompt_tokens = Some(usage.input_tokens);
                         app.session.last_completion_tokens = Some(usage.output_tokens);
-                        app.session.last_output_throughput =
-                            TokenThroughput::new(u64::from(usage.output_tokens), turn_elapsed);
                         app.session.last_prompt_cache_hit_tokens = usage.prompt_cache_hit_tokens;
                         app.session.last_prompt_cache_miss_tokens = usage.prompt_cache_miss_tokens;
                         app.session.last_reasoning_replay_tokens = usage.reasoning_replay_tokens;
@@ -2738,84 +2789,8 @@ pub(crate) async fn run_event_loop(
                         };
                         app.status_message = Some(app.tr(message_id).to_string());
                     }
-                    EngineEvent::SessionUpdated {
-                        session_id,
-                        messages,
-                        system_prompt,
-                        model,
-                        workspace,
-                    } => {
-                        // The engine adopts the host session id at spawn and
-                        // every SyncSession carries it, so a different id here
-                        // means a checkpoint written under the previous id
-                        // would be orphaned. Surface it instead of silently
-                        // re-keying persistence mid-session.
-                        if let Some(previous) = app.current_session_id.as_deref()
-                            && previous != session_id
-                        {
-                            tracing::warn!(
-                                previous,
-                                next = %session_id,
-                                "engine session id diverged from the host session id"
-                            );
-                            // The operator, not the log, owns this: earlier
-                            // checkpoints now live under the old id (#5931).
-                            let message = session_id_divergence_notice(app, previous, &session_id);
-                            app.push_status_toast(
-                                message.clone(),
-                                StatusToastLevel::Warning,
-                                Some(12_000),
-                            );
-                            app.add_message(HistoryCell::System { content: message });
-                            transcript_batch_updated = true;
-                        }
-                        app.current_session_id = Some(session_id.clone());
-                        if app.last_known_goal_state.is_some()
-                            && let Err(error) = persist_current_session_goal(app)
-                        {
-                            surface_goal_persistence_failure(app, &error);
-                        }
-                        app.context_token_cache.borrow_mut().clear();
-                        app.api_messages = messages;
-                        app.system_prompt = system_prompt;
-                        if app.auto_model {
-                            app.last_effective_model = Some(model);
-                        } else {
-                            app.set_model_selection(model);
-                        }
-                        app.update_model_compaction_budget();
-                        if app.workspace != workspace {
-                            apply_workspace_runtime_state(app, config, workspace);
-                        }
-                        if (app.is_loading || app.is_compacting || app.is_purging)
-                            && let Ok(manager) = SessionManager::default_location()
-                        {
-                            if let Ok(session) = build_session_snapshot(app, &manager) {
-                                app.session_title = Some(session.metadata.title.clone());
-                                // The engine's session id was pinned above, so
-                                // every checkpoint of this session lands in the
-                                // same per-session file.
-                                if let Err(err) = persist_with_pending_work_boundary(
-                                    app,
-                                    PersistRequest::SaveCheckpoint { session },
-                                ) {
-                                    app.status_message = Some(format!(
-                                        "To-do list update pending: checkpoint could not be queued ({err})"
-                                    ));
-                                }
-                            }
-                        } else if app.session_title.is_none() {
-                            // Never synchronously reload the growing session
-                            // JSON on the event-loop task just to recover a
-                            // title. The in-memory metadata cache is authoritative.
-                            let cached = app
-                                .current_session_metadata
-                                .as_ref()
-                                .filter(|metadata| metadata.id == session_id)
-                                .map(|metadata| metadata.title.clone());
-                            app.session_title =
-                                cached.or_else(|| derive_session_title(&app.api_messages));
-                        }
+                    event @ EngineEvent::SessionUpdated { .. } => {
+                        apply_engine_session_projection(app, config, event);
                     }
                     EngineEvent::CompactionStarted { id, auto, .. } => {
                         apply_compaction_started(app, id, auto);
@@ -3834,7 +3809,7 @@ pub(crate) async fn run_event_loop(
         // draft is only cloned while one is actually pending.
         let queue_now_empty = app.queued_messages.is_empty() && app.queued_draft.is_none();
         if !(queue_now_empty && last_queue_was_empty) {
-            let queue_state = (app.queued_messages.clone(), app.queued_draft.clone());
+            let queue_state = offline_queue_projection(app);
             if queue_state != last_queue_state {
                 persist_offline_queue_state(app);
                 last_queue_state = queue_state;
@@ -4508,6 +4483,12 @@ pub(crate) async fn run_event_loop(
             // PTY/raw-mode — and by some kitty-keyboard-protocol terminals —
             // to canonical Ctrl+C so the quit-arm flow always runs (#4090).
             normalize_raw_ctrl_c(&mut key);
+
+            // Login cancellation precedes modal/focus dispatch: Extensions
+            // must not consume the Esc promised by the authorization notice.
+            if handle_mcp_login_key(app, &key) {
+                continue;
+            }
 
             // A route change made in-session is temporary and stays that way
             // until the user EXPLICITLY persists it with a command
@@ -5622,19 +5603,6 @@ pub(crate) async fn run_event_loop(
                     let _ = engine_handle.send(Op::Shutdown).await;
                     return Ok(());
                 }
-                // A pending MCP OAuth login owns Esc first: the notice that
-                // starts it promises "Esc cancels", and abandoning a login
-                // opened by a misclick must not depend on what else is focused.
-                KeyCode::Esc if app.mcp_login_cancel.is_some() => {
-                    if let Some((server, token)) = app.mcp_login_cancel.take() {
-                        token.cancel();
-                        app.status_message = Some(format!(
-                            "Cancelled the OAuth login for MCP server '{server}'."
-                        ));
-                        app.needs_redraw = true;
-                    }
-                    continue;
-                }
                 // Agent focus: Esc on an empty composer returns to the main
                 // conversation before any other Esc meaning applies.
                 KeyCode::Esc
@@ -6711,14 +6679,6 @@ mod fleet_workers_status_tests {
             "Current-session fleet workers: 3 total"
         );
     }
-}
-
-/// Text for a mid-session engine/host session id divergence: names both ids
-/// and the command that reopens the checkpoints written under the old one.
-pub(crate) fn session_id_divergence_notice(app: &App, previous: &str, next: &str) -> String {
-    app.tr(MessageId::SessionIdDivergedNotice)
-        .replace("{previous}", previous)
-        .replace("{next}", next)
 }
 
 /// Per-tick budget for the runtime store-failure tap. These events are rare;

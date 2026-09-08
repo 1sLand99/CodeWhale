@@ -2009,7 +2009,6 @@ pub fn set_config_value(app: &mut App, key: &str, value: &str, persist: bool) ->
                 app.update_model_compaction_budget();
                 app.session.last_prompt_tokens = None;
                 app.session.last_completion_tokens = None;
-                app.session.last_output_throughput = None;
                 return CommandResult::with_message_and_action(
                     format!(
                         "model = auto (auto-select model per turn; thinking = {})",
@@ -2057,7 +2056,6 @@ pub fn set_config_value(app: &mut App, key: &str, value: &str, persist: bool) ->
             app.update_model_compaction_budget();
             app.session.last_prompt_tokens = None;
             app.session.last_completion_tokens = None;
-            app.session.last_output_throughput = None;
             return CommandResult::with_message_and_action(
                 format!("model = {model}"),
                 AppAction::UpdateCompaction(app.compaction_config()),
@@ -2772,7 +2770,6 @@ pub fn set_config_value(app: &mut App, key: &str, value: &str, persist: bool) ->
                 app.update_model_compaction_budget();
                 app.session.last_prompt_tokens = None;
                 app.session.last_completion_tokens = None;
-                app.session.last_output_throughput = None;
                 action = Some(AppAction::UpdateCompaction(app.compaction_config()));
             }
         }

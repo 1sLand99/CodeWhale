@@ -19,6 +19,26 @@ use crate::snapshot::SnapshotRepo;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+/// Which configured limit governs a turn's step budget (#5994).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StepBudgetSource {
+    /// The ordinary interactive ceiling (`max_steps`).
+    Interactive,
+    /// The goal-turn allowance (`[goal] max_steps`).
+    Goal,
+}
+
+impl StepBudgetSource {
+    /// The configuration key named in soft-landing and exhaustion notices.
+    #[must_use]
+    pub const fn key_label(self) -> &'static str {
+        match self {
+            Self::Interactive => "max_steps",
+            Self::Goal => "[goal] max_steps",
+        }
+    }
+}
+
 /// Context for a single turn (user message + AI response).
 #[derive(Debug)]
 pub struct TurnContext {
@@ -34,6 +54,14 @@ pub struct TurnContext {
 
     /// Maximum steps allowed
     pub max_steps: u32,
+
+    /// Which configured limit `max_steps` came from.
+    pub budget_source: StepBudgetSource,
+
+    /// The turn's step budget was exhausted and the bounded final report was
+    /// granted (#5994). Set by the turn loop; the cross-turn goal fence reads
+    /// it so an exhausted goal pauses instead of re-arming.
+    pub budget_exhausted_final_report: bool,
 
     /// Number of tool calls made in this turn.
 
@@ -62,11 +90,18 @@ pub struct TurnContext {
 impl TurnContext {
     /// Create a new turn context
     pub fn new(max_steps: u32) -> Self {
+        Self::with_budget_source(max_steps, StepBudgetSource::Interactive)
+    }
+
+    /// Create a turn context with an explicit budget provenance (#5994).
+    pub fn with_budget_source(max_steps: u32, budget_source: StepBudgetSource) -> Self {
         Self {
             id: uuid::Uuid::new_v4().to_string(),
             started_at: Instant::now(),
             step: 0,
             max_steps,
+            budget_source,
+            budget_exhausted_final_report: false,
             cancelled: false,
             usage: Usage {
                 input_tokens: 0,

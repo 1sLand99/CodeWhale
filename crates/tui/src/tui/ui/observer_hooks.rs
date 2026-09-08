@@ -139,6 +139,128 @@ pub(super) fn surface_observer_hook_submission_failure(app: &mut App, error: Str
     app.surface_observer_hook_submission_failure(error);
 }
 
+/// Why the agent is waiting on the person, in the payload of
+/// [`HookEvent::WaitingForUser`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SessionWaitReason {
+    Approval,
+    UserInput,
+    GoalContinuation,
+}
+
+impl SessionWaitReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Approval => "approval",
+            Self::UserInput => "user_input",
+            Self::GoalContinuation => "goal_continuation",
+        }
+    }
+}
+
+/// The session's wait reason right now, when one exists.
+pub(super) fn session_wait_reason(app: &App) -> Option<SessionWaitReason> {
+    if app.view_stack.top_kind() == Some(crate::tui::views::ModalKind::Approval) {
+        return Some(SessionWaitReason::Approval);
+    }
+    if app.pending_user_input_prompt.is_some() {
+        return Some(SessionWaitReason::UserInput);
+    }
+    if app.goal_continuation_waiting {
+        return Some(SessionWaitReason::GoalContinuation);
+    }
+    None
+}
+
+/// The hook a turn-state edge fires, if any. Pure so the transition table is
+/// directly testable: into `Waiting` is `waiting_for_user`; into `Idle` from
+/// work or a wait is `session_idle`; everything else is silent.
+pub(super) fn session_state_transition_event(
+    previous: crate::tui::control_socket::TurnState,
+    current: crate::tui::control_socket::TurnState,
+) -> Option<HookEvent> {
+    use crate::tui::control_socket::TurnState;
+    match (previous, current) {
+        (TurnState::InProgress | TurnState::Waiting, TurnState::Idle) => {
+            Some(HookEvent::SessionIdle)
+        }
+        (TurnState::Idle | TurnState::InProgress, TurnState::Waiting) => {
+            Some(HookEvent::WaitingForUser)
+        }
+        _ => None,
+    }
+}
+
+/// Fire the session-state hooks on transitions of the shared
+/// [`crate::tui::control_socket::turn_state_from_app`] projection (#6004):
+/// `waiting_for_user` when a wait begins, `session_idle` when the session
+/// settles back to idle after work or a wait. The first observed state is
+/// recorded without firing so startup never emits a spurious transition.
+pub(super) fn execute_session_state_transition_hooks(
+    app: &App,
+    previous: &mut Option<crate::tui::control_socket::TurnState>,
+) {
+    use crate::tui::control_socket::turn_state_from_app;
+    let current = turn_state_from_app(app);
+    let previous = previous.replace(current);
+    let Some(previous) = previous else {
+        return;
+    };
+    let Some(event) = session_state_transition_event(previous, current) else {
+        return;
+    };
+    if !app.hooks.has_hooks_for_event(event) {
+        return;
+    }
+    let mut payload = serde_json::json!({
+        "from": turn_state_name(previous),
+        "to": turn_state_name(current),
+    });
+    if event == HookEvent::WaitingForUser
+        && let Some(reason) = session_wait_reason(app)
+    {
+        payload["reason"] = serde_json::Value::String(reason.as_str().to_string());
+    }
+    if event == HookEvent::SessionIdle
+        && let Some(status) = app.runtime_turn_status.as_deref()
+    {
+        payload["last_turn_status"] = serde_json::Value::String(status.to_string());
+    }
+    if let Err(error) = app
+        .hooks
+        .submit_json_observer(event, app.base_hook_context(), payload)
+    {
+        tracing::warn!("session-state hook submission failed: {error}");
+    }
+}
+
+fn turn_state_name(state: crate::tui::control_socket::TurnState) -> &'static str {
+    match state {
+        crate::tui::control_socket::TurnState::Idle => "idle",
+        crate::tui::control_socket::TurnState::InProgress => "in_progress",
+        crate::tui::control_socket::TurnState::Waiting => "waiting",
+    }
+}
+
+/// Fire `session_error` for a turn whose terminal status is failed (#6004).
+/// Transient tool failures the agent absorbs never reach this: only the
+/// turn-ending failure fires it, so an alert here means the agent stopped.
+pub(super) fn execute_session_error_hook(app: &App, error: Option<&str>) {
+    if !app.hooks.has_hooks_for_event(HookEvent::SessionError) {
+        return;
+    }
+    let payload = serde_json::json!({
+        "status": "failed",
+        "error": error.unwrap_or_default(),
+    });
+    if let Err(error) =
+        app.hooks
+            .submit_json_observer(HookEvent::SessionError, app.base_hook_context(), payload)
+    {
+        tracing::warn!("session-error hook submission failed: {error}");
+    }
+}
+
 pub(super) struct TurnEndObserverMetadata<'a> {
     pub(super) turn_id: std::borrow::Cow<'a, str>,
     pub(super) created_at: chrono::DateTime<chrono::Utc>,
@@ -264,5 +386,103 @@ pub(super) fn subagent_status_from_completion_result(result: &str) -> SubAgentSt
         Some("interrupted") => SubAgentStatus::Interrupted(reason),
         Some("budget_exhausted") => SubAgentStatus::BudgetExhausted,
         _ => SubAgentStatus::Completed,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::control_socket::TurnState;
+    use crate::tui::control_socket::turn_state_from_app;
+
+    #[test]
+    fn session_state_transition_table_fires_only_on_real_edges() {
+        use HookEvent::*;
+        assert_eq!(
+            session_state_transition_event(TurnState::InProgress, TurnState::Idle),
+            Some(SessionIdle)
+        );
+        assert_eq!(
+            session_state_transition_event(TurnState::Waiting, TurnState::Idle),
+            Some(SessionIdle)
+        );
+        assert_eq!(
+            session_state_transition_event(TurnState::Idle, TurnState::Waiting),
+            Some(WaitingForUser)
+        );
+        assert_eq!(
+            session_state_transition_event(TurnState::InProgress, TurnState::Waiting),
+            Some(WaitingForUser)
+        );
+        // No edge, or edges that are not attention transitions: silent.
+        assert_eq!(
+            session_state_transition_event(TurnState::Idle, TurnState::InProgress),
+            None
+        );
+        assert_eq!(
+            session_state_transition_event(TurnState::Idle, TurnState::Idle),
+            None
+        );
+        assert_eq!(
+            session_state_transition_event(TurnState::Waiting, TurnState::InProgress),
+            None
+        );
+    }
+
+    fn test_app() -> App {
+        let config = crate::config::Config::default();
+        App::new(
+            crate::test_support::test_tui_options(std::env::current_dir().unwrap()),
+            &config,
+        )
+    }
+
+    #[test]
+    fn turn_state_projection_covers_every_wait_on_the_person() {
+        let mut app = test_app();
+        assert_eq!(turn_state_from_app(&app), TurnState::Idle);
+
+        app.is_loading = true;
+        assert_eq!(turn_state_from_app(&app), TurnState::InProgress);
+        app.is_loading = false;
+
+        app.pending_user_input_prompt = Some((
+            "q1".to_string(),
+            crate::tools::user_input::UserInputRequest {
+                questions: Vec::new(),
+            },
+        ));
+        assert_eq!(turn_state_from_app(&app), TurnState::Waiting);
+        assert_eq!(
+            session_wait_reason(&app),
+            Some(SessionWaitReason::UserInput)
+        );
+        app.pending_user_input_prompt = None;
+
+        app.goal_continuation_waiting = true;
+        assert_eq!(turn_state_from_app(&app), TurnState::Waiting);
+        assert_eq!(
+            session_wait_reason(&app),
+            Some(SessionWaitReason::GoalContinuation)
+        );
+        app.goal_continuation_waiting = false;
+
+        app.view_stack.push(
+            crate::tui::approval::ApprovalView::new_with_default_selection(
+                crate::tui::approval::ApprovalRequest::new_with_intent(
+                    "a1",
+                    "exec_shell",
+                    "run the tests",
+                    &serde_json::json!({"cmd": "cargo test"}),
+                    "key",
+                    None,
+                    &app.workspace,
+                ),
+                crate::localization::Locale::En,
+                crate::config::ApprovalDefaultSelection::default(),
+            ),
+        );
+        assert_eq!(turn_state_from_app(&app), TurnState::Waiting);
+        assert_eq!(session_wait_reason(&app), Some(SessionWaitReason::Approval));
     }
 }

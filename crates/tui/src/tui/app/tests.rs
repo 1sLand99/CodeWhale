@@ -2143,7 +2143,8 @@ fn subscription_route_hides_stale_session_dollars_in_footer() {
         !matches!(chip, crate::route_billing::UsageChip::Money(_)),
         "{chip:?}"
     );
-    let rendered = crate::route_billing::format_usage_chip(&chip).unwrap_or_default();
+    let rendered = crate::route_billing::format_usage_chip(&chip, crate::localization::Locale::En)
+        .unwrap_or_default();
     assert!(!rendered.contains('$'), "{rendered}");
     assert!(rendered.contains("Codex OAuth quota"), "{rendered}");
 }
@@ -2174,7 +2175,7 @@ fn provider_switch_keeps_audited_cumulative_spend_visible() {
         crate::route_billing::UsageChip::Money(_)
     ));
     assert!(
-        crate::route_billing::format_usage_chip(&app.cumulative_usage_chip())
+        crate::route_billing::format_usage_chip(&app.cumulative_usage_chip(), app.ui_locale)
             .is_some_and(|label| !label.is_empty())
     );
 

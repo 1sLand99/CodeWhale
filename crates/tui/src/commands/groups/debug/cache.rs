@@ -617,7 +617,8 @@ const TURN_CACHE_TABLE_WIDTH: usize = 106;
 fn turn_cost_cell(
     rec: &TurnCacheRecord,
     currency: crate::pricing::CostCurrency,
-    unpriced_notes: &mut std::collections::BTreeSet<&'static str>,
+    unpriced_reasons: &mut std::collections::BTreeSet<crate::pricing::UnpricedReason>,
+    unpriced_classes: &mut std::collections::BTreeSet<&'static str>,
 ) -> String {
     let Some(audit) = rec.cost_audit.as_ref() else {
         return "—".to_string();
@@ -628,10 +629,10 @@ fn turn_cost_cell(
         return crate::pricing::format_cost_amount_precise(estimate.amount(currency), currency);
     }
     if let Some(reason) = audit.unpriced_reason {
-        unpriced_notes.insert(reason.label());
+        unpriced_reasons.insert(reason);
     }
     for class in &audit.unpriced_classes {
-        unpriced_notes.insert(class.label());
+        unpriced_classes.insert(class.label());
     }
     "—".to_string()
 }
@@ -649,7 +650,9 @@ fn format_cache_history(app: &App, count: usize, locale: Locale) -> String {
     let currency = app.cost_display_currency(app.cost_currency);
     // Non-secret audit trail for turns whose spend is missing from the session
     // total, so a `—` in the cost column is always explainable.
-    let mut unpriced_notes: std::collections::BTreeSet<&'static str> =
+    let mut unpriced_reasons: std::collections::BTreeSet<crate::pricing::UnpricedReason> =
+        std::collections::BTreeSet::new();
+    let mut unpriced_classes: std::collections::BTreeSet<&'static str> =
         std::collections::BTreeSet::new();
     let mut header = tr(locale, MessageId::CmdCacheHeader)
         .replace("{count}", &rows.len().to_string())
@@ -688,7 +691,7 @@ fn format_cache_history(app: &App, count: usize, locale: Locale) -> String {
             .map_or_else(|| "—".to_string(), |_| write.to_string());
         totals_write += classes.cache_write;
         totals_reasoning += u64::from(rec.reasoning_tokens.unwrap_or(0));
-        let cost_cell = turn_cost_cell(rec, currency, &mut unpriced_notes);
+        let cost_cell = turn_cost_cell(rec, currency, &mut unpriced_reasons, &mut unpriced_classes);
         let route_cell = format_turn_cache_route(rec);
         let age = humanize_age(now.saturating_duration_since(rec.recorded_at));
 
@@ -781,11 +784,16 @@ fn format_cache_history(app: &App, count: usize, locale: Locale) -> String {
             .replace("{avg}", &avg_ratio),
     );
     footer.push_str(&tr(locale, MessageId::CmdCacheFootnote));
-    if !unpriced_notes.is_empty() {
-        footer.push_str(&format!(
-            "cost — = no authoritative price for that turn; it is missing from the session estimate ({}).\n",
-            unpriced_notes.into_iter().collect::<Vec<_>>().join(", ")
-        ));
+    if !unpriced_reasons.is_empty() || !unpriced_classes.is_empty() {
+        // Reasons are localized prose; token-class labels are key names and
+        // stay raw, the same split `/cost` uses.
+        let notes = unpriced_reasons
+            .iter()
+            .map(|reason| tr(locale, reason.message_id()).into_owned())
+            .chain(unpriced_classes.iter().map(|class| (*class).to_string()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        footer.push_str(&tr(locale, MessageId::CmdCacheUnpricedNote).replace("{notes}", &notes));
     }
     footer.push_str(&tr(locale, MessageId::CmdCacheAdvice));
 

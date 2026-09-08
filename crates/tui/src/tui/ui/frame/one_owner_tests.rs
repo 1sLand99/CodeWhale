@@ -87,9 +87,8 @@ fn working_app() -> App {
         subagent("agent_b", crate::tools::subagent::SubAgentStatus::Running),
     ];
     app.session_metrics
-        .record_model_call(1_200, 30_000, Some(400), None);
-    app.session.last_output_throughput =
-        crate::resource_telemetry::TokenThroughput::new(1_200, Duration::from_secs(30));
+        .record_model_call(1_200, 29_600, Some(400), Some(30_000));
+    app.session.last_completion_tokens = Some(1_200);
     app
 }
 
@@ -140,7 +139,7 @@ fn composed_frame_paints_each_fact_in_exactly_one_row() {
                 "help hint",
                 crate::tui::shell_key_routing::info_help_hint(app.ui_locale),
             ),
-            ("output rate", "40 tok/s".to_string()),
+            ("output rate", "40 avg tok/s".to_string()),
             ("ttft", "ttft 400ms".to_string()),
         ];
         facts.push(("context reading", format!("ctx {pct}%")));
@@ -232,7 +231,7 @@ fn idle_frame_keeps_two_chrome_rows_and_last_turn_metrics() {
         rows[composer + 1]
     );
     assert!(
-        rows[composer + 1].contains("40 tok/s"),
+        rows[composer + 1].contains("40 avg tok/s"),
         "{}",
         rows[composer + 1]
     );

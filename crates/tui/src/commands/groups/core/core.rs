@@ -156,6 +156,11 @@ pub fn clear(app: &mut App) -> CommandResult {
             tr(app.ui_locale, MessageId::ClearConversationBusy).to_string(),
         );
     }
+    let new_id = uuid::Uuid::new_v4().to_string();
+    let queue_transition = match crate::tui::ui::prepare_offline_queue_transition(app, &new_id) {
+        Ok(transition) => transition,
+        Err(error) => return CommandResult::error(error),
+    };
     if !reset_conversation_state(app) {
         return CommandResult::error(
             tr(app.ui_locale, MessageId::ClearConversationBusy).to_string(),
@@ -165,7 +170,7 @@ pub fn clear(app: &mut App) -> CommandResult {
     // and every autosave, so mint the next id here (as `/new` does) rather
     // than letting the engine generate one the App only learns about from
     // `SessionUpdated`. Two ids for one conversation orphan the checkpoint.
-    let new_id = uuid::Uuid::new_v4().to_string();
+    crate::tui::ui::install_offline_queue_transition(app, queue_transition);
     app.current_session_id = Some(new_id.clone());
     app.current_session_metadata = None;
     app.session_title = None;
@@ -192,6 +197,13 @@ pub(crate) fn reset_conversation_state(app: &mut App) -> bool {
     // state while leaving an old To-do attached to the next session.
     if !app.clear_todos() {
         return false;
+    }
+    // Explicit reset discards the queue it was invoked on. Capture its owner
+    // before `/clear` or `/new` installs the next session id.
+    if let Some(lease) = app.offline_queue_lease.clone() {
+        crate::tui::persistence_actor::persist(
+            crate::tui::persistence_actor::PersistRequest::ClearOfflineQueue { lease },
+        );
     }
     // Atomically retire background accounting before zeroing the session.
     // Late reports retain the old scope token and are discarded instead of
@@ -225,7 +237,6 @@ pub(crate) fn reset_conversation_state(app: &mut App) -> bool {
     app.last_exec_wait_command = None;
     app.session.last_prompt_tokens = None;
     app.session.last_completion_tokens = None;
-    app.session.last_output_throughput = None;
     app.session.last_prompt_cache_hit_tokens = None;
     app.session.last_prompt_cache_miss_tokens = None;
     app.session.last_reasoning_replay_tokens = None;
@@ -272,7 +283,6 @@ pub fn model(app: &mut App, model_name: Option<&str>) -> CommandResult {
             } else {
                 app.session.last_prompt_tokens = None;
                 app.session.last_completion_tokens = None;
-                app.session.last_output_throughput = None;
             }
             let provider_identity = app.provider_identity_for_persistence().to_string();
             app.provider_models
@@ -363,7 +373,6 @@ pub fn model(app: &mut App, model_name: Option<&str>) -> CommandResult {
         } else {
             app.session.last_prompt_tokens = None;
             app.session.last_completion_tokens = None;
-            app.session.last_output_throughput = None;
         }
         let provider_identity = app.provider_identity_for_persistence().to_string();
         app.provider_models

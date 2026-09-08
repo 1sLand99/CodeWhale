@@ -2390,6 +2390,14 @@ pub struct ToolsConfig {
     /// (4). Values outside `2..=10` are clamped with a warning.
     #[serde(default)]
     pub user_input_max_options: Option<u32>,
+
+    /// Seconds Codewhale waits for a user-input answer or an approval
+    /// decision before cancelling it (#6003). `None` uses the built-in
+    /// default (300). An explicit `0` disables the timeout entirely, so
+    /// long human review or overnight automation can wait indefinitely.
+    /// Values above 86,400 (24h) are clamped with a warning.
+    #[serde(default)]
+    pub user_input_timeout_seconds: Option<u64>,
 }
 
 /// Persistent-goal loop controls (`[goal]` table in config.toml, #5052).
@@ -2404,6 +2412,16 @@ pub struct GoalConfig {
     /// control ends the run.
     #[serde(default)]
     pub max_continuations: Option<u32>,
+
+    /// Per-engine-turn step allowance while a goal is active (#5994). Goal
+    /// work gets a larger but still finite budget than an ordinary
+    /// interactive turn: `None` or `0` resolves to
+    /// [`crate::goal_loop::DEFAULT_GOAL_MAX_STEPS`] (1,000); values clamp to
+    /// `1..=100,000`. This bounds each turn, never the number of
+    /// continuation passes; explicit per-invocation ceilings
+    /// (`exec --max-turns`, child-worker caps) still win.
+    #[serde(default)]
+    pub max_steps: Option<u32>,
     /// Optional quiet period between successful cross-turn continuations.
     /// `0` preserves immediate continuation. Positive values make long-lived
     /// coordinator goals yield visibly between turns instead of sleeping
@@ -4912,6 +4930,24 @@ impl Config {
         )
     }
 
+    /// Effective wait for a user-input answer or an approval decision
+    /// (#6003). `None` means the built-in default (300s). An explicit `0`
+    /// disables the timeout; values above 24h clamp with a warning.
+    #[must_use]
+    pub fn user_input_timeout(&self) -> Option<std::time::Duration> {
+        const MAX_SECONDS: u64 = 86_400;
+        let seconds = self
+            .tools
+            .as_ref()
+            .and_then(|tools| tools.user_input_timeout_seconds)?;
+        if seconds > MAX_SECONDS {
+            tracing::warn!(
+                "[tools] user_input_timeout_seconds={seconds} exceeds 24h; clamping to {MAX_SECONDS}"
+            );
+        }
+        Some(std::time::Duration::from_secs(seconds.min(MAX_SECONDS)))
+    }
+
     #[must_use]
     pub fn auto_review_policy(&self) -> crate::tui::auto_review::AutoReviewPolicy {
         self.auto_review
@@ -7389,6 +7425,24 @@ impl Config {
             .unwrap_or(crate::goal_loop::DEFAULT_MAX_GOAL_CONTINUATIONS)
     }
 
+    /// Per-engine-turn step allowance while a goal is active (#5994). Goal
+    /// turns get [`crate::goal_loop::DEFAULT_GOAL_MAX_STEPS`] by default —
+    /// five times the ordinary interactive allowance — while staying finite.
+    #[must_use]
+    pub fn goal_max_steps(&self) -> u32 {
+        let configured = self.goal.as_ref().and_then(|goal| goal.max_steps);
+        match configured {
+            None | Some(0) => crate::goal_loop::DEFAULT_GOAL_MAX_STEPS,
+            Some(steps) => {
+                let clamped = steps.clamp(1, 100_000);
+                if clamped != steps {
+                    tracing::warn!("[goal] max_steps={steps} out of range; clamping to {clamped}");
+                }
+                clamped
+            }
+        }
+    }
+
     /// Quiet period between successful interactive goal turns (#5508).
     /// Absent/zero keeps the existing immediate-continuation behavior.
     #[must_use]
@@ -8201,6 +8255,31 @@ pub(crate) fn save_workspace_trust(workspace: &Path) -> Result<PathBuf> {
         )
     })
     .with_context(|| format!("Failed to write config to {}", config_path.display()))?;
+    Ok(config_path)
+}
+
+/// Project hook approval lives only in user-owned config, never in the repo.
+pub(crate) fn hook_receipt_for_workspace(workspace: &Path) -> Option<String> {
+    let raw = fs::read_to_string(default_config_path().ok()?).ok()?;
+    let doc = toml::from_str::<toml::Value>(&raw).ok()?;
+    doc.get("projects")?
+        .get(workspace_config_key(workspace))?
+        .get("hooks_sha256")?
+        .as_str()
+        .map(str::to_owned)
+}
+
+pub(crate) fn save_workspace_hook_receipt(workspace: &Path, digest: &str) -> Result<PathBuf> {
+    let config_path = try_default_config_path()?;
+    ensure_parent_dir(&config_path)?;
+    let project_key = workspace_config_key(workspace);
+    crate::config_persistence::mutate_config_document(&config_path, |doc| {
+        crate::config_persistence::set_document_value(
+            doc,
+            &["projects", project_key.as_str(), "hooks_sha256"],
+            digest,
+        )
+    })?;
     Ok(config_path)
 }
 

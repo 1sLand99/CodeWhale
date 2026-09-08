@@ -161,6 +161,8 @@ fn make_server(command: Option<&str>, args: &[&str], url: Option<&str>) -> McpSe
         oauth: None,
         oauth_resource: None,
         reviewed_plugin: None,
+        runtime_added: false,
+        allow_private_network: false,
     }
 }
 

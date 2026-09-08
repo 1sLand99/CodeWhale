@@ -436,15 +436,26 @@ impl SessionControl {
     }
 }
 
+/// The session's coarse turn state, shared by the control-socket `status`
+/// answer and the session-state hook transitions (#6004). `Waiting` covers
+/// every wait on the person — an open approval prompt, a presented
+/// `request_user_input` question, or a parked goal continuation — not only
+/// the continuation wait it used to map.
+pub(crate) fn turn_state_from_app(app: &App) -> TurnState {
+    if app.is_loading || matches!(app.runtime_turn_status.as_deref(), Some("in_progress")) {
+        return TurnState::InProgress;
+    }
+    if app.goal_continuation_waiting
+        || app.pending_user_input_prompt.is_some()
+        || app.view_stack.top_kind() == Some(crate::tui::views::ModalKind::Approval)
+    {
+        return TurnState::Waiting;
+    }
+    TurnState::Idle
+}
+
 fn snapshot_from_app(app: &App) -> StatusSnapshot {
-    let turn_state =
-        if app.is_loading || matches!(app.runtime_turn_status.as_deref(), Some("in_progress")) {
-            TurnState::InProgress
-        } else if app.goal_continuation_waiting {
-            TurnState::Waiting
-        } else {
-            TurnState::Idle
-        };
+    let turn_state = turn_state_from_app(app);
     // A paused goal parks its objective in `paused_goal_objective`, so the
     // snapshot surfaces the objective that is actually in flight.
     let objective = app

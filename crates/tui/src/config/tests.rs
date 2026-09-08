@@ -1478,6 +1478,90 @@ fn user_input_limits_read_from_tools_table_and_clamp() {
 }
 
 #[test]
+fn goal_max_steps_resolves_default_zero_and_clamps() {
+    let parsed: ConfigFile = toml::from_str("").expect("empty config");
+    assert_eq!(
+        parsed.base.goal_max_steps(),
+        crate::goal_loop::DEFAULT_GOAL_MAX_STEPS
+    );
+
+    // An explicit 0 is the goal default (1,000), never unlimited.
+    let parsed: ConfigFile = toml::from_str(
+        r#"
+        [goal]
+        max_steps = 0
+        "#,
+    )
+    .expect("goal config");
+    assert_eq!(
+        parsed.base.goal_max_steps(),
+        crate::goal_loop::DEFAULT_GOAL_MAX_STEPS
+    );
+
+    let parsed: ConfigFile = toml::from_str(
+        r#"
+        [goal]
+        max_steps = 50
+        "#,
+    )
+    .expect("goal config");
+    assert_eq!(parsed.base.goal_max_steps(), 50);
+
+    let parsed: ConfigFile = toml::from_str(
+        r#"
+        [goal]
+        max_steps = 500000
+        "#,
+    )
+    .expect("goal config");
+    assert_eq!(parsed.base.goal_max_steps(), 100_000);
+}
+
+#[test]
+fn user_input_timeout_defaults_disabled_and_clamps() {
+    let parsed: ConfigFile = toml::from_str("").expect("empty config");
+    assert_eq!(parsed.base.user_input_timeout(), None);
+
+    let parsed: ConfigFile = toml::from_str(
+        r#"
+        [tools]
+        user_input_timeout_seconds = 900
+        "#,
+    )
+    .expect("tools config");
+    assert_eq!(
+        parsed.base.user_input_timeout(),
+        Some(std::time::Duration::from_secs(900))
+    );
+
+    // An explicit 0 is the documented "wait forever" value, preserved as
+    // zero rather than defaulted or clamped away.
+    let parsed: ConfigFile = toml::from_str(
+        r#"
+        [tools]
+        user_input_timeout_seconds = 0
+        "#,
+    )
+    .expect("tools config");
+    assert_eq!(
+        parsed.base.user_input_timeout(),
+        Some(std::time::Duration::ZERO)
+    );
+
+    let parsed: ConfigFile = toml::from_str(
+        r#"
+        [tools]
+        user_input_timeout_seconds = 999999
+        "#,
+    )
+    .expect("tools config");
+    assert_eq!(
+        parsed.base.user_input_timeout(),
+        Some(std::time::Duration::from_secs(86_400))
+    );
+}
+
+#[test]
 fn explicit_duckduckgo_search_provider_is_preserved() {
     let config: Config = toml::from_str(
         r#"

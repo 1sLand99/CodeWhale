@@ -38,28 +38,10 @@ pub fn new_shared_goal_state_from_host_status(
     Arc::new(Mutex::new(state))
 }
 
-/// Create shared state restored from a persisted goal record, keeping the
-/// accumulated usage and continuation counters. See
-/// [`GoalState::from_persisted`].
+/// Restore the complete durable history; loading is not an explicit resume.
 #[must_use]
-pub fn new_shared_goal_state_from_persisted(
-    objective: &str,
-    token_budget: Option<u32>,
-    status: GoalStatus,
-    pause_reason: Option<GoalPauseReason>,
-    tokens_used: u64,
-    time_used_seconds: u64,
-    continuation_count: u32,
-) -> SharedGoalState {
-    Arc::new(Mutex::new(GoalState::from_persisted(
-        objective,
-        token_budget,
-        status,
-        pause_reason,
-        tokens_used,
-        time_used_seconds,
-        continuation_count,
-    )))
+pub fn new_shared_goal_state_from_snapshot(snapshot: &GoalSnapshot) -> SharedGoalState {
+    Arc::new(Mutex::new(GoalState::from_snapshot(snapshot)))
 }
 
 /// A goal declaration stated in ordinary user prose rather than as a leading
@@ -291,16 +273,7 @@ impl GoalStatus {
     }
 }
 
-/// Why an otherwise unfinished goal is paused.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum GoalPauseReason {
-    User,
-    Backoff,
-    NoProgress,
-    UsageLimit,
-    BudgetLimit,
-}
+pub use codewhale_protocol::GoalPauseReason;
 
 /// Whether a goal review is allowed to decide the judged contract.
 ///
@@ -322,23 +295,25 @@ pub struct GoalAdvisoryNote {
     pub summary: String,
 }
 
-impl GoalPauseReason {
-    #[must_use]
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::User => "user",
-            Self::Backoff => "run limit",
-            Self::NoProgress => "no progress",
-            Self::UsageLimit => "usage limit",
-            Self::BudgetLimit => "budget limit",
-        }
-    }
+/// The model's own reported progress for the active goal: a coarse percent
+/// plus what is happening now and what comes next. Runtime-only — the durable
+/// record deliberately keeps no volatile progress projection. The percent is
+/// the model's estimate, rendered as reported progress, never as a verified
+/// fraction of the work.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct GoalProgressReport {
+    pub percent: u8,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub now: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next: Option<String>,
 }
 
 /// Session-local goal state. `Instant` stays runtime-only; snapshots expose
 /// elapsed seconds so tool output remains serializable and stable.
 #[derive(Debug, Clone, Default)]
 pub struct GoalState {
+    goal_id: Option<String>,
     objective: Option<String>,
     token_budget: Option<u32>,
     status: Option<GoalStatus>,
@@ -359,6 +334,8 @@ pub struct GoalState {
     /// reporting the same gap several times inside one turn must not trip it
     /// before any continuation has happened.
     last_gap_pass: Option<u32>,
+    /// Latest reported progress, kept out of the stall accounting entirely.
+    progress: Option<GoalProgressReport>,
 }
 
 impl GoalState {
@@ -394,6 +371,7 @@ impl GoalState {
                         .status
                         .is_some_and(|previous| previous != GoalStatus::Active);
                 if changed {
+                    self.goal_id = Some(uuid::Uuid::new_v4().to_string());
                     self.objective = Some(objective.to_string());
                     self.token_budget = token_budget;
                     self.tokens_used = 0;
@@ -408,11 +386,13 @@ impl GoalState {
                     self.last_gap_fingerprint = None;
                     self.repeated_gap_count = 0;
                     self.last_gap_pass = None;
+                    self.progress = None;
                 } else if self.token_budget != token_budget {
                     self.token_budget = token_budget;
                 }
 
                 if resumed {
+                    self.goal_id = Some(uuid::Uuid::new_v4().to_string());
                     self.evidence = None;
                     self.blocker = None;
                     self.pause_reason = None;
@@ -420,6 +400,7 @@ impl GoalState {
                     self.last_gap_fingerprint = None;
                     self.repeated_gap_count = 0;
                     self.last_gap_pass = None;
+                    self.progress = None;
                 }
 
                 if changed || status_changed || self.status.is_none() {
@@ -450,6 +431,7 @@ impl GoalState {
                 "An unfinished goal already exists. Complete or clear it before creating another.",
             );
         }
+        self.goal_id = Some(uuid::Uuid::new_v4().to_string());
         self.objective = Some(objective);
         self.token_budget = token_budget;
         self.status = Some(GoalStatus::Active);
@@ -466,6 +448,7 @@ impl GoalState {
         self.last_gap_fingerprint = None;
         self.repeated_gap_count = 0;
         self.last_gap_pass = None;
+        self.progress = None;
         Ok(())
     }
 
@@ -479,12 +462,6 @@ impl GoalState {
     /// blockers, and review notes are runtime-only and start empty; the
     /// durable loop re-derives them on the next pass.
     ///
-    /// The stall fingerprint is deliberately runtime-only too: a stall does not
-    /// need to be replayed, because
-    /// [`crate::goal_loop::MAX_REPEATED_GAP_PASSES`] already converted it into a
-    /// pause, and a paused goal is what gets persisted and restored here. A
-    /// resume therefore starts a fresh stall window — which is correct, since a
-    /// resume is someone deciding the goal is worth continuing.
     #[must_use]
     pub fn from_persisted(
         objective: &str,
@@ -496,6 +473,7 @@ impl GoalState {
         continuation_count: u32,
     ) -> Self {
         Self {
+            goal_id: None,
             objective: Some(objective.to_string()),
             token_budget,
             status: Some(status),
@@ -512,6 +490,87 @@ impl GoalState {
             last_gap_fingerprint: None,
             repeated_gap_count: 0,
             last_gap_pass: None,
+            progress: None,
+        }
+    }
+
+    /// Keep the pre-pause review window on ordinary load. Invalid in-memory
+    /// input is held paused; durable stores reject it before this constructor.
+    #[must_use]
+    pub fn from_snapshot(snapshot: &GoalSnapshot) -> Self {
+        let Some(objective) = snapshot.objective.as_deref() else {
+            return Self::default();
+        };
+        let status = match snapshot.status.as_str() {
+            "active" => GoalStatus::Active,
+            "complete" => GoalStatus::Complete,
+            "blocked" => GoalStatus::Blocked,
+            _ => GoalStatus::Paused,
+        };
+        let mut state = Self::from_persisted(
+            objective,
+            snapshot.token_budget,
+            status,
+            snapshot.pause_reason,
+            snapshot.tokens_used,
+            snapshot.time_used_seconds,
+            snapshot.continuation_count,
+        );
+        state.goal_id.clone_from(&snapshot.goal_id);
+        state
+            .last_gap_fingerprint
+            .clone_from(&snapshot.last_gap_fingerprint);
+        state.repeated_gap_count = snapshot.repeated_gap_count;
+        state.last_gap_pass = snapshot.last_gap_pass;
+        state.progress = snapshot.progress.clone();
+        let now = Instant::now();
+        state.started_at = now
+            .checked_sub(std::time::Duration::from_secs(
+                snapshot
+                    .elapsed_seconds
+                    .unwrap_or(snapshot.time_used_seconds),
+            ))
+            .or(Some(now));
+        let stall_window_exhausted = state.status == Some(GoalStatus::Active)
+            && state.repeated_gap_count >= crate::goal_loop::MAX_REPEATED_GAP_PASSES;
+        if let Err(error) = snapshot.validate_stall_state() {
+            tracing::warn!("holding invalid restored goal paused: {error}");
+            state.status = Some(GoalStatus::Paused);
+            state.pause_reason = Some(GoalPauseReason::NoProgress);
+            state.finished_at = Some(now);
+        } else if stall_window_exhausted {
+            // The engine pauses NoProgress in the same mutation that fills
+            // the stall window, so a restored Active goal at the ceiling is
+            // corrupt; hold it paused rather than re-arming spent passes.
+            tracing::warn!("holding exhausted-stall-window restored goal paused");
+            state.status = Some(GoalStatus::Paused);
+            state.pause_reason = Some(GoalPauseReason::NoProgress);
+            state.finished_at = Some(now);
+        }
+        state
+    }
+
+    /// An accepted user resume is a new control revision, even when already
+    /// active. Cached loads never call this path.
+    pub fn resume(&mut self, goal_id: Option<String>) {
+        let objective = self.objective.clone();
+        self.sync_from_host_status(objective.as_deref(), self.token_budget, GoalStatus::Active);
+        if self.objective.is_some() {
+            self.goal_id = Some(goal_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()));
+            self.last_gap_fingerprint = None;
+            self.repeated_gap_count = 0;
+            self.last_gap_pass = None;
+            self.progress = None;
+        }
+    }
+
+    /// A new explicit declaration replaces the old revision, including when
+    /// the user repeats the same objective text.
+    pub fn replace(&mut self, objective: &str, token_budget: Option<u32>, goal_id: Option<String>) {
+        self.clear();
+        self.sync_from_host_status(Some(objective), token_budget, GoalStatus::Active);
+        if let Some(goal_id) = goal_id {
+            self.goal_id = Some(goal_id);
         }
     }
 
@@ -553,6 +612,14 @@ impl GoalState {
         self.pause_reason = None;
         self.completion_verification = Some(verification);
         Ok(())
+    }
+
+    /// Replace the reported progress projection. This never touches the
+    /// stall window or lifecycle state; it is display context only.
+    pub fn record_progress(&mut self, progress: GoalProgressReport) {
+        if self.is_active() {
+            self.progress = Some(progress);
+        }
     }
 
     pub fn record_advisory(&mut self, summary: String) -> Result<(), &'static str> {
@@ -659,6 +726,7 @@ impl GoalState {
             (None, _) => None,
         };
         GoalSnapshot {
+            goal_id: self.goal_id.clone(),
             objective: self.objective.clone(),
             status: self
                 .status
@@ -677,6 +745,8 @@ impl GoalState {
             advisories: self.advisories.clone(),
             last_gap_fingerprint: self.last_gap_fingerprint.clone(),
             repeated_gap_count: self.repeated_gap_count,
+            last_gap_pass: self.last_gap_pass,
+            progress: self.progress.clone(),
         }
     }
 }
@@ -684,6 +754,7 @@ impl GoalState {
 /// Serializable tool output and prompt input for the current goal.
 #[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
 pub struct GoalSnapshot {
+    pub goal_id: Option<String>,
     pub objective: Option<String>,
     pub status: String,
     pub token_budget: Option<u32>,
@@ -698,6 +769,11 @@ pub struct GoalSnapshot {
     pub advisories: Vec<GoalAdvisoryNote>,
     pub last_gap_fingerprint: Option<String>,
     pub repeated_gap_count: u32,
+    pub last_gap_pass: Option<u32>,
+    /// Latest reported progress. Skipped when absent so tool output and the
+    /// continuation prompt stay stable for goals that never report one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress: Option<GoalProgressReport>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -781,10 +857,20 @@ impl GoalSnapshot {
         self.objective.is_some() && self.status == GoalStatus::Active.as_str()
     }
 
+    pub fn validate_stall_state(&self) -> Result<(), &'static str> {
+        codewhale_protocol::validate_goal_stall_state(
+            self.last_gap_fingerprint.as_deref(),
+            self.repeated_gap_count,
+            self.last_gap_pass,
+            self.continuation_count,
+        )
+    }
+
     #[must_use]
     pub fn from_thread_goal(goal: &codewhale_protocol::ThreadGoal) -> Self {
         let (status, pause_reason) = thread_goal_status_projection(goal.status.clone());
         Self {
+            goal_id: Some(goal.goal_id.clone()),
             objective: Some(goal.objective.clone()),
             status: status.as_str().to_string(),
             token_budget: goal
@@ -796,11 +882,13 @@ impl GoalSnapshot {
             elapsed_seconds: None,
             evidence: None,
             blocker: None,
-            pause_reason,
+            pause_reason: goal.pause_reason.or(pause_reason),
             completion_verification: None,
             advisories: Vec::new(),
-            last_gap_fingerprint: None,
-            repeated_gap_count: 0,
+            last_gap_fingerprint: goal.last_gap_fingerprint.clone(),
+            repeated_gap_count: goal.repeated_gap_count,
+            last_gap_pass: goal.last_gap_pass,
+            progress: None,
         }
     }
 }
@@ -838,6 +926,19 @@ pub fn render_continuation_prompt(snapshot: &GoalSnapshot, continuation_index: u
         continuation_index,
         crate::goal_loop::MAX_REPEATED_GAP_PASSES,
     )
+}
+
+/// Render the reported-progress bar used by the transcript receipt and the
+/// metrics line: eight cells, filled in proportion to the percent. The bar
+/// visualizes a model-reported estimate; it is not a verified fraction.
+#[must_use]
+pub fn goal_progress_bar(percent: u8) -> String {
+    const CELLS: usize = 8;
+    let filled = (usize::from(percent.min(100)) * CELLS + 50) / 100;
+    let mut bar = String::with_capacity(CELLS * 3);
+    bar.push_str(&"▓".repeat(filled));
+    bar.push_str(&"░".repeat(CELLS - filled));
+    bar
 }
 
 fn lock_goal_state(
@@ -919,6 +1020,36 @@ fn parse_progress_verification(input: &Value) -> Result<GoalProgressVerification
         return Err(ToolError::invalid_input("verification.summary is required"));
     }
     Ok(verification)
+}
+
+fn parse_progress_report(input: &Value) -> Result<Option<GoalProgressReport>, ToolError> {
+    let Some(raw) = input.get("progress") else {
+        return Ok(None);
+    };
+    if raw.is_null() {
+        return Ok(None);
+    }
+    let percent = raw.get("percent").and_then(Value::as_u64).ok_or_else(|| {
+        ToolError::invalid_input("progress.percent must be an integer from 0 to 100")
+    })?;
+    let percent = u8::try_from(percent)
+        .ok()
+        .filter(|percent| *percent <= 100)
+        .ok_or_else(|| {
+            ToolError::invalid_input("progress.percent must be an integer from 0 to 100")
+        })?;
+    let note = |key: &str| -> Option<String> {
+        raw.get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| value.chars().take(160).collect())
+    };
+    Ok(Some(GoalProgressReport {
+        percent,
+        now: note("now"),
+        next: note("next"),
+    }))
 }
 
 fn json_result(snapshot: &GoalSnapshot) -> Result<ToolResult, ToolError> {
@@ -1126,6 +1257,28 @@ impl ToolSpec for UpdateGoalTool {
                 "advisory": {
                     "type": "string",
                     "description": "Required when status is advisory. Appended separately from the judged completion contract."
+                },
+                "progress": {
+                    "type": "object",
+                    "description": "Optional with not_achieved or advisory: your current best estimate of overall completion, shown to the user as reported progress. Keep percent honest — it is an estimate, never a verified fraction.",
+                    "properties": {
+                        "percent": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 100,
+                            "description": "Estimated percent complete, 0-100."
+                        },
+                        "now": {
+                            "type": "string",
+                            "description": "One short line: what is being worked on right now."
+                        },
+                        "next": {
+                            "type": "string",
+                            "description": "One short line: what comes next."
+                        }
+                    },
+                    "required": ["percent"],
+                    "additionalProperties": false
                 }
             },
             "required": ["status"],
@@ -1157,6 +1310,12 @@ impl ToolSpec for UpdateGoalTool {
             ));
         }
         let status = required_str(&input, "status")?.trim().to_ascii_lowercase();
+        let progress = parse_progress_report(&input)?;
+        if progress.is_some() && !matches!(status.as_str(), "not_achieved" | "advisory") {
+            return Err(ToolError::invalid_input(
+                "progress is only accepted with status not_achieved or advisory",
+            ));
+        }
         let snapshot = {
             let mut state = lock_goal_state(&self.goal_state)?;
             match status.as_str() {
@@ -1198,6 +1357,9 @@ impl ToolSpec for UpdateGoalTool {
                     state
                         .record_not_achieved(verification)
                         .map_err(ToolError::invalid_input)?;
+                    if let Some(progress) = progress {
+                        state.record_progress(progress);
+                    }
                 }
                 "advisory" => {
                     let advisory = input
@@ -1214,6 +1376,9 @@ impl ToolSpec for UpdateGoalTool {
                     state
                         .record_advisory(advisory)
                         .map_err(ToolError::invalid_input)?;
+                    if let Some(progress) = progress {
+                        state.record_progress(progress);
+                    }
                 }
                 other => {
                     return Err(ToolError::invalid_input(format!(
@@ -1997,6 +2162,10 @@ mod tests {
             tokens_used: 750,
             time_used_seconds: 44,
             continuation_count: 3,
+            last_gap_fingerprint: None,
+            repeated_gap_count: 0,
+            last_gap_pass: None,
+            pause_reason: None,
             created_at: 1,
             updated_at: 2,
         });
@@ -2067,6 +2236,148 @@ mod tests {
     fn update_goal_contract_treats_required_user_input_as_blocking() {
         let update = UpdateGoalTool::new(new_shared_goal_state());
         assert!(update.description().contains("requires user input"));
+    }
+
+    #[test]
+    fn goal_progress_bar_fills_in_proportion() {
+        assert_eq!(goal_progress_bar(0), "░░░░░░░░");
+        assert_eq!(goal_progress_bar(50), "▓▓▓▓░░░░");
+        assert_eq!(goal_progress_bar(100), "▓▓▓▓▓▓▓▓");
+        assert_eq!(goal_progress_bar(200), "▓▓▓▓▓▓▓▓");
+    }
+
+    #[tokio::test]
+    async fn update_goal_records_progress_with_not_achieved_and_advisory() {
+        let state = new_shared_goal_state();
+        {
+            let mut guard = state.lock().expect("goal lock");
+            guard
+                .create("ship the release".to_string(), None)
+                .expect("create");
+        }
+        let tool = UpdateGoalTool::new(state.clone());
+        let context = ToolContext::new(".");
+        let result = tool
+            .execute(
+                json!({
+                    "status": "not_achieved",
+                    "verification": {
+                        "status": "not_achieved",
+                        "check": "cargo test",
+                        "summary": "two failures remain",
+                        "gaps": ["picker test", "pricing test"]
+                    },
+                    "progress": {"percent": 40, "now": "fixing the picker", "next": "rerun gates"}
+                }),
+                &context,
+            )
+            .await
+            .expect("not_achieved accepted");
+        let snapshot: Value = serde_json::from_str(&result.content).expect("snapshot json");
+        let progress = snapshot.get("progress").expect("progress recorded");
+        assert_eq!(progress.get("percent").and_then(Value::as_u64), Some(40));
+        assert_eq!(
+            progress.get("now").and_then(Value::as_str),
+            Some("fixing the picker")
+        );
+        assert_eq!(
+            progress.get("next").and_then(Value::as_str),
+            Some("rerun gates")
+        );
+
+        let result = tool
+            .execute(
+                json!({
+                    "status": "advisory",
+                    "advisory": "cache eviction is likely",
+                    "progress": {"percent": 55}
+                }),
+                &context,
+            )
+            .await
+            .expect("advisory accepted");
+        let snapshot: Value = serde_json::from_str(&result.content).expect("snapshot json");
+        assert_eq!(
+            snapshot
+                .get("progress")
+                .and_then(|progress| progress.get("percent"))
+                .and_then(Value::as_u64),
+            Some(55)
+        );
+    }
+
+    #[tokio::test]
+    async fn update_goal_rejects_progress_on_terminal_status_and_bad_percent() {
+        let state = new_shared_goal_state();
+        {
+            let mut guard = state.lock().expect("goal lock");
+            guard
+                .create("ship the release".to_string(), None)
+                .expect("create");
+        }
+        let tool = UpdateGoalTool::new(state.clone());
+        let context = ToolContext::new(".");
+        let err = tool
+            .execute(
+                json!({
+                    "status": "complete",
+                    "evidence": "all gates pass",
+                    "verification": {"status": "passed", "check": "cargo test", "summary": "ok"},
+                    "progress": {"percent": 100}
+                }),
+                &context,
+            )
+            .await
+            .expect_err("progress is not terminal evidence");
+        assert!(
+            err.to_string().contains("not_achieved or advisory"),
+            "{err}"
+        );
+
+        let err = tool
+            .execute(
+                json!({
+                    "status": "advisory",
+                    "advisory": "note",
+                    "progress": {"percent": 140}
+                }),
+                &context,
+            )
+            .await
+            .expect_err("percent above 100 must fail");
+        assert!(err.to_string().contains("0 to 100"), "{err}");
+    }
+
+    #[test]
+    fn from_snapshot_holds_exhausted_stall_window_paused() {
+        // A restored snapshot that is still Active with a full stall window
+        // is corrupt: the engine pauses NoProgress in the same mutation that
+        // reaches the ceiling. The rehydrated state must stay paused instead
+        // of arming another pass.
+        let snapshot = GoalSnapshot {
+            goal_id: Some("goal-stall".to_string()),
+            objective: Some("finish issue 2199".to_string()),
+            status: "active".to_string(),
+            continuation_count: 3,
+            last_gap_fingerprint: Some("b".repeat(64)),
+            repeated_gap_count: crate::goal_loop::MAX_REPEATED_GAP_PASSES,
+            last_gap_pass: Some(3),
+            ..Default::default()
+        };
+        snapshot.validate_stall_state().expect("structurally valid");
+        let state = GoalState::from_snapshot(&snapshot);
+        assert_eq!(state.status, Some(GoalStatus::Paused));
+        assert_eq!(state.pause_reason, Some(GoalPauseReason::NoProgress));
+        assert!(!state.is_active());
+
+        // One below the ceiling restores as ordinary Active state.
+        let below = GoalSnapshot {
+            repeated_gap_count: crate::goal_loop::MAX_REPEATED_GAP_PASSES - 1,
+            ..snapshot
+        };
+        let state = GoalState::from_snapshot(&below);
+        assert_eq!(state.status, Some(GoalStatus::Active));
+        assert!(state.is_active());
     }
 
     #[test]

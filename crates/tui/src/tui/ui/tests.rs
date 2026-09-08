@@ -588,23 +588,6 @@ fn permission_cycle_shortcut_accepts_both_shift_tab_encodings() {
     )));
 }
 
-/// A live session in a deterministic focus state: no onboarding, no launch
-/// screen, no modal, composer owns the keys.
-#[test]
-fn session_id_divergence_notice_names_both_ids_and_the_resume_command() {
-    // #5931: a diverged engine session id was only logged; the operator now
-    // sees which id the checkpoints moved to and how to reopen the old one.
-    let app = focus_test_app();
-    let text =
-        super::event_loop::session_id_divergence_notice(&app, "sess-old-1234", "sess-new-5678");
-    // Plain asserts on purpose: formatting the notice into a panic message
-    // trips CodeQL's cleartext-logging rule on the session ids it contains.
-    assert!(text.contains("sess-new-5678"));
-    assert!(text.contains("sess-old-1234"));
-    assert!(text.contains("codewhale resume sess-old-1234"));
-    assert!(text.contains("codewhale sessions"));
-}
-
 #[test]
 fn runtime_store_failure_event_becomes_a_toast_naming_the_file_and_remedy() {
     // #5931: an unreadable runtime store record was only a log line; the
@@ -1963,6 +1946,7 @@ fn workflow_panel_uses_non_text_keys_for_controls() {
 }
 
 struct ConfigPathEnvGuard {
+    _codewhale_home: crate::test_support::EnvVarGuard,
     _codewhale_config_path: crate::test_support::EnvVarGuard,
     _deepseek_config_path: crate::test_support::EnvVarGuard,
     _tmp: TempDir,
@@ -1973,6 +1957,10 @@ impl ConfigPathEnvGuard {
     fn new() -> Self {
         let lock = crate::test_support::lock_test_env();
         let tmp = TempDir::new().expect("config tempdir");
+        // Setup completion writes settings and its receipt under CODEWHALE_HOME
+        // independently of the config override (#5932).
+        let codewhale_home =
+            crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", tmp.path().join(".codewhale"));
         let config_path = tmp.path().join(".deepseek").join("config.toml");
         std::fs::create_dir_all(config_path.parent().expect("config parent")).expect("config dir");
         let codewhale_config_path =
@@ -1980,6 +1968,7 @@ impl ConfigPathEnvGuard {
         let deepseek_config_path =
             crate::test_support::EnvVarGuard::set("DEEPSEEK_CONFIG_PATH", &config_path);
         Self {
+            _codewhale_home: codewhale_home,
             _codewhale_config_path: codewhale_config_path,
             _deepseek_config_path: deepseek_config_path,
             _tmp: tmp,
@@ -2046,20 +2035,54 @@ impl SettingsHomeGuard {
 }
 
 #[test]
-fn resume_hint_uses_canonical_resume_command() {
+fn resume_hint_reconstructs_exact_command_for_canonical_uuid() {
+    let id = "019dd9d6-4f44-7c83-9863-59674a12b827";
+    let hint = resume_hint_text(crate::localization::Locale::En, Some(id), true);
     assert_eq!(
-        resume_hint_text(),
-        "To continue this session, execute codewhale run --continue"
+        hint.as_deref(),
+        Some("To resume this session, run codewhale resume 019dd9d6-4f44-7c83-9863-59674a12b827")
     );
-    assert!(should_show_resume_hint(Some(
-        "019dd9d6-4f44-7c83-9863-59674a12b827"
-    )));
 }
 
 #[test]
-fn resume_hint_omits_missing_session_id() {
-    assert!(!should_show_resume_hint(None));
-    assert!(!should_show_resume_hint(Some("   ")));
+fn resume_hint_falls_back_to_picker_for_noncanonical_ids() {
+    for id in [
+        "legacy-session-42",
+        // Uppercase and unhyphenated UUIDs parse but are not the canonical
+        // spelling, so they get the picker rather than an exact command.
+        "019DD9D6-4F44-7C83-9863-59674A12B827",
+        "019dd9d64f447c83986359674a12b827",
+        // Malicious stored identifiers must never reach terminal output.
+        "019dd9d6-4f44-7c83-9863-59674a12b827; rm -rf ~",
+        "$(reboot)",
+        "x\n\x1b[2J",
+    ] {
+        assert_eq!(
+            resume_hint_text(crate::localization::Locale::En, Some(id), true).as_deref(),
+            Some("To choose a saved session, run codewhale resume"),
+            "id {id:?} must select the picker hint, never interpolation"
+        );
+    }
+}
+
+#[test]
+fn resume_hint_omits_missing_id_and_non_tty_output() {
+    assert_eq!(
+        resume_hint_text(crate::localization::Locale::En, None, true),
+        None
+    );
+    assert_eq!(
+        resume_hint_text(crate::localization::Locale::En, Some("   "), true),
+        None
+    );
+    assert_eq!(
+        resume_hint_text(
+            crate::localization::Locale::En,
+            Some("019dd9d6-4f44-7c83-9863-59674a12b827"),
+            false,
+        ),
+        None
+    );
 }
 
 #[test]
@@ -2071,6 +2094,10 @@ fn plain_mcp_show_refreshes_discovery_counts() {
         "plain /mcp snapshots the engine-owned live pool, not a UI discovery pool"
     );
     assert!(mcp_ui_action_refreshes_discovery(&McpUiAction::Validate));
+    assert!(!mcp_ui_action_refreshes_discovery(&McpUiAction::Login {
+        name: "fixture".to_string(),
+        scopes: Vec::new(),
+    }));
     assert!(
         !mcp_ui_action_refreshes_discovery(&McpUiAction::Reload),
         "reload is handled by the engine-owned live pool, not a UI discovery pool"
@@ -2078,6 +2105,283 @@ fn plain_mcp_show_refreshes_discovery_counts() {
     assert!(!mcp_ui_action_refreshes_discovery(&McpUiAction::Init {
         force: false,
     }));
+}
+
+#[tokio::test]
+async fn mcp_login_stalled_discovery_is_cancellable_and_repeat_clicks_keep_one_owner() {
+    use crate::tui::app::{McpLoginProgress, McpUiAction};
+    use tokio::io::AsyncReadExt;
+
+    let _env = crate::test_support::lock_test_env();
+    let temp = tempfile::tempdir().unwrap();
+    let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", temp.path());
+    let _backend = crate::test_support::EnvVarGuard::set("CODEWHALE_SECRET_BACKEND", "file");
+    let _proxy = crate::test_support::EnvVarGuard::set("NO_PROXY", "*");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut app = create_test_app();
+    app.workspace = temp.path().to_path_buf();
+    app.mcp_config_path = temp.path().join("mcp.json");
+    crate::mcp::add_server_config(
+        &app.mcp_config_path,
+        "stalled".to_string(),
+        None,
+        Some(format!("http://{}/mcp", listener.local_addr().unwrap())),
+        Vec::new(),
+        None,
+    )
+    .unwrap();
+    let mock = mock_engine_handle();
+    let config = Config::default();
+    let login = || McpUiAction::Login {
+        name: "stalled".to_string(),
+        scopes: Vec::new(),
+    };
+    tokio::time::timeout(
+        Duration::from_millis(200),
+        handle_mcp_ui_action(&mut app, &mock.handle, &config, login()),
+    )
+    .await
+    .expect("the action must return before stalled discovery, leaving input responsive");
+    let pending = app.mcp_login.as_ref().unwrap();
+    let old_cell = Arc::clone(&pending.progress);
+    let token = pending.cancel.clone();
+    let (mut socket, _) = tokio::time::timeout(Duration::from_secs(2), listener.accept())
+        .await
+        .expect("local control reaches metadata discovery")
+        .unwrap();
+    let mut request = [0; 4096];
+    let count = tokio::time::timeout(Duration::from_secs(2), socket.read(&mut request))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(count > 0);
+
+    handle_mcp_ui_action(&mut app, &mock.handle, &config, login()).await;
+    assert!(Arc::ptr_eq(
+        &old_cell,
+        &app.mcp_login.as_ref().unwrap().progress
+    ));
+    assert!(
+        app.status_toasts
+            .back()
+            .unwrap()
+            .text
+            .as_str()
+            .contains("already in progress")
+    );
+    open_mcp_extensions(&mut app);
+    let modal = app.view_stack.top_kind();
+    assert!(!handle_mcp_login_key(
+        &mut app,
+        &KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
+    ));
+    assert!(handle_mcp_login_key(
+        &mut app,
+        &KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+    ));
+    assert_eq!(
+        app.view_stack.top_kind(),
+        modal,
+        "Esc cancels before closing Extensions"
+    );
+    assert!(token.is_cancelled());
+    assert!(app.mcp_login.is_none());
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(2), socket.read(&mut request))
+            .await
+            .expect("Esc drops the outstanding discovery request")
+            .unwrap(),
+        0,
+    );
+
+    handle_mcp_ui_action(&mut app, &mock.handle, &config, login()).await;
+    let new_pending = app.mcp_login.as_ref().unwrap();
+    assert!(!Arc::ptr_eq(&old_cell, &new_pending.progress));
+    let new_token = new_pending.cancel.clone();
+    *old_cell.lock().unwrap() = Some(McpLoginProgress::Finished(Ok(())));
+    poll_mcp_login(&mut app);
+    assert!(
+        app.mcp_login.is_some(),
+        "a stale completion cannot clear the new owner"
+    );
+    assert!(
+        !app.status_toasts
+            .back()
+            .unwrap()
+            .text
+            .as_str()
+            .contains("Stored OAuth")
+    );
+    drop(app);
+    assert!(
+        new_token.is_cancelled(),
+        "leaving the app cancels the operation too"
+    );
+}
+
+#[test]
+fn mcp_login_progress_preserves_cancel_until_finish_and_ignores_cancelled_mailbox() {
+    use crate::tui::app::{McpLoginProgress, PendingMcpLogin};
+
+    let mut app = create_test_app();
+    let progress = Arc::new(Mutex::new(Some(McpLoginProgress::AuthorizationUrl(
+        "https://issuer.example/authorize?state=fixture".to_string(),
+    ))));
+    let token = tokio_util::sync::CancellationToken::new();
+    app.mcp_login = Some(PendingMcpLogin {
+        server: "fixture".to_string(),
+        cancel: token.clone(),
+        progress: Arc::clone(&progress),
+    });
+    poll_mcp_login(&mut app);
+    assert!(app.mcp_login.is_some());
+    assert!(!token.is_cancelled());
+    assert!(
+        app.status_toasts
+            .back()
+            .unwrap()
+            .text
+            .as_str()
+            .contains("Esc cancels")
+    );
+    assert!(
+        app.status_toasts
+            .back()
+            .unwrap()
+            .text
+            .as_str()
+            .contains("state=fixture")
+    );
+    *progress.lock().unwrap() = Some(McpLoginProgress::Finished(Ok(())));
+    poll_mcp_login(&mut app);
+    assert!(app.mcp_login.is_none());
+    assert!(
+        app.status_toasts
+            .back()
+            .unwrap()
+            .text
+            .as_str()
+            .contains("Stored OAuth credentials")
+    );
+    assert!(token.is_cancelled());
+    let completed = app.status_toasts.back().unwrap().text.clone();
+    *progress.lock().unwrap() = Some(McpLoginProgress::Finished(Err("late failure".into())));
+    poll_mcp_login(&mut app);
+    assert_eq!(app.status_toasts.back().unwrap().text, completed);
+}
+
+#[tokio::test]
+async fn mcp_login_background_handshake_preserves_network_default_deny() {
+    use crate::tui::app::McpUiAction;
+
+    let _env = crate::test_support::lock_test_env();
+    let temp = tempfile::tempdir().unwrap();
+    let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", temp.path());
+    let _backend = crate::test_support::EnvVarGuard::set("CODEWHALE_SECRET_BACKEND", "file");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut app = create_test_app();
+    app.workspace = temp.path().to_path_buf();
+    app.mcp_config_path = temp.path().join("mcp.json");
+    crate::mcp::add_server_config(
+        &app.mcp_config_path,
+        "denied".to_string(),
+        None,
+        Some(format!("http://{}/mcp", listener.local_addr().unwrap())),
+        Vec::new(),
+        None,
+    )
+    .unwrap();
+    let config = Config {
+        network: Some(toml::from_str("default = \"deny\"").unwrap()),
+        ..Config::default()
+    };
+    let mock = mock_engine_handle();
+    handle_mcp_ui_action(
+        &mut app,
+        &mock.handle,
+        &config,
+        McpUiAction::Login {
+            name: "denied".into(),
+            scopes: Vec::new(),
+        },
+    )
+    .await;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while app.mcp_login.is_some() {
+            poll_mcp_login(&mut app);
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("policy denial completes without waiting for the server");
+    assert!(
+        app.status_toasts
+            .back()
+            .unwrap()
+            .text
+            .as_str()
+            .contains("network policy")
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(30), listener.accept())
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn mcp_diagnose_reports_selected_last_observed_error_without_discovery() {
+    use crate::mcp::{McpManagerSnapshot, McpServerCapabilityMetadata, McpServerSnapshot};
+    use crate::tui::app::McpUiAction;
+
+    let mut app = create_test_app();
+    app.mcp_snapshot = Some(McpManagerSnapshot {
+        config_path: PathBuf::from("mcp.json"),
+        config_exists: true,
+        reload_required: false,
+        servers: vec![McpServerSnapshot {
+            name: "selected".into(),
+            enabled: true,
+            required: false,
+            transport: "http".into(),
+            command_or_url: "https://private-user:private-password@example.com/mcp".into(),
+            connect_timeout: 5,
+            execute_timeout: 5,
+            read_timeout: 5,
+            connected: false,
+            error: Some("metadata response could not be parsed".into()),
+            auth_required: false,
+            capability_metadata: McpServerCapabilityMetadata::NotObserved,
+            tools: Vec::new(),
+            resources: Vec::new(),
+            prompts: Vec::new(),
+        }],
+    });
+    let mut mock = mock_engine_handle();
+    tokio::time::timeout(
+        Duration::from_millis(200),
+        handle_mcp_ui_action(
+            &mut app,
+            &mock.handle,
+            &Config::default(),
+            McpUiAction::Diagnose {
+                name: "selected".into(),
+            },
+        ),
+    )
+    .await
+    .expect("Diagnose reports the observation without waiting for a new probe");
+    assert!(mock.rx_op.try_recv().is_err());
+    let receipt = app.status_toasts.back().unwrap().text.as_str();
+    assert!(receipt.contains("'selected'"));
+    assert!(receipt.contains("last observed: connection failed"));
+    assert!(receipt.contains("metadata response could not be parsed"));
+    assert!(receipt.contains("/mcp retry selected"));
+    assert!(!receipt.contains("private-password"));
+    assert!(!receipt.contains("refreshed"));
+    app.mcp_snapshot.as_mut().unwrap().servers[0].auth_required = true;
+    assert!(mcp_server_diagnosis(&app, "selected").contains("/mcp login selected"));
+    assert!(mcp_server_diagnosis(&app, "absent").contains("no observed connection state"));
 }
 
 #[tokio::test]
@@ -6742,7 +7046,7 @@ fn saved_session_with_messages(messages: Vec<Message>) -> SavedSession {
     SavedSession {
         schema_version: 1,
         metadata: crate::session_manager::SessionMetadata {
-            id: "resume-recovery-session".to_string(),
+            id: uuid::Uuid::new_v4().to_string(),
             title: "resume recovery".to_string(),
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
@@ -8285,6 +8589,15 @@ async fn successful_custom_provider_activation_completes_onboarding() {
     complete_provider_picker_onboarding_if_switched(&mut app, ApiProvider::Custom, switched);
 
     assert_eq!(app.api_provider, ApiProvider::Custom);
+    let fixture_home = config_env._tmp.path().join(".codewhale");
+    let fixture_settings = config_env
+        .config_path()
+        .parent()
+        .unwrap()
+        .join("settings.toml");
+    assert_eq!(crate::settings::Settings::path().unwrap(), fixture_settings);
+    assert!(fixture_settings.is_file());
+    assert!(fixture_home.join("setup_state.json").is_file());
     assert_ne!(
         app.onboarding,
         OnboardingState::Provider,
@@ -10905,6 +11218,7 @@ fn pending_goal_control_waits_for_authoritative_receipt() {
         .expect("valid paused target");
     app.pending_goal_controls
         .push_back(crate::tui::app::PendingGoalControl {
+            goal_id: None,
             intent: crate::tui::app::GoalControlIntent::SetStatus {
                 status: crate::tools::goal::GoalStatus::Paused,
                 clear: false,
@@ -11069,6 +11383,60 @@ fn apply_goal_snapshot_prints_a_receipt_when_the_runtime_sets_a_new_goal() {
         }),
         "a user-declared goal must not repeat its own receipt"
     );
+}
+
+#[test]
+fn apply_goal_snapshot_prints_one_receipt_per_progress_report() {
+    let mut app = create_test_app();
+    let snapshot = crate::tools::goal::GoalSnapshot {
+        objective: Some("make the tests pass".to_string()),
+        status: "active".to_string(),
+        progress: Some(crate::tools::goal::GoalProgressReport {
+            percent: 12,
+            now: Some("implementing the composer slice".to_string()),
+            next: Some("screenshot-verify desktop/mobile".to_string()),
+        }),
+        ..Default::default()
+    };
+    assert!(apply_goal_snapshot_to_app(&mut app, &snapshot));
+    let receipt = app
+        .history
+        .iter()
+        .find_map(|cell| match cell {
+            HistoryCell::System { content } if content.contains("Reported progress") => {
+                Some(content.clone())
+            }
+            _ => None,
+        })
+        .expect("progress receipt printed");
+    assert!(receipt.contains("12%"), "{receipt}");
+    assert!(receipt.contains('▓'), "{receipt}");
+    assert!(
+        receipt.contains("now implementing the composer slice"),
+        "{receipt}"
+    );
+    assert!(
+        receipt.contains("next screenshot-verify desktop/mobile"),
+        "{receipt}"
+    );
+
+    // The identical report does not reprint; a new percent does.
+    assert!(!apply_goal_snapshot_to_app(&mut app, &snapshot));
+    let mut advanced = snapshot.clone();
+    advanced.progress = Some(crate::tools::goal::GoalProgressReport {
+        percent: 34,
+        now: None,
+        next: None,
+    });
+    assert!(apply_goal_snapshot_to_app(&mut app, &advanced));
+    let receipts = app
+        .history
+        .iter()
+        .filter(
+            |cell| matches!(cell, HistoryCell::System { content } if content.contains("Reported progress")),
+        )
+        .count();
+    assert_eq!(receipts, 2);
 }
 
 #[test]
@@ -17963,7 +18331,7 @@ fn custom_session_resume_requires_structural_route_not_client_construction() {
 
     assert_eq!(
         app.current_session_id.as_deref(),
-        Some("resume-recovery-session")
+        Some(session.metadata.id.as_str())
     );
     assert_eq!(app.api_messages, session.messages);
     assert!(app.input.is_empty());
@@ -25202,4 +25570,275 @@ fn deleting_the_leading_slash_releases_the_command_claim() {
         Some("plugin"),
         "the edited line submits normally"
     );
+}
+
+async fn flush_offline_queue_test_actor(handle: &persistence_actor::PersistActorHandle) {
+    let (reply, receive) = tokio::sync::oneshot::channel();
+    assert!(handle.try_send(PersistRequest::FlushAndReport { reply }));
+    let report = receive.await.expect("queue durability report");
+    assert!(report.failures.is_empty(), "{:?}", report.failures);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn offline_queue_lifecycle_preserves_edits_and_explicit_reset() {
+    const PROBE: &str = "CODEWHALE_OFFLINE_QUEUE_LIFECYCLE_PROBE";
+    if std::env::var_os(PROBE).is_none() {
+        // The production actor is a process singleton. Run this complete UI
+        // lifecycle in its own process instead of replacing another test's
+        // actor or leaving a closed global sender behind.
+        let output = Command::new(std::env::current_exe().expect("test executable"))
+            .args([
+                "--exact",
+                "tui::ui::tests::offline_queue_lifecycle_preserves_edits_and_explicit_reset",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(PROBE, "1")
+            .output()
+            .expect("queue lifecycle subprocess");
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+        return;
+    }
+
+    let _environment = crate::test_support::lock_test_env();
+    let directory = tempfile::tempdir().expect("queue fixture");
+    let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", directory.path());
+    let manager = SessionManager::default_location().expect("session store");
+    for (id, text) in [("queue-A", "original A"), ("queue-B", "original B")] {
+        manager
+            .save_offline_queue_state(
+                &OfflineQueueState {
+                    messages: vec![QueuedSessionMessage {
+                        display: text.into(),
+                        skill_instruction: None,
+                        skill_provenance: None,
+                    }],
+                    ..OfflineQueueState::default()
+                },
+                Some(id),
+            )
+            .expect("park initial queue");
+    }
+    let (handle, task) = persistence_actor::spawn_persistence_actor(
+        SessionManager::default_location().expect("actor store"),
+    );
+    persistence_actor::init_actor(handle.clone());
+    let mut app = create_test_app();
+    let transition = prepare_offline_queue_transition(&app, "queue-A").expect("claim A");
+    assert!(install_offline_queue_transition(&mut app, transition));
+    assert!(app.pop_last_queued_into_draft());
+    let original_projection = offline_queue_projection(&app);
+    app.input = "edited A\nsecond line".into();
+    assert_ne!(
+        offline_queue_projection(&app),
+        original_projection,
+        "composer edits must trigger the frame's queue change detector"
+    );
+    persist_offline_queue_state(&app);
+    flush_offline_queue_test_actor(&handle).await;
+    assert_eq!(
+        manager
+            .load_offline_queue_state("queue-A")
+            .unwrap()
+            .unwrap()
+            .draft
+            .unwrap()
+            .display,
+        "edited A\nsecond line"
+    );
+    assert_eq!(app.queued_draft.as_ref().unwrap().display, "original A");
+    assert!(app.cancel_queued_draft_edit());
+    assert_eq!(app.queued_messages.back().unwrap().display, "original A");
+    assert!(app.pop_last_queued_into_draft());
+    app.input = "survives reopening".into();
+    persist_offline_queue_state(&app);
+    flush_offline_queue_test_actor(&handle).await;
+    drop(app);
+
+    let mut app = create_test_app();
+    let transition = prepare_offline_queue_transition(&app, "queue-A").expect("reopen A");
+    assert!(install_offline_queue_transition(&mut app, transition));
+    assert_eq!(app.input, "survives reopening");
+    let transition = prepare_offline_queue_transition(&app, "queue-B").expect("switch to B");
+    assert!(install_offline_queue_transition(&mut app, transition));
+    assert_eq!(app.queued_messages.front().unwrap().display, "original B");
+    flush_offline_queue_test_actor(&handle).await;
+    drop(
+        manager
+            .acquire_offline_queue_lease("queue-A")
+            .expect("A released after its write"),
+    );
+
+    let mut contender = create_test_app();
+    let transition = prepare_offline_queue_transition(&contender, "queue-C").expect("claim C");
+    install_offline_queue_transition(&mut contender, transition);
+    contender.input = "keep this composer".into();
+    contender.queue_message(queued_session_to_ui(QueuedSessionMessage {
+        display: "keep C queue".into(),
+        skill_instruction: None,
+        skill_provenance: None,
+    }));
+    let mut session_b = saved_session_with_messages(vec![text_message("user", "B transcript")]);
+    session_b.metadata.id = "queue-B".into();
+    let error = apply_loaded_session(&mut contender, &mut Config::default(), &session_b)
+        .expect_err("B has another editor");
+    assert!(error.contains("already open"));
+    assert_eq!(contender.current_session_id.as_deref(), Some("queue-C"));
+    assert_eq!(contender.input, "keep this composer");
+    assert_eq!(
+        contender.queued_messages.front().unwrap().display,
+        "keep C queue"
+    );
+    assert!(contender.api_messages.is_empty());
+
+    // Saving a copy changes the output path, not the live engine/queue owner.
+    let mut before_save = create_saved_session_with_id_and_mode(
+        "queue-B".into(),
+        &[],
+        &app.model,
+        &app.workspace,
+        0,
+        None,
+        None,
+    );
+    before_save.metadata.created_at = chrono::Utc::now() - chrono::Duration::days(10);
+    before_save.metadata.title = "User chosen title".into();
+    before_save.metadata.parent_session_id = Some("parent-session".into());
+    before_save.metadata.forked_from_message_count = Some(5);
+    before_save.metadata.archived = true;
+    manager
+        .save_session(&before_save)
+        .expect("saved lifecycle fixture");
+    app.current_session_metadata = Some(before_save.metadata.clone());
+    app.window_title = Some("User chosen tab".into());
+    let copy = directory.path().join("saved-copy.json");
+    let owner = app.offline_queue_lease.clone().unwrap();
+    let result = crate::commands::execute(&format!("/save {}", copy.display()), &mut app);
+    assert!(!result.is_error, "{:?}", result.message);
+    let saved: SavedSession = serde_json::from_slice(&std::fs::read(copy).unwrap()).unwrap();
+    assert_eq!(saved.metadata.id, "queue-B");
+    assert_eq!(saved.metadata.created_at, before_save.metadata.created_at);
+    assert_eq!(saved.metadata.title, before_save.metadata.title);
+    assert_eq!(
+        saved.metadata.parent_session_id,
+        before_save.metadata.parent_session_id
+    );
+    assert_eq!(saved.metadata.forked_from_message_count, Some(5));
+    assert!(saved.metadata.archived);
+    assert_eq!(saved.window_title.as_deref(), Some("User chosen tab"));
+
+    assert_eq!(app.current_session_id.as_deref(), Some("queue-B"));
+    assert!(Arc::ptr_eq(
+        &owner,
+        app.offline_queue_lease.as_ref().unwrap()
+    ));
+    drop(owner);
+    let result = crate::commands::execute("/new --force", &mut app);
+    assert!(!result.is_error, "{:?}", result.message);
+    assert_ne!(app.current_session_id.as_deref(), Some("queue-B"));
+    flush_offline_queue_test_actor(&handle).await;
+    assert!(
+        manager
+            .load_offline_queue_state("queue-B")
+            .unwrap()
+            .is_none(),
+        "explicit reset must clear the captured old owner"
+    );
+    assert_eq!(
+        manager
+            .load_offline_queue_state("queue-A")
+            .unwrap()
+            .unwrap()
+            .draft
+            .unwrap()
+            .display,
+        "survives reopening"
+    );
+
+    // An unreadable queue cannot be turned into an empty queue by a failed
+    // resume, including a document produced by a newer version.
+    app.input = "preserve on failed resume".into();
+    let active = app.current_session_id.clone();
+    for (id, bytes) in [
+        ("queue-corrupt", "{"),
+        ("queue-future", "{\"schema_version\":999}"),
+    ] {
+        let path = manager
+            .sessions_dir()
+            .join("checkpoints")
+            .join(format!("{id}.offline_queue.json"));
+        std::fs::write(&path, bytes).unwrap();
+        assert!(prepare_offline_queue_transition(&app, id).is_err());
+        assert_eq!(std::fs::read_to_string(path).unwrap(), bytes);
+        assert_eq!(app.current_session_id, active);
+        assert_eq!(app.input, "preserve on failed resume");
+    }
+    assert!(handle.try_send(PersistRequest::Shutdown));
+    task.await.expect("queue actor shutdown");
+}
+
+#[test]
+fn stale_session_projection_cannot_rewind_a_host_launch() {
+    let _environment = crate::test_support::lock_test_env();
+    let mut app = create_test_app();
+    let previous = super::event_loop::ensure_runtime_session_id(&mut app);
+    let result = begin_launch_session(&mut app, None);
+    assert!(!result.is_error, "{:?}", result.message);
+    let current = app.current_session_id.clone().unwrap();
+    assert_ne!(current, previous);
+    app.api_messages = vec![text_message("user", "current host transcript")];
+    app.system_prompt = Some(SystemPrompt::Text("current prompt".into()));
+    app.input = "typing remains responsive".into();
+    let workspace = app.workspace.clone();
+    let model = app.model.clone();
+    let history_length = app.history.len();
+    let notice_count = app.status_toasts.len();
+    assert!(!super::event_loop::apply_engine_session_projection(
+        &mut app,
+        &Config::default(),
+        EngineEvent::SessionUpdated {
+            session_id: previous,
+            messages: vec![text_message("user", "stale transcript")],
+            system_prompt: Some(SystemPrompt::Text("stale prompt".into())),
+            model: "stale-model".into(),
+            workspace: PathBuf::from("/must-not-be-adopted"),
+        }
+    ));
+    assert_eq!(app.current_session_id.as_deref(), Some(current.as_str()));
+    assert_eq!(
+        app.api_messages,
+        vec![text_message("user", "current host transcript")]
+    );
+    assert_eq!(
+        app.system_prompt,
+        Some(SystemPrompt::Text("current prompt".into()))
+    );
+    assert_eq!(app.workspace, workspace);
+    assert_eq!(app.model, model);
+    assert_eq!(app.input, "typing remains responsive");
+    assert_eq!(app.history.len(), history_length);
+    assert_eq!(app.status_toasts.len(), notice_count);
+    assert!(super::event_loop::apply_engine_session_projection(
+        &mut app,
+        &Config::default(),
+        EngineEvent::SessionUpdated {
+            session_id: current.clone(),
+            messages: vec![text_message("user", "expected engine transcript")],
+            system_prompt: None,
+            model,
+            workspace,
+        }
+    ));
+    assert_eq!(app.current_session_id.as_deref(), Some(current.as_str()));
+    assert_eq!(
+        app.api_messages,
+        vec![text_message("user", "expected engine transcript")]
+    );
+    assert_eq!(app.input, "typing remains responsive");
 }

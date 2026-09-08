@@ -540,14 +540,14 @@ impl Engine {
         if let Some(usage) = &review.usage {
             turn.add_usage(usage);
             if usage_has_reported_data(usage) {
+                let request_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
                 let _ = self
                     .tx_event
                     .send(Event::TurnUsage {
                         usage: usage.clone(),
-                        duration_ms: u64::try_from(started.elapsed().as_millis())
-                            .unwrap_or(u64::MAX),
+                        duration_ms: request_ms,
                         first_token_ms: None,
-                        request_ms: None,
+                        request_ms: Some(request_ms),
                     })
                     .await;
             }
@@ -815,13 +815,15 @@ impl Engine {
             // report. Savings proved out by the grok-style parity work (ops
             // A1): a step-faithful harness ends mid-report far too often.
             if !soft_landing_sent
-                && self.config.max_steps > 0
-                && turn.steps_used() >= ((self.config.max_steps as f32 * 0.8).floor() as u32).max(1)
+                && turn.max_steps > 0
+                && turn.steps_used() >= ((turn.max_steps as f32 * 0.8).floor() as u32).max(1)
             {
                 soft_landing_sent = true;
                 let notice = format!(
-                    "Step budget soft landing: you have used about {}% of your {} step budget. Stop exploring; write your final, complete report now, in final form, with evidence.",
-                    80, self.config.max_steps,
+                    "Step budget soft landing: you have used about {}% of your {} step budget ({}). Stop exploring; write your final, complete report now, in final form, with evidence.",
+                    80,
+                    turn.max_steps,
+                    turn.budget_source.key_label(),
                 );
                 self.add_session_message(self.user_text_message_with_turn_metadata(notice))
                     .await;
@@ -858,9 +860,11 @@ impl Engine {
                     // one final provider turn to write a bounded report, then
                     // let the natural no-tool termination close the turn.
                     final_report_sent = true;
+                    turn.budget_exhausted_final_report = true;
                     let notice = format!(
-                        "Your model-step budget was exhausted (limit: {}). You cannot continue working. Write your final report now: what you did, what you proved or found, what remains, and exact evidence. This is your last turn.",
-                        self.config.max_steps,
+                        "Your model-step budget was exhausted (limit: {}, {}). You cannot continue working. Write your final report now: what you did, what you proved or found, what remains, and exact evidence. This is your last turn.",
+                        turn.max_steps,
+                        turn.budget_source.key_label(),
                     );
                     self.add_session_message(self.user_text_message_with_turn_metadata(notice))
                         .await;
@@ -874,8 +878,9 @@ impl Engine {
                     break;
                 } else {
                     let error = format!(
-                        "Maximum model steps reached before completion (limit: {})",
-                        self.config.max_steps
+                        "Maximum model steps reached before completion (limit: {}, {})",
+                        turn.max_steps,
+                        turn.budget_source.key_label(),
                     );
                     let _ = self.tx_event.send(Event::status(error.clone())).await;
                     return (TurnOutcomeStatus::Failed, Some(error));
@@ -2711,9 +2716,13 @@ impl Engine {
             // #3027: deny wins over allow — check the deny-list first so a
             // tool present in both lists is still blocked.
             if blocked_error.is_none() && tool_policy.denies_tool(&tool_name) {
-                blocked_error = Some(ToolError::permission_denied(format!(
-                    "Tool '{tool_name}' is in the disallowed-tools list"
-                )));
+                blocked_error = Some(if McpPool::is_mcp_tool(&tool_name) {
+                    ToolError::not_available(format!("Unknown MCP tool name: {tool_name}"))
+                } else {
+                    ToolError::permission_denied(format!(
+                        "Tool '{tool_name}' is in the disallowed-tools list"
+                    ))
+                });
             }
 
             if blocked_error.is_none() && !tool_policy.passes_allow_list(&tool_name) {

@@ -65,7 +65,6 @@ impl SettingsPickerController {
     }
 
     #[must_use]
-    #[allow(dead_code)] // catalog accessors for model/provider migration (TUI-DOG-009)
     pub fn options(&self) -> &[SettingOption] {
         &self.options
     }

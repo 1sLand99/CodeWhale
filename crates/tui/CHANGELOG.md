@@ -109,7 +109,7 @@ with an accessibility-first pointer.
   bar's plan/act/operate chip. The `status`, `agents`, `reasoning_replay`,
   `prefix_stability`, `git_branch`, `last_tool_elapsed` and `rate_limit`
   items drove nothing and are retired; an existing `config.toml` still loads
-  and those keys are ignored (#5950).
+  and those keys are ignored (#5950, #5962).
 - The context reading is back on screen at every fullness. 0.9.12 painted
   `ctx NN%` only from 50% up, which left most of a session with no context
   signal at all; it now paints from 0% and keeps its warning colour from 80%
