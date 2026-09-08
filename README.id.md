@@ -1,7 +1,7 @@
-<!-- source: README.md sha256:3cc3ffc9b995 -->
+<!-- source: README.md sha256:330cff827493 -->
 # Codewhale
 
-Codewhale adalah agen pemrograman sumber terbuka untuk terminal Anda, dibuat dengan Rust dan dikembangkan secara terbuka bersama orang-orang yang menggunakannya.
+Codewhale adalah agen sumber terbuka yang membantu Anda mengembangkan perangkat lunak, mengolah berkas, dan mengotomatiskan tugas sehari-hari dengan model pilihan Anda. Mulailah dengan sebuah tugas di terminal, lalu hubungkan model terkelola atau lokal. Gunakan tim agen saat ingin membagi pekerjaan yang lebih besar ke berbagai model dan peran.
 
 ![Codewhale berjalan di terminal](web/public/codewhale-tui-171acee.png)
 
@@ -49,7 +49,7 @@ Lebih suka antarmuka grafis? Ekstensi CodeWhale for VS Code yang dikelola komuni
 
 ## Mengapa Codewhale
 
-- **Gunakan model yang Anda inginkan.** Hubungkan penyedia terkelola atau model lokal melalui Ollama, vLLM, atau SGLang. Ganti penyedia dan model dengan `/model`.
+- **Pilih model Anda.** Hubungkan penyedia terkelola atau model lokal melalui Ollama, vLLM, atau SGLang. Gunakan `/provider` untuk mengganti penyedia dan `/model` untuk memilih model.
 - **Tetap memegang kendali.** Plan hanya dapat membaca. Ask, Auto-Review, dan Full Access menampilkan perilaku persetujuan dengan jelas. `/undo` membatalkan giliran terakhir dan `/restore` mengembalikan ruang kerja ke snapshot sebelumnya.
 - **Jaga agar pekerjaan panjang tetap teratur.** Simpan sesi, tetapkan `/goal` yang bertahan lama, tinjau alur kerja sebelum dijalankan, dan koordinasikan agen tanpa memasukkan instruksi internal mereka ke transkrip Anda.
 - **Perluas agen yang sudah Anda miliki.** Hubungkan server MCP dan keterampilan, konfigurasikan hook, dan simpan peran agen sebagai berkas yang mudah dibaca di proyek atau pengaturan pribadi Anda.
@@ -69,10 +69,11 @@ Baca [urutan otorisasi](docs/AUTHORIZATION_ORDER.md) untuk susunan kebijakan yan
 - [MCP](docs/MCP.md), [hook](docs/HOOKS.md), dan [konfigurasi](docs/CONFIGURATION.md)
 - [Klien web lokal](docs/WEB.md)
 - [Semua dokumentasi](docs)
+- [Struktur repositori dan panduan kontribusi](CONTRIBUTING.md#project-structure)
 
 ## Bergabung dengan komunitas
 
-Codewhale menjadi lebih baik ketika orang menggunakannya, melaporkan hal yang terasa kurang tepat, dan membantu memperbaikinya. Jika penyedia belum tersedia, alur kerja terasa janggal, atau UI terminal menghambat Anda, [buat issue](https://github.com/Hmbown/CodeWhale/issues). Jika Anda tahu cara memperbaikinya, [buat pull request](CONTRIBUTING.md). Kontribusi pertama sangat disambut, dan kontributor tetap menerima kredit untuk pekerjaan yang digabungkan.
+**Laporan bug, ide fitur, dan pull request selalu diterima**, baik Anda telah memakai Codewhale selama berbulan-bulan maupun baru mencobanya. Jika penyedia belum tersedia, alur kerja terasa janggal, atau UI terminal menghambat Anda, [buat issue](https://github.com/Hmbown/CodeWhale/issues/new/choose) atau [kirim pull request](CONTRIBUTING.md) agar kita dapat memperbaikinya bersama. Kontribusi pertama sangat disambut, dan kontributor tetap menerima kredit untuk pekerjaan yang digabungkan.
 
 Bergabunglah di [Discord](https://discord.gg/37gfS3ksug), atau tambahkan Hunter di WeChat (`hunterbown`) dan mintalah untuk bergabung dengan grup Whale Brothers.
 

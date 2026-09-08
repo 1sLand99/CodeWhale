@@ -1,7 +1,7 @@
-<!-- source: README.md sha256:3cc3ffc9b995 -->
+<!-- source: README.md sha256:330cff827493 -->
 # Codewhale
 
-Codewhale to agent programistyczny o otwartym kodzie źródłowym do terminala, napisany w Rust i rozwijany publicznie wspólnie z osobami, które go używają.
+Codewhale to agent o otwartym kodzie źródłowym, który pomaga tworzyć oprogramowanie, pracować z plikami i automatyzować codzienne zadania przy użyciu wybranych modeli. Zacznij od zadania w terminalu i połącz się z modelem hostowanym lub lokalnym. Gdy chcesz podzielić większą pracę między różne modele i role, możesz zaangażować zespół agentów.
 
 ![Codewhale działający w terminalu](web/public/codewhale-tui-171acee.png)
 
@@ -49,7 +49,7 @@ Wolisz interfejs graficzny? Rozszerzenie CodeWhale for VS Code, utrzymywane prze
 
 ## Dlaczego Codewhale
 
-- **Używaj wybranego modelu.** Połącz się z hostowanymi dostawcami lub lokalnymi modelami przez Ollama, vLLM albo SGLang. Dostawcę i model zmienisz za pomocą `/model`.
+- **Wybieraj modele.** Połącz się z hostowanymi dostawcami lub lokalnymi modelami przez Ollama, vLLM albo SGLang. Polecenie `/provider` służy do zmiany dostawcy, a `/model` do wyboru modelu.
 - **Zachowaj kontrolę.** Tryb Plan jest tylko do odczytu. Ask, Auto-Review i Full Access jasno pokazują sposób zatwierdzania działań. `/undo` cofa ostatnią turę, a `/restore` przywraca przestrzeń roboczą do wcześniejszej migawki.
 - **Utrzymuj porządek w długich zadaniach.** Zapisuj sesje, ustawiaj trwały `/goal`, sprawdzaj przepływy pracy przed uruchomieniem i koordynuj agentów bez umieszczania ich wewnętrznych instrukcji w zapisie Twojej rozmowy.
 - **Rozszerzaj agenta, którego już masz.** Podłączaj serwery MCP i umiejętności, konfiguruj hooki oraz przechowuj role agentów jako czytelne pliki w projekcie lub ustawieniach osobistych.
@@ -69,10 +69,11 @@ Przeczytaj o [kolejności autoryzacji](docs/AUTHORIZATION_ORDER.md), aby poznać
 - [MCP](docs/MCP.md), [hooki](docs/HOOKS.md) i [konfiguracja](docs/CONFIGURATION.md)
 - [Lokalny klient webowy](docs/WEB.md)
 - [Cała dokumentacja](docs)
+- [Struktura repozytorium i przewodnik dla współtwórców](CONTRIBUTING.md#project-structure)
 
 ## Dołącz do społeczności
 
-Codewhale staje się lepszy, gdy ludzie go używają, zgłaszają niedogodności i pomagają je naprawiać. Jeśli brakuje dostawcy, przepływ pracy jest niewygodny albo interfejs terminala przeszkadza Ci w pracy, [otwórz issue](https://github.com/Hmbown/CodeWhale/issues). Jeśli wiesz, jak coś ulepszyć, [otwórz pull request](CONTRIBUTING.md). Pierwsze wkłady są mile widziane, a autorzy zachowują uznanie za pracę przyjętą do projektu.
+**Zgłoszenia błędów, pomysły na funkcje i pull requesty są mile widziane**, niezależnie od tego, czy używasz Codewhale od miesięcy, czy próbujesz go po raz pierwszy. Jeśli brakuje dostawcy, przepływ pracy jest niewygodny albo interfejs terminala przeszkadza Ci w pracy, [otwórz issue](https://github.com/Hmbown/CodeWhale/issues/new/choose) lub [wyślij pull request](CONTRIBUTING.md), abyśmy mogli wspólnie go ulepszyć. Pierwsze wkłady są mile widziane, a autorzy zachowują uznanie za pracę przyjętą do projektu.
 
 Dołącz do [Discorda](https://discord.gg/37gfS3ksug) albo dodaj Huntera na WeChat (`hunterbown`) i poproś o dołączenie do grupy Whale Brothers.
 

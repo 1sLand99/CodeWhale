@@ -1,7 +1,7 @@
-<!-- source: README.md sha256:3cc3ffc9b995 -->
+<!-- source: README.md sha256:330cff827493 -->
 # Codewhale
 
-Codewhale és un agent de programació de codi obert per al terminal, desenvolupat amb Rust i millorat públicament amb les persones que l’utilitzen.
+Codewhale és un agent de codi obert que t’ajuda a desenvolupar programari, treballar amb els teus fitxers i automatitzar tasques quotidianes amb els models que triïs. Comença amb una tasca al terminal i connecta un model allotjat o local. Quan vulguis repartir una feina més gran entre diferents models i rols, pots incorporar un equip d’agents.
 
 ![Codewhale executant-se en un terminal](web/public/codewhale-tui-171acee.png)
 
@@ -49,7 +49,7 @@ Prefereixes una interfície gràfica? L'extensió CodeWhale for VS Code, manting
 
 ## Per què Codewhale
 
-- **Fes servir el model que vulguis.** Connecta proveïdors allotjats o models locals mitjançant Ollama, vLLM o SGLang. Canvia de proveïdor i de model amb `/model`.
+- **Tria els teus models.** Connecta proveïdors allotjats o models locals mitjançant Ollama, vLLM o SGLang. Fes servir `/provider` per canviar de proveïdor i `/model` per triar un model.
 - **Mantén el control.** Plan és només de lectura. Ask, Auto-Review i Full Access fan visible el comportament de les aprovacions. `/undo` desfà l’últim torn i `/restore` retorna l’espai de treball a una instantània anterior.
 - **Mantén organitzades les feines llargues.** Desa sessions, defineix un `/goal` durador, revisa els fluxos de treball abans que s’executin i coordina agents sense convertir les seves instruccions internes en part de la teva conversa.
 - **Amplia l’agent que ja tens.** Connecta servidors MCP i habilitats, configura hooks i conserva els rols d’agent com a fitxers llegibles al projecte o a la configuració personal.
@@ -69,10 +69,11 @@ Llegeix l’[ordre d’autorització](docs/AUTHORIZATION_ORDER.md) per conèixer
 - [MCP](docs/MCP.md), [hooks](docs/HOOKS.md) i [configuració](docs/CONFIGURATION.md)
 - [Client web local](docs/WEB.md)
 - [Tota la documentació](docs)
+- [Estructura del repositori i guia de contribució](CONTRIBUTING.md#project-structure)
 
 ## Uneix-te a la comunitat
 
-Codewhale millora quan les persones l’utilitzen, expliquen què no funciona bé i ajuden a corregir-ho. Si falta un proveïdor, un flux de treball és incòmode o la interfície del terminal et dificulta la feina, [obre una incidència](https://github.com/Hmbown/CodeWhale/issues). Si saps com millorar-lo, [obre una pull request](CONTRIBUTING.md). Les primeres contribucions són benvingudes i qui hi contribueix conserva el reconeixement per la feina incorporada.
+**Els informes d’errors, les idees de funcionalitats i les pull requests són benvinguts**, tant si fa mesos que fas servir Codewhale com si el proves per primera vegada. Si falta un proveïdor, un flux de treball és incòmode o la interfície del terminal et dificulta la feina, [obre una incidència](https://github.com/Hmbown/CodeWhale/issues/new/choose) o [envia una pull request](CONTRIBUTING.md) perquè el puguem millorar plegats. Les primeres contribucions són benvingudes i qui hi contribueix conserva el reconeixement per la feina incorporada.
 
 Uneix-te al [Discord](https://discord.gg/37gfS3ksug), o afegeix Hunter a WeChat (`hunterbown`) i demana entrar al grup Whale Brothers.
 
