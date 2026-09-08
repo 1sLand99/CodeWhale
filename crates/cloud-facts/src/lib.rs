@@ -731,26 +731,25 @@ where
             }
             if !cache.envelope.is_empty()
                 && now.saturating_sub(cache.fetched_at) < settings.ttl_secs
-            {
-                if let Ok(verified) = verify_with(
+                && let Ok(verified) = verify_with(
                     cache.envelope.as_bytes(),
                     settings,
                     cache.highest_seen_version,
                     keys,
                     now,
-                ) {
-                    let version = publish_verified(
-                        &ticket,
-                        &verified,
-                        FactsOrigin::DiskCache,
-                        &cache,
-                        None,
-                        now,
-                    )?;
-                    return Ok(RefreshOutcome::Fresh {
-                        facts_version: Some(version),
-                    });
-                }
+                )
+            {
+                let version = publish_verified(
+                    &ticket,
+                    &verified,
+                    FactsOrigin::DiskCache,
+                    &cache,
+                    None,
+                    now,
+                )?;
+                return Ok(RefreshOutcome::Fresh {
+                    facts_version: Some(version),
+                });
             }
         }
         transport(

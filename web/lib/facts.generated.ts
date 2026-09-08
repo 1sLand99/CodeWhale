@@ -27,7 +27,7 @@ export interface RepoFacts {
 }
 
 export const FACTS: RepoFacts = {
-  "generatedAt": "2026-09-07T14:16:12.671Z",
+  "generatedAt": "2026-09-08T13:12:04.166Z",
   "sourceRevision": null,
   "sourceCommittedAt": null,
   "version": "0.9.13",
@@ -36,6 +36,7 @@ export const FACTS: RepoFacts = {
     "app-server",
     "build-support",
     "cli",
+    "cloud-facts",
     "command-contract",
     "config",
     "core",
@@ -177,7 +178,7 @@ export const FACTS: RepoFacts = {
     {
       "id": "openai-codex",
       "label": "OpenAI Codex",
-      "env": "ChatGPT/Codex OAuth via `codex login` (OPENAI_CODEX_ACCESS_TOKEN / CODEX_ACCESS_TOKEN override)"
+      "env": "ChatGPT OAuth via `codewhale auth chatgpt`; optional consented Codex CLI credentials (OPENAI_CODEX_ACCESS_TOKEN / CODEX_ACCESS_TOKEN override)"
     },
     {
       "id": "anthropic",

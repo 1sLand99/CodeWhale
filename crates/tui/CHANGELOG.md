@@ -177,6 +177,14 @@ with an accessibility-first pointer.
 
 ### Added
 
+- Signed cloud model facts can refresh provider capabilities and prices while
+  preserving verified cached data when a refresh fails. A dispatched request
+  keeps its selected price snapshot so later catalog updates cannot change its
+  recorded cost (#5752).
+- Saved sessions preserve exact provider routes. Auxiliary model calls settle
+  their usage once against the route and price snapshot that executed them,
+  including recovery, rather than resolving a new price at completion
+  (#5726, #5848).
 - `[tui].posture_bar` and `[tui].metrics_line` accept `full`, `compact`, or
   `hidden`, also available through `/config`. Compact preserves the existing
   rows' essential fields; hidden returns their space to the transcript (#5973).
