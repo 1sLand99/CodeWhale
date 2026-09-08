@@ -4274,6 +4274,7 @@ impl RuntimeThreadManager {
         let workshop_activation = crate::tools::large_output_router::WorkshopConfig::install_active(
             new_config.workshop.as_ref(),
         );
+        crate::initialize_cloud_facts(&new_config);
         let workflow_table = new_config.workflow_config();
         {
             let mut guard = self.config.write();
@@ -4360,6 +4361,7 @@ impl RuntimeThreadManager {
         config.runtime_thread_inference_unrelated = !config.runtime_chat_isolated;
         let process_owner_lock = Arc::new(RuntimeProcessOwnerLock::acquire(&manager_cfg.data_dir)?);
         let store = RuntimeThreadStore::open(manager_cfg.data_dir.clone())?;
+        crate::initialize_cloud_facts(&config);
         let (event_tx, _event_rx) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
         let manager = Self {
             config: Arc::new(parking_lot::RwLock::new(config)),

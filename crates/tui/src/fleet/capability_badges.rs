@@ -99,6 +99,7 @@ const fn catalog_provenance(source: &CatalogSource) -> &'static str {
         CatalogSource::Live { .. }
         | CatalogSource::ModelsDevLive { .. }
         | CatalogSource::CodewhaleLive { .. } => "live catalog",
+        CatalogSource::CloudFacts { .. } => "signed cloud facts",
         CatalogSource::ConfigOverride | CatalogSource::UserOverride => "override",
     }
 }

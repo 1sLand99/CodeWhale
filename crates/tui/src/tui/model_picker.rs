@@ -2545,7 +2545,8 @@ fn offering_fetched_at(row: &ModelPickerRow) -> u64 {
     match offering_for_row(row).map(|o| o.source) {
         Some(
             CatalogSource::Live { fetched_at, .. }
-            | CatalogSource::CodewhaleLive { fetched_at, .. },
+            | CatalogSource::CodewhaleLive { fetched_at, .. }
+            | CatalogSource::CloudFacts { fetched_at, .. },
         ) => fetched_at,
         _ => 0,
     }
@@ -2894,6 +2895,7 @@ fn render_picker_model_hint(
         Some(CatalogSource::Bundled | CatalogSource::CodewhaleBundled { .. }) => {
             parts.push("bundled".to_string())
         }
+        Some(CatalogSource::CloudFacts { .. }) => parts.push("signed facts".to_string()),
         Some(CatalogSource::ConfigOverride | CatalogSource::UserOverride) => {
             parts.push("override".to_string())
         }

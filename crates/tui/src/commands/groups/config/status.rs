@@ -16,6 +16,48 @@ pub fn status(app: &mut App) -> CommandResult {
     CommandResult::message(format_status(app))
 }
 
+/// Models.dev live-layer freshness: source, row count, and age (#4187).
+fn catalog_summary() -> String {
+    use crate::models_dev_live::ModelsDevFreshness;
+    let st = crate::models_dev_live::status();
+    let now = codewhale_config::catalog::now_unix();
+    let mut out = match st.freshness {
+        ModelsDevFreshness::Bundled => "bundled".to_string(),
+        ModelsDevFreshness::Live => "models.dev live".to_string(),
+        ModelsDevFreshness::Stale => "models.dev stale".to_string(),
+        ModelsDevFreshness::Failed => "models.dev refresh failed".to_string(),
+    };
+    if st.offering_count > 0 {
+        let _ = write!(out, " · {} offerings", st.offering_count);
+    }
+    if let Some(fetched_at) = st.fetched_at {
+        let _ = write!(
+            out,
+            " · fetched {}",
+            codewhale_config::cloud_facts::provenance::age_label(fetched_at, now)
+        );
+    }
+    if let Some(err) = st.last_error.as_deref().filter(|e| !e.is_empty())
+        && st.freshness == ModelsDevFreshness::Failed
+    {
+        let _ = write!(out, " ({err})");
+    }
+    out
+}
+
+/// Cloud facts provenance: channel, version, key, age, origin — or why the
+/// bundled facts are in use. Off by default.
+fn cloud_facts_summary() -> String {
+    let status = codewhale_cloud_facts::status();
+    if status.state == codewhale_config::cloud_facts::CloudFactsState::Off {
+        // The adjacent catalog source already describes the available facts.
+        // Repeating "bundled" here also mislabels a live Models.dev catalog.
+        "off".to_string()
+    } else {
+        status.label(codewhale_config::catalog::now_unix())
+    }
+}
+
 /// Row label column, in columns. English's widest label is `Context window:`
 /// (15); the tail space in [`push_row`] makes its value start at column 19.
 /// Longer localized labels extend naturally rather than being truncated.
@@ -104,11 +146,31 @@ fn format_status(app: &App) -> String {
             ],
         ),
     );
+    let mut source_summary =
+        context_window_source_label(context_window_source(app), locale).into_owned();
+    // The default bundled source needs no second catalog label. Keeping it
+    // compact preserves the 80-column budget as well as the report's row count.
+    if crate::models_dev_live::status().freshness
+        != crate::models_dev_live::ModelsDevFreshness::Bundled
+    {
+        let _ = write!(
+            source_summary,
+            " · {}: {}",
+            tr(locale, MessageId::StatusLabelCatalog),
+            catalog_summary()
+        );
+    }
+    let _ = write!(
+        source_summary,
+        " · {}: {}",
+        tr(locale, MessageId::StatusLabelCloudFacts),
+        cloud_facts_summary()
+    );
     push_row(
         &mut out,
         locale,
         MessageId::StatusLabelWindowSource,
-        context_window_source_label(context_window_source(app), locale).as_ref(),
+        &source_summary,
     );
     if let Some(key) = context_window_override_key(app, locale) {
         push_row(&mut out, locale, MessageId::StatusLabelWindowOverride, &key);
@@ -596,6 +658,14 @@ mod tests {
         assert_eq!(
             rows, 18,
             "fresh session is 18 rows with Window override present, got {rows} rows:\n{msg}"
+        );
+        let source = msg
+            .lines()
+            .find(|line| line.contains("Window source:"))
+            .unwrap();
+        assert!(
+            source.chars().count() <= 80,
+            "fresh source provenance must not wrap: {source}"
         );
     }
 

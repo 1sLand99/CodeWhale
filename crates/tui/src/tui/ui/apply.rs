@@ -1700,6 +1700,26 @@ pub(crate) async fn apply_command_result(
                     content: message.clone(),
                 });
                 app.status_message = Some(message);
+                // `/model refresh` also forces the cloud facts overlay when the
+                // (off-by-default) channel is enabled.
+                let cloud_settings = config.cloud_facts_config().settings();
+                codewhale_cloud_facts::configure(&cloud_settings);
+                if cloud_settings.enabled {
+                    let now = codewhale_config::catalog::now_unix();
+                    let cloud = match codewhale_cloud_facts::refresh(&cloud_settings, true).await {
+                        Ok(outcome) => {
+                            format!(
+                                "Cloud facts refreshed: {outcome:?} ({})",
+                                codewhale_cloud_facts::status().label(now)
+                            )
+                        }
+                        Err(err) => format!(
+                            "Cloud facts refresh failed ({err}); {}",
+                            codewhale_cloud_facts::status().label(now)
+                        ),
+                    };
+                    app.add_message(HistoryCell::System { content: cloud });
+                }
             }
             AppAction::CacheWarmup => {
                 app.status_message = Some("Warming prompt cache...".to_string());
@@ -2328,6 +2348,7 @@ pub(crate) async fn apply_command_result(
                         );
                         app.config_profile = Some(profile.clone());
                         *config = new_config.clone();
+                        crate::initialize_cloud_facts(config);
                         app.set_provider_identity_record(provider_identity);
                         app.billing_presentation =
                             crate::route_billing::for_route(config, app.api_provider);
@@ -3618,5 +3639,6 @@ pub(crate) fn apply_loaded_session_config_snapshot(
             &previous_workspace,
         );
     *config = next_config;
+    crate::initialize_cloud_facts(config);
     Ok(respawn)
 }

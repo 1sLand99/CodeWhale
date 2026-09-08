@@ -55,6 +55,8 @@ pub enum PricingProvenance {
     Unknown,
     /// From the Codewhale-owned signed/bundled catalog.
     CodewhaleCatalog,
+    /// Verified signed cloud-facts price block; expiry is checked at projection.
+    CloudFacts,
 }
 
 impl PricingProvenance {
@@ -68,6 +70,7 @@ impl PricingProvenance {
             Self::UserOverride => "user_override",
             Self::Unknown => "unknown",
             Self::CodewhaleCatalog => "codewhale_catalog",
+            Self::CloudFacts => "cloud_facts",
         }
     }
 
@@ -257,6 +260,23 @@ impl OfferingPricing {
     /// [`CatalogSource`].
     #[must_use]
     pub fn from_catalog_offering(offering: &CatalogOffering) -> Option<Self> {
+        Self::from_catalog_offering_at(offering, crate::catalog::now_unix())
+    }
+
+    /// Project at the dispatch clock when freezing a quote. Cloud-facts source
+    /// validity is signed and cannot be extended by a later transport refresh.
+    #[must_use]
+    pub fn from_catalog_offering_at(offering: &CatalogOffering, now: u64) -> Option<Self> {
+        let source = offering.pricing_source();
+        if let CatalogSource::CloudFacts {
+            fetched_at,
+            valid_until,
+            ..
+        } = source
+            && (*fetched_at > now || valid_until.is_some_and(|expires| now > expires))
+        {
+            return None;
+        }
         let cost = offering.cost.as_ref()?;
         // A provider/catalog price is untrusted numeric input.  Reject the
         // entire row when any published class is NaN, infinite, or negative;
@@ -281,9 +301,9 @@ impl OfferingPricing {
             output_per_million: cost.output,
             cache_read_per_million: cost.cache_read,
             cache_write_per_million: cost.cache_write,
-            provenance: provenance_from_source(&offering.source),
-            effective_at: effective_at_from_source(&offering.source),
-            endpoint_fingerprint: endpoint_fingerprint_from_source(&offering.source),
+            provenance: provenance_from_source(source),
+            effective_at: effective_at_from_source(source),
+            endpoint_fingerprint: endpoint_fingerprint_from_source(source),
         })
     }
 
@@ -504,6 +524,7 @@ pub fn catalog_cost_is_valid(cost: &ModelsDevCost) -> bool {
 
 fn provenance_from_source(source: &CatalogSource) -> PricingProvenance {
     match source {
+        CatalogSource::CloudFacts { .. } => PricingProvenance::CloudFacts,
         CatalogSource::Bundled | CatalogSource::ModelsDevLive { .. } => {
             PricingProvenance::ModelsDevBundled
         }
@@ -521,7 +542,8 @@ fn effective_at_from_source(source: &CatalogSource) -> Option<u64> {
     match source {
         CatalogSource::Live { fetched_at, .. }
         | CatalogSource::ModelsDevLive { fetched_at }
-        | CatalogSource::CodewhaleLive { fetched_at, .. } => Some(*fetched_at),
+        | CatalogSource::CodewhaleLive { fetched_at, .. }
+        | CatalogSource::CloudFacts { fetched_at, .. } => Some(*fetched_at),
         CatalogSource::Bundled
         | CatalogSource::ConfigOverride
         | CatalogSource::UserOverride
@@ -540,7 +562,8 @@ fn endpoint_fingerprint_from_source(source: &CatalogSource) -> Option<String> {
         | CatalogSource::ConfigOverride
         | CatalogSource::UserOverride
         | CatalogSource::CodewhaleBundled { .. }
-        | CatalogSource::CodewhaleLive { .. } => None,
+        | CatalogSource::CodewhaleLive { .. }
+        | CatalogSource::CloudFacts { .. } => None,
     }
 }
 

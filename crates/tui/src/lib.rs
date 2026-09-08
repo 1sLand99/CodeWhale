@@ -2226,6 +2226,7 @@ async fn run_async_main_dispatch(
             },
             Commands::Models(args) => {
                 let config = load_config_from_cli(&cli)?;
+                initialize_cloud_facts(&config);
                 run_models(&config, args).await
             }
             Commands::Speech(args) => {
@@ -2285,6 +2286,7 @@ async fn run_async_main_dispatch(
                     config.reasoning_effort = normalize_cli_reasoning_effort(reasoning_arg)?;
                     config.reasoning_effort_inferred_from_legacy_alias = false;
                 }
+                initialize_cloud_facts(&config);
                 let prompt = join_prompt_parts(&args.prompt);
                 let resume_session_id = resolve_exec_resume_session_id(&args, &workspace)?;
                 validate_exec_tool_authority_resume(
@@ -2468,6 +2470,7 @@ async fn run_async_main_dispatch(
                 } else if http_selected {
                     let (mut config, config_profile) =
                         load_config_from_cli_with_effective_profile(&cli)?;
+                    initialize_cloud_facts(&config);
                     let explicit_route_override =
                         crate::config::explicit_launch_provider_override().is_some()
                             || crate::config::explicit_launch_model_override().is_some();
@@ -2503,6 +2506,7 @@ async fn run_async_main_dispatch(
                     .await
                 } else if args.acp {
                     let config = load_config_from_cli(&cli)?;
+                    initialize_cloud_facts(&config);
                     let model = config.default_model();
                     acp_server::run_acp_server(config, model, workspace).await
                 } else {
@@ -3264,6 +3268,7 @@ async fn run_fleet_command(workspace: &Path, config: &Config, args: FleetArgs) -
             Ok(())
         }
         FleetCommand::Run(args) => {
+            initialize_cloud_facts(config);
             let max_workers = args.max_workers.clamp(1, 128);
             let manager =
                 manager.with_stale_after(Duration::from_secs(args.stale_after_seconds.max(1)));
@@ -7949,6 +7954,17 @@ fn resolve_workspace(cli: &Cli) -> PathBuf {
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
 }
 
+/// Activate facts only at accepted inference runtime settings boundaries.
+/// Identical settings preserve the shared ticket; readers track its generation.
+pub(crate) fn initialize_cloud_facts(config: &Config) {
+    let settings = config.cloud_facts_config().settings();
+    codewhale_cloud_facts::configure(&settings);
+    codewhale_cloud_facts::maybe_load_persisted_cache(&settings);
+    if tokio::runtime::Handle::try_current().is_ok() {
+        codewhale_cloud_facts::spawn_background_refresh(settings, None);
+    }
+}
+
 fn load_config_from_cli(cli: &Cli) -> Result<Config> {
     load_config_from_cli_with_effective_profile(cli).map(|(config, _)| config)
 }
@@ -8298,6 +8314,7 @@ fn pick_session_id() -> Result<String> {
 }
 
 async fn run_review(config: &Config, args: ReviewArgs) -> Result<()> {
+    initialize_cloud_facts(config);
     use crate::client::DeepSeekClient;
 
     // Resolved before anything is fetched or billed so an unknown
@@ -10862,6 +10879,7 @@ async fn run_interactive_with_notice(
         )?;
     }
     let config = &merged_config;
+    initialize_cloud_facts(config);
 
     if !cli.skip_onboarding {
         match crate::config::ensure_config_file_exists(cli.config.clone()) {
@@ -11706,6 +11724,7 @@ async fn run_workflow_tool_command_inner(
         }
     }
 
+    initialize_cloud_facts(&config);
     let model = resolve_exec_model(&config, None);
     let route = resolve_cli_exec_route(
         &config,

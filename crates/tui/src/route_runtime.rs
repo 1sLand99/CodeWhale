@@ -720,9 +720,21 @@ pub(crate) fn resolve_runtime_route_for_identity(
                     .to_string(),
             );
         }
+        let cloud_default = (model_selector.is_none()
+            && saved_provider_model.is_none()
+            && !catalog.endpoint_catalog_authoritative)
+            .then(|| {
+                provider.kind().and_then(|kind| {
+                    codewhale_config::cloud_facts::cloud_default_model_for_route(kind, &base_url)
+                        .map(|(model, _)| model)
+                })
+            })
+            .flatten();
         resolve_route_candidate_with_catalog_resolver(
             provider,
-            model_selector.filter(|_| !needs_local_default),
+            model_selector
+                .or(cloud_default.as_deref())
+                .filter(|_| !needs_local_default),
             saved_provider_model.filter(|_| !needs_local_default),
             Some(base_url),
             route_config.context_window_for_provider_config(provider),

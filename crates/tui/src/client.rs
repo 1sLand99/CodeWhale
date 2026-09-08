@@ -2351,20 +2351,17 @@ impl DeepSeekClient {
         let model =
             wire_model_for_provider_route(self.api_provider, &self.base_url, requested_model);
         let endpoint_fingerprint = crate::cost_status::endpoint_fingerprint(&self.base_url);
-        let provider_live_pricing =
-            u64::try_from(dispatched_at.timestamp())
-                .ok()
-                .and_then(|dispatched_at_unix| {
-                    endpoint_fingerprint.as_deref().and_then(|fingerprint| {
-                        crate::provider_catalog_live::fresh_provider_live_pricing_quote_at(
-                            self.api_provider,
-                            &self.provider_identity,
-                            &model,
-                            fingerprint,
-                            dispatched_at_unix,
-                        )
-                    })
-                });
+        let provider_live_pricing = u64::try_from(dispatched_at.timestamp())
+            .ok()
+            .and_then(|at| {
+                crate::provider_catalog_live::fresh_dispatch_pricing_quote_at(
+                    self.api_provider,
+                    &self.provider_identity,
+                    &model,
+                    &self.base_url,
+                    at,
+                )
+            });
         crate::cost_status::EffectiveRouteEnvelope {
             openrouter_vendor: self.openrouter_vendor.clone(),
             provider: self.api_provider,
@@ -2769,6 +2766,7 @@ impl DeepSeekClient {
             models
                 .into_iter()
                 .map(|model| CatalogOffering {
+                    cost_source: None,
                     provider: provider.clone(),
                     wire_model_id: model.id,
                     canonical_model: None,
@@ -3755,6 +3753,7 @@ fn codewhale_catalog_offerings_from_body(
             _ => codewhale_config::route::codewhale_endpoint_key_for_model(&id),
         };
         offerings.push(CatalogOffering {
+            cost_source: None,
             provider: provider.to_string(),
             wire_model_id: id,
             canonical_model: None,
@@ -3805,6 +3804,7 @@ fn named_gateway_catalog_offerings_from_body(
             });
             if let Some(matched) = same_provider_match {
                 CatalogOffering {
+                    cost_source: Some(matched.pricing_source().clone()),
                     provider: provider.to_string(),
                     wire_model_id: model.id,
                     canonical_model: matched.canonical_model.clone(),
@@ -3826,6 +3826,7 @@ fn named_gateway_catalog_offerings_from_body(
                 }
             } else {
                 CatalogOffering {
+                    cost_source: None,
                     provider: provider.to_string(),
                     wire_model_id: model.id,
                     canonical_model: None,
@@ -4077,6 +4078,7 @@ fn baseten_to_catalog_offering(
     let structured_output = item.supports_structured_output.or(Some(true));
 
     Ok(CatalogOffering {
+        cost_source: None,
         provider: provider.to_string(),
         wire_model_id: item.id.clone(),
         canonical_model: None,
@@ -4213,6 +4215,7 @@ fn openrouter_to_catalog_offering(
     });
 
     Ok(CatalogOffering {
+        cost_source: None,
         provider: provider.to_string(),
         wire_model_id: item.id.clone(),
         canonical_model: None,

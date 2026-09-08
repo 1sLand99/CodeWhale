@@ -68,6 +68,14 @@ pub enum CatalogSource {
     CodewhaleBundled { revision: String },
     /// Live Codewhale signed catalog fetched from CWC / `CODEWHALE_CATALOG_URL`.
     CodewhaleLive { revision: String, fetched_at: u64 },
+    /// Signed field patch, below provider-owned rows and explicit overrides.
+    CloudFacts {
+        facts_version: u64,
+        key_id: String,
+        fetched_at: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        valid_until: Option<u64>,
+    },
 }
 
 /// One catalog-layer offering row.
@@ -100,6 +108,9 @@ pub struct CatalogOffering {
     /// Provider-scoped pricing, when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost: Option<ModelsDevCost>,
+    /// Price authority stays separate when a layer changes only capabilities.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_source: Option<CatalogSource>,
     /// Input/output modalities for this offering, when known. Carried as the
     /// raw Models.dev shape so a factual `text` vs `multimodal` label can be
     /// derived without guessing; `None` means the layer did not state it (an
@@ -128,6 +139,11 @@ pub struct CatalogOffering {
 }
 
 impl CatalogOffering {
+    #[must_use]
+    pub fn pricing_source(&self) -> &CatalogSource {
+        self.cost_source.as_ref().unwrap_or(&self.source)
+    }
+
     /// The provider id as a route newtype.
     #[must_use]
     pub fn provider_id(&self) -> ProviderId {
@@ -318,6 +334,7 @@ fn offerings_from_models_dev(
                 structured_output: model.structured_output,
                 reasoning_options: model.reasoning_options.clone(),
                 source: source.clone(),
+                cost_source: None,
             });
         }
     }
@@ -635,6 +652,7 @@ impl CatalogSnapshot {
 ///  0 bundled              committed models.dev-shaped snapshot
 ///  5 codewhale bundled    Codewhale-owned offline snapshot
 /// 10 live models.dev      models.dev refresh
+/// 15 cloud facts          verified field patches (default off)
 /// 20 provider             per-provider /v1/models refresh
 /// 25 codewhale live       signed CWC catalog (authority)
 /// 30 config               config.toml [providers.*] overrides
@@ -650,7 +668,7 @@ pub struct CatalogCompiler {
     bundled: Vec<CatalogOffering>,
     codewhale_bundled: Vec<CatalogOffering>,
     models_dev_live: Vec<CatalogOffering>,
-    live: Vec<CatalogOffering>,
+    cloud_facts: Option<(crate::cloud_facts::ScopedFacts, u64)>,
     provider_live: Vec<CatalogOffering>,
     codewhale_live: Vec<CatalogOffering>,
     config: Vec<CatalogOffering>,
@@ -704,11 +722,28 @@ impl CatalogCompiler {
     /// Add live (combined models.dev + provider) rows.
     ///
     /// Prefer [`Self::with_models_dev_live`] / [`Self::with_provider_live`].
-    /// Kept so existing callers still compile; these rows sit between
-    /// models.dev live and provider live.
+    /// Source ownership places each row on the corresponding side of the
+    /// signed cloud layer; a legacy provider row never becomes a lower layer.
     #[must_use]
     pub fn with_live(mut self, rows: Vec<CatalogOffering>) -> Self {
-        self.live.extend(rows);
+        for row in rows {
+            if matches!(row.source, CatalogSource::ModelsDevLive { .. }) {
+                self.models_dev_live.push(row);
+            } else {
+                self.provider_live.push(row);
+            }
+        }
+        self
+    }
+
+    /// Apply signed facts between generic catalogs and provider-owned rows.
+    #[must_use]
+    pub fn with_cloud_facts(
+        mut self,
+        facts: &crate::cloud_facts::ScopedFacts,
+        fetched_at: u64,
+    ) -> Self {
+        self.cloud_facts = Some((facts.clone(), fetched_at));
         self
     }
 
@@ -749,8 +784,15 @@ impl CatalogCompiler {
             .into_iter()
             .chain(self.codewhale_bundled)
             .chain(self.models_dev_live)
-            .chain(self.live)
-            .chain(self.provider_live)
+        {
+            merged.insert(row.merge_key(), row);
+        }
+        if let Some((facts, fetched_at)) = self.cloud_facts {
+            crate::cloud_facts::catalog_patch::apply_model_patches(&mut merged, &facts, fetched_at);
+        }
+        for row in self
+            .provider_live
+            .into_iter()
             .chain(self.codewhale_live)
             .chain(self.config)
             .chain(self.overrides)

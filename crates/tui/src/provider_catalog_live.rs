@@ -76,7 +76,7 @@ pub struct ProviderCatalogRefreshTicket {
     generation: u64,
 }
 
-/// Immutable, secret-free provider-live rate evidence captured at dispatch.
+/// Immutable, secret-free catalog rate evidence captured at dispatch.
 ///
 /// Rates are stored as canonical decimal strings rather than `f64` so route
 /// receipts retain exact equality and stable JSON. `catalog_revision` binds
@@ -92,10 +92,22 @@ pub struct ProviderLivePricingQuote {
     pub(crate) catalog_revision: String,
     pub(crate) currency: Currency,
     pub(crate) provenance: PricingProvenance,
+    pub(crate) cloud_facts: Option<CloudFactsPricingSource>,
     pub(crate) input_per_million: Option<String>,
     pub(crate) output_per_million: Option<String>,
     pub(crate) cache_read_per_million: Option<String>,
     pub(crate) cache_write_per_million: Option<String>,
+}
+
+/// Signed source identity and validity, bound into a frozen rate receipt.
+/// The base URL is admitted only through the canonical official-endpoint
+/// contract; custom URLs or credential-bearing URLs cannot enter this field.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct CloudFactsPricingSource {
+    pub(crate) facts_version: u64,
+    pub(crate) key_id: String,
+    pub(crate) valid_until: Option<u64>,
+    pub(crate) base_url: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -108,6 +120,8 @@ struct ProviderLivePricingQuoteWire {
     catalog_revision: String,
     currency: Currency,
     provenance: PricingProvenance,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cloud_facts: Option<CloudFactsPricingSource>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     input_per_million: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -129,6 +143,7 @@ impl From<&ProviderLivePricingQuote> for ProviderLivePricingQuoteWire {
             catalog_revision: quote.catalog_revision.clone(),
             currency: quote.currency.clone(),
             provenance: quote.provenance.clone(),
+            cloud_facts: quote.cloud_facts.clone(),
             input_per_million: quote.input_per_million.clone(),
             output_per_million: quote.output_per_million.clone(),
             cache_read_per_million: quote.cache_read_per_million.clone(),
@@ -164,6 +179,7 @@ impl<'de> Deserialize<'de> for ProviderLivePricingQuote {
             catalog_revision: wire.catalog_revision,
             currency: wire.currency,
             provenance: wire.provenance,
+            cloud_facts: wire.cloud_facts,
             input_per_million: wire.input_per_million,
             output_per_million: wire.output_per_million,
             cache_read_per_million: wire.cache_read_per_million,
@@ -213,6 +229,7 @@ impl ProviderLivePricingQuote {
         output_per_million: &Option<String>,
         cache_read_per_million: &Option<String>,
         cache_write_per_million: &Option<String>,
+        cloud_facts: Option<&CloudFactsPricingSource>,
     ) -> Option<String> {
         let payload = serde_json::to_vec(&(
             "codewhale-provider-live-pricing-quote-v1",
@@ -229,6 +246,16 @@ impl ProviderLivePricingQuote {
             cache_write_per_million,
         ))
         .ok()?;
+        // Preserve the existing provider-live wire revision. The additional
+        // cloud source is independently domain-separated and hashes the whole
+        // original binding as well as the signed version/key/expiry.
+        let payload = match cloud_facts {
+            Some(source) => {
+                serde_json::to_vec(&("codewhale-cloud-facts-pricing-quote-v1", payload, source))
+                    .ok()?
+            }
+            None => payload,
+        };
         Some(format!("sha256:{}", crate::hashing::sha256_hex(payload)))
     }
 
@@ -264,6 +291,7 @@ impl ProviderLivePricingQuote {
             &output_per_million,
             &cache_read_per_million,
             &cache_write_per_million,
+            None,
         )?;
         Some(Self {
             provider,
@@ -274,6 +302,7 @@ impl ProviderLivePricingQuote {
             catalog_revision,
             currency: pricing.currency.clone(),
             provenance: pricing.provenance.clone(),
+            cloud_facts: None,
             input_per_million,
             output_per_million,
             cache_read_per_million,
@@ -316,13 +345,33 @@ impl ProviderLivePricingQuote {
             || self.wire_model != wire_model
             || self.endpoint_fingerprint != endpoint_fingerprint
             || self.catalog_fetched_at > dispatched_at_unix
-            || dispatched_at_unix.saturating_sub(self.catalog_fetched_at)
-                >= DEFAULT_PROVIDER_CATALOG_TTL_SECS
             || self.currency != Currency::Usd
-            || self.provenance != PricingProvenance::ProviderLive
-            || !reviewed_provider_live_scope(provider, provider_identity, endpoint_fingerprint)
         {
             return None;
+        }
+        match (&self.provenance, &self.cloud_facts) {
+            (PricingProvenance::ProviderLive, None)
+                if dispatched_at_unix.saturating_sub(self.catalog_fetched_at)
+                    < DEFAULT_PROVIDER_CATALOG_TTL_SECS
+                    && reviewed_provider_live_scope(
+                        provider,
+                        provider_identity,
+                        endpoint_fingerprint,
+                    ) => {}
+            (PricingProvenance::CloudFacts, Some(source))
+                if source.facts_version > 0
+                    && !source.key_id.is_empty()
+                    && source.key_id.len() <= 128
+                    && source
+                        .key_id
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+                    && source
+                        .valid_until
+                        .is_none_or(|expires| dispatched_at_unix <= expires)
+                    && cloud_pricing_scope(provider, provider_identity, &source.base_url)
+                    && base_url_fingerprint(&source.base_url) == endpoint_fingerprint => {}
+            _ => return None,
         }
         let input_per_million = Self::parse_rate(&self.input_per_million)?;
         let output_per_million = Self::parse_rate(&self.output_per_million)?;
@@ -339,7 +388,14 @@ impl ProviderLivePricingQuote {
         }
         // A reviewed per-token route needs both ordinary request classes. Cache
         // classes remain optional and fail closed later if a turn used them.
-        if cost.input.is_none() || cost.output.is_none() {
+        if self.cloud_facts.is_none() && (cost.input.is_none() || cost.output.is_none()) {
+            return None;
+        }
+        if cost.input.is_none()
+            && cost.output.is_none()
+            && cost.cache_read.is_none()
+            && cost.cache_write.is_none()
+        {
             return None;
         }
         let expected_revision = Self::revision_for(
@@ -354,6 +410,7 @@ impl ProviderLivePricingQuote {
             &self.output_per_million,
             &self.cache_read_per_million,
             &self.cache_write_per_million,
+            self.cloud_facts.as_ref(),
         )?;
         if self.catalog_revision != expected_revision {
             return None;
@@ -572,6 +629,7 @@ fn load_from_disk_unlocked_with_limit(path: &Path, max_bytes: u64) -> Option<Pro
             && entry.offerings.iter().all(|row| {
                 row.provider == identity
                     && crate::provider_lake::valid_catalog_model_id(&row.wire_model_id)
+                    && provider_cost_source_allowed(row)
                     && matches!(&row.source, codewhale_config::catalog::CatalogSource::Live {
                         base_url_fingerprint, fetched_at
                     } if base_url_fingerprint == &entry.base_url_fingerprint && *fetched_at == entry.fetched_at)
@@ -584,6 +642,18 @@ fn load_from_disk_unlocked_with_limit(path: &Path, max_bytes: u64) -> Option<Pro
         .entries
         .retain(|_, entry| !is_account_scoped_scope(&entry.provider, &entry.base_url_fingerprint));
     Some(cache)
+}
+
+fn provider_cost_source_allowed(row: &codewhale_config::catalog::CatalogOffering) -> bool {
+    use codewhale_config::catalog::CatalogSource;
+    matches!(
+        row.cost_source,
+        None | Some(
+            CatalogSource::Bundled
+                | CatalogSource::CodewhaleBundled { .. }
+                | CatalogSource::ModelsDevLive { .. }
+        )
+    )
 }
 
 fn load_from_disk_unlocked(path: &Path) -> Option<ProviderCatalogCache> {
@@ -1221,6 +1291,106 @@ pub(crate) fn fresh_provider_live_pricing_quote_at(
     )
 }
 
+fn cloud_pricing_scope(provider: ApiProvider, identity: &str, base_url: &str) -> bool {
+    provider != ApiProvider::OpenaiCodex
+        && identity == provider.as_str()
+        && codewhale_config::cloud_facts::scope::base_url_allowed(provider.as_str(), base_url)
+}
+
+/// Capture the effective mutable price authority once. Provider-owned live
+/// prices retain priority; signed cloud prices are admitted only on the exact
+/// canonical official route. The historical wire field name remains stable.
+pub(crate) fn fresh_dispatch_pricing_quote_at(
+    provider: ApiProvider,
+    provider_identity: &str,
+    wire_model: &str,
+    base_url: &str,
+    dispatched_at_unix: u64,
+) -> Option<ProviderLivePricingQuote> {
+    let endpoint_fingerprint = base_url_fingerprint(base_url);
+    if let Some(quote) = fresh_provider_live_pricing_quote_at(
+        provider,
+        provider_identity,
+        wire_model,
+        &endpoint_fingerprint,
+        dispatched_at_unix,
+    ) {
+        return Some(quote);
+    }
+    if !cloud_pricing_scope(provider, provider_identity, base_url) {
+        return None;
+    }
+    let snapshot = codewhale_config::cloud_facts::overlay::snapshot();
+    let facts = snapshot.facts.as_ref()?;
+    let offering = crate::provider_lake::catalog_offering_for_route(
+        provider,
+        provider_identity,
+        base_url,
+        wire_model,
+    )?;
+    let codewhale_config::catalog::CatalogSource::CloudFacts {
+        facts_version,
+        key_id,
+        fetched_at,
+        valid_until,
+    } = offering.pricing_source()
+    else {
+        return None;
+    };
+    // Provider cache files cannot authenticate a cloud price by copying a
+    // source stamp. This row must be a projection of the current verified
+    // overlay, with matching independent price authority and exact wire ID.
+    if offering.wire_model_id != wire_model
+        || !matches!(
+            offering.source,
+            codewhale_config::catalog::CatalogSource::CloudFacts { .. }
+        )
+        || *facts_version != facts.facts_version
+        || key_id != &facts.key_id
+        || *valid_until != facts.valid_until
+    {
+        return None;
+    }
+    let pricing = OfferingPricing::from_catalog_offering_at(&offering, dispatched_at_unix)?;
+    let mut quote = ProviderLivePricingQuote::from_pricing(
+        provider,
+        provider_identity,
+        wire_model,
+        &endpoint_fingerprint,
+        *fetched_at,
+        &pricing,
+    )?;
+    quote.cloud_facts = Some(CloudFactsPricingSource {
+        facts_version: *facts_version,
+        key_id: key_id.clone(),
+        valid_until: *valid_until,
+        base_url: base_url.to_string(),
+    });
+    quote.catalog_revision = ProviderLivePricingQuote::revision_for(
+        quote.provider,
+        &quote.provider_identity,
+        &quote.wire_model,
+        &quote.endpoint_fingerprint,
+        quote.catalog_fetched_at,
+        &quote.currency,
+        &quote.provenance,
+        &quote.input_per_million,
+        &quote.output_per_million,
+        &quote.cache_read_per_million,
+        &quote.cache_write_per_million,
+        quote.cloud_facts.as_ref(),
+    )?;
+    quote.pricing_for_route(
+        provider,
+        provider_identity,
+        wire_model,
+        &endpoint_fingerprint,
+        dispatched_at_unix,
+    )?;
+    (snapshot.generation == codewhale_config::cloud_facts::overlay::snapshot().generation)
+        .then_some(quote)
+}
+
 /// Record and atomically persist a successful provider refresh.
 ///
 /// `ProviderCatalogCache::record_success` replaces the exact scope, so models
@@ -1239,6 +1409,7 @@ fn record_success_for_identity(
     if delta.offerings.iter().any(|row| {
         row.provider != provider
             || !crate::provider_lake::valid_catalog_model_id(&row.wire_model_id)
+            || !provider_cost_source_allowed(row)
     }) {
         return record_failure_for_identity(
             kind,
@@ -2194,5 +2365,320 @@ mod tests {
         assert!(load_from_disk_unlocked_with_limit(&fifo, MAX_CACHE_BYTES).is_none());
         assert!(open_cache_lock(&fifo).is_err());
         assert!(load_from_disk_unlocked_with_limit(dir.path(), MAX_CACHE_BYTES).is_none());
+    }
+
+    struct CloudQuoteReset;
+    impl Drop for CloudQuoteReset {
+        fn drop(&mut self) {
+            codewhale_config::cloud_facts::overlay::clear();
+            crate::provider_lake::clear_live_snapshot();
+            reset_cache_for_test();
+        }
+    }
+
+    fn install_cloud_quote_fixture(
+        channel: &str,
+        provider: ApiProvider,
+        version: u64,
+        input: f64,
+        now: u64,
+    ) {
+        use codewhale_config::cloud_facts::{
+            CloudFactsState, CloudFactsStatus, FactsOrigin, ModelFact, PricingFact, ScopedFacts,
+            overlay,
+        };
+        let ticket = overlay::configure(true, "cloud-quote-fixture").unwrap();
+        assert!(overlay::publish(
+            &ticket,
+            Some(ScopedFacts {
+                channel: channel.into(),
+                facts_version: version,
+                key_id: "cwf-test-only".into(),
+                valid_until: Some(now + 60),
+                models: vec![ModelFact {
+                    provider: provider.as_str().into(),
+                    id: "cloud-quote-fixture".into(),
+                    context_window: Some(16_384),
+                    pricing: Some(PricingFact {
+                        input_per_m: Some(input),
+                        output_per_m: Some(2.0),
+                        cache_read_per_m: None,
+                    }),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            CloudFactsStatus {
+                state: CloudFactsState::Verified {
+                    channel: channel.into(),
+                    facts_version: version,
+                    key_id: "cwf-test-only".into(),
+                    fetched_at: now,
+                    origin: FactsOrigin::LocalFile,
+                    stale: false,
+                    patches: 1,
+                    defaults: 0,
+                    announcements: 0,
+                },
+                ..Default::default()
+            },
+        ));
+    }
+
+    #[test]
+    fn cloud_quote_freezes_actual_dispatch_and_survives_refresh_disable_and_reload() {
+        let _env = lock_test_env();
+        let _live = crate::provider_lake::lock_live_snapshot();
+        let home = tempfile::tempdir().unwrap();
+        let _home = EnvVarGuard::set("CODEWHALE_HOME", home.path());
+        let _enabled = EnvVarGuard::remove("CODEWHALE_DISABLE_CLOUD_FACTS");
+        let _reset = CloudQuoteReset;
+        reset_cache_for_test();
+        crate::provider_lake::clear_live_snapshot();
+        let now = chrono::Utc::now();
+        let at = now.timestamp() as u64;
+        let base = crate::config::DEFAULT_OPENAI_BASE_URL;
+        install_cloud_quote_fixture("quote-frozen", ApiProvider::Openai, 91, 1.0, at);
+        let route = crate::cost_status::EffectiveRouteEnvelope::capture(
+            None,
+            ApiProvider::Openai,
+            "openai",
+            "cloud-quote-fixture",
+            Some(base),
+            now,
+        );
+        let quote = route
+            .provider_live_pricing
+            .as_ref()
+            .expect("frozen cloud price");
+        assert_eq!(quote.provenance, PricingProvenance::CloudFacts);
+        assert_eq!(quote.cloud_facts.as_ref().unwrap().facts_version, 91);
+        assert_eq!(quote.input_per_million.as_deref(), Some("1"));
+        assert!(quote.cache_read_per_million.is_none());
+        let encoded = serde_json::to_string(&route).unwrap();
+        install_cloud_quote_fixture("quote-frozen", ApiProvider::Openai, 92, 9.0, at);
+        let newer = fresh_dispatch_pricing_quote_at(
+            ApiProvider::Openai,
+            "openai",
+            "cloud-quote-fixture",
+            base,
+            at,
+        )
+        .unwrap();
+        assert_eq!(newer.input_per_million.as_deref(), Some("9"));
+        assert_ne!(newer.catalog_revision, quote.catalog_revision);
+        codewhale_config::cloud_facts::overlay::clear();
+        assert!(
+            fresh_dispatch_pricing_quote_at(
+                ApiProvider::Openai,
+                "openai",
+                "cloud-quote-fixture",
+                base,
+                at,
+            )
+            .is_none()
+        );
+        let restored: crate::cost_status::EffectiveRouteEnvelope =
+            serde_json::from_str(&encoded).unwrap();
+        assert_eq!(restored, route);
+        let pricing = restored
+            .provider_live_pricing
+            .as_ref()
+            .unwrap()
+            .pricing_for_route(
+                ApiProvider::Openai,
+                "openai",
+                "cloud-quote-fixture",
+                &base_url_fingerprint(base),
+                at,
+            )
+            .unwrap();
+        assert_eq!(pricing.input_per_million, Some(1.0));
+        // Expiry is checked at dispatch; loading later does not reprice history.
+        assert!(
+            quote
+                .pricing_for_route(
+                    ApiProvider::Openai,
+                    "openai",
+                    "cloud-quote-fixture",
+                    &base_url_fingerprint(base),
+                    at + 61,
+                )
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn cloud_quote_rejects_cross_route_and_modified_source_receipts() {
+        let _env = lock_test_env();
+        let _live = crate::provider_lake::lock_live_snapshot();
+        let home = tempfile::tempdir().unwrap();
+        let _home = EnvVarGuard::set("CODEWHALE_HOME", home.path());
+        let _enabled = EnvVarGuard::remove("CODEWHALE_DISABLE_CLOUD_FACTS");
+        let _reset = CloudQuoteReset;
+        reset_cache_for_test();
+        crate::provider_lake::clear_live_snapshot();
+        let at = now_unix();
+        let base = crate::config::DEFAULT_OPENAI_BASE_URL;
+        install_cloud_quote_fixture("quote-binding", ApiProvider::Openai, 93, 1.0, at);
+        let quote = fresh_dispatch_pricing_quote_at(
+            ApiProvider::Openai,
+            "openai",
+            "cloud-quote-fixture",
+            base,
+            at,
+        )
+        .unwrap();
+        for (provider, identity, endpoint) in [
+            (ApiProvider::Openai, "openai", "https://proxy.example/v1"),
+            (ApiProvider::Custom, "openai", base),
+            (ApiProvider::Openai, "named-openai", base),
+            (
+                ApiProvider::Openai,
+                "openai",
+                "https://secret@api.openai.com/v1",
+            ),
+        ] {
+            assert!(
+                fresh_dispatch_pricing_quote_at(
+                    provider,
+                    identity,
+                    "cloud-quote-fixture",
+                    endpoint,
+                    at
+                )
+                .is_none()
+            );
+        }
+        let value = serde_json::to_value(&quote).unwrap();
+        for (field, replacement) in [
+            ("facts_version", serde_json::json!(94)),
+            ("key_id", serde_json::json!("cwf-relabelled")),
+            ("valid_until", serde_json::json!(at + 600)),
+            ("base_url", serde_json::json!("https://proxy.example/v1")),
+        ] {
+            let mut modified = value.clone();
+            modified["cloud_facts"][field] = replacement;
+            assert!(
+                serde_json::from_value::<ProviderLivePricingQuote>(modified).is_err(),
+                "changed {field} accepted"
+            );
+        }
+        let mut invalid = quote.clone();
+        invalid.cloud_facts.as_mut().unwrap().base_url = "https://secret@api.openai.com/v1".into();
+        assert!(serde_json::to_value(invalid).unwrap().is_null());
+        assert!(
+            quote
+                .pricing_for_route(
+                    ApiProvider::Openai,
+                    "openai",
+                    "different-model",
+                    &base_url_fingerprint(base),
+                    at,
+                )
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn cloud_quote_static_endpoint_survives_operator_endpoint_changes() {
+        let _env = lock_test_env();
+        let _live = crate::provider_lake::lock_live_snapshot();
+        let home = tempfile::tempdir().unwrap();
+        let _home = EnvVarGuard::set("CODEWHALE_HOME", home.path());
+        let _enabled = EnvVarGuard::remove("CODEWHALE_DISABLE_CLOUD_FACTS");
+        let _reset = CloudQuoteReset;
+        reset_cache_for_test();
+        crate::provider_lake::clear_live_snapshot();
+        let at = now_unix();
+        let base = ApiProvider::Codewhale.default_base_url();
+        let private = "https://private.example/v1?api_key=public-test-marker";
+        let declared = EnvVarGuard::set("CODEWHALE_API_BASE", private);
+        // The ordinary runtime credential contract intentionally accepts this
+        // explicit operator route. It is not a public signed-facts authority.
+        assert!(codewhale_config::provider_base_url_is_official(
+            codewhale_config::ProviderKind::Codewhale,
+            private,
+        ));
+        install_cloud_quote_fixture("quote-static", ApiProvider::Codewhale, 94, 1.0, at);
+        assert!(
+            fresh_dispatch_pricing_quote_at(
+                ApiProvider::Codewhale,
+                "codewhale",
+                "cloud-quote-fixture",
+                private,
+                at,
+            )
+            .is_none()
+        );
+        let quote = fresh_dispatch_pricing_quote_at(
+            ApiProvider::Codewhale,
+            "codewhale",
+            "cloud-quote-fixture",
+            base,
+            at,
+        )
+        .unwrap();
+        let encoded = serde_json::to_string(&quote).unwrap();
+        assert!(!encoded.contains("private.example"));
+        assert!(!encoded.contains("public-test-marker"));
+        drop(declared);
+        let removed = EnvVarGuard::remove("CODEWHALE_API_BASE");
+        let reloaded: ProviderLivePricingQuote = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(reloaded, quote);
+        drop(removed);
+        let _changed = EnvVarGuard::set("CODEWHALE_API_BASE", "https://another-private.example/v1");
+        assert_eq!(
+            serde_json::from_str::<ProviderLivePricingQuote>(&encoded).unwrap(),
+            quote
+        );
+        assert!(
+            quote
+                .pricing_for_route(
+                    ApiProvider::Codewhale,
+                    "codewhale",
+                    "cloud-quote-fixture",
+                    &base_url_fingerprint(base),
+                    at,
+                )
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn durable_provider_catalog_cannot_claim_cloud_or_override_price_authority() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog.json");
+        let mut cache = ProviderCatalogCache::new();
+        cache.record_success(
+            stored_delta("openai", "fp", &["fixture"]),
+            DEFAULT_PROVIDER_CATALOG_TTL_SECS,
+        );
+        let baseline = PersistedProviderCatalogs {
+            schema_version: CACHE_SCHEMA_VERSION,
+            cache,
+        };
+        fs::write(&path, serde_json::to_vec(&baseline).unwrap()).unwrap();
+        assert!(load_from_disk_unlocked(&path).is_some());
+        for source in [
+            CatalogSource::CloudFacts {
+                facts_version: 7,
+                key_id: "cwf-test-only".into(),
+                fetched_at: now_unix(),
+                valid_until: None,
+            },
+            CatalogSource::ConfigOverride,
+            CatalogSource::UserOverride,
+            CatalogSource::Live {
+                base_url_fingerprint: "other".into(),
+                fetched_at: now_unix(),
+            },
+        ] {
+            let mut forged = baseline.clone();
+            forged.cache.entries.values_mut().next().unwrap().offerings[0].cost_source =
+                Some(source);
+            fs::write(&path, serde_json::to_vec(&forged).unwrap()).unwrap();
+            assert!(load_from_disk_unlocked(&path).is_none());
+        }
     }
 }

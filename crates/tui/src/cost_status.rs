@@ -99,7 +99,7 @@ pub struct EffectiveRouteEnvelope {
     pub openrouter_vendor: Option<String>,
     pub billing_surface: Option<String>,
     pub endpoint_fingerprint: Option<String>,
-    /// Frozen provider-live rates captured from the exact fresh catalog scope
+    /// Frozen provider-live or signed cloud rates captured from the exact catalog scope
     /// at CodeWhale's pre-permit application-dispatch boundary. Legacy
     /// receipts omit this and therefore cannot meter a reviewed custom route
     /// retroactively.
@@ -190,20 +190,19 @@ impl EffectiveRouteEnvelope {
             |config| crate::route_billing::for_route(config, provider),
         );
         let endpoint_fingerprint = base_url.and_then(endpoint_fingerprint);
-        let provider_live_pricing =
+        let provider_live_pricing = base_url.and_then(|base_url| {
             u64::try_from(dispatched_at.timestamp())
                 .ok()
-                .and_then(|dispatched_at_unix| {
-                    endpoint_fingerprint.as_deref().and_then(|fingerprint| {
-                        crate::provider_catalog_live::fresh_provider_live_pricing_quote_at(
-                            provider,
-                            &provider_identity,
-                            &model,
-                            fingerprint,
-                            dispatched_at_unix,
-                        )
-                    })
-                });
+                .and_then(|at| {
+                    crate::provider_catalog_live::fresh_dispatch_pricing_quote_at(
+                        provider,
+                        &provider_identity,
+                        &model,
+                        base_url,
+                        at,
+                    )
+                })
+        });
         Self {
             provider,
             provider_identity: sanitize_persisted_route_label(&provider_identity),

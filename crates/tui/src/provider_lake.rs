@@ -126,7 +126,7 @@ static LIVE_GENERATION: AtomicU64 = AtomicU64::new(0);
 /// it was computed from. Re-merging ~5,700 offerings per call made every
 /// `/model` open pay a multi-second, UI-thread-blocking cost; the merge result
 /// only changes when the live snapshot changes, so cache it.
-static MERGED_CACHE: RwLock<Option<(u64, Arc<CatalogSnapshot>)>> = RwLock::new(None);
+static MERGED_CACHE: RwLock<Option<((u64, u64), Arc<CatalogSnapshot>)>> = RwLock::new(None);
 
 /// Generation/freshness-scoped route resolvers for provider-owned catalogs.
 /// Picker calls read the merged snapshot directly; execution projects that
@@ -138,6 +138,7 @@ static RUNTIME_RESOLVER_CACHE: RwLock<BTreeMap<String, RuntimeResolverCacheEntry
 #[derive(Clone)]
 struct RuntimeResolverCacheEntry {
     generation: u64,
+    cloud_generation: u64,
     status_is_fresh: bool,
     endpoint_catalog_authoritative: bool,
     resolver: RouteResolver,
@@ -410,7 +411,10 @@ pub(crate) fn lock_live_snapshot() -> LiveSnapshotLock {
 /// `LIVE_GENERATION`; every other call returns the cached `Arc` (the picker
 /// calls this per row, so it must be cheap).
 fn merged_snapshot() -> Arc<CatalogSnapshot> {
-    let generation = LIVE_GENERATION.load(Ordering::SeqCst);
+    let generation = (
+        LIVE_GENERATION.load(Ordering::SeqCst),
+        codewhale_config::cloud_facts::overlay::snapshot().generation,
+    );
     if let Ok(guard) = MERGED_CACHE.read()
         && let Some((cached_generation, cached)) = guard.as_ref()
         && *cached_generation == generation
@@ -429,10 +433,11 @@ fn merged_snapshot() -> Arc<CatalogSnapshot> {
 
 /// Uncached merge (see [`merged_snapshot`] for the caching seam).
 fn compute_merged_snapshot() -> CatalogSnapshot {
+    let cloud = codewhale_config::cloud_facts::overlay::snapshot();
     let Ok(live) = LIVE_SNAPSHOT.read() else {
         return apply_provider_model_cutlines(bundled_snapshot().clone());
     };
-    if live.models_dev.is_none() && live.per_provider.is_empty() {
+    if live.models_dev.is_none() && live.per_provider.is_empty() && cloud.facts.is_none() {
         return apply_provider_model_cutlines(bundled_snapshot().clone());
     }
 
@@ -467,6 +472,15 @@ fn compute_merged_snapshot() -> CatalogSnapshot {
             }
         }
     }
+    if let Some(facts) = &cloud.facts {
+        codewhale_config::cloud_facts::catalog_patch::apply_model_patches(
+            &mut merged,
+            facts,
+            cloud.fetched_at.unwrap_or(0),
+        );
+        // A provider roster owns removals as well as additions; cloud rows are lower priority.
+        merged.retain(|(provider, _), _| !is_authoritative(provider));
+    }
     for provider_snapshot in live
         .per_provider
         .iter()
@@ -489,6 +503,22 @@ fn compute_merged_snapshot() -> CatalogSnapshot {
         offerings: merged.into_values().collect(),
     };
     apply_provider_model_cutlines(merged)
+}
+
+fn apply_cloud_facts_for_provider(
+    rows: &mut BTreeMap<(String, String), CatalogOffering>,
+    provider: &str,
+    cloud: &codewhale_config::cloud_facts::overlay::OverlaySnapshot,
+) {
+    if let Some(facts) = &cloud.facts {
+        let mut scoped = (**facts).clone();
+        scoped.models.retain(|model| model.provider == provider);
+        codewhale_config::cloud_facts::catalog_patch::apply_model_patches(
+            rows,
+            &scoped,
+            cloud.fetched_at.unwrap_or(0),
+        );
+    }
 }
 
 /// Maps an [`ApiProvider`] to its bundled-catalog provider id.
@@ -565,6 +595,8 @@ pub(crate) fn runtime_catalog_resolver_for_identity(
     let fingerprint = base_url_fingerprint(base_url);
     let status_is_fresh = matches!(status, CatalogStatus::Fresh);
     let generation = LIVE_GENERATION.load(Ordering::SeqCst);
+    let cloud = codewhale_config::cloud_facts::overlay::snapshot();
+    let cloud_generation = cloud.generation;
     let cache_key = format!(
         "{}\u{1f}{}\u{1f}{}",
         provider.as_str(),
@@ -575,6 +607,7 @@ pub(crate) fn runtime_catalog_resolver_for_identity(
     if let Ok(cache) = RUNTIME_RESOLVER_CACHE.read()
         && let Some(cached) = cache.get(&cache_key)
         && cached.generation == generation
+        && cached.cloud_generation == cloud_generation
         && cached.status_is_fresh == status_is_fresh
     {
         return RuntimeCatalogResolver {
@@ -621,21 +654,76 @@ pub(crate) fn runtime_catalog_resolver_for_identity(
     // Nonselected providers retain the bundled/curated resolver baseline.
     // Another endpoint's live roster must not alter this route's ownership
     // checks (including strict-direct rejection of known foreign model ids).
-    let mut route_offerings: BTreeMap<(String, String), ProviderModelOffering> = bundled_snapshot()
-        .to_offerings()
-        .into_iter()
-        .map(|offering| (offering_key(&offering), offering))
+    let mut source_rows: BTreeMap<(String, String), CatalogOffering> = bundled_snapshot()
+        .offerings
+        .iter()
+        .cloned()
+        .map(|row| ((row.provider.clone(), row.wire_model_id.clone()), row))
         .collect();
+    let cloud_applies = !endpoint_catalog_authoritative
+        && provider.kind().is_some_and(|kind| {
+            codewhale_config::cloud_facts::scope::base_url_allowed(kind.as_str(), base_url)
+        })
+        && provider != ApiProvider::OpenaiCodex;
     if !endpoint_catalog_authoritative {
         for row in &selected_rows {
-            let offering = row.to_offering();
-            route_offerings.insert(offering_key(&offering), offering);
+            source_rows.insert(
+                (row.provider.clone(), row.wire_model_id.clone()),
+                row.clone(),
+            );
+        }
+        if cloud_applies {
+            apply_cloud_facts_for_provider(&mut source_rows, catalog_id.as_ref(), &cloud);
         }
     }
+    let mut route_offerings: BTreeMap<(String, String), ProviderModelOffering> = source_rows
+        .values()
+        .map(CatalogOffering::to_offering)
+        .map(|offering| (offering_key(&offering), offering))
+        .collect();
     // Curated transport facts win ordinary Models.dev collisions, exactly as
     // in RouteResolver::new(). A fresh exact roster replaces its whole scope.
     for offering in bundled_offerings() {
         route_offerings.insert(offering_key(&offering), offering);
+    }
+    // Keep curated transport identity, applying only fields explicitly signed
+    // at the lower cloud layer. Hidden rows must not be resurrected here.
+    if cloud_applies && let Some(facts) = &cloud.facts {
+        for patch in facts
+            .models
+            .iter()
+            .filter(|patch| patch.provider == catalog_id.as_ref())
+        {
+            let key = (patch.provider.clone(), patch.id.clone());
+            match patch.op {
+                codewhale_config::cloud_facts::types::ModelOp::Hide => {
+                    route_offerings.remove(&key);
+                }
+                codewhale_config::cloud_facts::types::ModelOp::Upsert => {
+                    if let Some(offering) = route_offerings.get_mut(&key) {
+                        if let Some(context) = patch.context_window {
+                            offering.limits.context_tokens = Some(context);
+                        }
+                        if let Some(output) = patch.max_output {
+                            offering.limits.output_tokens = Some(output);
+                        }
+                        if let Some(reasoning) = patch.reasoning {
+                            offering.capabilities.reasoning =
+                                codewhale_config::route::CapabilityState::from_optional_bool(Some(
+                                    reasoning,
+                                ));
+                        }
+                        if patch.pricing.is_some() {
+                            if let Some(row) = source_rows.get(&key) {
+                                offering.pricing =
+                                    codewhale_config::pricing::route_pricing_sku(row);
+                            }
+                        }
+                    }
+                }
+                codewhale_config::cloud_facts::types::ModelOp::Deprecate => {}
+            }
+        }
     }
     if endpoint_catalog_authoritative {
         let transport_provider = if provider == ApiProvider::Custom {
@@ -672,6 +760,7 @@ pub(crate) fn runtime_catalog_resolver_for_identity(
             cache_key,
             RuntimeResolverCacheEntry {
                 generation,
+                cloud_generation,
                 status_is_fresh,
                 endpoint_catalog_authoritative,
                 resolver: resolver.clone(),
@@ -878,6 +967,11 @@ pub(crate) fn catalog_offering_for_route(
         return None;
     }
     let offering = catalog_offering_for_model_identity(provider, Some(identity), model)?;
+    if matches!(offering.source, CatalogSource::CloudFacts { .. })
+        && !codewhale_config::cloud_facts::scope::base_url_allowed(provider.as_str(), base_url)
+    {
+        return bundled_catalog_offering_for_model(provider, model);
+    }
     if matches!(offering.source, CatalogSource::Live { .. })
         && !row_matches_endpoint_fingerprint(&offering, &base_url_fingerprint(base_url))
     {
@@ -1005,18 +1099,32 @@ pub(crate) fn catalog_models_for_route(
     // Do not borrow a live partition published for another endpoint.
     let catalog_id = catalog_provider_id(provider);
     let live = LIVE_SNAPSHOT.read().ok();
-    let mut rows: BTreeMap<String, CatalogOffering> = bundled_snapshot()
+    let mut rows: BTreeMap<(String, String), CatalogOffering> = bundled_snapshot()
         .offerings_for_provider(catalog_id)
         .into_iter()
-        .map(|row| (row.wire_model_id.clone(), row.clone()))
+        .map(|row| {
+            (
+                (row.provider.clone(), row.wire_model_id.clone()),
+                row.clone(),
+            )
+        })
         .collect();
     if let Some(models_dev) = live.as_ref().and_then(|live| live.models_dev.as_ref()) {
         for row in models_dev.offerings_for_provider(catalog_id) {
-            rows.insert(row.wire_model_id.clone(), row.clone());
+            rows.insert(
+                (row.provider.clone(), row.wire_model_id.clone()),
+                row.clone(),
+            );
         }
     }
+    let cloud = codewhale_config::cloud_facts::overlay::snapshot();
+    if provider.kind().is_some_and(|kind| {
+        codewhale_config::cloud_facts::scope::base_url_allowed(kind.as_str(), base_url)
+    }) {
+        apply_cloud_facts_for_provider(&mut rows, catalog_id, &cloud);
+    }
     let mut models = catalog_models_from_offerings(rows.values());
-    if models.is_empty() {
+    if models.is_empty() && cloud.facts.is_none() {
         models.extend(
             model_completion_names_for_provider(provider)
                 .into_iter()
@@ -2940,5 +3048,113 @@ mod tests {
         );
 
         clear_live_snapshot();
+    }
+
+    #[test]
+    fn cloud_generation_updates_exact_catalog_defaults_and_disable_restores_baseline() {
+        use codewhale_config::cloud_facts::{
+            CloudFactsStatus, ModelFact, ProviderDefaultFact, ScopedFacts, overlay,
+        };
+        let _live = lock_live_snapshot();
+        let home = tempfile::tempdir().unwrap();
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", home.path());
+        let _enabled = crate::test_support::EnvVarGuard::remove("CODEWHALE_DISABLE_CLOUD_FACTS");
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                overlay::clear();
+                clear_live_snapshot();
+                crate::provider_catalog_live::reset_cache_for_test();
+            }
+        }
+        let _reset = Reset;
+        overlay::clear();
+        clear_live_snapshot();
+        crate::provider_catalog_live::reset_cache_for_test();
+        let provider = ApiProvider::Openai;
+        let base = provider.default_base_url();
+        let model = "cloud-catalog-fixture";
+        let config = Config {
+            provider: Some("openai".into()),
+            ..Default::default()
+        };
+        let baseline = crate::route_runtime::resolve_runtime_route(&config, provider, None)
+            .unwrap()
+            .model;
+        assert!(
+            !catalog_models_for_route(provider, "openai", base)
+                .iter()
+                .any(|id| id == model)
+        );
+        let ticket = overlay::configure(true, "catalog-generation-test").unwrap();
+        let mut facts = ScopedFacts {
+            channel: "catalog-generation-test".into(),
+            facts_version: 1,
+            key_id: "cwf-test-only".into(),
+            models: vec![ModelFact {
+                provider: "openai".into(),
+                id: model.into(),
+                context_window: Some(31_337),
+                ..Default::default()
+            }],
+            provider_defaults: BTreeMap::from([(
+                "openai".into(),
+                ProviderDefaultFact {
+                    default_model: Some(model.into()),
+                    ..Default::default()
+                },
+            )]),
+            ..Default::default()
+        };
+        assert!(overlay::publish(
+            &ticket,
+            Some(facts.clone()),
+            CloudFactsStatus::default()
+        ));
+        assert!(
+            catalog_models_for_route(provider, "openai", base)
+                .iter()
+                .any(|id| id == model)
+        );
+        assert!(
+            catalog_models_for_route(provider, "openai", "https://catalog-proxy.invalid/v1")
+                .is_empty()
+        );
+        let route = crate::route_runtime::resolve_runtime_route(&config, provider, None).unwrap();
+        assert_eq!(route.model, model);
+        assert_eq!(route.candidate.limits().context_tokens, Some(31_337));
+        assert_eq!(
+            crate::route_runtime::resolve_runtime_route(&config, provider, Some(&baseline))
+                .unwrap()
+                .model,
+            baseline
+        );
+        facts.facts_version = 2;
+        facts.models[0].context_window = Some(62_674);
+        assert!(overlay::publish(
+            &ticket,
+            Some(facts),
+            CloudFactsStatus::default()
+        ));
+        assert_eq!(
+            crate::route_runtime::resolve_runtime_route(&config, provider, None)
+                .unwrap()
+                .candidate
+                .limits()
+                .context_tokens,
+            Some(62_674)
+        );
+        overlay::clear();
+        assert_eq!(
+            crate::route_runtime::resolve_runtime_route(&config, provider, None)
+                .unwrap()
+                .model,
+            baseline
+        );
+        assert!(
+            !catalog_models_for_route(provider, "openai", base)
+                .iter()
+                .any(|id| id == model)
+        );
     }
 }
