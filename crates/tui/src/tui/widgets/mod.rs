@@ -8096,6 +8096,13 @@ mod tests {
     fn chat_widget_reserves_scrollbar_gutter_when_scrollbar_visible() {
         let content_hash = "0123456789abcdef".repeat(4);
         let capability_hash = "fedcba9876543210".repeat(4);
+        // System continuations paint a left rail as well as the right scrollbar.
+        // Neither decoration is part of a wrapped trust token.
+        let token_text = |text: &str| -> String {
+            text.chars()
+                .filter(|ch| !ch.is_whitespace() && !matches!(ch, '│' | '┃' | '\u{258f}'))
+                .collect()
+        };
         for filtered in [false, true] {
             let mut app = create_test_app();
             app.low_motion = true;
@@ -8134,14 +8141,32 @@ mod tests {
                 widget.render(area, &mut buf);
 
                 let rendered = buffer_text(&buf, area);
-                let joined: String = rendered
-                    .chars()
-                    .filter(|ch| !ch.is_whitespace() && !matches!(ch, '│' | '┃'))
-                    .collect();
+                let joined = token_text(&rendered);
                 for hash in [&content_hash, &capability_hash] {
                     assert!(
                         joined.contains(hash.as_str()),
                         "lost trust-token characters at {width}x{height}, filtered={filtered}: {rendered:?}"
+                    );
+                    // The decoration filter must still reject actual overpaint:
+                    // replace the last hex cell on this token's first row with
+                    // a scrollbar, as in the reported narrow-pane failure.
+                    let y = (area.y..area.bottom())
+                        .find(|&y| {
+                            buffer_text(&buf, Rect::new(area.x, y, width, 1)).contains(&hash[..16])
+                        })
+                        .expect("the first token segment is visible");
+                    let x = (area.x..area.right())
+                        .rev()
+                        .find(|&x| {
+                            let symbol = buf[(x, y)].symbol();
+                            symbol.len() == 1 && symbol.as_bytes()[0].is_ascii_hexdigit()
+                        })
+                        .expect("the token row contains hex cells");
+                    let mut overpainted = buf.clone();
+                    overpainted[(x, y)].set_symbol("│");
+                    assert!(
+                        !token_text(&buffer_text(&overpainted, area)).contains(hash.as_str()),
+                        "the token check must reject a scrollbar-erased hex cell"
                     );
                 }
                 if widget.scrollbar.is_some() {
