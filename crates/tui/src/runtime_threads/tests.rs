@@ -1132,6 +1132,7 @@ fn sample_turn(thread_id: &str, turn_id: &str, status: RuntimeTurnStatus) -> Tur
         routed_usage_drop_records: Vec::new(),
         routed_usage_source_ids: Vec::new(),
         routed_usage_dropped_records: 0,
+        model_request_diagnostics: None,
         error: None,
         item_ids: Vec::new(),
         steer_count: 0,
@@ -7709,6 +7710,206 @@ async fn monitor_separates_lifecycle_start_from_billing_dispatch_and_child_usage
 }
 
 #[tokio::test]
+async fn monitor_persists_only_terminal_request_diagnostics_per_turn() -> Result<()> {
+    let manager = test_manager(test_runtime_dir())?;
+    let thread = manager
+        .create_thread(CreateThreadRequest::default())
+        .await?;
+    let mut harness = install_mock_engine(&manager, &thread.id).await;
+    let first = manager
+        .start_turn(
+            &thread.id,
+            StartTurnRequest {
+                prompt: "request diagnostics fixture".to_string(),
+                ..StartTurnRequest::default()
+            },
+        )
+        .await?;
+    assert!(matches!(
+        harness.rx_op.recv().await,
+        Some(Op::SendMessage { .. })
+    ));
+
+    let engine_turn_id = "engine_request_diagnostics_first";
+    harness
+        .tx_event
+        .send(EngineEvent::TurnStarted {
+            turn_id: engine_turn_id.to_string(),
+            created_at: Utc::now(),
+            route: None,
+        })
+        .await?;
+    let pre_request = crate::tool_inspection::ToolInspectionSnapshot::from_prepared_request(
+        engine_turn_id,
+        0,
+        None,
+    );
+    harness
+        .tx_event
+        .send(EngineEvent::ToolRequestSnapshot {
+            snapshot: pre_request,
+        })
+        .await?;
+    for status in ["preparing", "waiting", "streaming", "settling"] {
+        harness.tx_event.send(EngineEvent::status(status)).await?;
+    }
+    harness
+        .tx_event
+        .send(EngineEvent::MessageStarted { index: 0 })
+        .await?;
+    harness
+        .tx_event
+        .send(EngineEvent::MessageComplete { index: 0 })
+        .await?;
+    let mut foreign_terminal =
+        crate::tool_inspection::ToolInspectionSnapshot::from_prepared_request(
+            "engine_request_diagnostics_foreign",
+            1,
+            None,
+        );
+    foreign_terminal.terminal = Some(crate::tool_inspection::TurnStopDiagnostics {
+        model_requests_started: 99,
+        ..Default::default()
+    });
+    harness
+        .tx_event
+        .send(EngineEvent::ToolRequestSnapshot {
+            snapshot: foreign_terminal,
+        })
+        .await?;
+    let mut terminal_request =
+        crate::tool_inspection::ToolInspectionSnapshot::from_prepared_request(
+            engine_turn_id,
+            1,
+            None,
+        );
+    terminal_request.terminal = Some(crate::tool_inspection::TurnStopDiagnostics {
+        model_requests_started: 2,
+        transparent_stream_retries: 1,
+        stream_resumes: 1,
+        ..Default::default()
+    });
+    harness
+        .tx_event
+        .send(EngineEvent::ToolRequestSnapshot {
+            snapshot: terminal_request,
+        })
+        .await?;
+    harness
+        .tx_event
+        .send(EngineEvent::TurnComplete {
+            usage: Usage::default(),
+            parent_route_usage: Usage::default(),
+            routed_usage_dropped_records: 0,
+            status: TurnOutcomeStatus::Completed,
+            error: None,
+            tool_catalog: None,
+            base_url: None,
+        })
+        .await?;
+
+    let completed =
+        wait_for_terminal_turn(&manager, &first.id, TURN_SETTLEMENT_DEADLOCK_TIMEOUT).await?;
+    assert_eq!(
+        completed.model_request_diagnostics,
+        Some(RuntimeTurnRequestDiagnostics {
+            model_requests_started: 2,
+            transparent_stream_retries: 1,
+            stream_resumes: 1,
+        }),
+        "terminal model-client facts must be kept distinct from status items"
+    );
+    assert_eq!(
+        completed.schema_version, TERMINAL_REQUEST_DIAGNOSTICS_RUNTIME_SCHEMA_VERSION,
+        "the completed record must refuse an older reader that would drop diagnostics"
+    );
+    let status_items = manager
+        .store
+        .list_items_for_turn(&first.id)?
+        .into_iter()
+        .filter(|item| item.kind == TurnItemKind::Status)
+        .count();
+    assert_eq!(status_items, 4);
+    let completion = manager
+        .events_since(&thread.id, None)?
+        .into_iter()
+        .find(|event| {
+            event.event == "turn.completed" && event.turn_id.as_deref() == Some(first.id.as_str())
+        })
+        .expect("first turn completion receipt");
+    assert_eq!(
+        completion
+            .payload
+            .pointer("/turn/modelRequestDiagnostics/modelRequestsStarted")
+            .and_then(Value::as_u64),
+        Some(2),
+        "the existing completion event must carry the same turn's persisted receipt"
+    );
+
+    let second = manager
+        .start_turn(
+            &thread.id,
+            StartTurnRequest {
+                prompt: "pre-request snapshot fixture".to_string(),
+                ..StartTurnRequest::default()
+            },
+        )
+        .await?;
+    assert!(matches!(
+        harness.rx_op.recv().await,
+        Some(Op::SendMessage { .. })
+    ));
+    let second_engine_turn_id = "engine_request_diagnostics_second";
+    harness
+        .tx_event
+        .send(EngineEvent::TurnStarted {
+            turn_id: second_engine_turn_id.to_string(),
+            created_at: Utc::now(),
+            route: None,
+        })
+        .await?;
+    let pre_request = crate::tool_inspection::ToolInspectionSnapshot::from_prepared_request(
+        second_engine_turn_id,
+        0,
+        None,
+    );
+    harness
+        .tx_event
+        .send(EngineEvent::ToolRequestSnapshot {
+            snapshot: pre_request,
+        })
+        .await?;
+    harness
+        .tx_event
+        .send(EngineEvent::MessageStarted { index: 0 })
+        .await?;
+    harness
+        .tx_event
+        .send(EngineEvent::MessageComplete { index: 0 })
+        .await?;
+    harness
+        .tx_event
+        .send(EngineEvent::TurnComplete {
+            usage: Usage::default(),
+            parent_route_usage: Usage::default(),
+            routed_usage_dropped_records: 0,
+            status: TurnOutcomeStatus::Completed,
+            error: None,
+            tool_catalog: None,
+            base_url: None,
+        })
+        .await?;
+    let second =
+        wait_for_terminal_turn(&manager, &second.id, TURN_SETTLEMENT_DEADLOCK_TIMEOUT).await?;
+    assert!(
+        second.model_request_diagnostics.is_none(),
+        "a pre-request snapshot must not look like a delivered model call or inherit the prior turn"
+    );
+    assert_eq!(second.schema_version, CURRENT_RUNTIME_SCHEMA_VERSION);
+    Ok(())
+}
+
+#[tokio::test]
 async fn completed_turn_without_engine_output_fails() -> Result<()> {
     let manager = test_manager(test_runtime_dir())?;
     let thread = manager
@@ -13518,6 +13719,7 @@ fn opening_manager_recovers_stale_queued_and_in_progress_work() -> Result<()> {
         routed_usage_drop_records: Vec::new(),
         routed_usage_source_ids: Vec::new(),
         routed_usage_dropped_records: 0,
+        model_request_diagnostics: None,
         error: None,
         item_ids: vec![completed_item.id.clone(), in_progress_item.id.clone()],
         steer_count: 0,
@@ -13551,6 +13753,7 @@ fn opening_manager_recovers_stale_queued_and_in_progress_work() -> Result<()> {
         routed_usage_drop_records: Vec::new(),
         routed_usage_source_ids: Vec::new(),
         routed_usage_dropped_records: 0,
+        model_request_diagnostics: None,
         error: None,
         item_ids: vec![queued_item.id.clone()],
         steer_count: 0,
@@ -13832,6 +14035,7 @@ fn seed_turns_with_user_messages(
             routed_usage_drop_records: Vec::new(),
             routed_usage_source_ids: Vec::new(),
             routed_usage_dropped_records: 0,
+            model_request_diagnostics: None,
             error: None,
             item_ids: vec![user_item_id, asst_item_id],
             steer_count: 0,
@@ -14477,6 +14681,7 @@ fn restart_rebuild_restores_tool_call_identity_from_persisted_items() -> Result<
         routed_usage_drop_records: Vec::new(),
         routed_usage_source_ids: Vec::new(),
         routed_usage_dropped_records: 0,
+        model_request_diagnostics: None,
         error: None,
         item_ids: vec![user_item.id.clone(), call_item.id.clone()],
         steer_count: 0,
@@ -14576,6 +14781,7 @@ fn restart_rebuild_keeps_in_flight_tool_call_identity() -> Result<()> {
         routed_usage_drop_records: Vec::new(),
         routed_usage_source_ids: Vec::new(),
         routed_usage_dropped_records: 0,
+        model_request_diagnostics: None,
         error: None,
         item_ids: vec![call_item.id.clone()],
         steer_count: 0,
@@ -14670,6 +14876,7 @@ fn restart_rebuild_skips_legacy_tool_items_without_identity() -> Result<()> {
         routed_usage_drop_records: Vec::new(),
         routed_usage_source_ids: Vec::new(),
         routed_usage_dropped_records: 0,
+        model_request_diagnostics: None,
         error: None,
         item_ids: vec![user_item.id.clone(), legacy_tool_item.id.clone()],
         steer_count: 0,

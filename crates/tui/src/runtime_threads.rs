@@ -496,7 +496,11 @@ const CURRENT_RUNTIME_SCHEMA_VERSION: u32 = 2;
 const IMAGE_RUNTIME_SCHEMA_VERSION: u32 = 3;
 // Explicit allowances need a newer reader so old binaries cannot retry uncapped.
 const OUTPUT_LIMIT_RUNTIME_SCHEMA_VERSION: u32 = 4;
-const MAX_SUPPORTED_RUNTIME_SCHEMA_VERSION: u32 = OUTPUT_LIMIT_RUNTIME_SCHEMA_VERSION;
+// Terminal model-request diagnostics need a newer reader so it cannot
+// silently rewrite a completed turn while dropping its bounded receipt.
+const TERMINAL_REQUEST_DIAGNOSTICS_RUNTIME_SCHEMA_VERSION: u32 = 5;
+const MAX_SUPPORTED_RUNTIME_SCHEMA_VERSION: u32 =
+    TERMINAL_REQUEST_DIAGNOSTICS_RUNTIME_SCHEMA_VERSION;
 
 fn is_zero_u64(value: &u64) -> bool {
     *value == 0
@@ -821,6 +825,31 @@ fn thread_execution_state_matches(left: &ThreadRecord, right: &ThreadRecord) -> 
         && left.saved_session_checkpoint == right.saved_session_checkpoint
 }
 
+/// Bounded per-turn request facts copied only from the engine's terminal
+/// request snapshot. These are distinct from provider-reported `TurnUsage`:
+/// a model-client request may have no usage receipt, and client-local HTTP
+/// retries are intentionally not represented here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeTurnRequestDiagnostics {
+    /// Parent streaming model-client calls, including stream retries.
+    pub model_requests_started: u32,
+    /// Retries after a stream ended before content was observed.
+    pub transparent_stream_retries: u32,
+    /// Retry/resume attempts after an interrupted stream.
+    pub stream_resumes: u32,
+}
+
+impl From<&crate::tool_inspection::TurnStopDiagnostics> for RuntimeTurnRequestDiagnostics {
+    fn from(diagnostics: &crate::tool_inspection::TurnStopDiagnostics) -> Self {
+        Self {
+            model_requests_started: diagnostics.model_requests_started,
+            transparent_stream_retries: diagnostics.transparent_stream_retries,
+            stream_resumes: diagnostics.stream_resumes,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TurnRecord {
     /// Admitted per-request allowance. Older turns have no explicit allowance.
@@ -948,6 +977,16 @@ pub struct TurnRecord {
     /// Non-zero means token/cost aggregation is necessarily incomplete.
     #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub routed_usage_dropped_records: u64,
+    /// Terminal facts about parent streaming model-client calls. This is
+    /// absent until the engine emits its terminal request snapshot. It counts
+    /// model-client calls, not HTTP retries within the client or invoices.
+    #[serde(
+        default,
+        rename = "modelRequestDiagnostics",
+        alias = "model_request_diagnostics",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub model_request_diagnostics: Option<RuntimeTurnRequestDiagnostics>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     #[serde(default)]
@@ -971,9 +1010,19 @@ impl TurnRecord {
             );
         }
         if self.max_output_tokens.is_some()
-            != (self.schema_version == OUTPUT_LIMIT_RUNTIME_SCHEMA_VERSION)
+            && self.schema_version < OUTPUT_LIMIT_RUNTIME_SCHEMA_VERSION
         {
             bail!("Turn output allowance does not match its schema");
+        }
+        if self.max_output_tokens.is_none()
+            && self.schema_version == OUTPUT_LIMIT_RUNTIME_SCHEMA_VERSION
+        {
+            bail!("Turn output allowance does not match its schema");
+        }
+        if (self.schema_version == TERMINAL_REQUEST_DIAGNOSTICS_RUNTIME_SCHEMA_VERSION)
+            != self.model_request_diagnostics.is_some()
+        {
+            bail!("Turn request diagnostics do not match its schema");
         }
         Ok(())
     }
@@ -1225,6 +1274,7 @@ fn settle_unaccepted_routed_usage(
             routed_usage_drop_records: Vec::new(),
             routed_usage_source_ids: Vec::new(),
             routed_usage_dropped_records: 0,
+            model_request_diagnostics: None,
             error: Some(UNACCEPTED_TURN_REASON.to_string()),
             item_ids: Vec::new(),
             steer_count: 0,
@@ -7976,6 +8026,7 @@ impl RuntimeThreadManager {
                     routed_usage_drop_records: Vec::new(),
                     routed_usage_source_ids: Vec::new(),
                     routed_usage_dropped_records: 0,
+                    model_request_diagnostics: None,
                     error: None,
                     item_ids,
                     steer_count: 0,
@@ -8994,6 +9045,7 @@ impl RuntimeThreadManager {
             routed_usage_drop_records: Vec::new(),
             routed_usage_source_ids: Vec::new(),
             routed_usage_dropped_records: 0,
+            model_request_diagnostics: None,
             error: None,
             item_ids: Vec::new(),
             steer_count: 0,
@@ -9451,6 +9503,7 @@ impl RuntimeThreadManager {
             routed_usage_drop_records: Vec::new(),
             routed_usage_source_ids: Vec::new(),
             routed_usage_dropped_records: 0,
+            model_request_diagnostics: None,
             error: None,
             item_ids: Vec::new(),
             steer_count: 0,
@@ -10241,6 +10294,11 @@ impl RuntimeThreadManager {
         let mut turn_usage: Option<Usage> = None;
         let mut turn_effective_route_usage: Option<Usage> = None;
         let mut turn_routed_usage_dropped_records = 0_u64;
+        // The engine emits an initial request snapshot before connection setup
+        // and one terminal snapshot after it knows the outcome. Keep only the
+        // latter; a prepared request is not evidence of delivery or a model
+        // call, and the terminal counters intentionally exclude HTTP retries.
+        let mut turn_model_request_diagnostics: Option<RuntimeTurnRequestDiagnostics> = None;
         let mut turn_status: Option<RuntimeTurnStatus> = None;
         let mut turn_error: Option<String> = None;
         let mut saw_engine_activity = false;
@@ -11365,6 +11423,15 @@ impl RuntimeThreadManager {
                     )
                     .await?;
                 }
+                EngineEvent::ToolRequestSnapshot { snapshot } => {
+                    if let (Some(terminal), Some(engine_turn_id)) =
+                        (snapshot.terminal.as_ref(), engine_turn_id.as_deref())
+                        && !snapshot.turn_id.truncated
+                        && snapshot.turn_id.value == engine_turn_id
+                    {
+                        turn_model_request_diagnostics = Some(terminal.into());
+                    }
+                }
                 EngineEvent::TurnComplete {
                     usage,
                     parent_route_usage,
@@ -11574,6 +11641,10 @@ impl RuntimeThreadManager {
                 .routed_usage_dropped_records
                 .saturating_add(background_residual)
                 .saturating_add(turn_routed_usage_dropped_records);
+            turn.model_request_diagnostics = turn_model_request_diagnostics;
+            if turn.model_request_diagnostics.is_some() {
+                turn.schema_version = TERMINAL_REQUEST_DIAGNOSTICS_RUNTIME_SCHEMA_VERSION;
+            }
             turn.error = turn_error;
             self.store.save_turn(&turn)?;
             turn
