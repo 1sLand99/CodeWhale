@@ -88,8 +88,8 @@ impl AppModeUi for AppMode {
 /// The config file accepts every supported string value for forward-compat with
 /// providers that expose the full spectrum; DeepSeek currently collapses
 /// `Low`/`Medium` → `high`. OpenAI Codex normalizes inherited DeepSeek-only
-/// `Off` to `Low` and displays/sends `Max` as `xhigh` at the provider
-/// boundary. The default keyboard cycler walks the three DeepSeek-distinct
+/// `Off` to `Low` and keeps `XHigh`, `Max`, and `Ultra` distinct at the
+/// provider boundary. The default keyboard cycler walks the three DeepSeek-distinct
 /// tiers: `Off` → `High` → `Max` → `Off`; provider-aware callers should use
 /// [`ReasoningEffort::cycle_next_in`] with the route's effort list. Auto
 /// routing has no concrete provider yet, so
@@ -172,9 +172,12 @@ impl From<crate::work_graph::ReasoningEffortTier> for EffectiveReasoningEffort {
         use crate::work_graph::ReasoningEffortTier as Tier;
         match value {
             Tier::Off => Self::Tier(ReasoningEffort::Off),
+            Tier::Minimal => Self::Tier(ReasoningEffort::Minimal),
             Tier::Low => Self::Tier(ReasoningEffort::Low),
             Tier::Medium => Self::Tier(ReasoningEffort::Medium),
             Tier::High => Self::Tier(ReasoningEffort::High),
+            Tier::XHigh => Self::Tier(ReasoningEffort::XHigh),
+            Tier::Ultra => Self::Tier(ReasoningEffort::Ultra),
             Tier::Auto => Self::Tier(ReasoningEffort::Auto),
             Tier::Max => Self::Tier(ReasoningEffort::Max),
             Tier::ThinkingEnabledGranularityUnavailable => {
@@ -189,12 +192,12 @@ impl From<ReasoningEffort> for crate::work_graph::ReasoningEffortTier {
     fn from(value: ReasoningEffort) -> Self {
         match value {
             ReasoningEffort::Off => Self::Off,
-            ReasoningEffort::Minimal => Self::Low,
+            ReasoningEffort::Minimal => Self::Minimal,
             ReasoningEffort::Low => Self::Low,
             ReasoningEffort::Medium => Self::Medium,
             ReasoningEffort::High => Self::High,
-            ReasoningEffort::XHigh => Self::Max,
-            ReasoningEffort::Ultra => Self::Max,
+            ReasoningEffort::XHigh => Self::XHigh,
+            ReasoningEffort::Ultra => Self::Ultra,
             ReasoningEffort::Auto => Self::Auto,
             ReasoningEffort::Max => Self::Max,
         }
@@ -221,7 +224,7 @@ impl ReasoningEffort {
             "ultra" | "ultracode" => Ok(Self::Ultra),
             "max" | "maximum" => Ok(Self::Max),
             _ => Err(format!(
-                "Unrecognized reasoning effort {trimmed:?}. Expected: auto, off, low, medium, high, xhigh, or max."
+                "Unrecognized reasoning effort {trimmed:?}. Expected: auto, off, low, medium, high, xhigh, max, or ultra."
             )),
         }
     }
@@ -421,7 +424,7 @@ impl ReasoningEffort {
         (!efforts.is_empty()).then_some(efforts)
     }
 
-    fn from_catalog_token(raw: &str) -> Option<Self> {
+    pub(crate) fn from_catalog_token(raw: &str) -> Option<Self> {
         match raw.trim().to_ascii_lowercase().as_str() {
             "off" | "disabled" | "none" | "false" => Some(Self::Off),
             "minimal" | "minimum" => Some(Self::Minimal),

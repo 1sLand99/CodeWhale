@@ -6112,6 +6112,9 @@ struct ProviderModelEntry {
     /// name or transport protocol.
     image_input: codewhale_config::route::CapabilityState,
     output_token_limit: codewhale_config::route::CapabilityState,
+    reasoning_effort: codewhale_config::route::CapabilityState,
+    reasoning_effort_levels: Vec<String>,
+    reasoning_effort_source: Option<&'static str>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -6370,6 +6373,74 @@ fn provider_model_output_token_limit_for_api(
         .unwrap_or_default()
 }
 
+fn provider_model_entry_for_api(
+    config: &Config,
+    provider: ApiProvider,
+    model: String,
+) -> ProviderModelEntry {
+    use crate::tui::app::ReasoningEffort;
+    use codewhale_config::route::CapabilityState;
+
+    let mut entry = ProviderModelEntry {
+        image_input: provider_model_image_input_for_api(config, provider, &model),
+        output_token_limit: provider_model_output_token_limit_for_api(config, provider, &model),
+        id: model,
+        reasoning_effort: CapabilityState::Unknown,
+        reasoning_effort_levels: Vec::new(),
+        reasoning_effort_source: None,
+    };
+    // A provider kind and a familiar model name do not establish the
+    // capabilities of a different endpoint or named compatible route.
+    if provider == ApiProvider::Custom || config.provider_uses_custom_endpoint(provider) {
+        return entry;
+    }
+    if provider == ApiProvider::OpenaiCodex {
+        let roster = crate::codex_model_cache::model_roster();
+        if roster.freshness != crate::codex_model_cache::CodexModelCacheFreshness::Fresh {
+            return entry;
+        }
+        let Some(metadata) = roster.metadata_for(&entry.id) else {
+            return entry;
+        };
+        for effort in metadata
+            .efforts
+            .iter()
+            .filter_map(|raw| ReasoningEffort::from_catalog_token(raw))
+            // This API advertises active effort controls. Apps currently
+            // treats off as omission, not a provider's explicit none value.
+            .filter(|effort| *effort != ReasoningEffort::Off)
+            // Native compatibility still aliases minimal to low (and auto
+            // to medium). Do not advertise a manual tier the wire changes.
+            .filter(|effort| effort.api_value_for_provider(provider) == Some(effort.as_setting()))
+        {
+            let level = effort.as_setting().to_string();
+            if !entry.reasoning_effort_levels.contains(&level) {
+                entry.reasoning_effort_levels.push(level);
+            }
+        }
+        entry.reasoning_effort_source = Some(roster.source);
+        if metadata.reasoning == Some(false) {
+            entry.reasoning_effort = CapabilityState::Unsupported;
+        }
+    } else if let Some(efforts) = ReasoningEffort::catalog_effort_values(provider, &entry.id) {
+        entry.reasoning_effort_levels = efforts
+            .into_iter()
+            .filter(|effort| *effort != ReasoningEffort::Off)
+            .map(|effort| effort.as_setting().to_string())
+            .collect();
+        entry.reasoning_effort_source = Some("catalog");
+    } else if crate::route_runtime::resolve_runtime_route(config, provider, Some(&entry.id))
+        .is_ok_and(|route| route.candidate.capabilities().reasoning == CapabilityState::Unsupported)
+    {
+        entry.reasoning_effort = CapabilityState::Unsupported;
+        entry.reasoning_effort_source = Some("catalog");
+    }
+    if !entry.reasoning_effort_levels.is_empty() {
+        entry.reasoning_effort = CapabilityState::Supported;
+    }
+    entry
+}
+
 fn provider_default_model_for_api(
     config: &Config,
     _active_provider: ApiProvider,
@@ -6529,11 +6600,17 @@ pub(crate) fn runtime_chat_relay_catalog(
             "displayName": provider.display_name(),
             "defaultModel": default_model,
             "credentialState": credential_state,
-            "models": models.into_iter().map(|model| json!({
-                "imageInput": provider_model_image_input_for_api(config, provider, &model),
-                "outputTokenLimit": provider_model_output_token_limit_for_api(config, provider, &model),
-                "id": model,
-            })).collect::<Vec<_>>(),
+            "models": models.into_iter().map(|model| {
+                let entry = provider_model_entry_for_api(config, provider, model);
+                json!({
+                    "imageInput": entry.image_input,
+                    "outputTokenLimit": entry.output_token_limit,
+                    "id": entry.id,
+                    "reasoningEffort": entry.reasoning_effort,
+                    "reasoningEffortLevels": entry.reasoning_effort_levels,
+                    "reasoningEffortSource": entry.reasoning_effort_source,
+                })
+            }).collect::<Vec<_>>(),
         }],
     }))
 }
@@ -6642,15 +6719,7 @@ async fn list_provider_models(
     };
     let models = provider_models_for_api(&config, config.api_provider(), api_provider)
         .into_iter()
-        .map(|id| ProviderModelEntry {
-            image_input: provider_model_image_input_for_api(&config, api_provider, &id),
-            output_token_limit: provider_model_output_token_limit_for_api(
-                &config,
-                api_provider,
-                &id,
-            ),
-            id,
-        })
+        .map(|id| provider_model_entry_for_api(&config, api_provider, id))
         .collect();
     paginate_provider_models(api_provider.as_str(), models, &params, route_fingerprint).map(Json)
 }

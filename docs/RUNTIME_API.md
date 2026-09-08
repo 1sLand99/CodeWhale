@@ -1021,7 +1021,10 @@ non-empty list does not prove that the route can currently serve a request.
   "models": [
     {
       "id": "deepseek-v4-flash-vision-exp",
-      "image_input": "supported"
+      "image_input": "supported",
+      "reasoning_effort": "unknown",
+      "reasoning_effort_levels": [],
+      "reasoning_effort_source": null
     }
   ]
 }
@@ -1046,6 +1049,33 @@ provider/model route's capability state: `supported`, `unsupported`, or
 `unknown`. Keep `unknown` unknown rather than inferring from the model name or
 wire protocol. `supported` describes the model route; it does not mean a given
 client implements an image-upload control.
+
+`reasoning_effort` uses the same three capability states and describes whether
+the exact model's metadata publishes a selectable effort ladder.
+`reasoning_effort_levels` contains only canonical, recognized active effort levels
+from that metadata. Off and provider synonyms such as none are excluded: the
+Apps/Chat protocol treats off as omission, which does not prove support for an
+explicit provider disable command. A model capable of reasoning may still have
+an unknown active effort ladder.
+Codex levels are also excluded when native compatibility would change their
+wire value (currently minimal and auto). This projection does not change native
+compatibility behavior or advertise a tier the Runtime cannot send unchanged.
+No levels are inferred from a provider-wide default or a familiar model name
+on a custom endpoint. `reasoning_effort_source` identifies `catalog`,
+`codex_cli_cache`, or `codex_app_server`; missing, stale, and unrecognized model
+metadata stays unknown. Codex roster metadata describes the external CLI's
+roster, not proof that a separately configured Runtime credential belongs to
+the same account or that an authentication boundary is approved.
+
+Pass `?model_provider_id=<exact configured id>` when selecting a named route.
+The Runtime validates the provider kind and exact identity together, returns
+`model_provider_id` alongside that route's model list, and leaves the active
+configuration unchanged. An empty or unknown requested identity, or a mismatched kind, returns
+`400`; it never falls back to another named route.
+
+The Runtime Chat relay publishes the same effort fields in camelCase
+(`reasoningEffort`, `reasoningEffortLevels`, `reasoningEffortSource`). These
+model facts do not enable tool execution or establish account entitlement.
 
 For a thread-scoped choice, send the provider fields from the selected entry
 alongside the selected model. Omit `model_provider_id` when it is null:

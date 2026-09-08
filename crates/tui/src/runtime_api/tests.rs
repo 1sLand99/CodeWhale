@@ -8091,6 +8091,9 @@ fn provider_model_catalog_paginates_all_six_hundred_rows_without_truncation() {
     let models = (0..600)
         .rev()
         .map(|index| ProviderModelEntry {
+            reasoning_effort: codewhale_config::route::CapabilityState::Unknown,
+            reasoning_effort_levels: Vec::new(),
+            reasoning_effort_source: None,
             output_token_limit: codewhale_config::route::CapabilityState::Unknown,
             id: format!("openrouter/model-{index:03}"),
             image_input: codewhale_config::route::CapabilityState::Unknown,
@@ -8144,6 +8147,9 @@ fn provider_model_catalog_applies_filter_before_cursor_and_rejects_cross_scope_r
     let models = ["Alpha-One", "alpha-two", "beta"]
         .into_iter()
         .map(|id| ProviderModelEntry {
+            reasoning_effort: codewhale_config::route::CapabilityState::Unknown,
+            reasoning_effort_levels: Vec::new(),
+            reasoning_effort_source: None,
             output_token_limit: codewhale_config::route::CapabilityState::Unknown,
             id: id.to_string(),
             image_input: codewhale_config::route::CapabilityState::Unknown,
@@ -8199,6 +8205,9 @@ fn provider_model_cursor_rejects_catalog_change_between_pages() {
     let models = ["bravo", "charlie"]
         .into_iter()
         .map(|id| ProviderModelEntry {
+            reasoning_effort: codewhale_config::route::CapabilityState::Unknown,
+            reasoning_effort_levels: Vec::new(),
+            reasoning_effort_source: None,
             output_token_limit: codewhale_config::route::CapabilityState::Unknown,
             id: id.to_string(),
             image_input: codewhale_config::route::CapabilityState::Unknown,
@@ -8219,6 +8228,9 @@ fn provider_model_cursor_rejects_catalog_change_between_pages() {
     let cursor = first.next_cursor.expect("second page remains");
     let mut changed = models.clone();
     changed.push(ProviderModelEntry {
+        reasoning_effort: codewhale_config::route::CapabilityState::Unknown,
+        reasoning_effort_levels: Vec::new(),
+        reasoning_effort_source: None,
         output_token_limit: codewhale_config::route::CapabilityState::Unknown,
         id: "alpha".to_string(),
         image_input: codewhale_config::route::CapabilityState::Unknown,
@@ -8263,6 +8275,9 @@ fn provider_model_cursor_round_trips_multibyte_filter_at_the_allowed_limit() {
     let models = ["a", "b"]
         .into_iter()
         .map(|suffix| ProviderModelEntry {
+            reasoning_effort: codewhale_config::route::CapabilityState::Unknown,
+            reasoning_effort_levels: Vec::new(),
+            reasoning_effort_source: None,
             output_token_limit: codewhale_config::route::CapabilityState::Unknown,
             id: format!("{filter}{suffix}"),
             image_input: codewhale_config::route::CapabilityState::Unknown,
@@ -8576,6 +8591,9 @@ async fn provider_models_expose_exact_image_input_facts_and_thread_selection_sta
         .find(|entry| entry["id"] == "deepseek-v4-pro")
         .context("DeepSeek text model entry")?;
     assert_eq!(text_only["image_input"], "unsupported");
+    // A reasoning-capable model does not imply a published effort ladder.
+    assert_eq!(text_only["reasoning_effort"], "unknown");
+    assert_eq!(text_only["reasoning_effort_levels"], json!([]));
 
     let config_before = get_config(&client, &addr).await;
     let response = client
@@ -8595,6 +8613,183 @@ async fn provider_models_expose_exact_image_input_facts_and_thread_selection_sta
     assert_eq!(config_after["provider"], config_before["provider"]);
     assert_eq!(config_after["model"], config_before["model"]);
 
+    handle.abort();
+    Ok(())
+}
+
+#[test]
+fn provider_reasoning_metadata_keeps_exact_roster_levels_and_unknown_boundaries() {
+    let _lock = crate::test_support::lock_test_env();
+    let root = tempfile::tempdir().unwrap();
+    let _codex_home = crate::test_support::EnvVarGuard::set("CODEX_HOME", root.path());
+    let config = Config {
+        provider: Some("openai-codex".to_string()),
+        ..Config::default()
+    };
+    let cache_path = root.path().join("models_cache.json");
+    let cache = json!({
+        "fetched_at": chrono::Utc::now(),
+        "models": [
+            {"slug": "gpt-6-astra", "supported_reasoning_levels": [
+                {"effort": "low"}, {"effort": "medium"}, {"effort": "high"},
+                {"effort": "xhigh"}, {"effort": "max"}, {"effort": "ultra"},
+                {"effort": "unexpected-private-value"}
+            ]},
+            {"slug": "gpt-5.5", "supported_reasoning_levels": [{"effort": "high"}, {"effort": "xhigh"}]},
+            {"slug": "no-reasoning", "supported_reasoning_levels": []},
+            {"slug": "optional-reasoning", "supported_reasoning_levels": [{"effort": "none"}, {"effort": "minimal"}, {"effort": "low"}]},
+            {"slug": "no-effort-metadata"},
+            {"slug": "unrecognized-efforts", "supported_reasoning_levels": [{"effort": "future-value"}]}
+        ]
+    });
+    fs::write(&cache_path, serde_json::to_vec(&cache).unwrap()).unwrap();
+    let astra =
+        provider_model_entry_for_api(&config, ApiProvider::OpenaiCodex, "gpt-6-astra".to_string());
+    assert_eq!(
+        astra.reasoning_effort,
+        codewhale_config::route::CapabilityState::Supported
+    );
+    assert_eq!(
+        astra.reasoning_effort_levels,
+        ["low", "medium", "high", "xhigh", "max", "ultra"]
+    );
+    assert_eq!(astra.reasoning_effort_source, Some("codex_cli_cache"));
+    // The relay preserves the same model facts without elevating them into
+    // a tool-execution or account-entitlement receipt.
+    let _token = crate::test_support::EnvVarGuard::set("OPENAI_CODEX_ACCESS_TOKEN", "test-token");
+    let _legacy = crate::test_support::EnvVarGuard::remove("CODEX_ACCESS_TOKEN");
+    let relay = runtime_chat_relay_catalog(&config, &"c".repeat(32)).unwrap();
+    let relayed_astra = relay["providers"][0]["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|model| model["id"] == "gpt-6-astra")
+        .unwrap();
+    assert_eq!(relayed_astra["reasoningEffort"], "supported");
+    assert_eq!(
+        relayed_astra["reasoningEffortLevels"],
+        json!(astra.reasoning_effort_levels)
+    );
+    assert_eq!(relayed_astra["reasoningEffortSource"], "codex_cli_cache");
+    assert_eq!(relay["runtime"]["capabilities"]["tool_execution"], false);
+    assert!(!relay.to_string().contains("test-token"));
+    let older =
+        provider_model_entry_for_api(&config, ApiProvider::OpenaiCodex, "gpt-5.5".to_string());
+    assert_eq!(older.reasoning_effort_levels, ["high", "xhigh"]);
+    let unsupported = provider_model_entry_for_api(
+        &config,
+        ApiProvider::OpenaiCodex,
+        "no-reasoning".to_string(),
+    );
+    assert_eq!(
+        unsupported.reasoning_effort,
+        codewhale_config::route::CapabilityState::Unsupported
+    );
+    assert!(unsupported.reasoning_effort_levels.is_empty());
+    let optional = provider_model_entry_for_api(
+        &config,
+        ApiProvider::OpenaiCodex,
+        "optional-reasoning".to_string(),
+    );
+    assert_eq!(optional.reasoning_effort_levels, ["low"]);
+    assert_eq!(
+        optional.reasoning_effort,
+        codewhale_config::route::CapabilityState::Supported
+    );
+    for id in ["no-effort-metadata", "unrecognized-efforts"] {
+        let unknown =
+            provider_model_entry_for_api(&config, ApiProvider::OpenaiCodex, id.to_string());
+        assert_eq!(
+            unknown.reasoning_effort,
+            codewhale_config::route::CapabilityState::Unknown
+        );
+        assert!(unknown.reasoning_effort_levels.is_empty());
+    }
+    let missing = provider_model_entry_for_api(
+        &config,
+        ApiProvider::OpenaiCodex,
+        "unknown-model".to_string(),
+    );
+    assert_eq!(
+        missing.reasoning_effort,
+        codewhale_config::route::CapabilityState::Unknown
+    );
+    assert!(missing.reasoning_effort_levels.is_empty());
+    let mut custom = config.clone();
+    custom
+        .provider_config_for_mut(ApiProvider::OpenaiCodex)
+        .base_url = Some("https://proxy.example.test/v1".to_string());
+    let proxy =
+        provider_model_entry_for_api(&custom, ApiProvider::OpenaiCodex, "gpt-6-astra".to_string());
+    assert_eq!(
+        proxy.reasoning_effort,
+        codewhale_config::route::CapabilityState::Unknown
+    );
+    assert!(proxy.reasoning_effort_levels.is_empty());
+    let mut stale = cache;
+    stale["fetched_at"] = json!(chrono::Utc::now() - chrono::Duration::hours(48));
+    fs::write(&cache_path, serde_json::to_vec(&stale).unwrap()).unwrap();
+    let stale =
+        provider_model_entry_for_api(&config, ApiProvider::OpenaiCodex, "gpt-6-astra".to_string());
+    assert_eq!(
+        stale.reasoning_effort,
+        codewhale_config::route::CapabilityState::Unknown
+    );
+    assert!(stale.reasoning_effort_levels.is_empty());
+}
+
+#[tokio::test]
+async fn provider_models_query_keeps_named_routes_separate_without_switching() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let config_file = root.path().join("config.toml");
+    fs::write(
+        &config_file,
+        r#"provider = "first"
+[providers.first]
+kind = "openai-compatible"
+base_url = "http://127.0.0.1:18190/v1"
+model = "first-model"
+[providers.second]
+kind = "openai-compatible"
+base_url = "http://127.0.0.1:18191/v1"
+model = "gpt-6-astra"
+"#,
+    )?;
+    let Some((addr, _runtime_threads, handle)) =
+        spawn_test_server_with_config_path(config_file).await?
+    else {
+        return Ok(());
+    };
+    let client = crate::tls::reqwest_client();
+    let before = get_config(&client, &addr).await;
+    let response = client
+        .get(format!(
+            "http://{addr}/v1/providers/custom/models?model_provider_id=second"
+        ))
+        .send()
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await?;
+    assert_eq!(body["model_provider_id"], "second");
+    assert_eq!(body["models"].as_array().unwrap().len(), 1);
+    assert_eq!(body["models"][0]["id"], "gpt-6-astra");
+    assert_eq!(body["models"][0]["reasoning_effort"], "unknown");
+    assert_eq!(body["models"][0]["reasoning_effort_levels"], json!([]));
+    assert_eq!(
+        get_config(&client, &addr).await["provider"],
+        before["provider"]
+    );
+    for path in [
+        "custom/models?model_provider_id=",
+        "custom/models?model_provider_id=missing",
+        "openai-codex/models?model_provider_id=second",
+    ] {
+        let response = client
+            .get(format!("http://{addr}/v1/providers/{path}"))
+            .send()
+            .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
     handle.abort();
     Ok(())
 }
@@ -13273,6 +13468,9 @@ fn runtime_image_named_catalog_cursor_binds_identity_endpoint_and_catalog() -> R
     let models = ["one", "two"]
         .into_iter()
         .map(|id| ProviderModelEntry {
+            reasoning_effort: codewhale_config::route::CapabilityState::Unknown,
+            reasoning_effort_levels: Vec::new(),
+            reasoning_effort_source: None,
             id: id.into(),
             output_token_limit: codewhale_config::route::CapabilityState::Unknown,
             image_input: codewhale_config::route::CapabilityState::Supported,
