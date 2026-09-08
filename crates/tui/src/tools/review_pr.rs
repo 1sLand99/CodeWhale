@@ -138,7 +138,7 @@ pub(crate) fn model_diff(diff: &str) -> Cow<'_, str> {
         let content = line.trim_end_matches(['\r', '\n']);
         if content == "GIT binary patch" {
             binary = true;
-            output.push_str("[Binary content not semantically inspected; complete patch retained in review evidence.]\n");
+            output.push_str("[Binary content not semantically inspected; its encoded payload is omitted from model input.]\n");
         } else if !binary {
             output.push_str(line);
         } else if let Some((encoding, size)) = content.split_once(' ')
