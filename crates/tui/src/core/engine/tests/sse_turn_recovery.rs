@@ -12,6 +12,8 @@ const SECOND_USER: &str = "SECOND_REAL_USER";
 const NEXT_ANSWER: &str = "NEXT_TURN_COMPLETED";
 const SESSION_ID: &str = "sse-recovery-same-session";
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
+const FIXTURE_INPUT_TOKENS: u32 = 13;
+const FIXTURE_OUTPUT_TOKENS: u32 = 5;
 
 #[derive(Clone, Copy)]
 enum Failure {
@@ -119,14 +121,22 @@ async fn serve_response(
         "choices": [{"index": 0, "delta": {"content": text},
             "finish_reason": if is_second_turn { Some("stop") } else { None }}]
     });
-    let response = format!(
-        "data: {frame}\n\n{}",
-        if is_second_turn {
-            "data: [DONE]\n\n"
-        } else {
-            ""
-        }
-    );
+    let response = if is_second_turn {
+        // OpenAI-compatible streaming usage arrives in a final choices-empty
+        // frame. Keep the fixture token-only so it proves event separation
+        // without retaining user prompt text anywhere beyond the test request.
+        let usage = json!({
+            "id": "loopback-sse", "object": "chat.completion.chunk", "model": request["model"],
+            "choices": [],
+            "usage": {
+                "prompt_tokens": FIXTURE_INPUT_TOKENS,
+                "completion_tokens": FIXTURE_OUTPUT_TOKENS,
+            },
+        });
+        format!("data: {frame}\n\ndata: {usage}\n\ndata: [DONE]\n\n")
+    } else {
+        format!("data: {frame}\n\n")
+    };
     // Declaring an unmet length makes a socket close a real reqwest decode
     // error, rather than a clean EOF or a canned ModelClient error string.
     let declared_length = if is_second_turn {
@@ -188,6 +198,25 @@ fn terminal_status(events: &[Event]) -> TurnOutcomeStatus {
         Event::TurnComplete { status, .. } => *status,
         event => panic!("expected terminal TurnComplete, got {event:?}"),
     }
+}
+
+fn terminal_diagnostics(events: &[Event]) -> &crate::tool_inspection::TurnStopDiagnostics {
+    events
+        .iter()
+        .find_map(|event| match event {
+            Event::ToolRequestSnapshot { snapshot } => snapshot.terminal.as_ref(),
+            _ => None,
+        })
+        .expect("terminal request diagnostics")
+}
+
+fn retry_status_count(events: &[Event]) -> usize {
+    events
+        .iter()
+        .filter(|event| {
+            matches!(event, Event::Status { message } if message.starts_with("Connection interrupted;"))
+        })
+        .count()
 }
 
 async fn verify_next_user_turn_after_loss(failure: Failure) {
@@ -254,6 +283,29 @@ async fn verify_next_user_turn_after_loss(failure: Failure) {
         partial_count,
         "the failed/cancelled turn must settle before the new user turn; no healthy same-turn retry"
     );
+    let first_terminal = terminal_diagnostics(&first);
+    assert_eq!(
+        usize::try_from(first_terminal.model_requests_started).unwrap(),
+        partial_count,
+        "terminal parent-request count must match POSTs observed by the loopback"
+    );
+    let expected_resumes = match failure {
+        Failure::TruncatedBody => super::super::MAX_STREAM_RETRIES,
+        Failure::StalledBody => 0,
+    };
+    assert_eq!(first_terminal.stream_resumes, expected_resumes);
+    assert_eq!(first_terminal.transparent_stream_retries, 0);
+    assert_eq!(
+        retry_status_count(&first),
+        usize::try_from(expected_resumes).unwrap(),
+        "repeated retry status events describe existing resumes; they must not inflate parent requests"
+    );
+    assert!(
+        !first
+            .iter()
+            .any(|event| matches!(event, Event::TurnUsage { .. })),
+        "a stream without a provider usage frame must not fabricate token usage"
+    );
 
     // Submit the NEXT real user message immediately after terminal settlement,
     // using the original handle. There is no reconstruction or --continue.
@@ -268,6 +320,21 @@ async fn verify_next_user_turn_after_loss(failure: Failure) {
     assert!(second.iter().any(
         |event| matches!(event, Event::MessageDelta { content, .. } if content == NEXT_ANSWER)
     ));
+    let second_terminal = terminal_diagnostics(&second);
+    assert_eq!(second_terminal.model_requests_started, 1);
+    assert_eq!(second_terminal.stream_resumes, 0);
+    assert_eq!(second_terminal.transparent_stream_retries, 0);
+    assert_eq!(retry_status_count(&second), 0);
+    let usage_receipts = second
+        .iter()
+        .filter_map(|event| match event {
+            Event::TurnUsage { usage, .. } => Some(usage),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(usage_receipts.len(), 1);
+    assert_eq!(usage_receipts[0].input_tokens, FIXTURE_INPUT_TOKENS);
+    assert_eq!(usage_receipts[0].output_tokens, FIXTURE_OUTPUT_TOKENS);
 
     for event in first.iter().chain(&second) {
         assert!(
@@ -298,6 +365,11 @@ async fn verify_next_user_turn_after_loss(failure: Failure) {
     );
     let requests = server.requests.lock().unwrap().clone();
     assert_eq!(requests.len(), partial_count + 1);
+    assert_eq!(
+        requests.len() - partial_count,
+        1,
+        "the clean second user turn must issue exactly one loopback POST"
+    );
     let replay = &requests.last().unwrap()["messages"];
     let replay_text = replay.to_string();
     for fragment in [FIRST_USER.to_string(), SECOND_USER.to_string()]
