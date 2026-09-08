@@ -109,6 +109,7 @@ pub struct TurnRouteReceipt {
     wire_model: String,
     endpoint_identity: String,
     credential_generation: CredentialGeneration,
+    openrouter_vendor: Option<String>,
 }
 
 impl TurnRouteReceipt {
@@ -130,7 +131,20 @@ impl TurnRouteReceipt {
             wire_model: wire_model.trim().to_string(),
             endpoint_identity: endpoint_identity(base_url),
             credential_generation: CredentialGeneration::derive(base_url, credential),
+            openrouter_vendor: None,
         }
+    }
+
+    /// Keep upstream vendor restrictions frozen with the installed route.
+    #[must_use]
+    pub(crate) fn with_openrouter_vendor(mut self, vendor: Option<&str>) -> Self {
+        self.openrouter_vendor = vendor.map(str::to_string);
+        self
+    }
+
+    #[must_use]
+    pub(crate) fn openrouter_vendor(&self) -> Option<&str> {
+        self.openrouter_vendor.as_deref()
     }
 
     #[must_use]

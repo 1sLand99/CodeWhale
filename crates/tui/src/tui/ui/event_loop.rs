@@ -2487,6 +2487,7 @@ pub(crate) async fn run_event_loop(
                                         &launch.base_url,
                                         &launch.model,
                                         &summary,
+                                        launch.openrouter_vendor.as_deref(),
                                     )
                                     .await
                                     && let Ok(mut guard) = suggestion_cell.lock()

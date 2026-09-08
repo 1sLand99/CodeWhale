@@ -636,6 +636,7 @@ mod tests {
     #[test]
     fn token_usage_serde_round_trip_preserves_immutable_route_evidence() {
         let route = crate::cost_status::EffectiveRouteEnvelope {
+            openrouter_vendor: None,
             provider: ApiProvider::Moonshot,
             provider_identity: "kimi-membership".to_string(),
             model: "k3".to_string(),

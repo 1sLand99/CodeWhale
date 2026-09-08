@@ -3897,6 +3897,8 @@ impl LspConfigToml {
 
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct ProviderConfig {
+    /// OpenRouter upstream slug; disables upstream fallbacks when set.
+    pub vendor: Option<String>,
     #[serde(alias = "apiKey")]
     pub api_key: Option<String>,
     #[serde(alias = "baseUrl")]
@@ -5073,6 +5075,7 @@ impl Config {
 
     /// Validate that critical config fields are present.
     pub fn validate(&self) -> Result<()> {
+        self.openrouter_vendor()?;
         if self
             .provider
             .as_deref()
@@ -5860,6 +5863,22 @@ impl Config {
             // Handled by the name-keyed early return above (#1519).
             ApiProvider::Custom => unreachable!("custom provider resolved by name above"),
         })
+    }
+
+    /// Resolve the pin from the selected provider only, before any request.
+    pub(crate) fn openrouter_vendor(&self) -> Result<Option<String>> {
+        let provider = self.api_provider();
+        let Some(vendor) = self
+            .provider_config_for(provider)
+            .and_then(|entry| entry.vendor.as_deref())
+        else {
+            return Ok(None);
+        };
+        let vendor = codewhale_config::validate_openrouter_vendor(vendor)?;
+        if vendor.is_some() && provider != ApiProvider::Openrouter {
+            anyhow::bail!("vendor is only supported by providers.openrouter");
+        }
+        Ok(vendor.map(str::to_string))
     }
 
     pub(crate) fn subagent_provider_config(
@@ -11029,6 +11048,7 @@ fn merge_skills_config(
 
 fn merge_provider_config(base: ProviderConfig, override_cfg: ProviderConfig) -> ProviderConfig {
     ProviderConfig {
+        vendor: override_cfg.vendor.or(base.vendor),
         api_key: override_cfg.api_key.or(base.api_key),
         base_url: override_cfg.base_url.or(base.base_url),
         model: override_cfg.model.or(base.model),
@@ -12025,6 +12045,7 @@ fn provider_config_is_explicit(entry: &ProviderConfig) -> bool {
     let non_empty = |value: Option<&String>| value.is_some_and(|value| !value.trim().is_empty());
 
     non_empty(entry.api_key.as_ref())
+        || entry.vendor.is_some()
         || non_empty(entry.base_url.as_ref())
         || non_empty(entry.model.as_ref())
         || non_empty(entry.auth_mode.as_ref())

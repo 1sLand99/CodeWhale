@@ -477,25 +477,32 @@ is reasoning-capable, while Preview is not marked as a thinking model.
 ### OpenRouter vendor pinning
 
 OpenRouter serves each model through several upstream vendors, and Codewhale
-passes the `model` string to OpenRouter verbatim — so OpenRouter's own
-vendor-selection syntax works today in `[providers.openrouter] model` (or
-`/model`), with no extra configuration (#6007):
+can pin requests to a vendor with `[providers.openrouter] vendor` (#6007):
 
 ```toml
 provider = "openrouter"
-model = "deepseek/deepseek-v4-pro:deepinfra"   # pin the DeepInfra upstream
-# model = "deepseek/deepseek-v4-pro:floor"     # cheapest upstream
-# model = "@preset/my-team-preset"             # an account preset from the OpenRouter dashboard
+[providers.openrouter]
+model = "deepseek/deepseek-v4-pro"
+vendor = "deepinfra" # copy the vendor slug from the model's OpenRouter page
 ```
 
-The `:vendor` suffix pins one upstream vendor, `:floor` / `:ceil` bound its
-price tier, and `@preset/...` resolves an account preset. Codewhale does not
-fetch OpenRouter's per-vendor endpoint list and emits no `provider.order`
-request field, so pricing and availability for a pinned vendor come from
-OpenRouter's response, not from Codewhale's catalog: a pinned vendor may
-bill at a different rate than the model's catalog row, in which case cost
-surfaces report the routing-dependent missing-price reason rather than an
-invented number.
+This sends `"provider": {"order": ["deepinfra"], "allow_fallbacks": false}`
+on OpenRouter requests. A base slug can match multiple endpoint variants;
+copy a full slug such as `deepinfra/turbo` to select one variant. An unavailable
+pin fails at OpenRouter. Codewhale's separate `fallback_providers` setting can
+still switch the whole route after a recoverable error.
+
+The pin applies across OpenRouter models, including auxiliary requests on that
+route. Set `vendor = ""` to clear it. Reload config or restart to apply edits;
+requests already in flight keep their captured route. Other providers do not
+inherit the pin. `/preview-request` shows the primary request's routing fields.
+
+Model strings still pass through verbatim: `:floor` sorts by price, `:nitro`
+sorts by throughput, and `@preset/my-team-preset` references an account preset.
+See OpenRouter's [provider routing](https://openrouter.ai/docs/guides/routing/provider-selection)
+and [presets](https://openrouter.ai/docs/guides/features/presets) documentation.
+Codewhale does not fetch per-vendor endpoint prices or availability; pinned
+usage reports a routing-dependent unknown cost instead of a catalog estimate.
 
 ### Custom OpenAI-Compatible Gateways
 
@@ -2279,7 +2286,7 @@ reasoning contract, and all four membership ids omit generic sampling fields.
 - `tui.stream_chunk_timeout_secs` (int, optional, default `900`): per-SSE-chunk idle timeout for streamed model responses. Slow local or compatible servers can raise this with `/config stream_chunk_timeout_secs <seconds>`; `0` maps to the default and explicit values must be `1..=3600`. The legacy `DEEPSEEK_STREAM_IDLE_TIMEOUT_SECS` env var is still honored when this key is omitted.
 - `tui.header_items` (array of strings, optional, default `[]`): opt-in header chips. Set `header_items = ["tokens"]` under `[tui]` to show the session input, cache-hit, and output token counts. Narrow terminals elide the optional chip; wide terminals show it alongside context utilization.
 - `tui.osc8_links` (bool, optional, default on for macOS/Linux, off for Windows): emit OSC 8 escape sequences around URLs in transcript output so supporting terminals (iTerm2, Terminal.app 13+, Ghostty, Kitty, WezTerm, Alacritty, recent gnome-terminal/konsole) can open them with the terminal's link gesture—usually Cmd-click on macOS and Ctrl-click on Linux/Windows. Terminals without OSC 8 support render the plain label and ignore the escape. The escapes are emitted out-of-band (not inside buffer cells), so column corruption is not a concern; set `false` only for terminals that misrender the OSC 8 terminator itself. Windows legacy consoles default off; opt in with `true`.
-- `tui.max_model_steps` (int, optional, default `200`): finite ceiling on model steps one turn may take. A "step" is one accepted provider response, so this bounds how many billable requests a single user message can trigger. Values are clamped to `1..=100000`; `0` (or absent) resolves to the default — there is no `0`-means-unlimited sentinel. At ~80% of the budget the model gets one soft-landing notice to stop exploring and write its final report; at exhaustion the turn ends `Failed` with `Maximum model steps reached before completion (limit: N)` (after one bounded final-report turn when the model still owes work). This is the interactive runaway guard and applies to every turn, including a single goal pass; raise this knob to enlarge one pass — a goal pass that needs more than 200 model steps in one turn (before a terminal `update_goal`) would otherwise fail the turn. Multi-turn goal runs already continue automatically (see the Goal loop section below).
+- `tui.max_model_steps` (int, optional, default `200`): finite ceiling on model steps one turn may take. A "step" is one accepted provider response, so this bounds how many billable requests a single user message can trigger. Values are clamped to `1..=100000`; `0` (or absent) resolves to the default — there is no `0`-means-unlimited sentinel. At ~80% of the budget the model gets one soft-landing notice to stop exploring and write its final report; at exhaustion the turn ends `Failed` with `Maximum model steps reached before completion (limit: N)` (after one bounded final-report turn when the model still owes work). This is the ordinary interactive runaway guard. Active goal turns use `goal.max_steps` instead (default `1000`); raise that key to enlarge one goal pass. Explicit lower task or caller limits still apply. Multi-turn goal runs continue automatically (see the Goal loop section below).
 - `tui.turn_wall_clock_secs` (int, optional, default `3600`): cumulative per-turn wall-clock budget in seconds, measured across every model step of one turn (not per request). Time blocked on a human approval is excluded. Clamped to `30..=86400` (24 hours is the documented ceiling); `0` resolves to the default. When exhausted the turn stops before authorizing another billable request with a message naming the limit and the key to raise.
 - `transcript.prose_measure` (positive integer, optional, default absent = full width): wrap cap, in columns, for prose cells — user messages, assistant answers, and reasoning/thinking blocks — in the live transcript (#5436). Absent (or `0`) spends the full content width, consistent with tool/status cells and the #5322 wide-frame decision; the former 105-column prose rail is gone. Set a positive whole number (e.g. `prose_measure = 120` under `[transcript]`) to restore a bounded reading measure on ultrawide terminals. Narrow terminals always keep their content width — the cap clamps from above only. Tool, diff, and status cells never inherit this cap. Invalid values (negative or non-integer) are rejected at startup with a `transcript.prose_measure` config error. Resolved once per render pass, so the main transcript cache and the full-screen overlay always agree on the effective width.
 - `hooks` (optional): lifecycle hooks configuration (see `config.example.toml`).

@@ -172,6 +172,10 @@ fn route_product_to_wire(product: RouteProduct) -> wire::RouteProduct {
 
 fn billing_to_wire(billing: &RouteBillingEnvelope) -> wire::RouteBillingEnvelope {
     wire::RouteBillingEnvelope {
+        openrouter_vendor: billing
+            .openrouter_vendor
+            .as_deref()
+            .map(crate::cost_status::sanitize_persisted_route_label),
         billing_surface: billing.billing_surface.clone(),
         endpoint_fingerprint: billing.endpoint_fingerprint.clone(),
         billing_mode: billing_mode_str(billing.billing_mode).to_string(),

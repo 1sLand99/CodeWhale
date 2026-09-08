@@ -532,6 +532,7 @@ fn completed_turn_cost_receipt_uses_the_captured_effective_route() {
             auto_model: false,
             receipt: None,
             billing: Some(crate::core::events::RouteBillingEnvelope {
+                openrouter_vendor: None,
                 billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE.to_string()),
                 // A real fingerprint, produced by the production hasher. A
                 // receipt fails closed on anything that is not one, so a
@@ -11914,6 +11915,7 @@ fn turn_liveness_recovers_stalled_in_progress_turn() {
             auto_model: false,
             receipt: None,
             billing: Some(crate::core::events::RouteBillingEnvelope {
+                openrouter_vendor: None,
                 billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE.to_string()),
                 endpoint_fingerprint: Some("openai-endpoint".to_string()),
                 billing_mode: crate::cost_status::RouteBillingMode::Metered,
@@ -11965,6 +11967,7 @@ fn engine_event_disconnect_recovers_live_turn_immediately() {
             auto_model: false,
             receipt: None,
             billing: Some(crate::core::events::RouteBillingEnvelope {
+                openrouter_vendor: None,
                 billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE.to_string()),
                 endpoint_fingerprint: Some("openai-endpoint".to_string()),
                 billing_mode: crate::cost_status::RouteBillingMode::Metered,
@@ -12040,6 +12043,7 @@ fn engine_event_disconnect_cleans_cancelled_turn_metadata() {
             auto_model: false,
             receipt: None,
             billing: Some(crate::core::events::RouteBillingEnvelope {
+                openrouter_vendor: None,
                 billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE.to_string()),
                 endpoint_fingerprint: Some("openai-endpoint".to_string()),
                 billing_mode: crate::cost_status::RouteBillingMode::Metered,
@@ -14218,6 +14222,7 @@ fn turn_started_route_is_captured_before_cancel_suppression() {
             auto_model: true,
             receipt: None,
             billing: Some(crate::core::events::RouteBillingEnvelope {
+                openrouter_vendor: None,
                 billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE.to_string()),
                 endpoint_fingerprint: Some("openai-endpoint".to_string()),
                 billing_mode: crate::cost_status::RouteBillingMode::Metered,
@@ -14282,6 +14287,7 @@ fn turn_started_suggestion_authority_comes_from_the_route_receipt_not_config() {
             auto_model: false,
             receipt: Some(receipt),
             billing: Some(crate::core::events::RouteBillingEnvelope {
+                openrouter_vendor: None,
                 billing_surface: None,
                 endpoint_fingerprint: None,
                 billing_mode: crate::cost_status::RouteBillingMode::Unknown,
@@ -14324,6 +14330,7 @@ fn turn_started_without_a_route_receipt_captures_no_suggestion_authority() {
             auto_model: false,
             receipt: None,
             billing: Some(crate::core::events::RouteBillingEnvelope {
+                openrouter_vendor: None,
                 billing_surface: None,
                 endpoint_fingerprint: None,
                 billing_mode: crate::cost_status::RouteBillingMode::Unknown,
@@ -14360,6 +14367,7 @@ fn engine_error_health_accounting_uses_active_turn_route() {
             auto_model: true,
             receipt: None,
             billing: Some(crate::core::events::RouteBillingEnvelope {
+                openrouter_vendor: None,
                 billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE.to_string()),
                 endpoint_fingerprint: Some("openai-endpoint".to_string()),
                 billing_mode: crate::cost_status::RouteBillingMode::Metered,
@@ -17507,6 +17515,7 @@ fn legacy_child_usage_metadata_fails_closed_without_parent_route_fallback() {
             // borrow it: the fail-closed answer is Unknown, reported as
             // missing spend rather than silently inherited.
             billing: Some(crate::core::events::RouteBillingEnvelope {
+                openrouter_vendor: None,
                 billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE.to_string()),
                 endpoint_fingerprint: crate::cost_status::endpoint_fingerprint(
                     crate::config::DEFAULT_DEEPSEEK_BASE_URL,
@@ -17564,6 +17573,7 @@ fn child_usage_metadata_carries_cache_write_and_reasoning_end_to_end() {
 
     // The shared producer emits every class.
     let priced_route = crate::cost_status::EffectiveRouteEnvelope {
+        openrouter_vendor: None,
         provider: crate::config::ApiProvider::Anthropic,
         provider_identity: "anthropic-api".to_string(),
         model: "claude-haiku-4-5".to_string(),
@@ -17622,6 +17632,7 @@ fn child_usage_metadata_carries_cache_write_and_reasoning_end_to_end() {
     unpriced_app.api_provider = crate::config::ApiProvider::Deepseek;
     unpriced_app.billing_presentation = crate::route_billing::BillingPresentation::Metered;
     let unpriced_route = crate::cost_status::EffectiveRouteEnvelope {
+        openrouter_vendor: None,
         provider: crate::config::ApiProvider::Moonshot,
         provider_identity: "moonshot-api".to_string(),
         model: "kimi-k2.7-code".to_string(),

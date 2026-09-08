@@ -4905,6 +4905,10 @@ impl Engine {
         // digests the credential an injected client did not use and is therefore
         // withheld above.
         let dispatch_billing = crate::core::events::RouteBillingEnvelope {
+            openrouter_vendor: self
+                .deepseek_client
+                .as_ref()
+                .and_then(|client| client.openrouter_vendor().map(str::to_string)),
             billing_surface: crate::route_billing::billing_surface_for_dispatch(
                 Some(&self.api_config),
                 effective_provider,

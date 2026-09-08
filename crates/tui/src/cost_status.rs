@@ -94,6 +94,9 @@ pub struct EffectiveRouteEnvelope {
     pub provider: ApiProvider,
     pub provider_identity: String,
     pub model: String,
+    /// Requested OpenRouter upstream, frozen with the client that dispatched.
+    #[serde(default)]
+    pub openrouter_vendor: Option<String>,
     pub billing_surface: Option<String>,
     pub endpoint_fingerprint: Option<String>,
     #[serde(default)]
@@ -109,10 +112,16 @@ impl serde::Serialize for EffectiveRouteEnvelope {
         use serde::ser::SerializeStruct as _;
 
         let route = self.sanitized_for_persistence();
-        let mut state = serializer.serialize_struct("EffectiveRouteEnvelope", 7)?;
+        let mut state = serializer.serialize_struct(
+            "EffectiveRouteEnvelope",
+            7 + usize::from(route.openrouter_vendor.is_some()),
+        )?;
         state.serialize_field("provider", &route.provider)?;
         state.serialize_field("provider_identity", &route.provider_identity)?;
         state.serialize_field("model", &route.model)?;
+        if let Some(vendor) = &route.openrouter_vendor {
+            state.serialize_field("openrouter_vendor", vendor)?;
+        }
         state.serialize_field("billing_surface", &route.billing_surface)?;
         state.serialize_field("endpoint_fingerprint", &route.endpoint_fingerprint)?;
         state.serialize_field("billing_mode", &route.billing_mode)?;
@@ -174,6 +183,13 @@ impl EffectiveRouteEnvelope {
             provider,
             provider_identity: sanitize_persisted_route_label(&provider_identity),
             model: sanitize_persisted_route_label(&model),
+            openrouter_vendor: config
+                .filter(|_| provider == ApiProvider::Openrouter)
+                .and_then(|config| config.provider_config_for(provider))
+                .and_then(|entry| entry.vendor.as_deref())
+                .map(str::trim)
+                .filter(|vendor| !vendor.is_empty())
+                .map(sanitize_persisted_route_label),
             billing_surface: crate::route_billing::billing_surface_for_dispatch(
                 config, provider, base_url,
             )
@@ -197,6 +213,11 @@ impl EffectiveRouteEnvelope {
             }
             RouteBillingMode::Metered => {}
         }
+        // The OpenRouter model catalog does not identify a pinned upstream's
+        // price. An endpoint match alone must not promote that aggregate rate.
+        if self.provider == ApiProvider::Openrouter && self.openrouter_vendor.is_some() {
+            return TurnCostAudit::unpriced(crate::pricing::UnpricedReason::RoutingDependentPrice);
+        }
         crate::pricing::audit_turn_cost_for_route_on_endpoint_at(
             self.provider,
             &self.model,
@@ -210,7 +231,7 @@ impl EffectiveRouteEnvelope {
     #[must_use]
     pub fn receipt(&self, audit: &TurnCostAudit) -> String {
         let route = self.sanitized_for_persistence();
-        route_receipt(
+        let mut receipt = route_receipt(
             route.provider,
             Some(&route.provider_identity),
             &route.model,
@@ -218,7 +239,12 @@ impl EffectiveRouteEnvelope {
             route.endpoint_fingerprint.as_deref(),
             route.billing_mode,
             currency_tag(audit),
-        )
+        );
+        if let Some(vendor) = route.openrouter_vendor.as_deref() {
+            receipt.push_str(" openrouter_vendor=");
+            receipt.push_str(&safe_receipt_field(vendor));
+        }
+        receipt
     }
 
     /// Redact filesystem-like labels before a route crosses a persistence or
@@ -229,6 +255,10 @@ impl EffectiveRouteEnvelope {
         let mut route = self.clone();
         route.provider_identity = sanitize_persisted_route_label(&route.provider_identity);
         route.model = sanitize_persisted_route_label(&route.model);
+        route.openrouter_vendor = route
+            .openrouter_vendor
+            .as_deref()
+            .map(sanitize_persisted_route_label);
         route.billing_surface = route
             .billing_surface
             .as_deref()
@@ -284,6 +314,10 @@ pub fn child_usage_metadata_fields(
         serde_json::json!(route.provider_identity),
     );
     fields.insert("child_model".into(), serde_json::json!(route.model));
+    fields.insert(
+        "child_openrouter_vendor".into(),
+        serde_json::json!(route.openrouter_vendor),
+    );
     fields.insert(
         "child_billing_surface".into(),
         serde_json::json!(route.billing_surface),
@@ -381,6 +415,10 @@ pub fn child_route_envelope_from_metadata(
             provider: provider.unwrap_or(ApiProvider::Custom),
             provider_identity: provider_identity.unwrap_or_else(|| "legacy-unreported".to_string()),
             model,
+            openrouter_vendor: metadata
+                .get("child_openrouter_vendor")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
             billing_surface: metadata
                 .get("child_billing_surface")
                 .and_then(serde_json::Value::as_str)
@@ -1354,6 +1392,91 @@ mod tests {
     }
 
     #[test]
+    fn openrouter_vendor_pin_does_not_inherit_aggregate_catalog_price() {
+        let _live = crate::provider_lake::lock_live_snapshot();
+        crate::provider_lake::clear_live_snapshot();
+        let mut route = EffectiveRouteEnvelope::capture(
+            None,
+            ApiProvider::Openrouter,
+            "openrouter",
+            "qwen/qwen3.7-plus",
+            Some(ApiProvider::Openrouter.default_base_url()),
+            Utc::now(),
+        );
+        let usage = small_usage();
+        let aggregate = route.audit(&usage);
+        assert!(
+            aggregate.is_priced(),
+            "aggregate fixture must be priced: {aggregate:?}"
+        );
+
+        route.openrouter_vendor = Some("cerebras".to_string());
+        let audit = route.audit(&usage);
+        assert_eq!(
+            audit.unpriced_reason,
+            Some(crate::pricing::UnpricedReason::RoutingDependentPrice)
+        );
+        assert!(audit.estimate.is_none());
+        assert!(audit.counts_toward_money_coverage());
+        assert!(route.receipt(&audit).contains("openrouter_vendor=cerebras"));
+
+        for (billing_mode, reason) in [
+            (
+                RouteBillingMode::Subscription,
+                crate::pricing::UnpricedReason::NotMoneyMetered,
+            ),
+            (
+                RouteBillingMode::Local,
+                crate::pricing::UnpricedReason::NotMoneyMetered,
+            ),
+            (
+                RouteBillingMode::Unknown,
+                crate::pricing::UnpricedReason::UnknownBillingBasis,
+            ),
+        ] {
+            route.billing_mode = billing_mode;
+            assert_eq!(route.audit(&usage).unpriced_reason, Some(reason));
+        }
+    }
+
+    #[test]
+    fn openrouter_vendor_pin_survives_envelope_and_child_metadata_persistence() {
+        let mut config = crate::config::Config {
+            provider: Some("openrouter".to_string()),
+            ..Default::default()
+        };
+        config
+            .provider_config_for_mut(ApiProvider::Openrouter)
+            .vendor = Some("cerebras".to_string());
+        let route = EffectiveRouteEnvelope::capture(
+            Some(&config),
+            ApiProvider::Openrouter,
+            "openrouter",
+            "qwen/qwen3.7-plus",
+            Some(ApiProvider::Openrouter.default_base_url()),
+            Utc::now(),
+        );
+        config
+            .provider_config_for_mut(ApiProvider::Openrouter)
+            .vendor = None;
+        assert_eq!(route.openrouter_vendor.as_deref(), Some("cerebras"));
+
+        let mut json = serde_json::to_value(&route).expect("serialize route");
+        let restored: EffectiveRouteEnvelope =
+            serde_json::from_value(json.clone()).expect("restore route");
+        assert_eq!(restored, route);
+        let metadata =
+            serde_json::Value::Object(child_usage_metadata_fields(&route, &small_usage()));
+        assert_eq!(child_route_envelope_from_metadata(&metadata), Some(route));
+
+        json.as_object_mut()
+            .expect("route object")
+            .remove("openrouter_vendor");
+        let legacy: EffectiveRouteEnvelope = serde_json::from_value(json).expect("legacy route");
+        assert_eq!(legacy.openrouter_vendor, None);
+    }
+
+    #[test]
     fn child_metadata_round_trip_preserves_zero_and_reasoning_usage() {
         let route = deepseek_envelope();
         let usage = Usage {
@@ -1504,6 +1627,7 @@ mod tests {
     #[test]
     fn route_labels_redact_local_paths_but_preserve_model_namespaces() {
         let route = EffectiveRouteEnvelope {
+            openrouter_vendor: None,
             provider: ApiProvider::Openrouter,
             provider_identity: "/Users/alice/.config/provider-secret".to_string(),
             model: "/Volumes/private/checkpoints/model.gguf".to_string(),
@@ -1568,6 +1692,7 @@ mod tests {
     #[test]
     fn serialized_route_envelopes_records_and_child_receipts_are_secret_free() {
         let route = EffectiveRouteEnvelope {
+            openrouter_vendor: Some("Authorization: Bearer vendor-secret".to_string()),
             provider: ApiProvider::Custom,
             provider_identity: "Authorization: Bearer provider-secret".to_string(),
             model: "MODEL_API_KEY=sk-model-secret".to_string(),
@@ -1594,6 +1719,7 @@ mod tests {
             .expect("serialize child receipt");
         for serialized in [&envelope_json, &record_json, &child_json] {
             for secret in [
+                "vendor-secret",
                 "provider-secret",
                 "sk-model-secret",
                 "alice",

@@ -429,6 +429,7 @@ fn sample_turn(thread_id: &str, turn_id: &str, status: RuntimeTurnStatus) -> Tur
         permission_posture: None,
         effective_provider: None,
         effective_provider_id: None,
+        effective_openrouter_vendor: None,
         effective_billing_surface: None,
         effective_endpoint_fingerprint: None,
         effective_billing_mode: None,
@@ -607,6 +608,7 @@ fn set_test_turn_route(
     billing_mode: crate::cost_status::RouteBillingMode,
 ) {
     turn.persist_effective_route(&crate::cost_status::EffectiveRouteEnvelope {
+        openrouter_vendor: None,
         provider,
         provider_identity: provider_identity.to_string(),
         model: model.to_string(),
@@ -2750,10 +2752,56 @@ async fn simultaneous_named_custom_auto_threads_keep_exact_routes() -> Result<()
 }
 
 #[test]
+fn turn_record_preserves_openrouter_vendor_pin_after_reload() {
+    let mut turn = sample_turn("thr_vendor", "turn_vendor", RuntimeTurnStatus::Completed);
+    let route = crate::cost_status::EffectiveRouteEnvelope {
+        provider: ApiProvider::Openrouter,
+        provider_identity: "openrouter".to_string(),
+        model: "qwen/qwen3.7-plus".to_string(),
+        openrouter_vendor: Some("cerebras".to_string()),
+        billing_surface: crate::pricing::billing_surface_for_route(
+            ApiProvider::Openrouter,
+            Some(ApiProvider::Openrouter.default_base_url()),
+        )
+        .map(str::to_string),
+        endpoint_fingerprint: None,
+        billing_mode: crate::cost_status::RouteBillingMode::Metered,
+        dispatched_at: turn.created_at,
+    };
+    turn.persist_effective_route(&route);
+    let mut serialized = serde_json::to_value(&turn).expect("serialize turn");
+    assert_eq!(serialized["effective_openrouter_vendor"], "cerebras");
+    let restored: TurnRecord = serde_json::from_value(serialized.clone()).expect("restore turn");
+    assert_eq!(restored.effective_route_envelope(), Some(route.clone()));
+    let audit = restored
+        .effective_route_envelope()
+        .expect("route")
+        .audit(&Usage::default());
+    assert_eq!(
+        audit.unpriced_reason,
+        Some(crate::pricing::UnpricedReason::RoutingDependentPrice)
+    );
+
+    serialized
+        .as_object_mut()
+        .expect("turn object")
+        .remove("effective_openrouter_vendor");
+    let legacy: TurnRecord = serde_json::from_value(serialized).expect("legacy turn");
+    assert_eq!(
+        legacy
+            .effective_route_envelope()
+            .expect("legacy route")
+            .openrouter_vendor,
+        None
+    );
+}
+
+#[test]
 fn turn_record_persists_billing_surface_without_raw_endpoint() {
     let mut turn = sample_turn("thr_surface", "turn_surface", RuntimeTurnStatus::Completed);
     let fingerprint = "a".repeat(64);
     turn.persist_effective_route(&crate::cost_status::EffectiveRouteEnvelope {
+        openrouter_vendor: None,
         provider: ApiProvider::Stepfun,
         provider_identity: "stepfun-primary".to_string(),
         model: "step-3.7-flash".to_string(),
@@ -2785,6 +2833,7 @@ fn serialized_turn_record_redacts_all_route_and_source_fields() {
     .expect("serialize clean fixture");
     value["effective_provider"] = serde_json::json!("Authorization: Bearer provider-secret");
     value["effective_provider_id"] = serde_json::json!("CUSTOM_API_KEY=sk-provider-secret");
+    value["effective_openrouter_vendor"] = serde_json::json!("Authorization: Bearer vendor-secret");
     value["effective_model"] = serde_json::json!("../.ssh/model-secret");
     value["effective_billing_surface"] =
         serde_json::json!("https://alice:password@example.test/v1?token=secret#fragment");
@@ -2806,6 +2855,7 @@ fn serialized_turn_record_redacts_all_route_and_source_fields() {
 
     let serialized = serde_json::to_string(&turn).expect("serialize turn record");
     for secret in [
+        "vendor-secret",
         "provider-secret",
         "sk-provider-secret",
         ".ssh",
@@ -2927,6 +2977,7 @@ async fn aggregate_usage_for_thread_scopes_both_currencies_to_one_thread() -> Re
     );
     turn.routed_usage = vec![crate::cost_status::EffectiveRouteUsage {
         route: crate::cost_status::EffectiveRouteEnvelope {
+            openrouter_vendor: None,
             provider: ApiProvider::Deepseek,
             provider_identity: ApiProvider::Deepseek.as_str().to_string(),
             model: "deepseek-v4-flash".to_string(),
@@ -3297,6 +3348,7 @@ async fn aggregate_usage_includes_exclusive_child_calls_and_zero_usage_receipts(
     turn.routed_usage
         .push(crate::cost_status::EffectiveRouteUsage {
             route: crate::cost_status::EffectiveRouteEnvelope {
+                openrouter_vendor: None,
                 provider: ApiProvider::Deepseek,
                 provider_identity: "deepseek-child".to_string(),
                 model: "deepseek-v4-flash".to_string(),
@@ -3319,6 +3371,7 @@ async fn aggregate_usage_includes_exclusive_child_calls_and_zero_usage_receipts(
     turn.routed_usage
         .push(crate::cost_status::EffectiveRouteUsage {
             route: crate::cost_status::EffectiveRouteEnvelope {
+                openrouter_vendor: None,
                 provider: ApiProvider::OpenaiCodex,
                 provider_identity: "codex-oauth".to_string(),
                 model: "gpt-5.5".to_string(),
@@ -3377,6 +3430,7 @@ async fn aggregate_usage_filters_each_call_by_its_dispatch_timestamp() -> Result
     turn.routed_usage
         .push(crate::cost_status::EffectiveRouteUsage {
             route: crate::cost_status::EffectiveRouteEnvelope {
+                openrouter_vendor: None,
                 provider: ApiProvider::Deepseek,
                 provider_identity: "deepseek-child".to_string(),
                 model: "deepseek-v4-flash".to_string(),
@@ -5369,6 +5423,7 @@ async fn monitor_separates_lifecycle_start_from_billing_dispatch_and_child_usage
                 auto_model: false,
                 receipt: None,
                 billing: Some(crate::core::events::RouteBillingEnvelope {
+                    openrouter_vendor: None,
                     billing_surface: Some(crate::pricing::STEPFUN_PAYG_BILLING_SURFACE.to_string()),
                     endpoint_fingerprint: Some(endpoint_fingerprint.clone()),
                     billing_mode: crate::cost_status::RouteBillingMode::Metered,
@@ -5389,6 +5444,7 @@ async fn monitor_separates_lifecycle_start_from_billing_dispatch_and_child_usage
                 agent_id: "agent_child".to_string(),
                 source_id: "response-child".to_string(),
                 route: crate::cost_status::EffectiveRouteEnvelope {
+                    openrouter_vendor: None,
                     provider: ApiProvider::OpenaiCodex,
                     provider_identity: "codex-child".to_string(),
                     model: "gpt-5.5".to_string(),
@@ -5497,6 +5553,7 @@ async fn monitor_separates_lifecycle_start_from_billing_dispatch_and_child_usage
                 agent_id: "agent-child-second".to_string(),
                 source_id: "response-child-second".to_string(),
                 route: crate::cost_status::EffectiveRouteEnvelope {
+                    openrouter_vendor: None,
                     provider: ApiProvider::OpenaiCodex,
                     provider_identity: "codex-child".to_string(),
                     model: "gpt-5.5".to_string(),
@@ -11214,6 +11271,7 @@ fn opening_manager_recovers_stale_queued_and_in_progress_work() -> Result<()> {
         permission_posture: None,
         effective_provider: None,
         effective_provider_id: None,
+        effective_openrouter_vendor: None,
         effective_billing_surface: None,
         effective_endpoint_fingerprint: None,
         effective_billing_mode: None,
@@ -11241,6 +11299,7 @@ fn opening_manager_recovers_stale_queued_and_in_progress_work() -> Result<()> {
         permission_posture: None,
         effective_provider: None,
         effective_provider_id: None,
+        effective_openrouter_vendor: None,
         effective_billing_surface: None,
         effective_endpoint_fingerprint: None,
         effective_billing_mode: None,
@@ -11516,6 +11575,7 @@ fn seed_turns_with_user_messages(
             permission_posture: None,
             effective_provider: None,
             effective_provider_id: None,
+            effective_openrouter_vendor: None,
             effective_billing_surface: None,
             effective_endpoint_fingerprint: None,
             effective_billing_mode: None,
@@ -12153,6 +12213,7 @@ fn restart_rebuild_restores_tool_call_identity_from_persisted_items() -> Result<
         permission_posture: None,
         effective_provider: None,
         effective_provider_id: None,
+        effective_openrouter_vendor: None,
         effective_billing_surface: None,
         effective_endpoint_fingerprint: None,
         effective_billing_mode: None,
@@ -12246,6 +12307,7 @@ fn restart_rebuild_keeps_in_flight_tool_call_identity() -> Result<()> {
         permission_posture: None,
         effective_provider: None,
         effective_provider_id: None,
+        effective_openrouter_vendor: None,
         effective_billing_surface: None,
         effective_endpoint_fingerprint: None,
         effective_billing_mode: None,
@@ -12334,6 +12396,7 @@ fn restart_rebuild_skips_legacy_tool_items_without_identity() -> Result<()> {
         permission_posture: None,
         effective_provider: None,
         effective_provider_id: None,
+        effective_openrouter_vendor: None,
         effective_billing_surface: None,
         effective_endpoint_fingerprint: None,
         effective_billing_mode: None,

@@ -108,6 +108,8 @@ pub enum RouteProduct {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RouteBillingEnvelope {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub openrouter_vendor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub billing_surface: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub endpoint_fingerprint: Option<String>,
@@ -936,6 +938,7 @@ mod tests {
                 credential_generation_present: true,
             }),
             billing: Some(RouteBillingEnvelope {
+                openrouter_vendor: None,
                 billing_surface: None,
                 endpoint_fingerprint: Some("fp".into()),
                 billing_mode: "metered".into(),

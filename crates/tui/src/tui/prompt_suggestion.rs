@@ -59,8 +59,9 @@ impl SuggestionRouteAuthority {
 
     /// Whether a live re-resolution still lands on the same endpoint and the
     /// same credential generation.
-    fn authorizes(&self, base_url: &str, api_key: &str) -> bool {
+    fn authorizes(&self, base_url: &str, api_key: &str, openrouter_vendor: Option<&str>) -> bool {
         self.receipt.matches_live_route(base_url, api_key)
+            && self.receipt.openrouter_vendor() == openrouter_vendor
     }
 
     #[cfg(test)]
@@ -115,6 +116,7 @@ pub struct SuggestionRouteCredentials {
     pub base_url: String,
     /// Wire model the resolver arrived at. Must equal the snapshot model.
     pub model: String,
+    pub openrouter_vendor: Option<String>,
 }
 
 /// Redacted: an API key must never reach a log line, panic message, or test
@@ -136,6 +138,7 @@ pub struct SuggestionLaunch {
     pub api_key: String,
     pub base_url: String,
     pub model: String,
+    pub openrouter_vendor: Option<String>,
 }
 
 /// Redacted: see [`SuggestionRouteCredentials`].
@@ -212,6 +215,7 @@ fn resolve_credentials_for_identity(
         api_key,
         base_url: resolved.candidate.endpoint().base_url.clone(),
         model: resolved.model.clone(),
+        openrouter_vendor: resolved.config.openrouter_vendor().ok()?,
     })
 }
 
@@ -328,7 +332,11 @@ where
     // Both are checked against the receipt in one step, over the raw endpoint
     // and raw credential, so a mutation hidden behind identical redaction (URL
     // userinfo, a query token) is still a mismatch.
-    if !authority.authorizes(&credentials.base_url, &credentials.api_key) {
+    if !authority.authorizes(
+        &credentials.base_url,
+        &credentials.api_key,
+        credentials.openrouter_vendor.as_deref(),
+    ) {
         return None;
     }
 
@@ -341,6 +349,7 @@ where
         api_key: credentials.api_key,
         base_url: credentials.base_url,
         model: model.to_string(),
+        openrouter_vendor: credentials.openrouter_vendor,
     })
 }
 
@@ -386,6 +395,7 @@ pub async fn generate_suggestion(
     base_url: &str,
     model: &str,
     recent_messages: &str,
+    openrouter_vendor: Option<&str>,
 ) -> Option<String> {
     // Suggestions are model output derived from the just-completed
     // interactive transcript. They therefore participate in the same
@@ -394,7 +404,7 @@ pub async fn generate_suggestion(
     // so Runtime Chat cannot overlap or project a second inference lifecycle.
     let _inference = crate::client::acquire_remote_control_inference_participant().await;
     let client = suggestion_client();
-    let body = serde_json::json!({
+    let mut body = serde_json::json!({
         "model": model,
         "messages": [
             {
@@ -417,6 +427,7 @@ pub async fn generate_suggestion(
         "temperature": 0.3,
         "stream": false
     });
+    crate::client::apply_openrouter_vendor(&mut body, openrouter_vendor);
 
     let url = crate::client::api_url(base_url, "chat/completions");
     // Never log the raw request URL: a base URL can carry credentials in its
@@ -527,6 +538,42 @@ mod tests {
     const DEEPSEEK_KEY: &str = "sk-deepseek-secret";
 
     #[tokio::test]
+    async fn suggestion_request_preserves_openrouter_vendor_pin() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "choices": [{ "message": { "content": "What should we do next?" } }]
+            })))
+            .expect(2)
+            .mount(&server)
+            .await;
+
+        for vendor in [Some("chutes/region-fixture"), None] {
+            assert!(
+                generate_suggestion(
+                    "fixture-key",
+                    &format!("{}/v1", server.uri()),
+                    "fixture/model",
+                    "User: hello",
+                    vendor,
+                )
+                .await
+                .is_some()
+            );
+        }
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 2);
+        let pinned: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+        assert_eq!(
+            pinned["provider"],
+            serde_json::json!({"order": ["chutes/region-fixture"], "allow_fallbacks": false})
+        );
+        let unpinned: serde_json::Value = serde_json::from_slice(&requests[1].body).unwrap();
+        assert!(unpinned.get("provider").is_none());
+    }
+
+    #[tokio::test]
     async fn suggestion_inference_waits_for_runtime_chat_ownership() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -546,6 +593,7 @@ mod tests {
                 &base_url,
                 "deepseek-v4-flash",
                 "User: hello\nAssistant: hi",
+                None,
             )
             .await
         });
@@ -607,6 +655,7 @@ mod tests {
             api_key: api_key.to_string(),
             base_url: base_url.to_string(),
             model: model.to_string(),
+            openrouter_vendor: None,
         }
     }
 
@@ -1267,6 +1316,51 @@ mod tests {
         config
     }
 
+    #[test]
+    fn suggestion_vendor_pin_rotation_or_invalid_config_fails_closed() {
+        let _env = seal_deepseek_env();
+        let mut config = Config {
+            provider: Some("openrouter".to_string()),
+            providers: Some(ProvidersConfig {
+                openrouter: crate::config::ProviderConfig {
+                    api_key: Some("fixture-openrouter-key".to_string()),
+                    base_url: Some("http://127.0.0.1:18080/v1".to_string()),
+                    model: Some("fixture/model".to_string()),
+                    vendor: Some("chutes/region-fixture".to_string()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let client = crate::client::DeepSeekClient::new(&config).unwrap();
+        let authority = SuggestionRouteAuthority::from_receipt_for_test(
+            client.turn_route_receipt("openrouter"),
+        );
+        let route = SuggestionRouteSnapshot {
+            provider: ApiProvider::Openrouter,
+            provider_identity: "openrouter",
+            model: authority.model(),
+            authority: &authority,
+            actual_base_url: Some(client.base_url()),
+        };
+        let launch = plan_suggestion_launch_with_config(&config, true, true, 2, Some(route))
+            .expect("unchanged OpenRouter pin remains authorized");
+        assert_eq!(
+            launch.openrouter_vendor.as_deref(),
+            Some("chutes/region-fixture")
+        );
+
+        for changed_vendor in [Some("another-vendor"), None, Some("bad vendor")] {
+            config.providers.as_mut().unwrap().openrouter.vendor =
+                changed_vendor.map(str::to_string);
+            assert!(
+                plan_suggestion_launch_with_config(&config, true, true, 2, Some(route)).is_none(),
+                "changed, removed, or invalid vendor must not broaden the completed turn's route"
+            );
+        }
+    }
+
     /// Build the completed-turn route the engine would have reported, using the
     /// same resolution the engine performs. This keeps the tests correct even
     /// if a model selector normalizes to a different wire id.
@@ -1297,6 +1391,7 @@ mod tests {
             billing: Some(crate::core::events::RouteBillingEnvelope {
                 billing_surface: None,
                 endpoint_fingerprint: None,
+                openrouter_vendor: None,
                 billing_mode: crate::cost_status::RouteBillingMode::Unknown,
                 dispatched_at: chrono::Utc::now(),
             }),
@@ -1338,7 +1433,7 @@ mod tests {
         let credential_matches = resolved.as_ref().map(|credentials| {
             snapshot
                 .authority
-                .authorizes(&credentials.base_url, &credentials.api_key)
+                .authorizes(&credentials.base_url, &credentials.api_key, None)
         });
         format!(
             "snapshot={snapshot:?}, resolved={resolved:?}, \
@@ -1478,11 +1573,11 @@ mod tests {
             authority.endpoint_identity()
         );
         assert!(
-            !authority.authorizes(BASE_B, KEY_B),
+            !authority.authorizes(BASE_B, KEY_B, None),
             "route B must not be authorized by route A's receipt"
         );
         assert!(
-            authority.authorizes(&actual_base_url, KEY_A),
+            authority.authorizes(&actual_base_url, KEY_A, None),
             "route A must still authorize itself"
         );
 
@@ -1643,6 +1738,7 @@ mod tests {
                 billing: Some(crate::core::events::RouteBillingEnvelope {
                     billing_surface: None,
                     endpoint_fingerprint: None,
+                    openrouter_vendor: None,
                     billing_mode: crate::cost_status::RouteBillingMode::Unknown,
                     dispatched_at: chrono::Utc::now(),
                 }),

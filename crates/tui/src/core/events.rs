@@ -98,6 +98,7 @@ pub struct TurnRoute {
 ///   absent rather than defaulted.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RouteBillingEnvelope {
+    pub openrouter_vendor: Option<String>,
     pub billing_surface: Option<String>,
     pub endpoint_fingerprint: Option<String>,
     pub billing_mode: crate::cost_status::RouteBillingMode,
@@ -115,6 +116,7 @@ impl TurnRoute {
             provider: self.provider,
             provider_identity: self.provider_identity.clone(),
             model: self.model.clone(),
+            openrouter_vendor: billing.openrouter_vendor.clone(),
             billing_surface: billing.billing_surface.clone(),
             endpoint_fingerprint: billing.endpoint_fingerprint.clone(),
             billing_mode: billing.billing_mode,
