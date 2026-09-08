@@ -1683,6 +1683,11 @@ impl DeepSeekClient {
         config: Option<&Config>,
         model: &str,
     ) -> Result<Option<Self>> {
+        // The bound model already owns its admitted protocol and limits,
+        // including exact live-catalog facts absent from the offline catalog.
+        if model == self.default_model {
+            return Ok(None);
+        }
         static RESOLVER: OnceLock<RouteResolver> = OnceLock::new();
         let candidate = RESOLVER
             .get_or_init(RouteResolver::new)
@@ -1731,7 +1736,12 @@ impl DeepSeekClient {
         let model_aware = self.api_provider.metadata().is_some_and(|provider| {
             provider.wire_policy() == codewhale_config::provider::WirePolicy::ModelAware
         });
-        if !model_aware && request.model.trim() == self.default_model {
+        // Preserve the exact binding for model-aware providers too. Looking
+        // up this same model in the offline catalog would discard protocol
+        // and limit facts already admitted from an exact provider catalog.
+        if request.model == self.default_model
+            || (!model_aware && request.model.trim() == self.default_model)
+        {
             return Ok((request, self.route_limits));
         }
 
@@ -13226,6 +13236,98 @@ mod tests {
             assert_eq!(prepared.body["model"], model);
             assert_eq!(prepared.body["messages"][0]["content"], "hello");
         }
+    }
+
+    #[test]
+    fn exact_catalog_deepseek_preview_binding_survives_prepare_and_same_model_rebind() {
+        use codewhale_config::route::{
+            PricingSku, ProviderId, RouteCapabilities, WireModelId, offering::ProviderModelOffering,
+        };
+
+        let model = "deepseek-v4.1-flash-expires-on-0910";
+        // Synthetic catalog evidence: the offline catalog has no such row.
+        // This fixture does not assert that the real preview supports Responses.
+        let resolver = RouteResolver::from_offerings(vec![ProviderModelOffering {
+            provider: ProviderId::from("deepseek"),
+            canonical_model: None,
+            wire_model_id: WireModelId::from(model),
+            endpoint_key: "responses".to_string(),
+            default_for_provider: false,
+            limits: RouteLimits {
+                output_tokens: Some(777),
+                ..Default::default()
+            },
+            capabilities: RouteCapabilities::default(),
+            pricing: PricingSku::UnknownOrStale,
+        }]);
+        let candidate = resolver
+            .resolve(&RouteRequest {
+                explicit_provider: Some(codewhale_config::ProviderKind::Deepseek),
+                model_selector: Some(LogicalModelRef::from(model)),
+                base_url_override: Some("https://api.deepseek.com".to_string()),
+                ..Default::default()
+            })
+            .expect("exact synthetic catalog offering resolves");
+        assert_eq!(candidate.protocol(), WireFormat::Responses);
+        assert_eq!(candidate.wire_model_id().as_str(), model);
+
+        let config = Config {
+            provider: Some("deepseek".to_string()),
+            api_key: Some("ds-test".to_string()),
+            base_url: Some("https://api.deepseek.com".to_string()),
+            default_text_model: Some(model.to_string()),
+            ..Default::default()
+        };
+        let client = DeepSeekClient::from_candidate(&config, &candidate)
+            .expect("client binds exact synthetic catalog offering");
+        assert!(
+            client
+                .rebound_for_model_protocol(None, model)
+                .expect("the same admitted model needs no offline lookup")
+                .is_none()
+        );
+        let prepared = client
+            .prepare_outbound_request(
+                translation_message_request("hello", model.to_string(), "English", 4_096),
+                true,
+            )
+            .expect("same-model request preserves the exact catalog binding");
+        assert_eq!(prepared.dialect, WireDialect::OpenAiResponses);
+        assert_eq!(prepared.endpoint.url, "https://api.deepseek.com/responses");
+        assert_eq!(prepared.body["model"], model);
+        assert_eq!(prepared.body["max_output_tokens"], 777);
+
+        let other_model = "deepseek-v4-pro";
+        assert!(
+            client
+                .prepare_outbound_request(
+                    translation_message_request(
+                        "hello",
+                        other_model.to_string(),
+                        "English",
+                        4_096,
+                    ),
+                    true,
+                )
+                .is_err(),
+            "a different model must still obey the protocol switch guard"
+        );
+        let rebound = client
+            .rebound_for_model_protocol(Some(&config), other_model)
+            .expect("different model resolves independently")
+            .expect("Pro requires a Chat client");
+        let prepared = rebound
+            .prepare_outbound_request(
+                translation_message_request("hello", other_model.to_string(), "English", 4_096),
+                true,
+            )
+            .expect("rebound Pro prepares Chat");
+        assert_eq!(prepared.dialect, WireDialect::ChatCompletions);
+        assert_eq!(
+            prepared.endpoint.url,
+            "https://api.deepseek.com/chat/completions"
+        );
+        assert_eq!(prepared.body["model"], other_model);
     }
 
     #[test]
