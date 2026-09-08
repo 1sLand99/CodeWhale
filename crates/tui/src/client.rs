@@ -13231,7 +13231,7 @@ mod tests {
             assert_eq!(prepared.dialect, WireDialect::ChatCompletions);
             assert_eq!(
                 prepared.endpoint.url,
-                "https://api.deepseek.com/chat/completions"
+                "https://api.deepseek.com/v1/chat/completions"
             );
             assert_eq!(prepared.body["model"], model);
             assert_eq!(prepared.body["messages"][0]["content"], "hello");
@@ -13325,7 +13325,7 @@ mod tests {
         assert_eq!(prepared.dialect, WireDialect::ChatCompletions);
         assert_eq!(
             prepared.endpoint.url,
-            "https://api.deepseek.com/chat/completions"
+            "https://api.deepseek.com/v1/chat/completions"
         );
         assert_eq!(prepared.body["model"], other_model);
     }
