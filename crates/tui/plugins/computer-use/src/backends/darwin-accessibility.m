@@ -249,10 +249,20 @@ static BOOL axActivate(pid_t pid) {
   return e==kAXErrorSuccess;
 }
 static NSRunningApplication *resolve(NSDictionary *ref) {
-  if(![ref isKindOfClass:NSDictionary.class]) ref=@{};
-  if(!ref.count) return NSWorkspace.sharedWorkspace.frontmostApplication;
-  NSString *bundle=[ref[@"bundle_id"] length]?ref[@"bundle_id"]:nil, *name=[ref[@"name"] length]?ref[@"name"]:nil;
-  if(!ref[@"pid"] && !bundle && !name) return NSWorkspace.sharedWorkspace.frontmostApplication;
+  // Only omission selects the frontmost app. An explicit but malformed
+  // identity must never redirect observation or input to the user's app.
+  if(!ref) return NSWorkspace.sharedWorkspace.frontmostApplication;
+  if(![ref isKindOfClass:NSDictionary.class] || !ref.count) return nil;
+  for(id key in ref) {
+    id value=ref[key];
+    if([key isEqual:@"pid"]) {
+      if(![value isKindOfClass:NSNumber.class] || CFGetTypeID((__bridge CFTypeRef)value)==CFBooleanGetTypeID()
+         || [value doubleValue]<=0 || [value doubleValue]>INT_MAX || [value doubleValue]!=[value intValue]) return nil;
+    } else if([key isEqual:@"name"] || [key isEqual:@"bundle_id"]) {
+      if(![value isKindOfClass:NSString.class] || ![value stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet].length) return nil;
+    } else return nil;
+  }
+  NSString *bundle=ref[@"bundle_id"], *name=ref[@"name"];
   for(NSRunningApplication *a in NSWorkspace.sharedWorkspace.runningApplications) {
     if(ref[@"pid"] && a.processIdentifier!=[ref[@"pid"] intValue]) continue;
     if(bundle && !matchesName(a.bundleIdentifier,bundle)) continue;
@@ -413,7 +423,7 @@ static id execute(NSDictionary *p) {
     return @{@"updated":@YES};
   }
   if([tool isEqual:@"window_info"]) {
-    NSRunningApplication *a=resolve(args[@"app_ref"]?:args[@"input_app_ref"]?:@{});
+    NSRunningApplication *a=resolve(args[@"app_ref"]?:args[@"input_app_ref"]);
     if(!a) @throw [NSException exceptionWithName:@"app" reason:@"application not found" userInfo:nil];
     AXUIElementRef ax=AXUIElementCreateApplication(a.processIdentifier);
     NSArray *axWindows=attr(ax,@"AXWindows");
@@ -455,7 +465,7 @@ static id execute(NSDictionary *p) {
     return @{@"found":@NO,@"skipped":skipped};
   }
   if([tool isEqual:@"app_info"]) {
-    NSRunningApplication *a=resolve(args[@"app_ref"]?:@{});
+    NSRunningApplication *a=resolve(args[@"app_ref"]);
     if(!a) @throw [NSException exceptionWithName:@"app" reason:@"application not found" userInfo:nil];
     if([args[@"activate"] boolValue]) cuLockInput();
     cuCheckCancelled();
@@ -653,7 +663,7 @@ static id execute(NSDictionary *p) {
   if([tool isEqual:@"cursor_position"]) {
     CGEventRef event=CGEventCreate(NULL); CGPoint p=CGEventGetLocation(event); CFRelease(event); return @{@"x":@(p.x),@"y":@(p.y)};
   }
-  NSRunningApplication *a=resolve(args[@"app_ref"]?:args[@"target"][@"app_ref"]?:@{});
+  NSRunningApplication *a=resolve(args[@"app_ref"]?:args[@"target"][@"app_ref"]);
   if(!a) @throw [NSException exceptionWithName:@"app" reason:@"application not found" userInfo:nil];
   AXUIElementRef app=AXUIElementCreateApplication(a.processIdentifier);
   AXUIElementSetMessagingTimeout(app,2.0);

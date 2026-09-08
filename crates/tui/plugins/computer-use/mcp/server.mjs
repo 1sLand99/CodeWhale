@@ -404,7 +404,6 @@ async function prepareArgs(computer, name, args, resolve, sink) {
     out[key] = { ...given, ...(await normalizeTarget(computer, given, kind, resolve, sink)) };
   }
   if (name === "get_app_state") {
-    out.app_ref = out.app_ref ?? null;
     if (out.detail != null && !["summary", "compact", "full"].includes(out.detail)) throw new ServerError("bad_args", "detail must be summary or full (compact is an alias for summary)");
     out.detail = out.detail === "full" ? "full" : "summary";
     if (out.include_ocr != null && typeof out.include_ocr !== "boolean") throw new ServerError("bad_args", "include_ocr must be true or false");

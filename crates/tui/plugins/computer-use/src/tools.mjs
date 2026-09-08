@@ -98,7 +98,7 @@ export const TOOLS = [
   },
   {
     name: "list_windows",
-    description: "List windows of an application (or all windows when app_ref is omitted).",
+    description: "List application windows. On macOS, app_ref selects the app; omission selects the frontmost app. Other platforms list all windows and reject app_ref selectors.",
     inputSchema: {
       type: "object",
       properties: {
@@ -120,8 +120,8 @@ export const TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        app_ref: { type: "object", properties: { pid: { type: "integer" }, name: { type: "string" }, bundle_id: { type: "string" } }, additionalProperties: false },
-        window_id: { type: "integer", description: "Zero-based window index within the app" },
+        app_ref: { type: "object", properties: { pid: { type: "integer" }, name: { type: "string" }, bundle_id: { type: "string" } }, additionalProperties: false, description: "macOS accepts PID, name and bundle identity. Linux accepts only a unique exact AT-SPI app name. Windows accepts only a unique exact window title in name (from list_windows.title). HarmonyOS rejects explicit app selectors." },
+        window_id: { type: "integer", description: "macOS only: zero-based window index within the app. Other platforms reject this selector." },
         detail: { enum: ["summary", "compact", "full"], default: "summary", description: "Summary is the concise default; full includes nested menus and internal tree structure. Compact is a compatibility alias for summary." },
         include_ocr: { type: "boolean", default: false, description: "On macOS, also recognize visible text locally from the selected app window. Requires Screen Recording permission. Returns text, confidence and raster coordinate targets for UI that accessibility cannot read; no vision model is required." },
         computer: computerParam,

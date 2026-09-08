@@ -95,6 +95,16 @@ function assertEventStrategy(strategy) {
   }
 }
 
+function unsupportedSelector(message) {
+  return Object.assign(new ExecError(message), { code: "unsupported_selector" });
+}
+
+function assertUntargetedElement(target) {
+  if (["app_ref", "windowIndex", "window_id"].some((key) => Object.hasOwn(target, key))) {
+    throw unsupportedSelector("Windows semantic actions do not support explicit application or window selectors");
+  }
+}
+
 export function create(opts = {}) {
   // Allow tests (and other embedders) to inject a runner so no real
   // powershell.exe is spawned. Production uses the imported runner.
@@ -213,8 +223,10 @@ if (-not $out) { $out = '[]' }
 Write-Output ('{"apps": ' + $out + '}');`);
       return { apps: (Array.isArray(j.apps) ? j.apps : [j.apps]).map((a) => ({ name: a.name, pid: a.pid2, title: a.title })) };
     },
-    list_windows: async () => {
-      const j = await psJson(`Add-Type -AssemblyName System.Windows.Forms;
+    list_windows: async (args = {}) => {
+      if (Object.hasOwn(args, "app_ref") || Object.hasOwn(args, "window_id")) throw unsupportedSelector("Windows list_windows does not support app_ref or window_id; omit them to list all windows");
+      const j = await psJson(`$ErrorActionPreference = 'Stop';
+Add-Type -AssemblyName System.Windows.Forms;
 Add-Type -TypeDefinition @'
 using System;
 using System.Text;
@@ -246,7 +258,7 @@ public static class WinEnum {
   }
 }
 '@;
-$json = (WinEnum::List() | ForEach-Object { $p = $_.Split('|', 2); $parts = $p[1].Split('|', 2); [pscustomobject]@{ pid2 = [int]$p[0]; geom = $parts[0]; title = $parts[1] } } | ConvertTo-Json -Compress;
+$json = [WinEnum]::List() | ForEach-Object { $p = $_.Split('|', 2); $parts = $p[1].Split('|', 2); [pscustomobject]@{ pid2 = [int]$p[0]; geom = $parts[0]; title = $parts[1] } } | ConvertTo-Json -Compress;
 if (-not $json) { $json = '[]' }
 Write-Output ('{"windows": ' + $json + '}');`, { timeoutMs: 25_000 });
       return {
@@ -263,19 +275,29 @@ Write-Output ('{"windows": ' + $json + '}');`, { timeoutMs: 25_000 });
       if (r.code !== 0) throw new ExecError(`Start-Process failed: ${r.stderr.trim().slice(0, 200)}`, r);
       return { launched: true, name: target, url: urlArg ?? null, activate };
     },
-    get_app_state: async ({ app_ref, detail } = {}) => {
-      const filter = app_ref?.name ? app_ref.name.replace(/'/g, "''") : "";
+    get_app_state: async (args = {}) => {
+      if (Object.hasOwn(args, "window_id")) throw unsupportedSelector("Windows get_app_state does not support window_id");
+      const { app_ref, detail } = args;
+      if (Object.hasOwn(args, "app_ref") && (!app_ref || typeof app_ref !== "object" || Array.isArray(app_ref)
+        || Object.keys(app_ref).length !== 1 || !Object.hasOwn(app_ref, "name") || typeof app_ref.name !== "string" || !app_ref.name.trim())) {
+        throw unsupportedSelector("Windows get_app_state supports only app_ref: { name: exact window title }; PID, bundle_id and other references are unsupported");
+      }
+      const filter = Buffer.from(app_ref?.name ?? "", "utf16le").toString("base64");
       const maxEls = detail === "full" ? 800 : 400;
       const j = await psJson(`Add-Type -AssemblyName UIAutomationClient;
 Add-Type -AssemblyName UIAutomationTypes;
 $max = ${maxEls};
+$filter = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('${filter}'));
 $root = [System.Windows.Automation.AutomationElement]::RootElement;
 $els = New-Object System.Collections.ArrayList;
 $found = $false; $truncated = $false; $appName = $null;
-$targets = $root.FindAll([System.Windows.Automation.TreeScope]::Children, [System.Windows.Automation.Condition]::TrueCondition);
+$targets = @($root.FindAll([System.Windows.Automation.TreeScope]::Children, [System.Windows.Automation.Condition]::TrueCondition));
+if ($filter) {
+  $targets = @($targets | Where-Object { [string]::Equals($_.Current.Name, $filter, [StringComparison]::OrdinalIgnoreCase) });
+  if ($targets.Count -gt 1) { throw 'More than one application window has this exact name' }
+}
 foreach ($t in $targets) {
   $nm = $t.Current.Name;
-  if ('${filter}' -and $nm -notlike '*${filter}*') { continue }
   $found = $true; $appName = $nm;
   $stack = New-Object System.Collections.Stack;
   $stack.Push(@($t, @(0)));
@@ -294,10 +316,12 @@ foreach ($t in $targets) {
 }
 $result = [pscustomobject]@{ found = $found; name = $appName; truncated = $truncated; elements = @($els | ForEach-Object { [pscustomobject]@{ index = $_.index; path = $_.path; role = ($_.role -replace 'ControlType.',''); label = $_.label; value = $_.value; enabled = $_.enabled; position = [pscustomobject]@{ x = $_.x; y = $_.y }; size = [pscustomobject]@{ w = $_.w; h = $_.h }; actions = $_.actions } }) };
 Write-Output ($result | ConvertTo-Json -Depth 6 -Compress);`, { timeoutMs: 60_000 });
-      if (!j.found) throw new ExecError("application window not found in UIA tree — pass app_ref.name from list_apps");
+      if (!j.found) throw new ExecError("application window not found in UIA tree — pass app_ref.name as the exact window title from list_windows or list_apps.title");
       return j;
     },
-    screenshot: async ({ display, region, path: outPath } = {}) => {
+    screenshot: async (args = {}) => {
+      if (Object.hasOwn(args, "app_ref") || Object.hasOwn(args, "window_id")) throw unsupportedSelector("Windows screenshot does not support app_ref or window_id; omit them for a desktop screenshot");
+      const { display, region, path: outPath } = args;
       const dir = recordingsDir();
       fs.mkdirSync(dir, { recursive: true });
       const file = outPath || path.join(dir, `shot-${new Date().toISOString().replace(/[:.]/g, "-")}-${crypto.randomBytes(3).toString("hex")}.png`);
@@ -427,6 +451,7 @@ Write-Output '{"ok": true}';`, { timeoutMs: Math.max(10_000, d * 1000 + 8000) })
       });
     },
     set_value: async ({ target, value }) => {
+      assertUntargetedElement(target);
       // UIA ValuePattern via a re-walk to target.path from the desktop root.
       const b64path = Buffer.from(JSON.stringify(target.path ?? []), "utf8").toString("base64");
       const b64val = Buffer.from(String(value ?? ""), "utf16le").toString("base64");
@@ -455,6 +480,7 @@ try {
     },
     select_text: async () => { throw new ExecError("select_text is not implemented on the win32 backend yet — fail-closed"); },
     perform_action: async ({ target, action }) => {
+      assertUntargetedElement(target);
       const b64path = Buffer.from(JSON.stringify(target.path ?? []), "utf8").toString("base64");
       const act = String(action ?? "Invoke").replace(/'/g, "");
       const j = await psJson(`Add-Type -AssemblyName UIAutomationClient; Add-Type -AssemblyName UIAutomationTypes;

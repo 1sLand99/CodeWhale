@@ -230,7 +230,7 @@ export function create({ exec }) {
     if (!/\.png$/.test(file)) throw new ExecError("screenshot path must end in .png");
     const args = ["-x", "-t", "png"];
     const disp = display ?? state.activeDisplay;
-    const window = app_ref ? await native("window_info", { app_ref, window_id }) : null;
+    const window = app_ref !== undefined ? await native("window_info", { app_ref, window_id }) : null;
     if (window && region) throw new ExecError("choose app_ref or region, not both");
     if (window) args.push("-o", "-l", String(window.window_id));
     else if (disp && disp !== "all") args.push("-D", String(disp));
@@ -406,7 +406,7 @@ export function create({ exec }) {
   // ---------- apps / windows ----------
   async function listApps() { return native("list_apps"); }
 
-  async function listWindows(appRef) { return native("list_windows", { app_ref: appRef }); }
+  async function listWindows({ app_ref } = {}) { return native("list_windows", { app_ref }); }
 
   async function openApplication({ name, bundle_id: bid, pid, url: urlArg, activate = false } = {}) {
     if (!name && !bid && !pid) throw new ExecError("open_application needs name, bundle_id or pid");
@@ -517,7 +517,7 @@ export function create({ exec }) {
       return t;
     },
     resolve_element: async ({ app_ref, windowIndex, path: pathArr } = {}) => {
-      const r = await native("resolve_element", { app_ref: app_ref ?? {}, windowIndex: windowIndex ?? 0, path: pathArr ?? [] });
+      const r = await native("resolve_element", { app_ref, windowIndex: windowIndex ?? 0, path: pathArr ?? [] });
       return { found: !!r?.found, element: r?.element ?? null, reason: r?.reason ?? null };
     },
     preview: async ({ enabled = true } = {}) => {

@@ -63,6 +63,10 @@ function assertEventStrategy(strategy) {
   }
 }
 
+function rejectAppSelectors(args) {
+  if (["app_ref", "window_id", "windowIndex"].some(key => Object.hasOwn(args, key))) throw Object.assign(new ExecError("HarmonyOS cannot select an app or window for observation or element actions; explicit selectors are unsupported"), { code: "unsupported_selector" });
+}
+
 export function create({ exec }) {
   const shell = (args, opts = {}) => exec.shell(args, { timeoutMs: 20_000, ...opts });
 
@@ -101,6 +105,7 @@ export function create({ exec }) {
   }
 
   async function centerOf(target) {
+    rejectAppSelectors(target);
     const tree = await dumpLayout();
     const els = flatten(tree);
     const el = els[target.index];
@@ -146,7 +151,8 @@ export function create({ exec }) {
       const bundles = out.split("\n").map((s) => s.trim()).filter((s) => /^[a-zA-Z][\w.]*$/.test(s));
       return { apps: bundles.map((b) => ({ name: b, bundle_id: b, kind: "bundle" })) };
     },
-    list_windows: async () => {
+    list_windows: async (args = {}) => {
+      rejectAppSelectors(args);
       const out = await deviceOut(["hidumper", "-s", "WindowManagerService", "-a", "-a"], { timeoutMs: 25_000 }).catch(() => "");
       const windows = out.split("\n").filter((l) => /Window Name|bundleName/i.test(l)).slice(0, 40).map((l) => ({ title: l.trim().slice(0, 160) }));
       return { windows: windows.length ? windows : [{ title: "(window list unavailable on this HarmonyOS build)" }] };
@@ -165,12 +171,15 @@ export function create({ exec }) {
       }
       throw new ExecError(`aa start failed: ${last}`);
     },
-    get_app_state: async () => {
+    get_app_state: async (args = {}) => {
+      rejectAppSelectors(args);
       const tree = await dumpLayout();
       const els = flatten(tree);
       return { bundle_id: tree.attributes?.bundleName ?? null, elements: els, truncated: els.length >= 600 };
     },
-    screenshot: async ({ path: outPath } = {}) => {
+    screenshot: async (args = {}) => {
+      rejectAppSelectors(args);
+      const { path: outPath } = args;
       const dir = process.env.CODEWHALE_CU_RECORDINGS_DIR || path.join(os.homedir(), ".codewhale-cu", "recordings");
       fs.mkdirSync(dir, { recursive: true });
       const file = outPath || path.join(dir, `shot-${new Date().toISOString().replace(/[:.]/g, "-")}-${crypto.randomBytes(3).toString("hex")}.jpeg`);

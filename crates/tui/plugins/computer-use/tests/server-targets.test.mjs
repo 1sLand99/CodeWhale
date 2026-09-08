@@ -95,6 +95,13 @@ after(() => {
   for (const d of [stateDir, recDir, path.dirname(callsFile)]) { try { fs.rmSync(d, { recursive: true, force: true }); } catch {} }
 });
 
+test("app-state arguments distinguish an omitted reference from an explicit null", async () => {
+  await tool("get_app_state", {});
+  assert.equal(Object.hasOwn(calls("get_app_state").at(-1).args, "app_ref"), false);
+  await tool("get_app_state", { app_ref: null });
+  assert.equal(calls("get_app_state").at(-1).args.app_ref, null);
+});
+
 test("summary preserves readable UI and original target indices while full retains tree structure", async () => {
   for (const detail of [undefined, "summary", "compact"]) {
     const state = await tool("get_app_state", { detail });
