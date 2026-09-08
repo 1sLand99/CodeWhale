@@ -3918,6 +3918,7 @@ pub(crate) async fn run_event_loop(
                         }
                     }
                     EngineEvent::TurnUsage {
+                        max_output_tokens: _,
                         usage,
                         duration_ms,
                         first_token_ms,

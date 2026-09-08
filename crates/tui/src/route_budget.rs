@@ -13,6 +13,26 @@ pub(crate) fn known_route_limits(limits: RouteLimits) -> Option<RouteLimits> {
     limits.has_known_limit().then_some(limits)
 }
 
+/// Whether this exact transport can represent an explicit output allowance.
+/// Codex OAuth Responses rejects the field; other supported dialects carry it.
+pub(crate) fn route_supports_output_token_limit(
+    provider: ApiProvider,
+    protocol: codewhale_config::route::RequestProtocol,
+) -> bool {
+    !(provider == ApiProvider::OpenaiCodex
+        && protocol == codewhale_config::route::RequestProtocol::Responses)
+}
+
+pub(crate) fn effective_max_output_tokens_for_turn(
+    provider: ApiProvider,
+    model: &str,
+    route_limits: Option<RouteLimits>,
+    allowance: Option<std::num::NonZeroU32>,
+) -> u32 {
+    let ceiling = effective_max_output_tokens_for_route(provider, model, route_limits);
+    allowance.map_or(ceiling, |allowance| ceiling.min(allowance.get()))
+}
+
 /// Context window for a resolved runtime route.
 ///
 /// Route/offering facts win when known; otherwise this falls back to the

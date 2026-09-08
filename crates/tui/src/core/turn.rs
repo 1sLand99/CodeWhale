@@ -42,6 +42,7 @@ impl StepBudgetSource {
 /// Context for a single turn (user message + AI response).
 #[derive(Debug)]
 pub struct TurnContext {
+    pub max_output_tokens: Option<std::num::NonZeroU32>,
     /// Turn ID
     pub id: String,
 
@@ -106,6 +107,7 @@ impl TurnContext {
     /// Create a turn context with an explicit budget provenance (#5994).
     pub fn with_budget_source(max_steps: u32, budget_source: StepBudgetSource) -> Self {
         Self {
+            max_output_tokens: None,
             id: uuid::Uuid::new_v4().to_string(),
             started_at: Instant::now(),
             step: 0,

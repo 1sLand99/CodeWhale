@@ -273,6 +273,8 @@ pub enum Event {
     /// provider never reported usage for the call — absence is honest, and
     /// fields inside `usage` stay `None` when the provider omits them.
     TurnUsage {
+        /// Primary request allowance; not a claim of provider-reported usage.
+        max_output_tokens: Option<u32>,
         usage: Usage,
         /// Wall-clock duration of this model call's stream.
         duration_ms: u64,

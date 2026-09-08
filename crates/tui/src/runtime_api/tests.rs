@@ -435,6 +435,7 @@ fn messages_from_thread_detail_batches_tool_results() {
         saved_session_checkpoint: None,
     };
     let turn = TurnRecord {
+        max_output_tokens: None,
         schema_version: 2,
         id: turn_id.clone(),
         thread_id: thread.id.clone(),
@@ -5755,6 +5756,7 @@ async fn session_save_merges_thread_cost_split_and_records_coverage() -> Result<
     let store = runtime_threads.test_store();
     let now = Utc::now();
     let mut turn = TurnRecord {
+        max_output_tokens: None,
         schema_version: 2,
         id: "turn_cost_merge".to_string(),
         thread_id: thread_id.clone(),
@@ -5947,6 +5949,7 @@ async fn session_save_persists_parent_cny_unpriced_reasons_without_double_count(
     let store = runtime_threads.test_store();
     let now = Utc::now();
     let mut turn = TurnRecord {
+        max_output_tokens: None,
         schema_version: 2,
         id: "turn_cny_reasons".to_string(),
         thread_id: thread_id.clone(),
@@ -6957,6 +6960,7 @@ fn seed_summary_search_transcript(
             item_ids.push(item_id);
         }
         store.save_turn(&TurnRecord {
+            max_output_tokens: None,
             schema_version: 2,
             id: turn_id.clone(),
             thread_id: thread_id.to_string(),
@@ -7852,6 +7856,7 @@ fn provider_model_catalog_paginates_all_six_hundred_rows_without_truncation() {
     let models = (0..600)
         .rev()
         .map(|index| ProviderModelEntry {
+            output_token_limit: codewhale_config::route::CapabilityState::Unknown,
             id: format!("openrouter/model-{index:03}"),
             image_input: codewhale_config::route::CapabilityState::Unknown,
         })
@@ -7902,6 +7907,7 @@ fn provider_model_catalog_applies_filter_before_cursor_and_rejects_cross_scope_r
     let models = ["Alpha-One", "alpha-two", "beta"]
         .into_iter()
         .map(|id| ProviderModelEntry {
+            output_token_limit: codewhale_config::route::CapabilityState::Unknown,
             id: id.to_string(),
             image_input: codewhale_config::route::CapabilityState::Unknown,
         })
@@ -7950,6 +7956,7 @@ fn provider_model_cursor_rejects_catalog_change_between_pages() {
     let models = ["bravo", "charlie"]
         .into_iter()
         .map(|id| ProviderModelEntry {
+            output_token_limit: codewhale_config::route::CapabilityState::Unknown,
             id: id.to_string(),
             image_input: codewhale_config::route::CapabilityState::Unknown,
         })
@@ -7967,6 +7974,7 @@ fn provider_model_cursor_rejects_catalog_change_between_pages() {
     let cursor = first.next_cursor.expect("second page remains");
     let mut changed = models.clone();
     changed.push(ProviderModelEntry {
+        output_token_limit: codewhale_config::route::CapabilityState::Unknown,
         id: "alpha".to_string(),
         image_input: codewhale_config::route::CapabilityState::Unknown,
     });
@@ -8006,6 +8014,7 @@ fn provider_model_cursor_round_trips_multibyte_filter_at_the_allowed_limit() {
     let models = ["a", "b"]
         .into_iter()
         .map(|suffix| ProviderModelEntry {
+            output_token_limit: codewhale_config::route::CapabilityState::Unknown,
             id: format!("{filter}{suffix}"),
             image_input: codewhale_config::route::CapabilityState::Unknown,
         })
@@ -12219,5 +12228,76 @@ async fn api_config_reports_local_default_availability_without_blocking_config_r
     handle.abort();
     crate::provider_catalog_live::reset_cache_for_test();
     crate::provider_lake::clear_live_snapshot();
+    Ok(())
+}
+
+#[test]
+fn output_cap_catalog_reports_exact_transport_support() {
+    use codewhale_config::route::CapabilityState;
+    let _env = crate::test_support::lock_test_env();
+    let config = Config::default();
+    assert_eq!(
+        provider_model_output_token_limit_for_api(&config, ApiProvider::OpenaiCodex, "gpt-5.5"),
+        CapabilityState::Unsupported
+    );
+    assert_eq!(
+        provider_model_output_token_limit_for_api(
+            &config,
+            ApiProvider::Deepseek,
+            "deepseek-v4-pro"
+        ),
+        CapabilityState::Supported
+    );
+    assert!(default_runtime_capabilities().turn_output_token_limit);
+}
+
+#[tokio::test]
+async fn output_cap_compatibility_stream_rejects_before_thread_creation() -> Result<()> {
+    let _env = lock_test_env();
+    let temp = tempfile::tempdir()?;
+    let _home = EnvVarGuard::set("CODEWHALE_HOME", temp.path());
+    let root = temp.path().join("server");
+    let (addr, manager, server) = spawn_test_server_with_root_token_mobile_workspace_and_overrides(
+        root.clone(),
+        root.join("sessions"),
+        None,
+        false,
+        root.join("workspace"),
+        TestServerOverrides {
+            config: Some(Config {
+                provider: Some("openai-codex".into()),
+                default_text_model: Some("gpt-5.5".into()),
+                ..Config::default()
+            }),
+            ..Default::default()
+        },
+    )
+    .await?
+    .context("loopback fixture must bind")?;
+    let client = crate::tls::reqwest_client();
+    for input in [
+        json!({"prompt":"review","model":"gpt-5.5","maxOutputTokens":1500}),
+        json!({"prompt":"review","model":"auto","maxOutputTokens":1500}),
+        json!({"prompt":"review","maxOutputTokens":0}),
+        json!({"prompt":"review","maxOutputTokens":1.5}),
+    ] {
+        let response = client
+            .post(format!("http://{addr}/v1/stream"))
+            .json(&input)
+            .send()
+            .await?;
+        assert!(
+            response.status().is_client_error(),
+            "{:?}",
+            response.status()
+        );
+    }
+    assert!(
+        manager
+            .list_threads(ThreadListFilter::IncludeArchived, None)
+            .await?
+            .is_empty()
+    );
+    server.abort();
     Ok(())
 }

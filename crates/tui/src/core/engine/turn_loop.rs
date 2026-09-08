@@ -1191,10 +1191,11 @@ impl Engine {
                     resolved_route_window_tokens = budget.window_tokens,
                     resolved_model_output_ceiling_tokens = ?output_ceiling.clamp_tokens(),
                     resolved_model_output_ceiling_source = output_ceiling.as_str(),
-                    effective_request_output_cap_tokens = effective_max_output_tokens_for_route(
+                    effective_request_output_cap_tokens = crate::route_budget::effective_max_output_tokens_for_turn(
                         self.api_provider,
                         &self.session.model,
                         self.active_route_limits,
+                        turn.max_output_tokens,
                     ),
                     reserved_response_headroom_tokens = budget.output_cap_tokens,
                     safety_headroom_tokens = crate::context_budget::CONTEXT_HEADROOM_TOKENS,
@@ -1409,10 +1410,11 @@ impl Engine {
                     }
                     messages
                 },
-                max_tokens: effective_max_output_tokens_for_route(
+                max_tokens: crate::route_budget::effective_max_output_tokens_for_turn(
                     self.api_provider,
                     &self.session.model,
                     self.active_route_limits,
+                    turn.max_output_tokens,
                 ),
                 system: self.session.system_prompt.clone(),
                 tools: active_tools.clone(),
@@ -1427,6 +1429,11 @@ impl Engine {
                 },
                 reasoning_effort: effective_reasoning_effort,
             });
+            if turn.max_output_tokens.is_some() {
+                request.max_tokens = request
+                    .max_tokens
+                    .min(client.effective_max_output_tokens(&self.session.model));
+            }
             // Normalize images against the route this request is actually
             // going to. Session history keeps the real image so that switching
             // to a vision-capable model later makes it visible again; only the
@@ -1600,6 +1607,9 @@ impl Engine {
                 let _ = self
                     .tx_event
                     .send(Event::TurnUsage {
+                        max_output_tokens: turn
+                            .max_output_tokens
+                            .map(|_| stream_request.max_tokens),
                         usage: usage.clone(),
                         duration_ms: u64::try_from(stream_start.elapsed().as_millis())
                             .unwrap_or(u64::MAX),

@@ -2564,6 +2564,7 @@ impl Engine {
                 self.config.hook_executor.clone(),
                 self.config.verbosity.clone(),
                 UserInputProvenance::Runtime,
+                None,
             )
             .await;
     }
@@ -2605,6 +2606,7 @@ impl Engine {
                 }
                 EngineRunInput::Operation(op) => match *op {
                     Op::SendMessage {
+                        max_output_tokens,
                         content,
                         mode,
                         route,
@@ -2658,6 +2660,7 @@ impl Engine {
                             hook_executor,
                             verbosity,
                             provenance,
+                            max_output_tokens,
                         )
                         .await;
                     }
@@ -2763,6 +2766,7 @@ impl Engine {
                                 self.config.hook_executor.clone(),
                                 self.config.verbosity.clone(),
                                 UserInputProvenance::Runtime,
+                                None,
                             )
                             .await;
                     }
@@ -3311,6 +3315,7 @@ impl Engine {
                             self.config.hook_executor.clone(),
                             self.config.verbosity.clone(),
                             UserInputProvenance::ExternalUser,
+                            None,
                         )
                         .await;
                     }
@@ -3960,6 +3965,7 @@ impl Engine {
                 self.config.hook_executor.clone(),
                 self.config.verbosity.clone(),
                 UserInputProvenance::SubAgentHandoff,
+                None,
             )
             .await;
         if !outcome.started() {
@@ -4741,6 +4747,7 @@ impl Engine {
         hook_executor: Option<std::sync::Arc<crate::hooks::HookExecutor>>,
         verbosity: Option<String>,
         provenance: UserInputProvenance,
+        max_output_tokens: Option<std::num::NonZeroU32>,
     ) -> SendMessageOutcome {
         let turn_control = self.begin_turn_control();
         let mut goal_objective = goal_objective;
@@ -4916,6 +4923,7 @@ impl Engine {
         } else {
             TurnContext::new(self.config.max_steps)
         };
+        turn.max_output_tokens = max_output_tokens;
         self.turn_counter = self.turn_counter.saturating_add(1);
         let turn_started_at = chrono::Utc::now();
         // Mint the route receipt from the client that `install_resolved_runtime_route`

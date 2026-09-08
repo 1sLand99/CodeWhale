@@ -979,6 +979,7 @@ async fn assert_preview_matches_first_wire_body(
             None,
             verbosity,
             UserInputProvenance::ExternalUser,
+            None,
         )
         .await;
 
@@ -1944,6 +1945,7 @@ async fn provider_reported_usage_is_unavailable_until_a_response_reports_it() {
             None,
             None,
             UserInputProvenance::ExternalUser,
+            None,
         )
         .await;
 

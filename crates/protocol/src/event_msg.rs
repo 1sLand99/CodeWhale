@@ -409,6 +409,12 @@ pub enum EventMsg {
     },
     /// Usage for one model call within the turn.
     TurnUsage {
+        #[serde(
+            default,
+            rename = "maxOutputTokens",
+            skip_serializing_if = "Option::is_none"
+        )]
+        max_output_tokens: Option<u32>,
         thread_id: ThreadId,
         session_id: SessionId,
         usage: TokenUsage,
@@ -1060,6 +1066,7 @@ mod tests {
                 base_url: None,
             },
             EventMsg::TurnUsage {
+                max_output_tokens: None,
                 thread_id: t.clone(),
                 session_id: s.clone(),
                 usage: usage.clone(),
