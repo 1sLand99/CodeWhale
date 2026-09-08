@@ -7721,6 +7721,7 @@ async fn monitor_persists_only_terminal_request_diagnostics_per_turn() -> Result
             &thread.id,
             StartTurnRequest {
                 prompt: "request diagnostics fixture".to_string(),
+                max_output_tokens: std::num::NonZeroU32::new(256),
                 ..StartTurnRequest::default()
             },
         )
@@ -7820,8 +7821,8 @@ async fn monitor_persists_only_terminal_request_diagnostics_per_turn() -> Result
         "terminal model-client facts must be kept distinct from status items"
     );
     assert_eq!(
-        completed.schema_version, TERMINAL_REQUEST_DIAGNOSTICS_RUNTIME_SCHEMA_VERSION,
-        "the completed record must refuse an older reader that would drop diagnostics"
+        completed.schema_version, OUTPUT_LIMIT_RUNTIME_SCHEMA_VERSION,
+        "optional diagnostics must preserve the existing v4 output-limit schema"
     );
     let status_items = manager
         .store
@@ -7851,6 +7852,7 @@ async fn monitor_persists_only_terminal_request_diagnostics_per_turn() -> Result
             &thread.id,
             StartTurnRequest {
                 prompt: "pre-request snapshot fixture".to_string(),
+                max_output_tokens: std::num::NonZeroU32::new(256),
                 ..StartTurnRequest::default()
             },
         )
@@ -7905,7 +7907,13 @@ async fn monitor_persists_only_terminal_request_diagnostics_per_turn() -> Result
         second.model_request_diagnostics.is_none(),
         "a pre-request snapshot must not look like a delivered model call or inherit the prior turn"
     );
-    assert_eq!(second.schema_version, CURRENT_RUNTIME_SCHEMA_VERSION);
+    assert_eq!(second.schema_version, OUTPUT_LIMIT_RUNTIME_SCHEMA_VERSION);
+    assert!(
+        serde_json::to_value(&second)?
+            .get("modelRequestDiagnostics")
+            .is_none(),
+        "a v4 turn without a terminal snapshot must retain the legacy optional shape"
+    );
     Ok(())
 }
 

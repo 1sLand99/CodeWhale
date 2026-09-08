@@ -496,11 +496,7 @@ const CURRENT_RUNTIME_SCHEMA_VERSION: u32 = 2;
 const IMAGE_RUNTIME_SCHEMA_VERSION: u32 = 3;
 // Explicit allowances need a newer reader so old binaries cannot retry uncapped.
 const OUTPUT_LIMIT_RUNTIME_SCHEMA_VERSION: u32 = 4;
-// Terminal model-request diagnostics need a newer reader so it cannot
-// silently rewrite a completed turn while dropping its bounded receipt.
-const TERMINAL_REQUEST_DIAGNOSTICS_RUNTIME_SCHEMA_VERSION: u32 = 5;
-const MAX_SUPPORTED_RUNTIME_SCHEMA_VERSION: u32 =
-    TERMINAL_REQUEST_DIAGNOSTICS_RUNTIME_SCHEMA_VERSION;
+const MAX_SUPPORTED_RUNTIME_SCHEMA_VERSION: u32 = OUTPUT_LIMIT_RUNTIME_SCHEMA_VERSION;
 
 fn is_zero_u64(value: &u64) -> bool {
     *value == 0
@@ -1010,19 +1006,9 @@ impl TurnRecord {
             );
         }
         if self.max_output_tokens.is_some()
-            && self.schema_version < OUTPUT_LIMIT_RUNTIME_SCHEMA_VERSION
+            != (self.schema_version == OUTPUT_LIMIT_RUNTIME_SCHEMA_VERSION)
         {
             bail!("Turn output allowance does not match its schema");
-        }
-        if self.max_output_tokens.is_none()
-            && self.schema_version == OUTPUT_LIMIT_RUNTIME_SCHEMA_VERSION
-        {
-            bail!("Turn output allowance does not match its schema");
-        }
-        if (self.schema_version == TERMINAL_REQUEST_DIAGNOSTICS_RUNTIME_SCHEMA_VERSION)
-            != self.model_request_diagnostics.is_some()
-        {
-            bail!("Turn request diagnostics do not match its schema");
         }
         Ok(())
     }
@@ -11642,9 +11628,6 @@ impl RuntimeThreadManager {
                 .saturating_add(background_residual)
                 .saturating_add(turn_routed_usage_dropped_records);
             turn.model_request_diagnostics = turn_model_request_diagnostics;
-            if turn.model_request_diagnostics.is_some() {
-                turn.schema_version = TERMINAL_REQUEST_DIAGNOSTICS_RUNTIME_SCHEMA_VERSION;
-            }
             turn.error = turn_error;
             self.store.save_turn(&turn)?;
             turn
