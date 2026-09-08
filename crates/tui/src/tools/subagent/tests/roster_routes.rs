@@ -698,3 +698,548 @@ async fn shortlisted_model_on_multiple_providers_requires_exact_selector() {
     assert!(manager.read().await.agents.is_empty());
     assert_eq!(calls.load(Ordering::SeqCst), 0);
 }
+
+fn write_restart_route_config(path: &std::path::Path, base_url: &str, role_pins: &str) {
+    std::fs::write(
+        path,
+        format!(
+            r#"
+provider = "deepseek"
+model = "deepseek-v4-flash"
+api_key = "fixture-key"
+base_url = "{base_url}"
+
+[providers.ReviewerRoute]
+kind = "openai-compatible"
+api_key = "fixture-review-key"
+base_url = "{base_url}"
+model = "fixture-review-model"
+
+[providers.OtherRoute]
+kind = "openai-compatible"
+api_key = "fixture-other-key"
+base_url = "{base_url}"
+model = "fixture-review-model"
+
+{role_pins}
+"#
+        ),
+    )
+    .unwrap();
+}
+
+async fn assert_admitted_route(
+    manager: &SharedSubAgentManager,
+    started: &crate::tools::spec::ToolResult,
+    expected: Value,
+) -> String {
+    let content: Value = serde_json::from_str(&started.content).unwrap();
+    let metadata = started.metadata.as_ref().unwrap();
+    let receipt = &metadata["child_route"];
+    assert_eq!(&content["child_route"], receipt);
+    for (field, value) in expected.as_object().unwrap() {
+        assert_eq!(&receipt[field], value, "admitted {field}: {receipt}");
+    }
+    let id = metadata["agent_id"].as_str().unwrap().to_string();
+    let manager = manager.read().await;
+    let spec = &manager.worker_records[&id].spec;
+    assert_eq!(serde_json::to_value(&spec.child_route).unwrap(), *receipt);
+    assert_eq!(spec.model, receipt["model_id"].as_str().unwrap());
+    assert_eq!(spec.agent_type.as_str(), receipt["canonical_role"]);
+    assert_eq!(manager.agents[&id].model, spec.model);
+    let manifest = spec
+        .launch_manifest
+        .as_ref()
+        .expect("persisted launch authority");
+    assert_eq!(manifest.child_id, id);
+    assert_eq!(manifest.profile, spec.runtime_profile);
+    assert_eq!(manifest.profile.role, spec.agent_type);
+    assert_eq!(
+        manifest.profile.model,
+        crate::worker_profile::ModelRoute::Fixed(spec.model.clone())
+    );
+    assert_eq!(
+        manifest.profile.provider.as_deref(),
+        receipt["provider_id"].as_str()
+    );
+    assert_eq!(
+        manifest.profile.reasoning_effort.as_deref(),
+        receipt["effective_reasoning"].as_str()
+    );
+    id
+}
+
+async fn wait_for_queued_child(mailbox: &mut MailboxReceiver, id: &str) {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let envelope = mailbox.recv().await.expect("child progress channel");
+            if matches!(envelope.message, MailboxMessage::Progress { agent_id, status }
+                if agent_id == id && status.contains("queued"))
+            {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("actual child reaches the held launch gate");
+}
+
+#[tokio::test]
+async fn fleet_editor_save_reload_reaches_type_only_admission_without_a_model_request() {
+    use crate::fleet::store::{
+        FleetFile, FleetScope, load_fleet_in_scope, save_fleet, set_selected,
+    };
+    use crate::tui::views::fleet_detail::FleetDetailView;
+    use crate::tui::views::{ModalView, ViewAction, ViewEvent};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let _env = crate::test_support::lock_test_env();
+    let root = tempdir().unwrap();
+    let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", root.path().join("state"));
+    let _project = ProjectProfilesGuard::enabled();
+    let (fixture_client, calls, bodies) = delayed_chat_client(Duration::ZERO, "done").await;
+    let _provider = crate::test_support::EnvVarGuard::set("CODEWHALE_PROVIDER", "deepseek");
+    let _endpoint =
+        crate::test_support::EnvVarGuard::set("CODEWHALE_BASE_URL", fixture_client.base_url());
+    let _model = crate::test_support::EnvVarGuard::set("CODEWHALE_MODEL", "deepseek-v4-flash");
+    let config_path = root.path().join("config.toml");
+    write_restart_route_config(&config_path, fixture_client.base_url(), "");
+    let config = crate::config::Config::load(Some(config_path.clone()), None).unwrap();
+    let mut fleet = FleetFile::new("Editor restart acceptance".into(), None).unwrap();
+    fleet.members.push(
+        serde_json::from_value(json!({
+            "id":"review-pin", "role":"reviewer", "instructions":"SAVED_REVIEW_INSTRUCTION"
+        }))
+        .unwrap(),
+    );
+    save_fleet(&fleet, FleetScope::Workspace, root.path()).unwrap();
+    set_selected(&fleet.name, FleetScope::Workspace, root.path()).unwrap();
+
+    let mut app = crate::tui::app::App::new(
+        crate::test_support::test_tui_options(root.path().to_path_buf()),
+        &config,
+    );
+    app.workspace = root.path().to_path_buf();
+    let mut view = FleetDetailView::open_for_member(
+        &app,
+        &config,
+        &fleet.name,
+        FleetScope::Workspace,
+        Some("review-pin"),
+    )
+    .unwrap();
+    let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+    view.handle_key(key(KeyCode::Char('e')));
+    for ch in "ReviewerRoute".chars() {
+        view.handle_key(key(KeyCode::Char(ch)));
+    }
+    view.handle_key(key(KeyCode::Enter));
+    // Off survives generic route normalization and distinguishes the saved
+    // choice from default reasoning without inventing fixture capabilities.
+    view.handle_key(key(KeyCode::Char('t')));
+    assert!(matches!(
+        view.handle_key(key(KeyCode::Char('s'))),
+        ViewAction::EmitAndClose(ViewEvent::FleetStoreChanged { .. })
+    ));
+    let (saved, _) = load_fleet_in_scope(&fleet.name, FleetScope::Workspace, root.path()).unwrap();
+    let pin = &saved.members[0];
+    assert!(!pin.shortlist);
+    assert_eq!(pin.role, "reviewer");
+    assert_eq!(pin.provider.as_deref(), Some("ReviewerRoute"));
+    assert_eq!(pin.model.as_deref(), Some("fixture-review-model"));
+    assert_eq!(pin.reasoning.as_deref(), Some("off"));
+    drop((view, app, config, fixture_client));
+
+    // Restart from the ordinary file loader; no old UI state or runtime roster survives.
+    let reloaded = crate::config::Config::load(Some(config_path), None).unwrap();
+    let client = DeepSeekClient::new(&reloaded).unwrap();
+    let manager = new_shared_subagent_manager(root.path().to_path_buf(), 1);
+    let gate = manager.read().await.launch_gate.clone();
+    let held_permit = gate.acquire_owned().await.unwrap();
+    let (mailbox, mut mailbox_rx) = Mailbox::new(CancellationToken::new());
+    let context = ToolContext::new(root.path()).with_state_namespace("fleet-editor-restarted");
+    let mut runtime = SubAgentRuntime::new(
+        client,
+        "deepseek-v4-flash".into(),
+        context.clone(),
+        false,
+        None,
+        manager.clone(),
+    )
+    .with_api_config(reloaded);
+    runtime.mailbox = Some(mailbox);
+    let loaded_roster = spawn_roster(&runtime);
+    let loaded_pin = loaded_roster
+        .members()
+        .iter()
+        .find(|member| member.id == "review-pin")
+        .unwrap();
+    assert_eq!(loaded_pin.profile.reasoning_effort.as_deref(), Some("off"));
+    let tool = AgentTool::new(manager.clone(), runtime);
+    for extra in [
+        json!({"model":"OtherRoute/fixture-review-model"}),
+        json!({"model_strength":"faster"}),
+    ] {
+        let mut request = json!({"type":"reviewer", "prompt":"Review without execution."});
+        request
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        assert!(tool.execute(request, &context).await.is_err());
+        assert!(manager.read().await.agents.is_empty());
+        assert!(manager.read().await.worker_records.is_empty());
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+    let started = tool
+        .execute(
+            json!({"type":"reviewer", "prompt":"Review without execution."}),
+            &context,
+        )
+        .await
+        .unwrap();
+    let id = assert_admitted_route(
+        &manager,
+        &started,
+        json!({
+            "requested_type":"reviewer", "requested_profile":null,
+            "resolved_profile_id":"review-pin", "profile_origin":"project",
+            "canonical_role":"reviewer", "provider_id":"ReviewerRoute",
+            "model_id":"fixture-review-model", "route_source":"agent_profile.model",
+        "requested_reasoning":"inherit", "effective_reasoning":"off"
+        }),
+    )
+    .await;
+    assert!(
+        manager.read().await.worker_records[&id]
+            .spec
+            .launch_manifest
+            .as_ref()
+            .unwrap()
+            .prompt
+            .contains("SAVED_REVIEW_INSTRUCTION")
+    );
+    wait_for_queued_child(&mut mailbox_rx, &id).await;
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert!(bodies.lock().unwrap().is_empty());
+    manager.write().await.cancel_agent(&id).unwrap();
+    assert_eq!(
+        manager.read().await.agents[&id].status,
+        SubAgentStatus::Cancelled
+    );
+    drop(held_permit);
+}
+
+#[tokio::test]
+async fn reloaded_manual_role_pin_and_explicit_profile_keep_distinct_shortlist_receipts() {
+    use crate::fleet::store::{FleetFile, FleetScope, save_fleet, set_selected};
+    let _env = crate::test_support::lock_test_env();
+    let root = tempdir().unwrap();
+    let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", root.path().join("state"));
+    let _project = ProjectProfilesGuard::enabled();
+    let (fixture_client, calls, bodies) = delayed_chat_client(Duration::ZERO, "done").await;
+    let _provider = crate::test_support::EnvVarGuard::set("CODEWHALE_PROVIDER", "deepseek");
+    let _endpoint =
+        crate::test_support::EnvVarGuard::set("CODEWHALE_BASE_URL", fixture_client.base_url());
+    let _model = crate::test_support::EnvVarGuard::set("CODEWHALE_MODEL", "deepseek-v4-flash");
+    let config_path = root.path().join("config.toml");
+    write_restart_route_config(
+        &config_path,
+        fixture_client.base_url(),
+        r#"
+[subagents.models]
+reviewer = "deepseek-v4-flash"
+default = "deepseek-v4-pro"
+[subagents.roles.reviewer]
+model = "deepseek-v4-pro"
+"#,
+    );
+    let mut fleet = FleetFile::new("Manual pin precedence".into(), None).unwrap();
+    for member in [
+        json!({"id":"review-choice", "shortlist":true, "provider":"ReviewerRoute", "model":"fixture-review-model"}),
+        // Off stays distinct from the default on this generic custom route.
+        json!({"id":"review-pin", "role":"reviewer", "provider":"ReviewerRoute", "model":"fixture-review-model", "reasoning":"off"}),
+    ] {
+        fleet.members.push(serde_json::from_value(member).unwrap());
+    }
+    save_fleet(&fleet, FleetScope::Workspace, root.path()).unwrap();
+    set_selected(&fleet.name, FleetScope::Workspace, root.path()).unwrap();
+    let config = crate::config::Config::load(Some(config_path), None).unwrap();
+    let overrides = config.subagent_model_overrides();
+    assert_eq!(overrides["reviewer"].model, "deepseek-v4-pro");
+    assert_eq!(overrides["reviewer"].provider, None);
+    let client = DeepSeekClient::new(&config).unwrap();
+    let manager = new_shared_subagent_manager(root.path().to_path_buf(), 1);
+    let gate = manager.read().await.launch_gate.clone();
+    let held_permit = gate.acquire_owned().await.unwrap();
+    let (mailbox, mut mailbox_rx) = Mailbox::new(CancellationToken::new());
+    let context = ToolContext::new(root.path()).with_state_namespace("manual-role-restarted");
+    let mut runtime = SubAgentRuntime::new(
+        client,
+        "deepseek-v4-flash".into(),
+        context.clone(),
+        false,
+        None,
+        manager.clone(),
+    )
+    .with_api_config(config);
+    runtime.mailbox = Some(mailbox);
+    let loaded_roster = spawn_roster(&runtime);
+    let loaded_pin = loaded_roster
+        .members()
+        .iter()
+        .find(|member| member.id == "review-pin")
+        .unwrap();
+    assert_eq!(loaded_pin.profile.reasoning_effort.as_deref(), Some("off"));
+    let tool = AgentTool::new(manager.clone(), runtime);
+    let result = tool
+        .execute(json!({"action":"roster"}), &context)
+        .await
+        .unwrap();
+    let roster: Value = serde_json::from_str(&result.content).unwrap();
+    let model = roster["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["selector"]["model"] == "ReviewerRoute/fixture-review-model")
+        .expect("shortlisted model row");
+    assert_eq!(model["route"]["provider"], "ReviewerRoute");
+    assert_eq!(model["route"]["model"], "fixture-review-model");
+    assert_ne!(model["route"]["source"], "role.pin");
+    for role in ["general", "reviewer"] {
+        let row = roster["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["role"] == role)
+            .unwrap();
+        assert_eq!(row["route"]["model"], "deepseek-v4-pro");
+        assert_eq!(row["route"]["source"], "role.pin");
+    }
+    for extra in [
+        json!({"model":"ReviewerRoute/fixture-review-model"}),
+        json!({"model_strength":"faster"}),
+    ] {
+        let mut request = json!({"type":"reviewer", "prompt":"Review."});
+        request
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        assert!(tool.execute(request, &context).await.is_err());
+        assert!(manager.read().await.agents.is_empty());
+        assert!(manager.read().await.worker_records.is_empty());
+    }
+    for (request, expected) in [
+        (
+            json!({"type":"reviewer", "prompt":"Review."}),
+            json!({
+                "requested_profile":null, "resolved_profile_id":null,
+                "provider_id":"deepseek", "model_id":"deepseek-v4-pro", "route_source":"role.pin"
+            }),
+        ),
+        (
+            json!({"type":"reviewer", "model":"deepseek/deepseek-v4-pro", "prompt":"Review."}),
+            json!({
+                "requested_profile":null, "resolved_profile_id":null,
+                "provider_id":"deepseek", "model_id":"deepseek-v4-pro", "route_source":"role.pin"
+            }),
+        ),
+        (
+            json!({"profile":"member:review-pin", "prompt":"Review."}),
+            json!({
+                "requested_profile":"member:review-pin", "resolved_profile_id":"review-pin",
+                "provider_id":"ReviewerRoute", "model_id":"fixture-review-model",
+                "canonical_role":"reviewer", "requested_reasoning":"inherit",
+                "effective_reasoning":"off", "route_source":"agent_profile.model"
+            }),
+        ),
+        (
+            json!({"profile":"member:review-pin", "thinking":"low", "prompt":"Review."}),
+            json!({
+                "requested_profile":"member:review-pin", "resolved_profile_id":"review-pin",
+                "provider_id":"ReviewerRoute", "model_id":"fixture-review-model",
+                "canonical_role":"reviewer", "requested_reasoning":"low",
+                "effective_reasoning":"high", "route_source":"agent_profile.model"
+            }),
+        ),
+    ] {
+        let started = tool.execute(request, &context).await.unwrap();
+        let id = assert_admitted_route(&manager, &started, expected).await;
+        wait_for_queued_child(&mut mailbox_rx, &id).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert!(bodies.lock().unwrap().is_empty());
+        manager.write().await.cancel_agent(&id).unwrap();
+    }
+    drop(held_permit);
+}
+
+#[tokio::test]
+async fn loaded_structured_role_routes_bind_exact_providers_and_legacy_namespaces_stay_opaque() {
+    let _env = crate::test_support::lock_test_env();
+    for (
+        name,
+        parent_provider,
+        parent_model,
+        declaration,
+        pin_provider,
+        pin_model,
+        admitted_provider,
+    ) in [
+        (
+            "structured-route",
+            "deepseek",
+            "deepseek-v4-flash",
+            "[subagents.roles.reviewer]\nmodel = \"ReviewerRoute/fixture-review-model\"",
+            Some("ReviewerRoute"),
+            "fixture-review-model",
+            Some("ReviewerRoute"),
+        ),
+        (
+            "unknown-route",
+            "deepseek",
+            "deepseek-v4-flash",
+            "[subagents.roles.reviewer]\nmodel = \"MissingRoute/fixture-review-model\"",
+            Some("MissingRoute"),
+            "fixture-review-model",
+            None,
+        ),
+        (
+            "legacy-namespace",
+            "openrouter",
+            "deepseek/deepseek-v4-flash",
+            "[subagents.models]\nreviewer = \"deepseek/deepseek-v4-pro\"",
+            None,
+            "deepseek/deepseek-v4-pro",
+            Some("openrouter"),
+        ),
+    ] {
+        let root = tempdir().unwrap();
+        let _home =
+            crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", root.path().join("state"));
+        let (fixture_client, calls, bodies) = delayed_chat_client(Duration::ZERO, "done").await;
+        let _provider =
+            crate::test_support::EnvVarGuard::set("CODEWHALE_PROVIDER", parent_provider);
+        let _endpoint =
+            crate::test_support::EnvVarGuard::set("CODEWHALE_BASE_URL", fixture_client.base_url());
+        let _model = crate::test_support::EnvVarGuard::set("CODEWHALE_MODEL", parent_model);
+        let config_path = root.path().join("config.toml");
+        // `deepseek` is a real configured provider as well as the legacy wire
+        // namespace. The old map must not reinterpret that namespace as a pin.
+        let declarations = format!(
+            r#"
+[providers.deepseek]
+api_key = "fixture-deepseek-key"
+base_url = "{base_url}"
+model = "deepseek-v4-flash"
+[providers.openrouter]
+api_key = "fixture-router-key"
+base_url = "{base_url}"
+model = "deepseek/deepseek-v4-flash"
+{declaration}
+"#,
+            base_url = fixture_client.base_url()
+        );
+        write_restart_route_config(&config_path, fixture_client.base_url(), &declarations);
+        let config = crate::config::Config::load(Some(config_path), None).unwrap();
+        let overrides = config.subagent_model_overrides();
+        assert_eq!(
+            overrides["reviewer"].provider.as_deref(),
+            pin_provider,
+            "{name}"
+        );
+        assert_eq!(overrides["reviewer"].model, pin_model, "{name}");
+        assert_eq!(
+            config.provider_identity_for(config.api_provider()),
+            parent_provider
+        );
+        let client = DeepSeekClient::new(&config).unwrap();
+        let manager = new_shared_subagent_manager(root.path().to_path_buf(), 1);
+        let gate = manager.read().await.launch_gate.clone();
+        let held_permit = gate.acquire_owned().await.unwrap();
+        let (mailbox, mut mailbox_rx) = Mailbox::new(CancellationToken::new());
+        let context = ToolContext::new(root.path()).with_state_namespace(name);
+        let mut runtime = SubAgentRuntime::new(
+            client,
+            parent_model.into(),
+            context.clone(),
+            false,
+            None,
+            manager.clone(),
+        )
+        .with_api_config(config);
+        runtime.mailbox = Some(mailbox);
+        let tool = AgentTool::new(manager.clone(), runtime);
+        let roster_result = tool
+            .execute(json!({"action":"roster"}), &context)
+            .await
+            .unwrap();
+        let roster: Value = serde_json::from_str(&roster_result.content).unwrap();
+        let row = roster["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["role"] == "reviewer")
+            .unwrap();
+        let request = json!({"type":"reviewer", "prompt":"Review before model execution."});
+        let Some(expected_provider) = admitted_provider else {
+            assert!(row["route"].is_null());
+            assert!(
+                row["route_error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("MissingRoute")
+            );
+            let error = tool.execute(request, &context).await.unwrap_err();
+            assert!(error.to_string().contains("MissingRoute"), "{error}");
+            assert!(manager.read().await.agents.is_empty());
+            assert!(manager.read().await.worker_records.is_empty());
+            assert_eq!(calls.load(Ordering::SeqCst), 0);
+            assert!(bodies.lock().unwrap().is_empty());
+            drop(held_permit);
+            continue;
+        };
+        assert_eq!(row["route"]["provider"], expected_provider, "{name}");
+        assert_eq!(row["route"]["model"], pin_model, "{name}");
+        assert_eq!(row["route"]["source"], "role.pin", "{name}");
+        if pin_provider.is_some() {
+            for extra in [
+                json!({"model":"OtherRoute/fixture-review-model"}),
+                json!({"model_strength":"faster"}),
+            ] {
+                let mut conflicting = request.clone();
+                conflicting
+                    .as_object_mut()
+                    .unwrap()
+                    .extend(extra.as_object().unwrap().clone());
+                let error = tool.execute(conflicting, &context).await.unwrap_err();
+                assert!(error.to_string().contains("pins"), "{error}");
+                assert!(manager.read().await.agents.is_empty());
+                assert!(manager.read().await.worker_records.is_empty());
+                assert_eq!(calls.load(Ordering::SeqCst), 0);
+            }
+        }
+        let mut matching = request.clone();
+        matching["model"] = json!(format!("{expected_provider}/{pin_model}"));
+        for request in [request, matching] {
+            let started = tool.execute(request, &context).await.unwrap();
+            let id = assert_admitted_route(
+                &manager,
+                &started,
+                json!({
+                    "requested_type":"reviewer", "canonical_role":"reviewer",
+                    "requested_profile":null, "resolved_profile_id":null, "profile_origin":null,
+                    "provider_id":expected_provider, "model_id":pin_model, "route_source":"role.pin"
+                }),
+            )
+            .await;
+            wait_for_queued_child(&mut mailbox_rx, &id).await;
+            assert_eq!(calls.load(Ordering::SeqCst), 0);
+            assert!(bodies.lock().unwrap().is_empty());
+            manager.write().await.cancel_agent(&id).unwrap();
+            assert_eq!(
+                manager.read().await.agents[&id].status,
+                SubAgentStatus::Cancelled
+            );
+        }
+        drop(held_permit);
+    }
+}

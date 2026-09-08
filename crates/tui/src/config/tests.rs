@@ -2717,15 +2717,15 @@ reviewer_model = "reviewer-model"
     .expect("parse canonical Fleet role keys");
     let overrides = canonical.subagent_model_overrides();
     assert_eq!(
-        overrides.get("scout").map(String::as_str),
+        overrides.get("scout").map(|pin| pin.model.as_str()),
         Some("scout-model")
     );
     assert_eq!(
-        overrides.get("planner").map(String::as_str),
+        overrides.get("planner").map(|pin| pin.model.as_str()),
         Some("planner-model")
     );
     assert_eq!(
-        overrides.get("reviewer").map(String::as_str),
+        overrides.get("reviewer").map(|pin| pin.model.as_str()),
         Some("reviewer-model")
     );
 
@@ -2740,17 +2740,97 @@ review_model = "legacy-reviewer"
     .expect("parse v0.9.x role aliases");
     let overrides = legacy.subagent_model_overrides();
     assert_eq!(
-        overrides.get("scout").map(String::as_str),
+        overrides.get("scout").map(|pin| pin.model.as_str()),
         Some("legacy-scout")
     );
     assert_eq!(
-        overrides.get("planner").map(String::as_str),
+        overrides.get("planner").map(|pin| pin.model.as_str()),
         Some("legacy-planner")
     );
     assert_eq!(
-        overrides.get("reviewer").map(String::as_str),
+        overrides.get("reviewer").map(|pin| pin.model.as_str()),
         Some("legacy-reviewer")
     );
+}
+
+#[test]
+fn structured_role_pins_merge_into_legacy_override_authority() {
+    let config: Config = toml::from_str(
+        r#"
+[subagents]
+reviewer_model = "scalar-reviewer"
+worker_model = "scalar-worker"
+scout_model = "scalar-scout"
+[subagents.models]
+reviewer = "map-reviewer"
+[subagents.roles.REVIEW]
+model = "alias-reviewer"
+[subagents.roles.reviewer]
+model = "canonical-reviewer"
+[subagents.roles.scout]
+model = "structured-scout"
+[subagents.roles.default]
+model = "all-role-fallback"
+[subagents.roles.custom]
+model = "  "
+"#,
+    )
+    .expect("parse structured and legacy inputs together");
+    let overrides = config.subagent_model_overrides();
+    assert_eq!(overrides["reviewer"].model, "canonical-reviewer");
+    assert_eq!(overrides["explore"].model, "structured-scout");
+    assert_eq!(overrides["general"].model, "scalar-worker");
+    assert_eq!(overrides["default"].model, "all-role-fallback");
+    assert_eq!(
+        overrides["custom"].model, "",
+        "blank explicit pin reaches admission validation"
+    );
+}
+
+#[test]
+fn structured_role_declarations_preserve_provider_identity_and_legacy_wire_ids() {
+    let config: Config = toml::from_str(
+        r#"
+[subagents]
+worker_model = "deepseek/deepseek-v4-pro"
+[subagents.models]
+reviewer = "deepseek/deepseek-v4-flash"
+[subagents.roles.advisor]
+model = "ReviewerRoute/vendor/model-id"
+[subagents.roles.implement]
+model = "openrouter/deepseek/deepseek-v4-pro"
+"#,
+    )
+    .unwrap();
+    let pins = config.subagent_model_overrides();
+    for (role, model) in [
+        ("general", "deepseek/deepseek-v4-pro"),
+        ("reviewer", "deepseek/deepseek-v4-flash"),
+    ] {
+        assert_eq!(
+            pins[role].provider, None,
+            "legacy ids remain provider-owned"
+        );
+        assert_eq!(pins[role].model, model);
+    }
+    assert_eq!(pins["advisor"].provider.as_deref(), Some("ReviewerRoute"));
+    assert_eq!(pins["advisor"].model, "vendor/model-id");
+    assert_eq!(pins["implement"].provider.as_deref(), Some("openrouter"));
+    assert_eq!(pins["implement"].model, "deepseek/deepseek-v4-pro");
+}
+
+#[test]
+fn structured_role_pins_require_a_typed_model_field() {
+    for input in [
+        "[subagents.roles.reviewer]\n",
+        "[subagents.roles.reviewer]\nmodel = 42\n",
+        "[subagents.roles.reviewer]\nmodel = \"model\"\nprovider = \"other\"\n",
+    ] {
+        assert!(
+            toml::from_str::<Config>(input).is_err(),
+            "invalid role pin accepted: {input}"
+        );
+    }
 }
 
 #[test]

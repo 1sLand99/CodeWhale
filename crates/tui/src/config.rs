@@ -2409,7 +2409,7 @@ pub struct CompactionSettings {
 /// Fleet-role model overrides for delegated workers. Canonical keys in
 /// `models` are `worker`, `scout`, `planner`, `reviewer`, `builder`,
 /// `verifier`, and `custom`. Legacy sub-agent type names remain accepted for
-/// v0.9.x compatibility. Per-call explicit model choices still win.
+/// v0.9.x compatibility. Explicit manual pins are authoritative at admission.
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct SubagentsConfig {
     /// Top-level switch for the model-facing `agent` tool. `None` preserves
@@ -2431,6 +2431,10 @@ pub struct SubagentsConfig {
     pub custom_model: Option<String>,
     #[serde(default)]
     pub models: Option<HashMap<String, String>>,
+    /// Structured role pins, folded into the same override map as the legacy
+    /// scalar and `models` inputs. These entries take precedence over both.
+    #[serde(default)]
+    pub roles: Option<HashMap<String, SubagentRoleConfig>>,
     /// Maximum concurrent sub-agents. Overrides the top-level max_subagents
     /// setting. Clamped to [1, MAX_SUBAGENTS].
     #[serde(default)]
@@ -2495,6 +2499,38 @@ pub struct SubagentsConfig {
     /// provider names such as `deepseek`, `zai`, `openrouter`, or `anthropic`.
     #[serde(default)]
     pub providers: Option<HashMap<String, SubagentProviderConfig>>,
+}
+
+/// One authored role pin. This new field accepts an explicit `provider/model`
+/// declaration, or a bare model on the session provider. Legacy model inputs
+/// retain their opaque provider-owned ids, including any slashes.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SubagentRoleConfig {
+    pub model: String,
+}
+
+/// One role override carried through Config, Engine, and child admission.
+/// Provider identity is retained until the existing route resolver binds it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubagentModelOverride {
+    pub provider: Option<String>,
+    pub model: String,
+}
+
+impl From<String> for SubagentModelOverride {
+    fn from(model: String) -> Self {
+        Self {
+            provider: None,
+            model,
+        }
+    }
+}
+
+impl From<&str> for SubagentModelOverride {
+    fn from(model: &str) -> Self {
+        model.to_string().into()
+    }
 }
 
 /// Provider-specific sub-agent limit overrides.
@@ -5227,6 +5263,18 @@ impl Config {
         provider_id: &str,
     ) -> std::result::Result<ProviderIdentity, String> {
         let mut identity = self.resolve_provider_identity(provider_id)?;
+        if provider_id
+            .trim()
+            .eq_ignore_ascii_case(ApiProvider::Custom.as_str())
+            && !identity
+                .key
+                .eq_ignore_ascii_case(ApiProvider::Custom.as_str())
+        {
+            return Err(format!(
+                "an explicit provider pin must name the configured provider '{}'; `custom` is not a wildcard for a named provider",
+                identity.key
+            ));
+        }
         if identity.provider == ApiProvider::OllamaCloud
             && ApiProvider::parse(provider_id.trim()) == Some(ApiProvider::OllamaCloud)
         {
@@ -7700,7 +7748,7 @@ impl Config {
     /// Raw sub-agent model override map. Values are validated at spawn time
     /// so an invalid role/type model fails before any partial agent spawn.
     #[must_use]
-    pub fn subagent_model_overrides(&self) -> HashMap<String, String> {
+    pub fn subagent_model_overrides(&self) -> HashMap<String, SubagentModelOverride> {
         let mut overrides = HashMap::new();
         let Some(cfg) = self.subagents.as_ref() else {
             return overrides;
@@ -7708,7 +7756,7 @@ impl Config {
 
         let mut insert = |key: &str, value: &Option<String>| {
             if let Some(model) = value.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
-                overrides.insert(key.to_string(), model.to_string());
+                overrides.insert(key.to_string(), model.into());
             }
         };
         insert("default", &cfg.default_model);
@@ -7729,8 +7777,39 @@ impl Config {
                 let key = key.trim();
                 let model = model.trim();
                 if !key.is_empty() && !model.is_empty() {
-                    overrides.insert(key.to_ascii_lowercase(), model.to_string());
+                    overrides.insert(key.to_ascii_lowercase(), model.into());
                 }
+            }
+        }
+
+        if let Some(roles) = cfg.roles.as_ref() {
+            let mut entries: Vec<_> = roles.iter().collect();
+            // Apply legacy aliases first, then canonical keys, deterministically.
+            // `default` is the all-role fallback, not the legacy general alias.
+            let canonical = |key: &str| {
+                let key = key.trim().to_ascii_lowercase();
+                if key == "default" {
+                    key
+                } else {
+                    crate::fleet::role::migrate_legacy_role_token(&key)
+                        .unwrap_or(&key)
+                        .to_string()
+                }
+            };
+            entries
+                .sort_by_key(|(key, _)| (canonical(key) == key.trim().to_ascii_lowercase(), *key));
+            for (key, pin) in entries {
+                // Keep blank explicit pins so admission rejects them rather
+                // than silently inheriting a different route.
+                let value = pin.model.trim();
+                let pin = match value.split_once('/') {
+                    Some((provider, model)) => SubagentModelOverride {
+                        provider: Some(provider.trim().to_string()),
+                        model: model.trim().to_string(),
+                    },
+                    None => value.into(),
+                };
+                overrides.insert(canonical(key), pin);
             }
         }
 

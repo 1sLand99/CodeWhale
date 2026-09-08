@@ -31,7 +31,7 @@ use unicode_normalization::UnicodeNormalization;
 use uuid::Uuid;
 
 use crate::client::DeepSeekClient;
-use crate::config::MAX_SUBAGENTS;
+use crate::config::{MAX_SUBAGENTS, SubagentModelOverride};
 use crate::core::engine::tool_catalog::{
     TOOL_SEARCH_NAME, active_tools_for_request, apply_native_tool_deferral,
     ensure_advanced_tooling, execute_tool_search_with_cache, initial_active_tools,
@@ -1558,7 +1558,11 @@ fn worker_profile_for_spawn(
     );
     requested.max_spawn_depth = runtime.max_spawn_depth.saturating_sub(runtime.spawn_depth);
     requested.background = true;
-    runtime.worker_profile.derive_child(&requested)
+    let mut profile = runtime.worker_profile.derive_child(&requested);
+    // Route binding already resolved the child tier, including an absent tier.
+    // Authority intersection must not re-inherit a different parent setting.
+    profile.reasoning_effort = runtime.reasoning_effort.clone();
+    profile
 }
 
 fn normalize_worker_record(mut record: AgentWorkerRecord) -> AgentWorkerRecord {
@@ -2484,7 +2488,7 @@ pub struct SubAgentRuntime {
     pub auto_model: bool,
     pub reasoning_effort: Option<String>,
     pub reasoning_effort_auto: bool,
-    pub role_models: HashMap<String, String>,
+    pub role_models: HashMap<String, SubagentModelOverride>,
     pub context: ToolContext,
     pub allow_shell: bool,
     /// When true, Suggest-level file writes auto-accept for write-capable roles
@@ -2836,7 +2840,7 @@ impl SubAgentRuntime {
     /// Attach raw role/type model overrides. Values are intentionally
     /// validated at spawn time so bad config fails before a partial spawn.
     #[must_use]
-    pub fn with_role_models(mut self, role_models: HashMap<String, String>) -> Self {
+    pub fn with_role_models(mut self, role_models: HashMap<String, SubagentModelOverride>) -> Self {
         self.role_models = role_models;
         self
     }
@@ -6663,6 +6667,14 @@ impl SubAgentManager {
                         preserved.denied_tools.push(rule.clone());
                     }
                 }
+                // Resume the recorded child tier rather than the caller's
+                // current tier. Older manifests omitted it; the child receipt
+                // already records the actual resolved value, including None.
+                if let Some(route) = options.child_route.as_ref() {
+                    preserved.reasoning_effort = route.effective_reasoning.clone();
+                }
+                runtime.reasoning_effort = preserved.reasoning_effort.clone();
+                runtime.reasoning_effort_auto = false;
                 runtime.worker_profile = preserved.clone();
                 preserved
             }
@@ -8550,7 +8562,7 @@ const AGENT_TOOL_DESCRIPTION: &str = concat!(
     "Start with action=start and prompt; returns a turn-owned agent_id immediately. Read-only roles need no extra fields. Set detached=true only for work that must remain independently observable after the turn. ",
     "Use multiple starts for independent parallel tasks. ",
     "type selects the Fleet role: general (full tool access for multi-step tasks), explore (fast read-only exploration), planner (grounded strategy, read-only probes), reviewer (reads and grades code), implement (lands focused code changes), test (runs tests and reports evidence), advisor (read-only design counsel), or custom (allowed_tools on the parent's posture). ",
-    "profile selects a saved member or built-in role. Saved pins are exact; model/strength override unpinned role routing; thinking overrides the tier. ",
+    "profile selects a saved member or built-in role. Saved profile and manual role pins are exact; model/strength choose unpinned routes; thinking overrides the tier. ",
     "Use action=roster for resolved roles, models, reasoning, context and cost evidence; it makes no provider request. ",
     "Child run budgets (model turns, wall time) come from Fleet role defaults and operator [subagents] config, not per-call fields. ",
     "worktree=true gives the child an isolated git worktree — use it whenever parallel writers must not collide with the parent checkout. ",
@@ -8632,12 +8644,12 @@ impl ToolSpec for AgentTool {
                 },
                 "model": {
                     "type": "string",
-                    "description": "Exact model or provider/model from roster models, plus the session model. A selected Pod constrains task choices to those routes; saved profile pins remain exact. With no selected models, current-provider overrides remain available."
+                    "description": "For an unpinned role, choose an exact model or provider/model from roster models, plus the session model. A selected Pod constrains task choices to those routes; saved profile and manual role pins remain exact. With no selected models, current-provider overrides remain available."
                 },
                 "model_strength": {
                     "type": "string",
                     "enum": ["same", "faster"],
-                    "description": "For this task: same inherits the session model; faster requests its provider's faster candidate. Explicit model wins. Inspect roster for resolved defaults."
+                    "description": "For an unpinned role: same inherits the session model; faster requests its provider's faster candidate. An explicit task model precedes strength. Saved profile and manual role pins refuse strength changes. Inspect roster for resolved routes."
                 },
                 "thinking": {
                     "type": "string",
@@ -8836,6 +8848,7 @@ impl ToolSpec for AgentTool {
                             json!({"provider": model.provider, "model": model.model, "roles": model.roles,
                                 "selector": {"model": selector}}),
                             json!({"prompt": "Preview selected model.", "type": "general", "model": selector}),
+                            false,
                         ).await);
                     }
                 }
@@ -8848,12 +8861,12 @@ impl ToolSpec for AgentTool {
                     "models": model_rows,
                     "model_total_count": selected_models.as_ref().map_or(0, Vec::len),
                     "model_load_error": selected_models.err().map(|error| error.to_string()),
-                    "model_help": "Choose an exact model selector with any unpinned type. The session model is always allowed. Empty models retains current-provider model/strength choices. Saved profile pins remain exact.",
+                    "model_help": "Choose an exact model selector with an unpinned type. The session model is allowed for unpinned roles. Model rows describe the selected route independently of role pins. Empty models retains current-provider model/strength choices. Manual role and saved profile pins remain exact.",
                     "profiles": profiles,
                     "profile_count": profiles.len(),
                     "profile_total_count": roster.members().iter().filter(|member| member.origin != crate::fleet::roster::ProfileOrigin::BuiltIn).count(),
                     "profile_load_error": roster.load_error(),
-                    "selector_help": "Use type:<role> for a built-in posture, or profile:<member_id> for a saved member with its instructions and exact route. model/model_strength override unpinned role defaults; saved model pins cannot change. thinking may override the saved tier.",
+                    "selector_help": "Use type:<role> for its posture and configured role pin, or profile:<member_id> for a saved member with its instructions and exact route. Explicit profiles precede manual role pins, then unique saved role pins. model/model_strength choose only unpinned routes; thinking may override the saved tier.",
                 });
                 let mut result = ToolResult::json(&payload)
                     .map_err(|error| ToolError::execution_failed(error.to_string()))?;
@@ -9454,7 +9467,8 @@ async fn spawn_subagent_from_input(
         requested_profile: spawn_request.profile.clone(),
         requested_reasoning: subagent_thinking_label(spawn_request.thinking).to_string(),
     };
-    let profile_member = resolve_spawn_profile(&mut spawn_request, &spawn_roster(&runtime))?;
+    let profile_member =
+        resolve_spawn_route_profile(&runtime, &mut spawn_request, &spawn_roster(&runtime))?;
     // Role resolution runs before classification so the bounded-write contract
     // sees the effective role: read-only roles stay ergonomic while a
     // manager/builder role can never acquire an implicit repository-wide
@@ -9493,6 +9507,7 @@ async fn spawn_subagent_from_input(
         &spawn_request,
         profile_member.as_ref(),
         &effective_prompt,
+        true,
     )
     .await?;
     let effective_model = child_runtime.model.clone();
@@ -13194,6 +13209,32 @@ fn spawn_roster(runtime: &SubAgentRuntime) -> crate::fleet::roster::FleetRoster 
     )
 }
 
+/// Explicit profiles win; otherwise a manual role pin precedes a saved role's
+/// complete member route. Keep provider pins out of the provider-less model map.
+fn resolve_spawn_route_profile(
+    runtime: &SubAgentRuntime,
+    request: &mut SpawnRequest,
+    roster: &crate::fleet::roster::FleetRoster,
+) -> Result<Option<crate::fleet::profile::AgentProfile>, ToolError> {
+    let member = resolve_spawn_profile(request, roster)?;
+    if member.is_some() || configured_manual_spawn_model(runtime, request)?.is_some() {
+        return Ok(member);
+    }
+    let role = request
+        .assignment
+        .role
+        .as_deref()
+        .unwrap_or_else(|| request.agent_type.as_str());
+    let member = crate::fleet::worker_runtime::resolve_pinned_role_profile(roster.members(), role)
+        .map_err(|error| ToolError::invalid_input(error.to_string()))?;
+    let Some(member) = member else {
+        return Ok(None);
+    };
+    request.profile = Some(format!("member:{}", member.id));
+    // Reuse explicit-profile trust, posture, reasoning, and instruction binding.
+    resolve_spawn_profile(request, roster)
+}
+
 /// Resolve saved identity through the same trusted roster as durable Fleet.
 /// The role posture and the parent's policy remain the authority ceiling.
 fn resolve_spawn_profile(
@@ -13251,21 +13292,14 @@ fn resolve_spawn_profile(
         .map(str::trim)
         .filter(|model| !model.is_empty() && !model.eq_ignore_ascii_case("auto"))
     {
-        if let Some(model) = request.model.as_deref()
-            && !model.eq_ignore_ascii_case(pinned)
-        {
-            return Err(ToolError::invalid_input(format!(
-                "Fleet profile '{}' pins model '{pinned}', but the task requested '{model}'. Select another profile or omit profile to choose a task model.",
-                member.id
-            )));
-        }
         if request.model_strength_explicit {
             return Err(ToolError::invalid_input(format!(
                 "Fleet profile '{}' pins model '{pinned}'; model_strength cannot change an exact saved route.",
                 member.id
             )));
         }
-        request.model = None;
+        // Compare any task selector only after the exact provider is bound, so
+        // a qualified selector can prove it names this same provider/model pair.
     }
     request.agent_type = role;
     request.profile = Some(member.id.clone());
@@ -13472,6 +13506,7 @@ pub(crate) fn session_permission_ceiling(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SpawnRouteSource {
     AgentProfileModel,
+    RolePin,
     TaskModel,
     TaskModelStrength,
     RoleDefault,
@@ -13482,6 +13517,7 @@ impl SpawnRouteSource {
     fn as_str(self) -> &'static str {
         match self {
             Self::AgentProfileModel => "agent_profile.model",
+            Self::RolePin => "role.pin",
             Self::TaskModel => "task.model",
             Self::TaskModelStrength => "task.model_strength",
             Self::RoleDefault => "role.default",
@@ -13497,12 +13533,18 @@ struct SpawnModelSelection {
 }
 
 /// Resolve the child model once, with receipt-grade precedence provenance:
-/// explicit task field > configured role/type default > operator run model.
+/// Manual pins precede task choices; inherited defaults remain the last fallback.
 /// Saved member pins are bound before this unpinned task/default fallback.
 fn resolve_spawn_model_selection(
     runtime: &SubAgentRuntime,
     request: &SpawnRequest,
 ) -> Result<SpawnModelSelection, ToolError> {
+    if let Some(pin) = configured_manual_spawn_model(runtime, request)? {
+        return Ok(SpawnModelSelection {
+            model_route: ModelRoute::Fixed(pin.model),
+            source: SpawnRouteSource::RolePin,
+        });
+    }
     if let Some(model) = request.model.as_deref() {
         let model =
             normalize_requested_subagent_model(model, "model", runtime.client.api_provider())?;
@@ -13620,9 +13662,11 @@ async fn bind_spawn_model_route(
     request: &SpawnRequest,
     member: Option<&crate::fleet::profile::AgentProfile>,
     prompt: &str,
+    apply_role_pins: bool,
 ) -> Result<(ModelRoute, SpawnRouteSource), ToolError> {
     bind_profile_provider(runtime, member)?;
     let mut shortlisted = false;
+    let mut manual_pin = None;
     let mut selection = if let Some(member) = member
         && let Some(model) = member
             .profile
@@ -13639,6 +13683,20 @@ async fn bind_spawn_model_route(
             )?),
             source: SpawnRouteSource::AgentProfileModel,
         }
+    } else if apply_role_pins && let Some(pin) = configured_manual_spawn_model(runtime, request)? {
+        if let Some(provider) = pin.provider.as_deref() {
+            bind_spawn_provider(runtime, provider)?;
+        }
+        let selection = SpawnModelSelection {
+            model_route: ModelRoute::Fixed(normalize_requested_subagent_model(
+                &pin.model,
+                "role.model",
+                runtime.client.api_provider(),
+            )?),
+            source: SpawnRouteSource::RolePin,
+        };
+        manual_pin = Some(pin);
+        selection
     } else if let Some(model) = bind_shortlisted_task_model(runtime, request)? {
         shortlisted = true;
         SpawnModelSelection {
@@ -13649,12 +13707,38 @@ async fn bind_spawn_model_route(
             )?),
             source: SpawnRouteSource::TaskModel,
         }
+    } else if !apply_role_pins && let Some(model) = request.model.as_deref() {
+        // Model rows disclose the shortlist's exact route, independently of a
+        // role. Actual starts and role/profile rows always apply role pins.
+        SpawnModelSelection {
+            model_route: ModelRoute::Fixed(normalize_requested_subagent_model(
+                model,
+                "model",
+                runtime.client.api_provider(),
+            )?),
+            source: SpawnRouteSource::TaskModel,
+        }
     } else {
         resolve_spawn_model_selection(runtime, request)?
     };
-    let providerless =
-        crate::fleet::worker_runtime::explicit_fleet_provider_id(member).is_none() && !shortlisted;
+    let providerless = crate::fleet::worker_runtime::explicit_fleet_provider_id(member).is_none()
+        && !shortlisted
+        && manual_pin.as_ref().is_none_or(|pin| pin.provider.is_none());
+    let unresolved_pin = selection.model_route.clone();
     resolve_fixed_spawn_model_route(runtime, &mut selection, providerless)?;
+    if matches!(
+        selection.source,
+        SpawnRouteSource::AgentProfileModel | SpawnRouteSource::RolePin
+    ) {
+        validate_spawn_pin_request(
+            runtime,
+            request,
+            member,
+            manual_pin.as_ref(),
+            &unresolved_pin,
+            &selection,
+        )?;
+    }
     let route = resolve_subagent_assignment_route(
         runtime,
         None,
@@ -13683,6 +13767,62 @@ async fn bind_spawn_model_route(
     Ok((route.model_route, selection.source))
 }
 
+fn validate_spawn_pin_request(
+    runtime: &SubAgentRuntime,
+    request: &SpawnRequest,
+    member: Option<&crate::fleet::profile::AgentProfile>,
+    manual_pin: Option<&SubagentModelOverride>,
+    unresolved_pin: &ModelRoute,
+    selection: &SpawnModelSelection,
+) -> Result<(), ToolError> {
+    let ModelRoute::Fixed(pinned) = &selection.model_route else {
+        return Ok(());
+    };
+    if request.model_strength_explicit {
+        return Err(ToolError::invalid_input(format!(
+            "{} pins model '{pinned}'; model_strength cannot change an exact saved route.",
+            selection.source.as_str(),
+        )));
+    }
+    let Some(requested) = request.model.as_deref() else {
+        return Ok(());
+    };
+    let provider = runtime.api_config.as_deref().map_or_else(
+        || runtime.client.api_provider().as_str().to_string(),
+        |config| config.provider_identity_for(runtime.client.api_provider()),
+    );
+    let matches = |model: &str| {
+        crate::fleet::worker_runtime::requested_model_matches_pin(requested, model, Some(&provider))
+            || member.is_some_and(|member| {
+                crate::fleet::worker_runtime::requested_model_matches_pin(
+                    requested,
+                    model,
+                    member.profile.provider.as_deref(),
+                )
+            })
+            || manual_pin.is_some_and(|pin| {
+                crate::fleet::worker_runtime::requested_model_matches_pin(
+                    requested,
+                    model,
+                    pin.provider.as_deref(),
+                )
+            })
+    };
+    if matches(pinned)
+        || matches!(unresolved_pin, ModelRoute::Fixed(model) if matches(model))
+        || member
+            .and_then(|member| member.profile.model.as_deref())
+            .is_some_and(matches)
+        || manual_pin.is_some_and(|pin| matches(&pin.model))
+    {
+        return Ok(());
+    }
+    Err(ToolError::invalid_input(format!(
+        "{} pins route '{provider}/{pinned}'; the requested model conflicts with that route. Omit the task model or change the saved pin.",
+        selection.source.as_str(),
+    )))
+}
+
 async fn resolved_role_roster_entry(
     runtime: &SubAgentRuntime,
     roster: &crate::fleet::roster::FleetRoster,
@@ -13696,6 +13836,7 @@ async fn resolved_role_roster_entry(
             "selector": {"type": role.as_str()},
         }),
         json!({"prompt": "Preview role defaults.", "type": role.as_str()}),
+        true,
     )
     .await
 }
@@ -13715,6 +13856,7 @@ async fn resolved_profile_roster_entry(
         roster,
         entry,
         json!({"prompt": "Preview saved profile.", "profile": member.id}),
+        true,
     )
     .await
 }
@@ -13724,16 +13866,21 @@ async fn resolved_spawn_roster_entry(
     roster: &crate::fleet::roster::FleetRoster,
     mut entry: Value,
     input: Value,
+    apply_role_pins: bool,
 ) -> Value {
     // Exactly the spawn's parser/profile/provider/model binding, without admission or inference.
     let request = parse_spawn_request(&input).and_then(|mut request| {
-        let member = resolve_spawn_profile(&mut request, roster)?;
+        let member = if apply_role_pins {
+            resolve_spawn_route_profile(runtime, &mut request, roster)?
+        } else {
+            None
+        };
         Ok((request, member))
     });
     let mut child = runtime.child_runtime();
     let resolved = match request {
         Ok((request, member)) => {
-            bind_spawn_model_route(&mut child, &request, member.as_ref(), "").await
+            bind_spawn_model_route(&mut child, &request, member.as_ref(), "", apply_role_pins).await
         }
         Err(error) => Err(error),
     };
@@ -13810,6 +13957,7 @@ fn resolve_fixed_spawn_model_route(
     if !matches!(
         selection.source,
         SpawnRouteSource::TaskModel
+            | SpawnRouteSource::RolePin
             | SpawnRouteSource::RoleDefault
             | SpawnRouteSource::AgentProfileModel
     ) {
@@ -13828,7 +13976,9 @@ fn resolve_fixed_spawn_model_route(
     {
         if matches!(
             selection.source,
-            SpawnRouteSource::TaskModel | SpawnRouteSource::AgentProfileModel
+            SpawnRouteSource::TaskModel
+                | SpawnRouteSource::RolePin
+                | SpawnRouteSource::AgentProfileModel
         ) {
             return Err(ToolError::invalid_input(reason));
         }
@@ -13989,6 +14139,66 @@ pub(crate) fn configured_model_for_role_or_type(
     role: Option<&str>,
     agent_type: &FleetRole,
 ) -> Result<Option<String>, ToolError> {
+    let Some((key, pin)) = configured_role_model_override(&runtime.role_models, role, agent_type)
+    else {
+        return Ok(None);
+    };
+    if let Some(provider) = pin.provider.as_deref()
+        && !provider_pin_matches_session(runtime, provider)
+    {
+        return Err(ToolError::invalid_input(format!(
+            "subagents.{key}.model has an explicit provider that is not bound to this child; an exact role pin requires the current session Config."
+        )));
+    }
+    normalize_requested_subagent_model(
+        &pin.model,
+        &format!("subagents.{key}.model"),
+        runtime.client.api_provider(),
+    )
+    .map(Some)
+}
+
+fn configured_manual_spawn_model(
+    runtime: &SubAgentRuntime,
+    request: &SpawnRequest,
+) -> Result<Option<SubagentModelOverride>, ToolError> {
+    let Some(config) = runtime.api_config.as_deref() else {
+        return Ok(None);
+    };
+    let overrides = config.subagent_model_overrides();
+    let Some((key, pin)) = configured_role_model_override(
+        &overrides,
+        request.assignment.role.as_deref(),
+        &request.agent_type,
+    ) else {
+        return Ok(None);
+    };
+    if pin.model.trim().is_empty() || pin.model.chars().any(char::is_control) {
+        return Err(ToolError::invalid_input(format!(
+            "subagents.{key}.model must name one nonblank model without control characters"
+        )));
+    }
+    if let Some(provider) = pin.provider.as_deref() {
+        if provider.trim().is_empty() || pin.model.trim().eq_ignore_ascii_case("auto") {
+            return Err(ToolError::invalid_input(format!(
+                "subagents.{key}.model must pair a nonblank provider with an exact model"
+            )));
+        }
+        config
+            .resolve_provider_pin_identity(provider)
+            .map_err(ToolError::invalid_input)?;
+    } else if pin.model.trim().eq_ignore_ascii_case("auto") {
+        return Ok(None);
+    }
+    Ok(Some(pin.clone()))
+}
+
+/// One alias/default precedence for manual Config pins and legacy role defaults.
+pub(crate) fn configured_role_model_override<'a>(
+    overrides: &'a HashMap<String, SubagentModelOverride>,
+    role: Option<&str>,
+    agent_type: &FleetRole,
+) -> Option<(String, &'a SubagentModelOverride)> {
     let mut keys = Vec::new();
     let mut push_key = |key: String| {
         if !keys.contains(&key) {
@@ -14018,16 +14228,11 @@ pub(crate) fn configured_model_for_role_or_type(
     push_key("default".to_string());
 
     for key in keys {
-        if let Some(model) = runtime.role_models.get(&key) {
-            return normalize_requested_subagent_model(
-                model,
-                &format!("subagents.{key}.model"),
-                runtime.client.api_provider(),
-            )
-            .map(Some);
+        if let Some(pin) = overrides.get(&key) {
+            return Some((key, pin));
         }
     }
-    Ok(None)
+    None
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

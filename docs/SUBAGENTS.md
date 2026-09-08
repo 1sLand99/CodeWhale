@@ -400,8 +400,11 @@ session (docs/CACHE.md; accepted at the v0.9.9 boundary).
 
 `agent(action="roster")` reports each built-in role's resolved provider, model,
 reasoning effort, known route limits and capability provenance. It uses the
-same resolver as execution, including live session role defaults. Per-task `model` takes precedence over
-`model_strength`, then role defaults and the inherited session route.
+same resolver as execution. An explicit saved profile wins first, followed by
+a manual role pin in the current configuration, then a unique saved member
+pinning that semantic role. Conflicting task `model` or `model_strength` choices
+fail before admission. For an unpinned role, per-task `model` precedes
+`model_strength`, then inherited role defaults and the session route.
 When a Pod is selected, the `models` rows list its exact routes in saved order.
 Use a listed `provider/model` selector for a task on an unpinned role; the session
 model remains allowed. Off-list choices fail with the allowed routes, and a bare
@@ -488,9 +491,11 @@ instead of opening more agents into a spent pool.
 
 ## Per-role models (#3018)
 
-Children can run on a different model than the parent. Two config surfaces
-feed the same override map (`[subagents.models]` keys win on conflict, keys
-are case-insensitive):
+Children can run on a different model than the parent. Structured role pins,
+the legacy model map, and convenience keys feed one override map. Structured
+`[subagents.roles.<role>]` entries win over `[subagents.models]`, which wins over
+the convenience keys. Keys are case-insensitive; within the structured table,
+a canonical role key wins over its legacy alias:
 
 ```toml
 [subagents]
@@ -504,7 +509,25 @@ custom_model   = "deepseek-v4-pro"     # custom
 [subagents.models]
 # Free-form role → model map; any role alias accepted by agent works.
 builder = "deepseek-v4-pro"
+
+[subagents.roles.reviewer]
+model = "deepseek/deepseek-v4-pro"
 ```
+
+These are manual pins for direct and Workflow `agent` starts. A task may restate
+the same model or exact provider/model pair, but cannot change the pin with
+`model` or `model_strength`. An explicit saved profile takes precedence over a
+manual role pin. A type-only start also selects a unique saved role pin when
+there is no manual override; ambiguous saved roles fail instead of choosing one.
+Durable Fleet runs retain their selected member's frozen route.
+
+Structured role pins accept `provider/model`, preserving the configured provider's
+exact identity and the complete model suffix. Unknown providers, empty pairs,
+and cross-provider `auto` choices fail before admission. A bare structured model
+inherits the session provider. For a namespaced model, qualify it explicitly,
+for example `openrouter/deepseek/deepseek-v4-pro`. Legacy scalar and
+`[subagents.models]` values keep their full provider-owned id, including slashes;
+they do not change providers.
 
 The v0.9.x convenience keys `explorer_model`, `awaiter_model`, and
 `review_model` remain accepted as deprecated aliases so existing config files
@@ -536,9 +559,11 @@ network router and keep children on the session model.
 
 ## Per-profile provider routes (#3965)
 
-`[subagents.models]` changes the child model within the active provider. To pin
-a child to a different provider, use a fleet/AgentProfile and pass it to the
-model-facing `agent` tool with `profile`. The profile's explicit `provider` +
+`[subagents.models]` changes the child model within the active provider. A slash
+in that legacy input does not grant another provider. To pin a different provider,
+use a structured `[subagents.roles.<role>]` declaration as above, or use a
+fleet/AgentProfile and select it with `profile` or its unique saved role.
+The profile's explicit `provider` +
 `model` fields win over the parent session route; omitting `provider` preserves
 the existing inherit behavior.
 

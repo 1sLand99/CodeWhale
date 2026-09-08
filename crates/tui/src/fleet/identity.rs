@@ -58,12 +58,7 @@ pub fn load_effective_roster(
             ));
         }
     };
-    if fleet.operator.is_none()
-        && fleet
-            .members
-            .iter()
-            .all(|member| member.role.trim().is_empty())
-    {
+    if fleet.operator.is_none() && fleet.members.iter().all(|member| member.shortlist) {
         return plugins.map_or_else(
             || FleetRoster::load(fleet_config, workspace),
             |plugins| FleetRoster::load_with_plugins(fleet_config, workspace, plugins),
@@ -84,6 +79,7 @@ pub fn roster_from_fleet(fleet: &FleetFile, scope: FleetScope, source: &Path) ->
         fleet
             .members
             .iter()
+            .filter(|member| !member.shortlist)
             .map(|member| {
                 let role = member.role.trim();
                 let role = if role.is_empty() {
@@ -487,6 +483,7 @@ mod tests {
         FleetMember {
             id: id.to_string(),
             display_name: display_name.map(str::to_string),
+            shortlist: false,
             role: role.to_string(),
             model: None,
             provider: None,
@@ -507,6 +504,7 @@ mod tests {
             members: vec![FleetMember {
                 id: "Scout-One".to_string(),
                 display_name: Some("Flash Scout".to_string()),
+                shortlist: false,
                 role: "scout".to_string(),
                 model: Some("deepseek-v4-flash".to_string()),
                 provider: Some("deepseek".to_string()),
@@ -537,6 +535,85 @@ mod tests {
     }
 
     #[test]
+    fn selected_shortlist_excludes_model_roles_and_preserves_id_only_members_on_reload() {
+        use crate::fleet::store::{FleetOperator, save_fleet, set_selected};
+        let _lock = crate::test_support::lock_test_env();
+        let workspace = tempfile::tempdir().unwrap();
+        let _home =
+            crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", workspace.path().join("home"));
+        let mut fleet = FleetFile::parse(
+            r#"schema = "fleet"
+schema_revision = 2
+name = "Id-only roles"
+
+[[members]]
+id = "general"
+provider = "deepseek"
+model = "deepseek-v4-pro"
+
+[[members]]
+id = "audit-team"
+provider = "custom-a"
+model = "private-review-model"
+
+[[members]]
+id = "model-choice"
+shortlist = true
+provider = "openrouter"
+model = "qwen/qwen3.7-plus"
+"#,
+        )
+        .unwrap();
+        save_fleet(&fleet, FleetScope::Workspace, workspace.path()).unwrap();
+        set_selected(&fleet.name, FleetScope::Workspace, workspace.path()).unwrap();
+        let roster = load_effective_roster(&Default::default(), workspace.path(), None);
+        assert!(
+            roster.is_exact_selection(),
+            "unmarked id-only members are real saved roles"
+        );
+        assert_eq!(roster.members().len(), 2);
+        assert!(roster.get("model-choice").is_none());
+        for (id, provider, model) in [
+            ("general", "deepseek", "deepseek-v4-pro"),
+            ("audit-team", "custom-a", "private-review-model"),
+        ] {
+            let member = roster.get(id).expect("id-only member preserved");
+            assert_eq!(member.profile.role.name, id);
+            assert_eq!(member.profile.provider.as_deref(), Some(provider));
+            assert_eq!(member.profile.model.as_deref(), Some(model));
+        }
+
+        fleet.members.retain(|member| member.shortlist);
+        save_fleet(&fleet, FleetScope::Workspace, workspace.path()).unwrap();
+        let roster = load_effective_roster(&Default::default(), workspace.path(), None);
+        assert!(
+            !roster.is_exact_selection(),
+            "shortlist alone preserves default roles"
+        );
+        assert!(!roster.members().is_empty());
+        assert!(
+            roster
+                .members()
+                .iter()
+                .all(|member| member.origin == ProfileOrigin::BuiltIn)
+        );
+        assert!(roster.get("model-choice").is_none());
+
+        fleet.operator = Some(FleetOperator {
+            provider: "deepseek".into(),
+            model: "deepseek-v4-flash".into(),
+            reasoning: None,
+        });
+        save_fleet(&fleet, FleetScope::Workspace, workspace.path()).unwrap();
+        let roster = load_effective_roster(&Default::default(), workspace.path(), None);
+        assert!(
+            roster.is_exact_selection(),
+            "an explicit operator keeps selected Fleet policy"
+        );
+        assert!(roster.members().is_empty());
+    }
+
+    #[test]
     fn selected_v2_member_route_precedence_is_member_then_operator_then_session() {
         let fleet = FleetFile {
             schema: FLEET_SCHEMA_KIND.to_string(),
@@ -552,6 +629,7 @@ mod tests {
                 FleetMember {
                     id: "inherited".to_string(),
                     display_name: None,
+                    shortlist: false,
                     role: "scout".to_string(),
                     model: None,
                     provider: None,
@@ -562,6 +640,7 @@ mod tests {
                 FleetMember {
                     id: "pinned".to_string(),
                     display_name: None,
+                    shortlist: false,
                     role: "reviewer".to_string(),
                     model: Some("gpt-5.6".to_string()),
                     provider: Some("openrouter".to_string()),

@@ -368,7 +368,7 @@ pub struct EngineConfig {
     /// Durable runtime services exposed to model-visible tools.
     pub runtime_services: RuntimeToolServices,
     /// Per-role/type sub-agent model overrides already resolved from config.
-    pub subagent_model_overrides: HashMap<String, String>,
+    pub subagent_model_overrides: HashMap<String, crate::config::SubagentModelOverride>,
     /// Merged fleet roster (built-ins + config + personal/workspace agent
     /// files) shared by model-spawned sub-agents and fleet dispatch
     /// (#fleet-roster cutover (v0.8.67)). Defaults to built-ins only; the
@@ -6122,7 +6122,7 @@ impl Engine {
     /// Role/type model map for sub-agent runtimes: roster member pins first,
     /// then explicit `[subagents]` overrides on top so explicit config wins
     /// (#fleet-roster cutover (v0.8.67)).
-    fn subagent_role_models(&self) -> HashMap<String, String> {
+    fn subagent_role_models(&self) -> HashMap<String, crate::config::SubagentModelOverride> {
         let mut models = self.config.fleet_roster.model_overrides();
         models.extend(
             self.config
@@ -7920,7 +7920,7 @@ pub(crate) struct TurnRouteContext {
     /// never construct child agents from the previously installed config.
     pub(crate) api_config: Box<crate::config::Config>,
     pub(crate) locale_tag: String,
-    pub(crate) role_models: HashMap<String, String>,
+    pub(crate) role_models: HashMap<String, crate::config::SubagentModelOverride>,
     pub(crate) auto_model: bool,
     pub(crate) reasoning_effort: Option<String>,
     pub(crate) reasoning_effort_auto: bool,

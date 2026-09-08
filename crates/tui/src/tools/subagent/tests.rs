@@ -4317,12 +4317,12 @@ fn test_resolve_spawn_role_accepts_legacy_alias() {
 }
 
 #[test]
-fn spawn_model_selection_has_stable_three_tier_precedence_and_source() {
+fn unpinned_task_choices_precede_implicit_role_defaults_and_session() {
     let mut runtime = stub_runtime();
     runtime.model = "deepseek-v4-flash".to_string();
     runtime
         .role_models
-        .insert("reviewer".to_string(), "deepseek-v4-flash".to_string());
+        .insert("reviewer".to_string(), "deepseek-v4-flash".into());
 
     let request = parse_spawn_request(&json!({
         "prompt": "x",
@@ -4350,8 +4350,8 @@ fn spawn_model_selection_has_stable_three_tier_precedence_and_source() {
     assert_eq!(selected.model_route, ModelRoute::Faster);
     assert_eq!(selected.source, SpawnRouteSource::TaskModelStrength);
 
-    // Roles pin no model: with no explicit task field the configured role
-    // default wins directly.
+    // This legacy runtime map has no current Config pin. Its implicit default
+    // still applies only when no task selector was provided.
     let request =
         parse_spawn_request(&json!({"prompt": "x", "role": "review"})).expect("role request");
     let selected =
@@ -4366,6 +4366,339 @@ fn spawn_model_selection_has_stable_three_tier_precedence_and_source() {
     let selected = resolve_spawn_model_selection(&runtime, &request).expect("run model selection");
     assert_eq!(selected.model_route, ModelRoute::Inherit);
     assert_eq!(selected.source, SpawnRouteSource::RunModel);
+}
+
+#[tokio::test]
+async fn manual_config_role_pin_refuses_task_model_and_strength_before_binding() {
+    let mut runtime = stub_runtime();
+    runtime.model = "deepseek-v4-pro".into();
+    Arc::make_mut(runtime.api_config.as_mut().unwrap()).subagents = Some(
+        toml::from_str::<crate::config::SubagentsConfig>(
+            "[roles.review]\nmodel = 'deepseek-v4-flash'\n",
+        )
+        .unwrap(),
+    );
+    runtime
+        .role_models
+        .insert("reviewer".into(), "deepseek-v4-pro".into());
+
+    for input in [
+        json!({"prompt":"review", "role":"review", "model":"deepseek-v4-pro"}),
+        json!({"prompt":"review", "role":"review", "model_strength":"faster"}),
+    ] {
+        let request = parse_spawn_request(&input).unwrap();
+        let selection = resolve_spawn_model_selection(&runtime, &request).unwrap();
+        assert_eq!(selection.source, SpawnRouteSource::RolePin);
+        assert_eq!(
+            selection.model_route,
+            ModelRoute::Fixed("deepseek-v4-flash".into())
+        );
+        let error = bind_spawn_model_route(&mut runtime, &request, None, "", true)
+            .await
+            .expect_err("task choices cannot replace a current Config pin");
+        let message = error.to_string();
+        assert!(message.contains("role.pin"), "{message}");
+        assert!(
+            message.contains("conflicts") || message.contains("model_strength"),
+            "{message}"
+        );
+        assert_eq!(
+            runtime.model, "deepseek-v4-pro",
+            "a refused bind has no selected child route"
+        );
+    }
+}
+
+#[tokio::test]
+async fn manual_role_pin_accepts_only_its_exact_qualified_provider_selector() {
+    let mut runtime = stub_runtime();
+    Arc::make_mut(runtime.api_config.as_mut().unwrap()).subagents = Some(
+        toml::from_str::<crate::config::SubagentsConfig>(
+            "[roles.reviewer]\nmodel = 'deepseek/deepseek-v4-flash'\n",
+        )
+        .unwrap(),
+    );
+    for model in ["deepseek-v4-flash", "deepseek/deepseek-v4-flash"] {
+        let request =
+            parse_spawn_request(&json!({"prompt":"review", "type":"reviewer", "model":model}))
+                .unwrap();
+        let (route, source) = bind_spawn_model_route(&mut runtime, &request, None, "", true)
+            .await
+            .expect("the task may restate the same exact route");
+        assert_eq!(route, ModelRoute::Fixed("deepseek-v4-flash".into()));
+        assert_eq!(source, SpawnRouteSource::RolePin);
+        assert_eq!(runtime.client.api_provider(), ApiProvider::Deepseek);
+    }
+    let request = parse_spawn_request(&json!({
+        "prompt":"review", "type":"reviewer", "model":"moonshot/deepseek-v4-flash"
+    }))
+    .unwrap();
+    let error = bind_spawn_model_route(&mut runtime, &request, None, "", true)
+        .await
+        .expect_err("a provider prefix cannot retarget the saved pin");
+    assert!(error.to_string().contains("conflicts"), "{error}");
+    assert_eq!(runtime.client.api_provider(), ApiProvider::Deepseek);
+}
+
+#[tokio::test]
+async fn structured_role_pin_rejects_incomplete_auto_and_unknown_provider_pairs() {
+    for value in [
+        "",
+        "/model-x",
+        "openrouter/",
+        "openrouter/auto",
+        "not-a-configured-provider/model-x",
+        "deepseek/not-a-deepseek-model",
+    ] {
+        let mut runtime = stub_runtime();
+        let original_model = runtime.model.clone();
+        let original_endpoint = runtime.client.base_url().to_string();
+        Arc::make_mut(runtime.api_config.as_mut().unwrap()).subagents = Some(
+            toml::from_str::<crate::config::SubagentsConfig>(&format!(
+                "[roles.reviewer]\nmodel = '{value}'\n",
+            ))
+            .unwrap(),
+        );
+        let request = parse_spawn_request(&json!({"prompt":"review", "type":"reviewer"})).unwrap();
+        let error = bind_spawn_model_route(&mut runtime, &request, None, "", true)
+            .await
+            .expect_err("an invalid explicit route cannot inherit a usable default");
+        assert!(!error.to_string().is_empty(), "{value:?}: {error}");
+        assert_eq!(
+            runtime.model, original_model,
+            "{value:?}: no child route was installed"
+        );
+        assert_eq!(
+            runtime.client.base_url(),
+            original_endpoint,
+            "{value:?}: no other provider was selected"
+        );
+    }
+}
+
+#[tokio::test]
+async fn manual_role_pin_keeps_case_distinct_custom_provider_identity() {
+    let mut runtime = stub_runtime();
+    let config = crate::config::Config {
+        provider: Some("TeamA".into()),
+        providers: Some(crate::config::ProvidersConfig {
+            custom: HashMap::from([
+                (
+                    "TeamA".into(),
+                    crate::config::ProviderConfig {
+                        kind: Some("openai-compatible".into()),
+                        base_url: Some("http://127.0.0.1:1/v1".into()),
+                        api_key: Some("fixture-upper-key".into()),
+                        model: Some("model-x".into()),
+                        ..Default::default()
+                    },
+                ),
+                (
+                    "teama".into(),
+                    crate::config::ProviderConfig {
+                        kind: Some("openai-compatible".into()),
+                        base_url: Some("http://127.0.0.1:2/v1".into()),
+                        api_key: Some("fixture-lower-key".into()),
+                        model: Some("model-x".into()),
+                        ..Default::default()
+                    },
+                ),
+            ]),
+            ..Default::default()
+        }),
+        subagents: Some(
+            toml::from_str::<crate::config::SubagentsConfig>(
+                "[roles.reviewer]\nmodel = 'TeamA/model-x'\n",
+            )
+            .unwrap(),
+        ),
+        ..Default::default()
+    };
+    assert_ne!(
+        config.resolve_provider_pin_identity("TeamA").unwrap().key,
+        config.resolve_provider_pin_identity("teama").unwrap().key,
+        "the fixture represents two separately configured provider identities"
+    );
+    runtime.client = DeepSeekClient::new(&config).unwrap();
+    runtime.api_config = Some(Arc::new(config));
+    runtime.model = "model-x".into();
+    for (selector, succeeds) in [("TeamA/model-x", true), ("teama/model-x", false)] {
+        let request = parse_spawn_request(&json!({
+            "prompt":"review", "type":"reviewer", "model":selector
+        }))
+        .unwrap();
+        let result = bind_spawn_model_route(&mut runtime, &request, None, "", true).await;
+        if succeeds {
+            assert_eq!(result.unwrap().1, SpawnRouteSource::RolePin);
+        } else {
+            let error = result.expect_err("case-distinct provider must not satisfy the pin");
+            assert!(error.to_string().contains("conflicts"), "{error}");
+        }
+        assert_eq!(runtime.client.base_url(), "http://127.0.0.1:1/v1");
+    }
+}
+
+#[tokio::test]
+async fn foreign_manual_role_pin_is_not_downgraded_to_an_implicit_default() {
+    let mut runtime = stub_runtime();
+    let config = crate::config::Config {
+        provider: Some("moonshot".into()),
+        providers: Some(crate::config::ProvidersConfig {
+            moonshot: crate::config::ProviderConfig {
+                api_key: Some("fixture-key".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        }),
+        subagents: Some(
+            toml::from_str::<crate::config::SubagentsConfig>(
+                "[roles.reviewer]\nmodel = 'deepseek-v4-flash'\n",
+            )
+            .unwrap(),
+        ),
+        ..Default::default()
+    };
+    runtime.client = DeepSeekClient::new(&config).unwrap();
+    runtime.api_config = Some(Arc::new(config));
+    runtime.model = "kimi-k2.6".into();
+    let request = parse_spawn_request(&json!({"prompt":"review", "type":"reviewer"})).unwrap();
+    let mut selected = resolve_spawn_model_selection(&runtime, &request).unwrap();
+    assert_eq!(selected.source, SpawnRouteSource::RolePin);
+    let error = resolve_fixed_spawn_model_route(&runtime, &mut selected, true)
+        .expect_err("a current Config pin is deliberate and must never inherit silently");
+    assert!(error.to_string().contains("moonshot"), "{error}");
+    assert_eq!(selected.source, SpawnRouteSource::RolePin);
+    assert!(matches!(selected.model_route, ModelRoute::Fixed(_)));
+    bind_spawn_model_route(&mut runtime, &request, None, "", true)
+        .await
+        .expect_err("the actual bind must keep the same known-foreign refusal");
+    assert_eq!(runtime.model, "kimi-k2.6");
+}
+
+#[tokio::test]
+async fn structured_custom_pin_refuses_named_provider_migration_but_accepts_literal_custom() {
+    let pin = || {
+        Some(
+            toml::from_str::<crate::config::SubagentsConfig>(
+                "[roles.reviewer]\nmodel = 'custom/model-x'\n",
+            )
+            .unwrap(),
+        )
+    };
+    let named = crate::config::Config {
+        provider: Some("TeamA".into()),
+        providers: Some(crate::config::ProvidersConfig {
+            custom: HashMap::from([(
+                "TeamA".into(),
+                crate::config::ProviderConfig {
+                    kind: Some("openai-compatible".into()),
+                    base_url: Some("http://127.0.0.1:1/v1".into()),
+                    api_key: Some("fixture-named-key".into()),
+                    model: Some("model-x".into()),
+                    ..Default::default()
+                },
+            )]),
+            ..Default::default()
+        }),
+        subagents: pin(),
+        ..Default::default()
+    };
+    assert_eq!(
+        named.resolve_provider_identity("custom").unwrap().key,
+        "TeamA",
+        "historical session migration remains available and is the exact rejected pin shape"
+    );
+    let literal = crate::config::Config {
+        provider: Some("custom".into()),
+        base_url: Some("http://127.0.0.1:2/v1".into()),
+        api_key: Some("fixture-literal-key".into()),
+        default_text_model: Some("model-x".into()),
+        subagents: pin(),
+        ..Default::default()
+    };
+    for (config, should_bind) in [(named, false), (literal, true)] {
+        let mut runtime = stub_runtime();
+        runtime.client = DeepSeekClient::new(&config).unwrap();
+        runtime.api_config = Some(Arc::new(config));
+        runtime.model = "parent-model".into();
+        let endpoint = runtime.client.base_url().to_string();
+        let request = parse_spawn_request(&json!({
+            "prompt":"review", "type":"reviewer", "model":"custom/model-x"
+        }))
+        .unwrap();
+        let result = bind_spawn_model_route(&mut runtime, &request, None, "", true).await;
+        if should_bind {
+            assert_eq!(result.unwrap().1, SpawnRouteSource::RolePin);
+            assert_eq!(runtime.model, "model-x");
+            assert_eq!(
+                runtime
+                    .api_config
+                    .as_ref()
+                    .unwrap()
+                    .provider_identity_for(ApiProvider::Custom),
+                "custom"
+            );
+        } else {
+            let error =
+                result.expect_err("an authored custom pin cannot migrate to sole named TeamA");
+            assert!(error.to_string().contains("not a wildcard"), "{error}");
+            assert_eq!(
+                runtime.model, "parent-model",
+                "refusal must not install a child route"
+            );
+        }
+        assert_eq!(runtime.client.base_url(), endpoint);
+    }
+}
+
+#[test]
+fn saved_role_ambiguity_fails_unless_a_higher_priority_pin_selects_the_route() {
+    let root = tempdir().unwrap();
+    for id in ["review-a", "review-b"] {
+        std::fs::write(root.path().join(format!("{id}.toml")), format!(
+            "id = '{id}'\nbase_role = 'reviewer'\nprovider = 'deepseek'\nmodel = 'deepseek-v4-flash'\n",
+        )).unwrap();
+    }
+    let profiles = crate::fleet::profile::load_agent_profiles_from_dir(root.path()).unwrap();
+    assert_eq!(profiles.len(), 2);
+    let roster = FleetRoster::from_members(profiles);
+    let mut runtime = stub_runtime();
+    let mut request = parse_spawn_request(&json!({"prompt":"review", "type":"reviewer"})).unwrap();
+    let error = resolve_spawn_route_profile(&runtime, &mut request, &roster)
+        .expect_err("an implicit role must not choose arbitrarily between saved pins");
+    assert!(error.to_string().contains("ambiguous"), "{error}");
+    assert_eq!(
+        request.profile, None,
+        "failed selection must not stamp a member"
+    );
+
+    Arc::make_mut(runtime.api_config.as_mut().unwrap()).subagents = Some(
+        toml::from_str::<crate::config::SubagentsConfig>(
+            "[roles.reviewer]\nmodel = 'deepseek-v4-pro'\n",
+        )
+        .unwrap(),
+    );
+    assert!(
+        resolve_spawn_route_profile(&runtime, &mut request, &roster)
+            .unwrap()
+            .is_none(),
+        "a manual pin precedes implicit saved-role selection"
+    );
+    assert_eq!(
+        resolve_spawn_model_selection(&runtime, &request)
+            .unwrap()
+            .source,
+        SpawnRouteSource::RolePin
+    );
+
+    let mut explicit =
+        parse_spawn_request(&json!({"prompt":"review", "profile":"review-b"})).unwrap();
+    let selected = resolve_spawn_route_profile(&runtime, &mut explicit, &roster)
+        .unwrap()
+        .expect("an explicit saved identity precedes the manual pin");
+    assert_eq!(selected.id, "review-b");
+    assert_eq!(selected.profile.model.as_deref(), Some("deepseek-v4-flash"));
+    assert_eq!(explicit.agent_type, FleetRole::Reviewer);
 }
 
 #[test]
@@ -4480,11 +4813,14 @@ fn spawn_route_sources_refresh_removes_stale_pins_and_overlays_live_config() {
     let mut runtime = stub_runtime();
     runtime
         .role_models
-        .insert("builder".to_string(), "stale-launch-model".to_string());
+        .insert("builder".to_string(), "stale-launch-model".into());
 
     refresh_spawn_route_sources(&mut runtime);
     assert_eq!(
-        runtime.role_models.get("builder").map(String::as_str),
+        runtime
+            .role_models
+            .get("builder")
+            .map(|pin| pin.model.as_str()),
         None,
         "removed launch-time defaults cannot survive refresh"
     );
@@ -4499,17 +4835,26 @@ fn spawn_route_sources_refresh_removes_stale_pins_and_overlays_live_config() {
 
     refresh_spawn_route_sources(&mut runtime);
     assert_eq!(
-        runtime.role_models.get("builder").map(String::as_str),
+        runtime
+            .role_models
+            .get("builder")
+            .map(|pin| pin.model.as_str()),
         None,
         "removed pins remain absent when other defaults change"
     );
     assert_eq!(
-        runtime.role_models.get("worker").map(String::as_str),
+        runtime
+            .role_models
+            .get("worker")
+            .map(|pin| pin.model.as_str()),
         Some("live-config-model"),
         "live config wins on top of the snapshot"
     );
     assert_eq!(
-        runtime.role_models.get("general").map(String::as_str),
+        runtime
+            .role_models
+            .get("general")
+            .map(|pin| pin.model.as_str()),
         Some("live-config-model"),
         "worker override covers the general alias too"
     );
@@ -15403,7 +15748,7 @@ fn role_model_validation_accepts_provider_native_ids() {
     let mut runtime = stub_runtime_for_provider("moonshot");
     runtime
         .role_models
-        .insert("worker".to_string(), "kimi-k2.5".to_string());
+        .insert("worker".to_string(), "kimi-k2.5".into());
 
     let model = configured_model_for_role_or_type(&runtime, Some("worker"), &FleetRole::Worker)
         .expect("provider-native id is accepted");
@@ -15416,7 +15761,7 @@ fn consultant_reads_released_advisory_role_model_override_keys() {
         let mut runtime = stub_runtime();
         runtime
             .role_models
-            .insert(legacy_key.to_string(), "deepseek-v4-flash".to_string());
+            .insert(legacy_key.to_string(), "deepseek-v4-flash".into());
 
         let model = configured_model_for_role_or_type(&runtime, None, &FleetRole::Consultant)
             .expect("released compatibility override should remain valid");
@@ -15429,13 +15774,13 @@ fn canonical_consultant_model_override_precedes_compatibility_keys() {
     let mut runtime = stub_runtime();
     runtime
         .role_models
-        .insert("advisor".to_string(), "deepseek-v4-pro".to_string());
+        .insert("advisor".to_string(), "deepseek-v4-pro".into());
     runtime
         .role_models
-        .insert("oracle".to_string(), "deepseek-v4-flash".to_string());
+        .insert("oracle".to_string(), "deepseek-v4-flash".into());
     runtime
         .role_models
-        .insert("consultant".to_string(), "deepseek-v4-flash".to_string());
+        .insert("consultant".to_string(), "deepseek-v4-flash".into());
 
     let model = configured_model_for_role_or_type(&runtime, None, &FleetRole::Consultant)
         .expect("canonical consultant override should resolve");
@@ -15448,10 +15793,10 @@ fn raw_advisory_role_prefers_canonical_consultant_model_override() {
         let mut runtime = stub_runtime();
         runtime
             .role_models
-            .insert("advisor".to_string(), "deepseek-v4-pro".to_string());
+            .insert("advisor".to_string(), "deepseek-v4-pro".into());
         runtime
             .role_models
-            .insert(alias.to_string(), "deepseek-v4-flash".to_string());
+            .insert(alias.to_string(), "deepseek-v4-flash".into());
 
         let model =
             configured_model_for_role_or_type(&runtime, Some(alias), &FleetRole::Consultant)
@@ -15465,7 +15810,7 @@ fn role_model_validation_stays_strict_on_official_deepseek() {
     let mut runtime = stub_runtime();
     runtime
         .role_models
-        .insert("worker".to_string(), "kimi-k2.5".to_string());
+        .insert("worker".to_string(), "kimi-k2.5".into());
 
     let err = configured_model_for_role_or_type(&runtime, Some("worker"), &FleetRole::Worker)
         .expect_err("non-DeepSeek id is rejected on the official API");
@@ -20299,6 +20644,113 @@ async fn resume_from_checkpoint_is_idempotent_across_repeated_followups() {
         delivered_or_queued,
         "a repeated followup must reach the resumed target"
     );
+}
+
+#[tokio::test]
+async fn resume_keeps_recorded_reasoning_in_manifest_and_request_after_parent_changes() {
+    for (stored_tier, receipt_tier, expected) in [
+        (None, Some(Some("low")), Some("low")),
+        (Some("high"), Some(None), None),
+        (Some("low"), None, Some("low")),
+    ] {
+        let tmp = tempdir().unwrap();
+        let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 2);
+        let (client, calls, bodies) = delayed_chat_client(Duration::ZERO, "done").await;
+        let agent_id = {
+            let mut guard = manager.write().await;
+            let (id, _) = guard.insert_test_interrupted_continuable_agent(
+                "paused-tier",
+                tmp.path(),
+                vec![Message {
+                    role: Role::User,
+                    content: vec![ContentBlock::Text {
+                        text: "Continue the review.".into(),
+                        cache_control: None,
+                    }],
+                }],
+            );
+            let agent = guard.agents.get_mut(&id).unwrap();
+            agent.model = "deepseek-v4-flash".into();
+            agent.agent_type = FleetRole::Scout;
+            agent.allowed_tools = Some(Vec::new());
+            let spec = &mut guard.worker_records.get_mut(&id).unwrap().spec;
+            spec.model = "deepseek-v4-flash".into();
+            spec.agent_type = FleetRole::Scout;
+            spec.runtime_profile = WorkerRuntimeProfile::for_role(FleetRole::Scout);
+            spec.runtime_profile.reasoning_effort = stored_tier.map(str::to_string);
+            spec.child_route = receipt_tier.map(|tier| ChildRouteReceipt {
+                requested_type: "explore".into(),
+                requested_profile: None,
+                resolved_profile_id: None,
+                profile_origin: None,
+                canonical_role: "explore".into(),
+                provider_id: "deepseek".into(),
+                model_id: "deepseek-v4-flash".into(),
+                route_source: "role.pin".into(),
+                requested_reasoning: "inherit".into(),
+                effective_reasoning: tier.map(str::to_string),
+                runtime_version: "fixture".into(),
+                runtime_build_sha: "fixture".into(),
+            });
+            id
+        };
+        let mut runtime = stub_runtime();
+        runtime.client = client;
+        runtime.manager = Arc::clone(&manager);
+        runtime.reasoning_effort = Some("high".into());
+        runtime.reasoning_effort_auto = true;
+        runtime.worker_profile.reasoning_effort = Some("high".into());
+        let resumed = manager
+            .write()
+            .await
+            .resume_from_checkpoint(
+                Arc::clone(&manager),
+                runtime,
+                &agent_id,
+                "Continue with the saved route.",
+            )
+            .unwrap();
+        {
+            let guard = manager.read().await;
+            let spec = &guard.worker_records.get(&resumed.agent_id).unwrap().spec;
+            assert_eq!(spec.runtime_profile.reasoning_effort.as_deref(), expected);
+            assert_eq!(
+                spec.launch_manifest
+                    .as_ref()
+                    .unwrap()
+                    .profile
+                    .reasoning_effort
+                    .as_deref(),
+                expected
+            );
+            assert_eq!(
+                guard
+                    .worker_records
+                    .get(&agent_id)
+                    .unwrap()
+                    .spec
+                    .runtime_profile
+                    .reasoning_effort
+                    .as_deref(),
+                stored_tier,
+                "resuming must not rewrite the interrupted record"
+            );
+        }
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while calls.load(Ordering::SeqCst) == 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("resumed child must reach the local request fixture");
+        let body = bodies.lock().unwrap().first().unwrap().clone();
+        assert_eq!(
+            body["reasoning_effort"],
+            json!(expected),
+            "the resumed request must keep the recorded tier, including no tier"
+        );
+        let _ = manager.write().await.cancel_agent(&resumed.agent_id);
+    }
 }
 
 #[tokio::test]

@@ -550,7 +550,11 @@ impl FleetListView {
                 };
                 format!(
                     "Coordinator: {coordinator} · members: {}",
-                    fleet.members.len()
+                    fleet
+                        .members
+                        .iter()
+                        .filter(|member| !member.shortlist)
+                        .count()
                 )
             }
             Err(err) => format!("unreadable: {err}"),
