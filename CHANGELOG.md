@@ -17,6 +17,13 @@ with an accessibility-first pointer.
 
 ### Fixed
 
+- New, imported, and live session titles skip runtime handoffs and use the
+  first real user prompt. Explicitly renamed titles retain priority
+  (#6012, thanks @SparkofSpike).
+- UI dispatch acceptance now precedes Engine execution, so a delayed acceptance
+  callback cannot overwrite a turn that has already started or completed.
+  Cancelling before acceptance preserves the prompt and leaves the next
+  dispatch usable.
 - Bottom-chrome effort is omitted when the route cannot prove an effective
   tier; `/status` retains the full explanation. Cost remains visible when
   known, and `cost: unknown` remains on metered routes lacking a reading (#5950).
@@ -84,6 +91,10 @@ with an accessibility-first pointer.
 
 ### Changed
 
+- Runtime turn receipts retain the Engine's terminal model-request, stream-retry,
+  and resume counters separately from displayed status and provider-reported
+  usage. These counters do not count HTTP retries inside a provider client or
+  establish provider billing.
 - Initial tool definitions no longer repeat shell interpreter guidance and
   agent lifecycle/scope instructions in multiple description fields. Parameter
   schemas, approval rules and dispatch behavior are preserved. This reduces
