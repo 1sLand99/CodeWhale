@@ -11333,6 +11333,26 @@ fn provider_capability_scenario_2() {
         assert_eq!(cap.max_output, Some(384_000));
         assert!(cap.thinking_supported);
         assert!(!cap.cache_telemetry_supported);
+
+        // Only the exact provider-owned bundled row supplies this ceiling.
+        // Neighboring IDs and a different provider cannot inherit its limit.
+        for (provider, model) in [
+            (
+                ApiProvider::Fireworks,
+                "accounts/fireworks/models/deepseek-v4.1-flash-expires-on-0910",
+            ),
+            (
+                ApiProvider::Fireworks,
+                "accounts/fireworks/models/deepseek-v4-pro-custom",
+            ),
+            (ApiProvider::Deepseek, DEFAULT_FIREWORKS_MODEL),
+        ] {
+            assert_eq!(
+                provider_capability(provider, model).max_output,
+                None,
+                "{model}"
+            );
+        }
     }
     // from provider_capability_siliconflow_v4_pro_has_thinking_no_cache
     {

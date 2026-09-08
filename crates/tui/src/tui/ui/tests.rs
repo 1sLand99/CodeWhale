@@ -26116,7 +26116,7 @@ fn startup_that_cannot_account_for_its_bytes_keeps_the_line_in_the_composer() {
     let resent = app.handle_composer_enter();
     assert_eq!(
         resent.as_deref(),
-        Some("gin install /tmp/bundle\n\nsecond line")
+        Some("gin install /tmp/bundle\n\nsecond line\n")
     );
 }
 

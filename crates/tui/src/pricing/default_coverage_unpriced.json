@@ -7,7 +7,7 @@
       ["codewhale", "deepseek/deepseek-v4-pro", "https://api.codewhale.net/v1", "chat_completions", "metered"],
       ["deepinfra", "deepseek-ai/DeepSeek-V4-Pro", "https://api.deepinfra.com/v1/openai", "chat_completions", "metered"],
       ["edenai", "deepseek/deepseek-v4-pro", "https://api.edenai.run/v3", "chat_completions", "metered"],
-      ["google", "gemini-3.1-pro-preview", "https://generativelanguage.googleapis.com/v1beta/openai/", "chat_completions", "metered"],
+      ["google", "gemini-3.1-pro-preview", "https://generativelanguage.googleapis.com/v1beta/openai", "chat_completions", "metered"],
       ["huggingface", "deepseek-ai/DeepSeek-V4-Pro", "https://router.huggingface.co/v1", "chat_completions", "metered"],
       ["longcat", "LongCat-2.0", "https://api.longcat.chat/openai/v1", "chat_completions", "metered"],
       ["novita", "deepseek/deepseek-v4-pro", "https://api.novita.ai/openai/v1", "chat_completions", "metered"],
