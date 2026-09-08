@@ -186,8 +186,11 @@ mod tests {
             16
         );
         let samples: Vec<i16> = WHALE_WAV[44..]
-            .chunks_exact(2)
-            .map(|b| i16::from_le_bytes([b[0], b[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .copied()
+            .map(i16::from_le_bytes)
             .collect();
         assert_eq!(samples.first(), Some(&0));
         assert_eq!(samples.last(), Some(&0));

@@ -188,8 +188,8 @@ mod tests {
         assert!(result.message.unwrap().contains("投稿"));
     }
 
-    #[tokio::test]
-    async fn agent_draft_command_review_and_edit_share_one_session_artifact() {
+    #[test]
+    fn agent_draft_command_review_and_edit_share_one_session_artifact() {
         let _lock = crate::artifacts::TEST_ARTIFACT_SESSIONS_GUARD
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -215,9 +215,12 @@ mod tests {
             ));
         let tool = GithubTool::new("github");
         let draft = json!({"title":"Runtime lost the tool result", "expected":"Result reaches the agent", "actual":"Result was missing", "impact":"Task needs a retry", "steps":["Request a tool result"], "observed":["The result was absent"]});
-        let result = tool
-            .execute(json!({"action":"report_draft", "report":draft}), &context)
-            .await
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let result = runtime
+            .block_on(tool.execute(json!({"action":"report_draft", "report":draft}), &context))
             .unwrap();
         let payload: serde_json::Value = serde_json::from_str(&result.content).unwrap();
         let id = payload["report_id"].as_str().unwrap();

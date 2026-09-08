@@ -477,8 +477,8 @@ fn runtime_image_validation_preserves_exact_bytes_and_rejects_corruption() {
     let input = runtime_image_fixture(7);
     let blocks = prepare_runtime_images(std::slice::from_ref(&input)).unwrap();
     assert_eq!(
-        runtime_images_from_blocks(&blocks).unwrap(),
-        [input.clone()]
+        runtime_images_from_blocks(&blocks).unwrap().as_slice(),
+        std::slice::from_ref(&input)
     );
     for bad in [
         codewhale_protocol::runtime::RuntimeImageInput {

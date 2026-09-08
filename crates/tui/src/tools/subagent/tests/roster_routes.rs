@@ -815,10 +815,8 @@ async fn fleet_editor_save_reload_reaches_type_only_admission_without_a_model_re
     save_fleet(&fleet, FleetScope::Workspace, root.path()).unwrap();
     set_selected(&fleet.name, FleetScope::Workspace, root.path()).unwrap();
 
-    let mut app = crate::tui::app::App::new(
-        crate::test_support::test_tui_options(root.path().to_path_buf()),
-        &config,
-    );
+    let mut app =
+        crate::tui::app::App::new(crate::test_support::test_tui_options(root.path()), &config);
     app.workspace = root.path().to_path_buf();
     let mut view = FleetDetailView::open_for_member(
         &app,
