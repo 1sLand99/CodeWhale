@@ -9404,3 +9404,202 @@ fn openrouter_vendor_config_round_trip_and_trust_boundary() -> Result<()> {
     assert_eq!(reloaded.get_value(key), None);
     Ok(())
 }
+
+#[test]
+fn notifications_nested_edits_keep_toml_types_siblings_and_future_fields() {
+    let mut config: ConfigToml = toml::from_str(
+        r#"
+[notifications]
+quiet = false
+future_delivery = "keep"
+[notifications.events]
+input-needed = false
+"#,
+    )
+    .unwrap();
+    config.set_value("notifications.quiet", "true").unwrap();
+    config
+        .set_value("notifications.threshold_secs", "42")
+        .unwrap();
+    config
+        .set_value("notifications.events.approval-needed", "false")
+        .unwrap();
+    config
+        .set_value(
+            "notifications.event_sound.events",
+            r#"["input-needed", "model-notify"]"#,
+        )
+        .unwrap();
+    config.set_value("notifications.sound", "whale").unwrap();
+    let encoded = toml::to_string(&config).unwrap();
+    let raw: toml::Value = toml::from_str(&encoded).unwrap();
+    let notifications = &raw["notifications"];
+    assert_eq!(notifications["quiet"].as_bool(), Some(true));
+    assert_eq!(notifications["threshold_secs"].as_integer(), Some(42));
+    assert_eq!(
+        notifications["events"]["approval-needed"].as_bool(),
+        Some(false)
+    );
+    assert_eq!(
+        notifications["events"]["input-needed"].as_bool(),
+        Some(false)
+    );
+    assert_eq!(notifications["future_delivery"].as_str(), Some("keep"));
+    assert_eq!(
+        notifications["event_sound"]["events"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert!(!raw.as_table().unwrap().contains_key("notifications.quiet"));
+    assert_eq!(
+        config.get_display_value("notifications.sound").as_deref(),
+        Some("whale")
+    );
+}
+
+#[test]
+fn notifications_invalid_edits_are_atomic_even_with_public_update_values() {
+    use notifications::{NotificationConfigUpdate as Update, NotificationSetting as Key};
+    let mut config = ConfigToml::default();
+    config.set_value("notifications.quiet", "true").unwrap();
+    let before = toml::to_string(&config).unwrap();
+    for (key, value) in [
+        ("notifications", "false"),
+        ("notifications.quiet", "maybe"),
+        ("notifications.threshold_secs", "18446744073709551615"),
+        ("notifications.event_sound.events", r#"["bogus"]"#),
+        ("notifications.events.unknown", "true"),
+        ("notifications.sound_file", ""),
+    ] {
+        assert!(config.set_value(key, value).is_err(), "{key}");
+        assert_eq!(toml::to_string(&config).unwrap(), before);
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    std::fs::write(&path, &before).unwrap();
+    for update in [
+        Update::ThresholdSecs(u64::MAX),
+        Update::SoundFile(PathBuf::new()),
+        Update::EventSoundEvents(vec!["bogus".into()]),
+    ] {
+        let mut live = notifications::NotificationsConfig::default();
+        let prior = live.clone();
+        assert!(update.persist(&path).is_err());
+        assert!(live.apply_update(update).is_err());
+        assert_eq!(live, prior);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+    }
+    assert!(
+        notifications::edit_extras(
+            &mut config.extras,
+            Key::Quiet,
+            Some(toml::Value::String("true".into()))
+        )
+        .is_err()
+    );
+    assert_eq!(toml::to_string(&config).unwrap(), before);
+}
+
+#[test]
+fn notifications_targeted_persistence_preserves_comments_and_leaf_unset() {
+    use notifications::{NotificationConfigUpdate as Update, NotificationSetting as Key};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    std::fs::write(&path, "# operator note\n\"notifications.quiet\" = \"false\"\n[notifications]\nquiet = false # retained\nfuture = 7\n[notifications.events]\ninput-needed = false\n").unwrap();
+    Update::parse(Key::Quiet, "true")
+        .unwrap()
+        .persist(&path)
+        .unwrap();
+    Update::parse(Key::Sound, "whale")
+        .unwrap()
+        .persist(&path)
+        .unwrap();
+    Key::Quiet.unset(&path).unwrap();
+    let saved = std::fs::read_to_string(&path).unwrap();
+    assert!(saved.contains("# operator note"));
+    let raw: toml::Value = toml::from_str(&saved).unwrap();
+    assert!(!raw.as_table().unwrap().contains_key("notifications.quiet"));
+    assert!(raw["notifications"].get("quiet").is_none());
+    assert_eq!(raw["notifications"]["sound"].as_str(), Some("whale"));
+    assert_eq!(raw["notifications"]["future"].as_integer(), Some(7));
+    assert_eq!(
+        raw["notifications"]["events"]["input-needed"].as_bool(),
+        Some(false)
+    );
+}
+
+#[test]
+fn notifications_legacy_condition_is_fallback_and_explicit_sound_off_wins() {
+    let mut config: ConfigToml = toml::from_str(
+        "[tui]\nnotification_condition = \"never\"\n[notifications]\ncompletion_sound = \"bell\"\n",
+    )
+    .unwrap();
+    assert_eq!(
+        config.get_value("notifications.condition").as_deref(),
+        Some("never")
+    );
+    assert_eq!(
+        config.get_value("notifications.sound").as_deref(),
+        Some("legacy")
+    );
+    config
+        .set_value("notifications.condition", "always")
+        .unwrap();
+    config.set_value("notifications.sound", "off").unwrap();
+    assert_eq!(
+        config.get_value("notifications.condition").as_deref(),
+        Some("always")
+    );
+    config.unset_value("notifications.condition").unwrap();
+    assert_eq!(
+        config.get_value("notifications.condition").as_deref(),
+        Some("never")
+    );
+    assert_eq!(
+        config.get_value("notifications.sound").as_deref(),
+        Some("off")
+    );
+}
+
+#[test]
+fn notifications_path_whitespace_and_quotes_round_trip_without_reparsing() {
+    let mut config = ConfigToml::default();
+    for path in [
+        " sound with spaces.wav ",
+        "\"quoted-name.wav",
+        "folder/normal.wav",
+    ] {
+        let raw = toml::Value::String(path.into()).to_string();
+        config.set_value("notifications.sound_file", &raw).unwrap();
+        assert_eq!(
+            config.get_value("notifications.sound_file").as_deref(),
+            Some(path)
+        );
+    }
+}
+
+#[test]
+fn notifications_malformed_parent_and_unknown_root_cannot_erase_config() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    let original = "[notifications]\nevents = false\nquiet = true\n";
+    std::fs::write(&path, original).unwrap();
+    let update = notifications::NotificationConfigUpdate::parse(
+        notifications::NotificationSetting::Event(notifications::NotificationEvent::InputNeeded),
+        "false",
+    )
+    .unwrap();
+    assert!(update.persist(&path).is_err());
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    let mut config: ConfigToml = toml::from_str(original).unwrap();
+    assert!(config.unset_value("notifications").is_err());
+    let before = toml::to_string(&config).unwrap();
+    assert!(
+        config
+            .set_value("notifications.events.input-needed", "false")
+            .is_err()
+    );
+    assert_eq!(toml::to_string(&config).unwrap(), before);
+}

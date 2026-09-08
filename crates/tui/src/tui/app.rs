@@ -1511,6 +1511,8 @@ pub struct App {
     /// Ghost-text follow-up suggestion shown in the composer when empty.
     /// Generated asynchronously after each completed turn; cleared on new input.
     pub prompt_suggestion: Option<String>,
+    /// Read-only view of the current Config, refreshed by its notification delta owner.
+    pub notification_settings: crate::config::NotificationsConfig,
     /// Monotonic turn counter for stale-suggestion protection. Incremented on
     /// each TurnStarted; background suggestion tasks capture the token and
     /// discard their result if the token no longer matches.

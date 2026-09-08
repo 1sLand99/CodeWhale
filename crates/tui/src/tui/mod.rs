@@ -76,6 +76,7 @@ pub mod menu_style;
 pub mod model_picker;
 pub mod motion;
 pub mod mouse_ui;
+pub(crate) mod notification_audio;
 pub mod notification_payload;
 pub mod notifications;
 pub mod ocean;

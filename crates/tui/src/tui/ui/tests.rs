@@ -23074,6 +23074,8 @@ fn notification_settings_tui_always_keeps_configured_method_no_threshold() {
             event_sound: crate::config::EventSoundConfig::default(),
             quiet: false,
             events: crate::config::NotificationEventsConfig::default(),
+            sound: None,
+            condition: None,
         }),
         ..Config::default()
     };
@@ -23112,6 +23114,8 @@ fn notification_settings_no_tui_override_uses_notifications_block() {
             event_sound: crate::config::EventSoundConfig::default(),
             quiet: false,
             events: crate::config::NotificationEventsConfig::default(),
+            sound: None,
+            condition: None,
         }),
         ..Config::default()
     };
@@ -26052,4 +26056,78 @@ fn stale_session_projection_cannot_rewind_a_host_launch() {
         vec![text_message("user", "expected engine transcript")]
     );
     assert_eq!(app.input, "typing remains responsive");
+}
+
+#[test]
+fn notification_live_delta_updates_current_config_projection_and_queries_atomically() {
+    let _guard = crate::test_support::lock_test_env();
+    let mut app = create_test_app();
+    let mut config = Config::default();
+    for (key, value) in [
+        ("quiet", "true"),
+        ("sound", "whale"),
+        ("events.approval-needed", "false"),
+    ] {
+        let result = commands::execute(&format!("/config notifications {key} {value}"), &mut app);
+        assert!(!result.is_error, "{:?}", result.message);
+        let Some(AppAction::UpdateNotification { update }) = result.action else {
+            panic!("missing typed delta")
+        };
+        apply_notification_update(&mut app, &mut config, update).unwrap();
+        let get = commands::execute(&format!("/config notifications {key}"), &mut app);
+        assert!(get.message.unwrap().contains(&format!("= {value}")));
+    }
+    assert!(config.notifications_config().quiet);
+    assert!(!config.notifications_config().events.approval_needed);
+    assert_eq!(
+        config.notifications_config().sound,
+        Some(crate::config::CompletionSound::Whale)
+    );
+    assert_eq!(app.notification_settings, config.notifications_config());
+    let before = app.notification_settings.clone();
+    assert!(
+        apply_notification_update(
+            &mut app,
+            &mut config,
+            crate::config::NotificationConfigUpdate::ThresholdSecs(u64::MAX)
+        )
+        .is_err()
+    );
+    assert_eq!(config.notifications_config(), before);
+    assert_eq!(app.notification_settings, before);
+    // The same replacement helper used by profile/resume/provider paths
+    // must refresh both UI and installed policy without a second store.
+    app.refresh_notification_settings(&Config::default());
+    assert!(!app.notification_settings.quiet);
+    assert_eq!(app.notification_settings.sound, None);
+}
+
+#[test]
+fn notification_invalid_live_delta_uses_selected_locale_and_keeps_policy() {
+    use crate::localization::Locale;
+
+    let _guard = crate::test_support::lock_test_env();
+    let mut app = create_test_app();
+    let mut config = Config::default();
+    let before = config.notifications_config();
+    for locale in [Locale::Ja, Locale::Fr] {
+        app.ui_locale = locale;
+        let error = apply_notification_update(
+            &mut app,
+            &mut config,
+            crate::config::NotificationConfigUpdate::ThresholdSecs(u64::MAX),
+        )
+        .unwrap_err();
+        let expected = tr(locale, MessageId::ConfigCommandInvalidValue)
+            .replace("{key}", "notifications.threshold_secs")
+            .replace("{value}", &tr(locale, MessageId::ConfigUnavailable))
+            .replace(
+                "{choices}",
+                codewhale_config::notifications::NotificationSetting::ThresholdSecs.choices(),
+            );
+        assert_eq!(error.to_string(), expected);
+        assert!(!error.to_string().contains("notification integer exceeds"));
+        assert_eq!(config.notifications_config(), before);
+        assert_eq!(app.notification_settings, before);
+    }
 }

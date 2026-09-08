@@ -9,6 +9,7 @@ pub mod device_code;
 pub mod external_credentials;
 pub mod model_reference;
 pub mod models_dev;
+pub mod notifications;
 pub mod persistence;
 pub mod pricing;
 pub mod provider;
@@ -2946,6 +2947,14 @@ impl ConfigToml {
 
     #[must_use]
     pub fn get_value(&self, key: &str) -> Option<String> {
+        if notifications::in_namespace(key) {
+            let setting = notifications::NotificationSetting::parse(key)?;
+            return Some(
+                notifications::from_extras(&self.extras)
+                    .ok()?
+                    .display(setting),
+            );
+        }
         if let Some((provider, field)) = parse_provider_config_key(key) {
             return get_provider_config_value(self.providers.for_provider(provider), field);
         }
@@ -3000,6 +3009,9 @@ impl ConfigToml {
 
     #[must_use]
     pub fn get_display_value(&self, key: &str) -> Option<String> {
+        if notifications::in_namespace(key) {
+            return self.get_value(key);
+        }
         if let Some((provider, field)) = parse_provider_config_key(key) {
             return get_provider_config_display_value(self.providers.for_provider(provider), field);
         }
@@ -3067,6 +3079,11 @@ impl ConfigToml {
     }
 
     pub fn set_value(&mut self, key: &str, value: &str) -> Result<()> {
+        if notifications::in_namespace(key) {
+            let setting = notifications::NotificationSetting::required(key)?;
+            let update = notifications::NotificationConfigUpdate::parse(setting, value)?;
+            return notifications::edit_extras(&mut self.extras, setting, update.value()?);
+        }
         if parse_custom_provider_config_key(key).is_some_and(|(provider_id, _)| {
             ProviderKind::parse_config_identity(provider_id) == Some(ProviderKind::Antigravity)
         }) {
@@ -3132,6 +3149,10 @@ impl ConfigToml {
     }
 
     pub fn unset_value(&mut self, key: &str) -> Result<()> {
+        if notifications::in_namespace(key) {
+            let setting = notifications::NotificationSetting::required(key)?;
+            return notifications::edit_extras(&mut self.extras, setting, None);
+        }
         if let Some((provider, field)) = parse_provider_config_key(key) {
             unset_provider_config_value(self, provider, field);
             return Ok(());
@@ -3235,7 +3256,31 @@ impl ConfigToml {
         }
 
         for (k, v) in &self.extras {
-            out.insert(k.clone(), redact_toml_value_for_display(k, v));
+            if k == "notifications" {
+                if let Ok(config) = notifications::from_extras(&self.extras) {
+                    for setting in notifications::NotificationSetting::ALL {
+                        out.insert(
+                            format!("notifications.{}", setting.key()),
+                            config.display(setting),
+                        );
+                    }
+                } else {
+                    out.insert(k.clone(), "<invalid notification configuration>".into());
+                }
+            } else if notifications::in_namespace(k)
+                && notifications::NotificationSetting::parse(k).is_some()
+            {
+                if let Ok(config) = notifications::from_extras(&self.extras) {
+                    let setting = notifications::NotificationSetting::parse(k)
+                        .expect("known notification key");
+                    out.insert(
+                        format!("notifications.{}", setting.key()),
+                        config.display(setting),
+                    );
+                }
+            } else {
+                out.insert(k.clone(), redact_toml_value_for_display(k, v));
+            }
         }
         out
     }

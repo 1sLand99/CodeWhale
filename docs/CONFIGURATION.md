@@ -2247,39 +2247,28 @@ reasoning contract, and all four membership ids omit generic sampling fields.
   - `[retry].initial_delay` (float seconds, default `1.0`)
   - `[retry].max_delay` (float seconds, default `60.0`)
   - `[retry].exponential_base` (float, default `2.0`)
-- `[notifications].method` (string, optional): `auto`, `osc9`, `kitty`,
-  `ghostty`, `bel`, or `off`. Defaults to `auto`. The TUI fires this on completed (successful)
-  turns whose elapsed time meets `threshold_secs`; failed and cancelled
-  turns are silent. `auto` resolves to `osc9` for `iTerm.app`, `Ghostty`,
-  and `WezTerm` (detected via `$TERM_PROGRAM`). Unknown terminals fail closed
-  to `off`; Codewhale never invents an audible BEL fallback.
-- `[notifications].threshold_secs` (int, optional): defaults to `30`.
-  Only completed turns whose elapsed time meets or exceeds this fire a
-  notification.
-- `[notifications].include_summary` (bool, optional): defaults to
-  `false`. When `true`, the notification body includes the elapsed
-  duration and the turn's cost in the configured display currency.
-- `[notifications].completion_sound` (string, optional): `off`, `beep`,
-  `bell`, or `file`. Defaults to `off`. This opt-in sound follows the same
-  focus and quiet policy as desktop notifications. `file` plays the WAV path
-  from `[notifications].sound_file` on Windows.
-- `[notifications].sound_file` (path, optional): path to a custom WAV file
-  used when `completion_sound = "file"`.
-- `[notifications].quiet` (bool, optional): defaults to `false`. Quiet
-  mode — suppresses every desktop notification and sound (all categories,
-  all delivery methods) without changing `method`, `completion_sound`, or the
-  per-category switches.
-- `[notifications.events]` (table, optional): per-category
-  desktop-notification switches; every key defaults to `true`. Keys:
-  `turn-complete`, `subagent-terminal`, `approval-needed`,
-  `input-needed`, `elevation-needed`, `model-notify`. A disabled
-  category is suppressed on every delivery mechanism (OSC 9, Kitty,
-  Ghostty, BEL, macOS Notification Center).
-- `[notifications.event_sound]` (table, optional): opt-in, deterministic
-  per-event sound cues. Keys: `enabled` (bool, default `false`), `events`
-  (array of kebab-case event names, default `["turn-complete",
-  "approval-needed"]`), `min_interval_ms` (int, default `2000`), `quiet`
-  (bool, default `false`). See "Event sound cues" below.
+- `[notifications]`: notification delivery, attention, categories and audio share one
+  policy. `quiet = true`, `method = "off"`, `condition = "never"` and disabled
+  categories suppress both the banner and Codewhale's selected sound.
+- `notifications.method`: `auto` (default), `osc9`, `kitty`, `ghostty`, `bel`, `off`.
+- `notifications.condition`: `unfocused` (default), `always`, `never`. When absent,
+  the legacy `tui.notification_condition` remains the fallback. `always` also
+  bypasses the duration threshold; `unfocused` requires two seconds away.
+- `notifications.threshold_secs`: nonnegative integer, default `30`.
+- `notifications.include_summary`: boolean, default `false`.
+- `notifications.sound`: optional `off`, `whale`, `bell`, `beep`, `file`.
+  A selected value controls audio across enabled categories. Absent keeps legacy
+  `completion_sound` and `event_sound` choices; `off` overrides both.
+- `notifications.sound_file`: custom local WAV path for `sound = "file"` or legacy
+  `completion_sound = "file"`.
+- `notifications.subagent_completion`: `always`, `final-only` (default), `off`.
+- `notifications.quiet`: boolean, default `false`.
+- `notifications.events`: six boolean categories, all enabled by default; see below.
+- `notifications.completion_sound`: legacy completion cue, default `off`, with the
+  same values as `sound`. Used only when `sound` is absent.
+- `notifications.event_sound`: legacy `enabled` (default `false`), `events`
+  (default `["turn-complete", "approval-needed"]`), and `quiet` (default `false`).
+  `min_interval_ms` (default `2000`) applies to each category's audio in both modes.
 - `tui.alternate_screen` (string, optional, default `auto`): which screen an interactive session starts on. `auto` and `always` start on the TUI-owned alternate screen; `never` starts in inline mode — a ratatui viewport the full height of the terminal with no alternate screen, so the shell's scrollback survives the session and stays scrollable after exit. `/fullscreen` and `/inline` switch it in-process; a switch that the terminal refuses rolls back and says why. Inline mode paints the whole transcript inside its viewport — nothing is written into the host scrollback while the session runs.
 - `tui.mouse_capture` (bool, optional, default `true` on non-Windows terminals and on Windows Terminal/ConEmu/Cmder when the alternate screen is active; `false` on legacy Windows console and inside JetBrains JediTerm — PyCharm/IDEA/CLion/etc. — where mouse-event escapes leak into the input stream as garbled text, see #878 / #898): enable internal mouse scrolling, transcript selection, right-click context actions, and transcript scrollbar dragging. TUI-owned drag selection copies only transcript text, removes visual wrap-column line breaks from paragraphs, and keeps selection scoped to the transcript pane. Set this to `false` or run with `--no-mouse-capture` for raw terminal selection; set it to `true` or run with `--mouse-capture` to opt in anywhere it's defaulted off. On raw terminal selection, especially on legacy Windows console or when mouse capture is disabled, selection may cross the right workbar and include visual wraps because the terminal, not the TUI, owns the selection.
 - `tui.terminal_probe_timeout_ms` (int, optional, default `500`): startup terminal-mode probe timeout in milliseconds. Values are clamped to `100..=5000`; timeout emits a warning and aborts startup instead of hanging indefinitely.
@@ -2431,90 +2420,102 @@ reprompt_message = ""
 
 ### Notifications
 
-The TUI can emit a desktop notification (OSC 9 escape or plain BEL) when a turn **completes successfully** and took longer than a threshold, so you can tab away while a long task runs. Failed or cancelled turns are intentionally silent — the notification is a "your task is ready" cue, not a generic ping. Configuration lives under `[notifications]`:
+Notification controls are available in the existing `/config` settings view,
+from terminal commands, and through the CLI. All write the same `config.toml`
+keys. Terminal changes apply immediately; add `--save` to keep them. CLI writes
+apply when the next process loads its configuration.
+
+```sh
+codewhale config set notifications.sound whale
+codewhale config set notifications.events.approval-needed false
+codewhale config set notifications.quiet true
+codewhale config get notifications
+codewhale config unset notifications.quiet
+```
+
+```text
+/config notifications sound whale --save
+/config notifications condition unfocused --save
+/config notifications quiet true
+/config notifications status
+```
+
+Nested CLI edits preserve TOML types, unrelated keys and comments. Unset removes
+only the selected leaf. `notifications.sound legacy` in the TUI, or CLI unset of
+`notifications.sound`, restores previous sound choices. Invalid values are
+rejected before file or session changes. In an active TUI profile, saved edits
+update its notification table when it owns one; otherwise they update the
+inherited root table. The settings detail keeps saved and current values distinct.
 
 ```toml
 [notifications]
-method          = "auto"  # auto | osc9 | bel | off
-threshold_secs  = 30      # only notify when the turn took >= this many seconds
-include_summary = false   # include elapsed time + cost in the notification body
-completion_sound = "off"  # off | beep | bell | file; sound is opt-in
-sound_file = "E:\\google\\downloads\\notify.wav" # for completion_sound = "file"
-quiet = false             # true suppresses every desktop notification and sound
+method = "auto"        # auto | osc9 | kitty | ghostty | bel | off
+condition = "unfocused" # unfocused | always | never
+threshold_secs = 30
+include_summary = false
+sound = "whale"        # optional; sound is opt-in, not enabled by default
+quiet = false
 
-[notifications.events]    # per-category switches; all default to true
-turn-complete     = true  # an agent turn finished
-subagent-terminal = true  # a sub-agent reached a terminal status
-approval-needed   = true  # a tool call is blocked on your approval
-input-needed      = true  # the agent asked a question and is blocked
-elevation-needed  = true  # the sandbox denied a tool and needs a decision
-model-notify      = true  # the model called the `notify` tool
+[notifications.events]
+turn-complete = true
+subagent-terminal = true
+approval-needed = true
+input-needed = true
+elevation-needed = true
+model-notify = true
 ```
 
-`quiet = true` is the one-flag "stop interrupting me" switch: it silences
-every category on every delivery mechanism while leaving the rest of your
-notification configuration intact, so flipping it back restores your exact
-previous policy. `[notifications.events]` disables single categories the
-same way — a disabled category is suppressed at the emission path, so it
-cannot leak through one specific protocol. A suppressed notification also
-suppresses its paired `[notifications.event_sound]` cue (no orphaned bells
-for events you turned off). The turn-completion chime also respects `quiet`.
+`quiet = true` mutes every category without changing saved choices. `method =
+"off"` also stops both banner and selected audio. Disabling a category stops its
+sound. Attention and duration gates apply before any sink runs. Title animation
+completion is silent; only the authorized notification event can request audio.
+Successful turn completion is a notification category; failed/cancelled turns do
+not create a success notification.
 
-Method semantics:
+`auto` chooses a recognized terminal protocol or the existing macOS native
+fallback; unknown terminals remain unsupported and never invent a bell. `bel`
+is an audio-only transport: one selected cue is dispatched, without a second
+transport bell. With `sound = "off"`, that transport is silent. `osc9`, `kitty`
+and `ghostty` use their terminal notification protocols; tmux passthrough is
+preserved. Terminal/OS notification preferences still govern display, attribution
+and any sound the host itself adds.
 
-- `auto` (default) — picks a supported native or terminal banner transport. Unknown terminals fail closed to `off`; automatic banner selection never invents a BEL sound.
-- `osc9` — emit `\x1b]9;<msg>\x07`. Inside tmux the sequence is wrapped in DCS passthrough so it reaches the outer terminal.
-- `bel` — emit a single `\x07` byte. Use this on Windows only if you actively want the chime back.
-- `off` — disable banners. An explicitly selected completion sound remains an independent control.
+By default the terminal must stay unfocused for two seconds. `condition =
+"always"` allows foreground notifications and bypasses the duration threshold;
+`"never"` suppresses all delivery. The canonical condition takes precedence over
+legacy `[tui].notification_condition`.
 
-By default, delivery is background-only: Codewhale waits until the terminal
-has remained unfocused for two seconds. Set `notification_condition =
-"always"` under `[tui]` to allow configured notifications in the foreground,
-or `"never"` to suppress all operator notifications. macOS native banners are
-silent. `completion_sound` controls the turn-completion cue; the separate,
-opt-in `[notifications.event_sound]` table controls event BEL cues. Explicit
-`method = "bel"` is also audible and should be used only when that is wanted.
+The bundled `whale` is a 1.55-second original whale-inspired cue, with no
+third-party recording. It remains an opt-in candidate pending listening approval.
+WAV playback uses a background worker: macOS `/usr/bin/afplay`, Linux `aplay`
+from [ALSA utilities](https://github.com/alsa-project/alsa-utils), or Windows
+`PlaySoundW`. A missing player/file or unsupported platform has no fallback bell.
+Only one WAV plays at a time. A worker-start receipt is a dispatch attempt, not
+proof of audible playback or OS acceptance. The existing macOS `osascript`
+banner retains Script Editor attribution; this Core change does not provide a
+branded native Apps banner.
 
-Windows users who run inside a known OSC-9 terminal (e.g. WezTerm on Windows) keep getting OSC-9 notifications. Set `method = "off"` to disable threshold-based desktop notifications entirely.
+#### Previous sound settings
 
-`completion_sound = "file"` is for Windows users who want a per-application
-completion sound without changing the global Windows sound scheme. It plays the
-configured WAV `sound_file` asynchronously via the native Windows audio API.
-
-#### Event sound cues
-
-`[notifications.event_sound]` is an opt-in, deterministic policy that emits a
-terminal-bell-level cue when specific notification events fire (approval
-prompts, blocked-on-input, sub-agent completion, and so on). It is **off by
-default**; with `enabled = false` nothing is emitted, which is the
-platform-safe no-op fallback.
+When `notifications.sound` is absent, completion uses a non-off
+`completion_sound` selection, and other events use the existing event allow-list.
+These are compatibility inputs to the same audio decision, not separate playback
+paths. When the global sound is selected, it takes precedence over the previous
+completion/event choices. The default remains silent unless a legacy sound or
+explicit `bel` transport was already selected.
 
 ```toml
 [notifications.event_sound]
-enabled = false                              # default: off (opt-in)
-events = ["turn-complete", "approval-needed"] # default allow-list
-min_interval_ms = 2000                       # per-event rate limit
-quiet = false                                # true silences everything without editing the allow-list
+enabled = false
+events = ["turn-complete", "approval-needed"]
+min_interval_ms = 2000
+quiet = false
 ```
 
-The cue table is fixed — cues are functional BEL-based signals, not
-designed-for-pleasantness audio, and every cue is one or two `\x07` bytes
-(inert on terminals that ignore BEL, so this is a platform-safe no-op
-everywhere):
-
-| Event | Cue |
-|---|---|
-| `turn-complete` | BEL (`\x07`) |
-| `subagent-terminal` | BEL (`\x07`) |
-| `approval-needed` | double BEL (`\x07\x07`) |
-| `input-needed` | BEL (`\x07`) |
-| `elevation-needed` | double BEL (`\x07\x07`) |
-| `model-notify` | BEL (`\x07`) |
-
-Decision order: disabled → quiet mode → event not in `events` → `turn-complete`
-deferred to the `completion_sound` channel when that is active (so the two
-never double-ding) → per-event rate limit (`min_interval_ms` since the last
-play of that event) → play. Unknown strings in `events` are ignored.
+Legacy event cues use one bell for completion, subagent completion, input and
+model notices; approval/elevation cues use two. The per-category repeat interval
+survives settings refreshes. Old unknown event names are ignored on load; new
+CLI/TUI edits require names from the six categories above.
 
 #### What a notification can contain
 

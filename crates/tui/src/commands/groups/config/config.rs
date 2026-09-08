@@ -2,21 +2,19 @@
 
 use super::CommandResult;
 use crate::config::{
-    ApiProvider, CompletionSound, Config, DEFAULT_STREAM_CHUNK_TIMEOUT_SECS,
-    DEFAULT_SUBAGENT_API_TIMEOUT_SECS, DEFAULT_SUBAGENT_HEARTBEAT_TIMEOUT_SECS,
-    DEFAULT_XIAOMI_MIMO_BASE_URL, MAX_STREAM_CHUNK_TIMEOUT_SECS, MAX_SUBAGENT_API_TIMEOUT_SECS,
+    ApiProvider, Config, DEFAULT_STREAM_CHUNK_TIMEOUT_SECS, DEFAULT_SUBAGENT_API_TIMEOUT_SECS,
+    DEFAULT_SUBAGENT_HEARTBEAT_TIMEOUT_SECS, DEFAULT_XIAOMI_MIMO_BASE_URL,
+    MAX_STREAM_CHUNK_TIMEOUT_SECS, MAX_SUBAGENT_API_TIMEOUT_SECS,
     MAX_SUBAGENT_HEARTBEAT_TIMEOUT_SECS, MAX_SUBAGENTS, MIN_STREAM_CHUNK_TIMEOUT_SECS,
     MIN_SUBAGENT_API_TIMEOUT_SECS, MIN_SUBAGENT_HEARTBEAT_TIMEOUT_SECS, NotificationConfigUpdate,
-    NotificationMethod, NotificationsConfig, SearchProvider, SearchProviderSource,
-    SubagentCompletionNotification, SubagentsConfig, XIAOMI_MIMO_PAY_AS_YOU_GO_BASE_URL,
-    clear_active_provider_api_key, normalize_custom_model_id, normalize_model_name_for_provider,
-    validate_route,
+    NotificationSetting, NotificationsConfig, SearchProvider, SearchProviderSource,
+    SubagentsConfig, XIAOMI_MIMO_PAY_AS_YOU_GO_BASE_URL, clear_active_provider_api_key,
+    normalize_custom_model_id, normalize_model_name_for_provider, validate_route,
 };
 use crate::config_persistence::{
     persist_provider_base_url_key, persist_root_bool_key, persist_root_string_key,
-    persist_subagents_bool_key, persist_subagents_integer_key, persist_table_bool_key,
-    persist_table_integer_key, persist_table_string_key, persist_tui_integer_key,
-    persist_unset_root_key,
+    persist_subagents_bool_key, persist_subagents_integer_key, persist_table_string_key,
+    persist_tui_integer_key, persist_unset_root_key,
 };
 use crate::localization::{MessageId, resolve_locale, tr};
 use crate::settings::Settings;
@@ -513,9 +511,7 @@ fn show_single_setting(app: &App, key: &str) -> CommandResult {
         "prompt_suggestion" => load_command_config(app)
             .ok()
             .map(|config| prompt_suggestion_display(&config)),
-        "notifications" => load_command_config(app)
-            .ok()
-            .map(|config| notifications_summary(&config)),
+        "notifications" => Some(notifications_summary_value(&app.notification_settings)),
         _ => {
             let known = Settings::available_settings()
                 .iter()
@@ -1086,17 +1082,16 @@ fn prompt_suggestion_display(config: &Config) -> String {
     config.prompt_suggestion_enabled().to_string()
 }
 
-fn notifications_for_edit(config: &Config) -> NotificationsConfig {
-    config.notifications_config()
+fn notifications_summary(config: &Config) -> String {
+    notifications_summary_value(&config.notifications_config())
 }
 
-fn notifications_summary(config: &Config) -> String {
-    let notifications = notifications_for_edit(config);
+fn notifications_summary_value(notifications: &NotificationsConfig) -> String {
     format!(
         "method={} threshold={}s sound={} quiet={}",
         notifications.method.as_str(),
         notifications.threshold_secs,
-        notifications.completion_sound.as_str(),
+        notifications.display(NotificationSetting::Sound),
         notifications.quiet
     )
 }
@@ -1200,275 +1195,91 @@ fn set_prompt_suggestion(app: &mut App, value: &str, persist: bool) -> CommandRe
 }
 
 fn notifications_config_command(app: &mut App, raw: &str) -> CommandResult {
-    let mut tokens = raw.split_whitespace().collect::<Vec<_>>();
-    let persist = matches!(tokens.last(), Some(&"--save" | &"-s"));
-    if persist {
-        tokens.pop();
+    let raw = raw.trim();
+    let (raw, persist) = raw
+        .strip_suffix(" --save")
+        .or_else(|| raw.strip_suffix(" -s"))
+        .map_or((raw, false), |value| (value.trim_end(), true));
+    if raw.is_empty() || raw == "status" {
+        return show_notifications_status(app);
     }
-
-    match tokens.as_slice() {
-        [] | ["status"] => show_notifications_status(app),
-        [key] => show_notifications_setting(app, key),
-        [key, value] => set_notifications_value(app, key, value, persist),
-        _ => CommandResult::error(format!(
-            "{} /config notifications [status|method|threshold_secs|include_summary|quiet|completion_sound|subagent_completion <value>] [--save]",
-            tr(app.ui_locale, MessageId::HelpUsageLabel)
-        )),
+    match raw.split_once(char::is_whitespace) {
+        Some((key, value)) => set_notifications_value(app, key, value.trim(), persist),
+        None => show_notifications_setting(app, raw),
     }
 }
 
 fn show_notifications_status(app: &App) -> CommandResult {
-    let config = match load_command_config(app) {
-        Ok(config) => config,
-        Err(err) => return CommandResult::error(err),
-    };
-    let notifications = notifications_for_edit(&config);
-    let lines = [
-        "[notifications] — config.toml".to_string(),
-        format!("method = {}", notifications.method.as_str()),
-        format!("threshold_secs = {}", notifications.threshold_secs),
-        format!("include_summary = {}", notifications.include_summary),
-        format!("quiet = {}", notifications.quiet),
+    let mut lines = vec!["[notifications]".to_string()];
+    lines.extend(NotificationSetting::ALL.into_iter().map(|setting| {
         format!(
-            "completion_sound = {}",
-            notifications.completion_sound.as_str()
-        ),
-        format!(
-            "subagent_completion = {}",
-            notifications.subagent_completion.as_str()
-        ),
-        String::new(),
-        tr(app.ui_locale, MessageId::ConfigNotificationsSetHint).into_owned(),
-    ];
+            "{} = {}",
+            setting.key(),
+            app.notification_settings.display(setting)
+        )
+    }));
+    lines.push(tr(app.ui_locale, MessageId::ConfigNotificationsSetHint).into_owned());
     CommandResult::message(lines.join("\n"))
 }
 
 fn show_notifications_setting(app: &App, key: &str) -> CommandResult {
-    let config = match load_command_config(app) {
-        Ok(config) => config,
-        Err(err) => return CommandResult::error(err),
+    let Some(setting) = NotificationSetting::parse(key) else {
+        return invalid_notification_value(app, key, key, "/config notifications status");
     };
-    let Some(key) = canonical_notifications_key(key) else {
-        return CommandResult::error(
-            tr(app.ui_locale, MessageId::ConfigCommandInvalidValue)
-                .replace("{key}", "notifications")
-                .replace("{value}", key)
-                .replace("{choices}", "/config notifications status"),
-        );
-    };
-    let notifications = notifications_for_edit(&config);
-    let value = notifications_field_display(&notifications, key);
-    CommandResult::message(format!("notifications.{key} = {value}"))
+    CommandResult::message(format!(
+        "notifications.{} = {}",
+        setting.key(),
+        app.notification_settings.display(setting)
+    ))
+}
+
+fn invalid_notification_value(app: &App, key: &str, value: &str, choices: &str) -> CommandResult {
+    CommandResult::error(
+        tr(app.ui_locale, MessageId::ConfigCommandInvalidValue)
+            .replace("{key}", &format!("notifications.{key}"))
+            .replace("{value}", value)
+            .replace("{choices}", choices),
+    )
 }
 
 fn set_notifications_value(app: &mut App, key: &str, value: &str, persist: bool) -> CommandResult {
-    let Some(key) = canonical_notifications_key(key) else {
-        return CommandResult::error(
-            tr(app.ui_locale, MessageId::ConfigCommandInvalidValue)
-                .replace("{key}", "notifications")
-                .replace("{value}", key)
-                .replace("{choices}", "/config notifications status"),
-        );
+    let Some(setting) = NotificationSetting::parse(key) else {
+        return invalid_notification_value(app, key, value, "/config notifications status");
     };
-
-    let (update, save_result) = match key {
-        "method" => {
-            let Some(method) = NotificationMethod::parse(value) else {
-                return CommandResult::error(
-                    tr(app.ui_locale, MessageId::ConfigCommandInvalidValue)
-                        .replace("{key}", "notifications.method")
-                        .replace("{value}", value)
-                        .replace("{choices}", NotificationMethod::names_hint()),
-                );
-            };
-            (
-                NotificationConfigUpdate::Method(method),
-                persist.then(|| {
-                    persist_table_string_key(
-                        app.config_path.as_deref(),
-                        "notifications",
-                        "method",
-                        method.as_str(),
-                    )
-                }),
-            )
-        }
-        "threshold_secs" => {
-            let threshold = match value.trim().parse::<u64>() {
-                Ok(threshold) => threshold,
-                Err(_) => {
-                    return CommandResult::error(
-                        tr(app.ui_locale, MessageId::ConfigNotificationsWholeNumber).into_owned(),
-                    );
-                }
-            };
-            (
-                NotificationConfigUpdate::ThresholdSecs(threshold),
-                persist.then(|| {
-                    persist_table_integer_key(
-                        app.config_path.as_deref(),
-                        "notifications",
-                        "threshold_secs",
-                        threshold,
-                    )
-                }),
-            )
-        }
-        "include_summary" => {
-            let enabled = match parse_config_bool(value) {
-                Ok(enabled) => enabled,
-                Err(_) => {
-                    return CommandResult::error(
-                        tr(app.ui_locale, MessageId::ConfigCommandInvalidValue)
-                            .replace("{key}", "notifications.include_summary")
-                            .replace("{value}", value)
-                            .replace("{choices}", "on, off, true, false, yes, no"),
-                    );
-                }
-            };
-            (
-                NotificationConfigUpdate::IncludeSummary(enabled),
-                persist.then(|| {
-                    persist_table_bool_key(
-                        app.config_path.as_deref(),
-                        "notifications",
-                        "include_summary",
-                        enabled,
-                    )
-                }),
-            )
-        }
-        "quiet" => {
-            let enabled = match parse_config_bool(value) {
-                Ok(enabled) => enabled,
-                Err(_) => {
-                    return CommandResult::error(
-                        tr(app.ui_locale, MessageId::ConfigCommandInvalidValue)
-                            .replace("{key}", "notifications.quiet")
-                            .replace("{value}", value)
-                            .replace("{choices}", "on, off, true, false, yes, no"),
-                    );
-                }
-            };
-            (
-                NotificationConfigUpdate::Quiet(enabled),
-                persist.then(|| {
-                    persist_table_bool_key(
-                        app.config_path.as_deref(),
-                        "notifications",
-                        "quiet",
-                        enabled,
-                    )
-                }),
-            )
-        }
-        "completion_sound" => {
-            let Some(sound) = CompletionSound::parse(value) else {
-                return CommandResult::error(
-                    tr(app.ui_locale, MessageId::ConfigCommandInvalidValue)
-                        .replace("{key}", "notifications.completion_sound")
-                        .replace("{value}", value)
-                        .replace("{choices}", CompletionSound::names_hint()),
-                );
-            };
-            (
-                NotificationConfigUpdate::CompletionSound(sound),
-                persist.then(|| {
-                    persist_table_string_key(
-                        app.config_path.as_deref(),
-                        "notifications",
-                        "completion_sound",
-                        sound.as_str(),
-                    )
-                }),
-            )
-        }
-        "subagent_completion" => {
-            let Some(mode) = SubagentCompletionNotification::parse(value) else {
-                return CommandResult::error(
-                    tr(app.ui_locale, MessageId::ConfigCommandInvalidValue)
-                        .replace("{key}", "notifications.subagent_completion")
-                        .replace("{value}", value)
-                        .replace("{choices}", SubagentCompletionNotification::names_hint()),
-                );
-            };
-            (
-                NotificationConfigUpdate::SubagentCompletion(mode),
-                persist.then(|| {
-                    persist_table_string_key(
-                        app.config_path.as_deref(),
-                        "notifications",
-                        "subagent_completion",
-                        mode.as_str(),
-                    )
-                }),
-            )
-        }
-        _ => unreachable!("canonical notifications key"),
+    let update = match NotificationConfigUpdate::parse(setting, value) {
+        Ok(update) => update,
+        Err(_) => return invalid_notification_value(app, setting.key(), value, setting.choices()),
     };
-
-    let scope = if let Some(result) = save_result {
+    let scope = if persist {
+        let result = crate::config_persistence::config_toml_path(app.config_path.as_deref())
+            .and_then(|path| {
+                update.persist_for_profile(&path, app.config_profile.as_deref())?;
+                Ok(path)
+            });
         match result {
             Ok(path) => format!(
                 "{} {}",
                 tr(app.ui_locale, MessageId::ConfigScopeSaved),
                 path.display()
             ),
-            Err(err) => {
+            Err(error) => {
                 return CommandResult::error(
                     tr(app.ui_locale, MessageId::StartupDefaultNotSaved)
-                        .replace("{setting}", &format!("notifications.{key}"))
-                        .replace("{error}", &err.to_string()),
+                        .replace("{setting}", &format!("notifications.{}", setting.key()))
+                        .replace("{error}", &error.to_string()),
                 );
             }
         }
     } else {
         tr(app.ui_locale, MessageId::ConfigScopeSession).into_owned()
     };
-
-    let display_value = notification_update_display(update);
     CommandResult::with_message_and_action(
         tr(app.ui_locale, MessageId::ConfigNotificationUpdated)
-            .replace("{key}", key)
-            .replace("{value}", &display_value)
+            .replace("{key}", setting.key())
+            .replace("{value}", &update.display())
             .replace("{scope}", &scope),
         AppAction::UpdateNotification { update },
     )
-}
-
-fn notification_update_display(update: NotificationConfigUpdate) -> String {
-    match update {
-        NotificationConfigUpdate::Method(value) => value.as_str().to_string(),
-        NotificationConfigUpdate::ThresholdSecs(value) => value.to_string(),
-        NotificationConfigUpdate::IncludeSummary(value) => value.to_string(),
-        NotificationConfigUpdate::Quiet(value) => value.to_string(),
-        NotificationConfigUpdate::CompletionSound(value) => value.as_str().to_string(),
-        NotificationConfigUpdate::SubagentCompletion(value) => value.as_str().to_string(),
-    }
-}
-
-fn canonical_notifications_key(key: &str) -> Option<&'static str> {
-    match key.trim().to_ascii_lowercase().replace('-', "_").as_str() {
-        "method" => Some("method"),
-        "threshold_secs" | "threshold" => Some("threshold_secs"),
-        "include_summary" | "summary" => Some("include_summary"),
-        "quiet" => Some("quiet"),
-        "completion_sound" | "sound" => Some("completion_sound"),
-        "subagent_completion" => Some("subagent_completion"),
-        _ => None,
-    }
-}
-
-fn notifications_field_display(notifications: &NotificationsConfig, key: &str) -> String {
-    match key {
-        "method" => notifications.method.as_str().to_string(),
-        "threshold_secs" => notifications.threshold_secs.to_string(),
-        "include_summary" => notifications.include_summary.to_string(),
-        "quiet" => notifications.quiet.to_string(),
-        "completion_sound" => notifications.completion_sound.as_str().to_string(),
-        "subagent_completion" => notifications.subagent_completion.as_str().to_string(),
-        _ => unreachable!("canonical notifications key"),
-    }
 }
 
 fn stream_chunk_timeout_value_label(raw: u64, resolved: u64) -> String {
@@ -3302,6 +3113,7 @@ pub fn logout(app: &mut App) -> CommandResult {
 mod tests {
     use super::*;
     use crate::config::Config;
+    use crate::config::NotificationMethod;
     use crate::test_support::{EnvVarGuard, TestEnvLock, lock_test_env};
     use crate::tui::app::{App, TuiOptions};
     use crate::tui::approval::ApprovalMode;
@@ -4683,7 +4495,12 @@ completion_sound = "bell"
         .unwrap();
 
         let mut app = create_test_app();
-        app.config_path = Some(config_path);
+        app.config_path = Some(config_path.clone());
+        // This fixture starts App with defaults; seed its current Config view
+        // as the real constructor does before asking a live-session query.
+        app.notification_settings = Config::load(Some(config_path), None)
+            .unwrap()
+            .notifications_config();
 
         let search = config_command(&mut app, Some("search.provider"));
         assert!(!search.is_error, "{:?}", search.message);
@@ -4788,7 +4605,7 @@ completion_sound = "bell"
             let Some(AppAction::UpdateNotification { update }) = result.action else {
                 panic!("expected notification field delta for {command}");
             };
-            live.apply_update(update);
+            live.apply_update(update).unwrap();
         }
 
         assert_eq!(live.method, NotificationMethod::Osc9);
