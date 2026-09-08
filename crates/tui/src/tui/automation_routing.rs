@@ -796,6 +796,7 @@ mod tests {
             thread_id: None,
             turn_id: None,
             error: None,
+            dispatch: None,
         };
         let runs_dir = temp.path().join("runs").join(&automation.id);
         fs::create_dir_all(&runs_dir).expect("runs dir");

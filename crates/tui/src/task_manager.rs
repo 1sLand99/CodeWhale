@@ -411,6 +411,22 @@ pub struct NewTaskRequest {
 }
 
 impl NewTaskRequest {
+    /// Preserve values already resolved into a staged or accepted task.
+    pub(crate) fn from_task(task: &TaskRecord) -> Self {
+        Self {
+            prompt: task.prompt.clone(),
+            model: Some(task.model.clone()),
+            model_provider: task.model_provider.clone(),
+            model_provider_id: task.model_provider_id.clone(),
+            workspace: Some(task.workspace.clone()),
+            mode: Some(task.mode.clone()),
+            allow_shell: Some(task.allow_shell),
+            trust_mode: Some(task.trust_mode),
+            auto_approve: Some(task.auto_approve),
+            owner_session_id: task.owner_session_id.clone(),
+        }
+    }
+
     #[cfg(test)]
     #[must_use]
     pub fn from_prompt(prompt: impl Into<String>) -> Self {
@@ -1304,6 +1320,64 @@ impl TaskManager {
         format!("task_{}", &Uuid::new_v4().simple().to_string()[..16])
     }
 
+    /// Read the exact durable task binding without adopting another process's
+    /// queue. Used by the automation dispatcher while it owns the store claim.
+    pub(crate) fn read_bound_task(&self, task_id: &str) -> Result<Option<TaskRecord>> {
+        if task_id.is_empty()
+            || !task_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        {
+            bail!("Invalid durable task id");
+        }
+        read_bound_task_file(&self.tasks_dir.join(format!("{task_id}.json")), task_id)
+    }
+
+    /// Recover a persisted automation admission under its cross-process
+    /// dispatch lock. A promoted task is accepted work, including failed or
+    /// interrupted work; returning it must never enqueue it again.
+    pub(crate) async fn recover_task_admission(
+        &self,
+        request: NewTaskRequest,
+        task_id: String,
+    ) -> Result<TaskRecord> {
+        validate_preallocated_task_id(&task_id)?;
+        if let Some(task) = self.read_bound_task(&task_id)? {
+            validate_bound_task_request(&task, &request)?;
+            return Ok(task);
+        }
+        let staged_path = self.tasks_dir.join(format!(".{task_id}.json.pending"));
+        let admission = if let Some(staged) = read_bound_task_file(&staged_path, &task_id)? {
+            validate_bound_task_request(&staged, &request)?;
+            if staged.status != TaskStatus::Queued
+                || staged.started_at.is_some()
+                || staged.thread_id.is_some()
+                || staged.turn_id.is_some()
+            {
+                bail!("Unpromoted task stage contains execution evidence; refusing to replay it");
+            }
+            // The original resolved settings remain durable in this stage
+            // until promotion, including if recovery itself is interrupted.
+            self.admit_task_record(staged, true).await
+        } else {
+            self.add_task_with_id(request.clone(), task_id.clone())
+                .await
+        };
+        match admission {
+            Ok(task) => Ok(task),
+            Err(error) => {
+                // Preserve a task promoted before a torn response; do not
+                // replace its identity or convert accepted work into a retry.
+                if let Some(task) = self.read_bound_task(&task_id)? {
+                    validate_bound_task_request(&task, &request)?;
+                    Ok(task)
+                } else {
+                    Err(error)
+                }
+            }
+        }
+    }
+
     /// Enqueue using a preallocated id. This is crate-visible only for the
     /// model tool's register-before-work transaction.
     pub(crate) async fn add_task_with_id(
@@ -1323,12 +1397,7 @@ impl TaskManager {
         {
             bail!("A pinned task provider requires an explicit model");
         }
-        if task_id.len() != 21
-            || !task_id.starts_with("task_")
-            || !task_id[5..].chars().all(|ch| ch.is_ascii_hexdigit())
-        {
-            bail!("Invalid preallocated task id: expected task_<16hex>");
-        }
+        validate_preallocated_task_id(&task_id)?;
 
         let task = TaskRecord {
             schema_version: CURRENT_TASK_SCHEMA_VERSION,
@@ -1382,6 +1451,10 @@ impl TaskManager {
             }],
         };
 
+        self.admit_task_record(task, false).await
+    }
+
+    async fn admit_task_record(&self, task: TaskRecord, recover_stage: bool) -> Result<TaskRecord> {
         {
             let mut state = self.state.lock().await;
             let task_path = self.tasks_dir.join(format!("{}.json", task.id));
@@ -1389,21 +1462,38 @@ impl TaskManager {
             // replay ignores an interrupted create until the queue write has
             // succeeded and this file is atomically promoted.
             let staged_task_path = self.tasks_dir.join(format!(".{}.json.pending", task.id));
-            if state.tasks.contains_key(&task.id) || task_path.exists() || staged_task_path.exists()
+            if recover_stage {
+                if let Some(accepted) = self.read_bound_task(&task.id)? {
+                    validate_bound_task_request(&accepted, &NewTaskRequest::from_task(&task))?;
+                    return Ok(accepted);
+                }
+                let current = read_bound_task_file(&staged_task_path, &task.id)?
+                    .context("Unaccepted task stage disappeared during recovery")?;
+                if serde_json::to_value(&current)? != serde_json::to_value(&task)? {
+                    bail!("Unaccepted task stage changed during recovery");
+                }
+            }
+            if state.tasks.contains_key(&task.id)
+                || task_path.exists()
+                || (!recover_stage && staged_task_path.exists())
             {
                 bail!("Task id already exists: {}", task.id);
             }
             let mut next_queue = state.queue.clone();
-            next_queue.push_back(task.id.clone());
+            if !next_queue.contains(&task.id) {
+                next_queue.push_back(task.id.clone());
+            }
 
             // Stage the owner record, then persist its queue membership, then
             // atomically promote it. A crash before promotion leaves either an
             // ignored staged file or a queue entry with no task (which replay
             // drops); a crash after promotion leaves the complete runnable
             // pair. In-memory scheduling is published only after all three.
-            write_json_atomic(&staged_task_path, &task)?;
+            if !recover_stage {
+                write_json_atomic(&staged_task_path, &task)?;
+            }
             if let Err(err) = self.persist_queue_locked(&next_queue) {
-                if let Err(cleanup_err) = fs::remove_file(&staged_task_path) {
+                if !recover_stage && let Err(cleanup_err) = fs::remove_file(&staged_task_path) {
                     tracing::warn!(
                         task_id = %task.id,
                         error = %cleanup_err,
@@ -1414,7 +1504,11 @@ impl TaskManager {
             }
             if let Err(promote_err) = fs::rename(&staged_task_path, &task_path) {
                 let rollback_error = self.persist_queue_locked(&state.queue).err();
-                let cleanup_error = fs::remove_file(&staged_task_path).err();
+                let cleanup_error = if recover_stage {
+                    None
+                } else {
+                    fs::remove_file(&staged_task_path).err()
+                };
                 let mut message =
                     format!("Failed to promote staged task {}: {promote_err}", task.id);
                 if let Some(rollback_error) = rollback_error {
@@ -2375,6 +2469,62 @@ fn normalize_hunt_verdict(raw: &str) -> Result<&'static str> {
     }
 }
 
+fn validate_preallocated_task_id(task_id: &str) -> Result<()> {
+    if task_id.len() != 21
+        || !task_id.starts_with("task_")
+        || !task_id[5..].chars().all(|ch| ch.is_ascii_hexdigit())
+    {
+        bail!("Invalid preallocated task id: expected task_<16hex>");
+    }
+    Ok(())
+}
+
+fn read_bound_task_file(path: &Path, task_id: &str) -> Result<Option<TaskRecord>> {
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).context("read bound task"),
+    };
+    let task: TaskRecord = serde_json::from_slice(&bytes).context("decode bound task")?;
+    if task.id != task_id || task.schema_version > CURRENT_TASK_SCHEMA_VERSION {
+        bail!("Bound task identity or schema does not match its durable admission");
+    }
+    Ok(Some(task))
+}
+
+pub(crate) fn validate_bound_task_request(
+    task: &TaskRecord,
+    request: &NewTaskRequest,
+) -> Result<()> {
+    if task.prompt != request.prompt.trim()
+        || task.owner_session_id != request.owner_session_id
+        || task.model_provider != request.model_provider
+        || task.model_provider_id != request.model_provider_id
+        || request
+            .model
+            .as_ref()
+            .is_some_and(|value| value != &task.model)
+        || request
+            .workspace
+            .as_ref()
+            .is_some_and(|value| value != &task.workspace)
+        || request
+            .mode
+            .as_ref()
+            .is_some_and(|value| value != &task.mode)
+        || request
+            .allow_shell
+            .is_some_and(|value| value != task.allow_shell)
+        || request
+            .trust_mode
+            .is_some_and(|value| value != task.trust_mode)
+        || task.auto_approve != request.auto_approve.unwrap_or(false)
+    {
+        bail!("Task admission replay does not match the bound request");
+    }
+    Ok(())
+}
+
 /// Outcome of loading the persisted task store at boot: the reconciled task
 /// map + queue, plus the ids whose status was flipped running->failed by
 /// crash recovery (the only records boot needs to re-persist).
@@ -2913,6 +3063,177 @@ mod tests {
         );
         assert!(!loaded.timeline.is_empty());
         assert_eq!(loaded.checklist.items[0].content, "read fixture");
+        Ok(())
+    }
+
+    struct AdmissionCountingExecutor(Arc<AtomicUsize>);
+
+    #[async_trait]
+    impl TaskExecutor for AdmissionCountingExecutor {
+        async fn execute(
+            &self,
+            _task: ExecutionTask,
+            _events: mpsc::Sender<TaskExecutionEvent>,
+            _cancel: CancellationToken,
+        ) -> TaskExecutionResult {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            TaskExecutionResult {
+                status: TaskStatus::Completed,
+                result_text: Some("admission fixture completed".into()),
+                error: None,
+                terminal_reason: TaskTerminalReason::Completed,
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn interrupted_task_stage_preserves_resolved_request_and_executes_once() -> Result<()> {
+        for queue_was_written in [false, true] {
+            let root = tempfile::tempdir()?;
+            let tasks_dir = root.path().join("tasks");
+            fs::create_dir_all(&tasks_dir)?;
+            let mut staged = sample_task_record();
+            staged.status = TaskStatus::Queued;
+            staged.started_at = None;
+            staged.model = "staged-model".into();
+            staged.workspace = root.path().join("staged-workspace");
+            fs::create_dir(&staged.workspace)?;
+            let mut request = NewTaskRequest::from_task(&staged);
+            request.model = None;
+            request.workspace = None;
+            request.mode = None;
+            request.allow_shell = None;
+            request.trust_mode = None;
+            let staged_path = tasks_dir.join(format!(".{}.json.pending", staged.id));
+            write_json_atomic(&staged_path, &staged)?;
+            if queue_was_written {
+                write_json_atomic(
+                    &root.path().join("queue.json"),
+                    &QueueFile {
+                        queue: vec![staged.id.clone()],
+                    },
+                )?;
+            }
+            let executions = Arc::new(AtomicUsize::new(0));
+            let mut config = test_config(root.path().to_path_buf());
+            config.default_model = "new-default-model".into();
+            config.default_workspace = root.path().join("new-workspace");
+            config.default_mode = "plan".into();
+            config.allow_shell = true;
+            config.trust_mode = true;
+            let manager = TaskManager::start_with_executor(
+                config,
+                Arc::new(AdmissionCountingExecutor(executions.clone())),
+            )
+            .await?;
+            // Interrupt recovery while its admission is waiting for the queue
+            // lock. The resolved intent must remain durable for another retry.
+            let stage_before = fs::read(&staged_path)?;
+            let queue_guard = manager.state.lock().await;
+            let mut recovery =
+                Box::pin(manager.recover_task_admission(request.clone(), staged.id.clone()));
+            assert!(
+                tokio::time::timeout(Duration::from_millis(25), &mut recovery)
+                    .await
+                    .is_err()
+            );
+            assert_eq!(
+                fs::read(&staged_path)?,
+                stage_before,
+                "interrupted recovery must preserve its resolved staged intent"
+            );
+            assert!(manager.read_bound_task(&staged.id)?.is_none());
+            assert_eq!(executions.load(Ordering::SeqCst), 0);
+            drop(recovery);
+            drop(queue_guard);
+            let admitted = manager
+                .recover_task_admission(request.clone(), staged.id.clone())
+                .await?;
+            assert_eq!(admitted.id, staged.id);
+            assert_eq!(admitted.model, staged.model);
+            assert_eq!(admitted.workspace, staged.workspace);
+            assert_eq!(admitted.mode, staged.mode);
+            assert_eq!(admitted.allow_shell, staged.allow_shell);
+            assert_eq!(admitted.trust_mode, staged.trust_mode);
+            assert!(
+                !staged_path.exists(),
+                "unaccepted stage recovered through TaskManager"
+            );
+            let completed =
+                wait_for_terminal_state(&manager, &admitted.id, Duration::from_secs(5)).await?;
+            assert_eq!(completed.status, TaskStatus::Completed);
+            assert!(
+                completed
+                    .result_summary
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("admission fixture completed")
+            );
+            assert_eq!(executions.load(Ordering::SeqCst), 1);
+            let replay = manager
+                .recover_task_admission(request.clone(), staged.id.clone())
+                .await?;
+            assert_eq!(replay.status, TaskStatus::Completed);
+            assert_eq!(replay.id, staged.id);
+            let canonical = tasks_dir.join(format!("{}.json", staged.id));
+            let before = fs::read(&canonical)?;
+            let mut mismatched = request;
+            mismatched.prompt = "a different operation".into();
+            let error = manager
+                .recover_task_admission(mismatched, staged.id)
+                .await
+                .expect_err("mismatched replay must be rejected");
+            assert!(error.to_string().contains("does not match"));
+            assert_eq!(
+                fs::read(canonical)?,
+                before,
+                "replay cannot rewrite accepted work"
+            );
+            assert_eq!(executions.load(Ordering::SeqCst), 1);
+            manager.shutdown();
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn accepted_task_interrupted_by_restart_is_reconciled_without_execution() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let tasks_dir = root.path().join("tasks");
+        fs::create_dir_all(&tasks_dir)?;
+        let accepted = sample_task_record();
+        let request = NewTaskRequest::from_task(&accepted);
+        write_json_atomic(&tasks_dir.join(format!("{}.json", accepted.id)), &accepted)?;
+        write_json_atomic(
+            &root.path().join("queue.json"),
+            &QueueFile {
+                queue: vec![accepted.id.clone()],
+            },
+        )?;
+        let executions = Arc::new(AtomicUsize::new(0));
+        let manager = TaskManager::start_with_executor(
+            test_config(root.path().to_path_buf()),
+            Arc::new(AdmissionCountingExecutor(executions.clone())),
+        )
+        .await?;
+        let recovered = manager
+            .recover_task_admission(request, accepted.id.clone())
+            .await?;
+        assert_eq!(recovered.id, accepted.id);
+        assert_eq!(recovered.status, TaskStatus::Failed);
+        assert!(
+            recovered
+                .error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("Interrupted by process restart")
+        );
+        assert_eq!(manager.list_tasks(None).await.len(), 1);
+        assert_eq!(
+            executions.load(Ordering::SeqCst),
+            0,
+            "accepted work cannot be replayed after restart"
+        );
+        manager.shutdown();
         Ok(())
     }
 
