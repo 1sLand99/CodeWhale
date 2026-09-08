@@ -52,12 +52,12 @@ typography:
     lineHeight: 1.1
     letterSpacing: "-0.022em"
   subheading:
-    fontFamily: "IBM Plex Sans Condensed, ui-sans-serif, system-ui, sans-serif"
+    fontFamily: "Shannon Sans, ui-sans-serif, system-ui, sans-serif"
     fontSize: "1.12rem"
     fontWeight: 600
     lineHeight: 1.25
   body:
-    fontFamily: "IBM Plex Sans, ui-sans-serif, system-ui, sans-serif"
+    fontFamily: "Shannon Sans, ui-sans-serif, system-ui, sans-serif"
     fontSize: "1rem"
     fontWeight: 400
     lineHeight: 1.6
@@ -180,16 +180,16 @@ semantic names and never repeats a hex:
 
 ## Typography
 
-Four faces, one job each:
+Three faces with distinct roles:
 
 - **Newsreader 400/500 (+ italic)** — the display voice: `h1`, `h2`, the
   gain columns' titles, the chapter title on the water. Book weight, tracking
   −0.022em, `text-wrap: balance`. Loaded through `next/font/google` as
   `--font-serif`. Never used below 1.3rem.
-- **IBM Plex Sans Condensed 500/600** — `h3`/`h4` and the small headings:
-  the product's own label face, `--font-display`.
-- **IBM Plex Sans 400/500/600** — body, buttons, links (`--font-body`).
-  Measure ≤ 70ch.
+- **Shannon Sans variable 100–900** — body, buttons, links and small headings.
+  `--font-body` and the historic `--font-display`/condensed role share one local
+  upright face; their existing weights and scale distinguish the roles. Measure
+  ≤ 70ch. The font and its OFL notice live in `web/public/brand/fonts/`.
 - **JetBrains Mono 400/500** — code, the `cw` dot chain, the plate's rubric
   (`AGENTIC COMPUTING, ON YOUR TERMS`), the running heads (`02 / YOUR MODELS`).
   These rubrics are the only tracked uppercase on the site.

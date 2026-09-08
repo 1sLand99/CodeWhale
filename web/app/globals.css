@@ -79,9 +79,11 @@
   --stage-dim: var(--whale-text-muted);
   --violet: var(--whale-mode-operate); /* 1px rules only, never text */
 
-  /* Type stacks. Newsreader carries the folio's display voice (h1/h2); IBM
-     Plex Sans Condensed carries the small headings; IBM Plex Sans carries
-     body copy, and JetBrains Mono carries terminal code. */
+  /* Newsreader carries h1/h2; Shannon Sans supplies body and small headings.
+     The historic condensed role keeps its scale and weight, not a second face.
+     JetBrains Mono and the Unicode fallback stacks retain their own roles. */
+  --font-body: var(--font-shannon-sans);
+  --font-display: var(--font-shannon-sans);
   --font-cjk: "PingFang SC", "Hiragino Sans GB", "Source Han Serif SC",
     "Noto Serif CJK SC", serif;
 
@@ -151,7 +153,7 @@ body {
      by the waterline band and the ocean column, never by a page gradient. */
   background: var(--paper);
   color: var(--ink);
-  font-family: var(--font-body), "IBM Plex Sans", "Noto Sans SC", system-ui, sans-serif;
+  font-family: var(--font-body), "Noto Sans SC", system-ui, sans-serif;
   font-feature-settings: "ss01", "cv11", "tnum";
   max-width: 100%;
   overflow-x: clip;
@@ -165,8 +167,7 @@ main, header, footer, nav { position: relative; z-index: 1; }
 /* ---------- type ---------- */
 /* The folio voice: Newsreader for the big headings, set at book weight with
    a little negative tracking so it reads as a title page rather than a
-   blog. Small headings stay on Plex Sans Condensed — the product's own
-   label face. */
+   blog. Small headings use the shared Shannon Sans label face. */
 .font-display { font-family: var(--font-serif), "Newsreader", Georgia, "Times New Roman", serif; font-weight: 500; }
 .font-serif { font-family: var(--font-serif), "Newsreader", Georgia, "Times New Roman", serif; }
 .font-condensed { font-family: var(--font-display), ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; font-weight: 600; }
@@ -392,7 +393,7 @@ html[lang="ko"] h3 {
 /* ---------- numbers ---------- */
 .tabular { font-variant-numeric: tabular-nums; }
 .bignum {
-  font-family: var(--font-body), "IBM Plex Sans", system-ui, sans-serif;
+  font-family: var(--font-body), system-ui, sans-serif;
   font-weight: 600;
   font-size: 2.2rem;
   line-height: 1;
@@ -620,7 +621,7 @@ mark.search-highlight {
   padding: 0.35rem 0.75rem;
   border: 1px solid var(--hairline);
   border-radius: 6px;
-  font-family: var(--font-body), "IBM Plex Sans", system-ui, sans-serif;
+  font-family: var(--font-body), system-ui, sans-serif;
   font-size: 0.75rem;
   font-weight: 600;
 }
@@ -632,7 +633,7 @@ mark.search-highlight {
 .paper-star-badge .brand-mark { margin-right: 0.3rem; }
 
 .nav-link {
-  font-family: var(--font-body), "IBM Plex Sans", system-ui, sans-serif;
+  font-family: var(--font-body), system-ui, sans-serif;
   font-size: 0.78rem;
   letter-spacing: 0;
   color: var(--ink);
@@ -1737,7 +1738,7 @@ a.body-link:hover { background-size: 100% 6px; color: var(--ink); }
   border: 1px solid var(--indigo-deep);
   border-radius: 5px;
   color: var(--indigo-deep);
-  font-family: var(--font-body), "IBM Plex Sans", system-ui, sans-serif;
+  font-family: var(--font-body), system-ui, sans-serif;
   font-size: 0.95rem;
   font-weight: 500;
   line-height: 1;

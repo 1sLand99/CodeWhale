@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
-import { IBM_Plex_Sans, IBM_Plex_Sans_Condensed, JetBrains_Mono, Newsreader } from "next/font/google";
+import localFont from "next/font/local";
+import { JetBrains_Mono, Newsreader } from "next/font/google";
 import { Nav } from "@/components/nav";
 import { Footer } from "@/components/footer";
 import { UsageCounting } from "@/components/usage-counting";
@@ -11,13 +12,13 @@ import { buildPageMetadata } from "@/lib/page-meta";
 import { buildSiteJsonLd } from "@/lib/site-schema";
 import "../globals.css";
 
-// Type stacks resolve in globals.css: Newsreader carries the folio's display
-// voice (h1/h2), IBM Plex Sans Condensed the small headings, IBM Plex Sans
-// the body, JetBrains Mono the terminal.
-const body = IBM_Plex_Sans({
-  subsets: ["latin", "cyrillic", "vietnamese"],
-  weight: ["400", "500", "600"],
-  variable: "--font-body",
+// Shannon Sans 0.110 supplies body and small-heading roles through one asset.
+// Its OFL notice lives beside it; Newsreader and JetBrains Mono keep their roles.
+const sans = localFont({
+  src: "../../public/brand/fonts/ShannonSans-Variable.woff2",
+  weight: "100 900",
+  style: "normal",
+  variable: "--font-shannon-sans",
   display: "swap",
 });
 
@@ -25,13 +26,6 @@ const mono = JetBrains_Mono({
   subsets: ["latin", "cyrillic"],
   weight: ["400", "500", "600"],
   variable: "--font-mono",
-  display: "swap",
-});
-
-const display = IBM_Plex_Sans_Condensed({
-  subsets: ["latin"],
-  weight: ["500", "600"],
-  variable: "--font-display",
   display: "swap",
 });
 
@@ -78,7 +72,7 @@ export default async function LocaleLayout({
     <html
       lang={locale}
       dir={dir}
-      className={`${body.variable} ${mono.variable} ${display.variable} ${serif.variable}`}
+      className={`${sans.variable} ${mono.variable} ${serif.variable}`}
       suppressHydrationWarning
     >
       <body>

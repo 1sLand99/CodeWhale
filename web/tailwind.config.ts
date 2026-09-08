@@ -25,12 +25,11 @@ export default {
         cobalt: "var(--cobalt)",
       },
       fontFamily: {
-        // Display and body are one instrument voice — system sans at heading
-        // weight and tracking (globals.css resolves --font-display to
-        // --font-body). Mono stays JetBrains Mono, loaded by next/font in
-        // app/[locale]/layout.tsx.
+        // Body and the small-heading sans role share the local Shannon face.
+        // The folio's .font-display class remains Newsreader in globals.css;
+        // mono stays JetBrains Mono. All faces load in app/[locale]/layout.tsx.
         display: ["var(--font-display)", "ui-sans-serif", "system-ui", "sans-serif"],
-        body: ["var(--font-body)", '"IBM Plex Sans"', '"Noto Sans SC"', "ui-sans-serif", "system-ui", "sans-serif"],
+        body: ["var(--font-body)", '"Noto Sans SC"', "ui-sans-serif", "system-ui", "sans-serif"],
         cjk: ["var(--font-cjk)", '"PingFang SC"', '"Source Han Serif SC"', "serif"],
         mono: ["var(--font-mono)", '"JetBrains Mono"', "ui-monospace", "Menlo", "monospace"],
       },
