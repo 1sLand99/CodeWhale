@@ -1938,6 +1938,8 @@ pub enum MessageId {
     WorkflowReceiptEstimated,
     // Sidebar work strip.
     SidebarTasksLabel,
+    TaskOwnershipUnverified,
+    TaskInventoryUnavailable,
     SidebarTodoLabel,
     SidebarStopControl,
     SidebarDestructiveArmed,
@@ -4114,6 +4116,8 @@ pub const ALL_MESSAGE_IDS: &[MessageId] = &[
     MessageId::WorkflowReceiptProviderReported,
     MessageId::WorkflowReceiptEstimated,
     MessageId::SidebarTasksLabel,
+    MessageId::TaskOwnershipUnverified,
+    MessageId::TaskInventoryUnavailable,
     MessageId::SidebarTodoLabel,
     MessageId::SidebarStopControl,
     MessageId::SidebarDestructiveArmed,

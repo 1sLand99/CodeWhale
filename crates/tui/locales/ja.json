@@ -1601,6 +1601,8 @@
   "WorkflowReceiptProviderReported": "プロバイダー報告",
   "WorkflowReceiptEstimated": "推定",
   "SidebarTasksLabel": "タスク",
+  "TaskOwnershipUnverified": "実行主体を確認できません",
+  "TaskInventoryUnavailable": "タスクストレージにアクセスできないため、最後に確認した状態を表示しています。",
   "SidebarTodoLabel": "To-do",
   "WorkSurfaceTodoProgress": "{label} {completed}/{total} · 残り{remaining}",
   "SidebarStopControl": "停止",

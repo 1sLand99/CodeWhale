@@ -1578,6 +1578,8 @@
   "WorkflowReceiptProviderReported": "informat pel proveïdor",
   "WorkflowReceiptEstimated": "estimat",
   "SidebarTasksLabel": "Tasques",
+  "TaskOwnershipUnverified": "Responsable de l’execució sense verificar",
+  "TaskInventoryUnavailable": "L’emmagatzematge de tasques no està disponible; es mostra l’últim estat conegut.",
   "SidebarTodoLabel": "Pendents",
   "WorkSurfaceTodoProgress": "{label} {completed}/{total} · en queden {remaining}",
   "SidebarStopControl": "atura",

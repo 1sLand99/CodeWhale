@@ -23075,3 +23075,79 @@ fn engine_adopts_host_owned_session_id_from_config() {
         engine.session_id()
     );
 }
+
+#[tokio::test]
+async fn restored_task_binding_is_not_missing_when_its_inventory_is_unavailable()
+-> anyhow::Result<()> {
+    use crate::task_manager::{TaskExecutionResult, TaskManager, TaskManagerConfig};
+    struct Unused;
+    #[async_trait::async_trait]
+    impl crate::task_manager::TaskExecutor for Unused {
+        async fn execute(
+            &self,
+            _: crate::task_manager::ExecutionTask,
+            _: tokio::sync::mpsc::Sender<crate::task_manager::TaskExecutionEvent>,
+            _: tokio_util::sync::CancellationToken,
+        ) -> TaskExecutionResult {
+            panic!("this fixture must never execute a task")
+        }
+    }
+    let (mut engine, _handle, _todos, work, root) = todo_engine();
+    let tasks = TaskManager::start_with_executor(
+        TaskManagerConfig {
+            data_dir: root.path().join("tasks"),
+            worker_count: 1,
+            default_workspace: root.path().into(),
+            default_model: "fixture".into(),
+            default_mode: "plan".into(),
+            allow_shell: false,
+            trust_mode: false,
+            execution_limits: crate::task_manager::TaskExecutionLimits::default(),
+        },
+        Arc::new(Unused),
+    )
+    .await?;
+    engine.config.runtime_services.task_manager = Some(tasks.clone());
+    let session = engine.session.id.clone();
+    let id = work
+        .register_operation(
+            &session,
+            crate::work_graph::OperationIntent::new(
+                "task:task_0123456789abcdef",
+                "restored task",
+                true,
+                "tasks",
+                "fixture",
+            ),
+        )
+        .map_err(anyhow::Error::msg)?;
+    let before = work
+        .capture(Some(&session))
+        .map_err(anyhow::Error::msg)?
+        .unwrap();
+    let queue = tasks.data_dir().join("queue.json");
+    let saved = std::fs::read(&queue)?;
+    std::fs::write(&queue, b"{corrupt")?;
+    engine.reconcile_restored_work_bindings().await;
+    let unavailable = work
+        .capture(Some(&session))
+        .map_err(anyhow::Error::msg)?
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(unavailable.graph.node(&id))?,
+        serde_json::to_value(before.graph.node(&id))?
+    );
+    std::fs::write(&queue, saved)?;
+    engine.reconcile_restored_work_bindings().await;
+    let available = work
+        .capture(Some(&session))
+        .map_err(anyhow::Error::msg)?
+        .unwrap();
+    assert_ne!(
+        serde_json::to_value(available.graph.node(&id))?,
+        serde_json::to_value(before.graph.node(&id))?,
+        "healthy absence must still reconcile OwnerMissing"
+    );
+    tasks.shutdown_and_wait().await?;
+    Ok(())
+}

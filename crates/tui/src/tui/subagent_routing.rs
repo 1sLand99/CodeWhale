@@ -1126,6 +1126,7 @@ mod tests {
 
     fn task_summary(id: &str, status: TaskStatus, duration_ms: Option<u64>) -> TaskSummary {
         TaskSummary {
+            execution_binding_known: true,
             id: id.to_string(),
             status,
             prompt_summary: "Fix task list output".to_string(),

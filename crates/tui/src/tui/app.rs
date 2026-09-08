@@ -2334,6 +2334,8 @@ pub struct App {
     pub memory_size_hint: Option<String>,
     /// Cached background tasks for sidebar rendering.
     pub task_panel: Vec<TaskPanelEntry>,
+    pub task_panel_session_id: Option<String>,
+    pub task_panel_unavailable: bool,
     /// Live scheduled-work projection for the activity band
     /// (AUTOMATION-VISIBILITY-SPEC §2.1), refreshed on the task-panel cadence
     /// by `refresh_automation_panel`. The band reads it;

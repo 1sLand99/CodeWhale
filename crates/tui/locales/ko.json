@@ -1601,6 +1601,8 @@
   "WorkflowReceiptProviderReported": "제공자 보고",
   "WorkflowReceiptEstimated": "추정",
   "SidebarTasksLabel": "작업",
+  "TaskOwnershipUnverified": "실행 주체 미확인",
+  "TaskInventoryUnavailable": "작업 저장소를 사용할 수 없어 마지막으로 확인된 상태를 표시합니다.",
   "SidebarTodoLabel": "할 일",
   "WorkSurfaceTodoProgress": "{label} {completed}/{total} · {remaining}개 남음",
   "SidebarStopControl": "중지",

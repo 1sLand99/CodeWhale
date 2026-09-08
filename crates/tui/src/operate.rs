@@ -10,7 +10,7 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -719,6 +719,13 @@ pub(crate) fn keepalive_readiness(
 ) -> Result<(String, bool)> {
     let mut readiness = (String::new(), false);
     manager.edit_automation(OPERATE_KEEPALIVE_ID, |current| {
+        if current
+            .as_ref()
+            .and_then(|record| record.execution_scope.as_deref())
+            .is_some_and(|scope| Some(scope) != manager.execution_scope())
+        {
+            bail!("Operate keepalive belongs to another Runtime execution scope");
+        }
         let (_, model, credentials) = keepalive_route(config, current.as_ref(), selection)?;
         readiness = (model, credentials);
         Ok(None)
@@ -1210,10 +1217,21 @@ pub(crate) fn upsert_keepalive(
     );
     let mut readiness = (String::new(), false);
     manager.edit_automation(OPERATE_KEEPALIVE_ID, |current| {
+        let scope = manager
+            .execution_scope()
+            .context("Operate execution ownership is unverified")?;
+        if current
+            .as_ref()
+            .and_then(|record| record.execution_scope.as_deref())
+            .is_some_and(|bound| bound != scope)
+        {
+            bail!("Operate keepalive belongs to another Runtime execution scope");
+        }
         let (identity, model, ready) = keepalive_route(config, current.as_ref(), selection)?;
         readiness = (model.clone(), ready);
         let mut record = current.unwrap_or_else(|| AutomationRecord {
             schema_version: crate::automation_manager::CURRENT_AUTOMATION_SCHEMA_VERSION,
+            execution_scope: Some(scope.to_string()),
             id: OPERATE_KEEPALIVE_ID.to_string(),
             name: "Operate keep-alive".to_string(),
             prompt: prompt.clone(),
@@ -1233,6 +1251,10 @@ pub(crate) fn upsert_keepalive(
             next_run_at: None,
             last_run_at: None,
         });
+        record.schema_version = crate::automation_manager::CURRENT_AUTOMATION_SCHEMA_VERSION;
+        if record.execution_scope.is_none() {
+            record.execution_scope = Some(scope.to_string());
+        }
         record.name = "Operate keep-alive".to_string();
         record.prompt = prompt;
         record.rrule = OPERATE_KEEPALIVE_RRULE.to_string();
@@ -1329,7 +1351,7 @@ api_key_env = "CW_OPERATE_MISSING_TEST_KEY"
         let _cli = crate::test_support::EnvVarGuard::remove("CODEWHALE_CLI_API_KEY");
         let _missing = crate::test_support::EnvVarGuard::remove("CW_OPERATE_MISSING_TEST_KEY");
         let root = TempDir::new()?;
-        let manager = AutomationManager::open(root.path().join("automations"))?;
+        let manager = AutomationManager::open_for_test(root.path().join("automations"))?;
         let mut config = route_fixture_config();
         assert!(upsert_keepalive(&manager, root.path(), true, &config, None)?.1);
         let first = manager.get_automation(OPERATE_KEEPALIVE_ID)?;
@@ -1388,7 +1410,7 @@ api_key_env = "CW_OPERATE_MISSING_TEST_KEY"
         let _env = crate::test_support::lock_test_env();
         let _cli = crate::test_support::EnvVarGuard::remove("CODEWHALE_CLI_API_KEY");
         let root = TempDir::new()?;
-        let manager = AutomationManager::open(root.path().join("automations"))?;
+        let manager = AutomationManager::open_for_test(root.path().join("automations"))?;
         let config = crate::config::Config {
             provider: Some("custom".into()),
             base_url: Some("https://legacy.example.test/v1".into()),
@@ -1435,7 +1457,7 @@ api_key_env = "CW_OPERATE_MISSING_TEST_KEY"
     #[tokio::test]
     async fn keepalive_pin_reaches_task_and_survives_parent_change() -> Result<()> {
         let root = TempDir::new()?;
-        let manager = AutomationManager::open(root.path().join("automations"))?;
+        let manager = AutomationManager::open_for_test(root.path().join("automations"))?;
         let mut config = route_fixture_config();
         upsert_keepalive(&manager, root.path(), false, &config, None)?;
         pause_keepalive(&manager)?;
@@ -1476,7 +1498,7 @@ api_key_env = "CW_OPERATE_MISSING_TEST_KEY"
         assert_eq!(observed[0].model_provider_id, task.model_provider_id);
         assert_eq!(observed[0].auto_approve, Some(false));
         drop(observed);
-        let reopened = AutomationManager::open(root.path().join("automations"))?;
+        let reopened = AutomationManager::open_for_test(root.path().join("automations"))?;
         assert!(keepalive_readiness(&reopened, &config, None)?.1);
         assert_eq!(
             reopened.list_runs(OPERATE_KEEPALIVE_ID, None)?[0]
@@ -1831,7 +1853,7 @@ api_key_env = "CW_OPERATE_MISSING_TEST_KEY"
     #[test]
     fn keepalive_reuse_refreshes_cwds_and_kicks_first_lead_run() {
         let dir = TempDir::new().expect("temp");
-        let manager = AutomationManager::open(dir.path().to_path_buf()).expect("manager");
+        let manager = AutomationManager::open_for_test(dir.path().to_path_buf()).expect("manager");
         let workspace_a = dir.path().join("workspace-a");
         let workspace_b = dir.path().join("workspace-b");
         fs::create_dir_all(&workspace_a).expect("dir a");
@@ -1878,7 +1900,7 @@ api_key_env = "CW_OPERATE_MISSING_TEST_KEY"
     #[test]
     fn cancel_pauses_keepalive_so_no_cost_accrues() {
         let dir = TempDir::new().expect("temp");
-        let manager = AutomationManager::open(dir.path().to_path_buf()).expect("manager");
+        let manager = AutomationManager::open_for_test(dir.path().to_path_buf()).expect("manager");
         upsert_keepalive(&manager, dir.path(), false, &route_fixture_config(), None)
             .expect("upsert");
         pause_keepalive(&manager).expect("pause");
@@ -1890,7 +1912,8 @@ api_key_env = "CW_OPERATE_MISSING_TEST_KEY"
 
         // Pausing is idempotent and a missing keepalive is not an error.
         pause_keepalive(&manager).expect("pause again");
-        let empty = AutomationManager::open(dir.path().join("empty")).expect("empty manager");
+        let empty =
+            AutomationManager::open_for_test(dir.path().join("empty")).expect("empty manager");
         pause_keepalive(&empty).expect("missing keepalive is a no-op");
         assert!(!kick_keepalive(&empty).expect("kick missing"));
 
@@ -2070,7 +2093,7 @@ api_key_env = "CW_OPERATE_MISSING_TEST_KEY"
     #[test]
     fn keepalive_automation_and_defaults() {
         let dir = TempDir::new().expect("temp");
-        let manager = AutomationManager::open(dir.path().to_path_buf()).expect("manager");
+        let manager = AutomationManager::open_for_test(dir.path().to_path_buf()).expect("manager");
         upsert_keepalive(&manager, dir.path(), false, &route_fixture_config(), None)
             .expect("upsert");
         let record = manager

@@ -1601,6 +1601,8 @@
   "WorkflowReceiptProviderReported": "informado por proveedor",
   "WorkflowReceiptEstimated": "estimado",
   "SidebarTasksLabel": "Tareas",
+  "TaskOwnershipUnverified": "Responsable de ejecución sin verificar",
+  "TaskInventoryUnavailable": "El almacenamiento de tareas no está disponible; se muestra el último estado conocido.",
   "SidebarTodoLabel": "Pendientes",
   "WorkSurfaceTodoProgress": "{label} {completed}/{total} · {remaining} restantes",
   "SidebarStopControl": "detener",
