@@ -468,6 +468,17 @@ pub const SETTINGS_SCHEMA: &[SettingDef] = &[
         ui(TAB_APPEARANCE, "display", "", "ConfigHintHelpExpandGroups"),
     ),
     def(
+        "contextual_tips",
+        SettingKind::Bool(ON_OFF),
+        "true",
+        ui(
+            TAB_APPEARANCE,
+            "display",
+            "ConfigLabelContextualTips",
+            "ConfigHintContextualTips",
+        ),
+    ),
+    def(
         "pin_last_prompt",
         SettingKind::Bool(ON_OFF),
         "true",

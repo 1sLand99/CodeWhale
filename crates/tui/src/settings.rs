@@ -328,6 +328,9 @@ pub struct Settings {
     /// the long tail. Type-to-filter still unfolds matches.
     #[serde(default)]
     pub help_expand_groups: bool,
+    /// Show quiet, action-triggered command discovery tips.
+    #[serde(default = "default_true")]
+    pub contextual_tips: bool,
     /// Pin the last user prompt at the top of the transcript when it has
     /// scrolled off. Default on.
     #[serde(default = "default_true")]
@@ -560,6 +563,7 @@ impl Default for Settings {
             thinking_preview_lines: default_thinking_preview_lines(),
             thinking_highlight: true,
             help_expand_groups: false,
+            contextual_tips: true,
             pin_last_prompt: true,
             show_tool_details: false,
             inline_diffs: "full".to_string(),
@@ -1321,6 +1325,9 @@ impl Settings {
     }
 
     fn save_to_path(&self, path: &Path) -> Result<()> {
+        // Parse-error fallback values keep the UI usable, but cannot replace
+        // the unreadable document. Do not echo its potentially private text.
+        anyhow::ensure!(self.load_error.is_none(), "settings.toml: invalid TOML");
         // Create config directory if it doesn't exist
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).with_context(|| {
@@ -1385,6 +1392,7 @@ impl Settings {
             "thinking_preview_lines" | "thinking_preview" => "thinking_preview_lines",
             "thinking_highlight" | "reasoning_highlight" => "thinking_highlight",
             "help_expand_groups" | "help_expanded" => "help_expand_groups",
+            "contextual_tips" => "contextual_tips",
             "pin_last_prompt" | "pin_prompt" => "pin_last_prompt",
             "show_tool_details" | "tool_details" => "show_tool_details",
             "inline_diffs" | "inline_diff" | "diffs" => "inline_diffs",
@@ -1532,6 +1540,9 @@ impl Settings {
             }
             "help_expand_groups" | "help_expanded" => {
                 self.help_expand_groups = parse_bool(value)?;
+            }
+            "contextual_tips" => {
+                self.contextual_tips = parse_bool(value)?;
             }
             "pin_last_prompt" | "pin_prompt" => {
                 self.pin_last_prompt = parse_bool(value)?;
@@ -1785,6 +1796,7 @@ impl Settings {
             self.help_expand_groups
         ));
         lines.push(format!("  pin_last_prompt:    {}", self.pin_last_prompt));
+        lines.push(format!("  contextual_tips:    {}", self.contextual_tips));
         lines.push(format!("  show_tool_details:  {}", self.show_tool_details));
         lines.push(format!("  inline_diffs:      {}", self.inline_diffs));
         lines.push(format!("  locale:            {}", self.locale));
@@ -1949,6 +1961,7 @@ impl Settings {
                 "@-mention completion behavior: fuzzy/browser (default fuzzy)",
             ),
             ("show_thinking", "Show model thinking: on/off"),
+            ("contextual_tips", ""), // Localized guidance comes from the schema.
             (
                 "thinking_default_expanded",
                 "Expand model thinking by default; Space still toggles: on/off",
@@ -3599,6 +3612,34 @@ mod tests {
                 .copied(),
             Some(1)
         );
+    }
+
+    #[test]
+    fn contextual_tips_default_on_and_round_trip_opt_out() {
+        let old: Settings = toml::from_str("").unwrap();
+        assert!(old.contextual_tips);
+        let mut settings = old;
+        settings.set("contextual_tips", "off").unwrap();
+        let restored: Settings = toml::from_str(&toml::to_string(&settings).unwrap()).unwrap();
+        assert!(!restored.contextual_tips);
+    }
+
+    #[test]
+    fn settings_save_preserves_malformed_document_instead_of_fallback_defaults() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("settings.toml");
+        let malformed = "theme = [private_fixture_payload\n";
+        std::fs::write(&path, malformed).unwrap();
+        let mut settings =
+            Settings::load_persisted_from_candidates(Some(path.clone()), None, None).unwrap();
+        assert!(settings.load_error.is_some());
+        // Impression writers use this same save boundary as the opt-out.
+        settings
+            .behavioral_tip_impressions
+            .insert("planning_mode".into(), 1);
+        let error = settings.save_to_path(&path).unwrap_err().to_string();
+        assert_eq!(std::fs::read_to_string(path).unwrap(), malformed);
+        assert!(!error.contains("private_fixture_payload"));
     }
 
     #[test]

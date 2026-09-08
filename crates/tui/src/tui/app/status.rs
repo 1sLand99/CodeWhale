@@ -28,6 +28,7 @@ pub struct StatusToast {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StatusToastKind {
     Ordinary,
+    BehavioralTip(crate::tui::behavioral_tips::BehavioralTip),
     ContextPressure(crate::context_budget::PressureLevel),
 }
 

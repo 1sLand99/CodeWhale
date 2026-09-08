@@ -2145,5 +2145,8 @@
   "GoalProgressLabel": "Mục tiêu",
   "GoalProgressReceipt": "Tiến độ đã báo cáo {percent}% {bar}",
   "GoalProgressNow": "L hiện tại {note}",
-  "GoalProgressNext": "  tiếp theo {note}"
+  "GoalProgressNext": "  tiếp theo {note}",
+  "ConfigLabelContextualTips": "Gợi ý theo ngữ cảnh",
+  "ConfigHintContextualTips": "Thỉnh thoảng gợi ý lệnh sau các thao tác liên quan; tắt để ẩn gợi ý.",
+  "ContextualTipsNotSaved": "Tùy chọn gợi ý áp dụng cho phiên này nhưng không thể lưu: {error}"
 }

@@ -2145,5 +2145,8 @@
   "GoalProgressLabel": "Sasaran",
   "GoalProgressReceipt": "Kemajuan dilaporkan {percent}% {bar}",
   "GoalProgressNow": "L kini {note}",
-  "GoalProgressNext": "  berikutnya {note}"
+  "GoalProgressNext": "  berikutnya {note}",
+  "ConfigLabelContextualTips": "Tips kontekstual",
+  "ConfigHintContextualTips": "Saran perintah sesekali setelah tindakan terkait; nonaktifkan untuk menyembunyikan tips.",
+  "ContextualTipsNotSaved": "Preferensi tips berlaku untuk sesi ini, tetapi tidak dapat disimpan: {error}"
 }

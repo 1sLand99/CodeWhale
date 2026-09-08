@@ -2145,5 +2145,8 @@
   "GoalProgressLabel": "目標",
   "GoalProgressReceipt": "已回報進度 {percent}% {bar}",
   "GoalProgressNow": "L 目前 {note}",
-  "GoalProgressNext": "  下一步 {note}"
+  "GoalProgressNext": "  下一步 {note}",
+  "ConfigLabelContextualTips": "情境提示",
+  "ConfigHintContextualTips": "在相關操作後偶爾推薦指令；關閉後不再顯示提示。",
+  "ContextualTipsNotSaved": "提示偏好已套用於本次工作階段，但無法儲存：{error}"
 }

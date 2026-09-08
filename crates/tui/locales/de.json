@@ -2145,5 +2145,8 @@
   "GoalProgressLabel": "Ziel",
   "GoalProgressReceipt": "Gemeldeter Fortschritt {percent}% {bar}",
   "GoalProgressNow": "L jetzt {note}",
-  "GoalProgressNext": "  weiter {note}"
+  "GoalProgressNext": "  weiter {note}",
+  "ConfigLabelContextualTips": "Kontextbezogene Tipps",
+  "ConfigHintContextualTips": "Gelegentliche Befehlsvorschläge nach passenden Aktionen; ausschalten, um Tipps auszublenden.",
+  "ContextualTipsNotSaved": "Die Einstellung für Tipps gilt für diese Sitzung, konnte aber nicht gespeichert werden: {error}"
 }

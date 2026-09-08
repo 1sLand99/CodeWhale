@@ -2145,5 +2145,8 @@
   "GoalProgressLabel": "ゴール",
   "GoalProgressReceipt": "報告された進捗 {percent}% {bar}",
   "GoalProgressNow": "L 現在 {note}",
-  "GoalProgressNext": "  次 {note}"
+  "GoalProgressNext": "  次 {note}",
+  "ConfigLabelContextualTips": "状況に応じたヒント",
+  "ConfigHintContextualTips": "関連する操作の後にコマンドを時々提案します。オフにするとヒントを非表示にします。",
+  "ContextualTipsNotSaved": "ヒントの設定はこのセッションに適用されますが、保存できませんでした: {error}"
 }

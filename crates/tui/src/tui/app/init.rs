@@ -1084,7 +1084,9 @@ impl App {
             task_panel: Vec::new(),
             automation_panel: crate::tui::automation_panel::AutomationPanelState::default(),
             automation_scan: None,
-            behavioral_tips: crate::tui::behavioral_tips::BehavioralTipState::default(),
+            behavioral_tips: crate::tui::behavioral_tips::BehavioralTipState::new(
+                settings.contextual_tips,
+            ),
             footer_hint_uses: settings.footer_hint_uses.clone(),
             workflow_panel: None,
             session_started_at: chrono::Utc::now(),
