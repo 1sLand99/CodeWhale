@@ -4439,6 +4439,7 @@ impl RuntimeThreadManager {
             new_config.workshop.as_ref(),
         );
         crate::initialize_cloud_facts(&new_config);
+        crate::provider_catalog_live::maybe_load_persisted_cache_for_config(&new_config);
         let workflow_table = new_config.workflow_config();
         {
             let mut guard = self.config.write();
