@@ -4407,6 +4407,30 @@ fn a_finished_job_reports_its_duration_not_a_growing_elapsed() {
 #[cfg(unix)]
 #[tokio::test]
 async fn readonly_pipeline_preserves_arguments_and_disables_git_helpers() {
+    const PROBE: &str = "CODEWHALE_TEST_READONLY_PIPELINE_SHELL";
+    if std::env::var_os(PROBE).is_none() {
+        // The dispatcher is process-pinned. Exercise both the supported shell
+        // and the fail-closed POSIX fallback without inheriting the CI shell.
+        for shell in ["/bin/bash", "/bin/sh"] {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "tools::shell::tests::readonly_pipeline_preserves_arguments_and_disables_git_helpers",
+                    "--test-threads=1",
+                ])
+                .env(PROBE, shell)
+                .env("SHELL", shell)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "read-only pipeline probe failed ({shell})\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        return;
+    }
     let workspace = tempdir().unwrap();
     let outside = tempdir().unwrap();
     let sentinel = outside.path().join("secret");
@@ -4439,6 +4463,15 @@ async fn readonly_pipeline_preserves_arguments_and_disables_git_helpers() {
         .execute(json!({"command": "cat input.txt | wc -l"}), &ctx)
         .await
         .unwrap();
+    if std::env::var(PROBE).as_deref() == Ok("/bin/sh") {
+        assert!(!ordinary.success);
+        assert!(
+            ordinary
+                .content
+                .contains("read-only pipelines require bash or zsh")
+        );
+        return;
+    }
     assert!(ordinary.success, "{}", ordinary.content);
     assert!(
         tool.execute(json!({"command": "cat linked-secret | cat"}), &ctx)
