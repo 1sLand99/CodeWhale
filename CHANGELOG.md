@@ -127,9 +127,14 @@ with an accessibility-first pointer.
   silently again. Because the bundle's content hash changes, Computer
   Use deactivates and asks for a fresh review after upgrading — that is
   the designed fail-closed path for a desktop-driving plugin. The
-  desktop app itself stays an opt-in install from the plugin
-  distribution; the bundled server runs direct mode and says how to get
-  the app.
+  current macOS source candidate also embeds the compiled native helper,
+  so its bundled server can run directly without a separate Computer Use
+  app or a compiler on the user's machine. Accessibility and Screen
+  Recording permissions belong to the hosting app or terminal and remain
+  user-controlled. The CLI's Computer Use server requires Node.js 20 or newer. These are source
+  candidate changes; they do not establish published-package or platform
+  qualification. See the [included plugin guide](crates/tui/plugins/computer-use/README.md)
+  for platform requirements and limitations.
 - `/statusline` drives the bottom chrome again. Since the 0.9.12 shell
   redesign the posture bar and the metrics line were built independently of
   `tui.status_items`, so every toggle in the picker except the balance fetch

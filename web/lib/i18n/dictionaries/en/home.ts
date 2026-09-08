@@ -68,7 +68,7 @@ export const home: HomeDict = {
 
   startHeading: "Getting started with Codewhale",
   startLede:
-    "Once you have installed Codewhale and connected a model, you can describe your first task in the terminal and add a Fleet when you want several agents to share the work.",
+    "Install the published release, connect a model, then try one task in your project folder. A team of agents is optional; start with one and add more when the work can be split.",
   startGuideLink: "Read the getting-started guide",
   startVocabularyLink: "Look up a term",
 
@@ -104,10 +104,10 @@ export const home: HomeDict = {
 
   surfacesHeading: "Ways to work with Codewhale",
   surfaces: [
-    ["TUI", "Interactive terminal work"],
-    ["codewhale exec", "Scripts and CI"],
-    ["Local web client", "Localhost interface; hosted browser workbench in development"],
-    ["Runtime API + MCP", "Local integrations"],
+    ["TUI", "Run codewhale to work interactively in your terminal"],
+    ["codewhale exec", "Run a task from a script or CI job"],
+    ["Local web client", "Run codewhale web to open a browser client for the same local Runtime"],
+    ["Plugins and MCP", "Add tools to the Runtime; review and enable plugins before use"],
     ["Fleet", "Several agents on one job"],
   ],
   runtimeLink: "Explore integrations",

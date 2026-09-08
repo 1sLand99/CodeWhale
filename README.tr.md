@@ -1,9 +1,11 @@
-<!-- source: README.md sha256:330cff827493 -->
+<!-- source: README.md sha256:a446e3921085 -->
 # Codewhale
 
-Codewhale, seçtiğiniz modelleri kullanarak yazılım geliştirmenize, dosyalarınızla çalışmanıza ve günlük işleri otomatikleştirmenize yardımcı olan açık kaynaklı bir ajandır. Terminalde bir görevle başlayın ve barındırılan ya da yerel bir modele bağlanın. Daha büyük bir işi farklı modeller ve roller arasında paylaştırmak istediğinizde bir ajan ekibinden yararlanabilirsiniz.
+Codewhale, seçtiğiniz barındırılan veya yerel bir modeli kullanarak projenizi okuyan, dosyaları düzenleyen, komutları çalıştıran ve yaptığı işi kontrol eden açık kaynaklı bir ajandır. Terminalde tek bir görevle başlayın. Daha büyük bir işte, işin bölümlerini farklı model ve rollere sahip ajanlara verin.
 
 ![Terminalde çalışan Codewhale](web/public/codewhale-tui-171acee.png)
+
+*v0.9.12 geliştirme derlemesinden terminal önizlemesi.*
 
 [English](README.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja-JP.md) · [Tiếng Việt](README.vi.md) · [Bahasa Indonesia](README.id.md) · [한국어](README.ko-KR.md) · [Español](README.es-419.md) · [Português](README.pt-BR.md) · [Русский](README.ru.md) · [Українська](README.uk.md) · [Français](README.fr.md) · [Deutsch](README.de.md) · [繁體中文](README.zh-TW.md) · [हिन्दी](README.hi.md) · [Italiano](README.it.md) · [Polski](README.pl.md) · [العربية](README.ar.md) · [Català](README.ca.md)
 
@@ -21,15 +23,17 @@ curl -fsSL https://codewhale.net/install.sh | sh
 "$HOME/.local/bin/codewhale"
 ```
 
+Yükleyici, yayımlanmış en son sürümü seçer. [Değişiklik günlüğü](CHANGELOG.md), bir sonraki sürümün henüz yayımlanmamış adayını da açıklar; bu değişiklikler, sürüm kullanıma sunulana kadar yayımlanmış indirmelere dahil edilmez.
+
 Windows’ta [GitHub Releases](https://github.com/Hmbown/CodeWhale/releases/latest) üzerinden uygun yükleyiciyi veya arşivi indirin. Mevcut doğrudan kurulumu güncellemek için `codewhale update`, yalnızca kontrol etmek için `codewhale update --check` çalıştırın. Güncelleyici çalıştırılabilir dosyanın yolunu gösterir ve daha yeni derlemeleri korur. npm ve Cargo ikincil paketleme seçenekleridir. Paket yöneticisinden geçiş ve PATH ayarları için [kurulum kılavuzuna](docs/INSTALL.md) bakın.
 
-Codewhale ilk çalıştırmada bir sağlayıcıya bağlanmanıza veya çevrimdışı kalmanıza yardımcı olur. Cargo, Docker, Nix, Scoop, önceden derlenmiş arşivler, Android/Termux ve CNB aynasını da destekler. [Kurulum kılavuzuna](docs/INSTALL.md) bakın.
+Codewhale ilk çalıştırmada bir sağlayıcıya bağlanmanıza veya Codewhale’i çevrimdışı yapılandırmanıza yardımcı olur. Model yanıtları için barındırılan ya da yerel bir modele bağlantı gerekir. Codewhale, ikincil paketleme seçenekleri olarak npm ve Cargo’nun yanı sıra Docker, Nix, Scoop, Android/Termux ve isteğe bağlı CNB aynasını da destekler. Paket yöneticisiyle yönetilen mevcut kurulumlar için geçiş talimatları sağlanır. [Kurulum ve PATH yardımına](docs/INSTALL.md) bakın.
 
 Her kabukta Tab tamamlama tek bir komutla etkinleştirilir — `codewhale completion bash|zsh|fish|powershell|elvish`. [Kabuk tamamlamalarına](docs/INSTALL.md#8-shell-completions) bakın.
 
 ## Kullanım
 
-Codewhale ile ekip arkadaşınızla konuşur gibi konuşun:
+Proje klasörünüzde bir terminal açın ve `codewhale` komutunu çalıştırın. `/provider` ile sağlayıcınızı, `/model` ile modelinizi seçin. Ardından somut bir görev tarif edin:
 
 ```text
 Fix the failing tests and explain what changed.
@@ -41,16 +45,24 @@ TUI’yi açmadan da bir görev çalıştırabilirsiniz:
 codewhale exec "fix the failing tests and explain what changed"
 ```
 
-Codewhale deponuzu okuyabilir, dosyaları düzenleyebilir, komutları çalıştırabilir, sonuçları inceleyebilir ve bir hedefe doğru çalışmayı sürdürebilir. Ne kadar erişime sahip olacağına siz karar verirsiniz.
+Codewhale deponuzu okuyabilir, dosyaları düzenleyebilir, komutları çalıştırabilir, sonuçları inceleyebilir ve bir hedefe doğru çalışmayı sürdürebilir. Dosyaları değiştirmeden veya kabuk komutlarını çalıştırmadan inceleme yapmak için `/mode plan`, değişiklik yapmak istediğinizde ise `/mode work` kullanın. Ask, Auto-Review veya Full Access seçeneklerinden birini seçmek için `Shift+Tab` tuşlarına basın; [modlar ve izinler kılavuzu](docs/MODES.md) her birinin nelere izin verdiğini açıklar.
 
-## Grafik arayüz
+## Terminal, uygulamalar ve Computer Use
 
-Grafik bir arayüzü mü tercih edersiniz? Topluluk tarafından bakımı yapılan CodeWhale for VS Code eklentisi aynı aracıyı VS Code kenar çubuğuna taşır — sohbet, konu tabanlı görüşmeler, canlı diff ve görev yönetimi, hepsi aynı Runtime API üzerinde; oturumlar terminalle eşitlenmiş kalır. [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=HengQuWorld.brotherwhale-vscode) üzerinden kurun; kaynak kodu [GitHub](https://github.com/HengQuWorld/CodeWhale-VSCode) adresinde.
+Terminal ve grafik istemciler, ajanı ve araçlarını çalıştıran Codewhale Runtime’a bağlanır:
+
+- **Terminal:** `codewhale` etkileşimli arayüzü açar; `codewhale exec` bir betikten veya CI işinden görev çalıştırır.
+- **Yerel tarayıcı:** `codewhale web`, aynı çalışma zamanı için paketle birlikte gelen [yerel web istemcisini](docs/WEB.md) açar.
+- **Codewhale web ve masaüstü uygulamaları:** geliştirme aşamasındaki grafik çalışma ortamlarıdır. Kullanılabilirlikleri [ürün sayfasında](https://codewhale.net/en/product) belirtilir.
+
+**Computer Use, diğer uygulamaları gözlemlemek ve onlarla etkileşime girmek için araçlar ekler.** Eklenti mevcut kaynak koduna dahildir. Kullanmadan önce istediği erişimi gözden geçirin ve eklentiyi etkinleştirin; işletim sistemi izinleri ve platform gereksinimleri geçerliliğini korur. Birlikte gelen [Computer Use kılavuzuna](crates/tui/plugins/computer-use/README.md) ve [eklenti kurulumuna](docs/PLUGINS.md) bakın.
+
+Topluluk tarafından bakımı yapılan VS Code için CodeWhale eklentisi, kenar çubuğundan yerel Runtime’a bağlanır. [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=HengQuWorld.brotherwhale-vscode) üzerinden kurun; kaynak kodu [GitHub](https://github.com/HengQuWorld/CodeWhale-VSCode) adresindedir.
 
 ## Neden Codewhale
 
 - **Modellerinizi seçin.** Barındırılan sağlayıcılara veya Ollama, vLLM ya da SGLang üzerinden yerel modellere bağlanın. Sağlayıcı değiştirmek için `/provider`, model seçmek için `/model` kullanın.
-- **Kontrolü elinizde tutun.** Plan salt okunurdur. Ask, Auto-Review ve Full Access, onay davranışını görünür kılar. `/undo` son turu geri alır, `/restore` ise çalışma alanını önceki bir anlık görüntüye döndürür.
+- **Kontrolü elinizde tutun.** Önerilen eylemleri ve bunların sonucunda dosyalarda oluşan değişiklikleri inceleyin. Onay ayarları ne zaman inceleme gerektiğini belirler; Full Access de politikanın kesin sınırlarına uyar. `/undo` ve `/restore`, değişikliklerden sonra çalışma alanını geri yüklemenize yardımcı olur.
 - **Uzun süren işleri düzenli tutun.** Oturumları kaydedin, kalıcı bir `/goal` belirleyin, iş akışlarını çalışmadan önce gözden geçirin ve ajanların iç talimatlarını konuşmanıza taşımadan onları koordine edin.
 - **Elinizdeki ajanı genişletin.** MCP sunucularını ve becerileri bağlayın, hook’ları yapılandırın ve ajan rollerini projenizde veya kişisel ayarlarınızda okunabilir dosyalar olarak saklayın.
 

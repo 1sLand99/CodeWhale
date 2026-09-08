@@ -34,8 +34,8 @@ export const GETTING_STARTED_STEPS: GuideStep[] = [
     id: "install",
     title: { en: "Install Codewhale", zh: "安装 Codewhale" },
     body: {
-      en: "Run the command below on macOS or Linux, or open the install guide for Windows, package managers, and instructions for building from source.",
-      zh: "在 macOS 或 Linux 上运行下方命令即可安装；如果使用 Windows、包管理器，或想从源码编译，可以查看完整安装指南。",
+      en: "The command below installs the latest published release on macOS or Linux. Use the install guide for Windows, package managers, or building the unreleased source candidate.",
+      zh: "下方命令会在 macOS 或 Linux 上安装最新发布版本。Windows、包管理器以及未发布候选版的源码构建方式，请参阅安装指南。",
     },
     commands: ["curl -fsSL https://codewhale.net/install.sh | sh"],
     link: {
@@ -47,8 +47,8 @@ export const GETTING_STARTED_STEPS: GuideStep[] = [
     id: "connect-provider",
     title: { en: "Connect your model", zh: "连接你的模型" },
     body: {
-      en: "Connect a local model or use your own provider key, as shown here for DeepSeek; the provider guide walks through the other options.",
-      zh: "你可以连接本地模型，也可以使用自己的提供商密钥；下面以 DeepSeek 为例，其他连接方式见提供商指南。",
+      en: "Model replies need a connection to a hosted or local model. Use your own provider key, as in the DeepSeek example below, or follow the provider guide for other services and local models. Offline setup does not require a key.",
+      zh: "模型回复需要连接云端或本地模型。你可以使用自己的提供商密钥（下方以 DeepSeek 为例），或按提供商指南连接其他服务和本地模型。离线配置不需要密钥。",
     },
     commands: ["codewhale auth set --provider deepseek"],
     link: {
@@ -60,8 +60,8 @@ export const GETTING_STARTED_STEPS: GuideStep[] = [
     id: "first-session",
     title: { en: "Give it a task", zh: "交给它一项任务" },
     body: {
-      en: "Open Codewhale in your project folder and ask it to explain the code, build a feature, or automate a task. You can change providers with /provider, select a model with /model, and choose how it works with /mode.",
-      zh: "在项目文件夹中打开 Codewhale，就可以让它解释代码、开发功能或自动完成任务。工作过程中可以用 /provider 切换提供商、用 /model 选择模型，并用 /mode 调整工作模式。",
+      en: "Open Codewhale in your project folder. Try /mode plan and ask it to explain the project, then use /mode work when you want edits and commands. Shift+Tab changes the approval setting; /provider and /model change the model connection.",
+      zh: "在项目文件夹中打开 Codewhale。先用 /mode plan 让它解释项目；需要修改文件或运行命令时，再切换到 /mode work。Shift+Tab 切换审批设置，/provider 和 /model 用于更改模型连接。",
     },
     commands: ["codewhale"],
     link: {

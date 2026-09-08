@@ -106,7 +106,7 @@ commands update their own copies, so verify PATH again afterward.
 
 ## 1. Supported platforms
 
-As checked on 2026-09-04, [latest stable v0.9.11](https://github.com/Hmbown/CodeWhale/releases/tag/v0.9.11)
+As checked on 2026-09-08, [latest stable v0.9.12](https://github.com/Hmbown/CodeWhale/releases/tag/v0.9.12)
 publishes Linux x64/arm64, macOS x64/arm64, Windows x64/arm64, and Android arm64
 assets. Artifact presence is distinct from platform qualification.
 The table below describes the v0.9.13 source candidate's platform and secondary
@@ -119,7 +119,7 @@ v0.8.8 onward. Linux RISC-V prebuilts are temporarily paused because the locked
 | ------------ | ------------ | ----------------------------------------------------- | :---------: | :-------------: |
 | Linux | x64 (x86_64) | `codewhale-linux-x64`, `codew-linux-x64` | ✅ | ✅ |
 | Linux | arm64 | `codewhale-linux-arm64`, `codew-linux-arm64` | ✅ | ✅ |
-| Android / Termux | arm64 (aarch64) | `codewhale-android-arm64.tar.gz` (published in v0.9.11; device support is preview) | ⚠️⁴ preview | ⚠️⁴ preview |
+| Android / Termux | arm64 (aarch64) | `codewhale-android-arm64.tar.gz` (published in v0.9.12; device support is preview) | ⚠️⁴ preview | ⚠️⁴ preview |
 | Linux | riscv64 | temporarily unsupported until upstream bindings land | ❌¹ | ❌³ |
 | macOS | x64 | `codewhale-macos-x64`, `codew-macos-x64` | ✅ | ✅ |
 | macOS | arm64 (M-series) | `codewhale-macos-arm64`, `codew-macos-arm64` | ✅ | ✅ |

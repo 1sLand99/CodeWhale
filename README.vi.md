@@ -1,9 +1,11 @@
-<!-- source: README.md sha256:330cff827493 -->
+<!-- source: README.md sha256:a446e3921085 -->
 # Codewhale
 
-Codewhale là tác nhân mã nguồn mở giúp bạn phát triển phần mềm, làm việc với tệp và tự động hóa các tác vụ hằng ngày bằng những mô hình bạn chọn. Bắt đầu với một tác vụ trong terminal và kết nối với mô hình được lưu trữ hoặc mô hình cục bộ. Khi muốn chia công việc lớn hơn cho nhiều mô hình và vai trò, bạn có thể sử dụng một nhóm tác nhân.
+Codewhale là tác nhân mã nguồn mở có thể đọc dự án, chỉnh sửa tệp, chạy lệnh và kiểm tra công việc của mình bằng mô hình do nhà cung cấp lưu trữ hoặc mô hình cục bộ mà bạn chọn. Hãy bắt đầu với một tác vụ trong terminal. Với công việc lớn hơn, bạn có thể giao từng phần cho các tác nhân dùng mô hình và đảm nhiệm vai trò khác nhau.
 
 ![Codewhale đang chạy trong terminal](web/public/codewhale-tui-171acee.png)
+
+*Hình xem trước terminal từ bản dựng phát triển v0.9.12.*
 
 [English](README.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja-JP.md) · [Bahasa Indonesia](README.id.md) · [한국어](README.ko-KR.md) · [Español](README.es-419.md) · [Português](README.pt-BR.md) · [Русский](README.ru.md) · [Українська](README.uk.md) · [Français](README.fr.md) · [Deutsch](README.de.md) · [繁體中文](README.zh-TW.md) · [हिन्दी](README.hi.md) · [Türkçe](README.tr.md) · [Italiano](README.it.md) · [Polski](README.pl.md) · [العربية](README.ar.md) · [Català](README.ca.md)
 
@@ -21,15 +23,17 @@ curl -fsSL https://codewhale.net/install.sh | sh
 "$HOME/.local/bin/codewhale"
 ```
 
+Trình cài đặt chọn bản phát hành mới nhất đã được công bố. [Nhật ký thay đổi](CHANGELOG.md) cũng mô tả bản ứng viên chưa công bố của lần phát hành tiếp theo; những thay đổi đó chỉ có trong các bản tải xuống công khai khi bản phát hành tương ứng được công bố.
+
 Trên Windows, tải bộ cài hoặc gói lưu trữ phù hợp từ [GitHub Releases](https://github.com/Hmbown/CodeWhale/releases/latest). Với bản cài trực tiếp đã có, chạy `codewhale update`; dùng `codewhale update --check` nếu chỉ muốn kiểm tra. Trình cập nhật hiển thị đường dẫn tệp thực thi và giữ lại các bản dựng mới hơn. npm và Cargo là lựa chọn phụ; xem [hướng dẫn cài đặt](docs/INSTALL.md) để chuyển từ trình quản lý gói và thiết lập PATH.
 
-Trong lần chạy đầu tiên, Codewhale sẽ giúp bạn kết nối với nhà cung cấp hoặc tiếp tục làm việc ngoại tuyến. Codewhale cũng hỗ trợ Cargo, Docker, Nix, Scoop, các gói dựng sẵn, Android/Termux và bản sao CNB. Xem [hướng dẫn cài đặt](docs/INSTALL.md).
+Trong lần chạy đầu tiên, Codewhale sẽ giúp bạn kết nối với nhà cung cấp hoặc cấu hình Codewhale ngoại tuyến. Để nhận phản hồi từ mô hình, bạn cần kết nối với mô hình do nhà cung cấp lưu trữ hoặc mô hình cục bộ. Codewhale cũng hỗ trợ npm và Cargo như các hình thức đóng gói thứ cấp, cùng với Docker, Nix, Scoop, Android/Termux và bản sao CNB tùy chọn. Các bản cài đặt hiện có qua trình quản lý gói sẽ được hướng dẫn chuyển đổi. Xem [trợ giúp cài đặt và PATH](docs/INSTALL.md).
 
 Mỗi shell chỉ cần một lệnh để bật tính năng hoàn thành bằng phím Tab — `codewhale completion bash|zsh|fish|powershell|elvish`. Xem [tính năng hoàn thành của shell](docs/INSTALL.md#8-shell-completions).
 
 ## Sử dụng
 
-Hãy trò chuyện với Codewhale như khi bạn trao đổi với một đồng đội:
+Mở terminal trong thư mục dự án và chạy `codewhale`. Chọn nhà cung cấp bằng `/provider` và mô hình bằng `/model`. Sau đó mô tả một tác vụ cụ thể:
 
 ```text
 Fix the failing tests and explain what changed.
@@ -41,16 +45,24 @@ Hoặc chạy tác vụ mà không cần mở TUI:
 codewhale exec "fix the failing tests and explain what changed"
 ```
 
-Codewhale có thể đọc kho mã nguồn, chỉnh sửa tệp, chạy lệnh, kiểm tra kết quả và tiếp tục làm việc hướng đến mục tiêu. Bạn quyết định mức quyền truy cập dành cho nó.
+Codewhale có thể đọc kho mã nguồn, chỉnh sửa tệp, chạy lệnh, kiểm tra kết quả và tiếp tục làm việc hướng đến mục tiêu. Dùng `/mode plan` để tìm hiểu mà không thay đổi tệp hay thực thi lệnh shell, và `/mode work` khi bạn muốn tác nhân thực hiện thay đổi. Nhấn `Shift+Tab` để chọn Ask, Auto-Review hoặc Full Access; [hướng dẫn về chế độ và quyền](docs/MODES.md) giải thích những thao tác được phép ở mỗi lựa chọn.
 
-## Giao diện GUI
+## Terminal, ứng dụng và Computer Use
 
-Thích giao diện đồ họa hơn? Tiện ích CodeWhale for VS Code do cộng đồng duy trì đưa cùng một agent vào thanh bên VS Code — trò chuyện, hội thoại theo luồng, diff trực tiếp và quản lý tác vụ, đều dùng chung Runtime API, giúp phiên làm việc đồng bộ với thiết bị đầu cuối. Cài đặt từ [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=HengQuWorld.brotherwhale-vscode); mã nguồn có trên [GitHub](https://github.com/HengQuWorld/CodeWhale-VSCode).
+Terminal và các ứng dụng khách đồ họa kết nối với Codewhale Runtime, nơi chạy tác nhân và các công cụ của nó:
+
+- **Terminal:** `codewhale` mở giao diện tương tác; `codewhale exec` chạy tác vụ từ tập lệnh hoặc công việc CI.
+- **Trình duyệt cục bộ:** `codewhale web` mở [ứng dụng web cục bộ](docs/WEB.md) đi kèm, dùng cùng Runtime.
+- **Ứng dụng web và máy tính để bàn Codewhale:** các môi trường làm việc đồ họa đang được phát triển. Thông tin về khả năng sử dụng được liệt kê trên [trang sản phẩm](https://codewhale.net/en/product).
+
+**Computer Use bổ sung công cụ để quan sát và tương tác với các ứng dụng khác.** Plugin này có trong mã nguồn hiện tại. Hãy xem xét quyền truy cập được yêu cầu và bật plugin trước khi sử dụng; các yêu cầu về quyền của hệ điều hành và nền tảng vẫn được áp dụng. Xem [hướng dẫn Computer Use](crates/tui/plugins/computer-use/README.md) đi kèm và [thiết lập plugin](docs/PLUGINS.md).
+
+Trong VS Code, tiện ích CodeWhale do cộng đồng duy trì kết nối với Runtime cục bộ từ thanh bên. Cài đặt từ [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=HengQuWorld.brotherwhale-vscode); mã nguồn có trên [GitHub](https://github.com/HengQuWorld/CodeWhale-VSCode).
 
 ## Vì sao chọn Codewhale
 
 - **Chọn mô hình của bạn.** Kết nối với nhà cung cấp dịch vụ hoặc với mô hình cục bộ thông qua Ollama, vLLM hay SGLang. Dùng `/provider` để đổi nhà cung cấp và `/model` để chọn mô hình.
-- **Luôn nắm quyền kiểm soát.** Plan chỉ cho phép đọc. Ask, Auto-Review và Full Access hiển thị rõ cách hoạt động của việc phê duyệt. `/undo` hoàn tác lượt gần nhất, còn `/restore` đưa không gian làm việc về một ảnh chụp trước đó.
+- **Luôn nắm quyền kiểm soát.** Kiểm tra các thao tác được đề xuất và những thay đổi tệp do chúng tạo ra. Cài đặt phê duyệt quyết định khi nào cần xem xét; Full Access vẫn tuân thủ các giới hạn chính sách bắt buộc. `/undo` và `/restore` giúp khôi phục các thay đổi trong không gian làm việc.
 - **Sắp xếp công việc dài hạn.** Lưu phiên, đặt `/goal` lâu dài, xem lại quy trình trước khi chạy và phối hợp các tác nhân mà không đưa chỉ dẫn nội bộ của chúng vào bản ghi hội thoại của bạn.
 - **Mở rộng tác nhân bạn đang có.** Kết nối máy chủ MCP và kỹ năng, cấu hình hook, đồng thời lưu vai trò tác nhân dưới dạng các tệp dễ đọc trong dự án hoặc phần cài đặt cá nhân.
 

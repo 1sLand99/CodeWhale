@@ -1,9 +1,11 @@
-<!-- source: README.md sha256:330cff827493 -->
+<!-- source: README.md sha256:a446e3921085 -->
 # Codewhale
 
-Codewhale은 원하는 모델로 소프트웨어 개발, 파일 작업, 일상 작업 자동화를 돕는 오픈 소스 에이전트입니다. 터미널에서 작업을 지정하고 호스팅 모델이나 로컬 모델에 연결해 시작하세요. 더 큰 작업을 여러 모델과 역할로 나누고 싶을 때는 에이전트 팀을 구성할 수 있습니다.
+Codewhale은 사용자가 선택한 호스팅 모델이나 로컬 모델로 프로젝트를 읽고, 파일을 편집하고, 명령을 실행하며, 작업 결과를 확인하는 오픈 소스 에이전트입니다. 터미널에서 하나의 작업으로 시작하세요. 더 큰 작업은 서로 다른 모델과 역할을 가진 에이전트에게 나누어 맡길 수 있습니다.
 
 ![터미널에서 실행 중인 Codewhale](web/public/codewhale-tui-171acee.png)
+
+*v0.9.12 개발 빌드의 터미널 미리보기입니다.*
 
 [English](README.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja-JP.md) · [Tiếng Việt](README.vi.md) · [Bahasa Indonesia](README.id.md) · [Español](README.es-419.md) · [Português](README.pt-BR.md) · [Русский](README.ru.md) · [Українська](README.uk.md) · [Français](README.fr.md) · [Deutsch](README.de.md) · [繁體中文](README.zh-TW.md) · [हिन्दी](README.hi.md) · [Türkçe](README.tr.md) · [Italiano](README.it.md) · [Polski](README.pl.md) · [العربية](README.ar.md) · [Català](README.ca.md)
 
@@ -21,15 +23,17 @@ curl -fsSL https://codewhale.net/install.sh | sh
 "$HOME/.local/bin/codewhale"
 ```
 
+설치 도구는 공개된 최신 릴리스를 선택합니다. [변경 이력](CHANGELOG.md)에는 다음 릴리스의 미공개 후보 버전도 설명되어 있지만, 해당 릴리스가 공개되기 전에는 그 변경 사항이 공개 다운로드에 포함되지 않습니다.
+
 Windows에서는 [GitHub Releases](https://github.com/Hmbown/CodeWhale/releases/latest)에서 맞는 설치 프로그램이나 아카이브를 받으세요. 기존 직접 설치는 `codewhale update`로 업데이트하고, 확인만 하려면 `codewhale update --check`를 사용하세요. 업데이트 도구는 실행 파일 경로를 표시하며 더 최신인 빌드는 유지합니다. npm과 Cargo는 보조 패키지 설치 방법입니다. 패키지 관리자 설치에서 이전하거나 PATH를 설정하려면 [설치 안내서](docs/INSTALL.md)를 참조하세요.
 
-처음 실행하면 공급자 연결 과정을 안내하며, 오프라인 상태로 계속 사용할 수도 있습니다. Codewhale은 Cargo, Docker, Nix, Scoop, 사전 빌드 아카이브, Android/Termux, CNB 미러도 지원합니다. [설치 안내서](docs/INSTALL.md)를 참조하세요.
+처음 실행하면 공급자 연결 과정을 안내하며, 오프라인으로 Codewhale을 설정할 수도 있습니다. 모델의 응답을 받으려면 호스팅 모델이나 로컬 모델에 연결해야 합니다. Codewhale은 보조 패키지 설치 경로로 npm과 Cargo를 지원하며, Docker, Nix, Scoop, Android/Termux와 선택적으로 사용할 수 있는 CNB 미러도 지원합니다. 패키지 관리자로 설치한 기존 버전에는 이전 안내가 제공됩니다. [설치 및 PATH 도움말](docs/INSTALL.md)을 참조하세요.
 
 각 셸에서 Tab 자동 완성은 명령 한 줄로 설정할 수 있습니다 — `codewhale completion bash|zsh|fish|powershell|elvish`. [셸 자동 완성](docs/INSTALL.md#8-shell-completions)을 참조하세요.
 
 ## 사용법
 
-팀원에게 말하듯 Codewhale에 요청하세요:
+프로젝트 폴더에서 터미널을 열고 `codewhale`을 실행하세요. `/provider`로 공급자를, `/model`로 모델을 선택한 다음 구체적인 작업을 설명하세요:
 
 ```text
 Fix the failing tests and explain what changed.
@@ -41,16 +45,24 @@ TUI를 열지 않고 작업을 실행할 수도 있습니다:
 codewhale exec "fix the failing tests and explain what changed"
 ```
 
-Codewhale은 저장소를 읽고, 파일을 편집하고, 명령을 실행하고, 결과를 확인하며 목표를 향해 계속 작업할 수 있습니다. 어느 정도의 접근 권한을 줄지는 사용자가 결정합니다.
+Codewhale은 저장소를 읽고, 파일을 편집하고, 명령을 실행하고, 결과를 확인하며 목표를 향해 계속 작업할 수 있습니다. 파일을 변경하거나 셸 명령을 실행하지 않고 살펴보려면 `/mode plan`을 사용하고, 변경을 수행하려면 `/mode work`를 사용하세요. `Shift+Tab`을 누르면 Ask, Auto-Review, Full Access를 선택할 수 있습니다. 각 설정이 허용하는 작업은 [모드 및 권한 안내서](docs/MODES.md)에서 확인하세요.
 
-## GUI 프런트엔드
+## 터미널, 앱, Computer Use
 
-그래픽 인터페이스를 선호하시나요? 커뮤니티가 관리하는 CodeWhale for VS Code 확장은 동일한 에이전트를 VS Code 사이드바에 담아 채팅·스레드 대화·실시간 diff·작업 관리를 같은 Runtime API로 제공하며, 세션은 터미널과 동기화됩니다. [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=HengQuWorld.brotherwhale-vscode)에서 설치하세요. 소스 코드는 [GitHub](https://github.com/HengQuWorld/CodeWhale-VSCode)에 있습니다.
+터미널과 그래픽 클라이언트는 Codewhale Runtime에 연결하며, Runtime이 에이전트와 도구를 실행합니다:
+
+- **터미널:** `codewhale`은 대화형 인터페이스를 열고, `codewhale exec`는 스크립트나 CI 작업에서 태스크를 실행합니다.
+- **로컬 브라우저:** `codewhale web`은 같은 Runtime을 사용하는 내장 [로컬 웹 클라이언트](docs/WEB.md)를 엽니다.
+- **Codewhale 웹 및 데스크톱 앱:** 개발 중인 그래픽 작업 환경입니다. 이용 가능 여부는 [제품 페이지](https://codewhale.net/en/product)에서 확인할 수 있습니다.
+
+**Computer Use는 다른 애플리케이션을 관찰하고 조작하는 도구를 추가합니다.** 이 플러그인은 현재 소스에 포함되어 있습니다. 사용 전에 요청하는 접근 권한을 검토하고 활성화하세요. OS 권한과 플랫폼 요구 사항도 충족해야 합니다. 포함된 [Computer Use 안내서](crates/tui/plugins/computer-use/README.md)와 [플러그인 설정](docs/PLUGINS.md)을 참조하세요.
+
+VS Code에서는 커뮤니티가 관리하는 CodeWhale 확장이 사이드바에서 로컬 Runtime에 연결합니다. [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=HengQuWorld.brotherwhale-vscode)에서 설치하세요. 소스 코드는 [GitHub](https://github.com/HengQuWorld/CodeWhale-VSCode)에 있습니다.
 
 ## Codewhale을 선택하는 이유
 
 - **모델을 선택하세요.** 호스팅 공급자에 연결하거나 Ollama, vLLM, SGLang을 통해 로컬 모델을 사용할 수 있습니다. `/provider`로 공급자를 바꾸고 `/model`로 모델을 선택하세요.
-- **계속 주도권을 가지세요.** Plan은 읽기 전용입니다. Ask, Auto-Review, Full Access는 승인 동작을 명확하게 보여 줍니다. `/undo`는 마지막 턴을 되돌리고 `/restore`는 작업 공간을 이전 스냅샷으로 복원합니다.
+- **계속 주도권을 가지세요.** 제안된 작업과 그 결과로 생긴 파일 변경을 확인하세요. 승인 설정은 언제 검토가 필요한지 결정하며, Full Access에서도 반드시 지켜야 하는 정책 경계는 유지됩니다. `/undo`와 `/restore`는 작업 공간의 변경을 복구하는 데 도움이 됩니다.
 - **긴 작업도 체계적으로 관리하세요.** 세션을 저장하고, 지속되는 `/goal`을 설정하고, 워크플로 실행 전에 검토하며, 에이전트의 내부 지시가 대화 기록에 섞이지 않도록 여러 에이전트를 조율할 수 있습니다.
 - **이미 사용 중인 에이전트를 확장하세요.** MCP 서버와 스킬을 연결하고, 훅을 구성하고, 에이전트 역할을 프로젝트나 개인 설정에 읽기 쉬운 파일로 보관할 수 있습니다.
 

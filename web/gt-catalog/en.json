@@ -127,7 +127,7 @@
     ],
     "modelsLink": "Explore models and providers",
     "startHeading": "Getting started with Codewhale",
-    "startLede": "Once you have installed Codewhale and connected a model, you can describe your first task in the terminal and add a Fleet when you want several agents to share the work.",
+    "startLede": "Install the published release, connect a model, then try one task in your project folder. A team of agents is optional; start with one and add more when the work can be split.",
     "startGuideLink": "Read the getting-started guide",
     "startVocabularyLink": "Look up a term",
     "chapterAccount": "Get Codewhale",
@@ -161,19 +161,19 @@
     "surfaces": [
       [
         "TUI",
-        "Interactive terminal work"
+        "Run codewhale to work interactively in your terminal"
       ],
       [
         "codewhale exec",
-        "Scripts and CI"
+        "Run a task from a script or CI job"
       ],
       [
         "Local web client",
-        "Localhost interface; hosted browser workbench in development"
+        "Run codewhale web to open a browser client for the same local Runtime"
       ],
       [
-        "Runtime API + MCP",
-        "Local integrations"
+        "Plugins and MCP",
+        "Add tools to the Runtime; review and enable plugins before use"
       ],
       [
         "Fleet",

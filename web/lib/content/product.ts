@@ -70,8 +70,8 @@ export const PRODUCT_COPY = {
 
   availabilityHeading: { en: "Where to use Codewhale", zh: "在哪里使用 Codewhale" },
   availabilityLede: {
-    en: "Start in the terminal. The app and cloud computers are in development.",
-    zh: "从终端开始使用。应用和云端计算机正在开发中。",
+    en: "Start with the published terminal release. The web and desktop workbenches and cloud computers are in development; they have separate availability from the terminal.",
+    zh: "从已发布的终端版开始使用。网页工作台、桌面工作台和云端计算机正在开发中，它们的开放状态与终端版分别说明。",
   },
   availability: [
     {
@@ -134,8 +134,8 @@ export const PRODUCT_COPY = {
 
   surfacesHeading: { en: "Use the tools that fit your work", zh: "选择适合工作的工具" },
   surfacesLede: {
-    en: "Start in the terminal, run scripts with codewhale exec, or connect through the Runtime API and MCP.",
-    zh: "在终端中开始，用 codewhale exec 运行脚本，或通过 Runtime API 和 MCP 连接工具。",
+    en: "The Runtime runs the agent and its tools. Terminal and browser clients let you direct that work. The current source includes the Computer Use plugin for interacting with other applications; review and enable it before use.",
+    zh: "Runtime 负责运行智能体及其工具，终端和浏览器客户端让你指挥任务。当前源码包含 Computer Use 插件，用于操作其他应用；使用前需审核并启用。",
   },
   surfacesLink: { en: "Explore integrations", zh: "查看集成" },
 

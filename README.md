@@ -1,9 +1,9 @@
 # Codewhale
 
-Codewhale is an open-source agent that helps you build software, work with your
-files, and automate everyday tasks using the models you choose. Start with a
-task in your terminal, connect a hosted or local model, and bring in a team of
-agents when you want to share a larger job across different models and roles.
+Codewhale is an open-source agent that reads your project, edits files, runs
+commands, and checks its work using a hosted or local model you choose. Start
+with one task in your terminal. For a larger job, give parts of the work to
+agents with different models and roles.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="brand/wordmark-inverted.svg">
@@ -22,6 +22,8 @@ agents when you want to share a larger job across different models and roles.
   <img src="web/public/codewhale-tui-171acee.png" alt="A Codewhale terminal session" width="720">
 </picture>
 
+*Terminal preview from a v0.9.12 development build.*
+
 ## Install
 
 macOS / Linux — install the official GitHub release:
@@ -31,13 +33,18 @@ curl -fsSL https://codewhale.net/install.sh | sh
 "$HOME/.local/bin/codewhale"
 ```
 
+The installer selects the latest published release. The [changelog](CHANGELOG.md)
+also describes the next release's unreleased candidate; those changes are not
+included in published downloads until the release is available.
+
 Windows: download the matching installer or archive from
 [GitHub Releases](https://github.com/Hmbown/CodeWhale/releases/latest).
 For an existing direct install, run `codewhale update` (or `codewhale update --check`
 to inspect it). The updater prints the executable path and keeps newer builds.
 
 
-The first run helps you connect a provider or stay offline. Codewhale also
+The first run helps you connect a provider or configure Codewhale offline.
+Model replies require a connected hosted or local model. Codewhale also
 supports npm and Cargo as secondary packaging routes, plus Docker, Nix, Scoop,
 Android/Termux, and an optional CNB mirror. Existing package-managed installs
 receive migration instructions. See [installation and PATH help](docs/INSTALL.md).
@@ -47,7 +54,8 @@ See [shell completions](docs/INSTALL.md#8-shell-completions).
 
 ## Use
 
-Talk to Codewhale the same way you would talk to a teammate:
+Open a terminal in your project folder and run `codewhale`. Choose your provider
+with `/provider` and your model with `/model`. Then describe a concrete task:
 
 ```text
 Fix the failing tests and explain what changed.
@@ -60,14 +68,32 @@ codewhale exec "fix the failing tests and explain what changed"
 ```
 
 Codewhale can read your repository, edit files, run commands, inspect results,
-and keep working toward a goal. You decide how much access it has.
+and keep working toward a goal. Use `/mode plan` to explore without file changes
+or shell execution, and `/mode work` when you want it to make changes. Press
+`Shift+Tab` to choose Ask, Auto-Review, or Full Access; the
+[modes and permissions guide](docs/MODES.md) explains what each allows.
 
-## GUI frontend
+## Terminal, apps, and Computer Use
 
-Prefer a graphical interface? The community-maintained CodeWhale for VS Code
-extension wraps the same agent in a VS Code sidebar — chat, threaded
-conversations, live diffs, and task management over the same Runtime API, so
-sessions stay in sync with the terminal. Install it from the
+The terminal and graphical clients connect to the Codewhale Runtime, which runs
+the agent and its tools:
+
+- **Terminal:** `codewhale` opens the interactive interface; `codewhale exec`
+  runs a task from a script or CI job.
+- **Local browser:** `codewhale web` opens the bundled
+  [local web client](docs/WEB.md) for the same runtime.
+- **Codewhale web and desktop apps:** graphical workbenches in development.
+  Their availability is listed on the [product page](https://codewhale.net/en/product).
+
+**Computer Use adds tools for observing and interacting with other applications.**
+The plugin is included in the current source.
+Review its requested access and enable it before use; OS permissions and
+platform requirements still apply. See the included
+[Computer Use guide](crates/tui/plugins/computer-use/README.md) and
+[plugin setup](docs/PLUGINS.md).
+
+For VS Code, the community-maintained CodeWhale extension connects to the local
+Runtime from a sidebar. Install it from the
 [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=HengQuWorld.brotherwhale-vscode);
 source code is on [GitHub](https://github.com/HengQuWorld/CodeWhale-VSCode).
 
@@ -76,9 +102,9 @@ source code is on [GitHub](https://github.com/HengQuWorld/CodeWhale-VSCode).
 - **Choose your models.** Connect hosted providers or local models through
   Ollama, vLLM, or SGLang. Use `/provider` to change providers and `/model` to
   choose a model.
-- **Stay in control.** Plan is read-only. Ask, Auto-Review, and Full Access make
-  approval behavior visible. `/undo` reverts the last turn and `/restore`
-  returns the workspace to an earlier snapshot.
+- **Stay in control.** Inspect proposed actions and resulting file changes.
+  Approval settings govern when review is needed; Full Access still respects
+  hard policy boundaries. `/undo` and `/restore` help recover workspace changes.
 - **Keep long work organized.** Save sessions, set a durable `/goal`, review
   workflows before they run, and coordinate agents without turning their
   internal instructions into your transcript.
