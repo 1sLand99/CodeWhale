@@ -2178,7 +2178,7 @@ pub(crate) fn is_empty_auto_created_session(session: &SessionMetadata) -> bool {
             .eq_ignore_ascii_case(DEFAULT_SESSION_TITLE)
 }
 
-fn paths_equivalent(lhs: &Path, rhs: &Path) -> bool {
+pub(crate) fn paths_equivalent(lhs: &Path, rhs: &Path) -> bool {
     let lhs_canonical = fs::canonicalize(lhs).ok();
     let rhs_canonical = fs::canonicalize(rhs).ok();
     match (lhs_canonical, rhs_canonical) {
