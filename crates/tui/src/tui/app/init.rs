@@ -7,6 +7,12 @@
 use super::*;
 
 impl App {
+    /// Install the Config owner's current policy and refresh its read-only UI projection.
+    pub(crate) fn refresh_notification_settings(&mut self, config: &Config) {
+        self.notification_settings = config.notifications_config();
+        let _ = crate::tui::notifications::settings(config);
+    }
+
     #[cfg(test)]
     pub fn new(options: TuiOptions, config: &Config) -> Self {
         let workspace = options.workspace.clone();
@@ -775,6 +781,7 @@ impl App {
             last_enter_instant: None,
             provider_wait_incident_logged: false,
             prompt_suggestion: None,
+            notification_settings: config.notifications_config(),
             prompt_suggestion_gen: std::sync::atomic::AtomicU64::new(0),
             offline_mode: false,
             turn_error_posted: false,

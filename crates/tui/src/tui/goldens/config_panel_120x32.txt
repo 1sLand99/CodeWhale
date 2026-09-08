@@ -2,7 +2,7 @@
    Config  ──────────────────────────────────────────────────────────────────────────────────────────────────────────── 
                                                                                                                         
    Appearance   Models & providers   Work   Tools & MCP   Trust   Motion   Advanced                                     
-   Search: type to filter  (17/52)                                                                                      
+   Search: type to filter  (17/71)                                                                                      
   ❯ Display         │  Display                                                │Theme                                    
                     │❯Theme                              terminal       ‹ ›   │theme                                    
                     │ Language                           auto           ‹ ›   │                                         

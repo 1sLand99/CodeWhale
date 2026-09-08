@@ -1753,8 +1753,12 @@ fn notification_defaults_and_live_updates_share_one_consistent_model() {
         "a fresh install must never opt itself into an audible completion cue"
     );
 
-    notifications.apply_update(NotificationConfigUpdate::Method(NotificationMethod::Osc9));
-    notifications.apply_update(NotificationConfigUpdate::Quiet(true));
+    notifications
+        .apply_update(NotificationConfigUpdate::Method(NotificationMethod::Osc9))
+        .unwrap();
+    notifications
+        .apply_update(NotificationConfigUpdate::Quiet(true))
+        .unwrap();
 
     assert_eq!(notifications.method, NotificationMethod::Osc9);
     assert!(notifications.quiet);
@@ -14052,4 +14056,99 @@ model = "deepseek/deepseek-v4-pro"
     assert_eq!(switched.openrouter_vendor().unwrap(), None);
     switched.provider_config_for_mut(ApiProvider::Openai).vendor = Some("deepinfra".into());
     assert!(switched.openrouter_vendor().is_err());
+}
+
+#[test]
+fn notifications_saved_profile_edit_roundtrips_the_actual_tui_loader() {
+    let _guard = crate::test_support::lock_test_env();
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("config.toml");
+    std::fs::write(&path, "[notifications]\nmethod = \"kitty\"\nsound = \"bell\"\n[profiles.work.notifications]\nquiet = true\nsound = \"off\"\n[profiles.inherited]\n").unwrap();
+    let edit = NotificationConfigUpdate::Sound(Some(CompletionSound::Whale));
+    edit.persist_for_profile(&path, Some("work")).unwrap();
+    let work = Config::load(Some(path.clone()), Some("work"))
+        .unwrap()
+        .notifications_config();
+    assert_eq!(work.sound, Some(CompletionSound::Whale));
+    assert!(work.quiet);
+    let root = Config::load(Some(path.clone()), None)
+        .unwrap()
+        .notifications_config();
+    assert_eq!(root.sound, Some(CompletionSound::Bell));
+    NotificationConfigUpdate::Quiet(true)
+        .persist_for_profile(&path, Some("inherited"))
+        .unwrap();
+    let inherited = Config::load(Some(path.clone()), Some("inherited"))
+        .unwrap()
+        .notifications_config();
+    assert!(inherited.quiet);
+    assert_eq!(inherited.method, NotificationMethod::Kitty);
+    let raw: toml::Value = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert!(raw["profiles"]["inherited"].get("notifications").is_none());
+    let before = std::fs::read(&path).unwrap();
+    assert!(edit.persist_for_profile(&path, Some("missing")).is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+}
+
+#[test]
+fn notifications_canonical_condition_overrides_and_unsets_to_legacy() {
+    let config: Config = toml::from_str("[tui]\nnotification_condition = \"never\"\n[notifications]\ncondition = \"always\"\nsound = \"off\"\ncompletion_sound = \"whale\"\n").unwrap();
+    assert_eq!(
+        config.notifications_config().condition,
+        Some(NotificationCondition::Always)
+    );
+    assert_eq!(
+        config.notifications_config().sound,
+        Some(CompletionSound::Off)
+    );
+    assert_eq!(
+        crate::tui::notifications::settings_projection(&config)
+            .unwrap()
+            .1,
+        std::time::Duration::ZERO
+    );
+}
+
+#[test]
+#[ignore = "requires CODEWHALE_TEST_NOTIFICATION_CLI pointing at the built CLI"]
+fn notifications_real_cli_file_is_consumed_by_actual_tui_loader() {
+    let _guard = crate::test_support::lock_test_env();
+    let binary = std::env::var_os("CODEWHALE_TEST_NOTIFICATION_CLI").expect("supply built CLI");
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("config.toml");
+    for (key, value) in [
+        ("sound", "whale"),
+        ("quiet", "true"),
+        ("events.approval-needed", "false"),
+        ("condition", "always"),
+        ("threshold_secs", "17"),
+        ("event_sound.events", r#"["model-notify", "input-needed"]"#),
+    ] {
+        let result = std::process::Command::new(&binary)
+            .env_clear()
+            .env("HOME", temp.path())
+            .env("USERPROFILE", temp.path())
+            .env("CODEWHALE_HOME", temp.path().join("state"))
+            .env("CODEWHALE_SECRET_BACKEND", "file")
+            .current_dir(temp.path())
+            .arg("--config")
+            .arg(&path)
+            .args(["config", "set", &format!("notifications.{key}"), value])
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{key}: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+    let loaded = Config::load(Some(path), None)
+        .unwrap()
+        .notifications_config();
+    assert_eq!(loaded.sound, Some(CompletionSound::Whale));
+    assert!(loaded.quiet);
+    assert!(!loaded.events.approval_needed);
+    assert_eq!(loaded.condition, Some(NotificationCondition::Always));
+    assert_eq!(loaded.threshold_secs, 17);
+    assert_eq!(loaded.event_sound.events, ["model-notify", "input-needed"]);
 }

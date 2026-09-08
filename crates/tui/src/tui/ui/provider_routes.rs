@@ -468,6 +468,8 @@ pub(crate) fn rollback_provider_after_auth_failure(
     } = pending;
 
     *config = previous_config;
+
+    app.refresh_notification_settings(config);
     if let Ok(identity) = config.active_provider_identity(previous_provider) {
         app.set_provider_identity_record(identity);
     } else {
@@ -645,6 +647,7 @@ pub(crate) async fn switch_provider(
                     })
                 {
                     *config = previous_config;
+                    app.refresh_notification_settings(config);
                     app.view_stack.push(picker);
                     app.status_message = Some(format!(
                         "{} needs a key or local runtime — enter one to switch.",
@@ -655,6 +658,7 @@ pub(crate) async fn switch_provider(
                 }
             }
             *config = previous_config;
+            app.refresh_notification_settings(config);
             app.add_message(HistoryCell::System {
                 content: format!(
                     "Cannot switch to {}: {reason}\nProvider unchanged ({}).",
@@ -673,6 +677,7 @@ pub(crate) async fn switch_provider(
         Err(err) => {
             app.pending_provider_switch = None;
             *config = previous_config;
+            app.refresh_notification_settings(config);
             app.add_message(HistoryCell::System {
                 content: format!(
                     "Failed to switch provider to {}: {err}\nProvider unchanged ({}).",
@@ -689,6 +694,7 @@ pub(crate) async fn switch_provider(
     let context_window_source = validated_route.context_window.source;
     let new_model = validated_route.model.clone();
     *config = *validated_route.config;
+    app.refresh_notification_settings(config);
 
     let new_base_url = resolved_endpoint;
     let new_endpoint = display_base_url_host(&new_base_url);

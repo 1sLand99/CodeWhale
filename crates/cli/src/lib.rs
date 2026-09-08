@@ -4544,6 +4544,26 @@ fn run_config_command(
     }
     match command {
         ConfigCommand::Get { key } => {
+            if codewhale_config::notifications::in_namespace(&key) {
+                let config = codewhale_config::notifications::from_extras(&store.config.extras)?;
+                let keys = if key.eq_ignore_ascii_case("notifications") {
+                    codewhale_config::notifications::NotificationSetting::ALL.to_vec()
+                } else {
+                    vec![codewhale_config::notifications::NotificationSetting::required(&key)?]
+                };
+                for setting in keys {
+                    if key.eq_ignore_ascii_case("notifications") {
+                        println!(
+                            "notifications.{} = {}",
+                            setting.key(),
+                            config.display(setting)
+                        );
+                    } else {
+                        println!("{}", config.display(setting));
+                    }
+                }
+                return Ok(());
+            }
             if let Some(value) = store.config.get_display_value(&key) {
                 if key == "telemetry" {
                     println!(
@@ -4559,6 +4579,14 @@ fn run_config_command(
             bail!("key not found: {key}");
         }
         ConfigCommand::Set { key, value } => {
+            if codewhale_config::notifications::in_namespace(&key) {
+                let setting = codewhale_config::notifications::NotificationSetting::required(&key)?;
+                codewhale_config::notifications::NotificationConfigUpdate::parse(setting, &value)?
+                    .persist(store.path())?;
+                store.reload()?;
+                println!("set notifications.{}", setting.key());
+                return Ok(());
+            }
             store.config.set_value(&key, &value)?;
             if key == "telemetry" {
                 let enabled = store
@@ -4598,6 +4626,13 @@ fn run_config_command(
             Ok(())
         }
         ConfigCommand::Unset { key } => {
+            if codewhale_config::notifications::in_namespace(&key) {
+                let setting = codewhale_config::notifications::NotificationSetting::required(&key)?;
+                setting.unset(store.path())?;
+                store.reload()?;
+                println!("unset notifications.{}", setting.key());
+                return Ok(());
+            }
             store.config.unset_value(&key)?;
             store.save()?;
             println!("unset {key}");

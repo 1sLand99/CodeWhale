@@ -1118,6 +1118,7 @@ pub(crate) async fn apply_provider_fallback_switch(
         return;
     }
     *config = *next_config;
+    app.refresh_notification_settings(config);
     app.set_provider_identity_record(target_identity);
     app.billing_presentation = crate::route_billing::for_route(config, target);
 
@@ -1203,6 +1204,26 @@ pub(super) fn reject_inline_inference_while_runtime_chat_owns_run(
         .replace("{setting}", "Codewhale Runtime");
     app.push_status_toast(notice, crate::tui::app::StatusToastLevel::Info, Some(6_000));
     true
+}
+
+pub(crate) fn apply_notification_update(
+    app: &mut App,
+    config: &mut Config,
+    update: crate::config::NotificationConfigUpdate,
+) -> Result<()> {
+    let mut notifications = config.notifications_config();
+    let setting = update.setting();
+    notifications.apply_update(update).map_err(|_| {
+        anyhow::anyhow!(
+            app.tr(MessageId::ConfigCommandInvalidValue)
+                .replace("{key}", &format!("notifications.{}", setting.key()))
+                .replace("{value}", &app.tr(MessageId::ConfigUnavailable))
+                .replace("{choices}", setting.choices())
+        )
+    })?;
+    config.notifications = Some(notifications);
+    app.refresh_notification_settings(config);
+    Ok(())
 }
 
 pub(crate) async fn apply_command_result(
@@ -1837,11 +1858,9 @@ pub(crate) async fn apply_command_result(
                 config.prompt_suggestion = Some(enabled);
             }
             AppAction::UpdateNotification { update } => {
-                config
-                    .notifications
-                    .get_or_insert_with(crate::config::NotificationsConfig::default)
-                    .apply_update(update);
-                let _ = crate::tui::notifications::settings(config);
+                if let Err(error) = apply_notification_update(app, config, update) {
+                    app.push_status_toast(error.to_string(), StatusToastLevel::Error, Some(6_000));
+                }
             }
             AppAction::SetAdvisorEnabled { enabled } => {
                 let _ = engine_handle.send(Op::SetAdvisorEnabled { enabled }).await;
@@ -2328,6 +2347,7 @@ pub(crate) async fn apply_command_result(
                         );
                         app.config_profile = Some(profile.clone());
                         *config = new_config.clone();
+                        app.refresh_notification_settings(config);
                         app.set_provider_identity_record(provider_identity);
                         app.billing_presentation =
                             crate::route_billing::for_route(config, app.api_provider);
@@ -3396,6 +3416,7 @@ pub(crate) fn apply_loaded_session_with_goal(
     // provider response is rejected by `cost_status::report`.
     let _settled_old_cost_scope = crate::cost_status::close_current_scope();
     *config = *restored_route.config;
+    app.refresh_notification_settings(config);
     app.api_messages = crate::runtime_handoff::project_messages_for_restore(&session.messages);
     app.clear_history();
     app.tool_cells.clear();
@@ -3618,5 +3639,6 @@ pub(crate) fn apply_loaded_session_config_snapshot(
             &previous_workspace,
         );
     *config = next_config;
+    app.refresh_notification_settings(config);
     Ok(respawn)
 }
