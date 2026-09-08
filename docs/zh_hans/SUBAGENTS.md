@@ -193,18 +193,21 @@ max_admitted = 12
 
 使用 `/config subagents status` 查看全局值和当前 provider 解析后的扇出、深度与超时配置。
 
-## 对外公布的 agent 工具字段（v0.9.9）
+## 对外公布的 agent 工具字段（v0.9.13）
 
-面向模型的 `agent` 工具 schema 正好公布 **12 个字段**（#5324、#5123）：
+面向模型的 `agent` 工具 schema 包含生命周期、作用域和每个任务的路由控制（#5915、#5955）：
 
-`action`、`prompt`、`type`、`profile`、`name`、`agent_id`、`message`、`until`、`detached`、`worktree`、`write_roots`、`resume_from`
+`action`、`prompt`、`type`、`profile`、`name`、`agent_id`、`message`、`until`、`detached`、`worktree`、`write_roots`、`resume_from`、`model`、`model_strength`、`thinking`
 
 外加按 action 区分的 `dependentSchemas` 树（`start` 需要 `prompt`；`message`/`followup` 需要目标和 `message`；`peek`/`interrupt`/`cancel` 需要目标）。schema 变更是钉死的提示词前缀的一部分，所以升级会在每个会话中重新填充一次 provider KV 前缀（docs/CACHE.md；在 v0.9.9 边界接受）。
+
+`agent(action="roster")` 使用与执行相同的解析器，列出内置角色实际使用的 provider、模型、思维层级、已知上下文限制和能力来源。每个任务的 `model` 优先于 `model_strength`，然后采用角色默认值和会话路由。请求其他 provider 的模型会在接受任务前被拒绝；角色权限上限保持不变。已保存的 Pod 成员使用持久 Pod 调度。
+
+费用类别仅描述当前未缓存文本输入和输出的费率，不代表未来任务的总费用。缺少费率或依赖路由的价格保持未知；订阅和本地路由标记为非按金额计费。查询不会向 provider 发送请求，可达性标记为未验证。
 
 **解析接受但未公布（兼容）。** 以下输入已从公布的 schema 中移除，但仍保持解析接受并按原样生效，因此已保存的转录、ACP/MCP 客户端和 Fleet 配置照旧重放——`token_budget` 已经遵循的正是同一个契约：
 
 - 预算：`max_steps`、`wall_time_secs`、`max_depth`（参见[子代理预算](#子代理预算步数墙钟时间)了解默认值现在来自何处）
-- 路由：`model`、`model_strength`、`thinking`（`profile` 钉死路由和思维层级；没有它时子代理继承操作者模型）
 - workspace/隔离：`workspace_policy`、`write_authority`、`fork_context`、`cwd`、`worktree_path`、`worktree_branch`、`worktree_base`
 - 发起契约：`deliberate`、`dependencies`、`acceptance`、`expected_artifact`、`exact_files`、`coordination_contracts`
 - 生命周期附加：`timeout_secs`（wait）、`reason`（interrupt）、`include_archived`（status）以及 `token_budget`

@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use tempfile::{Builder as TempDirBuilder, tempdir};
 
 mod launch_receipt;
+mod roster_routes;
 
 fn built_in_whale_name_that_cannot_be_generated_for(agent_id: &str) -> &'static str {
     WHALE_NICKNAMES
@@ -4783,11 +4784,7 @@ fn subagent_tool_schemas_advertise_real_type_and_role_vocabulary() {
         );
     }
     assert!(agent_schema["properties"].get("role").is_none());
-    // #5324/#5123: the advertised surface is exactly 12 fields. Budgets,
-    // model/thinking overrides, worktree-path knobs and spawn-contract
-    // ceremony moved off the schema; the parser still accepts them for
-    // replay compat (pinned by
-    // `agent_tool_unadvertised_fields_remain_parse_accepted` below).
+    // Route controls must be discoverable alongside lifecycle and scope.
     let mut advertised: Vec<&str> = agent_schema["properties"]
         .as_object()
         .expect("agent schema properties must be an object")
@@ -4800,10 +4797,13 @@ fn subagent_tool_schemas_advertise_real_type_and_role_vocabulary() {
         "agent_id",
         "detached",
         "message",
+        "model",
+        "model_strength",
         "name",
         "profile",
         "prompt",
         "resume_from",
+        "thinking",
         "type",
         "until",
         "worktree",
@@ -4812,16 +4812,13 @@ fn subagent_tool_schemas_advertise_real_type_and_role_vocabulary() {
     expected.sort_unstable();
     assert_eq!(
         advertised, expected,
-        "the agent tool must advertise exactly the 12-field surface: {}",
+        "the agent tool must advertise lifecycle, scope and routing controls: {}",
         agent_schema["properties"]
     );
     for unadvertised in [
         "max_depth",
         "max_steps",
         "wall_time_secs",
-        "model",
-        "model_strength",
-        "thinking",
         "fork_context",
         "workspace_policy",
         "write_authority",

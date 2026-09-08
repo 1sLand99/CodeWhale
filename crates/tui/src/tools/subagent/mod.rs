@@ -8402,8 +8402,8 @@ const AGENT_TOOL_DESCRIPTION: &str = concat!(
     "Start with action=start and prompt; returns a turn-owned agent_id immediately. Read-only roles need no extra fields. Set detached=true only for work that must remain independently observable after the turn. ",
     "Use multiple starts for independent parallel tasks. ",
     "type selects the Fleet role: general (full tool access for multi-step tasks), explore (fast read-only exploration), planner (grounded strategy, read-only probes), reviewer (reads and grades code), implement (lands focused code changes), test (runs tests and reports evidence), advisor (read-only design counsel), or custom (allowed_tools on the parent's posture). ",
-    "profile runs the child as a named Fleet role — pass a profile only when the task needs a different role than type selects. Without a profile the child inherits the parent's model; per-call model or thinking overrides are not part of this surface. ",
-    "Use action=roster to inspect the Fleet roles and their descriptions before choosing a type or profile. ",
+    "profile selects a built-in role. model, model_strength and thinking override task routing on the current provider; foreign models are refused. ",
+    "Use action=roster for resolved roles, models, reasoning, context and cost evidence; it makes no provider request. ",
     "Child run budgets (model turns, wall time) come from Fleet role defaults and operator [subagents] config, not per-call fields. ",
     "worktree=true gives the child an isolated git worktree — use it whenever parallel writers must not collide with the parent checkout. ",
     "A write-capable child defaults write scope to the parent workspace; narrow it with write_roots (repo-relative directory trees) so parallel children claim disjoint scope. ",
@@ -8427,14 +8427,8 @@ impl ToolSpec for AgentTool {
         AGENT_TOOL_DESCRIPTION
     }
 
-    /// Advertised `agent` schema: exactly 12 fields (#5324, #5123) —
-    /// action, prompt, type, profile, name, agent_id, message, until,
-    /// detached, worktree, write_roots, resume_from — plus the
-    /// action-discriminated `dependentSchemas` tree. Every field removed
-    /// from this schema (budgets, model/thinking overrides, worktree-path
-    /// knobs, deliberate/spawn-contract knobs, wait/status extras) stays
-    /// parse-accepted unchanged for saved transcripts, ACP/MCP clients and
-    /// Fleet configs, exactly like `token_budget`; see docs/SUBAGENTS.md.
+    /// Routing choices are advertised alongside lifecycle and scope fields.
+    /// Budgets and legacy execution knobs remain parse-accepted for replay.
     fn input_schema(&self) -> Value {
         let target_required = json!([
             {
@@ -8452,7 +8446,7 @@ impl ToolSpec for AgentTool {
                 "action": {
                     "type": "string",
                     "enum": ["start", "roster", "status", "peek", "message", "followup", "interrupt", "wait", "claim", "release", "cancel"],
-                    "description": "start launches a turn-owned worker and returns immediately. roster lists the Fleet roles and their descriptions. status/peek inspect running or retained workers. message queues a note without waking a running child. followup delivers queued notes and wakes a running child for its next user-provenance model turn. interrupt stops the current turn while preserving the child checkpoint. wait only observes; see until. claim widens your own enforced write scope (see write_roots). release clears write claims whose owner is no longer running — the remediation a write-scope contention refusal names; pass agent_id to clear one, omit it to sweep. cancel permanently cancels a running child."
+                    "description": "start launches a turn-owned worker and returns immediately. roster lists roles with their resolved routes and capability/cost evidence. status/peek inspect running or retained workers. message queues a note without waking a running child. followup delivers queued notes and wakes a running child for its next user-provenance model turn. interrupt stops the current turn while preserving the child checkpoint. wait only observes; see until. claim widens your own enforced write scope (see write_roots). release clears write claims whose owner is no longer running — the remediation a write-scope contention refusal names; pass agent_id to clear one, omit it to sweep. cancel permanently cancels a running child."
                 },
                 "until": {
                     "type": "string",
@@ -8486,7 +8480,21 @@ impl ToolSpec for AgentTool {
                 },
                 "profile": {
                     "type": "string",
-                    "description": "Optional Fleet role selector. Use a role name (action=roster lists the roles); unknown values are refused. The resolved role supplies the child's posture. There is no per-call model override on this surface."
+                    "description": "Optional Fleet role selector. Use a role name (action=roster lists the roles); unknown values are refused. The resolved role supplies the child's posture; model and thinking may override its route defaults."
+                },
+                "model": {
+                    "type": "string",
+                    "description": "Exact model on the current provider for this task. Overrides role defaults and model_strength; foreign-provider models are refused."
+                },
+                "model_strength": {
+                    "type": "string",
+                    "enum": ["same", "faster"],
+                    "description": "For this task: same inherits the session model; faster requests its provider's faster candidate. Explicit model wins. Inspect roster for resolved defaults."
+                },
+                "thinking": {
+                    "type": "string",
+                    "enum": ["inherit", "auto", "off", "low", "medium", "high", "xhigh", "max", "ultra"],
+                    "description": "Requested reasoning effort, normalized to the selected route's supported values. inherit uses role defaults then session effort; auto considers this task."
                 },
                 "worktree": {
                     "type": "boolean",
@@ -8653,26 +8661,19 @@ impl ToolSpec for AgentTool {
         match action {
             AgentToolAction::Start => {}
             AgentToolAction::Roster => {
-                // Role catalog, not a roster: exec spawns resolve roles only
-                // (see `resolve_spawn_role`). The saved-member roster lives in
-                // the durable Fleet UI (`/fleet`); the agent tool never reads it.
-                let members: Vec<Value> = FleetRole::all()
-                    .iter()
-                    .map(|role| {
-                        json!({
-                            "member_id": role.as_str(),
-                            "role": role.as_str(),
-                            "description": role.description(),
-                        })
-                    })
-                    .collect();
+                let mut runtime = self.runtime.clone();
+                refresh_spawn_route_sources(&mut runtime);
+                let mut members = Vec::new();
+                for role in FleetRole::all() {
+                    members.push(resolved_role_roster_entry(&runtime, &role).await);
+                }
                 let payload = json!({
                     "action": "roster",
                     "count": members.len(),
                     "total_count": members.len(),
                     "truncated": false,
                     "members": members,
-                    "selector_help": "Use type:<role> with one of the listed roles. There are no saved members: every spawn resolves a role only.",
+                    "selector_help": "Use type:<role> with a listed built-in role. model, model_strength and thinking can override task defaults on the current provider. Saved Pod members use the durable Pod dispatch surface.",
                 });
                 let mut result = ToolResult::json(&payload)
                     .map_err(|error| ToolError::execution_failed(error.to_string()))?;
@@ -9293,49 +9294,21 @@ async fn spawn_subagent_from_input(
     } else {
         runtime.child_runtime()
     };
-    // Role-only dispatch inherits the session client: there are no saved
-    // provider pins outside the durable Fleet runs, so every child runs on
-    // the parent's provider and there is no cross-provider client to build.
-    let mut model_selection = resolve_spawn_model_selection(&child_runtime, &spawn_request)?;
-    resolve_fixed_spawn_model_route(&child_runtime, &mut model_selection, true)?;
     let resident_context = spawn_request
         .resident_file
         .as_deref()
         .map(|file_path| read_bounded_resident_context(&runtime.context, file_path))
         .transpose()?;
     let effective_prompt = assemble_spawn_prompt(&spawn_request, resident_context.as_ref());
-    let route = resolve_subagent_assignment_route(
-        &child_runtime,
-        None,
-        &effective_prompt,
-        &spawn_request.agent_type,
-        model_selection.model_route,
-        spawn_request.thinking,
-    )
-    .await;
-    let effective_model =
-        ensure_subagent_model_for_provider(&child_runtime, &route.model_route, route.model)?;
-    child_runtime.model = effective_model.clone();
-    if let Some(rebound) = child_runtime
-        .client
-        .rebound_for_model_protocol(child_runtime.api_config.as_deref(), &effective_model)
-        .map_err(|err| {
-            ToolError::execution_failed(format!(
-                "Fleet dispatch could not bind the wire protocol for model {effective_model:?}: {err:#}"
-            ))
-        })?
-    {
-        child_runtime.client = rebound;
-    }
-    child_runtime.reasoning_effort = route.reasoning_effort.clone();
-    child_runtime.reasoning_effort_auto = false;
-    let model_route = route.model_route;
+    let (model_route, route_source) =
+        bind_spawn_model_route(&mut child_runtime, &spawn_request, &effective_prompt).await?;
+    let effective_model = child_runtime.model.clone();
     let child_route = mint_child_route_receipt(
         &requested_route,
         &spawn_request,
         &child_runtime,
         effective_model.clone(),
-        model_selection.source.as_str(),
+        route_source.as_str(),
     )?;
 
     if spawn_request.worktree.is_some() {
@@ -13131,6 +13104,110 @@ fn resolve_spawn_model_selection(
         model_route: ModelRoute::Inherit,
         source: SpawnRouteSource::RunModel,
     })
+}
+
+/// Bind discovery and execution through the same provider/model/effort path.
+/// This performs no inference and reserves no child or workspace resources.
+async fn bind_spawn_model_route(
+    runtime: &mut SubAgentRuntime,
+    request: &SpawnRequest,
+    prompt: &str,
+) -> Result<(ModelRoute, SpawnRouteSource), ToolError> {
+    let mut selection = resolve_spawn_model_selection(runtime, request)?;
+    resolve_fixed_spawn_model_route(runtime, &mut selection, true)?;
+    let route = resolve_subagent_assignment_route(
+        runtime,
+        None,
+        prompt,
+        &request.agent_type,
+        selection.model_route,
+        request.thinking,
+    )
+    .await;
+    let model = ensure_subagent_model_for_provider(runtime, &route.model_route, route.model)?;
+    if let Some(rebound) = runtime
+        .client
+        .rebound_for_model_protocol(runtime.api_config.as_deref(), &model)
+        .map_err(|err| {
+            ToolError::execution_failed(format!(
+                "Pod dispatch could not bind the wire protocol for model {model:?}: {err:#}"
+            ))
+        })?
+    {
+        runtime.client = rebound;
+    }
+    runtime.model = model;
+    runtime.reasoning_effort = route.reasoning_effort;
+    runtime.reasoning_effort_auto = false;
+    Ok((route.model_route, selection.source))
+}
+
+async fn resolved_role_roster_entry(runtime: &SubAgentRuntime, role: &FleetRole) -> Value {
+    let mut entry = json!({
+        "member_id": role.as_str(),
+        "role": role.as_str(),
+        "description": role.description(),
+    });
+    // The parser owns role-specific defaults, including explore's faster lane.
+    // No execution or permission check is skipped: this only previews a route.
+    let request =
+        parse_spawn_request(&json!({"prompt": "Preview role defaults.", "type": role.as_str()}));
+    let mut child = runtime.child_runtime();
+    let resolved = match request {
+        Ok(request) => bind_spawn_model_route(&mut child, &request, "").await,
+        Err(error) => Err(error),
+    };
+    match resolved {
+        Ok((_, source)) => {
+            let envelope = child
+                .client
+                .effective_route_envelope(&child.model, chrono::Utc::now())
+                .sanitized_for_persistence();
+            let limits = child.client.route_limits();
+            // Inspect nonzero text classes through the existing route audit;
+            // this does not record usage or claim a future task's total cost.
+            let audit = envelope.audit(&crate::models::Usage {
+                input_tokens: 1,
+                output_tokens: 1,
+                ..Default::default()
+            });
+            let cost_class = match audit.estimate {
+                Some(estimate) if estimate.is_positive() => "paid",
+                Some(estimate) if estimate.is_finite_nonnegative() => "free",
+                _ if audit.unpriced_reason
+                    == Some(crate::pricing::UnpricedReason::NotMoneyMetered) =>
+                {
+                    "not_money_metered"
+                }
+                _ => "unknown",
+            };
+            let capabilities = crate::fleet::capability_badges::resolve_route_capability_badges(
+                Some(&envelope.provider_identity),
+                &child.model,
+            );
+            entry["route"] = json!({
+                "provider": envelope.provider_identity,
+                "model": envelope.model,
+                "openrouter_vendor": envelope.openrouter_vendor,
+                "source": source.as_str(),
+                "reasoning_effort": child.reasoning_effort,
+                "context_window": limits.and_then(|limits| limits.context_tokens),
+                "max_output": limits.and_then(|limits| limits.output_tokens),
+                "capability_badges": capabilities.as_ref().map(|facts| &facts.badges),
+                "capability_source": capabilities.as_ref().map(|facts| facts.provenance),
+                "cost_class": cost_class,
+                "cost_basis": "current uncached text input/output rates; other token classes, tools and future usage may differ",
+                "unpriced_reason": audit.unpriced_reason.map(|reason| reason.label()),
+                "reachability": "unverified",
+            });
+        }
+        Err(error) => {
+            entry["route"] = Value::Null;
+            entry["route_error"] =
+                json!(runtime.client.redact_model_bound_text(&error.to_string()));
+        }
+    }
+    entry
 }
 
 /// Resolve caller/config model pins to the child provider's exact wire id

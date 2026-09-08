@@ -384,17 +384,31 @@ provider's resolved fanout, depth, and timeout profile.
 
 ## Advertised agent-tool fields (v0.9.9)
 
-The model-facing `agent` tool schema advertises exactly **12 fields**
-(#5324, #5123):
+The model-facing `agent` tool schema includes lifecycle, scope and per-task
+routing controls (#5915, #5955):
 
 `action`, `prompt`, `type`, `profile`, `name`, `agent_id`, `message`,
-`until`, `detached`, `worktree`, `write_roots`, `resume_from`
+`until`, `detached`, `worktree`, `write_roots`, `resume_from`, `model`,
+`model_strength`, `thinking`
 
 plus the action-discriminated `dependentSchemas` tree (`start` requires
 `prompt`; `message`/`followup` require a target and `message`; `peek`/
 `interrupt`/`cancel` require a target). The schema change is part of the
 pinned prompt prefix, so upgrading re-fills the provider KV prefix once per
 session (docs/CACHE.md; accepted at the v0.9.9 boundary).
+
+`agent(action="roster")` reports each built-in role's resolved provider, model,
+reasoning effort, known route limits and capability provenance. It uses the
+same resolver as execution, including live session role defaults and the
+explore role's faster lane. Per-task `model` takes precedence over
+`model_strength`, then role defaults and the inherited session route.
+Foreign-provider model requests fail before admission; these controls do not
+change a child's authority. Saved Pod members use durable Pod dispatch.
+
+Cost classes describe current uncached text input/output rates, not the total
+price of a future task. Missing or routing-dependent prices remain unknown;
+subscription/local routes are labelled not money metered. Discovery makes no
+provider request and reports reachability as unverified.
 
 **Parse-accepted but unadvertised (compat).** The following inputs were
 removed from the advertised schema but remain accepted for saved transcripts,
@@ -407,8 +421,6 @@ intersects them with live policy:
 - delegation compatibility: `max_depth`, `maxDepth`, or `max_spawn_depth`;
   values are restricted to 0 through the Runtime hard ceiling of 8. New
   model-authored calls inherit the operator's `[subagents] max_depth` instead.
-- routing: `model`, `model_strength`, `thinking` (a `profile` pins route and
-  thinking tier; without one the child inherits the operator model)
 - workspace/isolation: `workspace_policy`, `write_authority`, `fork_context`,
   `cwd`, `worktree_path`, `worktree_branch`, `worktree_base`
 - spawn contract: `deliberate`, `dependencies`, `acceptance`,
