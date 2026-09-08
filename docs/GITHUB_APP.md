@@ -94,6 +94,18 @@ silently truncated or treated as a provider funding problem. Increasing the
 limit is an explicit input-budget choice and still requires a model with
 sufficient context; it is not proof that the review can complete.
 
+When the complete PR cannot fit, keep the failed advisory check and record
+that the model review did not run. Do not turn an input-limit failure into a
+clean review. Maintainers can review explicitly bounded paths with a trusted
+build using `review --base <base-sha> --path <path>` from a checkout pinned to
+the PR head. Local diff reviews also reject oversized input. These scopes
+cannot use `--pr` or `--post`; their receipts cover only the selected paths.
+Record the exact base/head, included paths and diff fingerprints, findings,
+checks actually run, and remaining coverage. Separately review interactions
+across paths and inspect changed media. A file inventory or a passing test
+suite is not evidence that those source reviews completed. This fallback
+does not change repository rules or satisfy a required whole-PR review.
+
 ## Output budget
 
 `CODEWHALE_REVIEW_MAX_OUTPUT_TOKENS` optionally sets the CLI's output budget

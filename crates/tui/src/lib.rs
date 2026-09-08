@@ -1264,7 +1264,7 @@ struct ReviewArgs {
     /// with "available from configured provider route(s): ...").
     #[arg(long)]
     provider: Option<String>,
-    /// Maximum diff characters; an oversized PR is refused, never truncated
+    /// Maximum diff characters; an oversized diff is refused, never truncated
     #[arg(long, default_value_t = 200_000)]
     max_chars: usize,
     /// Write a durable pre-push review receipt after a successful review
@@ -9281,7 +9281,7 @@ fn format_pr_prompt(number: u32, view: &GhPullRequest, diff: &str) -> String {
 }
 
 fn collect_diff(args: &ReviewArgs, pr_view: Option<&GhPullRequest>) -> Result<String> {
-    let mut diff = if let Some(number) = args.pr {
+    let diff = if let Some(number) = args.pr {
         run_gh_pr_diff(
             number,
             args.repo.as_deref(),
@@ -9312,10 +9312,20 @@ fn collect_diff(args: &ReviewArgs, pr_view: Option<&GhPullRequest>) -> Result<St
     };
     if args.pr.is_some() {
         crate::tools::review_pr::ensure_input_fits(&diff, args.max_chars)?;
-    } else if diff.len() > args.max_chars {
-        diff = crate::utils::truncate_with_ellipsis(&diff, args.max_chars, "\n...[truncated]\n");
+    } else {
+        ensure_local_review_diff_fits(&diff, args.max_chars)?;
     }
     Ok(diff)
+}
+
+fn ensure_local_review_diff_fits(diff: &str, max_chars: usize) -> Result<()> {
+    let chars = diff.chars().count();
+    if chars > max_chars {
+        bail!(
+            "Complete local diff requires {chars} characters, exceeding the review limit of {max_chars}. No review was run and no receipt was written or accepted. Select an explicit --path scope, or increase --max-chars only if the selected model can accept the complete input."
+        );
+    }
+    Ok(())
 }
 
 fn review_target_label(args: &ReviewArgs) -> String {
@@ -15700,6 +15710,31 @@ api_key = "test-only-key"
             "",
         ]
         .join("\n")
+    }
+
+    #[test]
+    fn local_review_budget_rejects_changes_beyond_a_shared_prefix() {
+        let prefix = review_test_diff();
+        let limit = prefix.chars().count();
+        for tail in ["+safe_change();\n", "+dangerous_change();\n"] {
+            let diff = format!("{prefix}{tail}");
+            let error = ensure_local_review_diff_fits(&diff, limit).unwrap_err();
+            assert!(error.to_string().contains("No review was run"));
+            assert!(
+                error
+                    .to_string()
+                    .contains("no receipt was written or accepted")
+            );
+        }
+    }
+
+    #[test]
+    fn local_review_budget_counts_unicode_characters_without_cutting_input() {
+        let diff = format!("{}+鲸鱼\n", review_test_diff());
+        let limit = diff.chars().count();
+        assert!(diff.len() > limit);
+        ensure_local_review_diff_fits(&diff, limit).unwrap();
+        assert!(ensure_local_review_diff_fits(&diff, limit - 1).is_err());
     }
 
     #[test]
