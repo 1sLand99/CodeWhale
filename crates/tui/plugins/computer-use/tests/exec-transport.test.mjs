@@ -157,3 +157,10 @@ test("hdc readFile cleans up its private temp dir even when the pull fails", asy
   assert.ok(seenLocal, "pull was attempted");
   assert.ok(!fs.existsSync(path.dirname(seenLocal)), "failed pull still cleans up its private temp dir");
 });
+
+test("hdc pullFile rejects traversal and shell metacharacters before execution", async () => {
+  const ex = hdcExec({});
+  for (const remote of ["/data/../secret", "/data/file;touch", "/data/$(touch)", "//data/file", null]) {
+    await assert.rejects(ex.pullFile(remote, "/unused-fixture-output"), /refusing unsafe remote path/);
+  }
+});

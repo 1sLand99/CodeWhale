@@ -279,14 +279,14 @@ test("an element losing its label or role is stale even if the geometry matches"
 
 test("a state_id issued on another computer fails state_wrong_computer", async () => {
   const st = await freshState(); // bound to "local"
-  const reg = await tool("computer_register", { computer: "pad", transport: "hdc" });
+  const reg = await tool("computer_register", { computer: "other-pad", transport: "hdc" });
   assert.equal(reg.ok, true);
   try {
-    const r = await tool("left_click", { computer: "pad", target: { type: "element", state_id: st.state_id, index: 1 } });
+    const r = await tool("left_click", { computer: "other-pad", target: { type: "element", state_id: st.state_id, index: 1 } });
     assert.equal(r.ok, false);
     assert.equal(r.error.code, "state_wrong_computer");
   } finally {
-    await tool("computer_remove", { computer: "pad" });
+    await tool("computer_remove", { computer: "other-pad" });
     await tool("computer_switch", { computer: "local" });
   }
 });

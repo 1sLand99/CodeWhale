@@ -5,7 +5,7 @@
 // computer id switches the sticky active computer.
 import fs from "node:fs";
 import * as registry from "../src/registry.mjs";
-import { backendFor, installRemoteAgent, executorFor, closeAppSession } from "../src/transport.mjs";
+import { backendFor, installRemoteAgent, executorFor, closeAppSession, routeFingerprint } from "../src/transport.mjs";
 import { TOOLS, TOOL_NAMES, READ_ONLY_TOOLS, REMOTE_TOOLS, BACKEND_METHOD } from "../src/tools.mjs";
 import { tryJson, withSignal, throwIfAborted, wait } from "../src/exec.mjs";
 
@@ -27,8 +27,12 @@ let dispatch = Promise.resolve();
 const appStates = new Map();
 /** computerId -> last raster metadata {file, scale, origin} */
 const lastRasters = new Map();
-/** computerId -> cached backend (local/hdc only) */
+/** computerId -> route-bound session resources; the registry owns configuration. */
 const backendCache = new Map();
+const ROUTE_INSPECTION_TOOLS = new Set([
+  "request_access", "list_displays", "list_apps", "list_windows", "get_app_state", "screenshot",
+  "cursor_position", "read_clipboard", "recording_list", "recording_status",
+]);
 
 function receipt(computer, extra) {
   return {
@@ -42,17 +46,67 @@ function fail(computer, code, message, extra = {}) {
   return receipt(computer, { ok: false, error: { code, message }, ...extra });
 }
 
-async function getBackend(computer) {
-  const key = computer.id;
-  if (computer.transport === "local" || computer.transport === "hdc") {
-    if (!backendCache.has(key)) {
-      const { backend } = await backendFor(computer);
-      backendCache.set(key, backend);
-    }
-    return backendCache.get(key);
+function invalidateObservations(id) {
+  lastRasters.delete(id);
+  for (const [stateId, state] of appStates) {
+    if (state.computerId === id) appStates.delete(stateId);
   }
-  const { backend } = await backendFor(computer);
-  return backend;
+}
+
+async function retireBinding(id) {
+  const binding = backendCache.get(id);
+  invalidateObservations(id);
+  if (!binding) return;
+  // Mark unusable before awaiting cleanup. A failure, or a catalog rollback,
+  // must never resurrect this backend or its observations.
+  binding.retired = true;
+  binding.needsObservation = true;
+  await withSignal(null, async () => {
+    const outcomes = await Promise.allSettled([
+      binding.usedApp ? closeAppSession() : Promise.resolve(),
+      (async () => {
+        try { await binding.backend?.releaseInput?.(); }
+        finally { await binding.backend?.closeSession?.(); }
+      })(),
+    ]);
+    const failed = outcomes.find(result => result.status === "rejected");
+    if (failed) throw failed.reason;
+  });
+  binding.backend = null;
+}
+
+async function bindComputer(computer) {
+  const route = routeFingerprint(computer);
+  let binding = backendCache.get(computer.id);
+  if (binding && (binding.route !== route || binding.retired)) {
+    await retireBinding(computer.id);
+    binding = { route, needsObservation: true };
+    backendCache.set(computer.id, binding);
+  } else if (!binding) {
+    binding = { route, needsObservation: false };
+    backendCache.set(computer.id, binding);
+  }
+  return binding;
+}
+
+async function assertCurrentRoute(computer, binding, dispatched = false) {
+  try {
+    let current;
+    try { current = registry.get(computer.id); }
+    catch (err) { await retireBinding(computer.id); throw err; }
+    if (binding.retired || routeFingerprint(current) !== binding.route) {
+      await bindComputer(current);
+      throw new ServerError("computer_route_changed", "Computer route changed during this request — observe the registered target again before acting");
+    }
+  } catch (err) {
+    if (dispatched) err.requestDispatched = true;
+    throw err;
+  }
+}
+
+async function getBackend(computer, binding) {
+  if (!binding.backend) binding.backend = (await backendFor(computer)).backend;
+  return binding.backend;
 }
 
 /** Element target -> enriched target with cached app identity and AX path. */
@@ -234,6 +288,7 @@ async function callTool(params) {
   if (name === "computer_register") {
     try {
       const entry = registry.register({ id: args.computer, transport: args.transport, label: args.label, host: args.host, port: args.port, user: args.user, target: args.target });
+      await bindComputer(entry);
       let installed = null;
       if (entry.transport === "ssh" && args.installAgent !== false) {
         installed = await installRemoteAgent(entry);
@@ -248,6 +303,7 @@ async function callTool(params) {
         } catch {}
       }
       const fresh = registry.get(entry.id);
+      await bindComputer(fresh);
       return { content: [{ type: "text", text: JSON.stringify(receipt(null, { ok: true, registered: { ...fresh, platform: fresh.platform ?? fresh.platformHint ?? null }, agentInstall: installed })) }] };
     } catch (err) {
       // Registration problems (unreachable host, agent push failed) are
@@ -260,8 +316,7 @@ async function callTool(params) {
     const res = registry.remove(args.computer);
     if (activeComputerId === args.computer) activeComputerId = "local";
     res.active = activeComputerId;
-    backendCache.delete(args.computer);
-    lastRasters.delete(args.computer);
+    await retireBinding(args.computer);
     return { content: [{ type: "text", text: JSON.stringify(receipt(null, { ok: true, ...res })) }] };
   }
 
@@ -283,15 +338,23 @@ async function callTool(params) {
       computer = registry.get(activeComputerId);
     }
   } catch (err) {
+    await retireBinding(args.computer || activeComputerId);
     return { content: [{ type: "text", text: JSON.stringify(fail(null, err.code ?? "registry_error", err.message)) }], isError: true };
   }
 
+  let binding;
+  let dispatched = false;
   try {
+    binding = await bindComputer(computer);
+    if (binding.needsObservation && !ROUTE_INSPECTION_TOOLS.has(name)) {
+      throw new ServerError("computer_observation_required", "Computer route changed — call screenshot or get_app_state on the registered target before acting");
+    }
     // Out-of-process runners (the desktop app for the local computer, the
     // remote agent for ssh computers) get the request over the wire.
     const backendMethod = BACKEND_METHOD[name] === "request_access" ? "probe" : BACKEND_METHOD[name];
     let data;
     const ex = computer.transport === "local" || computer.transport === "ssh" ? await executorFor(computer) : null;
+    if (ex?.kind === "app") binding.usedApp = true;
     // Zoom needs the bound parent raster up front (server-side check too, not
     // only the backend) so it can bind the child raster after success.
     let zoomParent = null;
@@ -310,17 +373,20 @@ async function callTool(params) {
       };
       const wireArgs = await prepareArgs(computer, name, args, resolve, sink);
       throwIfAborted();
+      await assertCurrentRoute(computer, binding);
       // Re-check the kill switch: a stop that arrived while the executor was
       // being resolved still blocks this dispatch.
       if (controlStopped && !READ_ONLY_TOOLS.has(name)) throw new ServerError("control_stopped", "stop_computer_control is active; no further actions are permitted this session");
       inFlight++;
       let reply;
       try {
+        dispatched = true;
         reply = await ex.remote({ tool: backendMethod, args: wireArgs }, { timeoutMs: backendMethod.startsWith("recording") || backendMethod === "get_app_state" ? 60_000 : 30_000 });
       } finally {
         inFlight--;
       }
       if (!reply.ok) throw new ServerError(reply.error?.code ?? "remote_error", reply.error?.message ?? "remote agent failed");
+      await assertCurrentRoute(computer, binding, true);
       data = reply.data;
       if (Array.isArray(data)) data = { items: data };
       if ((backendMethod === "screenshot" || backendMethod === "zoom") && data?.file) {
@@ -337,20 +403,23 @@ async function callTool(params) {
       }
       if (backendMethod === "probe") Object.assign(data, { via: ex.kind, app: ex.app ?? null });
     } else {
-      const backend = await getBackend(computer);
+      const backend = await getBackend(computer, binding);
       if (typeof backend[backendMethod] !== "function") {
         throw new ServerError("unsupported_on_backend", `"${name}" is not implemented on the ${computer.platform ?? computer.transport} backend`);
       }
       const resolve = typeof backend.resolve_element === "function" ? (req) => backend.resolve_element(req) : null;
       const prepared = await prepareArgs(computer, name, args, resolve, sink);
       throwIfAborted();
+      await assertCurrentRoute(computer, binding);
       if (controlStopped && !READ_ONLY_TOOLS.has(name)) throw new ServerError("control_stopped", "stop_computer_control is active; no further actions are permitted this session");
       inFlight++;
       try {
+        dispatched = true;
         data = await backend[backendMethod](prepared);
       } finally {
         inFlight--;
       }
+      await assertCurrentRoute(computer, binding, true);
       if (Array.isArray(data)) data = { items: data }; // keep receipts objects
       if (name === "screenshot") bindRaster(computer, data);
       if (backendMethod === "zoom") bindZoomRaster(computer, zoomParent, args.region, data?.file ?? data?.path);
@@ -377,9 +446,25 @@ async function callTool(params) {
       const bytes = fs.readFileSync(data.file || data.path);
       content.push({ type: "image", mimeType: bytes[0] === 0xff ? "image/jpeg" : "image/png", data: bytes.toString("base64") });
     }
+    if ((name === "screenshot" && (data?.file || data?.path) && data?.pixels?.w > 0 && data?.pixels?.h > 0) ||
+        (name === "get_app_state" && data?.found !== false && Array.isArray(data?.elements))) {
+      binding.needsObservation = false;
+    }
     return { content };
   } catch (err) {
-    return { content: [{ type: "text", text: JSON.stringify(fail(computer, err.code ?? "tool_error", err.message ?? String(err), { tool: name, switched })) }], isError: true };
+    let outcomeUnknown = !!err.requestDispatched;
+    if (dispatched && !outcomeUnknown) {
+      // A transport/backend can fail after delivering input. Reconcile its
+      // captured route on failure too, without replacing the original error
+      // with a route/cleanup error or claiming an unchanged-route failure sent input.
+      try { await assertCurrentRoute(computer, binding, true); }
+      catch { outcomeUnknown = true; }
+    }
+    return { content: [{ type: "text", text: JSON.stringify(fail(computer, err.code ?? "tool_error", err.message ?? String(err), {
+      tool: name, switched,
+      ...(outcomeUnknown ? { request_dispatched: true, outcome_unknown: true,
+        note: "Dispatch to the previous route was attempted; its effect is unconfirmed. Observe the current target; do not automatically retry the action." } : {}),
+    })) }], isError: true };
   }
 }
 
@@ -478,9 +563,9 @@ async function releaseControl({ releaseOnly = false } = {}) {
         await dispatch;
         await withSignal(null, () => Promise.all([
           closeAppSession({ releaseOnly }),
-          ...[...backendCache.values()].map(async (backend) => {
-            await backend.releaseInput?.();
-            if (!releaseOnly) await backend.closeSession?.();
+          ...[...backendCache.values()].map(async ({ backend }) => {
+            await backend?.releaseInput?.();
+            if (!releaseOnly) await backend?.closeSession?.();
           }),
         ]));
       })(),

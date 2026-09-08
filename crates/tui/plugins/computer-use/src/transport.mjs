@@ -19,10 +19,12 @@ export const PLUGIN_ROOT = path.resolve(__dirname, "..");
 // the permission-owning desktop helper remains running across tasks.
 export const SESSION_ID = crypto.randomUUID();
 let usedApp = false;
+let appSessionClosed = false;
 export function closeAppSession({ releaseOnly = false } = {}) {
-  if (!usedApp) return Promise.resolve();
+  if (!usedApp || appSessionClosed) return Promise.resolve();
   return appSessionRequest({ tool: releaseOnly ? "release_session_input" : "close_session", sessionId: SESSION_ID }, { timeoutMs: 2_500, signal: null }).then((reply) => {
     if (!reply?.ok) throw Object.assign(new ExecError(reply?.error?.message ?? "Computer input cleanup failed"), { code: reply?.error?.code ?? "input_release_failed" });
+    if (!releaseOnly) appSessionClosed = true;
   });
 }
 
@@ -70,6 +72,7 @@ export function appExec(app, sessionId = SESSION_ID) {
     app,
     filesLocal: true,
     remote(request, opts = {}) {
+      if (sessionId === SESSION_ID && appSessionClosed) throw Object.assign(new ExecError("Computer session was closed; start a new MCP session to use the local helper again"), { code: "app_session_closed" });
       usedApp = true;
       return appSessionRequest({ ...request, sessionId }, { timeoutMs: opts.timeoutMs ?? 30_000 });
     },
@@ -143,7 +146,9 @@ export function hdcExec(computer) {
     runOk,
     shell,
     async pullFile(remotePath, localPath, opts = {}) {
-      safeRemotePath(remotePath);
+      // HDC device captures use absolute paths; SSH agent paths are relative.
+      // Validate the remaining path with the same traversal/metacharacter guard.
+      safeRemotePath(typeof remotePath === "string" ? remotePath.replace(/^\//, "") : remotePath);
       const r = await run("hdc", [...targetArgs, "file", "recv", remotePath, localPath], opts);
       if (r.code !== 0) throw new ExecError(`hdc file recv failed: ${r.stderr.trim().slice(0, 300)}`, r);
       return localPath;
@@ -189,13 +194,27 @@ export async function executorFor(computer) {
  * Map a computer to its backend module. Local platform is fixed; ssh
  * computers may carry platformHint (probed at registration).
  */
-export async function backendFor(computer) {
+function effectivePlatform(computer) {
   let platform = computer.platform ?? computer.platformHint;
   if (!platform) {
     if (computer.transport === "local") platform = process.platform;
     else if (computer.transport === "hdc") platform = "harmonyos";
     else platform = "linux"; // conservative default for ssh; registration probes it
   }
+  return platform;
+}
+
+/** Identity of the effective route, excluding catalog presentation metadata. */
+export function routeFingerprint(computer) {
+  const route = [computer.transport, effectivePlatform(computer)];
+  if (computer.transport === "hdc") route.push(computer.target || null);
+  if (computer.transport === "ssh") route.push(computer.host, computer.user || null,
+    computer.port || null, computer.agentPath ?? ".codewhale-cu/agent/agent.mjs");
+  return JSON.stringify(route);
+}
+
+export async function backendFor(computer) {
+  const platform = effectivePlatform(computer);
   // Test hook: inject a fake local backend by absolute path to an .mjs
   // module exporting `create` (used by tests/, never set in production).
   const testBackend = computer.transport === "local" && process.env.CODEWHALE_CU_TEST_BACKEND;
