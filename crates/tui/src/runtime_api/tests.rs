@@ -121,12 +121,12 @@ fn provider_default_model_cases() -> Vec<(&'static str, Config, &'static str)> {
 fn runtime_request_model_uses_the_active_provider_default() {
     for (label, config, expected) in provider_default_model_cases() {
         assert_eq!(
-            runtime_request_model(&config, None),
+            runtime_request_model(&config, None).expect("configured default"),
             expected,
             "{label} omitted-model resolution"
         );
         assert_eq!(
-            runtime_request_model(&config, Some("explicit-model")),
+            runtime_request_model(&config, Some("explicit-model")).expect("explicit model"),
             "explicit-model",
             "{label} explicit model"
         );
@@ -444,16 +444,20 @@ fn messages_from_thread_detail_batches_tool_results() {
         ended_at: Some(now),
         duration_ms: Some(0),
         usage: None,
+        routing_settlement: false,
+        effective_route_usage: None,
         permission_posture: Some("ask".to_string()),
         effective_provider: None,
         effective_provider_id: None,
         effective_openrouter_vendor: None,
         effective_billing_surface: None,
         effective_endpoint_fingerprint: None,
+        effective_provider_live_pricing: None,
         effective_billing_mode: None,
         effective_dispatched_at: None,
         effective_model: None,
         routed_usage: Vec::new(),
+        routed_usage_drop_records: Vec::new(),
         routed_usage_source_ids: Vec::new(),
         routed_usage_dropped_records: 0,
         error: None,
@@ -981,6 +985,155 @@ async fn spawn_test_server_with_root_token_mobile_workspace_and_overrides(
         tokio::task::JoinHandle<()>,
     )>,
 > {
+    let (setup_tx, setup_rx) = oneshot::channel();
+    // If this test sealed the process environment (`lock_test_env`), the
+    // server thread must join that scope: its `Config::load` reads env through
+    // `with_test_env_lock`, which would otherwise block on the mutex the test
+    // holds while awaiting this very setup — a deadlock.
+    let env_ticket = crate::test_support::env_scope_ticket();
+    spawn_product_stack_server(
+        root,
+        sessions_dir,
+        runtime_token,
+        mobile_enabled,
+        workspace,
+        overrides,
+        env_ticket,
+        setup_tx,
+    );
+    let Some((addr, runtime_threads, shutdown_tx)) = setup_rx
+        .await
+        .context("runtime-api test server thread ended during setup")??
+    else {
+        return Ok(None);
+    };
+    // Owns the shutdown side for as long as the test keeps the handle alive:
+    // aborting it (or the test runtime dropping it) closes the listener and
+    // ends the server thread.
+    let handle = tokio::spawn(async move {
+        let _shutdown = shutdown_tx;
+        std::future::pending::<()>().await
+    });
+    Ok(Some((addr, runtime_threads, handle)))
+}
+
+/// What the server thread hands back once the router is bound: everything the
+/// test body needs, plus the shutdown side of the server.
+type TestServerSetup = (SocketAddr, SharedRuntimeThreadManager, oneshot::Sender<()>);
+
+/// Builds and serves the Runtime API router where the product builds and
+/// serves it: on a thread with the product's `CODEWHALE_MAIN_STACK_BYTES`
+/// stack.
+///
+/// `#[tokio::test]` drives its current-thread runtime on the 2 MiB libtest
+/// thread, so a harness that built its state and spawned its server onto that
+/// runtime ran every product path — config load and reload (the serde
+/// `toml::de::visit_map` frames for the full `Config`), manager construction,
+/// thread lifecycle, streaming — on a stack the product never gives it
+/// (`lib.rs` sizes the runtime workers with `CODEWHALE_MAIN_STACK_BYTES`).
+/// Config load under a profile and the thread-lifecycle path marginally
+/// overflowed 2 MiB in debug builds (`has overflowed its stack`, SIGABRT for
+/// the whole lib suite), which CI masked with `RUST_MIN_STACK`. Running setup
+/// *and* serving on one product-sized thread removes the class: the libtest
+/// thread keeps only the test body and its HTTP client, and no product frame
+/// depth can overflow it.
+///
+/// Setup results come back through `setup_tx`; the caller wraps the shutdown
+/// sender in the `JoinHandle` the call sites expect. Nothing here runs on the
+/// test's runtime, so the server thread must outlive setup: it serves until
+/// the shutdown sender is dropped.
+///
+/// `env_ticket` adopts the thread into the calling test's sealed env scope
+/// (`test_env_lock::join_env_scope`), so its `Config::load` env reads see the
+/// test's environment instead of blocking on the mutex the test holds while
+/// awaiting setup. `None` when the caller sealed nothing.
+fn spawn_product_stack_server(
+    root: PathBuf,
+    sessions_dir: PathBuf,
+    runtime_token: Option<String>,
+    mobile_enabled: bool,
+    workspace: PathBuf,
+    overrides: TestServerOverrides,
+    env_ticket: Option<crate::test_support::EnvScopeTicket>,
+    setup_tx: oneshot::Sender<Result<Option<TestServerSetup>>>,
+) {
+    std::thread::Builder::new()
+        .name("runtime-api-test-server".to_string())
+        .stack_size(crate::CODEWHALE_MAIN_STACK_BYTES)
+        .spawn(move || {
+            // Adopted for the thread's lifetime; the scope's generation check
+            // refuses enrollment once the sealing test has ended.
+            let _membership = crate::test_support::join_env_scope(env_ticket);
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime-api test server runtime");
+            runtime.block_on(async move {
+                match build_test_server(
+                    root,
+                    sessions_dir,
+                    runtime_token,
+                    mobile_enabled,
+                    workspace,
+                    overrides,
+                )
+                .await
+                {
+                    Ok(Some((listener, app, addr, runtime_threads))) => {
+                        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+                        if setup_tx
+                            .send(Ok(Some((addr, runtime_threads, shutdown_tx))))
+                            .is_err()
+                        {
+                            // The test gave up waiting; do not serve.
+                            return;
+                        }
+                        listener
+                            .set_nonblocking(true)
+                            .expect("nonblocking test listener");
+                        let listener =
+                            TcpListener::from_std(listener).expect("register test listener");
+                        tokio::select! {
+                            _ = async {
+                                let _ = axum::serve(
+                                    listener,
+                                    app.into_make_service_with_connect_info::<SocketAddr>(),
+                                )
+                                .await;
+                            } => {}
+                            _ = shutdown_rx => {}
+                        }
+                    }
+                    Ok(None) => {
+                        let _ = setup_tx.send(Ok(None));
+                    }
+                    Err(err) => {
+                        let _ = setup_tx.send(Err(err));
+                    }
+                }
+            });
+        })
+        .expect("spawn runtime-api test server thread");
+}
+
+/// The whole harness body — config load, managers, router build — formerly
+/// inline in `spawn_test_server_with_root_token_mobile_workspace_and_overrides`.
+/// Runs on the product-stack server thread (see `spawn_product_stack_server`).
+async fn build_test_server(
+    root: PathBuf,
+    sessions_dir: PathBuf,
+    runtime_token: Option<String>,
+    mobile_enabled: bool,
+    workspace: PathBuf,
+    overrides: TestServerOverrides,
+) -> Result<
+    Option<(
+        std::net::TcpListener,
+        axum::Router,
+        SocketAddr,
+        SharedRuntimeThreadManager,
+    )>,
+> {
     let _ = rustls::crypto::ring::default_provider().install_default();
     fs::create_dir_all(&sessions_dir)?;
     fs::create_dir_all(&workspace)?;
@@ -995,8 +1148,6 @@ async fn spawn_test_server_with_root_token_mobile_workspace_and_overrides(
             ..Config::default()
         }
     };
-    config.mcp_config_path = Some(root.join("mcp.json").to_string_lossy().to_string());
-
     config.mcp_config_path = Some(root.join("mcp.json").to_string_lossy().to_string());
     let manager = TaskManager::start_with_executor(
         TaskManagerConfig {
@@ -1027,7 +1178,9 @@ async fn spawn_test_server_with_root_token_mobile_workspace_and_overrides(
     let sub_agent_manager = overrides
         .sub_agent_manager
         .unwrap_or_else(|| runtime_api_sub_agent_manager(&workspace, 2));
-    let listener = match TcpListener::bind("127.0.0.1:0").await {
+    // A std listener: the server thread registers it with its own runtime
+    // after setup is reported (see `spawn_product_stack_server`).
+    let listener = match std::net::TcpListener::bind("127.0.0.1:0") {
         Ok(listener) => listener,
         Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => return Ok(None),
         Err(err) => return Err(err.into()),
@@ -1073,14 +1226,7 @@ async fn spawn_test_server_with_root_token_mobile_workspace_and_overrides(
         compat_stream_test_hook: overrides.compat_stream_test_hook,
     };
     let app = build_router(state);
-    let handle = tokio::spawn(async move {
-        let _ = axum::serve(
-            listener,
-            app.into_make_service_with_connect_info::<SocketAddr>(),
-        )
-        .await;
-    });
-    Ok(Some((addr, runtime_threads, handle)))
+    Ok(Some((listener, app, addr, runtime_threads)))
 }
 
 async fn spawn_test_server() -> Result<
@@ -2604,6 +2750,12 @@ async fn compatibility_stream_closes_losslessly_across_replay_live_handoff() -> 
                     output_tokens: 1,
                     ..Usage::default()
                 },
+                parent_route_usage: Usage {
+                    input_tokens: 3,
+                    output_tokens: 1,
+                    ..Usage::default()
+                },
+                routed_usage_dropped_records: 0,
                 status: TurnOutcomeStatus::Completed,
                 error: None,
                 tool_catalog: None,
@@ -2852,6 +3004,8 @@ async fn compatibility_stream_exposes_and_resolves_user_input_without_answer_ech
             .tx_event
             .send(EngineEvent::TurnComplete {
                 usage: Usage::default(),
+                parent_route_usage: Usage::default(),
+                routed_usage_dropped_records: 0,
                 status: TurnOutcomeStatus::Completed,
                 error: None,
                 tool_catalog: None,
@@ -3215,6 +3369,12 @@ async fn thread_endpoints_expose_lifecycle_contract() -> Result<()> {
                                 output_tokens: 5,
                                 ..Usage::default()
                             },
+                            parent_route_usage: Usage {
+                                input_tokens: 10,
+                                output_tokens: 5,
+                                ..Usage::default()
+                            },
+                            routed_usage_dropped_records: 0,
                             status: TurnOutcomeStatus::Completed,
                             error: None,
                             tool_catalog: None,
@@ -3230,6 +3390,8 @@ async fn thread_endpoints_expose_lifecycle_contract() -> Result<()> {
                                 output_tokens: 0,
                                 ..Usage::default()
                             },
+                            parent_route_usage: Usage::default(),
+                            routed_usage_dropped_records: 0,
                             status: TurnOutcomeStatus::Completed,
                             error: None,
                             tool_catalog: None,
@@ -3367,6 +3529,8 @@ async fn turn_endpoint_operation_key_returns_original_and_conflicts_on_mismatch(
             let _ = tx_event
                 .send(EngineEvent::TurnComplete {
                     usage: Usage::default(),
+                    parent_route_usage: Usage::default(),
+                    routed_usage_dropped_records: 0,
                     status: TurnOutcomeStatus::Completed,
                     error: None,
                     tool_catalog: None,
@@ -3475,6 +3639,12 @@ async fn events_endpoint_respects_since_seq_cursor() -> Result<()> {
                     output_tokens: 3,
                     ..Usage::default()
                 },
+                parent_route_usage: Usage {
+                    input_tokens: 5,
+                    output_tokens: 3,
+                    ..Usage::default()
+                },
+                routed_usage_dropped_records: 0,
                 status: TurnOutcomeStatus::Completed,
                 error: None,
                 tool_catalog: None,
@@ -3694,6 +3864,12 @@ async fn steer_and_interrupt_endpoints_work_on_active_turn() -> Result<()> {
                     output_tokens: 1,
                     ..Usage::default()
                 },
+                parent_route_usage: Usage {
+                    input_tokens: 2,
+                    output_tokens: 1,
+                    ..Usage::default()
+                },
+                routed_usage_dropped_records: 0,
                 status: TurnOutcomeStatus::Completed,
                 error: None,
                 tool_catalog: None,
@@ -4051,6 +4227,12 @@ async fn stream_endpoint_remains_backward_compatible() -> Result<()> {
                     output_tokens: 2,
                     ..Usage::default()
                 },
+                parent_route_usage: Usage {
+                    input_tokens: 4,
+                    output_tokens: 2,
+                    ..Usage::default()
+                },
+                routed_usage_dropped_records: 0,
                 status: TurnOutcomeStatus::Completed,
                 error: None,
                 tool_catalog: None,
@@ -4740,6 +4922,12 @@ async fn session_create_from_thread_rejects_active_turn() -> Result<()> {
                     output_tokens: 1,
                     ..Usage::default()
                 },
+                parent_route_usage: Usage {
+                    input_tokens: 2,
+                    output_tokens: 1,
+                    ..Usage::default()
+                },
+                routed_usage_dropped_records: 0,
                 status: TurnOutcomeStatus::Completed,
                 error: None,
                 tool_catalog: None,
@@ -4883,7 +5071,10 @@ async fn session_summary_route_projects_rows_and_honours_archive_filters() -> Re
     let client = crate::tls::reqwest_client();
 
     let active: Vec<serde_json::Value> = client
-        .get(format!("http://{addr}/v1/sessions/summary"))
+        .get(format!(
+            "http://127.0.0.1:{}/v1/sessions/summary",
+            addr.port()
+        ))
         .send()
         .await?
         .error_for_status()?
@@ -4913,7 +5104,8 @@ async fn session_summary_route_projects_rows_and_honours_archive_filters() -> Re
 
     let archived: Vec<serde_json::Value> = client
         .get(format!(
-            "http://{addr}/v1/sessions/summary?archived_only=true"
+            "http://127.0.0.1:{}/v1/sessions/summary?archived_only=true",
+            addr.port()
         ))
         .send()
         .await?
@@ -4944,7 +5136,10 @@ async fn session_patch_route_renames_archives_and_reports_real_changes() -> Resu
     let client = crate::tls::reqwest_client();
 
     let patched: serde_json::Value = client
-        .patch(format!("http://{addr}/v1/sessions/sess-patch"))
+        .patch(format!(
+            "http://127.0.0.1:{}/v1/sessions/sess-patch",
+            addr.port()
+        ))
         .json(&json!({ "title": "After", "archived": true }))
         .send()
         .await?
@@ -4964,7 +5159,10 @@ async fn session_patch_route_renames_archives_and_reports_real_changes() -> Resu
 
     // A re-patch to the same state changes nothing, and says so.
     let repeat: serde_json::Value = client
-        .patch(format!("http://{addr}/v1/sessions/sess-patch"))
+        .patch(format!(
+            "http://127.0.0.1:{}/v1/sessions/sess-patch",
+            addr.port()
+        ))
         .json(&json!({ "archived": true }))
         .send()
         .await?
@@ -4981,7 +5179,10 @@ async fn session_patch_route_renames_archives_and_reports_real_changes() -> Resu
 
     // An empty body is a client error, not a silent no-op.
     let empty = client
-        .patch(format!("http://{addr}/v1/sessions/sess-patch"))
+        .patch(format!(
+            "http://127.0.0.1:{}/v1/sessions/sess-patch",
+            addr.port()
+        ))
         .json(&json!({}))
         .send()
         .await?;
@@ -4989,7 +5190,10 @@ async fn session_patch_route_renames_archives_and_reports_real_changes() -> Resu
 
     // A blank title is rejected with the reason, not accepted.
     let blank = client
-        .patch(format!("http://{addr}/v1/sessions/sess-patch"))
+        .patch(format!(
+            "http://127.0.0.1:{}/v1/sessions/sess-patch",
+            addr.port()
+        ))
         .json(&json!({ "title": "   " }))
         .send()
         .await?;
@@ -5016,7 +5220,10 @@ async fn session_patch_route_refuses_a_live_session_with_a_conflict() -> Result<
 
     crate::session_manager::set_live_session(Some("sess-live"));
     let conflict = client
-        .patch(format!("http://{addr}/v1/sessions/sess-live"))
+        .patch(format!(
+            "http://127.0.0.1:{}/v1/sessions/sess-live",
+            addr.port()
+        ))
         .json(&json!({ "title": "Renamed from the dashboard" }))
         .send()
         .await?;
@@ -5024,7 +5231,10 @@ async fn session_patch_route_refuses_a_live_session_with_a_conflict() -> Result<
 
     crate::session_manager::set_live_session(None);
     let allowed = client
-        .patch(format!("http://{addr}/v1/sessions/sess-live"))
+        .patch(format!(
+            "http://127.0.0.1:{}/v1/sessions/sess-live",
+            addr.port()
+        ))
         .json(&json!({ "title": "Renamed from the dashboard" }))
         .send()
         .await?;
@@ -5047,7 +5257,8 @@ async fn session_detail_route_serves_a_bounded_redacted_peek_on_request() -> Res
 
     let peek: serde_json::Value = client
         .get(format!(
-            "http://{addr}/v1/sessions/sess-peek?peek=true&entries=12"
+            "http://127.0.0.1:{}/v1/sessions/sess-peek?peek=true&entries=12",
+            addr.port()
         ))
         .send()
         .await?
@@ -5069,7 +5280,10 @@ async fn session_detail_route_serves_a_bounded_redacted_peek_on_request() -> Res
     }
 
     let detail: serde_json::Value = client
-        .get(format!("http://{addr}/v1/sessions/sess-peek"))
+        .get(format!(
+            "http://127.0.0.1:{}/v1/sessions/sess-peek",
+            addr.port()
+        ))
         .send()
         .await?
         .error_for_status()?
@@ -5553,12 +5767,15 @@ async fn session_save_merges_thread_cost_split_and_records_coverage() -> Result<
             output_tokens: 1_000,
             ..Usage::default()
         }),
+        routing_settlement: false,
+        effective_route_usage: None,
         permission_posture: None,
         effective_provider: None,
         effective_provider_id: None,
         effective_openrouter_vendor: None,
         effective_billing_surface: None,
         effective_endpoint_fingerprint: None,
+        effective_provider_live_pricing: None,
         effective_billing_mode: None,
         effective_dispatched_at: None,
         effective_model: None,
@@ -5570,6 +5787,7 @@ async fn session_save_merges_thread_cost_split_and_records_coverage() -> Result<
                 model: "deepseek-v4-flash".to_string(),
                 billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE.to_string()),
                 endpoint_fingerprint: None,
+                provider_live_pricing: None,
                 billing_mode: crate::cost_status::RouteBillingMode::Metered,
                 dispatched_at: now,
             },
@@ -5579,6 +5797,7 @@ async fn session_save_merges_thread_cost_split_and_records_coverage() -> Result<
                 ..Usage::default()
             },
         }],
+        routed_usage_drop_records: Vec::new(),
         routed_usage_source_ids: Vec::new(),
         routed_usage_dropped_records: 0,
         error: None,
@@ -5740,12 +5959,15 @@ async fn session_save_persists_parent_cny_unpriced_reasons_without_double_count(
             output_tokens: 1_000,
             ..Usage::default()
         }),
+        routing_settlement: false,
+        effective_route_usage: None,
         permission_posture: None,
         effective_provider: None,
         effective_provider_id: None,
         effective_openrouter_vendor: None,
         effective_billing_surface: None,
         effective_endpoint_fingerprint: None,
+        effective_provider_live_pricing: None,
         effective_billing_mode: None,
         effective_dispatched_at: None,
         effective_model: None,
@@ -5757,6 +5979,7 @@ async fn session_save_persists_parent_cny_unpriced_reasons_without_double_count(
                 model: "deepseek-v4-flash".to_string(),
                 billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE.to_string()),
                 endpoint_fingerprint: None,
+                provider_live_pricing: None,
                 billing_mode: crate::cost_status::RouteBillingMode::Metered,
                 dispatched_at: now,
             },
@@ -5766,6 +5989,7 @@ async fn session_save_persists_parent_cny_unpriced_reasons_without_double_count(
                 ..Usage::default()
             },
         }],
+        routed_usage_drop_records: Vec::new(),
         routed_usage_source_ids: Vec::new(),
         routed_usage_dropped_records: 0,
         error: None,
@@ -6741,16 +6965,20 @@ fn seed_summary_search_transcript(
             ended_at: Some(created_at),
             duration_ms: Some(0),
             usage: None,
+            routing_settlement: false,
+            effective_route_usage: None,
             permission_posture: None,
             effective_provider: None,
             effective_provider_id: None,
             effective_openrouter_vendor: None,
             effective_billing_surface: None,
             effective_endpoint_fingerprint: None,
+            effective_provider_live_pricing: None,
             effective_billing_mode: None,
             effective_dispatched_at: None,
             effective_model: None,
             routed_usage: Vec::new(),
+            routed_usage_drop_records: Vec::new(),
             routed_usage_source_ids: Vec::new(),
             routed_usage_dropped_records: 0,
             error: None,
@@ -7617,6 +7845,209 @@ async fn get_provider_models(
         .expect("GET /v1/providers/{id}/models should return valid JSON")
 }
 
+#[test]
+fn provider_model_catalog_paginates_all_six_hundred_rows_without_truncation() {
+    let models = (0..600)
+        .rev()
+        .map(|index| ProviderModelEntry {
+            id: format!("openrouter/model-{index:03}"),
+            image_input: codewhale_config::route::CapabilityState::Unknown,
+        })
+        .collect::<Vec<_>>();
+    let mut cursor = None;
+    let mut observed = Vec::new();
+    let mut page_count = 0usize;
+
+    loop {
+        let response = paginate_provider_models(
+            "openrouter",
+            models.clone(),
+            &ListProviderModelsParams {
+                filter: None,
+                cursor,
+                limit: Some(MAX_PROVIDER_MODELS_PAGE_SIZE),
+            },
+        )
+        .expect("page should be valid");
+        page_count += 1;
+        assert_eq!(response.provider, "openrouter");
+        assert_eq!(response.total, 600);
+        assert!(!response.models.is_empty());
+        assert!(response.models.len() <= MAX_PROVIDER_MODELS_PAGE_SIZE);
+        observed.extend(response.models.into_iter().map(|entry| entry.id));
+        cursor = response.next_cursor;
+        if cursor.is_none() {
+            break;
+        }
+    }
+
+    assert_eq!(page_count, 3);
+    assert_eq!(observed.len(), 600);
+    assert_eq!(
+        observed.first().map(String::as_str),
+        Some("openrouter/model-000")
+    );
+    assert_eq!(
+        observed.last().map(String::as_str),
+        Some("openrouter/model-599")
+    );
+    let unique = observed.iter().collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(unique.len(), 600);
+}
+
+#[test]
+fn provider_model_catalog_applies_filter_before_cursor_and_rejects_cross_scope_replay() {
+    let models = ["Alpha-One", "alpha-two", "beta"]
+        .into_iter()
+        .map(|id| ProviderModelEntry {
+            id: id.to_string(),
+            image_input: codewhale_config::route::CapabilityState::Unknown,
+        })
+        .collect::<Vec<_>>();
+    let first = paginate_provider_models(
+        "openrouter",
+        models.clone(),
+        &ListProviderModelsParams {
+            filter: Some(" ALPHA ".to_string()),
+            cursor: None,
+            limit: Some(1),
+        },
+    )
+    .expect("filtered first page should be valid");
+    assert_eq!(first.total, 2);
+    assert_eq!(first.models[0].id, "Alpha-One");
+    let cursor = first.next_cursor.expect("a second filtered row remains");
+
+    let second = paginate_provider_models(
+        "openrouter",
+        models.clone(),
+        &ListProviderModelsParams {
+            filter: Some("alpha".to_string()),
+            cursor: Some(cursor.clone()),
+            limit: Some(1),
+        },
+    )
+    .expect("matching filter should continue");
+    assert_eq!(second.models[0].id, "alpha-two");
+    assert!(second.next_cursor.is_none());
+
+    let replay = paginate_provider_models(
+        "baseten",
+        models,
+        &ListProviderModelsParams {
+            filter: Some("alpha".to_string()),
+            cursor: Some(cursor),
+            limit: Some(1),
+        },
+    );
+    assert!(replay.is_err(), "a cursor cannot cross provider ownership");
+}
+
+#[test]
+fn provider_model_cursor_rejects_catalog_change_between_pages() {
+    let models = ["bravo", "charlie"]
+        .into_iter()
+        .map(|id| ProviderModelEntry {
+            id: id.to_string(),
+            image_input: codewhale_config::route::CapabilityState::Unknown,
+        })
+        .collect::<Vec<_>>();
+    let first = paginate_provider_models(
+        "openrouter",
+        models.clone(),
+        &ListProviderModelsParams {
+            filter: None,
+            cursor: None,
+            limit: Some(1),
+        },
+    )
+    .expect("first page");
+    let cursor = first.next_cursor.expect("second page remains");
+    let mut changed = models.clone();
+    changed.push(ProviderModelEntry {
+        id: "alpha".to_string(),
+        image_input: codewhale_config::route::CapabilityState::Unknown,
+    });
+    assert!(
+        paginate_provider_models(
+            "openrouter",
+            changed,
+            &ListProviderModelsParams {
+                filter: None,
+                cursor: Some(cursor.clone()),
+                limit: Some(1),
+            }
+        )
+        .is_err(),
+        "an insertion before the cursor must force a restart, not disappear"
+    );
+    let mut changed = models;
+    changed[1].image_input = codewhale_config::route::CapabilityState::Supported;
+    assert!(
+        paginate_provider_models(
+            "openrouter",
+            changed,
+            &ListProviderModelsParams {
+                filter: None,
+                cursor: Some(cursor),
+                limit: Some(1),
+            }
+        )
+        .is_err(),
+        "capability changes also invalidate a catalog snapshot"
+    );
+}
+
+#[test]
+fn provider_model_cursor_round_trips_multibyte_filter_at_the_allowed_limit() {
+    let filter = "😀".repeat(MAX_PROVIDER_MODELS_FILTER_CHARS);
+    let models = ["a", "b"]
+        .into_iter()
+        .map(|suffix| ProviderModelEntry {
+            id: format!("{filter}{suffix}"),
+            image_input: codewhale_config::route::CapabilityState::Unknown,
+        })
+        .collect::<Vec<_>>();
+    let first = paginate_provider_models(
+        "openrouter",
+        models.clone(),
+        &ListProviderModelsParams {
+            filter: Some(filter.clone()),
+            cursor: None,
+            limit: Some(1),
+        },
+    )
+    .expect("first page");
+    let second = paginate_provider_models(
+        "openrouter",
+        models,
+        &ListProviderModelsParams {
+            filter: Some(filter),
+            cursor: first.next_cursor,
+            limit: Some(1),
+        },
+    )
+    .expect("all emitted cursors must be accepted, including multibyte filters");
+    assert_eq!(second.models.len(), 1);
+    assert!(second.next_cursor.is_none());
+}
+
+#[test]
+fn runtime_chat_relay_projection_keeps_six_hundred_safe_models_without_silent_cutoff() {
+    let models = (0..600)
+        .map(|index| format!("openrouter/model-{index:03}"))
+        .collect::<Vec<_>>();
+    let projected = runtime_chat_safe_models(models.clone()).expect("600 rows are safely bounded");
+    assert_eq!(projected, models);
+
+    let oversized = (0..=MAX_PROVIDER_MODELS_CATALOG_SIZE)
+        .map(|index| format!("provider/model-{index:05}"))
+        .collect::<Vec<_>>();
+    let error = runtime_chat_safe_models(oversized).expect_err("oversized relay must fail loudly");
+    assert!(error.contains("safe"));
+    assert!(error.contains(&MAX_PROVIDER_MODELS_CATALOG_SIZE.to_string()));
+}
+
 #[tokio::test]
 async fn provider_catalog_and_switch_preserve_each_listed_route_identity() -> Result<()> {
     let _lock = lock_test_env();
@@ -7920,7 +8351,7 @@ fn provider_catalog_keeps_official_deepseek_facts_but_not_custom_proxy_claims() 
         provider_config.model = Some("deepseek-v4-pro".to_string());
 
         assert!(
-            !provider_uses_custom_route_for_api(&config, ApiProvider::Deepseek),
+            !config.provider_uses_custom_endpoint(ApiProvider::Deepseek),
             "official DeepSeek endpoint must retain the shared model catalog: {official_base_url}"
         );
         let models = provider_models_for_api(&config, ApiProvider::Deepseek, ApiProvider::Deepseek);
@@ -7941,10 +8372,7 @@ fn provider_catalog_keeps_official_deepseek_facts_but_not_custom_proxy_claims() 
     provider_config.base_url = Some("https://deepseek-proxy.example.test/v1".to_string());
     provider_config.model = Some("private-deepseek-deployment".to_string());
 
-    assert!(provider_uses_custom_route_for_api(
-        &custom,
-        ApiProvider::Deepseek
-    ));
+    assert!(custom.provider_uses_custom_endpoint(ApiProvider::Deepseek));
     assert_eq!(
         provider_models_for_api(&custom, ApiProvider::Deepseek, ApiProvider::Deepseek),
         vec!["private-deepseek-deployment".to_string()],
@@ -11463,5 +11891,181 @@ vendor = "{vendor}"
         }
     }
     handle.abort();
+    Ok(())
+}
+
+#[test]
+fn api_provider_default_and_model_list_follow_exact_local_catalog() {
+    use codewhale_config::catalog::{
+        CatalogOffering, CatalogRefreshError, CatalogSource, ProviderCatalogDelta,
+        base_url_fingerprint, now_unix,
+    };
+
+    let _env = crate::test_support::lock_test_env();
+    let _live = crate::provider_lake::lock_live_snapshot();
+    let home = tempfile::tempdir().unwrap();
+    let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", home.path());
+    crate::provider_catalog_live::reset_cache_for_test();
+    crate::provider_lake::clear_live_snapshot();
+    let provider = ApiProvider::Ollama;
+    let endpoint = "http://localhost:11455/v1";
+    let mut config = Config {
+        provider: Some("ollama".into()),
+        ..Default::default()
+    };
+    config.provider_config_for_mut(provider).base_url = Some(endpoint.into());
+    assert_eq!(
+        provider_default_model_for_api(&config, provider, provider),
+        ""
+    );
+    assert!(!provider_models_for_api(&config, provider, provider).contains(&"unknown".to_string()));
+    assert!(runtime_request_model(&config, None).is_err());
+    assert_eq!(
+        runtime_request_model(&config, Some("auto")).unwrap(),
+        "auto"
+    );
+    assert_eq!(
+        runtime_request_model(&config, Some("chosen:tag")).unwrap(),
+        "chosen:tag"
+    );
+    let fingerprint = base_url_fingerprint(endpoint);
+    let fetched_at = now_unix();
+    let ticket =
+        crate::provider_catalog_live::begin_refresh_for_identity(provider, "ollama", endpoint);
+    crate::provider_catalog_live::record_success_if_current(
+        &ticket,
+        ProviderCatalogDelta {
+            provider: "ollama".into(),
+            base_url_fingerprint: fingerprint.clone(),
+            fetched_at,
+            offerings: vec![CatalogOffering {
+                provider: "ollama".into(),
+                wire_model_id: "local-default:tag".into(),
+                endpoint_key: "chat".into(),
+                source: CatalogSource::Live {
+                    base_url_fingerprint: fingerprint.clone(),
+                    fetched_at,
+                },
+                ..Default::default()
+            }],
+        },
+    );
+    assert_eq!(
+        provider_default_model_for_api(&config, provider, provider),
+        "local-default:tag"
+    );
+    assert_eq!(
+        provider_models_for_api(&config, provider, provider),
+        vec!["local-default:tag"]
+    );
+    assert_eq!(
+        runtime_request_model(&config, None).unwrap(),
+        "local-default:tag"
+    );
+    let mut other = config.clone();
+    other.provider_config_for_mut(provider).base_url = Some("http://localhost:11456/v1".into());
+    assert_eq!(
+        provider_default_model_for_api(&other, provider, provider),
+        ""
+    );
+    assert!(provider_models_for_api(&other, provider, provider).is_empty());
+    crate::provider_catalog_live::record_failure_if_current(
+        &ticket,
+        "ollama",
+        &fingerprint,
+        CatalogRefreshError::Network,
+    );
+    assert_eq!(
+        provider_default_model_for_api(&config, provider, provider),
+        ""
+    );
+    assert!(runtime_request_model(&config, None).is_err());
+    config.set_provider_model_override(provider, Some("chosen:tag".into()));
+    assert_eq!(
+        provider_default_model_for_api(&config, provider, provider),
+        "chosen:tag"
+    );
+    crate::provider_catalog_live::reset_cache_for_test();
+    crate::provider_lake::clear_live_snapshot();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn api_config_reports_local_default_availability_without_blocking_config_reads() -> Result<()>
+{
+    use codewhale_config::catalog::{
+        CatalogOffering, CatalogSource, ProviderCatalogDelta, base_url_fingerprint, now_unix,
+    };
+
+    let _env = lock_test_env();
+    let _live = crate::provider_lake::lock_live_snapshot();
+    let home = tempfile::tempdir()?;
+    let _home = EnvVarGuard::set("CODEWHALE_HOME", home.path());
+    crate::provider_catalog_live::reset_cache_for_test();
+    crate::provider_lake::clear_live_snapshot();
+    let config_file = home.path().join("config.toml");
+    let endpoint = "http://localhost:11457/v1";
+    fs::write(
+        &config_file,
+        format!("provider = \"ollama\"\n[providers.ollama]\nbase_url = \"{endpoint}\"\n"),
+    )?;
+    let Some((addr, _runtime_threads, handle)) =
+        spawn_test_server_with_config_path(config_file).await?
+    else {
+        return Ok(());
+    };
+    let client = crate::tls::reqwest_client();
+    let unavailable = get_config(&client, &addr).await;
+    assert_eq!(unavailable["model"], "");
+    assert_eq!(unavailable["model_available"], false);
+    assert_eq!(
+        unavailable["default_model"], DEFAULT_TEXT_MODEL,
+        "legacy root field stays unchanged"
+    );
+    for path in ["tasks", "stream"] {
+        let response = client
+            .post(format!("http://{addr}/v1/{path}"))
+            .json(&json!({"prompt": "missing local model"}))
+            .send()
+            .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            response
+                .text()
+                .await?
+                .contains("no available default model")
+        );
+    }
+    let fetched_at = now_unix();
+    let fingerprint = base_url_fingerprint(endpoint);
+    let ticket = crate::provider_catalog_live::begin_refresh_for_identity(
+        ApiProvider::Ollama,
+        "ollama",
+        endpoint,
+    );
+    crate::provider_catalog_live::record_success_if_current(
+        &ticket,
+        ProviderCatalogDelta {
+            provider: "ollama".into(),
+            base_url_fingerprint: fingerprint.clone(),
+            fetched_at,
+            offerings: vec![CatalogOffering {
+                provider: "ollama".into(),
+                wire_model_id: "available:tag".into(),
+                endpoint_key: "chat".into(),
+                source: CatalogSource::Live {
+                    base_url_fingerprint: fingerprint,
+                    fetched_at,
+                },
+                ..Default::default()
+            }],
+        },
+    );
+    let available = get_config(&client, &addr).await;
+    assert_eq!(available["model"], "available:tag");
+    assert_eq!(available["model_available"], true);
+    assert_eq!(available["default_model"], DEFAULT_TEXT_MODEL);
+    handle.abort();
+    crate::provider_catalog_live::reset_cache_for_test();
+    crate::provider_lake::clear_live_snapshot();
     Ok(())
 }

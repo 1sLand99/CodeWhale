@@ -10,7 +10,7 @@ use crate::core::model_client::ModelClient;
 use crate::logging;
 use crate::models::Role;
 use crate::models::{
-    CacheControl, ContentBlock, Message, MessageRequest, SystemBlock, SystemPrompt,
+    CacheControl, ContentBlock, Message, MessageRequest, SystemBlock, SystemPrompt, Usage,
 };
 
 #[path = "compaction/last_round.rs"]
@@ -1062,11 +1062,15 @@ fn is_context_window_error_message(text: &str) -> bool {
 /// - Never panics
 /// - Never corrupts the original messages (returns error instead)
 /// - Only retries on transient errors (network, rate limit, etc.)
+///
+/// `invocation_usage` retains every decoded response, including rejected
+/// summaries, across retries and cancellation of this future.
 pub async fn compact_messages_safe(
     client: &dyn ModelClient,
     messages: &[Message],
     system_prompt: Option<&SystemPrompt>,
     prepared: &PreparedCompactionEnvelope,
+    invocation_usage: &mut Usage,
 ) -> Result<CompactionResult> {
     const MAX_RETRIES: u32 = 3;
     const BASE_DELAY_MS: u64 = 1000;
@@ -1136,8 +1140,14 @@ pub async fn compact_messages_safe(
             tokio::time::sleep(delay).await;
         }
 
-        match compact_messages_with_metadata(client, compaction_input, config, &mut quality_retries)
-            .await
+        match compact_messages_with_metadata(
+            client,
+            compaction_input,
+            config,
+            &mut quality_retries,
+            invocation_usage,
+        )
+        .await
         {
             Ok((msgs, prompt, mut coverage)) => {
                 let kept = sanitize_retained_messages(msgs);
@@ -1234,8 +1244,15 @@ async fn compact_messages(
     config: &CompactionConfig,
 ) -> Result<(Vec<Message>, Option<SystemPrompt>, Vec<Message>)> {
     let mut quality_retries = 0;
-    let (messages, summary_prompt, _coverage) =
-        compact_messages_with_metadata(client, messages, config, &mut quality_retries).await?;
+    let mut invocation_usage = Usage::default();
+    let (messages, summary_prompt, _coverage) = compact_messages_with_metadata(
+        client,
+        messages,
+        config,
+        &mut quality_retries,
+        &mut invocation_usage,
+    )
+    .await?;
     Ok((messages, summary_prompt, Vec::new()))
 }
 
@@ -1244,12 +1261,14 @@ async fn compact_messages_with_metadata(
     messages: &[Message],
     config: &CompactionConfig,
     quality_retries: &mut u32,
+    invocation_usage: &mut Usage,
 ) -> Result<(Vec<Message>, Option<SystemPrompt>, CompactionCoverage)> {
     if messages.is_empty() {
         return Ok((Vec::new(), None, CompactionCoverage::default()));
     }
 
-    let summary = create_summary(client, messages, config, quality_retries).await?;
+    let summary =
+        create_summary(client, messages, config, quality_retries, invocation_usage).await?;
     let anchors = user_anchors_section(config.workspace.as_deref());
     let checkpoint_text = build_compaction_summary_block_text(&summary, &anchors);
     let summary_block = SystemBlock {
@@ -1409,6 +1428,7 @@ async fn create_summary(
     messages: &[Message],
     config: &CompactionConfig,
     quality_retries: &mut u32,
+    invocation_usage: &mut Usage,
 ) -> Result<String> {
     // The summarization request IS the live conversation plus one final user
     // message asking for the handoff summary, so the provider's prefix cache
@@ -1478,6 +1498,10 @@ async fn create_summary(
             }
             Err(err) => return Err(err),
         };
+
+        // Keep the caller's total before any validation or subsequent await.
+        // A rejected summary or canceled retry still consumed these tokens.
+        crate::core::turn::add_usage_to(invocation_usage, &response.usage);
 
         // Compaction summary calls are billed; route the tokens through the
         // side-channel so the dashboard total matches the website (#526).
@@ -1903,6 +1927,7 @@ mod tests {
     struct ScriptedSummaryClient {
         responses: std::sync::Mutex<std::collections::VecDeque<anyhow::Result<Vec<ContentBlock>>>>,
         requests: std::sync::Mutex<Vec<MessageRequest>>,
+        retry_started: Option<std::sync::Arc<tokio::sync::Notify>>,
     }
 
     impl ScriptedSummaryClient {
@@ -1914,6 +1939,7 @@ mod tests {
             Self {
                 responses: std::sync::Mutex::new(responses.into()),
                 requests: std::sync::Mutex::new(Vec::new()),
+                retry_started: None,
             }
         }
     }
@@ -1940,9 +1966,15 @@ mod tests {
                 .responses
                 .lock()
                 .expect("read scripted summary response")
-                .pop_front()
-                .ok_or_else(|| anyhow::anyhow!("scripted summary responses exhausted"))?;
-            let content = outcome?;
+                .pop_front();
+            if outcome.is_none()
+                && let Some(retry_started) = &self.retry_started
+            {
+                retry_started.notify_one();
+                return std::future::pending().await;
+            }
+            let content = outcome
+                .ok_or_else(|| anyhow::anyhow!("scripted summary responses exhausted"))??;
             Ok(crate::models::MessageResponse {
                 id: "summary-scripted".to_string(),
                 r#type: "message".to_string(),
@@ -1952,7 +1984,13 @@ mod tests {
                 stop_reason: None,
                 stop_sequence: None,
                 container: None,
-                usage: crate::models::Usage::default(),
+                usage: Usage {
+                    input_tokens: 17,
+                    output_tokens: 3,
+                    prompt_cache_hit_tokens: Some(5),
+                    reasoning_tokens: Some(2),
+                    ..Usage::default()
+                },
             })
         }
 
@@ -2170,9 +2208,20 @@ mod tests {
             ..Default::default()
         };
 
-        let result = compact_messages_safe(&client, &original, None, &prepared(&config))
-            .await
-            .expect("the conservative retry should recover a usable summary");
+        let mut invocation_usage = Usage::default();
+        let result = compact_messages_safe(
+            &client,
+            &original,
+            None,
+            &prepared(&config),
+            &mut invocation_usage,
+        )
+        .await
+        .expect("the conservative retry should recover a usable summary");
+        assert_eq!(invocation_usage.input_tokens, 34);
+        assert_eq!(invocation_usage.output_tokens, 6);
+        assert_eq!(invocation_usage.prompt_cache_hit_tokens, Some(10));
+        assert_eq!(invocation_usage.reasoning_tokens, Some(4));
 
         let requests = client
             .requests
@@ -2222,14 +2271,20 @@ mod tests {
             ..Default::default()
         };
 
+        let mut invocation_usage = Usage::default();
         let result = compact_messages_safe(
             &client,
             &[msg("user", "Preserve the current migration state.")],
             None,
             &prepared(&config),
+            &mut invocation_usage,
         )
         .await
         .expect("the outer retry should recover after the transient failure");
+        assert_eq!(invocation_usage.input_tokens, 34);
+        assert_eq!(invocation_usage.output_tokens, 6);
+        assert_eq!(invocation_usage.prompt_cache_hit_tokens, Some(10));
+        assert_eq!(invocation_usage.reasoning_tokens, Some(4));
 
         assert_eq!(
             result.retries_used, 2,
@@ -2244,6 +2299,35 @@ mod tests {
             3,
             "the diagnostic count must match the two calls after the initial request"
         );
+    }
+
+    #[tokio::test]
+    async fn compaction_usage_survives_cancellation_during_quality_retry() {
+        let _cost_scope = crate::cost_status::test_scope();
+        let retry_started = std::sync::Arc::new(tokio::sync::Notify::new());
+        let mut client = ScriptedSummaryClient::new(vec![vec![ContentBlock::Text {
+            text: "...".to_string(),
+            cache_control: None,
+        }]]);
+        client.retry_started = Some(std::sync::Arc::clone(&retry_started));
+        let messages = vec![msg("user", "Preserve the migration state.")];
+        let prepared = prepared(&CompactionConfig::default());
+        let mut invocation_usage = Usage::default();
+        {
+            let compaction =
+                compact_messages_safe(&client, &messages, None, &prepared, &mut invocation_usage);
+            tokio::pin!(compaction);
+            tokio::select! {
+                result = &mut compaction => panic!("retry must remain pending: {result:?}"),
+                _ = retry_started.notified() => {},
+                _ = tokio::time::sleep(Duration::from_secs(10)) => panic!("quality retry did not start"),
+            }
+        }
+        assert_eq!(invocation_usage.input_tokens, 17);
+        assert_eq!(invocation_usage.output_tokens, 3);
+        assert_eq!(invocation_usage.prompt_cache_hit_tokens, Some(5));
+        assert_eq!(invocation_usage.reasoning_tokens, Some(2));
+        assert_eq!(client.requests.lock().unwrap().len(), 2);
     }
 
     #[tokio::test]
@@ -2265,9 +2349,20 @@ mod tests {
             ..Default::default()
         };
 
-        let error = compact_messages_safe(&client, &original, None, &prepared(&config))
-            .await
-            .expect_err("two non-text responses must not replace history");
+        let mut invocation_usage = Usage::default();
+        let error = compact_messages_safe(
+            &client,
+            &original,
+            None,
+            &prepared(&config),
+            &mut invocation_usage,
+        )
+        .await
+        .expect_err("two non-text responses must not replace history");
+        assert_eq!(invocation_usage.input_tokens, 34);
+        assert_eq!(invocation_usage.output_tokens, 6);
+        assert_eq!(invocation_usage.prompt_cache_hit_tokens, Some(10));
+        assert_eq!(invocation_usage.reasoning_tokens, Some(4));
 
         assert!(
             error
@@ -2296,7 +2391,6 @@ mod tests {
             "borrowed source history must remain byte-for-byte unchanged"
         );
     }
-
     #[tokio::test]
     async fn compaction_uses_the_resolved_route_output_allowance() {
         for (route_label, provider, model) in [

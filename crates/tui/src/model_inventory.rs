@@ -9,7 +9,7 @@ use serde::Serialize;
 use crate::config::{
     ApiProvider, Config, has_api_key_for, normalize_model_name_for_provider, provider_capability,
 };
-use crate::provider_lake::{all_catalog_models_for_provider, models_for_provider};
+use crate::provider_lake::models_for_provider;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -344,6 +344,9 @@ impl ModelInventory {
 }
 
 fn push_model(models: &mut Vec<String>, provider: ApiProvider, model: &str) {
+    if provider == ApiProvider::Ollama && crate::config::is_unresolved_local_ollama_model(model) {
+        return;
+    }
     let Some(model) = normalize_model_name_for_provider(provider, model)
         .or_else(|| crate::config::normalize_custom_model_id(model))
     else {
@@ -365,55 +368,29 @@ fn configured_model_for_provider(config: &Config, provider: ApiProvider) -> Opti
         .filter(|model| !model.is_empty())
 }
 
-fn provider_default_model(config: &Config, provider: ApiProvider) -> String {
-    if provider == ApiProvider::Ollama {
-        let configured = if provider == config.api_provider() {
-            Some(config.default_model())
-        } else {
-            configured_model_for_provider(config, provider)
-        };
-        let unresolved = configured.as_deref().is_none_or(|model| {
-            model.trim().eq_ignore_ascii_case("auto")
-                || crate::config::is_unresolved_local_ollama_model(model)
-        });
-        if unresolved
-            && let Some(live) = crate::provider_lake::live_per_provider_models(provider)
-                .into_iter()
-                .next()
-        {
-            return live;
-        }
-        if let Some(model) = configured.filter(|model| {
-            !model.trim().eq_ignore_ascii_case("auto")
-                && !crate::config::is_unresolved_local_ollama_model(model)
-        }) {
-            return model;
-        }
-    }
-    if provider == config.api_provider() {
-        let model = config.default_model();
-        if !model.trim().eq_ignore_ascii_case("auto") {
-            return model;
-        }
-    }
-    if provider == ApiProvider::Moonshot
-        && config
-            .provider_config_for(provider)
-            .is_some_and(crate::config::provider_config_uses_kimi_imported_token)
-    {
-        return crate::config::DEFAULT_KIMI_CODE_MODEL.to_string();
-    }
-    all_catalog_models_for_provider(provider)
-        .first()
-        .map(|model| model.as_str())
-        .unwrap_or(match provider {
-            ApiProvider::Ollama => crate::config::DEFAULT_OLLAMA_MODEL,
-            ApiProvider::OllamaCloud => crate::config::DEFAULT_OLLAMA_CLOUD_MODEL,
-            ApiProvider::Sglang => crate::config::DEFAULT_SGLANG_MODEL,
-            ApiProvider::Vllm => crate::config::DEFAULT_VLLM_MODEL,
-            _ => crate::config::DEFAULT_TEXT_MODEL,
+pub(crate) fn provider_default_model(config: &Config, provider: ApiProvider) -> String {
+    let configured = configured_model_for_provider(config, provider).or_else(|| {
+        (provider == config.api_provider() && config.default_text_model.is_some())
+            .then(|| config.default_model())
+    });
+    let selector = configured.as_deref().filter(|model| {
+        !model.trim().eq_ignore_ascii_case("auto")
+            && !(provider == ApiProvider::Ollama
+                && crate::config::is_unresolved_local_ollama_model(model))
+    });
+    // Inventory labels must use the executable route's exact endpoint default,
+    // not whichever provider-wide snapshot happened to refresh most recently.
+    crate::route_runtime::resolve_runtime_route(config, provider, selector)
+        .map(|route| route.model)
+        .unwrap_or_else(|_| {
+            configured.unwrap_or_else(|| {
+                provider
+                    .kind()
+                    .map(|kind| kind.provider().default_model())
+                    .unwrap_or(crate::config::DEFAULT_TEXT_MODEL)
+                    .to_string()
+            })
         })
-        .to_string()
 }
 
 fn auth_source_for_provider(config: &Config, provider: ApiProvider) -> Option<ModelAuthSource> {
@@ -541,7 +518,8 @@ mod tests {
     fn inventory_marks_local_providers_keyless() {
         let _env_lock = crate::test_support::lock_test_env();
         let _deepseek = crate::test_support::EnvVarGuard::remove("DEEPSEEK_API_KEY");
-        let config = Config::default();
+        let mut config = Config::default();
+        config.set_provider_model_override(ApiProvider::Ollama, Some("local-tag:latest".into()));
 
         let inventory = ModelInventory::from_config(&config);
 
@@ -1133,31 +1111,92 @@ mod tests {
     }
 
     #[test]
-    fn ollama_default_prefers_live_local_tags_over_the_unresolved_marker() {
+    fn ollama_inventory_default_uses_only_the_fresh_exact_endpoint_roster() {
+        use codewhale_config::catalog::{
+            CatalogOffering, CatalogRefreshError, CatalogSource, ProviderCatalogDelta,
+            base_url_fingerprint, now_unix,
+        };
+
+        let _env = crate::test_support::lock_test_env();
         let _live = crate::provider_lake::lock_live_snapshot();
+        let home = tempfile::tempdir().unwrap();
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", home.path());
+        crate::provider_catalog_live::reset_cache_for_test();
         crate::provider_lake::clear_live_snapshot();
-        let config = Config {
+        let mut config = Config {
             provider: Some("ollama".to_string()),
             ..Default::default()
         };
+        let endpoint = "http://localhost:11445/v1";
+        config.provider_config_for_mut(ApiProvider::Ollama).base_url = Some(endpoint.into());
         assert_eq!(
             provider_default_model(&config, ApiProvider::Ollama),
-            crate::config::DEFAULT_OLLAMA_MODEL
+            "unknown"
         );
-
-        crate::provider_lake::merge_live_offerings(vec![
-            codewhale_config::catalog::CatalogOffering {
-                provider: "ollama".to_string(),
-                wire_model_id: "qwen2.5:0.5b".to_string(),
-                endpoint_key: "chat".to_string(),
-                default_for_provider: true,
-                ..Default::default()
+        assert!(
+            ModelInventory::from_config(&config)
+                .candidates
+                .iter()
+                .all(|row| { row.provider != ApiProvider::Ollama || row.model != "unknown" })
+        );
+        let fingerprint = base_url_fingerprint(endpoint);
+        let now = now_unix();
+        let ticket = crate::provider_catalog_live::begin_refresh_for_identity(
+            ApiProvider::Ollama,
+            "ollama",
+            endpoint,
+        );
+        crate::provider_catalog_live::record_success_if_current(
+            &ticket,
+            ProviderCatalogDelta {
+                provider: "ollama".into(),
+                base_url_fingerprint: fingerprint.clone(),
+                fetched_at: now,
+                offerings: vec![CatalogOffering {
+                    provider: "ollama".into(),
+                    wire_model_id: "qwen2.5:0.5b".into(),
+                    endpoint_key: "chat".into(),
+                    source: CatalogSource::Live {
+                        base_url_fingerprint: fingerprint.clone(),
+                        fetched_at: now,
+                    },
+                    ..Default::default()
+                }],
             },
-        ]);
+        );
         assert_eq!(
             provider_default_model(&config, ApiProvider::Ollama),
             "qwen2.5:0.5b"
         );
+        let inventory = ModelInventory::from_config(&config);
+        assert!(inventory.candidates.iter().any(|row| {
+            row.provider == ApiProvider::Ollama
+                && row.model == "qwen2.5:0.5b"
+                && row.default_for_provider
+        }));
+        let mut other = config.clone();
+        other.provider_config_for_mut(ApiProvider::Ollama).base_url =
+            Some("http://localhost:11446/v1".into());
+        assert_eq!(
+            provider_default_model(&other, ApiProvider::Ollama),
+            "unknown"
+        );
+        crate::provider_catalog_live::record_failure_if_current(
+            &ticket,
+            "ollama",
+            &fingerprint,
+            CatalogRefreshError::Network,
+        );
+        assert_eq!(
+            provider_default_model(&config, ApiProvider::Ollama),
+            "unknown"
+        );
+        config.set_provider_model_override(ApiProvider::Ollama, Some("chosen:tag".into()));
+        assert_eq!(
+            provider_default_model(&config, ApiProvider::Ollama),
+            "chosen:tag"
+        );
+        crate::provider_catalog_live::reset_cache_for_test();
         crate::provider_lake::clear_live_snapshot();
     }
 }

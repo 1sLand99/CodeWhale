@@ -1951,6 +1951,8 @@ impl Engine {
             .tx_event
             .send(Event::TurnComplete {
                 usage: Usage::default(),
+                parent_route_usage: Usage::default(),
+                routed_usage_dropped_records: 0,
                 status,
                 error,
                 tool_catalog: None,
@@ -2515,6 +2517,7 @@ impl Engine {
                 self.current_mode,
                 route,
                 self.config.compaction.clone(),
+                crate::cost_status::RuntimeUsageBatch::default(),
                 self.config.goal_objective.clone(),
                 self.config.goal_token_budget,
                 self.config.goal_status,
@@ -2576,6 +2579,7 @@ impl Engine {
                         mode,
                         route,
                         compaction,
+                        initial_routed_usage,
                         goal_objective,
                         goal_token_budget,
                         goal_status,
@@ -2598,6 +2602,7 @@ impl Engine {
                             mode,
                             *route,
                             *compaction,
+                            *initial_routed_usage,
                             goal_objective,
                             goal_token_budget,
                             goal_status,
@@ -2702,6 +2707,7 @@ impl Engine {
                                 self.current_mode,
                                 route,
                                 self.config.compaction.clone(),
+                                crate::cost_status::RuntimeUsageBatch::default(),
                                 goal_snapshot.objective,
                                 goal_snapshot.token_budget,
                                 GoalStatus::Active,
@@ -3249,6 +3255,7 @@ impl Engine {
                             mode,
                             route,
                             self.config.compaction.clone(),
+                            crate::cost_status::RuntimeUsageBatch::default(),
                             self.config.goal_objective.clone(),
                             self.config.goal_token_budget,
                             self.config.goal_status,
@@ -3897,6 +3904,7 @@ impl Engine {
                 self.current_mode,
                 route,
                 self.config.compaction.clone(),
+                crate::cost_status::RuntimeUsageBatch::default(),
                 self.config.goal_objective.clone(),
                 self.config.goal_token_budget,
                 self.config.goal_status,
@@ -4019,6 +4027,8 @@ impl Engine {
             .tx_event
             .send(Event::TurnComplete {
                 usage: Usage::default(),
+                parent_route_usage: Usage::default(),
+                routed_usage_dropped_records: 0,
                 status: TurnOutcomeStatus::Failed,
                 error: Some(message.clone()),
                 tool_catalog: None,
@@ -4675,6 +4685,7 @@ impl Engine {
         mode: AppMode,
         route: ResolvedRuntimeRoute,
         compaction: CompactionConfig,
+        initial_routed_usage: crate::cost_status::RuntimeUsageBatch,
         goal_objective: Option<String>,
         goal_token_budget: Option<u32>,
         goal_status: GoalStatus,
@@ -4695,6 +4706,7 @@ impl Engine {
         let mut goal_objective = goal_objective;
         let mut goal_token_budget = goal_token_budget;
         let mut goal_status = goal_status;
+        let initial_usage_owner = compaction.runtime_cost_owner.clone();
 
         // A literal natural-language `/goal` declaration is control-plane
         // intent, not a suggestion that each provider may acknowledge or
@@ -4779,6 +4791,12 @@ impl Engine {
         let dispatched_product =
             crate::route_billing::capture_product(&route.config, effective_provider);
         if let Err(err) = self.install_resolved_runtime_route(route) {
+            let cost_scope = crate::cost_status::scope_token();
+            crate::cost_status::report_runtime_usage_batch(
+                cost_scope,
+                initial_usage_owner.as_deref(),
+                &initial_routed_usage,
+            );
             let _ = self
                 .tx_event
                 .send(Event::error(ErrorEnvelope::fatal_auth(format!(
@@ -4890,8 +4908,8 @@ impl Engine {
             model: model.clone(),
             auto_model,
             receipt: route_receipt,
-            // A start is not a dispatch. The billing envelope is attached
-            // below, on the route held for the wire boundary only.
+            // A start is not an application dispatch. The billing envelope is
+            // attached below, then stamped at the pre-permit admission boundary.
             billing: None,
             // The classification receipt, by contrast, is frozen here at the
             // client-freeze boundary and is readable from `TurnStarted` on.
@@ -4916,10 +4934,14 @@ impl Engine {
             )
             .map(str::to_string),
             endpoint_fingerprint: route_base_url.and_then(crate::cost_status::endpoint_fingerprint),
+            // A live rate is not evidence at turn creation. `turn_loop`
+            // freezes it from the exact fresh cache scope at CodeWhale's
+            // pre-permit application-dispatch boundary.
+            provider_live_pricing: None,
             // Classified from this turn's own frozen receipt, not from a
             // second ambient `for_route` read. Both halves of the route then
             // answer from the same captured endpoint + credential product, so
-            // the envelope stamped on the wire and the receipt carried on
+            // the application-dispatch envelope and the receipt carried on
             // `TurnRoute` cannot disagree about how this turn bills.
             billing_mode: crate::route_billing::for_dispatched_receipt(
                 crate::route_billing::DispatchedReceipt {
@@ -4930,8 +4952,8 @@ impl Engine {
                 },
             )
             .into(),
-            // Provisional. Replaced with the true wire-boundary instant
-            // when `run_turn` emits `Event::RouteDispatched`.
+            // Provisional. Replaced with the pre-permit application-dispatch
+            // instant when `run_turn` emits `Event::RouteDispatched`.
             dispatched_at: turn_started_at,
         };
         turn.pending_route = Some(TurnRoute {
@@ -4952,30 +4974,57 @@ impl Engine {
             .await;
         self.emit_pending_snapshot_notices().await;
 
+        // Auto's classifier completed before this parent turn was admitted.
+        // Bind its exact routed records to the now-accepted turn: total tokens
+        // and model-call telemetry include the work, while parent_route_usage
+        // remains untouched so the parent quote can never price it.
+        turn.add_routed_usages(
+            initial_routed_usage
+                .records
+                .iter()
+                .map(|record| &record.usage.usage),
+        );
+        // Exact missing-usage records are persisted route-aware by the runtime
+        // sink. TurnComplete carries only any count whose exact route record
+        // was truncated, otherwise the terminal merge would count the same
+        // provider response twice and misclassify subscription/local calls.
+        let residual_dropped_records = initial_routed_usage.dropped_records.saturating_sub(
+            u64::try_from(initial_routed_usage.drop_records.len()).unwrap_or(u64::MAX),
+        );
+        turn.add_routed_usage_dropped_records(residual_dropped_records);
+        let initial_cost_scope = crate::cost_status::scope_token();
+        for record in &initial_routed_usage.records {
+            crate::cost_status::report_effective_route_for_runtime(
+                initial_cost_scope,
+                initial_usage_owner.as_deref(),
+                &record.source_id,
+                &record.usage.route,
+                &record.usage.usage,
+            );
+            let _ = self
+                .tx_event
+                .send(Event::RoutedTurnUsage {
+                    usage: record.usage.usage.clone(),
+                    duration_ms: 0,
+                    first_token_ms: None,
+                    request_ms: None,
+                })
+                .await;
+        }
+        for record in &initial_routed_usage.drop_records {
+            crate::cost_status::report_unreceipted_provider_success(
+                initial_cost_scope,
+                initial_usage_owner.as_deref(),
+                &record.source_id,
+                &record.route,
+            );
+        }
+
         // Apply the host-resolved route budget before building the request.
         // The model, limits, and compaction policy arrive in one operation so
         // no provider request can observe a partially updated route.
         self.active_route_limits = route_limits;
         self.config.compaction = compaction;
-        // Headless/runtime hosts supply their durable turn owner. Interactive
-        // turns historically supplied none, leaving a detached child with
-        // only the soon-to-be-sealed mailbox. Give this turn an owner whose
-        // sink folds into the existing session cost pool; cloned child leases
-        // keep it live beyond TurnComplete without reopening the mailbox.
-        let interactive_runtime_cost_owner = if self.config.terminal_chrome_enabled
-            && self.config.compaction.runtime_cost_owner.is_none()
-        {
-            let owner = format!("interactive:{}:{}", self.session.id, turn.id);
-            crate::cost_status::register_interactive_runtime_usage_sink(
-                &owner,
-                crate::cost_status::scope_token(),
-            );
-            self.config.compaction.runtime_cost_owner = Some(owner.clone());
-            Some(owner)
-        } else {
-            None
-        };
-
         // Snapshot the workspace BEFORE we touch a single tool. Run the git
         // work on the blocking pool so the async runtime stays responsive;
         // failure is non-fatal (the helper logs at WARN).
@@ -5026,6 +5075,8 @@ impl Engine {
                 .tx_event
                 .send(Event::TurnComplete {
                     usage: turn.usage.clone(),
+                    parent_route_usage: turn.parent_route_usage.clone(),
+                    routed_usage_dropped_records: turn.routed_usage_dropped_records,
                     status: TurnOutcomeStatus::Failed,
                     error: Some(message.clone()),
                     tool_catalog: None,
@@ -5043,6 +5094,27 @@ impl Engine {
             self.reconcile_non_completed_goal_turn(&outcome).await;
             return outcome;
         }
+
+        // Headless/runtime hosts supply their durable turn owner. Interactive
+        // turns historically supplied none, leaving a detached child with
+        // only the soon-to-be-sealed mailbox. Install this turn-local sink
+        // only after every pre-dispatch failure return, and retire/clear it at
+        // settlement so the next turn always receives a fresh owner.
+        let interactive_runtime_cost_owner = if self.config.terminal_chrome_enabled
+            && self.config.compaction.runtime_cost_owner.is_none()
+        {
+            let owner = format!("interactive:{}:{}", self.session.id, turn.id);
+            crate::cost_status::register_persistent_interactive_runtime_usage_sink(
+                &owner,
+                crate::cost_status::scope_token(),
+                &self.session.id,
+                &turn.id,
+            );
+            self.config.compaction.runtime_cost_owner = Some(owner.clone());
+            Some(owner)
+        } else {
+            None
+        };
 
         let previous_goal_objective = self.config.goal_objective.clone();
         let previous_goal_token_budget = self.config.goal_token_budget;
@@ -5256,8 +5328,25 @@ impl Engine {
                 barrier.cancel_and_flush().await;
             }
         }
+        // The advisor is dispatched after TurnComplete, but its usage still
+        // belongs to this originating turn. Acquire the owner lease before an
+        // interactive owner is marked terminal so a late provider response
+        // retains its exact sink instead of falling into a later session.
+        let advisor_usage_context = (self.config.advisor_config.enabled
+            && status == TurnOutcomeStatus::Completed
+            && self.deepseek_client.is_some())
+        .then(|| {
+            crate::tools::subagent::advisor::AdvisorUsageContext::capture(
+                self.config.compaction.runtime_cost_owner.as_deref(),
+            )
+        });
         if let Some(owner) = interactive_runtime_cost_owner.as_deref() {
             crate::cost_status::finish_runtime_usage_owner(owner);
+            // This owner is turn-local. Leaving it in the reusable engine
+            // config makes the next interactive turn skip registration and
+            // route background usage into a retired sink/journal. Host-owned
+            // runtime turn ids never enter this branch and remain untouched.
+            self.config.compaction.runtime_cost_owner = None;
         }
 
         // Emit turn complete event — after all post-turn bookkeeping so
@@ -5270,6 +5359,8 @@ impl Engine {
             .tx_event
             .send(Event::TurnComplete {
                 usage: turn.usage,
+                parent_route_usage: turn.parent_route_usage,
+                routed_usage_dropped_records: turn.routed_usage_dropped_records,
                 status,
                 error: error.clone(),
                 tool_catalog: tool_catalog_for_event,
@@ -5315,6 +5406,7 @@ impl Engine {
         if self.config.advisor_config.enabled
             && matches!(status, TurnOutcomeStatus::Completed)
             && let Some(client) = self.deepseek_client.clone()
+            && let Some(usage_context) = advisor_usage_context
         {
             // Lazily create the shared emission guard on first use.
             let guard = self
@@ -5328,6 +5420,10 @@ impl Engine {
 
             let advisor_messages: Vec<crate::models::Message> = self.session.messages.to_vec();
             let advisor_config = self.config.advisor_config.clone();
+            // This clone is frozen before the detached task starts and keeps
+            // every configured provider route available for an explicit
+            // cross-provider advisor model without consulting later UI state.
+            let advisor_route_config = self.api_config.clone();
             let advisor_model = self.session.model.clone();
             let advisor_tx = self.tx_event.clone();
             let advisor_turn_id = turn.id.clone();
@@ -5341,7 +5437,9 @@ impl Engine {
                         advisor_messages,
                         advisor_config,
                         client,
+                        advisor_route_config,
                         advisor_model,
+                        usage_context,
                         guard,
                         advisor_tx,
                     )
@@ -5433,6 +5531,8 @@ impl Engine {
                 .tx_event
                 .send(Event::TurnComplete {
                     usage: Usage::default(),
+                    parent_route_usage: Usage::default(),
+                    routed_usage_dropped_records: 0,
                     status: TurnOutcomeStatus::Interrupted,
                     error: None,
                     tool_catalog: None,
@@ -5457,6 +5557,21 @@ impl Engine {
         self.handle_manual_compaction(id, cancel_token).await;
     }
 
+    async fn emit_compaction_usage(&self, usage: &Usage, elapsed: Duration) {
+        if *usage == Usage::default() {
+            return;
+        }
+        let _ = self
+            .tx_event
+            .send(Event::RoutedTurnUsage {
+                usage: usage.clone(),
+                duration_ms: u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+                first_token_ms: None,
+                request_ms: None,
+            })
+            .await;
+    }
+
     async fn handle_manual_compaction(&mut self, id: String, cancel_token: CancellationToken) {
         let zero_usage = Usage {
             input_tokens: 0,
@@ -5476,6 +5591,8 @@ impl Engine {
                 .tx_event
                 .send(Event::TurnComplete {
                     usage: zero_usage,
+                    parent_route_usage: Usage::default(),
+                    routed_usage_dropped_records: 0,
                     status: TurnOutcomeStatus::Failed,
                     error: Some(message),
                     tool_catalog: None,
@@ -5495,6 +5612,8 @@ impl Engine {
 
         let prepared = self.prepare_compaction_envelope(self.config.compaction.clone());
 
+        let started = Instant::now();
+        let mut compaction_usage = Usage::default();
         let compaction_result = tokio::select! {
             biased;
             _ = cancel_token.cancelled() => None,
@@ -5503,8 +5622,13 @@ impl Engine {
                 &self.session.messages,
                 self.session.system_prompt.as_ref(),
                 &prepared,
+                &mut compaction_usage,
             ) => Some(result),
         };
+        self.session.total_usage.add(&compaction_usage);
+        self.record_goal_usage_for_turn(&compaction_usage, started.elapsed());
+        self.emit_compaction_usage(&compaction_usage, started.elapsed())
+            .await;
 
         let Some(compaction_result) = compaction_result else {
             self.finish_compaction(&id);
@@ -5517,7 +5641,9 @@ impl Engine {
             let _ = self
                 .tx_event
                 .send(Event::TurnComplete {
-                    usage: zero_usage,
+                    usage: compaction_usage,
+                    parent_route_usage: Usage::default(),
+                    routed_usage_dropped_records: 0,
                     status: TurnOutcomeStatus::Interrupted,
                     error: None,
                     tool_catalog: None,
@@ -5544,7 +5670,9 @@ impl Engine {
                         let _ = self
                             .tx_event
                             .send(Event::TurnComplete {
-                                usage: zero_usage,
+                                usage: compaction_usage,
+                                parent_route_usage: Usage::default(),
+                                routed_usage_dropped_records: 0,
                                 status: TurnOutcomeStatus::Interrupted,
                                 error: None,
                                 tool_catalog: None,
@@ -5609,7 +5737,9 @@ impl Engine {
         let _ = self
             .tx_event
             .send(Event::TurnComplete {
-                usage: zero_usage,
+                usage: compaction_usage,
+                parent_route_usage: Usage::default(),
+                routed_usage_dropped_records: 0,
                 status: turn_status,
                 error: turn_error,
                 tool_catalog: None,
@@ -5635,6 +5765,8 @@ impl Engine {
                 .tx_event
                 .send(Event::TurnComplete {
                     usage: zero_usage,
+                    parent_route_usage: Usage::default(),
+                    routed_usage_dropped_records: 0,
                     status: TurnOutcomeStatus::Failed,
                     error: Some(message),
                     tool_catalog: None,
@@ -5693,6 +5825,8 @@ impl Engine {
             .tx_event
             .send(Event::TurnComplete {
                 usage: zero_usage,
+                parent_route_usage: Usage::default(),
+                routed_usage_dropped_records: 0,
                 status,
                 error,
                 tool_catalog: None,
@@ -5770,6 +5904,7 @@ impl Engine {
         &mut self,
         client: &dyn crate::core::model_client::ModelClient,
         reason: &str,
+        turn: &mut TurnContext,
     ) -> bool {
         let Some(target_budget) = context_input_budget_for_route(
             self.api_provider,
@@ -5811,6 +5946,8 @@ impl Engine {
             .max(1);
         let prepared = self.prepare_compaction_envelope(forced_config);
 
+        let started = Instant::now();
+        let mut compaction_usage = Usage::default();
         let (compaction_result, turn_was_canceled) = tokio::select! {
             biased;
             _ = turn_cancel.cancelled() => (None, true),
@@ -5820,8 +5957,12 @@ impl Engine {
                 &self.session.messages,
                 self.session.system_prompt.as_ref(),
                 &prepared,
+                &mut compaction_usage,
             ) => (Some(result), false),
         };
+        turn.add_usage(&compaction_usage);
+        self.emit_compaction_usage(&compaction_usage, started.elapsed())
+            .await;
         let Some(compaction_result) = compaction_result else {
             self.finish_compaction(&id);
             let message = if turn_was_canceled {

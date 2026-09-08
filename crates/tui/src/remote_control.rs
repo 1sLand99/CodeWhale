@@ -7557,6 +7557,8 @@ mod tests {
     fn turn_complete_event() -> EngineEvent {
         EngineEvent::TurnComplete {
             usage: crate::models::Usage::default(),
+            parent_route_usage: crate::models::Usage::default(),
+            routed_usage_dropped_records: 0,
             status: TurnOutcomeStatus::Completed,
             error: None,
             tool_catalog: None,
@@ -8043,6 +8045,8 @@ mod tests {
         };
         controller.observe_engine_event(&EngineEvent::TurnComplete {
             usage: usage.clone(),
+            parent_route_usage: usage.clone(),
+            routed_usage_dropped_records: 0,
             status: TurnOutcomeStatus::Completed,
             error: None,
             tool_catalog: None,

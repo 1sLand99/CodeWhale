@@ -22,7 +22,7 @@ use crate::work_graph::ReasoningEffortTier;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::io;
 use std::path::{Component, Path, PathBuf};
 use uuid::Uuid;
@@ -39,6 +39,53 @@ const MAX_SESSION_GOAL_OBJECTIVE_CHARS: usize = 8_192;
 const MAX_SESSION_GOAL_FILE_BYTES: u64 = 64 * 1_024;
 const CURRENT_SESSION_SCHEMA_VERSION: u32 = 1;
 const CURRENT_QUEUE_SCHEMA_VERSION: u32 = 1;
+const LATE_USAGE_DIR: &str = ".late-usage";
+const CURRENT_LATE_USAGE_SCHEMA_VERSION: u32 = 1;
+const MAX_LATE_USAGE_RECORDS_PER_SESSION: usize = 64;
+const MAX_LATE_USAGE_LEDGER_BYTES: u64 = 1024 * 1024;
+const LATE_USAGE_DELETED: &[u8] = b"codewhale-session-deleted-v1\n";
+const LATE_USAGE_UNAVAILABLE_REASON: &str = "late_usage_ledger_unavailable";
+
+#[derive(Clone, Copy)]
+enum SessionRemoval {
+    Explicit,
+    Retention,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct LateUsageRecord {
+    source_fingerprint: String,
+    turn_fingerprint: String,
+    route: crate::cost_status::EffectiveRouteEnvelope,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    usage: Option<crate::models::Usage>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct LateUsageLedger {
+    schema_version: u32,
+    #[serde(default)]
+    records: Vec<LateUsageRecord>,
+    #[serde(default)]
+    overflowed: bool,
+}
+
+impl Default for LateUsageLedger {
+    fn default() -> Self {
+        Self {
+            schema_version: CURRENT_LATE_USAGE_SCHEMA_VERSION,
+            records: Vec::new(),
+            overflowed: false,
+        }
+    }
+}
+
+fn is_sha256_fingerprint(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
 
 const fn default_session_schema_version() -> u32 {
     CURRENT_SESSION_SCHEMA_VERSION
@@ -71,6 +118,119 @@ fn normalize_managed_dir(path: PathBuf) -> std::io::Result<PathBuf> {
         return Ok(path);
     }
     std::env::current_dir().map(|cwd| cwd.join(path))
+}
+
+fn open_private_lock_file(path: &Path) -> io::Result<fs::File> {
+    let mut options = OpenOptions::new();
+    options.create(true).read(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        options
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK);
+        let file = options.open(path)?;
+        validate_private_regular_file(&file, path)?;
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        Ok(file)
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+        let file = options.open(path)?;
+        validate_private_regular_file(&file, path)?;
+        Ok(file)
+    }
+    #[cfg(all(not(unix), not(windows)))]
+    {
+        let file = options.open(path)?;
+        validate_private_regular_file(&file, path)?;
+        Ok(file)
+    }
+}
+
+fn open_private_read_file(path: &Path) -> io::Result<fs::File> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    let file = options.open(path)?;
+    validate_private_regular_file(&file, path)?;
+    Ok(file)
+}
+
+#[cfg(unix)]
+fn validate_private_regular_file(file: &fs::File, path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.nlink() != 1 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "private sidecar file {} must be one regular filesystem link",
+                path.display()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn validate_private_regular_file(file: &fs::File, path: &Path) -> io::Result<()> {
+    use std::os::windows::fs::MetadataExt as _;
+    use std::os::windows::io::AsRawHandle as _;
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_REPARSE_POINT, GetFileInformationByHandle,
+    };
+
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "private sidecar file {} must be a non-reparse regular file",
+                path.display()
+            ),
+        ));
+    }
+    let mut info = BY_HANDLE_FILE_INFORMATION::default();
+    // SAFETY: `file` keeps the handle valid and `info` is writable for the call.
+    if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut info) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if info.nNumberOfLinks != 1 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "private sidecar file {} must have exactly one filesystem link",
+                path.display()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(all(not(unix), not(windows)))]
+fn validate_private_regular_file(file: &fs::File, path: &Path) -> io::Result<()> {
+    if !file.metadata()?.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("private sidecar file {} must be regular", path.display()),
+        ));
+    }
+    Ok(())
 }
 
 /// Persisted queued message for offline/degraded mode.
@@ -506,6 +666,45 @@ pub struct SessionCostSnapshot {
 }
 
 impl SessionCostSnapshot {
+    fn absorb_late_background_cost(&mut self, pool: &crate::cost_status::PendingBackgroundCost) {
+        let estimate = crate::pricing::CostEstimate {
+            usd: self.subagent_cost_usd,
+            cny: self.subagent_cost_cny,
+        }
+        .saturating_add(pool.estimate);
+        self.subagent_cost_usd = estimate.usd;
+        self.subagent_cost_cny = estimate.cny;
+        self.priced_turns = self.priced_turns.saturating_add(pool.priced_turns);
+        self.unpriced_turns = self.unpriced_turns.saturating_add(pool.unpriced_turns);
+        self.cny_priced_turns = self.cny_priced_turns.saturating_add(pool.cny_priced_turns);
+        self.cny_unpriced_turns = self
+            .cny_unpriced_turns
+            .saturating_add(pool.cny_unpriced_turns);
+        self.unpriced_reasons
+            .extend(pool.unpriced_reasons.iter().map(ToString::to_string));
+        self.cny_unpriced_reasons
+            .extend(pool.cny_unpriced_reasons.iter().map(ToString::to_string));
+        self.unpriced_classes
+            .extend(pool.unpriced_classes.iter().map(ToString::to_string));
+        self.pricing_provenances
+            .extend(pool.pricing_provenances.iter().map(ToString::to_string));
+        self.live_pricing_defects
+            .extend(pool.live_pricing_defects.iter().map(ToString::to_string));
+        self.live_pricing_unusable_defects.extend(
+            pool.live_pricing_unusable_defects
+                .iter()
+                .map(ToString::to_string),
+        );
+        self.route_receipts
+            .extend(pool.route_receipts.iter().cloned());
+        self.usage_source_fingerprints
+            .extend(pool.usage_source_fingerprints.iter().cloned());
+        self.coverage_recorded = true;
+        let total = self.total_estimate();
+        self.displayed_cost_high_water_usd = self.displayed_cost_high_water_usd.max(total.usd);
+        self.displayed_cost_high_water_cny = self.displayed_cost_high_water_cny.max(total.cny);
+    }
+
     /// Session + subagent spend as **one** dual-currency accumulator.
     ///
     /// The persisted USD and CNY columns are projections of per-turn
@@ -1162,6 +1361,367 @@ impl SessionManager {
         &self.sessions_dir
     }
 
+    fn late_usage_paths(&self, session_id: &str) -> io::Result<(PathBuf, PathBuf)> {
+        let session_id = self.validated_session_id(session_id)?;
+        let dir = self.sessions_dir.join(LATE_USAGE_DIR);
+        match fs::symlink_metadata(&dir) {
+            Ok(metadata) => {
+                #[cfg(windows)]
+                let linked = {
+                    use std::os::windows::fs::MetadataExt as _;
+                    metadata.file_attributes()
+                        & windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT
+                        != 0
+                };
+                #[cfg(not(windows))]
+                let linked = metadata.file_type().is_symlink();
+                if linked || !metadata.is_dir() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "late usage store must be a real directory",
+                    ));
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        Ok((
+            dir.join(format!("{session_id}.json")),
+            dir.join(format!("{session_id}.lock")),
+        ))
+    }
+
+    /// Only mutations create accounting storage. Snapshot/list reads must work
+    /// for a healthy transcript even when no sidecar has ever been written.
+    fn ensure_late_usage_paths(&self, session_id: &str) -> io::Result<(PathBuf, PathBuf)> {
+        self.late_usage_paths(session_id)?;
+        let dir = self.sessions_dir.join(LATE_USAGE_DIR);
+        match fs::create_dir(&dir) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+        let paths = self.late_usage_paths(session_id)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+            OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+                .open(&dir)?
+                .set_permissions(fs::Permissions::from_mode(0o700))?;
+        }
+        Ok(paths)
+    }
+
+    /// A deletion marker and its stable lock survive deletion, without any
+    /// route or usage data. A captured callback must never recreate the ledger.
+    fn late_usage_is_deleted(path: &Path) -> io::Result<bool> {
+        use std::io::Read as _;
+        let tombstone = match open_private_read_file(&path.with_extension("deleted")) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        let mut marker = Vec::with_capacity(LATE_USAGE_DELETED.len());
+        tombstone
+            .take(u64::try_from(LATE_USAGE_DELETED.len()).unwrap_or(u64::MAX) + 1)
+            .read_to_end(&mut marker)?;
+        if marker != LATE_USAGE_DELETED {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid late usage deletion marker",
+            ));
+        }
+        Ok(true)
+    }
+
+    fn write_late_usage_ledger(path: &Path, ledger: &LateUsageLedger) -> io::Result<()> {
+        let bytes = serde_json::to_vec(ledger)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_LATE_USAGE_LEDGER_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "late usage ledger exceeds its size bound",
+            ));
+        }
+        write_atomic(path, &bytes)
+    }
+
+    fn load_late_usage_unlocked(path: &Path) -> io::Result<LateUsageLedger> {
+        let file = match open_private_read_file(path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Ok(LateUsageLedger::default());
+            }
+            Err(error) => return Err(error),
+        };
+        let metadata = file.metadata()?;
+        if metadata.len() > MAX_LATE_USAGE_LEDGER_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "late usage ledger {} exceeds its size bound",
+                    path.display()
+                ),
+            ));
+        }
+        use std::io::Read as _;
+        let mut raw = Vec::with_capacity(
+            usize::try_from(metadata.len().min(MAX_LATE_USAGE_LEDGER_BYTES)).unwrap_or(0),
+        );
+        file.take(MAX_LATE_USAGE_LEDGER_BYTES.saturating_add(1))
+            .read_to_end(&mut raw)?;
+        if u64::try_from(raw.len()).unwrap_or(u64::MAX) > MAX_LATE_USAGE_LEDGER_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "late usage ledger {} exceeds its size bound",
+                    path.display()
+                ),
+            ));
+        }
+        let ledger: LateUsageLedger = serde_json::from_slice(&raw)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        if ledger.schema_version != CURRENT_LATE_USAGE_SCHEMA_VERSION
+            || ledger.records.len() > MAX_LATE_USAGE_RECORDS_PER_SESSION
+            || ledger.records.iter().any(|record| {
+                !is_sha256_fingerprint(&record.source_fingerprint)
+                    || !is_sha256_fingerprint(&record.turn_fingerprint)
+            })
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "late usage ledger has an unsupported or unbounded shape",
+            ));
+        }
+        Ok(ledger)
+    }
+
+    fn with_session_write_admission<T>(
+        &self,
+        session_id: &str,
+        write: impl FnOnce() -> io::Result<T>,
+    ) -> io::Result<Option<T>> {
+        let (path, lock_path) = self.ensure_late_usage_paths(session_id)?;
+        let lock_file = open_private_lock_file(&lock_path)?;
+        let mut lock = fd_lock::RwLock::new(lock_file);
+        let _guard = lock.write()?;
+        if Self::late_usage_is_deleted(&path)? {
+            return Ok(None);
+        }
+        write().map(Some)
+    }
+
+    /// Serialize active accounting admission with deletion of its origin.
+    /// A retired origin is handled without running the callback. Callers must
+    /// release this boundary before attempting a late-usage append, which
+    /// independently checks retirement under the same stable lock.
+    pub(crate) fn with_live_session_origin(
+        &self,
+        session_id: &str,
+        accept: impl FnOnce() -> bool,
+    ) -> io::Result<Option<bool>> {
+        self.with_session_write_admission(session_id, || Ok(accept()))
+    }
+
+    fn retired_session_write_error() -> io::Error {
+        io::Error::new(io::ErrorKind::NotFound, "session was deleted")
+    }
+
+    fn persist_late_usage_record(
+        &self,
+        session_id: &str,
+        turn_id: &str,
+        source_id: &str,
+        route: &crate::cost_status::EffectiveRouteEnvelope,
+        usage: Option<&crate::models::Usage>,
+    ) -> io::Result<bool> {
+        let (path, lock_path) = self.ensure_late_usage_paths(session_id)?;
+        let lock_file = open_private_lock_file(&lock_path)?;
+        let mut lock = fd_lock::RwLock::new(lock_file);
+        let _guard = lock.write()?;
+        if Self::late_usage_is_deleted(&path)? {
+            // Handled, rather than a failed sink that should queue a retry.
+            return Ok(true);
+        }
+        let mut ledger = Self::load_late_usage_unlocked(&path)?;
+        let source_fingerprint = crate::cost_status::usage_source_fingerprint(source_id);
+        if ledger
+            .records
+            .iter()
+            .any(|record| record.source_fingerprint == source_fingerprint)
+        {
+            return Ok(true);
+        }
+        if ledger.records.len() == MAX_LATE_USAGE_RECORDS_PER_SESSION {
+            if !ledger.overflowed {
+                ledger.overflowed = true;
+                Self::write_late_usage_ledger(&path, &ledger)?;
+            }
+            return Ok(true);
+        }
+        ledger.records.push(LateUsageRecord {
+            source_fingerprint,
+            turn_fingerprint: crate::cost_status::usage_source_fingerprint(turn_id),
+            route: route.sanitized_for_persistence(),
+            usage: usage.cloned(),
+        });
+        Self::write_late_usage_ledger(&path, &ledger)?;
+        Ok(true)
+    }
+
+    pub(crate) fn persist_late_runtime_usage(
+        &self,
+        session_id: &str,
+        turn_id: &str,
+        record: &crate::cost_status::RuntimeUsageRecord,
+    ) -> io::Result<bool> {
+        self.persist_late_usage_record(
+            session_id,
+            turn_id,
+            &record.source_id,
+            &record.usage.route,
+            Some(&record.usage.usage),
+        )
+    }
+
+    pub(crate) fn persist_late_runtime_drop(
+        &self,
+        session_id: &str,
+        turn_id: &str,
+        record: &crate::cost_status::RuntimeUsageDropRecord,
+    ) -> io::Result<bool> {
+        self.persist_late_usage_record(session_id, turn_id, &record.source_id, &record.route, None)
+    }
+
+    fn with_session_read_lock<T>(
+        &self,
+        session_id: &str,
+        read: impl FnOnce(&Path) -> io::Result<T>,
+    ) -> io::Result<T> {
+        let (path, lock_path) = self.late_usage_paths(session_id)?;
+        let lock_file = match open_private_read_file(&lock_path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                // Atomic replacement makes a copied ledger readable without
+                // creating a lock. No writer can have published a tombstone
+                // without first creating the stable lock.
+                return read(&path);
+            }
+            Err(error) => return Err(error),
+        };
+        let lock = fd_lock::RwLock::new(lock_file);
+        let _guard = lock.read()?;
+        read(&path)
+    }
+
+    fn load_late_usage(&self, session_id: &str) -> io::Result<LateUsageLedger> {
+        self.with_session_read_lock(session_id, |path| {
+            if Self::late_usage_is_deleted(path)? {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "session accounting was deleted",
+                ));
+            }
+            Self::load_late_usage_unlocked(path)
+        })
+    }
+
+    fn apply_late_usage_to_metadata(&self, metadata: &mut SessionMetadata) {
+        let ledger = match self.load_late_usage(&metadata.id) {
+            Ok(ledger) => ledger,
+            Err(_) => {
+                // The transcript is independent of optional accounting data.
+                // Keep a stable gap receipt even when this projection is later
+                // saved; loading it again must not invent another missing call.
+                let fingerprint = crate::cost_status::usage_source_fingerprint(&format!(
+                    "late-usage-unavailable:{}",
+                    crate::cost_status::usage_source_fingerprint(&metadata.id)
+                ));
+                if metadata.cost.usage_source_fingerprints.insert(fingerprint) {
+                    metadata.cost.unpriced_turns = metadata.cost.unpriced_turns.saturating_add(1);
+                    metadata.cost.cny_unpriced_turns =
+                        metadata.cost.cny_unpriced_turns.saturating_add(1);
+                }
+                metadata
+                    .cost
+                    .unpriced_reasons
+                    .insert(LATE_USAGE_UNAVAILABLE_REASON.to_string());
+                metadata
+                    .cost
+                    .cny_unpriced_reasons
+                    .insert(LATE_USAGE_UNAVAILABLE_REASON.to_string());
+                metadata.cost.coverage_recorded = true;
+                return;
+            }
+        };
+        for record in ledger.records {
+            let source_fingerprint = record.source_fingerprint.clone();
+            let source_id = format!("late:{}", record.source_fingerprint);
+            let mut pending = if let Some(usage) = record.usage.as_ref() {
+                crate::cost_status::background_cost_for_runtime_usage(
+                    &crate::cost_status::RuntimeUsageRecord {
+                        source_id,
+                        usage: crate::cost_status::EffectiveRouteUsage {
+                            route: record.route,
+                            usage: usage.clone(),
+                        },
+                    },
+                )
+            } else {
+                crate::cost_status::background_cost_for_runtime_drop(
+                    &crate::cost_status::RuntimeUsageDropRecord {
+                        source_id,
+                        route: record.route,
+                    },
+                )
+            };
+            // The sidecar already stores the canonical SHA-256 identity. Do
+            // not hash it again while projecting the receipt into the saved
+            // session, or a concurrent main-snapshot writer that already
+            // contains the response would not dedupe against this overlay.
+            pending.usage_source_fingerprints.clear();
+            pending
+                .usage_source_fingerprints
+                .insert(source_fingerprint.clone());
+            if metadata
+                .cost
+                .usage_source_fingerprints
+                .contains(&source_fingerprint)
+            {
+                continue;
+            }
+            if let Some(usage) = record.usage {
+                metadata.total_tokens = metadata
+                    .total_tokens
+                    .saturating_add(u64::from(usage.input_tokens))
+                    .saturating_add(u64::from(usage.output_tokens));
+            }
+            metadata.cost.absorb_late_background_cost(&pending);
+        }
+        if ledger.overflowed {
+            let fingerprint = crate::cost_status::usage_source_fingerprint(&format!(
+                "late-usage-overflow:{}",
+                crate::cost_status::usage_source_fingerprint(&metadata.id)
+            ));
+            if metadata.cost.usage_source_fingerprints.insert(fingerprint) {
+                metadata.cost.unpriced_turns = metadata.cost.unpriced_turns.saturating_add(1);
+                metadata.cost.cny_unpriced_turns =
+                    metadata.cost.cny_unpriced_turns.saturating_add(1);
+                metadata
+                    .cost
+                    .unpriced_reasons
+                    .insert("late_usage_ledger_overflow".to_string());
+                metadata
+                    .cost
+                    .cny_unpriced_reasons
+                    .insert("late_usage_ledger_overflow".to_string());
+                metadata.cost.coverage_recorded = true;
+            }
+        }
+    }
+
     /// Persist the bounded goal control state for one saved session.
     /// `None` is the canonical clear operation and is idempotent.
     pub fn save_session_goal(
@@ -1213,22 +1773,27 @@ impl SessionManager {
     /// Save a session to disk using atomic write (temp file + fsync + rename).
     pub fn save_session(&self, session: &SavedSession) -> std::io::Result<PathBuf> {
         let path = self.validated_session_path(&session.metadata.id)?;
-        let already_persisted = path.exists()
-            || self
-                .validated_checkpoint_path(&session.metadata.id)
-                .is_ok_and(|checkpoint| checkpoint.exists());
+        self.with_session_write_admission(&session.metadata.id, || {
+            let already_persisted = path.exists()
+                || self
+                    .validated_checkpoint_path(&session.metadata.id)
+                    .is_ok_and(|checkpoint| checkpoint.exists());
 
-        self.archive_before_first_graph_write(session, &path)?;
+            self.archive_before_first_graph_write(session, &path)?;
 
-        let mut durable_session = session.clone();
-        self.hydrate_approval_receipts(&mut durable_session)?;
-        let content = serialize_saved_session(&durable_session)?;
+            let mut durable_session = session.clone();
+            self.hydrate_approval_receipts(&mut durable_session)?;
+            let content = serialize_saved_session(&durable_session)?;
 
-        // Atomic write via write_atomic (NamedTempFile + fsync + persist)
-        write_atomic(&path, content.as_bytes())?;
-        self.stamp_session_boot_owner_for_new_record(&session.metadata.id, already_persisted);
+            // Atomic write via write_atomic (NamedTempFile + fsync + persist)
+            write_atomic(&path, content.as_bytes())?;
+            self.stamp_session_boot_owner_for_new_record(&session.metadata.id, already_persisted);
+            Ok(())
+        })?
+        .ok_or_else(Self::retired_session_write_error)?;
 
-        // Clean up old sessions if we have too many
+        // Cleanup may delete sessions, so release this session's lifecycle
+        // lock first instead of recursively acquiring it during cleanup.
         self.cleanup_old_sessions()?;
 
         Ok(path)
@@ -1240,15 +1805,19 @@ impl SessionManager {
     /// concurrent sessions never overwrite each other's crash-recovery state.
     pub fn save_checkpoint(&self, session: &SavedSession) -> std::io::Result<PathBuf> {
         let path = self.validated_checkpoint_path(&session.metadata.id)?;
-        let session_path = self.validated_session_path(&session.metadata.id)?;
-        self.archive_before_first_graph_write(session, &session_path)?;
-        fs::create_dir_all(self.checkpoints_dir())?;
-        let already_persisted = path.exists() || session_path.exists();
-        let mut durable_session = session.clone();
-        self.hydrate_approval_receipts(&mut durable_session)?;
-        let content = serialize_saved_session(&durable_session)?;
-        write_atomic(&path, content.as_bytes())?;
-        self.stamp_session_boot_owner_for_new_record(&session.metadata.id, already_persisted);
+        self.with_session_write_admission(&session.metadata.id, || {
+            let session_path = self.validated_session_path(&session.metadata.id)?;
+            self.archive_before_first_graph_write(session, &session_path)?;
+            fs::create_dir_all(self.checkpoints_dir())?;
+            let already_persisted = path.exists() || session_path.exists();
+            let mut durable_session = session.clone();
+            self.hydrate_approval_receipts(&mut durable_session)?;
+            let content = serialize_saved_session(&durable_session)?;
+            write_atomic(&path, content.as_bytes())?;
+            self.stamp_session_boot_owner_for_new_record(&session.metadata.id, already_persisted);
+            Ok(())
+        })?
+        .ok_or_else(Self::retired_session_write_error)?;
         Ok(path)
     }
 
@@ -1393,8 +1962,18 @@ impl SessionManager {
                 ),
             ));
         }
+        // A crash after retirement but before checkpoint removal must not
+        // offer the deleted origin for recovery. Optional accounting damage
+        // still permits recovery and is projected as incomplete below.
+        if self
+            .with_session_read_lock(&session.metadata.id, Self::late_usage_is_deleted)
+            .unwrap_or(false)
+        {
+            return Ok(None);
+        }
         session.system_prompt = strip_legacy_truncation_note(session.system_prompt);
         self.hydrate_approval_receipts(&mut session)?;
+        self.apply_late_usage_to_metadata(&mut session.metadata);
         Ok(Some(session))
     }
 
@@ -1412,6 +1991,29 @@ impl SessionManager {
     pub fn load_legacy_checkpoint(&self) -> std::io::Result<Option<SavedSession>> {
         let path = self.checkpoints_dir().join(LEGACY_CHECKPOINT_FILE);
         self.read_checkpoint_file(&path)
+    }
+
+    fn legacy_checkpoint_origin(&self) -> io::Result<Option<String>> {
+        use std::io::Read as _;
+
+        let path = self.checkpoints_dir().join(LEGACY_CHECKPOINT_FILE);
+        let file = match open_private_read_file(&path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        // Lifecycle cleanup only needs the leading metadata. Never follow
+        // links or read an unbounded legacy transcript to identify its owner.
+        let mut prefix = Vec::new();
+        file.take(1024 * 1024).read_to_end(&mut prefix)?;
+        extract_top_level_metadata(&prefix)
+            .map(|metadata| Some(metadata.id))
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "unknown legacy checkpoint origin",
+                )
+            })
     }
 
     /// Clear one session's crash-recovery checkpoint. Scoped: this can never
@@ -1674,6 +2276,7 @@ impl SessionManager {
         session.system_prompt = strip_legacy_truncation_note(session.system_prompt);
         session.ensure_journal();
         self.hydrate_approval_receipts(&mut session)?;
+        self.apply_late_usage_to_metadata(&mut session.metadata);
 
         Ok(session)
     }
@@ -1757,8 +2360,9 @@ impl SessionManager {
             let path = entry.path();
 
             if path.extension().is_some_and(|ext| ext == "json")
-                && let Ok(session) = Self::load_session_metadata(&path)
+                && let Ok(mut session) = Self::load_session_metadata(&path)
             {
+                self.apply_late_usage_to_metadata(&mut session);
                 sessions.push(session);
             }
         }
@@ -1895,11 +2499,82 @@ impl SessionManager {
         })
     }
 
-    /// Delete a session by ID
+    /// Delete a session and its recovery checkpoints, retiring its origin.
     pub fn delete_session(&self, id: &str) -> std::io::Result<()> {
+        self.remove_session(id, SessionRemoval::Explicit)
+    }
+
+    fn remove_session(&self, id: &str, removal: SessionRemoval) -> std::io::Result<()> {
         let path = self.validated_session_path(id)?;
+        // Older ordinary snapshots may use a name reserved by the checkpoint
+        // directory. Such a name must never address its shared legacy files.
+        let checkpoint = self.validated_checkpoint_path(id).ok();
+        let legacy_checkpoint = self.checkpoints_dir().join(LEGACY_CHECKPOINT_FILE);
+        let (late_path, lock_path) = self.ensure_late_usage_paths(id)?;
+        let lock_file = open_private_lock_file(&lock_path)?;
+        let mut lock = fd_lock::RwLock::new(lock_file);
+        let _guard = lock.write()?;
+        let already_deleted = Self::late_usage_is_deleted(&late_path)?;
+        let legacy_origin = self.legacy_checkpoint_origin();
+        let owns_legacy_checkpoint =
+            matches!(&legacy_origin, Ok(Some(origin)) if origin == id.trim());
+        let has_recovery = match checkpoint.as_ref() {
+            Some(path) => path.try_exists()?,
+            None => false,
+        } || owns_legacy_checkpoint;
+        if !already_deleted {
+            // An unknown id must not acquire a deletion marker. A prior
+            // tombstone, however, lets a retry finish interrupted cleanup.
+            match fs::symlink_metadata(&path) {
+                Ok(_) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound && has_recovery => {}
+                Err(error) => return Err(error),
+            }
+        }
+        if matches!(removal, SessionRemoval::Retention)
+            && (has_recovery || legacy_origin.is_err())
+            && !already_deleted
+        {
+            // Retention owns the ordinary snapshot, not crash recovery. Keep
+            // the origin and its accounting/evidence writable for resume.
+            // An unreadable legacy origin cannot justify retiring any id.
+            return match fs::remove_file(&path) {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(error),
+            };
+        }
         self.save_session_goal(id, None)?;
-        fs::remove_file(path)?;
+        // Publish the tombstone before removing data. A crash or a delayed
+        // callback can no longer re-create this session's accounting. The
+        // stable lock inode must never be removed or atomically replaced.
+        if !already_deleted {
+            write_atomic(&late_path.with_extension("deleted"), LATE_USAGE_DELETED)?;
+        }
+        match fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        match fs::remove_file(&late_path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        if let Some(checkpoint) = checkpoint {
+            match fs::remove_file(checkpoint) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+        }
+        if owns_legacy_checkpoint {
+            match fs::remove_file(&legacy_checkpoint) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+        }
         self.clear_session_boot_owner(id);
         let session_dir = self.sessions_dir.join(id.trim());
         if session_dir.exists() {
@@ -1946,6 +2621,10 @@ impl SessionManager {
         let Ok(entries) = fs::read_dir(&self.sessions_dir) else {
             return;
         };
+        let Ok(legacy_checkpoint_origin) = self.legacy_checkpoint_origin() else {
+            // An unidentified legacy checkpoint may own any orphan's evidence.
+            return;
+        };
         let mut reclaimed = 0usize;
         for entry in entries.flatten() {
             if reclaimed >= Self::MAX_ORPHAN_DIRS_PER_SWEEP {
@@ -1972,7 +2651,11 @@ impl SessionManager {
             let Ok(session_path) = self.validated_session_path(id) else {
                 continue;
             };
-            if session_path.exists() || is_live_session(id) || is_claimed_session_dir(id) {
+            if session_path.exists()
+                || is_live_session(id)
+                || is_claimed_session_dir(id)
+                || legacy_checkpoint_origin.as_deref() == Some(id)
+            {
                 continue;
             }
             if self
@@ -2004,7 +2687,7 @@ impl SessionManager {
                 if keep.is_some_and(|id| id == session.id) {
                     continue;
                 }
-                let _ = self.delete_session(&session.id);
+                let _ = self.remove_session(&session.id, SessionRemoval::Retention);
             }
         }
         self.reclaim_orphaned_session_dirs();
@@ -2054,7 +2737,7 @@ impl SessionManager {
                 continue;
             }
             if session.updated_at < cutoff {
-                if let Err(err) = self.delete_session(&session.id) {
+                if let Err(err) = self.remove_session(&session.id, SessionRemoval::Retention) {
                     tracing::warn!(
                         target: "session",
                         session = session.id,
@@ -2726,6 +3409,929 @@ mod tests {
                 cache_control: None,
             }],
         }
+    }
+
+    fn save_late_usage_test_session(manager: &SessionManager, id: &str) -> SavedSession {
+        let session = create_saved_session_with_id_and_mode(
+            id.to_string(),
+            &[make_test_message("user", "recoverable transcript")],
+            "deepseek-v4-flash",
+            manager.sessions_dir(),
+            0,
+            None,
+            Some("agent"),
+        );
+        manager.save_session(&session).expect("save session");
+        session
+    }
+
+    fn late_usage_test_record(source_id: &str) -> crate::cost_status::RuntimeUsageRecord {
+        crate::cost_status::RuntimeUsageRecord {
+            source_id: source_id.to_string(),
+            usage: crate::cost_status::EffectiveRouteUsage {
+                route: crate::cost_status::EffectiveRouteEnvelope::capture(
+                    None,
+                    ApiProvider::Deepseek,
+                    "deepseek",
+                    "deepseek-v4-flash",
+                    Some(crate::config::DEFAULT_DEEPSEEK_BASE_URL),
+                    Utc::now(),
+                ),
+                usage: crate::models::Usage {
+                    input_tokens: 1,
+                    ..Default::default()
+                },
+            },
+        }
+    }
+
+    #[test]
+    fn late_usage_reads_do_not_create_accounting_storage() {
+        let tmp = tempdir().expect("tempdir");
+        let manager = SessionManager::new(tmp.path().join("sessions")).expect("manager");
+        let saved = save_late_usage_test_session(&manager, "no-late-usage");
+        let directory = manager.sessions_dir().join(LATE_USAGE_DIR);
+        let inventory = || {
+            fs::read_dir(&directory)
+                .expect("accounting directory")
+                .map(|entry| entry.expect("entry").file_name())
+                .collect::<BTreeSet<_>>()
+        };
+        let before = inventory();
+        assert_eq!(before.len(), 1, "save creates the lifecycle lock only");
+        assert_eq!(manager.list_sessions().expect("list").len(), 1);
+        manager.load_session_by_prefix("no-late").expect("resume");
+        manager
+            .load_session_snapshot("no-late-usage")
+            .expect("snapshot");
+        assert_eq!(inventory(), before, "reads must not create sidecar files");
+
+        // Imported snapshots predate lifecycle locks. Reading one must not
+        // create either its missing accounting directory or a lock leaf.
+        let imported = SessionManager::new(tmp.path().join("imported")).expect("imported store");
+        write_atomic(
+            &imported
+                .validated_session_path(&saved.metadata.id)
+                .expect("imported path"),
+            serialize_saved_session(&saved)
+                .expect("snapshot bytes")
+                .as_bytes(),
+        )
+        .expect("import snapshot");
+        let imported_directory = imported.sessions_dir().join(LATE_USAGE_DIR);
+        imported.list_sessions().expect("imported list");
+        imported
+            .load_session_by_prefix("no-late")
+            .expect("imported resume");
+        assert!(
+            !imported_directory.exists(),
+            "reads must not create the sidecar directory"
+        );
+
+        fs::create_dir(&imported_directory).expect("empty accounting directory");
+        imported
+            .load_session_snapshot("no-late-usage")
+            .expect("imported snapshot");
+        assert_eq!(
+            fs::read_dir(imported_directory).expect("directory").count(),
+            0
+        );
+    }
+
+    #[test]
+    fn late_usage_projection_failure_preserves_recovery_and_is_idempotent() {
+        for malformed in ["json", "oversized", "directory", "tombstone"] {
+            let tmp = tempdir().expect("tempdir");
+            let manager = SessionManager::new(tmp.path().join("sessions")).expect("manager");
+            let affected = save_late_usage_test_session(&manager, "affected-session");
+            save_late_usage_test_session(&manager, "healthy-session");
+            let (ledger, _) = manager
+                .ensure_late_usage_paths("affected-session")
+                .expect("paths");
+            match malformed {
+                "json" => fs::write(&ledger, b"{invalid accounting").expect("malformed ledger"),
+                "oversized" => fs::File::create(&ledger)
+                    .expect("file")
+                    .set_len(MAX_LATE_USAGE_LEDGER_BYTES + 1)
+                    .expect("oversized ledger"),
+                "directory" => fs::create_dir(&ledger).expect("special ledger"),
+                "tombstone" => fs::write(ledger.with_extension("deleted"), b"invalid marker")
+                    .expect("malformed tombstone"),
+                _ => unreachable!(),
+            }
+
+            let listed = manager
+                .list_sessions()
+                .expect("list survives sidecar failure");
+            assert_eq!(listed.len(), 2);
+            let bad = listed
+                .iter()
+                .find(|session| session.id == affected.metadata.id)
+                .expect("affected");
+            assert!(
+                bad.cost
+                    .unpriced_reasons
+                    .contains(LATE_USAGE_UNAVAILABLE_REASON)
+            );
+            assert_eq!(bad.cost.unpriced_turns, 1);
+            let good = manager
+                .load_session_by_prefix("healthy")
+                .expect("unaffected resume");
+            assert_eq!(good.metadata.cost.unpriced_turns, 0);
+
+            let mut restored = manager
+                .load_session_by_prefix("affected")
+                .expect("affected recovery");
+            assert_eq!(restored.messages, affected.messages);
+            manager.apply_late_usage_to_metadata(&mut restored.metadata);
+            assert_eq!(restored.metadata.cost.unpriced_turns, 1);
+            assert_eq!(restored.metadata.cost.cny_unpriced_turns, 1);
+            assert_eq!(restored.metadata.cost.usage_source_fingerprints.len(), 1);
+            if malformed == "tombstone" {
+                assert!(
+                    manager.save_session(&restored).is_err(),
+                    "an invalid deletion marker must fail closed for writes"
+                );
+                fs::remove_file(ledger.with_extension("deleted"))
+                    .expect("repair malformed deletion marker");
+            }
+            manager
+                .save_session(&restored)
+                .expect("save recovered transcript");
+            let again = manager
+                .load_session_snapshot("affected-session")
+                .expect("repeat recovery");
+            assert_eq!(again.metadata.cost.unpriced_turns, 1);
+            assert_eq!(again.metadata.cost.cny_unpriced_turns, 1);
+            assert_eq!(
+                again.metadata.total_tokens, 0,
+                "unsafe accounting must not be used"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn linked_late_usage_directory_does_not_block_transcripts_or_touch_target() {
+        use std::os::unix::fs::{PermissionsExt as _, symlink};
+        let tmp = tempdir().expect("tempdir");
+        let manager = SessionManager::new(tmp.path().join("sessions")).expect("manager");
+        save_late_usage_test_session(&manager, "linked-directory");
+        let outside = tmp.path().join("outside");
+        fs::create_dir(&outside).expect("outside directory");
+        fs::set_permissions(&outside, fs::Permissions::from_mode(0o755))
+            .expect("outside permissions");
+        fs::rename(
+            manager.sessions_dir().join(LATE_USAGE_DIR),
+            tmp.path().join("original-accounting"),
+        )
+        .expect("park original accounting directory");
+        symlink(&outside, manager.sessions_dir().join(LATE_USAGE_DIR)).expect("linked store");
+        let recovered = manager
+            .load_session_snapshot("linked-directory")
+            .expect("transcript");
+        assert!(
+            recovered
+                .metadata
+                .cost
+                .unpriced_reasons
+                .contains(LATE_USAGE_UNAVAILABLE_REASON)
+        );
+        assert_eq!(manager.list_sessions().expect("listing").len(), 1);
+        assert!(
+            manager
+                .persist_late_runtime_usage(
+                    "linked-directory",
+                    "turn",
+                    &late_usage_test_record("source")
+                )
+                .is_err()
+        );
+        assert_eq!(fs::read_dir(&outside).expect("outside contents").count(), 0);
+        assert_eq!(
+            fs::metadata(outside)
+                .expect("outside metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o755
+        );
+    }
+
+    #[test]
+    fn deleting_session_retires_late_usage_and_keeps_one_lock_inode() {
+        let tmp = tempdir().expect("tempdir");
+        let manager = SessionManager::new(tmp.path().join("sessions")).expect("manager");
+        save_late_usage_test_session(&manager, "deleted-session");
+        let record = late_usage_test_record("before-deletion");
+        manager
+            .persist_late_runtime_usage("deleted-session", "turn", &record)
+            .expect("append");
+        let (ledger, lock_path) = manager.late_usage_paths("deleted-session").expect("paths");
+        let mut old_lock =
+            fd_lock::RwLock::new(open_private_lock_file(&lock_path).expect("captured lock"));
+
+        manager.delete_session("deleted-session").expect("delete");
+        assert!(!ledger.exists());
+        assert!(
+            !manager
+                .validated_session_path("deleted-session")
+                .expect("session path")
+                .exists()
+        );
+        assert!(SessionManager::late_usage_is_deleted(&ledger).expect("tombstone"));
+        assert!(manager.load_late_usage("deleted-session").is_err());
+        assert!(
+            manager
+                .persist_late_runtime_usage("deleted-session", "turn", &record)
+                .expect("retired replay")
+        );
+        assert!(
+            !ledger.exists(),
+            "late callback must not resurrect accounting"
+        );
+        manager
+            .delete_session("deleted-session")
+            .expect("idempotent cleanup retry");
+
+        let mut new_lock =
+            fd_lock::RwLock::new(open_private_lock_file(&lock_path).expect("current lock"));
+        let _held = old_lock.write().expect("old handle still owns the lock");
+        assert!(
+            matches!(new_lock.try_write(), Err(error) if error.kind() == io::ErrorKind::WouldBlock),
+            "deletion must not replace or unlink a held lock inode"
+        );
+    }
+
+    #[test]
+    fn lifecycle_admission_holds_delete_lock_and_rejects_retired_origin() {
+        let tmp = tempdir().expect("tempdir");
+        let manager = SessionManager::new(tmp.path().join("sessions")).expect("manager");
+        save_late_usage_test_session(&manager, "active-origin");
+        let (_, lock_path) = manager.late_usage_paths("active-origin").expect("paths");
+        let mut competing_lock =
+            fd_lock::RwLock::new(open_private_lock_file(&lock_path).expect("competing lock"));
+        assert_eq!(
+            manager
+                .with_live_session_origin("active-origin", || {
+                    assert!(
+                        matches!(competing_lock.try_write(), Err(error) if error.kind() == io::ErrorKind::WouldBlock),
+                        "active acceptance must hold the deletion lock"
+                    );
+                    true
+                })
+                .expect("active acceptance"),
+            Some(true)
+        );
+        assert_eq!(
+            manager
+                .with_live_session_origin("active-origin", || false)
+                .expect("stale scope falls through"),
+            Some(false)
+        );
+        drop(competing_lock.write().expect("admission releases the lock"));
+
+        manager.delete_session("active-origin").expect("delete");
+        let mut ran_after_delete = false;
+        assert_eq!(
+            manager
+                .with_live_session_origin("active-origin", || {
+                    ran_after_delete = true;
+                    true
+                })
+                .expect("retired origin"),
+            None
+        );
+        assert!(!ran_after_delete, "retired scopes cannot accept new usage");
+    }
+
+    #[test]
+    fn deleted_session_rejects_stale_snapshot_and_checkpoint_saves() {
+        let tmp = tempdir().expect("tempdir");
+        let manager = SessionManager::new(tmp.path().join("sessions")).expect("manager");
+        let stale = save_late_usage_test_session(&manager, "stale-writer");
+        manager.delete_session("stale-writer").expect("delete");
+        for error in [
+            manager.save_session(&stale).expect_err("reject stale save"),
+            manager
+                .save_checkpoint(&stale)
+                .expect_err("reject stale checkpoint"),
+        ] {
+            assert_eq!(error.kind(), io::ErrorKind::NotFound);
+        }
+        assert!(manager.list_sessions().expect("list").is_empty());
+        assert!(
+            !manager
+                .validated_checkpoint_path("stale-writer")
+                .expect("checkpoint path")
+                .exists(),
+            "a retired writer must not recreate crash-recovery data"
+        );
+    }
+
+    #[test]
+    fn explicit_delete_removes_owned_recovery_checkpoints_only() {
+        let tmp = tempdir().expect("tempdir");
+        let manager = SessionManager::new(tmp.path().join("sessions")).expect("manager");
+        let retired = save_late_usage_test_session(&manager, "retired-recovery");
+        let retained = save_late_usage_test_session(&manager, "retained-recovery");
+        manager.save_checkpoint(&retired).expect("owned checkpoint");
+        manager
+            .save_checkpoint(&retained)
+            .expect("other checkpoint");
+        let legacy_path = manager.checkpoints_dir().join(LEGACY_CHECKPOINT_FILE);
+        write_atomic(
+            &legacy_path,
+            serialize_saved_session(&retired)
+                .expect("legacy bytes")
+                .as_bytes(),
+        )
+        .expect("owned legacy checkpoint");
+
+        manager.delete_session("retired-recovery").expect("delete");
+        assert!(manager.load_legacy_checkpoint().expect("legacy").is_none());
+        assert!(
+            manager
+                .load_session_checkpoint("retired-recovery")
+                .expect("owned checkpoint")
+                .is_none()
+        );
+        let checkpoints = manager.list_checkpoints().expect("checkpoint picker");
+        assert_eq!(checkpoints.len(), 1);
+        assert!(matches!(
+            &checkpoints[0].source,
+            CheckpointSource::Session(id) if id == "retained-recovery"
+        ));
+        assert!(
+            manager
+                .load_session_checkpoint("retained-recovery")
+                .expect("other recovery")
+                .is_some()
+        );
+
+        // An origin can exist only as crash recovery, with no ordinary
+        // snapshot. Explicit deletion must still be able to retire it.
+        fs::remove_file(
+            manager
+                .validated_session_path("retained-recovery")
+                .expect("ordinary snapshot path"),
+        )
+        .expect("simulate checkpoint-only origin");
+        manager
+            .delete_session("retained-recovery")
+            .expect("delete recovery-only origin");
+        assert!(
+            manager
+                .list_checkpoints()
+                .expect("checkpoint picker")
+                .is_empty()
+        );
+        assert!(manager.save_checkpoint(&retained).is_err());
+    }
+
+    #[test]
+    fn retention_preserves_checkpoint_origin_receipts_and_evidence() {
+        for retention in ["age", "size"] {
+            for checkpoint_kind in ["session", "legacy"] {
+                let tmp = tempdir().expect("tempdir");
+                let manager = SessionManager::new(tmp.path().join("sessions")).expect("manager");
+                let id = "55555555-5555-4555-8555-555555555555";
+                let mut old = save_late_usage_test_session(&manager, id);
+                old.metadata.updated_at = Utc::now() - chrono::Duration::days(60);
+                manager.save_session(&old).expect("old snapshot");
+                let evidence = manager.sessions_dir().join(id).join("artifacts");
+                fs::create_dir_all(&evidence).expect("recovery evidence");
+                fs::write(evidence.join("receipt.txt"), b"recoverable evidence").expect("receipt");
+                if checkpoint_kind == "session" {
+                    manager.save_checkpoint(&old).expect("recovery checkpoint");
+                } else {
+                    fs::create_dir_all(manager.checkpoints_dir()).expect("checkpoints");
+                    write_atomic(
+                        &manager.checkpoints_dir().join(LEGACY_CHECKPOINT_FILE),
+                        serialize_saved_session(&old)
+                            .expect("legacy bytes")
+                            .as_bytes(),
+                    )
+                    .expect("legacy recovery checkpoint");
+                }
+                manager
+                    .persist_late_runtime_usage(id, "turn", &late_usage_test_record("before-prune"))
+                    .expect("origin accounting");
+                if retention == "age" {
+                    assert_eq!(
+                        manager
+                            .prune_sessions_older_than(std::time::Duration::from_secs(24 * 3600))
+                            .expect("age prune"),
+                        1
+                    );
+                } else {
+                    for index in 0..MAX_SESSIONS {
+                        write_session_with_updated_at(
+                            &manager,
+                            &format!("fresh-{index}"),
+                            Utc::now(),
+                        );
+                    }
+                    manager.cleanup_old_sessions().expect("size cleanup");
+                    assert_eq!(
+                        manager.list_sessions().expect("sessions").len(),
+                        MAX_SESSIONS
+                    );
+                }
+                assert!(
+                    !manager
+                        .validated_session_path(id)
+                        .expect("snapshot path")
+                        .exists()
+                );
+                let (ledger, _) = manager.late_usage_paths(id).expect("ledger paths");
+                assert!(!SessionManager::late_usage_is_deleted(&ledger).expect("origin retained"));
+                assert!(ledger.exists(), "recovery must retain accounting");
+                assert!(
+                    evidence.join("receipt.txt").exists(),
+                    "recovery must retain evidence"
+                );
+                assert_eq!(
+                    manager
+                        .with_live_session_origin(id, || true)
+                        .expect("resume admission"),
+                    Some(true)
+                );
+                let mut recovered = if checkpoint_kind == "session" {
+                    manager
+                        .load_session_checkpoint(id)
+                        .expect("checkpoint read")
+                } else {
+                    manager.load_legacy_checkpoint().expect("legacy read")
+                }
+                .expect("retained recovery");
+                assert_eq!(
+                    recovered.metadata.total_tokens, 1,
+                    "checkpoint overlays exact origin usage"
+                );
+                recovered.metadata.updated_at = Utc::now();
+                manager
+                    .save_session(&recovered)
+                    .expect("save resumed origin");
+                assert_eq!(
+                    manager
+                        .load_session_snapshot(id)
+                        .expect("resumed snapshot")
+                        .metadata
+                        .total_tokens,
+                    1,
+                    "replayed recovery accounting remains idempotent"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn interrupted_session_deletion_keeps_recovery_incomplete_and_can_finish() {
+        let tmp = tempdir().expect("tempdir");
+        let manager = SessionManager::new(tmp.path().join("sessions")).expect("manager");
+        let saved = save_late_usage_test_session(&manager, "interrupted-delete");
+        manager
+            .save_checkpoint(&saved)
+            .expect("checkpoint before deletion");
+        write_atomic(
+            &manager.checkpoints_dir().join(LEGACY_CHECKPOINT_FILE),
+            serialize_saved_session(&saved)
+                .expect("legacy bytes")
+                .as_bytes(),
+        )
+        .expect("legacy checkpoint before deletion");
+        let (ledger, _) = manager
+            .ensure_late_usage_paths("interrupted-delete")
+            .expect("paths");
+        write_atomic(&ledger.with_extension("deleted"), LATE_USAGE_DELETED)
+            .expect("crash after tombstone");
+        let recovered = manager
+            .load_session_snapshot("interrupted-delete")
+            .expect("transcript remains recoverable");
+        assert!(
+            recovered
+                .metadata
+                .cost
+                .unpriced_reasons
+                .contains(LATE_USAGE_UNAVAILABLE_REASON)
+        );
+        assert!(
+            manager
+                .load_session_checkpoint("interrupted-delete")
+                .expect("checkpoint read")
+                .is_none(),
+            "a checkpoint retired before a crash must not be offered for recovery"
+        );
+        assert!(
+            manager
+                .load_legacy_checkpoint()
+                .expect("legacy read")
+                .is_none()
+        );
+        manager
+            .delete_session("interrupted-delete")
+            .expect("finish deletion");
+        assert!(manager.list_sessions().expect("list").is_empty());
+        assert!(manager.list_checkpoints().expect("checkpoints").is_empty());
+    }
+
+    #[test]
+    #[ignore = "subprocess helper for the late usage deletion regression"]
+    fn late_usage_callback_subprocess() {
+        let directory = PathBuf::from(
+            std::env::var_os("CODEWHALE_LATE_USAGE_TEST_DIR").expect("fixture directory"),
+        );
+        let manager = SessionManager::new(directory.join("sessions")).expect("manager");
+        manager
+            .persist_late_runtime_usage(
+                "process-delete-race",
+                "turn",
+                &late_usage_test_record("first-callback"),
+            )
+            .expect("first callback");
+        fs::write(directory.join("ready"), b"ready").expect("signal ready");
+        let started = std::time::Instant::now();
+        while !directory.join("continue").exists() {
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(10),
+                "callback gate timed out"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(
+            manager
+                .persist_late_runtime_usage(
+                    "process-delete-race",
+                    "turn",
+                    &late_usage_test_record("late-callback")
+                )
+                .expect("retired callback")
+        );
+    }
+
+    #[test]
+    fn late_usage_callback_in_another_process_cannot_resurrect_deleted_session() {
+        let tmp = tempdir().expect("tempdir");
+        let manager = SessionManager::new(tmp.path().join("sessions")).expect("manager");
+        save_late_usage_test_session(&manager, "process-delete-race");
+        let mut child =
+            std::process::Command::new(std::env::current_exe().expect("test executable"))
+                .args([
+                    "--exact",
+                    "session_manager::tests::late_usage_callback_subprocess",
+                    "--ignored",
+                ])
+                .env("CODEWHALE_LATE_USAGE_TEST_DIR", tmp.path())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .expect("callback process");
+        let started = std::time::Instant::now();
+        while !tmp.path().join("ready").exists() {
+            if started.elapsed() >= std::time::Duration::from_secs(10)
+                || child.try_wait().expect("child status").is_some()
+            {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("callback process did not reach the deletion gate");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(
+            manager
+                .load_session_snapshot("process-delete-race")
+                .expect("first callback persisted")
+                .metadata
+                .total_tokens,
+            1
+        );
+        let deleted = manager.delete_session("process-delete-race");
+        fs::write(tmp.path().join("continue"), b"continue").expect("release callback");
+        let status = loop {
+            if let Some(status) = child.try_wait().expect("child status") {
+                break status;
+            }
+            if started.elapsed() >= std::time::Duration::from_secs(10) {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("late callback process did not finish");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        };
+        deleted.expect("delete while callback process was pending");
+        assert!(status.success(), "callback process failed");
+        let (ledger, _) = manager
+            .late_usage_paths("process-delete-race")
+            .expect("paths");
+        assert!(!ledger.exists());
+        assert!(manager.list_sessions().expect("list").is_empty());
+    }
+
+    #[test]
+    fn late_usage_sidecar_survives_stale_session_save_and_replays_once() {
+        let tmp = tempdir().expect("tempdir");
+        let manager = SessionManager::new(tmp.path().join("sessions")).expect("manager");
+        let old_id = "old-session";
+        let new_id = "new-session";
+        let old = create_saved_session_with_id_and_mode(
+            old_id.to_string(),
+            &[make_test_message("user", "old session")],
+            "deepseek-v4-flash",
+            tmp.path(),
+            0,
+            None,
+            Some("agent"),
+        );
+        let new = create_saved_session_with_id_and_mode(
+            new_id.to_string(),
+            &[make_test_message("user", "new session")],
+            "deepseek-v4-flash",
+            tmp.path(),
+            0,
+            None,
+            Some("agent"),
+        );
+        manager.save_session(&old).expect("save old");
+        manager.save_session(&new).expect("save new");
+
+        let priced_route = crate::cost_status::EffectiveRouteEnvelope::capture(
+            None,
+            ApiProvider::Deepseek,
+            "deepseek",
+            "deepseek-v4-flash",
+            Some(crate::config::DEFAULT_DEEPSEEK_BASE_URL),
+            Utc::now(),
+        );
+        let usage = crate::models::Usage {
+            input_tokens: 17,
+            output_tokens: 5,
+            ..crate::models::Usage::default()
+        };
+        let usage_record = crate::cost_status::RuntimeUsageRecord {
+            source_id: "translation:old-turn:assistant:1".to_string(),
+            usage: crate::cost_status::EffectiveRouteUsage {
+                route: priced_route.clone(),
+                usage: usage.clone(),
+            },
+        };
+        let missing_record = crate::cost_status::RuntimeUsageDropRecord {
+            source_id: "advisor:old-turn:provider-response:0".to_string(),
+            route: priced_route,
+        };
+        let mut subscription_route = missing_record.route.clone();
+        subscription_route.billing_mode = crate::cost_status::RouteBillingMode::Subscription;
+        let subscription_missing = crate::cost_status::RuntimeUsageDropRecord {
+            source_id: "translation:old-turn:thinking:2".to_string(),
+            route: subscription_route,
+        };
+
+        for _ in 0..2 {
+            assert!(
+                manager
+                    .persist_late_runtime_usage(old_id, "old-turn", &usage_record)
+                    .expect("persist late usage")
+            );
+            assert!(
+                manager
+                    .persist_late_runtime_drop(old_id, "old-turn", &missing_record)
+                    .expect("persist missing usage")
+            );
+            assert!(
+                manager
+                    .persist_late_runtime_drop(old_id, "old-turn", &subscription_missing)
+                    .expect("persist subscription missing usage")
+            );
+        }
+
+        // A concurrent stale whole-session writer cannot erase the independent
+        // origin ledger. Loading overlays it once by stable response identity.
+        manager.save_session(&old).expect("stale old-session save");
+        let first = manager.load_session_snapshot(old_id).expect("load old");
+        let second = manager.load_session_snapshot(old_id).expect("replay old");
+        for loaded in [&first, &second] {
+            assert_eq!(loaded.metadata.total_tokens, 22);
+            assert_eq!(loaded.metadata.cost.unpriced_turns, 1);
+            assert_eq!(loaded.metadata.cost.cny_unpriced_turns, 1);
+            assert_eq!(loaded.metadata.cost.usage_source_fingerprints.len(), 3);
+            assert!(
+                loaded
+                    .metadata
+                    .cost
+                    .unpriced_reasons
+                    .contains("provider_success_missing_usage")
+            );
+        }
+        assert_eq!(first.metadata.cost.priced_turns, 1);
+
+        let clean = manager.load_session_snapshot(new_id).expect("load new");
+        assert_eq!(clean.metadata.total_tokens, 0);
+        assert_eq!(clean.metadata.cost.priced_turns, 0);
+        assert_eq!(clean.metadata.cost.unpriced_turns, 0);
+        assert!(clean.metadata.cost.usage_source_fingerprints.is_empty());
+
+        let ledger = fs::read_to_string(
+            manager
+                .sessions_dir()
+                .join(LATE_USAGE_DIR)
+                .join(format!("{old_id}.json")),
+        )
+        .expect("late ledger");
+        assert!(!ledger.contains("translation:old-turn"));
+        assert!(!ledger.contains(crate::config::DEFAULT_DEEPSEEK_BASE_URL));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let ledger_dir = manager.sessions_dir().join(LATE_USAGE_DIR);
+            assert_eq!(
+                fs::metadata(&ledger_dir)
+                    .expect("private sidecar directory")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o700
+            );
+            for path in [
+                ledger_dir.join(format!("{old_id}.json")),
+                ledger_dir.join(format!("{old_id}.lock")),
+            ] {
+                assert_eq!(
+                    fs::metadata(path)
+                        .expect("private sidecar metadata")
+                        .permissions()
+                        .mode()
+                        & 0o777,
+                    0o600
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn late_usage_sidecar_has_a_bounded_fail_closed_overflow() {
+        let tmp = tempdir().expect("tempdir");
+        let manager = SessionManager::new(tmp.path().join("sessions")).expect("manager");
+        let session_id = "bounded-session";
+        let session = create_saved_session_with_id_and_mode(
+            session_id.to_string(),
+            &[make_test_message("user", "bounded session")],
+            "local-model",
+            tmp.path(),
+            0,
+            None,
+            Some("agent"),
+        );
+        manager.save_session(&session).expect("save bounded");
+        let mut route = crate::cost_status::EffectiveRouteEnvelope::capture(
+            None,
+            ApiProvider::Custom,
+            "local-provider",
+            "local-model",
+            Some("http://127.0.0.1:11434/v1"),
+            Utc::now(),
+        );
+        route.billing_mode = crate::cost_status::RouteBillingMode::Local;
+        for index in 0..=MAX_LATE_USAGE_RECORDS_PER_SESSION {
+            manager
+                .persist_late_runtime_usage(
+                    session_id,
+                    "bounded-turn",
+                    &crate::cost_status::RuntimeUsageRecord {
+                        source_id: format!("late-bounded:{index}"),
+                        usage: crate::cost_status::EffectiveRouteUsage {
+                            route: route.clone(),
+                            usage: crate::models::Usage {
+                                input_tokens: 1,
+                                ..crate::models::Usage::default()
+                            },
+                        },
+                    },
+                )
+                .expect("bounded append");
+        }
+
+        let loaded = manager
+            .load_session_snapshot(session_id)
+            .expect("load bounded");
+        assert_eq!(
+            loaded.metadata.total_tokens,
+            u64::try_from(MAX_LATE_USAGE_RECORDS_PER_SESSION).unwrap_or(u64::MAX)
+        );
+        assert_eq!(loaded.metadata.cost.unpriced_turns, 1);
+        assert!(
+            loaded
+                .metadata
+                .cost
+                .unpriced_reasons
+                .contains("late_usage_ledger_overflow")
+        );
+        let ledger = manager.load_late_usage(session_id).expect("bounded ledger");
+        assert_eq!(ledger.records.len(), MAX_LATE_USAGE_RECORDS_PER_SESSION);
+        assert!(ledger.overflowed);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn late_usage_sidecar_rejects_linked_lock_and_ledger_leaves() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempdir().expect("tempdir");
+        let manager = SessionManager::new(tmp.path().join("sessions")).expect("manager");
+        let session_id = "linked-sidecar-session";
+        save_late_usage_test_session(&manager, session_id);
+        save_late_usage_test_session(&manager, "unaffected-sidecar-session");
+        let (ledger_path, lock_path) = manager.ensure_late_usage_paths(session_id).expect("paths");
+        let route = crate::cost_status::EffectiveRouteEnvelope::capture(
+            None,
+            ApiProvider::Deepseek,
+            "deepseek",
+            "deepseek-v4-flash",
+            Some(crate::config::DEFAULT_DEEPSEEK_BASE_URL),
+            Utc::now(),
+        );
+        let record = crate::cost_status::RuntimeUsageRecord {
+            source_id: "linked-sidecar-response".to_string(),
+            usage: crate::cost_status::EffectiveRouteUsage {
+                route,
+                usage: crate::models::Usage {
+                    input_tokens: 1,
+                    ..crate::models::Usage::default()
+                },
+            },
+        };
+
+        let outside_lock = tmp.path().join("outside.lock");
+        fs::write(&outside_lock, b"outside-lock").expect("outside lock");
+        fs::remove_file(&lock_path).expect("replace fixture lifecycle lock");
+        symlink(&outside_lock, &lock_path).expect("symlink lock");
+        assert!(
+            manager
+                .persist_late_runtime_usage(session_id, "turn", &record)
+                .is_err(),
+            "a symlink lock leaf must fail closed"
+        );
+        assert_eq!(
+            fs::read(&outside_lock).expect("outside lock unchanged"),
+            b"outside-lock"
+        );
+        fs::remove_file(&lock_path).expect("remove lock symlink");
+
+        fs::hard_link(&outside_lock, &lock_path).expect("hard-linked lock");
+        assert!(
+            manager
+                .persist_late_runtime_usage(session_id, "turn", &record)
+                .is_err(),
+            "a multiply linked lock leaf must fail closed"
+        );
+        fs::remove_file(&lock_path).expect("remove hard-linked lock");
+
+        let outside_ledger = tmp.path().join("outside.json");
+        fs::write(
+            &outside_ledger,
+            br#"{"schema_version":1,"records":[],"overflowed":false}"#,
+        )
+        .expect("outside ledger");
+        symlink(&outside_ledger, &ledger_path).expect("symlink ledger");
+        assert!(
+            manager.load_late_usage(session_id).is_err(),
+            "a symlink ledger leaf must fail closed"
+        );
+        assert!(
+            manager
+                .load_session_snapshot(session_id)
+                .expect("recover linked ledger transcript")
+                .metadata
+                .cost
+                .unpriced_reasons
+                .contains(LATE_USAGE_UNAVAILABLE_REASON)
+        );
+        fs::remove_file(&ledger_path).expect("remove ledger symlink");
+
+        fs::hard_link(&outside_ledger, &ledger_path).expect("hard-linked ledger");
+        assert!(
+            manager.load_late_usage(session_id).is_err(),
+            "a multiply linked ledger leaf must fail closed"
+        );
+        assert_eq!(
+            manager
+                .list_sessions()
+                .expect("list linked ledger transcript")
+                .len(),
+            2
+        );
+        assert_eq!(
+            manager
+                .load_session_by_prefix("unaffected")
+                .expect("unaffected resume")
+                .metadata
+                .cost
+                .unpriced_turns,
+            0
+        );
+        assert_eq!(
+            fs::read(&outside_ledger).expect("outside ledger unchanged"),
+            br#"{"schema_version":1,"records":[],"overflowed":false}"#
+        );
     }
 
     #[test]
