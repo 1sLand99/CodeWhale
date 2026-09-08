@@ -37,6 +37,8 @@ export const CHANGELOG: ChangelogRelease[] = [
       {
         "heading": "Fixed",
         "items": [
+          "New, imported, and live session titles skip runtime handoffs and use the first real user prompt. Explicitly renamed titles retain priority (#6012, thanks @SparkofSpike).",
+          "UI dispatch acceptance now precedes Engine execution, so a delayed acceptance callback cannot overwrite a turn that has already started or completed. Cancelling before acceptance preserves the prompt and leaves the next dispatch usable.",
           "Bottom-chrome effort is omitted when the route cannot prove an effective tier; /status retains the full explanation. Cost remains visible when known, and cost: unknown remains on metered routes lacking a reading (#5950).",
           "Pasting multiline text is one paste again. 0.9.12 gated the paste-burst heuristic off whenever bracketed paste was *requested*, but a terminal can accept EnableBracketedPaste and still deliver a paste as individual keystrokes — on those terminals (observed on Windows 11) every pasted line was submitted as its own message. The heuristic is again armed whenever tui.paste_burst_detection is on, and the existing bracketed_paste_seen guard still disarms it for the rest of the…",
           "serve --acp no longer breaks strict JetBrains clients: the initialize response advertised sessionCapabilities.list as a boolean and carried an undefined nested load capability; it now sends {\"list\": {}} with no load key, per the ACP schema (#5969, reported by @Lujc0523).",
@@ -47,20 +49,23 @@ export const CHANGELOG: ChangelogRelease[] = [
           "allow_insecure_http = true under a [providers.<name>] table works again. 0.9.12 tightened plain-HTTP base URL handling in a way that silently dropped the per-provider key, leaving the process-wide env var as the only opt-in — LAN llama.cpp and internal-gateway users had to export CODEWHALE_ALLOW_INSECURE_HTTP=1 to connect at all. The key is honored again (parsed, settable and unsettable through codewhale config set providers.<name>.allow_insecure_http, and listed in the…",
           "A Fleet task that selects a roster member with worker.agent_profile now runs with that member's posture. The launch-time resolver only consulted the resolved member when the legacy worker.role label was absent, so a task labelled manager that selected member:reviewer ran as a write-capable manager instead of a reviewer and was never leased. The member's canonical slot now wins whenever one resolved; the label remains the posture only when no member resolved at all. To keep…"
         ],
-        "itemCount": 9
+        "itemCount": 11
       },
       {
         "heading": "Changed",
         "items": [
+          "The website uses Shannon Sans with versioned local font assets and retained serif, monospace, and language fallbacks. Terminal fonts are unchanged.",
+          "codewhale metrics reports recorded model requests and stream recovery separately from provider-reported token usage, with coverage for missing and duplicate receipts. Status messages and cumulative snapshots do not add requests or count tokens again.",
+          "Runtime turn receipts retain the Engine's terminal model-request, stream-retry, and resume counters separately from displayed status and provider-reported usage. These counters do not count HTTP retries inside a provider client or establish provider billing.",
           "Initial tool definitions no longer repeat shell interpreter guidance and agent lifecycle/scope instructions in multiple description fields. Parameter schemas, approval rules and dispatch behavior are preserved. This reduces prompt schema size; it does not establish a provider billing regression.",
-          "The built-in Computer Use plugin bundle is refreshed to the standalone plugin's 0.2.1 runtime (vendored from Hmbown/codewhale-cu-plugin at 4ffebcc): the native macOS accessibility backend with an a11y-first pointer strategy (covered points are refused, previews are drawn), the permission-owning desktop-app socket transport, remote computers over ssh and HarmonyOS HDC with contained temp handling, truthful win32 PowerShell failure reporting, and the shared allow-listed…",
+          "The built-in Computer Use plugin bundle is refreshed to the standalone plugin's 0.2.1 runtime (vendored from Hmbown/codewhale-cu-plugin at 724ad258): the native macOS accessibility backend with an a11y-first pointer strategy (covered points are refused, previews are drawn), the permission-owning desktop-app socket transport, remote computers over ssh and HarmonyOS HDC with contained temp handling, truthful win32 PowerShell failure reporting, and the shared allow-listed…",
           "/statusline drives the bottom chrome again. Since the 0.9.12 shell redesign the posture bar and the metrics line were built independently of tui.status_items, so every toggle in the picker except the balance fetch was decoration. Each remaining item now shows or hides exactly one thing: model, context_percent, cost, balance, cache, tokens and session_metrics are metrics-line segments, and mode is the posture bar's plan/act/operate chip. The status, agents, reasoning_replay,…",
           "The context reading is back on screen at every fullness. 0.9.12 painted ctx NN% only from 50% up, which left most of a session with no context signal at all; it now paints from 0% and keeps its warning colour from 80% up (#5950).",
           "A child agent parked because its parent's turn ended is shown as parked in the Agents panel, the sidebar and Agent Details, with resume_from / cancel as the recovery, instead of wearing the same \"waiting for input\" label as a child that asked a question. Parked work sorts below live and answerable work and no longer inflates the blocked chip; the receipts roster and the wire state gain parked (#5906, #5921).",
           "codewhale account keys set|remove|list no longer carry a hardcoded eight-provider list. Provider ids come from the control plane's public catalog (GET /api/model-providers), are validated locally against ^[a-z0-9][a-z0-9-]{0,63}$ before they reach a URL path, and list shows every catalog provider with its label and stored-key state. --from-local maps a catalog row onto the local runtime provider through the catalog's own runtimeProvider field, so a newly supported provider…",
           "/mcp lists the servers that need a login first, as their own Needs login group above Needs attention, and opens with the cursor already on the first such row so the Enter the screen advertises runs /mcp login <server> straight away; translated in all 15 packs. A snapshot test pins the footer shape the chip landed with (MCP · N connected · N ◆ auth required · N failed) so an expired login never regresses into the failed count (#5926)."
         ],
-        "itemCount": 7
+        "itemCount": 10
       },
       {
         "heading": "Fixed",

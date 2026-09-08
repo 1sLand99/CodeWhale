@@ -91,6 +91,12 @@ with an accessibility-first pointer.
 
 ### Changed
 
+- The website uses Shannon Sans with versioned local font assets and retained
+  serif, monospace, and language fallbacks. Terminal fonts are unchanged.
+- `codewhale metrics` reports recorded model requests and stream recovery
+  separately from provider-reported token usage, with coverage for missing
+  and duplicate receipts. Status messages and cumulative snapshots do not
+  add requests or count tokens again.
 - Runtime turn receipts retain the Engine's terminal model-request, stream-retry,
   and resume counters separately from displayed status and provider-reported
   usage. These counters do not count HTTP retries inside a provider client or
@@ -102,7 +108,7 @@ with an accessibility-first pointer.
 
 - The built-in Computer Use plugin bundle is refreshed to the standalone
   plugin's 0.2.1 runtime (vendored from `Hmbown/codewhale-cu-plugin`
-  at `4ffebcc`): the native macOS accessibility backend with an
+  at `724ad258`): the native macOS accessibility backend with an
   a11y-first pointer strategy (covered points are refused, previews are
   drawn), the permission-owning desktop-app socket transport, remote
   computers over ssh and HarmonyOS HDC with contained temp handling,
@@ -113,7 +119,9 @@ with an accessibility-first pointer.
   Single left clicks on macOS element targets now revalidate and press
   the observed element directly, without substituting a point hit-test
   or raw-pointer fallback. Explicit event clicks retain the app-ownership
-  guard; a sent press still requires visual verification. The
+  guard; a sent press still requires visual verification. Background mode
+  permits application-bound keys and accessibility actions while refusing
+  shared-pointer gestures; it does not provide an isolated desktop. The
   embed list gained the five new runtime files, and a consistency test
   now pins the embed list to the vendored tree so the bundle cannot rot
   silently again. Because the bundle's content hash changes, Computer
