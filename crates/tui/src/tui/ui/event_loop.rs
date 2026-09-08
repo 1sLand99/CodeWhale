@@ -964,10 +964,8 @@ pub async fn run_tui(
     // screen; answering it rebuilds the engine with the confirmed mode.
     app.redaction_gate = crate::tui::redaction_gate::confirmation_required(config);
 
-    let engine_config = build_engine_config(&app, config);
-
-    // Spawn the Engine - it will handle all API communication
-    let engine_handle = spawn_tui_engine(engine_config, config);
+    // Restore before admitting initial input, including resumed conversations.
+    let engine_handle = spawn_tui_engine_with_session(&mut app, config).await?;
     crate::startup_trace::mark("engine_spawned");
     // The translation client is optional: it never crashes the TUI on
     // startup, even when the API key is missing, the base URL is malformed,
@@ -982,28 +980,6 @@ pub async fn run_tui(
             None
         }
     };
-
-    if !app.api_messages.is_empty() {
-        let _ = engine_handle
-            .send(Op::SyncSession {
-                session_id: app.current_session_id.clone(),
-                messages: app.api_messages.clone(),
-                system_prompt: app.system_prompt.clone(),
-                system_prompt_override: false,
-                model: app.model.clone(),
-                workspace: app.workspace.clone(),
-                mode: app.mode,
-            })
-            .await;
-    }
-
-    // The engine owns the canonical model-facing prompt from startup. Mirror
-    // that exact value before the first draw so `/context` never reports an
-    // empty system prompt merely because no user turn has been submitted yet.
-    match engine_handle.get_session_snapshot().await {
-        Ok(snapshot) => app.system_prompt = snapshot.system_prompt,
-        Err(err) => tracing::warn!("could not mirror initial engine system prompt: {err:#}"),
-    }
 
     // Fire session start hook
     {
@@ -4536,6 +4512,24 @@ pub(crate) async fn run_event_loop(
             app.needs_redraw = true;
 
             // Handle bracketed paste events
+            if app.redaction_gate && app.onboarding == OnboardingState::None {
+                if let Event::Mouse(mouse) = &evt {
+                    match mouse.kind {
+                        event::MouseEventKind::ScrollDown => app
+                            .redaction_gate_scroll
+                            .set(app.redaction_gate_scroll.get().saturating_add(1)),
+                        event::MouseEventKind::ScrollUp => app
+                            .redaction_gate_scroll
+                            .set(app.redaction_gate_scroll.get().saturating_sub(1)),
+                        _ => {}
+                    }
+                    app.needs_redraw = true;
+                    continue;
+                }
+                if matches!(&evt, Event::Paste(_)) {
+                    continue;
+                }
+            }
             if let Event::Paste(text) = &evt {
                 handle_bracketed_paste(app, text);
                 continue;
@@ -4807,6 +4801,102 @@ pub(crate) async fn run_event_loop(
             // PTY/raw-mode — and by some kitty-keyboard-protocol terminals —
             // to canonical Ctrl+C so the quit-arm flow always runs (#4090).
             normalize_raw_ctrl_c(&mut key);
+
+            // The `[redaction] model_bound` opt-out gate owns every key until
+            // it is answered, exactly like onboarding above. Enter never
+            // confirms by reflex (same discipline as workspace trust): the
+            // three explicit choices are advertised in the action rail.
+            if app.redaction_gate && app.onboarding == OnboardingState::None {
+                match key.code {
+                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        let _ = engine_handle.send(Op::Shutdown).await;
+                        return Ok(());
+                    }
+                    KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Char('1') => {
+                        if !app.redaction_gate_confirming {
+                            // First confirm only advances to the final
+                            // confirmation stage; nothing is persisted yet.
+                            app.redaction_gate_confirming = true;
+                            app.redaction_gate_scroll.set(0);
+                        } else {
+                            match crate::tui::redaction_gate::record_confirmation(config) {
+                                Ok(_) => {
+                                    // The engine already spawned with masking on
+                                    // (the unconfirmed safe default). Rebuild it so
+                                    // its client picks up the confirmed opt-out.
+                                    let _ = engine_handle.send(Op::Shutdown).await;
+                                    engine_handle =
+                                        spawn_tui_engine_with_session(app, config).await?;
+                                    app.redaction_gate = false;
+                                    app.redaction_gate_confirming = false;
+                                    app.needs_redraw = true;
+                                }
+                                Err(err) => {
+                                    tracing::warn!(
+                                        "redaction confirmation could not be saved: {err}"
+                                    );
+                                    app.push_status_toast(
+                                        app.tr(MessageId::RedactionGateSaveFailed).into_owned(),
+                                        StatusToastLevel::Error,
+                                        Some(12_000),
+                                    );
+                                    app.redaction_gate_scroll.set(0);
+                                }
+                            }
+                        }
+                    }
+                    KeyCode::Char('u') | KeyCode::Char('U') | KeyCode::Char('2') => {
+                        if app.redaction_gate_confirming {
+                            // Second-stage "back": return to the first stage
+                            // without recording anything.
+                            app.redaction_gate_confirming = false;
+                            app.redaction_gate_scroll.set(0);
+                        } else {
+                            // Keep masking on for this launch. Nothing is
+                            // persisted and no config file is rewritten;
+                            // because the config field still requests
+                            // "disabled", the next launch asks again.
+                            app.redaction_gate = false;
+                            app.needs_redraw = true;
+                        }
+                    }
+                    KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Char('3') => {
+                        let _ = engine_handle.send(Op::Shutdown).await;
+                        return Ok(());
+                    }
+                    // Esc on the final-confirmation stage steps back to the
+                    // first stage (the user was mid-decision); on the first
+                    // stage it quits, matching the trust screen.
+                    KeyCode::Esc if app.redaction_gate_confirming => {
+                        app.redaction_gate_confirming = false;
+                        app.redaction_gate_scroll.set(0);
+                    }
+                    KeyCode::Esc => {
+                        let _ = engine_handle.send(Op::Shutdown).await;
+                        return Ok(());
+                    }
+                    KeyCode::Enter => {
+                        app.push_status_toast(
+                            app.tr(MessageId::RedactionGateEnterHint).into_owned(),
+                            StatusToastLevel::Info,
+                            Some(12_000),
+                        );
+                        app.redaction_gate_scroll.set(0);
+                    }
+                    KeyCode::Down | KeyCode::PageDown => app
+                        .redaction_gate_scroll
+                        .set(app.redaction_gate_scroll.get().saturating_add(1)),
+                    KeyCode::Up | KeyCode::PageUp => app
+                        .redaction_gate_scroll
+                        .set(app.redaction_gate_scroll.get().saturating_sub(1)),
+                    KeyCode::Home => app.redaction_gate_scroll.set(0),
+                    KeyCode::End => app.redaction_gate_scroll.set(usize::MAX),
+                    _ => {}
+                }
+                app.needs_redraw = true;
+                submit_initial_input_if_ready(app, config, &engine_handle).await?;
+                continue;
+            }
 
             // Login cancellation precedes modal/focus dispatch: Extensions
             // must not consume the Esc promised by the authorization notice.
@@ -5088,82 +5178,6 @@ pub(crate) async fn run_event_loop(
                     KeyCode::Esc if app.onboarding == OnboardingState::TrustDirectory => {
                         let _ = engine_handle.send(Op::Shutdown).await;
                         return Ok(());
-                    }
-                    _ => {}
-                }
-                continue;
-            }
-
-            // The `[redaction] model_bound` opt-out gate owns every key until
-            // it is answered, exactly like onboarding above. Enter never
-            // confirms by reflex (same discipline as workspace trust): the
-            // three explicit choices are advertised in the action rail.
-            if app.redaction_gate {
-                match key.code {
-                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        let _ = engine_handle.send(Op::Shutdown).await;
-                        return Ok(());
-                    }
-                    KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Char('1') => {
-                        if !app.redaction_gate_confirming {
-                            // First confirm only advances to the final
-                            // confirmation stage; nothing is persisted yet.
-                            app.redaction_gate_confirming = true;
-                            app.status_message = None;
-                        } else {
-                            match crate::tui::redaction_gate::record_confirmation() {
-                                Ok(_) => {
-                                    // The engine already spawned with masking on
-                                    // (the unconfirmed safe default). Rebuild it so
-                                    // its client picks up the confirmed opt-out.
-                                    let _ = engine_handle.send(Op::Shutdown).await;
-                                    let engine_config = build_engine_config(app, config);
-                                    engine_handle = spawn_tui_engine(engine_config, config);
-                                    app.redaction_gate = false;
-                                    app.redaction_gate_confirming = false;
-                                    app.needs_redraw = true;
-                                }
-                                Err(err) => {
-                                    app.status_message = Some(format!(
-                                        "Failed to record redaction confirmation: {err}"
-                                    ));
-                                }
-                            }
-                        }
-                    }
-                    KeyCode::Char('u') | KeyCode::Char('U') | KeyCode::Char('2') => {
-                        if app.redaction_gate_confirming {
-                            // Second-stage "back": return to the first stage
-                            // without recording anything.
-                            app.redaction_gate_confirming = false;
-                            app.status_message = None;
-                        } else {
-                            // Keep masking on for this launch. Nothing is
-                            // persisted and no config file is rewritten;
-                            // because the config field still requests
-                            // "disabled", the next launch asks again.
-                            app.redaction_gate = false;
-                            app.needs_redraw = true;
-                        }
-                    }
-                    KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Char('3') => {
-                        let _ = engine_handle.send(Op::Shutdown).await;
-                        return Ok(());
-                    }
-                    // Esc on the final-confirmation stage steps back to the
-                    // first stage (the user was mid-decision); on the first
-                    // stage it quits, matching the trust screen.
-                    KeyCode::Esc if app.redaction_gate_confirming => {
-                        app.redaction_gate_confirming = false;
-                        app.status_message = None;
-                    }
-                    KeyCode::Esc => {
-                        let _ = engine_handle.send(Op::Shutdown).await;
-                        return Ok(());
-                    }
-                    KeyCode::Enter => {
-                        app.status_message =
-                            Some(app.tr(MessageId::RedactionGateEnterHint).to_string());
                     }
                     _ => {}
                 }

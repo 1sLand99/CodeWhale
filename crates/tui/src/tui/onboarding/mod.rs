@@ -204,7 +204,7 @@ fn wrap_body(lines: &mut Vec<Line<'static>>, app: &App, id: MessageId, width: us
 /// Characters that may not begin a line in Japanese and Chinese typography
 /// (a small, uncontroversial kinsoku set: closing brackets, sentence-final
 /// punctuation, and the sound-extension mark). When a width break would strand
-/// one of these at the start of a line, one more cluster is pulled back.
+/// one of these at the start of a line, carry its preceding grapheme forward.
 const NO_LINE_START: &[char] = &[
     '。', '、', '．', '，', '，', '。', '」', '』', '）', '］', '｝', '〕', '〉', '》', '”', '’',
     '！', '？', '：', '；', 'ー', '々', '·', '…', '!', '?', ',', '.', ':', ';', ')', ']', '}',
@@ -232,16 +232,30 @@ fn break_by_display_width(text: &str, width: usize) -> Vec<String> {
                 .next()
                 .is_some_and(|c| NO_LINE_START.contains(&c));
             if starts_forbidden {
-                // Keep the punctuation with the text it belongs to. The line
-                // runs one column over only if that is unavoidable, which is
-                // still better than opening the next line with `。`.
-                current.push_str(cluster);
+                // Carry the preceding text with its punctuation onto the next
+                // line. Extending a full line instead silently clips it in a
+                // terminal viewport, including on the redaction consent gate.
+                if let Some((split, _)) = current.grapheme_indices(true).rev().find(|(_, part)| {
+                    !part
+                        .chars()
+                        .next()
+                        .is_some_and(|ch| NO_LINE_START.contains(&ch))
+                }) && split > 0
+                    && UnicodeWidthStr::width(&current[split..]) + cluster_width <= width
+                {
+                    let carry = current.split_off(split);
+                    out.push(std::mem::replace(&mut current, carry));
+                    current_width = UnicodeWidthStr::width(current.as_str());
+                } else {
+                    // A punctuation-only run cannot satisfy both typography
+                    // and width; preserve every character inside the viewport.
+                    out.push(std::mem::take(&mut current));
+                    current_width = 0;
+                }
+            } else {
                 out.push(std::mem::take(&mut current));
                 current_width = 0;
-                continue;
             }
-            out.push(std::mem::take(&mut current));
-            current_width = 0;
         }
         current.push_str(cluster);
         current_width += cluster_width;
@@ -976,7 +990,7 @@ mod tests {
         );
         for line in &lines {
             assert!(
-                UnicodeWidthStr::width(line.as_str()) <= 77,
+                UnicodeWidthStr::width(line.as_str()) <= 76,
                 "line exceeds the lane: {:?} ({} cols)",
                 line,
                 UnicodeWidthStr::width(line.as_str())

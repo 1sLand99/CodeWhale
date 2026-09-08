@@ -1950,6 +1950,8 @@ pub struct App {
     /// user already pressed 1/Y on the first stage and must confirm once more
     /// before the opt-out actually takes effect.
     pub redaction_gate_confirming: bool,
+    /// Viewport position for the consent text; clamped by the gate renderer.
+    pub redaction_gate_scroll: std::cell::Cell<usize>,
     pub onboarding_needs_api_key: bool,
     pub onboarding_provider: ApiProvider,
     pub onboarding_workspace_trust_gate: bool,

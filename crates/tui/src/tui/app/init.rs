@@ -944,6 +944,7 @@ impl App {
             onboarding,
             redaction_gate: false,
             redaction_gate_confirming: false,
+            redaction_gate_scroll: std::cell::Cell::new(0),
             onboarding_needs_api_key: needs_api_key,
             onboarding_provider: provider,
             onboarding_workspace_trust_gate,

@@ -8348,6 +8348,156 @@ async fn mode_change_update_sends_restored_agent_policy() {
     }
 }
 
+fn operate_tui_route_config() -> Config {
+    let mut config: Config = toml::from_str(
+        r#"
+provider = "startup-route"
+[providers.startup-route]
+kind = "openai-compatible"
+base_url = "https://startup.example.test/v1"
+model = "startup-model"
+auth_mode = "none"
+[providers.collision-route]
+kind = "openai-compatible"
+base_url = "https://custom-openai.example.test/v1"
+model = "table-default"
+auth_mode = "none"
+"#,
+    )
+    .expect("operate TUI routes");
+    let custom = &mut config.providers.as_mut().expect("providers").custom;
+    let collision = custom.remove("collision-route").expect("custom fixture");
+    custom.insert("openai".to_string(), collision);
+    config
+}
+
+#[tokio::test]
+async fn operate_entry_preserves_live_custom_identity_and_auto_over_startup_route() {
+    let _env = crate::test_support::lock_test_env();
+    for selected in ["session-model", "auto"] {
+        let root = TempDir::new().expect("root");
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", root.path());
+        let _operate = crate::test_support::EnvVarGuard::set(
+            "CODEWHALE_OPERATE_DIR",
+            root.path().join("operate"),
+        );
+        let mut config = operate_tui_route_config();
+        config.fleet_operator_route_applied = true;
+        let manager =
+            crate::automation_manager::AutomationManager::open(root.path().join("automations"))
+                .expect("manager");
+        let automations = Arc::new(tokio::sync::Mutex::new(manager));
+        let mut app = create_test_app();
+        app.workspace = root.path().to_path_buf();
+        app.runtime_services.automations = Some(automations.clone());
+        app.set_provider_identity_record(
+            config
+                .resolve_persisted_provider_identity(Some("custom"), Some("openai"))
+                .expect("exact custom"),
+        );
+        app.set_model_selection(selected.to_string());
+        app.last_effective_model = Some("previous-turn-model".to_string());
+        let engine = mock_engine_handle();
+        apply_mode_update(
+            &mut app,
+            &engine.handle,
+            &config,
+            crate::tui::app::AppMode::Operate,
+        )
+        .await;
+        let record = automations
+            .lock()
+            .await
+            .get_automation(crate::operate::OPERATE_KEEPALIVE_ID)
+            .expect("keepalive installed");
+        assert_eq!(record.model.as_deref(), Some(selected));
+        assert_eq!(record.model_provider.as_deref(), Some("custom"));
+        assert_eq!(record.model_provider_id.as_deref(), Some("openai"));
+        assert_eq!(record.auto_approve, Some(false));
+        let operation = crate::operate::OperationStore::open(root.path().join("operate"))
+            .expect("store")
+            .load()
+            .expect("load")
+            .expect("operation");
+        assert_eq!(operation.lead_operator.model, selected);
+        assert!(
+            operation
+                .roster
+                .iter()
+                .filter(|member| member.id == "lead")
+                .all(|member| member.model == selected)
+        );
+        assert!(operation.credentials_present);
+        assert!(
+            automations
+                .lock()
+                .await
+                .list_runs(&record.id, None)
+                .expect("runs")
+                .is_empty(),
+            "entry alone is not task execution"
+        );
+    }
+}
+
+#[tokio::test]
+async fn operate_rejected_attach_does_not_reactivate_saved_keepalive() {
+    let _env = crate::test_support::lock_test_env();
+    let root = TempDir::new().expect("root");
+    let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", root.path());
+    let operate_dir = root.path().join("operate");
+    let _operate = crate::test_support::EnvVarGuard::set("CODEWHALE_OPERATE_DIR", &operate_dir);
+    let config = operate_tui_route_config();
+    let manager =
+        crate::automation_manager::AutomationManager::open(root.path().join("automations"))
+            .expect("manager");
+    crate::operate::upsert_keepalive(&manager, root.path(), true, &config, None).expect("upsert");
+    crate::operate::pause_keepalive(&manager).expect("pause");
+    let before = serde_json::to_value(
+        manager
+            .get_automation(crate::operate::OPERATE_KEEPALIVE_ID)
+            .expect("record"),
+    )
+    .expect("json");
+    std::fs::create_dir_all(&operate_dir).expect("directory");
+    std::fs::write(operate_dir.join("current.json"), b"{broken")
+        .expect("corrupt operation fixture");
+    let automations = Arc::new(tokio::sync::Mutex::new(manager));
+    let mut app = create_test_app();
+    app.workspace = root.path().to_path_buf();
+    app.runtime_services.automations = Some(automations.clone());
+    app.set_provider_identity_record(
+        config
+            .active_provider_identity(ApiProvider::Custom)
+            .expect("identity"),
+    );
+    app.set_model_selection("startup-model".into());
+    let engine = mock_engine_handle();
+    apply_mode_update(
+        &mut app,
+        &engine.handle,
+        &config,
+        crate::tui::app::AppMode::Operate,
+    )
+    .await;
+    let record = automations
+        .lock()
+        .await
+        .get_automation(crate::operate::OPERATE_KEEPALIVE_ID)
+        .expect("saved keepalive");
+    assert_eq!(serde_json::to_value(&record).expect("json"), before);
+    assert_eq!(
+        record.status,
+        crate::automation_manager::AutomationStatus::Paused
+    );
+    assert!(record.next_run_at.is_none());
+    assert_eq!(
+        std::fs::read(operate_dir.join("current.json")).expect("operation"),
+        b"{broken"
+    );
+    assert!(app.history.iter().any(|cell| matches!(cell, HistoryCell::System { content } if content.contains("Operate did not start"))));
+}
+
 #[tokio::test]
 async fn operate_mode_entry_attaches_to_recorded_operation() {
     let _lock = crate::test_support::lock_test_env();
@@ -8356,14 +8506,24 @@ async fn operate_mode_entry_attaches_to_recorded_operation() {
     // Pre-record a planned operation: entering Operate must attach to it
     // (same id) instead of minting a fresh record that resets spend and plan.
     let store = crate::operate::OperationStore::open(dir.path()).expect("store");
-    let recorded =
-        crate::operate::start_operation(&store, dir.path(), Some("Steady ops".into()), None, true)
-            .expect("start");
+    let recorded = crate::operate::start_operation(
+        &store,
+        dir.path(),
+        Some("Steady ops".into()),
+        None,
+        true,
+        "selected-model",
+    )
+    .expect("start");
     let mut planned = recorded.clone();
     planned.plan_from_direction();
     store.save(&planned).expect("save planned");
 
     let mut app = create_test_app();
+    app.runtime_services.automations = Some(Arc::new(tokio::sync::Mutex::new(
+        crate::automation_manager::AutomationManager::open(dir.path().join("automations"))
+            .expect("automations"),
+    )));
     let engine = crate::core::engine::mock_engine_handle();
     assert!(
         apply_mode_update(
@@ -15555,6 +15715,189 @@ async fn startup_prompt_waits_for_onboarding_then_dispatches() {
         }
         other => panic!("expected SendMessage, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn redaction_gate_preserves_startup_and_external_input_without_dispatch() {
+    let mut app = create_test_app();
+    app.onboarding = OnboardingState::None;
+    app.redaction_gate = true;
+    app.input = "review the local fixture".to_string();
+    app.cursor_position = app.input.chars().count();
+    app.auto_submit_initial_input = true;
+    let config = Config::default();
+    let mut engine = mock_engine_handle();
+    for confirming in [false, true] {
+        app.redaction_gate_confirming = confirming;
+        submit_initial_input_if_ready(&mut app, &config, &engine.handle)
+            .await
+            .unwrap();
+        assert!(app.auto_submit_initial_input);
+        assert_eq!(app.input, "review the local fixture");
+        assert!(app.api_messages.is_empty());
+        assert!(engine.rx_op.try_recv().is_err());
+        assert!(
+            super::dispatch::prepare_user_dispatch(
+                &mut app,
+                &config,
+                QueuedMessage::new("external callback".to_string(), None)
+            )
+            .is_err()
+        );
+    }
+    // Choosing keep masking on releases precisely the original pending input.
+    app.redaction_gate = false;
+    submit_initial_input_if_ready(&mut app, &config, &engine.handle)
+        .await
+        .unwrap();
+    submit_initial_input_if_ready(&mut app, &config, &engine.handle)
+        .await
+        .unwrap();
+    assert!(!app.auto_submit_initial_input);
+    assert!(app.input.is_empty());
+    match engine.rx_op.try_recv().unwrap() {
+        Op::SendMessage { content, .. } => assert!(content.contains("review the local fixture")),
+        other => panic!("unexpected operation: {other:?}"),
+    }
+    assert!(engine.rx_op.try_recv().is_err());
+
+    let mut external = create_test_app();
+    external.redaction_gate = true;
+    dispatch_user_message(
+        &mut external,
+        &config,
+        &engine.handle,
+        QueuedMessage::new("callback while confirming".to_string(), None),
+    )
+    .await
+    .unwrap();
+    assert_eq!(external.input, "callback while confirming");
+    assert!(external.api_messages.is_empty());
+    assert!(engine.rx_op.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn redaction_confirmation_restores_history_before_first_local_provider_request() {
+    use crate::test_support::{EnvVarGuard, lock_test_env};
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path},
+    };
+    let _lock = lock_test_env();
+    let temp = tempfile::tempdir().unwrap();
+    let _home = EnvVarGuard::set("CODEWHALE_HOME", temp.path());
+    let _proxy = EnvVarGuard::set("NO_PROXY", "*");
+    let server = MockServer::builder()
+        .body_print_limit(wiremock::BodyPrintLimit::Limited(0))
+        .start()
+        .await;
+    Mock::given(method("POST")).and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200)
+            .insert_header("content-type", "text/event-stream")
+            .set_body_string(concat!(
+                "data: {\"id\":\"local-consent\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Done.\"},\"finish_reason\":null}]}\n\n",
+                "data: {\"id\":\"local-consent\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+                "data: [DONE]\n\n"
+            )))
+        .expect(1).mount(&server).await;
+    let config_path = temp.path().join("selected.toml");
+    std::fs::write(&config_path, format!(
+        "provider = \"deepseek\"\napi_key = \"synthetic-local-consent-key\"\nbase_url = \"{}\"\n[redaction]\nmodel_bound = \"disabled\"\n",
+        server.uri()
+    )).unwrap();
+    let config = Config::load(Some(config_path), None).unwrap();
+    let mut app = crate::test_support::test_app_with_options(TuiOptions {
+        start_in_agent_mode: true,
+        ..crate::test_support::test_tui_options(temp.path())
+    });
+    app.auto_model = false;
+    app.onboarding = OnboardingState::None;
+    app.redaction_gate = true;
+    app.current_session_id = Some("local-consent-resumed-session".to_string());
+    app.api_messages = vec![
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: "Remember the fixture color is amber.".to_string(),
+                cache_control: None,
+            }],
+        },
+        Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::Text {
+                text: "I will remember amber.".to_string(),
+                cache_control: None,
+            }],
+        },
+    ];
+    let expected_history = serde_json::to_value(&app.api_messages).unwrap();
+    app.input = "What color did I give you?".to_string();
+    app.cursor_position = app.input.chars().count();
+    app.auto_submit_initial_input = true;
+    let engine = spawn_tui_engine_with_session(&mut app, &config)
+        .await
+        .unwrap();
+    for confirming in [false, true] {
+        app.redaction_gate_confirming = confirming;
+        submit_initial_input_if_ready(&mut app, &config, &engine)
+            .await
+            .unwrap();
+        // A snapshot is a FIFO barrier after any accidentally queued operation.
+        let snapshot = engine.get_session_snapshot().await.unwrap();
+        assert_eq!(
+            serde_json::to_value(snapshot.messages).unwrap(),
+            expected_history
+        );
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+    crate::tui::redaction_gate::record_confirmation(&config).unwrap();
+    engine.send(Op::Shutdown).await.unwrap();
+    let replacement = spawn_tui_engine_with_session(&mut app, &config)
+        .await
+        .unwrap();
+    let snapshot = replacement.get_session_snapshot().await.unwrap();
+    assert_eq!(
+        serde_json::to_value(snapshot.messages).unwrap(),
+        expected_history
+    );
+    assert_eq!(
+        app.current_session_id.as_deref(),
+        Some("local-consent-resumed-session")
+    );
+    assert!(!crate::tui::redaction_gate::confirmation_required(&config));
+    app.redaction_gate = false;
+    app.redaction_gate_confirming = false;
+    submit_initial_input_if_ready(&mut app, &config, &replacement)
+        .await
+        .unwrap();
+    submit_initial_input_if_ready(&mut app, &config, &replacement)
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if !server.received_requests().await.unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("one request to the local provider after consent");
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 1);
+    let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+    let wire = body["messages"].to_string();
+    for expected in [
+        "Remember the fixture color is amber.",
+        "I will remember amber.",
+        "What color did I give you?",
+    ] {
+        assert!(
+            wire.contains(expected),
+            "resumed conversation missing from local request"
+        );
+    }
+    replacement.send(Op::Shutdown).await.unwrap();
 }
 
 #[tokio::test]

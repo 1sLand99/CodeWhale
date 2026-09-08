@@ -495,6 +495,38 @@ fn spawn_tui_engine(config: EngineConfig, api_config: &Config) -> EngineHandle {
     handle
 }
 
+/// Startup and consent-triggered replacement restore the same conversation
+/// before admitting any pending input. The existing engine remains the sole
+/// owner of model-facing history and the frozen system prefix.
+async fn spawn_tui_engine_with_session(app: &mut App, config: &Config) -> Result<EngineHandle> {
+    let handle = spawn_tui_engine(build_engine_config(app, config), config);
+    let restored = async {
+        if !app.api_messages.is_empty() {
+            handle
+                .send(Op::SyncSession {
+                    session_id: app.current_session_id.clone(),
+                    messages: app.api_messages.clone(),
+                    system_prompt: app.system_prompt.clone(),
+                    system_prompt_override: false,
+                    model: app.model.clone(),
+                    workspace: app.workspace.clone(),
+                    mode: app.mode,
+                })
+                .await?;
+        }
+        // FIFO snapshot acknowledgement also proves the restore was processed.
+        let snapshot = handle.get_session_snapshot().await?;
+        app.system_prompt = snapshot.system_prompt;
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+    if let Err(error) = restored {
+        let _ = handle.send(Op::Shutdown).await;
+        return Err(error);
+    }
+    Ok(handle)
+}
+
 fn configured_instruction_sources(config: &Config) -> Vec<prompts::InstructionSource> {
     config
         .instructions_paths()

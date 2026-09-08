@@ -718,13 +718,49 @@ async fn present_operate_board(app: &mut App, config: &Config) {
             return;
         }
     };
-    let credentials = crate::operate::operate_credentials_present(config);
+    let Some(automations) = app
+        .runtime_services
+        .automations
+        .as_ref()
+        .map(std::sync::Arc::clone)
+    else {
+        app.add_message(crate::tui::history::HistoryCell::System {
+            content: "Operate keep-alive not installed: automation service unavailable".to_string(),
+        });
+        return;
+    };
+    let model = app.model_selection_for_persistence();
+    let identity = match config.resolve_persisted_provider_identity(
+        Some(app.api_provider.as_str()),
+        app.provider_id_for_persistence(),
+    ) {
+        Ok(identity) => identity,
+        Err(error) => {
+            app.add_message(crate::tui::history::HistoryCell::System {
+                content: format!("Operate keep-alive not installed: {error}"),
+            });
+            return;
+        }
+    };
+    let (lead_model, credentials) = {
+        let manager = automations.lock().await;
+        match crate::operate::keepalive_readiness(&manager, config, Some((&identity, &model))) {
+            Ok(credentials) => credentials,
+            Err(error) => {
+                app.add_message(crate::tui::history::HistoryCell::System {
+                    content: format!("Operate keep-alive not installed: {error}"),
+                });
+                return;
+            }
+        }
+    };
     let operation = match crate::operate::attach_or_start_operation(
         &store,
         &app.workspace,
         None,
         None,
         credentials,
+        &lead_model,
     ) {
         Ok(mut operation) => {
             if credentials && !operation.direction.is_empty() && operation.lead_plan.is_none() {
@@ -751,16 +787,15 @@ async fn present_operate_board(app: &mut App, config: &Config) {
         .lead_plan
         .as_ref()
         .is_some_and(|plan| !plan.slices.is_empty());
-    if let Some(automations) = app
-        .runtime_services
-        .automations
-        .as_ref()
-        .map(std::sync::Arc::clone)
     {
         let manager = automations.lock().await;
-        if let Err(error) =
-            crate::operate::upsert_keepalive(&manager, &app.workspace, needs_lead_plan)
-        {
+        if let Err(error) = crate::operate::upsert_keepalive(
+            &manager,
+            &app.workspace,
+            needs_lead_plan,
+            config,
+            Some((&identity, &model)),
+        ) {
             app.add_message(crate::tui::history::HistoryCell::System {
                 content: format!("Operate keep-alive not installed: {error}"),
             });
