@@ -15,8 +15,8 @@ printf '%s\n' '#!/bin/sh' 'printf "%s\n" "$TEST_TOOLCHAIN/rustc"' > "$fixture/bi
 chmod +x "$fixture/bin/rustup"
 fixture_stack=20971520
 
-run_isolated() {
-  env HOME="$fixture/outer/home" \
+run_fixture() {
+  env -i HOME="$fixture/outer/home" \
     CODEWHALE_HOME="$fixture/outer/home/.codewhale" \
     CODEWHALE_CONFIG_PATH="$fixture/outer/poison.toml" \
     DEEPSEEK_CONFIG_PATH="$fixture/outer/legacy-poison.toml" \
@@ -25,9 +25,14 @@ run_isolated() {
     OPENAI_API_KEY=synthetic-outer-key \
     RUST_MIN_STACK="$fixture_stack" \
     CARGO_HOME="$fixture/cargo" RUSTUP_HOME="$fixture/rustup" \
-    TEST_TOOLCHAIN="$fixture/toolchain" TMPDIR="$fixture/tmp with spaces" \
-    PATH="$fixture/bin:$PATH" \
-    "$repo_root/scripts/with-hermetic-test-home.sh" "$@"
+    TEST_FIXTURE="$fixture" TEST_TOOLCHAIN="$fixture/toolchain" \
+    TMPDIR="$fixture/tmp with spaces" \
+    CODEWHALE_DEV_CACHE_QUIET=1 CODEWHALE_SCCACHE=0 \
+    PATH="$fixture/bin:/usr/bin:/bin" "$@"
+}
+
+run_isolated() {
+  run_fixture "$repo_root/scripts/with-hermetic-test-home.sh" "$@"
 }
 
 run_isolated sh -c '
@@ -70,4 +75,77 @@ status=0
 run_isolated > "$fixture/usage" 2>&1 || status=$?
 test "$status" -eq 2
 printf '%s\n' 'ok 3 - missing command is rejected'
-printf '%s\n' 'test result: 3 passed; 0 failed'
+
+# Exercise the actual developer entry point without invoking a Rust tool.
+# The cache remains outside the disposable HOME, including Cargo's literal
+# build-dir template and --config argument needed for template expansion.
+cat > "$fixture/toolchain/cargo" <<'EOF'
+#!/bin/sh
+set -eu
+if [ "${1:-}" = --version ]; then
+  printf '%s\n' 'cargo 1.97.0 (synthetic)'
+  exit 0
+fi
+test "$HOME" != "$TEST_FIXTURE/outer/home" || {
+  printf '%s\n' 'dev-test left ambient HOME visible' >&2
+  exit 1
+}
+test "$USERPROFILE" = "$HOME"
+test ! -e "$HOME/.codewhale/fleets/selected"
+test -z "${CODEWHALE_HOME+x}"
+test -z "${CODEWHALE_CONFIG_PATH+x}"
+test -z "${DEEPSEEK_CONFIG_PATH+x}"
+test -z "${DEEPSEEK_HOME+x}"
+test -z "$OPENAI_API_KEY"
+test "$CARGO_HOME" = "$TEST_FIXTURE/cargo"
+test "$RUSTUP_HOME" = "$TEST_FIXTURE/rustup"
+test "$RUST_MIN_STACK" = 16777216
+test "$CARGO_BUILD_BUILD_DIR" = "$TEST_FIXTURE/outer/home/.cache/codewhale/build/{workspace-path-hash}"
+test "$CARGO_BUILD_BUILD_DIR" = "$CODEWHALE_CACHE_ROOT/build/{workspace-path-hash}"
+printf '%s\n' "$HOME" > "$TEST_FIXTURE/dev-home"
+printf '%s\n' "$@" > "$TEST_FIXTURE/dev-argv"
+exit "${TEST_CARGO_STATUS:-0}"
+EOF
+printf '%s\n' '#!/bin/sh' 'printf "%s\n" "commit-hash: synthetic"' > "$fixture/toolchain/rustc"
+printf '%s\n' '#!/bin/sh' 'exit 0' > "$fixture/bin/cargo-nextest"
+chmod +x "$fixture/toolchain/cargo" "$fixture/toolchain/rustc" "$fixture/bin/cargo-nextest"
+ln -s "$fixture/toolchain/cargo" "$fixture/bin/cargo"
+ln -s "$fixture/toolchain/rustc" "$fixture/bin/rustc"
+
+count=3
+for runner in 0 1; do
+  for area in config tui-integration; do
+    run_fixture env CODEWHALE_DEV_NEXTEST="$runner" \
+      "$repo_root/scripts/dev-test.sh" "$area" 'one argument $(not run)' > "$fixture/dev-output"
+    {
+      printf '%s\n' --config "build.build-dir = \"$fixture/outer/home/.cache/codewhale/build/{workspace-path-hash}\""
+      if [ "$runner" -eq 1 ]; then
+        printf '%s\n' nextest run
+      else
+        printf '%s\n' test
+      fi
+      if [ "$area" = config ]; then
+        printf '%s\n' -p codewhale-config --lib
+      else
+        printf '%s\n' -p codewhale-tui --test integration
+      fi
+      printf '%s\n' --locked 'one argument $(not run)'
+    } > "$fixture/expected-argv"
+    cmp "$fixture/expected-argv" "$fixture/dev-argv"
+    child_home=$(cat "$fixture/dev-home")
+    test ! -d "${child_home%/*}"
+    test -d "$fixture/outer/home/.cache/codewhale/build"
+    count=$((count + 1))
+    printf 'ok %s - dev-test runner=%s area=%s isolates config and preserves persistent cache and argv\n' "$count" "$runner" "$area"
+  done
+done
+
+status=0
+run_fixture env CODEWHALE_DEV_NEXTEST=0 TEST_CARGO_STATUS=37 \
+  "$repo_root/scripts/dev-test.sh" config > "$fixture/dev-output" || status=$?
+test "$status" -eq 37
+child_home=$(cat "$fixture/dev-home")
+test ! -d "${child_home%/*}"
+test "$(cat "$fixture/outer/home/.codewhale/fleets/selected")" = 'My fleet'
+printf '%s\n' 'ok 8 - dev-test preserves failure status and cleans only its temporary home'
+printf '%s\n' 'test result: 8 passed; 0 failed'

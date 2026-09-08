@@ -217,6 +217,7 @@ jobs:
           bash scripts/release/verify-remote-tag.test.sh
           bash packaging/aur/render.test.sh
           sh scripts/dev-cache.test.sh
+          sh scripts/with-hermetic-test-home.test.sh
           bash .github/scripts/update-homebrew-tap.test.sh
           node .github/scripts/release-workflows.test.js
           node --test scripts/release/assemble-release-assets.test.js
@@ -314,15 +315,10 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Hermetic safety and authorization tests
         env:
-          HOME: ${{ runner.temp }}/cw-hermetic-home
-          USERPROFILE: ${{ runner.temp }}/cw-hermetic-home
-          CODEWHALE_HOME: ${{ runner.temp }}/cw-hermetic-home/.codewhale
           RUST_MIN_STACK: "8388608"
         run: |
-          mkdir -p "${HOME}" "${CODEWHALE_HOME}"
-          unset CODEWHALE_CONFIG_PATH DEEPSEEK_CONFIG_PATH DEEPSEEK_HOME || true
-          cargo test -p codewhale-tui --lib --locked -- command_safety auto_review authority sandbox
-          cargo test -p codewhale-execpolicy --locked
+          sh scripts/with-hermetic-test-home.sh cargo test -p codewhale-tui --lib --locked -- command_safety auto_review authority sandbox
+          sh scripts/with-hermetic-test-home.sh cargo test -p codewhale-execpolicy --locked
 
   lint:
     name: Lint
@@ -515,7 +511,7 @@ jobs:
           cache-bin: false
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Run workflow crate tests
-        run: cargo test -p codewhale-workflow --locked
+        run: sh scripts/with-hermetic-test-home.sh cargo test -p codewhale-workflow --locked
 
   test:
     name: Test
@@ -622,7 +618,8 @@ jobs:
         # executable; retries are off, so a flake is a red run, not a hidden
         # one. nextest does not run doctests — the next step keeps them.
         if: needs.changes.outputs.heavy == 'true' && (matrix.os != 'ubuntu-latest' || github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request')
-        run: cargo nextest run --workspace --all-features --locked --profile ci
+        shell: bash
+        run: sh scripts/with-hermetic-test-home.sh cargo nextest run --workspace --all-features --locked --profile ci
         env:
           # Give test threads the stack the product gives itself. main.rs runs
           # the owner thread and every tokio worker at
@@ -639,7 +636,8 @@ jobs:
           RUST_MIN_STACK: '16777216'
       - name: Run doctests
         if: needs.changes.outputs.heavy == 'true' && (matrix.os != 'ubuntu-latest' || github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request')
-        run: cargo test --workspace --all-features --locked --doc
+        shell: bash
+        run: sh scripts/with-hermetic-test-home.sh cargo test --workspace --all-features --locked --doc
         env:
           RUST_MIN_STACK: '16777216'
       # The Ubuntu lint lane validates non-RSS backlog fields. Run the same

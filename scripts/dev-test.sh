@@ -2,8 +2,8 @@
 # Map a workspace area or source path to the fastest cargo/nextest
 # invocation for that area, and apply the portable cache topology so a
 # new worktree actually gets isolated build-dir (+ sccache only when
-# incremental is already off). Developer iteration aid only; no product
-# behavior.
+# incremental is already off). Tests run under the shared temporary HOME
+# boundary; compiler caches and toolchain homes remain persistent.
 #
 # Usage:
 #   scripts/dev-test.sh <area|path> [filter...]
@@ -77,7 +77,8 @@ When cargo-nextest is on PATH, the run stage is `cargo nextest run`
 instead of `cargo test` (same binaries; process per test). Set
 CODEWHALE_DEV_NEXTEST=0 to force libtest. New worktrees get an isolated
 Cargo build-dir via scripts/dev-cache.sh; sccache wraps rustc only when
-incremental is already off. Do not use cargo test --workspace for a
+incremental is already off. Test HOME and config paths are isolated by
+scripts/with-hermetic-test-home.sh. Do not use cargo test --workspace for a
 single-area edit. --lib and --tests are disjoint; a green --lib run does
 not cover crates/tui/tests/.
 EOF
@@ -195,12 +196,6 @@ case $area in
     ;;
 esac
 
-codewhale_dev_cache_apply
-if [ -z "${RUST_MIN_STACK:-}" ]; then
-  RUST_MIN_STACK=16777216
-  export RUST_MIN_STACK
-fi
-
 use_nextest=0
 _cw_nextest=${CODEWHALE_DEV_NEXTEST:-auto}
 if codewhale_dev_cache_falsey "$_cw_nextest"; then
@@ -215,18 +210,20 @@ fi
 if [ "$target" = "--test" ]; then
   if [ "$use_nextest" -eq 1 ]; then
     set -- nextest run -p "$pkg" --test "$harness" --locked "$@"
-    printf '+ cargo %s\n' "$*"
-    codewhale_dev_cache_exec_cargo "$@"
+  else
+    set -- test -p "$pkg" --test "$harness" --locked "$@"
   fi
-  set -- test -p "$pkg" --test "$harness" --locked "$@"
 else
   if [ "$use_nextest" -eq 1 ]; then
     set -- nextest run -p "$pkg" --lib --locked "$@"
-    printf '+ cargo %s\n' "$*"
-    codewhale_dev_cache_exec_cargo "$@"
+  else
+    set -- test -p "$pkg" --lib --locked "$@"
   fi
-  set -- test -p "$pkg" --lib --locked "$@"
 fi
 
 printf '+ cargo %s\n' "$*"
-codewhale_dev_cache_exec_cargo "$@"
+# Resolve the persistent cache before replacing HOME; dev-cargo applies the
+# topology once, retaining Cargo's build-dir template and any caller overrides.
+CODEWHALE_CACHE_ROOT=$(codewhale_dev_cache_root)
+export CODEWHALE_CACHE_ROOT
+exec "$repo_root/scripts/with-hermetic-test-home.sh" "$repo_root/scripts/dev-cargo.sh" "$@"
