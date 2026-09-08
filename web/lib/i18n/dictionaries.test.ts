@@ -104,9 +104,7 @@ const CHROME_LOANWORDS: Record<string, readonly string[]> = {
 const HOME_PROSE_KEYS = [
   "metaTitle",
   "metaDescription",
-  "kicker",
-  "heroTitleA",
-  "heroTitleB",
+  "heroTitle",
   "heroIntro",
   "getCodewhale",
   "exploreProduct",
@@ -526,7 +524,7 @@ describe("website dictionaries", () => {
     }
     // Chinese resolves to its OWN dictionary, not the English reference.
     expect(chrome.navDocs).not.toBe(EN_CHROME.navDocs);
-    expect(home.heroTitleA).not.toBe(EN_HOME.heroTitleA);
+    expect(home.heroTitle).not.toBe(EN_HOME.heroTitle);
   });
 
   it("leaves no unmarked English prose in any non-English dictionary", () => {

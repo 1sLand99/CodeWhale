@@ -9,20 +9,18 @@ import type { HomeDict } from "../types";
  */
 
 export const home: HomeDict = {
-  metaTitle: "Codewhale — 作りたいものを、形に。",
+  metaTitle: "Codewhale — 選んだモデルで開発し、作業を自動化する",
   metaDescription:
-    "Codewhale でソフトウェアを作り、ファイルを扱い、タスクを自動化。ホスト型やローカルのモデルを選び、作業に合わせてプロバイダーを切り替えられます。",
-  kicker: "オープンソースの AI エージェント",
-  heroTitleA: "作りたいものを、形に。",
-  heroTitleB: "使うモデルは、自分で選ぶ。",
+    "オープンソースのエージェントと、自由に選べるホスト型またはローカルの AI モデルを使って、ソフトウェアを開発し、ファイルを扱い、日々の作業を自動化できます。",
+  heroTitle: "選んだモデルで開発し、作業を自動化する",
   heroIntro:
-    "{brand} のエージェントは、ソフトウェアの開発、ファイルの操作、タスクの自動化を手伝います。好きなモデルを選び、作業に合わせてプロバイダーを切り替えられます。",
+    "{brand} のエージェントは、ソフトウェアを開発し、ファイルを扱い、繰り返し行う作業を再利用できるワークフローにまとめられます。達成したいことを伝えて仕事に合うホスト型またはローカルのモデルを選び、必要に応じてプロバイダーを自由に切り替えながら作業を進めてください。",
   getCodewhale: "Codewhale を入手",
   exploreProduct: "製品を見る",
   shotPreview: "ターミナルのプレビュー",
   shotBuild: "v{version} 開発ビルド",
   screenshotAlt:
-    "ターミナル上の Codewhale v0.9.12 開発ビルド：点字で描かれたクジラのマーク、履歴のない新規セッション、メッセージ入力欄、そして Full Access、Work モード、予定タスク 2 件、MCP サーバー接続中、GLM-5.3 最大強度を示すフッター",
+    "Codewhale v0.9.12 のターミナル（ビルド 171acee689aa）。新しいセッションに、クジラのマーク、メッセージ入力欄、Full Access と Operate モード、2 件のスケジュール済みタスク、接続中の 21 台の MCP サーバー、推論の強度を最大に設定した GLM-5.3 が表示されている。",
   latestRelease: "最新リリース {tag}",
   releaseUnavailable: "リリース情報を取得できません",
   currentSource: "ソース",
@@ -31,40 +29,40 @@ export const home: HomeDict = {
   publishedRelease: "リリース済み",
   figcaptionSourceCandidate: "未リリース",
   chapterTerminal: "あなたのターミナル",
-  chapterTerminalTitle: "作りたいものから始めよう。",
-  gainHeading: "アイデアを動かそう。",
-  gainLede: "プロジェクトを作る、疑問を調べる、タスクを自動化する。まずはひとつのエージェントで始め、大きな仕事は複数のエージェントで分担できます。",
+  chapterTerminalTitle: "作りたいものから始める",
+  gainHeading: "Codewhale でできること",
+  gainLede: "プロジェクトや質問、自動化したい作業から始めて、ひとつのエージェントと一緒に進めることも、大きな仕事を複数のエージェントに分担させることもできます。",
   gain: [
     [
-      "作ってみよう",
-      "アイデアを動くソフトウェアに。エージェントがファイルを編集し、コマンドを実行して、結果を確認できます。"
+      "作りたいものを形にする",
+      "作りたいものを説明し、コードを読み、ファイルを編集し、コマンドを実行して結果を確認できるエージェントと一緒に取り組めます。"
     ],
     [
-      "繰り返す作業を自動化",
-      "繰り返し行うタスクのスクリプトやワークフローを作り、ターミナルから実行できます。"
+      "日々の作業を自動化する",
+      "繰り返し行う作業のスクリプトやワークフローを作れば、必要なときにターミナルから何度でも実行できます。"
     ],
     [
-      "使うモデルを選ぶ",
-      "ホスト型やローカルのモデルに接続。大きな仕事を、異なるモデルや役割を持つエージェントに分担させられます。"
+      "さまざまなモデルを使う",
+      "エージェントにホスト型またはローカルのモデルを使い、モデルや役割に合った仕事をそれぞれに任せられます。"
     ]
   ],
   chapterModels: "あなたのモデル",
-  modelsHeading: "タスクに合うモデルを見つけよう。",
+  modelsHeading: "作業に合わせて選べるモデル",
   modelsBody:
-    "ホスト型プロバイダーの利用、ゲートウェイ経由の接続、ローカルでのモデル実行に対応。セッションごとにプロバイダーとモデルを選び、作業中にも変更できます。",
+    "ホスト型のプロバイダーに直接接続することも、ゲートウェイを通じて複数のプロバイダーを利用することも、モデルをローカルで実行することもでき、作業中にセッションごとに使うモデルを選べます。",
   modelsFacts: [
     ["ホスト型", "自分の API キーを codewhale auth set --provider <id> で保存"],
     ["ゲートウェイ", "ひとつのエンドポイントで多くのモデル、プロバイダーは自分で選ぶ"],
     ["ローカル", "localhost 上の vLLM、SGLang、Ollama。通常キー不要"],
   ],
   modelsLink: "モデルとプロバイダーを見る",
-  startHeading: "最初のタスクを始めよう。",
-  startLede: "Codewhale をインストールしてモデルを接続し、やりたいことを伝えてください。複数のエージェントで分担したいときは、Fleet を追加できます。",
+  startHeading: "Codewhale を使い始めるには",
+  startLede: "Codewhale をインストールしてモデルを接続したら、ターミナルで最初の作業を伝え、複数のエージェントに分担してほしくなったときに Fleet を追加できます。",
   startGuideLink: "はじめかたガイドを読む",
   startVocabularyLink: "製品用語を見る",
   chapterAccount: "Codewhale を入手",
-  availabilityHeading: "Codewhale を使える場所。",
-  availabilityLede: "まずはターミナルから。アプリとクラウドコンピューターは開発中です。",
+  availabilityHeading: "Codewhale を使える場所",
+  availabilityLede: "Codewhale は今すぐターミナルで使え、Web アプリ、デスクトップアプリ、クラウドコンピューターも現在開発しています。",
   availability: [
     [
       "ターミナル",
@@ -87,9 +85,9 @@ export const home: HomeDict = {
       "タスクを実行するためのホスト型コンピューター。"
     ]
   ],
-  availabilityNote: "ターミナルは Codewhale アカウントなしで使えます。ホスト型モデルの利用料金は、契約先のプロバイダーから請求されます。",
+  availabilityNote: "ターミナルは Codewhale のアカウントなしで使え、ホスト型モデルの利用料金はプロバイダーから請求されます。",
   accountLink: "アカウントを作成",
-  surfacesHeading: "作業のある場所で、そのままランタイムを使う。",
+  surfacesHeading: "Codewhale のさまざまな使い方",
   surfaces: [
     ["TUI", "対話型のターミナル作業"],
     ["codewhale exec", "スクリプトと CI"],
@@ -98,14 +96,14 @@ export const home: HomeDict = {
     ["Fleet","複数のエージェントでひとつの仕事に取り組む"],
   ],
   runtimeLink: "連携機能を見る",
-  installBandHeading: "コマンド 1 つで始める。",
+  installBandHeading: "macOS または Linux に Codewhale をインストールする",
   copy: "コピー",
   copied: "コピー済み ✓",
   binaries: "バイナリ",
   chinaMirrors: "中国ミラー",
   installGuideLink: "インストールガイドを読む",
-  communityHeading: "公開の場でつくる",
-  communityBody: "MIT ライセンス。ランタイム、プロバイダー、プラットフォーム、ドキュメント、テストにまたがる貢献者たちの手で形づくられています。",
+  communityHeading: "Codewhale を一緒により良くする",
+  communityBody: "バグの報告でも、機能のアイデアでも、初めてのプルリクエストでも、皆さんの声を聞き、これからの取り組みを一緒に進めていきたいと考えています。",
   communityLinksAria: "コミュニティリンク",
-  contribute: "貢献する",
+  contribute: "プルリクエストを送る",
 };

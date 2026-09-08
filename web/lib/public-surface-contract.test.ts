@@ -573,13 +573,12 @@ done
   });
 
   it("keeps supplied terminal screenshots and website dimensions truthful", () => {
-    // The website serves the new founder PNG untouched. The README still
-    // carries the earlier development capture until its owner updates it.
+    // Website and README share the founder-supplied PNG without alteration.
     const readmeImage = bytes(matrix.screenshot.readme);
     const websiteImage = bytes(matrix.screenshot.website);
 
-    expect(imageDimensions(websiteImage)).toEqual([2760, 1494]);
-    expect(imageDimensions(readmeImage)).toEqual([1136, 615]);
+    expect(imageDimensions(websiteImage)).toEqual([1078, 466]);
+    expect(readmeImage).toEqual(websiteImage);
     expect(statSync(new URL(matrix.screenshot.readme, root)).size).toBeLessThan(500_000);
     expect(statSync(new URL(matrix.screenshot.website, root)).size).toBeLessThan(500_000);
     expect(matrix.screenshot.terminal).toBe("unrecorded");
@@ -589,24 +588,24 @@ done
 
     const readme = text("README.md");
     const homepage = text("web/app/[locale]/page.tsx");
-    expect(readme).toContain("assets/screenshot.webp");
+    expect(readme).toContain(matrix.screenshot.readme);
     expect(`web/public${TERMINAL_SCREENSHOT.src}`).toBe(matrix.screenshot.website);
     expect(imageDimensions(websiteImage)).toEqual([TERMINAL_SCREENSHOT.width, TERMINAL_SCREENSHOT.height]);
     expect(homepage).toContain("src={TERMINAL_SCREENSHOT.src}");
     // Alt text and caption are dictionary-backed; every routed locale must
     // describe the capture as what it is — a v0.9.12 development build in
-    // Work mode with Full Access, not a release and not a default.
+    // Operate mode with Full Access, not a release and not a default.
     expect(homepage).toContain("alt={d.screenshotAlt}");
     expect(homepage).toContain("fill(d.shotBuild, { version: TERMINAL_SCREENSHOT.version })");
     expect(getHome("en").shotBuild).toBe("v{version} development build");
-    expect(getHome("en").screenshotAlt).toContain("development build");
+    expect(getHome("en").screenshotAlt).toContain("171acee689aa");
     expect(getHome("en").screenshotAlt).toContain("Full Access");
-    expect(getHome("en").screenshotAlt).toContain("Work mode");
+    expect(getHome("en").screenshotAlt).toContain("Operate mode");
     for (const locale of ["zh", "ja", "vi", "ko", "ru", "uk", "es", "pt-BR", "id", "fr", "de", "ca", "hi", "tr", "it", "pl", "ar"]) {
       const home = getHome(locale);
       expect(home.shotBuild, `${locale} shotBuild`).toContain("{version}");
       expect(home.screenshotAlt, `${locale} alt`).toContain("Full Access");
-      expect(home.screenshotAlt, `${locale} alt`).toContain("Work");
+      expect(home.screenshotAlt, `${locale} alt`).toContain("Operate");
       expect(home.screenshotAlt, `${locale} alt`).toContain("0.9.12");
     }
   });

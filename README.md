@@ -1,10 +1,9 @@
 # Codewhale
 
-Create what you want. Automate tasks. Choose your models.
-
-Codewhale is an open-source agent for building software, working with files,
-and automating tasks. Use hosted or local models, switch providers as your work
-changes, and give larger jobs to a team of agents. Start in your terminal.
+Codewhale is an open-source agent that helps you build software, work with your
+files, and automate everyday tasks using the models you choose. Start with a
+task in your terminal, connect a hosted or local model, and bring in a team of
+agents when you want to share a larger job across different models and roles.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="brand/wordmark-inverted.svg">
@@ -19,8 +18,8 @@ changes, and give larger jobs to a team of agents. Start in your terminal.
 [![Discord](https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/37gfS3ksug)
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="assets/screenshot.webp">
-  <img src="assets/screenshot.webp" alt="A Codewhale terminal session" width="720">
+  <source media="(prefers-color-scheme: dark)" srcset="web/public/codewhale-tui-171acee.png">
+  <img src="web/public/codewhale-tui-171acee.png" alt="A Codewhale terminal session" width="720">
 </picture>
 
 ## Install
@@ -109,12 +108,12 @@ stack and [configuration](docs/CONFIGURATION.md) for local settings.
 
 ## Join the community
 
-Codewhale gets better when people use it, report what feels wrong, and help fix
-it. If a provider is missing, a workflow is awkward, or the terminal UI gets in
-your way, [open an issue](https://github.com/Hmbown/CodeWhale/issues). If you
-know how to improve it, [open a pull request](CONTRIBUTING.md). First
-contributions are welcome, and contributors keep credit for the work that
-lands.
+**Bug reports, feature ideas, and pull requests are welcome**, whether you have
+used Codewhale for months or are trying it for the first time. If a provider is
+missing, a workflow is awkward, or the terminal UI gets in your way,
+[open an issue](https://github.com/Hmbown/CodeWhale/issues/new/choose) or
+[send a pull request](CONTRIBUTING.md) so we can improve it together. We welcome
+first contributions, and contributors keep credit for the work that lands.
 
 Join the [Discord](https://discord.gg/37gfS3ksug), or add Hunter on WeChat
 (`hunterbown`) and ask to join the Whale Brothers group.

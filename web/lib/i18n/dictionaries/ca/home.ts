@@ -9,20 +9,18 @@ import type { HomeDict } from "../types";
  */
 
 export const home: HomeDict = {
-  metaTitle: "Codewhale — Crea el que vulguis.",
+  metaTitle: "Codewhale — Crea i automatitza amb els models que triïs",
   metaDescription:
-    "Crea programari, treballa amb fitxers i automatitza tasques amb Codewhale. Tria models allotjats o locals i canvia de proveïdor segons les teves necessitats.",
-  kicker: "Agents d’IA de codi obert",
-  heroTitleA: "Crea el que vulguis.",
-  heroTitleB: "Tria els teus models.",
+    "Crea programari, treballa amb els teus fitxers i automatitza les tasques quotidianes amb agents de codi obert i els models d’IA allotjats o locals que triïs.",
+  heroTitle: "Crea i automatitza amb els models que triïs",
   heroIntro:
-    "{brand} et proporciona agents que poden crear programari, treballar amb fitxers i automatitzar tasques. Fes servir els models que triïs i canvia de proveïdor segons les teves necessitats.",
+    "{brand} et proporciona agents que poden crear programari, treballar amb els teus fitxers i convertir les tasques repetitives en fluxos de treball reutilitzables. Digues-los què vols aconseguir i tria els models allotjats o locals adequats per a la feina, amb la llibertat de canviar de proveïdor sobre la marxa.",
   getCodewhale: "Obtenir Codewhale",
   exploreProduct: "Explorar el producte",
   shotPreview: "Vista prèvia del terminal",
   shotBuild: "build de desenvolupament v{version}",
   screenshotAlt:
-    "Build de desenvolupament de Codewhale v0.9.12 en un terminal: la marca de la balena en braille, una sessió nova sense historial, el compositor de missatges i un peu que mostra Full Access, mode Work, dues tasques programades, servidors MCP connectant-se i el model GLM-5.3 al màxim esforç",
+    "Terminal de Codewhale v0.9.12, compilació 171acee689aa: una sessió nova amb l’emblema de la balena, el camp de redacció de missatges, Full Access i el mode Operate, dues tasques programades, 21 servidors MCP en procés de connexió i GLM-5.3 amb l’esforç màxim.",
   latestRelease: "Última versió {tag}",
   releaseUnavailable: "Estat de la versió no disponible",
   currentSource: "Font",
@@ -31,44 +29,44 @@ export const home: HomeDict = {
   publishedRelease: "publicada",
   figcaptionSourceCandidate: "sense publicar",
   chapterTerminal: "El teu terminal",
-  chapterTerminalTitle: "Comença amb alguna cosa que vulguis crear.",
+  chapterTerminalTitle: "Comença amb alguna cosa que vulguis crear",
   gainHeading:
-    "Posa les teves idees en marxa.",
+    "Què pots fer amb Codewhale",
   gainLede:
-    "Crea un projecte, investiga una qüestió o automatitza una tasca. Comença amb un agent i reparteix les feines més grans entre diversos.",
+    "Comença amb un projecte, una pregunta o una tasca que vulguis automatitzar, i després treballa amb un agent o reparteix les parts d’una feina més gran entre diversos.",
   gain: [
     [
       "Crea alguna cosa",
-      "Converteix una idea en programari que funcioni. Els teus agents poden editar fitxers, executar ordres i comprovar el resultat."
+      "Descriu què vols crear i treballa amb agents que poden llegir el teu codi, editar fitxers, executar ordres i comprovar el resultat."
     ],
     [
-      "Automatitza les tasques repetitives",
-      "Crea scripts i fluxos de treball per a les tasques que repeteixes i executa’ls des del terminal."
+      "Automatitza la feina quotidiana",
+      "Crea scripts i fluxos de treball per a les tasques que repeteixes, de manera que els puguis tornar a executar des del terminal sempre que els necessitis."
     ],
     [
-      "Tria els teus models",
-      "Connecta models allotjats o locals. Reparteix les parts d’una feina més gran entre agents amb models i rols diferents."
+      "Treballa amb models diferents",
+      "Fes servir models allotjats o locals per als teus agents, amb models i rols diferents que s’encarreguin de les parts de la feina per a les quals són adequats."
     ]
   ],
   chapterModels: "Els teus models",
-  modelsHeading: "Troba un model adequat per a la tasca.",
+  modelsHeading: "Opcions de models per a cada tasca",
   modelsBody:
-    "Fes servir un proveïdor de models allotjats, connecta’t a través d’una passarel·la o executa un model en local. Tria un proveïdor i un model per a cada sessió i canvia’ls mentre treballes.",
+    "Connecta’t directament a un proveïdor de models allotjats, fes servir una passarel·la per accedir a diversos proveïdors o executa un model en local, i tria quin model fa servir cada sessió mentre treballes.",
   modelsFacts: [
     ["Allotjat", "La teva pròpia clau d’API, desada amb codewhale auth set --provider <id>"],
     ["Gateway", "Un endpoint per a molts models; el proveïdor el segueixes triant tu"],
     ["Local", "vLLM, SGLang, Ollama a localhost; normalment sense clau"],
   ],
   modelsLink: "Explora els models i els proveïdors",
-  startHeading: "Comença la teva primera tasca.",
+  startHeading: "Primers passos amb Codewhale",
   startLede:
-    "Instal·la Codewhale, connecta un model i digues-li què vols fer. Afegeix un Fleet quan vulguis repartir la feina entre diversos agents.",
+    "Un cop hagis instal·lat Codewhale i connectat un model, pots descriure la teva primera tasca al terminal i afegir un Fleet quan vulguis repartir la feina entre diversos agents.",
   startGuideLink: "Llegeix la guia d’inici",
   startVocabularyLink: "Consulta el vocabulari del producte",
   chapterAccount: "Obtenir Codewhale",
-  availabilityHeading: "On fer servir Codewhale.",
+  availabilityHeading: "On pots fer servir Codewhale",
   availabilityLede:
-    "Comença al terminal. L’aplicació i els ordinadors al núvol estan en desenvolupament.",
+    "Ja pots fer servir Codewhale al teu terminal mentre desenvolupem l’aplicació web, l’aplicació d’escriptori i els ordinadors al núvol.",
   availability: [
     [
       "Terminal",
@@ -92,9 +90,9 @@ export const home: HomeDict = {
     ]
   ],
   availabilityNote:
-    "El terminal funciona sense un compte de Codewhale. El teu proveïdor factura l’ús dels models allotjats.",
+    "Pots fer servir el terminal sense un compte de Codewhale, i el teu proveïdor factura qualsevol ús de models allotjats.",
   accountLink: "Crear un compte",
-  surfacesHeading: "Fes servir el runtime on passa la feina.",
+  surfacesHeading: "Maneres de treballar amb Codewhale",
   surfaces: [
     ["TUI", "Treball interactiu al terminal"],
     ["codewhale exec", "Scripts i CI"],
@@ -103,15 +101,15 @@ export const home: HomeDict = {
     ["Fleet","Diversos agents en una mateixa feina"],
   ],
   runtimeLink: "Explora les integracions",
-  installBandHeading: "Comença amb una sola ordre.",
+  installBandHeading: "Instal·la Codewhale a macOS o Linux",
   copy: "Copia",
   copied: "Copiat ✓",
   binaries: "Binaris",
   chinaMirrors: "Mirrors a la Xina",
   installGuideLink: "Llegeix la guia d’instal·lació",
-  communityHeading: "Construït en públic",
+  communityHeading: "Ajuda a millorar Codewhale",
   communityBody:
-    "Amb llicència MIT i format per col·laboradors de runtimes, proveïdors, plataformes, documentació i tests.",
+    "Tant si has trobat un error com si tens una idea per a una funció o vols enviar el teu primer pull request, ens agradaria escoltar-te i treballar plegats en els pròxims passos.",
   communityLinksAria: "Enllaços de la comunitat",
-  contribute: "Col·labora",
+  contribute: "Enviar un pull request",
 };

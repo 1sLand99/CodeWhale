@@ -9,20 +9,18 @@ import type { HomeDict } from "../types";
  */
 
 export const home: HomeDict = {
-  metaTitle: "Codewhale — Crea lo que quieras.",
+  metaTitle: "Codewhale — Crea y automatiza con los modelos que elijas",
   metaDescription:
-    "Crea software, trabaja con archivos y automatiza tareas con Codewhale. Elige modelos alojados o locales y cambia de proveedor según lo que necesites.",
-  kicker: "Agentes de IA de código abierto",
-  heroTitleA: "Crea lo que quieras.",
-  heroTitleB: "Elige tus modelos.",
+    "Crea software, trabaja con tus archivos y automatiza las tareas cotidianas con agentes de código abierto y los modelos de IA alojados o locales que elijas.",
+  heroTitle: "Crea y automatiza con los modelos que elijas",
   heroIntro:
-    "{brand} te ofrece agentes que pueden crear software, trabajar con archivos y automatizar tareas. Usa los modelos que elijas y cambia de proveedor según lo que necesites.",
+    "{brand} te ofrece agentes que pueden crear software, trabajar con tus archivos y convertir las tareas repetitivas en flujos de trabajo reutilizables. Diles qué quieres conseguir y elige los modelos alojados o locales adecuados para el trabajo, con la libertad de cambiar de proveedor sobre la marcha.",
   getCodewhale: "Obtener Codewhale",
   exploreProduct: "Explorar el producto",
   shotPreview: "Vista previa de la terminal",
   shotBuild: "build de desarrollo v{version}",
   screenshotAlt:
-    "Build de desarrollo de Codewhale v0.9.12 en una terminal: la marca de la ballena en braille, una sesión nueva sin historial, el compositor de mensajes y un pie que muestra Full Access, modo Work, dos tareas programadas, servidores MCP conectándose y el modelo GLM-5.3 al máximo esfuerzo",
+    "Terminal de Codewhale v0.9.12, compilación 171acee689aa: una sesión nueva con el emblema de la ballena, el campo para escribir mensajes, Full Access y el modo Operate, dos tareas programadas, 21 servidores MCP en proceso de conexión y GLM-5.3 con el esfuerzo máximo.",
   latestRelease: "Último lanzamiento {tag}",
   releaseUnavailable: "Estado del lanzamiento no disponible",
   currentSource: "Fuente",
@@ -31,44 +29,44 @@ export const home: HomeDict = {
   publishedRelease: "publicado",
   figcaptionSourceCandidate: "sin publicar",
   chapterTerminal: "Tu terminal",
-  chapterTerminalTitle: "Empieza con algo que quieras crear.",
+  chapterTerminalTitle: "Empieza con algo que quieras crear",
   gainHeading:
-    "Pon tus ideas a trabajar.",
+    "Qué puedes hacer con Codewhale",
   gainLede:
-    "Crea un proyecto, investiga una pregunta o automatiza una tarea. Empieza con un agente y reparte los trabajos más grandes entre varios.",
+    "Empieza con un proyecto, una pregunta o una tarea que quieras automatizar, y después trabaja con un agente o reparte las partes de un trabajo más grande entre varios.",
   gain: [
     [
       "Crea algo",
-      "Convierte una idea en software que funcione. Tus agentes pueden editar archivos, ejecutar comandos y comprobar el resultado."
+      "Describe qué quieres crear y trabaja con agentes que pueden leer tu código, editar archivos, ejecutar comandos y comprobar el resultado."
     ],
     [
-      "Automatiza las tareas repetitivas",
-      "Crea scripts y flujos de trabajo para las tareas que repites y ejecútalos desde la terminal."
+      "Automatiza el trabajo cotidiano",
+      "Crea scripts y flujos de trabajo para las tareas que repites, de modo que puedas volver a ejecutarlos desde la terminal siempre que los necesites."
     ],
     [
-      "Elige tus modelos",
-      "Conecta modelos alojados o locales. Reparte las partes de un trabajo más grande entre agentes con distintos modelos y roles."
+      "Trabaja con distintos modelos",
+      "Usa modelos alojados o locales para tus agentes, con distintos modelos y roles que se encarguen de las partes del trabajo para las que son adecuados."
     ]
   ],
   chapterModels: "Tus modelos",
-  modelsHeading: "Encuentra un modelo adecuado para cada tarea.",
+  modelsHeading: "Opciones de modelos para cada tarea",
   modelsBody:
-    "Usa un proveedor de modelos alojados, conéctate a través de una pasarela o ejecuta un modelo en local. Elige un proveedor y un modelo para cada sesión y cámbialos mientras trabajas.",
+    "Conéctate directamente a un proveedor de modelos alojados, usa una pasarela para acceder a varios proveedores o ejecuta un modelo en local, y elige qué modelo usa cada sesión mientras trabajas.",
   modelsFacts: [
     ["Alojado", "Tu propia clave de API, guardada con codewhale auth set --provider <id>"],
     ["Gateway", "Un endpoint para muchos modelos; el proveedor lo sigues eligiendo tú"],
     ["Local", "vLLM, SGLang, Ollama en localhost; normalmente sin clave"],
   ],
   modelsLink: "Explorar modelos y proveedores",
-  startHeading: "Empieza tu primera tarea.",
+  startHeading: "Primeros pasos con Codewhale",
   startLede:
-    "Instala Codewhale, conecta un modelo y dile qué quieres hacer. Añade un Fleet cuando quieras repartir el trabajo entre varios agentes.",
+    "Una vez que hayas instalado Codewhale y conectado un modelo, puedes describir tu primera tarea en la terminal y añadir un Fleet cuando quieras repartir el trabajo entre varios agentes.",
   startGuideLink: "Leer la guía de primeros pasos",
   startVocabularyLink: "Ver el vocabulario del producto",
   chapterAccount: "Obtener Codewhale",
-  availabilityHeading: "Dónde usar Codewhale.",
+  availabilityHeading: "Dónde puedes usar Codewhale",
   availabilityLede:
-    "Empieza en la terminal. La aplicación y las computadoras en la nube están en desarrollo.",
+    "Ya puedes usar Codewhale en tu terminal mientras desarrollamos la aplicación web, la aplicación de escritorio y las computadoras en la nube.",
   availability: [
     [
       "Terminal",
@@ -92,9 +90,9 @@ export const home: HomeDict = {
     ]
   ],
   availabilityNote:
-    "La terminal funciona sin una cuenta de Codewhale. Tu proveedor factura el uso de los modelos alojados.",
+    "Puedes usar la terminal sin una cuenta de Codewhale, y tu proveedor factura cualquier uso de modelos alojados.",
   accountLink: "Crear una cuenta",
-  surfacesHeading: "Usa el runtime donde ocurre el trabajo.",
+  surfacesHeading: "Formas de trabajar con Codewhale",
   surfaces: [
     ["TUI", "Trabajo interactivo en la terminal"],
     ["codewhale exec", "Scripts y CI"],
@@ -103,15 +101,15 @@ export const home: HomeDict = {
     ["Fleet","Varios agentes en un mismo trabajo"],
   ],
   runtimeLink: "Explorar integraciones",
-  installBandHeading: "Empieza con un solo comando.",
+  installBandHeading: "Instala Codewhale en macOS o Linux",
   copy: "Copiar",
   copied: "Copiado ✓",
   binaries: "Binarios",
   chinaMirrors: "Espejos en China",
   installGuideLink: "Leer la guía de instalación",
-  communityHeading: "Construido en público",
+  communityHeading: "Ayuda a mejorar Codewhale",
   communityBody:
-    "Con licencia MIT y moldeado por colaboradores en runtimes, proveedores, plataformas, documentación y pruebas.",
+    "Tanto si has encontrado un error como si tienes una idea para una función o quieres enviar tu primer pull request, nos gustaría escucharte y trabajar juntos en los próximos pasos.",
   communityLinksAria: "Enlaces de la comunidad",
-  contribute: "Contribuir",
+  contribute: "Enviar un pull request",
 };

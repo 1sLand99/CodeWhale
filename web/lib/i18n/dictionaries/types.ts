@@ -18,7 +18,7 @@
  * "Plan · Work · Operate", "Ask · Auto-Review · Full Access",
  * "TUI · exec · web · API", "Codewhale", "GitHub", "Issues",
  * `npm install -g codewhale`, `cargo test --locked`, `codewhale exec`,
- * package-manager proper nouns, mirror names, and `/codewhale-tui.png`.
+ * package-manager proper nouns, mirror names, and captured media paths.
  */
 
 export interface ChromeDict {
@@ -202,10 +202,8 @@ export interface HomeDict {
   metaTitle: string;
   metaDescription: string;
 
-  /** The plate's rubric above the title, e.g. "Agentic computing, on your terms". */
-  kicker: string;
-  heroTitleA: string;
-  heroTitleB: string;
+  /** A complete headline that wraps naturally in each locale. */
+  heroTitle: string;
   /**
    * Hero lede. Carries a `{brand}` token so the brand can be typeset in its
    * own span wherever the sentence needs it — the page splits on the token
@@ -221,7 +219,7 @@ export interface HomeDict {
   shotPreview: string;
   /** Screenshot caption, build item with a `{version}` token. */
   shotBuild: string;
-  /** Screenshot alt text for /codewhale-tui.png — describes the capture as it is. */
+  /** Screenshot alt text for the current media manifest capture. */
   screenshotAlt: string;
 
   /** "Latest release {tag}" */

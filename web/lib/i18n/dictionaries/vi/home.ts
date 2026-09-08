@@ -9,20 +9,18 @@ import type { HomeDict } from "../types";
  */
 
 export const home: HomeDict = {
-  metaTitle: "Codewhale — Tạo những gì bạn muốn.",
+  metaTitle: "Codewhale — Xây dựng và tự động hóa với các mô hình bạn chọn",
   metaDescription:
-    "Phát triển phần mềm, làm việc với tệp và tự động hóa tác vụ cùng Codewhale. Chọn mô hình từ nhà cung cấp hoặc mô hình cục bộ, rồi đổi nhà cung cấp theo nhu cầu công việc.",
-  kicker: "Tác tử AI mã nguồn mở",
-  heroTitleA: "Tạo những gì bạn muốn.",
-  heroTitleB: "Chọn mô hình bạn muốn dùng.",
+    "Xây dựng phần mềm, làm việc với tệp và tự động hóa các tác vụ hằng ngày bằng tác tử mã nguồn mở cùng các mô hình AI chạy trên máy chủ hoặc cục bộ theo lựa chọn của bạn.",
+  heroTitle: "Xây dựng và tự động hóa với các mô hình bạn chọn",
   heroIntro:
-    "{brand} mang đến các tác tử có thể phát triển phần mềm, làm việc với tệp và tự động hóa tác vụ. Dùng mô hình bạn chọn và đổi nhà cung cấp theo nhu cầu công việc.",
+    "{brand} cung cấp các tác tử có thể xây dựng phần mềm, làm việc với tệp và biến những tác vụ lặp lại thành quy trình có thể tái sử dụng. Hãy cho chúng biết bạn muốn hoàn thành điều gì rồi chọn mô hình chạy trên máy chủ hoặc cục bộ phù hợp với công việc, đồng thời bạn có thể tự do chuyển đổi nhà cung cấp trong quá trình làm việc.",
   getCodewhale: "Tải Codewhale",
   exploreProduct: "Khám phá sản phẩm",
   shotPreview: "Xem trước terminal",
   shotBuild: "bản phát triển v{version}",
   screenshotAlt:
-    "Bản phát triển Codewhale v0.9.12 trong terminal: biểu tượng cá voi bằng chữ nổi, phiên mới chưa có lịch sử, ô soạn tin, và thanh chân trang hiển thị Full Access, chế độ Work, hai tác vụ đã lên lịch, máy chủ MCP đang kết nối và mô hình GLM-5.3 ở mức tối đa",
+    "Terminal Codewhale v0.9.12, bản dựng 171acee689aa: một phiên mới với biểu tượng cá voi, ô soạn tin nhắn, Full Access và chế độ Operate, hai tác vụ đã lên lịch, 21 máy chủ MCP đang kết nối và GLM-5.3 được đặt ở mức nỗ lực tối đa.",
   latestRelease: "Bản phát hành mới nhất {tag}",
   releaseUnavailable: "Không có trạng thái phát hành",
   currentSource: "Mã nguồn",
@@ -31,44 +29,44 @@ export const home: HomeDict = {
   publishedRelease: "đã phát hành",
   figcaptionSourceCandidate: "chưa phát hành",
   chapterTerminal: "Terminal của bạn",
-  chapterTerminalTitle: "Bắt đầu với điều bạn muốn tạo ra.",
+  chapterTerminalTitle: "Bắt đầu với điều bạn muốn tạo ra",
   gainHeading:
-    "Biến ý tưởng thành hành động.",
+    "Những việc bạn có thể làm với Codewhale",
   gainLede:
-    "Xây dựng dự án, tìm hiểu một vấn đề hoặc tự động hóa tác vụ. Bắt đầu với một tác tử, rồi chia việc lớn hơn cho nhiều tác tử.",
+    "Hãy bắt đầu từ một dự án, một câu hỏi hoặc một tác vụ bạn muốn tự động hóa, rồi làm việc với một tác tử hoặc chia các phần của công việc lớn hơn cho nhiều tác tử.",
   gain: [
     [
-      "Bắt tay xây dựng",
-      "Biến ý tưởng thành phần mềm chạy được. Các tác tử có thể chỉnh sửa tệp, chạy lệnh và kiểm tra kết quả."
+      "Tạo ra điều bạn muốn",
+      "Mô tả điều bạn muốn tạo ra và làm việc cùng các tác tử có thể đọc mã, chỉnh sửa tệp, chạy lệnh và kiểm tra kết quả."
     ],
     [
-      "Tự động hóa việc lặp lại",
-      "Tạo tập lệnh và quy trình cho những tác vụ thường lặp lại, rồi chạy từ terminal."
+      "Tự động hóa công việc hằng ngày",
+      "Tạo tập lệnh và quy trình cho các tác vụ bạn thường lặp lại để có thể chạy lại từ terminal bất cứ khi nào cần."
     ],
     [
-      "Chọn mô hình bạn muốn dùng",
-      "Kết nối mô hình từ nhà cung cấp hoặc mô hình cục bộ. Chia một công việc lớn cho các tác tử dùng mô hình và đảm nhiệm vai trò khác nhau."
+      "Làm việc với nhiều mô hình",
+      "Sử dụng mô hình chạy trên máy chủ hoặc cục bộ cho các tác tử, với những mô hình và vai trò khác nhau đảm nhận các phần công việc phù hợp."
     ]
   ],
   chapterModels: "Mô hình của bạn",
-  modelsHeading: "Tìm mô hình phù hợp với tác vụ.",
+  modelsHeading: "Lựa chọn mô hình cho từng tác vụ",
   modelsBody:
-    "Dùng dịch vụ của nhà cung cấp, kết nối qua cổng trung gian hoặc chạy mô hình cục bộ. Chọn nhà cung cấp và mô hình cho từng phiên, rồi thay đổi trong lúc làm việc.",
+    "Bạn có thể kết nối trực tiếp với một nhà cung cấp mô hình, dùng cổng kết nối để truy cập nhiều nhà cung cấp hoặc chạy mô hình cục bộ, rồi chọn mô hình cho từng phiên khi làm việc.",
   modelsFacts: [
     ["Hosted", "Khóa API của bạn, lưu bằng codewhale auth set --provider <id>"],
     ["Gateway", "Một endpoint cho nhiều mô hình, nhà cung cấp vẫn do bạn chọn"],
     ["Cục bộ", "vLLM, SGLang, Ollama trên localhost — thường không cần khóa"],
   ],
   modelsLink: "Khám phá mô hình và nhà cung cấp",
-  startHeading: "Bắt đầu tác vụ đầu tiên.",
+  startHeading: "Bắt đầu sử dụng Codewhale",
   startLede:
-    "Cài đặt Codewhale, kết nối một mô hình và cho biết bạn muốn làm gì. Thêm Fleet khi muốn nhiều tác tử cùng chia sẻ công việc.",
+    "Sau khi cài đặt Codewhale và kết nối một mô hình, bạn có thể mô tả tác vụ đầu tiên trong terminal và thêm Fleet khi muốn nhiều tác tử cùng chia sẻ công việc.",
   startGuideLink: "Đọc hướng dẫn bắt đầu",
   startVocabularyLink: "Xem thuật ngữ sản phẩm",
   chapterAccount: "Tải Codewhale",
-  availabilityHeading: "Bạn có thể dùng Codewhale ở đâu.",
+  availabilityHeading: "Nơi bạn có thể sử dụng Codewhale",
   availabilityLede:
-    "Bắt đầu từ terminal. Ứng dụng và máy tính đám mây đang được phát triển.",
+    "Bạn có thể sử dụng Codewhale trong terminal ngay hôm nay, trong khi chúng tôi đang phát triển ứng dụng web, ứng dụng máy tính và máy tính đám mây.",
   availability: [
     [
       "Terminal",
@@ -92,9 +90,9 @@ export const home: HomeDict = {
     ]
   ],
   availabilityNote:
-    "Terminal không cần tài khoản Codewhale. Nhà cung cấp của bạn tính phí sử dụng các mô hình do họ vận hành.",
+    "Bạn có thể dùng terminal mà không cần tài khoản Codewhale; phí sử dụng các mô hình do nhà cung cấp vận hành sẽ do nhà cung cấp đó tính.",
   accountLink: "Tạo tài khoản",
-  surfacesHeading: "Dùng runtime ngay nơi công việc diễn ra.",
+  surfacesHeading: "Các cách làm việc với Codewhale",
   surfaces: [
     ["TUI", "Làm việc tương tác trong terminal"],
     ["codewhale exec", "Script và CI"],
@@ -103,15 +101,15 @@ export const home: HomeDict = {
     ["Fleet","Nhiều tác tử cùng làm một việc"],
   ],
   runtimeLink: "Khám phá các tích hợp",
-  installBandHeading: "Bắt đầu chỉ bằng một lệnh.",
+  installBandHeading: "Cài đặt Codewhale trên macOS hoặc Linux",
   copy: "Sao chép",
   copied: "Đã sao chép ✓",
   binaries: "Bản nhị phân",
   chinaMirrors: "Mirror Trung Quốc",
   installGuideLink: "Đọc hướng dẫn cài đặt",
-  communityHeading: "Xây dựng công khai",
+  communityHeading: "Cùng giúp Codewhale tốt hơn",
   communityBody:
-    "Giấy phép MIT, được định hình bởi những người đóng góp trên khắp runtime, nhà cung cấp, nền tảng, tài liệu và kiểm thử.",
+    "Dù bạn phát hiện lỗi, có ý tưởng về một tính năng hay muốn gửi pull request đầu tiên, chúng tôi đều muốn lắng nghe và cùng bạn thực hiện những bước tiếp theo.",
   communityLinksAria: "Liên kết cộng đồng",
-  contribute: "Đóng góp",
+  contribute: "Gửi pull request",
 };

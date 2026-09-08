@@ -64,12 +64,7 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
         <Strata variant="hero" />
         <div className="product-container folio-hero-grid">
           <div className="folio-hero-copy">
-            <p className="folio-kicker">{d.kicker}</p>
-            <h1>
-              {d.heroTitleA}
-              <br />
-              {d.heroTitleB}
-            </h1>
+            <h1>{d.heroTitle}</h1>
             <p className="folio-lede">
               {ledeParts.map((part, index) => (
                 <Fragment key={index}>
@@ -89,7 +84,7 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
           </div>
 
           {/* The founder's own capture of the v0.9.12 development build: a
-              new session, Work mode, Full Access. Shown at its native aspect
+              new session, Operate mode, Full Access. Shown at its native aspect
               so the footer stays legible; the caption says exactly what it
               is and is not. */}
           <figure className="folio-shot">
@@ -99,6 +94,7 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
               width={TERMINAL_SCREENSHOT.width}
               height={TERMINAL_SCREENSHOT.height}
               sizes="(max-width: 58rem) calc(100vw - 2rem), 56rem"
+              unoptimized
               priority
             />
             <figcaption>
