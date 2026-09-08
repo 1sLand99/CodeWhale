@@ -9,13 +9,102 @@
 //! so the agent loop's mailbox API is reviewable on its own.
 
 use anyhow::Result;
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 use super::approval::{ApprovalDecision, UserInputDecision};
 use super::{
     CancelReason, EngineHandle, LiveRuntimeAuthority, Op, RuntimePermissionAuthority,
     UserInputResponse,
 };
+
+#[derive(Clone)]
+pub(super) struct TurnControl {
+    pub id: u64,
+    pub cancel: CancellationToken,
+    pub reason: Arc<StdMutex<Option<CancelReason>>>,
+}
+
+#[derive(Default)]
+pub(super) struct TurnControls {
+    next_id: u64,
+    pub active: Option<TurnControl>,
+    pub pending: VecDeque<TurnControl>,
+}
+
+impl TurnControls {
+    pub fn fresh(&mut self) -> TurnControl {
+        self.next_id = self
+            .next_id
+            .checked_add(1)
+            .expect("turn control id exhausted");
+        TurnControl {
+            id: self.next_id,
+            cancel: CancellationToken::new(),
+            reason: Arc::new(StdMutex::new(None)),
+        }
+    }
+
+    fn target(&self) -> Option<&TurnControl> {
+        self.active.as_ref().or_else(|| self.pending.front())
+    }
+}
+
+pub(super) struct TurnControlGuard {
+    pub controls: Arc<StdMutex<TurnControls>>,
+    pub id: u64,
+}
+
+impl Drop for TurnControlGuard {
+    fn drop(&mut self) {
+        let mut controls = self
+            .controls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if controls
+            .active
+            .as_ref()
+            .is_some_and(|active| active.id == self.id)
+        {
+            controls.active = None;
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct SteerInput {
+    pub(super) turn_id: Option<u64>,
+    pub(crate) content: String,
+}
+
+impl std::ops::Deref for SteerInput {
+    type Target = str;
+    fn deref(&self) -> &str {
+        &self.content
+    }
+}
+
+impl std::fmt::Display for SteerInput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.content.fmt(f)
+    }
+}
+
+pub(crate) struct SteerPermit {
+    permit: mpsc::OwnedPermit<SteerInput>,
+    turn_id: Option<u64>,
+}
+
+impl SteerPermit {
+    pub(crate) fn send(self, content: String) {
+        self.permit.send(SteerInput {
+            turn_id: self.turn_id,
+            content,
+        });
+    }
+}
 
 impl EngineHandle {
     /// Called only while Runtime holds the idle turn admission claim. The
@@ -50,11 +139,11 @@ impl EngineHandle {
     /// Send an operation to the engine
     pub async fn send(&self, op: Op) -> Result<()> {
         let authority = Self::change_mode_authority(&op);
-        let permit = self.tx_op.reserve().await?;
+        let permit = self.tx_op.clone().reserve_owned().await?;
         if let Some(authority) = authority {
             self.publish_runtime_authority(authority);
         }
-        permit.send(op);
+        self.send_reserved_op(permit, op);
         Ok(())
     }
 
@@ -65,7 +154,7 @@ impl EngineHandle {
     /// safely be dropped and re-requested on the next drain cycle.
     pub fn try_send(&self, op: Op) -> Result<()> {
         let authority = Self::change_mode_authority(&op);
-        let result = self.tx_op.try_send(op);
+        let result = self.tx_op.clone().try_reserve_owned();
         // A full channel already guarantees that the engine will wake and
         // drain an operation. Publish the typed authority anyway: the drain
         // applies pending authority before handling that queued operation, so
@@ -76,8 +165,22 @@ impl EngineHandle {
         {
             self.publish_runtime_authority(authority);
         }
-        result?;
+        self.send_reserved_op(result?, op);
         Ok(())
+    }
+
+    /// Bind controls and enqueue under one lock, preserving the same FIFO as
+    /// the operation mailbox even when several senders hold reserved slots.
+    pub(crate) fn send_reserved_op(&self, permit: mpsc::OwnedPermit<Op>, op: Op) {
+        let mut controls = self
+            .turn_controls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if matches!(&op, Op::SendMessage { .. }) {
+            let control = controls.fresh();
+            controls.pending.push_back(control);
+        }
+        permit.send(op);
     }
 
     fn change_mode_authority(op: &Op) -> Option<LiveRuntimeAuthority> {
@@ -144,8 +247,15 @@ impl EngineHandle {
     /// Reserve capacity for a runtime steer before it mutates durable state.
     /// The owned permit lets the caller persist and dispatch synchronously,
     /// without a cancellation point between those two operations.
-    pub(crate) async fn reserve_steer(&self) -> Result<mpsc::OwnedPermit<String>> {
-        Ok(self.tx_steer.clone().reserve_owned().await?)
+    pub(crate) async fn reserve_steer(&self) -> Result<SteerPermit> {
+        let permit = self.tx_steer.clone().reserve_owned().await?;
+        let turn_id = self
+            .turn_controls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .target()
+            .map(|control| control.id);
+        Ok(SteerPermit { permit, turn_id })
     }
 
     /// Cancel the current request (user-initiated path — keeps the
@@ -158,6 +268,19 @@ impl EngineHandle {
     /// Cancel the current request and latch the reason so downstream
     /// "request cancelled" error messages can name a cause.
     pub fn cancel_with_reason(&self, reason: CancelReason) {
+        // Keep turn activation excluded until both the admitted control and
+        // the legacy shared token have been canceled.
+        let controls = self
+            .turn_controls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(control) = controls.target() {
+            *control
+                .reason
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(reason);
+            control.cancel.cancel();
+        }
         match self.cancel_reason.lock() {
             Ok(mut slot) => *slot = Some(reason),
             Err(poisoned) => *poisoned.into_inner() = Some(reason),
@@ -173,6 +296,14 @@ impl EngineHandle {
     #[must_use]
     #[allow(dead_code)]
     pub fn is_cancelled(&self) -> bool {
+        if let Some(control) = self
+            .turn_controls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .target()
+        {
+            return control.cancel.is_cancelled();
+        }
         match self.cancel_token.lock() {
             Ok(token) => token.is_cancelled(),
             Err(poisoned) => poisoned.into_inner().is_cancelled(),
@@ -253,7 +384,7 @@ impl EngineHandle {
 
     /// Steer an in-flight turn with additional user input.
     pub async fn steer(&self, content: impl Into<String>) -> Result<()> {
-        self.tx_steer.send(content.into()).await?;
+        self.reserve_steer().await?.send(content.into());
         Ok(())
     }
 

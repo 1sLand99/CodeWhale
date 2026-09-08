@@ -432,6 +432,7 @@ fn messages_from_thread_detail_batches_tool_results() {
         task_id: None,
         title: None,
         session_id: None,
+        saved_session_checkpoint: None,
     };
     let turn = TurnRecord {
         schema_version: 2,
@@ -622,6 +623,7 @@ fn legacy_exact_thread_export_normalizes_provider_kind_and_id() {
             task_id: None,
             title: None,
             session_id: None,
+            saved_session_checkpoint: None,
         },
         turns: Vec::new(),
         items: Vec::new(),
