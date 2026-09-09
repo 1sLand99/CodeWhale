@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Offline conversion contracts; no foreign code or MCP server is executed."""
+"""Offline conversion contracts; only the synthetic Node fixture is executed."""
 
 import argparse
 import importlib.util
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -64,9 +65,9 @@ class ConversionTests(unittest.TestCase):
         (path / "SKILL.md").write_text(text, encoding="utf-8")
         return path
 
-    def args(self, *, config=None, skills=(), dialect="opencode-v1", output=None, name="converted-demo"):
+    def args(self, *, config=None, skills=(), dialect="opencode-v1", output=None, name="converted-demo", stdio_roots=()):
         return argparse.Namespace(config=config, skill=list(skills), format=dialect,
-                                  output=output or self.fresh("output"), name=name)
+                                  output=output or self.fresh("output"), name=name, stdio_root=list(stdio_roots))
 
     def cli(self, args, *, env=None):
         command = [sys.executable, "-B", str(SCRIPT), "--format", args.format,
@@ -75,6 +76,8 @@ class ConversionTests(unittest.TestCase):
             command += ["--config", str(args.config)]
         for skill in args.skill:
             command += ["--skill", str(skill)]
+        for root in args.stdio_root:
+            command += ["--stdio-root", root]
         environment = dict(os.environ)
         environment.update(env or {})
         environment["PYTHONDONTWRITEBYTECODE"] = "1"
@@ -134,6 +137,154 @@ class ConversionTests(unittest.TestCase):
         self.assertEqual(self.servers(args.output)["docs"], {
             "type": "streamable-http", "url": "https://docs.example.invalid/mcp",
             "extensions": {"net.codewhale": {"disabled": True, "execute_timeout": 19}}})
+
+    def node_source(self):
+        root = self.fresh("packaged-node")
+        root.mkdir()
+        (root / "server.mjs").write_text("throw new Error('converter must never execute this');\n")
+        return root
+
+    def local(self, **changes):
+        return {"type": "local", "command": ["node", "server.mjs"], **changes}
+
+    def test_cli_local_node_copies_source_without_execution_or_credential_lookup(self):
+        root = self.node_source()
+        (root / "resource.json").write_text('{"answer":42}')
+        args = self.args(config=self.config({"mcp": {"localdocs": self.local(
+            enabled=False, timeout=7000, environment={"API_TOKEN": "{env:CONVERSION_TEST_TOKEN}"})}}),
+            stdio_roots=[f"localdocs={root}"])
+        result = self.cli(args, env={"CONVERSION_TEST_TOKEN": CANARY})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.servers(args.output)["localdocs"], {
+            "type": "stdio", "command": "node", "args": ["server.mjs"], "cwd": "mcp/localdocs",
+            "env": {"API_TOKEN": "${CONVERSION_TEST_TOKEN}"},
+            "extensions": {"net.codewhale": {"disabled": True, "connect_timeout": 7, "execute_timeout": 7}}})
+        self.assertEqual((args.output / "mcp/localdocs/server.mjs").read_bytes(), (root / "server.mjs").read_bytes())
+        self.assertEqual((args.output / "mcp/localdocs/resource.json").read_bytes(), (root / "resource.json").read_bytes())
+        extension = json.loads((args.output / "plugin.json").read_text())["extensions"]["net.codewhale"]
+        self.assertEqual(extension, {"when": {"binaries": ["node"]}})
+        self.assert_no_canary(result, args.output)
+
+    def test_local_node_v2_and_dsh_preserve_disable_cwd_and_timeouts(self):
+        root = self.node_source()
+        cases = [("opencode-v2", {"mcp": {"timeout": {"startup": 4000, "request": 11000}, "servers": {
+            "docs": self.local(cwd=".", disabled=True, timeout={"request": 23000})}}},
+            {"disabled": True, "connect_timeout": 4, "execute_timeout": 23}),
+            ("dsh", [{"name": "@deepseek-ai/dsh-mcp-client", "disabled": True, "config": {
+                "serverName": "docs", "transport": "stdio", "command": "node", "args": ["server.mjs"],
+                "cwd": ".", "env": {}, "toolCallTimeoutMs": 19000}}],
+                {"disabled": True, "execute_timeout": 19})]
+        for dialect, document, extension in cases:
+            with self.subTest(dialect=dialect):
+                args = self.args(config=self.config(document), dialect=dialect, stdio_roots=[f"docs={root}"])
+                self.assertEqual(converter.convert(args), (0, 1, 0))
+                server = self.servers(args.output)["docs"]
+                self.assertEqual(server["cwd"], "mcp/docs")
+                self.assertEqual(server["extensions"]["net.codewhale"], extension)
+
+    @unittest.skipUnless(shutil.which("node"), "Node is needed for the synthetic MCP fixture")
+    def test_packaged_node_mcp_discovers_and_calls_tool_with_sibling_and_cwd_resource(self):
+        root = self.node_source()
+        (root / "resource.json").write_text('{"answer":42}')
+        (root / "sibling.mjs").write_text("export const name = 'fixture_answer';\n")
+        (root / "server.mjs").write_text('''import readline from 'node:readline';
+import { readFileSync } from 'node:fs';
+import { name } from './sibling.mjs';
+for await (const line of readline.createInterface({ input: process.stdin })) {
+  const request = JSON.parse(line);
+  if (request.id === undefined) continue;
+  const result = request.method === 'initialize'
+    ? { protocolVersion: '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'fixture', version: '1' } }
+    : request.method === 'tools/list'
+      ? { tools: [{ name, description: 'Read the packaged answer', inputSchema: { type: 'object' } }] }
+      : { content: [{ type: 'text', text: String(JSON.parse(readFileSync('resource.json', 'utf8')).answer) }] };
+  process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id, result }) + '\\n');
+}
+''')
+        args = self.args(config=self.config({"mcp": {"docs": self.local()}}), stdio_roots=[f"docs={root}"])
+        converter.convert(args)
+        # Mutating original resources cannot change the converted package.
+        (root / "resource.json").write_text('{"answer":99}')
+        server = self.servers(args.output)["docs"]
+        requests = [
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+            {"jsonrpc": "2.0", "method": "notifications/initialized"},
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+            {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "fixture_answer", "arguments": {}}},
+        ]
+        result = subprocess.run([shutil.which("node"), *server["args"]], cwd=args.output / server["cwd"],
+            input="".join(json.dumps(request) + "\n" for request in requests), text=True, capture_output=True,
+            timeout=10, check=False, env={"PATH": str(Path(shutil.which("node")).parent)})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        responses = [json.loads(line) for line in result.stdout.splitlines()]
+        self.assertEqual(responses[1]["result"]["tools"][0]["name"], "fixture_answer")
+        self.assertEqual(responses[2]["result"]["content"], [{"type": "text", "text": "42"}])
+
+    def test_local_node_requires_matching_explicit_roots_and_safe_launcher(self):
+        root = self.node_source()
+        for command in (["node", "../server.mjs"], ["node", "/server.mjs"], ["node", "C:\\server.mjs"],
+                        ["node", "server.js"], ["node", "server.cjs"],
+                        ["node", "--eval", "process.exit()"], ["node", "server.mjs", CANARY],
+                        ["npx", "some-server"], ["sh", "server.mjs"], ["node", "https://example.invalid/server.mjs"],
+                        ["node", "{env:ENTRY}.mjs"], ["node", 1]):
+            with self.subTest(command=command):
+                self.refuse(self.args(config=self.config({"mcp": {"docs": self.local(command=command)}}),
+                                      stdio_roots=[f"docs={root}"]))
+        config = self.config({"mcp": {"docs": self.local()}})
+        for roots in ([], [f"other={root}"], [f"docs={root}", f"docs={root}"], [f"docs={root}", f"other={root}"]):
+            self.refuse(self.args(config=config, stdio_roots=roots))
+        self.refuse(self.args(skills=[self.skill()], stdio_roots=[f"docs={root}"]))
+        self.refuse(self.args(config=self.config(self.v1()), stdio_roots=[f"docs={root}"]))
+        self.refuse(self.args(config=config, stdio_roots=[f"docs={root}"], output=root / "output"))
+
+    def test_local_node_rejects_literal_environment_loader_overrides_and_nonportable_cwd(self):
+        root = self.node_source()
+        for environment in ({"TOKEN": CANARY}, {"TOKEN": "{file:/private/key}"}, {"PLUGIN_ROOT": "{env:TOKEN}"},
+                            {"node_options": "{env:OPTIONS}"}, {"NODE_PATH": "{env:IMPORTS}"}, {"PATH": "{env:PATH}"},
+                            {"DYLD_INSERT_LIBRARIES": "{env:LIBRARY}"}, {"LD_PRELOAD": "{env:LIBRARY}"}):
+            args = self.args(config=self.config({"mcp": {"docs": self.local(environment=environment)}}),
+                             stdio_roots=[f"docs={root}"])
+            result = self.cli(args)
+            self.assertEqual(result.returncode, 1)
+            self.assertFalse(args.output.exists())
+            self.assert_no_canary(result, args.output)
+        for cwd in ("..", "./workspace", "/workspace", ["."]):
+            self.refuse(self.args(config=self.config({"mcp": {"servers": {"docs": self.local(cwd=cwd)}}}),
+                                  dialect="opencode-v2", stdio_roots=[f"docs={root}"]))
+        for extra in ({"env": {"TOKEN": "{env:TOKEN}"}}, {"failOnStartupError": True}, {"reconnect": {}}):
+            config = {"serverName": "docs", "transport": "stdio", "command": "node", "args": ["server.mjs"], **extra}
+            self.refuse(self.args(config=self.config([{"name": "@deepseek-ai/dsh-mcp-client", "config": config}]),
+                                  dialect="dsh", stdio_roots=[f"docs={root}"]))
+
+    def test_local_node_refuses_secret_and_linked_dependencies_atomically(self):
+        for name in (".env.local", ".gitignore", ".npmrc", "credentials.json", "server.key", "identity.pem"):
+            root = self.node_source()
+            (root / name).write_text(CANARY)
+            args = self.args(config=self.config({"mcp": {"docs": self.local()}}), stdio_roots=[f"docs={root}"])
+            result = self.cli(args)
+            self.assertEqual(result.returncode, 1)
+            self.assert_no_canary(result, args.output)
+            self.assertFalse(args.output.exists())
+        for kind in ("symlink", "hardlink", "directory-link"):
+            root = self.node_source()
+            outside = self.write("outside", ".mjs")
+            if kind == "hardlink":
+                os.link(outside, root / "dependency.mjs")
+            elif kind == "directory-link":
+                (root / "node_modules").symlink_to(self.root, target_is_directory=True)
+            else:
+                (root / "dependency.mjs").symlink_to(outside)
+            self.refuse(self.args(config=self.config({"mcp": {"docs": self.local()}}), stdio_roots=[f"docs={root}"]))
+            self.assertEqual(outside.read_text(), "outside")
+
+    def test_local_node_shares_aggregate_copy_budget_with_skills_and_servers(self):
+        root = self.node_source()
+        (root / "resource.bin").write_bytes(b"a" * 2300)
+        config = self.config({"mcp": {"docs": self.local(), "second": self.local()}})
+        with mock.patch.object(converter, "MAX_BYTES", 4000):
+            self.refuse(self.args(config=config, stdio_roots=[f"docs={root}", f"second={root}"]))
+        with mock.patch.object(converter, "MAX_FILES", 4):
+            self.refuse(self.args(config=config, stdio_roots=[f"docs={root}", f"second={root}"]))
 
     def test_skill_keeps_explicit_invocation_and_metadata_out_of_frontmatter(self):
         extra = {"name": "wrong-name", "invocation": "automatic", "description": "wrong description"}

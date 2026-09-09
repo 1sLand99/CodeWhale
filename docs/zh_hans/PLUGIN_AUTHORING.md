@@ -1,7 +1,7 @@
 # 编写你的第一个 Codewhale 插件
 
 > 英文原文：[PLUGIN_AUTHORING.md](../PLUGIN_AUTHORING.md)。
-> 最后与英文同步日期（last synced with English revision）：2026-09-08。
+> 最后与英文同步日期（last synced with English revision）：2026-09-09。
 
 先从一个 skill 开始：把 Markdown 指令文件放进一个小型插件包。
 [hello-codewhale 示例](../examples/plugins/hello-codewhale/plugin.json)
@@ -156,7 +156,7 @@ MCP 使用[插件验证契约](../PLUGIN_BUNDLES.md#validation-both-formats)规�
 ## 转换现有插件
 
 [`scripts/convert-plugin.py`](../../scripts/convert-plugin.py) 将明确选定的远程 MCP
-声明和可移植 Skills 转换为原生插件包。需要 Python 3.10+ 和 PyYAML 6+；
+声明、已打包的本地 Node MCP 服务器和可移植 Skills 转换为原生插件包。需要 Python 3.10+ 和 PyYAML 6+；
 如果缺少，请单独安装。转换器不会安装依赖、扫描现有应用配置或凭据、
 发送网络请求，也不会执行源代码。
 
@@ -186,7 +186,7 @@ python3 scripts/convert-plugin.py --format opencode-v1 \
 
 如果数据采用 `mcp.servers.<name>` 结构，请选择 `--format opencode-v2`；
 该格式的服务器开关是 `disabled`，不是 `enabled`。根据数据选择格式，
-不要依据文件名或上游分支名推断版本。两种格式都要求明确设置 `oauth: false`。
+不要依据文件名或上游分支名推断版本。两种格式的远程服务器都要求明确设置 `oauth: false`。
 远程 MCP 输出**仅使用 Streamable HTTP**，不会复现 OpenCode 回退到旧版 SSE 的行为。
 对于仅支持 SSE 的端点，请手工编写包含 `type: "sse"` 的原生 `mcp.json`，
 并使用相同的审查流程。
@@ -219,6 +219,52 @@ python3 scripts/convert-plugin.py --format dsh \
 DSH 输入也可以使用 JSON，但必须是普通条目列表，不能是完整 profile 或
 patch 组合。每个条目的 `name` 都必须为 `@deepseek-ai/dsh-mcp-client`。
 
+### 本地 Node MCP 服务器
+
+对于已打包的 Node MCP 服务器，使用 `--stdio-root SERVER=DIRECTORY` 明确选择
+原进程的工作目录。转换器将整个目录复制到 `mcp/<server>`，并把原生服务器的
+工作目录设为经审查的副本，保留相对入口导入和只读资源的目录布局。
+
+```json
+{
+  "mcp": {
+    "localdocs": {
+      "type": "local",
+      "command": ["node", "server.mjs"],
+      "environment": {"API_TOKEN": "{env:LOCALDOCS_TOKEN}"},
+      "enabled": false
+    }
+  }
+}
+```
+
+```sh
+python3 scripts/convert-plugin.py --format opencode-v1 \
+  --config ./local-mcp.json --stdio-root localdocs=./packaged-localdocs \
+  --name local-tools --output ./migrated-local
+```
+
+每个本地服务器都必须提供对应的 `--stdio-root`。OpenCode v2 使用 `mcp.servers`
+和 `disabled`。静态 DSH 条目使用 `transport: stdio`、`command: node`、
+`args: [server.mjs]`；DSH 的 `env` 必须省略或为空，其字面量和表达式不按
+OpenCode 环境引用解释。DSH/v2 的 `cwd` 只能省略、为空或为 `.`；选定目录明确
+指定原进程的工作目录。只有远程 OpenCode 服务器需要 `oauth: false`。
+
+仅支持 `node` 加一个相对 `.mjs` 入口。原生 macOS 经审查启动适配器保留 `.mjs`
+的同级模块导入；此转换器尚未验证 `.js` 和 `.cjs` 入口，需手工移植。依赖和只读资源必须
+预先打包在该目录内；转换时不运行包管理器、安装脚本、模块加载器或服务器。
+符号链接/reparse point、硬链接文件、隐藏文件或目录（包括 `.gitignore`、
+`.env*`、`.npmrc` 和 `node_modules/.bin`）、常见凭据文件名及私钥容器会被拒绝。
+请准备干净的打包目录；不会根据忽略规则静默遗漏文件。转换前检查每个选定文件
+是否嵌入凭据。整个输出仍受 4,096 个文件 / 64 MiB 限制。
+
+Shell 启动器、Node 标志、额外参数、其他解释器、环境变量字面值以及改变模块
+加载方式的环境变量名均不支持。写入工作目录、依赖实时工作区或导入包外文件的
+服务器需要手工移植。复制文件不等于静态验证 JavaScript 依赖闭包，也不提供
+代码沙箱。本地 MCP 以宿主用户权限运行；远程端点的主机声明不会限制本地进程
+的网络或文件访问。Codewhale 启动服务器前仍需完成原生安装、能力审查、哈希绑定
+信任和启用流程。此功能是已打包 Node MCP 子集，不执行 DSH/Cordis 插件模块。
+
 ### 审查转换结果
 
 两个示例都保留服务器的停用状态，并使用占位端点。准备连接时，先替换源文件中的
@@ -238,7 +284,8 @@ patch 组合。每个条目的 `name` 都必须为 `@deepseek-ai/dsh-mcp-client`
 URL 中的文件或环境变量替换都会被拒绝。配置的超时值以毫秒表示，
 必须是 `1000` 到 `3600000` 之间的整秒值。未指定的超时使用 Codewhale 的默认值。
 
-可执行插件和 hooks、stdio 服务器、自动 OAuth、JavaScript、YAML 别名或标签、
+外部运行时的可执行插件和 hooks、其他 stdio 启动方式、自动 OAuth、配置中的
+JavaScript、YAML 别名或标签、
 `__jsExpr`，以及不支持的 skill 运行时字段（包括 `user-invocable: false`）
 需要手工移植。转换不会复现其他客户端的运行时，也不会绕过 Codewhale 的凭据
 和沙箱规则。

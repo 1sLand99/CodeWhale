@@ -185,20 +185,13 @@ def timeout(value):
     return value // 1000
 
 
-def remote_server(config, dialect, defaults):
+def server_options(config, dialect, defaults):
     extension = {}
     if dialect == "dsh":
-        mapping(config)
-        require(config.get("transport") == "streamable-http", "Local MCP processes require manual native authoring.")
-        mapping(config, {"serverName", "transport", "url", "headers", "toolCallTimeoutMs", "failOnStartupError"})
         require(config.get("failOnStartupError", False) is False, "DSH startup-failure policy requires a manual port.")
         if "toolCallTimeoutMs" in config:
             extension["execute_timeout"] = timeout(config["toolCallTimeoutMs"])
     else:
-        mapping(config)
-        require(config.get("type") == "remote", "Local MCP processes require manual native authoring.")
-        mapping(config, {"type", "url", "headers", "oauth", "enabled" if dialect == "opencode-v1" else "disabled", "timeout"})
-        require(config.get("oauth") is False, "Set oauth:false explicitly; plugin OAuth and upstream auto-OAuth cannot be converted.")
         disabled = not config.get("enabled", True) if dialect == "opencode-v1" else config.get("disabled", False)
         flag = config.get("enabled", True) if dialect == "opencode-v1" else config.get("disabled", False)
         require(type(flag) is bool, "MCP enablement must be a boolean.")
@@ -213,6 +206,19 @@ def remote_server(config, dialect, defaults):
             for old, new in (("startup", "connect_timeout"), ("request", "execute_timeout")):
                 if old in limits:
                     extension[new] = timeout(limits[old])
+    return extension
+
+
+def remote_server(config, dialect, defaults):
+    mapping(config)
+    if dialect == "dsh":
+        require(config.get("transport") == "streamable-http", "Unsupported MCP transport.")
+        mapping(config, {"serverName", "transport", "url", "headers", "toolCallTimeoutMs", "failOnStartupError"})
+    else:
+        require(config.get("type") == "remote", "Unsupported MCP transport.")
+        mapping(config, {"type", "url", "headers", "oauth", "enabled" if dialect == "opencode-v1" else "disabled", "timeout"})
+        require(config.get("oauth") is False, "Set oauth:false explicitly; plugin OAuth and upstream auto-OAuth cannot be converted.")
+    extension = server_options(config, dialect, defaults)
     url = config.get("url")
     require(isinstance(url, str) and not re.search(r"[\s\\{}]", url), "MCP URL must be a literal endpoint without interpolation.")
     try:
@@ -254,7 +260,69 @@ def remote_server(config, dialect, defaults):
             "extensions": {"net.codewhale": extension}}, host
 
 
-def mcp_config(path, dialect):
+def stdio_server(config, dialect, defaults, name, root):
+    require(root is not None, "Local MCP needs an explicit --stdio-root SERVER=DIRECTORY containing its packaged Node source.")
+    if dialect == "dsh":
+        mapping(config, {"serverName", "transport", "command", "args", "env", "cwd", "toolCallTimeoutMs", "failOnStartupError"})
+        command, arguments = config.get("command"), config.get("args", [])
+        require(not mapping(config.get("env", {})), "DSH stdio env values and expressions require a manual native port.")
+        environment = {}
+    else:
+        allowed = {"type", "command", "environment", "timeout", "enabled" if dialect == "opencode-v1" else "disabled"}
+        if dialect == "opencode-v2":
+            allowed.add("cwd")
+        mapping(config, allowed)
+        argv = config.get("command")
+        require(isinstance(argv, list) and len(argv) == 2, "Local MCP command must be exactly [\"node\", \"relative-entry.mjs\"].")
+        command, arguments = argv[0], argv[1:]
+        environment = mapping(config.get("environment", {}))
+    require(command == "node" and isinstance(arguments, list) and len(arguments) == 1,
+            "Only node with one packaged .mjs entry is supported; no launcher flags, package managers or shell commands.")
+    entry = arguments[0]
+    require(isinstance(entry, str) and re.fullmatch(r"(?:\./)?[A-Za-z0-9_][A-Za-z0-9_./-]*\.mjs", entry)
+            and ".." not in entry.split("/"), "Node entry must be a contained relative .mjs file; other entry formats require a manual port.")
+    require(config.get("cwd", "") in ("", "."), "Select the original process working directory with --stdio-root; other cwd values require a manual port.")
+    require(plain_path(root / entry).is_file(), "Packaged Node entry does not exist.")
+    require(len(environment) <= 64, "At most 64 environment mappings are supported.")
+    env = {}
+    for key, value in environment.items():
+        require(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key) is not None
+                and key.upper() not in {"PLUGIN_ROOT", "PLUGIN_DATA", "NODE_OPTIONS", "NODE_PATH", "PATH",
+                                        "LD_PRELOAD", "LD_LIBRARY_PATH", "DYLD_INSERT_LIBRARIES", "DYLD_LIBRARY_PATH", "DYLD_FRAMEWORK_PATH"},
+                "Invalid, reserved or loader-changing stdio environment name.")
+        reference = re.fullmatch(r"\{env:([A-Za-z_][A-Za-z0-9_]*)\}", value) if isinstance(value, str) else None
+        require(reference is not None, "Local MCP environment values must be exact OpenCode {env:NAME} references; literals are not copied.")
+        env[key] = "${" + reference[1] + "}"
+    return {"type": "stdio", "command": "node", "args": [entry], "cwd": f"mcp/{name}",
+            "env": env, "extensions": {"net.codewhale": server_options(config, dialect, defaults)}}
+
+
+def stdio_files(root, name, max_files, max_bytes):
+    """Copy an explicitly packaged directory, never resolve/install dependencies."""
+    def fail_walk(error):
+        raise error
+
+    files, visited, used_bytes = {}, 0, 0
+    for current, dirs, children in os.walk(root, followlinks=False, onerror=fail_walk):
+        for child in dirs + children:
+            visited += 1
+            require(visited <= MAX_FILES, "Packaged MCP source has too many filesystem entries.")
+            candidate = plain_path(Path(current) / child)
+            lower = candidate.name.lower()
+            require(not lower.startswith(".") and lower not in {"credentials", "credentials.json", "secrets.json", "id_rsa", "id_ed25519"}
+                    and candidate.suffix.lower() not in {".pem", ".key", ".p12", ".pfx"},
+                    "Package MCP source without hidden files, repository metadata or credential files; nothing was copied.")
+            if candidate.is_dir():
+                continue
+            require(len(files) < max_files, "Selected components exceed the file budget.")
+            content = read_file(candidate, max_bytes - used_bytes)
+            files[f"mcp/{name}/{candidate.relative_to(root).as_posix()}"] = content
+            used_bytes += len(content)
+    return files
+
+
+def mcp_config(path, dialect, stdio_roots=None):
+    stdio_roots = stdio_roots or {}
     document = data(text_file(path), json_only=dialect != "dsh")
     ignored = 0
     if dialect == "dsh":
@@ -285,14 +353,22 @@ def mcp_config(path, dialect):
         entries = [(key, value, False) for key, value in servers.items()]
     require(len(entries) <= 64, "At most 64 MCP servers can be converted at once.")
     result, hosts = {}, set()
+    local_names = set()
     for name, config, disabled in entries:
         require(isinstance(name, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,31}", name), "Invalid or missing MCP server name.")
         require(name not in result, "Duplicate MCP server name; no entries were written.")
-        converted, host = remote_server(config, dialect, defaults)
+        mapping(config)
+        local = config.get("transport") == "stdio" if dialect == "dsh" else config.get("type") == "local"
+        if local:
+            converted = stdio_server(config, dialect, defaults, name, stdio_roots.get(name))
+            local_names.add(name)
+        else:
+            converted, host = remote_server(config, dialect, defaults)
+            hosts.add(host)
         if disabled:
             converted["extensions"]["net.codewhale"]["disabled"] = True
         result[name] = converted
-        hosts.add(host)
+    require(set(stdio_roots) == local_names, "Every --stdio-root must name a selected local MCP server.")
     return result, sorted(hosts), ignored
 
 
@@ -310,19 +386,40 @@ def convert(args):
         require(name not in skill_names, "Duplicate skill name; no files were written.")
         skill_names.add(name)
         files.update(additions)
-    servers, hosts, ignored = mcp_config(args.config, args.format) if args.config else ({}, [], 0)
+    roots = {}
+    for specification in getattr(args, "stdio_root", []):
+        name, separator, directory = specification.partition("=")
+        require(separator and directory and name not in roots, "Use unique --stdio-root SERVER=DIRECTORY selections.")
+        source = plain_path(directory)
+        require(source.is_dir(), "The selected stdio root must be a directory.")
+        require(source != output and source not in output.parents, "Output must be outside the selected MCP source.")
+        roots[name] = source
+    require(not roots or args.config, "--stdio-root requires a selected MCP configuration.")
+    servers, hosts, ignored = mcp_config(args.config, args.format, roots) if args.config else ({}, [], 0)
+    for name, source in roots.items():
+        files.update(stdio_files(source, name, MAX_FILES - len(files), MAX_BYTES - sum(map(len, files.values()))))
     require(files or servers, "No portable components selected. Use --skill and/or --config.")
     manifest = {"$schema": "https://agent-plugins.org/schemas/plugin.json", "name": args.name}
+    extension = {}
     if hosts:
-        manifest["extensions"] = {"net.codewhale": {"capabilities": {"network_hosts": hosts}}}
+        extension["capabilities"] = {"network_hosts": hosts}
+    if roots:
+        extension["when"] = {"binaries": ["node"]}
+    if extension:
+        manifest["extensions"] = {"net.codewhale": extension}
     files["plugin.json"] = (json.dumps(manifest, indent=2) + "\n").encode()
     if servers:
         files["mcp.json"] = (json.dumps({"mcpServers": servers}, indent=2) + "\n").encode()
     files["CONVERSION.md"] = (f"# Conversion receipt\n\nSource dialect: {args.format}.\n"
-        f"Converted {len(skill_names)} selected Skills and {len(servers)} remote MCP declarations.\n"
+        f"Converted {len(skill_names)} selected Skills, {len(servers) - len(roots)} remote and {len(roots)} local MCP declarations.\n"
         f"Ignored {ignored} unrelated top-level application settings.\n\n"
         "No source code, package manager, install hook, network request or credential lookup ran.\n"
         "Companion skill files were copied as data; review them before loading a skill.\n"
+        "Selected Node source, dependencies and resources were copied as data into mcp/<server>.\n"
+        "Each --stdio-root is the original process working directory; the staged copy becomes its cwd.\n"
+        "Review all copied files and environment names. Node runs only through the native trusted MCP lifecycle.\n"
+        "Local MCP runs with host-user process authority, not an OS sandbox; stdio does not confine its network or files.\n"
+        "Mutable workspace state, writable package resources and external module dependencies require a manual port.\n"
         "This output is not installed, trusted or enabled. Run `/plugin install <directory>`,\n"
         "then `/plugin validate <name>` and review the exact trust token before enabling.\n"
         "Remote MCP output uses Streamable HTTP only; OpenCode's legacy SSE fallback is not reproduced.\n"
@@ -356,6 +453,8 @@ def main():
     parser.add_argument("--format", choices=("opencode-v1", "opencode-v2", "dsh"), required=True)
     parser.add_argument("--config", type=Path, help="OpenCode JSON or static DSH Cordis YAML/JSON (optional)")
     parser.add_argument("--skill", type=Path, action="append", default=[], help="Explicit skill directory or Markdown file; repeatable")
+    parser.add_argument("--stdio-root", action="append", default=[], metavar="SERVER=DIRECTORY",
+                        help="Explicit packaged Node MCP working directory; repeat for each selected local server")
     parser.add_argument("--name", required=True, help="Name for the new native bundle")
     parser.add_argument("--output", type=Path, required=True, help="Fresh directory whose parent already exists")
     args = parser.parse_args()
@@ -365,7 +464,7 @@ def main():
         message = str(error) if isinstance(error, ConversionError) else "File operation failed; source and output must be accessible regular paths."
         print(f"Conversion refused: {message}", file=sys.stderr)
         return 1
-    print(f"Prepared {skills} Skills and {servers} remote MCP declarations; {ignored} unrelated settings omitted.")
+    print(f"Prepared {skills} Skills and {servers} MCP declarations; {ignored} unrelated settings omitted.")
     print("Review CONVERSION.md, then use the existing /plugin install, validate, trust and enable commands.")
     return 0
 

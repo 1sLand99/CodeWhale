@@ -164,7 +164,8 @@ before adding a hook.
 ## Convert an existing plugin
 
 [`scripts/convert-plugin.py`](../scripts/convert-plugin.py) converts explicitly
-selected remote MCP declarations and portable Skills into a native bundle.
+selected remote MCP declarations, packaged local Node MCP servers, and portable
+Skills into a native bundle.
 It requires Python 3.10+ and PyYAML 6+; install those separately if absent.
 The converter installs no dependencies, scans no ambient configuration or
 credentials, makes no network requests, and executes no source code.
@@ -196,7 +197,7 @@ python3 scripts/convert-plugin.py --format opencode-v1 \
 Choose `--format opencode-v2` for the `mcp.servers.<name>` layout, whose server
 flag is `disabled` instead of `enabled`. Select the format from the data;
 filenames and upstream branch names do not determine its version. Both formats
-require explicit `oauth: false`. Remote MCP output uses **Streamable HTTP only**;
+require explicit `oauth: false` for remote servers. Remote MCP output uses **Streamable HTTP only**;
 OpenCode's fallback to legacy SSE is not reproduced. For an SSE-only endpoint,
 author native `mcp.json` with `type: "sse"` and use the same review flow.
 
@@ -231,6 +232,62 @@ python3 scripts/convert-plugin.py --format dsh \
 The DSH input may also be JSON, but must be the plain entry list, not a full
 profile or patch composition. Each row must name `@deepseek-ai/dsh-mcp-client`.
 
+### Local Node MCP servers
+
+For an already packaged Node MCP server, select its original process working
+directory explicitly. The converter copies that directory into `mcp/<server>`
+and sets the native server's working directory to the reviewed copy. Relative
+entrypoint imports and read-only resources keep the same layout.
+
+```json
+{
+  "mcp": {
+    "localdocs": {
+      "type": "local",
+      "command": ["node", "server.mjs"],
+      "environment": {"API_TOKEN": "{env:LOCALDOCS_TOKEN}"},
+      "enabled": false
+    }
+  }
+}
+```
+
+```sh
+python3 scripts/convert-plugin.py --format opencode-v1 \
+  --config ./local-mcp.json --stdio-root localdocs=./packaged-localdocs \
+  --name local-tools --output ./migrated-local
+```
+
+Repeat `--stdio-root SERVER=DIRECTORY` for every local server in the selected
+configuration. OpenCode v2 uses `mcp.servers` and `disabled`. Static DSH entries
+use `transport: stdio`, `command: node`, and `args: [server.mjs]`; DSH `env`
+must be absent or empty because its literals/expressions are not OpenCode
+environment references. Optional DSH/v2 `cwd` must be absent, empty, or `.`;
+the selected root explicitly supplies the original working directory.
+
+Only `node` plus one relative `.mjs` entry is supported. The native macOS
+reviewed-launch adapter preserves sibling imports for `.mjs`; `.js` and `.cjs`
+entrypoints are not qualified by this converter and require a manual port.
+Package dependencies and read-only resources first, inside the selected root.
+No package manager, install script, module loader or server runs during
+conversion. Links/reparse points, hard-linked files, hidden files/directories
+(including `.gitignore`, `.env*`, `.npmrc` and `node_modules/.bin`), common
+credential filenames, and private-key containers are refused. Prepare a clean
+package directory; ignore rules are not used to silently omit files. Inspect
+every selected file for embedded credentials before conversion. The existing
+4,096-file / 64 MiB aggregate bundle limit applies.
+
+The converter rejects shell launchers, Node flags, extra arguments, non-Node
+interpreters, literal environment values, and loader-changing environment
+names. Stateful servers that write into their working directory, depend on the
+live workspace, or import files outside the package need a manual native port.
+Copying files does not statically verify JavaScript import closure or sandbox
+arbitrary code. Local MCP processes run with host-user authority; their network
+and filesystem access are not restricted by the remote endpoint host list.
+The same native install, capability review, hash-bound trust, and enable steps
+are required before Codewhale launches the server. This adds a packaged Node
+MCP subset; it does not execute DSH/Cordis plugin modules.
+
 ### Review the result
 
 Both examples preserve disabled servers and use a placeholder endpoint. Replace
@@ -253,13 +310,14 @@ DSH header expressions, and URL file/environment substitution are refused.
 Configured timeouts must be whole seconds expressed in milliseconds, from
 `1000` through `3600000`. Omitted timeouts use Codewhale's defaults.
 
-Executable plugins and hooks, stdio servers, automatic OAuth, JavaScript,
+Executable foreign plugins and hooks, other stdio launchers, automatic OAuth,
+configuration JavaScript,
 YAML aliases/tags, `__jsExpr`, and unsupported skill runtime fields (including
 `user-invocable: false`) require a manual port. Conversion does not reproduce
 another client's runtime or bypass Codewhale's credential and sandbox rules.
 
 Read the generated `CONVERSION.md`, `plugin.json`, `mcp.json` when present, and
-all selected skill files. Then use `/plugin install ./migrated-opencode` (or the
+all selected skill and MCP source files. Then use `/plugin install ./migrated-opencode` (or the
 DSH output path), `/plugin validate <name>`, and the same hash-bound trust and
 enable flow above. Conversion alone proves neither connectivity nor runtime
 compatibility; the output is not installed, trusted, or enabled.
