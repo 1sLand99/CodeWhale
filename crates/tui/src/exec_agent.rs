@@ -17,6 +17,41 @@ pub(crate) fn exec_max_steps(max_turns: Option<u32>) -> u32 {
     crate::core::engine::turn_budget::resolve_max_model_steps(max_turns)
 }
 
+/// Attach the durable automation store headless `exec` inspects.
+///
+/// Headless exec builds its catalog from the same tool surface the TUI and the
+/// Runtime host do, so it advertises `automation` and `send_later` whether or
+/// not the store behind them is attached. Left unattached, every call failed
+/// "AutomationManager is not attached" — the tool was real and the service was
+/// missing. This opens the same store those two hosts open: a shared directory
+/// guarded per transaction by its own file locks (`AutomationManager::open`),
+/// so it adds no second store, no scheduler, and no second scheduling
+/// authority.
+///
+/// What exec deliberately does not take is the Runtime's task-execution lease.
+/// That lease is exclusive (`TaskExecutionLease::new`) and a one-shot host must
+/// neither contend with it nor recover work from the process that holds it. So
+/// the manager returned here is *unbound*: inspection works, and everything
+/// that would promise dispatch is refused by the tool's own admission check
+/// (`tools::automation::require_dispatch_owner`) rather than persisting a
+/// schedule nothing would honor.
+///
+/// Fleet worker subprocesses get nothing, keeping the narrowed envelope they
+/// were launched with alongside the empty plugin registry and disabled
+/// subagents. A store that cannot be opened is reported, never swallowed:
+/// both other hosts fail startup on it, so exec does too instead of
+/// advertising an automation surface it silently cannot serve.
+pub(crate) fn exec_automation_services(
+    fleet_authority_active: bool,
+) -> Result<Option<crate::automation_manager::SharedAutomationManager>> {
+    if fleet_authority_active {
+        return Ok(None);
+    }
+    let service = crate::automation_manager::AutomationManager::default_location()
+        .context("open the automation store for headless exec")?;
+    Ok(Some(std::sync::Arc::new(tokio::sync::Mutex::new(service))))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_exec_agent(
     config: &Config,
@@ -213,9 +248,11 @@ pub(crate) async fn run_exec_agent(
         && explicit_sandbox
             .is_some_and(|sandbox| sandbox.eq_ignore_ascii_case("danger-full-access"));
     let exec_shell_manager = crate::tools::shell::new_shared_shell_manager(workspace.clone());
+    let exec_automations = exec_automation_services(fleet_authority_active)?;
     let runtime_services = crate::tools::spec::RuntimeToolServices {
         shell_manager: Some(exec_shell_manager.clone()),
         persist_services_enabled,
+        automations: exec_automations,
         media_originals_dir: crate::media_originals::default_store_dir(),
         ..crate::tools::spec::RuntimeToolServices::default()
     };
@@ -1159,4 +1196,75 @@ pub(crate) async fn run_exec_agent(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::exec_automation_services;
+
+    /// The reproduced defect: headless exec advertised `automation` while
+    /// attaching no store, so every call — including the read-only `list` and
+    /// `read` — failed "AutomationManager is not attached". Exec must attach
+    /// the same durable store the TUI and the Runtime open.
+    #[test]
+    fn headless_exec_attaches_the_shared_automation_store() {
+        let _lock = crate::test_support::lock_test_env();
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        // SAFETY: serialised by lock_test_env.
+        unsafe {
+            std::env::set_var("CODEWHALE_AUTOMATIONS_DIR", tmp.path());
+        }
+        let attached = exec_automation_services(false).expect("open store");
+        // SAFETY: cleanup under the same lock.
+        unsafe {
+            std::env::remove_var("CODEWHALE_AUTOMATIONS_DIR");
+        }
+        let attached = attached.expect("exec attaches the automation store");
+        let manager = attached.blocking_lock();
+        // Reads work against the shared store...
+        assert!(
+            manager.list_automations().is_ok(),
+            "an attached store must serve inspection"
+        );
+        // ...while the exec host stays outside the Runtime's exclusive
+        // task-execution lease, so it claims no dispatch ownership.
+        assert!(
+            manager.execution_scope().is_none(),
+            "a one-shot host must not claim an execution scope"
+        );
+    }
+
+    /// A Fleet worker keeps the narrowed envelope it was launched with.
+    #[test]
+    fn fleet_workers_get_no_automation_store() {
+        assert!(
+            exec_automation_services(true)
+                .expect("no store to open")
+                .is_none()
+        );
+    }
+
+    /// A store that cannot be opened is reported, not swallowed into a silent
+    /// "not attached" at the first tool call.
+    #[test]
+    fn an_unopenable_store_fails_loudly() {
+        let _lock = crate::test_support::lock_test_env();
+        let tmp = tempfile::NamedTempFile::new().expect("temp file");
+        // A regular file cannot host the store's directories.
+        let blocked = tmp.path().join("automations");
+        // SAFETY: serialised by lock_test_env.
+        unsafe {
+            std::env::set_var("CODEWHALE_AUTOMATIONS_DIR", &blocked);
+        }
+        let result = exec_automation_services(false);
+        // SAFETY: cleanup under the same lock.
+        unsafe {
+            std::env::remove_var("CODEWHALE_AUTOMATIONS_DIR");
+        }
+        let err = result.expect_err("opening the store must fail");
+        assert!(
+            format!("{err:#}").contains("automation store for headless exec"),
+            "the failure must name what could not be opened: {err:#}"
+        );
+    }
 }
