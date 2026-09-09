@@ -100,6 +100,51 @@ with an accessibility-first pointer.
   rejected at run creation with a message naming both postures; casing and
   legacy aliases of the member's own role are still accepted (#5945, thanks
   @gaord).
+- A queued message keeps one transcript entry from queue through steer to
+  dispatch. It no longer reads as delivered while it is still pending, and the
+  second Enter the strip prompts for no longer paints a duplicate bubble.
+- The Tasks rail panel no longer swallows the first keystroke of typed input:
+  bare `y`/`Y` yank only when the work surface holds keyboard focus, so a
+  message that starts with "yes" stays intact (#2000).
+- `wait` results reach the parent intact. The parent-context summarizer
+  projected every `agent` tool result through the sub-agent snapshot renderer,
+  which replaced a wait envelope's `settled`, `still_running`, `timed_out`,
+  `waited_ms`, and `note` with `unknown (agent) status=unknown`. Only
+  snapshot-shaped results are summarized now.
+- A sub-agent's final summary uses the same adaptive tool-result budget as
+  every other tool result (`tool_result_max_bytes`, 12k floor, 2 MiB ceiling)
+  instead of a hardcoded 12k/4k/4k copy that cut a 12,001-character report to
+  8,000.
+- The metrics line no longer carries a permanent `/help` hint. The route still
+  appears until its binding has been used and then retires with the other
+  footer hints, so the row stays quiet once help is learned.
+- `request_user_input`'s description names when asking is the right move
+  (ambiguous scope, an irreversible or expensive choice, a missing preference)
+  and when it is not, so the model stops guessing at discoverable facts.
+- `config.example.toml` states the real search default (keyless Firecrawl, not
+  DuckDuckGo) and the preferred `CODEWHALE_SEARCH_*` environment names.
+- Startup type-ahead is preserved whole, and a slash command interrupted by
+  startup keystrokes is no longer re-read as prose and sent to the model
+  (#5925).
+- The model picker renders a large catalog without lag and supports per-column
+  sort and mouse selection (#5975).
+- Session metrics report effective request throughput from provider receipts
+  instead of a live estimate divided by the whole turn, and cost stays honest
+  when a route has no price reading (#5976, #5977).
+- An offline-queue submit delivered as late raw keystrokes no longer wedges the
+  composer behind stacked session notices (#5999).
+- Fleet setup with a model filter that matches nothing renders a hint instead
+  of panicking (#5953), and shortlist enrollment plus authoritative role pins
+  are honored on dispatch (#5915).
+- A mid-turn MCP catalog refresh keeps the tool pool deferred and the active
+  set narrow (#5939).
+- Computer Use on macOS verifies application activation before sending
+  keystrokes and guards input by the frontmost app (#5927).
+- Onboarding tests isolate `CODEWHALE_HOME`, so a fixture provider can no
+  longer leak into the real setup state (#5932).
+- Snapshot availability is retained with one warning per session, and a
+  diverged engine session id is a visible notice rather than a log line
+  (#5930).
 
 ### Changed
 
