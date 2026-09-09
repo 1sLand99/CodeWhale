@@ -241,7 +241,8 @@ ignored with a warning in the log.
 `status_items` composes the rows; two size presets decide how much of each
 row paints. `[tui].posture_bar` and `[tui].metrics_line` each take `full`
 (the default), `compact`, or `hidden`, also settable at runtime with
-`/config posture_bar compact`. `compact` is the row after its first shed
+`/config posture_bar compact`. TOML values must be lowercase; `/config`
+accepts either case. `compact` is the row after its first shed
 rungs: the posture bar keeps its permission and mode chips — and the cap
 warning, which is advice, not decoration — and drops the clocks, counts and
 hint; the metrics line keeps the route, the context reading, the cost and

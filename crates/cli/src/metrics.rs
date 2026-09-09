@@ -172,22 +172,73 @@ impl CompactionStats {
     }
 }
 
-/// Sub-agent spawn stats.
+/// Sub-agent lifecycle receipt counts; these are not unique worker totals.
 #[derive(Debug, Default, serde::Serialize)]
 pub struct AgentStats {
     pub spawns: u64,
     pub successes: u64,
     pub failures: u64,
+    pub cancelled: u64,
+    pub interrupted: u64,
+    pub budget_exhausted: u64,
+    /// Terminal receipts with missing, malformed, or unrecognized outcomes.
+    pub unknown_outcomes: u64,
 }
 
 impl AgentStats {
-    fn success_rate_pct(&self) -> Option<f64> {
-        let judged = self.successes + self.failures;
-        if judged == 0 {
-            None
+    fn record_completion(&mut self, event: &Value) {
+        // Runtime's worker_status owns the outcome. A completed status item
+        // means its receipt settled, not that the worker succeeded. Preserve
+        // explicit unknown values instead of falling back to a legacy boolean.
+        let status = event
+            .pointer("/details/worker_status")
+            .or_else(|| event.pointer("/payload/worker_status"))
+            .or_else(|| event.pointer("/details/status"))
+            .or_else(|| event.pointer("/payload/status"));
+        let count = if let Some(status) = status {
+            match status.as_str() {
+                Some("completed") => &mut self.successes,
+                Some("failed") => &mut self.failures,
+                Some("cancelled") => &mut self.cancelled,
+                Some("interrupted") => &mut self.interrupted,
+                Some("budget_exhausted") => &mut self.budget_exhausted,
+                _ => &mut self.unknown_outcomes,
+            }
         } else {
-            Some(self.successes as f64 / judged as f64 * 100.0)
+            match event
+                .pointer("/details/success")
+                .or_else(|| event.pointer("/payload/success"))
+                .and_then(Value::as_bool)
+            {
+                Some(true) => &mut self.successes,
+                Some(false) => &mut self.failures,
+                None => &mut self.unknown_outcomes,
+            }
+        };
+        *count = count.saturating_add(1);
+    }
+
+    fn summary(&self) -> String {
+        let outcomes = [
+            (self.successes, "completed"),
+            (self.failures, "failed"),
+            (self.cancelled, "cancelled"),
+            (self.interrupted, "interrupted"),
+            (self.budget_exhausted, "budget exhausted"),
+            (self.unknown_outcomes, "outcome unconfirmed"),
+        ]
+        .into_iter()
+        .filter(|(count, _)| *count > 0)
+        .map(|(count, label)| format!("{} {label}", fmt_num(count)))
+        .collect::<Vec<_>>();
+        if self.spawns == 0 && outcomes.is_empty() {
+            return "Sub-agents: (no data)".to_string();
         }
+        let mut summary = format!("Sub-agents: {} spawn receipts", fmt_num(self.spawns));
+        if !outcomes.is_empty() {
+            summary.push_str(&format!("; outcomes: {}", outcomes.join(", ")));
+        }
+        summary
     }
 }
 
@@ -447,16 +498,7 @@ fn read_audit_log(
                 rollup.agents.spawns += 1;
             }
             "agent.completed" | "subagent.completed" => {
-                let success = v
-                    .pointer("/details/success")
-                    .or_else(|| v.pointer("/payload/success"))
-                    .and_then(|b| b.as_bool())
-                    .unwrap_or(true);
-                if success {
-                    rollup.agents.successes += 1;
-                } else {
-                    rollup.agents.failures += 1;
-                }
+                rollup.agents.record_completion(&v);
             }
             e if e.starts_with("capacity.") => {
                 rollup.capacity.total += 1;
@@ -746,15 +788,7 @@ fn read_events_jsonl(
                 rollup.agents.spawns += 1;
             }
             "agent.completed" | "subagent.completed" => {
-                let success = v
-                    .pointer("/payload/success")
-                    .and_then(|b| b.as_bool())
-                    .unwrap_or(true);
-                if success {
-                    rollup.agents.successes += 1;
-                } else {
-                    rollup.agents.failures += 1;
-                }
+                rollup.agents.record_completion(&v);
             }
             e if e.starts_with("capacity.") => {
                 rollup.capacity.total += 1;
@@ -999,19 +1033,7 @@ fn print_human(rollup: &Rollup) {
     }
 
     // ── Sub-agents ─────────────────────────────────────────────────────────
-    if rollup.agents.spawns > 0 {
-        let rate_str = match rollup.agents.success_rate_pct() {
-            Some(pct) => format!(", {pct:.1}% success"),
-            None => String::new(),
-        };
-        println!(
-            "Sub-agents: {} spawns{}",
-            fmt_num(rollup.agents.spawns),
-            rate_str
-        );
-    } else {
-        println!("Sub-agents: (no data)");
-    }
+    println!("{}", rollup.agents.summary());
 
     // ── Capacity interventions ─────────────────────────────────────────────
     if rollup.capacity.total > 0 {
@@ -1169,6 +1191,119 @@ mod tests {
             writeln!(tmp, "{event}").unwrap();
         }
         tmp
+    }
+
+    #[test]
+    fn runtime_worker_completion_uses_owner_outcome_not_completed_receipt_status() {
+        let statuses = [
+            serde_json::json!("completed"),
+            serde_json::json!("failed"),
+            serde_json::json!("cancelled"),
+            serde_json::json!("interrupted"),
+            serde_json::json!("budget_exhausted"),
+            Value::Null,
+        ];
+        let events: Vec<_> = statuses
+            .into_iter()
+            .enumerate()
+            .map(|(seq, worker_status)| {
+                runtime_event(
+                    seq as u64,
+                    "2026-09-08T10:00:00Z",
+                    "thread-a",
+                    Some("turn-a"),
+                    "agent.completed",
+                    serde_json::json!({
+                        "item": { "kind": "status", "status": "completed" },
+                        "agent_id": format!("worker-{seq}"),
+                        "worker_status": worker_status,
+                        "parent_run_id": "run-a",
+                        "spawn_depth": 1,
+                        "continuable": false,
+                    }),
+                )
+            })
+            .collect();
+        let tmp = write_runtime_events(&events);
+        let mut rollup = Rollup::default();
+        read_runtime_test_log(tmp.path(), None, &mut rollup);
+        let agents = &rollup.agents;
+        assert_eq!(agents.successes, 1, "a settled item is not worker success");
+        assert_eq!(agents.failures, 1);
+        assert_eq!(agents.cancelled, 1);
+        assert_eq!(agents.interrupted, 1);
+        assert_eq!(agents.budget_exhausted, 1);
+        assert_eq!(agents.unknown_outcomes, 1);
+        assert_eq!(agents.spawns, 0);
+        let summary = agents.summary();
+        assert!(summary.contains("1 failed"));
+        assert!(summary.contains("1 outcome unconfirmed"));
+        assert!(
+            !summary.contains("no data"),
+            "terminal-only windows have data"
+        );
+        assert!(
+            !summary.contains("%"),
+            "partial receipts are not a success rate"
+        );
+    }
+
+    #[test]
+    fn runtime_legacy_worker_receipts_require_explicit_success_evidence() {
+        let payloads = [
+            serde_json::json!({ "success": true }),
+            serde_json::json!({ "success": false }),
+            serde_json::json!({}),
+            serde_json::json!({ "success": "true" }),
+            serde_json::json!({ "worker_status": "failed", "success": true }),
+            serde_json::json!({ "worker_status": null, "success": true }),
+            serde_json::json!({ "worker_status": "running", "success": true }),
+            serde_json::json!({ "worker_status": { "completed": true }, "success": true }),
+            serde_json::json!({ "worker_status": "future_outcome", "success": true }),
+        ];
+        let events: Vec<_> = payloads
+            .into_iter()
+            .enumerate()
+            .map(|(seq, payload)| {
+                runtime_event(
+                    seq as u64,
+                    "2026-09-08T10:00:00Z",
+                    "thread-a",
+                    Some("turn-a"),
+                    "agent.completed",
+                    payload,
+                )
+            })
+            .collect();
+        let tmp = write_runtime_events(&events);
+        let mut rollup = Rollup::default();
+        read_runtime_test_log(tmp.path(), None, &mut rollup);
+        assert_eq!(rollup.agents.successes, 1);
+        assert_eq!(rollup.agents.failures, 2);
+        assert_eq!(rollup.agents.unknown_outcomes, 6);
+    }
+
+    #[test]
+    fn audit_worker_receipts_share_typed_and_legacy_outcome_rules() {
+        let events = [
+            serde_json::json!({ "event": "agent.completed", "details": { "worker_status": "failed", "success": true } }),
+            serde_json::json!({ "event": "subagent.completed", "payload": { "status": "cancelled", "success": true } }),
+            serde_json::json!({ "event": "subagent.completed", "details": { "status": "completed" } }),
+            serde_json::json!({ "event": "agent.completed", "details": { "success": false } }),
+            serde_json::json!({ "event": "agent.completed", "payload": { "success": true } }),
+            serde_json::json!({ "event": "agent.completed", "details": { "worker_status": null, "success": true } }),
+            serde_json::json!({ "event": "agent.completed", "details": {} }),
+        ];
+        let tmp = write_runtime_events(&events);
+        let mut rollup = Rollup::default();
+        read_audit_test_log(tmp.path(), None, &mut rollup);
+        assert_eq!(rollup.agents.successes, 2);
+        assert_eq!(rollup.agents.failures, 2);
+        assert_eq!(rollup.agents.cancelled, 1);
+        assert_eq!(rollup.agents.unknown_outcomes, 2);
+        let json = serde_json::to_value(&rollup).unwrap();
+        assert_eq!(json["agents"]["unknown_outcomes"], 2);
+        assert_eq!(json["agents"]["cancelled"], 1);
     }
 
     // ── Duration parser ──

@@ -62,12 +62,14 @@
 
 ## 单一递归轴
 
-worker 在 `spawn_depth = 0` 运行，并且可以在满足 `spawn_depth + 1 ≤ max_spawn_depth` 时派生子级，因此预算 `N` 提供 `N` 层嵌套委派。子代理和 fleet worker 共享**一条**轴，来源是 `codewhale_config`：
+worker 在 `spawn_depth = 0` 运行，并且可以在满足 `spawn_depth + 1 ≤ max_spawn_depth` 时派生子级，因此预算 `N` 提供 `N` 层嵌套委派。子代理和通过 fleet 选择的 Runtime worker 共享**一条**轴，来源是 `codewhale_config`：
 
-- `DEFAULT_SPAWN_DEPTH = 3` —— 独立子代理和 fleet worker 的默认预算（因此它们不会漂移成"两个移动靶"）；
-- `MAX_SPAWN_DEPTH_CEILING = 8` —— 可选上限，每个配置值（fleet 的 `max_spawn_depth`、`agent` 的 `max_depth`）都会被钳制到该值。
+- `DEFAULT_SPAWN_DEPTH = 3` —— 独立子代理和通过 fleet 选择的 Runtime worker 的默认预算；
+- `MAX_SPAWN_DEPTH_CEILING = 8` —— 可选上限，所有 Runtime 配置值（包括 fleet 执行配置中的 `max_spawn_depth`）都会被钳制到该值。
 
-注意解析器和对外公布的 schema 对 `agent` 的 `max_depth` 看法不一致：解析器钳制到 8（`tools/subagent/mod.rs:10601-10617`），而展示给模型的 JSON schema 声明 `"maximum": 3`（`mod.rs:6845-6848`）。因此模型无法请求运行时愿意兑现的深度。这里作为代码差异跟踪，而不是文档差异。
+面向模型的 `agent` schema 有意省略 `max_depth`。解析器仍接受 `max_depth`、`maxDepth` 和 `max_spawn_depth`，以兼容已保存的转录、ACP/MCP 客户端和内部调用，并拒绝大于 8 的值。当前由模型发起的调用继承 Runtime 配置，而不是通过工具 schema 协商递归深度。
+
+Workflow IR 另有默认五层嵌套节点的结构验证限制。该限制约束编排文档的结构，不会授予或消耗 Runtime 的子级委派深度。
 
 根 worker 即使在预算为 0 时也会运行；预算约束的是*子级*委派。默认预算至少提供三层嵌套。
 

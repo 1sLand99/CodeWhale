@@ -1125,11 +1125,10 @@ alternate_screen = "auto"   # auto/always start on the alternate screen; never s
 mouse_capture = true        # true copies only transcript user/assistant text; false uses raw terminal selection/copy
 terminal_probe_timeout_ms = 500 # optional startup terminal-mode timeout (100-5000ms)
 stream_chunk_timeout_secs = 900 # optional SSE idle timeout per chunk (0 = default, 1-3600)
-# R1 turn budgets. An agent loop with no finite bound can spend real money
-# forever, so every one of these is finite by default and finite at its
-# maximum. `0` is an invalid value that falls back to the default — it is
-# never a "0 means unlimited" sentinel.
-max_model_steps = 200        # model steps one turn may take (0 = default, 1-100000)
+# Model steps are uncapped by default. Uncomment to install an explicit
+# ceiling; omission or 0 means no step limit, positive values clamp to 1-100000.
+# max_model_steps = 1000
+# Wall-clock and stream budgets remain finite; 0 selects their default.
 turn_wall_clock_secs = 3600  # cumulative wall clock for one turn, excluding time
                              # blocked on a human approval (0 = default, 30-86400)
 stream_max_content_mb = 10   # per-step cap on streamed content (0 = default, 1-512)

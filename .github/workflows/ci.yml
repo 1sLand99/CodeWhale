@@ -621,6 +621,10 @@ jobs:
         shell: bash
         run: sh scripts/with-hermetic-test-home.sh cargo nextest run --workspace --all-features --locked --profile ci
         env:
+          # sccache 0.17 panics resolving its config directory under the
+          # isolated Windows home before Cargo can compile or run any test.
+          # Bypass only that optional cache; keep the full suite and isolation.
+          RUSTC_WRAPPER: ${{ matrix.os != 'windows-latest' && env.RUSTC_WRAPPER || '' }}
           # Give test threads the stack the product gives itself. main.rs runs
           # the owner thread and every tokio worker at
           # CODEWHALE_MAIN_STACK_BYTES (16 MiB) because the engine and
@@ -639,6 +643,7 @@ jobs:
         shell: bash
         run: sh scripts/with-hermetic-test-home.sh cargo test --workspace --all-features --locked --doc
         env:
+          RUSTC_WRAPPER: ${{ matrix.os != 'windows-latest' && env.RUSTC_WRAPPER || '' }}
           RUST_MIN_STACK: '16777216'
       # The Ubuntu lint lane validates non-RSS backlog fields. Run the same
       # source-bound measurement on macOS so loss or growth of RSS evidence

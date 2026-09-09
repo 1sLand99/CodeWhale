@@ -318,7 +318,7 @@ pub struct EngineConfig {
     pub translation_enabled: bool,
     pub verbosity: Option<String>,
     /// Maximum number of assistant steps before stopping. Ordinary interactive
-    /// hosts use [`UNBOUNDED_MODEL_STEPS`]; explicit test/embed callers may
+    /// hosts use [`DEFAULT_MODEL_STEPS`]; explicit test/embed callers may
     /// still install a finite boundary.
     pub max_steps: u32,
     /// Maximum number of concurrently active subagents.
@@ -518,12 +518,8 @@ pub struct EngineConfig {
     pub advisor_config: crate::tools::subagent::AdvisorConfig,
 }
 
-/// Default model-step ceiling for hosts that do not resolve one from
-/// configuration (R1). Formerly `UNBOUNDED_MODEL_STEPS = u32::MAX`, which
-/// made an unbounded agent loop the default everywhere. It is finite now:
-/// progress/stationarity controls still live at the tool loop, but they are
-/// no longer the *only* thing standing between a stuck loop and unbounded
-/// spend. Overridable via `[tui].max_model_steps`; see
+/// Uncapped model steps for hosts without an explicit configured ceiling.
+/// Wall-clock and stream budgets are independent. See
 /// [`turn_budget::resolve_max_model_steps`].
 pub(crate) const DEFAULT_MODEL_STEPS: u32 = turn_budget::DEFAULT_MAX_MODEL_STEPS;
 
@@ -547,10 +543,7 @@ impl Default for EngineConfig {
             instructions: Vec::new(),
             project_context_pack_enabled: false,
             translation_enabled: false,
-            // R1: every turn carries a finite model-step budget. Callers
-            // that need a different boundary set one explicitly; progress-
-            // based stationarity still belongs at the tool-loop layer, but
-            // it is no longer the only bound on spend.
+            // Callers opt into a finite model-step boundary explicitly.
             max_steps: DEFAULT_MODEL_STEPS,
             max_subagents: DEFAULT_MAX_SUBAGENTS,
             max_admitted_subagents: DEFAULT_MAX_SUBAGENTS,

@@ -53,7 +53,8 @@ pub struct TurnContext {
     /// Current step in the turn (tool call iteration)
     pub step: u32,
 
-    /// Maximum steps allowed
+    /// Configured steps, or `u32::MAX` for no limit. Use `step_limit` for
+    /// budget decisions; the counter saturates without stopping an uncapped turn.
     pub max_steps: u32,
 
     /// Which configured limit `max_steps` came from.
@@ -118,7 +119,7 @@ impl TurnContext {
             budget_source,
             budget_exhausted_final_report: false,
             stop_diagnostics: crate::tool_inspection::TurnStopDiagnostics {
-                effective_max_steps: max_steps,
+                effective_max_steps: (max_steps != u32::MAX).then_some(max_steps),
                 step_budget_source: budget_source.key_label(),
                 ..Default::default()
             },
@@ -139,13 +140,20 @@ impl TurnContext {
 
     /// Increment the step counter
     pub fn next_step(&mut self) -> bool {
-        self.step += 1;
-        self.step <= self.max_steps
+        self.step = self.step.saturating_add(1);
+        self.step_limit().is_none_or(|limit| self.step <= limit)
+    }
+
+    /// A resolved integer default means no ceiling, including at counter
+    /// saturation. Explicit positive configuration is clamped before here.
+    #[must_use]
+    pub fn step_limit(&self) -> Option<u32> {
+        (self.max_steps != u32::MAX).then_some(self.max_steps)
     }
 
     /// Check if the turn has reached max steps
     pub fn at_max_steps(&self) -> bool {
-        self.step >= self.max_steps
+        self.step_limit().is_some_and(|limit| self.step >= limit)
     }
 
     /// Model steps consumed so far (for soft-landing and reporting).
@@ -175,7 +183,7 @@ impl TurnContext {
         use crate::tool_inspection::TurnStopReason;
         self.stop_diagnostics.status = Some(status);
         self.stop_diagnostics.model_step_index = self.step;
-        self.stop_diagnostics.final_report_requested = self.budget_exhausted_final_report;
+        self.stop_diagnostics.final_report_requested |= self.budget_exhausted_final_report;
         self.stop_diagnostics.last_reported_input_tokens = self.latest_parent_input_tokens;
         match status {
             super::events::TurnOutcomeStatus::Interrupted => {

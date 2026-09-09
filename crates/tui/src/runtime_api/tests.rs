@@ -9708,15 +9708,17 @@ async fn switch_provider_rejects_legacy_deepseek_cn_alias() -> Result<()> {
 }
 
 #[tokio::test]
-async fn switch_provider_with_deepseek_and_explicit_model_persists_canonical_leaf() -> Result<()> {
+async fn switch_provider_with_deepseek_and_explicit_model_preserves_root_fallback() -> Result<()> {
     // Switching TO DeepSeek with an explicit model persists that model on the
-    // canonical `[providers.deepseek].model` leaf, not on a root alias.
+    // canonical `[providers.deepseek].model` leaf, and the incoming route
+    // resolves it from there.
     //
     // The fixture also carries a root `default_text_model` left over from the
-    // outgoing Volcengine route. Root aliases address the *active* route, so
-    // leaving it behind would make the file this endpoint just wrote fail
-    // `Config::load` under DeepSeek. It is already shadowed by Volcengine's own
-    // leaf, so the switch drops it rather than relocating it.
+    // outgoing Volcengine route. `Config::validate` checks the *selected*
+    // route's model, so that alias is inert under DeepSeek: the write neither
+    // overwrites it nor is invalidated by it, and the file still loads. It is
+    // saved state, and deleting it to satisfy validation of a value nothing
+    // resolves would be data loss.
     let root = std::env::temp_dir().join(format!(
         "codewhale-switch-deepseek-model-{}",
         Uuid::new_v4()
@@ -9756,35 +9758,42 @@ model = "glm-2"
         "switch to deepseek with model should succeed, body: {body}"
     );
 
-    // The persisted config must have provider = "deepseek", the explicit model
-    // on DeepSeek's canonical leaf, and no root alias still naming Volcengine's
-    // model. Volcengine keeps its own saved leaf untouched.
+    assert_eq!(body["provider"], "deepseek");
+    assert_eq!(body["model"], "deepseek-v4-pro");
+
     let persisted = fs::read_to_string(&config_file)?;
-    let document: toml::Value = toml::from_str(&persisted)?;
+    let saved: toml::Value = toml::from_str(&persisted)?;
     assert_eq!(
-        document["provider"].as_str(),
+        saved["provider"].as_str(),
         Some("deepseek"),
         "provider should be persisted as deepseek. Actual config:\n{persisted}"
     );
     assert_eq!(
-        document["providers"]["deepseek"]["model"].as_str(),
+        saved["default_text_model"].as_str(),
+        Some("old-model"),
+        "an inert root fallback is saved state and must survive the switch. \
+         Actual config:\n{persisted}"
+    );
+    assert_eq!(
+        saved["providers"]["deepseek"]["model"].as_str(),
         Some("deepseek-v4-pro"),
         "the explicit model belongs on DeepSeek's canonical leaf. \
          Actual config:\n{persisted}"
     );
-    assert!(
-        document.get("default_text_model").is_none(),
-        "a root alias naming the outgoing route must not survive the switch. \
-         Actual config:\n{persisted}"
-    );
     assert_eq!(
-        document["providers"]["volcengine"]["model"].as_str(),
+        saved["providers"]["volcengine"]["model"].as_str(),
         Some("glm-2"),
         "the outgoing route keeps its own saved model. Actual config:\n{persisted}"
     );
     // The receipt that matters: what was written still loads under the new
-    // route. Before the root alias was cleared this returned 500.
-    Config::load(Some(config_file), None)?;
+    // route, and resolves the selected leaf rather than the root fallback.
+    // Validating the root alias instead of the selection returned 500 here.
+    let reloaded = Config::load(Some(config_file.clone()), None)?;
+    assert_eq!(
+        reloaded.api_provider(),
+        crate::config::ApiProvider::Deepseek
+    );
+    assert_eq!(reloaded.default_model(), "deepseek-v4-pro");
 
     handle.abort();
     Ok(())
@@ -12552,6 +12561,7 @@ async fn marketplace_catalog_lifecycle_over_http_lists_installs_and_removes() ->
         }))
         .send()
         .await?;
+    assert_eq!(add_resp.status(), StatusCode::CREATED);
     let add: serde_json::Value = add_resp.json().await?;
     assert!(add["action"] == "added", "marketplace add failed: {add}");
     assert_eq!(add["candidate_count"], 1);

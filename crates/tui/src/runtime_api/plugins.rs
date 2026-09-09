@@ -89,10 +89,10 @@ pub(super) struct PluginsResponse {
     pub(super) validation_clean: bool,
 }
 
-/// One reviewed-plugin MCP server in the trust-review payload. Secret-bearing
-/// maps are reduced to key names, mirroring `McpServerDetail` for configured
-/// servers: a reviewer sees what would run and where it would talk, never
-/// credential values.
+/// One reviewed-plugin MCP server in the trust-review payload. Environment
+/// and header maps expose only key names; URLs expose only their network
+/// authority. Command and argument text remain the bundle's declared launch
+/// instructions for review, so bundles should pass credentials through env.
 #[derive(Debug, Serialize)]
 pub(super) struct PluginMcpServerReview {
     pub(super) name: String,
@@ -270,7 +270,10 @@ fn mcp_server_review(name: &str, cfg: &crate::mcp::McpServerConfig) -> PluginMcp
         kind: if cfg.url.is_some() { "remote" } else { "stdio" },
         command: cfg.command.clone(),
         args: cfg.args.clone(),
-        url: cfg.url.clone(),
+        url: cfg
+            .url
+            .as_deref()
+            .map(crate::doctor::structural_url_authority),
         env_keys,
         header_keys,
     }
@@ -414,8 +417,8 @@ async fn run_plugin_mutation(
         .map(plugin_summary);
     let note = match receipt.outcome {
         PluginMutationOutcome::Installed => Some(
-            "Installed disabled and untrusted. Review the capability payload \
-             (GET /v1/apps/plugins/{name}), then trust and enable it.",
+            "Installed disabled and untrusted. Open this plugin's detail \
+             to review its capabilities, then trust and enable it.",
         ),
         PluginMutationOutcome::Updated => Some(
             "Content changed; the previous trust receipt no longer matches. \
@@ -452,7 +455,7 @@ async fn run_registry_mutation(
         if token != &plugin.review_token() {
             return Err(ApiError::bad_request(
                 "review token does not match this bundle's content and capability set; \
-                 re-read GET /v1/apps/plugins/{name} and confirm the current token",
+                 reload this plugin's detail and confirm the current review token",
             ));
         }
     }
@@ -488,8 +491,8 @@ async fn run_registry_mutation(
     };
     let note = match (action, plugin.state_label()) {
         ("enabled", "enabled-untrusted") => Some(
-            "enabled-untrusted: the bundle is not trusted; run the review flow \
-             (GET /v1/apps/plugins/{name}) and trust it first",
+            "enabled-untrusted: the bundle is not trusted; open this plugin's \
+             detail, review its capabilities and trust it first",
         ),
         ("enabled", _) => {
             let inactive = plugin.inventory.unsupported_labels();
@@ -943,5 +946,73 @@ pub(super) async fn install_marketplace_candidate_api(
             "candidate '{}' has parse errors and cannot be installed: {diagnostics}",
             req.candidate
         ))),
+    }
+}
+
+#[cfg(test)]
+mod review_tests {
+    use super::mcp_server_review;
+
+    #[test]
+    fn plugin_mcp_review_omits_url_credentials_without_changing_the_bundle() {
+        for (raw, expected) in [
+            (
+                "https://review-user:review-password@mcp.example.invalid:8443/review-path?arbitrary=review-query#review-fragment",
+                "https://mcp.example.invalid:8443",
+            ),
+            (
+                "http://[::1]:9000/mcp?token=review-query",
+                "http://[::1]:9000",
+            ),
+            (
+                "https://mcp.example.invalid/mcp",
+                "https://mcp.example.invalid",
+            ),
+            (
+                "not a URL review-secret",
+                "unparseable (configured value omitted)",
+            ),
+            (
+                "data:text/plain,review-secret",
+                "unparseable (configured value omitted)",
+            ),
+        ] {
+            let cfg: crate::mcp::McpServerConfig = serde_json::from_value(serde_json::json!({
+                "url": raw,
+                "env": { "REVIEW_ENV": "review-env-value" },
+                "headers": { "Authorization": "review-header-value" }
+            }))
+            .unwrap();
+            let review = mcp_server_review("demo", &cfg);
+            assert_eq!(review.url.as_deref(), Some(expected));
+            assert_eq!(review.kind, "remote");
+            assert_eq!(review.env_keys, ["REVIEW_ENV"]);
+            assert_eq!(review.header_keys, ["Authorization"]);
+            let payload = serde_json::to_string(&review).unwrap();
+            for secret in [
+                "review-user",
+                "review-password",
+                "review-path",
+                "review-query",
+                "review-fragment",
+                "review-secret",
+                "review-env-value",
+                "review-header-value",
+            ] {
+                assert!(!payload.contains(secret), "review exposed {secret}");
+            }
+            // Display redaction must not change the endpoint used at execution
+            // or the manifest from which the trust receipt is derived.
+            assert_eq!(cfg.url.as_deref(), Some(raw));
+        }
+        let stdio: crate::mcp::McpServerConfig = serde_json::from_value(serde_json::json!({
+            "command": "npx", "args": ["demo-server"]
+        }))
+        .unwrap();
+        let review = mcp_server_review("stdio", &stdio);
+        assert_eq!(review.kind, "stdio");
+        assert_eq!(review.url, None);
+        assert_eq!(review.command, stdio.command);
+        assert_eq!(review.args, stdio.args);
     }
 }

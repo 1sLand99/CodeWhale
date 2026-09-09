@@ -785,7 +785,7 @@
   "OnboardTrustUntrustedNotice": "Fortfahren ohne Workspace-Vertrauen — Tools und Hooks bleiben eingeschränkt.",
   "RedactionGateActionConfirm": "bestätigen und deaktivieren",
   "RedactionGateActionKeep": "Schwärzung beibehalten",
-  "RedactionGateActionQuit": "CodeWhale beenden",
+  "RedactionGateActionQuit": "Codewhale beenden",
   "RedactionGateConfirmTitle": "Endgültige Bestätigung",
   "RedactionGateConfirmQuestion": "Sind Sie wirklich sicher? Nach dem Deaktivieren werden Schlüssel in Tool-Ausgaben unverändert an das Modell gesendet, bis Sie die Schwärzung wieder aktivieren und erneut bestätigen.",
   "RedactionGateActionBack": "zurück",

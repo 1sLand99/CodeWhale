@@ -5,7 +5,9 @@
 //! event handling, tool planning/execution, LSP post-edit hooks, capacity
 //! checkpoints, and loop termination.
 
-use super::dispatch::normalize_schema_json_containers;
+use super::dispatch::{
+    FleetDenialAction, FleetDenialBatch, FleetDenialGuard, normalize_schema_json_containers,
+};
 use super::*;
 use crate::core::authority::{ToolPermission, resolve_tool_permission};
 use crate::core::ops::UserInputProvenance;
@@ -745,6 +747,11 @@ impl Engine {
                 .map(str::to_string),
         );
         let tool_registry = Some(&tool_policy.registry);
+        // Fleet workers already carry the validated outer authority. Keep
+        // their denial guard local: it never pauses/cancels a working sibling.
+        let mut fleet_denial_guard = tool_registry
+            .filter(|registry| registry.context().tool_authority.is_some())
+            .map(|_| FleetDenialGuard::default());
         // #4415: the turn's tool-call admission counter. It lives here —
         // across every model step and batch of this turn — never in the
         // catalog; the policy only carries the declared limit, and `None`
@@ -815,6 +822,11 @@ impl Engine {
             }
 
             if self.apply_pending_runtime_authority().await {
+                if let Some(guard) = fleet_denial_guard.as_mut() {
+                    guard.reset();
+                    turn.stop_diagnostics
+                        .permission_denial_rounds_without_progress = 0;
+                }
                 mode = self.current_mode;
                 questions_allowed = crate::core::authority::permission_posture_allows_questions(
                     self.session.approval_mode,
@@ -842,6 +854,11 @@ impl Engine {
                     .await;
             }
             if accepted_steer {
+                if let Some(guard) = fleet_denial_guard.as_mut() {
+                    guard.reset();
+                    turn.stop_diagnostics
+                        .permission_denial_rounds_without_progress = 0;
+                }
                 grant_turn_end_steer_response_allowance(
                     turn_end_child_guard_sent,
                     &mut turn_end_child_coordination_responses_remaining,
@@ -879,8 +896,9 @@ impl Engine {
             // report. Savings proved out by the grok-style parity work (ops
             // A1): a step-faithful harness ends mid-report far too often.
             if !turn.stop_diagnostics.soft_landing_sent
-                && turn.max_steps > 0
-                && turn.steps_used() >= ((turn.max_steps as f32 * 0.8).floor() as u32).max(1)
+                && let Some(step_limit) = turn.step_limit()
+                && step_limit > 0
+                && turn.steps_used() >= ((step_limit as f32 * 0.8).floor() as u32).max(1)
             {
                 turn.stop_diagnostics.soft_landing_sent = true;
                 let notice = format!(
@@ -1406,6 +1424,9 @@ impl Engine {
                 }
             }
 
+            let fleet_report_response = fleet_denial_guard
+                .as_ref()
+                .is_some_and(FleetDenialGuard::report_only);
             let mut request = prepare_primary_turn_request(PrimaryTurnRequest {
                 model: self.session.model.clone(),
                 messages: {
@@ -1426,7 +1447,12 @@ impl Engine {
                 system: self.session.system_prompt.clone(),
                 tools: active_tools.clone(),
                 tool_choice: if active_tools.is_some() {
-                    if strict_tool_mode {
+                    if fleet_report_response {
+                        // Keep the pinned tool prefix; only this request's
+                        // choice changes. Admission below also enforces this
+                        // if a provider ignores the report-only request.
+                        Some(json!("none"))
+                    } else if strict_tool_mode {
                         Some(json!("required"))
                     } else {
                         Some(json!({ "type": "auto" }))
@@ -1945,10 +1971,20 @@ impl Engine {
                 }
             }
 
+            // A worker may cooperate with the strategy notice by immediately
+            // reporting its blocker. No intervening useful work means that
+            // report must not become a false Completed result.
+            let fleet_no_progress_report = fleet_report_response
+                || tool_uses.is_empty()
+                    && fleet_denial_guard
+                        .as_ref()
+                        .is_some_and(FleetDenialGuard::awaiting_strategy_change);
+
             // A protocol-level tool stop promises a call, unlike ordinary
             // text that merely describes an intended action. Keep that
             // distinction factual; never synthesize a tool or another request.
             if tool_uses.is_empty()
+                && !fleet_no_progress_report
                 && turn_error.is_none()
                 && matches!(stop_reason.as_deref(), Some("tool_calls" | "tool_use"))
             {
@@ -2053,6 +2089,7 @@ impl Engine {
             // and re-issuing it would only reproduce the same stop instead of
             // failing the turn honestly.
             if output_limit_truncated.is_some()
+                && !fleet_no_progress_report
                 && tool_uses.is_empty()
                 && has_sendable_assistant_content
             {
@@ -2086,8 +2123,13 @@ impl Engine {
             // continuation if under cap → resume, 5) one settlement prompt
             // for turn-owned children → resume, 6) else end. No status
             // claims "ending" before step 6.
-            if tool_uses.is_empty() {
+            if tool_uses.is_empty() && !fleet_no_progress_report {
                 if !pending_steers.is_empty() {
+                    if let Some(guard) = fleet_denial_guard.as_mut() {
+                        guard.reset();
+                        turn.stop_diagnostics
+                            .permission_denial_rounds_without_progress = 0;
+                    }
                     for steer in pending_steers.drain(..) {
                         self.session
                             .working_set
@@ -2641,7 +2683,16 @@ impl Engine {
             // provider is streaming. Apply the newest typed authority before
             // planning this tool batch; already-running tools are never
             // retroactively reclassified.
-            if self.apply_pending_runtime_authority().await {
+            let authority_changed_before_tools = self.apply_pending_runtime_authority().await;
+            if authority_changed_before_tools {
+                // A response requested as report-only never acquires execution
+                // authority after it streamed. Reset only after pairing its
+                // suppressed calls; the next response can use the new posture.
+                if !fleet_report_response && let Some(guard) = fleet_denial_guard.as_mut() {
+                    guard.reset();
+                    turn.stop_diagnostics
+                        .permission_denial_rounds_without_progress = 0;
+                }
                 mode = self.current_mode;
                 questions_allowed = crate::core::authority::permission_posture_allows_questions(
                     self.session.approval_mode,
@@ -2660,9 +2711,10 @@ impl Engine {
             }
 
             let tool_exec_lock = self.tool_exec_lock.clone();
-            let mcp_pool = if tool_uses
-                .iter()
-                .any(|tool| McpPool::is_mcp_tool(&tool.name))
+            let mcp_pool = if !fleet_report_response
+                && tool_uses
+                    .iter()
+                    .any(|tool| McpPool::is_mcp_tool(&tool.name))
             {
                 match self.ensure_mcp_pool().await {
                     Ok(pool) => Some(pool),
@@ -2694,10 +2746,11 @@ impl Engine {
                     &mut active_tool_names,
                     &mut tool_call_budget,
                     mode,
+                    fleet_denial_guard.as_ref(),
                 )
                 .await;
 
-            let outcomes = self
+            let (outcomes, authority_changed_during_tools) = self
                 .execute_planned_tools(
                     plans,
                     &turn.id,
@@ -2713,15 +2766,24 @@ impl Engine {
                 )
                 .await;
 
-            self.process_tool_results(
-                outcomes,
-                turn,
-                &mut tool_catalog,
-                &mut active_tool_names,
-                &hook_contexts,
-            )
-            .await;
+            let authority_changed =
+                authority_changed_before_tools || authority_changed_during_tools;
+            let denial_action = self
+                .process_tool_results(
+                    outcomes,
+                    turn,
+                    &mut tool_catalog,
+                    &mut active_tool_names,
+                    &hook_contexts,
+                    if authority_changed || fleet_report_response {
+                        None
+                    } else {
+                        fleet_denial_guard.as_mut()
+                    },
+                )
+                .await;
 
+            let accepted_steer_after_tools = !pending_steers.is_empty();
             if !pending_steers.is_empty() {
                 for steer in pending_steers.drain(..) {
                     self.session
@@ -2734,6 +2796,63 @@ impl Engine {
                     turn_end_child_guard_sent,
                     &mut turn_end_child_coordination_responses_remaining,
                 );
+            }
+
+            if authority_changed || accepted_steer_after_tools {
+                if let Some(guard) = fleet_denial_guard.as_mut() {
+                    guard.reset();
+                    turn.stop_diagnostics
+                        .permission_denial_rounds_without_progress = 0;
+                }
+            } else if fleet_no_progress_report {
+                // Exactly one accepted report response, including empty,
+                // reasoning-only, truncated or tool-producing responses.
+                if self.cancel_token.is_cancelled() {
+                    return (TurnOutcomeStatus::Interrupted, None);
+                }
+                turn.stop_diagnostics.last_response_tool_calls_suppressed = Some(tool_uses.len());
+                let error = if turn.budget_exhausted_final_report {
+                    // One response can serve both report requests; the
+                    // explicit budget retains its existing stop provenance.
+                    format!(
+                        "Maximum model steps reached before completion (limit: {}, {})",
+                        turn.max_steps,
+                        turn.budget_source.key_label()
+                    )
+                } else {
+                    turn.stop_diagnostics.reason = Some(TurnStopReason::NoProgress);
+                    "Fleet worker stopped after repeated permission denials without new evidence. Work and tool results are retained in the transcript; review the blocker before resuming.".to_string()
+                };
+                let _ = self.tx_event.send(Event::status(error.clone())).await;
+                return (TurnOutcomeStatus::Failed, Some(error));
+            } else {
+                let notice = match denial_action {
+                    FleetDenialAction::Continue => None,
+                    FleetDenialAction::SwitchStrategy => {
+                        turn.stop_diagnostics.permission_strategy_switches = turn
+                            .stop_diagnostics
+                            .permission_strategy_switches
+                            .saturating_add(1);
+                        Some(
+                            "Fleet strategy switch required: repeated permission denials produced no new evidence. The rejected action is held. Use another permitted tool from the current catalog to make progress, or report completed work and the blocker. Do not work around permissions or request the same approval again.",
+                        )
+                    }
+                    FleetDenialAction::FinalReport => {
+                        turn.stop_diagnostics.final_report_requested = true;
+                        Some(
+                            "Fleet no-progress final report: permission denials continued after the strategy switch without new evidence. Your next response is report-only; no tools will execute. Report what you completed, exact evidence, the permission blocker and remaining work. This is the last response unless the user changes direction or authority.",
+                        )
+                    }
+                };
+                if let Some(notice) = notice {
+                    // Dynamic guard facts are append-only runtime history;
+                    // BASE_PROMPT and the session's pinned prefix stay intact.
+                    self.add_session_message(self.runtime_text_message_with_turn_metadata(
+                        notice.to_string(),
+                        UserInputProvenance::Runtime,
+                    ))
+                    .await;
+                }
             }
 
             // Surface an output-limit truncation after the tool result so the
@@ -2829,6 +2948,7 @@ impl Engine {
         active_tool_names: &mut std::collections::HashSet<String>,
         tool_call_budget: &mut ToolCallBudget,
         mode: AppMode,
+        fleet_denial_guard: Option<&FleetDenialGuard>,
     ) -> PlannedToolCalls {
         let active_tools_at_batch_start = active_tool_names.clone();
         let mut deferred_tools_hydrated_this_batch: std::collections::HashSet<String> =
@@ -2917,6 +3037,12 @@ impl Engine {
             }
 
             if blocked_error.is_none()
+                && let Some(guard) = fleet_denial_guard
+            {
+                blocked_error = guard.admission_error(&tool_name, &tool_input);
+            }
+
+            if blocked_error.is_none()
                 && let Some(error) = tool.input_parse_error.clone()
             {
                 blocked_error = Some(ToolError::invalid_input(error));
@@ -2973,19 +3099,21 @@ impl Engine {
             // scheduling field has one inspectable owner. Preparation is
             // side-effect free; execution remains below the full gate
             // stack exactly as before.
-            let mut prepared_policy = match prepare_tool_call(
-                &tool_name,
-                tool_input.clone(),
-                tool_registry,
-                self.session.auto_approve,
-            ) {
-                Ok(policy) => Some(policy),
-                Err(error) => {
-                    if blocked_error.is_none() {
+            let mut prepared_policy = if blocked_error.is_none() {
+                match prepare_tool_call(
+                    &tool_name,
+                    tool_input.clone(),
+                    tool_registry,
+                    self.session.auto_approve,
+                ) {
+                    Ok(policy) => Some(policy),
+                    Err(error) => {
                         blocked_error = Some(error);
+                        None
                     }
-                    None
                 }
+            } else {
+                None
             };
             let mut reprepared_after_hook = false;
 
@@ -3100,6 +3228,14 @@ impl Engine {
                     "resources": &resources,
                     "reprepared_after_hook": reprepared_after_hook,
                 }));
+            }
+
+            // Preparation/hooks may rewrite the action. Recheck at the same
+            // admission boundary before ask-rules or model-backed review.
+            if blocked_error.is_none()
+                && let Some(guard) = fleet_denial_guard
+            {
+                blocked_error = guard.admission_error(&tool_name, &tool_input);
             }
 
             if blocked_error.is_none()
@@ -3453,7 +3589,10 @@ impl Engine {
         batch_sandbox_policy: &crate::sandbox::SandboxPolicy,
         mode: &mut AppMode,
         questions_allowed: &mut bool,
-    ) -> Vec<Option<ToolExecOutcome>> {
+    ) -> (Vec<Option<ToolExecOutcome>>, bool) {
+        let mut authority_changed = false;
+        let collect_fleet_evidence =
+            tool_registry.is_some_and(|registry| registry.context().tool_authority.is_some());
         // --- Intent summary for write tools (#2381) ---
         // When the model invokes write tools, extract its preceding text
         // as an "intent summary" so the approval view can show *why* the
@@ -3525,6 +3664,7 @@ impl Engine {
             // stale approval or sandbox facts. Return one typed retry to
             // the model; the next call is planned under the new posture.
             if self.apply_pending_runtime_authority().await {
+                authority_changed = true;
                 *mode = self.current_mode;
                 *questions_allowed = crate::core::authority::permission_posture_allows_questions(
                     self.session.approval_mode,
@@ -3550,6 +3690,7 @@ impl Engine {
                         started_at: Instant::now(),
                         terminal: ToolExecutionOutcome::from_legacy(result),
                         content_blocks: Vec::new(),
+                        original_content_digest: None,
                     });
                 }
                 continue;
@@ -3587,6 +3728,7 @@ impl Engine {
                         started_at: Instant::now(),
                         terminal,
                         content_blocks: Vec::new(),
+                        original_content_digest: None,
                     });
                 }
                 continue;
@@ -3629,6 +3771,7 @@ impl Engine {
                             started_at: Instant::now(),
                             terminal: ToolExecutionOutcome::from_legacy(result),
                             content_blocks: Vec::new(),
+                            original_content_digest: None,
                         });
                         continue;
                     }
@@ -3641,6 +3784,7 @@ impl Engine {
                             started_at: Instant::now(),
                             terminal: ToolExecutionOutcome::from_legacy(Err(err)),
                             content_blocks: Vec::new(),
+                            original_content_digest: None,
                         });
                         continue;
                     }
@@ -3677,6 +3821,18 @@ impl Engine {
                             context_override,
                         )
                         .await;
+
+                        let original_content_digest = result
+                            .as_ref()
+                            .ok()
+                            .filter(|_| collect_fleet_evidence)
+                            .and_then(|result| {
+                                FleetDenialGuard::original_content_digest(
+                                    &plan.name,
+                                    &plan.input,
+                                    &result.result,
+                                )
+                            });
 
                         // #500: spill outsized output before fanout (mirror
                         // of the sequential path below). Emit a
@@ -3720,6 +3876,7 @@ impl Engine {
                             started_at,
                             terminal: ToolExecutionOutcome::from_legacy(legacy_result),
                             content_blocks,
+                            original_content_digest,
                         }
                     });
                 }
@@ -3768,6 +3925,7 @@ impl Engine {
                             started_at: Instant::now(),
                             terminal,
                             content_blocks: Vec::new(),
+                            original_content_digest: None,
                         });
                     }
                 }
@@ -3796,6 +3954,7 @@ impl Engine {
                             started_at: Instant::now(),
                             terminal: ToolExecutionOutcome::from_legacy(result),
                             content_blocks: Vec::new(),
+                            original_content_digest: None,
                         });
                         continue;
                     }
@@ -3818,6 +3977,7 @@ impl Engine {
                             started_at: Instant::now(),
                             terminal: ToolExecutionOutcome::from_legacy(result),
                             content_blocks: Vec::new(),
+                            original_content_digest: None,
                         });
                         continue;
                     }
@@ -3875,6 +4035,7 @@ impl Engine {
                             started_at,
                             terminal,
                             content_blocks,
+                            original_content_digest: None,
                         });
                         continue;
                     }
@@ -3915,6 +4076,7 @@ impl Engine {
                             started_at,
                             terminal: ToolExecutionOutcome::from_legacy(result),
                             content_blocks: Vec::new(),
+                            original_content_digest: None,
                         });
                         continue;
                     }
@@ -3962,6 +4124,7 @@ impl Engine {
                             started_at,
                             terminal: ToolExecutionOutcome::from_legacy(result),
                             content_blocks: Vec::new(),
+                            original_content_digest: None,
                         });
                         continue;
                     }
@@ -4095,6 +4258,7 @@ impl Engine {
                     // model can retry immediately under the newly applied
                     // authority.
                     let mut result_override = if self.apply_pending_runtime_authority().await {
+                        authority_changed = true;
                         *mode = self.current_mode;
                         *questions_allowed =
                             crate::core::authority::permission_posture_allows_questions(
@@ -4132,6 +4296,7 @@ impl Engine {
                     }
 
                     if self.apply_pending_runtime_authority().await {
+                        authority_changed = true;
                         *mode = self.current_mode;
                         *questions_allowed =
                             crate::core::authority::permission_posture_allows_questions(
@@ -4187,6 +4352,18 @@ impl Engine {
                         stamp_tool_result_approval(&mut tool_result.result, approval_stamp);
                     }
 
+                    let original_content_digest = result
+                        .as_ref()
+                        .ok()
+                        .filter(|_| collect_fleet_evidence)
+                        .and_then(|result| {
+                            FleetDenialGuard::original_content_digest(
+                                &tool_name,
+                                &tool_input,
+                                &result.result,
+                            )
+                        });
+
                     // #500: spill outsized tool outputs to disk before the
                     // result fans out to the model context and the UI cell.
                     // Both consumers see the same artifact reference block +
@@ -4239,11 +4416,12 @@ impl Engine {
                         started_at,
                         terminal,
                         content_blocks,
+                        original_content_digest,
                     });
                 }
             }
         }
-        outcomes
+        (outcomes, authority_changed)
     }
 
     /// Read cancellation evidence only after the active future has been dropped,
@@ -4303,7 +4481,9 @@ impl Engine {
         tool_catalog: &mut Vec<crate::models::Tool>,
         active_tool_names: &mut std::collections::HashSet<String>,
         hook_contexts: &std::collections::HashMap<String, String>,
-    ) {
+        mut fleet_denial_guard: Option<&mut FleetDenialGuard>,
+    ) -> FleetDenialAction {
+        let mut denial_batch = FleetDenialBatch::default();
         let active_tool_names_before = active_tool_names.clone();
         let tool_catalog_len_before = tool_catalog.len();
         // #dogfood 0.8.67: if the model mutates the goal mid-turn via
@@ -4320,6 +4500,16 @@ impl Engine {
             let routed_duration_ms =
                 u64::try_from(outcome.started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
             let result = outcome.terminal.into_legacy_result();
+            if let Some(guard) = fleet_denial_guard.as_deref_mut() {
+                guard.observe(
+                    &mut denial_batch,
+                    &outcome.name,
+                    &tool_input,
+                    terminal_status,
+                    &result,
+                    outcome.original_content_digest,
+                );
+            }
             if matches!(outcome.name.as_str(), "create_goal" | "update_goal") {
                 goal_tool_ran = true;
             }
@@ -4526,6 +4716,12 @@ impl Engine {
         {
             self.session.pending_prefix_change_reason = Some("tool_surface".to_string());
         }
+        fleet_denial_guard.map_or(FleetDenialAction::Continue, |guard| {
+            let action = guard.finish_batch(denial_batch);
+            turn.stop_diagnostics
+                .permission_denial_rounds_without_progress = guard.denial_rounds_without_progress();
+            action
+        })
     }
 
     #[allow(clippy::too_many_arguments)]

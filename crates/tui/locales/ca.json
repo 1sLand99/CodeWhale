@@ -785,7 +785,7 @@
   "OnboardTrustUntrustedNotice": "S'ha continuat sense confiança a l'espai de treball — les eines i els hooks continuen restringits.",
   "RedactionGateActionConfirm": "confirmar i desactivar",
   "RedactionGateActionKeep": "mantenir l'emmascarament",
-  "RedactionGateActionQuit": "sortir de CodeWhale",
+  "RedactionGateActionQuit": "sortir de Codewhale",
   "RedactionGateConfirmTitle": "Confirmació final",
   "RedactionGateConfirmQuestion": "Esteu realment segur? Un cop desactivat, les claus de les sortides d'eines s'enviaran tal com són al model, fins que reactiveu l'emmascarament i torneu a confirmar.",
   "RedactionGateActionBack": "enrere",

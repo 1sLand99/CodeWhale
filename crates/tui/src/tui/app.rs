@@ -2564,6 +2564,9 @@ impl App {
     /// composer has text.
     #[must_use]
     pub fn focus(&self) -> Focus {
+        if self.redaction_gate && self.onboarding == OnboardingState::None {
+            return Focus::RedactionGate;
+        }
         if let Some(kind) = self.view_stack.top_kind() {
             return Focus::Modal(kind);
         }

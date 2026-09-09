@@ -785,7 +785,7 @@
   "OnboardTrustUntrustedNotice": "Melanjutkan tanpa kepercayaan workspace — alat dan hook tetap dibatasi.",
   "RedactionGateActionConfirm": "konfirmasi dan nonaktifkan",
   "RedactionGateActionKeep": "pertahankan penyembunyian",
-  "RedactionGateActionQuit": "keluar dari CodeWhale",
+  "RedactionGateActionQuit": "keluar dari Codewhale",
   "RedactionGateConfirmTitle": "Konfirmasi akhir",
   "RedactionGateConfirmQuestion": "Anda benar-benar yakin? Setelah dimatikan, kunci pada keluaran alat akan dikirim apa adanya ke model, hingga Anda mengaktifkan kembali penyembunyian dan mengonfirmasi ulang.",
   "RedactionGateActionBack": "kembali",

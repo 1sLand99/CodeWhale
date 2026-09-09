@@ -37,6 +37,227 @@ pub(super) struct ToolExecOutcome {
     pub(super) started_at: std::time::Instant,
     pub(super) terminal: ToolExecutionOutcome,
     pub(super) content_blocks: Vec<ToolResultContentBlock>,
+    /// Read-result bytes before spillover adds call-specific artifact paths.
+    pub(super) original_content_digest: Option<[u8; 32]>,
+}
+
+/// Progress observations for one provider response, independent of tool finish
+/// order. Only typed permission denials contribute to the retry guard (#6015).
+#[derive(Default)]
+pub(super) struct FleetDenialBatch {
+    denied: std::collections::HashSet<String>,
+    made_progress: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum FleetDenialAction {
+    Continue,
+    SwitchStrategy,
+    FinalReport,
+}
+
+/// Turn-local guard for an engine with a Fleet authority envelope. This is an
+/// admission predicate and result accumulator, not another execution loop.
+/// Three responses give the model two opportunities to use denial feedback;
+/// after one strategy notice, three more denied responses request a report.
+#[derive(Default)]
+pub(super) struct FleetDenialGuard {
+    denied_rounds: std::collections::HashMap<String, u8>,
+    switch_requested: bool,
+    recovery_denied_rounds: u8,
+    denial_rounds_without_progress: u32,
+    report_only: bool,
+    // Last observed bytes per read request: paths alone cannot distinguish a
+    // changed file, and an unchanged read must not repeatedly reset denials.
+    // Coverage is bounded; an evicted observation is treated conservatively
+    // as new evidence. No raw arguments/bytes are kept.
+    reads: std::collections::VecDeque<([u8; 32], [u8; 32])>,
+}
+
+impl FleetDenialGuard {
+    const REPEATED_DENIAL_ROUNDS: u8 = 3;
+    const MAX_OBSERVATIONS: usize = 32;
+
+    pub(super) fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    pub(super) fn report_only(&self) -> bool {
+        self.report_only
+    }
+
+    pub(super) fn awaiting_strategy_change(&self) -> bool {
+        self.switch_requested
+    }
+
+    pub(super) fn denial_rounds_without_progress(&self) -> u32 {
+        self.denial_rounds_without_progress
+    }
+
+    pub(super) fn original_content_digest(
+        name: &str,
+        input: &serde_json::Value,
+        output: &ToolResult,
+    ) -> Option<[u8; 32]> {
+        use sha2::{Digest, Sha256};
+        let action = crate::tools::canonical_action::canonical_action_alias(name, input);
+        (output.success
+            && matches!(
+                action,
+                "read_file" | "list_dir" | "file_search" | "grep_files"
+            ))
+        .then(|| Sha256::digest(output.content.as_bytes()).into())
+    }
+
+    pub(super) fn admission_error(
+        &self,
+        name: &str,
+        input: &serde_json::Value,
+    ) -> Option<ToolError> {
+        let action = crate::tools::canonical_action::canonical_action_alias(name, input);
+        if self.report_only {
+            Some(ToolError::permission_denied(
+                "Fleet no-progress final report: no tools may execute in this response. Report completed work, evidence and the remaining blocker; do not change permission mode or retry tools.",
+            ))
+        } else if self.switch_requested && self.denied_rounds.contains_key(action) {
+            Some(ToolError::permission_denied(
+                "Fleet permission-denial loop: this action is held until useful permitted work or an explicit authority change. Use another permitted tool or report the blocker; do not change permission mode or request permission again.",
+            ))
+        } else {
+            None
+        }
+    }
+
+    pub(super) fn observe(
+        &mut self,
+        batch: &mut FleetDenialBatch,
+        name: &str,
+        input: &serde_json::Value,
+        status: crate::tools::spec::ToolTerminalStatus,
+        result: &Result<ToolResult, ToolError>,
+        original_content_digest: Option<[u8; 32]>,
+    ) {
+        use crate::tools::spec::ToolTerminalStatus;
+
+        let action = crate::tools::canonical_action::canonical_action_alias(name, input);
+        if status == ToolTerminalStatus::Denied
+            && matches!(result, Err(ToolError::PermissionDenied { .. }))
+        {
+            batch.denied.insert(action.to_owned());
+            return;
+        }
+        let Ok(output) = result else { return };
+        if status != ToolTerminalStatus::Succeeded
+            || !output.success
+            || output.metadata.as_ref().is_some_and(|metadata| {
+                metadata
+                    .get("executed")
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(false)
+                    || metadata
+                        .get("cancelled")
+                        .and_then(serde_json::Value::as_bool)
+                        == Some(true)
+            })
+        {
+            return;
+        }
+        // Waiting is useful coordination, but its repeated success receipt is
+        // neither new evidence nor a failure. Its own timeouts still govern it.
+        if matches!(
+            action,
+            "exec_shell_wait" | "exec_wait" | "terminal/wait" | "wait_for_dev_server" | "sleep"
+        ) || name == "agent"
+            && input
+                .get("action")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|action| matches!(action, "wait" | "status" | "list"))
+        {
+            return;
+        }
+        if matches!(
+            action,
+            "read_file" | "list_dir" | "file_search" | "grep_files"
+        ) {
+            use sha2::{Digest, Sha256};
+
+            let mut semantic_input = input.clone();
+            if action != name
+                && let Some(object) = semantic_input.as_object_mut()
+            {
+                object.remove("action");
+            }
+            let mut hasher = Sha256::new();
+            hasher.update(action.as_bytes());
+            hasher.update([0]);
+            // Tool JSON preserves insertion order; reordered equivalent keys
+            // must not manufacture a new read request.
+            hasher.update(crate::client::canonical_json(&semantic_input).as_bytes());
+            let key: [u8; 32] = hasher.finalize().into();
+            let contents = original_content_digest
+                .unwrap_or_else(|| Sha256::digest(output.content.as_bytes()).into());
+            let previous = self
+                .reads
+                .iter()
+                .position(|(old_key, _)| *old_key == key)
+                .and_then(|index| self.reads.remove(index));
+            batch.made_progress |=
+                previous.is_none_or(|(_, old_contents)| old_contents != contents);
+            self.reads.push_back((key, contents));
+            if self.reads.len() > Self::MAX_OBSERVATIONS {
+                self.reads.pop_front();
+            }
+        } else {
+            // A successful mutation or unfamiliar tool is useful work. Do not
+            // terminate it based on guesses about its content or side effects.
+            batch.made_progress = true;
+        }
+    }
+
+    pub(super) fn finish_batch(&mut self, batch: FleetDenialBatch) -> FleetDenialAction {
+        if self.report_only {
+            return FleetDenialAction::Continue;
+        }
+        if batch.made_progress {
+            self.denied_rounds.clear();
+            self.switch_requested = false;
+            self.recovery_denied_rounds = 0;
+            self.denial_rounds_without_progress = 0;
+            return FleetDenialAction::Continue;
+        }
+        if batch.denied.is_empty() {
+            return FleetDenialAction::Continue;
+        }
+        self.denial_rounds_without_progress = self.denial_rounds_without_progress.saturating_add(1);
+        if self.switch_requested {
+            self.recovery_denied_rounds = self.recovery_denied_rounds.saturating_add(1);
+            if self.recovery_denied_rounds >= Self::REPEATED_DENIAL_ROUNDS {
+                self.report_only = true;
+                return FleetDenialAction::FinalReport;
+            }
+            return FleetDenialAction::Continue;
+        }
+        for action in batch.denied {
+            // The guard never retains payloads. Unknown families beyond this
+            // bounded window do not evict an already observed denial streak.
+            if self.denied_rounds.contains_key(&action)
+                || self.denied_rounds.len() < Self::MAX_OBSERVATIONS
+            {
+                let count = self.denied_rounds.entry(action).or_default();
+                *count = count.saturating_add(1);
+            }
+        }
+        if self
+            .denied_rounds
+            .values()
+            .any(|count| *count >= Self::REPEATED_DENIAL_ROUNDS)
+        {
+            self.switch_requested = true;
+            FleetDenialAction::SwitchStrategy
+        } else {
+            FleetDenialAction::Continue
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

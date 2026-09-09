@@ -4849,12 +4849,13 @@ pub(crate) async fn run_event_loop(
             // confirms by reflex (same discipline as workspace trust): the
             // three explicit choices are advertised in the action rail.
             if app.redaction_gate && app.onboarding == OnboardingState::None {
+                let gate_binding = shell_binding_for_key(app, &key);
                 match key.code {
                     KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         let _ = engine_handle.send(Op::Shutdown).await;
                         return Ok(());
                     }
-                    KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Char('1') => {
+                    _ if gate_binding == Some(ShellBindingId::RedactionGateConfirm) => {
                         if !app.redaction_gate_confirming {
                             // First confirm only advances to the final
                             // confirmation stage; nothing is persisted yet.
@@ -4898,7 +4899,7 @@ pub(crate) async fn run_event_loop(
                             }
                         }
                     }
-                    KeyCode::Char('u') | KeyCode::Char('U') | KeyCode::Char('2') => {
+                    _ if gate_binding == Some(ShellBindingId::RedactionGateKeepOrBack) => {
                         if app.redaction_gate_confirming {
                             // Second-stage "back": return to the first stage
                             // without recording anything.
@@ -4916,7 +4917,7 @@ pub(crate) async fn run_event_loop(
                             app.needs_redraw = true;
                         }
                     }
-                    KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Char('3') => {
+                    _ if gate_binding == Some(ShellBindingId::RedactionGateQuit) => {
                         let _ = engine_handle.send(Op::Shutdown).await;
                         return Ok(());
                     }
@@ -4943,12 +4944,18 @@ pub(crate) async fn run_event_loop(
                         );
                         app.redaction_gate_scroll.set(0);
                     }
-                    KeyCode::Down | KeyCode::PageDown => app
-                        .redaction_gate_scroll
-                        .set(app.redaction_gate_scroll.get().saturating_add(1)),
-                    KeyCode::Up | KeyCode::PageUp => app
-                        .redaction_gate_scroll
-                        .set(app.redaction_gate_scroll.get().saturating_sub(1)),
+                    KeyCode::Down | KeyCode::PageDown
+                        if gate_binding == Some(ShellBindingId::RedactionGateScroll) =>
+                    {
+                        app.redaction_gate_scroll
+                            .set(app.redaction_gate_scroll.get().saturating_add(1))
+                    }
+                    KeyCode::Up | KeyCode::PageUp
+                        if gate_binding == Some(ShellBindingId::RedactionGateScroll) =>
+                    {
+                        app.redaction_gate_scroll
+                            .set(app.redaction_gate_scroll.get().saturating_sub(1))
+                    }
                     KeyCode::Home => app.redaction_gate_scroll.set(0),
                     KeyCode::End => app.redaction_gate_scroll.set(usize::MAX),
                     _ => {}
