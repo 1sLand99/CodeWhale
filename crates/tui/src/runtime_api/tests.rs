@@ -12532,6 +12532,7 @@ async fn marketplace_catalog_lifecycle_over_http_lists_installs_and_removes() ->
         }))
         .send()
         .await?;
+    assert_eq!(add_resp.status(), StatusCode::CREATED);
     let add: serde_json::Value = add_resp.json().await?;
     assert!(add["action"] == "added", "marketplace add failed: {add}");
     assert_eq!(add["candidate_count"], 1);

@@ -239,11 +239,7 @@ pub(crate) fn structural_url_authority(url: &str) -> String {
     let Some(host) = parsed.host_str() else {
         return "unparseable (configured value omitted)".to_string();
     };
-    let host = if host.contains(':') {
-        format!("[{host}]")
-    } else {
-        host.to_string()
-    };
+    // Url::host_str already includes the brackets around an IPv6 address.
     let mut authority = format!("{}://{host}", parsed.scheme());
     if let Some(port) = parsed.port() {
         authority.push(':');
