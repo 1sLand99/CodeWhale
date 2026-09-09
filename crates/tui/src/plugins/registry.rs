@@ -2163,14 +2163,87 @@ mod windows_acl_tests {
     use std::ffi::c_void;
     use std::mem::{MaybeUninit, size_of};
     use std::os::windows::ffi::OsStrExt;
+    use windows::Win32::Foundation::{CloseHandle, HANDLE};
     use windows::Win32::Security::{
-        ACCESS_ALLOWED_ACE, ACL, ACL_SIZE_INFORMATION, AclSizeInformation, CONTAINER_INHERIT_ACE,
-        DACL_SECURITY_INFORMATION, EqualSid, GetAce, GetAclInformation, GetFileSecurityW,
-        GetSecurityDescriptorControl, GetSecurityDescriptorDacl, GetSecurityDescriptorOwner,
-        OBJECT_INHERIT_ACE, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
-        SE_DACL_PROTECTED,
+        ACCESS_ALLOWED_ACE, ACL, ACL_SIZE_INFORMATION, AclSizeInformation, AdjustTokenPrivileges,
+        CONTAINER_INHERIT_ACE, DACL_SECURITY_INFORMATION, DuplicateTokenEx, EqualSid, GetAce,
+        GetAclInformation, GetFileSecurityW, GetSecurityDescriptorControl,
+        GetSecurityDescriptorDacl, GetSecurityDescriptorOwner, OBJECT_INHERIT_ACE,
+        OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, RevertToSelf, SE_DACL_PROTECTED,
+        SecurityImpersonation, TOKEN_ADJUST_PRIVILEGES, TOKEN_DUPLICATE, TOKEN_IMPERSONATE,
+        TOKEN_QUERY, TokenImpersonation,
     };
+    use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken, SetThreadToken};
     use windows::core::{BOOL, PCWSTR};
+
+    /// Pin the fixture to a thread token with privileges disabled. Hosted
+    /// runners can hold backup/restore/take-ownership privileges that bypass
+    /// the DACL, making a WRITE_OWNER denial depend on the host identity.
+    /// The process token is unchanged, and dropping the guard reverts the thread.
+    struct UnprivilegedThreadToken {
+        process_token: HANDLE,
+        restricted: HANDLE,
+    }
+
+    impl UnprivilegedThreadToken {
+        fn adopt() -> windows::core::Result<Self> {
+            let mut process_token = HANDLE::default();
+            // SAFETY: the pseudo process handle is valid for the current
+            // process and the output location is live across the call.
+            unsafe {
+                OpenProcessToken(
+                    GetCurrentProcess(),
+                    TOKEN_DUPLICATE | TOKEN_QUERY,
+                    &mut process_token,
+                )
+            }?;
+            let mut restricted = HANDLE::default();
+            // SAFETY: `process_token` stays open for the call and `restricted`
+            // receives a new handle ownership of which passes to the guard.
+            let duplicated = unsafe {
+                DuplicateTokenEx(
+                    process_token,
+                    TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY | TOKEN_IMPERSONATE,
+                    None,
+                    SecurityImpersonation,
+                    TokenImpersonation,
+                    &mut restricted,
+                )
+            };
+            if let Err(error) = duplicated {
+                // SAFETY: closing the only handle opened above.
+                unsafe {
+                    let _ = CloseHandle(process_token);
+                }
+                return Err(error);
+            }
+            // Own both handles before the fallible calls below, so a failure
+            // still reverts and closes through `Drop`.
+            let guard = Self {
+                process_token,
+                restricted,
+            };
+            // DisableAllPrivileges leaves the duplicate holding none, so the
+            // DACL becomes the only thing that can grant WRITE_OWNER.
+            // SAFETY: `restricted` is owned by `guard` for the whole call.
+            unsafe { AdjustTokenPrivileges(guard.restricted, true, None, 0, None, None) }?;
+            // SAFETY: impersonation is scoped to this thread and undone in Drop.
+            unsafe { SetThreadToken(None, Some(guard.restricted)) }?;
+            Ok(guard)
+        }
+    }
+
+    impl Drop for UnprivilegedThreadToken {
+        fn drop(&mut self) {
+            // SAFETY: reverts this thread's identity and closes the two handles
+            // this guard opened, each exactly once.
+            unsafe {
+                let _ = RevertToSelf();
+                let _ = CloseHandle(self.restricted);
+                let _ = CloseHandle(self.process_token);
+            }
+        }
+    }
 
     fn create_junction(link: &std::path::Path, target: &std::path::Path) {
         let output = std::process::Command::new("cmd")
@@ -2270,6 +2343,12 @@ mod windows_acl_tests {
         .expect("current owner may restrict its DACL without changing ownership");
         drop(reduced);
 
+        // From here the DACL must be the only authority. Held to the end of the
+        // test so the fallback and the restored ACL are both observed through
+        // an identity that cannot bypass the descriptor.
+        let _unprivileged = UnprivilegedThreadToken::adopt()
+            .expect("restricted thread identity for the WRITE_OWNER denial");
+
         let denied = std::fs::OpenOptions::new()
             .access_mode(0x0002_0000 | 0x0004_0000 | 0x0008_0000)
             .share_mode(0x0000_0001)
@@ -2319,6 +2398,13 @@ mod windows_acl_tests {
         )
         .expect("current owner may remove WRITE_OWNER from an existing state lock");
         drop(reduced);
+
+        // This sibling passed on the hosted runner only because its denial open
+        // omits FILE_FLAG_BACKUP_SEMANTICS, which is what engages the
+        // descriptor-bypassing privileges. That is an accident of the flags, not
+        // a guarantee, so pin the identity here too.
+        let _unprivileged = UnprivilegedThreadToken::adopt()
+            .expect("restricted thread identity for the WRITE_OWNER denial");
 
         let denied = std::fs::OpenOptions::new()
             .access_mode(0x001e_019f) // FILE_GENERIC_READ | FILE_GENERIC_WRITE | WRITE_DAC | WRITE_OWNER

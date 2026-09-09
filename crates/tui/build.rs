@@ -5,7 +5,7 @@ fn main() {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     codewhale_build_support::declare_rerun_conditions(&manifest_dir);
     generate_localization(&manifest_dir);
-    configure_windows_stack();
+    codewhale_build_support::configure_windows_main_stack("codewhale-tui");
     build_computer_use_helper(&manifest_dir);
     codewhale_build_support::emit_build_version(&manifest_dir, env!("CARGO_PKG_VERSION"));
 }
@@ -130,20 +130,4 @@ fn build_computer_use_helper(manifest_dir: &std::path::Path) {
         "Computer Use helper signing failed: {}",
         String::from_utf8_lossy(&signed.stderr)
     );
-}
-
-fn configure_windows_stack() {
-    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
-        return;
-    }
-
-    match std::env::var("CARGO_CFG_TARGET_ENV").as_deref() {
-        Ok("msvc") => {
-            println!("cargo:rustc-link-arg-bin=codewhale-tui=/STACK:8388608");
-        }
-        Ok("gnu") => {
-            println!("cargo:rustc-link-arg-bin=codewhale-tui=-Wl,--stack,8388608");
-        }
-        _ => {}
-    }
 }

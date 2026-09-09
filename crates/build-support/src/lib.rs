@@ -31,6 +31,48 @@
 
 use std::path::Path;
 
+/// Main-thread stack reserve shared by the Windows CLI and TUI entrypoints.
+/// `RUST_MIN_STACK` only sizes spawned threads; the CLI's default 1 MiB main
+/// stack overflowed in `model resolve`. Reuse the TUI's existing 8 MiB reserve.
+pub const WINDOWS_MAIN_STACK_BYTES: u64 = 8 * 1024 * 1024;
+
+/// The linker directive that reserves [`WINDOWS_MAIN_STACK_BYTES`] for
+/// `bin_name`, or `None` when the target is not Windows.
+///
+/// The environment is injected so the decision is testable on any host without
+/// mutating the process, matching [`release_build_sha`].
+///
+/// `cargo:rustc-link-arg-bin` only reaches binaries in the *calling* package,
+/// so each package that ships an entrypoint must emit its own — which is why
+/// this lives here instead of being stated once.
+#[must_use]
+pub fn windows_main_stack_link_arg(
+    bin_name: &str,
+    read_env: impl Fn(&str) -> Option<String>,
+) -> Option<String> {
+    if read_env("CARGO_CFG_TARGET_OS").as_deref() != Some("windows") {
+        return None;
+    }
+    let bytes = WINDOWS_MAIN_STACK_BYTES;
+    match read_env("CARGO_CFG_TARGET_ENV").as_deref() {
+        Some("msvc") => Some(format!(
+            "cargo:rustc-link-arg-bin={bin_name}=/STACK:{bytes}"
+        )),
+        Some("gnu") => Some(format!(
+            "cargo:rustc-link-arg-bin={bin_name}=-Wl,--stack,{bytes}"
+        )),
+        _ => None,
+    }
+}
+
+/// Emit the reserve for one binary in the calling package.
+pub fn configure_windows_main_stack(bin_name: &str) {
+    if let Some(directive) = windows_main_stack_link_arg(bin_name, |name| std::env::var(name).ok())
+    {
+        println!("{directive}");
+    }
+}
+
 /// Declare the rerun conditions for the build-metadata directives: the two
 /// SHA-override environment variables, and deliberately nothing about the
 /// local checkout — watching `.git` files is what made every local commit
@@ -168,7 +210,64 @@ fn short_sha(value: String) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{full_sha, release_build_sha, short_sha};
+    use super::{
+        WINDOWS_MAIN_STACK_BYTES, full_sha, release_build_sha, short_sha,
+        windows_main_stack_link_arg,
+    };
+
+    fn windows_target(env: &'static str) -> impl Fn(&str) -> Option<String> {
+        move |name| match name {
+            "CARGO_CFG_TARGET_OS" => Some("windows".to_string()),
+            "CARGO_CFG_TARGET_ENV" => Some(env.to_string()),
+            _ => None,
+        }
+    }
+
+    /// Every Codewhale entrypoint must reserve its Windows main-thread stack.
+    ///
+    /// `codewhale` shipped without it while `codewhale-tui` had it, so
+    /// `codewhale model resolve` ran `fn main` on the 1 MiB linker default and
+    /// aborted with `thread 'main' has overflowed its stack` on hosted Windows.
+    /// `cargo:rustc-link-arg-bin` reaches only the calling package's binaries,
+    /// so each entrypoint needs its own directive and neither covers the other.
+    #[test]
+    fn every_windows_entrypoint_reserves_the_same_main_stack() {
+        for bin in ["codewhale", "codewhale-tui"] {
+            assert_eq!(
+                windows_main_stack_link_arg(bin, windows_target("msvc")),
+                Some(format!(
+                    "cargo:rustc-link-arg-bin={bin}=/STACK:{WINDOWS_MAIN_STACK_BYTES}"
+                ))
+            );
+            assert_eq!(
+                windows_main_stack_link_arg(bin, windows_target("gnu")),
+                Some(format!(
+                    "cargo:rustc-link-arg-bin={bin}=-Wl,--stack,{WINDOWS_MAIN_STACK_BYTES}"
+                ))
+            );
+        }
+        // Keep the previously shipped TUI reserve.
+        assert_eq!(WINDOWS_MAIN_STACK_BYTES, 8 * 1024 * 1024);
+    }
+
+    /// The directive is Windows-only and names one binary. A non-Windows target
+    /// emits nothing, so this never becomes a workspace-wide stack change.
+    #[test]
+    fn no_stack_directive_is_emitted_off_windows() {
+        for os in ["linux", "macos"] {
+            assert_eq!(
+                windows_main_stack_link_arg("codewhale", |name| (name == "CARGO_CFG_TARGET_OS")
+                    .then(|| os.to_string())),
+                None
+            );
+        }
+        // An unknown Windows ABI gets no guessed linker syntax.
+        assert_eq!(
+            windows_main_stack_link_arg("codewhale", windows_target("sgx")),
+            None
+        );
+        assert_eq!(windows_main_stack_link_arg("codewhale", |_| None), None);
+    }
 
     #[test]
     fn packaged_sources_do_not_claim_to_be_unreleased_or_stamped() {

@@ -6,9 +6,10 @@ use std::path::{Component, Path};
 
 pub(crate) fn path_is_confined(path: &Path) -> bool {
     !path.as_os_str().is_empty()
-        && path
-            .components()
-            .all(|component| matches!(component, Component::Normal(_)))
+        && path.components().all(|component| match component {
+            Component::Normal(name) => !cfg!(windows) || !name.as_encoded_bytes().contains(&b':'),
+            _ => false,
+        })
 }
 
 fn invalid_path() -> io::Error {
@@ -321,17 +322,177 @@ impl WorkspaceFile {
     }
 
     fn atomic_write(&self, bytes: &[u8], replace: bool) -> io::Result<()> {
-        let mut temporary = tempfile::NamedTempFile::new_in(&self.directory)?;
-        temporary.write_all(bytes)?;
-        temporary.as_file().sync_all()?;
-        let path = self.directory.join(&self.filename);
-        if replace {
-            temporary.persist(path)
-        } else {
-            temporary.persist_noclobber(path)
+        use std::mem::{offset_of, size_of};
+        use std::os::windows::ffi::OsStrExt;
+        use std::os::windows::fs::OpenOptionsExt;
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Wdk::Storage::FileSystem::{
+            FILE_RENAME_INFORMATION, FileRenameInformation, NtSetInformationFile,
+        };
+        use windows_sys::Win32::Foundation::RtlNtStatusToDosError;
+        use windows_sys::Win32::Storage::FileSystem::{
+            DELETE, FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_SHARE_READ,
+        };
+        use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
+
+        let mut temporary =
+            tempfile::Builder::new()
+                .prefix(".fleet-write-")
+                .make_in(&self.directory, |path| {
+                    std::fs::OpenOptions::new()
+                        .create_new(true)
+                        .access_mode(FILE_GENERIC_READ | FILE_GENERIC_WRITE | DELETE)
+                        .share_mode(FILE_SHARE_READ)
+                        .open(path)
+                })?;
+        let result = (|| {
+            temporary.write_all(bytes)?;
+            temporary.as_file().sync_all()?;
+
+            // MoveFileExW (including tempfile::persist) reopens the destination
+            // directory with FILE_ADD_FILE, conflicting with our ancestor pins.
+            // A native rename with no root handle and a single basename uses
+            // the source file's existing parent instead. Keep all ancestor and
+            // source handles pinned; never relax their write/delete guards.
+            // https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/ns-ntifs-_file_rename_information
+            let name = self.filename.encode_wide().collect::<Vec<_>>();
+            let name_bytes = name.len() * size_of::<u16>();
+            let buffer_size = (offset_of!(FILE_RENAME_INFORMATION, FileName) + name_bytes)
+                .max(size_of::<FILE_RENAME_INFORMATION>());
+            let mut buffer = vec![0_usize; buffer_size.div_ceil(size_of::<usize>())];
+            let rename = buffer.as_mut_ptr().cast::<FILE_RENAME_INFORMATION>();
+            // SAFETY: the zeroed buffer is aligned and covers the struct plus
+            // the complete UTF-16 basename; no root means the source's parent.
+            unsafe {
+                (*rename).Anonymous.ReplaceIfExists = replace;
+                (*rename).FileNameLength = name_bytes as u32;
+                std::ptr::copy_nonoverlapping(
+                    name.as_ptr(),
+                    (*rename).FileName.as_mut_ptr(),
+                    name.len(),
+                );
+            }
+            let mut attempt = 0;
+            loop {
+                let mut status = IO_STATUS_BLOCK::default();
+                // SAFETY: this synchronously opened file has DELETE access;
+                // every handle and buffer remains live throughout the call.
+                let result = unsafe {
+                    NtSetInformationFile(
+                        temporary.as_file().as_raw_handle(),
+                        &mut status,
+                        rename.cast(),
+                        buffer_size as u32,
+                        FileRenameInformation,
+                    )
+                };
+                if result >= 0 {
+                    return Ok(());
+                }
+                // SAFETY: converts the returned NTSTATUS without dereferencing.
+                let error =
+                    io::Error::from_raw_os_error(unsafe { RtlNtStatusToDosError(result) as i32 });
+                let Some(backoff) = crate::utils::windows_publish_retry_delay(&error, attempt)
+                else {
+                    return Err(error);
+                };
+                std::thread::sleep(backoff);
+                attempt += 1;
+            }
+        })();
+        match result {
+            Ok(()) => {
+                // The old name is vacant after the rename; do not unlink an
+                // entry another process might create there afterwards.
+                temporary.disable_cleanup(true);
+                Ok(())
+            }
+            Err(error) => {
+                // Close the source's delete-denying handle before cleanup.
+                temporary.into_temp_path().close()?;
+                Err(error)
+            }
         }
-        .map_err(|error| error.error)?;
-        Ok(())
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_publication_tests {
+    use super::*;
+    use std::os::windows::fs::OpenOptionsExt;
+
+    #[test]
+    fn publication_and_replacement_keep_ancestor_write_and_delete_guards() {
+        let workspace = tempfile::tempdir().unwrap();
+        let parent = workspace.path().join("private");
+        let ledger =
+            WorkspaceFile::open(workspace.path(), Path::new("private/fleet.jsonl"), true).unwrap();
+        let forbidden = std::fs::OpenOptions::new()
+            .write(true)
+            .custom_flags(0x0220_0000)
+            .open(&parent)
+            .unwrap_err();
+        assert_eq!(forbidden.raw_os_error(), Some(32));
+        assert!(std::fs::rename(&parent, workspace.path().join("swapped")).is_err());
+
+        // Both fail with MoveFileExW while the destination parent is pinned.
+        ledger.publish(b"first").unwrap();
+        ledger.replace(b"compacted").unwrap();
+        assert_eq!(
+            std::fs::read(parent.join("fleet.jsonl")).unwrap(),
+            b"compacted"
+        );
+        assert_eq!(std::fs::read_dir(&parent).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn replacement_survives_a_short_lived_reader_without_delete_sharing() {
+        let workspace = tempfile::tempdir().unwrap();
+        let relative = Path::new("fleet.jsonl");
+        let ledger = WorkspaceFile::open(workspace.path(), relative, true).unwrap();
+        ledger.publish(b"first").unwrap();
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0x1 | 0x2)
+            .open(workspace.path().join(relative))
+            .unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            drop(held);
+        });
+        ledger.replace(b"compacted").unwrap();
+        release.join().unwrap();
+        assert_eq!(
+            std::fs::read(workspace.path().join(relative)).unwrap(),
+            b"compacted"
+        );
+    }
+
+    #[test]
+    fn immutable_publication_preserves_existing_bytes_and_removes_its_temporary() {
+        let workspace = tempfile::tempdir().unwrap();
+        let artifact =
+            WorkspaceFile::open(workspace.path(), Path::new("receipt.json"), true).unwrap();
+        artifact.publish(b"receipt").unwrap();
+        assert_eq!(
+            artifact.publish(b"replacement").unwrap_err().kind(),
+            io::ErrorKind::AlreadyExists
+        );
+        assert_eq!(
+            std::fs::read(workspace.path().join("receipt.json")).unwrap(),
+            b"receipt"
+        );
+        assert_eq!(std::fs::read_dir(workspace.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn artifact_paths_cannot_name_windows_alternate_data_streams() {
+        for path in ["receipt.json:private", "dir/receipt:private", ":stream"] {
+            assert!(
+                !path_is_confined(Path::new(path)),
+                "accepted stream path {path}"
+            );
+        }
     }
 }
 

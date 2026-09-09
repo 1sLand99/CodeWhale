@@ -344,6 +344,41 @@ fn hard_link_count(_path: &Path) -> Option<u64> {
     None
 }
 
+/// Backoff before re-attempting a Windows atomic publication, or `None` when
+/// `error` must be surfaced to the caller.
+///
+/// Windows can briefly deny the rename that publishes a temporary file while
+/// Defender, the indexer, or a concurrent reader still holds the source or the
+/// destination without delete sharing. `MoveFileExW` then reports a sharing or
+/// lock violation that clears on its own, while a real permission failure
+/// repeats until the attempts run out.
+///
+/// The ordinary and confined Fleet writers share this classification
+/// and schedule, to tolerate brief sharing conflicts without letting
+/// either path invent a broader retry of its own. Only the rename is
+/// re-attempted: callers keep the temporary they already wrote and synced, so a
+/// retry never rewrites bytes or widens the window in which data can be lost.
+///
+/// The classification stays deliberately narrow. `ERROR_ALREADY_EXISTS` in
+/// particular is a real answer for no-clobber publication — Fleet artifact
+/// immutability depends on receiving it — so it is returned unchanged.
+#[cfg(windows)]
+pub(crate) fn windows_publish_retry_delay(
+    error: &std::io::Error,
+    attempt: usize,
+) -> Option<std::time::Duration> {
+    const MAX_PERSIST_ATTEMPTS: usize = 6;
+    // 5 ERROR_ACCESS_DENIED, 32 ERROR_SHARING_VIOLATION, 33 ERROR_LOCK_VIOLATION.
+    let transient = error.kind() == std::io::ErrorKind::PermissionDenied
+        || matches!(error.raw_os_error(), Some(5 | 32 | 33));
+    if !transient || attempt + 1 >= MAX_PERSIST_ATTEMPTS {
+        return None;
+    }
+    Some(std::time::Duration::from_millis(
+        10u64.saturating_mul(1u64 << attempt),
+    ))
+}
+
 fn write_atomic_with_permissions(
     path: &Path,
     contents: &[u8],
@@ -416,25 +451,20 @@ fn write_atomic_with_permissions(
     tmp.as_file().sync_all()?;
     #[cfg(windows)]
     {
-        // Windows can briefly deny replacement while Defender, indexing, or a
-        // concurrent reader still holds the destination without delete sharing.
         // Keep the already-synced tempfile and retry only the transient Win32
         // sharing/lock failures; permanent permission errors still surface.
-        const MAX_PERSIST_ATTEMPTS: usize = 6;
         let mut pending = tmp;
-        for attempt in 0..MAX_PERSIST_ATTEMPTS {
+        let mut attempt = 0;
+        loop {
             match pending.persist(path) {
                 Ok(_) => break,
                 Err(err) => {
-                    let retryable = err.error.kind() == std::io::ErrorKind::PermissionDenied
-                        || matches!(err.error.raw_os_error(), Some(5 | 32 | 33));
-                    if !retryable || attempt + 1 == MAX_PERSIST_ATTEMPTS {
+                    let Some(backoff) = windows_publish_retry_delay(&err.error, attempt) else {
                         return Err(err.error);
-                    }
+                    };
                     pending = err.file;
-                    std::thread::sleep(std::time::Duration::from_millis(
-                        10u64.saturating_mul(1u64 << attempt),
-                    ));
+                    std::thread::sleep(backoff);
+                    attempt += 1;
                 }
             }
         }
