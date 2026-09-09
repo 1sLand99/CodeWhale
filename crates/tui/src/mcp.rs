@@ -687,25 +687,26 @@ impl ReviewedPluginMcpSource {
         if Path::new(command).is_absolute() {
             launch.bind_command(staged_root, Path::new(command), &validated.file_hashes)?;
         }
-        // Darwin cannot hand Node an ESM entry by descriptor when that entry
-        // imports sibling modules: `/dev/fd/N` has no directory, so every
-        // relative specifier resolves against `/dev/` (#5916). Such an entry
-        // keeps its staged path — its bytes are still hash-verified by
-        // `bind_file` below, and the siblings were always read by path.
+        // Darwin descriptor paths lose Node's module filename, package.json
+        // context and relative-import directory (#5916). Keep the staged path
+        // for .js/.cjs and multi-file .mjs entries, after bind_file verifies
+        // their bytes. Node reopens these paths; this is not atomic descriptor
+        // execution. Sibling modules already use the reviewed staged paths.
         #[cfg(target_os = "macos")]
-        let esm_entry_index = is_node_command(command)
-            .then(|| {
-                args.iter().position(|argument| {
-                    let path = Path::new(argument);
-                    path.is_absolute()
-                        && path.starts_with(staged_root)
-                        && path.extension().is_some_and(|extension| extension == "mjs")
-                })
-            })
-            .flatten();
+        let node_entry_index = is_node_command(command)
+            .then(|| node_script_entry_index(args))
+            .flatten()
+            .filter(|&index| {
+                let path = Path::new(&args[index]);
+                path.is_absolute()
+                    && path.starts_with(staged_root)
+                    && path.extension().is_some_and(|extension| {
+                        matches!(extension.to_str(), Some("mjs" | "js" | "cjs"))
+                    })
+            });
         #[cfg(target_os = "macos")]
-        let esm_entry_keeps_path = esm_entry_index.is_some_and(|index| {
-            esm_entry_has_module_siblings(
+        let node_entry_keeps_path = node_entry_index.is_some_and(|index| {
+            node_entry_needs_staged_path(
                 staged_root,
                 Path::new(&args[index]),
                 &validated.file_hashes,
@@ -716,15 +717,15 @@ impl ReviewedPluginMcpSource {
             if path.is_absolute() && path.starts_with(staged_root) && path.is_file() {
                 let bound = launch.bind_file(staged_root, path, &validated.file_hashes)?;
                 #[cfg(target_os = "macos")]
-                if esm_entry_keeps_path && esm_entry_index == Some(index) {
+                if node_entry_keeps_path && node_entry_index == Some(index) {
                     continue;
                 }
                 launch.args[index] = bound;
             }
         }
         #[cfg(target_os = "macos")]
-        if let Some(entry_index) = esm_entry_index
-            && !esm_entry_keeps_path
+        if let Some(entry_index) = node_entry_index
+            && !node_entry_keeps_path
         {
             launch.args = node_esm_descriptor_args(&launch.args, entry_index);
         }
@@ -734,8 +735,10 @@ impl ReviewedPluginMcpSource {
             }
             launch.bind_cwd(cwd)?;
         }
-        // A final authority pass detects any non-executed companion/config
-        // drift while handles were opened. Execution itself uses the handles.
+        // A final authority pass detects source/stage and capability drift
+        // while handles were opened. Retained Node entry paths and imports
+        // are reopened after this check; their owner-only, read-only stage is
+        // not an atomic handle binding or an OS sandbox.
         self.validate_before_stdio_spawn(server_name)?;
         Ok(launch)
     }
@@ -790,12 +793,10 @@ impl ReviewedPluginMcpSource {
     }
 }
 
-/// Whether a reviewed `.mjs` entry shares its stage with other module files.
-/// Such an entry must launch by path: Node resolves its relative imports
-/// against the entry's own URL, and a `/dev/fd/N` URL has no directory to
-/// resolve against (#5916). Manifests and data files do not count.
+/// Preserve .js package type lookup, .cjs module semantics and multi-file
+/// .mjs relative imports. A lone .mjs retains the existing descriptor launch.
 #[cfg(target_os = "macos")]
-fn esm_entry_has_module_siblings(
+fn node_entry_needs_staged_path(
     staged_root: &Path,
     entry: &Path,
     file_hashes: &std::collections::BTreeMap<PathBuf, String>,
@@ -803,6 +804,12 @@ fn esm_entry_has_module_siblings(
     let Ok(entry) = entry.strip_prefix(staged_root) else {
         return false;
     };
+    if entry
+        .extension()
+        .is_some_and(|extension| matches!(extension.to_str(), Some("js" | "cjs")))
+    {
+        return true;
+    }
     file_hashes.keys().any(|path| {
         path != entry
             && path.extension().is_some_and(|extension| {
@@ -812,6 +819,52 @@ fn esm_entry_has_module_siblings(
                 )
             })
     })
+}
+
+/// Find the script operand, never a preload's value or an argument belonging
+/// to an earlier script. Unknown option layouts get no Node-specific rewrite;
+/// the generic reviewed-file binder still applies.
+#[cfg(target_os = "macos")]
+fn node_script_entry_index(args: &[impl AsRef<std::ffi::OsStr>]) -> Option<usize> {
+    let mut index = 0;
+    while let Some(argument) = args.get(index) {
+        let argument = argument.as_ref().to_str()?;
+        match argument {
+            "--" => return (index + 1 < args.len()).then_some(index + 1),
+            "-" | "-e" | "--eval" | "-p" | "--print" | "--run" | "--test" | "-c" | "--check"
+            | "-i" | "--interactive" | "--input-type" => return None,
+            "-r"
+            | "--require"
+            | "--import"
+            | "--loader"
+            | "--experimental-loader"
+            | "-C"
+            | "--conditions"
+            | "--max-old-space-size"
+            | "--stack-size" => index += 2,
+            "--no-warnings"
+            | "--trace-warnings"
+            | "--trace-deprecation"
+            | "--no-deprecation"
+            | "--enable-source-maps"
+            | "--preserve-symlinks"
+            | "--preserve-symlinks-main"
+            | "--abort-on-uncaught-exception"
+            | "--expose-gc"
+            | "--jitless" => index += 1,
+            _ if argument.starts_with("--eval=")
+                || argument.starts_with("--print=")
+                || argument.starts_with("--run=")
+                || argument.starts_with("--input-type=") =>
+            {
+                return None;
+            }
+            _ if argument.starts_with("--") && argument.contains('=') => index += 1,
+            _ if argument.starts_with('-') => return None,
+            _ => return Some(index),
+        }
+    }
+    None
 }
 
 fn is_node_command(command: &str) -> bool {
@@ -842,14 +895,12 @@ fn node_esm_descriptor_args(
     args: &[std::ffi::OsString],
     entry_index: usize,
 ) -> Vec<std::ffi::OsString> {
-    let leading_are_options = args[..entry_index]
-        .iter()
-        .all(|argument| argument.to_string_lossy().starts_with('-'));
-    if !leading_are_options {
+    if node_script_entry_index(args) != Some(entry_index) {
         return args.to_vec();
     }
     let bound_entry = args[entry_index].clone();
-    let mut rewritten: Vec<std::ffi::OsString> = args[..entry_index].to_vec();
+    let prefix_end = entry_index - usize::from(entry_index > 0 && args[entry_index - 1] == "--");
+    let mut rewritten: Vec<std::ffi::OsString> = args[..prefix_end].to_vec();
     rewritten.push(std::ffi::OsString::from("--import"));
     rewritten.push(bound_entry.clone());
     rewritten.push(std::ffi::OsString::from("-e"));
@@ -865,7 +916,8 @@ pub(crate) struct ReviewedStdioLaunch {
     pub(crate) args: Vec<std::ffi::OsString>,
     pub(crate) cwd: Option<PathBuf>,
     /// Kept for the child lifetime. Windows opens deny write/delete sharing;
-    /// Unix children execute/read inherited descriptors rather than paths.
+    /// Unix normally uses inherited descriptors; macOS Node entries needing
+    /// module path context are hash-checked here, then reopened by path.
     pub(crate) opened_files: Vec<fs::File>,
     #[cfg(unix)]
     pub(crate) cwd_fd: Option<fs::File>,

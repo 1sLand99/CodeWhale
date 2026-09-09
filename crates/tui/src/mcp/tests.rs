@@ -1128,7 +1128,7 @@ connect_timeout = 2
 
 #[cfg(target_os = "macos")]
 #[tokio::test]
-async fn reviewed_multi_file_node_mjs_plugin_launches_by_staged_path() {
+async fn reviewed_node_plugins_preserve_module_path_context() {
     if std::process::Command::new("node")
         .arg("--version")
         .output()
@@ -1138,28 +1138,56 @@ async fn reviewed_multi_file_node_mjs_plugin_launches_by_staged_path() {
         return;
     }
 
-    // The entry imports a sibling module, exactly like the computer-use
-    // bundle (#5916). Launched by descriptor, Node would resolve `./lib/...`
-    // against `/dev/` and the child would die before the handshake.
-    let dir = tempfile::tempdir().unwrap();
-    let plugins_root = dir.path().join("plugins");
-    let plugin_base = plugins_root.join("node-esm-multi");
-    fs::create_dir_all(plugin_base.join("mcp")).unwrap();
-    fs::create_dir_all(plugin_base.join("lib")).unwrap();
-    fs::write(
-        plugin_base.join("lib").join("reply.mjs"),
-        r#"import path from 'node:path';
+    for (extension, package_type) in [
+        ("mjs", "module"),
+        ("js", "module"),
+        ("js", "commonjs"),
+        ("cjs", "module"),
+    ] {
+        let esm = extension != "cjs" && package_type == "module";
+        // The entry imports a sibling module, exactly like the computer-use
+        // bundle (#5916). Launched by descriptor, Node would resolve `./lib/...`
+        // against `/dev/` and the child would die before the handshake.
+        let dir = tempfile::tempdir().unwrap();
+        let plugins_root = dir.path().join("plugins");
+        let plugin_base = plugins_root.join("node-esm-multi");
+        fs::create_dir_all(plugin_base.join("mcp")).unwrap();
+        fs::create_dir_all(plugin_base.join("lib")).unwrap();
+        fs::write(
+            plugin_base.join("package.json"),
+            format!(r#"{{"type":"{package_type}"}}"#),
+        )
+        .unwrap();
+        fs::write(plugin_base.join("mcp/reply.json"), r#"{"answer":42}"#).unwrap();
+        fs::write(
+            plugin_base.join("lib").join(format!("reply.{extension}")),
+            if esm {
+                r#"import path from 'node:path';
 import url from 'node:url';
 export const TOOL = 'ready-from-sibling';
 export const ENTRY_DIR = path.basename(path.dirname(url.fileURLToPath(import.meta.url)));
-"#,
-    )
-    .unwrap();
-    fs::write(
-        plugin_base.join("mcp").join("server.mjs"),
-        r#"import readline from 'node:readline';
-import { TOOL, ENTRY_DIR } from '../lib/reply.mjs';
-const lines = readline.createInterface({ input: process.stdin });
+"#
+            } else {
+                r#"const path = require('node:path');
+exports.TOOL = 'ready-from-sibling';
+exports.ENTRY_DIR = path.basename(__dirname);
+"#
+            },
+        )
+        .unwrap();
+        let imports = if esm {
+            format!(
+                "import readline from 'node:readline';\nimport fs from 'node:fs';\nimport {{ TOOL, ENTRY_DIR }} from '../lib/reply.{extension}';\n"
+            )
+        } else {
+            format!(
+                "const readline = require('node:readline');\nconst fs = require('node:fs');\nconst {{ TOOL, ENTRY_DIR }} = require('../lib/reply.{extension}');\n"
+            )
+        };
+        fs::write(
+            plugin_base.join("mcp").join(format!("server.{extension}")),
+            imports
+                + r#"const lines = readline.createInterface({ input: process.stdin });
 lines.on('line', (line) => {
   const request = JSON.parse(line);
   if (request.id === undefined) return;
@@ -1174,17 +1202,23 @@ lines.on('line', (line) => {
     result = {
       tools: [{ name: TOOL, description: ENTRY_DIR, inputSchema: { type: 'object' } }]
     };
+  } else if (request.method === 'tools/call') {
+    result = { content: [{ type: 'text', text: JSON.stringify({
+      answer: JSON.parse(fs.readFileSync('reply.json', 'utf8')).answer,
+      args: process.argv.slice(2)
+    }) }] };
   } else {
     result = {};
   }
   process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id, result }) + '\n');
 });
 "#,
-    )
-    .unwrap();
-    fs::write(
-        plugin_base.join("plugin.toml"),
-        r#"
+        )
+        .unwrap();
+        fs::write(
+            plugin_base.join("plugin.toml"),
+            format!(
+                r#"
 schema_version = 1
 [plugin]
 name = "node-esm-multi"
@@ -1192,44 +1226,69 @@ version = "1.0.0"
 
 [mcp_servers.local]
 command = "node"
-args = ["mcp/server.mjs"]
+args = ["--no-warnings", "server.{extension}", "fixture-argument"]
+cwd = "mcp"
 connect_timeout = 2
-"#,
-    )
-    .unwrap();
-
-    let discovery = crate::plugins::discovery::DiscoveryConfig {
-        workspace: dir.path().join("project"),
-        user_plugins_dir: plugins_root,
-        workspace_plugins_dir: dir.path().join("workspace-plugins-unused"),
-        builtin_plugin_dirs: Vec::new(),
-        state_path: dir.path().join("plugin-state/state.json"),
-    };
-    let mut registry = crate::plugins::discovery::discover_with_config(&discovery);
-    registry.trust("node-esm-multi").unwrap();
-    registry.enable("node-esm-multi").unwrap();
-    let active = registry.active_plugins()[0].clone();
-    let authority = registry.authority_for("node-esm-multi").unwrap();
-    let merged = merge_plugin_mcp_servers_from_plugins(
-        McpConfig::default(),
-        vec![("node-esm-multi".to_string(), active, authority)],
-    )
-    .unwrap();
-    let mut pool = McpPool::new(merged);
-
-    let connection = pool
-        .get_or_connect("plugin-14-node-esm-multi-local")
-        .await
+"#
+            ),
+        )
         .unwrap();
-    assert_eq!(connection.tools().len(), 1);
-    assert_eq!(connection.tools()[0].name, "ready-from-sibling");
-    // The sibling resolved from the staged tree, not from `/dev/`.
-    assert_eq!(connection.tools()[0].description.as_deref(), Some("lib"));
+
+        let discovery = crate::plugins::discovery::DiscoveryConfig {
+            workspace: dir.path().join("project"),
+            user_plugins_dir: plugins_root,
+            workspace_plugins_dir: dir.path().join("workspace-plugins-unused"),
+            builtin_plugin_dirs: Vec::new(),
+            state_path: dir.path().join("plugin-state/state.json"),
+        };
+        let mut registry = crate::plugins::discovery::discover_with_config(&discovery);
+        registry.trust("node-esm-multi").unwrap();
+        registry.enable("node-esm-multi").unwrap();
+        let active = registry.active_plugins()[0].clone();
+        let authority = registry.authority_for("node-esm-multi").unwrap();
+        let merged = merge_plugin_mcp_servers_from_plugins(
+            McpConfig::default(),
+            vec![("node-esm-multi".to_string(), active, authority)],
+        )
+        .unwrap();
+        let mut pool = McpPool::new(merged);
+
+        let connection = pool
+            .get_or_connect("plugin-14-node-esm-multi-local")
+            .await
+            .unwrap();
+        assert_eq!(connection.tools().len(), 1);
+        assert_eq!(connection.tools()[0].name, "ready-from-sibling");
+        // The sibling resolved from the staged tree, not from `/dev/`.
+        assert_eq!(connection.tools()[0].description.as_deref(), Some("lib"));
+        let result = pool
+            .call_tool(
+                "mcp_plugin-14-node-esm-multi-local_ready-from-sibling",
+                serde_json::json!({}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            result["content"][0]["text"], r#"{"answer":42,"args":["fixture-argument"]}"#,
+            "{extension}/{package_type} must preserve staged cwd resources and script arguments"
+        );
+        registry.disable("node-esm-multi").unwrap();
+        assert!(pool.all_tools().is_empty());
+        assert!(
+            pool.call_tool(
+                "mcp_plugin-14-node-esm-multi-local_ready-from-sibling",
+                serde_json::json!({})
+            )
+            .await
+            .is_err(),
+            "disabled Node tools must not remain callable"
+        );
+    }
 }
 
 #[cfg(target_os = "macos")]
 #[test]
-fn esm_entry_with_module_siblings_keeps_its_staged_path() {
+fn node_entry_preserves_package_type_and_sibling_context() {
     use std::collections::BTreeMap;
     let staged_root = Path::new("/stage/plugin");
     let entry = staged_root.join("mcp/server.mjs");
@@ -1239,8 +1298,17 @@ fn esm_entry_with_module_siblings_keeps_its_staged_path() {
             .map(|path| (PathBuf::from(path), "h".to_string()))
             .collect::<BTreeMap<_, _>>()
     };
+    // Even a single .js/.cjs depends on filename/package-type semantics.
+    for extension in ["js", "cjs"] {
+        let relative = format!("mcp/server.{extension}");
+        assert!(node_entry_needs_staged_path(
+            staged_root,
+            &staged_root.join(&relative),
+            &hash(&[&relative, "package.json"]),
+        ));
+    }
     // Manifests, docs, and data files are not modules.
-    assert!(!esm_entry_has_module_siblings(
+    assert!(!node_entry_needs_staged_path(
         staged_root,
         &entry,
         &hash(&[
@@ -1259,7 +1327,7 @@ fn esm_entry_with_module_siblings_keeps_its_staged_path() {
         "wasm/x.wasm",
     ] {
         assert!(
-            esm_entry_has_module_siblings(
+            node_entry_needs_staged_path(
                 staged_root,
                 &entry,
                 &hash(&["mcp/server.mjs", "plugin.json", sibling]),
@@ -1268,7 +1336,7 @@ fn esm_entry_with_module_siblings_keeps_its_staged_path() {
         );
     }
     // An entry outside the stage never qualifies.
-    assert!(!esm_entry_has_module_siblings(
+    assert!(!node_entry_needs_staged_path(
         Path::new("/elsewhere"),
         &entry,
         &hash(&["mcp/server.mjs", "src/tools.mjs"]),
@@ -1309,6 +1377,84 @@ fn node_esm_descriptor_launch_keeps_options_argv_shape_and_script_arguments() {
     // entrypoint; the launch is left untouched.
     let args = vec![os("other.js"), os("/dev/fd/7")];
     assert_eq!(super::node_esm_descriptor_args(&args, 1), args);
+
+    // The original option terminator cannot precede the injected --import.
+    let args = vec![
+        os("--no-warnings"),
+        os("--"),
+        os("/dev/fd/7"),
+        os("argument"),
+    ];
+    assert_eq!(
+        super::node_esm_descriptor_args(&args, 2),
+        vec![
+            os("--no-warnings"),
+            os("--import"),
+            os("/dev/fd/7"),
+            os("-e"),
+            os(""),
+            os("--"),
+            os("/dev/fd/7"),
+            os("argument")
+        ]
+    );
+    let args = vec![os("--conditions"), os("fixture"), os("/dev/fd/7")];
+    let rewritten = super::node_esm_descriptor_args(&args, 2);
+    assert_eq!(
+        &rewritten[..4],
+        &[
+            os("--conditions"),
+            os("fixture"),
+            os("--import"),
+            os("/dev/fd/7")
+        ]
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn reviewed_node_launch_identifies_only_the_script_operand() {
+    for (args, expected) in [
+        (vec!["/stage/server.js", "/stage/later.mjs"], Some(0)),
+        (vec!["other.js", "/stage/later.mjs"], Some(0)),
+        (
+            vec!["--require", "/stage/preload.cjs", "/stage/server.js"],
+            Some(2),
+        ),
+        (
+            vec!["--import", "/stage/preload.mjs", "/stage/server.mjs"],
+            Some(2),
+        ),
+        (vec!["--require"], None),
+        (vec!["--", "/stage/server.cjs"], Some(1)),
+        (vec!["--"], None),
+        (
+            vec!["--max-old-space-size=256", "/stage/server.mjs"],
+            Some(1),
+        ),
+        (
+            vec!["--max-old-space-size", "256", "/stage/server.mjs"],
+            Some(2),
+        ),
+        (
+            vec![
+                "--abort-on-uncaught-exception",
+                "--expose-gc",
+                "--jitless",
+                "/stage/server.mjs",
+            ],
+            Some(3),
+        ),
+        (vec!["-e", "console.log('x')", "/stage/later.mjs"], None),
+        (vec!["--eval=console.log('x')", "/stage/later.mjs"], None),
+        (vec!["--run=task", "--", "/stage/later.js"], None),
+        (vec!["--input-type=module", "/stage/server.mjs"], None),
+        (vec!["--input-type", "module", "/stage/server.mjs"], None),
+        (vec!["--unknown-option", "/stage/value.js"], None),
+        (vec!["-", "/stage/later.mjs"], None),
+    ] {
+        assert_eq!(node_script_entry_index(&args), expected, "{args:?}");
+    }
 }
 
 #[test]
