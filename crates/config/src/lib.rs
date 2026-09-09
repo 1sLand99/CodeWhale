@@ -4401,7 +4401,7 @@ fn normalize_model_for_provider(provider: ProviderKind, model: &str) -> String {
 /// `/models` roster also contains Messages and Responses models, which are
 /// deliberately absent from this Chat-only route.
 ///
-/// Reviewed against https://opencode.ai/docs/go/#endpoints on 2026-09-08.
+/// Reviewed against <https://opencode.ai/docs/go/#endpoints> on 2026-09-08.
 /// Previously reviewed IDs remain compatible absent explicit deprecation;
 /// live availability is established separately by the provider catalog.
 pub const OPENCODE_GO_CHAT_MODELS: &[&str] = &[

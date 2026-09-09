@@ -729,7 +729,7 @@ pub enum ViewEvent {
     /// archive, which is exactly the kind of small lie that erodes trust in
     /// every other receipt.
     SessionArchived {
-        metadata: crate::session_manager::SessionMetadata,
+        metadata: Box<crate::session_manager::SessionMetadata>,
     },
     SessionDeleted {
         session_id: String,

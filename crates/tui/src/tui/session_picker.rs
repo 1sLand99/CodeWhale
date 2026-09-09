@@ -476,7 +476,9 @@ impl SessionPickerView {
             tr(self.locale, message_id)
                 .replace("{id}", crate::session_manager::truncate_id(&session.id)),
         );
-        ViewAction::Emit(ViewEvent::SessionArchived { metadata })
+        ViewAction::Emit(ViewEvent::SessionArchived {
+            metadata: Box::new(metadata),
+        })
     }
 
     /// Flip whether archived sessions appear in the list.
