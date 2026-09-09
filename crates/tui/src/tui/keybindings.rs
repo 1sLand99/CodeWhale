@@ -583,7 +583,9 @@ mod tests {
             "F3 / /provider"
         );
         assert_eq!(binding(ShellBindingId::Help).catalog_chord, "F1 / Ctrl+/");
-        // Every advertised binding, not a hand-picked four: the two that were
+        // Every ordinary shell binding: exclusive redaction choices are
+        // advertised only by their consent screen, never as global shortcuts.
+        // The two that were
         // not covered had already drifted (the view-cycle chord read
         // "Ctrl+] / Ctrl+Tab" here and "Ctrl+Tab / Ctrl+]" at the source),
         // which is exactly the rot this module's doc comment warns about.

@@ -24,6 +24,7 @@ use crate::localization::MessageId;
 use crate::palette;
 use crate::tui::app::{App, RedactionGateNotice, StatusToastKind};
 use crate::tui::onboarding::wrap_words;
+use crate::tui::shell_key_routing::{ShellBindingId, binding};
 use crate::tui::views::{ActionHint, render_modal_footer, render_underwater_surface};
 
 /// Whether the startup gate must ask before the current config's
@@ -49,7 +50,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     };
     let mut hints = action_hints(app);
     hints.push(ActionHint::new(
-        "↑/↓",
+        binding(ShellBindingId::RedactionGateScroll).footer_chord,
         app.tr(MessageId::SetupActionScrollBody).to_string(),
     ));
     let buf = f.buffer_mut();
@@ -76,37 +77,27 @@ fn center_vertically(area: Rect, rows: usize) -> Rect {
 }
 
 fn action_hints(app: &App) -> Vec<ActionHint> {
-    if app.redaction_gate_confirming {
-        vec![
-            ActionHint::new(
-                "1/Y",
-                app.tr(MessageId::RedactionGateActionConfirm).to_string(),
-            ),
-            ActionHint::new(
-                "2/U",
-                app.tr(MessageId::RedactionGateActionBack).to_string(),
-            ),
-            ActionHint::new(
-                "3/N",
-                app.tr(MessageId::RedactionGateActionQuit).to_string(),
-            ),
-        ]
-    } else {
-        vec![
-            ActionHint::new(
-                "1/Y",
-                app.tr(MessageId::RedactionGateActionConfirm).to_string(),
-            ),
-            ActionHint::new(
-                "2/U",
-                app.tr(MessageId::RedactionGateActionKeep).to_string(),
-            ),
-            ActionHint::new(
-                "3/N",
-                app.tr(MessageId::RedactionGateActionQuit).to_string(),
-            ),
-        ]
-    }
+    [
+        (
+            ShellBindingId::RedactionGateConfirm,
+            MessageId::RedactionGateActionConfirm,
+        ),
+        (
+            ShellBindingId::RedactionGateKeepOrBack,
+            if app.redaction_gate_confirming {
+                MessageId::RedactionGateActionBack
+            } else {
+                MessageId::RedactionGateActionKeep
+            },
+        ),
+        (
+            ShellBindingId::RedactionGateQuit,
+            MessageId::RedactionGateActionQuit,
+        ),
+    ]
+    .into_iter()
+    .map(|(id, label)| ActionHint::new(binding(id).footer_chord, app.tr(label).to_string()))
+    .collect()
 }
 
 fn screen_lines(app: &App, width: usize, height: usize) -> Vec<Line<'static>> {
