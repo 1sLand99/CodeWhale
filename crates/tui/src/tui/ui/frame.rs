@@ -991,12 +991,34 @@ pub(crate) fn build_session_snapshot(
             .clone_from(&cached.parent_session_id);
         session.metadata.forked_from_message_count = cached.forked_from_message_count;
         session.metadata.archived = cached.archived;
+        session
+            .metadata
+            .runtime_store
+            .clone_from(&cached.runtime_store);
     }
     // The cache above is a hint; disk is the authority for lifecycle state.
     // Re-reading here is what makes "an archive or rename cannot be reverted
     // by autosave" true regardless of which surface applied it or when
     // (#2934 / #4397). One bounded metadata-prefix read, not a transcript scan.
     let merged = manager.merge_persisted_lifecycle(&mut session.metadata);
+    if let Some(binding) = app
+        .runtime_services
+        .task_manager
+        .as_ref()
+        .and_then(|tasks| tasks.session_store_binding())
+    {
+        if session
+            .metadata
+            .runtime_store
+            .as_ref()
+            .is_some_and(|saved| saved != &binding)
+        {
+            return Err(
+                "session snapshot refused to replace its saved Runtime store ownership".into(),
+            );
+        }
+        session.metadata.runtime_store = Some(binding);
+    }
     // Title resolution, in priority order:
     // 1. Disk, when the session already exists (#2934/#4397: a rename applied
     //    through the session manager is persisted and must survive autosave).

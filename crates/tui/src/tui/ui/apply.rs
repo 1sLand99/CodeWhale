@@ -3530,6 +3530,12 @@ pub(crate) fn apply_loaded_session_with_goal(
     session: &SavedSession,
     goal: Option<&crate::session_manager::SessionGoalState>,
 ) -> Result<(), String> {
+    if let Some(binding) = session.metadata.runtime_store.as_ref()
+        && let Some(tasks) = app.runtime_services.task_manager.as_ref()
+        && tasks.session_store_binding().as_ref() != Some(binding)
+    {
+        return Err("This session belongs to another Runtime host. Resume it in a new Codewhale process to reopen its saved store.".into());
+    }
     if app.session_transition_blocked() {
         return Err(
             "runtime work is active; wait for the current turn, maintenance, and background tasks to finish, or cancel that specific work before switching sessions".to_string(),

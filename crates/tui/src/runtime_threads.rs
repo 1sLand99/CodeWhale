@@ -2876,6 +2876,45 @@ pub struct RuntimeThreadManagerConfig {
     pub max_active_threads: usize,
 }
 
+/// Durable host authority shared by conversations created in that host.
+/// A conversation id can change at launch; the locked Runtime store cannot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeStoreBinding {
+    pub data_dir: PathBuf,
+    pub execution_scope: String,
+}
+
+impl RuntimeStoreBinding {
+    fn validate_existing_store(&self) -> Result<()> {
+        anyhow::ensure!(
+            self.data_dir.is_absolute(),
+            "Saved Runtime store path must be absolute"
+        );
+        let root = checked_existing_runtime_store_dir(&self.data_dir)?;
+        let owner: RuntimeStoreOwner =
+            serde_json::from_str(&read_store_file(&root.join(AGENT_MAIL_OWNER_FILE))?)?;
+        validated_record_id(&owner.owner_id, "Runtime owner id")?;
+        anyhow::ensure!(
+            runtime_execution_scope(&owner.owner_id, &root.join(EVENT_TRANSACTION_LOCK_FILE))
+                == self.execution_scope,
+            "Saved session Runtime store ownership does not match; refusing to recover another scope"
+        );
+        Ok(())
+    }
+}
+
+fn runtime_execution_scope(owner_id: &str, event_lock_path: &Path) -> String {
+    let mut digest = Sha256::new();
+    digest.update(owner_id.as_bytes());
+    digest.update([0]);
+    digest.update(event_lock_path.as_os_str().as_encoded_bytes());
+    digest
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
 impl RuntimeThreadManagerConfig {
     #[must_use]
     pub fn from_task_data_dir(task_data_dir: PathBuf) -> Self {
@@ -4539,7 +4578,7 @@ impl RuntimeThreadManager {
         workspace: PathBuf,
         manager_cfg: RuntimeThreadManagerConfig,
     ) -> Result<Self> {
-        Self::open_inner(config, workspace, manager_cfg, None)
+        Self::open_inner(config, workspace, manager_cfg, None, None)
     }
 
     pub fn open_with_plugin_registry(
@@ -4548,7 +4587,34 @@ impl RuntimeThreadManager {
         manager_cfg: RuntimeThreadManagerConfig,
         plugin_registry: Arc<crate::plugins::PluginRegistry>,
     ) -> Result<Self> {
-        Self::open_inner(config, workspace, manager_cfg, Some(plugin_registry))
+        Self::open_inner(config, workspace, manager_cfg, Some(plugin_registry), None)
+    }
+
+    pub(crate) fn open_for_session(
+        config: Config,
+        workspace: PathBuf,
+        mut manager_cfg: RuntimeThreadManagerConfig,
+        plugin_registry: Arc<crate::plugins::PluginRegistry>,
+        binding: Option<&RuntimeStoreBinding>,
+    ) -> Result<Self> {
+        if let Some(binding) = binding {
+            if let Some(override_dir) = runtime_dir_override() {
+                anyhow::ensure!(
+                    checked_runtime_store_root(override_dir)? == binding.data_dir,
+                    "Runtime directory override conflicts with the saved session's Runtime store"
+                );
+            }
+            // A missing bound store is an error, never a request to mint a new owner.
+            binding.validate_existing_store()?;
+            manager_cfg.data_dir.clone_from(&binding.data_dir);
+        }
+        Self::open_inner(
+            config,
+            workspace,
+            manager_cfg,
+            Some(plugin_registry),
+            binding,
+        )
     }
 
     fn open_inner(
@@ -4556,6 +4622,7 @@ impl RuntimeThreadManager {
         workspace: PathBuf,
         manager_cfg: RuntimeThreadManagerConfig,
         plugin_registry: Option<Arc<crate::plugins::PluginRegistry>>,
+        binding: Option<&RuntimeStoreBinding>,
     ) -> Result<Self> {
         // A public RuntimeThreadManager owns independent native threads. They
         // may run concurrently with the interactive TUI because their events
@@ -4564,6 +4631,10 @@ impl RuntimeThreadManager {
         // only while its host holds the exclusive run lease.
         config.runtime_thread_inference_unrelated = !config.runtime_chat_isolated;
         let process_owner_lock = Arc::new(RuntimeProcessOwnerLock::acquire(&manager_cfg.data_dir)?);
+        // Recheck under the exclusive host lock, before store recovery can write.
+        if let Some(binding) = binding {
+            binding.validate_existing_store()?;
+        }
         let store = RuntimeThreadStore::open(manager_cfg.data_dir.clone())?;
         crate::initialize_cloud_facts(&config);
         let (event_tx, _event_rx) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
@@ -4609,18 +4680,22 @@ impl RuntimeThreadManager {
 
     /// Identity of the actual Runtime store, not a model-supplied session label.
     pub(crate) fn task_execution_identity(&self) -> (String, Arc<RuntimeProcessOwnerLock>) {
-        let mut digest = Sha256::new();
-        digest.update(self.store.owner_id.as_bytes());
-        digest.update([0]);
-        digest.update(self.store.event_lock_path.as_os_str().as_encoded_bytes());
         (
-            digest
-                .finalize()
-                .iter()
-                .map(|byte| format!("{byte:02x}"))
-                .collect(),
+            runtime_execution_scope(&self.store.owner_id, &self.store.event_lock_path),
             self._process_owner_lock.clone(),
         )
+    }
+
+    pub(crate) fn session_store_binding(&self) -> RuntimeStoreBinding {
+        RuntimeStoreBinding {
+            data_dir: self
+                .store
+                .event_lock_path
+                .parent()
+                .expect("Runtime store root")
+                .to_path_buf(),
+            execution_scope: self.task_execution_identity().0,
+        }
     }
 
     pub(crate) async fn close_execution_admission(&self) {

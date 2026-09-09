@@ -56,6 +56,8 @@ use crate::models::Role;
 use crate::tui::selection::{SelectionAutoscroll, TranscriptSelectionPoint};
 use tempfile::TempDir;
 
+mod runtime_store_binding;
+
 #[test]
 fn failed_engine_channel_settles_classifier_batch_once() {
     let _cost_scope = crate::cost_status::test_scope();
@@ -7304,6 +7306,7 @@ fn saved_session_with_messages(messages: Vec<Message>) -> SavedSession {
             cost: crate::session_manager::SessionCostSnapshot::default(),
             parent_session_id: None,
             forked_from_message_count: None,
+            runtime_store: None,
             cumulative_turn_secs: 0,
             archived: false,
             spawn_depth: 0,

@@ -306,8 +306,8 @@ fn exact_translation_client(
 
 /// Bind the Runtime thread store to a session before the process-owner lock
 /// is taken, so a second Codewhale on the same machine does not collide on
-/// the default root (#5630). Resume reuses the loaded id; a fresh session
-/// claims one here so first persist keeps it.
+/// the default root (#5630). This id is only the initial store anchor; saved
+/// metadata retains the actual store binding when launch creates a new id.
 pub(crate) fn ensure_runtime_session_id(app: &mut App) -> String {
     if let Some(existing) = app
         .current_session_id
@@ -921,6 +921,9 @@ pub async fn run_tui(
         config.clone(),
         std::sync::Arc::clone(&app.plugin_registry),
         &session_id,
+        app.current_session_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.runtime_store.as_ref()),
     )
     .await?;
     let _task_shutdown = task_manager.shutdown_guard();

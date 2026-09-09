@@ -289,6 +289,7 @@ fn saved_session_with_blocks(blocks: Vec<crate::models::ContentBlock>) -> SavedS
             cost: Default::default(),
             parent_session_id: None,
             forked_from_message_count: None,
+            runtime_store: None,
             cumulative_turn_secs: 0,
             archived: false,
             spawn_depth: 0,

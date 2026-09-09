@@ -298,6 +298,10 @@ pub struct SessionContextReference {
 pub struct SessionMetadata {
     /// Unique session identifier
     pub id: String,
+    /// Actual host Runtime authority; independent of the conversation id.
+    /// Legacy/imported conversations have no binding until saved by a host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_store: Option<crate::runtime_threads::RuntimeStoreBinding>,
     /// Human-readable title (derived from first message)
     pub title: String,
     /// When the session was created
@@ -1040,6 +1044,7 @@ impl SavedSession {
             cost: SessionCostSnapshot::default(),
             parent_session_id: None,
             forked_from_message_count: None,
+            runtime_store: None,
             cumulative_turn_secs: 0,
             archived: false,
             spawn_depth,
@@ -2338,6 +2343,7 @@ impl SessionManager {
         metadata.created_at = persisted.created_at;
         metadata.parent_session_id = persisted.parent_session_id;
         metadata.forked_from_message_count = persisted.forked_from_message_count;
+        metadata.runtime_store = persisted.runtime_store;
         true
     }
 
@@ -2490,7 +2496,27 @@ impl SessionManager {
         self.clear_session_boot_owner(id);
         let session_dir = self.sessions_dir.join(id.trim());
         if session_dir.exists() {
-            fs::remove_dir_all(session_dir)?;
+            if crate::plugins::metadata_is_link_or_reparse(&fs::symlink_metadata(&session_dir)?) {
+                // Preserve remove_dir_all's existing no-follow behavior.
+                fs::remove_dir_all(session_dir)?;
+                return Ok(());
+            }
+            // Other conversations and automations can share this host's Runtime
+            // authority. Deleting a transcript must never delete that store.
+            for entry in fs::read_dir(&session_dir)? {
+                let entry = entry?;
+                if entry.file_name() == "runtime" {
+                    continue;
+                }
+                if entry.file_type()?.is_dir() {
+                    fs::remove_dir_all(entry.path())?;
+                } else {
+                    fs::remove_file(entry.path())?;
+                }
+            }
+            if fs::read_dir(&session_dir)?.next().is_none() {
+                fs::remove_dir(session_dir)?;
+            }
         }
         Ok(())
     }
@@ -2881,6 +2907,7 @@ pub fn create_saved_session_with_id_and_mode(
             cost: SessionCostSnapshot::default(),
             parent_session_id: None,
             forked_from_message_count: None,
+            runtime_store: None,
             cumulative_turn_secs: 0,
             archived: false,
             spawn_depth: 0,
@@ -4564,6 +4591,7 @@ mod tests {
                 cost: SessionCostSnapshot::default(),
                 parent_session_id: None,
                 forked_from_message_count: None,
+                runtime_store: None,
                 cumulative_turn_secs: 0,
                 archived: false,
                 spawn_depth: 0,
@@ -4605,6 +4633,7 @@ mod tests {
                 cost: SessionCostSnapshot::default(),
                 parent_session_id: None,
                 forked_from_message_count: None,
+                runtime_store: None,
                 cumulative_turn_secs: 0,
                 archived: false,
                 spawn_depth: 0,

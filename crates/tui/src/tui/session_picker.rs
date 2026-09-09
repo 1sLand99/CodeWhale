@@ -1290,6 +1290,7 @@ mod tests {
             cost: crate::session_manager::SessionCostSnapshot::default(),
             parent_session_id: None,
             forked_from_message_count: None,
+            runtime_store: None,
             cumulative_turn_secs: 0,
             archived: false,
             spawn_depth: 0,

@@ -1321,20 +1321,21 @@ struct QueueFile {
 impl TaskManager {
     /// Start the manager with the default DeepSeek executor.
     ///
-    /// Interactive callers pass the session id so the Runtime store (and its
-    /// exclusive process-owner lock) is per-session rather than per-machine
-    /// (#5630).
+    /// Interactive callers pass an initial session id to isolate new hosts,
+    /// or the saved store binding to retain the same authority across resume.
     pub async fn start(
         cfg: TaskManagerConfig,
         api_config: Config,
         plugin_registry: Arc<crate::plugins::PluginRegistry>,
         session_id: &str,
+        binding: Option<&crate::runtime_threads::RuntimeStoreBinding>,
     ) -> Result<SharedTaskManager> {
-        let runtime_threads = Arc::new(RuntimeThreadManager::open_with_plugin_registry(
+        let runtime_threads = Arc::new(RuntimeThreadManager::open_for_session(
             api_config.clone(),
             cfg.default_workspace.clone(),
             RuntimeThreadManagerConfig::for_session(cfg.data_dir.clone(), session_id),
             plugin_registry,
+            binding,
         )?);
         Self::start_with_runtime_manager(cfg, api_config, runtime_threads).await
     }
@@ -1496,6 +1497,14 @@ impl TaskManager {
 
     pub(crate) fn execution_scope(&self) -> &str {
         &self.execution_lease.scope
+    }
+
+    pub(crate) fn session_store_binding(
+        &self,
+    ) -> Option<crate::runtime_threads::RuntimeStoreBinding> {
+        self.runtime_threads
+            .as_ref()
+            .map(|runtime| runtime.session_store_binding())
     }
 
     pub async fn set_default_workspace(&self, workspace: PathBuf) {
