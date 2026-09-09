@@ -253,6 +253,11 @@ impl AutomationsView {
         self.rows.get(self.row)
     }
 
+    pub(crate) fn show_action_receipt(&mut self, receipt: String) {
+        self.notice = Some(receipt);
+        self.refresh();
+    }
+
     fn move_row(&mut self, delta: isize) {
         if self.rows.is_empty() {
             return;
@@ -765,13 +770,17 @@ impl ModalView for AutomationsView {
         }
         let hints = self.footer_hints();
         let content = render_modal_footer(area, buf, &hints);
+        let header = Paragraph::new(self.header_lines()).wrap(Wrap { trim: false });
+        let header_height = u16::try_from(header.line_count(content.width))
+            .unwrap_or(u16::MAX)
+            .saturating_add(1);
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(4), Constraint::Min(1)])
+            .constraints([Constraint::Length(header_height), Constraint::Min(1)])
             .split(content);
-        // Each header fact owns one row. Wrapping the counts/scope at compact
-        // widths must not push the explicit Save receipt out of the header.
-        Paragraph::new(self.header_lines()).render(chunks[0], buf);
+        // Keep action feedback visible while this panel covers the transcript.
+        // Reserve wrapped rows before the New/Edit buttons, including for CJK.
+        header.render(chunks[0], buf);
         let mut x = chunks[0].x;
         self.new_button.set(Rect::ZERO);
         self.edit_button.set(Rect::ZERO);
@@ -998,11 +1007,58 @@ mod tests {
             1
         );
         view.render(area, &mut buffer);
-        let receipt: String = (0..40).map(|x| buffer[(x, 2)].symbol()).collect();
+        let receipt = rendered_text(area, &buffer);
         assert!(
             receipt.contains("Saved saved"),
             "compact receipt: {receipt}"
         );
+    }
+
+    fn rendered_text(area: Rect, buffer: &Buffer) -> String {
+        (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn refused_action_stays_visible_in_list_and_detail_after_refresh() {
+        for (locale, receipt) in [
+            (
+                Locale::En,
+                "Could not run automation: Automation belongs to another Runtime execution scope",
+            ),
+            (
+                Locale::ZhHans,
+                "无法运行此自动化：它属于另一会话，请返回原会话后重试。",
+            ),
+        ] {
+            for width in [40, 80, 120] {
+                for detail in [false, true] {
+                    let mut view = view();
+                    view.locale = locale;
+                    view.detail_open = detail;
+                    view.show_action_receipt(receipt.to_string());
+                    view.refresh();
+                    let area = Rect::new(0, 0, width, 20);
+                    let mut buffer = Buffer::empty(area);
+                    view.render(area, &mut buffer);
+                    let text = rendered_text(area, &buffer);
+                    let compact =
+                        |s: &str| s.chars().filter(|c| !c.is_whitespace()).collect::<String>();
+                    assert!(
+                        compact(&text).contains(&compact(receipt)),
+                        "{locale:?}/{width}/{detail}: {text}"
+                    );
+                    assert!(!view.new_button.get().is_empty(), "New remains accessible");
+                    assert_eq!(view.rows.len(), 2, "feedback preserves definitions");
+                }
+            }
+        }
     }
 
     #[test]

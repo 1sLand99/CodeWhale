@@ -62,6 +62,29 @@ pub(super) async fn handle_action(
         }
         AutomationAction::Run(id) => run_now(locale, &automations, &id, task_manager).await,
     };
+    present_receipt(app, cell);
+}
+
+fn present_receipt(app: &mut App, cell: HistoryCell) {
+    // The automation room covers the transcript. A refused action still needs
+    // an immediate visible receipt there, even when no run record was created.
+    if app.view_stack.top_kind() == Some(crate::tui::views::ModalKind::Automations)
+        && let Some(mut view) = app.view_stack.pop()
+    {
+        if let Some(automations_view) =
+            view.as_any_mut()
+                .downcast_mut::<crate::tui::views::automations::AutomationsView>()
+        {
+            let receipt = match &cell {
+                HistoryCell::Automation(receipt) => receipt.plain_summary(),
+                HistoryCell::System { content } => content.clone(),
+                _ => String::new(),
+            };
+            automations_view.show_action_receipt(receipt);
+        }
+        app.view_stack.push_boxed(view);
+        app.needs_redraw = true;
+    }
     app.add_message(cell);
 }
 
@@ -524,7 +547,7 @@ fn delivery_mode_label(record: &AutomationRecord) -> String {
 }
 
 fn add_message(app: &mut App, content: String) {
-    app.add_message(HistoryCell::System { content });
+    present_receipt(app, HistoryCell::System { content });
 }
 
 #[cfg(test)]
@@ -564,6 +587,65 @@ mod tests {
             next_run_at: None,
             last_run_at: None,
         }
+    }
+
+    #[test]
+    fn action_receipts_reach_the_open_room_and_remain_in_history() {
+        use crate::tui::views::{ModalKind, automations::AutomationsView};
+        use ratatui::{buffer::Buffer, layout::Rect};
+
+        let root = TempDir::new().unwrap();
+        let mut app = crate::test_support::test_app_with_options(
+            crate::test_support::test_tui_options(root.path()),
+        );
+        app.view_stack
+            .push(AutomationsView::from_rows(Vec::new(), Locale::En));
+        for cell in [
+            system(
+                "Could not run automation: Automation belongs to another Runtime execution scope"
+                    .to_string(),
+            ),
+            HistoryCell::Automation(AutomationCell::mutated(
+                "Nightly checks".into(),
+                "paused".into(),
+            )),
+        ] {
+            let expected = match &cell {
+                HistoryCell::System { content } => content.clone(),
+                HistoryCell::Automation(receipt) => receipt.plain_summary(),
+                _ => unreachable!(),
+            };
+            let before = app.history.len();
+            present_receipt(&mut app, cell);
+            assert_eq!(app.history.len(), before + 1);
+            assert_eq!(app.view_stack.top_kind(), Some(ModalKind::Automations));
+            let view = app.view_stack.pop().unwrap();
+            let area = Rect::new(0, 0, 120, 20);
+            let mut buffer = Buffer::empty(area);
+            view.render(area, &mut buffer);
+            let text = (0..area.height)
+                .map(|y| {
+                    (0..area.width)
+                        .map(|x| buffer[(x, y)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(text.contains(&expected), "{text}");
+            app.view_stack.push_boxed(view);
+        }
+        // The missing-manager early return uses this same path.
+        add_message(&mut app, "Automation manager unavailable".into());
+        let view = app.view_stack.pop().unwrap();
+        let area = Rect::new(0, 0, 80, 20);
+        let mut buffer = Buffer::empty(area);
+        view.render(area, &mut buffer);
+        let text = buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(text.contains("Automation manager unavailable"));
     }
 
     #[test]
