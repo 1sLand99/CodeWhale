@@ -407,7 +407,10 @@ pub(crate) fn lock_live_snapshot() -> LiveSnapshotLock {
 /// merely overlaying matching ids. This is what lets a successful
 /// `/v1/models` refresh remove models retired upstream. Failed refreshes retain
 /// the last successful provider partition; clearing a partition restores the
-/// offline/cross-provider fallbacks.
+/// offline/cross-provider fallbacks. The one row a provider partition does not
+/// suppress is a signed row the payload explicitly attests is unlisted — see
+/// the `retain` in [`compute_merged_snapshot`]. Roster rows are completed, not
+/// replaced, where the roster itself stated nothing.
 ///
 /// Memoized: the merge is recomputed only after a live-layer mutation bumps
 /// `LIVE_GENERATION`; every other call returns the cached `Arc` (the picker
@@ -480,8 +483,21 @@ fn compute_merged_snapshot() -> CatalogSnapshot {
             facts,
             cloud.fetched_at.unwrap_or(0),
         );
-        // A provider roster owns removals as well as additions; cloud rows are lower priority.
-        merged.retain(|(provider, _), _| !is_authoritative(provider));
+        // A provider roster owns its omissions as well as the ids it lists, and
+        // the loops above already withheld the lower layers for such a provider
+        // — so a signed row surviving here would be one this client cannot
+        // otherwise justify. Only an explicit `allow_unlisted` assertion keeps
+        // it; without one the roster stands. The partition loop below still
+        // owns every id the roster does list.
+        merged.retain(|(provider, model), row| {
+            if !is_authoritative(provider) {
+                return true;
+            }
+            matches!(row.source, CatalogSource::CloudFacts { .. })
+                && codewhale_config::cloud_facts::catalog_patch::is_unlisted_attested(
+                    facts, provider, model,
+                )
+        });
     }
     for provider_snapshot in live
         .per_provider
@@ -495,10 +511,17 @@ fn compute_merged_snapshot() -> CatalogSnapshot {
         })
     {
         for row in &provider_snapshot.offerings {
-            merged.insert(
-                (row.provider.clone(), row.wire_model_id.clone()),
-                row.clone(),
-            );
+            let mut row = row.clone();
+            // The roster owns this id. Where it stated a fact, that fact wins;
+            // where it said nothing, the signed layer may still complete the
+            // row instead of leaving the picker and the executor with an
+            // unknown it does not have to have.
+            if let Some(facts) = &cloud.facts {
+                codewhale_config::cloud_facts::catalog_patch::complete_provider_live_row(
+                    &mut row, facts,
+                );
+            }
+            merged.insert((row.provider.clone(), row.wire_model_id.clone()), row);
         }
     }
     let merged = CatalogSnapshot {
@@ -521,6 +544,71 @@ fn apply_cloud_facts_for_provider(
             cloud.fetched_at.unwrap_or(0),
         );
     }
+}
+
+/// Does the signed cloud layer describe this exact route?
+///
+/// Every condition is load-bearing:
+/// - the route resolves to a canonical provider kind. The TUI-only legacy
+///   `deepseek-cn` alias has none, so it inherits nothing;
+/// - the identity the signer names is this route's own. Catalog rows collapse
+///   regional and dual-wire aliases onto a vendor primary
+///   ([`catalog_provider_id`]), so SiliconFlow China and DeepSeek's
+///   Anthropic-wire route read the `siliconflow` / `deepseek` partitions — a
+///   fact signed for the primary is not a fact about those other endpoints and
+///   only an exact identity match may consume it. This is the same exact-
+///   identity keying `cloud_default_model_for_route` already uses for defaults;
+/// - the base URL is on that provider's official HTTPS contract, so a custom,
+///   proxied or redirected endpoint never inherits signed facts.
+///
+/// `cloud_facts::scope` stays the single authority for which providers and
+/// hosts are in scope at all (it is what excludes custom/local routes and the
+/// Codex account roster); this must not grow a second copy of that table.
+pub(crate) fn cloud_facts_apply_to_route(provider: ApiProvider, base_url: &str) -> bool {
+    provider.kind().is_some_and(|kind| {
+        kind.as_str() == catalog_provider_id(provider)
+            && codewhale_config::cloud_facts::scope::base_url_allowed(kind.as_str(), base_url)
+    })
+}
+
+/// Signed rows for `provider` on this endpoint that the payload explicitly
+/// attests exist despite the provider roster omitting them.
+///
+/// A provider `/v1/models` roster is authoritative for every id it lists **and
+/// for its own omissions**: this client keeps no history of past rosters, so it
+/// cannot tell a never-listed preview from a model the provider retired, and it
+/// does not guess. The single exception is an explicit signed `allow_unlisted`
+/// assertion, which the signer must renew as it expires (`not_after` is
+/// mandatory for one). Everything else the payload says about this provider is
+/// still a patch on rows that exist — never a reason to add one back.
+///
+/// The assertion carries exactly that: existence of that exact id. It is
+/// filtered here by the same route gate as every other signed fact, so it
+/// cannot reach a custom, proxied, regional or dual-wire endpoint, and it does
+/// not touch account entitlement (an OAuth/account roster provider is outside
+/// the signed scope entirely).
+fn cloud_unlisted_offerings_for_route(
+    provider: ApiProvider,
+    base_url: &str,
+) -> BTreeMap<(String, String), CatalogOffering> {
+    let mut rows = BTreeMap::new();
+    if !cloud_facts_apply_to_route(provider, base_url) {
+        return rows;
+    }
+    let cloud = codewhale_config::cloud_facts::overlay::snapshot();
+    let Some(facts) = cloud.facts.as_ref() else {
+        return rows;
+    };
+    let catalog_id = catalog_provider_id(provider);
+    apply_cloud_facts_for_provider(&mut rows, catalog_id, &cloud);
+    rows.retain(|(row_provider, row_id), _| {
+        codewhale_config::cloud_facts::catalog_patch::is_unlisted_attested(
+            facts,
+            row_provider,
+            row_id,
+        )
+    });
+    rows
 }
 
 /// Maps an [`ApiProvider`] to its bundled-catalog provider id.
@@ -662,11 +750,8 @@ pub(crate) fn runtime_catalog_resolver_for_identity(
         .cloned()
         .map(|row| ((row.provider.clone(), row.wire_model_id.clone()), row))
         .collect();
-    let cloud_applies = !endpoint_catalog_authoritative
-        && provider.kind().is_some_and(|kind| {
-            codewhale_config::cloud_facts::scope::base_url_allowed(kind.as_str(), base_url)
-        })
-        && provider != ApiProvider::OpenaiCodex;
+    let cloud_applies =
+        !endpoint_catalog_authoritative && cloud_facts_apply_to_route(provider, base_url);
     if !endpoint_catalog_authoritative {
         for row in &selected_rows {
             source_rows.insert(
@@ -733,10 +818,32 @@ pub(crate) fn runtime_catalog_resolver_for_identity(
             catalog_id.as_ref()
         };
         route_offerings.retain(|_, offering| offering.provider.as_str() != transport_provider);
+        let route_facts = cloud_facts_apply_to_route(provider, base_url)
+            .then_some(cloud.facts.as_ref())
+            .flatten();
         for mut row in selected_rows {
             row.provider = transport_provider.to_string();
+            // Same completion the picker applies, from the same helper: the
+            // executor must not resolve with an unknown the signed layer has
+            // already stated, nor with anything the provider itself contradicts.
+            if let Some(facts) = route_facts {
+                codewhale_config::cloud_facts::catalog_patch::complete_provider_live_row(
+                    &mut row, facts,
+                );
+            }
             let offering = row.to_offering();
             route_offerings.insert(offering_key(&offering), offering);
+        }
+        // The roster replaced its whole scope, but an id it explicitly attests
+        // is unlisted is not an id it denied. That signed row is executable
+        // beside the roster, carrying only the facts the payload stated —
+        // otherwise the picker would offer a model the executor cannot resolve
+        // with the same metadata.
+        for row in cloud_unlisted_offerings_for_route(provider, base_url).into_values() {
+            let offering = row.to_offering();
+            route_offerings
+                .entry(offering_key(&offering))
+                .or_insert(offering);
         }
     }
 
@@ -957,9 +1064,30 @@ pub(crate) fn catalog_offering_for_route(
         crate::provider_catalog_live::cached_entry_for_route(provider, identity, base_url)
         && entry.fetched_at > 0
     {
-        return entry
+        if let Some(mut row) = entry
             .offerings
             .into_iter()
+            .find(|row| row.wire_model_id == model)
+        {
+            // An id-only roster row states existence, not that its limits and
+            // capabilities are unknown. Complete it from the signed layer for
+            // this exact route; anything the provider did state stays.
+            let cloud = codewhale_config::cloud_facts::overlay::snapshot();
+            if cloud_facts_apply_to_route(provider, base_url)
+                && let Some(facts) = &cloud.facts
+            {
+                codewhale_config::cloud_facts::catalog_patch::complete_provider_live_row(
+                    &mut row, facts,
+                );
+            }
+            return Some(row);
+        }
+        // The roster answered and does not list this id. Only an explicitly
+        // attested unlisted row may still name it here: falling through to the
+        // bundled/Models.dev merge would hand back facts for a model the roster
+        // has retired.
+        return cloud_unlisted_offerings_for_route(provider, base_url)
+            .into_values()
             .find(|row| row.wire_model_id == model);
     }
     if provider.kind().is_none_or(|kind| {
@@ -969,7 +1097,7 @@ pub(crate) fn catalog_offering_for_route(
     }
     let offering = catalog_offering_for_model_identity(provider, Some(identity), model)?;
     if matches!(offering.source, CatalogSource::CloudFacts { .. })
-        && !codewhale_config::cloud_facts::scope::base_url_allowed(provider.as_str(), base_url)
+        && !cloud_facts_apply_to_route(provider, base_url)
     {
         return bundled_catalog_offering_for_model(provider, model);
     }
@@ -1109,8 +1237,10 @@ pub(crate) fn valid_catalog_model_id(value: &str) -> bool {
 }
 
 /// Endpoint-scoped roster for CLI, pickers and inventory. A cached provider
-/// listing is authoritative for IDs, including removals. Failed/stale rows
-/// remain usable offline; configured models are retained by the caller.
+/// listing is authoritative for the IDs it lists **and for its own omissions**;
+/// the only ID appended after it is one the signed payload explicitly attests
+/// as unlisted. Failed/stale rows remain usable offline; configured models are
+/// retained by the caller.
 #[must_use]
 pub(crate) fn catalog_models_for_route(
     provider: ApiProvider,
@@ -1124,11 +1254,18 @@ pub(crate) fn catalog_models_for_route(
         crate::provider_catalog_live::cached_entry_for_route(provider, identity, base_url)
         && entry.fetched_at > 0
     {
-        return entry
-            .offerings
-            .into_iter()
-            .map(|row| row.wire_model_id)
-            .collect();
+        let mut models = Vec::with_capacity(entry.offerings.len());
+        for row in &entry.offerings {
+            push_unique_model(&mut models, &row.wire_model_id);
+        }
+        // Appended, never interleaved: the roster keeps its own order and its
+        // own authority, and an explicitly attested unlisted id is offered
+        // after it. This is the same list the picker, metadata lookups and the
+        // route resolver read, so a user pin stays exactly what it was.
+        for row in cloud_unlisted_offerings_for_route(provider, base_url).values() {
+            push_unique_model(&mut models, &row.wire_model_id);
+        }
+        return models;
     }
     if provider == ApiProvider::Custom {
         return codewhale_config::provider_setup_template(identity)
@@ -1174,9 +1311,7 @@ pub(crate) fn catalog_models_for_route(
         }
     }
     let cloud = codewhale_config::cloud_facts::overlay::snapshot();
-    if provider.kind().is_some_and(|kind| {
-        codewhale_config::cloud_facts::scope::base_url_allowed(kind.as_str(), base_url)
-    }) {
+    if cloud_facts_apply_to_route(provider, base_url) {
         apply_cloud_facts_for_provider(&mut rows, catalog_id, &cloud);
     }
     let mut models = catalog_models_from_offerings(rows.values());
@@ -2657,11 +2792,8 @@ mod tests {
         }"#;
         let catalog =
             codewhale_config::models_dev::ModelsDevCatalog::parse_json(body).expect("parse");
-        let live_rows = codewhale_config::catalog::live_offerings_from_models_dev(
-            &catalog,
-            "alias-fp",
-            1_700_000_000,
-        );
+        let live_rows =
+            codewhale_config::catalog::live_offerings_from_models_dev(&catalog, 1_700_000_000);
         assert!(
             live_rows.iter().all(|r| r.provider == "moonshot"),
             "both moonshotai and moonshot must normalize onto moonshot: {:?}",
@@ -3212,6 +3344,697 @@ mod tests {
             !catalog_models_for_route(provider, "openai", base)
                 .iter()
                 .any(|id| id == model)
+        );
+    }
+
+    /// Test scaffolding shared by the signed-catalog cases: an isolated home,
+    /// cloud facts enabled, and every process-wide layer reset on the way out.
+    ///
+    /// Field order is the drop order and is load-bearing: the env guards must
+    /// restore their variables while this thread still holds the test env
+    /// barrier that [`lock_live_snapshot`] took, so `_live` is declared last.
+    struct CloudFactsTestEnv {
+        _enabled: crate::test_support::EnvVarGuard,
+        _home: crate::test_support::EnvVarGuard,
+        _home_dir: tempfile::TempDir,
+        _live: LiveSnapshotLock,
+    }
+
+    impl Drop for CloudFactsTestEnv {
+        fn drop(&mut self) {
+            codewhale_config::cloud_facts::overlay::clear();
+            clear_live_snapshot();
+            crate::provider_catalog_live::reset_cache_for_test();
+        }
+    }
+
+    fn cloud_facts_test_env() -> CloudFactsTestEnv {
+        let live = lock_live_snapshot();
+        let home_dir = tempfile::tempdir().unwrap();
+        let home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", home_dir.path());
+        let enabled = crate::test_support::EnvVarGuard::remove("CODEWHALE_DISABLE_CLOUD_FACTS");
+        codewhale_config::cloud_facts::overlay::clear();
+        clear_live_snapshot();
+        crate::provider_catalog_live::reset_cache_for_test();
+        CloudFactsTestEnv {
+            _enabled: enabled,
+            _home: home,
+            _home_dir: home_dir,
+            _live: live,
+        }
+    }
+
+    fn publish_test_facts(
+        channel: &str,
+        version: u64,
+        valid_until: Option<u64>,
+        models: Vec<codewhale_config::cloud_facts::ModelFact>,
+    ) {
+        use codewhale_config::cloud_facts::{CloudFactsStatus, ScopedFacts, overlay};
+        let ticket = overlay::configure(true, channel).unwrap();
+        assert!(overlay::publish(
+            &ticket,
+            Some(ScopedFacts {
+                channel: channel.into(),
+                facts_version: version,
+                key_id: "cwf-test-only".into(),
+                valid_until,
+                models,
+                ..Default::default()
+            }),
+            CloudFactsStatus::default()
+        ));
+    }
+
+    fn upsert_fact(
+        provider: &str,
+        id: &str,
+        context_window: u64,
+    ) -> codewhale_config::cloud_facts::ModelFact {
+        codewhale_config::cloud_facts::ModelFact {
+            provider: provider.into(),
+            id: id.into(),
+            context_window: Some(context_window),
+            ..Default::default()
+        }
+    }
+
+    /// An id-only unlisted assertion: the signer says this exact id exists on
+    /// the provider's official endpoint and states nothing else about it.
+    fn attested_fact(provider: &str, id: &str) -> codewhale_config::cloud_facts::ModelFact {
+        codewhale_config::cloud_facts::ModelFact {
+            provider: provider.into(),
+            id: id.into(),
+            allow_unlisted: true,
+            ..Default::default()
+        }
+    }
+
+    /// `scoped_view` only keeps an assertion in a payload that expires; mirror
+    /// that here so these tests publish what the client can actually receive.
+    fn bounded() -> Option<u64> {
+        Some(codewhale_config::catalog::now_unix() + 3_600)
+    }
+
+    fn record_roster(base: &str, offerings: Vec<CatalogOffering>) {
+        use codewhale_config::catalog::ProviderCatalogDelta;
+        crate::provider_catalog_live::record_success(ProviderCatalogDelta {
+            provider: "deepseek".to_string(),
+            base_url_fingerprint: base_url_fingerprint(base),
+            fetched_at: codewhale_config::catalog::now_unix(),
+            offerings,
+        });
+    }
+
+    fn roster_row(base: &str, id: &str) -> CatalogOffering {
+        CatalogOffering {
+            provider: "deepseek".to_string(),
+            wire_model_id: id.to_string(),
+            endpoint_key: "chat".to_string(),
+            source: CatalogSource::Live {
+                base_url_fingerprint: base_url_fingerprint(base),
+                fetched_at: codewhale_config::catalog::now_unix(),
+            },
+            ..Default::default()
+        }
+    }
+
+    /// A provider roster owns the ids it lists **and its own omissions**. This
+    /// client keeps no roster history, so nothing it holds locally — bundled or
+    /// otherwise — is evidence about what the provider once served: only an
+    /// explicit signed assertion may name an id the roster omits, and it does so
+    /// for a bundled id and an unknown id alike.
+    #[test]
+    fn roster_omission_stands_unless_the_payload_explicitly_attests_the_id() {
+        let _env = cloud_facts_test_env();
+
+        let provider = ApiProvider::Deepseek;
+        let base = provider.default_base_url();
+        // One id the bundled catalog knows, one it has never heard of. Neither
+        // fact changes what the roster is authoritative about.
+        let bundled = "deepseek-v4-flash";
+        let unknown = "deepseek-v4-nano-preview";
+        let listed = "deepseek-v4-pro";
+        assert!(bundled_catalog_offering_for_model(provider, bundled).is_some());
+        assert!(bundled_catalog_offering_for_model(provider, unknown).is_none());
+        record_roster(base, vec![roster_row(base, listed)]);
+
+        // No assertion: the roster's omission stands for both ids.
+        publish_test_facts(
+            "roster-dominance-test",
+            1,
+            bounded(),
+            vec![
+                upsert_fact("deepseek", bundled, 999_999),
+                upsert_fact("deepseek", unknown, 131_072),
+            ],
+        );
+        let models = catalog_models_for_route(provider, "deepseek", base);
+        assert!(models.iter().any(|id| id == listed), "{models:?}");
+        for id in [bundled, unknown] {
+            assert!(
+                !models.iter().any(|row| row == id),
+                "an unattested patch must not survive the roster's omission: {models:?}"
+            );
+            assert!(
+                catalog_offering_for_route(provider, "deepseek", base, id).is_none(),
+                "{id} must not answer with signed facts either"
+            );
+            assert!(
+                !all_catalog_models_for_provider(provider)
+                    .iter()
+                    .any(|row| row == id),
+                "the merged view must not read it back out either"
+            );
+        }
+
+        // Same ids, now explicitly attested. The bundled one carries no stated
+        // limits, so it must not inherit the bundled row's.
+        publish_test_facts(
+            "roster-dominance-test",
+            2,
+            bounded(),
+            vec![
+                attested_fact("deepseek", bundled),
+                codewhale_config::cloud_facts::ModelFact {
+                    allow_unlisted: true,
+                    ..upsert_fact("deepseek", unknown, 131_072)
+                },
+            ],
+        );
+        let models = catalog_models_for_route(provider, "deepseek", base);
+        let merged = all_catalog_models_for_provider(provider);
+        for id in [listed, bundled, unknown] {
+            assert!(models.iter().any(|row| row == id), "{models:?}");
+            assert!(merged.iter().any(|row| row == id), "{merged:?}");
+        }
+        let attested = catalog_offering_for_route(provider, "deepseek", base, bundled)
+            .expect("an attested id resolves its own facts");
+        assert_eq!(
+            attested.limit, None,
+            "an id-only assertion must not borrow limits from the bundled layer"
+        );
+        assert_eq!(attested.cost, None);
+        assert_eq!(attested.tool_call, None);
+        assert_eq!(attested.modalities, None);
+        assert_eq!(attested.attachment, None);
+        let offering = catalog_offering_for_route(provider, "deepseek", base, unknown)
+            .expect("an attested id resolves its own facts");
+        assert_eq!(offering.wire_model_id, unknown, "the exact id, verbatim");
+        assert_eq!(
+            offering.limit.and_then(|limit| limit.context),
+            Some(131_072)
+        );
+
+        // The executor reads the same list the picker does.
+        let config = Config {
+            provider: Some("deepseek".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            crate::route_runtime::resolve_runtime_route(&config, provider, Some(unknown))
+                .unwrap()
+                .candidate
+                .limits()
+                .context_tokens,
+            Some(131_072)
+        );
+
+        // Signed rows never reach a proxied endpoint, attested or not.
+        assert!(
+            !catalog_models_for_route(provider, "deepseek", "https://deepseek-proxy.invalid/v1")
+                .iter()
+                .any(|id| id == unknown)
+        );
+    }
+
+    /// Every retraction path is the signer's, and none needs a provider
+    /// request: `hide` removes a bundled row, an elapsed validity bound drops
+    /// the whole overlay on read (including the hide it carried), and dropping
+    /// an upsert withdraws the row it created.
+    #[test]
+    fn signed_hide_expiry_and_dropped_upsert_retract_rows_without_a_provider_request() {
+        use codewhale_config::catalog::now_unix;
+        use codewhale_config::cloud_facts::{ModelFact, ModelOp};
+        let _env = cloud_facts_test_env();
+
+        let provider = ApiProvider::Deepseek;
+        let base = provider.default_base_url();
+        let hidden = "deepseek-v4-flash";
+        let preview = "deepseek-v4-nano-preview";
+        let before = catalog_models_for_route(provider, "deepseek", base);
+        assert!(before.iter().any(|id| id == hidden), "{before:?}");
+
+        publish_test_facts(
+            "retraction-test",
+            1,
+            None,
+            vec![
+                ModelFact {
+                    provider: "deepseek".into(),
+                    id: hidden.into(),
+                    op: ModelOp::Hide,
+                    ..Default::default()
+                },
+                upsert_fact("deepseek", preview, 131_072),
+            ],
+        );
+        let hidden_view = catalog_models_for_route(provider, "deepseek", base);
+        assert!(
+            !hidden_view.iter().any(|id| id == hidden),
+            "hide must remove the bundled row: {hidden_view:?}"
+        );
+        assert!(
+            hidden_view.iter().any(|id| id == preview),
+            "{hidden_view:?}"
+        );
+
+        // Expiry is evaluated on read: no refresh, no provider request, and no
+        // setting change is needed for the payload to stop being authority.
+        publish_test_facts(
+            "retraction-test",
+            2,
+            Some(now_unix().saturating_sub(1)),
+            vec![
+                ModelFact {
+                    provider: "deepseek".into(),
+                    id: hidden.into(),
+                    op: ModelOp::Hide,
+                    ..Default::default()
+                },
+                upsert_fact("deepseek", preview, 131_072),
+            ],
+        );
+        let expired = catalog_models_for_route(provider, "deepseek", base);
+        assert!(
+            expired.iter().any(|id| id == hidden),
+            "an expired payload cannot keep hiding a bundled row: {expired:?}"
+        );
+        assert!(
+            !expired.iter().any(|id| id == preview),
+            "an expired payload cannot keep offering its own row: {expired:?}"
+        );
+
+        // The third retraction: publish the same channel without the upsert.
+        // An attested row is offered past a roster, so this is the path that
+        // withdraws one without waiting for `not_after`.
+        record_roster(base, vec![roster_row(base, "deepseek-v4-pro")]);
+        publish_test_facts(
+            "retraction-test",
+            3,
+            bounded(),
+            vec![attested_fact("deepseek", preview)],
+        );
+        assert!(
+            catalog_models_for_route(provider, "deepseek", base)
+                .iter()
+                .any(|id| id == preview)
+        );
+        publish_test_facts("retraction-test", 4, bounded(), Vec::new());
+        let withdrawn = catalog_models_for_route(provider, "deepseek", base);
+        assert!(
+            !withdrawn.iter().any(|id| id == preview),
+            "dropping the upsert must withdraw the row: {withdrawn:?}"
+        );
+        assert!(
+            withdrawn.iter().any(|id| id == "deepseek-v4-pro"),
+            "the roster is untouched by the withdrawal: {withdrawn:?}"
+        );
+    }
+
+    /// A signed row names one canonical identity on one official endpoint.
+    /// Catalog partitions deliberately collapse regional and dual-wire aliases
+    /// onto a vendor primary, and that collapse must not become a channel for
+    /// facts to reach an endpoint the signer did not name.
+    #[test]
+    fn signed_rows_do_not_cross_regional_wire_or_proxied_routes() {
+        let _env = cloud_facts_test_env();
+
+        let preview = "deepseek-v4-nano-preview";
+        let siliconflow_preview = "sf-preview-not-in-any-catalog";
+        publish_test_facts(
+            "route-scope-test",
+            1,
+            bounded(),
+            vec![
+                // Attested: the assertion must not widen the endpoint or
+                // identity boundary either.
+                codewhale_config::cloud_facts::ModelFact {
+                    allow_unlisted: true,
+                    pricing: Some(codewhale_config::cloud_facts::PricingFact {
+                        input_per_m: Some(0.25),
+                        output_per_m: Some(1.0),
+                        ..Default::default()
+                    }),
+                    ..upsert_fact("deepseek", preview, 131_072)
+                },
+                upsert_fact("siliconflow", siliconflow_preview, 65_536),
+            ],
+        );
+        let offers = |provider: ApiProvider, identity: &str, model: &str| {
+            catalog_models_for_route(provider, identity, provider.default_base_url())
+                .iter()
+                .any(|id| id == model)
+        };
+
+        assert!(
+            offers(ApiProvider::Deepseek, "deepseek", preview),
+            "the exact signed route must offer the row"
+        );
+        // Same host, but a TUI-only legacy alias with no canonical identity.
+        assert!(
+            !offers(ApiProvider::DeepseekCN, "deepseek-cn", preview),
+            "the legacy CN alias inherits nothing from the primary identity"
+        );
+        // Reads the `deepseek` partition, but is a separate endpoint contract.
+        assert!(
+            !offers(
+                ApiProvider::DeepseekAnthropic,
+                "deepseek-anthropic",
+                preview
+            ),
+            "the Anthropic-wire endpoint is not the identity the signer named"
+        );
+        // A regional sibling that shares a catalog partition, not an identity.
+        assert!(
+            offers(ApiProvider::Siliconflow, "siliconflow", siliconflow_preview),
+            "the exact signed SiliconFlow route must offer the row"
+        );
+        assert!(
+            !offers(
+                ApiProvider::SiliconflowCn,
+                "siliconflow-CN",
+                siliconflow_preview
+            ),
+            "the China endpoint is a different identity, even where the host allowlist overlaps"
+        );
+        // A proxy or redirect on the right identity is still the wrong endpoint.
+        assert!(
+            !catalog_models_for_route(
+                ApiProvider::Deepseek,
+                "deepseek",
+                "https://deepseek-proxy.invalid/v1"
+            )
+            .iter()
+            .any(|id| id == preview),
+            "a custom base URL never inherits signed rows"
+        );
+
+        // The price travels with the row and no further. A signed rate that
+        // renders somewhere it cannot be billed is the failure this layer must
+        // not have, so the offered row and the dispatch quote answer together.
+        let quote = |provider: ApiProvider, identity: &str, base: &str| {
+            crate::provider_catalog_live::fresh_dispatch_pricing_quote_at(
+                provider,
+                identity,
+                preview,
+                base,
+                codewhale_config::catalog::now_unix(),
+            )
+        };
+        assert!(
+            quote(
+                ApiProvider::Deepseek,
+                "deepseek",
+                ApiProvider::Deepseek.default_base_url()
+            )
+            .is_some(),
+            "a signed price on the exact signed route is billable — this is what \
+             makes a rate change data rather than a release"
+        );
+        for (provider, identity) in [
+            (ApiProvider::DeepseekCN, "deepseek-cn"),
+            (ApiProvider::DeepseekAnthropic, "deepseek-anthropic"),
+        ] {
+            assert!(
+                quote(provider, identity, provider.default_base_url()).is_none(),
+                "{identity} must not mint a quote from another endpoint's facts"
+            );
+        }
+        assert!(
+            quote(
+                ApiProvider::Deepseek,
+                "deepseek",
+                "https://deepseek-proxy.invalid/v1"
+            )
+            .is_none(),
+            "and neither may a proxied base URL"
+        );
+        assert!(
+            quote(
+                ApiProvider::Deepseek,
+                "deepseek-custom-table",
+                ApiProvider::Deepseek.default_base_url()
+            )
+            .is_none(),
+            "a differently-named provider table is a separate billing relationship"
+        );
+    }
+
+    /// A roster that answers with ids alone has not said its models have no
+    /// limits. Signed facts complete that silence for the picker, the metadata
+    /// lookup and the executor alike — and lose every field the provider did
+    /// state. Price stays the provider's business: nothing renders a cloud rate
+    /// on a provider row that the dispatch quote would refuse to bill.
+    #[test]
+    fn provider_id_only_rows_take_signed_limits_while_provider_facts_and_prices_win() {
+        use codewhale_config::cloud_facts::{ModelFact, PricingFact};
+        use codewhale_config::models_dev::ModelsDevLimit;
+        let _env = cloud_facts_test_env();
+
+        let provider = ApiProvider::Deepseek;
+        let base = provider.default_base_url();
+        let id_only = "deepseek-roster-bare";
+        let detailed = "deepseek-roster-detailed";
+        record_roster(
+            base,
+            vec![
+                roster_row(base, id_only),
+                CatalogOffering {
+                    limit: Some(ModelsDevLimit {
+                        context: Some(12_345),
+                        ..Default::default()
+                    }),
+                    reasoning: Some(false),
+                    ..roster_row(base, detailed)
+                },
+            ],
+        );
+        let signed = |id: &str| ModelFact {
+            max_output: Some(8_192),
+            reasoning: Some(true),
+            pricing: Some(PricingFact {
+                input_per_m: Some(1.0),
+                output_per_m: Some(2.0),
+                ..Default::default()
+            }),
+            ..upsert_fact("deepseek", id, 131_072)
+        };
+        publish_test_facts(
+            "roster-completion-test",
+            1,
+            bounded(),
+            vec![signed(id_only), signed(detailed)],
+        );
+
+        let bare = catalog_offering_for_route(provider, "deepseek", base, id_only)
+            .expect("the roster row is still there");
+        let limit = bare.limit.clone().expect("signed limits complete it");
+        assert_eq!(limit.context, Some(131_072));
+        assert_eq!(limit.output, Some(8_192));
+        assert_eq!(bare.reasoning, Some(true));
+        assert!(
+            matches!(bare.source, CatalogSource::Live { .. }),
+            "the row is still the provider's: {:?}",
+            bare.source
+        );
+        assert_eq!(
+            bare.cost, None,
+            "a signed price must not appear on a provider-live row"
+        );
+        assert!(
+            !matches!(bare.pricing_source(), CatalogSource::CloudFacts { .. }),
+            "price provenance must not claim a cloud rate here"
+        );
+        assert!(
+            crate::provider_catalog_live::fresh_dispatch_pricing_quote_at(
+                provider,
+                "deepseek",
+                id_only,
+                base,
+                codewhale_config::catalog::now_unix(),
+            )
+            .is_none(),
+            "and nothing bills against one either"
+        );
+
+        let stated = catalog_offering_for_route(provider, "deepseek", base, detailed)
+            .expect("the roster row is still there");
+        let limit = stated.limit.clone().expect("provider limits are kept");
+        assert_eq!(
+            limit.context,
+            Some(12_345),
+            "the provider's own context must win"
+        );
+        assert_eq!(limit.output, Some(8_192), "only the silence is filled");
+        assert_eq!(stated.reasoning, Some(false), "and its own capability wins");
+
+        // The same completion reaches the merged picker view and the executor.
+        assert_eq!(
+            catalog_offering_for_model(provider, id_only)
+                .and_then(|row| row.limit)
+                .and_then(|limit| limit.context),
+            Some(131_072)
+        );
+        let config = Config {
+            provider: Some("deepseek".into()),
+            ..Default::default()
+        };
+        let limits = |model: &str| {
+            crate::route_runtime::resolve_runtime_route(&config, provider, Some(model))
+                .unwrap()
+                .candidate
+                .limits()
+                .context_tokens
+        };
+        assert_eq!(limits(id_only), Some(131_072));
+        assert_eq!(limits(detailed), Some(12_345));
+    }
+
+    /// The population this layer exists to serve. Most models a user sees are
+    /// described by a Models.dev refresh rather than by their provider, and a
+    /// stale window or a changed rate on one of those is exactly what a signed
+    /// correction must fix — arriving as data, not as a reinstall. The rows are
+    /// published through the real producer, so this is also the runtime proof
+    /// that external enrichment sits below the signed layer.
+    #[test]
+    fn signed_facts_correct_models_dev_enrichment_on_the_exact_route() {
+        use codewhale_config::cloud_facts::{ModelFact, PricingFact};
+        let _env = cloud_facts_test_env();
+
+        let provider = ApiProvider::Deepseek;
+        let base = provider.default_base_url();
+        let model = "deepseek-enriched-only";
+        let body = format!(
+            r#"{{
+              "models": {{}},
+              "providers": {{
+                "deepseek": {{
+                  "id": "deepseek",
+                  "models": {{
+                    "{model}": {{
+                      "id": "{model}",
+                      "modalities": {{ "input": ["text"], "output": ["text"] }},
+                      "limit": {{ "context": 65536, "output": 4096 }},
+                      "cost": {{ "input": 2.0, "output": 8.0 }}
+                    }}
+                  }}
+                }}
+              }}
+            }}"#
+        );
+        let catalog =
+            codewhale_config::models_dev::ModelsDevCatalog::parse_json(&body).expect("parse");
+        set_live_snapshot(
+            CatalogSnapshot {
+                offerings: codewhale_config::catalog::live_offerings_from_models_dev(
+                    &catalog,
+                    codewhale_config::catalog::now_unix(),
+                ),
+            },
+            LiveSource::ModelsDev,
+        );
+
+        // A refreshed row describes a model, not an endpoint, so the route
+        // resolves it without an endpoint fingerprint to match against.
+        let enriched = catalog_offering_for_route(provider, "deepseek", base, model)
+            .expect("the enriched row answers on the provider's own endpoint");
+        assert_eq!(
+            enriched.limit.as_ref().and_then(|limit| limit.context),
+            Some(65_536)
+        );
+
+        publish_test_facts(
+            "models-dev-correction-test",
+            1,
+            bounded(),
+            vec![ModelFact {
+                pricing: Some(PricingFact {
+                    input_per_m: Some(0.5),
+                    output_per_m: Some(1.5),
+                    ..Default::default()
+                }),
+                ..upsert_fact("deepseek", model, 131_072)
+            }],
+        );
+
+        let corrected = catalog_offering_for_route(provider, "deepseek", base, model)
+            .expect("the corrected row is still offered");
+        let limit = corrected.limit.clone().expect("limits are kept");
+        assert_eq!(
+            limit.context,
+            Some(131_072),
+            "the stale window is corrected"
+        );
+        assert_eq!(
+            limit.output,
+            Some(4_096),
+            "and only what the payload states is replaced"
+        );
+        assert_eq!(
+            corrected.cost.as_ref().and_then(|cost| cost.input),
+            Some(0.5),
+            "the signed rate replaces the enriched one"
+        );
+        assert!(matches!(
+            corrected.pricing_source(),
+            CatalogSource::CloudFacts { .. }
+        ));
+
+        // The executor reads the same correction the picker does.
+        let config = Config {
+            provider: Some("deepseek".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            crate::route_runtime::resolve_runtime_route(&config, provider, Some(model))
+                .unwrap()
+                .candidate
+                .limits()
+                .context_tokens,
+            Some(131_072)
+        );
+
+        // A corrected rate is only worth rendering where it is billable, and
+        // only on the endpoint and identity the signer named.
+        let quote = |identity: &str, endpoint: &str| {
+            crate::provider_catalog_live::fresh_dispatch_pricing_quote_at(
+                provider,
+                identity,
+                model,
+                endpoint,
+                codewhale_config::catalog::now_unix(),
+            )
+        };
+        assert!(
+            quote("deepseek", base).is_some(),
+            "the corrected rate bills on the exact signed route"
+        );
+        assert!(
+            quote("deepseek", "https://deepseek-proxy.invalid/v1").is_none(),
+            "a proxied base URL never inherits it"
+        );
+        assert!(
+            quote("deepseek-custom-table", base).is_none(),
+            "a differently-named provider table is a separate billing relationship"
+        );
+
+        // A fresh roster is still the authority for the ids it lists: it
+        // suppresses the enrichment and the correction that rode on it.
+        record_roster(base, vec![roster_row(base, "deepseek-v4-pro")]);
+        assert!(
+            catalog_offering_for_route(provider, "deepseek", base, model).is_none(),
+            "an unattested correction cannot survive the roster's omission"
         );
     }
 }

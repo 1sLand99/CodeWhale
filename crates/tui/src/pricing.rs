@@ -5297,6 +5297,11 @@ mod tests {
         );
     }
 
+    /// The fixture deliberately stamps `Live` rather than the `ModelsDevLive`
+    /// the refresh now emits: this pins the *second*, independent check — the
+    /// live partition the row sits in — which is what still catches a row
+    /// mislabelled by an older publisher or a stale on-disk cache. Do not
+    /// "correct" the source here; that would delete this belt's only coverage.
     #[test]
     fn models_dev_live_overlay_does_not_replace_bundled_catalog_rates() {
         let _live = crate::provider_lake::lock_live_snapshot();

@@ -64,6 +64,10 @@ pub struct PricingFact {
     pub cache_read_per_m: Option<f64>,
 }
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 /// A field-level patch to one `(provider, wire id)` catalog row.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct ModelFact {
@@ -71,6 +75,18 @@ pub struct ModelFact {
     pub id: String,
     #[serde(default)]
     pub op: ModelOp,
+    /// Signed assertion that this exact id is available on the provider's
+    /// official endpoint even when the provider's own `/v1/models` roster does
+    /// not list it.
+    ///
+    /// Absent/false (the default, and what every older client sees) means the
+    /// roster stays authoritative for its own omissions. The assertion is only
+    /// honored on an `Upsert` inside a payload that carries `not_after`, so it
+    /// always expires on its own; see [`super::scope::scoped_view`]. It grants
+    /// nothing else: identity, endpoint, account-entitlement and user
+    /// precedence rules are unchanged.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub allow_unlisted: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_window: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

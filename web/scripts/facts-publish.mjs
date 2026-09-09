@@ -200,6 +200,16 @@ export function validateSource(source) {
         }
       }
       if (m.reasoning !== undefined && typeof m.reasoning !== "boolean") errors.push(`${where}.reasoning must be boolean`);
+      // Additive field: older clients deserialize it as false and keep provider
+      // roster dominance, so an unsigned or unaware reader loses nothing.
+      if (m.allow_unlisted !== undefined) {
+        if (typeof m.allow_unlisted !== "boolean") errors.push(`${where}.allow_unlisted must be boolean`);
+        else if (m.allow_unlisted) {
+          if (m.op !== undefined && m.op !== "upsert") errors.push(`${where}.allow_unlisted requires op upsert`);
+          // The client drops the assertion in a payload that cannot expire.
+          if (!source.not_after) errors.push(`${where}.allow_unlisted requires a payload not_after`);
+        }
+      }
       optString(errors, where, m, "display_name", 120);
       optString(errors, where, m, "deprecated_at", 40);
       optString(errors, where, m, "replacement", 200);

@@ -11,14 +11,21 @@
 //! ```text
 //! bundled Models.dev snapshot         (legacy seed, not competing truth)
 //!   < bundled Codewhale catalog       (Codewhale-owned offline snapshot)
-//!   < live Models.dev
+//!   < live Models.dev                 (public catalog, external enrichment)
+//!   < signed cloud facts              (curated correction, off by default)
 //!   < live provider `/v1/models`      (credential-scoped workspace list)
-//!   < live Codewhale signed catalog   (authority when present)
 //!   < config.toml / user overrides
 //! ```
 //!
-//! After #4187, live Models.dev rows are preferred whenever present. The bundled
-//! asset remains so offline startup and failed refreshes still resolve defaults.
+//! The two live layers are not the same kind of claim. A provider roster is a
+//! fact about an endpoint the caller authenticated to; models.dev is a public
+//! third-party catalog that is merely fresher than the bundled copy of itself.
+//! Only the first outranks a signed correction — see
+//! [`CatalogSource::ModelsDevLive`].
+//!
+//! After #4187, live Models.dev rows are preferred over the bundled seed. The
+//! bundled asset remains so offline startup and failed refreshes still resolve
+//! defaults.
 //!
 //! Invariants preserved from #2608 / #3497:
 //! - A catalog row is **not** an executable route. Rows still compile through
@@ -56,6 +63,12 @@ pub enum CatalogSource {
     Bundled,
     /// A provider live `/models` row, scoped to a base-URL fingerprint and the
     /// unix timestamp it was fetched at.
+    ///
+    /// This is a **provider fact**: the row exists because that endpoint, asked
+    /// under the caller's own credential, said so. It therefore outranks the
+    /// signed cloud layer and is never patched by it, and its fingerprint names
+    /// the billing surface the row prices. A third-party catalog describing the
+    /// same model is [`Self::ModelsDevLive`], whatever URL it was fetched from.
     Live {
         base_url_fingerprint: String,
         fetched_at: u64,
@@ -63,14 +76,24 @@ pub enum CatalogSource {
     /// A user / custom override (custom endpoint, pinned model, explicit facts).
     UserOverride,
     /// Live models.dev refresh (layer 10). Distinct from provider `/v1/models`.
+    ///
+    /// **External enrichment, not a provider fact.** Models.dev is a public
+    /// catalog nobody authenticates to, so these rows sit *below* the signed
+    /// cloud layer and a fresh signed correction may replace their limits and
+    /// prices. Carrying no endpoint fingerprint is deliberate: like the bundled
+    /// seed this layer refreshes, the row describes a model, not an endpoint.
     ModelsDevLive { fetched_at: u64 },
     /// `config.toml` `[providers.*]` override (layer 30).
     ConfigOverride,
     /// Codewhale-owned bundled catalog snapshot (offline authority seed).
     CodewhaleBundled { revision: String },
-    /// Live Codewhale signed catalog fetched from CWC / `CODEWHALE_CATALOG_URL`.
-    CodewhaleLive { revision: String, fetched_at: u64 },
     /// Signed field patch, below provider-owned rows and explicit overrides.
+    ///
+    /// This is the only online catalog authority in the client. A second one
+    /// (`CodewhaleLive`, a layer-25 "signed CWC catalog" declared in #5783 and
+    /// never given a fetcher) was removed once signed cloud facts shipped as
+    /// the implemented signed layer: two signed catalogs on opposite sides of
+    /// the provider roster is exactly the split this product exists not to be.
     CloudFacts {
         facts_version: u64,
         key_id: String,
@@ -270,26 +293,28 @@ pub fn bundled_offerings_from_models_dev(catalog: &ModelsDevCatalog) -> Vec<Cata
 
 /// Hydrate live [`CatalogOffering`] rows from a fetched Models.dev catalog (#4187).
 ///
-/// Same text-chat filter as [`bundled_offerings_from_models_dev`], but each row is
-/// tagged [`CatalogSource::Live`] with the Models.dev URL fingerprint and fetch
-/// timestamp. Provider keys are normalized onto CodeWhale [`crate::ProviderKind`]
-/// ids when an alias match exists (`moonshotai` → `moonshot`, `togetherai` →
-/// `together`, `zhipuai` → `zai`, …); unknown Models.dev providers keep their
-/// upstream id so they stay discoverable without becoming executable routes.
+/// Same text-chat filter as [`bundled_offerings_from_models_dev`], but each row
+/// is tagged [`CatalogSource::ModelsDevLive`] with the fetch timestamp, so a
+/// refresh lands on layer 10: above the bundled seed it supersedes, below the
+/// signed cloud layer that may correct it, and far below a provider roster.
+/// Provider keys are normalized onto CodeWhale [`crate::ProviderKind`] ids when
+/// an alias match exists (`moonshotai` → `moonshot`, `togetherai` → `together`,
+/// `zhipuai` → `zai`, …); unknown Models.dev providers keep their upstream id so
+/// they stay discoverable without becoming executable routes.
+///
+/// These rows deliberately carry no base-URL fingerprint. This function used to
+/// stamp [`CatalogSource::Live`] with the models.dev URL's fingerprint, which
+/// made every enriched row claim to be a provider-owned roster fetched from an
+/// endpoint nobody bills against: signed patches were skipped as "from a higher
+/// layer", the price was labelled `ProviderLive` and then failed its endpoint
+/// check, and route lookup dropped the row for the same mismatch. Models.dev is
+/// a public catalog scoped to a model, exactly like the layer-0 seed.
 #[must_use]
 pub fn live_offerings_from_models_dev(
     catalog: &ModelsDevCatalog,
-    base_url_fingerprint: &str,
     fetched_at: u64,
 ) -> Vec<CatalogOffering> {
-    offerings_from_models_dev(
-        catalog,
-        CatalogSource::Live {
-            base_url_fingerprint: base_url_fingerprint.to_string(),
-            fetched_at,
-        },
-        true,
-    )
+    offerings_from_models_dev(catalog, CatalogSource::ModelsDevLive { fetched_at }, true)
 }
 
 fn offerings_from_models_dev(
@@ -656,11 +681,16 @@ impl CatalogSnapshot {
 /// 10 live models.dev      models.dev refresh
 /// 15 cloud facts          verified field patches (default off)
 /// 20 provider             per-provider /v1/models refresh
-/// 25 codewhale live       signed CWC catalog (authority)
 /// 30 config               config.toml [providers.*] overrides
 /// 40 user                 user approved set
 ///    policy DENY          last, never overridden
 /// ```
+///
+/// Layer 25 in `docs/CATALOG_REFRESH.md` — the Codewhale account roster — is
+/// deliberately absent here: an account-scoped roster is entitlement, not a
+/// public catalog layer, so it is enforced where the credential is known
+/// (`provider_lake`'s endpoint-authoritative path) and never compiled into a
+/// shared snapshot.
 ///
 /// [`Self::with_live`] remains the combined live bucket so existing callers
 /// keep working; prefer [`Self::with_models_dev_live`] / [`Self::with_provider_live`]
@@ -672,7 +702,6 @@ pub struct CatalogCompiler {
     models_dev_live: Vec<CatalogOffering>,
     cloud_facts: Option<(crate::cloud_facts::ScopedFacts, u64)>,
     provider_live: Vec<CatalogOffering>,
-    codewhale_live: Vec<CatalogOffering>,
     config: Vec<CatalogOffering>,
     overrides: Vec<CatalogOffering>,
     policy: crate::route::CatalogPolicy,
@@ -704,13 +733,6 @@ impl CatalogCompiler {
     #[must_use]
     pub fn with_codewhale_bundled(mut self, rows: Vec<CatalogOffering>) -> Self {
         self.codewhale_bundled.extend(rows);
-        self
-    }
-
-    /// Add live signed Codewhale catalog rows (layer 25; authority when present).
-    #[must_use]
-    pub fn with_codewhale_live(mut self, rows: Vec<CatalogOffering>) -> Self {
-        self.codewhale_live.extend(rows);
         self
     }
 
@@ -795,7 +817,6 @@ impl CatalogCompiler {
         for row in self
             .provider_live
             .into_iter()
-            .chain(self.codewhale_live)
             .chain(self.config)
             .chain(self.overrides)
         {

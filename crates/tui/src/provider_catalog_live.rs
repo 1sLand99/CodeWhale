@@ -1295,10 +1295,24 @@ pub(crate) fn fresh_provider_live_pricing_quote_at(
     )
 }
 
+/// A price is a fact, so it is in scope exactly where a fact is.
+///
+/// This defers to [`crate::provider_lake::cloud_facts_apply_to_route`] rather
+/// than repeating the scope table. The copy it replaces admitted the dual-wire
+/// and regional routes (`deepseek-anthropic`, `siliconflow-CN`) that the
+/// catalog gate refuses; no price actually escaped through it, because the
+/// offering lookup below independently returns a non-`CloudFacts` row on those
+/// routes and the quote then fails — but that is one authority masking another,
+/// not agreement, and it would become a real leak the moment either moved. The
+/// copy also carried its own `!= OpenaiCodex` test, which `cloud_facts::scope`
+/// has always enforced for every consumer.
+///
+/// The one condition that is this file's own: the *configured* identity must be
+/// the canonical provider. A differently-named provider table pointing at the
+/// official host is a separate credential and billing relationship.
 fn cloud_pricing_scope(provider: ApiProvider, identity: &str, base_url: &str) -> bool {
-    provider != ApiProvider::OpenaiCodex
-        && identity == provider.as_str()
-        && codewhale_config::cloud_facts::scope::base_url_allowed(provider.as_str(), base_url)
+    identity == provider.as_str()
+        && crate::provider_lake::cloud_facts_apply_to_route(provider, base_url)
 }
 
 /// Capture the effective mutable price authority once. Provider-owned live

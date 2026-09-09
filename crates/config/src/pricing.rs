@@ -41,13 +41,16 @@ pub enum Currency {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "source", rename_all = "snake_case")]
 pub enum PricingProvenance {
-    /// Seeded from a bundled Models.dev catalog snapshot.
+    /// Sourced from the Models.dev catalog — the bundled snapshot or a live
+    /// refresh of it. Both are the same third-party claim about a model, so
+    /// they share a provenance; `effective_at` is `Some` only for the refresh.
     ModelsDevBundled,
-    /// From a provider live `/models` (or pricing) refresh.
+    /// From a provider live `/models` (or pricing) refresh — a rate the
+    /// provider itself published for one endpoint, not a catalog's report of it.
     ProviderLive,
     /// From provider documentation / a hand-sourced seed. Set only by callers
     /// constructing rows directly; `from_catalog_offering` never produces this
-    /// (Models.dev-sourced rows map to `ModelsDevBundled` / `ProviderLive`).
+    /// (Models.dev-sourced rows map to `ModelsDevBundled`).
     ProviderDocs,
     /// User-supplied override (custom endpoint, enterprise terms, local route).
     UserOverride,
@@ -532,9 +535,7 @@ fn provenance_from_source(source: &CatalogSource) -> PricingProvenance {
         CatalogSource::ConfigOverride | CatalogSource::UserOverride => {
             PricingProvenance::UserOverride
         }
-        CatalogSource::CodewhaleBundled { .. } | CatalogSource::CodewhaleLive { .. } => {
-            PricingProvenance::CodewhaleCatalog
-        }
+        CatalogSource::CodewhaleBundled { .. } => PricingProvenance::CodewhaleCatalog,
     }
 }
 
@@ -542,7 +543,6 @@ fn effective_at_from_source(source: &CatalogSource) -> Option<u64> {
     match source {
         CatalogSource::Live { fetched_at, .. }
         | CatalogSource::ModelsDevLive { fetched_at }
-        | CatalogSource::CodewhaleLive { fetched_at, .. }
         | CatalogSource::CloudFacts { fetched_at, .. } => Some(*fetched_at),
         CatalogSource::Bundled
         | CatalogSource::ConfigOverride
@@ -562,7 +562,6 @@ fn endpoint_fingerprint_from_source(source: &CatalogSource) -> Option<String> {
         | CatalogSource::ConfigOverride
         | CatalogSource::UserOverride
         | CatalogSource::CodewhaleBundled { .. }
-        | CatalogSource::CodewhaleLive { .. }
         | CatalogSource::CloudFacts { .. } => None,
     }
 }

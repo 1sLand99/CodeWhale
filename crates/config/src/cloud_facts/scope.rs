@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 
 use super::types::{
-    Announcement, MAX_ANNOUNCEMENT_CHARS, ModelFact, ProviderDefaultFact, ReleaseFact,
+    Announcement, MAX_ANNOUNCEMENT_CHARS, ModelFact, ModelOp, ProviderDefaultFact, ReleaseFact,
 };
 use super::verify::{VerifiedFacts, item_applies, parse_rfc3339_utc};
 use crate::provider_kind::ProviderKind;
@@ -144,7 +144,19 @@ pub fn scoped_view(
             ));
             continue;
         }
-        out.models.push(model.clone());
+        let mut kept = model.clone();
+        // An unlisted assertion overrides a provider roster's own omission, so
+        // it must be an `Upsert` and it must expire: without `not_after` the
+        // claim would outlive any ability to withdraw it by publishing. The
+        // rest of the patch still applies; only the assertion is discarded.
+        if kept.allow_unlisted && (kept.op != ModelOp::Upsert || out.valid_until.is_none()) {
+            kept.allow_unlisted = false;
+            out.dropped.push(format!(
+                "model {}/{}: allow_unlisted needs an upsert in a payload with not_after",
+                model.provider, model.id
+            ));
+        }
+        out.models.push(kept);
     }
 
     for (provider, fact) in &facts.provider_defaults {

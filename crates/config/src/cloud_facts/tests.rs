@@ -839,10 +839,6 @@ fn legacy_live_and_operator_layers_cannot_be_overwritten_by_cloud_patches() {
             base_url_fingerprint: "fixture".into(),
             fetched_at: NOW,
         },
-        CatalogSource::CodewhaleLive {
-            revision: "fixture".into(),
-            fetched_at: NOW,
-        },
         CatalogSource::ConfigOverride,
         CatalogSource::UserOverride,
     ] {
@@ -872,6 +868,99 @@ fn legacy_live_and_operator_layers_cannot_be_overwritten_by_cloud_patches() {
     assert_eq!(snapshot.offerings, vec![row]);
 }
 
+/// The complement of the layer test above: a correction must actually *reach* a
+/// live Models.dev row, because that layer describes most of the models a user
+/// sees. Both sides go through [`crate::catalog::CatalogCompiler::with_live`],
+/// which routes a row by its own source, and the enriched rows come from the
+/// real producer — so this fails if the refresh ever goes back to stamping
+/// `Live`, which put every enriched row above the layer meant to correct it and
+/// left a published rate change reaching nobody without a reinstall.
+#[test]
+fn signed_facts_correct_a_live_models_dev_row_but_never_the_provider_roster() {
+    use super::{ModelFact, PricingFact, ScopedFacts};
+    use crate::catalog::live_offerings_from_models_dev;
+    use crate::models_dev::ModelsDevCatalog;
+
+    let raw = r#"{
+      "models": {},
+      "providers": {
+        "deepseek": {
+          "id": "deepseek",
+          "models": {
+            "deepseek-chat": {
+              "id": "deepseek-chat",
+              "modalities": { "input": ["text"], "output": ["text"] },
+              "limit": { "context": 65536, "output": 4096 },
+              "cost": { "input": 2.0, "output": 8.0 }
+            }
+          }
+        }
+      }
+    }"#;
+    let catalog = ModelsDevCatalog::parse_json(raw).expect("fixture parses");
+    let enriched = live_offerings_from_models_dev(&catalog, NOW);
+    assert_eq!(enriched.len(), 1, "one text-chat row");
+
+    let facts = ScopedFacts {
+        facts_version: 3,
+        key_id: "cwf-test-only".into(),
+        models: vec![ModelFact {
+            provider: "deepseek".into(),
+            id: "deepseek-chat".into(),
+            context_window: Some(131_072),
+            pricing: Some(PricingFact {
+                input_per_m: Some(0.5),
+                output_per_m: Some(1.5),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+
+    let corrected = CatalogCompiler::new()
+        .with_live(enriched.clone())
+        .with_cloud_facts(&facts, NOW)
+        .compile();
+    let row = corrected
+        .offerings
+        .iter()
+        .find(|row| row.wire_model_id == "deepseek-chat")
+        .expect("the row survives its own correction");
+    let limit = row.limit.as_ref().expect("limits are kept");
+    assert_eq!(
+        limit.context,
+        Some(131_072),
+        "the stale window is corrected"
+    );
+    assert_eq!(
+        limit.output,
+        Some(4_096),
+        "and only what the payload states is replaced"
+    );
+    assert_eq!(row.cost.as_ref().and_then(|cost| cost.input), Some(0.5));
+    assert_eq!(row.cost.as_ref().and_then(|cost| cost.output), Some(1.5));
+    assert!(matches!(
+        row.pricing_source(),
+        CatalogSource::CloudFacts { .. }
+    ));
+
+    // The same payload, same wire, once the provider's own roster owns the id:
+    // an authenticated endpoint outranks a signed correction, field for field.
+    let roster = CatalogOffering {
+        source: CatalogSource::Live {
+            base_url_fingerprint: "deepseek-endpoint".into(),
+            fetched_at: NOW,
+        },
+        ..enriched[0].clone()
+    };
+    let untouched = CatalogCompiler::new()
+        .with_live(vec![roster.clone()])
+        .with_cloud_facts(&facts, NOW)
+        .compile();
+    assert_eq!(untouched.offerings, vec![roster]);
+}
+
 #[test]
 fn unsigned_metadata_cannot_amplify_rejection_messages() {
     let signer = Signer::new("cwf-bounds");
@@ -882,6 +971,244 @@ fn unsigned_metadata_cannot_amplify_rejection_messages() {
         let error = verify(&serde_json::to_vec(&envelope).unwrap(), &keys).unwrap_err();
         assert!(error.to_string().len() < 256, "{field}");
     }
+}
+
+/// The unlisted assertion is the only thing that may override a provider
+/// roster's own omission, so the scoped view is where it is bounded: an
+/// `upsert` in a payload that expires. The rest of the patch survives either
+/// way — only the assertion is withdrawn, with a receipt.
+#[test]
+fn unlisted_assertion_needs_an_upsert_in_an_expiring_payload() {
+    let signer = Signer::new("cwf-unlisted");
+    let keys = [signer.trusted(KeyStatus::Active)];
+    let models = json!([
+        {"provider": "deepseek", "id": "preview-a", "allow_unlisted": true},
+        {"provider": "deepseek", "id": "preview-b", "op": "hide", "allow_unlisted": true},
+        {"provider": "deepseek", "id": "listed-c", "context_window": 1000},
+    ]);
+
+    let mut bounded = payload("stable", 11, "*");
+    bounded["models"] = models.clone();
+    bounded["not_after"] = json!("2026-12-31T00:00:00Z");
+    let verified = verify(
+        &serde_json::to_vec(&signer.envelope(&bounded)).unwrap(),
+        &keys,
+    )
+    .unwrap();
+    let scoped = scoped_view(&verified, &v("0.9.11"), NOW);
+    assert!(scoped.valid_until.is_some());
+    assert_eq!(scoped.models.len(), 3, "patches themselves are not dropped");
+    assert!(super::catalog_patch::is_unlisted_attested(
+        &scoped,
+        "deepseek",
+        "preview-a"
+    ));
+    assert!(
+        !super::catalog_patch::is_unlisted_attested(&scoped, "deepseek", "preview-b"),
+        "a hide cannot carry an existence assertion"
+    );
+    assert!(!super::catalog_patch::is_unlisted_attested(
+        &scoped, "deepseek", "listed-c"
+    ));
+    assert!(
+        !super::catalog_patch::is_unlisted_attested(&scoped, "deepseek", "preview-a-x"),
+        "the assertion names one exact id, never a prefix"
+    );
+
+    let mut unbounded = payload("stable", 12, "*");
+    unbounded["models"] = models;
+    let verified = verify(
+        &serde_json::to_vec(&signer.envelope(&unbounded)).unwrap(),
+        &keys,
+    )
+    .unwrap();
+    let scoped = scoped_view(&verified, &v("0.9.11"), NOW);
+    assert!(scoped.valid_until.is_none());
+    assert_eq!(scoped.models.len(), 3);
+    assert!(
+        !super::catalog_patch::is_unlisted_attested(&scoped, "deepseek", "preview-a"),
+        "an assertion that cannot expire is not honored"
+    );
+    assert_eq!(
+        scoped
+            .dropped
+            .iter()
+            .filter(|receipt| receipt.contains("allow_unlisted"))
+            .count(),
+        2
+    );
+}
+
+/// An attested id needs no invented context window to be listed, and gets no
+/// invented anything else either.
+#[test]
+fn attested_id_only_upsert_creates_a_row_with_everything_unknown() {
+    use super::{ModelFact, ScopedFacts};
+    let bare = |allow_unlisted| ModelFact {
+        provider: "deepseek".into(),
+        id: "preview-a".into(),
+        allow_unlisted,
+        ..Default::default()
+    };
+    let key = ("deepseek".to_string(), "preview-a".to_string());
+
+    let mut rows = BTreeMap::new();
+    let skipped = apply_model_patches(
+        &mut rows,
+        &ScopedFacts {
+            models: vec![bare(false)],
+            ..Default::default()
+        },
+        NOW,
+    );
+    assert!(rows.is_empty(), "an id alone still creates nothing");
+    assert_eq!(skipped.len(), 1);
+    assert!(
+        skipped[0]
+            .reason
+            .contains("context_window or allow_unlisted")
+    );
+
+    let mut rows = BTreeMap::new();
+    assert!(
+        apply_model_patches(
+            &mut rows,
+            &ScopedFacts {
+                facts_version: 3,
+                key_id: "cwf-unlisted".into(),
+                valid_until: Some(crate::catalog::now_unix() + 3600),
+                models: vec![bare(true)],
+                ..Default::default()
+            },
+            NOW,
+        )
+        .is_empty()
+    );
+    let row = &rows[&key];
+    assert_eq!(row.wire_model_id, "preview-a");
+    assert_eq!(row.limit, None, "no limits were stated, so none are known");
+    assert_eq!(row.cost, None);
+    assert_eq!(row.cost_source, None);
+    assert_eq!(row.reasoning, None);
+    assert_eq!(row.tool_call, None);
+    assert_eq!(row.modalities, None);
+    assert_eq!(row.attachment, None);
+    assert!(matches!(row.source, CatalogSource::CloudFacts { .. }));
+}
+
+/// A roster that answers with ids alone has said nothing about limits — not
+/// that they are unknown. Completion fills only that silence.
+#[test]
+fn provider_live_rows_are_completed_only_where_the_provider_is_silent() {
+    use super::catalog_patch::complete_provider_live_row;
+    use super::{ModelFact, PricingFact, ScopedFacts};
+    use crate::models_dev::{ModelsDevCost, ModelsDevLimit};
+    let live = CatalogSource::Live {
+        base_url_fingerprint: "fixture".into(),
+        fetched_at: NOW,
+    };
+    let facts = ScopedFacts {
+        facts_version: 4,
+        key_id: "cwf-unlisted".into(),
+        models: vec![ModelFact {
+            provider: "deepseek".into(),
+            id: "roster-model".into(),
+            context_window: Some(131_072),
+            max_output: Some(8_192),
+            reasoning: Some(true),
+            pricing: Some(PricingFact {
+                input_per_m: Some(1.0),
+                output_per_m: Some(2.0),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let id_only = CatalogOffering {
+        provider: "deepseek".into(),
+        wire_model_id: "roster-model".into(),
+        source: live.clone(),
+        ..Default::default()
+    };
+
+    let mut row = id_only.clone();
+    assert!(complete_provider_live_row(&mut row, &facts));
+    assert_eq!(row.limit.as_ref().unwrap().context, Some(131_072));
+    assert_eq!(row.limit.as_ref().unwrap().output, Some(8_192));
+    assert_eq!(row.reasoning, Some(true));
+    assert_eq!(row.source, live, "the row is still the provider's");
+    assert_eq!(row.cost, None, "a signed price is not billable here");
+    assert_eq!(row.cost_source, None);
+
+    // Anything the provider actually stated wins, field by field.
+    let mut row = CatalogOffering {
+        limit: Some(ModelsDevLimit {
+            context: Some(64_000),
+            ..Default::default()
+        }),
+        reasoning: Some(false),
+        cost: Some(ModelsDevCost {
+            input: Some(9.0),
+            ..Default::default()
+        }),
+        ..id_only.clone()
+    };
+    assert!(complete_provider_live_row(&mut row, &facts));
+    assert_eq!(row.limit.as_ref().unwrap().context, Some(64_000));
+    assert_eq!(row.limit.as_ref().unwrap().output, Some(8_192));
+    assert_eq!(row.reasoning, Some(false));
+    assert_eq!(row.cost.as_ref().unwrap().input, Some(9.0));
+
+    // Only provider-live rows are completed, and only by current facts.
+    for source in [
+        CatalogSource::Bundled,
+        CatalogSource::ConfigOverride,
+        CatalogSource::UserOverride,
+        CatalogSource::ModelsDevLive { fetched_at: NOW },
+    ] {
+        let mut row = CatalogOffering {
+            source,
+            ..id_only.clone()
+        };
+        let before = row.clone();
+        assert!(!complete_provider_live_row(&mut row, &facts));
+        assert_eq!(row, before);
+    }
+    let mut row = id_only.clone();
+    let expired = ScopedFacts {
+        valid_until: Some(0),
+        ..facts.clone()
+    };
+    assert!(!complete_provider_live_row(&mut row, &expired));
+    assert_eq!(row, id_only);
+}
+
+/// Producer/consumer parity for the additive field: an older payload without it
+/// keeps roster dominance, and a newer one round-trips through the same wire
+/// shape the publisher signs.
+#[test]
+fn allow_unlisted_defaults_to_false_and_round_trips() {
+    use super::ModelFact;
+    let without: ModelFact =
+        serde_json::from_value(json!({"provider": "deepseek", "id": "preview-a"})).unwrap();
+    assert!(!without.allow_unlisted);
+    assert_eq!(
+        serde_json::to_value(&without)
+            .unwrap()
+            .get("allow_unlisted"),
+        None,
+        "an unset assertion must not appear in the signed bytes"
+    );
+    let with: ModelFact = serde_json::from_value(
+        json!({"provider": "deepseek", "id": "preview-a", "allow_unlisted": true}),
+    )
+    .unwrap();
+    assert!(with.allow_unlisted);
+    assert_eq!(
+        serde_json::to_value(&with).unwrap()["allow_unlisted"],
+        json!(true)
+    );
 }
 
 #[test]

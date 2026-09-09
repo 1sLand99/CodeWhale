@@ -985,14 +985,15 @@ fn live_offerings_normalize_models_dev_provider_aliases() {
       }
     }"#;
     let catalog = ModelsDevCatalog::parse_json(raw).expect("fixture parses");
-    let rows = live_offerings_from_models_dev(&catalog, "fp-models-dev", 1_700);
+    let rows = live_offerings_from_models_dev(&catalog, 1_700);
 
+    // Layer 10, and no endpoint fingerprint: a models.dev row is external
+    // enrichment about a model, not a provider's statement about an endpoint.
+    // Stamping `Live` here put every enriched row above the signed layer that
+    // is supposed to be able to correct it.
     assert_eq!(
         find(&rows, "moonshot", "kimi-k2.5").source,
-        CatalogSource::Live {
-            base_url_fingerprint: "fp-models-dev".into(),
-            fetched_at: 1_700,
-        }
+        CatalogSource::ModelsDevLive { fetched_at: 1_700 }
     );
     find(&rows, "together", "deepseek-ai/DeepSeek-V4-Pro");
     find(&rows, "zai", "glm-5.2");
@@ -1013,8 +1014,12 @@ fn offering(provider: &str, wire: &str, source: CatalogSource) -> CatalogOfferin
     }
 }
 
+/// The layer-25 "signed CWC catalog" this test used to pin is gone: it never
+/// had a fetcher, and signed cloud facts (layer 15, under the provider roster)
+/// is the client's one online catalog authority. What still has to hold on the
+/// same wire is that the provider's own roster outranks models.dev.
 #[test]
-fn codewhale_live_catalog_beats_models_dev_on_the_same_wire() {
+fn provider_live_beats_models_dev_on_the_same_wire() {
     let snapshot = CatalogCompiler::new()
         .with_bundled(vec![offering(
             "command-code",
@@ -1026,11 +1031,11 @@ fn codewhale_live_catalog_beats_models_dev_on_the_same_wire() {
             "deepseek/deepseek-v4-flash",
             CatalogSource::ModelsDevLive { fetched_at: 1 },
         )])
-        .with_codewhale_live(vec![offering(
+        .with_provider_live(vec![offering(
             "command-code",
             "deepseek/deepseek-v4-flash",
-            CatalogSource::CodewhaleLive {
-                revision: "2026-08-31.1".into(),
+            CatalogSource::Live {
+                base_url_fingerprint: "fixture".into(),
                 fetched_at: 2,
             },
         )])
@@ -1042,7 +1047,7 @@ fn codewhale_live_catalog_beats_models_dev_on_the_same_wire() {
     );
     assert!(matches!(
         row.source,
-        CatalogSource::CodewhaleLive { ref revision, fetched_at: 2 }
-            if revision == "2026-08-31.1"
+        CatalogSource::Live { ref base_url_fingerprint, fetched_at: 2 }
+            if base_url_fingerprint == "fixture"
     ));
 }

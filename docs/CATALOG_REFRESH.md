@@ -76,7 +76,11 @@ When the TUI/runtime starts (and is not disabled):
    Models.dev (15 s timeout, explicit Codewhale user-agent, **no credentials**).
 3. On success: atomic write to
    `~/.codewhale/catalog/models-dev-catalog.json` and publish rows into
-   ProviderLake as `CatalogSource::Live`.
+   ProviderLake as `CatalogSource::ModelsDevLive` — layer 10, carrying no
+   endpoint fingerprint. Models.dev is a public catalog describing a model, so
+   a refreshed row is treated exactly like the layer-0 seed it supersedes and
+   stays correctable by layer 15. `CatalogSource::Live` is reserved for a
+   provider's own credential-scoped `/models` answer at layer 20.
 4. On failure: keep prior cache or fall back to the **bundled** seed. Model
    selection never hard-fails because Models.dev is down.
 

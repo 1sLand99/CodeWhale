@@ -85,7 +85,9 @@ struct PersistedModelsDevCache {
     schema_version: u32,
     /// Unix seconds the payload was fetched (or loaded from an override path).
     fetched_at: u64,
-    /// Fingerprint of the source URL/path used for `CatalogSource::Live`.
+    /// Fingerprint of the source URL/path this body was fetched from. It scopes
+    /// the on-disk cache; it is deliberately not carried on the published rows,
+    /// which describe a model rather than an endpoint (`ModelsDevLive`).
     source_fingerprint: String,
     /// Human-readable source label (URL or `file:…`); never a secret.
     source_label: String,
@@ -230,7 +232,6 @@ pub fn maybe_load_persisted_cache() {
     };
     if let Err(err) = publish_from_body(
         &cache.body,
-        &cache.source_fingerprint,
         cache.fetched_at,
         cache.source_label.as_str(),
         freshness,
@@ -281,13 +282,7 @@ pub async fn refresh(force_network: bool) -> Result<usize, ModelsDevRefreshError
     };
     let fetched_at = now_unix();
     let fingerprint = base_url_fingerprint(&url);
-    let count = publish_from_body(
-        &body,
-        &fingerprint,
-        fetched_at,
-        &url,
-        ModelsDevFreshness::Live,
-    )?;
+    let count = publish_from_body(&body, fetched_at, &url, ModelsDevFreshness::Live)?;
     if let Some(path) = cache_path() {
         save_cache_file(
             &path,
@@ -341,13 +336,7 @@ async fn refresh_from_path(path: &Path) -> Result<usize, ModelsDevRefreshError> 
     let fetched_at = now_unix();
     let label = format!("file:{}", path.display());
     let fingerprint = base_url_fingerprint(&label);
-    let count = publish_from_body(
-        &body,
-        &fingerprint,
-        fetched_at,
-        &label,
-        ModelsDevFreshness::Live,
-    )?;
+    let count = publish_from_body(&body, fetched_at, &label, ModelsDevFreshness::Live)?;
     if let Some(cache) = cache_path() {
         save_cache_file(
             &cache,
@@ -391,7 +380,6 @@ async fn fetch_catalog_body(url: &str) -> Result<String, ModelsDevRefreshError> 
 
 fn publish_from_body(
     body: &str,
-    fingerprint: &str,
     fetched_at: u64,
     source_label: &str,
     freshness: ModelsDevFreshness,
@@ -401,7 +389,9 @@ fn publish_from_body(
         mark_failed(mapped.clone());
         mapped
     })?;
-    let offerings = live_offerings_from_models_dev(&catalog, fingerprint, fetched_at);
+    // The source fingerprint scopes the *disk cache*, not the rows: a
+    // models.dev row describes a model, not an endpoint (`ModelsDevLive`).
+    let offerings = live_offerings_from_models_dev(&catalog, fetched_at);
     if offerings.is_empty() {
         let err = ModelsDevRefreshError::EmptyCatalog;
         mark_failed(err.clone());
@@ -493,11 +483,7 @@ pub(crate) fn offerings_from_json_for_test(
     body: &str,
 ) -> Result<Vec<codewhale_config::catalog::CatalogOffering>, String> {
     let catalog = ModelsDevCatalog::parse_json(body).map_err(|e| e.to_string())?;
-    Ok(live_offerings_from_models_dev(
-        &catalog,
-        "test-fp",
-        1_700_000_000,
-    ))
+    Ok(live_offerings_from_models_dev(&catalog, 1_700_000_000))
 }
 
 #[cfg(test)]
@@ -604,9 +590,12 @@ mod tests {
         assert!(providers.contains(&"unknown-gateway"));
         assert!(!providers.contains(&"togetherai"));
         assert!(!providers.contains(&"moonshotai"));
+        // Layer 10, not layer 20: a refresh of a public catalog is external
+        // enrichment about a model, not a provider's answer about an endpoint,
+        // so it stays correctable by the signed layer above it.
         assert!(
             rows.iter()
-                .all(|r| matches!(r.source, CatalogSource::Live { .. }))
+                .all(|r| matches!(r.source, CatalogSource::ModelsDevLive { .. }))
         );
     }
 

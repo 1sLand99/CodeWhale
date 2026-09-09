@@ -85,9 +85,77 @@ The existing compiler inserts cloud facts at layer 15:
 < 30 config < 40 user overrides < policy DENY
 ```
 
-An upsert patches specified metadata fields. Creating a row requires its context
-window. Deprecation annotates; hide only removes lower bundled/Models.dev rows.
-Cloud data cannot delete provider-live, account, config or user rows.
+An upsert patches specified metadata fields. Creating a row requires either its
+context window or an `allow_unlisted` assertion (below); an attested ID-only row
+is created with every limit, price and capability **unknown** rather than
+inferred from a sibling model or a lower stale layer. Deprecation annotates;
+hide only removes lower bundled/Models.dev rows. Cloud data cannot delete
+provider-live, account, config or user rows.
+
+**Which rows a patch reaches.** An upsert replaces fields on a row held at
+layer 0, 5 or 10 — the bundled Models.dev seed, the bundled Codewhale snapshot,
+and a live Models.dev refresh — and is skipped with a receipt on anything at
+layer 20 and above. That reach is the point of the layer split: most models a
+user sees are described by Models.dev rather than by the provider, so a stale
+context window or a changed rate on such a model is exactly what a signed
+correction exists to fix, without a reinstall.
+
+The distinction is what was *asked*, not what was fetched most recently. A
+provider `/v1/models` answer is a fact about an endpoint the user
+authenticated to, so it outranks a signed correction and is only ever
+completed, never displaced. A Models.dev refresh is a public third-party
+catalog that is merely fresher than the copy compiled into the binary, so it
+is corrigible on the same terms as that copy. A refreshed row therefore carries
+`CatalogSource::ModelsDevLive` and no endpoint fingerprint; only a provider
+roster carries `CatalogSource::Live`.
+
+A provider `/v1/models` roster is authoritative for the IDs it lists **and for
+its own omissions**. This client keeps no history of past rosters, so it cannot
+tell a never-listed preview from a model the provider retired, and it does not
+guess: no local layer — bundled, Models.dev, or anything else — is evidence
+about what a provider once served. Without an explicit assertion the roster
+stands, and a signed patch can never put an omitted ID back.
+
+`allow_unlisted` is that explicit assertion: a signed boolean on one model
+patch, default false, meaning "this exact ID is available on this provider's
+official endpoint even though the roster omits it". It is honored only on an
+`upsert` and only in a payload that carries `not_after`, so the claim always
+expires and has to be renewed by publishing rather than lived with. An older
+client that predates the field deserializes it as false and simply keeps roster
+dominance. The assertion grants nothing else: it does not bypass identity,
+region, endpoint, account/OAuth entitlement, or user configuration precedence,
+and it names one exact ID — no prefix, family or fallback.
+
+`hide` and `deprecate` act on a row the local catalog holds. An attested row is
+retracted by dropping its upsert from the next payload or letting `not_after`
+lapse. A failed or rejected request is never treated as evidence a model is
+absent, and no fallback model is substituted for one.
+
+A roster that answers with IDs alone has said nothing about limits or
+capabilities — it has not said they are unknown. Signed values therefore
+**complete** a provider-live row where it is silent, and never displace what the
+provider stated: layer 20 still wins every field it sets. Completion covers
+context, max output and reasoning support. One helper does this for the picker,
+the metadata lookup and the route resolver alike, so those three cannot drift;
+on the route-scoped surfaces it is gated by the identity/endpoint rule below,
+while the cross-provider merged view stays partition-scoped as it already is for
+ordinary patches. It deliberately excludes price: a
+filled price would sit on a provider-live row with a signed price source, which
+the dispatch-quote check does not admit, so it would render without being
+billable. Cloud prices continue to apply only where no fresh roster owns the
+row, keeping the price classes atomic and the source recorded.
+
+Signed rows are scoped to one canonical provider identity on that provider's
+official HTTPS endpoint contract, so a custom or proxied base URL never inherits
+them. Catalog partitions collapse regional and dual-wire aliases onto a vendor
+primary (`deepseek-cn` and `deepseek-anthropic` read `deepseek`;
+`siliconflow-CN` reads `siliconflow`), and that collapse is not a channel for
+facts: only a route whose own canonical identity is the identity the payload
+names consumes them, matching how provider defaults have always been keyed.
+Signing for an identity the catalog collapses is therefore inert rather than
+cross-applied. The cross-provider merged view remains partition-scoped by
+design; the endpoint contract is enforced at the route-scoped surfaces that
+execution, pricing, and the model list read.
 
 Capability and price provenance are independent. A capability-only patch keeps
 the original price source. A cloud price block replaces all token classes
@@ -126,6 +194,29 @@ website. `facts_current` must be a read-only view with explicit SELECT grants,
 RLS and policies limited to published public channels. This repository slice
 performs no remote schema, grant, key, or data mutation; those controls require
 separate deployment evidence.
+
+Two storage properties are part of the delivery contract rather than an
+implementation detail, because a published fact is retracted through them:
+
+- **A channel serves its head version only.** Revoking, expiring or
+  future-dating the head must make the channel serve *nothing*, never the
+  previous release. Silently re-serving an older version is a rollback
+  delivered to every client whose version floor is not yet set; the repair for
+  a bad release is publishing a higher `facts_version`, and the client's own
+  rollback floor is the second line of defence, not the first.
+- **`facts_version` is monotonic per channel.** Accepting a version at or below
+  a channel's published high-water mark would let a withdrawn payload return.
+
+Retraction therefore has two independent halves, and the operator should know
+which one they are using. Publishing a later payload that drops the entry (or
+letting `not_after` lapse) retracts the *fact*, and a client applies that at its
+next successful refresh. `facts-publish.mjs revoke` stops the *release* at the
+transport instead: it hands nothing to a client that asks, so a client already
+holding the revoked envelope keeps applying it until its cached copy goes stale
+— `ttl_secs`, 6 h by default, after which the payload stops being applied
+whether or not a refresh succeeds. Neither half is instantaneous, and this layer
+has no recall channel; a fact that must stop applying at an exact moment belongs
+in `not_after`, not in a later revocation.
 
 ## Authoring and public fixtures
 
