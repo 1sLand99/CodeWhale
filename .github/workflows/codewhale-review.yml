@@ -16,8 +16,10 @@ name: Codewhale PR Review
 # being fetched for its diff. Same-repository authors already have write access.
 #
 # CODEWHALE_REVIEW_MAX_CHARS bounds each complete ordered review pass
-# (default 200000). CODEWHALE_REVIEW_MAX_PASSES defaults to 1; increasing it is
-# an explicit spend/duration choice. Exceeding either bound never posts a prefix.
+# (normally 200000). CODEWHALE_REVIEW_MAX_PASSES normally defaults to 1.
+# PR #6002 has an explicitly approved 500000-char / 16-pass / 65536-output
+# DeepSeek Pro budget below; other PRs retain the conservative defaults.
+# Exceeding either coverage bound never posts a prefix.
 # Missing keys and provider outages keep the existing advisory policy, and
 # their explicit non-run receipts must never be counted as completed reviews.
 
@@ -139,11 +141,14 @@ jobs:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          CODEWHALE_REVIEW_PROVIDER: ${{ vars.CODEWHALE_REVIEW_PROVIDER }}
-          CODEWHALE_REVIEW_MODEL: ${{ vars.CODEWHALE_REVIEW_MODEL }}
-          CODEWHALE_REVIEW_MAX_OUTPUT_TOKENS: ${{ vars.CODEWHALE_REVIEW_MAX_OUTPUT_TOKENS }}
-          CODEWHALE_REVIEW_MAX_CHARS: ${{ vars.CODEWHALE_REVIEW_MAX_CHARS }}
-          CODEWHALE_REVIEW_MAX_PASSES: ${{ vars.CODEWHALE_REVIEW_MAX_PASSES }}
+          # One approved release review, using the existing provider secret.
+          # These ceilings authorize complete ordered passes only for PR #6002;
+          # repository variables remain explicit operator overrides.
+          CODEWHALE_REVIEW_PROVIDER: ${{ vars.CODEWHALE_REVIEW_PROVIDER || (github.event.pull_request.number == 6002 && 'deepseek') || '' }}
+          CODEWHALE_REVIEW_MODEL: ${{ vars.CODEWHALE_REVIEW_MODEL || (github.event.pull_request.number == 6002 && 'deepseek-v4-pro') || '' }}
+          CODEWHALE_REVIEW_MAX_OUTPUT_TOKENS: ${{ vars.CODEWHALE_REVIEW_MAX_OUTPUT_TOKENS || (github.event.pull_request.number == 6002 && '65536') || '' }}
+          CODEWHALE_REVIEW_MAX_CHARS: ${{ vars.CODEWHALE_REVIEW_MAX_CHARS || (github.event.pull_request.number == 6002 && '500000') || '200000' }}
+          CODEWHALE_REVIEW_MAX_PASSES: ${{ vars.CODEWHALE_REVIEW_MAX_PASSES || (github.event.pull_request.number == 6002 && '16') || '1' }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail

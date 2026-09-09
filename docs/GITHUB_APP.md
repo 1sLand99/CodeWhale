@@ -71,6 +71,15 @@ with `--no-project-config`. Account mode deliberately pins the relay route:
 the account agent precondition reports a configured provider, but does not
 supply an exact model id or a vendor credential to the runner.
 
+For release PR **#6002** only, the workflow supplies an explicitly approved
+`deepseek` / `deepseek-v4-pro` route and ceilings of **500000** characters per
+pass, **16** complete passes, and **65536** output tokens per request. Existing
+repository variables override these values. Other PRs retain the defaults
+below. This exception changes no credentials or coverage rules: a diff that
+requires more than 16 passes still fails before model review, and a provider
+non-run is never completed-review evidence. Keep the release head frozen
+during review to avoid cancellation and repeated provider cost.
+
 ## Complete diffs and input limits
 
 The workflow checks out the event's pinned head SHA for same-repository PRs,
