@@ -1,5 +1,6 @@
 //! Tool for structured code reviews of files, diffs, or pull requests.
 
+use std::borrow::Cow;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -205,6 +206,11 @@ pub struct PrReviewPassManifest {
     pub number: usize,
     pub diff_fingerprint: String,
     pub diff_chars: usize,
+    /// Number of entries in `files`: whole file patches plus, for an
+    /// oversized text file, its `(part k/n)` parts. Parts of one file never
+    /// share a pass — their combined size exceeds the whole file, which
+    /// already exceeded the per-pass limit — so this is also the distinct
+    /// file count of the pass and parts cannot inflate coverage.
     pub file_count: usize,
     pub files: Vec<String>,
 }
@@ -258,6 +264,37 @@ fn pr_file_patches(diff: &str) -> Vec<&str> {
         .collect()
 }
 
+/// Split one file patch into its full header (`diff --git` through the `+++`
+/// line) and its complete unified-diff hunks, every slice byte-exact. A patch
+/// without hunks (binary or metadata-only) is all header and cannot be split.
+fn pr_file_hunks(patch: &str) -> (&str, Vec<&str>) {
+    let mut starts = patch
+        .match_indices("@@ ")
+        .filter_map(|(offset, _)| {
+            (offset == 0 || patch.as_bytes().get(offset.wrapping_sub(1)) == Some(&b'\n'))
+                .then_some(offset)
+        })
+        .collect::<Vec<_>>();
+    let header = starts.first().map_or(patch, |end| &patch[..*end]);
+    starts.push(patch.len());
+    let hunks = starts
+        .windows(2)
+        .map(|window| &patch[window[0]..window[1]])
+        .collect();
+    (header, hunks)
+}
+
+/// One unit of PR review pass packing: a whole file patch, or one part of an
+/// oversized text file split at complete hunk boundaries. `header_bytes` is
+/// nonzero only on continuation parts, where the full file header is
+/// replayed; it is the exact byte prefix to strip when rebuilding the
+/// original diff.
+struct PrReviewPiece<'a> {
+    diff: Cow<'a, str>,
+    label: String,
+    header_bytes: usize,
+}
+
 pub(crate) fn plan_pr_review(
     diff: &str,
     view: &super::review_pr::GhPullRequest,
@@ -277,22 +314,69 @@ pub(crate) fn plan_pr_review(
         view.changed_files
     );
 
-    let mut grouped: Vec<Vec<&str>> = Vec::new();
-    let mut current = Vec::new();
-    let mut current_chars = 0;
+    // A whole file stays together whenever it fits. An oversized text file
+    // splits only at complete hunk boundaries, with the full file header
+    // replayed into every part so each part stays a self-describing patch;
+    // no line is elided, shortened or reordered. Sizes use the model
+    // representation, so a binary payload already omitted there can never
+    // drive a split.
+    let mut pieces: Vec<PrReviewPiece<'_>> = Vec::new();
     for patch in patches {
         let patch_chars = super::review_pr::model_diff(patch).chars().count();
+        if patch_chars <= max_chars {
+            pieces.push(PrReviewPiece {
+                diff: Cow::Borrowed(patch),
+                label: patch_label(patch),
+                header_bytes: 0,
+            });
+            continue;
+        }
+        let (header, hunks) = pr_file_hunks(patch);
+        let header_chars = header.chars().count();
+        let largest_hunk_chars = hunks.iter().map(|hunk| hunk.chars().count()).max();
         anyhow::ensure!(
-            patch_chars <= max_chars,
+            largest_hunk_chars.is_some_and(|hunk_chars| header_chars + hunk_chars <= max_chars),
             "Complete PR file patch {} requires {patch_chars} characters, exceeding the per-pass review limit of {max_chars}. No review was run or posted.",
             patch_label(patch)
         );
-        if !current.is_empty() && current_chars + patch_chars > max_chars {
+        let label = patch_label(patch);
+        let mut parts: Vec<String> = Vec::new();
+        let mut part = String::from(header);
+        let mut part_chars = header_chars;
+        for hunk in hunks {
+            let hunk_chars = hunk.chars().count();
+            if part_chars > header_chars && part_chars + hunk_chars > max_chars {
+                parts.push(std::mem::replace(&mut part, String::from(header)));
+                part_chars = header_chars;
+            }
+            part.push_str(hunk);
+            part_chars += hunk_chars;
+        }
+        parts.push(part);
+        let total = parts.len();
+        pieces.extend(
+            parts
+                .into_iter()
+                .enumerate()
+                .map(|(index, part)| PrReviewPiece {
+                    label: format!("{label} (part {}/{total})", index + 1),
+                    header_bytes: if index == 0 { 0 } else { header.len() },
+                    diff: Cow::Owned(part),
+                }),
+        );
+    }
+
+    let mut grouped: Vec<Vec<PrReviewPiece<'_>>> = Vec::new();
+    let mut current: Vec<PrReviewPiece<'_>> = Vec::new();
+    let mut current_chars = 0;
+    for piece in pieces {
+        let piece_chars = super::review_pr::model_diff(&piece.diff).chars().count();
+        if !current.is_empty() && current_chars + piece_chars > max_chars {
             grouped.push(std::mem::take(&mut current));
             current_chars = 0;
         }
-        current.push(patch);
-        current_chars += patch_chars;
+        current.push(piece);
+        current_chars += piece_chars;
     }
     if !current.is_empty() {
         grouped.push(current);
@@ -304,33 +388,41 @@ pub(crate) fn plan_pr_review(
         grouped.len()
     );
 
+    // The completeness guard, byte-for-byte as before: continuation parts
+    // replay the file header, so exactly those repeated headers are stripped
+    // and the rebuilt plan must equal the original diff.
+    anyhow::ensure!(
+        grouped
+            .iter()
+            .flatten()
+            .map(|piece| &piece.diff[piece.header_bytes..])
+            .collect::<String>()
+            == diff,
+        "PR review plan did not preserve the complete diff byte-for-byte"
+    );
+
     let passes = grouped
         .into_iter()
         .enumerate()
-        .map(|(index, patches)| {
-            let diff = patches.concat();
-            let labels = patches
+        .map(|(index, pieces)| {
+            let diff = pieces
                 .iter()
-                .map(|patch| patch_label(patch))
+                .map(|piece| -> &str { &piece.diff })
+                .collect::<String>();
+            let labels = pieces
+                .iter()
+                .map(|piece| piece.label.clone())
                 .collect::<Vec<_>>();
             let manifest = PrReviewPassManifest {
                 number: index + 1,
                 diff_fingerprint: diff_fingerprint(&diff),
                 diff_chars: super::review_pr::model_diff(&diff).chars().count(),
-                file_count: patches.len(),
+                file_count: pieces.len(),
                 files: labels,
             };
             PrReviewPass { manifest, diff }
         })
         .collect::<Vec<_>>();
-    anyhow::ensure!(
-        passes
-            .iter()
-            .map(|pass| pass.diff.as_str())
-            .collect::<String>()
-            == diff,
-        "PR review plan did not preserve the complete diff byte-for-byte"
-    );
     let manifest = PrReviewManifest {
         base_sha: view.base_sha.clone(),
         head_sha: view.head_sha.clone(),
@@ -1653,6 +1745,21 @@ mod tests {
         )
     }
 
+    fn pr_multi_hunk_patch(name: &str, contents: &[&str]) -> String {
+        let mut patch = format!(
+            "diff --git a/{name} b/{name}\nindex {}..{} 100644\n--- a/{name}\n+++ b/{name}\n",
+            "1".repeat(40),
+            "2".repeat(40)
+        );
+        for (index, content) in contents.iter().enumerate() {
+            patch.push_str(&format!(
+                "@@ -{0},1 +{0},1 @@\n-old{0}\n+{content}\n",
+                index + 1
+            ));
+        }
+        patch
+    }
+
     fn clean_pass(summary: &str) -> String {
         json!({
             "summary": summary,
@@ -1700,6 +1807,134 @@ mod tests {
         let error = plan_pr_review(&diff, &pr_view(1), 100, MAX_REVIEW_PASSES).unwrap_err();
         assert!(error.to_string().contains("large.txt"));
         assert!(error.to_string().contains("No review was run or posted"));
+    }
+
+    #[test]
+    fn pr_batch_plan_splits_oversized_file_only_at_complete_hunk_boundaries() {
+        let contents = ["alpha", "bravo", "charlie", "delta"];
+        let patch = pr_multi_hunk_patch("big.txt", &contents);
+        let (header, hunks) = pr_file_hunks(&patch);
+        assert_eq!(hunks.len(), 4);
+        assert!(hunks.iter().all(|hunk| hunk.starts_with("@@ ")));
+        assert_eq!(format!("{header}{}", hunks.concat()), patch);
+
+        // A file that fits is never split.
+        let whole = plan_pr_review(&patch, &pr_view(1), patch.chars().count(), 1).unwrap();
+        assert_eq!(whole.passes.len(), 1);
+        assert_eq!(whole.passes[0].diff, patch);
+        assert_eq!(whole.manifest.passes[0].files, ["a/big.txt b/big.txt"]);
+
+        // Header plus the largest hunk fits, so header plus any two hunks does
+        // not: exactly one hunk per part, four parts, four passes.
+        let max_chars =
+            header.chars().count() + hunks.iter().map(|hunk| hunk.chars().count()).max().unwrap();
+        let error = plan_pr_review(&patch, &pr_view(1), max_chars, 3).unwrap_err();
+        assert!(error.to_string().contains("requires 4 passes"));
+        assert!(error.to_string().contains("No review was run or posted"));
+
+        let plan = plan_pr_review(&patch, &pr_view(1), max_chars, 4).unwrap();
+        assert_eq!(plan.passes.len(), 4);
+        assert_eq!(plan.manifest.file_count, 1);
+        let mut rebuilt = String::new();
+        for (index, pass) in plan.passes.iter().enumerate() {
+            assert!(pass.diff.starts_with(header));
+            assert!(pass.diff.contains(&format!("+{}", contents[index])));
+            assert_eq!(pass.manifest.diff_chars, pass.diff.chars().count());
+            assert!(pass.manifest.diff_chars <= max_chars);
+            assert_eq!(
+                pass.manifest.files,
+                [format!("a/big.txt b/big.txt (part {}/4)", index + 1)]
+            );
+            assert_eq!(pass.manifest.file_count, 1);
+            if index == 0 {
+                rebuilt.push_str(&pass.diff);
+            } else {
+                rebuilt.push_str(
+                    pass.diff
+                        .strip_prefix(header)
+                        .expect("continuation part replays the full file header"),
+                );
+            }
+        }
+        assert_eq!(rebuilt, patch);
+    }
+
+    #[test]
+    fn pr_batch_plan_refuses_when_one_hunk_with_header_cannot_fit() {
+        let patch = pr_multi_hunk_patch("mixed.txt", &["ok", &"x".repeat(500)]);
+        let (header, hunks) = pr_file_hunks(&patch);
+        // The small hunk fits with the header; the large one does not, so the
+        // file cannot be split and the plan must fail before any pass.
+        let max_chars = header.chars().count() + hunks[0].chars().count();
+        let error = plan_pr_review(&patch, &pr_view(1), max_chars, MAX_REVIEW_PASSES).unwrap_err();
+        assert!(error.to_string().contains("mixed.txt"));
+        assert!(error.to_string().contains("No review was run or posted"));
+    }
+
+    #[test]
+    fn pr_batch_plan_never_splits_a_binary_patch_for_its_omitted_payload() {
+        let patch = format!(
+            "diff --git a/blob.bin b/blob.bin\nindex {}..{} 100644\nGIT binary patch\nliteral 8\n{}\n",
+            "1".repeat(40),
+            "2".repeat(40),
+            "z".repeat(10_000)
+        );
+        let model_chars = super::super::review_pr::model_diff(&patch).chars().count();
+        assert!(model_chars < patch.chars().count());
+        let plan = plan_pr_review(&patch, &pr_view(1), model_chars, 1).unwrap();
+        assert_eq!(plan.passes.len(), 1);
+        assert_eq!(plan.passes[0].diff, patch);
+        assert_eq!(plan.manifest.passes[0].files, ["a/blob.bin b/blob.bin"]);
+        assert_eq!(plan.manifest.binary_file_patches, 1);
+    }
+
+    #[test]
+    fn pr_batch_plan_counts_distinct_files_when_a_split_shares_the_plan() {
+        let hunk_content = "x".repeat(200);
+        let big = pr_multi_hunk_patch(
+            "big.txt",
+            &[
+                hunk_content.as_str(),
+                hunk_content.as_str(),
+                hunk_content.as_str(),
+            ],
+        );
+        let small = pr_patch("small.txt", "tiny");
+        let diff = format!("{big}{small}");
+        let (header, hunks) = pr_file_hunks(&big);
+        let hunk_chars = hunks[0].chars().count();
+        let header_chars = header.chars().count();
+        // Two parts for big.txt (header + two hunks, header + one hunk), then
+        // small.txt packed after the second part.
+        let max_chars = header_chars + 2 * hunk_chars + small.chars().count();
+        assert!(big.chars().count() > max_chars);
+        let plan = plan_pr_review(&diff, &pr_view(2), max_chars, 2).unwrap();
+        assert_eq!(plan.passes.len(), 2);
+        assert_eq!(plan.manifest.file_count, 2);
+        assert_eq!(
+            plan.manifest.passes[0].files,
+            ["a/big.txt b/big.txt (part 1/2)"]
+        );
+        assert_eq!(plan.manifest.passes[0].file_count, 1);
+        assert_eq!(
+            plan.manifest.passes[1].files,
+            [
+                "a/big.txt b/big.txt (part 2/2)".to_string(),
+                "a/small.txt b/small.txt".to_string()
+            ]
+        );
+        assert_eq!(plan.manifest.passes[1].file_count, 2);
+        // The second pass holds big.txt's continuation (header replayed),
+        // then small.txt whole; stripping the one repeated header rebuilds
+        // the original diff byte-for-byte.
+        let mut rebuilt = plan.passes[0].diff.clone();
+        rebuilt.push_str(
+            plan.passes[1]
+                .diff
+                .strip_prefix(header)
+                .expect("continuation part replays the full file header"),
+        );
+        assert_eq!(rebuilt, diff);
     }
 
     #[test]
