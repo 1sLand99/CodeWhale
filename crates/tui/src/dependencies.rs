@@ -397,6 +397,85 @@ pub trait ExternalTool {
 /// Git version control.
 pub struct Git;
 
+impl Git {
+    /// Construct a read-only review command with content conversion disabled.
+    /// Review callers also pass `--no-ext-diff` and `--no-textconv` for diffs.
+    /// Configured filters otherwise execute even when those flags are present.
+    pub(crate) fn review_command(workspace: &Path) -> anyhow::Result<Command> {
+        use anyhow::{Context, bail};
+
+        let base = || -> anyhow::Result<Command> {
+            let mut command = Self::command().context("git not found on PATH")?;
+            command
+                .current_dir(workspace)
+                .stdin(std::process::Stdio::null())
+                // GIT_CONFIG redirects only `git config`, not `git diff`.
+                // Both phases must observe the same effective repository config.
+                .env_remove("GIT_CONFIG")
+                .env_remove("GIT_CONFIG_PARAMETERS")
+                .env("GIT_CONFIG_COUNT", "2")
+                .env("GIT_CONFIG_KEY_0", "core.fsmonitor")
+                .env("GIT_CONFIG_VALUE_0", "false")
+                .env("GIT_CONFIG_KEY_1", "core.hooksPath")
+                .env(
+                    "GIT_CONFIG_VALUE_1",
+                    if cfg!(windows) { "NUL" } else { "/dev/null" },
+                )
+                .env("GIT_NO_LAZY_FETCH", "1")
+                .env("GIT_NO_REPLACE_OBJECTS", "1")
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .env("GIT_PAGER", "");
+            Ok(command)
+        };
+        let output = base()?
+            .args([
+                "config",
+                "--null",
+                "--name-only",
+                "--get-regexp",
+                r"^filter\..*\.(clean|process|required)$",
+            ])
+            .output()
+            .context("Failed to inspect Git review filters")?;
+        let no_filters =
+            output.status.code() == Some(1) && output.stdout.is_empty() && output.stderr.is_empty();
+        if (!output.status.success() && !no_filters)
+            || (!output.stdout.is_empty() && !output.stdout.ends_with(&[0]))
+        {
+            bail!("Cannot safely inspect Git review configuration");
+        }
+        let mut filters = std::collections::BTreeSet::new();
+        for key in output
+            .stdout
+            .split(|byte| *byte == 0)
+            .filter(|key| !key.is_empty())
+        {
+            let key =
+                std::str::from_utf8(key).context("Git review filter name is not valid UTF-8")?;
+            let (driver, _) = key
+                .rsplit_once('.')
+                .context("Invalid Git review filter key")?;
+            filters.insert(driver);
+        }
+        let mut command = base()?;
+        let mut count = 2;
+        for driver in filters {
+            for (suffix, value) in [("clean", ""), ("process", ""), ("required", "false")] {
+                // A subsection may contain '='; `-c key=value` would then
+                // override a different key. Separate env fields preserve it.
+                command.env(
+                    format!("GIT_CONFIG_KEY_{count}"),
+                    format!("{driver}.{suffix}"),
+                );
+                command.env(format!("GIT_CONFIG_VALUE_{count}"), value);
+                count += 1;
+            }
+        }
+        command.env("GIT_CONFIG_COUNT", count.to_string());
+        Ok(command)
+    }
+}
+
 impl ExternalTool for Git {
     fn candidates() -> &'static [&'static str] {
         &["git"]

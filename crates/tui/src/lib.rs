@@ -8341,7 +8341,11 @@ async fn run_review(config: &Config, args: ReviewArgs) -> Result<()> {
         Some(number) => Some((number, run_gh_pr_view(number, args.repo.as_deref())?)),
         None => None,
     };
-    let diff = collect_diff(&args, pr_view.as_ref().map(|(_, view)| view))?;
+    let diff = collect_diff(
+        &args,
+        pr_view.as_ref().map(|(_, view)| view),
+        &std::env::current_dir()?,
+    )?;
     if diff.trim().is_empty() {
         bail!("No diff to review.");
     }
@@ -9459,7 +9463,11 @@ fn format_pr_prompt(number: u32, view: &GhPullRequest, diff: &str) -> String {
     )
 }
 
-fn collect_diff(args: &ReviewArgs, pr_view: Option<&GhPullRequest>) -> Result<String> {
+fn collect_diff(
+    args: &ReviewArgs,
+    pr_view: Option<&GhPullRequest>,
+    workspace: &std::path::Path,
+) -> Result<String> {
     let diff = if let Some(number) = args.pr {
         run_gh_pr_diff(
             number,
@@ -9467,9 +9475,10 @@ fn collect_diff(args: &ReviewArgs, pr_view: Option<&GhPullRequest>) -> Result<St
             pr_view.context("PR snapshot is required")?,
         )?
     } else {
-        let mut cmd = crate::dependencies::Git::command()
-            .ok_or_else(|| anyhow::anyhow!("git not found on PATH"))?;
-        cmd.arg("diff");
+        let mut cmd = crate::dependencies::Git::review_command(workspace)?;
+        // Review repository content without executing its diff drivers.
+        cmd.current_dir(workspace)
+            .args(["diff", "--no-ext-diff", "--no-textconv"]);
         if args.staged {
             cmd.arg("--cached");
         }
@@ -15984,6 +15993,140 @@ api_key = "test-only-key"
             "",
         ]
         .join("\n")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_review_collects_raw_changes_without_running_diff_helpers() {
+        use std::os::unix::fs::PermissionsExt;
+
+        for helper_kind in ["textconv", "external", "clean", "process"] {
+            for mode in ["working", "staged", "base", "path"] {
+                let workspace = tempfile::tempdir().unwrap();
+                let path = workspace.path();
+                let git = |args: &[&str]| {
+                    let output = crate::dependencies::Git::command()
+                        .expect("git")
+                        .current_dir(path)
+                        .args([
+                            "-c",
+                            "core.hooksPath=/dev/null",
+                            "-c",
+                            "commit.gpgSign=false",
+                        ])
+                        .args(args)
+                        .output()
+                        .unwrap();
+                    assert!(
+                        output.status.success(),
+                        "{args:?}: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                    String::from_utf8(output.stdout).unwrap()
+                };
+                git(&["init", "-q"]);
+                git(&["config", "user.name", "Review fixture"]);
+                git(&["config", "user.email", "fixture@example.invalid"]);
+                std::fs::write(
+                    path.join(".gitattributes"),
+                    "*.txt diff=fixture filter=fixture=odd\n",
+                )
+                .unwrap();
+                for name in ["- source.txt", "other.txt"] {
+                    std::fs::write(path.join(name), "before\n").unwrap();
+                }
+                std::fs::write(path.join("binary.dat"), b"\0before").unwrap();
+                git(&["add", "."]);
+                git(&["commit", "-qm", "before"]);
+                for name in ["- source.txt", "other.txt"] {
+                    std::fs::write(path.join(name), "after\n").unwrap();
+                }
+                std::fs::write(path.join("binary.dat"), b"\0after").unwrap();
+                if matches!(mode, "staged" | "base") {
+                    git(&["add", "."]);
+                }
+                if mode == "base" {
+                    git(&["commit", "-qm", "after"]);
+                }
+                let script = match helper_kind {
+                    "external" => {
+                        "#!/bin/sh\nprintf touched > helper-marker\nprintf external-diff\n"
+                    }
+                    "clean" => "#!/bin/sh\nprintf touched > helper-marker\ncat\n",
+                    "process" => "#!/bin/sh\nprintf touched > helper-marker\nexit 1\n",
+                    _ => "#!/bin/sh\nprintf touched > helper-marker\ncat < \"$1\"\n",
+                };
+                let helper = path.join("helper.sh");
+                std::fs::write(&helper, script).unwrap();
+                std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700)).unwrap();
+                git(&[
+                    "config",
+                    match helper_kind {
+                        "external" => "diff.external",
+                        "clean" => "filter.fixture=odd.clean",
+                        "process" => "filter.fixture=odd.process",
+                        _ => "diff.fixture.textconv",
+                    },
+                    "./helper.sh",
+                ]);
+                if matches!(helper_kind, "clean" | "process") {
+                    git(&["config", "filter.fixture=odd.required", "true"]);
+                }
+                let (review_flags, diff_flags): (&[&str], &[&str]) = match mode {
+                    "staged" => (&["--staged"], &["--cached"]),
+                    "base" => (&["--base", "HEAD^"], &["HEAD^...HEAD"]),
+                    "path" => (&["--path=- source.txt"], &["--", "- source.txt"]),
+                    _ => (&[], &[]),
+                };
+                // Positive control: the same repository really can invoke its helper.
+                let mut baseline = vec!["diff", "--ext-diff"];
+                baseline.extend_from_slice(diff_flags);
+                let baseline = crate::dependencies::Git::command()
+                    .unwrap()
+                    .current_dir(path)
+                    .args(&baseline)
+                    .output()
+                    .unwrap();
+                let marker = path.join("helper-marker");
+                let conversion = matches!(helper_kind, "clean" | "process");
+                let reads_worktree = matches!(mode, "working" | "path");
+                assert_eq!(
+                    marker.exists(),
+                    !conversion || reads_worktree,
+                    "positive control: {mode}, {helper_kind}"
+                );
+                assert_eq!(
+                    baseline.status.success(),
+                    helper_kind != "process" || !reads_worktree
+                );
+                if marker.exists() {
+                    std::fs::remove_file(&marker).unwrap();
+                }
+
+                let mut argv = vec!["codewhale", "review"];
+                argv.extend_from_slice(review_flags);
+                let mut args = review_args(&argv);
+                let diff = collect_diff(&args, None, path).unwrap();
+                assert!(!marker.exists(), "{mode}, {helper_kind}");
+                assert!(diff.contains("-before\n+after"), "{diff}");
+                assert!(diff.contains("- source.txt"));
+                if mode == "path" {
+                    assert!(!diff.contains("other.txt"));
+                    assert!(!diff.contains("binary.dat"));
+                } else {
+                    assert!(diff.contains("other.txt"));
+                    assert!(diff.contains("Binary files") && diff.contains("binary.dat"));
+                }
+                args.max_chars = 1;
+                assert!(
+                    collect_diff(&args, None, path)
+                        .unwrap_err()
+                        .to_string()
+                        .contains("No review was run")
+                );
+                assert!(!marker.exists());
+            }
+        }
     }
 
     #[test]

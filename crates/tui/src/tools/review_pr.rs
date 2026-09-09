@@ -334,10 +334,9 @@ fn read_bounded(reader: impl Read, limit: usize) -> std::io::Result<Vec<u8>> {
 
 fn run_command(workspace: &Path, program: Program, args: &[String]) -> Result<String> {
     let mut command = match program {
-        Program::Gh => Gh::command(),
-        Program::Git => Git::command(),
-    }
-    .context("PR review requires Git and GitHub CLI on PATH")?;
+        Program::Gh => Gh::command().context("PR review requires GitHub CLI on PATH")?,
+        Program::Git => Git::review_command(workspace)?,
+    };
     command
         .args(args)
         .current_dir(workspace)

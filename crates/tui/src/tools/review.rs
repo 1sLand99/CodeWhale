@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::client::DeepSeekClient;
+#[cfg(test)]
 use crate::dependencies::ExternalTool;
 use crate::llm_client::LlmClient;
 use crate::models::{ContentBlock, Message, MessageRequest, SystemPrompt, Usage};
@@ -1534,10 +1535,9 @@ async fn run_review_git(
 ) -> Result<std::process::Output, ToolError> {
     let workspace = workspace.to_path_buf();
     tokio::task::spawn_blocking(move || {
-        let Some(mut cmd) = crate::dependencies::Git::command() else {
-            return Err(ToolError::execution_failed("git not found"));
-        };
-        cmd.args(args).current_dir(workspace).output().map_err(|e| {
+        let mut cmd = crate::dependencies::Git::review_command(&workspace)
+            .map_err(|e| ToolError::execution_failed(e.to_string()))?;
+        cmd.args(args).output().map_err(|e| {
             ToolError::execution_failed(format!("Failed to {operation} with git: {e}"))
         })
     })
