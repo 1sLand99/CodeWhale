@@ -785,7 +785,7 @@
   "OnboardTrustUntrustedNotice": "वर्कस्पेस ट्रस्ट के बिना जारी — टूल और हुक प्रतिबंधित रहेंगे।",
   "RedactionGateActionConfirm": "पुष्टि करें और अक्षम करें",
   "RedactionGateActionKeep": "मास्किंग बनाए रखें",
-  "RedactionGateActionQuit": "CodeWhale से बाहर निकलें",
+  "RedactionGateActionQuit": "Codewhale से बाहर निकलें",
   "RedactionGateConfirmTitle": "अंतिम पुष्टि",
   "RedactionGateConfirmQuestion": "क्या आप सच में पक्के हैं? बंद करने के बाद टूल आउटपुट की कुंजियाँ ज्यों की त्यों मॉडल को भेजी जाएँगी, जब तक आप मास्किंग फिर चालू कर पुनः पुष्टि नहीं करते।",
   "RedactionGateActionBack": "वापस",

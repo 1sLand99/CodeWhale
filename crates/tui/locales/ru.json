@@ -785,7 +785,7 @@
   "OnboardTrustUntrustedNotice": "Продолжение без доверия к рабочей области — инструменты и хуки останутся ограниченными.",
   "RedactionGateActionConfirm": "подтвердить и отключить",
   "RedactionGateActionKeep": "оставить маскирование",
-  "RedactionGateActionQuit": "выйти из CodeWhale",
+  "RedactionGateActionQuit": "выйти из Codewhale",
   "RedactionGateConfirmTitle": "Финальное подтверждение",
   "RedactionGateConfirmQuestion": "Вы действительно уверены? После отключения ключи в выводе инструментов будут отправляться модели как есть, пока вы снова не включите маскирование и не подтвердите.",
   "RedactionGateActionBack": "назад",

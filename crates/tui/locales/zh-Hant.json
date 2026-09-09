@@ -1189,7 +1189,7 @@
   "OnboardTrustUntrustedNotice": "在未信任工作區的情況下繼續 — 工具與鉤子保持受限。",
   "RedactionGateActionConfirm": "確認並關閉",
   "RedactionGateActionKeep": "保持脫敏開啟",
-  "RedactionGateActionQuit": "結束 CodeWhale",
+  "RedactionGateActionQuit": "結束 Codewhale",
   "RedactionGateConfirmTitle": "最終確認",
   "RedactionGateConfirmQuestion": "您真的確認嗎？關閉後，工具輸出中的金鑰將原樣傳送給模型，直到您重新開啟並再次確認。",
   "RedactionGateActionBack": "返回",

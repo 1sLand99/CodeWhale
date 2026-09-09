@@ -808,7 +808,7 @@
   "OnboardTrustUntrustedNotice": "작업 공간을 신뢰하지 않고 계속합니다 — 도구와 훅은 제한된 상태로 유지됩니다.",
   "RedactionGateActionConfirm": "확인 후 끄기",
   "RedactionGateActionKeep": "마스킹 유지",
-  "RedactionGateActionQuit": "CodeWhale 종료",
+  "RedactionGateActionQuit": "Codewhale 종료",
   "RedactionGateConfirmTitle": "최종 확인",
   "RedactionGateConfirmQuestion": "정말 확실합니까? 끄면 도구 출력의 키가 그대로 모델로 전송되며, 다시 켜고 재확인하기 전까지 유지됩니다.",
   "RedactionGateActionBack": "뒤로",

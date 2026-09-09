@@ -808,7 +808,7 @@
   "OnboardTrustUntrustedNotice": "Continuando sem confiar no workspace — ferramentas e hooks permanecem restritos.",
   "RedactionGateActionConfirm": "confirmar e desativar",
   "RedactionGateActionKeep": "manter mascaramento",
-  "RedactionGateActionQuit": "sair do CodeWhale",
+  "RedactionGateActionQuit": "sair do Codewhale",
   "RedactionGateConfirmTitle": "Confirmação final",
   "RedactionGateConfirmQuestion": "Tem certeza mesmo? Depois de desativar, as chaves nas saídas de ferramentas serão enviadas ao modelo como estão, até você reativar o mascaramento e confirmar de novo.",
   "RedactionGateActionBack": "voltar",
