@@ -14,10 +14,9 @@ pub(crate) fn info_context_percent(app: &App) -> u8 {
     crate::tui::phase_strip::context_percent_from_app(app)
 }
 
-/// The session cost as the metrics line prints it — the same price string
-/// `/cost`, the roster's right column and the price widget print
-/// (SHELL-DESIGN-20260901 §2.11 item 5). Empty until the session has a
-/// priced or counted turn.
+/// Format the session's cumulative usage chip for the metrics line. `/cost`
+/// has its own detailed receipt and coverage report; it does not call this
+/// formatter. Chips without a cost display produce an empty string.
 ///
 /// Incomplete cost includes its receipt's reason, including an unclassified
 /// billing route. A provider switch cannot erase earlier missing coverage.

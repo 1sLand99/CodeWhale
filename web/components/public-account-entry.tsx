@@ -23,7 +23,7 @@ export function PublicAccountEntry({
     <div className="portal-home">
       <section className="portal-section">
         <div className="portal-container public-account-entry">
-          {/* Pinned app-icon raster generated from brand/mark.svg; do not restyle. */}
+          {/* Pinned app-icon raster; see CANONICAL_MARK_SRC for its source asset. */}
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img
             className="public-account-mark"

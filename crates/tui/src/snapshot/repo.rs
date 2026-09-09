@@ -1429,11 +1429,15 @@ mod tests {
         let survivor = before[1].timestamp;
         let victim = before[2].timestamp;
         assert!(
-            survivor - victim >= 2,
-            "fixture needs a real gap between the pairs (survivor {survivor}, victim {victim})"
+            survivor - victim >= 8,
+            "fixture needs an 8s gap between the pairs (survivor {survivor}, victim {victim})"
         );
         let midpoint = victim + (survivor - victim) / 2;
-        let max_age = Duration::from_secs((now - midpoint).max(0) as u64);
+        assert!(
+            now > midpoint,
+            "fixture cutoff is not before the current time"
+        );
+        let max_age = Duration::from_secs((now - midpoint) as u64);
 
         // The two old snapshots drop, the two new ones survive.
         let removed = repo.prune_older_than(max_age).unwrap();
